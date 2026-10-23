@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = ["crates/engine", "crates/gpu", "apps/procraft-android", "apps/procraft-android/bindgen"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace.lints.rust]
+# `deny`, not `forbid`: the one place that talks to the platform (the Android bridge's surface
+# module) allows it locally.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# Never crash on input: no unwrap/expect/panics/indexing outside tests (see clippy.toml).
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+dbg_macro = "warn"
+too_many_arguments = "allow"
+
+[workspace.dependencies]
+procraft-engine = { path = "crates/engine" }
+procraft-gpu = { path = "crates/gpu" }
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "dx12", "wgsl"] }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+log = "0.4"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+png = "0.18"
+miniz_oxide = "0.8"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+debug = false
