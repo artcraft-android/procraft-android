@@ -176,7 +176,21 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             listOf(Act("Flip horizontal") { vm.flipCanvas(horizontal = true) }, Act("Flip vertical") { vm.flipCanvas(horizontal = false) }),
             listOf(Act("Canvas information") { vm.canvasInfoOpen = true }),
         )
-        2 -> listOf(
+        2 -> listOfNotNull(
+            // a model shares as a model too
+            if (vm.modelOpen) {
+                listOf(
+                    Heading("Share 3D"),
+                    Act("OBJ") { share(CanvasViewModel.Export.MODEL_OBJ) },
+                    Act("USDZ") { share(CanvasViewModel.Export.MODEL_USDZ) },
+                    Act("Render") { share(CanvasViewModel.Export.MODEL_RENDER) },
+                    Act("PNG Textures") { share(CanvasViewModel.Export.MODEL_TEXTURES) },
+                    Act("Animated rotate") { share(CanvasViewModel.Export.MODEL_ROTATE) },
+                    Act("Animated swing") { share(CanvasViewModel.Export.MODEL_SWING) },
+                )
+            } else {
+                null
+            },
             listOf(
                 Heading("Share Image"),
                 Act(CanvasViewModel.PACKAGE_LABEL) {

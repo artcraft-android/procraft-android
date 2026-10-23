@@ -45,7 +45,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     // IDLE: a finger that doesn't paint, waiting for a hold or more fingers; HOVER: fingers
     // setting the brush while the pen hovers
-    private enum class Mode { NONE, PEN, FINGER, IDLE, GESTURE, PICK, TRANSFORM, SELECT, ADJUST, PUCK, SHAPE, HOVER }
+    private enum class Mode { NONE, PEN, FINGER, IDLE, GESTURE, PICK, TRANSFORM, SELECT, ADJUST, PUCK, SHAPE, HOVER, TURN }
 
     /** The pen is hovering over the canvas. */
     private var penHovering = false
@@ -473,6 +473,13 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     transformGrabbed = false
                     return true
                 }
+                // on a model, a finger turns it; the pen paints
+                if (vm.modelOpen && kindOf(e, 0) == PointerKind.FINGER) {
+                    mode = Mode.TURN
+                    lastX = e.x
+                    lastY = e.y
+                    return true
+                }
                 // a snapped shape's handle is dragged; anything else keeps the shape and draws on
                 val handle = vm.quickShapeHandleAt(Offset(e.x, e.y))
                 if (handle != null) {
@@ -565,7 +572,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     vm.shapeDrag = null
                     vm.thresholdDrag?.let { (p, t) -> vm.selectByColour(p, t, live = false) }
                 }
-                if (mode == Mode.FINGER || mode == Mode.IDLE || mode == Mode.TRANSFORM || mode == Mode.SELECT) {
+                if (mode == Mode.FINGER || mode == Mode.IDLE || mode == Mode.TRANSFORM || mode == Mode.SELECT || mode == Mode.TURN) {
                     gestureStart = e.eventTime
                     gestureScale = 1f
                 }
@@ -599,6 +606,12 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 Mode.PICK -> vm.pickAt(e.x, e.y, pickSide)
                 Mode.IDLE -> if (hypot(e.x - downX, e.y - downY) > tapSlop) removeCallbacks(holdToPick)
                 Mode.HOVER -> hoverAdjust(e)
+                Mode.TURN -> {
+                    s.turnModel(e.x - lastX, e.y - lastY)
+                    tapMoved += hypot(e.x - lastX, e.y - lastY)
+                    lastX = e.x
+                    lastY = e.y
+                }
                 Mode.PUCK -> vm.moveClonePuck(Offset(e.x, e.y) - puckGrab)
                 Mode.SHAPE -> vm.moveQuickShapeHandle(shapeHandle, Offset(e.x, e.y))
                 Mode.GESTURE -> if (fingers >= 3) scrub(e) else moveGesture(e, s)
@@ -665,7 +678,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                         vm.settleToFit()
                     }
                     Mode.PICK -> vm.finishPick()
-                    Mode.PUCK, Mode.SHAPE, Mode.IDLE, Mode.HOVER -> Unit
+                    Mode.PUCK, Mode.SHAPE, Mode.IDLE, Mode.HOVER, Mode.TURN -> Unit
                     Mode.SELECT -> select(e, done = true)
                     Mode.ADJUST -> if (vm.adjustment == Adjustment.LIQUIFY) {
                         // still moving when it lifts, liquify carries on

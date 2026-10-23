@@ -38,6 +38,9 @@ struct ArtworkFile {
     /// How it was last shown, if it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     view: Option<SavedView>,
+    /// The model painted on, if it is one (its current texture set is `document`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<crate::scene3d::SavedModel>,
 }
 
 /// A view kept with an artwork: the canvas point in the middle of the window, the zoom and the
@@ -91,6 +94,7 @@ pub(crate) struct SaveSnapshot {
     file: ArtworkFile,
     layers: Vec<(LayerId, Vec<u8>)>,
     composite: Option<Vec<u8>>,
+    model: Option<crate::scene3d::ModelSnapshot>,
 }
 
 /// What the last saves wrote: the folder, and a hash of each layer's pixels, so layers that
@@ -99,10 +103,11 @@ pub(crate) struct SaveSnapshot {
 pub(crate) struct Saved {
     dir: PathBuf,
     layers: std::collections::HashMap<LayerId, u64>,
+    sets: crate::scene3d::SavedSets,
 }
 
 /// A quick hash of pixels, to tell a changed layer from one saved already.
-fn pixels_hash(rgba: &[u8]) -> u64 {
+pub(crate) fn pixels_hash(rgba: &[u8]) -> u64 {
     const PRIME: u64 = 0x0000_0100_0000_01B3;
     let (words, rest) = rgba.as_chunks::<8>();
     let mut h: u64 = 0xCBF2_9CE4_8422_2325;
@@ -126,10 +131,12 @@ impl crate::State {
             && self.pending_doc.is_none()
             && self.feather_base.is_none()
             && self.selection_before.is_none()
+            && self.scene.as_ref().is_none_or(|s| !s.stroking)
     }
 
     /// The artwork as it is now, for saving.
     pub(crate) fn save_snapshot(&mut self) -> Result<SaveSnapshot, MobileError> {
+        let model = self.model_snapshot()?;
         let file = ArtworkFile {
             format: FORMAT.to_owned(),
             version: VERSION,
@@ -138,6 +145,7 @@ impl crate::State {
             info: self.info.clone(),
             // as shown, or as it opened if it hasn't been shown
             view: self.view.as_ref().and_then(|v| SavedView::of(v, self.window_size)).or(self.saved_view),
+            model: model.as_ref().map(|m| m.saved.clone()),
         };
         let mut layers = Vec::new();
         let mut composite = None;
@@ -152,17 +160,18 @@ impl crate::State {
             // not shown yet: what was opened is still what there is
             layers = self.pending_pixels.clone();
         }
-        Ok(SaveSnapshot { file, layers, composite })
+        Ok(SaveSnapshot { file, layers, composite, model })
     }
 }
 
 /// Writes a save into `dir` (made if missing): the layers that changed since the last save there,
 /// the thumbnail and the document.
 fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Result<(), MobileError> {
-    let SaveSnapshot { file, layers, composite } = snapshot;
+    let SaveSnapshot { file, layers, composite, model } = snapshot;
     if saved.dir != dir {
         saved.dir = dir.to_path_buf();
         saved.layers.clear();
+        saved.sets.clear();
     }
     let (w, h) = (file.document.width(), file.document.height());
     fs::create_dir_all(dir.join("layers")).map_err(|e| file_error("making the folder", e))?;
@@ -186,7 +195,14 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
             }
         }
     }
-    if let Some(rgba) = composite {
+    if let Some(model) = model.as_ref() {
+        crate::scene3d::write_model(&mut saved.sets, dir, model)?;
+    }
+    // a model's thumbnail is the model as last shown
+    if let Some((pw, ph, rgba)) = model.and_then(|m| m.picture) {
+        let (tw, th, thumb) = thumbnail(&rgba, pw, ph, THUMBNAIL_SIDE);
+        write_atomically(&dir.join("thumbnail.png"), |p| write_png(p, tw, th, &thumb, &[]))?;
+    } else if let Some(rgba) = composite {
         let (tw, th, mut thumb) = thumbnail(&rgba, w, h, THUMBNAIL_SIDE);
         // the gallery shows it in the artwork's colours (a CMYK canvas's: as its press prints them)
         if let Some(table) = proof_table(&file.document) {
@@ -274,11 +290,13 @@ impl CanvasSession {
                 Err(e) => log::error!("layer {:?}: {e}", layer.id),
             }
         }
+        let scene = file.model.as_ref().map(|m| crate::scene3d::open_saved_model(&dir, m)).transpose()?;
         let session = CanvasSession::with_document(doc, file.name, pixels);
         {
             let mut st = session.shared.lock();
             st.info = file.info;
             st.saved_view = file.view;
+            st.scene = scene;
         }
         Ok(session)
     }
@@ -680,7 +698,7 @@ pub(crate) fn write_atomically(
 }
 
 /// A PNG of RGBA8 pixels, carrying the colour profile `icc` (none if empty).
-fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8], icc: &[u8]) -> Result<(), MobileError> {
+pub(crate) fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8], icc: &[u8]) -> Result<(), MobileError> {
     let bytes = png_bytes(width, height, rgba, icc)?;
     fs::write(path, bytes).map_err(|e| file_error("saving", e))
 }
@@ -710,7 +728,7 @@ fn png_bytes(width: u32, height: u32, rgba: &[u8], icc: &[u8]) -> Result<Vec<u8>
 }
 
 /// A PNG's RGBA8 pixels, which must be `width` × `height`.
-fn read_png(path: &Path, width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
+pub(crate) fn read_png(path: &Path, width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
     let file = fs::File::open(path).map_err(|e| file_error("opening a layer", e))?;
     let decoder = png::Decoder::new(BufReader::new(file));
     let mut reader = decoder.read_info().map_err(|e| file_error("opening a layer", e))?;

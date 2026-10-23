@@ -979,6 +979,43 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** The open artwork paints on a model: one finger turns it. */
+    var modelOpen by mutableStateOf(false)
+        private set
+
+    /** The model's texture sets (by material), and the one painted on: its layers show. */
+    var textureSets by mutableStateOf<List<String>>(emptyList())
+        private set
+    var textureSet by mutableStateOf(0)
+        private set
+
+    /** Paints on texture set [index] from now on: the layers become its layers. */
+    fun chooseTextureSet(index: Int) {
+        val s = session ?: return
+        if (index == textureSet || index !in textureSets.indices) return
+        s.chooseTextureSet(index.toUInt())
+        textureSet = index
+        refresh()
+        refreshThumbnails()
+    }
+
+    /** A new artwork painting on the model in the file [uri] (named [name]: OBJ, USDZ or USDC). */
+    private suspend fun newFromModel(uri: android.net.Uri, name: String) {
+        val resolver = getApplication<Application>().contentResolver
+        val s = withContext(Dispatchers.IO) {
+            runCatching {
+                val file = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
+                CanvasSession.openModel(file, name, null, name.substringBeforeLast('.').ifBlank { "Untitled Artwork" }, 0u)
+            }.onFailure { android.util.Log.e("ProCraft", "opening a model", it) }.getOrNull()
+        }
+        if (s == null) {
+            message = "This model can't be opened."
+            return
+        }
+        start(s, store.newFolder(galleryDir))
+        startedNew()
+    }
+
     /** A file from elsewhere into the gallery: an artwork file, or a picture as a new artwork. */
     fun importFile(uri: android.net.Uri) {
         val resolver = getApplication<Application>().contentResolver
@@ -997,6 +1034,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 message = "Palette added."
             } else if (foreign) {
                 message = "This palette can't be read."
+            } else if (name != null && MODEL_EXTENSIONS.any { name.endsWith(".$it", ignoreCase = true) }) {
+                newFromModel(uri, name)
             } else if (head != null && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()) {
                 val ok = withContext(Dispatchers.IO) {
                     val dir = store.newFolder(galleryDir)
@@ -1365,6 +1404,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // the brushes in use as they were left (they go by place in the kept library)
         if (loaded) brushPrefs.getString(BRUSH_CHOICES, null)?.let { s.loadBrushChoices(it) }
         session = s
+        val model = s.modelInfo()
+        modelOpen = model != null
+        textureSets = model?.textureSets ?: emptyList()
+        textureSet = s.textureSet().toInt()
+        // a model is lit by the environment it was last lit by, else the default
+        if (model != null) {
+            val name = s.modelEnvironment() ?: DEFAULT_ENVIRONMENT
+            viewModelScope.launch {
+                val assets = getApplication<Application>().assets
+                val read = { n: String -> runCatching { assets.open("environments/$n.hdr").use { it.readBytes() } }.getOrNull() }
+                val chosen = withContext(Dispatchers.IO) { read(name)?.let { name to it } ?: read(DEFAULT_ENVIRONMENT)?.let { DEFAULT_ENVIRONMENT to it } }
+                if (chosen != null) s.setModelEnvironment(chosen.first, chosen.second)
+            }
+        }
         // brush files that came while no canvas was open
         addPendingBrushes(s)
         pushSecondary()
@@ -2980,6 +3033,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         TIFF("tif", "image/tiff"),
         LAYERS_PDF("pdf", "application/pdf"),
         LAYER_PNGS("png", "image/png"),
+        /** A model: OBJ, its material file and its textures, zipped. */
+        MODEL_OBJ("zip", "application/zip"),
+        /** A model as a USDZ package. */
+        MODEL_USDZ("usdz", "model/vnd.usdz+zip"),
+        /** A model's texture sets, a PNG each. */
+        MODEL_TEXTURES("png", "image/png"),
+        /** The model as shown. */
+        MODEL_RENDER("png", "image/png"),
+        /** The model on a turntable, turning once round or swinging, as a video. */
+        MODEL_ROTATE("mp4", "video/mp4"),
+        MODEL_SWING("mp4", "video/mp4"),
     }
 
     /** The artwork written as [kind] into the cache, to share: one file, or a PNG per layer. */
@@ -2994,6 +3058,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     Export.PSD -> s.exportPsd(file.path)
                     Export.PDF -> s.exportPdf(file.path, false, pdfQuality.toUByte())
                     Export.TIFF -> s.exportTiff(file.path)
+                    Export.MODEL_OBJ -> s.exportModelObj(file.path)
+                    Export.MODEL_USDZ -> s.exportModelUsdz(file.path)
+                    Export.MODEL_RENDER -> s.exportModelRender(file.path, false)
+                    Export.MODEL_ROTATE, Export.MODEL_SWING -> {
+                        if (!writeTurntable(s, file, kind == Export.MODEL_SWING)) return@withContext emptyList()
+                    }
+                    Export.MODEL_TEXTURES -> {
+                        val folder = File(dir, base).apply { deleteRecursively(); mkdirs() }
+                        return@withContext s.exportModelTextures(folder.path).map { File(it) }
+                    }
                     Export.LAYERS_PDF -> s.exportPdf(file.path, true, pdfQuality.toUByte())
                     Export.LAYER_PNGS -> {
                         val folder = File(dir, base).apply { deleteRecursively(); mkdirs() }
@@ -3006,6 +3080,24 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 emptyList()
             }
         }
+    }
+
+    /**
+     * The model on a turntable as an MP4 at [file]: [TURNTABLE_SECONDS] at [TURNTABLE_FPS], the
+     * window's shape, as large as the encoder takes up to [TURNTABLE_SIDE]. False if it fails.
+     */
+    private fun writeTurntable(s: CanvasSession, file: File, swing: Boolean): Boolean {
+        val (w, h) = VideoWriter.fit(windowPx.width.coerceAtLeast(2), windowPx.height.coerceAtLeast(2), TURNTABLE_SIDE) ?: return false
+        val count = TURNTABLE_SECONDS * TURNTABLE_FPS
+        val started = System.nanoTime()
+        val ok = VideoWriter.write(file, w, h, TURNTABLE_FPS, count) { i, pixels ->
+            val t = s.modelTurntableFrame(i.toUInt(), count.toUInt(), swing, w.toUInt(), h.toUInt()) ?: return@write false
+            // already ARGB, little-endian
+            java.nio.ByteBuffer.wrap(t.rgba).order(java.nio.ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(pixels, 0, w * h)
+            true
+        }
+        Log.i(TAG, "turntable ${w}x$h, $count frames in ${(System.nanoTime() - started) / 1_000_000} ms")
+        return ok
     }
 
     /** The layers as an animation, a frame each: the formats, by name, extension and type. */
@@ -4562,6 +4654,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
+        /** A model's turntable video: its length and frame rate. */
+        const val TURNTABLE_SECONDS = 5
+        const val TURNTABLE_FPS = 30
+        const val TURNTABLE_SIDE = 1920
+
+        /** Model files the gallery's Import opens to paint on. */
+        val MODEL_EXTENSIONS = listOf("obj", "usdz", "usdc", "usda", "usd")
+
+        /** The environment a model is lit by unless another is chosen (an asset in environments/). */
+        const val DEFAULT_ENVIRONMENT = "mountain"
+
         /** While the view settles, what is drawn over the canvas is moved this often (ms), and a little past its end (ns). */
         const val FRAME_MS = 16L
         const val SETTLE_MARGIN_NS = 50_000_000L

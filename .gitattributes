@@ -4,3 +4,7 @@
 *.png binary
 *.webp binary
 *.ttf binary
+*.usdz binary
+*.usdc binary
+*.usd binary
+*.hdr binary

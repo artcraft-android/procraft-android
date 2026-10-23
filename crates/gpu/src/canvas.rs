@@ -647,17 +647,19 @@ const CHARGE_LENGTH: f32 = 33.0;
 
 /// A wet stamp's (mixture, final mixture, pull) once the stroke has gone `length` canvas pixels:
 /// the paint the brush mixes into what it carries is what its dilution leaves (by 2.4) and its
-/// charge (running out by the cube root of the length), at least its attack, times `jitter`; it
+/// charge (running out by the cube root of the length), at least its attack (the stamp's
+/// `attack` share of it: its pressure), times `jitter`; it
 /// lays down what it carries by the mixture, a share of it by the grade; the pull is the wet
 /// pull's eighth root (a pull of 0.9 keeps 0.99 a stamp).
-fn wet_mixture(style: &StrokeStyle, length: f32, jitter: f32) -> (f32, f32, f32) {
+fn wet_mixture(style: &StrokeStyle, length: f32, jitter: f32, attack: f32) -> (f32, f32, f32) {
     let charge = if style.load > 0.0 {
         1.0 - ((1.0 - style.load) * (length.max(0.0) / CHARGE_LENGTH).cbrt()).clamp(0.0, 1.0)
     } else {
         0.0
     };
     let diluted = (1.0 - style.dilution.clamp(0.0, 1.0)).powf(2.4);
-    let mixture = ((diluted + charge).max(style.attack.clamp(0.0, 1.0)) * jitter).clamp(0.0, 1.0);
+    let attack = style.attack.clamp(0.0, 1.0) * attack.clamp(0.0, 1.0);
+    let mixture = ((diluted + charge).max(attack) * jitter).clamp(0.0, 1.0);
     let pull = style.wet_pull.unwrap_or(0.0).clamp(0.0, 1.0).powf(0.125);
     // undiluted the brush only paints; otherwise over a stroke it lays down half to all of what
     // its grade says
@@ -1134,6 +1136,8 @@ pub struct Canvas {
     uniform_slots: u64,
     stamp_buffer: wgpu::Buffer,
     stamp_capacity: u64,
+    /// How many times the composite has been redrawn.
+    composites: u64,
     active: Option<ActiveStroke>,
     smudge: Option<Smudge>,
     /// A layer's pixels set aside by [`Canvas::hold_layer`].
@@ -1329,6 +1333,7 @@ impl Canvas {
             uniform_slots,
             stamp_buffer,
             stamp_capacity,
+            composites: 0,
             active: None,
             smudge: None,
             held: None,
@@ -1441,11 +1446,50 @@ impl Canvas {
         self.steps_made
     }
 
+    /// How many times the composite has been redrawn: it changes whenever the picture does.
+    pub fn composites(&self) -> u64 {
+        self.composites
+    }
+
     /// Starts a stroke on `layer` (finishing one still open).
     pub fn begin_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
         self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false });
+    }
+
+    /// Begins a stroke whose pixels another pass draws into [`Canvas::stroke_target`] (3D
+    /// painting carries a stroke drawn on the screen onto a model's texture); each draw is told
+    /// with [`Canvas::stroke_drawn`], and the stroke ends (into `layer`) as any other.
+    pub fn begin_drawn_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
+        self.begin_stroke(layer, style);
+    }
+
+    /// Where a drawn stroke's pixels go: premultiplied, the canvas's size.
+    pub fn stroke_target(&self) -> &wgpu::TextureView {
+        &self.stroke_view
+    }
+
+    /// The open stroke's pixels as drawn so far (premultiplied, the canvas's size): what 3D
+    /// painting carries onto a model.
+    pub fn stroke_view(&self) -> &wgpu::TextureView {
+        &self.stroke_view
+    }
+
+    /// The canvas as composited by the last render (premultiplied, its size, the background in
+    /// if shown): what 3D painting shows on a model.
+    pub fn composite_view(&self) -> &wgpu::TextureView {
+        &self.composite_views[0]
+    }
+
+    /// A drawn stroke now reaches `bounds` (canvas pixels): it is shown there, and kept there
+    /// when it ends.
+    pub fn stroke_drawn(&mut self, bounds: IRect) {
+        let full = self.full();
+        let Some(active) = self.active.as_mut() else { return };
+        let bounds = bounds.intersect(full);
+        active.bounds = active.bounds.union(bounds);
+        self.dirty = self.dirty.union(bounds);
     }
 
     /// Draws more of the open stroke.
@@ -1487,7 +1531,7 @@ impl Canvas {
                     shift: stamp_extras(s).1,
                     look: [s.grain_depth, s.grain_size, s.secondary, s.gradation]
                         .map(|v| if v.is_finite() { v.clamp(0.0, 64.0) } else { 0.0 }),
-                    more: [s.grain_press, s.grain_bleed, transfer, 0.0]
+                    more: [s.grain_press, s.grain_bleed, transfer, s.attack]
                         .map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }),
                 }
             })
@@ -1533,7 +1577,7 @@ impl Canvas {
                     shift: stamp_extras(s).1,
                     look: [s.grain_depth, s.grain_size, s.secondary, s.gradation]
                         .map(|v| if v.is_finite() { v.clamp(0.0, 64.0) } else { 0.0 }),
-                    more: [s.grain_press, s.grain_bleed, transfer, 0.0]
+                    more: [s.grain_press, s.grain_bleed, transfer, s.attack]
                         .map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }),
                 }
             }),
@@ -2559,6 +2603,7 @@ impl Canvas {
         self.make_groups(device, doc.max_depth());
         if !dirty.is_empty() {
             self.composite(device, doc, &mut encoder, &mut uniforms, dirty);
+            self.composites = self.composites.wrapping_add(1);
         }
         self.dirty = IRect::EMPTY;
 
@@ -2755,8 +2800,11 @@ impl Canvas {
             // the mixture varies from stamp to stamp by the wetness jitter
             let jitter = 1.0 - style.wet_jitter * unit_hash(smudge.stamps);
             smudge.stamps = smudge.stamps.saturating_add(1);
-            let (mixture, final_mixture, wet_pull) =
-                if wet { wet_mixture(style, smudge.length, jitter) } else { (0.0, 1.0, style.pull.clamp(0.0, 1.0)) };
+            let (mixture, final_mixture, wet_pull) = if wet {
+                wet_mixture(style, smudge.length, jitter, s.more[3])
+            } else {
+                (0.0, 1.0, style.pull.clamp(0.0, 1.0))
+            };
             let moving = style.grain_mode == GrainMode::Moving;
             let offset = params.push(&SmudgeUniform {
                 center: s.center,

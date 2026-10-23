@@ -43,6 +43,21 @@ fn le(b: &[u8], at: usize) -> Option<usize> {
 /// Decodes one LZ4 block onto `out` until it holds `goal` bytes; matches may reach back into what
 /// `out` held before.
 fn block_into(src: &[u8], out: &mut Vec<u8>, goal: usize) -> Option<()> {
+    decode_block(src, out, goal)?;
+    (out.len() == goal).then_some(())
+}
+
+/// One bare LZ4 block (no framing), whatever its length up to `limit`; `None` if it is damaged or
+/// longer.
+pub fn raw_block(src: &[u8], limit: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    decode_block(src, &mut out, limit)?;
+    Some(out)
+}
+
+/// Decodes an LZ4 block onto `out`, to the block's end or until `out` holds `limit` bytes.
+fn decode_block(src: &[u8], out: &mut Vec<u8>, limit: usize) -> Option<()> {
+    let goal = limit;
     let mut i = 0;
     while i < src.len() {
         let token = *src.get(i)?;
@@ -87,7 +102,7 @@ fn block_into(src: &[u8], out: &mut Vec<u8>, goal: usize) -> Option<()> {
             out.push(b);
         }
     }
-    (out.len() == goal).then_some(())
+    Some(())
 }
 
 /// Encodes `data` in the framing, each block compressed (or stored, when that is smaller).

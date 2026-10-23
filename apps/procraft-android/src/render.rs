@@ -94,7 +94,13 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
                 st.needs_frame = true;
             }
             let to_screen = st.view.map(|v| v.to_screen());
-            if let (Some(canvas), Some(gpu), Some(to_screen)) = (st.canvas.as_mut(), st.gpu.as_ref(), to_screen) {
+            // a model is drawn in place of the flat canvas
+            if st.scene.is_some() {
+                let convert = colours_to(st.doc.profile, screen);
+                st.render_scene(&view, format, size, convert);
+                st.frames += 1;
+            } else if let (Some(canvas), Some(gpu), Some(to_screen)) = (st.canvas.as_mut(), st.gpu.as_ref(), to_screen)
+            {
                 let s = st.display_scale;
                 let grid = SurroundGrid {
                     spacing: GRID_SPACING_PT * s,

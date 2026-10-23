@@ -194,6 +194,10 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
         ) {
             // a closed group's layers are left out
             val shown = vm.layers.filter { !vm.hidden(it) }
+            // on a model, the texture set painted on heads its layers
+            vm.textureSets.getOrNull(vm.textureSet)?.let { name ->
+                item(key = "texture set") { TextureSetRow(name, onTap = {}) }
+            }
             itemsIndexed(shown, key = { _, l -> l.id.toLong() }) { index, l ->
                 val dragging = dragId == l.id
                 DisposableEffect(l.id) { onDispose { rows.remove(l.id) } }
@@ -287,8 +291,12 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                     ) { BlendEditor(vm, l) }
                 }
             }
+            // the model's other texture sets, a tap away
+            vm.textureSets.forEachIndexed { i, name ->
+                if (i != vm.textureSet) item(key = "texture set $i") { TextureSetRow(name, onTap = { vm.chooseTextureSet(i) }) }
+            }
             // it moves down and up with the rows above it
-            item(key = "background") {
+            if (!vm.modelOpen) item(key = "background") {
                 Box(
                     Modifier.animateItem(null, if (dragId != null || blendAt >= 0) null else Motion.rowMove(), null)
                         .padding(top = 10.dp).graphicsLayer { alpha = if (blendAt >= 0) belowShown else 1f },
@@ -814,6 +822,14 @@ private fun Option(label: String, checked: Boolean? = null, enabled: Boolean = t
         if (checked == true) Icon(PcIcons.Tick, contentDescription = null, tint = color, modifier = Modifier.size(18.dp))
     }
 }
+/** A model's texture set: its name heading the layers painted into it. */
+@Composable
+private fun TextureSetRow(name: String, onTap: () -> Unit) {
+    Box(Modifier.fillMaxWidth().height(RowHeight).clickable(onClick = onTap), contentAlignment = Alignment.CenterStart) {
+        Text(name, color = Pc.PanelTitle, fontSize = 17.sp, fontWeight = FontWeight.Medium, maxLines = 1, modifier = Modifier.padding(start = 16.dp))
+    }
+}
+
 @Composable
 private fun BackgroundRow(vm: CanvasViewModel) {
     val bg = vm.background

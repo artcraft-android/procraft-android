@@ -47,6 +47,9 @@ pub struct Stamp {
     /// What light pressure lets through (the brush's opacity transfer), 0..1: for a capped
     /// rendering the most the stamp builds up to, else already in its alpha.
     pub transfer: f32,
+    /// How much of the brush's wet-mix attack this stamp has: the pressure (as opacity follows
+    /// it), as far as the attack's tilt switch lets it, 0..1.
+    pub attack: f32,
 }
 
 impl Stamp {
@@ -69,6 +72,7 @@ impl Stamp {
             gradation: 0.0,
             taper: 1.0,
             transfer: 1.0,
+            attack: 1.0,
         }
     }
 
@@ -95,6 +99,7 @@ struct Placed {
     grain_press: f32,
     gradation: f32,
     transfer: f32,
+    attack: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -202,12 +207,29 @@ struct Extras {
     tilt_roundness_max: f32,
     /// Where each tilt control starts (see [`Tilt::reach`]).
     tilt_angles: TiltAngles,
+    /// The tilt switches: leaning (from each one's angle) scales the lateral and linear jitter
+    /// and the shape count, pulls the grain depth down to its least, and drives the stamp colour
+    /// jitter (hue, saturation, lightness, darkness, secondary) in place of the stamp's own.
+    tilt_switches: TiltSwitches,
     /// The brush's own motion filtering and expression, with the app's.
     motion_filtering: f32,
     motion_expression: f32,
     /// The gap per unit of stamp size: the older spacing (version 0) puts stamps 1/√2 as far
     /// apart as the newer.
     spacing_stride: f32,
+}
+
+/// Each tilt switch's angle (its dial's share of a quarter turn), none where the switch is off.
+#[derive(Clone, Copy, Debug, Default)]
+struct TiltSwitches {
+    jitter_lateral: Option<f32>,
+    jitter_linear: Option<f32>,
+    count: Option<f32>,
+    grain_depth: Option<f32>,
+    /// Hue, saturation, lightness, darkness and secondary.
+    color: [Option<f32>; 5],
+    /// The wet mix's attack (for a finger, too: as a pen lying flat).
+    attack: Option<f32>,
 }
 
 /// Each tilt control's angle (its dial's share of a quarter turn).
@@ -227,6 +249,7 @@ impl Extras {
     fn of(b: &Brush) -> Extras {
         let unit = |k: &str| b.setting(k).clamp(0.0, 1.0);
         let both = |k: &str| b.setting(k).clamp(-1.0, 1.0);
+        let switch = |k: &str| (b.setting(k) >= 0.5).then(|| unit(&format!("{k}_angle")));
         Extras {
             spacing_jitter: unit("spacing_jitter"),
             jitter_lateral: unit("jitter_lateral"),
@@ -279,6 +302,21 @@ impl Extras {
                 roundness: unit("roundness_tilt_angle"),
                 color: ["hue_tilt_angle", "saturation_tilt_angle", "brightness_tilt_angle"].map(unit),
                 secondary: unit("secondary_tilt_angle"),
+            },
+            tilt_switches: TiltSwitches {
+                jitter_lateral: switch("jitter_lateral_tilt"),
+                jitter_linear: switch("jitter_linear_tilt"),
+                count: switch("count_tilt"),
+                grain_depth: switch("grain_depth_tilt"),
+                color: [
+                    "stamp_hue_tilt",
+                    "stamp_saturation_tilt",
+                    "stamp_lightness_tilt",
+                    "stamp_darkness_tilt",
+                    "stamp_secondary_tilt",
+                ]
+                .map(switch),
+                attack: switch("attack_tilt"),
             },
             motion_filtering: unit("motion_filtering"),
             motion_expression: unit("motion_expression"),
@@ -350,6 +388,8 @@ pub struct StrokeBuilder {
     steady: bool,
     /// The samples are the path itself, pressed as they say: nothing smooths either.
     exact: bool,
+    /// Drawn on the studio's pad, and whether the brush previews tilt there.
+    pad: Option<bool>,
     gap_jitter: f32,
     /// The whole stroke's colour shift, drawn once.
     stroke_shift: [f32; 3],
@@ -452,6 +492,13 @@ impl StrokeBuilder {
         self
     }
 
+    /// The stroke is drawn on the brush studio's pad: the pen's lean never moves its stamps
+    /// toward the cap there, and the tilt switches act only when the brush previews tilt.
+    pub fn on_pad(mut self, preview_tilt: bool) -> StrokeBuilder {
+        self.pad = Some(preview_tilt);
+        self
+    }
+
     pub fn exact_path(mut self) -> StrokeBuilder {
         self.exact = true;
         self
@@ -489,6 +536,7 @@ impl StrokeBuilder {
             segments: 0,
             steady: false,
             exact: false,
+            pad: None,
             gap_jitter: 1.0,
             stroke_shift: [0.0; 3],
             stroke_secondary: 0.0,
@@ -819,8 +867,37 @@ impl StrokeBuilder {
         1.0 - (1.0 - built.min(1.0)).powf(1.0 / n.ceil())
     }
 
+    /// How far a tilt switch at `theta` lets its control act: all of it when the switch is off,
+    /// as far as the pen leans when it is on (nothing without a pen's lean, or on the pad unless
+    /// the brush previews tilt).
+    fn switched(&self, p: PathPoint, theta: Option<f32>) -> f32 {
+        match theta {
+            None => 1.0,
+            Some(_) if self.pad == Some(false) => 0.0,
+            Some(theta) => self.leaning(p, theta),
+        }
+    }
+
+    /// How far the pen's lean moves a stamp toward the cap, as a share of its radius: the tilt
+    /// angle's reach over the square root of two (a pen only, never on the pad).
+    fn toward_cap(&self, p: PathPoint) -> Vec2 {
+        if self.pad.is_some() || !self.pointer.has_pressure() {
+            return Vec2::ZERO;
+        }
+        let reach = self.leaning(p, self.brush.tilt.angle / std::f32::consts::FRAC_PI_2);
+        // the ramp's floor (an upright pen) moves nothing
+        if reach <= 1.0 / 1024.0 {
+            return Vec2::ZERO;
+        }
+        let k = reach * std::f32::consts::FRAC_1_SQRT_2;
+        // the lean's direction on the canvas, as for the size compression
+        let lean = p.azimuth - std::f32::consts::FRAC_PI_2 - self.screen_turn;
+        Vec2::new(lean.cos(), lean.sin()) * k
+    }
+
     fn place(&mut self, p: PathPoint, distance: f32, out: &mut Vec<Stamp>) {
         let x = self.extras;
+        let sw = x.tilt_switches;
         if x.spacing_jitter > 0.0 {
             self.gap_jitter = (1.0 + x.spacing_jitter * (self.random.next() * 2.0 - 1.0)).max(0.05);
         }
@@ -848,6 +925,12 @@ impl StrokeBuilder {
         }
         let shape = self.brush.shape.clone();
         let count = shape.count.clamp(1, 16);
+        // the count tilt: as many beyond the first as the lean lets through
+        let count = if sw.count.is_some() {
+            1 + ((count - 1) as f32 * self.switched(p, sw.count)).floor() as u32
+        } else {
+            count
+        };
         let dropped = (self.random.next() * x.count_jitter * count as f32) as u32;
         let (along, across) = (
             Vec2::new(self.direction.cos(), self.direction.sin()),
@@ -862,17 +945,30 @@ impl StrokeBuilder {
         let leant = self.leaning(p, x.tilt_angles.roundness);
         let tilted = x.tilt_roundness_max * (1.0 - leant) + (1.0 - x.tilt_roundness) * leant;
         let base_roundness = (drawn * shaped + grown) / (drawn + grown) * tilted;
+        // leaning moves the stamps toward the pen's cap, by up to their radius
+        let cap = self.toward_cap(p) * (diameter * 0.5);
+        let jitter_lateral = x.jitter_lateral * self.switched(p, sw.jitter_lateral);
+        let jitter_linear = x.jitter_linear * self.switched(p, sw.jitter_linear);
+        let color_tilt = sw.color.map(|theta| self.switched(p, theta));
+        // the wet attack follows the pressure, and the lean when its switch is on (a finger as a
+        // pen lying flat)
+        let attack_tilt = match sw.attack {
+            None => 1.0,
+            Some(theta) if self.pointer.has_pressure() => Tilt::reach(p.tilt, theta),
+            Some(theta) => Tilt::reach(std::f32::consts::FRAC_PI_2, theta),
+        };
+        let attack = (p.soft[1].clamp(0.0, 1.0) * attack_tilt).clamp(0.0, 1.0);
+        let [hue_tilt, saturation_tilt, lightness_tilt, darkness_tilt, secondary_tilt] = color_tilt;
         for _ in 0..(count - dropped.min(count - 1)) {
             let size = 1.0 - shape.size_jitter.clamp(0.0, 1.0) * self.random.next();
             let fade = 1.0 - shape.opacity_jitter.clamp(0.0, 1.0) * self.random.next();
-            let mut center = p.pos;
+            let mut center = p.pos + cap;
             if x.jitter_lateral > 0.0 {
                 center =
-                    center + across * ((self.random.next() * 2.0 - 1.0) * x.jitter_lateral * JITTER_REACH * diameter);
+                    center + across * ((self.random.next() * 2.0 - 1.0) * jitter_lateral * JITTER_REACH * diameter);
             }
             if x.jitter_linear > 0.0 {
-                center =
-                    center + along * ((self.random.next() * 2.0 - 1.0) * x.jitter_linear * JITTER_REACH * diameter);
+                center = center + along * ((self.random.next() * 2.0 - 1.0) * jitter_linear * JITTER_REACH * diameter);
             }
             if shape.throw > 0.0 {
                 let a = self.random.next() * std::f32::consts::TAU;
@@ -891,7 +987,9 @@ impl StrokeBuilder {
             }
             let roundness = (base_roundness * (1.0 - x.roundness_jitter * self.random.next())).clamp(0.05, 1.0);
             let flip = [x.flip_x && self.random.next() < 0.5, x.flip_y && self.random.next() < 0.5];
-            let stamp_shift = self.color_jitter(x.stamp_color);
+            let [h, s, l, d] = x.stamp_color;
+            let stamp_shift =
+                self.color_jitter([h * hue_tilt, s * saturation_tilt, l * lightness_tilt, d * darkness_tilt]);
             // light pressure and leaning shift the colour as far as their controls say
             let lean = x.tilt_angles.color.map(|theta| self.leaning(p, theta));
             let shift = [0, 1, 2].map(|k| {
@@ -902,11 +1000,12 @@ impl StrokeBuilder {
                     + scale * (by(&x.pressure_color) * light + by(&x.tilt_color) * by(&lean))
             });
             // random numbers only for the controls in use, so strokes without them replay as before
-            let secondary = (if x.stamp_secondary > 0.0 { x.stamp_secondary * self.random.next() } else { 0.0 }
-                + self.stroke_secondary
-                + x.pressure_secondary * light
-                + x.tilt_secondary * self.leaning(p, x.tilt_angles.secondary))
-            .clamp(0.0, 1.0);
+            let secondary =
+                (if x.stamp_secondary > 0.0 { x.stamp_secondary * secondary_tilt * self.random.next() } else { 0.0 }
+                    + self.stroke_secondary
+                    + x.pressure_secondary * light
+                    + x.tilt_secondary * self.leaning(p, x.tilt_angles.secondary))
+                .clamp(0.0, 1.0);
             // a moving grain: deeper (or shallower) from stamp to stamp, never under its least;
             // leaning lets more of it through
             let base = self.brush.grain.depth.max(1e-3);
@@ -914,7 +1013,12 @@ impl StrokeBuilder {
             let mut depth = base * (1.0 - jitter);
             depth += (1.0 - depth) * (x.tilt_bleed * self.leaning(p, x.tilt_angles.bleed)).clamp(0.0, 1.0);
             let grain_press = (1.0 - light).clamp(0.0, 1.0);
-            let depth = depth.max(x.grain_depth_min).clamp(0.0, 1.0);
+            let mut depth = depth.max(x.grain_depth_min).clamp(0.0, 1.0);
+            // the depth tilt: leaning takes the depth down to its least
+            if sw.grain_depth.is_some() {
+                let least = x.grain_depth_min.min(depth);
+                depth = least + (depth - least) * (1.0 - self.switched(p, sw.grain_depth));
+            }
             // sized with the stamp, against the stroke's size, unless cropped
             let grain_size = 1.0 + (diameter * size / self.diameter.max(1e-3) - 1.0) * (1.0 - x.grain_zoom);
             let placed = Placed {
@@ -932,6 +1036,7 @@ impl StrokeBuilder {
                 grain_press,
                 gradation: (x.tilt_gradation * self.leaning(p, x.tilt_angles.gradation)).max(0.0).sqrt().min(1.0),
                 transfer,
+                attack,
             };
             self.placed.push(placed);
             let stamp = self.finish_stamp(&placed, None);
@@ -981,6 +1086,7 @@ impl StrokeBuilder {
             gradation: p.gradation,
             taper: size.clamp(0.0, 1.0),
             transfer: p.transfer,
+            attack: p.attack,
         }
     }
 }
@@ -1208,6 +1314,87 @@ mod tests {
         tilted.tilt = 0.0;
         let upright = StrokeBuilder::new(brush, 10.0, Pointer::Stylus).preview(&[tilted]);
         assert!(upright[0].radius < 5.1);
+    }
+
+    #[test]
+    fn a_leaning_pen_moves_its_stamps_toward_the_cap() {
+        let angle = 0.1 * std::f32::consts::FRAC_PI_2;
+        let brush = Brush { tilt: Tilt { angle, size: 0.0, opacity: 0.0 }, pressure_size: 0.0, ..plain() };
+        // leaning with the pen pointing right on the screen
+        let mut s = Sample::at(Vec2::new(100.0, 100.0), 1.0, 0.0);
+        s.tilt = crate::brush::FLAT_TILT;
+        s.azimuth = std::f32::consts::FRAC_PI_2;
+        let pen = StrokeBuilder::new(brush.clone(), 10.0, Pointer::Stylus).preview(&[s]);
+        let shift = Tilt::reach(crate::brush::FLAT_TILT, 0.1) * std::f32::consts::FRAC_1_SQRT_2 * 5.0;
+        assert!(
+            (pen[0].center.x - (100.0 + shift)).abs() < 1e-3 && (pen[0].center.y - 100.0).abs() < 1e-3,
+            "{:?}",
+            pen[0].center
+        );
+        // fingers, upright pens and the studio's pad stay put
+        let finger = StrokeBuilder::new(brush.clone(), 10.0, Pointer::Finger).preview(&[s]);
+        assert_eq!(finger[0].center, Vec2::new(100.0, 100.0));
+        let pad = StrokeBuilder::new(brush.clone(), 10.0, Pointer::Stylus).on_pad(true).preview(&[s]);
+        assert_eq!(pad[0].center, Vec2::new(100.0, 100.0));
+        s.tilt = 0.0;
+        let upright = StrokeBuilder::new(brush, 10.0, Pointer::Stylus).preview(&[s]);
+        assert!((upright[0].center.x - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_wet_attack_follows_the_pressure_and_its_tilt_switch() {
+        let attack = |pressure: f32, tilt: f32, switch: bool, pointer: Pointer| {
+            let mut b = Brush { pressure_size: 0.0, ..plain() };
+            if switch {
+                b.set_setting("attack_tilt", 1.0);
+            }
+            let mut s = Sample::at(Vec2::new(10.0, 10.0), pressure, 0.0);
+            s.tilt = tilt;
+            StrokeBuilder::new(b, 10.0, pointer).preview(&[s])[0].attack
+        };
+        assert!((attack(1.0, 0.0, false, Pointer::Stylus) - 1.0).abs() < 1e-4);
+        assert!((attack(0.4, 0.0, false, Pointer::Stylus) - 0.4).abs() < 0.05);
+        // switched on: an upright pen next to none, a leaning one more, a finger as a flat pen
+        assert!(attack(1.0, 0.0, true, Pointer::Stylus) < 0.01);
+        let flat = Tilt::reach(crate::brush::FLAT_TILT, 0.0);
+        assert!((attack(1.0, crate::brush::FLAT_TILT, true, Pointer::Stylus) - flat).abs() < 1e-3);
+        let finger = Tilt::reach(std::f32::consts::FRAC_PI_2, 0.0);
+        assert!((attack(1.0, 0.0, true, Pointer::Finger) - finger).abs() < 1e-3);
+    }
+
+    #[test]
+    fn tilt_switches_hold_their_controls_back_until_the_pen_leans() {
+        let make = |tilt: f32, switches: bool| {
+            let mut b = Brush { pressure_size: 0.0, ..plain() };
+            b.shape.count = 8;
+            b.grain.depth = 1.0;
+            b.set_setting("jitter_lateral", 1.0);
+            b.set_setting("grain_depth_min", 0.2);
+            if switches {
+                for k in ["count_tilt", "jitter_lateral_tilt", "grain_depth_tilt"] {
+                    b.set_setting(k, 1.0);
+                }
+            }
+            let mut s = Sample::at(Vec2::new(50.0, 50.0), 1.0, 0.0);
+            s.tilt = tilt;
+            StrokeBuilder::new(b, 10.0, Pointer::Stylus).preview(&[s])
+        };
+        // off: all eight stamps, jittered off the point, the grain at full depth
+        let off = make(0.0, false);
+        assert_eq!(off.len(), 8);
+        assert!(off.iter().any(|s| (s.center.y - 50.0).abs() > 0.5));
+        // on and upright: one stamp, no jitter, the grain still at full depth
+        let upright = make(0.0, true);
+        assert_eq!(upright.len(), 1);
+        // (the lean's floor, 1/1024, still lets a trace through)
+        assert!((upright[0].center.y - 50.0).abs() < 0.05);
+        assert!(upright[0].grain_depth > 0.99, "{}", upright[0].grain_depth);
+        // on and leaning flat: more stamps, jittered, the grain pulled toward its least
+        let flat = make(crate::brush::FLAT_TILT, true);
+        assert!(flat.len() > 1);
+        // (its angle the brush's tilt angle, 0 here)
+        let reach = Tilt::reach(crate::brush::FLAT_TILT, 0.0);
+        assert!((flat[0].grain_depth - (0.2 + 0.8 * (1.0 - reach))).abs() < 1e-3, "{}", flat[0].grain_depth);
     }
 
     #[test]

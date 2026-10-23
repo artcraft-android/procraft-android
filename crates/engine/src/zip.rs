@@ -98,9 +98,29 @@ impl ZipWriter {
 
     /// Adds `data` as entry `name`, deflated (or stored, if deflating doesn't make it smaller).
     pub fn add(&mut self, name: &str, data: &[u8]) {
-        let crc = crc32(data);
         let deflated = miniz_oxide::deflate::compress_to_vec(data, 6);
-        let (method, body): (u16, &[u8]) = if deflated.len() < data.len() { (8, &deflated) } else { (0, data) };
+        if deflated.len() < data.len() {
+            self.entry(name, data, 8, &deflated, 0);
+        } else {
+            self.entry(name, data, 0, data, 0);
+        }
+    }
+
+    /// Adds `data` as entry `name` stored as it is, starting at a multiple of `align` bytes into
+    /// the archive (as USDZ packages ask: the local header padded with an extra field).
+    pub fn add_aligned(&mut self, name: &str, data: &[u8], align: usize) {
+        let align = align.max(1);
+        let at = self.out.len() + 30 + name.len();
+        let mut pad = (align - at % align) % align;
+        // an extra field needs four bytes for its id and size
+        if pad > 0 && pad < 4 {
+            pad += align;
+        }
+        self.entry(name, data, 0, data, pad);
+    }
+
+    fn entry(&mut self, name: &str, data: &[u8], method: u16, body: &[u8], pad: usize) {
+        let crc = crc32(data);
         let local = self.out.len() as u32;
         let name = name.as_bytes();
         let header = |sig: u32, central: bool| {
@@ -118,7 +138,8 @@ impl ZipWriter {
             h.extend_from_slice(&(body.len() as u32).to_le_bytes());
             h.extend_from_slice(&(data.len() as u32).to_le_bytes());
             h.extend_from_slice(&(name.len() as u16).to_le_bytes());
-            h.extend_from_slice(&0u16.to_le_bytes()); // extra
+            let extra = if central { 0 } else { pad as u16 };
+            h.extend_from_slice(&extra.to_le_bytes());
             if central {
                 h.extend_from_slice(&0u16.to_le_bytes()); // comment
                 h.extend_from_slice(&0u16.to_le_bytes()); // disk
@@ -127,6 +148,12 @@ impl ZipWriter {
                 h.extend_from_slice(&local.to_le_bytes());
             }
             h.extend_from_slice(name);
+            if !central && pad >= 4 {
+                // padding: an extra field of our own id, its size what is left
+                h.extend_from_slice(&0x1986u16.to_le_bytes());
+                h.extend_from_slice(&((pad - 4) as u16).to_le_bytes());
+                h.resize(h.len() + pad - 4, 0);
+            }
             h
         };
         self.out.extend_from_slice(&header(0x0403_4B50, false));

@@ -2,6 +2,9 @@ ProCraft is made with the following third-party software, under the licences giv
 
 The interface font, Inter, is under the SIL Open Font License 1.1 (its text above).
 
+The 3D view environments are panoramas from Poly Haven (polyhaven.com), under CC0 (public
+domain); their authors are listed in assets/environments/README.md.
+
 == Rust crates ==
 
 adler2 2.0.1 (0BSD OR MIT OR Apache-2.0)

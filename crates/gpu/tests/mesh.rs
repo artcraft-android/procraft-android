@@ -1,0 +1,377 @@
+//! 3D painting's model view: drawn with depth, textured and lit.
+#![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+
+use procraft_engine::mesh::read_obj;
+use procraft_gpu::{Gpu, MeshView, Orbit, read_texture, wgpu};
+
+fn gpu() -> Option<Gpu> {
+    Gpu::headless().ok()
+}
+
+const SIDE: u32 = 64;
+
+/// Draws `view` into a `SIDE` square and reads it back (RGBA8).
+fn draw(gpu: &Gpu, view: &mut MeshView) -> Vec<u8> {
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("test target"),
+        size: wgpu::Extent3d { width: SIDE, height: SIDE, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    // the clear colour round the model, not the environment
+    view.show_environment(gpu, false);
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
+    view.render(gpu, &mut encoder, &target_view, SIDE, SIDE, [0.0, 0.0, 0.0, 1.0]);
+    gpu.queue.submit([encoder.finish()]);
+    read_texture(gpu, &target, SIDE, SIDE).unwrap()
+}
+
+fn pixel(p: &[u8], x: u32, y: u32) -> [u8; 4] {
+    let i = ((y * SIDE + x) * 4) as usize;
+    [p[i], p[i + 1], p[i + 2], p[i + 3]]
+}
+
+/// Two squares facing +z, the near one (red) given first, the far one (blue) after it.
+const QUADS: &str = "v -1 -1 0.5\nv 1 -1 0.5\nv 1 1 0.5\nv -1 1 0.5\nv -2 -2 -0.5\nv 2 -2 -0.5\nv 2 2 -0.5\nv -2 2 -0.5\n\
+vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\n\
+usemtl near\nf 1/1/1 2/2/1 3/3/1 4/4/1\nusemtl far\nf 5/1/1 6/2/1 7/3/1 8/4/1\n";
+
+#[test]
+fn the_nearer_surface_hides_the_farther() {
+    let Some(gpu) = gpu() else { return };
+    let mesh = read_obj(QUADS, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 4, wgpu::TextureFormat::Rgba8Unorm);
+    view.set_base(&gpu, 0, [1.0, 0.0, 0.0]);
+    view.set_base(&gpu, 1, [0.0, 0.0, 1.0]);
+    // straight on from +z
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 6.0, fov: 0.9 };
+    let px = draw(&gpu, &mut view);
+    let middle = pixel(&px, SIDE / 2, SIDE / 2);
+    assert!(middle[0] > 100 && middle[2] < middle[0] / 3, "the near square in front: {middle:?}");
+    // past the near square's edge the far one shows
+    let rim = pixel(&px, SIDE / 2 + 13, SIDE / 2);
+    assert!(rim[2] > 100 && rim[0] < rim[2] / 3, "the far square around it: {rim:?}");
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn a_painted_texture_shows_over_the_base_colour() {
+    let Some(gpu) = gpu() else { return };
+    let mesh = read_obj(QUADS, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 4, wgpu::TextureFormat::Rgba8Unorm);
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 6.0, fov: 0.9 };
+    // the near square painted green all over (premultiplied, opaque)
+    let green: Vec<u8> = (0..16).flat_map(|_| [0, 255, 0, 255]).collect();
+    assert!(view.set_albedo(&gpu, 0, &green));
+    assert!(!view.set_albedo(&gpu, 0, &green[..8]));
+    let px = draw(&gpu, &mut view);
+    let middle = pixel(&px, SIDE / 2, SIDE / 2);
+    assert!(middle[1] > 100 && middle[0] < 60 && middle[2] < 60, "{middle:?}");
+    // unpainted, the far square shows its base colour (white), lit
+    let rim = pixel(&px, SIDE / 2 + 13, SIDE / 2);
+    assert!(rim[0] > 100 && rim[0] == rim[1] && rim[1] == rim[2], "{rim:?}");
+    // round the model, the clear colour
+    assert_eq!(pixel(&px, 0, 0), [0, 0, 0, 255]);
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn a_framed_model_fills_the_view_with_room_round_it() {
+    let Some(gpu) = gpu() else { return };
+    let mesh = read_obj(QUADS, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 4, wgpu::TextureFormat::Rgba8Unorm);
+    view.orbit = Orbit { rotation: Orbit::rotation_of(0.0, 0.0), ..view.orbit };
+    let px = draw(&gpu, &mut view);
+    let lit = (0..SIDE * SIDE).filter(|&k| pixel(&px, k % SIDE, k / SIDE)[0] > 20).count();
+    // the far square seen whole, about half the view across, not to its edges
+    assert!(lit > (SIDE * SIDE / 5) as usize && lit < (SIDE * SIDE / 3) as usize, "{lit}");
+    assert_eq!(pixel(&px, 0, SIDE / 2), [0, 0, 0, 255]);
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn a_stroke_on_the_screen_paints_the_surface_it_lands_on() {
+    use procraft_engine::document::Document;
+    use procraft_engine::geom::{IRect, Vec2};
+    use procraft_engine::stroke::Stamp;
+    use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
+    let Some(gpu) = gpu() else { return };
+    let mesh = read_obj(QUADS, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 16, wgpu::TextureFormat::Rgba8Unorm);
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 6.0, fov: 0.9 };
+    // a dot in the middle of the screen
+    let mut screen_doc = Document::new(SIDE, SIDE);
+    let mut screen = Canvas::new(&gpu, &screen_doc).unwrap();
+    let style = StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0);
+    screen.begin_stroke(screen_doc.current(), style);
+    let middle = SIDE as f32 / 2.0;
+    screen.add_stamps(&[Stamp::round(Vec2::new(middle, middle), 6.0, 1.0)]);
+    screen.render(&gpu, &mut screen_doc, None);
+    let bounds = IRect::around(Vec2::new(middle, middle), 7.0);
+    // onto each square's texture (16 square)
+    let mut painted = Vec::new();
+    let mut canvases = Vec::new();
+    for part in 0..2 {
+        let mut doc = Document::new(16, 16);
+        doc.background_visible = false;
+        let mut texture = Canvas::new(&gpu, &doc).unwrap();
+        texture.begin_drawn_stroke(doc.current(), style);
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("project") });
+        let reach = view.project_stroke(
+            &gpu,
+            &mut encoder,
+            part,
+            screen.stroke_view(),
+            bounds,
+            SIDE,
+            SIDE,
+            texture.stroke_target(),
+        );
+        gpu.queue.submit([encoder.finish()]);
+        texture.stroke_drawn(reach);
+        texture.end_stroke();
+        texture.render(&gpu, &mut doc, None);
+        painted.push((reach, texture.read_layer(&gpu, doc.current()).unwrap()));
+        canvases.push((texture, doc));
+    }
+    let alpha = |px: &[u8], x: u32, y: u32| px[((y * 16 + x) * 4 + 3) as usize];
+    // the near square: painted in its middle, not at its corners
+    let (reach, near) = &painted[0];
+    assert!(!reach.is_empty());
+    assert!(alpha(near, 8, 8) > 200, "{}", alpha(near, 8, 8));
+    assert_eq!(alpha(near, 1, 1), 0);
+    // the far square is hidden there: nothing reaches it
+    let (_, far) = &painted[1];
+    assert!(far.chunks(4).all(|p| p[3] == 0), "the hidden square was painted");
+    // the model shows the near square's canvas: red where painted, its base colour round it
+    let (near_canvas, _) = &canvases[0];
+    view.set_base(&gpu, 0, [0.0, 1.0, 0.0]);
+    view.set_albedo_view(&gpu, 0, near_canvas.composite_view());
+    let px = draw(&gpu, &mut view);
+    let middle_px = pixel(&px, SIDE / 2, SIDE / 2);
+    assert!(middle_px[0] > 100 && middle_px[1] < 60, "{middle_px:?}");
+    let off = pixel(&px, SIDE / 2 + 9, SIDE / 2);
+    assert!(off[1] > 100 && off[0] < 60, "{off:?}");
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn colours_go_into_the_targets_space_but_pictures_keep_their_own() {
+    let Some(gpu) = gpu() else { return };
+    let mesh = read_obj(QUADS, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 4, wgpu::TextureFormat::Rgba8Unorm);
+    view.set_base(&gpu, 0, [1.0, 0.0, 0.0]);
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 6.0, fov: 0.9 };
+    // a "space" whose red is the target's green
+    view.set_convert(Some([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]));
+    let shown = pixel(&draw(&gpu, &mut view), SIDE / 2, SIDE / 2);
+    assert!(shown[1] > 100 && shown[0] < 10, "{shown:?}");
+    let picture = view.picture(&gpu, SIDE, SIDE, [0.0, 0.0, 0.0, 1.0]).unwrap();
+    let kept = pixel(&picture, SIDE / 2, SIDE / 2);
+    assert!(kept[0] > 100 && kept[1] < kept[0] / 3, "{kept:?}");
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn a_projected_stroke_grows_a_little_past_its_island() {
+    use procraft_engine::document::Document;
+    use procraft_engine::geom::{IRect, Vec2};
+    use procraft_engine::stroke::Stamp;
+    use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
+    let Some(gpu) = gpu() else { return };
+    // one square facing the camera, its texture's middle half its island (texels 4 to 11)
+    let island = "v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nvt 0.25 0.25\nvt 0.75 0.25\nvt 0.75 0.75\nvt 0.25 0.75\nf 1/1 2/2 3/3 4/4\n";
+    let mesh = read_obj(island, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 16, wgpu::TextureFormat::Rgba8Unorm);
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 6.0, fov: 0.9 };
+    // a stroke over the whole square
+    let mut screen_doc = Document::new(SIDE, SIDE);
+    let mut screen = Canvas::new(&gpu, &screen_doc).unwrap();
+    let style = StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0);
+    screen.begin_stroke(screen_doc.current(), style);
+    let middle = SIDE as f32 / 2.0;
+    screen.add_stamps(&[Stamp::round(Vec2::new(middle, middle), 30.0, 1.0)]);
+    screen.render(&gpu, &mut screen_doc, None);
+    let mut doc = Document::new(16, 16);
+    doc.background_visible = false;
+    let mut texture = Canvas::new(&gpu, &doc).unwrap();
+    texture.begin_drawn_stroke(doc.current(), style);
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("project") });
+    let bounds = IRect::from_size(SIDE, SIDE);
+    let reach =
+        view.project_stroke(&gpu, &mut encoder, 0, screen.stroke_view(), bounds, SIDE, SIDE, texture.stroke_target());
+    gpu.queue.submit([encoder.finish()]);
+    texture.stroke_drawn(reach);
+    texture.end_stroke();
+    texture.render(&gpu, &mut doc, None);
+    let px = texture.read_layer(&gpu, doc.current()).unwrap();
+    let alpha = |x: u32| px[((8 * 16 + x) * 4 + 3) as usize];
+    // inside, and up to two texels outside, painted; further out, not
+    for x in [2, 3, 4, 8, 11, 12, 13] {
+        assert!(alpha(x) > 200, "texel {x}: {}", alpha(x));
+    }
+    for x in [0, 1, 14, 15] {
+        assert_eq!(alpha(x), 0, "texel {x}");
+    }
+    assert!(reach.x0 <= 2 && reach.x1 >= 14, "{reach:?}");
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn a_far_surface_shows_its_texture_filtered() {
+    let Some(gpu) = gpu() else { return };
+    let mesh = read_obj(QUADS, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 64, wgpu::TextureFormat::Rgba8Unorm);
+    // a black and white checker of single texels
+    let checker: Vec<u8> =
+        (0..64 * 64).flat_map(|i| if (i % 64 + i / 64) % 2 == 0 { [255; 4] } else { [0, 0, 0, 255] }).collect();
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("checker"),
+        size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        texture.as_image_copy(),
+        &checker,
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(64 * 4), rows_per_image: Some(64) },
+        wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 },
+    );
+    let albedo = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("levels") });
+    view.set_albedo_filtered(&gpu, &mut encoder, 0, &albedo);
+    gpu.queue.submit([encoder.finish()]);
+    // far off: the near square a few pixels across, each pixel over many texels
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 40.0, fov: 0.9 };
+    let px = draw(&gpu, &mut view);
+    let middle = (SIDE / 2 - 1..SIDE / 2 + 2).flat_map(|y| (SIDE / 2 - 1..SIDE / 2 + 2).map(move |x| (x, y)));
+    for (x, y) in middle {
+        let p = pixel(&px, x, y);
+        // grey, as lit: no texel black or white showing through
+        assert!(p[0] > 40 && p[0] < 200 && p[0] == p[1], "({x}, {y}): {p:?}");
+    }
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn painting_through_reaches_hidden_surfaces() {
+    use procraft_engine::document::Document;
+    use procraft_engine::geom::{IRect, Vec2};
+    use procraft_engine::stroke::Stamp;
+    use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
+    let Some(gpu) = gpu() else { return };
+    let mesh = read_obj(QUADS, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 16, wgpu::TextureFormat::Rgba8Unorm);
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 6.0, fov: 0.9 };
+    view.paint_through = true;
+    let mut screen_doc = Document::new(SIDE, SIDE);
+    let mut screen = Canvas::new(&gpu, &screen_doc).unwrap();
+    let style = StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0);
+    screen.begin_stroke(screen_doc.current(), style);
+    let middle = SIDE as f32 / 2.0;
+    screen.add_stamps(&[Stamp::round(Vec2::new(middle, middle), 6.0, 1.0)]);
+    screen.render(&gpu, &mut screen_doc, None);
+    // onto the far square, behind the near one
+    let mut doc = Document::new(16, 16);
+    doc.background_visible = false;
+    let mut texture = Canvas::new(&gpu, &doc).unwrap();
+    texture.begin_drawn_stroke(doc.current(), style);
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("through") });
+    let bounds = IRect::around(Vec2::new(middle, middle), 7.0);
+    let reach =
+        view.project_stroke(&gpu, &mut encoder, 1, screen.stroke_view(), bounds, SIDE, SIDE, texture.stroke_target());
+    gpu.queue.submit([encoder.finish()]);
+    texture.stroke_drawn(reach);
+    texture.end_stroke();
+    texture.render(&gpu, &mut doc, None);
+    let px = texture.read_layer(&gpu, doc.current()).unwrap();
+    assert!(px[((8 * 16 + 8) * 4 + 3) as usize] > 200, "the hidden square took no paint");
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn surfaces_turned_away_take_less_paint() {
+    use procraft_engine::document::Document;
+    use procraft_engine::geom::{IRect, Vec2};
+    use procraft_engine::stroke::Stamp;
+    use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
+    let Some(gpu) = gpu() else { return };
+    let square = "v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nf 1/1 2/2 3/3 4/4\n";
+    let mesh = read_obj(square, None).unwrap();
+    // the middle texel's paint, seen from `yaw` round
+    let paint_from = |yaw: f32| {
+        let mut view = MeshView::new(&gpu, &mesh, 16, wgpu::TextureFormat::Rgba8Unorm);
+        view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(yaw, 0.0), distance: 6.0, fov: 0.9 };
+        let mut screen_doc = Document::new(SIDE, SIDE);
+        let mut screen = Canvas::new(&gpu, &screen_doc).unwrap();
+        let style = StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0);
+        screen.begin_stroke(screen_doc.current(), style);
+        screen.add_stamps(&[Stamp::round(Vec2::new(SIDE as f32 / 2.0, SIDE as f32 / 2.0), 30.0, 1.0)]);
+        screen.render(&gpu, &mut screen_doc, None);
+        let mut doc = Document::new(16, 16);
+        doc.background_visible = false;
+        let mut texture = Canvas::new(&gpu, &doc).unwrap();
+        texture.begin_drawn_stroke(doc.current(), style);
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("graze") });
+        let reach = view.project_stroke(
+            &gpu,
+            &mut encoder,
+            0,
+            screen.stroke_view(),
+            IRect::from_size(SIDE, SIDE),
+            SIDE,
+            SIDE,
+            texture.stroke_target(),
+        );
+        gpu.queue.submit([encoder.finish()]);
+        texture.stroke_drawn(reach);
+        texture.end_stroke();
+        texture.render(&gpu, &mut doc, None);
+        texture.read_layer(&gpu, doc.current()).unwrap()[((8 * 16 + 8) * 4 + 3) as usize]
+    };
+    // square on: all of it; nearly edge on (cos 0.04): next to nothing
+    assert!(paint_from(0.3) > 250);
+    assert!(paint_from(1.53) < 30, "{}", paint_from(1.53));
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn a_mirror_reflects_what_is_behind_the_camera() {
+    use procraft_engine::environment::Equirect;
+    use procraft_gpu::Lighting;
+    let Some(gpu) = gpu() else { return };
+    let square = "v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nf 1/1 2/2 3/3 4/4\n";
+    let mesh = read_obj(square, None).unwrap();
+    // a panorama red behind the camera (its left and right edges, along +z) and green ahead
+    let (w, h) = (64u32, 32u32);
+    let pixels = (0..w * h)
+        .map(|i| {
+            let u = (i % w) as f32 / w as f32;
+            if !(0.25..0.75).contains(&u) { [4.0, 0.0, 0.0] } else { [0.0, 4.0, 0.0] }
+        })
+        .collect();
+    let panorama = Equirect { width: w, height: h, pixels };
+    let mut view = MeshView::new(&gpu, &mesh, 4, wgpu::TextureFormat::Rgba8Unorm);
+    view.set_lighting(&gpu, Lighting::new(&gpu, &panorama));
+    // a smooth metal, white: a mirror
+    view.set_material(&gpu, 0, 0.0, 1.0);
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 6.0, fov: 0.9 };
+    let px = draw(&gpu, &mut view);
+    let middle = pixel(&px, SIDE / 2, SIDE / 2);
+    assert!(middle[0] > 150 && middle[1] < 60, "{middle:?}");
+    // seen from behind (turned half round), it shows what was ahead
+    view.orbit.rotation = Orbit::rotation_of(std::f32::consts::PI, 0.0);
+    let px = draw(&gpu, &mut view);
+    let back = pixel(&px, SIDE / 2, SIDE / 2);
+    assert!(back[0] > 150 && back[1] < 60, "the environment turns with the camera: {back:?}");
+    assert_eq!(gpu.errors(), 0);
+}

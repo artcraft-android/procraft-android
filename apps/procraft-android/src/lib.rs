@@ -25,6 +25,7 @@ mod projection;
 mod quickshape;
 #[cfg(target_os = "android")]
 mod render;
+mod scene3d;
 mod selection;
 mod studio;
 #[cfg(test)]
@@ -298,6 +299,9 @@ pub(crate) struct State {
     pub(crate) info: project::ArtworkInfo,
     /// Saved layer pixels waiting for the canvas (an opened artwork before it is shown).
     pub(crate) pending_pixels: Vec<(procraft_engine::document::LayerId, Vec<u8>)>,
+    /// A model open to paint on, in place of the flat canvas (the document is its current
+    /// texture set's).
+    pub(crate) scene: Option<scene3d::Scene>,
     /// What fitting the canvas keeps clear of (left, top, right, bottom, window pixels).
     fit_insets: [f32; 4],
     /// Frosted panels open over the canvas: left, top, right, bottom and corner radius (window
@@ -419,6 +423,39 @@ impl State {
     fn brush(&self, tool: ToolKind) -> &Brush {
         let (set, index) = self.brush_ref(tool);
         self.library.get(set).and_then(|s| s.brushes.get(index)).unwrap_or(&self.fallback)
+    }
+
+    /// The brush a stroke of `tool` on `layer` uses, its style, and its diameter at the size
+    /// slider (canvas pixels, before the brush scale).
+    pub(crate) fn stroke_brush(
+        &mut self,
+        tool: ToolKind,
+        layer: procraft_engine::document::LayerId,
+    ) -> (Brush, StrokeStyle, f32) {
+        let sliders = self.sliders(tool);
+        let mut brush = self.brush(tool).clone();
+        // a blending brush's opacity lightens each stamp, as its flow does, so its strokes still
+        // build up to full; a glaze's caps the stroke
+        let opacity = if brush.blends() && matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) {
+            brush.flow *= sliders.opacity.clamp(0.0, 1.0).powf(procraft_engine::brush::FLOW_POWER);
+            1.0
+        } else {
+            brush.opacity(sliders.opacity)
+        };
+        let diameter = brush.diameter(sliders.size);
+        let mut style = StrokeStyle::for_brush(
+            &brush,
+            tool.stroke_tool(),
+            self.color,
+            opacity,
+            self.doc.layer(layer).is_some_and(|l| l.alpha_lock),
+        );
+        style.secondary = self.secondary;
+        style.preview = self.pad_strokes.is_some();
+        if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
+            canvas.use_sources(gpu, &mut style, &brush);
+        }
+        (brush, style, diameter)
     }
 
     /// More input for the pad's last kept stroke, if it keeps them.
@@ -609,6 +646,7 @@ impl CanvasSession {
             stroke: None,
             gpu: None,
             canvas: None,
+            scene: None,
             needs_frame: false,
             stop: false,
             projection_size: (1, 1),
@@ -754,6 +792,12 @@ impl CanvasSession {
             self.shared.frame(st);
             return;
         }
+        // on a model the stroke is drawn on the screen and carried onto it
+        if st.scene.is_some() {
+            st.scene_stroke_begin(pointer, &samples);
+            self.shared.frame(st);
+            return;
+        }
         let current = st.doc.current();
         st.finish_stroke();
         st.settle();
@@ -764,25 +808,21 @@ impl CanvasSession {
             return;
         }
         let tool = if pointer == PointerKind::StylusEraser { ToolKind::Erase } else { st.tool };
-        let sliders = st.sliders(tool);
-        let mut brush = st.brush(tool).clone();
-        // a blending brush's opacity lightens each stamp, as its flow does, so its strokes still
-        // build up to full; a glaze's caps the stroke
-        let opacity = if brush.blends() && matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) {
-            brush.flow *= sliders.opacity.clamp(0.0, 1.0).powf(procraft_engine::brush::FLOW_POWER);
-            1.0
-        } else {
-            brush.opacity(sliders.opacity)
-        };
+        let (brush, style, diameter) = st.stroke_brush(tool, current);
+        let diameter = diameter * st.brush_scale();
         st.strokes = st.strokes.wrapping_add(1);
         st.info.strokes = st.info.strokes.saturating_add(1);
         let seed = st.strokes.wrapping_mul(0x9e37_79b9);
-        let diameter = brush.diameter(sliders.size) * st.brush_scale();
         let mut builder = StrokeBuilder::with_seed(brush.clone(), diameter, pointer.into(), seed)
             .scaled(st.brush_scale())
             .with_input(st.input.clone())
             .on_view_turned(st.view.map_or(0.0, |v| v.rotation()))
             .seen_at(st.view.map_or(1.0, |v| v.zoom()) / st.display_scale);
+        if st.pad_strokes.is_some() {
+            // on the studio's pad the lean moves no stamps, and the tilt switches act only when
+            // the brush previews tilt
+            builder = builder.on_pad(brush.setting("preview_tilt") >= 0.5);
+        }
         if st.pad_sample {
             // the pad's sample scribble is drawn as given: its path whatever the brush's
             // streamline, its pressure as it comes (its pace still counts)
@@ -795,18 +835,6 @@ impl CanvasSession {
         st.drawn_pressure = 0.0;
         st.remember_input(&canvas_samples);
         let stamps = guide::mirrored(&st.doc.guide, &builder.add(&canvas_samples));
-        let mut style = StrokeStyle::for_brush(
-            &brush,
-            tool.stroke_tool(),
-            st.color,
-            opacity,
-            st.doc.layer(current).is_some_and(|l| l.alpha_lock),
-        );
-        style.secondary = st.secondary;
-        style.preview = st.pad_strokes.is_some();
-        if let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
-            canvas.use_sources(gpu, &mut style, &brush);
-        }
         // painted and erased strokes can be made shapes once they end
         st.last_stroke = None;
         st.began =
@@ -831,6 +859,11 @@ impl CanvasSession {
     pub fn stroke_add(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.scene.is_some() {
+            st.scene_stroke_add(&samples, false);
+            self.shared.frame(st);
+            return;
+        }
         st.keep_pad_input(&samples);
         let canvas_samples = st.assisted(st.to_canvas(&samples));
         // a snapped shape follows the held finger no further
@@ -852,6 +885,9 @@ impl CanvasSession {
     pub fn stroke_predict(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.scene.is_some() {
+            return;
+        }
         let canvas_samples = st.to_canvas(&samples);
         let (Some(builder), Some(canvas)) = (st.stroke.as_ref(), st.canvas.as_mut()) else { return };
         canvas.set_prediction(&builder.preview(&canvas_samples));
@@ -862,6 +898,11 @@ impl CanvasSession {
     pub fn stroke_end(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.scene.is_some() {
+            st.scene_stroke_add(&samples, true);
+            self.shared.frame(st);
+            return;
+        }
         st.keep_pad_input(&samples);
         let canvas_samples = st.assisted(st.to_canvas(&samples));
         // a snapped shape stays open to be edited, until the next thing done keeps it
@@ -883,6 +924,11 @@ impl CanvasSession {
     pub fn stroke_cancel(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.scene.is_some() {
+            st.scene_stroke_cancel();
+            self.shared.frame(st);
+            return;
+        }
         if let Some(kept) = st.pad_strokes.as_mut() {
             kept.pop();
         }
@@ -902,6 +948,11 @@ impl CanvasSession {
         let mut st = self.shared.lock();
         // the fingers take the canvas from wherever it was settling to
         st.view_motion = None;
+        if st.scene.is_some() {
+            st.scene_gesture(Vec2::new(pan_x, pan_y), scale);
+            self.shared.frame(&mut st);
+            return;
+        }
         if let Some(view) = st.view.as_mut() {
             view.gesture(Vec2::new(pivot_x, pivot_y), Vec2::new(pan_x, pan_y), scale, rotation);
             self.shared.frame(&mut st);

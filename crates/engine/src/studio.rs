@@ -202,7 +202,17 @@ impl Brush {
             | "hue_tilt_angle"
             | "saturation_tilt_angle"
             | "brightness_tilt_angle"
-            | "secondary_tilt_angle" => self.extra_or(key, self.tilt.angle / (PI / 2.0)),
+            | "secondary_tilt_angle"
+            | "jitter_lateral_tilt_angle"
+            | "jitter_linear_tilt_angle"
+            | "count_tilt_angle"
+            | "grain_depth_tilt_angle"
+            | "stamp_hue_tilt_angle"
+            | "stamp_saturation_tilt_angle"
+            | "stamp_lightness_tilt_angle"
+            | "stamp_darkness_tilt_angle"
+            | "stamp_secondary_tilt_angle"
+            | "attack_tilt_angle" => self.extra_or(key, self.tilt.angle / (PI / 2.0)),
             "tilt_opacity" => self.tilt.opacity,
             "tilt_size" => self.tilt.size,
             "max_size" => self.size_control(self.max_size),

@@ -5,6 +5,8 @@
 //! nothing relies on reading the render target in the shader (Android GPUs have no portable way).
 
 mod canvas;
+mod lighting;
+mod scene;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +15,8 @@ pub use canvas::{
     Backdrop, Canvas, DisplayLut, Filter, LiquifyMode, LiquifyStamp, Resample, SelectionLook, Stripes, StrokeStyle,
     StrokeTool, SurroundGrid, Target, Thumbnail, read_texture,
 };
+pub use lighting::Lighting;
+pub use scene::{MeshView, Orbit};
 pub use wgpu;
 
 #[derive(Debug, thiserror::Error)]
