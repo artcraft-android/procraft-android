@@ -748,6 +748,18 @@ fn an_imported_brush_shows_its_own_preview_until_changed() {
 }
 
 #[test]
+fn spacing_set_in_the_studio_is_spaced_the_current_way() {
+    let Some(s) = session(100, 100) else { return };
+    s.studio_begin();
+    s.set_studio_setting("spacing_version".to_owned(), 0.0);
+    s.set_studio_setting("max_size".to_owned(), 0.5);
+    let version = |s: &CanvasSession| s.studio_settings(vec!["spacing_version".to_owned()])[0];
+    assert_eq!(version(&s), 0.0);
+    s.set_studio_setting("spacing".to_owned(), 0.2);
+    assert_eq!(version(&s), 1.0);
+}
+
+#[test]
 fn a_closely_spaced_brush_keeps_its_size_controls() {
     let Some(s) = session(100, 100) else { return };
     s.studio_begin();

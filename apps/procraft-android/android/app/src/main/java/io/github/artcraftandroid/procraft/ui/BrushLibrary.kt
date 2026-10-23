@@ -552,15 +552,15 @@ private fun SwipeBrush(
     Box(Modifier.fillMaxWidth().onSizeChanged { width = it.width }.clipToBounds()) {
         if (offset.value < 0f) {
             Row(Modifier.matchParentSize(), horizontalArrangement = Arrangement.spacedBy(SwipeGap)) {
-                SwipeButton(PcIcons.ShareOut, "Share", SwipeFill, SwipeInk, Modifier.weight(1f)) {
+                SwipeButton(PcIcons.SwipeShare, "Share", SwipeFill, SwipeInk, Modifier.weight(1f)) {
                     onOpen(false)
                     onShare()
                 }
-                SwipeButton(PcIcons.Duplicate, "Duplicate", SwipeFill, SwipeInk, Modifier.weight(1f)) {
+                SwipeButton(PcIcons.SwipeDuplicate, "Duplicate", SwipeFill, SwipeInk, Modifier.weight(1f)) {
                     onOpen(false)
                     onDuplicate()
                 }
-                SwipeButton(PcIcons.Trash, "Delete", SwipeDelete, Color.White, Modifier.weight(1f)) {
+                SwipeButton(PcIcons.SwipeTrash, "Delete", SwipeDelete, Color.White, Modifier.weight(1f)) {
                     onOpen(false)
                     onDelete()
                 }
@@ -591,8 +591,9 @@ private fun SwipeButton(icon: ImageVector, label: String, fill: Color, ink: Colo
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Icon(icon, contentDescription = null, tint = ink, modifier = Modifier.size(16.dp))
-        Spacer(Modifier.height(5.dp))
+        // 19 across, as the reference's are, the label where it was
+        Icon(icon, contentDescription = null, tint = ink, modifier = Modifier.size(19.dp))
+        Spacer(Modifier.height(2.dp))
         Text(label, color = ink, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
     }
 }

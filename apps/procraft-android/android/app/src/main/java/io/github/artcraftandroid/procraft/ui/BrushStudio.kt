@@ -347,22 +347,27 @@ private fun gap(above: Any, below: Any): Dp {
     }
 }
 
-/** A blend mode setting: its mode's name, in blue, opens the modes as a list over it. */
+/**
+ * A blend mode setting: its mode's name, in blue, opens the modes as a list over it (the grain's
+ * own list for the grain, the layers' and behind for the brush and its burnt edges).
+ */
 @Composable
 private fun BlendPicker(vm: CanvasViewModel, c: StudioControl.Picker) {
     var open by remember { mutableStateOf(false) }
     var at by remember { mutableFloatStateOf(0f) }
     val current = vm.studio(c.key).roundToInt()
+    val modes = if (c.key == "grain_blend") vm.grainBlendModeList else vm.brushBlendModeList
     Row(
         Modifier.offset(y = 2.dp).fillMaxWidth().height(47.dp).padding(start = 8.dp, end = 8.dp).onGloballyPositioned { at = it.boundsInWindow().center.y },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(c.label, color = StudioDim, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
-        val name = vm.blendModeList.firstOrNull { it.id.toInt() == current }?.name ?: "Normal"
+        // a file may give the grain a layer mode the list leaves out
+        val name = (modes + vm.blendModeList).firstOrNull { it.id.toInt() == current }?.name ?: "Normal"
         Text(name, color = Pc.Accent, fontSize = 17.sp, maxLines = 1, modifier = Modifier.tap { open = true })
     }
     if (open) {
-        BlendModeList(vm.blendModeList, current, at) { picked ->
+        BlendModeList(modes, current, at) { picked ->
             open = false
             picked?.let { vm.setStudio(c.key, it.toFloat()) }
         }
@@ -411,11 +416,12 @@ private fun BlendModeList(modes: List<io.github.artcraftandroid.procraft.core.Bl
                 if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(ModeListLine))
                 Row(
                     Modifier.fillMaxWidth().height(ModeRow).background(if (picked) Pc.RowSelected else Color.Transparent).tap { onDone(m.id.toInt()) }
-                        .padding(start = 13.5.dp, end = 20.dp),
+                        .padding(start = 12.dp, end = 18.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(m.name, color = if (picked) Color.White else ModeListInk, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
-                    PcIcons.BlendGlyphs[m.name]?.let { Icon(it, contentDescription = null, tint = if (picked) Color.White else ModeListGlyph, modifier = Modifier.size(22.dp)) }
+                    // its 26 frame centred 31 in from the right
+                    PcIcons.BlendGlyphs[m.name]?.let { Icon(it, contentDescription = null, tint = if (picked) Color.White else ModeListGlyph, modifier = Modifier.size(26.dp)) }
                 }
             }
         }

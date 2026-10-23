@@ -4,7 +4,7 @@
 
 use std::f32::consts::PI;
 
-use crate::brush::{Brush, FLOW_POWER, GrainMode, Rendering};
+use crate::brush::{BRUSH_BEHIND, Brush, FLOW_POWER, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering};
 use crate::document::BlendMode;
 
 /// The most size (in brush-file units, see [`Brush::size_unit`]) the size controls can reach, for
@@ -273,9 +273,15 @@ impl Brush {
                 };
                 self.extra.insert(key.to_owned(), mode);
             }
-            // blend modes are kept by number (as the layers' are numbered)
-            "blend_mode" | "grain_blend" | "burnt_blend" => {
-                self.extra.insert(key.to_owned(), value.round().clamp(0.0, BlendMode::MAX_ID as f32));
+            // blend modes are kept by number (as the layers' are numbered; a grain's own and behind
+            // past them)
+            "blend_mode" | "burnt_blend" => {
+                let id = value.round().clamp(0.0, BRUSH_BEHIND as f32);
+                let known = id <= BlendMode::MAX_ID as f32 || id == BRUSH_BEHIND as f32;
+                self.extra.insert(key.to_owned(), if known { id } else { 0.0 });
+            }
+            "grain_blend" => {
+                self.extra.insert(key.to_owned(), value.round().clamp(0.0, GRAIN_LINEAR_HEIGHT as f32));
             }
             "flow" => self.flow = unit.powf(FLOW_POWER),
             "jitter_size" => self.shape.size_jitter = unit,

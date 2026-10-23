@@ -9,6 +9,8 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.snapping.SnapPosition
+import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,10 +29,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -654,31 +654,50 @@ private fun BlendEditor(vm: CanvasViewModel, l: LayerInfo) {
             },
             onDone = { vm.setLayerOpacity(l, opacity, done = true) },
         )
-        // the list opens with the layer's mode in its middle
-        val list = rememberScrollState()
-        val rowPx = with(LocalDensity.current) { 38.8.dp.toPx() }
-        val listPx = with(LocalDensity.current) { 349.dp.toPx() }
-        LaunchedEffect(l.id) {
-            val i = vm.blendModeList.indexOfFirst { it.id == l.blend }.coerceAtLeast(0)
-            list.scrollTo((i * rowPx - (listPx - rowPx) / 2f).roundToInt().coerceAtLeast(0))
+        // a picker: the rows snap to the list's middle and the row there is the layer's mode (set
+        // once a scroll settles); the ends padded so every row can reach the middle, the layer's
+        // mode there when it opens
+        val modes = vm.blendModeList
+        val layer by rememberUpdatedState(l)
+        val list = rememberLazyListState(modes.indexOfFirst { it.id == l.blend }.coerceAtLeast(0))
+        val scope = rememberCoroutineScope()
+        LaunchedEffect(list.isScrollInProgress) {
+            if (list.isScrollInProgress) return@LaunchedEffect
+            val info = list.layoutInfo
+            val middle = (info.viewportStartOffset + info.viewportEndOffset) / 2
+            val at = info.visibleItemsInfo.minByOrNull { kotlin.math.abs(it.offset + it.size / 2 - middle) } ?: return@LaunchedEffect
+            val m = modes.getOrNull(at.index) ?: return@LaunchedEffect
+            if (m.id != layer.blend) vm.setBlend(layer, m.id)
         }
-        Column(Modifier.padding(top = 11.dp).fillMaxWidth().height(349.dp).clip(RoundedCornerShape(12.dp)).background(Pc.LayerRow).verticalScroll(list)) {
-            for (m in vm.blendModeList) {
+        LazyColumn(
+            Modifier.padding(top = 11.dp).fillMaxWidth().height(BlendListHeight).clip(RoundedCornerShape(12.dp)).background(Pc.LayerRow),
+            state = list,
+            contentPadding = PaddingValues(vertical = (BlendListHeight - BlendRow) / 2),
+            flingBehavior = rememberSnapFlingBehavior(list, SnapPosition.Center),
+        ) {
+            itemsIndexed(modes) { i, m ->
                 val chosen = m.id == l.blend
                 val ink = if (chosen) Color.White else Pc.PanelTitle
                 Row(
-                    Modifier.fillMaxWidth().height(38.8.dp).background(if (chosen) Pc.RowSelected else Color.Transparent)
-                        .clickable { vm.setBlend(l, m.id) }.padding(start = 21.dp, end = 20.5.dp),
+                    Modifier.fillMaxWidth().height(BlendRow).background(if (chosen) Pc.RowSelected else Color.Transparent)
+                        .clickable { scope.launch { list.animateScrollToItem(i) } }.padding(start = 12.dp, end = 18.5.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(m.name, color = ink, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
-                    // drawn in a 22 frame: about 16 across, centred 31.5 in from the right
-                    PcIcons.BlendGlyphs[m.name]?.let { Icon(it, contentDescription = null, tint = ink, modifier = Modifier.size(22.dp)) }
+                    // its 26 frame centred 31.5 in from the right; grey unless chosen
+                    PcIcons.BlendGlyphs[m.name]?.let {
+                        Icon(it, contentDescription = null, tint = if (chosen) Color.White else BlendGlyphInk, modifier = Modifier.size(26.dp))
+                    }
                 }
             }
         }
     }
 }
+
+/** The layer's blend list: nine rows of [BlendRow] showing; its glyphs a darker grey than its names. */
+private val BlendRow = 38.8.dp
+private val BlendListHeight = 349.dp
+private val BlendGlyphInk = Color(0xFF808080)
 
 /** A thin blue slider with a white knob, set by dragging anywhere along it. */
 @Composable
@@ -724,7 +743,8 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
     }
     MenuPresence(open, androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f)) { look ->
         Popup(popupPositionProvider = place, onDismissRequest = onDone, properties = PopupProperties(focusable = true)) {
-            Column(look.width(194.dp).clip(RoundedCornerShape(24.dp)).background(Pc.MenuFill).padding(vertical = 7.dp)) {
+            // frosted over the canvas, as the library's menus are
+            Column(look.width(194.dp).clip(RoundedCornerShape(24.dp)).then(rememberFrost(24.dp)).background(Pc.GlassMenu).padding(vertical = 7.dp)) {
                 val then = { f: () -> Unit -> { f(); onDone() } }
                 Option("Rename", onClick = then(onRename))
                 when (l.kind) {

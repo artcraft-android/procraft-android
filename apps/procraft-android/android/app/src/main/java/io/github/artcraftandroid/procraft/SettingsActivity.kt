@@ -212,22 +212,28 @@ private fun ChoiceRow(prefs: android.content.SharedPreferences, s: Choice) {
     }
 }
 
-/** The licences of what the app is made with: the interface font's, as it ships with the app. */
+/**
+ * The licences of what the app is made with: the interface font's, then the third-party software's
+ * (assets/licenses.txt, written by tools/licenses.py), a paragraph a row.
+ */
 @Composable
 private fun Licences(onBack: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val text = remember {
-        val inter = runCatching { context.assets.open("fonts/Inter-OFL.txt").bufferedReader().use { it.readText() } }.getOrDefault("")
-        "The interface font is Inter, by The Inter Project Authors, under the SIL Open Font License 1.1.\n\n$inter"
+    val paragraphs = remember {
+        fun asset(name: String) = runCatching { context.assets.open(name).bufferedReader().use { it.readText() } }.getOrDefault("")
+        val gap = "\n\n"
+        val text = "The interface font is Inter, by The Inter Project Authors, under the SIL Open Font License 1.1." + gap +
+            asset("fonts/Inter-OFL.txt").trim() + gap + asset("licenses.txt")
+        text.split(gap).map { it.trimEnd() }.filter { it.isNotBlank() }
     }
     androidx.activity.compose.BackHandler(onBack = onBack)
     Box(Modifier.fillMaxSize().background(Back).safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
-        Column(Modifier.widthIn(max = 640.dp).fillMaxWidth().verticalScroll(rememberScrollState()).padding(24.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("‹ Settings", color = Blue, fontSize = 17.sp, modifier = Modifier.clickable(onClick = onBack).padding(vertical = 8.dp))
+        androidx.compose.foundation.lazy.LazyColumn(Modifier.widthIn(max = 640.dp).fillMaxWidth().padding(horizontal = 24.dp)) {
+            item {
+                Text("‹ Settings", color = Blue, fontSize = 17.sp, modifier = Modifier.padding(top = 24.dp).clickable(onClick = onBack).padding(vertical = 8.dp))
+                Text("Licenses", color = Ink, fontSize = 30.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp, bottom = 16.dp))
             }
-            Text("Licenses", color = Ink, fontSize = 30.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp, bottom = 16.dp))
-            Text(text, color = Dim, fontSize = 13.sp)
+            items(paragraphs.size) { i -> Text(paragraphs[i], color = Dim, fontSize = 13.sp, modifier = Modifier.padding(bottom = 12.dp)) }
         }
     }
 }

@@ -109,7 +109,7 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         let g = grain_look(raw);
         // the coverage and the grain combined by the grain's blend mode, as deep as it says, and
         // only where the stroke is
-        let a = grain_combine(s.a, g, lu.grain_depth, lu.grain_blend) * select(0.0, 1.0, s.a > 0.0);
+        let a = grain_combine(s.a, g, lu.grain_depth, lu.grain_blend);
         s = s * (a / max(s.a, 1e-6));
     }
     // burnt edges show where the stroke is thin: where its paper grain took paint away, or
@@ -229,6 +229,10 @@ fn blend(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
     // shade: the darker of the backdrop and the source laid over it, premultiplied and alpha too
     if (mode == 26u) {
         return min(b, s + b * (1.0 - s.a));
+    }
+    // behind (a brush's): the source laid under the backdrop
+    if (mode == 29u) {
+        return b + s * (1.0 - b.a);
     }
     let cb = unpremultiply(b);
     let cs = unpremultiply(s);

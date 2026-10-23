@@ -5,7 +5,7 @@
 //! file's own numbers. A set file is a zip of brushes, each in a folder of its own, with
 //! `brushset.plist` giving the set's name and the folders in order.
 
-use crate::brush::{Brush, Notches, SIZE_CURVE};
+use crate::brush::{BRUSH_BEHIND, Brush, GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT, Notches, SIZE_CURVE};
 use crate::document::BlendMode;
 use crate::geom::Vec2;
 use crate::keyed::{Archive, Builder, Object};
@@ -290,6 +290,9 @@ const RENDERING: [(bool, bool, bool); 6] = [
     (true, false, false),
 ];
 
+/// Behind as brush files number their blend modes (between Soft Light and Shade).
+const BEHIND_NUMBER: i64 = 18;
+
 /// The number of stamps a place for the count a file stores: one more than fifteen times it,
 /// whole (so a sixteenth for each stamp, as files are written, reads back the same).
 fn stamp_count(stored: f64) -> f32 {
@@ -431,16 +434,24 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
             );
         }
     }
-    // blend modes by the layers' numbering, the newest key first
-    let blend = |keys: &[&str]| keys.iter().find_map(|k| f.num(k)).map(|n| crate::native::blend_from(n.round() as i64));
+    // blend modes by the layers' numbering, the newest key first; a brush's also behind
+    let blend = |keys: &[&str]| {
+        keys.iter().find_map(|k| f.num(k)).map(|n| match n.round() as i64 {
+            BEHIND_NUMBER => BRUSH_BEHIND,
+            n => crate::native::blend_from(n).id(),
+        })
+    };
     if let Some(m) = blend(&["extendedBlend2", "extendedBlend", "blendMode"]) {
-        set("blend_mode", m.id() as f32);
+        set("blend_mode", m as f32);
     }
-    if let Some(m) = blend(&["grainBlendModeExtended", "grainBlendMode"]) {
-        set("grain_blend", m.id() as f32);
+    // a grain also blends by its own two modes, numbered past the layers'
+    if let Some(n) = ["grainBlendModeExtended", "grainBlendMode"].iter().find_map(|k| f.num(k)) {
+        let n = n.round() as i64;
+        let own = [GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT].into_iter().find(|&m| i64::from(m) == n);
+        set("grain_blend", own.unwrap_or_else(|| crate::native::blend_from(n).id()) as f32);
     }
     if let Some(m) = blend(&["burntEdgesBlendModeExtended", "burntEdgesBlendMode"]) {
-        set("burnt_blend", m.id() as f32);
+        set("burnt_blend", m as f32);
     }
     // an image of the brush's own is in the file by a name of its own (its path then null), or
     // by the name its path gives; else the path names a stock image
@@ -572,15 +583,21 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
         put(mode, Value::Int(i64::from(v == 1.0)));
     }
     let number = |control: &str| {
-        let id = BlendMode::from_id(brush.setting(control).round().max(0.0) as u32).unwrap_or(BlendMode::Normal);
-        crate::native::blend_to(id)
+        let id = brush.setting(control).round().max(0.0) as u32;
+        if id == BRUSH_BEHIND {
+            return BEHIND_NUMBER;
+        }
+        crate::native::blend_to(BlendMode::from_id(id).unwrap_or(BlendMode::Normal))
     };
     let mode = number("blend_mode");
     let (oldest, older) = crate::native::older_blends(mode);
     put("blendMode", Value::Int(oldest));
     put("extendedBlend", Value::Int(older));
     put("extendedBlend2", Value::Int(mode));
-    let grain_blend = number("grain_blend");
+    let grain_blend = match brush.setting("grain_blend").round() as u32 {
+        own @ (GRAIN_HEIGHT | GRAIN_LINEAR_HEIGHT) => i64::from(own),
+        _ => number("grain_blend"),
+    };
     put("grainBlendMode", Value::Int(crate::native::older_blends(grain_blend).1));
     put("grainBlendModeExtended", Value::Int(grain_blend));
     let burnt = number("burnt_blend");
@@ -725,6 +742,46 @@ mod tests {
                 again.setting(key),
                 brush.setting(key)
             );
+        }
+    }
+
+    #[test]
+    fn grain_blend_modes_survive_a_round_trip() {
+        // the grain's own height modes past the layers' as well as a layer mode
+        for mode in [GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT, BlendMode::ColorBurn.id()] {
+            let mut brush = Brush::round_pen();
+            brush.set_setting("grain_blend", mode as f32);
+            let pictures = Pictures {
+                shape_png: b"s",
+                grain_png: None,
+                thumbnail_png: b"t",
+                author_png: None,
+                signature_png: None,
+            };
+            let back = read(&write(&brush, "", &pictures)).unwrap();
+            let read_mode = back.settings.iter().find(|(k, _)| k == "grain_blend").map(|(_, v)| *v);
+            assert_eq!(read_mode, Some(mode as f32));
+            let mut again = Brush::round_pen();
+            again.set_setting("grain_blend", read_mode.unwrap());
+            assert_eq!(again.setting("grain_blend"), mode as f32);
+        }
+    }
+
+    #[test]
+    fn behind_survives_a_round_trip() {
+        // the brush's and its burnt edges' blend modes, as brush files number them
+        let mut brush = Brush::round_pen();
+        brush.set_setting("blend_mode", BRUSH_BEHIND as f32);
+        brush.set_setting("burnt_blend", BRUSH_BEHIND as f32);
+        let pictures =
+            Pictures { shape_png: b"s", grain_png: None, thumbnail_png: b"t", author_png: None, signature_png: None };
+        let back = read(&write(&brush, "", &pictures)).unwrap();
+        for key in ["blend_mode", "burnt_blend"] {
+            let mode = back.settings.iter().find(|(k, _)| k == key).map(|(_, v)| *v);
+            assert_eq!(mode, Some(BRUSH_BEHIND as f32), "{key}");
+            let mut again = Brush::round_pen();
+            again.set_setting(key, mode.unwrap());
+            assert_eq!(again.setting(key), BRUSH_BEHIND as f32, "{key}");
         }
     }
 

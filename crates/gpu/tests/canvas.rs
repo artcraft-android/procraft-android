@@ -1121,6 +1121,30 @@ fn a_stroke_blends_into_its_layer_by_its_mode() {
 }
 
 #[test]
+fn a_stroke_behind_goes_under_the_paint() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(64, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    // a blue band down the middle, then red laid behind it across
+    canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 1.0], 1.0));
+    canvas.add_stamps(&(0..64).map(|y| dot(Vec2::new(32.0, y as f32), 8.0)).collect::<Vec<_>>());
+    canvas.end_stroke();
+    let behind = StrokeStyle {
+        blend: procraft_engine::brush::BRUSH_BEHIND,
+        ..StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0)
+    };
+    canvas.begin_stroke(doc.current(), behind);
+    canvas.add_stamps(&(0..64).map(|x| dot(Vec2::new(x as f32, 40.0), 4.0)).collect::<Vec<_>>());
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    assert_eq!(pixel(&layer, 64, 32, 40), [0, 0, 255, 255], "the band stays over it");
+    let off = pixel(&layer, 64, 10, 40);
+    assert!(off[0] > 248 && off[2] < 8 && off[3] > 248, "red where nothing was: {off:?}");
+}
+
+#[test]
 fn stamps_mix_in_the_secondary_colour() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
@@ -1160,6 +1184,33 @@ fn the_grain_combines_with_the_stroke_by_its_blend_mode() {
     };
     let (multiplied, screened) = (cover(1), cover(7));
     assert!(screened > multiplied + 16 * 40, "multiply {multiplied}, screen {screened}");
+}
+
+#[test]
+fn a_grain_raises_faint_paint_only_in_part() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a faint dot and a light one laid normally over the paper grain: the grain lifts the light
+    // one to about its own level, the faint one (a quarter of the way to full rise) far less
+    let cover = |alpha: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let style = StrokeStyle {
+            grain: Some(0),
+            grain_depth: 1.0,
+            grain_scale: 64.0,
+            grain_blend: 0,
+            ..StrokeStyle::new(StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 20.0, alpha)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (24..40).map(|x| u32::from(pixel(&layer, 64, x, 32)[3])).sum::<u32>()
+    };
+    let (faint, light) = (cover(0.004), cover(0.06));
+    assert!(faint > 0 && faint * 2 < light, "faint {faint}, light {light}");
 }
 
 #[test]

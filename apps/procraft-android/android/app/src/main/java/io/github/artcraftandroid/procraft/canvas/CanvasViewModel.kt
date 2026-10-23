@@ -57,6 +57,8 @@ import io.github.artcraftandroid.procraft.gallery.Palette
 import io.github.artcraftandroid.procraft.gallery.PaletteStore
 import io.github.artcraftandroid.procraft.gallery.StandardPresets
 import io.github.artcraftandroid.procraft.core.blendModes
+import io.github.artcraftandroid.procraft.core.brushBlendModes
+import io.github.artcraftandroid.procraft.core.grainBlendModes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlin.math.abs
@@ -744,6 +746,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var padMenuOpen by mutableStateOf(false)
     val blendModeList: List<BlendModeInfo> = blendModes()
+    /** The modes a brush and its burnt edges blend by, as the studio lists them (the layers' and behind). */
+    val brushBlendModeList: List<BlendModeInfo> = brushBlendModes()
+    /** The modes a brush's grain blends by, as the studio lists them. */
+    val grainBlendModeList: List<BlendModeInfo> = grainBlendModes()
 
     init {
         refreshGallery()

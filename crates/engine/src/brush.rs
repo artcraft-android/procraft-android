@@ -193,6 +193,49 @@ pub const SIZE_CURVE: f32 = 2.2;
 /// range, to this power: light touches fall away fast.
 pub const FLOW_POWER: f32 = 2.5;
 
+/// A grain's own blend modes, numbered past the layers' (and as brush files number them): the
+/// coverage, raised twelvefold by the depth, as a height the grain cuts into, straight or also
+/// thinned over the grain's light (the renderer's `grain_combine`).
+pub const GRAIN_HEIGHT: u32 = 27;
+pub const GRAIN_LINEAR_HEIGHT: u32 = 28;
+
+/// The modes a grain blends by, in the order the studio lists them: some of the layers' and the
+/// grain's own two. (A brush file may name any layer mode; it is kept and drawn by it.)
+pub fn grain_blends() -> Vec<(u32, &'static str)> {
+    use crate::document::BlendMode as B;
+    let mut modes: Vec<(u32, &'static str)> = [
+        B::Multiply,
+        B::Darken,
+        B::ColorBurn,
+        B::LinearBurn,
+        B::Lighten,
+        B::ColorDodge,
+        B::Overlay,
+        B::HardMix,
+        B::Difference,
+        B::Subtract,
+        B::Divide,
+    ]
+    .iter()
+    .map(|m| (m.id(), m.name()))
+    .collect();
+    modes.extend([(GRAIN_HEIGHT, "Height"), (GRAIN_LINEAR_HEIGHT, "Linear Height")]);
+    modes
+}
+
+/// The blend mode that lays a brush's paint under what the layer has (only brushes and their burnt
+/// edges have it), numbered past the grain's own modes.
+pub const BRUSH_BEHIND: u32 = 29;
+
+/// The modes a brush (and its burnt edges) blends by, in the order the studio lists them: the
+/// layers' and then behind.
+pub fn brush_blends() -> Vec<(u32, &'static str)> {
+    let mut modes: Vec<(u32, &'static str)> =
+        crate::document::BlendMode::ALL.iter().map(|m| (m.id(), m.name())).collect();
+    modes.push((BRUSH_BEHIND, "Behind"));
+    modes
+}
+
 /// Where a grain sits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GrainMode {

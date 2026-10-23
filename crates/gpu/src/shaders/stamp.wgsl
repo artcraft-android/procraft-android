@@ -178,7 +178,7 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
             g = mix(g, pressed_in(g, i.grain_press), i.grain_bleed);
         }
         // combined with the shape by the grain's blend mode, as deep as it says, inside the shape
-        a = grain_combine(a, g, clamp(su.grain_depth * i.look.x, 0.0, 1.0), su.grain_blend) * select(0.0, 1.0, a > 0.0);
+        a = grain_combine(a, g, clamp(su.grain_depth * i.look.x, 0.0, 1.0), su.grain_blend);
     }
     // a leaning pen shades it across its width, strongest at its leading edge
     if (i.look.w > 0.0) {

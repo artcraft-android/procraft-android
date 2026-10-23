@@ -95,6 +95,24 @@ pub fn blend_modes() -> Vec<BlendModeInfo> {
     BlendMode::ALL.iter().map(|m| BlendModeInfo { id: m.id(), name: m.name().to_owned() }).collect()
 }
 
+/// The modes a brush and its burnt edges blend by, in the order the studio lists them.
+#[uniffi::export]
+pub fn brush_blend_modes() -> Vec<BlendModeInfo> {
+    procraft_engine::brush::brush_blends()
+        .into_iter()
+        .map(|(id, name)| BlendModeInfo { id, name: name.to_owned() })
+        .collect()
+}
+
+/// The modes a brush's grain blends by, in the order the studio lists them.
+#[uniffi::export]
+pub fn grain_blend_modes() -> Vec<BlendModeInfo> {
+    procraft_engine::brush::grain_blends()
+        .into_iter()
+        .map(|(id, name)| BlendModeInfo { id, name: name.to_owned() })
+        .collect()
+}
+
 #[uniffi::export]
 impl CanvasSession {
     /// The visible paint layers with something drawn under window point (`x`, `y`), top first.

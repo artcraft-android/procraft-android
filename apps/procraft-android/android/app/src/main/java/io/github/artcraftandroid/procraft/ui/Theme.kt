@@ -94,7 +94,8 @@ object Pc {
     val EmptySlot: Color get() = pick(0xFF555555, 0xFFC8C8C8)
     // a dark wash on the panel's glass (26 over the dark surround, 44 over white)
     val ActionsGroup: Color get() = pick(0x420C0C0C, 0xFFE8E8E8)
-    val ActionsSeparator: Color get() = pick(0xFF373737, 0xFFE2E2E2)
+    // a faint lightening of whatever the glass shows (+5 over the dark surround, +8 over white)
+    val ActionsSeparator: Color get() = pick(0x06FFFFFF, 0xFFE2E2E2)
     /** An Actions row's text: dimmer than the panel's title (#a8a8a8 against #c7c7c7). */
     val ActionsRow: Color get() = pick(0xFFA8A8A8, 0xFF393939)
     val ActionsDisabled: Color get() = pick(0xFF5E5E5E, 0xFFABABAB)

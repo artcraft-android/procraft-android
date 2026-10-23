@@ -144,15 +144,25 @@ fn blend_value(b: f32, s: f32, mode: u32) -> f32 {
 // and every other mode by the blend mode's own rule
 fn grain_combine(a: f32, g: f32, depth: f32, mode: u32) -> f32 {
     let h = 12.0 * a * depth;
+    var r = 0.0;
     if (mode == 27u) {
-        return clamp(h - g, 0.0, 1.0);
+        r = clamp(h - g, 0.0, 1.0);
+    } else if (mode == 28u) {
+        r = clamp(max(h * (1.0 - g), clamp(h - g, 0.0, 1.0)), 0.0, 1.0);
+    } else {
+        var blended = g + a * (1.0 - g);
+        if (mode != 0u) {
+            blended = clamp(blend_value(a, g, mode), 0.0, 1.0);
+        }
+        r = mix(a, blended, depth);
     }
-    if (mode == 28u) {
-        return clamp(max(h * (1.0 - g), clamp(h - g, 0.0, 1.0)), 0.0, 1.0);
+    // where the grain raises the coverage, faint coverage takes only part of the rise (all of it
+    // from GRAIN_RISE_FULL up; none where there is none)
+    if (r > a) {
+        r = a + min(a / GRAIN_RISE_FULL, 1.0) * (r - a);
     }
-    var blended = g + a * (1.0 - g);
-    if (mode != 0u) {
-        blended = clamp(blend_value(a, g, mode), 0.0, 1.0);
-    }
-    return mix(a, blended, depth);
+    return r;
 }
+
+// The coverage from which a grain raises it fully (a sixty-fourth, as 1/63.75).
+const GRAIN_RISE_FULL: f32 = 0.015686275;

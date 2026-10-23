@@ -9,7 +9,7 @@ use std::num::NonZeroU64;
 use std::sync::mpsc;
 
 use procraft_engine::animation::{self, FrameLook};
-use procraft_engine::brush::{Brush, GrainMode, Rendering, Source};
+use procraft_engine::brush::{BRUSH_BEHIND, Brush, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering, Source};
 use procraft_engine::document::{BlendMode, Document, Layer, LayerId, LayerKind};
 use procraft_engine::geom::{Affine, IRect};
 use procraft_engine::stroke::Stamp;
@@ -227,10 +227,10 @@ impl StrokeStyle {
             grade: if wet { brush.setting("wet_grade").abs().clamp(0.0, 1.0) } else { 0.0 },
             blur: if wet { brush.setting("wet_blur").clamp(0.0, 1.0) } else { 0.0 },
             wet_jitter: if wet { brush.setting("wet_jitter").clamp(0.0, 1.0) } else { 0.0 },
-            blend: brush.setting("blend_mode").round().clamp(0.0, BlendMode::MAX_ID as f32) as u32,
+            blend: brush.setting("blend_mode").round().clamp(0.0, BRUSH_BEHIND as f32) as u32,
             blur_jitter: if wet { brush.setting("wet_blur_jitter").clamp(0.0, 1.0) } else { 0.0 },
-            grain_blend: brush.setting("grain_blend").round().clamp(0.0, BlendMode::MAX_ID as f32) as u32,
-            burnt_blend: brush.setting("burnt_blend").round().clamp(0.0, BlendMode::MAX_ID as f32) as u32,
+            grain_blend: brush.setting("grain_blend").round().clamp(0.0, GRAIN_LINEAR_HEIGHT as f32) as u32,
+            burnt_blend: brush.setting("burnt_blend").round().clamp(0.0, BRUSH_BEHIND as f32) as u32,
             grain_rotation: brush.setting("grain_rotation").clamp(-1.0, 1.0) * std::f32::consts::PI,
             grain_sharp: brush.setting("grain_filtering") < 0.5,
             shape_sharp: brush.setting("shape_filtering") < 0.5,

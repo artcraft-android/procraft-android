@@ -143,6 +143,10 @@ impl CanvasSession {
         let mut st = self.shared.lock();
         if let Some(brush) = st.studio_change() {
             brush.set_setting(&key, value);
+            // spacing set by hand is spaced the current way, as a new brush is
+            if key == "spacing" {
+                brush.set_setting("spacing_version", 1.0);
+            }
         }
     }
 
