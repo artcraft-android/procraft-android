@@ -474,7 +474,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     return true
                 }
                 // on a model, a finger turns it; the pen paints
-                if (vm.modelOpen && kindOf(e, 0) == PointerKind.FINGER) {
+                if (vm.modelOpen && !vm.modelFlat && kindOf(e, 0) == PointerKind.FINGER) {
                     mode = Mode.TURN
                     lastX = e.x
                     lastY = e.y

@@ -793,7 +793,7 @@ impl CanvasSession {
             return;
         }
         // on a model the stroke is drawn on the screen and carried onto it
-        if st.scene.is_some() {
+        if st.scene_shown() {
             st.scene_stroke_begin(pointer, &samples);
             self.shared.frame(st);
             return;
@@ -859,7 +859,7 @@ impl CanvasSession {
     pub fn stroke_add(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if st.scene.is_some() {
+        if st.scene_shown() {
             st.scene_stroke_add(&samples, false);
             self.shared.frame(st);
             return;
@@ -885,7 +885,7 @@ impl CanvasSession {
     pub fn stroke_predict(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if st.scene.is_some() {
+        if st.scene_shown() {
             return;
         }
         let canvas_samples = st.to_canvas(&samples);
@@ -898,7 +898,7 @@ impl CanvasSession {
     pub fn stroke_end(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if st.scene.is_some() {
+        if st.scene_shown() {
             st.scene_stroke_add(&samples, true);
             self.shared.frame(st);
             return;
@@ -924,7 +924,7 @@ impl CanvasSession {
     pub fn stroke_cancel(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if st.scene.is_some() {
+        if st.scene_shown() {
             st.scene_stroke_cancel();
             self.shared.frame(st);
             return;
@@ -948,7 +948,7 @@ impl CanvasSession {
         let mut st = self.shared.lock();
         // the fingers take the canvas from wherever it was settling to
         st.view_motion = None;
-        if st.scene.is_some() {
+        if st.scene_shown() {
             st.scene_gesture(Vec2::new(pan_x, pan_y), scale);
             self.shared.frame(&mut st);
             return;

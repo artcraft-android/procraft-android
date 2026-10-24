@@ -989,10 +989,263 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var textureSet by mutableStateOf(0)
         private set
 
+    /** The texture set painted on shows flat, as a canvas, in place of the model (Show 2D texture). */
+    var modelFlat by mutableStateOf(false)
+        private set
+
+    fun changeModelFlat(on: Boolean) {
+        val s = session ?: return
+        s.setModelFlat(on)
+        modelFlat = s.modelFlat()
+    }
+
+    /** The Lighting Studio is open over the model (Actions > 3D > Edit lighting & environment). */
+    var lightingStudioOpen by mutableStateOf(false)
+        private set
+
+    /** The environment the model is lit by (an asset in environments/), how bright, and whether it shows behind. */
+    var modelEnvironment by mutableStateOf(DEFAULT_ENVIRONMENT)
+        private set
+    var modelExposure by mutableStateOf(1f)
+        private set
+    var modelEnvironmentShown by mutableStateOf(true)
+        private set
+
+    /** The lights the model is lit by, as the studio shows them. */
+    var modelLights by mutableStateOf<List<io.github.artcraftandroid.procraft.core.ModelLight>>(emptyList())
+        private set
+
+    /** The lighting as the studio found it, put back by Cancel. */
+    private class StudioKept(val environment: String, val exposure: Float, val shown: Boolean, val lights: List<io.github.artcraftandroid.procraft.core.ModelLight>)
+
+    private var studioKept: StudioKept? = null
+
+    fun openLightingStudio() {
+        val s = session ?: return
+        if (!modelOpen || modelFlat) return
+        closePanels()
+        modelLights = s.modelLights()
+        studioKept = StudioKept(modelEnvironment, modelExposure, modelEnvironmentShown, modelLights)
+        s.setLightingStudio(true)
+        lightingStudioOpen = true
+    }
+
+    /** Leaves the studio, keeping what was changed or ([keep] false) putting the lighting back. */
+    fun closeLightingStudio(keep: Boolean) {
+        val s = session
+        if (!keep) studioKept?.let { kept ->
+            if (kept.environment != modelEnvironment) chooseEnvironment(kept.environment)
+            changeExposure(kept.exposure)
+            changeEnvironmentShown(kept.shown)
+            s?.setModelLights(kept.lights)
+        }
+        s?.setLightingStudio(false)
+        modelLights = s?.modelLights() ?: emptyList()
+        studioKept = null
+        lightingStudioOpen = false
+    }
+
+    /** Adds a light above the model; at the most there can be, says so instead. */
+    fun addLight() {
+        val s = session ?: return
+        if (!s.addModelLight()) message = "A model can have four lights at most."
+        modelLights = s.modelLights()
+    }
+
+    fun duplicateLight(index: Int) {
+        val s = session ?: return
+        if (!s.duplicateModelLight(index.toUInt())) message = "A model can have four lights at most."
+        modelLights = s.modelLights()
+    }
+
+    fun deleteLight(index: Int) {
+        val s = session ?: return
+        s.deleteModelLight(index.toUInt())
+        modelLights = s.modelLights()
+    }
+
+    /** Light [index] changed to [light] (its colour or intensity). */
+    fun changeLight(index: Int, light: io.github.artcraftandroid.procraft.core.ModelLight) {
+        val s = session ?: return
+        s.setModelLight(index.toUInt(), light)
+        modelLights = s.modelLights()
+    }
+
+    /** The light whose cube is under window point ([x], [y]) in the studio, if one is. */
+    fun lightAt(x: Float, y: Float): Int? = session?.modelLightAt(x, y)?.toInt()
+
+    /** Light [index] in the studio: its middle on the window and how far its cube reaches (pixels). */
+    fun lightOnScreen(index: Int): List<Float>? = session?.modelLightOnScreen(index.toUInt())
+
+    fun moveLight(index: Int, dx: Float, dy: Float) {
+        val s = session ?: return
+        s.moveModelLight(index.toUInt(), dx, dy)
+        modelLights = s.modelLights()
+    }
+
+    /** A drag across the studio: its camera goes round the model and up or down. */
+    fun studioTurn(dx: Float, dy: Float) {
+        session?.studioTurn(dx, dy)
+    }
+
+    fun studioZoom(scale: Float) {
+        session?.studioZoom(scale)
+    }
+
+    /** Lights the model by the environment [name] (an asset in environments/), read off the main thread. */
+    fun chooseEnvironment(name: String) {
+        val s = session ?: return
+        modelEnvironment = name
+        viewModelScope.launch {
+            val assets = getApplication<Application>().assets
+            val hdr = withContext(Dispatchers.IO) { runCatching { assets.open("environments/$name.hdr").use { it.readBytes() } }.getOrNull() }
+            if (hdr != null && session === s && modelEnvironment == name) s.setModelEnvironment(name, hdr)
+        }
+    }
+
+    fun changeExposure(exposure: Float) {
+        val s = session ?: return
+        s.setModelExposure(exposure)
+        modelExposure = s.modelExposure()
+    }
+
+    fun changeEnvironmentShown(shown: Boolean) {
+        val s = session ?: return
+        s.setModelEnvironmentShown(shown)
+        modelEnvironmentShown = s.modelEnvironmentShown()
+    }
+
+    /** One finger across the studio's view: the model turns. */
+    fun turnModel(dx: Float, dy: Float) {
+        session?.turnModel(dx, dy)
+    }
+
+    /** Strokes on the model reach every surface under them, not only the nearest. */
+    var paintThrough by mutableStateOf(false)
+        private set
+
+    fun changePaintThrough(on: Boolean) {
+        val s = session ?: return
+        s.setPaintThrough(on)
+        paintThrough = s.paintThrough()
+    }
+
+    /** The model's meshes, each in its texture set; which one is open in the layers panel; which are hidden; their pictures. */
+    var submeshes by mutableStateOf<List<io.github.artcraftandroid.procraft.core.SubmeshInfo>>(emptyList())
+        private set
+    var openSubmesh by mutableStateOf<Int?>(null)
+        private set
+    var submeshesHidden by mutableStateOf<List<Boolean>>(emptyList())
+        private set
+    val submeshThumbnails = androidx.compose.runtime.mutableStateMapOf<Int, ImageBitmap>()
+
+    /** Opens submesh [index] in the layers panel (its texture set's layers under it), or closes it again. */
+    fun openSubmesh(index: Int) {
+        if (openSubmesh == index) {
+            openSubmesh = null
+            return
+        }
+        val m = submeshes.getOrNull(index) ?: return
+        openSubmesh = index
+        chooseTextureSet(m.textureSet.toInt())
+    }
+
+    /** Hides submesh [index] (or shows it again), saying which. */
+    fun toggleSubmeshHidden(index: Int) {
+        val s = session ?: return
+        val hide = submeshesHidden.getOrNull(index) != true
+        s.setSubmeshHidden(index.toUInt(), hide)
+        submeshesHidden = s.submeshesHidden()
+        showNotice(if (hide) "Hide Submesh" else "Show Submesh")
+    }
+
+    /** Draws each submesh's picture again, as the model is seen now. */
+    fun refreshSubmeshThumbnails() {
+        val s = session ?: return
+        for (i in submeshes.indices) {
+            viewModelScope.launch {
+                val image = withContext(Dispatchers.Default) {
+                    val t = s.submeshThumbnail(i.toUInt(), THUMB_SIDE.toUInt()) ?: return@withContext null
+                    val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
+                    bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
+                    bitmap.asImageBitmap()
+                }
+                if (image != null && session === s) submeshThumbnails[i] = image
+            }
+        }
+    }
+
+    /** The channel painted on the model's texture set: 0 its colour, 1 roughness, 2 metalness. */
+    var modelChannel by mutableStateOf(0)
+        private set
+
+    /** Each channel's own colour (hue, saturation, brightness), kept while another is painted. */
+    private val channelColors = arrayOfNulls<FloatArray>(3)
+
+    /** A channel's tile was chosen (blue, the layer's row not): painting goes to that channel of the current layer. */
+    var channelTileChosen by mutableStateOf(false)
+        private set
+
+    /** Chooses a layer's channel tile: [channel] painted from now on. */
+    fun chooseChannelTile(channel: Int) {
+        chooseChannel(channel)
+        channelTileChosen = true
+    }
+
+    /** A layer's row tapped on a model: the layer itself (its colour) is painted, no tile chosen. */
+    fun leaveChannelTiles() {
+        chooseChannel(0)
+        channelTileChosen = false
+    }
+
+    /** The layer whose channels show under it in the layers panel, if one's do; and their pictures. */
+    var channelTrayFor by mutableStateOf<ULong?>(null)
+    val channelThumbnails = androidx.compose.runtime.mutableStateMapOf<Pair<Int, ULong>, ImageBitmap>()
+
+    /**
+     * Paints on [channel] of the texture set from now on (its layers stay the layers), with that
+     * channel's own colour: roughness and metalness start black.
+     */
+    fun chooseChannel(channel: Int) {
+        val s = session ?: return
+        if (channel == modelChannel || channel !in 0..2) return
+        channelColors[modelChannel] = floatArrayOf(hue, saturation, brightness)
+        s.setModelChannel(channel.toUInt())
+        modelChannel = s.modelChannel().toInt()
+        val c = channelColors[modelChannel] ?: if (modelChannel == 0) null else floatArrayOf(0f, 0f, 0f)
+        c?.let { setColor(it[0], it[1], it[2]) }
+        refresh()
+        refreshThumbnails()
+    }
+
+    /** Shows layer [id]'s channels under it (or hides them), drawn afresh. */
+    fun toggleChannelTray(id: ULong) {
+        channelTrayFor = if (channelTrayFor == id) null else id
+        if (channelTrayFor == id) refreshChannelThumbnails(id)
+    }
+
+    private fun refreshChannelThumbnails(id: ULong) {
+        val s = session ?: return
+        for (c in 0..2) {
+            viewModelScope.launch {
+                val image = withContext(Dispatchers.Default) {
+                    val t = s.channelLayerThumbnail(c.toUInt(), id, THUMB_SIDE.toUInt()) ?: return@withContext null
+                    val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
+                    bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
+                    bitmap.asImageBitmap()
+                }
+                if (image != null && session === s) channelThumbnails[c to id] = image
+            }
+        }
+    }
+
     /** Paints on texture set [index] from now on: the layers become its layers. */
     fun chooseTextureSet(index: Int) {
         val s = session ?: return
         if (index == textureSet || index !in textureSets.indices) return
+        // a texture set is opened on its colour
+        leaveChannelTiles()
+        channelTrayFor = null
         s.chooseTextureSet(index.toUInt())
         textureSet = index
         refresh()
@@ -1005,7 +1258,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = withContext(Dispatchers.IO) {
             runCatching {
                 val file = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
-                CanvasSession.openModel(file, name, null, name.substringBeforeLast('.').ifBlank { "Untitled Artwork" }, 0u)
+                CanvasSession.openModel(file, name, null, name.substringBeforeLast('.').ifBlank { "Untitled Artwork" }, 0u).also(::loadModelTextures)
             }.onFailure { android.util.Log.e("ProCraft", "opening a model", it) }.getOrNull()
         }
         if (s == null) {
@@ -1014,6 +1267,42 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         start(s, store.newFolder(galleryDir))
         startedNew()
+    }
+
+    /**
+     * The images a model's file brings (a USDZ's), decoded and scaled to its texture sets' side
+     * into their Base Layers: colour as it is, roughness and metalness from the component they
+     * name, as grey.
+     */
+    private fun loadModelTextures(s: CanvasSession) {
+        val side = s.modelInfo()?.textureSize?.toInt() ?: return
+        val options = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+            inPreferredColorSpace = android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB)
+        }
+        // an image that can't be read is left out, the rest still come in
+        for (f in s.modelTextureFiles()) runCatching {
+            val decoded = BitmapFactory.decodeByteArray(f.bytes, 0, f.bytes.size, options) ?: return@runCatching
+            var scaled = Bitmap.createScaledBitmap(decoded, side, side, true)
+            if (scaled !== decoded) decoded.recycle()
+            // a 16-bit image decodes to half floats whatever is asked: made 8-bit
+            if (scaled.config != Bitmap.Config.ARGB_8888) scaled = scaled.copy(Bitmap.Config.ARGB_8888, true).also { scaled.recycle() }
+            if (f.component >= 0) {
+                val px = IntArray(side * side)
+                scaled.getPixels(px, 0, side, 0, 0, side, side)
+                val shift = when (f.component) { 0 -> 16; 1 -> 8; 2 -> 0; else -> 24 }
+                for (i in px.indices) {
+                    val v = (px[i] ushr shift) and 0xFF
+                    px[i] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+                }
+                scaled.setPixels(px, 0, side, 0, 0, side, side)
+            }
+            // RGBA, premultiplied
+            val buffer = ByteBuffer.allocate(side * side * 4)
+            scaled.copyPixelsToBuffer(buffer)
+            scaled.recycle()
+            s.setModelTexture(f.textureSet, f.channel, buffer.array())
+        }.onFailure { android.util.Log.e("ProCraft", "a model's texture", it) }
     }
 
     /** A file from elsewhere into the gallery: an artwork file, or a picture as a new artwork. */
@@ -1408,16 +1697,23 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         modelOpen = model != null
         textureSets = model?.textureSets ?: emptyList()
         textureSet = s.textureSet().toInt()
+        modelFlat = s.modelFlat()
+        paintThrough = s.paintThrough()
+        submeshes = model?.submeshes ?: emptyList()
+        submeshesHidden = s.submeshesHidden()
+        openSubmesh = null
+        submeshThumbnails.clear()
+        modelChannel = s.modelChannel().toInt()
+        channelTileChosen = false
+        channelColors.fill(null)
+        channelTrayFor = null
+        channelThumbnails.clear()
+        modelExposure = s.modelExposure()
+        modelEnvironmentShown = s.modelEnvironmentShown()
+        modelLights = s.modelLights()
+        lightingStudioOpen = false
         // a model is lit by the environment it was last lit by, else the default
-        if (model != null) {
-            val name = s.modelEnvironment() ?: DEFAULT_ENVIRONMENT
-            viewModelScope.launch {
-                val assets = getApplication<Application>().assets
-                val read = { n: String -> runCatching { assets.open("environments/$n.hdr").use { it.readBytes() } }.getOrNull() }
-                val chosen = withContext(Dispatchers.IO) { read(name)?.let { name to it } ?: read(DEFAULT_ENVIRONMENT)?.let { DEFAULT_ENVIRONMENT to it } }
-                if (chosen != null) s.setModelEnvironment(chosen.first, chosen.second)
-            }
-        }
+        if (model != null) chooseEnvironment(s.modelEnvironment()?.takeIf { it in ENVIRONMENTS } ?: DEFAULT_ENVIRONMENT)
         // brush files that came while no canvas was open
         addPendingBrushes(s)
         pushSecondary()
@@ -3039,11 +3335,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         MODEL_USDZ("usdz", "model/vnd.usdz+zip"),
         /** A model's texture sets, a PNG each. */
         MODEL_TEXTURES("png", "image/png"),
-        /** The model as shown. */
+        /** The model as shown, as a PNG, a JPEG or a TIFF. */
         MODEL_RENDER("png", "image/png"),
-        /** The model on a turntable, turning once round or swinging, as a video. */
-        MODEL_ROTATE("mp4", "video/mp4"),
-        MODEL_SWING("mp4", "video/mp4"),
+        MODEL_JPEG("jpg", "image/jpeg"),
+        MODEL_TIFF("tif", "image/tiff"),
     }
 
     /** The artwork written as [kind] into the cache, to share: one file, or a PNG per layer. */
@@ -3061,9 +3356,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     Export.MODEL_OBJ -> s.exportModelObj(file.path)
                     Export.MODEL_USDZ -> s.exportModelUsdz(file.path)
                     Export.MODEL_RENDER -> s.exportModelRender(file.path, false)
-                    Export.MODEL_ROTATE, Export.MODEL_SWING -> {
-                        if (!writeTurntable(s, file, kind == Export.MODEL_SWING)) return@withContext emptyList()
+                    Export.MODEL_JPEG -> {
+                        val png = File(dir, "$base.png")
+                        s.exportModelRender(png.path, false)
+                        val ok = io.github.artcraftandroid.procraft.gallery.pngToJpeg(png, file)
+                        png.delete()
+                        if (!ok) return@withContext emptyList()
                     }
+                    Export.MODEL_TIFF -> s.exportModelTiff(file.path)
                     Export.MODEL_TEXTURES -> {
                         val folder = File(dir, base).apply { deleteRecursively(); mkdirs() }
                         return@withContext s.exportModelTextures(folder.path).map { File(it) }
@@ -3082,22 +3382,61 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * The model on a turntable as an MP4 at [file]: [TURNTABLE_SECONDS] at [TURNTABLE_FPS], the
-     * window's shape, as large as the encoder takes up to [TURNTABLE_SIDE]. False if it fails.
-     */
-    private fun writeTurntable(s: CanvasSession, file: File, swing: Boolean): Boolean {
-        val (w, h) = VideoWriter.fit(windowPx.width.coerceAtLeast(2), windowPx.height.coerceAtLeast(2), TURNTABLE_SIDE) ?: return false
-        val count = TURNTABLE_SECONDS * TURNTABLE_FPS
-        val started = System.nanoTime()
-        val ok = VideoWriter.write(file, w, h, TURNTABLE_FPS, count) { i, pixels ->
-            val t = s.modelTurntableFrame(i.toUInt(), count.toUInt(), swing, w.toUInt(), h.toUInt()) ?: return@write false
-            // already ARGB, little-endian
-            java.nio.ByteBuffer.wrap(t.rgba).order(java.nio.ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(pixels, 0, w * h)
-            true
+    /** The model's turntable being set up to share (Share Image > Animated ...), if it is. */
+    var modelAnimatedExport by mutableStateOf<Animated?>(null)
+
+    /** How the model's turntable goes, and its size: 720p, 1080p, 4K or Square (kept while the app runs). */
+    var turntable by mutableStateOf(io.github.artcraftandroid.procraft.core.Turntable(swing = false, seconds = 2f, zoom = 0.5f, ease = 1f, environment = true))
+    var turntableSize by mutableStateOf(0)
+
+    /** The turntable's picture size for [turntableSize]: video's 16:9 sizes across, or a square. */
+    fun turntablePixels(): Pair<Int, Int> = TURNTABLE_SIZES.getOrElse(turntableSize) { TURNTABLE_SIZES[0] }
+
+    /** The turntable's frames, each [side] square, [fps] a second, for the preview. */
+    suspend fun turntablePreview(side: Int, fps: Int): List<Bitmap> {
+        val s = session ?: return emptyList()
+        val t = turntable
+        return withContext(Dispatchers.Default) {
+            val count = (t.seconds * fps).roundToInt().coerceAtLeast(1)
+            (0 until count).mapNotNull { i ->
+                val p = s.modelTurntablePicture(i.toUInt(), count.toUInt(), t, side.toUInt(), side.toUInt(), false) ?: return@mapNotNull null
+                Bitmap.createBitmap(p.width.toInt(), p.height.toInt(), Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(ByteBuffer.wrap(p.rgba)) }
+            }
         }
-        Log.i(TAG, "turntable ${w}x$h, $count frames in ${(System.nanoTime() - started) / 1_000_000} ms")
-        return ok
+    }
+
+    /** The model's turntable written as [format] into the cache, to share; null if it can't be made. */
+    suspend fun exportModelAnimation(format: Animated): File? {
+        val s = session ?: return null
+        val t = turntable
+        val (w, h) = turntablePixels()
+        return withContext(Dispatchers.IO) {
+            val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
+            val base = s.name().filter { it.isLetterOrDigit() || it in " _-" }.trim().ifEmpty { "Untitled Artwork" }
+            val file = File(dir, "$base.${format.extension}")
+            try {
+                when (format) {
+                    Animated.GIF -> s.exportModelGif(file.path, t, w.toUInt(), h.toUInt(), TURNTABLE_FPS.toFloat())
+                    Animated.PNG -> s.exportModelApng(file.path, t, w.toUInt(), h.toUInt(), TURNTABLE_FPS.toFloat())
+                    Animated.MP4, Animated.HEVC -> {
+                        val mime = if (format == Animated.HEVC) android.media.MediaFormat.MIMETYPE_VIDEO_HEVC else android.media.MediaFormat.MIMETYPE_VIDEO_AVC
+                        val (vw, vh) = VideoWriter.fit(w, h, maxOf(w, h), mime) ?: return@withContext null
+                        val count = (t.seconds * TURNTABLE_FPS).roundToInt().coerceAtLeast(1)
+                        val ok = VideoWriter.write(file, vw, vh, TURNTABLE_FPS, count, mime) { i, pixels ->
+                            val p = s.modelTurntablePicture(i.toUInt(), count.toUInt(), t, vw.toUInt(), vh.toUInt(), true) ?: return@write false
+                            // already ARGB, little-endian
+                            ByteBuffer.wrap(p.rgba).order(java.nio.ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(pixels, 0, vw * vh)
+                            true
+                        }
+                        if (!ok) return@withContext null
+                    }
+                }
+                file
+            } catch (e: MobileException) {
+                Log.e(TAG, "exporting the turntable", e)
+                null
+            }
+        }
     }
 
     /** The layers as an animation, a frame each: the formats, by name, extension and type. */
@@ -4654,16 +4993,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
-        /** A model's turntable video: its length and frame rate. */
-        const val TURNTABLE_SECONDS = 5
+        /** A model's turntable: its frame rate, and its sizes (720p, 1080p, 4K, Square). */
         const val TURNTABLE_FPS = 30
-        const val TURNTABLE_SIDE = 1920
+        val TURNTABLE_SIZES = listOf(1280 to 720, 1920 to 1080, 3840 to 2160, 1080 to 1080)
 
         /** Model files the gallery's Import opens to paint on. */
         val MODEL_EXTENSIONS = listOf("obj", "usdz", "usdc", "usda", "usd")
 
         /** The environment a model is lit by unless another is chosen (an asset in environments/). */
         const val DEFAULT_ENVIRONMENT = "mountain"
+
+        /** The environments to light a model by, as the Lighting Studio lists them (assets in environments/). */
+        val ENVIRONMENTS = listOf("studio", "coast", "auditorium", "city", "nightlife", "portside", "industrial", "sunrise", "beach", "mountain", "daytime")
 
         /** While the view settles, what is drawn over the canvas is moved this often (ms), and a little past its end (ns). */
         const val FRAME_MS = 16L

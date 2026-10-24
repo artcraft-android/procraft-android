@@ -16,7 +16,7 @@ pub use canvas::{
     StrokeTool, SurroundGrid, Target, Thumbnail, read_texture,
 };
 pub use lighting::Lighting;
-pub use scene::{MeshView, Orbit};
+pub use scene::{Light, MOST_LIGHTS, MeshView, Orbit};
 pub use wgpu;
 
 #[derive(Debug, thiserror::Error)]

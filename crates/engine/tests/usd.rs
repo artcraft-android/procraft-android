@@ -18,6 +18,10 @@ fn a_packaged_cube_keeps_its_faces_coordinates_and_materials() {
     assert_eq!(mesh.triangles.len(), 12);
     let parts: Vec<(&str, usize)> = mesh.parts.iter().map(|p| (p.material.as_str(), p.count)).collect();
     assert_eq!(parts, [("Body", 8), ("Lid", 4)]);
+    // one mesh, in two materials: a submesh in each, named as the mesh
+    let subs: Vec<(&str, usize)> = mesh.submeshes.iter().map(|m| (m.name.as_str(), m.part)).collect();
+    assert_eq!(subs.iter().map(|s| s.1).collect::<Vec<_>>(), [0, 1]);
+    assert!(subs.iter().all(|s| s.0 == subs[0].0 && !s.0.is_empty()), "{subs:?}");
     let (lo, hi) = mesh.bounds().unwrap();
     assert_eq!((lo, hi), ([-1.0; 3], [1.0; 3]));
     // each face covers the whole texture: its corners are the square's four
@@ -76,12 +80,23 @@ fn damaged_files_are_refused_without_panicking() {
 #[test]
 fn a_written_package_reads_back() {
     let mesh = read_usdz(&model("cube.usdz")).unwrap();
-    let textures: Vec<(String, Vec<u8>)> =
-        mesh.parts.iter().map(|p| (format!("{}.png", p.material), vec![0; 4])).collect();
+    let textures: Vec<[(String, Vec<u8>); 3]> = mesh
+        .parts
+        .iter()
+        .map(|p| ["color", "roughness", "metallic"].map(|c| (format!("{}-{c}.png", p.material), vec![0; 4])))
+        .collect();
     let again = read_usdz(&procraft_engine::usd::write_usdz(&mesh, &textures)).unwrap();
     assert_eq!(again.triangles.len(), mesh.triangles.len());
     let parts: Vec<(&str, usize)> = again.parts.iter().map(|p| (p.material.as_str(), p.count)).collect();
     assert_eq!(parts, [("Body", 8), ("Lid", 4)]);
+    // each material's images, as written: the greys read from their red
+    let maps: Vec<(&str, Option<&str>)> =
+        again.materials.iter().map(|m| (m.name.as_str(), m.color_map.as_deref())).collect();
+    assert_eq!(maps, [("Body", Some("textures/Body-color.png")), ("Lid", Some("textures/Lid-color.png"))]);
+    let lid = &again.materials[1];
+    assert_eq!(lid.roughness_map.as_deref(), Some("textures/Lid-roughness.png"));
+    assert_eq!(lid.metallic_map.as_deref(), Some("textures/Lid-metallic.png"));
+    assert_eq!((lid.roughness_component, lid.metallic_component), (Some(0), Some(0)));
     assert_eq!(again.bounds(), mesh.bounds());
 }
 

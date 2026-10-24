@@ -26,6 +26,17 @@ pub struct Part {
     pub count: usize,
 }
 
+/// One of the model's meshes (an object or group in an OBJ, a mesh in USD) within a part: its
+/// name and its run of [`Mesh::triangles`], inside the part's. A part painted on is shared by
+/// every submesh in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Submesh {
+    pub name: String,
+    pub part: usize,
+    pub first: usize,
+    pub count: usize,
+}
+
 /// What a material file says of one material: its colours and the images it maps.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Material {
@@ -40,6 +51,10 @@ pub struct Material {
     pub occlusion_map: Option<String>,
     pub roughness: Option<f32>,
     pub metallic: Option<f32>,
+    /// Which of a packed image's components the roughness and metalness are (0 red to 3 alpha;
+    /// none, its grey).
+    pub roughness_component: Option<usize>,
+    pub metallic_component: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -47,6 +62,9 @@ pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub triangles: Vec<[u32; 3]>,
     pub parts: Vec<Part>,
+    /// The meshes in each part, in order: each part's triangles are its submeshes' runs, one after
+    /// another.
+    pub submeshes: Vec<Submesh>,
     pub materials: Vec<Material>,
     /// The material file the model names, if any.
     pub material_file: Option<String>,
@@ -67,7 +85,21 @@ pub enum MeshError {
     Unreadable,
 }
 
+/// A part's roughness and metalness where its material gives none.
+pub const PLAIN_ROUGHNESS: f32 = 1.0;
+pub const PLAIN_METALLIC: f32 = 0.0;
+
 impl Mesh {
+    /// Part `part`'s own surface, under whatever is painted on it: its material's colour (else
+    /// white), roughness and metalness (else plain), each 0 to 1.
+    pub fn surface(&self, part: usize) -> ([f32; 3], f32, f32) {
+        let m = self.parts.get(part).and_then(|p| self.materials.iter().find(|m| m.name == p.material));
+        let color = m.and_then(|m| m.color).map_or([1.0; 3], |c| c.map(|x| x.clamp(0.0, 1.0)));
+        let roughness = m.and_then(|m| m.roughness).unwrap_or(PLAIN_ROUGHNESS).clamp(0.0, 1.0);
+        let metallic = m.and_then(|m| m.metallic).unwrap_or(PLAIN_METALLIC).clamp(0.0, 1.0);
+        (color, roughness, metallic)
+    }
+
     /// The smallest box holding the model: its least and most corners.
     pub fn bounds(&self) -> Option<([f32; 3], [f32; 3])> {
         let mut it = self.vertices.iter().map(|v| v.position);
@@ -135,6 +167,10 @@ pub fn read_obj(obj: &str, mtl: Option<&str>) -> Result<Mesh, MeshError> {
     let mut corners: Vec<[usize; 3]> = Vec::new();
     let mut faces: Vec<[usize; 3]> = Vec::new(); // into `corners`
     let mut parts: Vec<Part> = Vec::new();
+    // each run's object (or group), and the one faces go in now
+    let mut objects: Vec<String> = Vec::new();
+    let mut object = String::new();
+    let mut material = String::new();
     let mut material_file = None;
     let mut any_face_without_uv = false;
     let mut known: HashMap<[usize; 3], usize> = HashMap::new();
@@ -198,7 +234,8 @@ pub fn read_obj(obj: &str, mtl: Option<&str>) -> Result<Mesh, MeshError> {
                     continue;
                 }
                 if parts.is_empty() {
-                    parts.push(Part { material: String::new(), first: faces.len(), count: 0 });
+                    parts.push(Part { material: material.clone(), first: faces.len(), count: 0 });
+                    objects.push(object.clone());
                 }
                 for k in 1..poly.len() - 1 {
                     if let (Some(&a), Some(&b), Some(&c)) = (poly.first(), poly.get(k), poly.get(k + 1)) {
@@ -210,9 +247,15 @@ pub fn read_obj(obj: &str, mtl: Option<&str>) -> Result<Mesh, MeshError> {
                 }
             }
             "usemtl" => {
-                let name = words.collect::<Vec<_>>().join(" ");
+                material = words.collect::<Vec<_>>().join(" ");
                 // a new run, or back into a material already used (kept apart: parts are runs)
-                parts.push(Part { material: name, first: faces.len(), count: 0 });
+                parts.push(Part { material: material.clone(), first: faces.len(), count: 0 });
+                objects.push(object.clone());
+            }
+            "o" | "g" => {
+                object = words.collect::<Vec<_>>().join(" ");
+                parts.push(Part { material: material.clone(), first: faces.len(), count: 0 });
+                objects.push(object.clone());
             }
             "mtllib" => material_file = Some(words.collect::<Vec<_>>().join(" ")),
             _ => {}
@@ -222,13 +265,13 @@ pub fn read_obj(obj: &str, mtl: Option<&str>) -> Result<Mesh, MeshError> {
         return Err(MeshError::NoTextureCoordinates);
     }
     let materials = mtl.map(read_mtl).unwrap_or_default();
-    let gathered = Gathered { positions, uvs, normals, corners, faces, parts };
+    let gathered = Gathered { positions, uvs, normals, corners, faces, parts, objects };
     gathered.into_mesh(materials, material_file)
 }
 
 /// A model's faces as a file gives them, before they are made a [`Mesh`]: positions, texture
 /// coordinates and normals; corners, each an index into those three (`usize::MAX` for none);
-/// triangles of corners; and runs of triangles by material.
+/// triangles of corners; runs of triangles by material, and each run's object (its mesh's name).
 pub(crate) struct Gathered {
     pub(crate) positions: Vec<[f32; 3]>,
     pub(crate) uvs: Vec<[f32; 2]>,
@@ -236,13 +279,15 @@ pub(crate) struct Gathered {
     pub(crate) corners: Vec<[usize; 3]>,
     pub(crate) faces: Vec<[usize; 3]>,
     pub(crate) parts: Vec<Part>,
+    pub(crate) objects: Vec<String>,
 }
 
 impl Gathered {
-    /// The model: triangles grouped by material in the order materials first appear, normals
-    /// the file lacks made smooth from the faces around each position.
+    /// The model: triangles grouped by material in the order materials first appear, and within
+    /// a material by object, normals the file lacks made smooth from the faces around each
+    /// position.
     pub(crate) fn into_mesh(self, materials: Vec<Material>, material_file: Option<String>) -> Result<Mesh, MeshError> {
-        let Gathered { positions, uvs, normals, corners, faces, parts } = self;
+        let Gathered { positions, uvs, normals, corners, faces, parts, objects } = self;
         if faces.is_empty() {
             return Err(MeshError::NoFaces);
         }
@@ -252,12 +297,14 @@ impl Gathered {
         if uvs.is_empty() || corners.iter().any(|c| c[1] == usize::MAX) {
             return Err(MeshError::NoTextureCoordinates);
         }
-        // the runs' sizes, empty ones dropped, runs of one material joined
+        // the runs' sizes and objects, empty ones dropped
         let mut counted: Vec<Part> = Vec::new();
+        let mut counted_objects: Vec<&str> = Vec::new();
         for (i, p) in parts.iter().enumerate() {
             let end = parts.get(i + 1).map_or(faces.len(), |q| q.first);
             if end > p.first {
                 counted.push(Part { material: p.material.clone(), first: p.first, count: end - p.first });
+                counted_objects.push(objects.get(i).map_or("", String::as_str));
             }
         }
         // faces grouped by material, in the order materials first appear
@@ -269,10 +316,31 @@ impl Gathered {
         }
         let mut triangles_by_corner: Vec<[usize; 3]> = Vec::with_capacity(faces.len());
         let mut grouped: Vec<Part> = Vec::new();
-        for m in &order {
+        let mut submeshes: Vec<Submesh> = Vec::new();
+        for (index, m) in order.iter().enumerate() {
             let first = triangles_by_corner.len();
-            for p in counted.iter().filter(|p| &p.material == m) {
-                triangles_by_corner.extend(faces.get(p.first..p.first + p.count).unwrap_or(&[]));
+            // the material's objects in the order they first appear in it, each one's runs together
+            let runs: Vec<(&Part, &str)> =
+                counted.iter().zip(counted_objects.iter().copied()).filter(|(p, _)| &p.material == m).collect();
+            let mut names: Vec<&str> = Vec::new();
+            for (_, o) in &runs {
+                if !names.contains(o) {
+                    names.push(o);
+                }
+            }
+            for name in names {
+                let start = triangles_by_corner.len();
+                for (p, _) in runs.iter().filter(|(_, o)| *o == name) {
+                    triangles_by_corner.extend(faces.get(p.first..p.first + p.count).unwrap_or(&[]));
+                }
+                let name = if !name.is_empty() {
+                    name.to_owned()
+                } else if !m.is_empty() {
+                    m.clone()
+                } else {
+                    format!("Mesh {}", submeshes.len() + 1)
+                };
+                submeshes.push(Submesh { name, part: index, first: start, count: triangles_by_corner.len() - start });
             }
             grouped.push(Part { material: m.clone(), first, count: triangles_by_corner.len() - first });
         }
@@ -302,7 +370,7 @@ impl Gathered {
             })
             .collect();
         let triangles = triangles_by_corner.iter().map(|f| f.map(|c| c as u32)).collect();
-        Ok(Mesh { vertices, triangles, parts: grouped, materials, material_file })
+        Ok(Mesh { vertices, triangles, parts: grouped, submeshes, materials, material_file })
     }
 }
 
@@ -334,20 +402,29 @@ pub fn write_obj(mesh: &Mesh, mtl: &str, names: &[String]) -> String {
     out
 }
 
-/// A material file for [`write_obj`]: each material white, its colour the image beside it.
-pub fn write_mtl(materials: &[(String, String)]) -> String {
+/// A material file for [`write_obj`]: each material (its name, and the images beside it for its
+/// colour, roughness and metalness) white and physically shaded, its properties indented.
+pub fn write_mtl(materials: &[(String, [String; 3])]) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
-    for (name, image) in materials {
+    for (name, [color, roughness, metallic]) in materials {
         let _ = write!(
             out,
             "newmtl {name}
-Ka 0 0 0
-Kd 1 1 1
-Ks 0 0 0
-d 1
-illum 1
-map_Kd {image}
+\tmap_Kd {color}
+\tKd 1 1 1
+\tKa 0 0 0
+\tKs 0
+\tao 0
+\tsubsurface 0
+\tmap_metallic {metallic}
+\tspecularTint 0
+\tmap_roughness {roughness}
+\tanisotropicRotation 0
+\tsheen 0.05
+\tsheenTint 0
+\tclearCoat 0
+\tclearCoatGloss 0
 
 "
         );
@@ -382,9 +459,9 @@ pub fn read_mtl(mtl: &str) -> Vec<Material> {
             "Pr" => m.roughness = number(),
             "Pm" => m.metallic = number(),
             "map_Kd" => m.color_map = file(),
-            "map_Pr" => m.roughness_map = file(),
-            "map_Pm" => m.metallic_map = file(),
-            "map_Bump" | "map_bump" | "bump" | "norm" | "map_Kn" => m.normal_map = file(),
+            "map_Pr" | "map_roughness" => m.roughness_map = file(),
+            "map_Pm" | "map_metallic" => m.metallic_map = file(),
+            "map_Bump" | "map_bump" | "bump" | "norm" | "map_Kn" | "map_tangentSpaceNormal" => m.normal_map = file(),
             "map_Ka" | "map_ao" | "map_AO" => m.occlusion_map = file(),
             _ => {}
         }
@@ -440,7 +517,8 @@ f -8/1 -4/2 -1/3 -5/4
         let mesh = read_obj(CUBE, None).unwrap();
         let names: Vec<String> = mesh.parts.iter().map(|p| p.material.clone()).collect();
         let text = write_obj(&mesh, "cube.mtl", &names);
-        let again = read_obj(&text, Some(&write_mtl(&[("body".into(), "body.png".into())]))).unwrap();
+        let images = ["body-color.png".into(), "body-roughness.png".into(), "body-metallic.png".into()];
+        let again = read_obj(&text, Some(&write_mtl(&[("body".into(), images)]))).unwrap();
         assert_eq!(again.triangles.len(), mesh.triangles.len());
         assert_eq!(again.parts, mesh.parts);
         assert_eq!(again.vertices.len(), mesh.vertices.len());
@@ -453,7 +531,22 @@ f -8/1 -4/2 -1/3 -5/4
             }
         }
         assert_eq!(again.material_file.as_deref(), Some("cube.mtl"));
-        assert_eq!(again.materials[0].color_map.as_deref(), Some("body.png"));
+        let m = &again.materials[0];
+        assert_eq!(m.color_map.as_deref(), Some("body-color.png"));
+        assert_eq!(m.roughness_map.as_deref(), Some("body-roughness.png"));
+        assert_eq!(m.metallic_map.as_deref(), Some("body-metallic.png"));
+        assert_eq!(m.color, Some([1.0; 3]));
+    }
+
+    #[test]
+    fn a_parts_surface_is_its_materials_else_plain() {
+        let mut mesh = read_obj(CUBE, Some("newmtl body\nKd 1 0.5 2\nPr 0.25\n")).unwrap();
+        assert_eq!(mesh.surface(0), ([1.0, 0.5, 1.0], 0.25, PLAIN_METALLIC));
+        // a part without a material of its own, and one that isn't there
+        assert_eq!(mesh.surface(1), ([1.0; 3], PLAIN_ROUGHNESS, PLAIN_METALLIC));
+        assert_eq!(mesh.surface(9), ([1.0; 3], PLAIN_ROUGHNESS, PLAIN_METALLIC));
+        mesh.materials.clear();
+        assert_eq!(mesh.surface(0).0, [1.0; 3]);
     }
 
     #[test]
@@ -486,6 +579,55 @@ f -8/1 -4/2 -1/3 -5/4
             let out = [v.position[0] - 0.5, v.position[1] - 0.5, v.position[2] - 0.5];
             assert!(n[0] * out[0] + n[1] * out[1] + n[2] * out[2] > 0.0, "{v:?}");
         }
+    }
+
+    #[test]
+    fn objects_are_submeshes_within_their_materials() {
+        // a lid and its tab sharing one material, the can in another; more lid at the end
+        let obj = "v 0 0 0
+v 1 0 0
+v 1 1 0
+vt 0 0
+vt 1 0
+vt 1 1
+o Lid
+usemtl lid
+f 1/1 2/2 3/3
+o Tab
+usemtl lid
+f 1/1 2/2 3/3
+f 1/1 2/2 3/3
+o Can
+usemtl can
+f 1/1 2/2 3/3
+o Lid
+usemtl lid
+f 1/1 2/2 3/3
+";
+        let mesh = read_obj(obj, None).unwrap();
+        let parts: Vec<(&str, usize, usize)> =
+            mesh.parts.iter().map(|p| (p.material.as_str(), p.first, p.count)).collect();
+        assert_eq!(parts, [("lid", 0, 4), ("can", 4, 1)]);
+        let subs: Vec<(&str, usize, usize, usize)> =
+            mesh.submeshes.iter().map(|m| (m.name.as_str(), m.part, m.first, m.count)).collect();
+        assert_eq!(subs, [("Lid", 0, 0, 2), ("Tab", 0, 2, 2), ("Can", 1, 4, 1)]);
+        // without objects, each material is one, named after it
+        let plain = read_obj(
+            "v 0 0 0
+v 1 0 0
+v 1 1 0
+vt 0 0
+vt 1 0
+vt 1 1
+f 1/1 2/2 3/3
+usemtl red
+f 1/1 2/2 3/3
+",
+            None,
+        )
+        .unwrap();
+        let names: Vec<&str> = plain.submeshes.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["Mesh 1", "red"]);
     }
 
     #[test]

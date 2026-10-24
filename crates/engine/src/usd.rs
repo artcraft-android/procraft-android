@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use crate::applz4::raw_block;
-use crate::mesh::{Gathered, MAX_TRIANGLES, Mesh, MeshError, Part};
+use crate::mesh::{Gathered, MAX_TRIANGLES, Material, Mesh, MeshError, Part};
 use crate::zip::{ZipReader, ZipWriter};
 
 /// Reads a model from a `.usdz` package: its first layer (binary or text).
@@ -38,13 +38,13 @@ pub fn read_usdc(bytes: &[u8]) -> Result<Mesh, MeshError> {
 }
 
 /// Writes the model as a USDZ package: a text layer (`model.usda`) with the mesh, a subset of its
-/// faces for each part bound to a preview-surface material, and each part's image beside it
-/// (`textures`, by part: a file name and its PNG).
-pub fn write_usdz(mesh: &Mesh, textures: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let layer = write_usda(mesh, textures.iter().map(|(name, _)| name.as_str()));
+/// faces for each part bound to a preview-surface material, and each part's images beside it
+/// (`textures`, by part: its colour, roughness and metalness, each a file name and its PNG).
+pub fn write_usdz(mesh: &Mesh, textures: &[[(String, Vec<u8>); 3]]) -> Vec<u8> {
+    let layer = write_usda(mesh, textures.iter().map(|t| t.each_ref().map(|(name, _)| name.as_str())));
     let mut zip = ZipWriter::new();
     zip.add_aligned("model.usda", layer.as_bytes(), 64);
-    for (name, png) in textures {
+    for (name, png) in textures.iter().flatten() {
         zip.add_aligned(&format!("textures/{name}"), png, 64);
     }
     zip.finish()
@@ -63,8 +63,9 @@ fn identifier(name: &str, otherwise: &str) -> String {
 }
 
 /// The text layer of [`write_usdz`]: the mesh's corners as its points (each with its normal and
-/// texture coordinate), its triangles, and per part a subset and a material reading `textures`.
-fn write_usda<'a>(mesh: &Mesh, textures: impl Iterator<Item = &'a str>) -> String {
+/// texture coordinate), its triangles, and per part a subset and a material reading `textures`
+/// (its colour, roughness and metalness images).
+fn write_usda<'a>(mesh: &Mesh, textures: impl Iterator<Item = [&'a str; 3]>) -> String {
     let mut names: Vec<String> = Vec::new();
     for (i, part) in mesh.parts.iter().enumerate() {
         let mut n = identifier(&part.material, "Material");
@@ -123,7 +124,7 @@ fn write_usda<'a>(mesh: &Mesh, textures: impl Iterator<Item = &'a str>) -> Strin
     line(0, String::new());
     line(1, "def Scope \"Materials\"".into());
     line(1, "{".into());
-    for (name, file) in names.iter().zip(textures) {
+    for (name, [color, roughness, metallic]) in names.iter().zip(textures) {
         let m = format!("/Model/Materials/{name}");
         line(2, format!("def Material \"{name}\""));
         line(2, "{".into());
@@ -133,17 +134,28 @@ fn write_usda<'a>(mesh: &Mesh, textures: impl Iterator<Item = &'a str>) -> Strin
         line(3, "{".into());
         line(4, "uniform token info:id = \"UsdPreviewSurface\"".into());
         line(4, format!("color3f inputs:diffuseColor.connect = <{m}/Texture.outputs:rgb>"));
-        line(4, "float inputs:roughness = 0.5".into());
+        line(4, format!("float inputs:roughness.connect = <{m}/Roughness.outputs:r>"));
+        line(4, format!("float inputs:metallic.connect = <{m}/Metallic.outputs:r>"));
         line(4, "token outputs:surface".into());
         line(3, "}".into());
-        line(0, String::new());
-        line(3, "def Shader \"Texture\"".into());
-        line(3, "{".into());
-        line(4, "uniform token info:id = \"UsdUVTexture\"".into());
-        line(4, format!("asset inputs:file = @textures/{file}@"));
-        line(4, format!("float2 inputs:st.connect = <{m}/Coordinates.outputs:result>"));
-        line(4, "float3 outputs:rgb".into());
-        line(3, "}".into());
+        // the colour as it is, the greys as numbers (their red)
+        for (shader, file, output) in [
+            ("Texture", color, "float3 outputs:rgb"),
+            ("Roughness", roughness, "float outputs:r"),
+            ("Metallic", metallic, "float outputs:r"),
+        ] {
+            line(0, String::new());
+            line(3, format!("def Shader \"{shader}\""));
+            line(3, "{".into());
+            line(4, "uniform token info:id = \"UsdUVTexture\"".into());
+            line(4, format!("asset inputs:file = @textures/{file}@"));
+            if shader != "Texture" {
+                line(4, "token inputs:sourceColorSpace = \"raw\"".into());
+            }
+            line(4, format!("float2 inputs:st.connect = <{m}/Coordinates.outputs:result>"));
+            line(4, output.into());
+            line(3, "}".into());
+        }
         line(0, String::new());
         line(3, "def Shader \"Coordinates\"".into());
         line(3, "{".into());
@@ -268,6 +280,7 @@ mod kind {
     pub const FLOAT: u8 = 8;
     pub const DOUBLE: u8 = 9;
     pub const TOKEN: u8 = 11;
+    pub const ASSET: u8 = 12;
     pub const MATRIX4D: u8 = 15;
     pub const QUATD: u8 = 16;
     pub const QUATF: u8 = 17;
@@ -780,6 +793,8 @@ impl Crate<'_> {
     fn value(&self, rep: Rep) -> Option<Value> {
         match (rep.kind(), rep.is_array()) {
             (kind::TOKEN, false) => self.token_value(rep).map(|t| Value::Token(t.to_owned())),
+            // an asset's path is kept as a token
+            (kind::ASSET, false) if rep.is_inlined() => self.token(rep.payload()).map(|t| Value::Token(t.to_owned())),
             (kind::TOKEN, true) | (kind::TOKEN_VECTOR, _) => self.token_list(rep).map(Value::Tokens),
             (kind::INT | kind::UINT, true) => self.ints(rep).map(Value::Ints),
             (kind::VEC2F | kind::VEC2D | kind::VEC2H, true) => self.vectors::<2>(rep).map(Value::Vec2s),
@@ -923,18 +938,63 @@ impl<'a> Stage<'a> {
         }
     }
 
-    /// The name of the material a prim's `material:binding` points at.
+    /// The path of the material a prim's `material:binding` points at.
     fn material(&self, prim: &str) -> Option<String> {
-        let target = self.field(&format!("{prim}.material:binding"), "targetPaths").and_then(Value::path)?;
-        target.rsplit('/').next().map(str::to_owned)
+        self.field(&format!("{prim}.material:binding"), "targetPaths").and_then(Value::path)
     }
 
-    /// The stage's meshes as one model.
+    /// What an attribute is connected to (a prim's output), if anything.
+    fn connection(&self, attribute: &str) -> Option<String> {
+        self.field(attribute, "connectionPaths").and_then(Value::path)
+    }
+
+    /// The material at `path` as its preview surface describes it: its colour or colour image,
+    /// and its roughness and metalness or their images (and the component of each image read).
+    fn material_info(&self, path: &str) -> Material {
+        let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+        let mut m = Material { name, ..Material::default() };
+        let Some(surface) = self.connection(&format!("{path}.outputs:surface")) else { return m };
+        let shader = prim_of(&surface);
+        let input = |n: &str| format!("{shader}.inputs:{n}");
+        match self.connection(&input("diffuseColor")).and_then(|t| self.texture_file(&t)) {
+            Some((file, _)) => m.color_map = Some(file),
+            None => {
+                m.color =
+                    self.value(shader, "inputs:diffuseColor").and_then(|v| v.vector3()).map(|c| c.map(|x| x as f32));
+            }
+        }
+        match self.connection(&input("roughness")).and_then(|t| self.texture_file(&t)) {
+            Some((file, component)) => (m.roughness_map, m.roughness_component) = (Some(file), component),
+            None => m.roughness = self.value(shader, "inputs:roughness").and_then(|v| v.number()).map(|v| v as f32),
+        }
+        match self.connection(&input("metallic")).and_then(|t| self.texture_file(&t)) {
+            Some((file, component)) => (m.metallic_map, m.metallic_component) = (Some(file), component),
+            None => m.metallic = self.value(shader, "inputs:metallic").and_then(|v| v.number()).map(|v| v as f32),
+        }
+        m
+    }
+
+    /// The image a texture's output (`<texture>.outputs:<rgb, r, g, b or a>`) reads, and which
+    /// component of it (none: all three).
+    fn texture_file(&self, output: &str) -> Option<(String, Option<usize>)> {
+        let file = self.value(prim_of(output), "inputs:file").and_then(|v| v.token().map(str::to_owned))?;
+        let component = match output.rsplit(':').next() {
+            Some("r") => Some(0),
+            Some("g") => Some(1),
+            Some("b") => Some(2),
+            Some("a") => Some(3),
+            _ => None,
+        };
+        Some((file, component))
+    }
+
+    /// The stage's meshes as one model, with the materials they are bound to.
     fn model(&self) -> Result<Mesh, MeshError> {
         let mut out = Gather::default();
         let z_up = self.token("/", "upAxis").as_deref() == Some("Z");
         self.walk("/", IDENTITY, &mut |path, world| self.add_mesh(path, world, z_up, &mut out));
-        out.into_gathered().into_mesh(Vec::new(), None)
+        let materials = out.material_paths.iter().map(|p| self.material_info(p)).collect();
+        out.into_gathered().into_mesh(materials, None)
     }
 
     /// Adds the mesh at `path` (if it is one) to `out`, placed by `world`.
@@ -946,8 +1006,15 @@ impl<'a> Stage<'a> {
         let Some(counts) = self.value(path, "faceVertexCounts").and_then(Value::ints) else { return };
         let Some(indices) = self.value(path, "faceVertexIndices").and_then(Value::ints) else { return };
         let uv = self.texture_coordinates(path);
-        // each face's material: its subset's, else the mesh's own
-        let own = self.material(path).unwrap_or_default();
+        // each face's material: its subset's, else the mesh's own (by name; its path kept)
+        let mut name_of = |p: Option<String>| -> String {
+            let Some(p) = p else { return String::new() };
+            if !out.material_paths.contains(&p) {
+                out.material_paths.push(p.clone());
+            }
+            p.rsplit('/').next().unwrap_or(&p).to_owned()
+        };
+        let own = name_of(self.material(path));
         let mut face_material: Vec<Option<String>> = vec![None; counts.len()];
         for child in self.children(path) {
             if self.type_name(&child).as_deref() != Some("GeomSubset") {
@@ -957,13 +1024,15 @@ impl<'a> Stage<'a> {
             if family.is_some_and(|fam| fam != "materialBind") {
                 continue;
             }
-            let Some(name) = self.material(&child) else { continue };
+            let Some(name) = self.material(&child).map(|p| name_of(Some(p))) else { continue };
             for face in self.value(&child, "indices").and_then(Value::ints).unwrap_or_default() {
                 if let Some(slot) = usize::try_from(face).ok().and_then(|i| face_material.get_mut(i)) {
                     *slot = Some(name.clone());
                 }
             }
         }
+        // its faces are a submesh named as the mesh is
+        out.object = path.rsplit('/').next().unwrap_or(path).to_owned();
         let base = out.positions.len();
         for p in points {
             let mut q = apply(world, p);
@@ -1369,8 +1438,22 @@ impl TextReader {
             value = Some(self.raw(0)?);
         }
         let meta = if self.is('(') { self.metadata()? } else { HashMap::new() };
-        // connections and samples over time are not values of their own
-        if name.ends_with(".connect") || name.ends_with(".timeSamples") {
+        // a connection is kept as what it connects to; samples over time are not read
+        if let Some(base) = name.strip_suffix(".connect") {
+            let target = match value {
+                Some(Raw::Path(p)) => Some(p),
+                Some(Raw::List(items)) => {
+                    items.into_iter().find_map(|r| if let Raw::Path(p) = r { Some(p) } else { None })
+                }
+                _ => None,
+            };
+            if let Some(t) = target {
+                let full = if t.starts_with('/') { t } else { format!("{prim}/{t}") };
+                self.put(&format!("{prim}.{base}"), "connectionPaths", Value::Path(full));
+            }
+            return Some(());
+        }
+        if name.ends_with(".timeSamples") {
             return Some(());
         }
         let path = format!("{prim}.{name}");
@@ -1383,6 +1466,11 @@ impl TextReader {
         }
         Some(())
     }
+}
+
+/// The prim a property's path names (before its `.`).
+fn prim_of(property: &str) -> &str {
+    property.split('.').next().unwrap_or(property)
 }
 
 /// A written value as its declared type makes it (the types read here).
@@ -1401,7 +1489,7 @@ fn typed(type_name: &str, raw: Raw) -> Option<Value> {
         _ => 1,
     };
     match (base, array) {
-        ("token" | "string", false) => match raw {
+        ("token" | "string" | "asset", false) => match raw {
             Raw::Text(t) => Some(Value::Token(t)),
             _ => None,
         },
@@ -1508,6 +1596,11 @@ struct Gather {
     known: HashMap<[usize; 2], usize>,
     faces: Vec<[usize; 3]>,
     parts: Vec<Part>,
+    /// Each run's mesh, and the mesh whose faces come now.
+    objects: Vec<String>,
+    object: String,
+    /// The materials faces are bound to, by path.
+    material_paths: Vec<String>,
 }
 
 impl Gather {
@@ -1532,8 +1625,9 @@ impl Gather {
                 })
             })
             .collect();
-        if self.parts.last().is_none_or(|p| p.material != material) {
+        if self.parts.last().is_none_or(|p| p.material != material) || self.objects.last() != Some(&self.object) {
             self.parts.push(Part { material: material.to_owned(), first: self.faces.len(), count: 0 });
+            self.objects.push(self.object.clone());
         }
         if let Some(&a) = corners.first() {
             for pair in corners.get(1..).unwrap_or(&[]).windows(2) {
@@ -1552,6 +1646,7 @@ impl Gather {
             corners: self.corners,
             faces: self.faces,
             parts: self.parts,
+            objects: self.objects,
         }
     }
 }
@@ -1611,12 +1706,16 @@ mod tests {
             parts: vec![Part { material: "1 coat".into(), first: 0, count: 1 }],
             ..Mesh::default()
         };
-        let bytes = write_usdz(&mesh, &[("coat.png".into(), vec![7; 5])]);
+        let images =
+            [("coat.png".into(), vec![7; 5]), ("rough.png".into(), vec![8; 5]), ("metal.png".into(), vec![9; 5])];
+        let bytes = write_usdz(&mesh, &[images]);
         let zip = ZipReader::new(&bytes).unwrap();
-        assert_eq!(zip.names().collect::<Vec<_>>(), ["model.usda", "textures/coat.png"]);
+        let names = ["model.usda", "textures/coat.png", "textures/rough.png", "textures/metal.png"];
+        assert_eq!(zip.names().collect::<Vec<_>>(), names);
         assert_eq!(zip.read("textures/coat.png").unwrap(), [7; 5]);
+        assert_eq!(zip.read("textures/metal.png").unwrap(), [9; 5]);
         // each file's bytes start on a 64-byte boundary
-        for name in ["model.usda", "textures/coat.png"] {
+        for name in names {
             let data = zip.read(name).unwrap();
             let at = bytes.windows(data.len()).position(|w| w == data.as_slice()).unwrap();
             assert_eq!(at % 64, 0, "{name}");
@@ -1626,6 +1725,8 @@ mod tests {
         assert!(layer.contains("def GeomSubset \"_1_coat\""));
         assert!(layer.contains("rel material:binding = </Model/Materials/_1_coat>"));
         assert!(layer.contains("asset inputs:file = @textures/coat.png@"));
+        assert!(layer.contains("float inputs:roughness.connect = </Model/Materials/_1_coat/Roughness.outputs:r>"));
+        assert!(layer.contains("asset inputs:file = @textures/metal.png@"));
         assert!(layer.contains("int[] faceVertexIndices = [0, 1, 2]"));
     }
 

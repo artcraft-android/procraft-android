@@ -310,7 +310,8 @@ impl CanvasSession {
             let st = &mut *guard;
             st.finish_stroke();
             st.settle();
-            st.save_snapshot()?
+            // a model saves its colour as the artwork's document
+            st.with_colour(crate::State::save_snapshot)?
         };
         write_artwork(&mut saved, Path::new(&dir), snapshot)
     }
@@ -325,7 +326,8 @@ impl CanvasSession {
             if !st.idle() {
                 return Ok(false);
             }
-            st.save_snapshot()?
+            // a model saves its colour as the artwork's document
+            st.with_colour(crate::State::save_snapshot)?
         };
         write_artwork(&mut saved, Path::new(&dir), snapshot).map(|()| true)
     }

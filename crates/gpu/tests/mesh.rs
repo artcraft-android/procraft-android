@@ -3,6 +3,7 @@
 
 use procraft_engine::mesh::read_obj;
 use procraft_gpu::{Gpu, MeshView, Orbit, read_texture, wgpu};
+use wgpu::util::DeviceExt;
 
 fn gpu() -> Option<Gpu> {
     Gpu::headless().ok()
@@ -373,5 +374,134 @@ fn a_mirror_reflects_what_is_behind_the_camera() {
     let px = draw(&gpu, &mut view);
     let back = pixel(&px, SIDE / 2, SIDE / 2);
     assert!(back[0] > 150 && back[1] < 60, "the environment turns with the camera: {back:?}");
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn without_its_environment_the_model_stands_on_the_surround_grid() {
+    let Some(gpu) = gpu() else { return };
+    let mesh = read_obj(QUADS, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 4, wgpu::TextureFormat::Rgba8Unorm);
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 6.0, fov: 0.9 };
+    // lines 2 pixels wide every 8, from 4 down
+    view.set_grid(Some(procraft_gpu::SurroundGrid {
+        spacing: 8.0,
+        origin: [0.0, 4.0],
+        width: 2.0,
+        color: [0.5, 0.5, 0.5],
+    }));
+    let px = draw(&gpu, &mut view);
+    // at the corner, a line's pixel and the clear colour beside it; nothing over the grid's top
+    assert!(pixel(&px, 0, 12)[0] > 100, "{:?}", pixel(&px, 0, 12));
+    assert_eq!(pixel(&px, 3, 14)[0], 0);
+    assert_eq!(pixel(&px, 0, 2)[0], 0);
+    // the model is drawn over it
+    let middle = pixel(&px, SIDE / 2, SIDE / 2);
+    assert!(middle[0] > 150 && middle[1] > 150, "{middle:?}");
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn the_studio_shows_each_light_as_a_cube_and_moves_it_across_the_screen() {
+    let Some(gpu) = gpu() else { return };
+    let mesh = read_obj(QUADS, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 4, wgpu::TextureFormat::Rgba8Unorm);
+    view.lights = vec![procraft_gpu::Light { place: [-2.0, 2.0, 1.0], color: [1.0, 0.0, 0.0], intensity: 0.5 }];
+    let orbit = view.studio_orbit();
+    let [x, y, reach] = view.light_on_screen(&orbit, 0, SIDE, SIDE).unwrap();
+    assert!(x > 0.0 && x < SIDE as f32 / 2.0 && y > 0.0 && y < SIDE as f32 / 2.0, "up and left: {x} {y}");
+    assert!(reach > 0.5, "{reach}");
+    let draw_studio = |view: &mut MeshView| {
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("studio target"),
+            size: wgpu::Extent3d { width: SIDE, height: SIDE, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        view.show_environment(&gpu, false);
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
+        view.render_studio(&gpu, &mut encoder, &target_view, SIDE, SIDE, [0.0, 0.0, 0.0, 1.0], orbit);
+        gpu.queue.submit([encoder.finish()]);
+        read_texture(&gpu, &target, SIDE, SIDE).unwrap()
+    };
+    let px = draw_studio(&mut view);
+    let cube = pixel(&px, x as u32, y as u32);
+    assert!(cube[0] > 150 && cube[1] < cube[0] / 2, "a red cube: {cube:?}");
+    // the floor's lines show somewhere below the model
+    let floor = (SIDE * 3 / 4..SIDE)
+        .flat_map(|y| (0..SIDE).map(move |x| (x, y)))
+        .filter(|&(x, y)| pixel(&px, x, y)[1] > 60)
+        .count();
+    assert!(floor > 10, "{floor} floor pixels");
+    // dragged 10 pixels right and 6 down, it follows
+    view.move_light(&orbit, 0, 10.0, 6.0, SIDE, SIDE);
+    let [x2, y2, _] = view.light_on_screen(&orbit, 0, SIDE, SIDE).unwrap();
+    assert!((x2 - x - 10.0).abs() < 0.5 && (y2 - y - 6.0).abs() < 0.5, "{x} {y} -> {x2} {y2}");
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn a_hidden_submesh_is_not_drawn_and_each_has_its_own_picture() {
+    let Some(gpu) = gpu() else { return };
+    let mesh = read_obj(&format!("o Front\n{QUADS}").replace("usemtl far", "o Back\nusemtl far"), None).unwrap();
+    assert_eq!(mesh.submeshes.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["Front", "Back"]);
+    let mut view = MeshView::new(&gpu, &mesh, 4, wgpu::TextureFormat::Rgba8Unorm);
+    view.set_base(&gpu, 0, [1.0, 0.0, 0.0]);
+    view.set_base(&gpu, 1, [0.0, 0.0, 1.0]);
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 6.0, fov: 0.9 };
+    // the near square hidden, the far one shows through where it was
+    view.set_hidden(0, true);
+    let px = draw(&gpu, &mut view);
+    let middle = pixel(&px, SIDE / 2, SIDE / 2);
+    assert!(middle[2] > 100 && middle[0] < middle[2] / 3, "{middle:?}");
+    view.set_hidden(0, false);
+    // the near square alone fills its picture, on nothing at the corner
+    let picture = view.submesh_picture(&gpu, 0, SIDE).unwrap();
+    let centre = pixel(&picture, SIDE / 2, SIDE / 2);
+    assert!(centre[0] > 100 && centre[3] == 255, "{centre:?}");
+    assert_eq!(pixel(&picture, 0, 0)[3], 0);
+    // and the view is as it was
+    let again = draw(&gpu, &mut view);
+    assert!(pixel(&again, SIDE / 2, SIDE / 2)[0] > 100);
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn a_metalness_painted_over_the_material_changes_how_it_shades() {
+    let Some(gpu) = gpu() else { return };
+    let mesh = read_obj(QUADS, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 4, wgpu::TextureFormat::Rgba8Unorm);
+    view.set_base(&gpu, 0, [0.8, 0.2, 0.2]);
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 6.0, fov: 0.9 };
+    let plain = draw(&gpu, &mut view);
+    // fully metal: the red base reflects instead of scattering
+    let white = gpu.device.create_texture_with_data(
+        &gpu.queue,
+        &wgpu::TextureDescriptor {
+            label: Some("metal"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        &[255, 255, 255, 255],
+    );
+    let map = white.create_view(&wgpu::TextureViewDescriptor::default());
+    view.set_channel_view(&gpu, 0, 2, Some(&map));
+    let metal = draw(&gpu, &mut view);
+    let (a, b) = (pixel(&plain, SIDE / 2, SIDE / 2), pixel(&metal, SIDE / 2, SIDE / 2));
+    assert_ne!(a, b);
+    // and back to the material's own
+    view.set_channel_view(&gpu, 0, 2, None);
+    assert_eq!(pixel(&draw(&gpu, &mut view), SIDE / 2, SIDE / 2), a);
     assert_eq!(gpu.errors(), 0);
 }

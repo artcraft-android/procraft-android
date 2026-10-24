@@ -96,6 +96,9 @@ private val Tabs = listOf(
     Tab("Help", PcIcons.TabHelp),
 )
 
+/** On a model, its own tab takes Video's place. */
+private val ModelTabs = Tabs.map { if (it.label == "Video") Tab("3D", PcIcons.Tab3D) else it }
+
 /** The actions panel: six tabs of grouped rows (adding, the canvas, sharing, video, preferences, help). */
 @Composable
 fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) {
@@ -150,7 +153,12 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     val takePhoto = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.TakePicture()) { taken ->
         if (taken) vm.insertPicture(photo)
     }
-    val groups: List<List<ActionRow>> = when (shownTab) {
+    val model = vm.modelOpen
+    val tabs = if (model) ModelTabs else Tabs
+    val groups: List<List<ActionRow>> = if (model && shownTab <= 3) modelGroups(vm, shownTab, { k, q -> share(k, q) }, pickFile = { pickFile.launch(arrayOf("image/*")) },
+        pickPhoto = { pickPhoto.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+        takePhoto = { runCatching { takePhoto.launch(photo) }.onFailure { dialog = "Take a photo" to "No camera app is available." } },
+    ) else when (shownTab) {
         0 -> listOf(
             listOf(
                 Act("Insert a file") { pickFile.launch(arrayOf("image/*")) },
@@ -176,21 +184,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             listOf(Act("Flip horizontal") { vm.flipCanvas(horizontal = true) }, Act("Flip vertical") { vm.flipCanvas(horizontal = false) }),
             listOf(Act("Canvas information") { vm.canvasInfoOpen = true }),
         )
-        2 -> listOfNotNull(
-            // a model shares as a model too
-            if (vm.modelOpen) {
-                listOf(
-                    Heading("Share 3D"),
-                    Act("OBJ") { share(CanvasViewModel.Export.MODEL_OBJ) },
-                    Act("USDZ") { share(CanvasViewModel.Export.MODEL_USDZ) },
-                    Act("Render") { share(CanvasViewModel.Export.MODEL_RENDER) },
-                    Act("PNG Textures") { share(CanvasViewModel.Export.MODEL_TEXTURES) },
-                    Act("Animated rotate") { share(CanvasViewModel.Export.MODEL_ROTATE) },
-                    Act("Animated swing") { share(CanvasViewModel.Export.MODEL_SWING) },
-                )
-            } else {
-                null
-            },
+        2 -> listOf(
             listOf(
                 Heading("Share Image"),
                 Act(CanvasViewModel.PACKAGE_LABEL) {
@@ -285,7 +279,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                     modifier = Modifier.padding(start = 24.dp, top = 22.dp).height(34.dp),
                 )
                 Row(Modifier.padding(start = 10.dp).height(60.dp)) {
-                    Tabs.forEachIndexed { i, tab ->
+                    tabs.forEachIndexed { i, tab ->
                         // a tab lights up as soon as it is touched; the old one goes out when it is let go
                         val touch = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
                         val held = heldOf(touch)
@@ -306,7 +300,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 41.dp),
                             )
                         }
-                        if (i < Tabs.size - 1) Spacer(Modifier.width(10.dp))
+                        if (i < tabs.size - 1) Spacer(Modifier.width(10.dp))
                     }
                 }
                 Column(
@@ -368,6 +362,63 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             confirmButton = { TextButton(onClick = { dialog = null }) { Text("Done") } },
         )
     }
+}
+
+/**
+ * The first four tabs' rows on a model: adding without text, the canvas's reference and
+ * information, sharing the model, pictures of it and its textures, and the 3D tab (the 2D
+ * texture, painting through, lighting, AR). Prefs and Help are as on a canvas.
+ */
+private fun modelGroups(
+    vm: CanvasViewModel,
+    tab: Int,
+    share: (CanvasViewModel.Export, Int) -> Unit,
+    pickFile: () -> Unit,
+    pickPhoto: () -> Unit,
+    takePhoto: () -> Unit,
+): List<List<ActionRow>> = when (tab) {
+    0 -> listOf(
+        listOf(Act("Insert a file") { pickFile() }, Act("Insert a photo") { pickPhoto() }, Act("Take a photo") { takePhoto() }),
+        listOf(Act("Cut") { vm.cutLayer() }, Act("Copy") { vm.copyLayer() }, Act("Copy canvas") { vm.copyCanvas() }, Act("Paste", onClick = if (vm.canPaste) ({ vm.paste() }) else null)),
+    )
+    1 -> listOf(
+        listOf(Toggle("Reference", vm.referenceOn) { vm.changeReferenceOn(it) }),
+        listOf(Act("Canvas information") { vm.canvasInfoOpen = true }),
+    )
+    2 -> listOf(
+        listOf(
+            Heading("Share Model"),
+            // the native package doesn't hold a model yet
+            Act(CanvasViewModel.PACKAGE_LABEL),
+            Act("USDZ") { share(CanvasViewModel.Export.MODEL_USDZ, 100) },
+            Act("OBJ") { share(CanvasViewModel.Export.MODEL_OBJ, 100) },
+        ),
+        listOf(
+            Heading("Share Image"),
+            Act("JPEG") { share(CanvasViewModel.Export.MODEL_JPEG, 100) },
+            Act("PNG") { share(CanvasViewModel.Export.MODEL_RENDER, 100) },
+            Act("TIFF") { share(CanvasViewModel.Export.MODEL_TIFF, 100) },
+            Act("Animated GIF") { vm.modelAnimatedExport = CanvasViewModel.Animated.GIF },
+            Act("Animated PNG") { vm.modelAnimatedExport = CanvasViewModel.Animated.PNG },
+            Act("Animated MP4") { vm.modelAnimatedExport = CanvasViewModel.Animated.MP4 },
+            Act("Animated HEVC") { vm.modelAnimatedExport = CanvasViewModel.Animated.HEVC },
+        ),
+        listOf(Heading("Share Textures"), Act("PNG") { share(CanvasViewModel.Export.MODEL_TEXTURES, 100) }),
+    )
+    3 -> {
+        // showing the 2D texture, the rest is for the model
+        val shown = !vm.modelFlat
+        listOf(
+            listOf(
+                Toggle("Show 2D texture", vm.modelFlat) { vm.changeModelFlat(it) },
+                Toggle("Paint through mesh", vm.paintThrough, onChange = if (shown) ({ vm.changePaintThrough(it) }) else null),
+                Act("Edit lighting & environment", onClick = if (shown) ({ vm.openLightingStudio() }) else null),
+            ),
+            // no AR on Android yet
+            listOf(Act("View in AR")),
+        )
+    }
+    else -> emptyList()
 }
 
 /** A small menu beside a row: its choices, the chosen one marked with a blue dot. */

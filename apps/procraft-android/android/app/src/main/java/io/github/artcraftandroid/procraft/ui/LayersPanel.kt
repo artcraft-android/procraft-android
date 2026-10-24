@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyItemScope
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -152,6 +153,8 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
     // where each row is in the window: for dropping a dragged row and placing the options
     val rows = remember { mutableMapOf<ULong, Rect>() }
 
+    // a model's meshes are pictured as the model is seen when the panel opens
+    if (vm.modelOpen) LaunchedEffect(Unit) { vm.refreshSubmeshThumbnails() }
     Popover(LayersWidth, arrowX, modifier) {
         // kept while they fade out
         val open = options?.let { id -> vm.layers.firstOrNull { it.id == id }?.let { l -> rows[id]?.let { l to it } } }
@@ -194,20 +197,10 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
         ) {
             // a closed group's layers are left out
             val shown = vm.layers.filter { !vm.hidden(it) }
-            // on a model, the texture set painted on heads its layers
-            vm.textureSets.getOrNull(vm.textureSet)?.let { name ->
-                item(key = "texture set") { TextureSetRow(name, onTap = {}) }
-            }
-            itemsIndexed(shown, key = { _, l -> l.id.toLong() }) { index, l ->
+            // a layer's row: in the list, or on a model under its submesh, indented
+            val layerItem: @Composable LazyItemScope.(Int, LayerInfo, Shape, Dp, String?) -> Unit = { index, l, shape, indent, subtitle ->
                 val dragging = dragId == l.id
                 DisposableEffect(l.id) { onDispose { rows.remove(l.id) } }
-                // the list's ends round; the rows between are square
-                val shape = RoundedCornerShape(
-                    topStart = if (index == 0) ListCorner else 0.dp,
-                    topEnd = if (index == 0) ListCorner else 0.dp,
-                    bottomStart = if (index == shown.size - 1) ListCorner else 0.dp,
-                    bottomEnd = if (index == shown.size - 1) ListCorner else 0.dp,
-                )
                 Column(
                     Modifier.animateItem(Motion.rowFade(), if (dragging || blendAt >= 0) null else Motion.rowMove(), Motion.rowFade())
                         .onGloballyPositioned { rows[l.id] = it.boundsInWindow() }
@@ -241,7 +234,11 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                 ) {
                     val onTap = {
                         swiped = null
-                        if (vm.anyPicked) {
+                        // on a model the row means the layer itself: its colour, no channel's tile
+                        if (vm.modelOpen && vm.channelTileChosen && l.kind != LayerType.GROUP) {
+                            vm.leaveChannelTiles()
+                            if (!l.current) vm.selectLayer(l.id)
+                        } else if (vm.anyPicked) {
                             // picks give way to the layer tapped, the current one too
                             vm.selectLayer(l.id)
                             options = null
@@ -266,7 +263,7 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                     }
                     SwipeRow(vm, l, open = swiped == l.id, enabled = dragId == null, onOpen = { swiped = if (it) l.id else null }, onPick = { vm.pickLayer(l) }) {
                         if (l.kind == LayerType.GROUP) {
-                            GroupRow(vm, l, shape, name, onTap) { vm.toggleCollapsed(l) }
+                            GroupRow(vm, l, shape, name, onTap, indent) { vm.toggleCollapsed(l) }
                         } else LayerRow(
                             vm,
                             l,
@@ -278,8 +275,15 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                                 changeBlend(if (blendFor == l.id) null else l.id)
                                 options = null
                             },
+                            indent = indent,
+                            subtitle = subtitle,
+                            // on a model: its channels, and the row giving its blue to the channel painted
+                            onCube = if (vm.modelOpen && l.kind != LayerType.MASK) ({ vm.toggleChannelTray(l.id) }) else null,
+                            cubeLit = vm.modelOpen && l.current && vm.channelTileChosen,
+                            selected = l.current && !(vm.modelOpen && vm.channelTileChosen),
                         )
                     }
+                    if (vm.modelOpen && vm.channelTrayFor == l.id) ChannelTray(vm, l)
                     // the blend modes open under the row, the panel growing as they fade in, and close back
                     androidx.compose.animation.AnimatedVisibility(
                         blendFor == l.id,
@@ -291,9 +295,51 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                     ) { BlendEditor(vm, l) }
                 }
             }
-            // the model's other texture sets, a tap away
-            vm.textureSets.forEachIndexed { i, name ->
-                if (i != vm.textureSet) item(key = "texture set $i") { TextureSetRow(name, onTap = { vm.chooseTextureSet(i) }) }
+            if (!vm.modelOpen) {
+                itemsIndexed(shown, key = { _, l -> l.id.toLong() }) { index, l ->
+                    // the list's ends round; the rows between are square
+                    val shape = RoundedCornerShape(
+                        topStart = if (index == 0) ListCorner else 0.dp,
+                        topEnd = if (index == 0) ListCorner else 0.dp,
+                        bottomStart = if (index == shown.size - 1) ListCorner else 0.dp,
+                        bottomEnd = if (index == shown.size - 1) ListCorner else 0.dp,
+                    )
+                    layerItem(index, l, shape, 0.dp, null)
+                }
+            } else {
+                // on a model: each texture set headed by its name, its meshes under it; the open
+                // mesh's texture set's layers under that, shared by every mesh in the set
+                vm.textureSets.forEachIndexed { set, setName ->
+                    val meshes = vm.submeshes.withIndex().filter { it.value.textureSet.toInt() == set }
+                    if (meshes.isEmpty()) return@forEachIndexed
+                    item(key = "set $set") { SetHeader(setName, first = set == 0) }
+                    meshes.forEachIndexed { k, (m, info) ->
+                        val open = vm.openSubmesh == m
+                        val lastMesh = k == meshes.size - 1
+                        val layersUnder = open && set == vm.textureSet && shown.isNotEmpty()
+                        item(key = "mesh $m") {
+                            SubmeshRow(
+                                vm,
+                                m,
+                                info.name,
+                                open = layersUnder,
+                                shape = RoundedCornerShape(
+                                    topStart = if (k == 0) ListCorner else 0.dp,
+                                    topEnd = if (k == 0) ListCorner else 0.dp,
+                                    bottomStart = if (lastMesh && !layersUnder) ListCorner else 0.dp,
+                                    bottomEnd = if (lastMesh && !layersUnder) ListCorner else 0.dp,
+                                ),
+                            )
+                        }
+                        if (layersUnder) {
+                            itemsIndexed(shown, key = { _, l -> "layer ${l.id}" }) { index, l ->
+                                val end = lastMesh && index == shown.size - 1
+                                val shape = RoundedCornerShape(bottomStart = if (end) ListCorner else 0.dp, bottomEnd = if (end) ListCorner else 0.dp)
+                                layerItem(index, l, shape, GroupIndent, if (meshes.size > 1) "Shared" else null)
+                            }
+                        }
+                    }
+                }
             }
             // it moves down and up with the rows above it
             if (!vm.modelOpen) item(key = "background") {
@@ -499,12 +545,20 @@ private fun LockedName(l: LayerInfo, ink: Color, name: @Composable (Color, Modif
 
 /** A group's row: a line where a thumbnail would be, its name, its open or closed arrow and its box. */
 @Composable
-private fun GroupRow(vm: CanvasViewModel, l: LayerInfo, shape: Shape, name: @Composable (Color, Modifier) -> Unit, onTap: () -> Unit, onToggle: () -> Unit) {
+private fun GroupRow(
+    vm: CanvasViewModel,
+    l: LayerInfo,
+    shape: Shape,
+    name: @Composable (Color, Modifier) -> Unit,
+    onTap: () -> Unit,
+    indent: Dp,
+    onToggle: () -> Unit,
+) {
     Row(
         Modifier.fillMaxWidth().height(GroupHeight).clip(shape)
             .background(if (l.current) Pc.RowSelected else if (l.picked) PickedRow else Pc.LayerRow)
             .clickable(onClick = onTap)
-            .padding(start = GroupIndent * l.depth.toInt()),
+            .padding(start = indent + GroupIndent * l.depth.toInt()),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         val ink = if (l.current || l.picked) Color.White else Pc.PanelTitle
@@ -529,18 +583,23 @@ private fun LayerRow(
     owner: Boolean,
     onTap: () -> Unit,
     onBlend: () -> Unit,
+    indent: Dp = 0.dp,
+    subtitle: String? = null,
+    onCube: (() -> Unit)? = null,
+    cubeLit: Boolean = false,
+    selected: Boolean = l.current,
 ) {
     val mask = l.kind == LayerType.MASK
     val masked = vm.hasMask(l)
     Row(
         Modifier.fillMaxWidth().height(if (mask || masked) MaskedRowHeight else RowHeight).clip(shape)
             // the layer a selected mask belongs to shows a darker blue
-            .background(if (l.current) Pc.RowSelected else if (l.picked) PickedRow else if (owner) MaskOwnerRow else Pc.LayerRow)
+            .background(if (selected) Pc.RowSelected else if (l.picked) PickedRow else if (owner) MaskOwnerRow else Pc.LayerRow)
             .clickable(onClick = onTap)
-            .padding(start = (if (l.clipped) 18.dp else 0.dp) + GroupIndent * l.depth.toInt()),
+            .padding(start = indent + (if (l.clipped) 18.dp else 0.dp) + GroupIndent * l.depth.toInt()),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        val ink = if (l.current || l.picked) Color.White else Pc.PanelTitle
+        val ink = if (selected || l.picked) Color.White else Pc.PanelTitle
         if (l.clipped) Icon(PcIcons.Clip, contentDescription = "Clipped", tint = ink, modifier = Modifier.size(16.dp))
         // a mask's thumbnail and its layer's join into one, rounded only at the outer corners
         val corner = 4.dp
@@ -555,7 +614,21 @@ private fun LayerRow(
             else -> 0.dp
         }
         Box(Modifier.padding(start = 4.dp).offset(y = shift)) { Thumb(vm, l, thumbShape) }
-        LockedName(l, ink, name, Modifier.weight(1f))
+        if (subtitle == null) {
+            LockedName(l, ink, name, Modifier.weight(1f))
+        } else {
+            // a model's layer shared by its texture set's meshes says so under its name
+            Column(Modifier.weight(1f)) {
+                LockedName(l, ink, name, Modifier)
+                Text(subtitle, color = ink, fontSize = 13.sp, maxLines = 1, modifier = Modifier.padding(start = 29.dp))
+            }
+        }
+        // a model's layer: the button that shows its channels, blue while one of them is painted
+        if (onCube != null) {
+            Box(Modifier.offset(x = 16.dp).size(44.dp, 47.dp).clickable(onClick = onCube), contentAlignment = Alignment.Center) {
+                Icon(PcIcons.Tab3D, contentDescription = "Channels", tint = if (cubeLit) Pc.Accent else ink, modifier = Modifier.requiredSize(48.dp))
+            }
+        }
         // the blend and visibility buttons overlap by 8, as on the reference; a mask has no blend
         if (mask) {
             Spacer(Modifier.width(36.dp))
@@ -567,9 +640,38 @@ private fun LayerRow(
             }
         }
         Box(Modifier.size(44.dp, 47.dp).clickable { vm.toggleVisible(l) }, contentAlignment = Alignment.Center) {
-            CheckBox(l.visible, if (l.current || l.picked) Color.White else Pc.CheckFill)
+            CheckBox(l.visible, if (selected || l.picked) Color.White else Pc.CheckFill)
         }
         Spacer(Modifier.width(8.dp))
+    }
+}
+
+private val TrayFill = Color(0xFF303032)
+private val TileFill = Color(0xFF3B3B3D)
+
+/**
+ * A model's layer's channels under its row: Color, Roughness and Metallic, each its picture of
+ * the layer; the one painted on (of the current layer) blue. A tap paints on it.
+ */
+@Composable
+private fun ChannelTray(vm: CanvasViewModel, l: LayerInfo) {
+    Row(Modifier.fillMaxWidth().height(159.dp).background(TrayFill).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        listOf("Color", "Roughness", "Metallic").forEachIndexed { c, label ->
+            val chosen = l.current && vm.channelTileChosen && vm.modelChannel == c
+            Column(
+                Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(6.dp)).background(if (chosen) Pc.Accent else TileFill)
+                    .clickable {
+                        if (!l.current) vm.selectLayer(l.id)
+                        vm.chooseChannelTile(c)
+                    }
+                    .padding(6.dp),
+            ) {
+                Box(Modifier.fillMaxWidth().height(102.dp).clip(RoundedCornerShape(3.dp)).background(Pc.ThumbBackground)) {
+                    vm.channelThumbnails[c to l.id]?.let { Image(it, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
+                }
+                Text(label, color = if (chosen) Color.White else Pc.PanelTitle, fontSize = 15.sp, maxLines = 1, modifier = Modifier.padding(start = 2.dp, top = 9.dp))
+            }
+        }
     }
 }
 
@@ -822,11 +924,44 @@ private fun Option(label: String, checked: Boolean? = null, enabled: Boolean = t
         if (checked == true) Icon(PcIcons.Tick, contentDescription = null, tint = color, modifier = Modifier.size(18.dp))
     }
 }
-/** A model's texture set: its name heading the layers painted into it. */
+/** A model's texture set's name, heading its meshes: 41 tall, 16 under the set before it. */
 @Composable
-private fun TextureSetRow(name: String, onTap: () -> Unit) {
-    Box(Modifier.fillMaxWidth().height(RowHeight).clickable(onClick = onTap), contentAlignment = Alignment.CenterStart) {
-        Text(name, color = Pc.PanelTitle, fontSize = 17.sp, fontWeight = FontWeight.Medium, maxLines = 1, modifier = Modifier.padding(start = 16.dp))
+private fun SetHeader(name: String, first: Boolean) {
+    Column {
+        if (!first) Spacer(Modifier.height(16.dp))
+        Box(Modifier.fillMaxWidth().height(41.dp), contentAlignment = Alignment.TopStart) {
+            Text(name, color = Pc.PanelTitle, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(start = 16.dp, top = 12.dp))
+        }
+    }
+}
+
+/** A model's mesh opened in the layers panel: its row darkened blue. */
+private val SubmeshOpen = Color(0xFF25344A)
+private val SubmeshTile = Color(0xFF434246)
+
+/**
+ * One of a model's meshes: its picture, its name, the arrow that opens it (its texture set's
+ * layers under it) and its box (shown or hidden). A tap anywhere but the box opens or closes it.
+ */
+@Composable
+private fun SubmeshRow(vm: CanvasViewModel, index: Int, name: String, open: Boolean, shape: Shape) {
+    val hidden = vm.submeshesHidden.getOrNull(index) == true
+    Row(
+        Modifier.fillMaxWidth().height(RowHeight).clip(shape).background(if (open) SubmeshOpen else Pc.LayerRow)
+            .clickable { vm.openSubmesh(index) },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.padding(start = 4.dp).size(93.dp, 61.dp).clip(RoundedCornerShape(4.dp)).background(SubmeshTile), contentAlignment = Alignment.Center) {
+            vm.submeshThumbnails[index]?.let { Image(it, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(4.dp)) }
+        }
+        Text(name, color = Pc.PanelTitle, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(start = 29.dp, end = 6.dp))
+        Box(Modifier.offset(x = 8.dp).size(44.dp, 51.dp).clickable { vm.openSubmesh(index) }, contentAlignment = Alignment.Center) {
+            Icon(if (open) PcIcons.ChevronDown else PcIcons.ChevronRight, contentDescription = if (open) "Close" else "Open", tint = Pc.PanelTitle, modifier = Modifier.size(16.dp))
+        }
+        Box(Modifier.size(44.dp, 47.dp).clickable { vm.toggleSubmeshHidden(index) }, contentAlignment = Alignment.Center) {
+            CheckBox(!hidden, Pc.CheckFill)
+        }
+        Spacer(Modifier.width(8.dp))
     }
 }
 

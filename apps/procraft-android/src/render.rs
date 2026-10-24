@@ -95,7 +95,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
             }
             let to_screen = st.view.map(|v| v.to_screen());
             // a model is drawn in place of the flat canvas
-            if st.scene.is_some() {
+            if st.scene_shown() {
                 let convert = colours_to(st.doc.profile, screen);
                 st.render_scene(&view, format, size, convert);
                 st.frames += 1;

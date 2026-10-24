@@ -1,5 +1,5 @@
 // A 3D model drawn textured and lit: each part's albedo (premultiplied, over the part's base
-// colour where nothing is painted) shaded physically, by two lights fixed to the camera and by an
+// colour where nothing is painted) shaded physically, by up to four lights about it and by an
 // environment (its irradiance for diffuse light, a prefiltered radiance cube for reflections,
 // with the split-sum table), in the camera's space. Behind it, optionally, the environment's
 // irradiance as a backdrop.
@@ -9,10 +9,8 @@ struct View {
     view_proj: mat4x4<f32>,
     view: mat4x4<f32>,
     // each light's place in the camera's space, and its radiance
-    light0: vec4<f32>,
-    radiance0: vec4<f32>,
-    light1: vec4<f32>,
-    radiance1: vec4<f32>,
+    lights: array<vec4<f32>, 4>,
+    radiances: array<vec4<f32>, 4>,
     // the environment's irradiance as spherical harmonics (bands 0 to 2)
     sh: array<vec4<f32>, 9>,
     // exposure, the radiance cube's last level, and the target's size
@@ -23,6 +21,8 @@ struct View {
     c0: vec4<f32>,
     c1: vec4<f32>,
     c2: vec4<f32>,
+    // how many lights there are
+    counts: vec4<f32>,
 }
 
 struct Part {
@@ -39,6 +39,9 @@ struct Part {
 @group(1) @binding(0) var albedo: texture_2d<f32>;
 @group(1) @binding(1) var albedo_smp: sampler;
 @group(1) @binding(2) var<uniform> part: Part;
+// roughness and metalness painted over the material's (premultiplied greys)
+@group(1) @binding(3) var roughness_map: texture_2d<f32>;
+@group(1) @binding(4) var metallic_map: texture_2d<f32>;
 
 const PI: f32 = 3.14159265;
 
@@ -120,8 +123,12 @@ fn fs_main(i: Out) -> @location(0) vec4<f32> {
     let painted = textureSample(albedo, albedo_smp, i.uv);
     let color = painted.rgb + part.base.rgb * (1.0 - painted.a);
     let albedo_lin = pow(max(color, vec3<f32>(0.0)), vec3<f32>(2.2));
-    let roughness = part.material.x;
-    let metallic = part.material.y;
+    // a painted channel's grey over the material's value, as far as it covers
+    let rm = textureSample(roughness_map, albedo_smp, i.uv);
+    let mm = textureSample(metallic_map, albedo_smp, i.uv);
+    let grey = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let roughness = part.material.x * (1.0 - rm.a) + dot(rm.rgb, grey);
+    let metallic = part.material.y * (1.0 - mm.a) + dot(mm.rgb, grey);
     let v = normalize(-i.eye);
     // a normal turned away from the eye (the far side of an open surface, or a smooth one's
     // outline) mirrored across the view plane: facing the eye, its slant kept
@@ -132,8 +139,13 @@ fn fs_main(i: Out) -> @location(0) vec4<f32> {
     }
     let r = max(roughness, 0.045);
     let f0 = mix(vec3<f32>(0.04), albedo_lin, metallic);
-    var lo = direct(n, v, normalize(view.light0.xyz - i.eye), view.radiance0.xyz, albedo_lin, f0, r, metallic);
-    lo += direct(n, v, normalize(view.light1.xyz - i.eye), view.radiance1.xyz, albedo_lin, f0, r, metallic);
+    var lo = vec3<f32>(0.0);
+    let count = i32(view.counts.x);
+    for (var k = 0; k < 4; k++) {
+        if (k < count) {
+            lo += direct(n, v, normalize(view.lights[k].xyz - i.eye), view.radiances[k].xyz, albedo_lin, f0, r, metallic);
+        }
+    }
     // the environment: diffuse light from its irradiance, reflections from the prefiltered cube
     let nv = clamp(dot(n, v), 1e-5, 1.0);
     let reflected = textureSampleLevel(radiance, radiance_smp, reflect(-v, n), r * view.params.y).rgb;

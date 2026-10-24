@@ -19,18 +19,46 @@ use procraft_engine::mesh::{MAX_TRIANGLES, Mesh, MeshError, read_obj};
 use procraft_engine::stroke::StrokeBuilder;
 use procraft_engine::usd::{read_usd, read_usdc, read_usdz};
 use procraft_engine::view::View;
-use procraft_gpu::{Canvas, Lighting, MeshView, Orbit, StrokeTool, wgpu};
+use procraft_gpu::{Canvas, Light, Lighting, MOST_LIGHTS, MeshView, Orbit, StrokeTool, wgpu};
 
 use crate::project::{THUMBNAIL_SIDE, file_error, pixels_hash, read_png, write_atomically, write_png};
 use crate::{CanvasSession, MobileError, PenSample, PointerKind, State, ToolKind};
 
 /// How far a one-finger drag turns the model: this many radians across the window's shorter
-/// side (a small drag's share of a trackball's turn).
-const TURN_PER_SIDE: f32 = 2.93;
+/// side, wherever the finger is and however fast it goes (measured: 0.0122 rad a point on a 744
+/// point side).
+const TURN_PER_SIDE: f32 = 9.08;
+/// How far a drag across the Lighting Studio takes its camera round: radians across the shorter
+/// side.
+const STUDIO_TURN_PER_SIDE: f32 = 2.93;
 /// The nearest and farthest the camera comes, in the framing's units (the model's largest side
 /// counted as 4).
 const NEAREST: f32 = 0.05;
 const FARTHEST: f32 = 30.0;
+/// The brightest the model's light can be taken.
+const MOST_EXPOSURE: f32 = 5.0;
+/// Where a light added in the Lighting Studio stands: just above and behind the model's middle
+/// (framing units).
+const NEW_LIGHT: [f32; 3] = [0.8, 2.6, -0.6];
+/// How far a duplicated light stands from the one it copies (framing units).
+const DUPLICATE_OFFSET: [f32; 3] = [1.0, 0.0, 0.0];
+/// How far round a drag across the studio carries its camera (as the model is turned), and the
+/// lowest and highest it looks from (radians up from level).
+const STUDIO_LOWEST: f32 = 0.05;
+const STUDIO_HIGHEST: f32 = 1.5;
+/// A light is touched within this many pixels of its cube.
+const LIGHT_SLACK: f32 = 24.0;
+/// The hue bar's colours (sRGB), evenly spaced from its start to its end.
+const HUE_STOPS: [[f32; 3]; 8] = [
+    [1.0, 0.0, 0.0],
+    [1.0, 110.0 / 255.0, 0.0],
+    [1.0, 220.0 / 255.0, 0.0],
+    [53.0 / 255.0, 1.0, 0.0],
+    [0.0, 1.0, 236.0 / 255.0],
+    [0.0, 52.0 / 255.0, 1.0],
+    [170.0 / 255.0, 0.0, 1.0],
+    [1.0, 0.0, 0.0],
+];
 /// The texture sets' side when none is asked for, and the most there can be.
 const DEFAULT_TEXTURE_SIZE: u32 = 2048;
 const MOST_TEXTURE_SIZE: u32 = 4096;
@@ -52,10 +80,14 @@ impl TextureSet {
     }
 }
 
-/// A new texture set's document: `side` square, nothing painted (the part's base colour shows).
+/// A new texture set's document: `side` square, its one layer the Base Layer, nothing painted (the
+/// part's base colour shows).
 fn empty_texture(side: u32) -> Document {
     let mut doc = Document::new(side, side);
     doc.background_visible = false;
+    if let Some(id) = doc.layers().first().map(|l| l.id) {
+        doc.rename(id, "Base Layer");
+    }
     doc
 }
 
@@ -102,10 +134,33 @@ pub(crate) struct Scene {
     filtered: Vec<Option<(u64, bool)>>,
     /// Strokes reach every surface under them, not only the nearest.
     paint_through: bool,
+    /// The current texture set is shown flat, as a canvas, in place of the model.
+    flat: bool,
     /// An environment to light the model by, waiting for the next frame to be set up.
     environment: Option<procraft_engine::environment::Equirect>,
     /// The environment's name, kept with the model (none: the app's default).
     environment_name: Option<String>,
+    /// How bright the light is taken (1 as it is; 0 to 5).
+    exposure: f32,
+    /// The environment shows behind the model (else the canvas's surround); and whether one has
+    /// been set up yet.
+    environment_shown: bool,
+    lit: bool,
+    /// The lights it is lit by, as the interface sets them.
+    lights: Vec<ModelLight>,
+    /// The Lighting Studio is showing, seen through its own camera (kept while the model is open).
+    studio_open: bool,
+    studio: Option<Orbit>,
+    /// Which of its submeshes are hidden.
+    hidden: Vec<bool>,
+    /// Each part's roughness and metalness documents, once made; the place of the channel painted
+    /// is empty (it is the session's own).
+    channels: Vec<[Option<TextureSet>; 2]>,
+    /// The channel painted on the current part: 0 its colour, 1 roughness, 2 metalness. While it
+    /// isn't the colour, the part's colour document waits in [`Scene::sets`].
+    channel: usize,
+    /// Each part's channel maps as last given to the view (as [`Scene::filtered`]).
+    channel_shown: Vec<[Option<(u64, bool)>; 2]>,
     /// A stroke is being carried onto the model each frame; `ending`: once more, then it ends.
     pub(crate) stroking: bool,
     ending: bool,
@@ -141,8 +196,19 @@ impl Scene {
             bounds: IRect::EMPTY,
             filtered: Vec::new(),
             paint_through: false,
+            flat: false,
             environment: None,
             environment_name: None,
+            exposure: 1.0,
+            environment_shown: true,
+            lit: false,
+            lights: Light::DEFAULTS.iter().map(ModelLight::from_gpu).collect(),
+            studio_open: false,
+            studio: None,
+            hidden: Vec::new(),
+            channels: Vec::new(),
+            channel: 0,
+            channel_shown: Vec::new(),
             stroking: false,
             ending: false,
         }
@@ -225,10 +291,356 @@ impl CanvasSession {
         self.shared.lock().scene.as_ref().and_then(|s| s.environment_name.clone())
     }
 
+    /// How bright the model's light is taken: 1 as it is, 0 to [`MOST_EXPOSURE`].
+    pub fn model_exposure(&self) -> f32 {
+        self.shared.lock().scene.as_ref().map_or(1.0, |s| s.exposure)
+    }
+
+    pub fn set_model_exposure(&self, exposure: f32) {
+        let mut st = self.shared.lock();
+        let Some(scene) = st.scene.as_mut() else { return };
+        if exposure.is_finite() {
+            scene.exposure = exposure.clamp(0.0, MOST_EXPOSURE);
+        }
+        self.shared.frame(&mut st);
+    }
+
+    /// The lights the model is lit by.
+    pub fn model_lights(&self) -> Vec<ModelLight> {
+        self.shared.lock().scene.as_ref().map_or_else(Vec::new, |s| s.lights.clone())
+    }
+
+    /// Lights the model by `lights` (the first [`MOST_LIGHTS`]).
+    pub fn set_model_lights(&self, lights: Vec<ModelLight>) {
+        let mut st = self.shared.lock();
+        let Some(scene) = st.scene.as_mut() else { return };
+        scene.lights = lights.into_iter().take(MOST_LIGHTS).map(ModelLight::sane).collect();
+        self.shared.frame(&mut st);
+    }
+
+    /// Changes light `index` to `light` (its place, colour and intensity).
+    pub fn set_model_light(&self, index: u32, light: ModelLight) {
+        let mut st = self.shared.lock();
+        let Some(slot) = st.scene.as_mut().and_then(|s| s.lights.get_mut(index as usize)) else { return };
+        *slot = light.sane();
+        self.shared.frame(&mut st);
+    }
+
+    /// Adds a white light above and behind the model; false when it has as many as it can take.
+    pub fn add_model_light(&self) -> bool {
+        let mut st = self.shared.lock();
+        let Some(scene) = st.scene.as_mut() else { return false };
+        if scene.lights.len() >= MOST_LIGHTS {
+            return false;
+        }
+        let [x, y, z] = NEW_LIGHT;
+        scene.lights.push(ModelLight { x, y, z, hue: 0.0, saturation: 0.0, intensity: DEFAULT_INTENSITY });
+        self.shared.frame(&mut st);
+        true
+    }
+
+    /// Adds a copy of light `index` beside it; false when there are as many as can be.
+    pub fn duplicate_model_light(&self, index: u32) -> bool {
+        let mut st = self.shared.lock();
+        let Some(scene) = st.scene.as_mut() else { return false };
+        let Some(light) = scene.lights.get(index as usize).copied() else { return false };
+        if scene.lights.len() >= MOST_LIGHTS {
+            return false;
+        }
+        let [dx, dy, dz] = DUPLICATE_OFFSET;
+        scene.lights.push(ModelLight { x: light.x + dx, y: light.y + dy, z: light.z + dz, ..light });
+        self.shared.frame(&mut st);
+        true
+    }
+
+    pub fn delete_model_light(&self, index: u32) {
+        let mut st = self.shared.lock();
+        let Some(scene) = st.scene.as_mut() else { return };
+        if (index as usize) < scene.lights.len() {
+            scene.lights.remove(index as usize);
+        }
+        self.shared.frame(&mut st);
+    }
+
+    /// The channel painted on: 0 colour, 1 roughness, 2 metalness.
+    pub fn model_channel(&self) -> u32 {
+        self.shared.lock().scene.as_ref().map_or(0, |s| u32::try_from(s.channel).unwrap_or(0))
+    }
+
+    /// Paints on `channel` of the current texture set from now on (0 colour, 1 roughness, 2
+    /// metalness): its layers are the colour's layers, each with its own pixels.
+    pub fn set_model_channel(&self, channel: u32) {
+        let mut st = self.shared.lock();
+        st.choose_channel(channel as usize);
+        self.shared.frame(&mut st);
+    }
+
+    /// Layer `id`'s picture in `channel` of the current texture set (as layer thumbnails are),
+    /// for the channel tiles; none until it is drawn.
+    pub fn channel_layer_thumbnail(
+        &self,
+        channel: u32,
+        id: u64,
+        max_side: u32,
+    ) -> Option<crate::layers::ThumbnailImage> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let channel = channel as usize;
+        let current = st.scene.as_ref().map(|s| s.channel)?;
+        if channel == current {
+            drop(guard);
+            return self.layer_thumbnail(id, max_side);
+        }
+        let gpu = st.gpu.as_ref()?;
+        let scene = st.scene.as_mut()?;
+        let set = scene.slot(scene.current, channel)?.as_mut()?;
+        if set.canvas.is_none() {
+            let mut c = Canvas::new(gpu, &set.doc).ok()?;
+            for (lid, pixels) in std::mem::take(&mut set.pending) {
+                let _ = c.upload_layer(gpu, lid, &pixels);
+            }
+            set.canvas = Some(c);
+        }
+        let canvas = set.canvas.as_mut()?;
+        let t = canvas.layer_thumbnail(gpu, &mut set.doc, LayerId(id), max_side).ok()?;
+        Some(crate::layers::ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
+    }
+
+    /// The images the model's file brings for its texture sets (a USDZ's packed images): to be
+    /// decoded and given back with [`CanvasSession::set_model_texture`].
+    pub fn model_texture_files(&self) -> Vec<ModelTextureFile> {
+        let st = self.shared.lock();
+        let Some(scene) = st.scene.as_ref() else { return Vec::new() };
+        if scene.source.extension != "usdz" {
+            return Vec::new();
+        }
+        let Some(zip) = procraft_engine::zip::ZipReader::new(&scene.source.bytes) else { return Vec::new() };
+        let mut out = Vec::new();
+        for (set, part) in scene.mesh.parts.iter().enumerate() {
+            let Some(m) = scene.mesh.materials.iter().find(|m| m.name == part.material) else { continue };
+            let maps = [
+                (0, m.color_map.as_deref(), None),
+                (1, m.roughness_map.as_deref(), m.roughness_component),
+                (2, m.metallic_map.as_deref(), m.metallic_component),
+            ];
+            for (channel, map, component) in maps {
+                let Some(bytes) = map.and_then(|f| packed_file(&zip, f)) else { continue };
+                out.push(ModelTextureFile {
+                    texture_set: u32::try_from(set).unwrap_or(0),
+                    channel,
+                    component: component.and_then(|c| i32::try_from(c).ok()).unwrap_or(-1),
+                    bytes,
+                });
+            }
+        }
+        out
+    }
+
+    /// Puts `rgba` (premultiplied, the texture size square) into texture set `texture_set`'s
+    /// Base Layer in `channel` (0 colour, 1 roughness, 2 metalness), with no undo step; false if
+    /// it doesn't fit.
+    pub fn set_model_texture(&self, texture_set: u32, channel: u32, rgba: Vec<u8>) -> bool {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let (set, channel) = (texture_set as usize, channel as usize);
+        let Some(scene) = st.scene.as_mut() else { return false };
+        let side = scene.texture_size;
+        if channel > 2 || set >= scene.mesh.parts.len() || rgba.len() != (side as usize) * (side as usize) * 4 {
+            return false;
+        }
+        // the colour's layers say which is the Base Layer
+        let colour_is_session = set == scene.current && scene.channel == 0;
+        let structure = if colour_is_session {
+            st.doc.clone()
+        } else {
+            match scene.sets.get(set).and_then(Option::as_ref) {
+                Some(s) => s.doc.clone(),
+                None => return false,
+            }
+        };
+        let Some(base) = structure.layers().first().map(|l| l.id) else { return false };
+        if set == scene.current && channel == scene.channel {
+            match st.canvas.as_mut() {
+                Some(canvas) => canvas.put_layer(base, rgba),
+                None => st.pending_pixels.push((base, rgba)),
+            }
+        } else {
+            let Some(slot) = scene.slot(set, channel) else { return false };
+            let target = slot.get_or_insert_with(|| {
+                let mut made = TextureSet::empty(side);
+                follow_layers(&mut made, &structure);
+                made
+            });
+            match target.canvas.as_mut() {
+                Some(canvas) => canvas.put_layer(base, rgba),
+                None => target.pending.push((base, rgba)),
+            }
+        }
+        self.shared.frame(st);
+        true
+    }
+
+    /// Which of the model's submeshes are hidden, in order.
+    pub fn submeshes_hidden(&self) -> Vec<bool> {
+        let st = self.shared.lock();
+        st.scene.as_ref().map_or_else(Vec::new, |s| {
+            (0..s.mesh.submeshes.len()).map(|i| s.hidden.get(i).copied().unwrap_or(false)).collect()
+        })
+    }
+
+    /// Hides submesh `index` (not drawn or painted), or shows it again.
+    pub fn set_submesh_hidden(&self, index: u32, hidden: bool) {
+        let mut st = self.shared.lock();
+        let Some(scene) = st.scene.as_mut() else { return };
+        let count = scene.mesh.submeshes.len();
+        scene.hidden.resize(count, false);
+        if let Some(h) = scene.hidden.get_mut(index as usize) {
+            *h = hidden;
+        }
+        self.shared.frame(&mut st);
+    }
+
+    /// Submesh `index` on its own, seen as the model is now, filling a `side` square on nothing:
+    /// its row's picture. None until the model has been drawn.
+    pub fn submesh_thumbnail(&self, index: u32, side: u32) -> Option<crate::layers::ThumbnailImage> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let side = side.clamp(8, 1024);
+        let (Some(gpu), Some(view)) = (st.gpu.as_ref(), st.scene.as_mut().and_then(|s| s.view.as_mut())) else {
+            return None;
+        };
+        match view.submesh_picture(gpu, index as usize, side) {
+            Ok(rgba) => Some(crate::layers::ThumbnailImage { width: side, height: side, rgba }),
+            Err(e) => {
+                log::warn!("submesh picture: {e}");
+                None
+            }
+        }
+    }
+
+    /// Shows the Lighting Studio (the model on its floor among its lights) or the model again.
+    pub fn set_lighting_studio(&self, open: bool) {
+        let mut st = self.shared.lock();
+        let Some(scene) = st.scene.as_mut() else { return };
+        scene.studio_open = open;
+        self.shared.frame(&mut st);
+    }
+
+    /// A drag of (`dx`, `dy`) window pixels across the studio: its camera goes round the model
+    /// (across) and up or down (along), the model upright.
+    pub fn studio_turn(&self, dx: f32, dy: f32) {
+        let mut st = self.shared.lock();
+        let side = st.window_size.0.min(st.window_size.1).max(1) as f32;
+        let Some(scene) = st.scene.as_mut() else { return };
+        let Some(view) = scene.view.as_ref() else { return };
+        let orbit = scene.studio.get_or_insert_with(|| view.studio_orbit());
+        let (yaw, pitch) = yaw_pitch(orbit);
+        let yaw = yaw - dx / side * STUDIO_TURN_PER_SIDE;
+        let pitch = (pitch + dy / side * STUDIO_TURN_PER_SIDE).clamp(STUDIO_LOWEST, STUDIO_HIGHEST);
+        orbit.rotation = Orbit::rotation_of(yaw, pitch);
+        self.shared.frame(&mut st);
+    }
+
+    /// Two fingers pinching the studio by `scale`: its camera nearer or farther.
+    pub fn studio_zoom(&self, scale: f32) {
+        let mut st = self.shared.lock();
+        let Some(scene) = st.scene.as_mut() else { return };
+        let unit = Orbit::unit(&scene.mesh);
+        let Some(view) = scene.view.as_ref() else { return };
+        let orbit = scene.studio.get_or_insert_with(|| view.studio_orbit());
+        if scale.is_finite() && scale > 0.0 {
+            orbit.distance = (orbit.distance / scale).clamp(NEAREST * unit * 20.0, FARTHEST * unit * 2.0);
+        }
+        self.shared.frame(&mut st);
+    }
+
+    /// The light whose cube is under window point (`x`, `y`) in the studio, the nearest if more.
+    pub fn model_light_at(&self, x: f32, y: f32) -> Option<u32> {
+        let st = self.shared.lock();
+        let (w, h) = st.window_size;
+        let scene = st.scene.as_ref()?;
+        let view = scene.view.as_ref()?;
+        let orbit = scene.studio.unwrap_or_else(|| view.studio_orbit());
+        let gpu_view = scene.lights_view(view);
+        (0..gpu_view.lights.len())
+            .filter_map(|i| {
+                let [lx, ly, reach] = gpu_view.light_on_screen(&orbit, i, w, h)?;
+                let d = ((lx - x).powi(2) + (ly - y).powi(2)).sqrt();
+                (d <= reach + LIGHT_SLACK).then_some((i, d))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .and_then(|(i, _)| u32::try_from(i).ok())
+    }
+
+    /// Light `index` in the studio: its middle on the window and how far its cube reaches (pixels).
+    pub fn model_light_on_screen(&self, index: u32) -> Option<Vec<f32>> {
+        let st = self.shared.lock();
+        let (w, h) = st.window_size;
+        let scene = st.scene.as_ref()?;
+        let view = scene.view.as_ref()?;
+        let orbit = scene.studio.unwrap_or_else(|| view.studio_orbit());
+        scene.lights_view(view).light_on_screen(&orbit, index as usize, w, h).map(|p| p.to_vec())
+    }
+
+    /// Drags light `index` by (`dx`, `dy`) window pixels across the studio, at its depth.
+    pub fn move_model_light(&self, index: u32, dx: f32, dy: f32) {
+        let mut st = self.shared.lock();
+        let (w, h) = st.window_size;
+        let Some(scene) = st.scene.as_mut() else { return };
+        let Some(view) = scene.view.as_ref() else { return };
+        let orbit = scene.studio.unwrap_or_else(|| view.studio_orbit());
+        let mut moved = scene.lights_view(view);
+        moved.move_light(&orbit, index as usize, dx, dy, w, h);
+        if let (Some(light), Some(m)) = (scene.lights.get_mut(index as usize), moved.lights.get(index as usize)) {
+            [light.x, light.y, light.z] = m.place;
+        }
+        self.shared.frame(&mut st);
+    }
+
+    /// Whether the environment shows behind the model (else the canvas's surround).
+    pub fn model_environment_shown(&self) -> bool {
+        self.shared.lock().scene.as_ref().is_none_or(|s| s.environment_shown)
+    }
+
+    pub fn set_model_environment_shown(&self, shown: bool) {
+        let mut st = self.shared.lock();
+        let Some(scene) = st.scene.as_mut() else { return };
+        scene.environment_shown = shown;
+        self.shared.frame(&mut st);
+    }
+
     pub fn set_paint_through(&self, on: bool) {
         if let Some(scene) = self.shared.lock().scene.as_mut() {
             scene.paint_through = on;
         }
+    }
+
+    /// Whether the texture set painted on is shown flat (its 2D texture) in place of the model.
+    pub fn model_flat(&self) -> bool {
+        self.shared.lock().scene.as_ref().is_some_and(|s| s.flat)
+    }
+
+    /// Shows the texture set painted on flat, a canvas drawn and painted on as any other, or the
+    /// model again.
+    pub fn set_model_flat(&self, on: bool) {
+        let mut st = self.shared.lock();
+        let Some(flat) = st.scene.as_ref().map(|s| s.flat) else { return };
+        if flat == on {
+            return;
+        }
+        // the stroke under way ends where it was drawn
+        if flat {
+            st.finish_stroke();
+        } else {
+            st.scene_stroke_cancel();
+        }
+        if let Some(scene) = st.scene.as_mut() {
+            scene.flat = on;
+        }
+        if on {
+            st.view = Some(st.fitted_view());
+        }
+        self.shared.frame(&mut st);
     }
 
     /// One finger dragged by (`dx`, `dy`) window pixels across a model: it turns.
@@ -247,26 +659,36 @@ impl CanvasSession {
     pub fn export_model_obj(&self, path: String) -> Result<(), MobileError> {
         let files = self.model_files()?;
         let base = &files.base;
-        let images: Vec<(String, String)> =
-            files.names.iter().map(|n| (n.clone(), format!("{base}_{n}.png"))).collect();
+        let materials: Vec<(String, [String; 3])> =
+            files.names.iter().map(|n| (n.clone(), MODEL_CHANNEL_FILES.map(|c| format!("{n}-{c}.png")))).collect();
         let mut zip = procraft_engine::zip::ZipWriter::new();
         zip.add(
             &format!("{base}.obj"),
             procraft_engine::mesh::write_obj(&files.mesh, &format!("{base}.mtl"), &files.names).as_bytes(),
         );
-        zip.add(&format!("{base}.mtl"), procraft_engine::mesh::write_mtl(&images).as_bytes());
-        for ((_, file), png) in images.iter().zip(&files.pngs) {
-            zip.add(file, png);
+        zip.add(&format!("{base}.mtl"), procraft_engine::mesh::write_mtl(&materials).as_bytes());
+        for ((_, images), pngs) in materials.iter().zip(&files.pngs) {
+            for (file, png) in images.iter().zip(pngs) {
+                zip.add(file, png);
+            }
         }
         let bytes = zip.finish();
         write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("exporting the model", e)))
     }
 
     /// Writes the model as a USDZ package at `path`: the mesh with a preview-surface material
-    /// for each texture set, reading its picture (as for [`CanvasSession::export_model_obj`]).
+    /// for each texture set, reading its images (as for [`CanvasSession::export_model_obj`]).
     pub fn export_model_usdz(&self, path: String) -> Result<(), MobileError> {
         let files = self.model_files()?;
-        let textures: Vec<(String, Vec<u8>)> = files.names.iter().map(|n| format!("{n}.png")).zip(files.pngs).collect();
+        let textures: Vec<[(String, Vec<u8>); 3]> = files
+            .names
+            .iter()
+            .zip(files.pngs)
+            .map(|(n, [color, roughness, metallic])| {
+                let [c, r, m] = MODEL_CHANNEL_FILES.map(|c| format!("{n}-{c}.png"));
+                [(c, color), (r, roughness), (m, metallic)]
+            })
+            .collect();
         let bytes = procraft_engine::usd::write_usdz(&files.mesh, &textures);
         write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("exporting the model", e)))
     }
@@ -274,17 +696,19 @@ impl CanvasSession {
 
 #[uniffi::export]
 impl CanvasSession {
-    /// Each texture set's picture as a PNG in folder `dir` (made if missing; as for
-    /// [`CanvasSession::export_model_obj`]); returns the files' paths.
+    /// Each texture set's colour, roughness and metalness as PNGs in folder `dir` (made if
+    /// missing; as for [`CanvasSession::export_model_obj`]); returns the files' paths.
     pub fn export_model_textures(&self, dir: String) -> Result<Vec<String>, MobileError> {
         let files = self.model_files()?;
         let dir = Path::new(&dir);
         fs::create_dir_all(dir).map_err(|e| file_error("making the folder", e))?;
         let mut out = Vec::new();
-        for (name, png) in files.names.iter().zip(&files.pngs) {
-            let path = dir.join(format!("{}_{name}.png", files.base));
-            write_atomically(&path, |p| fs::write(p, png).map_err(|e| file_error("exporting the textures", e)))?;
-            out.push(path.to_string_lossy().into_owned());
+        for (name, pngs) in files.names.iter().zip(&files.pngs) {
+            for (channel, png) in SHARED_CHANNEL_NAMES.iter().zip(pngs) {
+                let path = dir.join(format!("{name}-{channel}.png"));
+                write_atomically(&path, |p| fs::write(p, png).map_err(|e| file_error("exporting the textures", e)))?;
+                out.push(path.to_string_lossy().into_owned());
+            }
         }
         Ok(out)
     }
@@ -292,89 +716,202 @@ impl CanvasSession {
     /// The model as the window shows it, at the window's size, as a PNG at `path`: on the
     /// canvas's surround, or with `transparent`, on nothing.
     pub fn export_model_render(&self, path: String, transparent: bool) -> Result<(), MobileError> {
-        let (w, h, rgba) = {
-            let mut guard = self.shared.lock();
-            let st = &mut *guard;
-            st.finish_stroke();
-            st.settle();
-            let (w, h) = st.window_size;
-            let (Some(gpu), Some(view)) = (st.gpu.as_ref(), st.scene.as_mut().and_then(|s| s.view.as_mut())) else {
-                return Err(file_error("rendering the model", "the model is not shown yet"));
-            };
-            let s = crate::SURROUND;
-            let clear = if transparent { [0.0; 4] } else { [f64::from(s[0]), f64::from(s[1]), f64::from(s[2]), 1.0] };
-            let rgba = view.picture(gpu, w, h, clear).map_err(|e| file_error("rendering the model", e))?;
-            (w, h, rgba)
-        };
+        let (w, h, rgba) = self.model_picture(transparent)?;
         let png = crate::project::rgba_png(w, h, &rgba);
         write_atomically(Path::new(&path), |p| fs::write(p, &png).map_err(|e| file_error("rendering the model", e)))
+    }
+
+    /// The model as the window shows it, on the canvas's surround, as a TIFF at `path`.
+    pub fn export_model_tiff(&self, path: String) -> Result<(), MobileError> {
+        let (w, h, rgba) = self.model_picture(false)?;
+        let bytes = procraft_engine::formats::tiff(w, h, 72.0, &[], &rgba);
+        write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("rendering the model", e)))
+    }
+}
+
+impl CanvasSession {
+    /// The model as the window shows it, at the window's size: its width, height and pixels
+    /// (premultiplied RGBA8), on the canvas's surround or, `transparent`, on nothing.
+    fn model_picture(&self, transparent: bool) -> Result<(u32, u32, Vec<u8>), MobileError> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.finish_stroke();
+        st.settle();
+        let (w, h) = st.window_size;
+        let (Some(gpu), Some(view)) = (st.gpu.as_ref(), st.scene.as_mut().and_then(|s| s.view.as_mut())) else {
+            return Err(file_error("rendering the model", "the model is not shown yet"));
+        };
+        let s = crate::SURROUND;
+        let clear = if transparent { [0.0; 4] } else { [f64::from(s[0]), f64::from(s[1]), f64::from(s[2]), 1.0] };
+        let rgba = view.picture(gpu, w, h, clear).map_err(|e| file_error("rendering the model", e))?;
+        Ok((w, h, rgba))
     }
 }
 
 /// How far a turntable's swing goes each way (radians).
 const SWING: f32 = std::f32::consts::PI / 6.0;
+/// The turntable's camera: this far above level (radians) and back (framing units), the model
+/// about four fifths of the picture's height; at its farthest it is this much further back for
+/// each share of Zoom distance (the model then about 1.78 times smaller at 100 %).
+const TURNTABLE_PITCH: f32 = 0.1;
+const TURNTABLE_DISTANCE: f32 = 6.5;
+const TURNTABLE_PULL: f32 = 0.65;
+
+/// How a model's turntable goes: once round (or swinging each way and back) every `seconds`,
+/// the camera pulled back by up to `zoom` (0 to 1) half way through, the turn eased in and out at
+/// the loop by `ease` (0 to 1), the environment behind it or not.
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct Turntable {
+    pub swing: bool,
+    pub seconds: f32,
+    pub zoom: f32,
+    pub ease: f32,
+    pub environment: bool,
+}
+
+impl Turntable {
+    /// The camera at `phase` (0 to 1) through the loop.
+    fn orbit(&self, view: &MeshView, phase: f32) -> Orbit {
+        let tau = std::f32::consts::TAU;
+        let p = phase.rem_euclid(1.0);
+        let ease = self.ease.clamp(0.0, 1.0);
+        // slowed to a stop at the loop's ends by the ease
+        let eased = p - ease * (tau * p).sin() / tau;
+        let yaw = if self.swing { SWING * (tau * eased).sin() } else { tau * eased };
+        let pull = (1.0 - (tau * p).cos()) / 2.0;
+        let distance = TURNTABLE_DISTANCE * (1.0 + TURNTABLE_PULL * self.zoom.clamp(0.0, 1.0) * pull);
+        view.upright_orbit(yaw, TURNTABLE_PITCH, distance)
+    }
+}
 
 #[uniffi::export]
 impl CanvasSession {
-    /// Frame `index` of `count` of the model on a turntable, as the window shows it and at
-    /// `width` × `height`: turning once round, or with `swing`, swinging a twelfth of a turn
-    /// each way and back. Opaque, each pixel's bytes blue, green, red, alpha (an ARGB integer
-    /// each, little-endian), ready for a video frame; none if the model isn't shown yet.
-    pub fn model_turntable_frame(
+    /// Frame `index` of `count` of the model's turntable as `turntable` sets it, at `width` ×
+    /// `height`: RGBA8, or with `bgra` opaque blue, green, red, alpha (an ARGB integer each,
+    /// little-endian, ready for a video frame). None if the model isn't shown yet.
+    pub fn model_turntable_picture(
         &self,
         index: u32,
         count: u32,
-        swing: bool,
+        turntable: Turntable,
         width: u32,
         height: u32,
+        bgra: bool,
     ) -> Option<crate::layers::ThumbnailImage> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        let (w, h) = (width.max(1), height.max(1));
         let (Some(gpu), Some(view)) = (st.gpu.as_ref(), st.scene.as_mut().and_then(|s| s.view.as_mut())) else {
             return None;
         };
-        let phase = index as f32 / count.max(1) as f32 * std::f32::consts::TAU;
-        let angle = if swing { SWING * phase.sin() } else { phase };
-        let kept = view.orbit;
-        view.orbit = kept.spun(angle);
+        let orbit = turntable.orbit(view, index as f32 / count.max(1) as f32);
         let s = crate::SURROUND;
         let clear = [f64::from(s[0]), f64::from(s[1]), f64::from(s[2]), 1.0];
-        let picture = view.picture(gpu, width.max(1), height.max(1), clear);
-        view.orbit = kept;
-        match picture {
+        match view.picture_from(gpu, orbit, w, h, clear, turntable.environment) {
             Ok(mut rgba) => {
-                for p in rgba.as_chunks_mut::<4>().0 {
-                    *p = [p[2], p[1], p[0], 255];
+                if bgra {
+                    for p in rgba.as_chunks_mut::<4>().0 {
+                        *p = [p[2], p[1], p[0], 255];
+                    }
                 }
-                Some(crate::layers::ThumbnailImage { width: width.max(1), height: height.max(1), rgba })
+                Some(crate::layers::ThumbnailImage { width: w, height: h, rgba })
             }
             Err(e) => {
-                log::warn!("turntable frame: {e}");
+                log::warn!("turntable picture: {e}");
                 None
             }
         }
     }
+
+    /// The model's turntable as a looping GIF at `path`: `fps` frames a second for its
+    /// `turntable.seconds`, `width` × `height`.
+    pub fn export_model_gif(
+        &self,
+        path: String,
+        turntable: Turntable,
+        width: u32,
+        height: u32,
+        fps: f32,
+    ) -> Result<(), MobileError> {
+        let count = turntable_frames(turntable, fps);
+        let delay = (100.0 / fps.clamp(1.0, 100.0)).round() as u16;
+        let mut gif: Option<procraft_engine::formats::GifWriter> = None;
+        for i in 0..count {
+            let t = self
+                .model_turntable_picture(i, count, turntable, width, height, false)
+                .ok_or_else(|| file_error("saving", "the model is not shown yet"))?;
+            gif.get_or_insert_with(|| procraft_engine::formats::GifWriter::new(t.width, t.height)).frame(
+                &t.rgba,
+                delay.max(1),
+                true,
+            );
+        }
+        let bytes = gif.ok_or_else(|| file_error("saving", "there are no frames"))?.finish();
+        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))
+    }
+
+    /// The model's turntable as a looping animated PNG at `path` (as for GIF).
+    pub fn export_model_apng(
+        &self,
+        path: String,
+        turntable: Turntable,
+        width: u32,
+        height: u32,
+        fps: f32,
+    ) -> Result<(), MobileError> {
+        let count = turntable_frames(turntable, fps);
+        let delay = (1000.0 / fps.clamp(1.0, 1000.0)).round().clamp(1.0, 65535.0) as u16;
+        let (w, h) = (width.max(1), height.max(1));
+        write_atomically(Path::new(&path), |f| {
+            let out = fs::File::create(f).map_err(|e| file_error("saving", e))?;
+            let mut encoder = png::Encoder::new(std::io::BufWriter::new(out), w, h);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_compression(png::Compression::Fast);
+            encoder.set_animated(count, 0).map_err(|e| file_error("saving", e))?;
+            encoder.set_frame_delay(delay, 1000).map_err(|e| file_error("saving", e))?;
+            let mut writer = encoder.write_header().map_err(|e| file_error("saving", e))?;
+            for i in 0..count {
+                let t = self
+                    .model_turntable_picture(i, count, turntable, w, h, false)
+                    .ok_or_else(|| file_error("saving", "the model is not shown yet"))?;
+                writer.write_image_data(&t.rgba).map_err(|e| file_error("saving", e))?;
+            }
+            writer.finish().map_err(|e| file_error("saving", e))
+        })
+    }
+}
+
+/// How many frames a turntable takes at `fps`: its seconds' worth, at least one.
+fn turntable_frames(turntable: Turntable, fps: f32) -> u32 {
+    (turntable.seconds.clamp(0.1, 60.0) * fps.clamp(1.0, 120.0)).round().max(1.0) as u32
 }
 
 /// What a model's exports are made of: the model, its texture sets' names (safe as file names,
-/// different from each other), their pictures as PNGs over white, and the artwork's name.
+/// different from each other), each set's colour, roughness and metalness as PNGs (over the
+/// part's own, as the model shows them), and the artwork's name.
 struct ModelFiles {
     mesh: Mesh,
     names: Vec<String>,
-    pngs: Vec<Vec<u8>>,
+    pngs: Vec<[Vec<u8>; 3]>,
     base: String,
 }
 
+/// The channels as a model's exports name their images (`<set>-<channel>.png`), and as the
+/// shared textures name them.
+const MODEL_CHANNEL_FILES: [&str; 3] = ["color", "roughness", "metallic"];
+const SHARED_CHANNEL_NAMES: [&str; 3] = ["Color", "Roughness", "Metallic"];
+
 impl CanvasSession {
     fn model_files(&self) -> Result<ModelFiles, MobileError> {
-        let (mesh, set_names, pictures, base) = {
+        let (mesh, set_names, pictures, side, base) = {
             let mut guard = self.shared.lock();
             let st = &mut *guard;
             st.finish_stroke();
             st.settle();
-            let pictures = st.texture_pictures()?;
+            let pictures = st.channel_pictures()?;
             let Some(scene) = st.scene.as_ref() else { return Err(file_error("exporting the model", "no model")) };
-            (scene.mesh.clone(), scene.set_names(), pictures, file_stem(&st.name, "Model"))
+            (scene.mesh.clone(), scene.set_names(), pictures, scene.texture_size, file_stem(&st.name, "Model"))
         };
         let mut names: Vec<String> = Vec::new();
         for name in set_names {
@@ -386,17 +923,53 @@ impl CanvasSession {
         }
         let pngs = pictures
             .into_iter()
-            .map(|(side, mut px)| {
-                // over white, opaque
-                for p in px.as_chunks_mut::<4>().0 {
-                    let clear = 255 - p[3];
-                    *p = [p[0].saturating_add(clear), p[1].saturating_add(clear), p[2].saturating_add(clear), 255];
-                }
-                crate::project::rgba_png(side, side, &px)
+            .enumerate()
+            .map(|(part, [color, roughness, metallic])| {
+                let (under, r, m) = mesh.surface(part);
+                [
+                    flattened(side, color, under, false),
+                    flattened(side, roughness, [r; 3], true),
+                    flattened(side, metallic, [m; 3], true),
+                ]
             })
             .collect();
         Ok(ModelFiles { mesh, names, pngs, base })
     }
+}
+
+/// A channel's picture (premultiplied RGBA8, `side` square; none if never painted) over what the
+/// part shows under it (`under`, 0 to 1), opaque, as a PNG: as it is, or as the grey the model
+/// reads from it.
+fn flattened(side: u32, picture: Option<Vec<u8>>, under: [f32; 3], grey: bool) -> Vec<u8> {
+    let under = under.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u16);
+    let mut px = picture.unwrap_or_else(|| vec![0; (side as usize) * (side as usize) * 4]);
+    let [ur, ug, ub] = under;
+    for p in px.as_chunks_mut::<4>().0 {
+        let [r, g, b, a] = *p;
+        let clear = 255 - u16::from(a);
+        let over = |c: u8, u: u16| (u16::from(c) + (u * clear + 127) / 255).min(255) as u8;
+        let [r, g, b] = [over(r, ur), over(g, ug), over(b, ub)];
+        *p = if grey {
+            // the model's own weights for a painted grey
+            let v = (0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)).round() as u8;
+            [v, v, v, 255]
+        } else {
+            [r, g, b, 255]
+        };
+    }
+    crate::project::rgba_png(side, side, &px)
+}
+
+/// A file packed in a USDZ by the path its layer gives (relative to the package; `./` and folders
+/// allowed for), else by its name alone.
+fn packed_file(zip: &procraft_engine::zip::ZipReader<'_>, path: &str) -> Option<Vec<u8>> {
+    let path = path.trim_start_matches("./");
+    if let Some(bytes) = zip.read(path) {
+        return Some(bytes);
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let found = zip.names().find(|n| n.rsplit('/').next() == Some(name))?.to_owned();
+    zip.read(&found)
 }
 
 /// A name made safe as part of a file name: letters, digits, `-` and `_` kept, the rest `_`.
@@ -407,35 +980,51 @@ fn file_stem(name: &str, otherwise: &str) -> String {
 }
 
 impl State {
-    /// Each texture set's picture (premultiplied RGBA8, its side), drawn now.
-    fn texture_pictures(&mut self) -> Result<Vec<(u32, Vec<u8>)>, MobileError> {
+    /// Each texture set's colour, roughness and metalness as painted (premultiplied RGBA8, the
+    /// texture size square), drawn now: none for a channel never painted.
+    fn channel_pictures(&mut self) -> Result<Vec<[Option<Vec<u8>>; 3]>, MobileError> {
         let failed = |e: String| file_error("reading the model's textures", e);
         let gpu = self.gpu.as_ref().ok_or_else(|| failed("the model is not shown yet".to_owned()))?;
         let Some(scene) = self.scene.as_mut() else { return Ok(Vec::new()) };
-        let side = scene.texture_size;
+        let (current, painted) = (scene.current, scene.channel);
         let mut out = Vec::new();
-        for (i, set) in scene.sets.iter_mut().enumerate() {
-            let px = if i == scene.current {
-                let canvas = self.canvas.as_mut().ok_or_else(|| failed("the model is not shown yet".to_owned()))?;
-                canvas.render(gpu, &mut self.doc, None);
-                canvas.read_composite(gpu).map_err(|e| failed(e.to_string()))?
-            } else {
-                let Some(set) = set else { continue };
-                if set.canvas.is_none() {
-                    let mut c = Canvas::new(gpu, &set.doc).map_err(|e| failed(e.to_string()))?;
-                    for (id, pixels) in std::mem::take(&mut set.pending) {
-                        c.upload_layer(gpu, id, &pixels).map_err(|e| failed(e.to_string()))?;
+        for part in 0..scene.mesh.parts.len() {
+            let mut pictures: [Option<Vec<u8>>; 3] = [None, None, None];
+            for (channel, picture) in pictures.iter_mut().enumerate() {
+                // the channel painted on is the session's; the others wait in the scene
+                *picture = if part == current && channel == painted {
+                    let canvas = self.canvas.as_mut().ok_or_else(|| failed("the model is not shown yet".to_owned()))?;
+                    canvas.render(gpu, &mut self.doc, None);
+                    Some(canvas.read_composite(gpu).map_err(|e| failed(e.to_string()))?)
+                } else {
+                    match scene.slot(part, channel).and_then(Option::as_mut) {
+                        Some(set) => Some(waiting_picture(gpu, set).map_err(failed)?),
+                        None => None,
                     }
-                    set.canvas = Some(c);
-                }
-                let Some(canvas) = set.canvas.as_mut() else { continue };
-                canvas.render(gpu, &mut set.doc, None);
-                canvas.read_composite(gpu).map_err(|e| failed(e.to_string()))?
-            };
-            out.push((side, px));
+                };
+            }
+            out.push(pictures);
         }
         Ok(out)
     }
+}
+
+/// A waiting texture set's picture, drawn now (its canvas made first if the model hasn't been
+/// drawn since it was opened).
+fn waiting_picture(gpu: &procraft_gpu::Gpu, set: &mut TextureSet) -> Result<Vec<u8>, String> {
+    let canvas = match set.canvas.take() {
+        Some(c) => c,
+        None => {
+            let mut c = Canvas::new(gpu, &set.doc).map_err(|e| e.to_string())?;
+            for (id, pixels) in std::mem::take(&mut set.pending) {
+                c.upload_layer(gpu, id, &pixels).map_err(|e| e.to_string())?;
+            }
+            c
+        }
+    };
+    let canvas = set.canvas.insert(canvas);
+    canvas.render(gpu, &mut set.doc, None);
+    canvas.read_composite(gpu).map_err(|e| e.to_string())
 }
 
 /// Why a model can't be painted on, in words.
@@ -466,6 +1055,18 @@ pub(crate) struct SavedModel {
     paint_through: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     environment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exposure: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    environment_shown: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lights: Option<Vec<ModelLight>>,
+    /// The submeshes hidden, by place.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    hidden: Vec<usize>,
+    /// Each part's roughness and metalness documents, by part, if made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    channels: Vec<[Option<Document>; 2]>,
 }
 
 fn obj() -> String {
@@ -491,14 +1092,32 @@ struct SavedOrbit {
 pub(crate) struct ModelSnapshot {
     pub(crate) saved: SavedModel,
     source: Arc<ModelSource>,
-    /// The waiting texture sets' layers, by part.
+    /// The waiting texture sets' layers, by part, and the parts' channels' (part, channel 1 or 2).
     layers: Vec<(usize, Pixels)>,
+    channel_layers: Vec<(usize, usize, Pixels)>,
     /// The model as last shown (premultiplied RGBA8, its size), for the gallery.
     pub(crate) picture: Option<(u32, u32, Vec<u8>)>,
 }
 
-/// What the last saves of a model wrote: a hash of each waiting texture set's layers.
-pub(crate) type SavedSets = HashMap<(usize, LayerId), u64>;
+/// What the last saves of a model wrote: a hash of each waiting texture set's layers, by part,
+/// channel (0 its colour) and layer.
+pub(crate) type SavedSets = HashMap<(usize, usize, LayerId), u64>;
+
+/// A waiting texture set's layers' pixels: read from its canvas, or as opened if not drawn yet.
+fn set_pixels(set: &mut TextureSet, gpu: Option<&procraft_gpu::Gpu>) -> Result<Pixels, MobileError> {
+    match (set.canvas.as_mut(), gpu) {
+        (Some(canvas), Some(gpu)) => {
+            canvas.render(gpu, &mut set.doc, None);
+            let mut pixels = Vec::new();
+            for layer in set.doc.layers() {
+                let rgba = canvas.read_layer(gpu, layer.id).map_err(|e| file_error("reading a layer", e))?;
+                pixels.push((layer.id, rgba));
+            }
+            Ok(pixels)
+        }
+        _ => Ok(set.pending.clone()),
+    }
+}
 
 impl State {
     /// The model's part of a save, if this is a model.
@@ -511,21 +1130,23 @@ impl State {
                 docs.push(None);
                 continue;
             };
-            let pixels = match (set.canvas.as_mut(), gpu) {
-                (Some(canvas), Some(gpu)) => {
-                    canvas.render(gpu, &mut set.doc, None);
-                    let mut pixels = Vec::new();
-                    for layer in set.doc.layers() {
-                        let rgba = canvas.read_layer(gpu, layer.id).map_err(|e| file_error("reading a layer", e))?;
-                        pixels.push((layer.id, rgba));
-                    }
-                    pixels
-                }
-                // not drawn yet: what was opened is still what there is
-                _ => set.pending.clone(),
-            };
+            let pixels = set_pixels(set, gpu)?;
             docs.push(Some(set.doc.clone()));
             layers.push((i, pixels));
+        }
+        // the channels (saved with the colour painted on, so none is the session's own)
+        let mut channels = Vec::new();
+        let mut channel_layers = Vec::new();
+        for (part, pair) in scene.channels.iter_mut().enumerate() {
+            let mut docs_of = [None, None];
+            for (k, set) in pair.iter_mut().enumerate() {
+                let Some(set) = set else { continue };
+                channel_layers.push((part, k + 1, set_pixels(set, gpu)?));
+                if let Some(d) = docs_of.get_mut(k) {
+                    *d = Some(set.doc.clone());
+                }
+            }
+            channels.push(docs_of);
         }
         let orbit = scene.orbit().map(|o| SavedOrbit {
             target: o.target,
@@ -552,9 +1173,15 @@ impl State {
                 extension: scene.source.extension.clone(),
                 paint_through: scene.paint_through,
                 environment: scene.environment_name.clone(),
+                exposure: (scene.exposure != 1.0).then_some(scene.exposure),
+                environment_shown: (!scene.environment_shown).then_some(false),
+                lights: Some(scene.lights.clone()),
+                hidden: scene.hidden.iter().enumerate().filter(|(_, h)| **h).map(|(i, _)| i).collect(),
+                channels,
             },
             source: scene.source.clone(),
             layers,
+            channel_layers,
             picture,
         }))
     }
@@ -574,17 +1201,22 @@ pub(crate) fn write_model(saved: &mut SavedSets, dir: &Path, model: &ModelSnapsh
         write_atomically(&mtl, |p| fs::write(p, text).map_err(|e| file_error("saving the model", e)))?;
     }
     let side = model.saved.texture_size;
-    for (part, pixels) in &model.layers {
-        let folder = dir.join("sets").join(part.to_string());
+    let colour = model.layers.iter().map(|(part, pixels)| (*part, 0, pixels));
+    let channels = model.channel_layers.iter().map(|(part, k, pixels)| (*part, *k, pixels));
+    for (part, channel, pixels) in colour.chain(channels) {
+        let mut folder = dir.join("sets").join(part.to_string());
+        if channel > 0 {
+            folder = folder.join(format!("c{channel}"));
+        }
         fs::create_dir_all(&folder).map_err(|e| file_error("making the folder", e))?;
         for (id, rgba) in pixels {
             let hash = pixels_hash(rgba);
             let path = folder.join(format!("{}.png", id.0));
-            if saved.get(&(*part, *id)) == Some(&hash) && path.exists() {
+            if saved.get(&(part, channel, *id)) == Some(&hash) && path.exists() {
                 continue;
             }
             write_atomically(&path, |p| write_png(p, side, side, rgba, &[]))?;
-            saved.insert((*part, *id), hash);
+            saved.insert((part, channel, *id), hash);
         }
         // layer files the set no longer has
         if let Ok(entries) = fs::read_dir(&folder) {
@@ -596,8 +1228,32 @@ pub(crate) fn write_model(saved: &mut SavedSets, dir: &Path, model: &ModelSnapsh
             }
         }
     }
-    saved.retain(|(part, id), _| model.layers.iter().any(|(p, px)| p == part && px.iter().any(|(i, _)| i == id)));
+    saved.retain(|(part, channel, id), _| {
+        let has = |px: &Pixels| px.iter().any(|(i, _)| i == id);
+        if *channel == 0 {
+            model.layers.iter().any(|(p, px)| p == part && has(px))
+        } else {
+            model.channel_layers.iter().any(|(p, k, px)| p == part && k == channel && has(px))
+        }
+    });
     Ok(())
+}
+
+/// The layers of `doc` saved in `folder` (each `<id>.png`, `side` square); a layer with no file is
+/// empty.
+fn read_set_layers(folder: &Path, doc: &Document, side: u32) -> Pixels {
+    let mut pending = Vec::new();
+    for layer in doc.layers() {
+        let path = folder.join(format!("{}.png", layer.id.0));
+        if !path.exists() {
+            continue;
+        }
+        match read_png(&path, side, side) {
+            Ok(rgba) => pending.push((layer.id, rgba)),
+            Err(e) => log::error!("{} layer {:?}: {e}", folder.display(), layer.id),
+        }
+    }
+    pending
 }
 
 /// The model saved in the artwork folder `dir`, as `saved` describes it.
@@ -617,25 +1273,41 @@ pub(crate) fn open_saved_model(dir: &Path, saved: &SavedModel) -> Result<Scene, 
             if (doc.width(), doc.height()) != (side, side) {
                 return None;
             }
-            let folder = dir.join("sets").join(part.to_string());
-            let mut pending = Vec::new();
-            for layer in doc.layers() {
-                let path = folder.join(format!("{}.png", layer.id.0));
-                // a layer with no file is empty
-                if !path.exists() {
+            let pending = read_set_layers(&dir.join("sets").join(part.to_string()), &doc, side);
+            Some(TextureSet { doc, canvas: None, pending })
+        })
+        .collect();
+    let channels = saved
+        .channels
+        .iter()
+        .enumerate()
+        .map(|(part, pair)| {
+            let mut out: [Option<TextureSet>; 2] = [None, None];
+            for (k, doc) in pair.iter().enumerate() {
+                let Some(doc) =
+                    doc.as_ref().map(|d| d.clone().repaired()).filter(|d| (d.width(), d.height()) == (side, side))
+                else {
                     continue;
-                }
-                match read_png(&path, side, side) {
-                    Ok(rgba) => pending.push((layer.id, rgba)),
-                    Err(e) => log::error!("texture set {part} layer {:?}: {e}", layer.id),
+                };
+                let folder = dir.join("sets").join(part.to_string()).join(format!("c{}", k + 1));
+                let pending = read_set_layers(&folder, &doc, side);
+                if let Some(slot) = out.get_mut(k) {
+                    *slot = Some(TextureSet { doc, canvas: None, pending });
                 }
             }
-            Some(TextureSet { doc, canvas: None, pending })
+            out
         })
         .collect();
     let mut scene = Scene::new(mesh, ModelSource { bytes, extension, mtl }, side, saved.current, waiting);
     scene.paint_through = saved.paint_through;
     scene.environment_name = saved.environment.clone();
+    scene.exposure = saved.exposure.filter(|e| e.is_finite()).map_or(1.0, |e| e.clamp(0.0, MOST_EXPOSURE));
+    scene.environment_shown = saved.environment_shown.unwrap_or(true);
+    if let Some(lights) = &saved.lights {
+        scene.lights = lights.iter().take(MOST_LIGHTS).map(|l| l.sane()).collect();
+    }
+    scene.hidden = (0..scene.mesh.submeshes.len()).map(|i| saved.hidden.contains(&i)).collect();
+    scene.channels = channels;
     scene.orbit = saved.orbit.map(|o| Orbit {
         target: o.target,
         rotation: o.rotation.unwrap_or_else(|| Orbit::rotation_of(o.yaw, o.pitch)),
@@ -645,12 +1317,98 @@ pub(crate) fn open_saved_model(dir: &Path, saved: &SavedModel) -> Result<Scene, 
     Ok(scene)
 }
 
+impl Scene {
+    /// Where part `part`'s `channel` document waits (0 colour, 1 roughness, 2 metalness).
+    fn slot(&mut self, part: usize, channel: usize) -> Option<&mut Option<TextureSet>> {
+        if channel == 0 {
+            return self.sets.get_mut(part);
+        }
+        let count = self.mesh.parts.len();
+        if self.channels.len() < count {
+            self.channels.resize_with(count, || [None, None]);
+        }
+        self.channels.get_mut(part).and_then(|c| c.get_mut(channel - 1))
+    }
+}
+
+/// `set`'s document made to have `structure`'s layers (their ids, order and settings, with its
+/// own pixels): layers new to it start empty, and its undo history goes if the layers changed.
+fn follow_layers(set: &mut TextureSet, structure: &Document) {
+    let ids = |d: &Document| d.layers().iter().map(|l| (l.id, l.kind, l.parent)).collect::<Vec<_>>();
+    let changed = ids(&set.doc) != ids(structure);
+    let had: Vec<LayerId> = set.doc.layers().iter().map(|l| l.id).collect();
+    let side = set.doc.width();
+    let mut doc = Document::from_layers(side, side, structure.layers().to_vec(), structure.current());
+    doc.background_visible = false;
+    set.doc = doc;
+    if !changed {
+        return;
+    }
+    set.pending.retain(|(id, _)| had.contains(id) && structure.layer(*id).is_some());
+    if let Some(canvas) = set.canvas.as_mut() {
+        for l in structure.layers().iter().filter(|l| !had.contains(&l.id)) {
+            canvas.wipe_layer(l.id);
+        }
+        canvas.forget_history();
+    }
+}
+
 impl State {
+    /// Paints on `channel` of the current part from now on: its document and canvas become the
+    /// session's, with the layers of the document painted on until now.
+    pub(crate) fn choose_channel(&mut self, channel: usize) {
+        if channel > 2 || self.scene.as_ref().is_none_or(|s| s.channel == channel) {
+            return;
+        }
+        if self.scene_shown() {
+            self.scene_stroke_cancel();
+        } else {
+            self.finish_stroke();
+        }
+        self.settle();
+        let side = self.doc.width();
+        let Some(scene) = self.scene.as_mut() else { return };
+        let (part, from) = (scene.current, scene.channel);
+        let old = TextureSet {
+            doc: std::mem::replace(&mut self.doc, Document::new(1, 1)),
+            canvas: self.canvas.take(),
+            pending: std::mem::take(&mut self.pending_pixels),
+        };
+        let structure = old.doc.clone();
+        if let Some(slot) = scene.slot(part, from) {
+            *slot = Some(old);
+        }
+        let mut new = scene.slot(part, channel).and_then(Option::take).unwrap_or_else(|| TextureSet::empty(side));
+        follow_layers(&mut new, &structure);
+        self.doc = new.doc;
+        self.canvas = new.canvas;
+        self.pending_pixels = new.pending;
+        scene.channel = channel;
+        self.ensure_canvas();
+    }
+
+    /// Runs `f` with the colour of the current part as the session's document (as saves need),
+    /// the channel painted on put back after.
+    pub(crate) fn with_colour<T>(&mut self, f: impl FnOnce(&mut State) -> T) -> T {
+        let channel = self.scene.as_ref().map_or(0, |s| s.channel);
+        self.choose_channel(0);
+        let out = f(self);
+        self.choose_channel(channel);
+        out
+    }
+
+    /// Whether a model is shown (and strokes and gestures go to it), not a flat canvas: a model
+    /// open and not showing its 2D texture.
+    pub(crate) fn scene_shown(&self) -> bool {
+        self.scene.as_ref().is_some_and(|s| !s.flat)
+    }
+
     /// Makes texture set `index` the current one: the session's document and canvas.
     pub(crate) fn choose_texture_set(&mut self, index: usize) {
         if self.scene.as_ref().is_none_or(|s| index == s.current || index >= s.sets.len()) {
             return;
         }
+        self.choose_channel(0);
         self.scene_stroke_cancel();
         self.settle();
         let Some(scene) = self.scene.as_mut() else { return };
@@ -837,8 +1595,8 @@ impl State {
                 view.show_environment(gpu, false);
                 scene.view = Some(view);
             }
-            // the waiting texture sets' canvases, with the pixels they opened with
-            for set in scene.sets.iter_mut().flatten() {
+            // the waiting texture sets' canvases (and channels), with the pixels they opened with
+            for set in scene.sets.iter_mut().flatten().chain(scene.channels.iter_mut().flatten().flatten()) {
                 if set.canvas.is_none() {
                     set.canvas = Canvas::new(gpu, &set.doc).ok();
                     if let Some(c) = set.canvas.as_mut() {
@@ -854,22 +1612,38 @@ impl State {
         }
         self.carry_stroke();
         let (Some(gpu), Some(scene)) = (self.gpu.as_ref(), self.scene.as_mut()) else { return };
-        // a new environment: prefiltered now, shown behind the model
+        // a new environment: prefiltered now, shown behind the model unless that's turned off
         if let (Some(view), Some(panorama)) = (scene.view.as_mut(), scene.environment.take()) {
             view.set_lighting(gpu, Lighting::new(gpu, &panorama));
-            view.show_environment(gpu, true);
+            scene.lit = true;
+        }
+        if let Some(view) = scene.view.as_mut() {
+            view.show_environment(gpu, scene.lit && scene.environment_shown);
+            view.set_exposure(scene.exposure);
         }
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.render(gpu, &mut self.doc, None);
         }
         let Some(view) = scene.view.as_mut() else { return };
         view.set_convert(convert);
+        let d = self.display_scale;
+        view.set_grid(Some(procraft_gpu::SurroundGrid {
+            spacing: crate::GRID_SPACING_PT * d,
+            origin: [0.0, crate::GRID_TOP_PT * d],
+            width: d,
+            color: crate::GRID_LINE,
+        }));
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("3D view") });
-        // each set's texture, its smaller levels made again when its picture has changed
+        // each set's texture, its smaller levels made again when its picture has changed (the
+        // current part's colour is the session's own unless a channel is painted on)
         scene.filtered.resize(scene.sets.len(), None);
+        let painting_colour = scene.channel == 0;
         for (i, (set, filtered)) in scene.sets.iter().zip(scene.filtered.iter_mut()).enumerate() {
-            let canvas =
-                if i == scene.current { self.canvas.as_ref() } else { set.as_ref().and_then(|s| s.canvas.as_ref()) };
+            let canvas = if i == scene.current && painting_colour {
+                self.canvas.as_ref()
+            } else {
+                set.as_ref().and_then(|s| s.canvas.as_ref())
+            };
             if let Some(c) = canvas
                 && *filtered != Some((c.composites(), i == scene.current))
             {
@@ -877,15 +1651,41 @@ impl State {
                 *filtered = Some((c.composites(), i == scene.current));
             }
         }
+        // each set's roughness and metalness, as painted
+        scene.channel_shown.resize(scene.mesh.parts.len(), [None, None]);
+        for part in 0..scene.mesh.parts.len() {
+            for k in 1..=2usize {
+                let session_own = part == scene.current && scene.channel == k;
+                let canvas = if session_own {
+                    self.canvas.as_ref()
+                } else {
+                    scene
+                        .channels
+                        .get(part)
+                        .and_then(|c| c.get(k - 1))
+                        .and_then(|s| s.as_ref())
+                        .and_then(|s| s.canvas.as_ref())
+                };
+                let key = canvas.map(|c| (c.composites(), session_own));
+                let Some(shown) = scene.channel_shown.get_mut(part).and_then(|c| c.get_mut(k - 1)) else { continue };
+                if *shown != key {
+                    view.set_channel_view(gpu, part, k, canvas.map(Canvas::composite_view));
+                    *shown = key;
+                }
+            }
+        }
+        view.lights = scene.lights.iter().map(|l| l.to_gpu()).collect();
+        for i in 0..scene.mesh.submeshes.len() {
+            view.set_hidden(i, scene.hidden.get(i).copied().unwrap_or(false));
+        }
         let s = crate::SURROUND;
-        view.render(
-            gpu,
-            &mut encoder,
-            target,
-            size.0,
-            size.1,
-            [f64::from(s[0]), f64::from(s[1]), f64::from(s[2]), 1.0],
-        );
+        let clear = [f64::from(s[0]), f64::from(s[1]), f64::from(s[2]), 1.0];
+        if scene.studio_open {
+            let orbit = *scene.studio.get_or_insert_with(|| view.studio_orbit());
+            view.render_studio(gpu, &mut encoder, target, size.0, size.1, clear, orbit);
+        } else {
+            view.render(gpu, &mut encoder, target, size.0, size.1, clear);
+        }
         gpu.queue.submit([encoder.finish()]);
     }
 }
@@ -909,6 +1709,100 @@ fn bounds_of(stamps: &[procraft_engine::stroke::Stamp]) -> IRect {
     stamps.iter().fold(IRect::EMPTY, |r, s| r.union(IRect::around(s.center, s.radius * std::f32::consts::SQRT_2)))
 }
 
+/// A light on the model as the interface sets it: its place (in the framing's units from the
+/// model's middle: x right, y up, z toward the front), its hue (a place along the hue bar, 0 to 1),
+/// how much of that colour it has (0 white, 1 the hue's own), and its intensity (0 to 1).
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record, serde::Serialize, serde::Deserialize)]
+pub struct ModelLight {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub hue: f32,
+    pub saturation: f32,
+    pub intensity: f32,
+}
+
+/// A light added in the studio shines this strongly.
+const DEFAULT_INTENSITY: f32 = 0.35;
+
+impl ModelLight {
+    fn from_gpu(l: &Light) -> ModelLight {
+        let [x, y, z] = l.place;
+        ModelLight { x, y, z, hue: 0.0, saturation: 0.0, intensity: l.intensity }
+    }
+
+    /// Kept within its ranges, any value that isn't a number reset.
+    fn sane(self) -> ModelLight {
+        let f = |v: f32, lo: f32, hi: f32, or: f32| if v.is_finite() { v.clamp(lo, hi) } else { or };
+        ModelLight {
+            x: f(self.x, -1e4, 1e4, 0.0),
+            y: f(self.y, -1e4, 1e4, 0.0),
+            z: f(self.z, -1e4, 1e4, 0.0),
+            hue: f(self.hue, 0.0, 1.0, 0.0),
+            saturation: f(self.saturation, 0.0, 1.0, 0.0),
+            intensity: f(self.intensity, 0.0, 1.0, DEFAULT_INTENSITY),
+        }
+    }
+
+    /// The light as the renderer takes it: its colour the hue bar's at its hue, mixed with white
+    /// by its saturation, in linear light.
+    fn to_gpu(self) -> Light {
+        let srgb = hue_color(self.hue).map(|c| 1.0 + (c - 1.0) * self.saturation.clamp(0.0, 1.0));
+        Light { place: [self.x, self.y, self.z], color: srgb.map(srgb_to_linear), intensity: self.intensity }
+    }
+}
+
+/// The hue bar's colour (sRGB) at `t` along it (0 to 1).
+fn hue_color(t: f32) -> [f32; 3] {
+    let at = t.clamp(0.0, 1.0) * (HUE_STOPS.len() - 1) as f32;
+    let i = (at.floor() as usize).min(HUE_STOPS.len() - 2);
+    let f = at - i as f32;
+    let (a, b) = (HUE_STOPS.get(i).copied().unwrap_or([1.0; 3]), HUE_STOPS.get(i + 1).copied().unwrap_or([1.0; 3]));
+    [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]
+}
+
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+/// An orbit's turn about the upright and its tilt up (radians), its camera held level.
+fn yaw_pitch(orbit: &Orbit) -> (f32, f32) {
+    let back = {
+        let e = orbit.eye();
+        let t = orbit.target;
+        let v = [e[0] - t[0], e[1] - t[1], e[2] - t[2]];
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-9);
+        [v[0] / l, v[1] / l, v[2] / l]
+    };
+    (back[0].atan2(back[2]), back[1].clamp(-1.0, 1.0).asin())
+}
+
+impl Scene {
+    /// A copy of the view's lights as the scene's lights set them (to project and move them).
+    fn lights_view<'a>(&self, view: &'a MeshView) -> LightsView<'a> {
+        LightsView { view, lights: self.lights.iter().map(|l| l.to_gpu()).collect() }
+    }
+}
+
+/// The view's way of placing lights on the screen, for lights of the scene's own.
+struct LightsView<'a> {
+    view: &'a MeshView,
+    lights: Vec<Light>,
+}
+
+impl LightsView<'_> {
+    fn light_on_screen(&self, orbit: &Orbit, index: usize, width: u32, height: u32) -> Option<[f32; 3]> {
+        let light = self.lights.get(index)?;
+        self.view.place_on_screen(orbit, light.place, width, height)
+    }
+
+    fn move_light(&mut self, orbit: &Orbit, index: usize, dx: f32, dy: f32, width: u32, height: u32) {
+        if let Some(l) = self.lights.get_mut(index) {
+            l.place = self.view.moved_place(orbit, l.place, dx, dy, width, height);
+        }
+    }
+}
+
 /// A model and its texture sets, as the interface sees them.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct ModelInfo {
@@ -916,6 +1810,27 @@ pub struct ModelInfo {
     pub triangles: u32,
     /// How much of each set's texture its triangles cover twice (0..1).
     pub overlaps: Vec<f32>,
+    /// The model's meshes, each in its texture set, in order.
+    pub submeshes: Vec<SubmeshInfo>,
+    /// Each texture set's side, pixels.
+    pub texture_size: u32,
+}
+
+/// An image a model's file brings for a texture set's channel (0 colour, 1 roughness, 2
+/// metalness): its file's bytes, and which of its components to take (-1: as it is, or its grey).
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct ModelTextureFile {
+    pub texture_set: u32,
+    pub channel: u32,
+    pub component: i32,
+    pub bytes: Vec<u8>,
+}
+
+/// One of a model's meshes: its name and the texture set it is painted in.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct SubmeshInfo {
+    pub name: String,
+    pub texture_set: u32,
 }
 
 impl ModelInfo {
@@ -924,6 +1839,13 @@ impl ModelInfo {
             texture_sets: scene.set_names(),
             triangles: u32::try_from(scene.mesh.triangles.len()).unwrap_or(u32::MAX),
             overlaps: (0..scene.mesh.parts.len()).map(|i| scene.mesh.uv_overlap(i, 256)).collect(),
+            submeshes: scene
+                .mesh
+                .submeshes
+                .iter()
+                .map(|m| SubmeshInfo { name: m.name.clone(), texture_set: u32::try_from(m.part).unwrap_or(0) })
+                .collect(),
+            texture_size: scene.texture_size,
         }
     }
 }
@@ -1019,6 +1941,210 @@ mod tests {
     }
 
     #[test]
+    fn the_2d_texture_shows_and_paints_flat() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 128).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        assert!(!s.model_flat());
+        s.set_model_flat(true);
+        assert!(s.model_flat() && !s.shared.lock().scene_shown());
+        // the texture fills the window: a stroke across it paints there as on any canvas
+        s.stroke_begin(PointerKind::Stylus, vec![sample(20.0, 20.0, 0.0)]);
+        s.stroke_add((1..20).map(|i| sample(20.0 + i as f32 * 8.0, 20.0, f64::from(i) * 8.0)).collect());
+        s.stroke_end(vec![sample(180.0, 20.0, 170.0)]);
+        let flat = painted(&s);
+        assert!(flat > 100, "{flat}");
+        // the model again: the turn still works and the paint stays
+        s.set_model_flat(false);
+        assert!(!s.model_flat() && s.shared.lock().scene_shown());
+        s.turn_model(50.0, 0.0);
+        frame(&s, 200);
+        assert_eq!(painted(&s), flat);
+    }
+
+    #[test]
+    fn the_studio_adds_moves_and_keeps_lights() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        // two white lights to begin with; four at most
+        assert_eq!(s.model_lights().len(), 2);
+        assert!(s.model_lights().iter().all(|l| l.saturation == 0.0));
+        assert!(s.add_model_light());
+        assert!(s.duplicate_model_light(0));
+        assert!(!s.add_model_light() && !s.duplicate_model_light(1));
+        assert_eq!(s.model_lights().len(), 4);
+        let copy = s.model_lights()[3];
+        assert_eq!((copy.y, copy.intensity), (s.model_lights()[0].y, s.model_lights()[0].intensity));
+        s.delete_model_light(3);
+        s.delete_model_light(9);
+        assert_eq!(s.model_lights().len(), 3);
+        let red = super::ModelLight { hue: 0.0, saturation: 1.0, intensity: 2.0, ..s.model_lights()[2] };
+        s.set_model_light(2, red);
+        assert_eq!(s.model_lights()[2].intensity, 1.0);
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        s.set_lighting_studio(true);
+        frame(&s, 200);
+        // the new light, picked where its cube shows, dragged across the screen
+        let at = s.model_light_on_screen(2).unwrap();
+        assert_eq!(s.model_light_at(at[0] + 2.0, at[1] - 2.0), Some(2));
+        assert_eq!(s.model_light_at(at[0] + 150.0, at[1] + 150.0), None);
+        s.move_model_light(2, 20.0, 0.0);
+        let moved = s.model_light_on_screen(2).unwrap();
+        assert!((moved[0] - at[0] - 20.0).abs() < 0.5 && (moved[1] - at[1]).abs() < 0.5, "{at:?} -> {moved:?}");
+        // the camera goes round and nearer; the light goes with the view
+        s.studio_turn(40.0, 0.0);
+        s.studio_zoom(1.5);
+        frame(&s, 200);
+        assert_ne!(s.model_light_on_screen(2).unwrap(), moved);
+        s.set_lighting_studio(false);
+        frame(&s, 200);
+        // its one mesh, hidden and kept so
+        let info = s.model_info().unwrap();
+        assert_eq!(info.submeshes, [super::SubmeshInfo { name: "Mesh 1".into(), texture_set: 0 }]);
+        assert!(s.submesh_thumbnail(0, 32).unwrap().rgba.chunks(4).any(|p| p[3] == 255));
+        s.set_submesh_hidden(0, true);
+        assert_eq!(s.submeshes_hidden(), [true]);
+        frame(&s, 200);
+        // kept with the model
+        let dir = std::env::temp_dir().join(format!("procraft-lights-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        s.save(dir.to_string_lossy().into_owned()).unwrap();
+        let again = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(again.model_lights(), s.model_lights());
+        assert_eq!(again.submeshes_hidden(), [true]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_turntable_pulls_back_half_way_and_exports_as_gif_and_png() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let turntable = super::Turntable { swing: false, seconds: 1.0, zoom: 1.0, ease: 1.0, environment: false };
+        let covered = |t: super::Turntable, i: u32| {
+            let p = s.model_turntable_picture(i, 8, t, 100, 100, false).unwrap();
+            let s = crate::SURROUND.map(|c| (c * 255.0).round() as i32);
+            p.rgba.chunks(4).filter(|px| (0..3).any(|k| (i32::from(px[k]) - s[k]).abs() > 12)).count()
+        };
+        let (near, far) = (covered(turntable, 0), covered(turntable, 4));
+        assert!(far * 2 < near, "pulled back: {near} -> {far}");
+        let still = super::Turntable { zoom: 0.0, ..turntable };
+        let (a, b) = (covered(still, 0), covered(still, 4));
+        assert!(a.abs_diff(b) * 10 < a, "no pull: {a} vs {b}");
+        let dir = std::env::temp_dir();
+        let gif = dir.join(format!("procraft-turn-{}.gif", std::process::id()));
+        s.export_model_gif(gif.to_string_lossy().into_owned(), turntable, 40, 30, 8.0).unwrap();
+        assert!(std::fs::read(&gif).unwrap().starts_with(b"GIF89a"));
+        let png = dir.join(format!("procraft-turn-{}.png", std::process::id()));
+        s.export_model_apng(png.to_string_lossy().into_owned(), turntable, 40, 30, 8.0).unwrap();
+        assert!(std::fs::read(&png).unwrap().get(1..4) == Some(b"PNG".as_slice()));
+        let _ = (std::fs::remove_file(&gif), std::fs::remove_file(&png));
+    }
+
+    #[test]
+    fn roughness_and_metalness_are_painted_in_their_own_layers() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        dab(&s);
+        let colour = painted(&s);
+        assert!(colour > 20, "{colour}");
+        // roughness: the same layers, nothing painted in them yet
+        assert_eq!(s.model_channel(), 0);
+        s.set_model_channel(1);
+        assert_eq!(s.model_channel(), 1);
+        assert_eq!(painted(&s), 0);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(70.0, 100.0, 0.0)]);
+        s.stroke_end(vec![sample(130.0, 100.0, 50.0)]);
+        frame(&s, 200);
+        let rough = painted(&s);
+        assert!(rough > colour, "{rough}");
+        // a layer added here is a layer of the colour too
+        let added = s.add_layer();
+        assert!(added != 0);
+        s.set_model_channel(0);
+        assert_eq!(painted(&s), colour);
+        assert!(s.layers().iter().any(|l| l.id == added));
+        // exports take every channel whichever is painted on: the colour and roughness as
+        // painted, the metalness (nothing painted) the plain one
+        s.set_model_channel(2);
+        assert_eq!(painted(&s), 0);
+        let dir = std::env::temp_dir().join(format!("procraft-channels-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pngs = s.export_model_textures(dir.join("t").to_string_lossy().into_owned()).unwrap();
+        let names: Vec<String> =
+            pngs.iter().filter_map(|p| std::path::Path::new(p).file_name()?.to_str().map(str::to_owned)).collect();
+        let set = super::file_stem(&s.model_info().unwrap().texture_sets[0], "Material");
+        assert_eq!(names, ["Color", "Roughness", "Metallic"].map(|c| format!("{set}-{c}.png")));
+        let read = |p: &str| {
+            let mut reader =
+                png::Decoder::new(std::io::BufReader::new(std::fs::File::open(p).unwrap())).read_info().unwrap();
+            let mut px = vec![0; reader.output_buffer_size().unwrap()];
+            reader.next_frame(&mut px).unwrap();
+            px.chunks(4).map(|p| (p[0], p[3])).collect::<Vec<_>>()
+        };
+        let plain = (255, 255);
+        assert!(read(&pngs[0]).iter().any(|&p| p != plain));
+        assert!(read(&pngs[1]).iter().any(|&p| p != plain));
+        assert!(read(&pngs[2]).iter().all(|&p| p == (0, 255)));
+        // kept with the model, saved while painting metalness
+        s.set_model_channel(1);
+        s.save(dir.join("a").to_string_lossy().into_owned()).unwrap();
+        assert_eq!(s.model_channel(), 1);
+        assert_eq!(painted(&s), rough);
+        assert!(dir.join("a").join("sets").join("0").join("c1").exists());
+        let again = CanvasSession::open(dir.join("a").to_string_lossy().into_owned()).unwrap();
+        assert!(shown(&again));
+        assert_eq!(again.model_channel(), 0);
+        assert_eq!(painted(&again), colour);
+        again.set_model_channel(1);
+        assert_eq!(painted(&again), rough);
+        frame(&again, 200);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_packaged_models_textures_come_in_as_its_base_layers() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        assert_eq!(s.layers().first().map(|l| l.name.clone()).as_deref(), Some("Base Layer"));
+        assert!(s.model_texture_files().is_empty());
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        dab(&s);
+        let path = std::env::temp_dir().join(format!("procraft-in-{}.usdz", std::process::id()));
+        s.export_model_usdz(path.to_string_lossy().into_owned()).unwrap();
+        // opened again, its textures come back as their images' files: the colour, and the
+        // roughness and metalness from their red
+        let bytes = std::fs::read(&path).unwrap();
+        let again = CanvasSession::open_model(bytes, "cube.usdz".into(), None, "Again".into(), 64).unwrap();
+        let files = again.model_texture_files();
+        let kinds: Vec<(u32, u32, i32)> = files.iter().map(|f| (f.texture_set, f.channel, f.component)).collect();
+        assert_eq!(kinds, [(0, 0, -1), (0, 1, 0), (0, 2, 0)]);
+        // decoded (as the interface does) into the Base Layer
+        let mut reader = png::Decoder::new(std::io::Cursor::new(files[0].bytes.clone())).read_info().unwrap();
+        let mut px = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut px).unwrap();
+        assert_eq!(px.len(), 64 * 64 * 4);
+        assert!(!again.set_model_texture(0, 0, vec![0; 8]));
+        assert!(again.set_model_texture(0, 0, px));
+        assert!(shown(&again));
+        frame(&again, 200);
+        // the exported picture is opaque (over white): every texel painted
+        assert_eq!(painted(&again), 64 * 64);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn two_fingers_bring_the_model_nearer_and_move_it() {
         let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
         if !shown(&s) {
@@ -1075,14 +2201,28 @@ f 1/1 2/2",
         let zip = procraft_engine::zip::ZipReader::new(&bytes).unwrap();
         let mut names: Vec<&str> = zip.names().collect();
         names.sort_unstable();
-        assert_eq!(names, ["Two_cubes.mtl", "Two_cubes.obj", "Two_cubes_front.png", "Two_cubes_side_wall.png"]);
+        assert_eq!(
+            names,
+            [
+                "Two_cubes.mtl",
+                "Two_cubes.obj",
+                "front-color.png",
+                "front-metallic.png",
+                "front-roughness.png",
+                "side_wall-color.png",
+                "side_wall-metallic.png",
+                "side_wall-roughness.png"
+            ]
+        );
         let obj = String::from_utf8(zip.read("Two_cubes.obj").unwrap()).unwrap();
         let mtl = String::from_utf8(zip.read("Two_cubes.mtl").unwrap()).unwrap();
         let mesh = procraft_engine::mesh::read_obj(&obj, Some(&mtl)).unwrap();
         assert_eq!(mesh.triangles.len(), 12);
-        assert_eq!(mesh.materials[1].color_map.as_deref(), Some("Two_cubes_side_wall.png"));
+        assert_eq!(mesh.materials[1].color_map.as_deref(), Some("side_wall-color.png"));
+        assert_eq!(mesh.materials[1].roughness_map.as_deref(), Some("side_wall-roughness.png"));
+        assert_eq!(mesh.materials[1].metallic_map.as_deref(), Some("side_wall-metallic.png"));
         // the painted set's picture has the stroke on white
-        let png = zip.read("Two_cubes_front.png").unwrap();
+        let png = zip.read("front-color.png").unwrap();
         let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
         let mut px = vec![0; reader.output_buffer_size().unwrap()];
         reader.next_frame(&mut px).unwrap();
@@ -1092,8 +2232,9 @@ f 1/1 2/2",
         // the pictures on their own, and the model as shown
         let dir = std::env::temp_dir().join(format!("procraft-textures-{}", std::process::id()));
         let pngs = s.export_model_textures(dir.to_string_lossy().into_owned()).unwrap();
-        assert_eq!(pngs.len(), 2);
+        assert_eq!(pngs.len(), 6);
         assert!(pngs.iter().all(|p| std::path::Path::new(p).exists()));
+        assert!(pngs.iter().any(|p| p.ends_with("side_wall-Roughness.png")));
         let _ = std::fs::remove_dir_all(&dir);
         let render = std::env::temp_dir().join(format!("procraft-render-{}.png", std::process::id()));
         s.export_model_render(render.to_string_lossy().into_owned(), true).unwrap();
@@ -1106,19 +2247,37 @@ f 1/1 2/2",
         assert_eq!(px[3], 0);
         assert_eq!(px[(100 * 200 + 100) * 4 + 3], 255);
         let _ = std::fs::remove_file(&render);
-        // a turntable's frames: the model turned, half way round the back
-        let first = s.model_turntable_frame(0, 4, false, 100, 100).unwrap();
-        let half = s.model_turntable_frame(2, 4, false, 100, 100).unwrap();
+        let tiff = std::env::temp_dir().join(format!("procraft-render-{}.tif", std::process::id()));
+        s.export_model_tiff(tiff.to_string_lossy().into_owned()).unwrap();
+        assert!(
+            std::fs::read(&tiff).unwrap().starts_with(b"II*\0") || std::fs::read(&tiff).unwrap().starts_with(b"MM\0*")
+        );
+        let _ = std::fs::remove_file(&tiff);
+        // a turntable's frames: the model turned, half way round the back, and round again
+        let turntable = super::Turntable { swing: false, seconds: 1.0, zoom: 0.0, ease: 0.0, environment: false };
+        let first = s.model_turntable_picture(0, 4, turntable, 100, 100, true).unwrap();
+        let half = s.model_turntable_picture(2, 4, turntable, 100, 100, true).unwrap();
         assert_eq!((first.width, first.height, first.rgba.len()), (100, 100, 100 * 100 * 4));
         assert!(first.rgba.chunks(4).all(|p| p[3] == 255));
         assert_ne!(first.rgba, half.rgba);
-        let again = s.model_turntable_frame(4, 4, false, 100, 100).unwrap();
+        let again = s.model_turntable_picture(4, 4, turntable, 100, 100, true).unwrap();
         assert_eq!(first.rgba, again.rgba);
-        // as a USDZ: the layer and both pictures
+        // as a USDZ: the layer and both sets' images
         s.export_model_usdz(path.to_string_lossy().into_owned()).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         let zip = procraft_engine::zip::ZipReader::new(&bytes).unwrap();
-        assert_eq!(zip.names().collect::<Vec<_>>(), ["model.usda", "textures/front.png", "textures/side_wall.png"]);
+        assert_eq!(
+            zip.names().collect::<Vec<_>>(),
+            [
+                "model.usda",
+                "textures/front-color.png",
+                "textures/front-roughness.png",
+                "textures/front-metallic.png",
+                "textures/side_wall-color.png",
+                "textures/side_wall-roughness.png",
+                "textures/side_wall-metallic.png"
+            ]
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1143,6 +2302,24 @@ f 1/1 2/2",
         s.stroke_begin(PointerKind::Stylus, vec![sample(90.0, 100.0, 0.0)]);
         s.stroke_end(vec![sample(110.0, 100.0, 50.0)]);
         frame(s, 200);
+    }
+
+    #[test]
+    fn a_saved_model_exports_once_opened_again() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        dab(&s);
+        let dir = std::env::temp_dir().join(format!("procraft-reopen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        s.save(dir.join("a").to_string_lossy().into_owned()).unwrap();
+        let again = CanvasSession::open(dir.join("a").to_string_lossy().into_owned()).unwrap();
+        assert!(shown(&again));
+        frame(&again, 200);
+        let zip = dir.join("cube.zip").to_string_lossy().into_owned();
+        again.export_model_obj(zip).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1174,6 +2351,13 @@ f 1/1 2/2",
         s.set_paint_through(true);
         let sky = procraft_engine::environment::write_hdr(&procraft_engine::environment::Equirect::uniform([0.5; 3]));
         assert!(s.set_model_environment("coast".into(), sky));
+        assert_eq!(s.model_exposure(), 1.0);
+        s.set_model_exposure(9.0);
+        assert_eq!(s.model_exposure(), 5.0);
+        s.set_model_exposure(0.4);
+        assert!(s.model_environment_shown());
+        s.set_model_environment_shown(false);
+        frame(&s, 200);
         s.save(dir.to_string_lossy().into_owned()).unwrap();
         for file in ["model.obj", "thumbnail.png", "artwork.json", "sets/0"] {
             assert!(dir.join(file).exists(), "{file}");
@@ -1185,6 +2369,8 @@ f 1/1 2/2",
         assert_eq!(painted(&again), side);
         assert!(again.paint_through());
         assert_eq!(again.model_environment().as_deref(), Some("coast"));
+        assert_eq!(again.model_exposure(), 0.4);
+        assert!(!again.model_environment_shown());
         // seen as it was left: the side still faces the camera
         let turn = |s: &CanvasSession| s.shared.lock().scene.as_ref().and_then(|sc| sc.orbit()).unwrap().rotation;
         assert!(turn(&again).iter().zip(turn(&s)).all(|(a, b)| (a - b).abs() < 1e-6));

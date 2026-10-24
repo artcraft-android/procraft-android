@@ -52,6 +52,7 @@ fun AppRoot(vm: CanvasViewModel) {
         BackHandler {
             when {
                 vm.guideEditing -> vm.closeGuideEditor(keep = false)
+                vm.lightingStudioOpen -> vm.closeLightingStudio(keep = false)
                 vm.studioOpen -> vm.closeStudio(keep = false)
                 vm.transformPopup != TransformPopup.NONE -> vm.transformPopup = TransformPopup.NONE
                 vm.selectionPopup != SelectionPopup.NONE -> vm.selectionPopup = SelectionPopup.NONE
@@ -115,7 +116,7 @@ fun AppRoot(vm: CanvasViewModel) {
                     TopBar(vm, Modifier.align(Alignment.TopCenter).then(up).then(fade))
                     // a mode taking the screen slides it off its edge, and back when it ends
                     androidx.compose.animation.AnimatedVisibility(
-                        vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && vm.cropRect == null && (vm.adjustment == null || vm.adjustPencil),
+                        vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && (vm.adjustment == null || vm.adjustPencil),
                         Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = maxHeight * Pc.SIDE_BAR_CENTRE - Pc.SideBarHeight / 2),
                         enter = Motion.sideBarIn(vm.rightHanded),
                         exit = Motion.sideBarOut(vm.rightHanded),
@@ -188,6 +189,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 if (vm.textInfo != null) TextEditor(vm)
                 RasterizePrompt(vm)
                 vm.animatedExport?.let { AnimatedExport(vm, it) }
+                vm.modelAnimatedExport?.let { ModelAnimatedExport(vm, it) }
                 // full-screen pages slide up over everything, and back down
                 androidx.compose.animation.AnimatedVisibility(
                     vm.canvasInfoOpen,
@@ -264,6 +266,7 @@ fun AppRoot(vm: CanvasViewModel) {
                     SelectionPopover(vm, maxWidth, maxHeight)
                 }
                 GuideEditor(vm)
+                LightingStudio(vm)
                 BrushStudio(vm)
                 PadMenu(vm)
             }

@@ -6,7 +6,7 @@ use procraft_engine::mesh::Mesh;
 use wgpu::util::DeviceExt;
 
 use crate::lighting::{CUBE_LEVELS, Lighting};
-use crate::{Gpu, GpuError, read_texture};
+use crate::{Gpu, GpuError, SurroundGrid, read_texture};
 use procraft_engine::environment::Equirect;
 
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -25,12 +25,35 @@ const DILATE: i32 = 2;
 const FRAMED_SIDE: f32 = 4.0;
 const FRAMED_DISTANCE: f32 = 8.0;
 const FIELD_OF_VIEW: f32 = 0.8727;
-/// The two lights, fixed to the camera: each one's place (in the framing's units, from the
-/// model's middle as the camera sees it) and its intensity (radiance intensity^4 x 50, white).
-const LIGHTS: [([f32; 3], f32); 2] = [([-2.0, 5.0, 2.0], 0.36), ([3.0, 4.0, 0.0], 0.30)];
-/// A part's roughness and metalness when its material gives none.
-const ROUGHNESS: f32 = 1.0;
-const METALLIC: f32 = 0.0;
+/// The most lights a model is lit by.
+pub const MOST_LIGHTS: usize = 4;
+/// The Lighting Studio's camera as it first opens: tilted this far down (radians) and this far
+/// back (in the framing's units, the model's largest side counted as 4).
+const STUDIO_PITCH: f32 = 0.716;
+const STUDIO_DISTANCE: f32 = 22.0;
+/// The studio's floor under the model: its radius and a grid cell's side, and each light's cube
+/// (framing units).
+const FLOOR_RADIUS: f32 = 9.5;
+const FLOOR_CELL: f32 = 1.0;
+const CUBE_SIDE: f32 = 0.8;
+
+/// A light shining on the model: its place (in the framing's units from the model's middle, along
+/// the world's axes), its colour (linear RGB) and its intensity (0 to 1; its radiance is the
+/// intensity^4 x 50 of its colour).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Light {
+    pub place: [f32; 3],
+    pub color: [f32; 3],
+    pub intensity: f32,
+}
+
+impl Light {
+    /// The lights a model starts with: white, one high on the left in front, one high on the right.
+    pub const DEFAULTS: [Light; 2] = [
+        Light { place: [-2.0, 5.0, 2.0], color: [1.0; 3], intensity: 0.36 },
+        Light { place: [3.0, 4.0, 0.0], color: [1.0; 3], intensity: 0.30 },
+    ];
+}
 /// The light of a model before it is given an environment: the same soft grey all round.
 const NEUTRAL_LIGHT: f32 = 0.6;
 
@@ -47,14 +70,24 @@ struct VertexGpu {
 struct ViewUniform {
     view_proj: [[f32; 4]; 4],
     view: [[f32; 4]; 4],
-    light0: [f32; 4],
-    radiance0: [f32; 4],
-    light1: [f32; 4],
-    radiance1: [f32; 4],
+    /// Each light's place in the camera's space, and its radiance; how many there are.
+    lights: [[f32; 4]; MOST_LIGHTS],
+    radiances: [[f32; 4]; MOST_LIGHTS],
     sh: [[f32; 4]; 9],
     params: [f32; 4],
     projection: [f32; 4],
     convert: [[f32; 4]; 3],
+    counts: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct StudioUniform {
+    view_proj: [[f32; 4]; 4],
+    floor: [f32; 4],
+    cubes: [[f32; 4]; MOST_LIGHTS],
+    colors: [[f32; 4]; MOST_LIGHTS],
+    target: [f32; 4],
 }
 
 #[repr(C)]
@@ -159,6 +192,8 @@ struct PartGpu {
     texture: wgpu::Texture,
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
+    /// What it shows: its albedo, and its roughness and metalness painted over the material's.
+    views: [wgpu::TextureView; 3],
     /// The albedo with its smaller levels, once given, so a far or slanting surface shows it
     /// filtered rather than speckled.
     mips: Option<(wgpu::Texture, Vec<wgpu::TextureView>, wgpu::TextureView)>,
@@ -191,6 +226,21 @@ pub struct MeshView {
     /// The environment drawn behind the model, and how bright the light is taken.
     backdrop: Option<wgpu::RenderPipeline>,
     exposure: f32,
+    /// Without the environment behind it, the canvas's surround grid is, if given; and what draws it.
+    grid: Option<SurroundGrid>,
+    grid_draw: Option<GridDraw>,
+    /// The model's middle and the height of its lowest point (the studio's floor), in the world.
+    middle: [f32; 3],
+    floor: f32,
+    /// What draws the Lighting Studio's floor and lights.
+    studio_draw: Option<StudioDraw>,
+    /// The lights it is lit by (at most [`MOST_LIGHTS`]).
+    pub lights: Vec<Light>,
+    /// A channel with nothing painted in it.
+    blank: wgpu::TextureView,
+    /// Each submesh's part and its run of indices, and whether it is hidden.
+    submeshes: Vec<(usize, u32, u32)>,
+    hidden: Vec<bool>,
     /// The framing's unit (the model's largest side over 4): the lights stand that far apart.
     unit: f32,
     /// What it draws into.
@@ -200,6 +250,172 @@ pub struct MeshView {
     pub orbit: Orbit,
     /// Strokes reach every surface under them, not only the nearest.
     pub paint_through: bool,
+}
+
+/// The surround grid's pipeline and its uniform.
+struct GridDraw {
+    pipeline: wgpu::RenderPipeline,
+    buffer: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GridUniform {
+    v0: [f32; 4],
+    v1: [f32; 4],
+}
+
+impl GridDraw {
+    fn new(gpu: &Gpu, format: wgpu::TextureFormat) -> GridDraw {
+        let device = &gpu.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mesh surround"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/surround.wgsl").into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mesh surround"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mesh surround"),
+            size: std::mem::size_of::<GridUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mesh surround"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mesh surround"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mesh surround"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_surround"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_surround"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        GridDraw { pipeline, buffer, bind }
+    }
+}
+
+/// The Lighting Studio's floor and lights' pipelines and their uniform.
+struct StudioDraw {
+    floor: wgpu::RenderPipeline,
+    cubes: wgpu::RenderPipeline,
+    buffer: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+}
+
+impl StudioDraw {
+    fn new(gpu: &Gpu, format: wgpu::TextureFormat) -> StudioDraw {
+        let device = &gpu.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("studio"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/studio.wgsl").into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("studio"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("studio"),
+            size: std::mem::size_of::<StudioUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("studio"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("studio"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = |label: &str, vs: &str, fs: &str, write: bool, blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some(vs),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH,
+                    depth_write_enabled: Some(write),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let floor = pipeline(
+            "studio floor",
+            "vs_floor",
+            "fs_floor",
+            false,
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        );
+        let cubes = pipeline("studio lights", "vs_cube", "fs_cube", true, None);
+        StudioDraw { floor, cubes, buffer, bind }
+    }
 }
 
 /// What carrying strokes onto the model takes: its pipelines, and the nearest surface's distance
@@ -300,8 +516,28 @@ impl MeshView {
                     },
                     count: None,
                 },
+                map_entry(3),
+                map_entry(4),
             ],
         });
+        // nothing painted in a channel: the material's own value shows
+        let blank = device
+            .create_texture_with_data(
+                &gpu.queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("mesh blank map"),
+                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: ALBEDO,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &[0, 0, 0, 0],
+            )
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let view_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mesh view"),
             size: std::mem::size_of::<ViewUniform>() as u64,
@@ -336,7 +572,8 @@ impl MeshView {
         let parts = mesh
             .parts
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(i, p)| {
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("mesh albedo"),
                     size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
@@ -348,28 +585,27 @@ impl MeshView {
                     view_formats: &[],
                 });
                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                // the material file's roughness and metalness, else plain
-                let m = mesh.materials.iter().find(|m| m.name == p.material);
-                let roughness = m.and_then(|m| m.roughness).unwrap_or(ROUGHNESS);
-                let metallic = m.and_then(|m| m.metallic).unwrap_or(METALLIC);
+                // the material's own colour, roughness and metalness under what is painted
+                let ([r, g, b], roughness, metallic) = mesh.surface(i);
                 let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("mesh part"),
                     contents: bytemuck::bytes_of(&PartUniform {
-                        base: [1.0, 1.0, 1.0, 1.0],
-                        material: [roughness.clamp(0.0, 1.0), metallic.clamp(0.0, 1.0), 0.0, 0.0],
+                        base: [r, g, b, 1.0],
+                        material: [roughness, metallic, 0.0, 0.0],
                     }),
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
-                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("mesh part"),
-                    layout: &part_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-                        wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
-                    ],
-                });
-                PartGpu { first: (p.first * 3) as u32, count: (p.count * 3) as u32, texture, uniform, bind, mips: None }
+                let views = [view, blank.clone(), blank.clone()];
+                let bind = part_bind(device, &part_layout, &sampler, &views, &uniform);
+                PartGpu {
+                    first: (p.first * 3) as u32,
+                    count: (p.count * 3) as u32,
+                    texture,
+                    uniform,
+                    bind,
+                    views,
+                    mips: None,
+                }
             })
             .collect();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -436,6 +672,17 @@ impl MeshView {
             table_sampler,
             backdrop: Some(backdrop),
             exposure: 1.0,
+            grid: None,
+            grid_draw: None,
+            middle: mesh
+                .bounds()
+                .map_or([0.0; 3], |(lo, hi)| [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0]),
+            floor: mesh.bounds().map_or(-1.0, |(lo, _)| lo[1]),
+            studio_draw: None,
+            lights: Light::DEFAULTS.to_vec(),
+            blank,
+            submeshes: mesh.submeshes.iter().map(|m| (m.part, (m.first * 3) as u32, (m.count * 3) as u32)).collect(),
+            hidden: vec![false; mesh.submeshes.len()],
             unit: Orbit::unit(mesh),
             format,
             convert: None,
@@ -480,6 +727,35 @@ impl MeshView {
         Ok(rgba)
     }
 
+    /// Submesh `index` on its own, seen from where the camera looks at the model now, filling a
+    /// `side` square with a little room round it, on nothing (RGBA8): its row's picture.
+    pub fn submesh_picture(&mut self, gpu: &Gpu, index: usize, side: u32) -> Result<Vec<u8>, GpuError> {
+        let Some(&(_, first, count)) = self.submeshes.get(index) else {
+            return Ok(vec![0; (side * side * 4) as usize]);
+        };
+        // its corners' middle and how far they reach from it
+        let tris = self.triangles.get(first as usize / 3..(first + count) as usize / 3).unwrap_or(&[]);
+        let corners: Vec<[f32; 3]> =
+            tris.iter().flatten().filter_map(|&i| self.positions.get(i as usize).copied()).collect();
+        let (lo, hi) = corners.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| {
+            ([lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])])
+        });
+        let middle = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+        let reach = corners
+            .iter()
+            .map(|p| ((p[0] - middle[0]).powi(2) + (p[1] - middle[1]).powi(2) + (p[2] - middle[2]).powi(2)).sqrt())
+            .fold(0.0f32, f32::max)
+            .max(1e-6);
+        let kept = (self.orbit, self.hidden.clone(), self.backdrop.take(), self.grid.take());
+        self.orbit = Orbit { target: middle, distance: reach * 1.15 / (self.orbit.fov / 2.0).sin(), ..self.orbit };
+        for (k, h) in self.hidden.iter_mut().enumerate() {
+            *h = k != index;
+        }
+        let picture = self.picture(gpu, side, side, [0.0; 4]);
+        (self.orbit, self.hidden, self.backdrop, self.grid) = kept;
+        picture
+    }
+
     pub fn part_count(&self) -> usize {
         self.parts.len()
     }
@@ -515,15 +791,18 @@ impl MeshView {
     /// as composited, say, so the model shows its layers and the stroke being drawn.
     pub fn set_albedo_view(&mut self, gpu: &Gpu, part: usize, albedo: &wgpu::TextureView) {
         let Some(p) = self.parts.get_mut(part) else { return };
-        p.bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mesh part"),
-            layout: &self.part_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(albedo) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: p.uniform.as_entire_binding() },
-            ],
-        });
+        p.views[0] = albedo.clone();
+        p.bind = part_bind(&gpu.device, &self.part_layout, &self.sampler, &p.views, &p.uniform);
+    }
+
+    /// Part `part`'s roughness (`channel` 1) or metalness (2) painted over its material's from
+    /// now on: `map` premultiplied, its grey taking the place of the material's value as far as
+    /// it covers (any size); none, the material's own everywhere.
+    pub fn set_channel_view(&mut self, gpu: &Gpu, part: usize, channel: usize, map: Option<&wgpu::TextureView>) {
+        let Some(p) = self.parts.get_mut(part) else { return };
+        let Some(slot) = p.views.get_mut(channel).filter(|_| channel > 0) else { return };
+        *slot = map.unwrap_or(&self.blank).clone();
+        p.bind = part_bind(&gpu.device, &self.part_layout, &self.sampler, &p.views, &p.uniform);
     }
 
     /// Shows `albedo` (premultiplied RGBA8, the texture size square) on part `part` through
@@ -590,15 +869,8 @@ impl MeshView {
             drop(pass);
             source = target;
         }
-        p.bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mesh part"),
-            layout: &self.part_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(all) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: p.uniform.as_entire_binding() },
-            ],
-        });
+        p.views[0] = all.clone();
+        p.bind = part_bind(&gpu.device, &self.part_layout, &self.sampler, &p.views, &p.uniform);
     }
 
     /// The colour part `part` shows where nothing is painted.
@@ -634,6 +906,11 @@ impl MeshView {
         if exposure.is_finite() {
             self.exposure = exposure.max(0.0);
         }
+    }
+
+    /// The grid drawn over the clear colour while the environment doesn't show behind the model.
+    pub fn set_grid(&mut self, grid: Option<SurroundGrid>) {
+        self.grid = grid;
     }
 
     /// Whether the environment shows behind the model (else the clear colour does).
@@ -700,7 +977,162 @@ impl MeshView {
         height: u32,
         clear: [f64; 4],
     ) {
+        self.draw(gpu, encoder, target, (width, height), clear, None);
+    }
+
+    /// Draws the Lighting Studio into `target` (`width` × `height`), cleared to `clear` first: the
+    /// model seen through `orbit` on its round floor, each light a cube.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_studio(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        clear: [f64; 4],
+        orbit: Orbit,
+    ) {
+        self.draw(gpu, encoder, target, (width, height), clear, Some(orbit));
+    }
+
+    /// Hides submesh `index` (or shows it again): not drawn, and not painted.
+    pub fn set_hidden(&mut self, index: usize, hidden: bool) {
+        if let Some(h) = self.hidden.get_mut(index) {
+            *h = hidden;
+        }
+    }
+
+    /// The runs of indices of part `part` that are shown: all of it, unless a submesh in it is
+    /// hidden.
+    fn shown_ranges(&self, part: usize) -> Vec<std::ops::Range<u32>> {
+        let Some(p) = self.parts.get(part) else { return Vec::new() };
+        let mine = || self.submeshes.iter().zip(&self.hidden).filter(move |((at, _, _), _)| *at == part);
+        if !mine().any(|(_, &h)| h) {
+            return std::iter::once(p.first..p.first + p.count).collect();
+        }
+        mine().filter(|(_, h)| !**h).map(|((_, first, count), _)| *first..*first + *count).collect()
+    }
+
+    /// The studio's camera as it first opens: the model from in front, high up and far back.
+    pub fn studio_orbit(&self) -> Orbit {
+        Orbit {
+            target: self.middle,
+            rotation: Orbit::rotation_of(0.0, STUDIO_PITCH),
+            distance: STUDIO_DISTANCE * self.unit,
+            fov: FIELD_OF_VIEW,
+        }
+    }
+
+    /// The model upright, turned `yaw` about its upright axis, seen from `pitch` above level and
+    /// `distance` back (framing units), its middle in the middle.
+    pub fn upright_orbit(&self, yaw: f32, pitch: f32, distance: f32) -> Orbit {
+        Orbit {
+            target: self.middle,
+            rotation: Orbit::rotation_of(yaw, pitch),
+            distance: distance * self.unit,
+            fov: FIELD_OF_VIEW,
+        }
+    }
+
+    /// The picture of the model as `orbit` sees it at `width` × `height` (RGBA8), on `clear`,
+    /// with or without the environment behind it (never the surround's grid).
+    pub fn picture_from(
+        &mut self,
+        gpu: &Gpu,
+        orbit: Orbit,
+        width: u32,
+        height: u32,
+        clear: [f64; 4],
+        environment: bool,
+    ) -> Result<Vec<u8>, GpuError> {
+        let kept = (self.orbit, self.grid.take(), self.backdrop.is_some());
+        self.orbit = orbit;
+        if !environment {
+            self.backdrop = None;
+        }
+        let picture = self.picture(gpu, width, height, clear);
+        self.orbit = kept.0;
+        self.grid = kept.1;
+        if kept.2 && self.backdrop.is_none() {
+            self.backdrop = Some(MeshView::backdrop_pipeline(gpu, &self.view_layout, self.format));
+        }
+        picture
+    }
+
+    /// Where `light` stands in the world.
+    fn light_world(&self, light: &Light) -> [f32; 3] {
+        let m = self.middle;
+        let p = light.place;
+        [m[0] + p[0] * self.unit, m[1] + p[1] * self.unit, m[2] + p[2] * self.unit]
+    }
+
+    /// Light `index` on a `width` × `height` screen seen through `orbit`: its middle and about how
+    /// far its cube reaches from it (pixels); none if it is behind the camera.
+    pub fn light_on_screen(&self, orbit: &Orbit, index: usize, width: u32, height: u32) -> Option<[f32; 3]> {
+        let light = self.lights.get(index)?;
+        self.place_on_screen(orbit, light.place, width, height)
+    }
+
+    /// A light's `place` (framing units from the model's middle) on a `width` × `height` screen
+    /// seen through `orbit`, as [`MeshView::light_on_screen`] gives it.
+    pub fn place_on_screen(&self, orbit: &Orbit, place: [f32; 3], width: u32, height: u32) -> Option<[f32; 3]> {
+        let at = self.light_world(&Light { place, color: [1.0; 3], intensity: 0.0 });
+        let (w, h) = (width.max(1) as f32, height.max(1) as f32);
+        let depth = orbit_depth(orbit, at);
+        if depth <= orbit.distance * 0.01 {
+            return None;
+        }
+        let m = orbit.view_proj(w / h);
+        let clip = transform(m, at);
+        if clip[3] <= 0.0 {
+            return None;
+        }
+        let (x, y) = ((clip[0] / clip[3] + 1.0) / 2.0 * w, (1.0 - clip[1] / clip[3]) / 2.0 * h);
+        let per_pixel = 2.0 * depth * (orbit.fov_y(w / h) / 2.0).tan() / h;
+        Some([x, y, CUBE_SIDE * self.unit * 0.8 / per_pixel])
+    }
+
+    /// Moves light `index` by (`dx`, `dy`) pixels (right and down) on a `width` × `height` screen
+    /// seen through `orbit`: across the plane facing the camera at the light's depth.
+    pub fn move_light(&mut self, orbit: &Orbit, index: usize, dx: f32, dy: f32, width: u32, height: u32) {
+        let Some(light) = self.lights.get(index).copied() else { return };
+        let place = self.moved_place(orbit, light.place, dx, dy, width, height);
+        if let Some(l) = self.lights.get_mut(index) {
+            l.place = place;
+        }
+    }
+
+    /// A light's `place` dragged by (`dx`, `dy`) pixels, as [`MeshView::move_light`] moves it.
+    pub fn moved_place(&self, orbit: &Orbit, place: [f32; 3], dx: f32, dy: f32, width: u32, height: u32) -> [f32; 3] {
+        let at = self.light_world(&Light { place, color: [1.0; 3], intensity: 0.0 });
+        let depth = orbit_depth(orbit, at).max(orbit.distance * 0.05);
+        let (w, h) = (width.max(1) as f32, height.max(1) as f32);
+        let per_unit = 2.0 * depth * (orbit.fov_y(w / h) / 2.0).tan() / h / self.unit;
+        let (right, up) = (orbit.right(), orbit.up());
+        let mut out = place;
+        for (k, p) in out.iter_mut().enumerate() {
+            if let (Some(r), Some(u)) = (right.get(k), up.get(k)) {
+                *p += (dx * r - dy * u) * per_unit;
+            }
+        }
+        out
+    }
+
+    fn draw(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        (width, height): (u32, u32),
+        clear: [f64; 4],
+        studio: Option<Orbit>,
+    ) {
+        let orbit = studio.unwrap_or(self.orbit);
         let (width, height) = (width.max(1), height.max(1));
+        let light_worlds: Vec<[f32; 3]> = self.lights.iter().take(MOST_LIGHTS).map(|l| self.light_world(l)).collect();
+        let shown_by_part: Vec<Vec<std::ops::Range<u32>>> =
+            (0..self.parts.len()).map(|i| self.shown_ranges(i)).collect();
         let stale = self.depth.as_ref().is_none_or(|(t, _)| t.width() != width || t.height() != height);
         if stale {
             let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -718,31 +1150,72 @@ impl MeshView {
         }
         let Some((_, depth_view)) = &self.depth else { return };
         let aspect = width as f32 / height as f32;
-        let view = look_at(self.orbit.eye(), self.orbit.target, self.orbit.up());
-        // the lights stand about the model's middle as the camera sees it: they turn with it
-        let middle = view[3];
-        let light = |k: usize| {
-            let (place, intensity) = LIGHTS.get(k).copied().unwrap_or(([0.0; 3], 0.0));
-            let [x, y, z] = place;
-            let at = [x * self.unit + middle[0], y * self.unit + middle[1], z * self.unit + middle[2]];
-            let radiance = intensity.powi(4) * 50.0;
-            ([at[0], at[1], at[2], 1.0], [radiance, radiance, radiance, 0.0])
-        };
-        let ((light0, radiance0), (light1, radiance1)) = (light(0), light(1));
-        let f = 1.0 / (self.orbit.fov_y(aspect) / 2.0).tan();
+        let view = look_at(orbit.eye(), orbit.target, orbit.up());
+        // the lights stand about the model in the world, seen from the camera
+        let mut lights = [[0.0; 4]; MOST_LIGHTS];
+        let mut radiances = [[0.0; 4]; MOST_LIGHTS];
+        let shown = self.lights.len().min(MOST_LIGHTS);
+        for (k, (light, w)) in self.lights.iter().zip(&light_worlds).enumerate() {
+            let radiance = light.intensity.clamp(0.0, 1.0).powi(4) * 50.0;
+            if let (Some(l), Some(r)) = (lights.get_mut(k), radiances.get_mut(k)) {
+                *l = transform(view, *w);
+                *r = [light.color[0] * radiance, light.color[1] * radiance, light.color[2] * radiance, 0.0];
+            }
+        }
+        let f = 1.0 / (orbit.fov_y(aspect) / 2.0).tan();
         let uniform = ViewUniform {
-            view_proj: self.orbit.view_proj(aspect),
+            view_proj: orbit.view_proj(aspect),
             view,
-            light0,
-            radiance0,
-            light1,
-            radiance1,
+            lights,
+            radiances,
             sh: self.lighting.sh,
             params: [self.exposure, (CUBE_LEVELS - 1) as f32, width as f32, height as f32],
             projection: [f / aspect, f, 0.0, 0.0],
             convert: self.convert.map_or([[0.0; 4]; 3], |m| m.map(|r| [r[0], r[1], r[2], 1.0])),
+            counts: [shown as f32, 0.0, 0.0, 0.0],
         };
         gpu.queue.write_buffer(&self.view_buffer, 0, bytemuck::bytes_of(&uniform));
+        // the surround's grid where no environment shows
+        let grid = match (self.backdrop.is_none(), self.grid) {
+            (true, Some(g)) => {
+                let format = self.format;
+                let draw = self.grid_draw.get_or_insert_with(|| GridDraw::new(gpu, format));
+                let srgb = if format.is_srgb() { 1.0 } else { 0.0 };
+                let u = GridUniform {
+                    v0: [g.spacing, g.origin[0], g.origin[1], g.width],
+                    v1: [g.color[0], g.color[1], g.color[2], srgb],
+                };
+                gpu.queue.write_buffer(&draw.buffer, 0, bytemuck::bytes_of(&u));
+                Some(&*draw)
+            }
+            _ => None,
+        };
+        // the studio's floor and lights, with the camera it is seen through
+        let studio_draw = match studio {
+            Some(o) => {
+                let format = self.format;
+                let mut cubes = [[0.0; 4]; MOST_LIGHTS];
+                let mut colors = [[0.0; 4]; MOST_LIGHTS];
+                for (k, (light, w)) in self.lights.iter().zip(&light_worlds).enumerate() {
+                    if let (Some(c), Some(col)) = (cubes.get_mut(k), colors.get_mut(k)) {
+                        *c = [w[0], w[1], w[2], CUBE_SIDE * self.unit];
+                        let s = light.color.map(linear_to_srgb);
+                        *col = [s[0], s[1], s[2], 1.0];
+                    }
+                }
+                let u = StudioUniform {
+                    view_proj: o.view_proj(aspect),
+                    floor: [self.floor, FLOOR_RADIUS * self.unit, FLOOR_CELL * self.unit, 0.0],
+                    cubes,
+                    colors,
+                    target: [if format.is_srgb() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                };
+                let draw = self.studio_draw.get_or_insert_with(|| StudioDraw::new(gpu, format));
+                gpu.queue.write_buffer(&draw.buffer, 0, bytemuck::bytes_of(&u));
+                Some(&*draw)
+            }
+            None => None,
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mesh"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -763,6 +1236,11 @@ impl MeshView {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if let Some(draw) = grid {
+            pass.set_pipeline(&draw.pipeline);
+            pass.set_bind_group(0, &draw.bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
         pass.set_bind_group(0, &self.view_bind, &[]);
         if let Some(backdrop) = &self.backdrop {
             pass.set_pipeline(backdrop);
@@ -771,11 +1249,71 @@ impl MeshView {
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-        for p in &self.parts {
+        for (p, shown) in self.parts.iter().zip(&shown_by_part) {
             pass.set_bind_group(1, &p.bind, &[]);
-            pass.draw_indexed(p.first..p.first + p.count, 0, 0..1);
+            for range in shown {
+                pass.draw_indexed(range.clone(), 0, 0..1);
+            }
+        }
+        if let Some(draw) = studio_draw {
+            pass.set_bind_group(0, &draw.bind, &[]);
+            pass.set_pipeline(&draw.floor);
+            pass.draw(0..6, 0..1);
+            pass.set_pipeline(&draw.cubes);
+            pass.draw(0..36, 0..shown as u32);
         }
     }
+}
+
+/// A part's bindings: its albedo, the sampler, its uniform, and its roughness and metalness maps.
+fn part_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    views: &[wgpu::TextureView; 3],
+    uniform: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    let [albedo, roughness, metallic] = views;
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("mesh part"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(albedo) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(roughness) },
+            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(metallic) },
+        ],
+    })
+}
+
+/// A part's channel map at `binding`, sampled as its albedo is.
+fn map_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+/// How far in front of the camera `at` is, along its view.
+fn orbit_depth(orbit: &Orbit, at: [f32; 3]) -> f32 {
+    let eye = orbit.eye();
+    let t = orbit.target;
+    let forward = [t[0] - eye[0], t[1] - eye[1], t[2] - eye[2]];
+    let length = (forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]).sqrt().max(1e-9);
+    ((at[0] - eye[0]) * forward[0] + (at[1] - eye[1]) * forward[1] + (at[2] - eye[2]) * forward[2]) / length
+}
+
+/// A linear-light value as sRGB.
+fn linear_to_srgb(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }
 
 impl MeshView {
@@ -799,6 +1337,10 @@ impl MeshView {
         let Some(p) = self.parts.get(part) else { return IRect::EMPTY };
         let (first, count) = (p.first, p.count);
         let view_proj = self.orbit.view_proj(width as f32 / height as f32);
+        // what's shown of each part, worked out before the projector is borrowed
+        let shown_by_part: Vec<Vec<std::ops::Range<u32>>> =
+            (0..self.parts.len()).map(|i| self.shown_ranges(i)).collect();
+        let shown = |i: usize| shown_by_part.get(i).cloned().unwrap_or_default();
         let projector = self.projector.get_or_insert_with(|| Projector::new(gpu));
         let stale = projector.screen.as_ref().is_none_or(|(t, _, _)| t.width() != width || t.height() != height);
         if stale {
@@ -919,7 +1461,9 @@ impl MeshView {
             pass.set_bind_group(0, &bind, &[]);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..(self.triangles.len() * 3) as u32, 0, 0..1);
+            for range in (0..self.parts.len()).flat_map(&shown) {
+                pass.draw_indexed(range, 0, 0..1);
+            }
         }
         // the part in its texture's space, taking the stroke where it is the nearest surface
         {
@@ -944,7 +1488,9 @@ impl MeshView {
             pass.set_bind_group(0, &bind, &[]);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(first..first + count, 0, 0..1);
+            for range in shown(part) {
+                pass.draw_indexed(range, 0, 0..1);
+            }
         }
         // grown past the islands' edges into the target
         {
