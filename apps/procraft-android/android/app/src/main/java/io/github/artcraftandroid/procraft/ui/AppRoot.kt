@@ -165,7 +165,8 @@ fun AppRoot(vm: CanvasViewModel) {
                             }
                             Panel.COLOR -> ColorPanel(vm, place.arrowX, maxHeight, at)
                             Panel.BRUSHES -> BrushLibrary(vm, place.arrowX, at.height(maxHeight - Pc.BarHeight - 25.dp))
-                            Panel.ACTIONS -> ActionsPanel(vm, place.arrowX, at)
+                            // ending 25 above the screen's edge, its rows scrolling (as measured)
+                            Panel.ACTIONS -> ActionsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
                             Panel.ADJUSTMENTS -> AdjustmentsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - Pc.PopoverGap))
                             Panel.NONE -> Unit
                         }

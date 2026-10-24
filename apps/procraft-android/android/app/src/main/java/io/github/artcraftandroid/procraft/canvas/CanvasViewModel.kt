@@ -753,6 +753,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         refreshGallery()
+        // the GPU made while the gallery shows, so the first artwork opens at once
+        viewModelScope.launch(Dispatchers.Default) { io.github.artcraftandroid.procraft.core.warmGpu() }
     }
 
     // ---- gallery ----
@@ -858,12 +860,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A new artwork made as preset [p] says, opened on the canvas. */
     fun newPresetArtwork(p: CanvasPreset) {
+        if (opening || session != null) return
+        opening = true
         val rgb = listOf(((p.background shr 16) and 255) / 255f, ((p.background shr 8) and 255) / 255f, (p.background and 255) / 255f)
-        val s = CanvasSession.newCustom(p.width.toUInt(), p.height.toUInt(), p.dpi, rgb, !p.backgroundHidden, "Untitled Artwork")
-        s.setNewProfile(p.profile)
-        start(s, store.newFolder(galleryDir))
-        timeLapse?.settings = p.timeLapse
-        startedNew()
+        viewModelScope.launch {
+            val s = withContext(Dispatchers.IO) {
+                CanvasSession.newCustom(p.width.toUInt(), p.height.toUInt(), p.dpi, rgb, !p.backgroundHidden, "Untitled Artwork").also {
+                    it.setNewProfile(p.profile)
+                    loadBrushes(it)
+                }
+            }
+            opening = false
+            start(s, store.newFolder(galleryDir), brushesLoaded = true)
+            timeLapse?.settings = p.timeLapse
+            startedNew()
+        }
     }
 
     /** The layers a canvas [width] × [height] holds on this device. */
@@ -882,10 +893,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A new artwork of `width` × `height` pixels (the screen's size), in Display P3, opened on the canvas. */
     fun newArtwork(width: Int, height: Int) {
-        val s = CanvasSession(width.coerceAtLeast(1).toUInt(), height.coerceAtLeast(1).toUInt())
-        s.setNewProfile(io.github.artcraftandroid.procraft.gallery.CanvasPreset.P3)
-        start(s, store.newFolder(galleryDir))
-        startedNew()
+        if (opening || session != null) return
+        opening = true
+        viewModelScope.launch {
+            val s = withContext(Dispatchers.IO) {
+                CanvasSession(width.coerceAtLeast(1).toUInt(), height.coerceAtLeast(1).toUInt()).also {
+                    it.setNewProfile(io.github.artcraftandroid.procraft.gallery.CanvasPreset.P3)
+                    loadBrushes(it)
+                }
+            }
+            opening = false
+            start(s, store.newFolder(galleryDir), brushesLoaded = true)
+            startedNew()
+        }
     }
 
     // the app's own settings (the settings page beside the canvas): read when the app comes back
@@ -972,9 +992,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 message = "This picture can't be opened."
                 return@launch
             }
-            val s = CanvasSession.fromImage(image, "Untitled Artwork")
-            if (p3) s.setNewProfile(io.github.artcraftandroid.procraft.gallery.CanvasPreset.P3)
-            start(s, store.newFolder(galleryDir))
+            val s = withContext(Dispatchers.IO) {
+                CanvasSession.fromImage(image, "Untitled Artwork").also {
+                    if (p3) it.setNewProfile(io.github.artcraftandroid.procraft.gallery.CanvasPreset.P3)
+                    loadBrushes(it)
+                }
+            }
+            start(s, store.newFolder(galleryDir), brushesLoaded = true)
             startedNew()
         }
     }
@@ -1258,14 +1282,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = withContext(Dispatchers.IO) {
             runCatching {
                 val file = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
-                CanvasSession.openModel(file, name, null, name.substringBeforeLast('.').ifBlank { "Untitled Artwork" }, 0u).also(::loadModelTextures)
+                CanvasSession.openModel(file, name, null, name.substringBeforeLast('.').ifBlank { "Untitled Artwork" }, 0u)
+                    .also(::loadModelTextures).also(::loadBrushes)
             }.onFailure { android.util.Log.e("ProCraft", "opening a model", it) }.getOrNull()
         }
         if (s == null) {
             message = "This model can't be opened."
             return
         }
-        start(s, store.newFolder(galleryDir))
+        start(s, store.newFolder(galleryDir), brushesLoaded = true)
         startedNew()
     }
 
@@ -1438,17 +1463,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Opens artwork [a], the gallery zooming into its cell; then [then]. */
     fun openArtwork(a: Artwork, then: (() -> Unit)? = null) {
-        if (opening) return
+        // one artwork open at a time: a second session on it would leave the screen on the first
+        if (opening || session != null) return
         opening = true
         val cell = thumbAt[a.dir.name]
         viewModelScope.launch {
-            val s = withContext(Dispatchers.IO) { runCatching { CanvasSession.open(a.dir.path) } }
+            val s = withContext(Dispatchers.IO) { runCatching { CanvasSession.open(a.dir.path).also(::loadBrushes) } }
             opening = false
             s.onSuccess {
                 if (!orientationMemory) it.forgetSavedView()
                 val m = it.openingViewMatrix(windowPx.width.toUInt(), windowPx.height.toUInt())
                 galleryZoom = cell?.let { c -> GalleryZoom(c, canvasRect(it, m), opening = true) }
-                start(it, a.dir)
+                start(it, a.dir, brushesLoaded = true)
                 then?.invoke()
             }.onFailure { message = "This artwork can't be opened." }
         }
@@ -1662,20 +1688,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) { runCatching { s.save(dir.path) } }
     }
 
-    private fun start(s: CanvasSession, dir: File) {
-        // the canvas's colours are P3 or sRGB numbers: the colour panel and swatches follow
-        refreshCanvasSpace(s)
-        // layers may take a quarter of the device's memory: every layer stays on the GPU
-        val memory = android.app.ActivityManager.MemoryInfo()
-        getApplication<Application>().getSystemService(android.app.ActivityManager::class.java)?.getMemoryInfo(memory)
-        if (memory.totalMem > 0) io.github.artcraftandroid.procraft.core.setLayerBudget((memory.totalMem / 4).toULong())
-        s.setSelectionVisibility(selectionVisibility)
-        s.setBrushScaling(brushOnScreen)
-        // as it was left, or fitted
-        if (!orientationMemory) s.forgetSavedView()
-        s.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputCurve.flatMap { listOf(it.x, it.y) })
-        applyAppSettings(s)
-        timeLapse = TimeLapse(dir).also { timeLapseRecording = it.recording }
+    /**
+     * Gives [s] the app's brushes as they were kept: the library (else the edits earlier versions
+     * kept), brushes shipped since joining it once, and the brushes in use. Reading the library
+     * takes half a second, so callers off the main thread do this before [start].
+     */
+    private fun loadBrushes(s: CanvasSession) {
         // the library as kept, else edits kept by earlier versions
         val kept = brushPrefs.getString(BRUSH_LIBRARY, null)
         val loaded = kept != null && s.loadBrushLibrary(kept)
@@ -1692,6 +1710,23 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         // the brushes in use as they were left (they go by place in the kept library)
         if (loaded) brushPrefs.getString(BRUSH_CHOICES, null)?.let { s.loadBrushChoices(it) }
+    }
+
+    private fun start(s: CanvasSession, dir: File, brushesLoaded: Boolean = false) {
+        // the canvas's colours are P3 or sRGB numbers: the colour panel and swatches follow
+        refreshCanvasSpace(s)
+        // layers may take a quarter of the device's memory: every layer stays on the GPU
+        val memory = android.app.ActivityManager.MemoryInfo()
+        getApplication<Application>().getSystemService(android.app.ActivityManager::class.java)?.getMemoryInfo(memory)
+        if (memory.totalMem > 0) io.github.artcraftandroid.procraft.core.setLayerBudget((memory.totalMem / 4).toULong())
+        s.setSelectionVisibility(selectionVisibility)
+        s.setBrushScaling(brushOnScreen)
+        // as it was left, or fitted
+        if (!orientationMemory) s.forgetSavedView()
+        s.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputCurve.flatMap { listOf(it.x, it.y) })
+        applyAppSettings(s)
+        timeLapse = TimeLapse(dir).also { timeLapseRecording = it.recording }
+        if (!brushesLoaded) loadBrushes(s)
         session = s
         val model = s.modelInfo()
         modelOpen = model != null

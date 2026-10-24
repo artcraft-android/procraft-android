@@ -15,17 +15,32 @@ use crate::{
 };
 
 pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
-    let instance = shared.lock().gpu.as_ref().map_or_else(Gpu::instance, |g| g.instance.clone());
+    let own = shared.lock().gpu.as_ref().map(|g| g.instance.clone());
+    // the app's device (waited for while it is being made), else one made for this window and
+    // kept for every artwork after
+    let mut kept = crate::device::kept();
+    let instance = own.clone().or_else(|| kept.as_ref().map(|g| g.instance.clone())).unwrap_or_else(Gpu::instance);
     let surface = match crate::window::create_surface(&instance, &window) {
         Ok(s) => s,
         Err(e) => return fail(&shared, e),
     };
-    if shared.lock().gpu.is_none() {
-        // the device is made once, for the first window, and kept with the layers it holds
+    let device = if own.is_some() {
+        None
+    } else if let Some(gpu) = kept.as_ref() {
+        Some(gpu.clone())
+    } else {
         match Gpu::for_surface(instance, &surface) {
-            Ok(gpu) => shared.lock().gpu = Some(gpu),
+            Ok(gpu) => {
+                *kept = Some(gpu.clone());
+                Some(gpu)
+            }
             Err(e) => return fail(&shared, e.to_string()),
         }
+    };
+    drop(kept);
+    if let Some(gpu) = device {
+        // it holds the session's layers from now on
+        shared.lock().gpu.get_or_insert(gpu);
     }
     let queue = {
         let mut st = shared.lock();

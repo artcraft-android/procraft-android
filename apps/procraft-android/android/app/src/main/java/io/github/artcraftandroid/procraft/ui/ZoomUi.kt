@@ -17,6 +17,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.lerp
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
@@ -76,8 +77,16 @@ fun ZoomingGallery(vm: CanvasViewModel, overlay: Boolean) {
                         else -> cover.value
                     }
                 }
-                // nothing in it is touched while it moves
-                .then(if (overlay) Modifier.pointerInput(Unit) { awaitEachGesture { while (true) awaitPointerEvent().changes.forEach { it.consume() } } } else Modifier),
+                // nothing in it is touched while it moves: taken before the gallery in it sees them
+                .then(
+                    if (overlay) {
+                        Modifier.pointerInput(Unit) {
+                            awaitEachGesture { while (true) awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() } }
+                        }
+                    } else {
+                        Modifier
+                    },
+                ),
         ) { GalleryScreen(vm) }
         // closing, the canvas fades away over its cell
         val picture = z.picture

@@ -8,8 +8,8 @@ mod canvas;
 mod lighting;
 mod scene;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 pub use canvas::{
     Backdrop, Canvas, DisplayLut, Filter, LiquifyMode, LiquifyStamp, Resample, SelectionLook, Stripes, StrokeStyle,
@@ -33,13 +33,16 @@ pub enum GpuError {
     Readback(String),
 }
 
-/// The device everything renders with.
+/// The device everything renders with. A clone is the same device, sharing what is made for it.
+#[derive(Clone)]
 pub struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     errors: Arc<AtomicU64>,
+    /// The canvases' pipelines, once the first canvas has made them.
+    canvas_pipelines: Arc<OnceLock<Arc<canvas::Pipelines>>>,
 }
 
 impl Gpu {
@@ -91,7 +94,18 @@ impl Gpu {
             counter.fetch_add(1, Ordering::Relaxed);
             log::error!("GPU error: {e}");
         }));
-        Ok(Gpu { instance, adapter, device, queue, errors })
+        Ok(Gpu { instance, adapter, device, queue, errors, canvas_pipelines: Arc::default() })
+    }
+
+    /// Makes the pipelines canvases draw with now, so the first canvas on this device is made at
+    /// once (slow: off the main thread).
+    pub fn prepare_canvases(&self) {
+        let _ = self.canvas_pipelines();
+    }
+
+    /// The pipelines canvases draw with, made by the first canvas on this device.
+    pub(crate) fn canvas_pipelines(&self) -> Arc<canvas::Pipelines> {
+        Arc::clone(self.canvas_pipelines.get_or_init(|| Arc::new(canvas::Pipelines::new(&self.device))))
     }
 
     /// GPU validation errors so far (each one is logged); tests expect none.
@@ -107,5 +121,26 @@ impl Gpu {
 
     pub fn max_texture_size(&self) -> u32 {
         self.device.limits().max_texture_dimension_2d
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canvases_on_one_device_share_their_pipelines() {
+        let gpu = match Gpu::headless() {
+            Ok(g) => g,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        let first = gpu.canvas_pipelines();
+        // the same once made, and for a clone of the device too
+        assert!(Arc::ptr_eq(&first, &gpu.canvas_pipelines()));
+        assert!(Arc::ptr_eq(&first, &gpu.clone().canvas_pipelines()));
+        // another device makes its own
+        if let Ok(other) = Gpu::headless() {
+            assert!(!Arc::ptr_eq(&first, &other.canvas_pipelines()));
+        }
     }
 }

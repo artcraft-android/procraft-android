@@ -16,6 +16,7 @@ mod brushes;
 mod clipboard;
 mod colour;
 mod crop;
+mod device;
 mod guide;
 mod layer_ops;
 mod layers;

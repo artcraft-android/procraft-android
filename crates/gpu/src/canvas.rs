@@ -1036,7 +1036,9 @@ impl Step {
     }
 }
 
-struct Pipelines {
+/// The pipelines every canvas on a device draws with, made once for the device (see
+/// [`crate::Gpu`]): compiling them takes a tablet a second and a half.
+pub(crate) struct Pipelines {
     /// A 3D colour table and its sampler, for the display.
     lut_layout: wgpu::BindGroupLayout,
     /// The display's: the canvas, the uniforms and the colour table.
@@ -1068,23 +1070,28 @@ struct Pipelines {
     /// Liquify stamps added into the field, and reconstruct's fading of it.
     liquify_add: wgpu::RenderPipeline,
     liquify_fade: wgpu::RenderPipeline,
-    /// The selection's look, per target format and whether it multiplies.
-    selection: HashMap<(wgpu::TextureFormat, bool), wgpu::RenderPipeline>,
     selection_module: wgpu::ShaderModule,
     smudge_layout: wgpu::BindGroupLayout,
     smudge_carry: wgpu::ComputePipeline,
     smudge_deposit: wgpu::ComputePipeline,
     display_module: wgpu::ShaderModule,
     display_pipeline_layout: wgpu::PipelineLayout,
-    display: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     surround_module: wgpu::ShaderModule,
     surround_pipeline_layout: wgpu::PipelineLayout,
-    surround: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     stamp_layout: wgpu::PipelineLayout,
     overlay_module: wgpu::ShaderModule,
-    overlay: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
-    /// Frosted panels: the blur passes and the regions drawn, per target format.
+    /// Frosted panels: the blur passes and the regions drawn.
     backdrop_module: wgpu::ShaderModule,
+}
+
+/// A canvas's own pipelines for drawing to a window, made for each target format as it comes.
+#[derive(Default)]
+struct ScreenPipelines {
+    display: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    surround: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    overlay: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    /// The selection's look, per target format and whether it multiplies.
+    selection: HashMap<(wgpu::TextureFormat, bool), wgpu::RenderPipeline>,
     blur: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     frost: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
 }
@@ -1092,7 +1099,8 @@ struct Pipelines {
 pub struct Canvas {
     width: u32,
     height: u32,
-    pipelines: Pipelines,
+    pipelines: std::sync::Arc<Pipelines>,
+    screen: ScreenPipelines,
     layers: HashMap<LayerId, LayerGpu>,
     stroke_view: wgpu::TextureView,
     /// Ping-pong pair; the finished composite is always left in the first.
@@ -1243,7 +1251,7 @@ impl Canvas {
             return Err(GpuError::TooLarge(width, height, max));
         }
         let device = &gpu.device;
-        let pipelines = Pipelines::new(device);
+        let pipelines = gpu.canvas_pipelines();
         let stroke_texture = texture(device, "stroke", width, height, STROKE_FORMAT);
         let stroke_view = stroke_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let composite = [
@@ -1305,6 +1313,7 @@ impl Canvas {
             width,
             height,
             pipelines,
+            screen: ScreenPipelines::default(),
             layers: HashMap::new(),
             stroke_view,
             composite,
@@ -3575,20 +3584,18 @@ impl Canvas {
     ) {
         let srgb = target.format.is_srgb();
         let Pipelines {
-            display,
             display_module,
             display_pipeline_layout,
             display_lut_layout,
-            surround: surround_pipelines,
             surround_module,
             surround_pipeline_layout,
-            overlay,
             overlay_module,
             stamp_layout,
-            selection: selection_pipelines,
             selection_module,
             ..
-        } = &mut self.pipelines;
+        } = &*self.pipelines;
+        let ScreenPipelines { display, surround: surround_pipelines, overlay, selection: selection_pipelines, .. } =
+            &mut self.screen;
         let pipeline = display.entry(target.format).or_insert_with(|| {
             sampled_pipeline(
                 device,
@@ -3779,16 +3786,9 @@ impl Canvas {
         }
         let Some(small) = self.backdrop.as_ref() else { return };
         let srgb = target.format.is_srgb();
-        let Pipelines {
-            display,
-            display_module,
-            display_pipeline_layout,
-            display_lut_layout,
-            backdrop_module,
-            blur,
-            frost,
-            ..
-        } = &mut self.pipelines;
+        let Pipelines { display_module, display_pipeline_layout, display_lut_layout, backdrop_module, .. } =
+            &*self.pipelines;
+        let ScreenPipelines { display, blur, frost, .. } = &mut self.screen;
         let display = display.entry(target.format).or_insert_with(|| {
             sampled_pipeline(
                 device,
@@ -4123,7 +4123,7 @@ impl Canvas {
 }
 
 impl Pipelines {
-    fn new(device: &wgpu::Device) -> Pipelines {
+    pub(crate) fn new(device: &wgpu::Device) -> Pipelines {
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -4561,18 +4561,16 @@ impl Pipelines {
             uniform_layout,
             display_module,
             display_pipeline_layout,
-            display: HashMap::new(),
+
             surround_module,
             surround_pipeline_layout,
-            surround: HashMap::new(),
+
             stamp_layout,
             overlay_module,
-            overlay: HashMap::new(),
+
             selection_module,
-            selection: HashMap::new(),
+
             backdrop_module,
-            blur: HashMap::new(),
-            frost: HashMap::new(),
         }
     }
 }
