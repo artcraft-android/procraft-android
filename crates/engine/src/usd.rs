@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use crate::applz4::raw_block;
-use crate::mesh::{Gathered, MAX_TRIANGLES, Material, Mesh, MeshError, Part};
+use crate::mesh::{Gathered, MAX_TRIANGLES, Material, Mesh, MeshError, Part, PartImages};
 use crate::zip::{ZipReader, ZipWriter};
 
 /// Reads a model from a `.usdz` package: its first layer (binary or text).
@@ -39,12 +39,12 @@ pub fn read_usdc(bytes: &[u8]) -> Result<Mesh, MeshError> {
 
 /// Writes the model as a USDZ package: a text layer (`model.usda`) with the mesh, a subset of its
 /// faces for each part bound to a preview-surface material, and each part's images beside it
-/// (`textures`, by part: its colour, roughness and metalness, each a file name and its PNG).
-pub fn write_usdz(mesh: &Mesh, textures: &[[(String, Vec<u8>); 3]]) -> Vec<u8> {
-    let layer = write_usda(mesh, textures.iter().map(|t| t.each_ref().map(|(name, _)| name.as_str())));
+/// (`textures`, by part).
+pub fn write_usdz(mesh: &Mesh, textures: &[PartImages]) -> Vec<u8> {
+    let layer = write_usda(mesh, textures);
     let mut zip = ZipWriter::new();
     zip.add_aligned("model.usda", layer.as_bytes(), 64);
-    for (name, png) in textures.iter().flatten() {
+    for (name, png) in textures.iter().flat_map(PartImages::files) {
         zip.add_aligned(&format!("textures/{name}"), png, 64);
     }
     zip.finish()
@@ -63,9 +63,8 @@ fn identifier(name: &str, otherwise: &str) -> String {
 }
 
 /// The text layer of [`write_usdz`]: the mesh's corners as its points (each with its normal and
-/// texture coordinate), its triangles, and per part a subset and a material reading `textures`
-/// (its colour, roughness and metalness images).
-fn write_usda<'a>(mesh: &Mesh, textures: impl Iterator<Item = [&'a str; 3]>) -> String {
+/// texture coordinate), its triangles, and per part a subset and a material reading its images.
+fn write_usda(mesh: &Mesh, textures: &[PartImages]) -> String {
     let mut names: Vec<String> = Vec::new();
     for (i, part) in mesh.parts.iter().enumerate() {
         let mut n = identifier(&part.material, "Material");
@@ -124,7 +123,8 @@ fn write_usda<'a>(mesh: &Mesh, textures: impl Iterator<Item = [&'a str; 3]>) -> 
     line(0, String::new());
     line(1, "def Scope \"Materials\"".into());
     line(1, "{".into());
-    for (name, [color, roughness, metallic]) in names.iter().zip(textures) {
+    for (name, images) in names.iter().zip(textures) {
+        let [(color, _), (roughness, _), (metallic, _)] = &images.maps;
         let m = format!("/Model/Materials/{name}");
         line(2, format!("def Material \"{name}\""));
         line(2, "{".into());
@@ -136,14 +136,23 @@ fn write_usda<'a>(mesh: &Mesh, textures: impl Iterator<Item = [&'a str; 3]>) -> 
         line(4, format!("color3f inputs:diffuseColor.connect = <{m}/Texture.outputs:rgb>"));
         line(4, format!("float inputs:roughness.connect = <{m}/Roughness.outputs:r>"));
         line(4, format!("float inputs:metallic.connect = <{m}/Metallic.outputs:r>"));
+        if images.normal.is_some() {
+            line(4, format!("normal3f inputs:normal.connect = <{m}/Normal.outputs:rgb>"));
+        }
+        if images.occlusion.is_some() {
+            line(4, format!("float inputs:occlusion.connect = <{m}/Occlusion.outputs:r>"));
+        }
         line(4, "token outputs:surface".into());
         line(3, "}".into());
-        // the colour as it is, the greys as numbers (their red)
-        for (shader, file, output) in [
-            ("Texture", color, "float3 outputs:rgb"),
-            ("Roughness", roughness, "float outputs:r"),
-            ("Metallic", metallic, "float outputs:r"),
-        ] {
+        // the colour as it is, the greys as numbers (their red), the normals from 0..1 to -1..1
+        let shaders = [
+            Some(("Texture", color, "float3 outputs:rgb")),
+            Some(("Roughness", roughness, "float outputs:r")),
+            Some(("Metallic", metallic, "float outputs:r")),
+            images.normal.as_ref().map(|(file, _)| ("Normal", file, "float3 outputs:rgb")),
+            images.occlusion.as_ref().map(|(file, _)| ("Occlusion", file, "float outputs:r")),
+        ];
+        for (shader, file, output) in shaders.into_iter().flatten() {
             line(0, String::new());
             line(3, format!("def Shader \"{shader}\""));
             line(3, "{".into());
@@ -151,6 +160,10 @@ fn write_usda<'a>(mesh: &Mesh, textures: impl Iterator<Item = [&'a str; 3]>) -> 
             line(4, format!("asset inputs:file = @textures/{file}@"));
             if shader != "Texture" {
                 line(4, "token inputs:sourceColorSpace = \"raw\"".into());
+            }
+            if shader == "Normal" {
+                line(4, "float4 inputs:scale = (2, 2, 2, 1)".into());
+                line(4, "float4 inputs:bias = (-1, -1, -1, 0)".into());
             }
             line(4, format!("float2 inputs:st.connect = <{m}/Coordinates.outputs:result>"));
             line(4, output.into());
@@ -971,6 +984,10 @@ impl<'a> Stage<'a> {
             Some((file, component)) => (m.metallic_map, m.metallic_component) = (Some(file), component),
             None => m.metallic = self.value(shader, "inputs:metallic").and_then(|v| v.number()).map(|v| v as f32),
         }
+        m.normal_map = self.connection(&input("normal")).and_then(|t| self.texture_file(&t)).map(|(file, _)| file);
+        if let Some((file, component)) = self.connection(&input("occlusion")).and_then(|t| self.texture_file(&t)) {
+            (m.occlusion_map, m.occlusion_component) = (Some(file), component);
+        }
         m
     }
 
@@ -1706,8 +1723,10 @@ mod tests {
             parts: vec![Part { material: "1 coat".into(), first: 0, count: 1 }],
             ..Mesh::default()
         };
-        let images =
-            [("coat.png".into(), vec![7; 5]), ("rough.png".into(), vec![8; 5]), ("metal.png".into(), vec![9; 5])];
+        let images = PartImages {
+            maps: [("coat.png".into(), vec![7; 5]), ("rough.png".into(), vec![8; 5]), ("metal.png".into(), vec![9; 5])],
+            ..PartImages::default()
+        };
         let bytes = write_usdz(&mesh, &[images]);
         let zip = ZipReader::new(&bytes).unwrap();
         let names = ["model.usda", "textures/coat.png", "textures/rough.png", "textures/metal.png"];

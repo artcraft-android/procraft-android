@@ -27,7 +27,7 @@ struct View {
 
 struct Part {
     base: vec4<f32>,
-    // roughness and metallic
+    // roughness and metallic, and whether there are a normal map and an occlusion map
     material: vec4<f32>,
 }
 
@@ -42,6 +42,9 @@ struct Part {
 // roughness and metalness painted over the material's (premultiplied greys)
 @group(1) @binding(3) var roughness_map: texture_2d<f32>;
 @group(1) @binding(4) var metallic_map: texture_2d<f32>;
+// the model's own normals (in the texture's tangent space) and ambient occlusion, if it has them
+@group(1) @binding(5) var normal_map: texture_2d<f32>;
+@group(1) @binding(6) var occlusion_map: texture_2d<f32>;
 
 const PI: f32 = 3.14159265;
 
@@ -118,8 +121,30 @@ fn finish(color: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(rgb, 1.0);
 }
 
+// The surface's normal bent by the normal map's `t` (0..1 RGB): along the texture's u and v as
+// they run across the surface here, from how position and texture coordinate change between
+// neighbouring pixels.
+fn bent(n: vec3<f32>, t: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, duv1: vec2<f32>, duv2: vec2<f32>) -> vec3<f32> {
+    let p2 = cross(dp2, n);
+    let p1 = cross(n, dp1);
+    let tu = p2 * duv1.x + p1 * duv2.x;
+    let tv = p2 * duv1.y + p1 * duv2.y;
+    let scale = inverseSqrt(max(max(dot(tu, tu), dot(tv, tv)), 1e-20));
+    let m = t * 2.0 - 1.0;
+    return normalize(tu * scale * m.x + tv * scale * m.y + n * m.z);
+}
+
 @fragment
 fn fs_main(i: Out) -> @location(0) vec4<f32> {
+    // how the surface and the file's texture coordinates run here (taken before any branch),
+    // across the target and up it (its rows run down)
+    let file_uv = vec2<f32>(i.uv.x, 1.0 - i.uv.y);
+    let dp1 = dpdx(i.eye);
+    let dp2 = -dpdy(i.eye);
+    let duv1 = dpdx(file_uv);
+    let duv2 = -dpdy(file_uv);
+    let bump = textureSample(normal_map, albedo_smp, i.uv).rgb;
+    let occlusion = textureSample(occlusion_map, albedo_smp, i.uv).r;
     let painted = textureSample(albedo, albedo_smp, i.uv);
     let color = painted.rgb + part.base.rgb * (1.0 - painted.a);
     let albedo_lin = pow(max(color, vec3<f32>(0.0)), vec3<f32>(2.2));
@@ -133,6 +158,9 @@ fn fs_main(i: Out) -> @location(0) vec4<f32> {
     // a normal turned away from the eye (the far side of an open surface, or a smooth one's
     // outline) mirrored across the view plane: facing the eye, its slant kept
     var n = normalize(i.normal);
+    if (part.material.z > 0.5) {
+        n = bent(n, bump, dp1, dp2, duv1, duv2);
+    }
     let away = dot(n, v);
     if (away < 0.0) {
         n = normalize(n - 2.0 * away * v);
@@ -152,7 +180,9 @@ fn fs_main(i: Out) -> @location(0) vec4<f32> {
     let split = textureSample(brdf, brdf_smp, vec2<f32>(nv, r)).rg;
     let fr = f0 + (max(vec3<f32>(1.0 - r), f0) - f0) * pow(1.0 - nv, 5.0);
     let ambient = (1.0 - fr) * (1.0 - metallic) * albedo_lin * irradiance(n) + reflected * (fr * split.x + split.y);
-    return finish(lo + ambient);
+    // the environment's light kept out of creases
+    let reach = select(1.0, occlusion, part.material.w > 0.5);
+    return finish(lo + ambient * reach);
 }
 
 // ---- the backdrop: the environment's irradiance seen past the model -------------------------

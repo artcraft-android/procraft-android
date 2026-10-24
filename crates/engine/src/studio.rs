@@ -204,7 +204,6 @@ impl Brush {
             | "brightness_tilt_angle"
             | "secondary_tilt_angle"
             | "jitter_lateral_tilt_angle"
-            | "jitter_linear_tilt_angle"
             | "count_tilt_angle"
             | "grain_depth_tilt_angle"
             | "stamp_hue_tilt_angle"
@@ -213,6 +212,11 @@ impl Brush {
             | "stamp_darkness_tilt_angle"
             | "stamp_secondary_tilt_angle"
             | "attack_tilt_angle" => self.extra_or(key, self.tilt.angle / (PI / 2.0)),
+            // the linear jitter's tilt switch and angle, where a brush has none, are the lateral's
+            "jitter_linear_tilt" | "jitter_linear_tilt_angle" => {
+                let lateral = key.replace("linear", "lateral");
+                self.extra.get(key).copied().unwrap_or_else(|| self.setting(&lateral))
+            }
             "tilt_opacity" => self.tilt.opacity,
             "tilt_size" => self.tilt.size,
             "max_size" => self.size_control(self.max_size),
@@ -341,6 +345,25 @@ impl Brush {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_linear_jitters_tilt_follows_the_laterals_unless_it_has_its_own() {
+        let mut b = Brush::round_pen();
+        b.set_setting("tilt_angle", 0.2);
+        // neither set: off, both angles the tilt angle
+        assert_eq!(b.setting("jitter_linear_tilt"), 0.0);
+        assert!((b.setting("jitter_linear_tilt_angle") - 0.2).abs() < 1e-6);
+        // the lateral's switch and angle carry over
+        b.set_setting("jitter_lateral_tilt", 1.0);
+        b.set_setting("jitter_lateral_tilt_angle", 0.6);
+        assert_eq!(b.setting("jitter_linear_tilt"), 1.0);
+        assert!((b.setting("jitter_linear_tilt_angle") - 0.6).abs() < 1e-6);
+        // until the linear has its own
+        b.set_setting("jitter_linear_tilt", 0.0);
+        b.set_setting("jitter_linear_tilt_angle", 0.3);
+        assert_eq!(b.setting("jitter_linear_tilt"), 0.0);
+        assert!((b.setting("jitter_linear_tilt_angle") - 0.3).abs() < 1e-6);
+    }
 
     #[test]
     fn controls_round_trip() {

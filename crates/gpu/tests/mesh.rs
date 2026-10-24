@@ -505,3 +505,70 @@ fn a_metalness_painted_over_the_material_changes_how_it_shades() {
     assert_eq!(pixel(&draw(&gpu, &mut view), SIDE / 2, SIDE / 2), a);
     assert_eq!(gpu.errors(), 0);
 }
+
+#[test]
+fn a_models_own_normal_and_occlusion_maps_shade_it() {
+    use procraft_gpu::SurfaceMap;
+    let Some(gpu) = gpu() else { return };
+    let square = "v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nf 1/1 2/2 3/3 4/4\n";
+    let mesh = read_obj(square, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 4, wgpu::TextureFormat::Rgba8Unorm);
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 6.0, fov: 0.9 };
+    let middle = |view: &mut MeshView| pixel(&draw(&gpu, view), SIDE / 2, SIDE / 2);
+    let near = |a: [u8; 4], b: [u8; 4]| a.iter().zip(&b).all(|(x, y)| x.abs_diff(*y) <= 3);
+    let plain = middle(&mut view);
+    let filled = |rgba: [u8; 4]| rgba.repeat(16);
+    // a flat normal map changes nothing; one leaning along u does
+    view.set_surface_map(&gpu, 0, SurfaceMap::Normal, Some((4, &filled([128, 128, 255, 255]))));
+    let flat = middle(&mut view);
+    assert!(near(flat, plain), "{flat:?} {plain:?}");
+    view.set_surface_map(&gpu, 0, SurfaceMap::Normal, Some((4, &filled([240, 128, 160, 255]))));
+    let leaning = middle(&mut view);
+    assert!(!near(leaning, plain), "{leaning:?} {plain:?}");
+    view.set_surface_map(&gpu, 0, SurfaceMap::Normal, None);
+    assert!(near(middle(&mut view), plain));
+    // full occlusion keeps the environment's light off; none leaves it as it was
+    view.set_surface_map(&gpu, 0, SurfaceMap::Occlusion, Some((4, &filled([0, 0, 0, 255]))));
+    let shut = middle(&mut view);
+    assert!(shut[0] + 10 < plain[0], "{shut:?} {plain:?}");
+    view.set_surface_map(&gpu, 0, SurfaceMap::Occlusion, Some((4, &filled([255, 255, 255, 255]))));
+    assert!(near(middle(&mut view), plain));
+    // a map of the wrong size is left out
+    view.set_surface_map(&gpu, 0, SurfaceMap::Occlusion, Some((4, &[0; 8])));
+    assert!(near(middle(&mut view), plain));
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn a_normal_map_leans_the_surface_along_its_texture_coordinates() {
+    use procraft_gpu::{Light, SurfaceMap};
+    let Some(gpu) = gpu() else { return };
+    // a square facing the camera, u running to its right (+x) and v up (+y)
+    let square = "v -1 -1 0
+v 1 -1 0
+v 1 1 0
+v -1 1 0
+vt 0 0
+vt 1 0
+vt 1 1
+vt 0 1
+f 1/1 2/2 3/3 4/4
+";
+    let mesh = read_obj(square, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 4, wgpu::TextureFormat::Rgba8Unorm);
+    view.set_material(&gpu, 0, 1.0, 0.0);
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 6.0, fov: 0.9 };
+    let mut lit = |place: [f32; 3], rgb: [u8; 3]| {
+        view.lights = vec![Light { place, color: [1.0; 3], intensity: 0.8 }];
+        let map = [rgb[0], rgb[1], rgb[2], 255].repeat(16);
+        view.set_surface_map(&gpu, 0, SurfaceMap::Normal, Some((4, &map)));
+        i32::from(pixel(&draw(&gpu, &mut view), SIDE / 2, SIDE / 2)[0])
+    };
+    // lit from the right (+x): leaning along +u turns it toward the light, along -u away
+    let (toward, away) = (lit([6.0, 0.0, 1.0], [218, 128, 218]), lit([6.0, 0.0, 1.0], [38, 128, 218]));
+    assert!(toward > away + 20, "lit from +x: {toward} leaning +u, {away} leaning -u");
+    // lit from above (+y): the same along v
+    let (toward, away) = (lit([0.0, 6.0, 1.0], [128, 218, 218]), lit([0.0, 6.0, 1.0], [128, 38, 218]));
+    assert!(toward > away + 20, "lit from +y: {toward} leaning +v, {away} leaning -v");
+    assert_eq!(gpu.errors(), 0);
+}

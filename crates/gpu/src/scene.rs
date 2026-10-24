@@ -102,8 +102,17 @@ struct ProjectUniform {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PartUniform {
     base: [f32; 4],
-    /// Roughness and metalness.
+    /// Roughness and metalness, and whether it has a normal map and an occlusion map (1 or 0).
     material: [f32; 4],
+}
+
+/// The maps a model's file brings for a part and that are shown as they are (not painted).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceMap {
+    /// Tangent-space normals (RGB, 0.5 the middle; green up the texture's v).
+    Normal,
+    /// Ambient occlusion: how much of the environment's light reaches each point (grey).
+    Occlusion,
 }
 
 /// Where the camera is: turned by `rotation` about `target`, `distance` from it, seeing `fov`
@@ -192,8 +201,11 @@ struct PartGpu {
     texture: wgpu::Texture,
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
-    /// What it shows: its albedo, and its roughness and metalness painted over the material's.
-    views: [wgpu::TextureView; 3],
+    /// What it shows: its albedo, its roughness and metalness painted over the material's, and
+    /// its normal and occlusion maps.
+    views: [wgpu::TextureView; 5],
+    /// The normal and occlusion maps, once given.
+    maps: [Option<wgpu::Texture>; 2],
     /// The albedo with its smaller levels, once given, so a far or slanting surface shows it
     /// filtered rather than speckled.
     mips: Option<(wgpu::Texture, Vec<wgpu::TextureView>, wgpu::TextureView)>,
@@ -207,7 +219,9 @@ pub struct MeshView {
     pipeline: wgpu::RenderPipeline,
     view_buffer: wgpu::Buffer,
     view_bind: wgpu::BindGroup,
-    depth: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// A depth buffer for each size the model was last drawn at (the window, and small under
+    /// frosted panels).
+    depths: Vec<(wgpu::Texture, wgpu::TextureView)>,
     texture_size: u32,
     part_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -518,6 +532,8 @@ impl MeshView {
                 },
                 map_entry(3),
                 map_entry(4),
+                map_entry(5),
+                map_entry(6),
             ],
         });
         // nothing painted in a channel: the material's own value shows
@@ -595,7 +611,7 @@ impl MeshView {
                     }),
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
-                let views = [view, blank.clone(), blank.clone()];
+                let views = [view, blank.clone(), blank.clone(), blank.clone(), blank.clone()];
                 let bind = part_bind(device, &part_layout, &sampler, &views, &uniform);
                 PartGpu {
                     first: (p.first * 3) as u32,
@@ -604,6 +620,7 @@ impl MeshView {
                     uniform,
                     bind,
                     views,
+                    maps: [None, None],
                     mips: None,
                 }
             })
@@ -657,7 +674,7 @@ impl MeshView {
             pipeline,
             view_buffer,
             view_bind,
-            depth: None,
+            depths: Vec::new(),
             texture_size: side,
             part_layout,
             sampler,
@@ -800,8 +817,47 @@ impl MeshView {
     /// it covers (any size); none, the material's own everywhere.
     pub fn set_channel_view(&mut self, gpu: &Gpu, part: usize, channel: usize, map: Option<&wgpu::TextureView>) {
         let Some(p) = self.parts.get_mut(part) else { return };
-        let Some(slot) = p.views.get_mut(channel).filter(|_| channel > 0) else { return };
+        let Some(slot) = p.views.get_mut(channel).filter(|_| channel == 1 || channel == 2) else { return };
         *slot = map.unwrap_or(&self.blank).clone();
+        p.bind = part_bind(&gpu.device, &self.part_layout, &self.sampler, &p.views, &p.uniform);
+    }
+
+    /// Shades part `part` by its `kind` of map from now on: `rgba` (`side` square, RGBA8); none,
+    /// without one.
+    pub fn set_surface_map(&mut self, gpu: &Gpu, part: usize, kind: SurfaceMap, map: Option<(u32, &[u8])>) {
+        let Some(p) = self.parts.get_mut(part) else { return };
+        let k = match kind {
+            SurfaceMap::Normal => 0,
+            SurfaceMap::Occlusion => 1,
+        };
+        let texture =
+            map.filter(|(side, rgba)| *side > 0 && rgba.len() == (*side as usize).pow(2) * 4).map(|(side, rgba)| {
+                gpu.device.create_texture_with_data(
+                    &gpu.queue,
+                    &wgpu::TextureDescriptor {
+                        label: Some("mesh surface map"),
+                        size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    },
+                    wgpu::util::TextureDataOrder::LayerMajor,
+                    rgba,
+                )
+            });
+        let view = texture
+            .as_ref()
+            .map_or_else(|| self.blank.clone(), |t| t.create_view(&wgpu::TextureViewDescriptor::default()));
+        let shown = if texture.is_some() { 1.0f32 } else { 0.0 };
+        if let (Some(v), Some(slot)) = (p.views.get_mut(3 + k), p.maps.get_mut(k)) {
+            *v = view;
+            *slot = texture;
+        }
+        // its flag: the material's third or fourth number
+        gpu.queue.write_buffer(&p.uniform, 24 + 4 * k as u64, bytemuck::bytes_of(&shown));
         p.bind = part_bind(&gpu.device, &self.part_layout, &self.sampler, &p.views, &p.uniform);
     }
 
@@ -883,7 +939,7 @@ impl MeshView {
     /// Part `part`'s roughness and metalness (0..1).
     pub fn set_material(&mut self, gpu: &Gpu, part: usize, roughness: f32, metallic: f32) {
         if let Some(p) = self.parts.get(part) {
-            let m = [roughness.clamp(0.0, 1.0), metallic.clamp(0.0, 1.0), 0.0, 0.0];
+            let m = [roughness.clamp(0.0, 1.0), metallic.clamp(0.0, 1.0)];
             gpu.queue.write_buffer(&p.uniform, 16, bytemuck::bytes_of(&m));
         }
     }
@@ -1133,8 +1189,10 @@ impl MeshView {
         let light_worlds: Vec<[f32; 3]> = self.lights.iter().take(MOST_LIGHTS).map(|l| self.light_world(l)).collect();
         let shown_by_part: Vec<Vec<std::ops::Range<u32>>> =
             (0..self.parts.len()).map(|i| self.shown_ranges(i)).collect();
-        let stale = self.depth.as_ref().is_none_or(|(t, _)| t.width() != width || t.height() != height);
-        if stale {
+        let found = self.depths.iter().position(|(t, _)| t.width() == width && t.height() == height);
+        let at = if let Some(i) = found {
+            i
+        } else {
             let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("mesh depth"),
                 size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -1146,9 +1204,13 @@ impl MeshView {
                 view_formats: &[],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.depth = Some((texture, view));
-        }
-        let Some((_, depth_view)) = &self.depth else { return };
+            if self.depths.len() >= 2 {
+                self.depths.remove(0);
+            }
+            self.depths.push((texture, view));
+            self.depths.len() - 1
+        };
+        let Some((_, depth_view)) = self.depths.get(at) else { return };
         let aspect = width as f32 / height as f32;
         let view = look_at(orbit.eye(), orbit.target, orbit.up());
         // the lights stand about the model in the world, seen from the camera
@@ -1270,10 +1332,10 @@ fn part_bind(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
-    views: &[wgpu::TextureView; 3],
+    views: &[wgpu::TextureView; 5],
     uniform: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
-    let [albedo, roughness, metallic] = views;
+    let [albedo, roughness, metallic, normal, occlusion] = views;
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("mesh part"),
         layout,
@@ -1283,6 +1345,8 @@ fn part_bind(
             wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(roughness) },
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(metallic) },
+            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(normal) },
+            wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(occlusion) },
         ],
     })
 }

@@ -289,6 +289,10 @@ pub struct Backdrop<'a> {
     pub sigma: f32,
 }
 
+/// Draws a scene for [`Canvas::frost_over`] into the view given (cleared first), at the size
+/// given.
+pub type SmallScene<'s> = &'s mut dyn FnMut(&mut wgpu::CommandEncoder, &wgpu::TextureView, (u32, u32));
+
 /// The backdrop's blur is this many texels wide (sigma) where it is worked out: the scene is
 /// drawn that much smaller.
 const BACKDROP_TEXELS: f32 = 6.0;
@@ -2619,7 +2623,7 @@ impl Canvas {
         if let Some(target) = target {
             self.display(device, &mut encoder, &mut uniforms, &target, predicted);
             if let Some(backdrop) = target.backdrop.filter(|b| !b.regions.is_empty() && b.sigma > 0.0) {
-                self.frost(device, &mut encoder, &mut uniforms, &target, backdrop);
+                self.frost(device, &mut encoder, &mut uniforms, &target, backdrop, None);
             }
         }
         if !uniforms.data.is_empty() {
@@ -3768,8 +3772,46 @@ impl Canvas {
         pass.draw(0..6, 0..predicted.end - predicted.start);
     }
 
-    /// Frosted panels: the canvas and its surround drawn again, small, blurred, and drawn into
-    /// each region of the target.
+    /// Frosted panels over a picture something else drew on `target` (a model): `scene` draws it
+    /// again into the view it is given (of the target's format, cleared, the size given), small,
+    /// and that is blurred and drawn into each region of the target.
+    #[allow(clippy::too_many_arguments)]
+    pub fn frost_over(
+        &mut self,
+        gpu: &Gpu,
+        target: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        size: (u32, u32),
+        surround: [f32; 3],
+        backdrop: Backdrop<'_>,
+        scene: SmallScene<'_>,
+    ) {
+        if backdrop.regions.is_empty() || backdrop.sigma <= 0.0 {
+            return;
+        }
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frost") });
+        let mut uniforms = UniformData::default();
+        let target = Target {
+            view: target,
+            format,
+            size,
+            to_screen: Affine::IDENTITY,
+            surround,
+            grid: None,
+            selection: None,
+            backdrop: None,
+            convert: None,
+            lut: None,
+        };
+        self.frost(&gpu.device, &mut encoder, &mut uniforms, &target, backdrop, Some(scene));
+        if !uniforms.data.is_empty() {
+            gpu.queue.write_buffer(&self.uniform_buffer, 0, &uniforms.data);
+        }
+        gpu.queue.submit([encoder.finish()]);
+    }
+
+    /// Frosted panels: the canvas and its surround (or what `other` draws) drawn again, small,
+    /// blurred, and drawn into each region of the target.
     fn frost(
         &mut self,
         device: &wgpu::Device,
@@ -3777,6 +3819,7 @@ impl Canvas {
         uniforms: &mut UniformData,
         target: &Target<'_>,
         backdrop: Backdrop<'_>,
+        other: Option<SmallScene<'_>>,
     ) {
         let k = (backdrop.sigma / BACKDROP_TEXELS).floor().clamp(1.0, 16.0);
         let size = ((target.size.0 as f32 / k).ceil() as u32, (target.size.1 as f32 / k).ceil() as u32);
@@ -3855,7 +3898,9 @@ impl Canvas {
         let surround = target.surround.map(|c| if srgb { srgb_to_linear(c) } else { c });
         let clear =
             wgpu::Color { r: f64::from(surround[0]), g: f64::from(surround[1]), b: f64::from(surround[2]), a: 1.0 };
-        {
+        if let Some(draw) = other {
+            draw(encoder, &small.views[0], size);
+        } else {
             let mut pass = render_pass(encoder, "backdrop scene", &small.views[0], wgpu::LoadOp::Clear(clear));
             pass.set_pipeline(display);
             pass.set_bind_group(0, &self.display_bind, &[]);

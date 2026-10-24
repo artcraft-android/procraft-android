@@ -100,16 +100,26 @@ fun Popover(
     val paint = fill ?: if (backdrops != null) Pc.PopoverFrost else Pc.PopoverFill
     val key = remember { Any() }
     val density = LocalDensity.current
-    if (backdrops != null) DisposableEffect(backdrops) { onDispose { backdrops.remove(key) } }
+    // the blur grows and fades with the panel: its body as drawn (already grown), and how much
+    // it shows
+    val look = LocalPanelLook.current
+    var body by remember { mutableStateOf<FloatArray?>(null) }
+    if (backdrops != null) {
+        DisposableEffect(backdrops) { onDispose { backdrops.remove(key) } }
+        // read here, so its being placed (or moved) comes back through here
+        val placed = body
+        SideEffect { placed?.let { backdrops.put(key, it + look.alpha) } }
+    }
     val frost = if (backdrops == null) {
         Modifier
     } else {
         Modifier.onGloballyPositioned { c ->
             val at = c.positionInWindow()
+            val k = look.scale
             val (arrowH, radius) = with(density) { Pc.ArrowHeight.toPx() to corner.toPx() }
             val (l, t, r) = Triple(if (side == ArrowSide.LEFT) arrowH else 0f, if (side == ArrowSide.TOP) arrowH else 0f, if (side == ArrowSide.RIGHT) arrowH else 0f)
             val b = if (side == ArrowSide.BOTTOM) arrowH else 0f
-            backdrops.put(key, floatArrayOf(at.x + l, at.y + t, at.x + c.size.width - r, at.y + c.size.height - b, radius))
+            body = floatArrayOf(at.x + l * k, at.y + t * k, at.x + (c.size.width - r) * k, at.y + (c.size.height - b) * k, radius * k)
         }
     }
     val sideways = side == ArrowSide.LEFT || side == ArrowSide.RIGHT

@@ -80,10 +80,19 @@ fn damaged_files_are_refused_without_panicking() {
 #[test]
 fn a_written_package_reads_back() {
     let mesh = read_usdz(&model("cube.usdz")).unwrap();
-    let textures: Vec<[(String, Vec<u8>); 3]> = mesh
+    // the lid has a normal map and ambient occlusion too
+    let textures: Vec<procraft_engine::mesh::PartImages> = mesh
         .parts
         .iter()
-        .map(|p| ["color", "roughness", "metallic"].map(|c| (format!("{}-{c}.png", p.material), vec![0; 4])))
+        .map(|p| {
+            let file = |c: &str| (format!("{}-{c}.png", p.material), vec![0; 4]);
+            let extra = p.material == "Lid";
+            procraft_engine::mesh::PartImages {
+                maps: ["color", "roughness", "metallic"].map(file),
+                normal: extra.then(|| file("normal")),
+                occlusion: extra.then(|| file("ambient_occlusion")),
+            }
+        })
         .collect();
     let again = read_usdz(&procraft_engine::usd::write_usdz(&mesh, &textures)).unwrap();
     assert_eq!(again.triangles.len(), mesh.triangles.len());
@@ -97,6 +106,11 @@ fn a_written_package_reads_back() {
     assert_eq!(lid.roughness_map.as_deref(), Some("textures/Lid-roughness.png"));
     assert_eq!(lid.metallic_map.as_deref(), Some("textures/Lid-metallic.png"));
     assert_eq!((lid.roughness_component, lid.metallic_component), (Some(0), Some(0)));
+    assert_eq!(lid.normal_map.as_deref(), Some("textures/Lid-normal.png"));
+    assert_eq!(lid.occlusion_map.as_deref(), Some("textures/Lid-ambient_occlusion.png"));
+    assert_eq!(lid.occlusion_component, Some(0));
+    let body = &again.materials[0];
+    assert_eq!((body.normal_map.as_deref(), body.occlusion_map.as_deref()), (None, None));
     assert_eq!(again.bounds(), mesh.bounds());
 }
 

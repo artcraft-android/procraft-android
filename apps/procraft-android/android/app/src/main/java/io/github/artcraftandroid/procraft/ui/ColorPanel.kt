@@ -163,7 +163,8 @@ private class BrushColor(private val vm: CanvasViewModel) : ColorPick {
 
 /** A colour of its own, starting at [rgb]; [onChange] hears every change. Greys keep their hue. */
 class HeldColor(rgb: Int, private val onChange: (Int) -> Unit) : ColorPick {
-    override var hue by mutableFloatStateOf(0f)
+    // a grey has no hue of its own: it opens at 180 degrees, as measured
+    override var hue by mutableFloatStateOf(0.5f)
         private set
     override var saturation by mutableFloatStateOf(0f)
         private set

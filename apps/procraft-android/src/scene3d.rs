@@ -15,7 +15,7 @@ use std::sync::Arc;
 use procraft_engine::document::{Document, LayerId, LayerKind};
 use procraft_engine::geom::{IRect, Vec2};
 use procraft_engine::input::Sample;
-use procraft_engine::mesh::{MAX_TRIANGLES, Mesh, MeshError, read_obj};
+use procraft_engine::mesh::{MAX_TRIANGLES, Mesh, MeshError, PartImages, read_obj};
 use procraft_engine::stroke::StrokeBuilder;
 use procraft_engine::usd::{read_usd, read_usdc, read_usdz};
 use procraft_engine::view::View;
@@ -161,6 +161,10 @@ pub(crate) struct Scene {
     channel: usize,
     /// Each part's channel maps as last given to the view (as [`Scene::filtered`]).
     channel_shown: Vec<[Option<(u64, bool)>; 2]>,
+    /// Each part's normal and occlusion maps from the model's file (RGBA8, the texture size
+    /// square), shown as they are; and whether the view has them as they are now.
+    surface_maps: Vec<[Option<Arc<Vec<u8>>>; 2]>,
+    surface_shown: bool,
     /// A stroke is being carried onto the model each frame; `ending`: once more, then it ends.
     pub(crate) stroking: bool,
     ending: bool,
@@ -209,6 +213,8 @@ impl Scene {
             channels: Vec::new(),
             channel: 0,
             channel_shown: Vec::new(),
+            surface_maps: Vec::new(),
+            surface_shown: false,
             stroking: false,
             ending: false,
         }
@@ -407,7 +413,8 @@ impl CanvasSession {
     }
 
     /// The images the model's file brings for its texture sets (a USDZ's packed images): to be
-    /// decoded and given back with [`CanvasSession::set_model_texture`].
+    /// decoded and given back with [`CanvasSession::set_model_texture`]. Its normal and occlusion
+    /// maps come as channels 3 and 4.
     pub fn model_texture_files(&self) -> Vec<ModelTextureFile> {
         let st = self.shared.lock();
         let Some(scene) = st.scene.as_ref() else { return Vec::new() };
@@ -422,6 +429,8 @@ impl CanvasSession {
                 (0, m.color_map.as_deref(), None),
                 (1, m.roughness_map.as_deref(), m.roughness_component),
                 (2, m.metallic_map.as_deref(), m.metallic_component),
+                (3, m.normal_map.as_deref(), None),
+                (4, m.occlusion_map.as_deref(), m.occlusion_component),
             ];
             for (channel, map, component) in maps {
                 let Some(bytes) = map.and_then(|f| packed_file(&zip, f)) else { continue };
@@ -437,16 +446,26 @@ impl CanvasSession {
     }
 
     /// Puts `rgba` (premultiplied, the texture size square) into texture set `texture_set`'s
-    /// Base Layer in `channel` (0 colour, 1 roughness, 2 metalness), with no undo step; false if
-    /// it doesn't fit.
+    /// Base Layer in `channel` (0 colour, 1 roughness, 2 metalness), with no undo step; or, as
+    /// channel 3 or 4, makes it the set's normal or occlusion map. False if it doesn't fit.
     pub fn set_model_texture(&self, texture_set: u32, channel: u32, rgba: Vec<u8>) -> bool {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let (set, channel) = (texture_set as usize, channel as usize);
         let Some(scene) = st.scene.as_mut() else { return false };
         let side = scene.texture_size;
-        if channel > 2 || set >= scene.mesh.parts.len() || rgba.len() != (side as usize) * (side as usize) * 4 {
+        if channel > 4 || set >= scene.mesh.parts.len() || rgba.len() != (side as usize) * (side as usize) * 4 {
             return false;
+        }
+        // the maps shown as they are
+        if channel >= 3 {
+            scene.surface_maps.resize(scene.mesh.parts.len(), [None, None]);
+            if let Some(slot) = scene.surface_maps.get_mut(set).and_then(|m| m.get_mut(channel - 3)) {
+                *slot = Some(Arc::new(rgba));
+            }
+            scene.surface_shown = false;
+            self.shared.frame(st);
+            return true;
         }
         // the colour's layers say which is the Base Layer
         let colour_is_session = set == scene.current && scene.channel == 0;
@@ -659,20 +678,51 @@ impl CanvasSession {
     pub fn export_model_obj(&self, path: String) -> Result<(), MobileError> {
         let files = self.model_files()?;
         let base = &files.base;
-        let materials: Vec<(String, [String; 3])> =
-            files.names.iter().map(|n| (n.clone(), MODEL_CHANNEL_FILES.map(|c| format!("{n}-{c}.png")))).collect();
+        let materials: Vec<(&str, &PartImages)> = files.names.iter().map(String::as_str).zip(&files.images).collect();
         let mut zip = procraft_engine::zip::ZipWriter::new();
         zip.add(
             &format!("{base}.obj"),
             procraft_engine::mesh::write_obj(&files.mesh, &format!("{base}.mtl"), &files.names).as_bytes(),
         );
         zip.add(&format!("{base}.mtl"), procraft_engine::mesh::write_mtl(&materials).as_bytes());
-        for ((_, images), pngs) in materials.iter().zip(&files.pngs) {
-            for (file, png) in images.iter().zip(pngs) {
-                zip.add(file, png);
-            }
+        for (file, png) in files.images.iter().flat_map(PartImages::files) {
+            zip.add(file, png);
         }
         let bytes = zip.finish();
+        write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("exporting the model", e)))
+    }
+
+    /// Writes the model as a glTF binary at `path`, for a viewer that shows it in the room: as
+    /// for [`CanvasSession::export_model_usdz`], each set's roughness and metalness in one image
+    /// (green and blue).
+    pub fn export_model_glb(&self, path: String) -> Result<(), MobileError> {
+        let ModelPixels { mesh, names, pixels, maps, side, .. } = self.model_pixels()?;
+        let png = |px: &[u8]| crate::project::rgba_png(side, side, px);
+        let encoded: Vec<[Vec<u8>; 4]> = pixels
+            .iter()
+            .enumerate()
+            .map(|(part, [colour, roughness, metallic])| {
+                let mut both = roughness.clone();
+                for (p, m) in both.as_chunks_mut::<4>().0.iter_mut().zip(metallic.as_chunks::<4>().0) {
+                    *p = [255, p[1], m[2], 255];
+                }
+                let [normal, occlusion] = maps.get(part).cloned().unwrap_or_default();
+                let map = |m: Option<Arc<Vec<u8>>>| m.map_or_else(Vec::new, |px| png(&px));
+                [png(colour), png(&both), map(normal), map(occlusion)]
+            })
+            .collect();
+        let parts: Vec<procraft_engine::gltf::GlbPart<'_>> = names
+            .iter()
+            .zip(&encoded)
+            .map(|(name, [colour, both, normal, occlusion])| procraft_engine::gltf::GlbPart {
+                name,
+                color: colour,
+                metallic_roughness: both,
+                normal: (!normal.is_empty()).then_some(normal.as_slice()),
+                occlusion: (!occlusion.is_empty()).then_some(occlusion.as_slice()),
+            })
+            .collect();
+        let bytes = procraft_engine::gltf::write_glb(&mesh, &parts);
         write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("exporting the model", e)))
     }
 
@@ -680,31 +730,28 @@ impl CanvasSession {
     /// for each texture set, reading its images (as for [`CanvasSession::export_model_obj`]).
     pub fn export_model_usdz(&self, path: String) -> Result<(), MobileError> {
         let files = self.model_files()?;
-        let textures: Vec<[(String, Vec<u8>); 3]> = files
-            .names
-            .iter()
-            .zip(files.pngs)
-            .map(|(n, [color, roughness, metallic])| {
-                let [c, r, m] = MODEL_CHANNEL_FILES.map(|c| format!("{n}-{c}.png"));
-                [(c, color), (r, roughness), (m, metallic)]
-            })
-            .collect();
-        let bytes = procraft_engine::usd::write_usdz(&files.mesh, &textures);
+        let bytes = procraft_engine::usd::write_usdz(&files.mesh, &files.images);
         write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("exporting the model", e)))
     }
 }
 
 #[uniffi::export]
 impl CanvasSession {
-    /// Each texture set's colour, roughness and metalness as PNGs in folder `dir` (made if
-    /// missing; as for [`CanvasSession::export_model_obj`]); returns the files' paths.
+    /// Each texture set's colour, roughness and metalness (and its normal and occlusion maps, if
+    /// it has them) as PNGs in folder `dir` (made if missing; as for
+    /// [`CanvasSession::export_model_obj`]); returns the files' paths.
     pub fn export_model_textures(&self, dir: String) -> Result<Vec<String>, MobileError> {
         let files = self.model_files()?;
         let dir = Path::new(&dir);
         fs::create_dir_all(dir).map_err(|e| file_error("making the folder", e))?;
         let mut out = Vec::new();
-        for (name, pngs) in files.names.iter().zip(&files.pngs) {
-            for (channel, png) in SHARED_CHANNEL_NAMES.iter().zip(pngs) {
+        for (name, images) in files.names.iter().zip(&files.images) {
+            let [colour, roughness, metallic] = images.maps.each_ref().map(|(_, png)| png);
+            let named = [("Color", colour), ("Roughness", roughness), ("Metallic", metallic)]
+                .into_iter()
+                .chain(images.normal.iter().map(|(_, png)| ("Normal", png)))
+                .chain(images.occlusion.iter().map(|(_, png)| ("AmbientOcclusion", png)));
+            for (channel, png) in named {
                 let path = dir.join(format!("{name}-{channel}.png"));
                 write_atomically(&path, |p| fs::write(p, png).map_err(|e| file_error("exporting the textures", e)))?;
                 out.push(path.to_string_lossy().into_owned());
@@ -888,30 +935,35 @@ fn turntable_frames(turntable: Turntable, fps: f32) -> u32 {
 }
 
 /// What a model's exports are made of: the model, its texture sets' names (safe as file names,
-/// different from each other), each set's colour, roughness and metalness as PNGs (over the
-/// part's own, as the model shows them), and the artwork's name.
+/// different from each other), each set's images as PNGs (its colour, roughness and metalness
+/// over the part's own, as the model shows them, and its normal and occlusion maps) named as
+/// models name them, and the artwork's name.
 struct ModelFiles {
     mesh: Mesh,
     names: Vec<String>,
-    pngs: Vec<[Vec<u8>; 3]>,
+    images: Vec<PartImages>,
     base: String,
 }
 
-/// The channels as a model's exports name their images (`<set>-<channel>.png`), and as the
-/// shared textures name them.
+/// The images as a model's exports name them (`<set>-<channel>.png`).
 const MODEL_CHANNEL_FILES: [&str; 3] = ["color", "roughness", "metallic"];
-const SHARED_CHANNEL_NAMES: [&str; 3] = ["Color", "Roughness", "Metallic"];
+const MODEL_NORMAL_FILE: &str = "normal";
+const MODEL_OCCLUSION_FILE: &str = "ambient_occlusion";
 
 impl CanvasSession {
-    fn model_files(&self) -> Result<ModelFiles, MobileError> {
-        let (mesh, set_names, pictures, side, base) = {
+    /// The model's texture sets' pixels as exports take them: each set's colour, roughness and
+    /// metalness over the part's own (RGBA8, the texture size square), with its maps and the
+    /// sets' names safe as file names.
+    fn model_pixels(&self) -> Result<ModelPixels, MobileError> {
+        let (mesh, set_names, pictures, maps, side, base) = {
             let mut guard = self.shared.lock();
             let st = &mut *guard;
             st.finish_stroke();
             st.settle();
             let pictures = st.channel_pictures()?;
             let Some(scene) = st.scene.as_ref() else { return Err(file_error("exporting the model", "no model")) };
-            (scene.mesh.clone(), scene.set_names(), pictures, scene.texture_size, file_stem(&st.name, "Model"))
+            let maps = scene.surface_maps.clone();
+            (scene.mesh.clone(), scene.set_names(), pictures, maps, scene.texture_size, file_stem(&st.name, "Model"))
         };
         let mut names: Vec<String> = Vec::new();
         for name in set_names {
@@ -921,7 +973,7 @@ impl CanvasSession {
             }
             names.push(n);
         }
-        let pngs = pictures
+        let pixels = pictures
             .into_iter()
             .enumerate()
             .map(|(part, [color, roughness, metallic])| {
@@ -933,13 +985,44 @@ impl CanvasSession {
                 ]
             })
             .collect();
-        Ok(ModelFiles { mesh, names, pngs, base })
+        Ok(ModelPixels { mesh, names, pixels, maps, side, base })
+    }
+
+    fn model_files(&self) -> Result<ModelFiles, MobileError> {
+        let ModelPixels { mesh, names, pixels, maps, side, base } = self.model_pixels()?;
+        let png = |px: &[u8]| crate::project::rgba_png(side, side, px);
+        let images = pixels
+            .iter()
+            .zip(&names)
+            .enumerate()
+            .map(|(part, ([cp, rp, mp], n))| {
+                let [c, r, m] = MODEL_CHANNEL_FILES.map(|k| format!("{n}-{k}.png"));
+                let [normal, occlusion] = maps.get(part).cloned().unwrap_or_default();
+                let map = |rgba: Option<Arc<Vec<u8>>>, k: &str| rgba.map(|px| (format!("{n}-{k}.png"), png(&px)));
+                PartImages {
+                    maps: [(c, png(cp)), (r, png(rp)), (m, png(mp))],
+                    normal: map(normal, MODEL_NORMAL_FILE),
+                    occlusion: map(occlusion, MODEL_OCCLUSION_FILE),
+                }
+            })
+            .collect();
+        Ok(ModelFiles { mesh, names, images, base })
     }
 }
 
+/// What [`CanvasSession::model_pixels`] gives.
+struct ModelPixels {
+    mesh: Mesh,
+    names: Vec<String>,
+    pixels: Vec<[Vec<u8>; 3]>,
+    maps: Vec<[Option<Arc<Vec<u8>>>; 2]>,
+    side: u32,
+    base: String,
+}
+
 /// A channel's picture (premultiplied RGBA8, `side` square; none if never painted) over what the
-/// part shows under it (`under`, 0 to 1), opaque, as a PNG: as it is, or as the grey the model
-/// reads from it.
+/// part shows under it (`under`, 0 to 1), opaque: as it is, or as the grey the model reads from
+/// it.
 fn flattened(side: u32, picture: Option<Vec<u8>>, under: [f32; 3], grey: bool) -> Vec<u8> {
     let under = under.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u16);
     let mut px = picture.unwrap_or_else(|| vec![0; (side as usize) * (side as usize) * 4]);
@@ -957,7 +1040,7 @@ fn flattened(side: u32, picture: Option<Vec<u8>>, under: [f32; 3], grey: bool) -
             [r, g, b, 255]
         };
     }
-    crate::project::rgba_png(side, side, &px)
+    px
 }
 
 /// A file packed in a USDZ by the path its layer gives (relative to the package; `./` and folders
@@ -1095,6 +1178,8 @@ pub(crate) struct ModelSnapshot {
     /// The waiting texture sets' layers, by part, and the parts' channels' (part, channel 1 or 2).
     layers: Vec<(usize, Pixels)>,
     channel_layers: Vec<(usize, usize, Pixels)>,
+    /// The parts' normal and occlusion maps (part, its file's name, RGBA8).
+    maps: Vec<(usize, &'static str, Arc<Vec<u8>>)>,
     /// The model as last shown (premultiplied RGBA8, its size), for the gallery.
     pub(crate) picture: Option<(u32, u32, Vec<u8>)>,
 }
@@ -1182,6 +1267,14 @@ impl State {
             source: scene.source.clone(),
             layers,
             channel_layers,
+            maps: scene
+                .surface_maps
+                .iter()
+                .enumerate()
+                .flat_map(|(part, maps)| {
+                    maps.iter().zip(MAP_FILES).filter_map(move |(m, name)| m.as_ref().map(|m| (part, name, m.clone())))
+                })
+                .collect(),
             picture,
         }))
     }
@@ -1201,6 +1294,14 @@ pub(crate) fn write_model(saved: &mut SavedSets, dir: &Path, model: &ModelSnapsh
         write_atomically(&mtl, |p| fs::write(p, text).map_err(|e| file_error("saving the model", e)))?;
     }
     let side = model.saved.texture_size;
+    // the maps, written once: they don't change
+    for (part, name, rgba) in &model.maps {
+        let path = dir.join("maps").join(format!("{part}-{name}.png"));
+        if !path.exists() {
+            fs::create_dir_all(dir.join("maps")).map_err(|e| file_error("making the folder", e))?;
+            write_atomically(&path, |p| write_png(p, side, side, rgba, &[]))?;
+        }
+    }
     let colour = model.layers.iter().map(|(part, pixels)| (*part, 0, pixels));
     let channels = model.channel_layers.iter().map(|(part, k, pixels)| (*part, *k, pixels));
     for (part, channel, pixels) in colour.chain(channels) {
@@ -1238,6 +1339,10 @@ pub(crate) fn write_model(saved: &mut SavedSets, dir: &Path, model: &ModelSnapsh
     });
     Ok(())
 }
+
+/// The names of a part's normal and occlusion maps' files in the artwork's `maps` folder
+/// (`<part>-<name>.png`).
+const MAP_FILES: [&str; 2] = ["normal", "occlusion"];
 
 /// The layers of `doc` saved in `folder` (each `<id>.png`, `side` square); a layer with no file is
 /// empty.
@@ -1308,6 +1413,14 @@ pub(crate) fn open_saved_model(dir: &Path, saved: &SavedModel) -> Result<Scene, 
     }
     scene.hidden = (0..scene.mesh.submeshes.len()).map(|i| saved.hidden.contains(&i)).collect();
     scene.channels = channels;
+    scene.surface_maps = (0..scene.mesh.parts.len())
+        .map(|part| {
+            MAP_FILES.map(|name| {
+                let path = dir.join("maps").join(format!("{part}-{name}.png"));
+                path.exists().then(|| read_png(&path, side, side).ok()).flatten().map(Arc::new)
+            })
+        })
+        .collect();
     scene.orbit = saved.orbit.map(|o| Orbit {
         target: o.target,
         rotation: o.rotation.unwrap_or_else(|| Orbit::rotation_of(o.yaw, o.pitch)),
@@ -1594,6 +1707,7 @@ impl State {
                 // the surround behind the model until an environment comes
                 view.show_environment(gpu, false);
                 scene.view = Some(view);
+                scene.surface_shown = false;
             }
             // the waiting texture sets' canvases (and channels), with the pixels they opened with
             for set in scene.sets.iter_mut().flatten().chain(scene.channels.iter_mut().flatten().flatten()) {
@@ -1674,19 +1788,41 @@ impl State {
                 }
             }
         }
+        // the model's own normal and occlusion maps, given again when they change
+        if !scene.surface_shown {
+            let side = scene.texture_size;
+            for (part, maps) in scene.surface_maps.iter().enumerate() {
+                for (map, kind) in
+                    maps.iter().zip([procraft_gpu::SurfaceMap::Normal, procraft_gpu::SurfaceMap::Occlusion])
+                {
+                    view.set_surface_map(gpu, part, kind, map.as_deref().map(|m| (side, m.as_slice())));
+                }
+            }
+            scene.surface_shown = true;
+        }
         view.lights = scene.lights.iter().map(|l| l.to_gpu()).collect();
         for i in 0..scene.mesh.submeshes.len() {
             view.set_hidden(i, scene.hidden.get(i).copied().unwrap_or(false));
         }
         let s = crate::SURROUND;
         let clear = [f64::from(s[0]), f64::from(s[1]), f64::from(s[2]), 1.0];
-        if scene.studio_open {
-            let orbit = *scene.studio.get_or_insert_with(|| view.studio_orbit());
-            view.render_studio(gpu, &mut encoder, target, size.0, size.1, clear, orbit);
-        } else {
-            view.render(gpu, &mut encoder, target, size.0, size.1, clear);
+        let studio = scene.studio_open.then(|| *scene.studio.get_or_insert_with(|| view.studio_orbit()));
+        match studio {
+            Some(orbit) => view.render_studio(gpu, &mut encoder, target, size.0, size.1, clear, orbit),
+            None => view.render(gpu, &mut encoder, target, size.0, size.1, clear),
         }
         gpu.queue.submit([encoder.finish()]);
+        // frosted panels over the model: it drawn again, small, and blurred under each
+        if let Some(canvas) = self.canvas.as_mut().filter(|_| !self.backdrops.is_empty()) {
+            let backdrop = procraft_gpu::Backdrop {
+                regions: &self.backdrops,
+                sigma: crate::BACKDROP_SIGMA_PT * self.display_scale,
+            };
+            canvas.frost_over(gpu, target, format, size, s, backdrop, &mut |encoder, small, (w, h)| match studio {
+                Some(orbit) => view.render_studio(gpu, encoder, small, w, h, clear, orbit),
+                None => view.render(gpu, encoder, small, w, h, clear),
+            });
+        }
     }
 }
 
@@ -1817,7 +1953,8 @@ pub struct ModelInfo {
 }
 
 /// An image a model's file brings for a texture set's channel (0 colour, 1 roughness, 2
-/// metalness): its file's bytes, and which of its components to take (-1: as it is, or its grey).
+/// metalness, 3 its normal map, 4 its occlusion): its file's bytes, and which of its components
+/// to take (-1: as it is, or its grey).
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct ModelTextureFile {
     pub texture_set: u32,
@@ -1884,6 +2021,47 @@ mod tests {
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
         st.render_scene(&view, format, (side, side), None);
         assert_eq!(st.gpu.as_ref().unwrap().errors(), 0, "GPU validation errors");
+    }
+
+    /// A frame of `s`'s model, `side` square, read back (RGBA8).
+    fn frame_pixels(s: &CanvasSession, side: u32) -> Vec<u8> {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = st.gpu.as_ref().unwrap().device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test frame"),
+            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        st.render_scene(&view, format, (side, side), None);
+        let gpu = st.gpu.as_ref().unwrap();
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+        procraft_gpu::read_texture(gpu, &target, side, side).unwrap()
+    }
+
+    #[test]
+    fn panels_over_a_model_blur_it_under_them() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let plain = frame_pixels(&s, 200);
+        // a panel over the left half
+        s.shared.lock().backdrops = vec![[0.0, 0.0, 100.0, 200.0, 0.0, 1.0]];
+        let frosted = frame_pixels(&s, 200);
+        let at = |p: &[u8], x: usize, y: usize| p[(y * 200 + x) * 4..][..4].to_vec();
+        // the model's edge softened under it, and nothing changed beside it
+        let under = (0..200).flat_map(|y| (0..100).map(move |x| (x, y)));
+        let changed = under.filter(|&(x, y)| at(&plain, x, y) != at(&frosted, x, y)).count();
+        assert!(changed > 200, "{changed}");
+        assert!((0..200).all(|y| (100..200).all(|x| at(&plain, x, y) == at(&frosted, x, y))));
     }
 
     /// How many of the current texture set's pixels have paint.
@@ -2302,6 +2480,85 @@ f 1/1 2/2",
         s.stroke_begin(PointerKind::Stylus, vec![sample(90.0, 100.0, 0.0)]);
         s.stroke_end(vec![sample(110.0, 100.0, 50.0)]);
         frame(s, 200);
+    }
+
+    #[test]
+    fn a_models_normal_and_occlusion_maps_are_kept_and_exported() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        // channels 3 and 4: the normal and occlusion maps, the texture size square
+        assert!(!s.set_model_texture(0, 3, vec![0; 8]));
+        assert!(!s.set_model_texture(0, 5, [128, 128, 255, 255].repeat(64 * 64)));
+        assert!(s.set_model_texture(0, 3, [128, 128, 255, 255].repeat(64 * 64)));
+        assert!(s.set_model_texture(0, 4, [200, 200, 200, 255].repeat(64 * 64)));
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let set = super::file_stem(&s.model_info().unwrap().texture_sets[0], "Material");
+        let dir = std::env::temp_dir().join(format!("procraft-maps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // in the OBJ's zip, named in its material file
+        let obj = dir.join("cube.zip");
+        s.export_model_obj(obj.to_string_lossy().into_owned()).unwrap();
+        let bytes = std::fs::read(&obj).unwrap();
+        let zip = procraft_engine::zip::ZipReader::new(&bytes).unwrap();
+        assert!(zip.read(&format!("{set}-normal.png")).is_some());
+        assert!(zip.read(&format!("{set}-ambient_occlusion.png")).is_some());
+        let mtl = String::from_utf8(zip.read("Cube.mtl").unwrap()).unwrap();
+        assert!(mtl.contains(&format!("map_tangentSpaceNormal {set}-normal.png")), "{mtl}");
+        assert!(mtl.contains(&format!("map_ao {set}-ambient_occlusion.png")), "{mtl}");
+        // shared as textures
+        let pngs = s.export_model_textures(dir.join("t").to_string_lossy().into_owned()).unwrap();
+        assert_eq!(pngs.len(), 5);
+        assert!(pngs.iter().any(|p| p.ends_with(&format!("{set}-AmbientOcclusion.png"))));
+        // kept with the artwork, and back when it opens
+        s.save(dir.join("a").to_string_lossy().into_owned()).unwrap();
+        assert!(dir.join("a").join("maps").join("0-normal.png").exists());
+        let again = CanvasSession::open(dir.join("a").to_string_lossy().into_owned()).unwrap();
+        let kept = again.shared.lock().scene.as_ref().unwrap().surface_maps.clone();
+        assert_eq!(kept[0][0].as_deref().map(|m| m[..4].to_vec()), Some(vec![128, 128, 255, 255]));
+        assert_eq!(kept[0][1].as_deref().map(|m| m[..4].to_vec()), Some(vec![200, 200, 200, 255]));
+        // a USDZ carries them, and brings them in again
+        let usdz = dir.join("cube.usdz");
+        s.export_model_usdz(usdz.to_string_lossy().into_owned()).unwrap();
+        let back =
+            CanvasSession::open_model(std::fs::read(&usdz).unwrap(), "cube.usdz".into(), None, "Back".into(), 64)
+                .unwrap();
+        let channels: Vec<u32> = back.model_texture_files().iter().map(|f| f.channel).collect();
+        assert_eq!(channels, [0, 1, 2, 3, 4]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_model_exports_as_a_glb_for_viewers() {
+        let two = CUBE.replacen("f 1/1", "usemtl front\nf 1/1", 1).replacen("f 1/1 2/2", "usemtl sides\nf 1/1 2/2", 1);
+        let s = CanvasSession::open_model(two.into_bytes(), "two.obj".into(), None, "Two".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let path = std::env::temp_dir().join(format!("procraft-glb-{}.glb", std::process::id()));
+        s.export_model_glb(path.to_string_lossy().into_owned()).unwrap();
+        let glb = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(&glb[0..4], b"glTF");
+        let json_len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let doc: serde_json::Value = serde_json::from_slice(&glb[20..20 + json_len]).unwrap();
+        let bin = &glb[20 + json_len + 8..];
+        assert_eq!(doc["materials"].as_array().unwrap().len(), 2);
+        assert_eq!(doc["materials"][0]["name"], "front");
+        // the roughness (1, as nothing says otherwise) in green and the metalness (0) in blue
+        let texture =
+            doc["materials"][0]["pbrMetallicRoughness"]["metallicRoughnessTexture"]["index"].as_u64().unwrap();
+        let source = doc["textures"][texture as usize]["source"].as_u64().unwrap() as usize;
+        let view = &doc["bufferViews"][doc["images"][source]["bufferView"].as_u64().unwrap() as usize];
+        let offset = view["byteOffset"].as_u64().unwrap() as usize;
+        let png = &bin[offset..offset + view["byteLength"].as_u64().unwrap() as usize];
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+        let mut px = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut px).unwrap();
+        assert!(px.chunks(4).all(|p| p[1] == 255 && p[2] == 0), "{:?}", &px[..4]);
     }
 
     #[test]

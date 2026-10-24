@@ -15,6 +15,7 @@ pub mod document;
 pub mod environment;
 pub mod formats;
 pub mod geom;
+pub mod gltf;
 pub mod guide;
 pub mod icc;
 pub mod input;

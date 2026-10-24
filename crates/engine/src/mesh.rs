@@ -55,6 +55,24 @@ pub struct Material {
     /// none, its grey).
     pub roughness_component: Option<usize>,
     pub metallic_component: Option<usize>,
+    /// Which of its image's components the occlusion is (none, its grey).
+    pub occlusion_component: Option<usize>,
+}
+
+/// A part's images in an export, each a file name and its bytes: its colour, roughness and
+/// metalness, and its normal map and ambient occlusion if it has them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PartImages {
+    pub maps: [(String, Vec<u8>); 3],
+    pub normal: Option<(String, Vec<u8>)>,
+    pub occlusion: Option<(String, Vec<u8>)>,
+}
+
+impl PartImages {
+    /// Every image it has, colour first.
+    pub fn files(&self) -> impl Iterator<Item = &(String, Vec<u8>)> {
+        self.maps.iter().chain(&self.normal).chain(&self.occlusion)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -402,32 +420,26 @@ pub fn write_obj(mesh: &Mesh, mtl: &str, names: &[String]) -> String {
     out
 }
 
-/// A material file for [`write_obj`]: each material (its name, and the images beside it for its
-/// colour, roughness and metalness) white and physically shaded, its properties indented.
-pub fn write_mtl(materials: &[(String, [String; 3])]) -> String {
+/// A material file for [`write_obj`]: each material (its name, and the images beside it) white
+/// and physically shaded, its properties indented.
+pub fn write_mtl(materials: &[(&str, &PartImages)]) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
-    for (name, [color, roughness, metallic]) in materials {
+    for (name, images) in materials {
+        let [(color, _), (roughness, _), (metallic, _)] = &images.maps;
+        let _ = write!(out, "newmtl {name}\n\tmap_Kd {color}\n\tKd 1 1 1\n\tKa 0 0 0\n\tKs 0\n");
+        if let Some((occlusion, _)) = &images.occlusion {
+            let _ = writeln!(out, "\tmap_ao {occlusion}");
+        }
         let _ = write!(
             out,
-            "newmtl {name}
-\tmap_Kd {color}
-\tKd 1 1 1
-\tKa 0 0 0
-\tKs 0
-\tao 0
-\tsubsurface 0
-\tmap_metallic {metallic}
-\tspecularTint 0
-\tmap_roughness {roughness}
-\tanisotropicRotation 0
-\tsheen 0.05
-\tsheenTint 0
-\tclearCoat 0
-\tclearCoatGloss 0
-
-"
+            "\tao 0\n\tsubsurface 0\n\tmap_metallic {metallic}\n\tspecularTint 0\n\tmap_roughness {roughness}\n\
+             \tanisotropicRotation 0\n\tsheen 0.05\n\tsheenTint 0\n\tclearCoat 0\n\tclearCoatGloss 0\n"
         );
+        if let Some((normal, _)) = &images.normal {
+            let _ = writeln!(out, "\tmap_tangentSpaceNormal {normal}");
+        }
+        out.push('\n');
     }
     out
 }
@@ -517,8 +529,15 @@ f -8/1 -4/2 -1/3 -5/4
         let mesh = read_obj(CUBE, None).unwrap();
         let names: Vec<String> = mesh.parts.iter().map(|p| p.material.clone()).collect();
         let text = write_obj(&mesh, "cube.mtl", &names);
-        let images = ["body-color.png".into(), "body-roughness.png".into(), "body-metallic.png".into()];
-        let again = read_obj(&text, Some(&write_mtl(&[("body".into(), images)]))).unwrap();
+        let images = PartImages {
+            maps: ["color", "roughness", "metallic"].map(|c| (format!("body-{c}.png"), Vec::new())),
+            normal: Some(("body-normal.png".into(), Vec::new())),
+            occlusion: Some(("body-ambient_occlusion.png".into(), Vec::new())),
+        };
+        let mtl = write_mtl(&[("body", &images)]);
+        assert!(mtl.contains("\tKs 0\n\tmap_ao body-ambient_occlusion.png\n\tao 0\n"));
+        assert!(mtl.ends_with("\tclearCoatGloss 0\n\tmap_tangentSpaceNormal body-normal.png\n\n"));
+        let again = read_obj(&text, Some(&mtl)).unwrap();
         assert_eq!(again.triangles.len(), mesh.triangles.len());
         assert_eq!(again.parts, mesh.parts);
         assert_eq!(again.vertices.len(), mesh.vertices.len());
@@ -535,6 +554,8 @@ f -8/1 -4/2 -1/3 -5/4
         assert_eq!(m.color_map.as_deref(), Some("body-color.png"));
         assert_eq!(m.roughness_map.as_deref(), Some("body-roughness.png"));
         assert_eq!(m.metallic_map.as_deref(), Some("body-metallic.png"));
+        assert_eq!(m.normal_map.as_deref(), Some("body-normal.png"));
+        assert_eq!(m.occlusion_map.as_deref(), Some("body-ambient_occlusion.png"));
         assert_eq!(m.color, Some([1.0; 3]));
     }
 
