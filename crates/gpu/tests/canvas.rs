@@ -6,7 +6,7 @@ use procraft_engine::document::Document;
 use procraft_engine::geom::{Homography, Vec2};
 use procraft_engine::input::{Pointer, Sample};
 use procraft_engine::profile::Profile;
-use procraft_engine::stroke::{Stamp, StrokeBuilder};
+use procraft_engine::stroke::{Stamp, StrokeBuilder, Tint};
 use procraft_engine::view::View;
 use procraft_gpu::{Backdrop, Canvas, Gpu, Resample, StrokeStyle, StrokeTool, SurroundGrid, Target, wgpu};
 
@@ -468,6 +468,38 @@ fn the_predicted_tail_shows_but_never_paints() {
 }
 
 #[test]
+fn a_stroke_tip_shows_until_the_next_one_replaces_it() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(100, 100);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let at = |canvas: &mut Canvas, doc: &mut Document, x: u32| {
+        canvas.render(&gpu, doc, None);
+        pixel(&canvas.read_composite(&gpu).unwrap(), 100, x, 50)
+    };
+    let (black, white) = ([0, 0, 0, 255], [255, 255, 255, 255]);
+    canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+    assert!(canvas.shows_tip());
+    canvas.add_stamps(&[dot(Vec2::new(20.0, 50.0), 5.0)]);
+    canvas.set_tip(&[dot(Vec2::new(40.0, 50.0), 5.0)]);
+    assert_eq!(at(&mut canvas, &mut doc, 40), black, "the tip");
+    // the next tip takes the last one's place; stamps kept stay
+    canvas.set_tip(&[dot(Vec2::new(60.0, 50.0), 5.0)]);
+    assert_eq!(at(&mut canvas, &mut doc, 40), white, "the old tip gone");
+    assert_eq!(at(&mut canvas, &mut doc, 60), black);
+    canvas.add_stamps(&[dot(Vec2::new(80.0, 50.0), 5.0)]);
+    assert_eq!(at(&mut canvas, &mut doc, 60), white, "stamps drawn for good take the tip off");
+    assert_eq!(at(&mut canvas, &mut doc, 80), black);
+    // a tip still showing as the stroke ends is not kept
+    canvas.set_tip(&[dot(Vec2::new(60.0, 50.0), 5.0)]);
+    canvas.end_stroke();
+    assert_eq!(at(&mut canvas, &mut doc, 60), white);
+    assert_eq!(at(&mut canvas, &mut doc, 20), black);
+    canvas.undo();
+    assert_eq!(at(&mut canvas, &mut doc, 20), white);
+}
+
+#[test]
 fn a_transform_moves_the_layer_and_undoes_as_one_step() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
@@ -858,14 +890,14 @@ fn a_stamps_colour_shift_turns_its_hue() {
     let mut canvas = Canvas::new(&gpu, &doc).unwrap();
     canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0));
     let mut turned = dot(Vec2::new(20.0, 32.0), 6.0);
-    turned.shift = [0.5, 0.0, 0.0];
-    let mut lighter = dot(Vec2::new(44.0, 32.0), 6.0);
-    lighter.shift = [0.0, 0.0, 0.5];
-    canvas.add_stamps(&[turned, lighter]);
+    turned.tint = Tint { hue: 0.5, ..Tint::NONE };
+    let mut drained = dot(Vec2::new(44.0, 32.0), 6.0);
+    drained.tint = Tint { saturation: [0.0, 0.0], ..Tint::NONE };
+    canvas.add_stamps(&[turned, drained]);
     canvas.end_stroke();
     canvas.render(&gpu, &mut doc, None);
     let px = canvas.read_composite(&gpu).unwrap();
-    // half a turn from red is cyan; half lighter is white
+    // half a turn from red is cyan; drained of its colour, white
     assert_eq!(pixel(&px, 64, 20, 32), [0, 255, 255, 255]);
     assert_eq!(pixel(&px, 64, 44, 32), [255, 255, 255, 255]);
 }
@@ -1233,4 +1265,21 @@ fn a_tapered_round_tip_thins_its_rim_too() {
     };
     let (whole, tapered) = (width(1.0), width(0.2));
     assert!(tapered < whole, "{tapered} {whole}");
+}
+
+#[test]
+fn a_stamp_taller_than_wide_draws_in_full() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(64, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+    // 8 px wide, 24 px tall
+    canvas.add_stamps(&[Stamp { roundness: 3.0, ..dot(Vec2::new(32.0, 32.0), 4.0) }]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let px = canvas.read_composite(&gpu).unwrap();
+    let painted = |x: u32, y: u32| pixel(&px, 64, x, y)[0] < 128;
+    assert!(painted(32, 32 + 9) && painted(32, 32 - 9), "its height");
+    assert!(!painted(32 + 7, 32), "its width");
 }

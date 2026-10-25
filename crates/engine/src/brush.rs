@@ -49,9 +49,10 @@ impl Source {
 /// Size and opacity at the ends of a stroke.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Taper {
-    /// Length of the start taper, 0..1 of [`TAPER_SPAN`] stamp diameters.
+    /// Length of the start taper, 0..1: of [`TAPER_TIME_MS`] for the newer taper, of
+    /// [`CLASSIC_TAPER_SPAN`] canvas pixels for the classic one.
     pub start: f32,
-    /// Length of the end taper, 0..1 of [`TAPER_SPAN`] stamp diameters.
+    /// Length of the end taper, likewise.
     pub end: f32,
     /// How thin the tips get: 0 = no change, 1 = down to nothing.
     pub size: f32,
@@ -59,106 +60,37 @@ pub struct Taper {
     pub opacity: f32,
 }
 
-/// A taper length of 1 spans this many stamp diameters.
-pub const TAPER_SPAN: f32 = 24.0;
+/// A newer taper of length 1 lasts this many milliseconds of the stroke, from when it starts or
+/// back from when it ends.
+pub const TAPER_TIME_MS: f64 = 83.34;
 
-/// A classic taper of length 1 spans this many canvas pixels, whatever the brush's size (as
-/// measured: the width grows evenly to full over it).
-pub const CLASSIC_TAPER_SPAN: f32 = 520.0;
-/// A classic end taper comes to its tip over at most the last this many milliseconds of the
-/// stroke, however long it is set (as measured, at any speed: a quarter of the width 11 ms before
-/// the pen lifts, half 24 ms, nine tenths 51 ms).
-pub const CLASSIC_END_MS: f32 = 58.0;
-/// The newer taper's ends on touch run over at most the first and the last this many milliseconds
-/// of the stroke, whatever the brush's size or the stroke's length (as measured: a quarter of the
-/// width 16 ms before the finger lifts, half 37 ms, nine tenths 73 ms).
-pub const TIMED_START_MS: f32 = 6.0;
-pub const TIMED_END_MS: f32 = 82.5;
-/// A newer taper of length 1 on touch lasts this long, up to those (as measured: a length of
-/// 0.0225 ends in a short tip, 0.0625 already in the whole, 0 in none).
-pub const TIMED_TAPER_SPAN_MS: f32 = 1300.0;
-/// How the width comes to an end taper's tip: the share of the end still to go, to this power.
-const CLASSIC_END_EASE: f32 = 0.83;
-const TIMED_END_EASE: f32 = 0.855;
-
-/// How far a taper of `len` canvas pixels has grown `d` pixels in, eased by `power`.
-fn grown(len: f32, d: f32, power: f32) -> f32 {
-    if len <= 0.0 { 1.0 } else { (d / len).clamp(0.0, 1.0).powf(power) }
-}
+/// A classic taper of length 1 spans this many canvas pixels, whatever the brush's size.
+pub const CLASSIC_TAPER_SPAN: f32 = 512.0;
 
 impl Taper {
     pub const NONE: Taper = Taper { start: 0.0, end: 0.0, size: 0.0, opacity: 0.0 };
 
-    /// The multipliers (size, opacity) at `distance` px from the start of a stroke of `length` px
-    /// drawn with a `diameter` px brush; `length` is `None` while the stroke is still being drawn.
-    pub fn factors(&self, distance: f32, length: Option<f32>, diameter: f32) -> (f32, f32) {
-        let span = TAPER_SPAN * diameter.max(0.5);
-        let (mut start, mut end) = (self.start.max(0.0) * span, self.end.max(0.0) * span);
-        if let Some(total) = length {
-            // a stroke shorter than its tapers tapers in proportion; a tap not at all
-            let sum = start + end;
-            if sum > total.max(0.0) && sum > 0.0 {
-                let k = total.max(0.0) / sum;
-                start *= k;
-                end *= k;
-            }
-        }
-        let ramp = |len: f32, d: f32| -> f32 {
-            if len <= 0.0 {
-                return 1.0;
-            }
-            let u = (d / len).clamp(0.0, 1.0);
-            1.0 - (1.0 - u) * (1.0 - u)
-        };
-        let mut t = ramp(start, distance);
-        if let Some(total) = length {
-            t = t.min(ramp(end, (total - distance).max(0.0)));
-        }
-        (1.0 - self.size.clamp(0.0, 1.0) * (1.0 - t), 1.0 - self.opacity.clamp(0.0, 1.0) * (1.0 - t))
+    /// The multipliers (size, opacity) where the start taper has grown `start` and the end taper
+    /// `end` of the way to full (0..1 each), with a tip of sharpness `tip` (0 comes to a point,
+    /// 1 stays almost whole until the very end).
+    pub fn applied(&self, start: f32, end: f32, tip: f32) -> (f32, f32) {
+        let power = Taper::tip_power(tip);
+        let left = |grown: f32| 1.0 - grown.clamp(0.0, 1.0).powf(power);
+        let (size, opacity) = (self.size.clamp(0.0, 1.0), self.opacity.clamp(0.0, 1.0));
+        let (s, e) = (left(start), left(end));
+        let thinned = (1.0 - size * s) * (1.0 - size * e);
+        let faded = (1.0 - (opacity * s).powf(2.5)) * (1.0 - (opacity * e).powf(2.5));
+        (thinned, faded)
     }
 
-    /// As [`Taper::factors`] for a classic taper, as measured: the start grows evenly over its
-    /// length in canvas pixels whatever the brush's size; the end comes to its tip over its length
-    /// or over the last [`CLASSIC_END_MS`] of the stroke, whichever is shorter (`pace`: how fast
-    /// the stroke ended, canvas pixels a millisecond); a stroke shorter than its tapers just
-    /// doesn't reach full.
-    pub fn classic_factors(&self, distance: f32, length: Option<f32>, pace: f32) -> (f32, f32) {
-        // a tap keeps its full size
-        if length.is_some_and(|l| l <= 0.0) {
-            return (1.0, 1.0);
-        }
-        let start = self.start.max(0.0) * CLASSIC_TAPER_SPAN;
-        let end = (self.end.max(0.0) * CLASSIC_TAPER_SPAN).min(CLASSIC_END_MS * pace.max(0.0));
-        let mut t = grown(start, distance, 1.0);
-        if let Some(total) = length {
-            t = t.min(grown(end, (total - distance).max(0.0), CLASSIC_END_EASE));
-        }
-        self.applied(t)
-    }
-
-    /// As [`Taper::factors`] for the newer taper on touch, as measured: each end lasts its length
-    /// in time ([`TIMED_TAPER_SPAN_MS`] for 1) up to [`TIMED_START_MS`] and [`TIMED_END_MS`],
-    /// over as much of the stroke as the finger covered in that time (`paces`: how fast the
-    /// stroke started and ended, canvas pixels a millisecond).
-    pub fn timed_factors(&self, distance: f32, length: Option<f32>, paces: (f32, f32)) -> (f32, f32) {
-        if length.is_some_and(|l| l <= 0.0) {
-            return (1.0, 1.0);
-        }
-        let lasts = |share: f32, most: f32| (share.max(0.0) * TIMED_TAPER_SPAN_MS).min(most);
-        let start = lasts(self.start, TIMED_START_MS) * paces.0.max(0.0);
-        let end = lasts(self.end, TIMED_END_MS) * paces.1.max(0.0);
-        let mut t = grown(start, distance, 1.0);
-        if let Some(total) = length {
-            t = t.min(grown(end, (total - distance).max(0.0), TIMED_END_EASE));
-        }
-        self.applied(t)
-    }
-
-    /// The multipliers (size, opacity) where the taper has grown `t` of the way to full.
-    fn applied(&self, t: f32) -> (f32, f32) {
-        (1.0 - self.size.clamp(0.0, 1.0) * (1.0 - t), 1.0 - self.opacity.clamp(0.0, 1.0) * (1.0 - t))
+    /// The power a taper's growth is taken to for a tip of sharpness `tip` (1 for a sharp one).
+    pub fn tip_power(tip: f32) -> f32 {
+        1.0 - TIP_BLUNTING * tip.clamp(0.0, 1.0)
     }
 }
+
+/// How far a blunt tip (1) bends the taper's growth: it grows to the power 1 less this.
+const TIP_BLUNTING: f32 = 0.984375;
 
 /// How a stroke's stamps build up within the stroke (the studio's rendering modes: Light Glaze
 /// keeps the strongest; Uniformed Glaze, Intense Glaze and Intense Blending build up; Heavy Glaze
@@ -184,6 +116,78 @@ pub enum PressureUse {
     Opacity = 1,
     Bleed = 2,
     Roundness = 3,
+}
+
+/// What else a brush may give a pressure curve of its own: the control is then scaled by the
+/// curve at the stamp's pressure (a finger's is full), and without one it doesn't follow the
+/// pressure at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PressureCurve {
+    LateralJitter,
+    LinearJitter,
+    Count,
+    CountJitter,
+    SizeJitter,
+    OpacityJitter,
+    Scatter,
+    /// The roundness jitter's two ways: along the stamp's height and its width.
+    RoundnessJitterY,
+    RoundnessJitterX,
+    GrainMovement,
+    GrainScale,
+    GrainZoom,
+    GrainDepth,
+    GrainDepthJitter,
+    WetGrade,
+    WetBlur,
+    WetBlurJitter,
+    WetnessJitter,
+    /// The colour's own response to pressure: hue, saturation, brightness and the secondary
+    /// colour's share.
+    Hue,
+    Saturation,
+    Brightness,
+    Secondary,
+    /// The stamp colour jitters.
+    HueJitter,
+    SaturationJitter,
+    LightnessJitter,
+    DarknessJitter,
+    SecondaryJitter,
+}
+
+/// A brush's own [`PressureCurve`]s, those it has.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PressureCurves(BTreeMap<PressureCurve, Curve>);
+
+impl PressureCurves {
+    pub fn get(&self, kind: PressureCurve) -> Option<&Curve> {
+        self.0.get(&kind)
+    }
+
+    /// Gives `kind` a curve, or takes its curve away.
+    pub fn set(&mut self, kind: PressureCurve, curve: Option<Curve>) {
+        match curve {
+            Some(c) => self.0.insert(kind, c),
+            None => self.0.remove(&kind),
+        };
+    }
+
+    /// The curves a new brush has: the colour's following the pressure, straight.
+    pub fn new_brush() -> PressureCurves {
+        let colour =
+            [PressureCurve::Hue, PressureCurve::Saturation, PressureCurve::Brightness, PressureCurve::Secondary];
+        PressureCurves(colour.into_iter().map(|k| (k, Curve::linear())).collect())
+    }
+
+    /// What `kind` is scaled by at `pressure`: 1 without a curve.
+    pub fn at(&self, kind: PressureCurve, pressure: f32) -> f32 {
+        self.0.get(&kind).map_or(1.0, |c| c.eval(pressure))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (PressureCurve, &Curve)> {
+        self.0.iter().map(|(k, c)| (*k, c))
+    }
 }
 
 /// The size slider's curve: the size it sets is its place to this power.
@@ -260,7 +264,7 @@ pub struct Shape {
     pub follow: f32,
     /// Turn with the direction the pen leans.
     pub follow_azimuth: bool,
-    /// A random rotation per stamp.
+    /// A random rotation, the same for every stamp of a stroke.
     pub randomise: bool,
     /// 1 = as drawn; lower squashes the stamp across its rotation.
     pub roundness: f32,
@@ -377,6 +381,8 @@ pub struct Brush {
     /// opacity.
     pub size_curve: Curve,
     pub opacity_curve: Curve,
+    /// Its own pressure curves for its other controls.
+    pub pressure_curves: PressureCurves,
     /// Taper for pens and for fingers.
     pub pen_taper: Taper,
     pub touch_taper: Taper,
@@ -524,6 +530,7 @@ impl Brush {
             pressure_curve: Curve::linear(),
             size_curve: Curve::linear(),
             opacity_curve: Curve::linear(),
+            pressure_curves: PressureCurves::new_brush(),
             pen_taper: Taper { start: 0.15, end: 0.2, size: 0.8, opacity: 0.0 },
             touch_taper: Taper { start: 0.1, end: 0.1, size: 0.6, opacity: 0.0 },
             shape: Shape::default(),
@@ -595,69 +602,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn taper_ramps_in_and_out() {
+    fn a_taper_thins_and_fades_its_tips_as_far_as_it_has_grown() {
         let t = Taper { start: 0.5, end: 0.5, size: 1.0, opacity: 0.5 };
-        let d = 10.0;
-        let span = 0.5 * TAPER_SPAN * d;
-        assert_eq!(t.factors(0.0, None, d), (0.0, 0.5));
-        assert_eq!(t.factors(span, None, d), (1.0, 1.0));
-        let (mid, _) = t.factors(span * 4.0, Some(span * 8.0), d);
-        assert_eq!(mid, 1.0);
-        let (end, _) = t.factors(span * 8.0, Some(span * 8.0), d);
-        assert_eq!(end, 0.0);
-        assert_eq!(Taper::NONE.factors(0.0, Some(0.0), d), (1.0, 1.0));
-        // a tap keeps its full size; a short stroke still thins at both ends
-        assert_eq!(t.factors(0.0, Some(0.0), d), (1.0, 1.0));
-        let (short_tip, _) = t.factors(0.0, Some(span), d);
-        let (short_mid, _) = t.factors(span / 2.0, Some(span), d);
-        assert!(short_tip < 0.1 && short_mid > 0.99);
-    }
-
-    #[test]
-    fn a_classic_taper_spans_canvas_pixels_whatever_the_size() {
-        let t = Taper { start: 0.5, end: 1.0, size: 1.0, opacity: 0.0 };
-        // the start grows evenly over half of the span
-        let half = 0.5 * CLASSIC_TAPER_SPAN;
-        assert_eq!(t.classic_factors(0.0, None, 1.0).0, 0.0);
-        assert!((t.classic_factors(half / 2.0, None, 1.0).0 - 0.5).abs() < 1e-5);
-        assert_eq!(t.classic_factors(half, None, 1.0).0, 1.0);
-        // the end is a short tip however long it is set, as long as the pen takes to lift: the
-        // faster the stroke ends, the longer the tip
-        let total = 2000.0;
-        for pace in [0.5, 1.0, 3.0] {
-            let tip = CLASSIC_END_MS * pace;
-            assert_eq!(t.classic_factors(total - tip, Some(total), pace).0, 1.0);
-            let half_way = t.classic_factors(total - tip / 2.0, Some(total), pace).0;
-            assert!((half_way - 0.5f32.powf(CLASSIC_END_EASE)).abs() < 1e-5);
-        }
-        // set short, the end is shorter still
-        let short = Taper { end: 0.02, ..t };
-        assert_eq!(short.classic_factors(total - 0.02 * CLASSIC_TAPER_SPAN, Some(total), 1.0).0, 1.0);
-        // a short stroke doesn't reach full; a tap keeps its size
-        assert!(t.classic_factors(100.0, Some(150.0), 1.0).0 < 0.5);
-        assert_eq!(t.classic_factors(0.0, Some(0.0), 1.0), (1.0, 1.0));
-    }
-
-    #[test]
-    fn the_newer_taper_on_touch_lasts_a_time() {
-        let t = Taper { start: 0.5, end: 0.5, size: 1.0, opacity: 0.0 };
-        let total = 2000.0;
-        // its ends cover what the finger moves over in their time, however long they are set
-        for pace in [0.5, 1.0, 3.0] {
-            let (start, end) = (TIMED_START_MS * pace, TIMED_END_MS * pace);
-            let at = |d: f32, t: &Taper| t.timed_factors(d, Some(total), (pace, pace)).0;
-            assert_eq!(at(0.0, &t), 0.0);
-            assert!((at(start / 2.0, &t) - 0.5).abs() < 1e-5);
-            assert_eq!(at(start, &t), 1.0);
-            assert_eq!(at(total - end, &t), 1.0);
-            assert!(at(total - end / 2.0, &t) < 0.6);
-            assert_eq!(at(total - end, &Taper { end: 1.0, ..t }), 1.0);
-        }
-        // set very short, an end is shorter; set to none, there is none
-        let short = Taper { end: 0.02, ..t };
-        assert_eq!(short.timed_factors(total - 0.02 * TIMED_TAPER_SPAN_MS, Some(total), (1.0, 1.0)).0, 1.0);
-        assert_eq!(Taper { end: 0.0, ..t }.timed_factors(total, Some(total), (1.0, 1.0)).0, 1.0);
-        assert_eq!(t.timed_factors(0.0, Some(0.0), (1.0, 1.0)), (1.0, 1.0));
+        // grown fully at both ends: whole; at a tip: thinned to nothing, faded by its opacity
+        assert_eq!(t.applied(1.0, 1.0, 0.0), (1.0, 1.0));
+        let (size, opacity) = t.applied(0.0, 1.0, 0.0);
+        assert_eq!(size, 0.0);
+        assert!((opacity - (1.0 - 0.5f32.powf(2.5))).abs() < 1e-6);
+        // a sharp tip grows evenly; a blunt one is almost whole a little way in
+        assert!((t.applied(0.25, 1.0, 0.0).0 - 0.25).abs() < 1e-6);
+        assert!(t.applied(0.05, 1.0, 1.0).0 > 0.95);
+        // both ends at once take away what each other leaves
+        assert!((t.applied(0.5, 0.5, 0.0).0 - 0.25).abs() < 1e-6);
+        assert_eq!(Taper::NONE.applied(0.0, 0.0, 0.0), (1.0, 1.0));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! file's own numbers. A set file is a zip of brushes, each in a folder of its own, with
 //! `brushset.plist` giving the set's name and the folders in order.
 
-use crate::brush::{BRUSH_BEHIND, Brush, GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT, Notches, SIZE_CURVE};
+use crate::brush::{BRUSH_BEHIND, Brush, GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT, Notches, PressureCurve, SIZE_CURVE};
 use crate::document::BlendMode;
 use crate::geom::Vec2;
 use crate::keyed::{Archive, Builder, Object};
@@ -30,6 +30,9 @@ pub struct BrushFile {
     /// The pressure's own curves for the size and the opacity, if not straight.
     pub size_curve: Option<Vec<Vec2>>,
     pub opacity_curve: Option<Vec<Vec2>>,
+    /// Its own pressure curves for other controls, those it has (straight ones too: a control
+    /// without one doesn't follow the pressure).
+    pub pressure_curves: Vec<(PressureCurve, Vec<Vec2>)>,
     pub shape: Texture,
     pub grain: Texture,
     /// Where the size and opacity sliders start when it is picked, 0..1.
@@ -395,6 +398,47 @@ fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+/// Where brush files keep each [`PressureCurve`].
+pub const PRESSURE_CURVES: [(PressureCurve, &str); 27] = [
+    (PressureCurve::LateralJitter, "dynamicsPressurePlotJitterCurve"),
+    (PressureCurve::LinearJitter, "dynamicsPressurePlotJitterLongitudinalCurve"),
+    (PressureCurve::Count, "dynamicsPressureStampCountCurve"),
+    (PressureCurve::CountJitter, "dynamicsPressureStampCountJitterCurve"),
+    (PressureCurve::SizeJitter, "dynamicsPressureSizeJitterCurve"),
+    (PressureCurve::OpacityJitter, "dynamicsPressureOpacityJitterCurve"),
+    (PressureCurve::Scatter, "dynamicsPressureShapeScatterCurve"),
+    (PressureCurve::RoundnessJitterY, "dynamicsPressureShapeRoundessVerticalJitterCurve"),
+    (PressureCurve::RoundnessJitterX, "dynamicsPressureShapeRoundessHorizontalJitterCurve"),
+    (PressureCurve::GrainMovement, "dynamicsPressureGrainMovementCurve"),
+    (PressureCurve::GrainScale, "dynamicsPressureGrainScaleCurve"),
+    (PressureCurve::GrainZoom, "dynamicsPressureGrainZoomCurve"),
+    (PressureCurve::GrainDepth, "dynamicsPressureGrainDepthCurve"),
+    (PressureCurve::GrainDepthJitter, "dynamicsPressureGrainDepthJitterCurve"),
+    (PressureCurve::WetGrade, "dynamicsPressureGradeCurve"),
+    (PressureCurve::WetBlur, "dynamicsPressureBlurCurve"),
+    (PressureCurve::WetBlurJitter, "dynamicsPressureBlurJitterCurve"),
+    (PressureCurve::WetnessJitter, "dynamicsPressureWetnessCurve"),
+    (PressureCurve::Hue, "dynamicsPressureHueCurve"),
+    (PressureCurve::Saturation, "dynamicsPressureSaturationCurve"),
+    (PressureCurve::Brightness, "dynamicsPressureBrightnessCurve"),
+    (PressureCurve::Secondary, "dynamicsPressureSecondaryColorCurve"),
+    (PressureCurve::HueJitter, "dynamicsPressureHueJitterCurve"),
+    (PressureCurve::SaturationJitter, "dynamicsPressureSaturationJitterCurve"),
+    (PressureCurve::LightnessJitter, "dynamicsPressureLightnessJitterCurve"),
+    (PressureCurve::DarknessJitter, "dynamicsPressureDarknessJitterCurve"),
+    (PressureCurve::SecondaryJitter, "dynamicsPressureSecondaryColorJitterCurve"),
+];
+
+/// The key brush files keep `kind` under.
+pub fn pressure_curve_key(kind: PressureCurve) -> &'static str {
+    PRESSURE_CURVES.iter().find(|(k, _)| *k == kind).map_or("", |(_, key)| key)
+}
+
+/// The curve kept under `key`, if it is one.
+pub fn pressure_curve_of(key: &str) -> Option<PressureCurve> {
+    PRESSURE_CURVES.iter().find(|(_, k)| *k == key).map(|(kind, _)| *kind)
+}
+
 /// Reads the brush whose files are under `prefix` in `zip`.
 fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     let archive = Archive::read(&zip.read(&format!("{prefix}Brush.archive"))?)?;
@@ -409,6 +453,20 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     for &(control, key, kept) in PLAIN {
         if let Some(v) = f.num(key) {
             set(control, to_control(kept, v));
+        }
+    }
+    // a file without the pen's own taper keys tapers a pen as it does touch
+    for (pen, touch, control) in [
+        ("pencilTaperStartLength", "taperStartLength", "pen_taper_start"),
+        ("pencilTaperEndLength", "taperEndLength", "pen_taper_end"),
+        ("pencilTaperSize", "taperSize", "pen_taper_size"),
+        ("pencilTaperOpacity", "taperOpacity", "pen_taper_opacity"),
+        ("pencilTaperShape", "taperShape", "pen_taper_tip"),
+    ] {
+        if f.num(pen).is_none()
+            && let Some(v) = f.num(touch)
+        {
+            set(control, v as f32);
         }
     }
     if let Some(v) = f.num("shapeCount") {
@@ -497,6 +555,15 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         sizes: ["savedPaintSizes", "savedSmudgeSizes", "savedEraseSizes"].map(|k| place(f.reals(k))),
         opacities: ["savedPaintOpacities", "savedSmudgeOpacities", "savedEraseOpacities"].map(|k| f.reals(k)),
     };
+    let mut pressure_curves: Vec<(PressureCurve, Vec<Vec2>)> =
+        PRESSURE_CURVES.iter().filter_map(|&(kind, key)| Some((kind, f.curve(key)?))).collect();
+    // a file from before the linear jitter had its own keys: it follows the lateral one's curve
+    if f.num("plotJitterLongitudinal").is_none()
+        && !pressure_curves.iter().any(|(k, _)| *k == PressureCurve::LinearJitter)
+        && let Some((_, c)) = pressure_curves.iter().find(|(k, _)| *k == PressureCurve::LateralJitter)
+    {
+        pressure_curves.push((PressureCurve::LinearJitter, c.clone()));
+    }
     Some(BrushFile {
         name: f.text("name").unwrap_or_else(|| "Imported Brush".to_owned()),
         author: f.text("authorName").unwrap_or_default(),
@@ -507,6 +574,7 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         pressure_curve: f.curve("dynamicsPressureOverall").filter(|c| !is_straight(c)),
         size_curve: f.curve("dynamicsPressureSizeCurve").filter(|c| !is_straight(c)),
         opacity_curve: f.curve("dynamicsPressureOpacityCurve").filter(|c| !is_straight(c)),
+        pressure_curves,
         shape: texture("bundledShapePath", "Shape.png", "shapeInverted"),
         grain: texture("bundledGrainPath", "Grain.png", "textureInverted"),
         paint_size: f.num("paintSize").unwrap_or(0.5) as f32,
@@ -642,12 +710,17 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
             }
         }
     }
-    // the pressure response, and its own curves for the size and the opacity
+    // the pressure response, its own curves for the size and the opacity, and those the brush has
+    // for its other controls
+    let others = brush.pressure_curves.iter().map(|(kind, c)| (pressure_curve_key(kind), c));
     for (key, c) in [
         ("dynamicsPressureOverall", &brush.pressure_curve),
         ("dynamicsPressureSizeCurve", &brush.size_curve),
         ("dynamicsPressureOpacityCurve", &brush.opacity_curve),
-    ] {
+    ]
+    .into_iter()
+    .chain(others)
+    {
         let points: Vec<Value> = c.points().iter().map(|p| b.string(&format!("{{{:.6}, {:.6}}}", p.x, p.y))).collect();
         let list = b.array(points, true);
         let curve = b.object(&["ValkyrieMagnitudinalCurve", "NSObject"], vec![("points", list)]);
@@ -837,6 +910,65 @@ mod tests {
         assert_eq!(back.first().unwrap().shape, Texture::Image { bytes: b"shape".to_vec(), inverted: false });
         assert_eq!(back.first().unwrap().grain, Texture::None);
         assert!(read_set(&write(brushes.first().unwrap(), "", &pictures())).is_none());
+    }
+
+    #[test]
+    fn pressure_curves_survive_a_round_trip_straight_ones_too() {
+        use crate::brush::PressureCurve;
+        use crate::curve::Curve;
+        let mut brush = Brush { pressure_curves: Default::default(), ..Brush::round_pen() };
+        let bend = Curve::new(&[Vec2::new(0.0, 0.0), Vec2::new(0.5, 0.8), Vec2::new(1.0, 1.0)]);
+        brush.pressure_curves.set(PressureCurve::Count, Some(bend));
+        brush.pressure_curves.set(PressureCurve::HueJitter, Some(Curve::linear()));
+        let pictures =
+            Pictures { shape_png: b"s", grain_png: None, thumbnail_png: b"t", author_png: None, signature_png: None };
+        let back = read(&write(&brush, "", &pictures)).unwrap();
+        let kinds: Vec<PressureCurve> = back.pressure_curves.iter().map(|(k, _)| *k).collect();
+        assert_eq!(kinds, [PressureCurve::Count, PressureCurve::HueJitter]);
+        let count = &back.pressure_curves[0].1;
+        assert!((count[1] - Vec2::new(0.5, 0.8)).length() < 1e-5);
+    }
+
+    #[test]
+    fn a_file_without_linear_jitter_keys_gives_it_the_laterals_curve() {
+        use crate::brush::PressureCurve;
+        let mut b = Builder::new();
+        let root = b.reserve();
+        let name = b.string("Old");
+        let points = vec![b.string("{0, 0}"), b.string("{0.5, 0.9}"), b.string("{1, 1}")];
+        let list = b.array(points, true);
+        let curve = b.object(&["ValkyrieMagnitudinalCurve", "NSObject"], vec![("points", list)]);
+        b.fill(
+            &root,
+            &["SilicaBrush", "ValkyrieBrush", "NSObject"],
+            vec![("name", name), ("plotJitter", Value::Real(0.5)), ("dynamicsPressurePlotJitterCurve", curve)],
+        );
+        let mut zip = ZipWriter::new();
+        zip.add("Brush.archive", &b.finish(root));
+        let back = read(&zip.finish()).unwrap();
+        let curve = |kind| back.pressure_curves.iter().find(|(k, _)| *k == kind).map(|(_, c)| c.clone());
+        assert!(curve(PressureCurve::LateralJitter).is_some());
+        assert_eq!(curve(PressureCurve::LinearJitter), curve(PressureCurve::LateralJitter));
+    }
+
+    #[test]
+    fn a_file_without_pen_taper_keys_tapers_a_pen_as_touch() {
+        let mut b = Builder::new();
+        let root = b.reserve();
+        let name = b.string("Old");
+        b.fill(
+            &root,
+            &["SilicaBrush", "ValkyrieBrush", "NSObject"],
+            vec![("name", name), ("taperStartLength", Value::Real(0.4)), ("pencilTaperEndLength", Value::Real(0.2))],
+        );
+        let mut zip = ZipWriter::new();
+        zip.add("Brush.archive", &b.finish(root));
+        let back = read(&zip.finish()).unwrap();
+        let get = |k: &str| back.settings.iter().rev().find(|(key, _)| key == k).map(|(_, v)| *v);
+        assert_eq!(get("pen_taper_start"), Some(0.4));
+        assert_eq!(get("touch_taper_start"), Some(0.4));
+        // its own key wins
+        assert_eq!(get("pen_taper_end"), Some(0.2));
     }
 
     #[test]

@@ -108,16 +108,24 @@ pub mod grain {
 const COARSE_LIGHT: f32 = 0.6;
 const COARSE_DEPTH: f32 = 1.25;
 
+static SHAPES: std::sync::OnceLock<Vec<GrayImage>> = std::sync::OnceLock::new();
+static GRAINS: std::sync::OnceLock<Vec<GrayImage>> = std::sync::OnceLock::new();
+
 /// The shapes, made once.
 pub fn shapes() -> Vec<GrayImage> {
-    static MADE: std::sync::OnceLock<Vec<GrayImage>> = std::sync::OnceLock::new();
-    MADE.get_or_init(make_shapes).clone()
+    SHAPES.get_or_init(make_shapes).clone()
 }
 
 /// The grains, made once.
 pub fn grains() -> Vec<GrayImage> {
-    static MADE: std::sync::OnceLock<Vec<GrayImage>> = std::sync::OnceLock::new();
-    MADE.get_or_init(make_grains).clone()
+    GRAINS.get_or_init(make_grains).clone()
+}
+
+/// Makes the shapes and grains now, so the first canvas doesn't wait for them (slow: off the main
+/// thread).
+pub fn prepare() {
+    SHAPES.get_or_init(make_shapes);
+    GRAINS.get_or_init(make_grains);
 }
 
 fn make_shapes() -> Vec<GrayImage> {

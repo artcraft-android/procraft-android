@@ -97,10 +97,11 @@ impl Gpu {
         Ok(Gpu { instance, adapter, device, queue, errors, canvas_pipelines: Arc::default() })
     }
 
-    /// Makes the pipelines canvases draw with now, so the first canvas on this device is made at
-    /// once (slow: off the main thread).
+    /// Makes the pipelines canvases draw with, and the brush images they hold, now, so the first
+    /// canvas on this device is made at once (slow: off the main thread).
     pub fn prepare_canvases(&self) {
         let _ = self.canvas_pipelines();
+        procraft_engine::textures::prepare();
     }
 
     /// The pipelines canvases draw with, made by the first canvas on this device.

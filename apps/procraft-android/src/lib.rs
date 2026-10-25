@@ -543,6 +543,26 @@ impl State {
     }
 }
 
+/// Draws `samples` into the canvas's open stroke: their stamps as they come or, for a stroke shown
+/// with its tip, those the end taper no longer reaches for good and the rest as the tip. Whether
+/// anything was drawn.
+fn draw_samples(
+    canvas: &mut Canvas,
+    builder: &mut StrokeBuilder,
+    samples: &[Sample],
+    guide: &procraft_engine::guide::Guide,
+) -> bool {
+    if canvas.shows_tip() && builder.shows_tip() {
+        let (kept, tip) = builder.add_tipped(samples);
+        canvas.add_stamps(&guide::mirrored(guide, &kept));
+        canvas.set_tip(&guide::mirrored(guide, &tip));
+        return !kept.is_empty() || !tip.is_empty();
+    }
+    let stamps = guide::mirrored(guide, &builder.add(samples));
+    canvas.add_stamps(&stamps);
+    !stamps.is_empty()
+}
+
 /// Ends the canvas's open stroke with `builder`'s final stamps: a painted or erased stroke is
 /// redrawn once in its final form (end taper); a smudge, which has already changed the layer, and
 /// an adjustment painted on, which adds to its mask, only get the stamps not drawn yet.
@@ -835,7 +855,6 @@ impl CanvasSession {
         st.drawn.clear();
         st.drawn_pressure = 0.0;
         st.remember_input(&canvas_samples);
-        let stamps = guide::mirrored(&st.doc.guide, &builder.add(&canvas_samples));
         // painted and erased strokes can be made shapes once they end
         st.last_stroke = None;
         st.began =
@@ -851,7 +870,7 @@ impl CanvasSession {
             });
         let Some(canvas) = st.canvas.as_mut() else { return };
         canvas.begin_stroke(current, style);
-        canvas.add_stamps(&stamps);
+        draw_samples(canvas, &mut builder, &canvas_samples, &st.doc.guide);
         st.stroke = Some(builder);
         self.shared.frame(st);
     }
@@ -873,9 +892,7 @@ impl CanvasSession {
         }
         st.remember_input(&canvas_samples);
         let (Some(builder), Some(canvas)) = (st.stroke.as_mut(), st.canvas.as_mut()) else { return };
-        let stamps = guide::mirrored(&st.doc.guide, &builder.add(&canvas_samples));
-        if !stamps.is_empty() {
-            canvas.add_stamps(&stamps);
+        if draw_samples(canvas, builder, &canvas_samples, &st.doc.guide) {
             st.redraw_painted_on();
             self.shared.frame(st);
         }
@@ -891,7 +908,12 @@ impl CanvasSession {
         }
         let canvas_samples = st.to_canvas(&samples);
         let (Some(builder), Some(canvas)) = (st.stroke.as_ref(), st.canvas.as_mut()) else { return };
-        canvas.set_prediction(&builder.preview(&canvas_samples));
+        // a stroke shown with its tip ends it where the input is predicted to go
+        if canvas.shows_tip() && builder.shows_tip() {
+            canvas.set_tip(&guide::mirrored(&st.doc.guide, &builder.preview_tip(&canvas_samples)));
+        } else {
+            canvas.set_prediction(&builder.preview(&canvas_samples));
+        }
         self.shared.frame(st);
     }
 

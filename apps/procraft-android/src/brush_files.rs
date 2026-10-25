@@ -146,7 +146,8 @@ fn folder_id(seed: u64, i: usize) -> String {
 /// A brush from a brush file: the studio's controls on a fresh brush, its images found or stood in
 /// for.
 fn brush_from(file: &BrushFile) -> Brush {
-    let mut b = Brush { name: file.name.clone(), ..Brush::round_pen() };
+    // only the curves the file has (a control without one doesn't follow the pressure)
+    let mut b = Brush { name: file.name.clone(), pressure_curves: Default::default(), ..Brush::round_pen() };
     let (image, source, hardness) = shape_for(&file.shape);
     b.shape.image = image;
     b.shape.source = source;
@@ -165,6 +166,9 @@ fn brush_from(file: &BrushFile) -> Brush {
     }
     if let Some(points) = &file.pressure_curve {
         b.pressure_curve = Curve::new(points);
+    }
+    for (kind, points) in &file.pressure_curves {
+        b.pressure_curves.set(*kind, Some(Curve::new(points)));
     }
     b.notches = file.notches.clone();
     let (image, source) = grain_for(&file.grain, file.thumbnail.as_deref());

@@ -12,7 +12,7 @@ use procraft_engine::animation::{self, FrameLook};
 use procraft_engine::brush::{BRUSH_BEHIND, Brush, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering, Source};
 use procraft_engine::document::{BlendMode, Document, Layer, LayerId, LayerKind};
 use procraft_engine::geom::{Affine, IRect};
-use procraft_engine::stroke::Stamp;
+use procraft_engine::stroke::{MOST_ROUNDNESS, Stamp};
 use procraft_engine::textures::{self, GrayImage, TEXTURE_SIZE};
 
 use crate::{Gpu, GpuError};
@@ -38,9 +38,9 @@ const _: () = assert!(
 const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
 
 /// The vertex layout of a stamp instance (stroke stamps and the predicted tail).
-const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
+const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 11] = wgpu::vertex_attr_array![
     0 => Float32x2, 1 => Float32, 2 => Float32, 3 => Float32, 4 => Float32, 5 => Float32x2, 6 => Float32x2, 7 => Float32x4,
-    8 => Float32x4, 9 => Float32x4
+    8 => Float32x4, 9 => Float32x4, 10 => Float32
 ];
 
 #[repr(C)]
@@ -399,14 +399,17 @@ struct StampInstance {
     grain_offset: [f32; 2],
     /// −1 where the shape is mirrored on that axis, else 1.
     flip: [f32; 2],
-    /// Hue (turns), saturation and lightness shifts, and room for more.
-    shift: [f32; 4],
+    /// The tint (see [`stamp_extras`]): the hue's turn, the saturation's keep and add, the
+    /// brightness's keep.
+    tint: [f32; 4],
     /// A moving grain's depth and tile size as multiples of the brush's, the share of the
     /// secondary colour, and how far it fades across its width (tilt gradation).
     look: [f32; 4],
     /// How hard the paint is pressed into a moving grain and how much that counts, and room for
     /// more.
     more: [f32; 4],
+    /// The tint's brightness add.
+    brightness_add: f32,
 }
 
 /// A stamp's (alpha, transfer) as its instance takes them: a capped stroke keeps its transfer
@@ -444,10 +447,15 @@ fn drawn_radius(style: &StrokeStyle, radius: f32, taper: f32) -> f32 {
 }
 
 /// A stamp's mirroring and colour shift for the GPU, kept finite.
-fn stamp_extras(s: &Stamp) -> ([f32; 2], [f32; 4]) {
+/// A stamp's flips (each 1 or -1), and its tint as the shader takes it: the hue's turn, the
+/// saturation's keep and add, the brightness's keep, then apart its add.
+fn stamp_extras(s: &Stamp) -> ([f32; 2], [f32; 4], f32) {
     let flip = s.flip.map(|f| if f { -1.0 } else { 1.0 });
-    let [h, sat, l] = s.shift.map(|v| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 });
-    (flip, [h, sat, l, 0.0])
+    let t = s.tint;
+    let ok = |v: f32, none: f32| if v.is_finite() { v.clamp(-4.0, 4.0) } else { none };
+    let [sk, sa] = t.saturation;
+    let [bk, ba] = t.brightness;
+    (flip, [ok(t.hue, 0.0), ok(sk, 1.0), ok(sa, 0.0), ok(bk, 1.0)], ok(ba, 0.0))
 }
 
 #[repr(C)]
@@ -766,6 +774,8 @@ enum Op {
     /// Stamps added to the stroke (`clear`: the stroke is redrawn from scratch).
     Stamps {
         instances: Vec<StampInstance>,
+        /// Each stamp's wet-mix scaling (see [`Stamp::wet`]), for the wet paint drawn in place.
+        wet: Vec<[f32; 4]>,
         style: StrokeStyle,
         clear: bool,
         layer: LayerId,
@@ -774,6 +784,10 @@ enum Op {
     },
     Commit(ActiveStroke),
     Cancel,
+    /// What the stroke has under this rectangle is put aside, for a tip drawn over it.
+    SaveTip(IRect),
+    /// What was put aside under this rectangle comes back (the tip drawn over it goes).
+    Untip(IRect),
     Undo,
     Redo,
     Clear(LayerId),
@@ -1106,7 +1120,11 @@ pub struct Canvas {
     pipelines: std::sync::Arc<Pipelines>,
     screen: ScreenPipelines,
     layers: HashMap<LayerId, LayerGpu>,
+    stroke: wgpu::Texture,
     stroke_view: wgpu::TextureView,
+    /// Where the open stroke's tip is drawn (see [`Canvas::set_tip`]), and what it covered.
+    tip: Option<IRect>,
+    tip_backup: Option<wgpu::Texture>,
     /// Ping-pong pair; the finished composite is always left in the first.
     composite: [wgpu::Texture; 2],
     composite_views: [wgpu::TextureView; 2],
@@ -1319,7 +1337,10 @@ impl Canvas {
             pipelines,
             screen: ScreenPipelines::default(),
             layers: HashMap::new(),
+            stroke: stroke_texture,
             stroke_view,
+            tip: None,
+            tip_backup: None,
             composite,
             composite_views,
             groups: Vec::new(),
@@ -1507,26 +1528,63 @@ impl Canvas {
 
     /// Draws more of the open stroke.
     pub fn add_stamps(&mut self, stamps: &[Stamp]) {
+        self.untip();
         self.push_stamps(stamps, false);
     }
 
     /// Redraws the open stroke from scratch with `stamps` (its final form, e.g. with the end taper).
     pub fn replace_stamps(&mut self, stamps: &[Stamp]) {
+        self.tip = None;
         self.push_stamps(stamps, true);
     }
 
-    fn push_stamps(&mut self, stamps: &[Stamp], clear: bool) {
+    /// Whether the open stroke can show a tip (see [`Canvas::set_tip`]): one built up in the
+    /// stroke texture, not painted in place or onto an adjustment.
+    pub fn shows_tip(&self) -> bool {
+        self.active.is_some_and(|a| !a.pencil && !a.style.in_place())
+    }
+
+    /// The open stroke's tip, drawn over it until the next stamps or tip: its last stamps as
+    /// they'd be drawn were it to end now.
+    pub fn set_tip(&mut self, stamps: &[Stamp]) {
+        self.untip();
+        if !self.shows_tip() || stamps.is_empty() {
+            return;
+        }
+        let at = self.ops.len();
+        let bounds = self.push_stamps(stamps, false);
+        if bounds.is_empty() {
+            return;
+        }
+        self.ops.insert(at, Op::SaveTip(bounds));
+        self.tip = Some(bounds);
+    }
+
+    /// Takes the tip off the open stroke.
+    fn untip(&mut self) {
+        if let Some(rect) = self.tip.take() {
+            self.dirty = self.dirty.union(rect);
+            self.ops.push(Op::Untip(rect));
+        }
+    }
+
+    /// Queues `stamps` into the open stroke (`clear`: from scratch); where they reach.
+    fn push_stamps(&mut self, stamps: &[Stamp], clear: bool) -> IRect {
         let full = self.full();
-        let Some(active) = self.active.as_mut() else { return };
+        let Some(active) = self.active.as_mut() else { return IRect::EMPTY };
         let mut bounds = IRect::EMPTY;
         let style = active.style;
         let capped = self.pipelines.stamp_capped.is_some();
-        let instances: Vec<StampInstance> = stamps
+        let drawn: Vec<&Stamp> =
+            stamps.iter().filter(|s| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite()).collect();
+        let wet: Vec<[f32; 4]> =
+            drawn.iter().map(|s| s.wet.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 })).collect();
+        let instances: Vec<StampInstance> = drawn
             .iter()
-            .filter(|s| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite())
             .map(|s| {
                 let radius = drawn_radius(&style, s.radius, s.taper);
-                bounds = bounds.union(IRect::around(s.center, radius * std::f32::consts::SQRT_2));
+                let tall = if s.roundness.is_finite() { s.roundness.clamp(1.0, MOST_ROUNDNESS) } else { 1.0 };
+                bounds = bounds.union(IRect::around(s.center, radius * tall * std::f32::consts::SQRT_2));
                 // without the capped pipeline, the transfer goes into the stamp
                 let (alpha, transfer) = capped_alpha(&style, capped, s);
                 StampInstance {
@@ -1534,14 +1592,15 @@ impl Canvas {
                     radius,
                     alpha,
                     angle: if s.angle.is_finite() { s.angle } else { 0.0 },
-                    roundness: if s.roundness.is_finite() { s.roundness.clamp(0.05, 1.0) } else { 1.0 },
+                    roundness: if s.roundness.is_finite() { s.roundness.clamp(0.05, MOST_ROUNDNESS) } else { 1.0 },
                     grain_offset: if s.grain_offset.is_finite() {
                         [s.grain_offset.x, s.grain_offset.y]
                     } else {
                         [0.0; 2]
                     },
                     flip: stamp_extras(s).0,
-                    shift: stamp_extras(s).1,
+                    tint: stamp_extras(s).1,
+                    brightness_add: stamp_extras(s).2,
                     look: [s.grain_depth, s.grain_size, s.secondary, s.gradation]
                         .map(|v| if v.is_finite() { v.clamp(0.0, 64.0) } else { 0.0 }),
                     more: [s.grain_press, s.grain_bleed, transfer, s.attack]
@@ -1561,12 +1620,14 @@ impl Canvas {
             let pencil = active.pencil;
             self.ops.push(Op::Stamps {
                 instances,
+                wet,
                 style: active.style,
                 clear: clear && !pencil,
                 layer: active.layer,
                 pencil,
             });
         }
+        bounds
     }
 
     /// Puts the open stroke into its layer (undoably).
@@ -1584,10 +1645,11 @@ impl Canvas {
                     radius: drawn_radius(&style, s.radius, s.taper),
                     alpha,
                     angle: if s.angle.is_finite() { s.angle } else { 0.0 },
-                    roundness: if s.roundness.is_finite() { s.roundness.clamp(0.05, 1.0) } else { 1.0 },
+                    roundness: if s.roundness.is_finite() { s.roundness.clamp(0.05, MOST_ROUNDNESS) } else { 1.0 },
                     grain_offset: [0.0; 2],
                     flip: stamp_extras(s).0,
-                    shift: stamp_extras(s).1,
+                    tint: stamp_extras(s).1,
+                    brightness_add: stamp_extras(s).2,
                     look: [s.grain_depth, s.grain_size, s.secondary, s.gradation]
                         .map(|v| if v.is_finite() { v.clamp(0.0, 64.0) } else { 0.0 }),
                     more: [s.grain_press, s.grain_bleed, transfer, s.attack]
@@ -1599,6 +1661,7 @@ impl Canvas {
 
     pub fn end_stroke(&mut self) {
         self.prediction.clear();
+        self.untip();
         if let Some(active) = self.active.take() {
             self.ops.push(Op::Commit(active));
         }
@@ -1607,6 +1670,7 @@ impl Canvas {
     /// Drops the open stroke.
     pub fn cancel_stroke(&mut self) {
         self.prediction.clear();
+        self.tip = None;
         if let Some(active) = self.active.take() {
             self.dirty = self.dirty.union(active.bounds);
             self.ops.push(Op::Cancel);
@@ -2124,9 +2188,10 @@ impl Canvas {
         let mut history_changed = false;
         for op in ops {
             match op {
-                Op::Stamps { instances, style, layer, clear, .. } if style.in_place() => {
+                Op::Stamps { instances, wet, style, layer, clear, .. } if style.in_place() => {
                     next_instance = next_instance.saturating_add(u32::try_from(instances.len()).unwrap_or(u32::MAX));
-                    self.smudge_stamps(device, &mut encoder, &mut smudge_uniforms, &instances, &style, layer, clear);
+                    let stamps = (instances.as_slice(), wet.as_slice());
+                    self.smudge_stamps(device, &mut encoder, &mut smudge_uniforms, stamps, &style, layer, clear);
                 }
                 Op::Stamps { instances, style, clear, pencil, .. } => {
                     let count = u32::try_from(instances.len()).unwrap_or(u32::MAX);
@@ -2195,6 +2260,33 @@ impl Canvas {
                         &self.stroke_view,
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     ));
+                }
+                Op::SaveTip(rect) => {
+                    let (width, height) = (rect.width(), rect.height());
+                    let roomy = self.tip_backup.as_ref().is_some_and(|b| b.width() >= width && b.height() >= height);
+                    if !roomy {
+                        // grown in steps, so a tip that grows doesn't make one every frame
+                        let room = |n: u32, most: u32| n.max(1).next_multiple_of(256).min(most);
+                        let (w, h) = self.tip_backup.as_ref().map_or((0, 0), |b| (b.width(), b.height()));
+                        let size = (room(width.max(w), self.width), room(height.max(h), self.height));
+                        self.tip_backup = Some(texture(device, "tip backup", size.0, size.1, STROKE_FORMAT));
+                    }
+                    if let Some(backup) = &self.tip_backup {
+                        encoder.copy_texture_to_texture(
+                            copy_at(&self.stroke, rect.x0, rect.y0),
+                            copy_at(backup, 0, 0),
+                            extent(width, height),
+                        );
+                    }
+                }
+                Op::Untip(rect) => {
+                    if let Some(backup) = &self.tip_backup {
+                        encoder.copy_texture_to_texture(
+                            copy_at(backup, 0, 0),
+                            copy_at(&self.stroke, rect.x0, rect.y0),
+                            extent(rect.width(), rect.height()),
+                        );
+                    }
                 }
                 Op::Undo => {
                     if let Some(step) = self.undo.pop() {
@@ -2647,7 +2739,7 @@ impl Canvas {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         params: &mut UniformData,
-        instances: &[StampInstance],
+        (instances, wet): (&[StampInstance], &[[f32; 4]]),
         style: &StrokeStyle,
         target: LayerId,
         restart: bool,
@@ -2797,24 +2889,28 @@ impl Canvas {
         let mut pass =
             encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("smudge"), timestamp_writes: None });
         pass.set_bind_group(1, &self.brush_bind, &[]);
-        for s in instances {
+        for (k, s) in instances.iter().enumerate() {
             let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
-            let bbox = IRect::around(center, s.radius * std::f32::consts::SQRT_2).intersect(full);
+            let bbox =
+                IRect::around(center, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
             if bbox.is_empty() || s.radius <= 0.0 {
                 continue;
             }
             changed = changed.union(bbox);
-            let wet = style.wet_pull.is_some() && style.tool == StrokeTool::Paint;
+            let wet_paint = style.wet_pull.is_some() && style.tool == StrokeTool::Paint;
             // the paint runs out with the length the stroke has gone
             if let Some([x, y]) = smudge.last {
                 smudge.length += (s.center[0] - x).hypot(s.center[1] - y);
             }
             smudge.last = Some(s.center);
+            // the grade, blur and jitters as far as this stamp's pressure takes them
+            let [grade_by, blur_by, blur_jitter_by, wet_jitter_by] = wet.get(k).copied().unwrap_or([1.0; 4]);
+            let stamp_style = StrokeStyle { grade: style.grade * grade_by, ..*style };
             // the mixture varies from stamp to stamp by the wetness jitter
-            let jitter = 1.0 - style.wet_jitter * unit_hash(smudge.stamps);
+            let jitter = 1.0 - style.wet_jitter * wet_jitter_by * unit_hash(smudge.stamps);
             smudge.stamps = smudge.stamps.saturating_add(1);
-            let (mixture, final_mixture, wet_pull) = if wet {
-                wet_mixture(style, smudge.length, jitter, s.more[3])
+            let (mixture, final_mixture, wet_pull) = if wet_paint {
+                wet_mixture(&stamp_style, smudge.length, jitter, s.more[3])
             } else {
                 (0.0, 1.0, style.pull.clamp(0.0, 1.0))
             };
@@ -2836,11 +2932,13 @@ impl Canvas {
                 grid: SMUDGE_GRID,
                 uniform_glaze: u32::from(style.rendering == Rendering::Strongest),
                 paint: [style.color[0], style.color[1], style.color[2], 1.0],
-                mode: u32::from(wet),
+                mode: u32::from(wet_paint),
                 mixture,
                 final_mixture,
-                grade: style.grade,
-                blur: style.blur * (1.0 - style.blur_jitter * unit_hash(smudge.stamps.wrapping_add(7919))),
+                grade: stamp_style.grade,
+                blur: style.blur
+                    * blur_by
+                    * (1.0 - style.blur_jitter * blur_jitter_by * unit_hash(smudge.stamps.wrapping_add(7919))),
                 grain: style.grain.map_or(-1, |g| g as i32),
                 // a moving grain sized and as deep as this stamp says
                 grain_scale: if moving { -style.grain_scale * s.look[1].max(0.05) } else { style.grain_scale },

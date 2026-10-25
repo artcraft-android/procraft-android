@@ -43,11 +43,14 @@ struct StampIn {
     @location(4) roundness: f32,
     @location(5) grain_offset: vec2<f32>,
     @location(6) flip: vec2<f32>,
-    @location(7) shift: vec4<f32>,
+    // the tint: the hue's turn, the saturation's keep and add, the brightness's keep
+    @location(7) tint: vec4<f32>,
     // a moving grain's depth and tile size as multiples of the brush's; the secondary colour's share
     @location(8) look: vec4<f32>,
     // how far the paint fills a moving grain in, and room for more
     @location(9) more: vec4<f32>,
+    // the tint's brightness add
+    @location(10) brightness_add: f32,
 }
 
 struct StampOut {
@@ -60,7 +63,8 @@ struct StampOut {
     // there on the canvas (the grain never turns or squashes with the stamp)
     @location(3) grain_at: vec2<f32>,
     @location(4) flip: vec2<f32>,
-    @location(5) shift: vec3<f32>,
+    // the stamp's colour: the brush's tinted, mixed with the secondary
+    @location(5) color: vec3<f32>,
     // how hard the paint is pressed into a moving grain, and how much that counts
     @location(8) grain_press: f32,
     @location(10) grain_bleed: f32,
@@ -90,7 +94,7 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
     o.alpha = inst.alpha;
     o.grain_at = inst.grain_offset + (p - inst.center);
     o.flip = inst.flip;
-    o.shift = inst.shift.xyz;
+    o.color = mix(tinted(su.color.rgb, inst.tint, inst.brightness_add), su.secondary.rgb, inst.look.z);
     o.look = inst.look;
     o.grain_press = inst.more.x;
     o.grain_bleed = inst.more.y;
@@ -98,16 +102,14 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
     return o;
 }
 
-// hue (0..1), saturation and lightness of a colour, and back
-fn to_hsl(c: vec3<f32>) -> vec3<f32> {
+// hue (0..1), saturation and brightness of a colour, and back
+fn to_hsb(c: vec3<f32>) -> vec3<f32> {
     let hi = max(c.r, max(c.g, c.b));
     let lo = min(c.r, min(c.g, c.b));
-    let l = (hi + lo) * 0.5;
     let d = hi - lo;
     if (d <= 1e-5) {
-        return vec3<f32>(0.0, 0.0, l);
+        return vec3<f32>(0.0, 0.0, hi);
     }
-    let s = d / (1.0 - abs(2.0 * l - 1.0) + 1e-5);
     var h = 0.0;
     if (hi == c.r) {
         h = (c.g - c.b) / d;
@@ -116,15 +118,23 @@ fn to_hsl(c: vec3<f32>) -> vec3<f32> {
     } else {
         h = (c.r - c.g) / d + 4.0;
     }
-    return vec3<f32>(fract(h / 6.0), clamp(s, 0.0, 1.0), l);
+    return vec3<f32>(fract(h / 6.0), d / hi, hi);
 }
 
-fn from_hsl(c: vec3<f32>) -> vec3<f32> {
-    let k = vec3<f32>(0.0, 2.0 / 3.0, 1.0 / 3.0);
-    let p = abs(fract(vec3<f32>(c.x) + k) * 6.0 - 3.0);
-    let rgb = clamp(p - 1.0, vec3<f32>(0.0), vec3<f32>(1.0));
-    let chroma = (1.0 - abs(2.0 * c.z - 1.0)) * c.y;
-    return c.z + chroma * (rgb - 0.5);
+fn from_hsb(c: vec3<f32>) -> vec3<f32> {
+    let k = fract(vec3<f32>(c.x) + vec3<f32>(5.0, 3.0, 1.0) / 6.0) * 6.0;
+    return c.z - c.z * c.y * clamp(min(k, 4.0 - k), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// `c` tinted: its hue turned, its saturation and brightness each kept by so much and added to
+fn tinted(c: vec3<f32>, t: vec4<f32>, brightness_add: f32) -> vec3<f32> {
+    if (all(t == vec4<f32>(0.0, 1.0, 0.0, 1.0)) && brightness_add == 0.0) {
+        return c;
+    }
+    let hsb = to_hsb(c);
+    let s = clamp(hsb.y * t.y + t.z, 0.0, 1.0);
+    let b = clamp(hsb.z * t.w + brightness_add, 0.0, 1.0);
+    return from_hsb(vec3<f32>(fract(hsb.x + t.x), s, b));
 }
 
 // the shape image's texel under `uv`, unfiltered
@@ -189,10 +199,5 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
     // paint keeps inside the selection
     let inside_selection = textureSampleLevel(selected, shape_smp, i.pos.xy / su.canvas_size, 0.0).r;
     a = a * small * small * i.alpha * inside_selection;
-    var color = mix(su.color.rgb, su.secondary.rgb, i.look.z);
-    if (any(i.shift != vec3<f32>(0.0))) {
-        let hsl = to_hsl(color);
-        color = from_hsl(vec3<f32>(fract(hsl.x + i.shift.x + 1.0), clamp(hsl.y + i.shift.y, 0.0, 1.0), clamp(hsl.z + i.shift.z, 0.0, 1.0)));
-    }
-    return vec4<f32>(color * a, a);
+    return vec4<f32>(i.color * a, a);
 }

@@ -2,7 +2,7 @@
 //! response, spacing, the shape's placement (rotation, scatter, count, jitter, roundness) and
 //! taper.
 
-use crate::brush::{Brush, FLOW_POWER, Rendering, Taper, Tilt};
+use crate::brush::{Brush, CLASSIC_TAPER_SPAN, FLOW_POWER, PressureCurve, Rendering, TAPER_TIME_MS, Taper, Tilt};
 use crate::curve::Curve;
 use crate::geom::{IRect, Vec2};
 use crate::input::{Pointer, Sample};
@@ -32,8 +32,8 @@ pub struct Stamp {
     pub grain_bleed: f32,
     /// The shape mirrored across its own vertical and horizontal axes.
     pub flip: [bool; 2],
-    /// The colour shifted: hue (turns), saturation and lightness (each −1..1).
-    pub shift: [f32; 3],
+    /// How its colour moves from the brush's.
+    pub tint: Tint,
     /// How much of the secondary colour it paints with, 0..1.
     pub secondary: f32,
     /// A moving grain's depth and tile size here, as multiples of the brush's.
@@ -50,6 +50,9 @@ pub struct Stamp {
     /// How much of the brush's wet-mix attack this stamp has: the pressure (as opacity follows
     /// it), as far as the attack's tilt switch lets it, 0..1.
     pub attack: f32,
+    /// The wet mix's grade, blur, blur jitter and wetness jitter as this stamp's pressure scales
+    /// them (the brush's own pressure curves; 1 each without them).
+    pub wet: [f32; 4],
 }
 
 impl Stamp {
@@ -65,7 +68,7 @@ impl Stamp {
             grain_press: 1.0,
             grain_bleed: 0.0,
             flip: [false; 2],
-            shift: [0.0; 3],
+            tint: Tint::NONE,
             secondary: 0.0,
             grain_depth: 1.0,
             grain_size: 1.0,
@@ -73,12 +76,43 @@ impl Stamp {
             taper: 1.0,
             transfer: 1.0,
             attack: 1.0,
+            wet: [1.0; 4],
         }
     }
 
     /// Pixels the stamp can touch: its square shape at any rotation.
     pub fn bounds(&self) -> IRect {
-        IRect::around(self.center, self.radius * std::f32::consts::SQRT_2)
+        IRect::around(self.center, self.radius * self.roundness.clamp(1.0, MOST_ROUNDNESS) * std::f32::consts::SQRT_2)
+    }
+}
+
+/// How a stamp's colour moves from the brush's, in hue, saturation and brightness: the hue
+/// turned by `hue` (turns), the saturation and the brightness each taken to `x keep + add`
+/// (`[keep, add]`), then held to 0..1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tint {
+    pub hue: f32,
+    pub saturation: [f32; 2],
+    pub brightness: [f32; 2],
+}
+
+impl Tint {
+    pub const NONE: Tint = Tint { hue: 0.0, saturation: [1.0, 0.0], brightness: [1.0, 0.0] };
+
+    /// This and `other` together: what each moves the colour by, added.
+    pub fn plus(self, other: Tint) -> Tint {
+        let [sk, sa] = self.saturation;
+        let [ok, oa] = other.saturation;
+        let [bk, ba] = self.brightness;
+        let [pk, pa] = other.brightness;
+        Tint { hue: self.hue + other.hue, saturation: [sk + ok - 1.0, sa + oa], brightness: [bk + pk - 1.0, ba + pa] }
+    }
+
+    /// The hue, saturation and brightness moved on by as much again, whatever the colour.
+    fn shifted(self, [hue, saturation, brightness]: [f32; 3]) -> Tint {
+        let [sk, sa] = self.saturation;
+        let [bk, ba] = self.brightness;
+        Tint { hue: self.hue + hue, saturation: [sk, sa + saturation], brightness: [bk, ba + brightness] }
     }
 }
 
@@ -92,14 +126,22 @@ struct Placed {
     angle: f32,
     roundness: f32,
     flip: [bool; 2],
-    shift: [f32; 3],
+    tint: Tint,
     secondary: f32,
     grain_depth: f32,
     grain_size: f32,
     grain_press: f32,
+    /// How far its moving grain rolls along with the stroke (see [`Extras::grain_movement`]).
+    grain_movement: f32,
     gradation: f32,
     transfer: f32,
     attack: f32,
+    wet: [f32; 4],
+    /// The pressure as the size, opacity, bleed and roundness took it.
+    pressed: [f32; 4],
+    /// How much of the stamp's roundness is the drawn shape's, which the pressure squeezes (the
+    /// rest is what leaning adds).
+    drawn_share: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -145,8 +187,13 @@ const MOST_AVERAGED: usize = 32;
 /// expression, how much of the way back to the pen it comes.
 const MOTION_FILTER_MOST: f32 = 0.9;
 const EXPRESSION_MOST: f32 = 0.5;
-/// A lateral or linear jitter of 1 moves a stamp up to this many diameters.
-const JITTER_REACH: f32 = 2.0;
+/// The most a stamp's height may be of its width (a roundness jitter can make it taller than
+/// wide).
+pub const MOST_ROUNDNESS: f32 = 20.0;
+
+/// The lateral and linear jitter as brush files keep them: the control to the power 2.2, times
+/// this; each moves a stamp up to that many times half its diagonal (plus a pixel).
+const JITTER_FILE_SCALE: f32 = 3.0;
 /// A fall off of 1 fades a stroke out over this many diameters.
 const FALLOFF_SPAN: f32 = 30.0;
 
@@ -160,7 +207,8 @@ struct Extras {
     count_jitter: f32,
     pressure_roundness: f32,
     tilt_roundness: f32,
-    roundness_jitter: f32,
+    /// The roundness jitter along the stamp's height and across its width.
+    roundness_jitter: [f32; 2],
     speed_size: f32,
     speed_opacity: f32,
     speed_spacing: f32,
@@ -192,6 +240,10 @@ struct Extras {
     /// How blunt the pen's and the finger's taper ends are, 0 (sharp) to 1.
     pen_taper_tip: f32,
     touch_taper_tip: f32,
+    /// How far a pen's pressure fades into its tapers, 0..1.
+    taper_pressure: f32,
+    /// A pen's stroke shows its end tapered as it is drawn.
+    tip_animation: bool,
     /// The secondary colour mixed in per stamp and per stroke (jitter, 0..1), and by light
     /// pressure and by leaning (−1..1).
     stamp_secondary: f32,
@@ -258,7 +310,7 @@ impl Extras {
             count_jitter: unit("count_jitter"),
             pressure_roundness: both("pressure_roundness"),
             tilt_roundness: both("tilt_roundness"),
-            roundness_jitter: unit("roundness_jitter_y").max(unit("roundness_jitter_x")),
+            roundness_jitter: [unit("roundness_jitter_y"), unit("roundness_jitter_x")],
             speed_size: both("speed_size"),
             speed_opacity: both("speed_opacity"),
             speed_spacing: unit("speed_spacing"),
@@ -287,6 +339,8 @@ impl Extras {
             grain_zoom: unit("grain_zoom"),
             pen_taper_tip: unit("pen_taper_tip"),
             touch_taper_tip: unit("touch_taper_tip"),
+            taper_pressure: unit("pen_taper_pressure"),
+            tip_animation: b.setting("pen_tip_animation") >= 0.5,
             stamp_secondary: unit("stamp_secondary"),
             stroke_secondary: unit("stroke_secondary"),
             pressure_secondary: both("pressure_secondary"),
@@ -327,10 +381,13 @@ impl Extras {
 
 /// Streamline is tuned for input at this interval; other rates are scaled to match.
 const REFERENCE_INTERVAL_MS: f64 = 1000.0 / 120.0;
-/// How fast a stroke starts is read over its first this many milliseconds, and how fast it ends
-/// over its last (for the tapers that last a time).
-const PACE_WINDOW_MS: f64 = 20.0;
-const END_PACE_WINDOW_MS: f64 = 60.0;
+/// When a classic taper ends, the stroke runs on past the last point by this many steps (touch,
+/// pen), each this much of the one before and turning this much more than it, and the end taper
+/// comes to its tip over them.
+const RUN_ON_TOUCH: usize = 4;
+const RUN_ON_PEN: usize = 1;
+const RUN_ON_SHRINK: f32 = 0.66;
+const RUN_ON_TURN: f32 = 1.125;
 /// How far (canvas pixels) offset jitter may move a stroke's start in a moving grain.
 const GRAIN_JITTER_SPAN: f32 = 1024.0;
 /// Stamps a stroke may hold (a guard against runaway input, far above any real stroke).
@@ -392,9 +449,11 @@ pub struct StrokeBuilder {
     pad: Option<bool>,
     gap_jitter: f32,
     /// The whole stroke's colour shift, drawn once.
-    stroke_shift: [f32; 3],
+    stroke_shift: Tint,
     /// The stroke's share of the secondary colour, picked as it starts.
     stroke_secondary: f32,
+    /// The random turn every stamp of the stroke takes (a randomised shape), picked as it starts.
+    stroke_turn: f32,
     /// How far the canvas is turned on screen, for a brush whose shapes keep to the screen.
     screen_turn: f32,
     /// Screen points a canvas pixel spans, for the speed dynamics.
@@ -404,12 +463,16 @@ pub struct StrokeBuilder {
     filtered: Option<Vec2>,
     /// Where in a moving grain the stroke starts.
     grain_start: Vec2,
-    /// How far the input has gone (canvas pixels, as it came) and when: its latest stretch, the
-    /// time it started and how fast it went at first (for the tapers that last a time).
-    trail: std::collections::VecDeque<(f64, f32)>,
+    /// When each sample came (milliseconds, always later than the one before) and how far the
+    /// input had gone by then (canvas pixels, as it came), for the tapers that last a time.
+    history: Vec<(f64, f32)>,
     input_length: f32,
-    started_ms: Option<f64>,
-    start_pace: Option<f32>,
+    /// The two input points before the last, for running a classic taper's end on past it.
+    before_last: [Option<Vec2>; 2],
+    /// How far a finished stroke ran on past its last point (see [`StrokeBuilder::run_on`]).
+    ran_on: Option<f32>,
+    /// How many stamps have been drawn for good, for a stroke shown with its tip.
+    kept: usize,
 }
 
 /// Smoothing and pressure set for every stroke, whatever the brush, on top of the brush's own.
@@ -538,17 +601,19 @@ impl StrokeBuilder {
             exact: false,
             pad: None,
             gap_jitter: 1.0,
-            stroke_shift: [0.0; 3],
+            stroke_shift: Tint::NONE,
             stroke_secondary: 0.0,
+            stroke_turn: 0.0,
             screen_turn: 0.0,
             points_per_pixel: 1.0,
             input: InputSettings::default(),
             filtered: None,
             grain_start: Vec2::ZERO,
-            trail: std::collections::VecDeque::new(),
+            history: Vec::new(),
             input_length: 0.0,
-            started_ms: None,
-            start_pace: None,
+            before_last: [None; 2],
+            ran_on: None,
+            kept: 0,
         }
         .reading_extras()
     }
@@ -563,19 +628,23 @@ impl StrokeBuilder {
         if self.extras.grain_offset_jitter {
             self.grain_start = Vec2::new(self.random.next(), self.random.next()) * GRAIN_JITTER_SPAN;
         }
+        if self.brush.shape.randomise {
+            self.stroke_turn = self.random.next() * std::f32::consts::TAU;
+        }
         self
     }
 
-    /// A random colour shift by `jitter` (hue, saturation, lightness, darkness).
-    fn color_jitter(&mut self, [hue, saturation, lightness, darkness]: [f32; 4]) -> [f32; 3] {
+    /// A random colour change by `jitter` (hue, saturation, lightness, darkness): the hue turned
+    /// either way, the saturation drawn toward a random one, the colour lightened by a share of
+    /// what is left to white and darkened by a share of what is left to black.
+    fn color_jitter(&mut self, [hue, saturation, lightness, darkness]: [f32; 4]) -> Tint {
         if hue == 0.0 && saturation == 0.0 && lightness == 0.0 && darkness == 0.0 {
-            return [0.0; 3];
+            return Tint::NONE;
         }
-        [
-            (self.random.next() * 2.0 - 1.0) * hue * 0.5,
-            -self.random.next() * saturation,
-            self.random.next() * lightness - self.random.next() * darkness,
-        ]
+        let turn = (self.random.next() - 0.5) * hue;
+        let toward = self.random.next() * saturation;
+        let (lighter, darker) = (self.random.next() * lightness, self.random.next() * darkness);
+        Tint { hue: turn, saturation: [1.0 - saturation, toward], brightness: [1.0 - lighter - darker, lighter] }
     }
 
     pub fn pointer(&self) -> Pointer {
@@ -619,14 +688,51 @@ impl StrokeBuilder {
         self.clone().add(samples)
     }
 
+    /// Whether the stroke shows its end tapered as it is drawn: a pen's, with a taper that lasts a
+    /// time and the tip animation on.
+    pub fn shows_tip(&self) -> bool {
+        self.pointer.has_pressure() && self.extras.tip_animation && !self.classic() && self.taper().end > 0.0
+    }
+
+    /// Adds samples to a stroke shown with its tip (see [`StrokeBuilder::shows_tip`]): returns
+    /// the stamps to draw for good now, those the end taper no longer reaches, and the tip, the
+    /// stamps after them as they would be drawn were the stroke to end here.
+    pub fn add_tipped(&mut self, samples: &[Sample]) -> (Vec<Stamp>, Vec<Stamp>) {
+        self.add(samples);
+        let start = self.start_span();
+        let reach = self.length - self.end_span(0.0);
+        let to = self.placed.iter().position(|p| p.distance >= reach).unwrap_or(self.placed.len()).max(self.kept);
+        let kept = self.placed.get(self.kept..to).unwrap_or_default();
+        let kept = kept.iter().map(|p| self.finish_stamp(p, start, None)).collect();
+        self.kept = to;
+        (kept, self.tip_from(to))
+    }
+
+    /// The tip as it would be with `samples` added (for drawing predicted input), the stroke
+    /// left as it is.
+    pub fn preview_tip(&self, samples: &[Sample]) -> Vec<Stamp> {
+        let mut ahead = self.clone();
+        ahead.add(samples);
+        ahead.tip_from(self.kept)
+    }
+
+    /// The stamps from `from` on as they would be drawn were the stroke to end here.
+    fn tip_from(&self, from: usize) -> Vec<Stamp> {
+        let (start, end, length) = (self.start_span(), self.end_span(0.0), self.length);
+        let tip = self.placed.get(from..).unwrap_or_default();
+        tip.iter().map(|p| self.finish_stamp(p, start, Some((length, end)))).collect()
+    }
+
     /// Every stamp so far as currently drawn (no end taper yet).
     pub fn stamps(&self) -> Vec<Stamp> {
-        self.placed.iter().map(|p| self.finish_stamp(p, None)).collect()
+        let start = self.start_span();
+        self.placed.iter().map(|p| self.finish_stamp(p, start, None)).collect()
     }
 
     /// Ends the stroke: walks on to where the pen lifted and applies the end taper. Returns all of
     /// the stroke's stamps, as they should finally be drawn.
     pub fn finish(&mut self) -> Vec<Stamp> {
+        let mut run_on = 0.0;
         if let (Some(last), Some(head)) = (self.last_sample, self.head) {
             let to = PathPoint {
                 pos: last.pos,
@@ -638,9 +744,15 @@ impl StrokeBuilder {
             };
             let mut ignored = Vec::new();
             self.walk_to(to, &mut ignored);
+            run_on = match self.ran_on {
+                Some(r) => r,
+                None => self.run_on(to, &mut ignored),
+            };
         }
+        self.ran_on = Some(run_on);
         let length = self.length;
-        let stamps: Vec<Stamp> = self.placed.iter().map(|p| self.finish_stamp(p, Some(length))).collect();
+        let (start, end) = (self.start_span(), self.end_span(run_on));
+        let stamps: Vec<Stamp> = self.placed.iter().map(|p| self.finish_stamp(p, start, Some((length, end)))).collect();
         self.bounds = stamps.iter().fold(IRect::EMPTY, |b, s| b.union(s.bounds()));
         stamps
     }
@@ -709,43 +821,97 @@ impl StrokeBuilder {
             _ => target,
         };
         self.smoothed = Some(smoothed);
-        self.keep_pace(s);
+        self.keep_time(s);
+        if let Some(last) = self.last_sample {
+            self.before_last = [self.before_last[1], Some(last.pos)];
+        }
         self.last_sample = Some(s);
         self.walk_to(smoothed, out);
     }
 
-    /// Notes how far and how fast the input has come with `s`.
-    fn keep_pace(&mut self, s: Sample) {
+    /// Notes how far the input has come with `s`, and when (samples without times of their own
+    /// count as coming at the usual rate).
+    fn keep_time(&mut self, s: Sample) {
         self.input_length += self.last_sample.map_or(0.0, |l| s.pos.distance(l.pos));
-        let started = *self.started_ms.get_or_insert(s.time_ms);
-        self.trail.push_back((s.time_ms, self.input_length));
-        while self.trail.len() > 2 && self.trail.get(1).is_some_and(|&(t, _)| s.time_ms - t >= END_PACE_WINDOW_MS) {
-            self.trail.pop_front();
-        }
-        if self.start_pace.is_none() && s.time_ms - started >= PACE_WINDOW_MS {
-            self.start_pace = Some(self.input_length / (s.time_ms - started) as f32);
-        }
+        let at = match self.history.last() {
+            Some(&(before, _)) if s.time_ms <= before => before + REFERENCE_INTERVAL_MS,
+            _ => s.time_ms,
+        };
+        self.history.push((at, self.input_length));
     }
 
-    /// How fast the stroke started and how fast it is going now (lately), canvas pixels a
-    /// millisecond; samples without times count as coming at the usual rate.
-    fn paces(&self) -> (f32, f32) {
-        let pace = |gone: f32, ms: f64, samples: usize| {
-            let ms = if ms >= 1.0 { ms } else { samples.saturating_sub(1) as f64 * REFERENCE_INTERVAL_MS };
-            if ms > 0.0 { gone / ms as f32 } else { 0.0 }
-        };
-        let now = match (self.trail.front(), self.trail.back()) {
-            (Some(&(t0, l0)), Some(&(t1, l1))) => pace(l1 - l0, t1 - t0, self.trail.len()),
-            _ => 0.0,
-        };
-        let started = self.start_pace.unwrap_or_else(|| {
-            let ms = match (self.started_ms, self.last_sample) {
-                (Some(t0), Some(last)) => last.time_ms - t0,
-                _ => 0.0,
-            };
-            pace(self.input_length, ms, self.segments as usize)
+    /// The input's length (as it came) put on the path the stamps follow, which smoothing
+    /// shortens.
+    fn on_path(&self, input: f32) -> f32 {
+        if self.input_length > 0.0 { input * (self.length / self.input_length).min(1.0) } else { input }
+    }
+
+    fn classic(&self) -> bool {
+        self.brush.extra.get("classic_taper").is_some_and(|&v| v >= 0.5)
+    }
+
+    /// How far along the path the start taper grows to full (0: none): the classic one over its
+    /// length in canvas pixels; the newer one over the input up to the first point past its time.
+    fn start_span(&self) -> f32 {
+        let taper = self.taper();
+        if taper.start <= 0.0 {
+            return 0.0;
+        }
+        if self.classic() {
+            return taper.start * CLASSIC_TAPER_SPAN;
+        }
+        let Some(&(t0, _)) = self.history.first() else { return 0.0 };
+        let time = f64::from(taper.start) * TAPER_TIME_MS;
+        let input = self.history.iter().find(|(t, _)| t - t0 > time).map_or(self.input_length, |&(_, l)| l);
+        self.on_path(input)
+    }
+
+    /// How far back from the end the end taper starts (0: none): the classic one over the run-on
+    /// (`run_on` canvas pixels) up to its length; the newer one over the input since the last
+    /// point before its time.
+    fn end_span(&self, run_on: f32) -> f32 {
+        let taper = self.taper();
+        if taper.end <= 0.0 {
+            return 0.0;
+        }
+        if self.classic() {
+            return run_on.min(taper.end * CLASSIC_TAPER_SPAN);
+        }
+        let Some(&(last, total)) = self.history.last() else { return 0.0 };
+        let time = f64::from(taper.end) * TAPER_TIME_MS;
+        let first = self.history.iter().position(|(t, _)| *t >= last - time).unwrap_or(0);
+        let before = first.checked_sub(1).and_then(|i| self.history.get(i)).map_or(0.0, |&(_, l)| l);
+        self.on_path(total - before)
+    }
+
+    /// A classic taper's end runs the stroke on past `last` (where the input ended) as it was
+    /// going, a few shrinking steps that turn on as it turned; how far it went (canvas pixels).
+    fn run_on(&mut self, last: PathPoint, out: &mut Vec<Stamp>) -> f32 {
+        let (Some(before), Some(last_input)) = (self.before_last[1], self.last_sample) else { return 0.0 };
+        if !self.classic() || self.taper().end <= 0.0 {
+            return 0.0;
+        }
+        let step = last_input.pos - before;
+        let mut reach = step.length();
+        if reach.is_nan() || reach <= 1e-3 {
+            return 0.0;
+        }
+        let mut heading = step.y.atan2(step.x);
+        let mut turn = self.before_last[0].map_or(0.0, |b| {
+            let earlier = before - b;
+            let d = heading - earlier.y.atan2(earlier.x);
+            (d + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
         });
-        (started, now)
+        let steps = if self.pointer.has_pressure() { RUN_ON_PEN } else { RUN_ON_TOUCH };
+        let (start, mut at) = (self.length, last);
+        for _ in 0..steps {
+            reach *= RUN_ON_SHRINK;
+            turn *= RUN_ON_TURN;
+            heading += turn;
+            at = PathPoint { pos: at.pos + Vec2::new(heading.cos(), heading.sin()) * reach, ..at };
+            self.walk_to(at, out);
+        }
+        self.length - start
     }
 
     /// Walks the path from its head to `to`, placing stamps at the brush's spacing.
@@ -897,6 +1063,7 @@ impl StrokeBuilder {
 
     fn place(&mut self, p: PathPoint, distance: f32, out: &mut Vec<Stamp>) {
         let x = self.extras;
+        let start_span = self.start_span();
         let sw = x.tilt_switches;
         if x.spacing_jitter > 0.0 {
             self.gap_jitter = (1.0 + x.spacing_jitter * (self.random.next() * 2.0 - 1.0)).max(0.05);
@@ -923,15 +1090,46 @@ impl StrokeBuilder {
         if self.brush.rendering == Rendering::Gradual && !self.brush.mixes_wet() {
             alpha = StrokeBuilder::gradual(alpha, diameter / self.step(p));
         }
+        use PressureCurve as PC;
         let shape = self.brush.shape.clone();
-        let count = shape.count.clamp(1, 16);
-        // the count tilt: as many beyond the first as the lean lets through
-        let count = if sw.count.is_some() {
-            1 + ((count - 1) as f32 * self.switched(p, sw.count)).floor() as u32
-        } else {
-            count
-        };
-        let dropped = (self.random.next() * x.count_jitter * count as f32) as u32;
+        // the brush's own pressure curves for its other controls, at the stamp's pressure (a
+        // finger's is full): each control scaled by its curve, or left as it is without one
+        let pressure = p.soft[2].clamp(0.0, 1.0);
+        let curves = &self.brush.pressure_curves;
+        let by = |k: PressureCurve| curves.at(k, pressure);
+        let [count_by, count_jitter_by, lateral_by, linear_by, size_jitter_by, opacity_jitter_by, scatter_by] = [
+            PC::Count,
+            PC::CountJitter,
+            PC::LateralJitter,
+            PC::LinearJitter,
+            PC::SizeJitter,
+            PC::OpacityJitter,
+            PC::Scatter,
+        ]
+        .map(by);
+        let [roundness_y_by, roundness_x_by, movement_by, grain_scale_by, zoom_by, depth_by, depth_jitter_by] = [
+            PC::RoundnessJitterY,
+            PC::RoundnessJitterX,
+            PC::GrainMovement,
+            PC::GrainScale,
+            PC::GrainZoom,
+            PC::GrainDepth,
+            PC::GrainDepthJitter,
+        ]
+        .map(by);
+        let wet = [PC::WetGrade, PC::WetBlur, PC::WetBlurJitter, PC::WetnessJitter].map(by);
+        let color_jitter_by =
+            [PC::HueJitter, PC::SaturationJitter, PC::LightnessJitter, PC::DarknessJitter, PC::SecondaryJitter];
+        let color_has_curve = color_jitter_by.map(|k| curves.get(k).is_some());
+        let color_jitter_by = color_jitter_by.map(by);
+        // the colour moves with the pressure as its curves say (without one, as far as at full)
+        let color_by = [PC::Hue, PC::Saturation, PC::Brightness, PC::Secondary].map(by);
+        // as many beyond the first as the count tilt, the count's own curve and its jitter let
+        // through, rounded down once
+        let leaning = if sw.count.is_some() { self.switched(p, sw.count) } else { 1.0 };
+        let beyond = (shape.count.clamp(1, 16) - 1) as f32 * leaning * count_by;
+        let beyond = beyond * (1.0 - self.random.next() * x.count_jitter * count_jitter_by);
+        let count = 1 + beyond.clamp(0.0, 15.0).floor() as u32;
         let (along, across) = (
             Vec2::new(self.direction.cos(), self.direction.sin()),
             Vec2::new(-self.direction.sin(), self.direction.cos()),
@@ -940,16 +1138,31 @@ impl StrokeBuilder {
         // takes it from its upright roundness towards its leaning one
         let grown = self.tilt_growth(p);
         let drawn = (diameter - grown).max(1e-3);
-        let shaped =
-            shape.roundness.clamp(0.05, 1.0) * (1.0 - x.pressure_roundness * (1.0 - p.soft[3].clamp(0.0, 1.0)));
+        let drawn_share = drawn / (drawn + grown);
         let leant = self.leaning(p, x.tilt_angles.roundness);
         let tilted = x.tilt_roundness_max * (1.0 - leant) + (1.0 - x.tilt_roundness) * leant;
-        let base_roundness = (drawn * shaped + grown) / (drawn + grown) * tilted;
+        let base_roundness = self.pressed_roundness(drawn_share, p.soft[3]) * tilted;
+        // the jitter reaches half the stamp's diagonal (its square as round as it is here), and a
+        // pixel more
+        let half = self.square_at(p) * 0.5;
+        let jitter_reach = half * (1.0 + base_roundness * base_roundness).sqrt() + 1.0;
         // leaning moves the stamps toward the pen's cap, by up to their radius
         let cap = self.toward_cap(p) * (diameter * 0.5);
-        let jitter_lateral = x.jitter_lateral * self.switched(p, sw.jitter_lateral);
-        let jitter_linear = x.jitter_linear * self.switched(p, sw.jitter_linear);
+        let file = |c: f32| JITTER_FILE_SCALE * c.powf(2.2);
+        let jitter_lateral = file(x.jitter_lateral) * self.switched(p, sw.jitter_lateral) * lateral_by;
+        let jitter_linear = file(x.jitter_linear) * self.switched(p, sw.jitter_linear) * linear_by;
+        // a colour jitter's tilt switch drives it by the lean in place of the pressure, and with a
+        // curve of its own the pressure's share comes on top
         let color_tilt = sw.color.map(|theta| self.switched(p, theta));
+        let (mut color_first, mut color_more) = (color_jitter_by, [0.0f32; 5]);
+        for ((((first, more), tilt), on), has_curve) in
+            color_first.iter_mut().zip(color_more.iter_mut()).zip(color_tilt).zip(sw.color).zip(color_has_curve)
+        {
+            if on.is_some() {
+                *more = if has_curve { *first } else { 0.0 };
+                *first = tilt;
+            }
+        }
         // the wet attack follows the pressure, and the lean when its switch is on (a finger as a
         // pen lying flat)
         let attack_tilt = match sw.attack {
@@ -958,17 +1171,20 @@ impl StrokeBuilder {
             Some(theta) => Tilt::reach(std::f32::consts::FRAC_PI_2, theta),
         };
         let attack = (p.soft[1].clamp(0.0, 1.0) * attack_tilt).clamp(0.0, 1.0);
-        let [hue_tilt, saturation_tilt, lightness_tilt, darkness_tilt, secondary_tilt] = color_tilt;
-        for _ in 0..(count - dropped.min(count - 1)) {
-            let size = 1.0 - shape.size_jitter.clamp(0.0, 1.0) * self.random.next();
-            let fade = 1.0 - shape.opacity_jitter.clamp(0.0, 1.0) * self.random.next();
+        let [hue_by, saturation_by, lightness_by, darkness_by, secondary_by] = color_first;
+        let [hue_more, saturation_more, lightness_more, darkness_more, secondary_more] = color_more;
+        for _ in 0..count {
+            let size = 1.0 - shape.size_jitter.clamp(0.0, 1.0) * size_jitter_by * self.random.next();
+            let fade = 1.0 - shape.opacity_jitter.clamp(0.0, 1.0) * opacity_jitter_by * self.random.next();
             let mut center = p.pos + cap;
-            if x.jitter_lateral > 0.0 {
-                center =
-                    center + across * ((self.random.next() * 2.0 - 1.0) * jitter_lateral * JITTER_REACH * diameter);
-            }
-            if x.jitter_linear > 0.0 {
-                center = center + along * ((self.random.next() * 2.0 - 1.0) * jitter_linear * JITTER_REACH * diameter);
+            // one random point a stamp: as far as a share of the reach, in a random direction, the
+            // reach across and along the stroke each its own
+            if x.jitter_lateral > 0.0 || x.jitter_linear > 0.0 {
+                let far = self.random.next();
+                let towards = (self.random.next() * 2.0 - 1.0) * std::f32::consts::PI;
+                center = center
+                    + across * (far * towards.sin() * jitter_lateral * jitter_reach)
+                    + along * (far * towards.cos() * jitter_linear * jitter_reach);
             }
             if shape.throw > 0.0 {
                 let a = self.random.next() * std::f32::consts::TAU;
@@ -979,38 +1195,55 @@ impl StrokeBuilder {
             if shape.follow_azimuth {
                 angle += p.azimuth;
             }
-            if shape.randomise {
-                angle += self.random.next() * std::f32::consts::TAU;
-            }
+            angle += self.stroke_turn;
             if shape.scatter > 0.0 {
-                angle += (self.random.next() * 2.0 - 1.0) * shape.scatter * std::f32::consts::PI;
+                angle += (self.random.next() * 2.0 - 1.0) * shape.scatter * scatter_by * std::f32::consts::PI;
             }
-            let roundness = (base_roundness * (1.0 - x.roundness_jitter * self.random.next())).clamp(0.05, 1.0);
+            // the roundness jitter squeezes the width and the height apart, and the stamp is scaled
+            // back so the larger of them stays whole
+            let [jitter_y, jitter_x] = x.roundness_jitter;
+            let squeezed = |jitter: f32, rng: &mut Random| if jitter > 0.0 { 1.0 - jitter * rng.next() } else { 1.0 };
+            let wide = squeezed(jitter_x * roundness_x_by, &mut self.random);
+            let tall = squeezed(jitter_y * roundness_y_by, &mut self.random);
+            let most = wide.max(tall).max(1e-3);
+            let (wide, tall) = ((wide / most).max(0.05), tall / most);
+            let roundness = (base_roundness * tall / wide).clamp(0.05, MOST_ROUNDNESS);
             let flip = [x.flip_x && self.random.next() < 0.5, x.flip_y && self.random.next() < 0.5];
             let [h, s, l, d] = x.stamp_color;
-            let stamp_shift =
-                self.color_jitter([h * hue_tilt, s * saturation_tilt, l * lightness_tilt, d * darkness_tilt]);
-            // light pressure and leaning shift the colour as far as their controls say
+            let mut stamp_tint = self.color_jitter([h * hue_by, s * saturation_by, l * lightness_by, d * darkness_by]);
+            let more = [h * hue_more, s * saturation_more, l * lightness_more, d * darkness_more];
+            if more.iter().any(|&m| m > 0.0) {
+                stamp_tint = stamp_tint.plus(self.color_jitter(more));
+            }
+            // pressure and leaning move the colour on as far as their controls say
             let lean = x.tilt_angles.color.map(|theta| self.leaning(p, theta));
-            let shift = [0, 1, 2].map(|k| {
+            let moved = [0, 1, 2].map(|k| {
                 let by = |a: &[f32; 3]| a.get(k).copied().unwrap_or(0.0);
-                let scale = if k == 0 { 0.5 } else { 1.0 };
-                by(&stamp_shift)
-                    + by(&self.stroke_shift)
-                    + scale * (by(&x.pressure_color) * light + by(&x.tilt_color) * by(&lean))
+                by(&x.pressure_color) * color_by.get(k).copied().unwrap_or(1.0) + by(&x.tilt_color) * by(&lean)
             });
+            let tint = self.stroke_shift.plus(stamp_tint).shifted(moved);
             // random numbers only for the controls in use, so strokes without them replay as before
-            let secondary =
-                (if x.stamp_secondary > 0.0 { x.stamp_secondary * secondary_tilt * self.random.next() } else { 0.0 }
-                    + self.stroke_secondary
-                    + x.pressure_secondary * light
-                    + x.tilt_secondary * self.leaning(p, x.tilt_angles.secondary))
-                .clamp(0.0, 1.0);
+            let mut stamp_secondary = 0.0;
+            if x.stamp_secondary > 0.0 {
+                stamp_secondary = x.stamp_secondary * secondary_by * self.random.next();
+                if secondary_more > 0.0 {
+                    stamp_secondary += x.stamp_secondary * secondary_more * self.random.next();
+                }
+            }
+            let secondary = (stamp_secondary
+                + self.stroke_secondary
+                + x.pressure_secondary * color_by[3]
+                + x.tilt_secondary * self.leaning(p, x.tilt_angles.secondary))
+            .clamp(0.0, 1.0);
             // a moving grain: deeper (or shallower) from stamp to stamp, never under its least;
             // leaning lets more of it through
             let base = self.brush.grain.depth.max(1e-3);
-            let jitter = if x.grain_depth_jitter > 0.0 { x.grain_depth_jitter * self.random.next() } else { 0.0 };
-            let mut depth = base * (1.0 - jitter);
+            let jitter = if x.grain_depth_jitter > 0.0 {
+                x.grain_depth_jitter * depth_jitter_by * self.random.next()
+            } else {
+                0.0
+            };
+            let mut depth = base * (1.0 - jitter) * depth_by;
             depth += (1.0 - depth) * (x.tilt_bleed * self.leaning(p, x.tilt_angles.bleed)).clamp(0.0, 1.0);
             let grain_press = (1.0 - light).clamp(0.0, 1.0);
             let mut depth = depth.max(x.grain_depth_min).clamp(0.0, 1.0);
@@ -1020,26 +1253,31 @@ impl StrokeBuilder {
                 depth = least + (depth - least) * (1.0 - self.switched(p, sw.grain_depth));
             }
             // sized with the stamp, against the stroke's size, unless cropped
-            let grain_size = 1.0 + (diameter * size / self.diameter.max(1e-3) - 1.0) * (1.0 - x.grain_zoom);
+            let grain_size = (1.0 + (diameter * size / self.diameter.max(1e-3) - 1.0) * (1.0 - x.grain_zoom * zoom_by))
+                * grain_scale_by;
             let placed = Placed {
                 center,
                 distance,
-                diameter: diameter * size,
+                diameter: diameter * size * wide,
                 alpha: alpha * fade,
                 angle,
                 roundness,
                 flip,
-                shift,
+                tint,
                 secondary,
                 grain_depth: depth / base,
                 grain_size: grain_size.max(0.05),
                 grain_press,
+                grain_movement: x.grain_movement * movement_by,
                 gradation: (x.tilt_gradation * self.leaning(p, x.tilt_angles.gradation)).max(0.0).sqrt().min(1.0),
                 transfer,
                 attack,
+                wet,
+                pressed: p.soft,
+                drawn_share,
             };
             self.placed.push(placed);
-            let stamp = self.finish_stamp(&placed, None);
+            let stamp = self.finish_stamp(&placed, start_span, None);
             self.bounds = self.bounds.union(stamp.bounds());
             out.push(stamp);
         }
@@ -1048,38 +1286,66 @@ impl StrokeBuilder {
     /// Where a stamp's moving grain is read from (see [`Stamp::grain_offset`]): in place on the
     /// canvas as far as the grain rolls, from wherever the stroke starts in it.
     fn grain_offset(&self, p: &Placed) -> Vec2 {
-        self.grain_start + p.center * self.extras.grain_movement
+        self.grain_start + p.center * p.grain_movement
+    }
+
+    /// The stamp's roundness before leaning and jitter: the shape's, squeezed as light pressure
+    /// `pressure` says, on the `drawn_share` of the stamp that isn't grown by leaning.
+    fn pressed_roundness(&self, drawn_share: f32, pressure: f32) -> f32 {
+        let squeezed = 1.0 - self.extras.pressure_roundness * (1.0 - pressure.clamp(0.0, 1.0));
+        drawn_share * self.brush.shape.roundness.clamp(0.05, 1.0) * squeezed + (1.0 - drawn_share)
     }
 
     fn taper(&self) -> &Taper {
         if self.pointer.has_pressure() { &self.brush.pen_taper } else { &self.brush.touch_taper }
     }
 
-    fn finish_stamp(&self, p: &Placed, length: Option<f32>) -> Stamp {
-        // a brush file's classic taper as measured; the newer kind on touch lasts a time as
-        // measured, on a pen it goes by stamp diameters
-        let classic = self.brush.extra.get("classic_taper").is_some_and(|&v| v >= 0.5);
-        let (size, alpha) = if classic {
-            self.taper().classic_factors(p.distance, length, self.paces().1)
-        } else if !self.pointer.has_pressure() {
-            self.taper().timed_factors(p.distance, length, self.paces())
-        } else {
-            self.taper().factors(p.distance, length, self.diameter)
+    /// The stamp `p` as drawn, its start taper growing over `start_span` canvas pixels of the
+    /// path and, once the stroke has ended, its end taper over the last `end` of its length:
+    /// `(length, end)`.
+    fn finish_stamp(&self, p: &Placed, start_span: f32, end: Option<(f32, f32)>) -> Stamp {
+        let grown = |gone: f32, span: f32| if span > 0.0 { (gone / span).clamp(0.0, 1.0) } else { 1.0 };
+        let (start, finish) = match end {
+            // a tap keeps its whole size
+            Some((length, _)) if length <= 0.0 => (1.0, 1.0),
+            Some((length, span)) => (grown(p.distance, start_span), grown(length - p.distance, span)),
+            None => (grown(p.distance, start_span), 1.0),
         };
-        // a blunt tip keeps part of the width where a sharp one comes to a point
         let tip = if self.pointer.has_pressure() { self.extras.pen_taper_tip } else { self.extras.touch_taper_tip };
-        let size = size + (1.0 - size) * tip * 0.5;
+        let (mut size, mut alpha) = self.taper().applied(start, finish, tip);
+        // a pen's pressure fades into the tapers as far as the brush says: the size, opacity,
+        // bleed and roundness it gave scaled to what the faded pressure gives
+        let fade = self.extras.taper_pressure;
+        let (mut grain_press, mut roundness) = (p.grain_press, p.roundness);
+        if self.pointer.has_pressure() && fade > 0.0 {
+            let kept = (1.0 - fade) + fade * (start * finish).powf(Taper::tip_power(tip));
+            let [s, o, b, r] = p.pressed;
+            let (s0, o0) = self.brush.factors(s, o);
+            let (s1, o1) = self.brush.factors(s * kept, o * kept);
+            if s0 > 0.0 {
+                size *= s1 / s0;
+            }
+            if o0 > 0.0 {
+                alpha *= (o1 / o0).powf(FLOW_POWER);
+            }
+            grain_press = (b * kept).clamp(0.0, 1.0);
+            let r0 = self.pressed_roundness(p.drawn_share, r);
+            if r0 > 0.0 {
+                let r1 = self.pressed_roundness(p.drawn_share, r * kept);
+                roundness = (roundness * r1 / r0).clamp(0.05, MOST_ROUNDNESS);
+            }
+        }
         Stamp {
             center: p.center,
             radius: (p.diameter * size * 0.5).max(0.25),
             alpha: (p.alpha * alpha).clamp(0.0, 1.0),
             angle: p.angle,
-            roundness: p.roundness,
+            roundness,
             grain_offset: self.grain_offset(p),
-            grain_press: p.grain_press,
+            grain_press,
             grain_bleed: self.extras.pressure_bleed.clamp(0.0, 1.0),
             flip: p.flip,
-            shift: p.shift,
+            tint: p.tint,
             secondary: p.secondary,
             grain_depth: p.grain_depth,
             grain_size: p.grain_size,
@@ -1087,6 +1353,7 @@ impl StrokeBuilder {
             taper: size.clamp(0.0, 1.0),
             transfer: p.transfer,
             attack: p.attack,
+            wet: p.wet,
         }
     }
 }
@@ -1239,7 +1506,8 @@ mod tests {
     #[test]
     fn a_touch_stroke_tapers_over_what_it_covers_in_the_taper_s_time() {
         let brush = Brush { touch_taper: Taper { start: 0.5, end: 0.5, size: 1.0, opacity: 0.0 }, ..plain() };
-        // 600 px drawn in samples `ms` apart: the faster, the longer the tapered ends
+        // 600 px drawn in samples `ms` apart: the end taper covers the input since the last
+        // sample before its time (0.5 x 83 ms), so the faster, the longer it is
         let near_end = |ms: f64| {
             let mut b = StrokeBuilder::new(brush.clone(), 20.0, Pointer::Finger);
             let samples: Vec<Sample> =
@@ -1249,12 +1517,108 @@ mod tests {
             let at = |x: f32| {
                 all.iter().min_by(|a, b| (a.center.x - x).abs().total_cmp(&(b.center.x - x).abs())).unwrap().radius
             };
-            (at(600.0 - 50.0), at(300.0))
+            (at(600.0 - 30.0), at(300.0))
         };
         let (fast, full) = near_end(8.0);
         let (slow, _) = near_end(32.0);
         assert!(fast < full * 0.8, "{fast} {full}");
         assert!((slow - full).abs() < 1e-3, "{slow} {full}");
+    }
+
+    #[test]
+    fn a_classic_end_runs_on_past_the_lift_and_tapers_there() {
+        let mut brush = Brush { touch_taper: Taper { start: 0.0, end: 1.0, size: 1.0, opacity: 0.0 }, ..plain() };
+        brush.pen_taper = brush.touch_taper.clone();
+        brush.set_setting("classic_taper", 1.0);
+        // 300 px in 10 px steps
+        let ran_to = |pointer| {
+            let mut b = StrokeBuilder::new(brush.clone(), 10.0, pointer);
+            b.add(&line(30, 300.0));
+            let all = b.finish();
+            let last = all.last().unwrap();
+            let at_lift = all.iter().min_by(|a, b| (a.center.x - 300.0).abs().total_cmp(&(b.center.x - 300.0).abs()));
+            (last.center.x, last.radius, at_lift.unwrap().radius)
+        };
+        // a finger runs on four shrinking steps (0.66, 0.44, 0.29, 0.19 of the last), a pen one
+        let (touch_end, touch_tip, touch_at_lift) = ran_to(Pointer::Finger);
+        assert!((touch_end - (300.0 + 15.73)).abs() < 1.0, "{touch_end}");
+        assert!(touch_tip < 0.5 && touch_at_lift > 4.9, "{touch_tip} {touch_at_lift}");
+        let (pen_end, pen_tip, _) = ran_to(Pointer::Stylus);
+        assert!((pen_end - 306.6).abs() < 1.0, "{pen_end}");
+        assert!(pen_tip < 1.0, "{pen_tip}");
+    }
+
+    #[test]
+    fn taper_pressure_fades_a_pens_pressure_into_its_tapers() {
+        // a taper that thins nothing by itself, a size that follows the pressure in full
+        let taper = Taper { start: 0.5, end: 0.5, size: 0.0, opacity: 0.0 };
+        let mut brush = Brush { pen_taper: taper.clone(), touch_taper: taper, pressure_size: 1.0, ..plain() };
+        let stamp = |brush: &Brush, pointer, at: usize| {
+            let mut b = StrokeBuilder::new(brush.clone(), 10.0, pointer);
+            let samples: Vec<Sample> =
+                (0..=100).map(|i| Sample::at(Vec2::new(i as f32 * 2.0, 50.0), 1.0, i as f64 * 4.0)).collect();
+            b.add(&samples);
+            b.finish().get(at).cloned().unwrap()
+        };
+        let near_start = |brush: &Brush, pointer| stamp(brush, pointer, 5).radius;
+        assert_eq!(near_start(&brush, Pointer::Stylus), 5.0);
+        brush.set_setting("pen_taper_pressure", 1.0);
+        assert!(near_start(&brush, Pointer::Stylus) < 3.0, "{}", near_start(&brush, Pointer::Stylus));
+        // a finger has no pressure to fade
+        assert_eq!(near_start(&brush, Pointer::Finger), 5.0);
+        // the bleed and the roundness take the faded pressure too, and are whole further in
+        brush.set_setting("pressure_bleed", 1.0);
+        brush.set_setting("pressure_roundness", 1.0);
+        let (tip, inside) = (stamp(&brush, Pointer::Stylus, 5), stamp(&brush, Pointer::Stylus, 40));
+        assert!(tip.grain_press < 0.6 && tip.roundness < 0.6, "{} {}", tip.grain_press, tip.roundness);
+        assert!(inside.grain_press > 0.99 && inside.roundness > 0.99, "{} {}", inside.grain_press, inside.roundness);
+    }
+
+    #[test]
+    fn a_pens_tip_shows_tapered_as_it_is_drawn() {
+        let taper = Taper { start: 0.0, end: 0.5, size: 1.0, opacity: 0.0 };
+        let brush = Brush { pen_taper: taper.clone(), touch_taper: taper, ..plain() };
+        // 2 px every 4 ms: the last 42 ms are the last 20 px or so
+        let samples: Vec<Sample> =
+            (0..=100).map(|i| Sample::at(Vec2::new(i as f32 * 2.0, 50.0), 1.0, i as f64 * 4.0)).collect();
+        let mut b = StrokeBuilder::new(brush.clone(), 10.0, Pointer::Stylus);
+        assert!(b.shows_tip());
+        let (kept, tip) = b.add_tipped(samples.get(..60).unwrap());
+        assert!(kept.iter().all(|s| s.radius == 5.0));
+        assert!(tip.len() < 30 && tip.last().unwrap().radius < 1.0, "{} {}", tip.len(), tip.last().unwrap().radius);
+        assert_eq!(kept.len() + tip.len(), b.stamp_count());
+        // drawn on, the old tip is kept whole and a new one shown
+        let (more, tip) = b.add_tipped(samples.get(60..).unwrap());
+        assert!(more.iter().all(|s| s.radius == 5.0) && more.first().unwrap().center.x < 118.0);
+        assert_eq!(kept.len() + more.len() + tip.len(), b.stamp_count());
+        // a predicted tip runs on to where the input is predicted to go, the stroke left as it is
+        let ahead = b.preview_tip(&[Sample::at(Vec2::new(240.0, 50.0), 1.0, 420.0)]);
+        assert!(ahead.last().unwrap().center.x > 230.0 && ahead.last().unwrap().radius < 1.0);
+        assert_eq!(kept.len() + more.len() + tip.len(), b.stamp_count());
+        // a finger, a classic taper or the animation off show no tip
+        assert!(!StrokeBuilder::new(brush.clone(), 10.0, Pointer::Finger).shows_tip());
+        let mut classic = brush.clone();
+        classic.set_setting("classic_taper", 1.0);
+        assert!(!StrokeBuilder::new(classic, 10.0, Pointer::Stylus).shows_tip());
+        let mut off = brush;
+        off.set_setting("pen_tip_animation", 0.0);
+        assert!(!StrokeBuilder::new(off, 10.0, Pointer::Stylus).shows_tip());
+    }
+
+    #[test]
+    fn a_newer_taper_on_a_pen_lasts_its_time() {
+        let brush = Brush { pen_taper: Taper { start: 0.5, end: 0.0, size: 1.0, opacity: 0.0 }, ..plain() };
+        // 2 px every 4 ms: half of 83 ms is reached by the eleventh sample, 22 px in
+        let mut b = StrokeBuilder::new(brush, 10.0, Pointer::Stylus);
+        let samples: Vec<Sample> =
+            (0..=100).map(|i| Sample::at(Vec2::new(i as f32 * 2.0, 50.0), 1.0, i as f64 * 4.0)).collect();
+        b.add(&samples);
+        let all = b.finish();
+        let at = |x: f32| all.iter().min_by(|a, b| (a.center.x - x).abs().total_cmp(&(b.center.x - x).abs())).unwrap();
+        assert!((at(11.0).radius - 2.5).abs() < 0.3, "{}", at(11.0).radius);
+        assert_eq!(at(30.0).radius, 5.0);
+        // no end taper set: the end stays whole
+        assert_eq!(all.last().unwrap().radius, 5.0);
     }
 
     #[test]
@@ -1295,6 +1659,115 @@ mod tests {
         // the same seed replays the same stroke
         let mut again = StrokeBuilder::new(Brush { shape: b.brush().shape.clone(), ..plain() }, 10.0, Pointer::Stylus);
         assert_eq!(again.add(&down), stamps);
+    }
+
+    #[test]
+    fn jitter_moves_a_stamp_within_half_its_diagonal_times_the_files_amount() {
+        let jittered = |lateral: f32, linear: f32| {
+            let mut brush = plain();
+            brush.set_setting("jitter_lateral", lateral);
+            brush.set_setting("jitter_linear", linear);
+            // a horizontal line at y = 50, stamps every pixel
+            StrokeBuilder::new(brush, 10.0, Pointer::Stylus).add(&line(20, 200.0))
+        };
+        // a round 10 px tip fills 10 / 0.797 of its square: half its diagonal and a pixel is 9.87;
+        // full lateral jitter is 3 of those across the stroke, none along it
+        let reach = 10.0 / crate::brushfile::ROUND_TIP_SHARE * 0.5 * std::f32::consts::SQRT_2 + 1.0;
+        let across: Vec<f32> = jittered(1.0, 0.0).iter().map(|s| (s.center.y - 50.0).abs()).collect();
+        assert!(across.iter().all(|&d| d <= 3.0 * reach + 1e-3), "{across:?}");
+        assert!(across.iter().any(|&d| d > 1.5 * reach));
+        // both: one random point a stamp, inside the circle of that reach
+        let both = jittered(1.0, 1.0);
+        let straight = jittered(0.0, 0.0);
+        for (j, s) in both.iter().zip(&straight) {
+            assert!(j.center.distance(s.center) <= 3.0 * reach + 1e-3);
+        }
+    }
+
+    #[test]
+    fn roundness_jitter_squeezes_width_and_height_apart() {
+        let stamps = |key: &str| {
+            let mut brush = plain();
+            brush.set_setting(key, 0.8);
+            StrokeBuilder::new(brush, 10.0, Pointer::Stylus).add(&line(20, 200.0))
+        };
+        // the width squeezed: narrower and taller than wide, the height whole
+        let narrow = stamps("roundness_jitter_x");
+        assert!(narrow.iter().any(|s| s.roundness > 1.5));
+        assert!(narrow.iter().all(|s| (s.radius * s.roundness - 5.0).abs() < 1e-3 && s.radius <= 5.0));
+        // the height squeezed: flatter, the width whole
+        let flat = stamps("roundness_jitter_y");
+        assert!(flat.iter().any(|s| s.roundness < 0.6));
+        assert!(flat.iter().all(|s| s.radius == 5.0 && s.roundness <= 1.0));
+        // a stamp taller than wide is held in its bounds
+        let tall = narrow.iter().max_by(|a, b| a.roundness.total_cmp(&b.roundness)).unwrap();
+        assert!(tall.bounds().height() as f32 >= 2.0 * tall.radius * tall.roundness);
+    }
+
+    #[test]
+    fn a_randomised_shape_turns_the_whole_stroke_one_way() {
+        let shape = Shape { randomise: true, follow: 0.0, ..Shape::default() };
+        let angles = |seed: u32| -> Vec<f32> {
+            let mut b =
+                StrokeBuilder::with_seed(Brush { shape: shape.clone(), ..plain() }, 10.0, Pointer::Stylus, seed);
+            b.add(&line(20, 200.0)).iter().map(|s| s.angle).collect()
+        };
+        let one = angles(1);
+        assert!(one.iter().all(|&a| a == one[0]), "{one:?}");
+        assert_ne!(angles(2)[0], one[0]);
+    }
+
+    #[test]
+    fn count_jitter_takes_a_share_off_the_stamps_beyond_the_first() {
+        let shape = Shape { count: 16, ..Shape::default() };
+        let mut brush = Brush { shape, ..plain() };
+        brush.set_setting("count_jitter", 0.5);
+        let stamps = StrokeBuilder::new(brush, 10.0, Pointer::Stylus).add(&line(40, 400.0));
+        // stamps of one place share its centre
+        let mut counts: Vec<usize> = Vec::new();
+        for (i, s) in stamps.iter().enumerate() {
+            if i == 0 || stamps[i - 1].center != s.center {
+                counts.push(0);
+            }
+            *counts.last_mut().unwrap() += 1;
+        }
+        // 15 beyond the first, less up to half of them: 8 to 16, and not always all
+        assert!(counts.iter().all(|&n| (8..=16).contains(&n)), "{counts:?}");
+        assert!(counts.iter().any(|&n| n < 16) && counts.iter().any(|&n| n > 12), "{counts:?}");
+    }
+
+    #[test]
+    fn a_brushs_own_pressure_curves_scale_its_count_and_jitters() {
+        use crate::brush::PressureCurve;
+        use crate::curve::Curve;
+        let shape = Shape { count: 5, size_jitter: 0.8, ..Shape::default() };
+        let mut brush = Brush { shape, pressure_size: 0.0, ..plain() };
+        brush.pressure_curves.set(PressureCurve::Count, Some(Curve::linear()));
+        brush.pressure_curves.set(PressureCurve::SizeJitter, Some(Curve::linear()));
+        brush.pressure_curves.set(PressureCurve::WetBlur, Some(Curve::linear()));
+        let stroke = |brush: &Brush, pointer, pressure: f32| {
+            let samples: Vec<Sample> =
+                (0..=10).map(|i| Sample::at(Vec2::new(i as f32 * 10.0, 50.0), pressure, i as f64 * 4.0)).collect();
+            StrokeBuilder::new(brush.clone(), 10.0, pointer).add(&samples)
+        };
+        let spread = |stamps: &[Stamp]| {
+            let (least, most) = stamps.iter().fold((f32::MAX, 0.0f32), |(l, m), s| (l.min(s.radius), m.max(s.radius)));
+            most / least
+        };
+        // pressing lightly: one stamp a place, hardly jittered
+        let light = stroke(&brush, Pointer::Stylus, 0.05);
+        assert!(spread(&light) < 1.05, "{}", spread(&light));
+        // the wet blur scaled the same way, the rest of the wet mix untouched
+        assert!(light.iter().all(|s| s.wet[1] < 0.1 && s.wet[0] == 1.0), "{:?}", light[0].wet);
+        // pressing fully, or a finger: five a place, jittered as far as the brush says
+        for full in [stroke(&brush, Pointer::Stylus, 1.0), stroke(&brush, Pointer::Finger, 0.0)] {
+            assert_eq!(full.len(), 5 * light.len());
+            assert!(spread(&full) > 2.0, "{}", spread(&full));
+        }
+        // without the curves, light pressure jitters and counts in full
+        brush.pressure_curves = Default::default();
+        let plain_light = stroke(&brush, Pointer::Stylus, 0.05);
+        assert_eq!(plain_light.len(), 5 * light.len());
     }
 
     #[test]
@@ -1518,14 +1991,14 @@ mod tests {
         let plain_light = mid(&stroke(&[], 0.3, Taper::NONE));
         let flow_light = mid(&stroke(&[("pressure_flow", 1.0)], 0.3, Taper::NONE));
         assert!(flow_light.alpha < plain_light.alpha * 0.5, "{} {}", flow_light.alpha, plain_light.alpha);
-        // a blunt tip keeps width at the stroke's ends
+        // a blunt tip keeps width at the stroke's ends (all but the very first stamp)
         let taper = Taper { start: 0.3, end: 0.3, size: 1.0, opacity: 0.0 };
-        let sharp = stroke(&[], 1.0, taper.clone())[0].radius;
-        let blunt = stroke(&[("pen_taper_tip", 1.0)], 1.0, taper)[0].radius;
+        let sharp = stroke(&[], 1.0, taper.clone())[2].radius;
+        let blunt = stroke(&[("pen_taper_tip", 1.0)], 1.0, taper)[2].radius;
         assert!(blunt > sharp + 1.0, "{blunt} {sharp}");
-        // the secondary colour: by light pressure, and jittered per stamp
+        // the secondary colour: by pressure, as its curve says, and jittered per stamp
         assert_eq!(mid(&stroke(&[], 0.3, Taper::NONE)).secondary, 0.0);
-        assert!((mid(&stroke(&[("pressure_secondary", 1.0)], 0.3, Taper::NONE)).secondary - 0.7).abs() < 0.05);
+        assert!((mid(&stroke(&[("pressure_secondary", 1.0)], 0.3, Taper::NONE)).secondary - 0.3).abs() < 0.05);
         let jittered = stroke(&[("stamp_secondary", 1.0)], 1.0, Taper::NONE);
         assert!(jittered.iter().any(|s| s.secondary > 0.5) && jittered.iter().any(|s| s.secondary < 0.5));
         // a moving grain: filled in by pressing harder, never under its least, jittered

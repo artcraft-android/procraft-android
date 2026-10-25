@@ -1337,9 +1337,9 @@ fn curve_samples_follow_the_curve() {
     for (i, v) in straight.iter().enumerate() {
         assert!((v - i as f32 / 4.0).abs() < 1e-5);
     }
-    // through a raised middle point, never above the top
+    // through a raised middle point (as its table reads it), never above the top
     let bent = crate::studio::curve_samples(vec![0.0, 0.0, 0.5, 0.8, 1.0, 1.0], 101);
-    assert!((bent[50] - 0.8).abs() < 1e-4);
+    assert!((bent[50] - 0.8).abs() < 1e-3);
     assert!(bent.iter().all(|v| (0.0..=1.0).contains(v)));
 }
 
@@ -1929,6 +1929,25 @@ fn slider_notches_are_kept_with_the_library() {
     assert!(t.remove_slider_notch(true, 0.32));
     assert!(t.slider_notches(true).is_empty());
     assert!(!t.remove_slider_notch(true, 0.3));
+}
+
+#[test]
+fn a_brushs_own_pressure_curves_are_kept_with_the_library() {
+    use procraft_engine::brush::PressureCurve;
+    use procraft_engine::curve::Curve;
+    use procraft_engine::geom::Vec2;
+    let bend = Curve::new(&[Vec2::new(0.0, 0.2), Vec2::new(1.0, 0.6)]);
+    let s = CanvasSession::new(64, 64);
+    {
+        let mut st = s.shared.lock();
+        let (set, index) = st.brush_ref(st.tool);
+        let brush = st.library.get_mut(set).and_then(|l| l.brushes.get_mut(index)).unwrap();
+        brush.pressure_curves.set(PressureCurve::GrainDepth, Some(bend.clone()));
+    }
+    let t = CanvasSession::new(64, 64);
+    assert!(t.load_brush_library(s.saved_brush_library()));
+    let st = t.shared.lock();
+    assert_eq!(st.brush(st.tool).pressure_curves.get(PressureCurve::GrainDepth), Some(&bend));
 }
 
 #[test]

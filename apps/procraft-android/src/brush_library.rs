@@ -3,8 +3,8 @@
 
 use std::collections::BTreeMap;
 
-use procraft_engine::brush::{Author, Brush, Notches, ResetPoint, Source, StockImage, StockImages};
-use procraft_engine::brushfile::Texture;
+use procraft_engine::brush::{Author, Brush, Notches, PressureCurves, ResetPoint, Source, StockImage, StockImages};
+use procraft_engine::brushfile::{self, Texture};
 use procraft_engine::curve::Curve;
 use procraft_engine::geom::Vec2;
 use procraft_engine::library::{BrushSet, SHELF};
@@ -115,6 +115,9 @@ struct SavedBrush {
     size_curve: Vec<[f32; 2]>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     opacity_curve: Vec<[f32; 2]>,
+    /// Its own pressure curves for other controls, by their keys in brush files, if they differ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pressure_curves: Option<BTreeMap<String, Vec<[f32; 2]>>>,
     /// The brush's own shape and grain images, as text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shape_source: Option<String>,
@@ -271,6 +274,14 @@ impl State {
             curve: kept(&brush.pressure_curve, &base.pressure_curve),
             size_curve: kept(&brush.size_curve, &base.size_curve),
             opacity_curve: kept(&brush.opacity_curve, &base.opacity_curve),
+            pressure_curves: (brush.pressure_curves != base.pressure_curves).then(|| {
+                let points = |c: &Curve| c.points().iter().map(|p| [p.x, p.y]).collect();
+                brush
+                    .pressure_curves
+                    .iter()
+                    .map(|(k, c)| (brushfile::pressure_curve_key(k).to_owned(), points(c)))
+                    .collect()
+            }),
             shape_source: brush.shape.source.as_ref().map(Source::to_text),
             grain_source: brush.grain.source.as_ref().map(Source::to_text),
             shape_image: image(brush.shape.image, base.shape.image),
@@ -333,6 +344,17 @@ impl State {
             if points.len() >= 2 {
                 let pts: Vec<Vec2> = points.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
                 *curve = Curve::new(&pts);
+            }
+        }
+        if let Some(curves) = &b.pressure_curves {
+            brush.pressure_curves = PressureCurves::default();
+            for (key, points) in curves {
+                if let Some(kind) = brushfile::pressure_curve_of(key)
+                    && points.len() >= 2
+                {
+                    let pts: Vec<Vec2> = points.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
+                    brush.pressure_curves.set(kind, Some(Curve::new(&pts)));
+                }
             }
         }
         brush.notches = b.notches.notches();
