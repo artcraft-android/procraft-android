@@ -116,6 +116,8 @@ pub enum PressureUse {
     Opacity = 1,
     Bleed = 2,
     Roundness = 3,
+    /// The stamp's own pressure, which the brush's other curves read.
+    Stamp = 4,
 }
 
 /// What else a brush may give a pressure curve of its own: the control is then scaled by the
@@ -154,6 +156,18 @@ pub enum PressureCurve {
     LightnessJitter,
     DarknessJitter,
     SecondaryJitter,
+    /// The controls that follow the pressure straight when the brush has no curve for them
+    /// (see [`PressureCurves::through`]): flow, bleed, roundness, the wet mix's dilution,
+    /// charge, attack and pull, the smudge's pull; and the spacing jitter.
+    Flow,
+    Bleed,
+    Roundness,
+    Dilution,
+    Charge,
+    Attack,
+    WetPull,
+    SmudgePull,
+    SpacingJitter,
 }
 
 /// A brush's own [`PressureCurve`]s, those it has.
@@ -185,6 +199,11 @@ impl PressureCurves {
         self.0.get(&kind).map_or(1.0, |c| c.eval(pressure))
     }
 
+    /// `pressure` through `kind`'s curve: as it is without one.
+    pub fn through(&self, kind: PressureCurve, pressure: f32) -> f32 {
+        self.0.get(&kind).map_or(pressure, |c| c.eval(pressure))
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (PressureCurve, &Curve)> {
         self.0.iter().map(|(k, c)| (*k, c))
     }
@@ -196,6 +215,15 @@ pub const SIZE_CURVE: f32 = 2.2;
 /// A stamp's opacity is its flow, pressure, tilt and speed together, through the brush's opacity
 /// range, to this power: light touches fall away fast.
 pub const FLOW_POWER: f32 = 2.5;
+
+/// The stroke length (canvas pixels) by which an amount of 1 has run out (see [`run_out`]).
+pub const RUN_OUT_LENGTH: f32 = 33.0;
+
+/// How far `amount` has run out once a stroke has gone `length` canvas pixels, 0..1: by the cube
+/// root of the length (the fall off's fade, and a wet brush's paint running out).
+pub fn run_out(amount: f32, length: f32) -> f32 {
+    (amount * (length.max(0.0) / RUN_OUT_LENGTH).cbrt()).clamp(0.0, 1.0)
+}
 
 /// A grain's own blend modes, numbered past the layers' (and as brush files number them): the
 /// coverage, raised twelvefold by the depth, as a height the grain cuts into, straight or also
@@ -581,9 +609,16 @@ impl Brush {
 
     /// The pressure as each of its uses takes it, through the pressure curve and their own:
     /// [`PressureUse`] order.
-    pub fn pressures(&self, pressure: f32) -> [f32; 4] {
+    pub fn pressures(&self, pressure: f32) -> [f32; 5] {
         let p = self.pressure_curve.eval(pressure);
-        [self.size_curve.eval(p), self.opacity_curve.eval(p), p, p]
+        let curves = &self.pressure_curves;
+        [
+            self.size_curve.eval(p),
+            self.opacity_curve.eval(p),
+            curves.through(PressureCurve::Bleed, p),
+            curves.through(PressureCurve::Roundness, p),
+            p,
+        ]
     }
 
     /// The (size, opacity) multipliers for the size's and the opacity's own pressures: an amount

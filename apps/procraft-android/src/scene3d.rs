@@ -99,6 +99,36 @@ pub(crate) struct ModelSource {
     mtl: Option<String>,
 }
 
+/// A file picked along with a model: an OBJ's material file, or an image its materials map.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ModelFile {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+/// What an OBJ takes from the files picked with it: the material file it names (or the only
+/// one), and the rest as the images its materials may map.
+fn companions(model: &[u8], extension: &str, files: Vec<ModelFile>) -> (Option<String>, Vec<ModelFile>) {
+    if extension != "obj" {
+        return (None, Vec::new());
+    }
+    let (libraries, images): (Vec<ModelFile>, Vec<ModelFile>) =
+        files.into_iter().partition(|f| extension_of(&f.name) == "mtl");
+    let named = String::from_utf8_lossy(model).lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix("mtllib")?;
+        rest.starts_with(char::is_whitespace).then(|| rest.trim().to_owned())
+    });
+    let only = if libraries.len() == 1 { libraries.first() } else { None };
+    let chosen = named.and_then(|n| libraries.iter().find(|f| same_file(&f.name, &n))).or(only);
+    (chosen.map(|f| String::from_utf8_lossy(&f.bytes).into_owned()), images)
+}
+
+/// Whether two paths name the same file: their last parts, ignoring case.
+fn same_file(a: &str, b: &str) -> bool {
+    let last = |p: &str| p.trim().rsplit(['/', '\\']).next().unwrap_or("").to_lowercase();
+    last(a) == last(b)
+}
+
 /// The kinds of model file that open: OBJ (with its MTL), USDZ, and USD binary or text.
 fn read_model(bytes: &[u8], extension: &str, mtl: Option<&str>) -> Result<Mesh, MeshError> {
     match extension {
@@ -161,6 +191,8 @@ pub(crate) struct Scene {
     channel: usize,
     /// Each part's channel maps as last given to the view (as [`Scene::filtered`]).
     channel_shown: Vec<[Option<(u64, bool)>; 2]>,
+    /// The images picked with an OBJ, until its materials' maps have been taken from them.
+    picked: Vec<ModelFile>,
     /// Each part's normal and occlusion maps from the model's file (RGBA8, the texture size
     /// square), shown as they are; and whether the view has them as they are now.
     surface_maps: Vec<[Option<Arc<Vec<u8>>>; 2]>,
@@ -213,6 +245,7 @@ impl Scene {
             channels: Vec::new(),
             channel: 0,
             channel_shown: Vec::new(),
+            picked: Vec::new(),
             surface_maps: Vec::new(),
             surface_shown: false,
             stroking: false,
@@ -237,21 +270,23 @@ impl Scene {
 #[uniffi::export]
 impl CanvasSession {
     /// Opens a model to paint on: `file` the model file named `file_name` (OBJ, USDZ or USDC, by
-    /// its extension), `mtl` an OBJ's material file if there is one. Each texture set is
-    /// `texture_size` pixels square (0: the default).
+    /// its extension), with the `files` picked along with it (an OBJ's material file and the
+    /// images it maps). Each texture set is `texture_size` pixels square (0: the default).
     #[uniffi::constructor]
     pub fn open_model(
         file: Vec<u8>,
         file_name: String,
-        mtl: Option<String>,
+        files: Vec<ModelFile>,
         name: String,
         texture_size: u32,
     ) -> Result<Arc<CanvasSession>, MobileError> {
         let extension = extension_of(&file_name);
+        let (mtl, picked) = companions(&file, &extension, files);
         let mesh = read_model(&file, &extension, mtl.as_deref())
             .map_err(|e| file_error("opening the model", mesh_error_text(&e)))?;
         let side = if texture_size == 0 { DEFAULT_TEXTURE_SIZE } else { texture_size.clamp(64, MOST_TEXTURE_SIZE) };
-        let scene = Scene::new(mesh, ModelSource { bytes: file, extension, mtl }, side, 0, Vec::new());
+        let mut scene = Scene::new(mesh, ModelSource { bytes: file, extension, mtl }, side, 0, Vec::new());
+        scene.picked = picked;
         let session = CanvasSession::with_document(empty_texture(side), name, Vec::new());
         session.shared.lock().scene = Some(scene);
         Ok(session)
@@ -412,16 +447,21 @@ impl CanvasSession {
         Some(crate::layers::ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
     }
 
-    /// The images the model's file brings for its texture sets (a USDZ's packed images): to be
-    /// decoded and given back with [`CanvasSession::set_model_texture`]. Its normal and occlusion
-    /// maps come as channels 3 and 4.
+    /// The images the model brings for its texture sets (a USDZ's packed images, or those
+    /// picked with an OBJ that its materials map): to be decoded and given back with
+    /// [`CanvasSession::set_model_texture`]. Its normal and occlusion maps come as channels 3
+    /// and 4. An OBJ's picked images are given once.
     pub fn model_texture_files(&self) -> Vec<ModelTextureFile> {
-        let st = self.shared.lock();
-        let Some(scene) = st.scene.as_ref() else { return Vec::new() };
-        if scene.source.extension != "usdz" {
-            return Vec::new();
-        }
-        let Some(zip) = procraft_engine::zip::ZipReader::new(&scene.source.bytes) else { return Vec::new() };
+        let mut st = self.shared.lock();
+        let Some(scene) = st.scene.as_mut() else { return Vec::new() };
+        let picked = std::mem::take(&mut scene.picked);
+        let zip = (scene.source.extension == "usdz")
+            .then(|| procraft_engine::zip::ZipReader::new(&scene.source.bytes))
+            .flatten();
+        let found = |path: &str| match &zip {
+            Some(zip) => packed_file(zip, path),
+            None => picked.iter().find(|f| same_file(&f.name, path)).map(|f| f.bytes.clone()),
+        };
         let mut out = Vec::new();
         for (set, part) in scene.mesh.parts.iter().enumerate() {
             let Some(m) = scene.mesh.materials.iter().find(|m| m.name == part.material) else { continue };
@@ -433,7 +473,7 @@ impl CanvasSession {
                 (4, m.occlusion_map.as_deref(), m.occlusion_component),
             ];
             for (channel, map, component) in maps {
-                let Some(bytes) = map.and_then(|f| packed_file(&zip, f)) else { continue };
+                let Some(bytes) = map.and_then(found) else { continue };
                 out.push(ModelTextureFile {
                     texture_set: u32::try_from(set).unwrap_or(0),
                     channel,
@@ -1991,6 +2031,7 @@ impl ModelInfo {
 mod tests {
     use procraft_gpu::{Gpu, wgpu};
 
+    use super::ModelFile;
     use crate::{CanvasSession, PenSample, PointerKind};
 
     /// A cube whose every face covers the whole texture.
@@ -2047,7 +2088,7 @@ mod tests {
 
     #[test]
     fn panels_over_a_model_blur_it_under_them() {
-        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
         if !shown(&s) {
             return;
         }
@@ -2079,7 +2120,7 @@ mod tests {
             Ok(g) => g,
             Err(e) => return eprintln!("skipped: {e}"),
         };
-        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 256).unwrap();
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 256).unwrap();
         let info = s.model_info().unwrap();
         assert_eq!((info.texture_sets.len(), info.triangles), (1, 12));
         {
@@ -2120,7 +2161,7 @@ mod tests {
 
     #[test]
     fn the_2d_texture_shows_and_paints_flat() {
-        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 128).unwrap();
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 128).unwrap();
         if !shown(&s) {
             return;
         }
@@ -2144,7 +2185,7 @@ mod tests {
 
     #[test]
     fn the_studio_adds_moves_and_keeps_lights() {
-        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
         // two white lights to begin with; four at most
         assert_eq!(s.model_lights().len(), 2);
         assert!(s.model_lights().iter().all(|l| l.saturation == 0.0));
@@ -2199,7 +2240,7 @@ mod tests {
 
     #[test]
     fn the_turntable_pulls_back_half_way_and_exports_as_gif_and_png() {
-        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
         if !shown(&s) {
             return;
         }
@@ -2227,7 +2268,7 @@ mod tests {
 
     #[test]
     fn roughness_and_metalness_are_painted_in_their_own_layers() {
-        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
         if !shown(&s) {
             return;
         }
@@ -2290,8 +2331,32 @@ mod tests {
     }
 
     #[test]
+    fn an_obj_takes_its_material_file_and_images_from_the_files_picked_with_it() {
+        let obj = format!("mtllib Cube Parts.mtl\nusemtl body\n{CUBE}");
+        let file = |name: &str, bytes: &[u8]| ModelFile { name: name.into(), bytes: bytes.to_vec() };
+        let mtl = b"newmtl body\nKd 1 0 0\nmap_Kd -bm 1 textures/Body.png\nmap_Pr rough.png\n";
+        let files = vec![
+            file("other.mtl", b"newmtl body\nKd 0 0 1\n"),
+            file("cube parts.MTL", mtl),
+            file("body.png", b"colour"),
+            file("rough.png", b"rough"),
+            file("unused.png", b"unused"),
+        ];
+        let s = CanvasSession::open_model(obj.clone().into(), "cube.obj".into(), files, "Cube".into(), 64).unwrap();
+        // the one it names, whatever the case; its maps found by their names alone
+        let found: Vec<(u32, Vec<u8>)> = s.model_texture_files().into_iter().map(|f| (f.channel, f.bytes)).collect();
+        assert_eq!(found, [(0, b"colour".to_vec()), (1, b"rough".to_vec())]);
+        // given once
+        assert!(s.model_texture_files().is_empty());
+        // without the one it names, the only one picked
+        let only = vec![file("whatever.mtl", mtl), file("rough.png", b"rough")];
+        let s = CanvasSession::open_model(obj.into(), "cube.obj".into(), only, "Cube".into(), 64).unwrap();
+        assert_eq!(s.model_texture_files().len(), 1);
+    }
+
+    #[test]
     fn a_packaged_models_textures_come_in_as_its_base_layers() {
-        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
         assert_eq!(s.layers().first().map(|l| l.name.clone()).as_deref(), Some("Base Layer"));
         assert!(s.model_texture_files().is_empty());
         if !shown(&s) {
@@ -2304,7 +2369,7 @@ mod tests {
         // opened again, its textures come back as their images' files: the colour, and the
         // roughness and metalness from their red
         let bytes = std::fs::read(&path).unwrap();
-        let again = CanvasSession::open_model(bytes, "cube.usdz".into(), None, "Again".into(), 64).unwrap();
+        let again = CanvasSession::open_model(bytes, "cube.usdz".into(), Vec::new(), "Again".into(), 64).unwrap();
         let files = again.model_texture_files();
         let kinds: Vec<(u32, u32, i32)> = files.iter().map(|f| (f.texture_set, f.channel, f.component)).collect();
         assert_eq!(kinds, [(0, 0, -1), (0, 1, 0), (0, 2, 0)]);
@@ -2324,7 +2389,7 @@ mod tests {
 
     #[test]
     fn two_fingers_bring_the_model_nearer_and_move_it() {
-        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
         if !shown(&s) {
             return;
         }
@@ -2367,7 +2432,8 @@ f 1/1",
 f 1/1 2/2",
                 1,
             );
-        let s = CanvasSession::open_model(two.into_bytes(), "two.obj".into(), None, "Two cubes".into(), 64).unwrap();
+        let s =
+            CanvasSession::open_model(two.into_bytes(), "two.obj".into(), Vec::new(), "Two cubes".into(), 64).unwrap();
         if !shown(&s) {
             return;
         }
@@ -2484,7 +2550,7 @@ f 1/1 2/2",
 
     #[test]
     fn a_models_normal_and_occlusion_maps_are_kept_and_exported() {
-        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
         // channels 3 and 4: the normal and occlusion maps, the texture size square
         assert!(!s.set_model_texture(0, 3, vec![0; 8]));
         assert!(!s.set_model_texture(0, 5, [128, 128, 255, 255].repeat(64 * 64)));
@@ -2523,7 +2589,7 @@ f 1/1 2/2",
         let usdz = dir.join("cube.usdz");
         s.export_model_usdz(usdz.to_string_lossy().into_owned()).unwrap();
         let back =
-            CanvasSession::open_model(std::fs::read(&usdz).unwrap(), "cube.usdz".into(), None, "Back".into(), 64)
+            CanvasSession::open_model(std::fs::read(&usdz).unwrap(), "cube.usdz".into(), Vec::new(), "Back".into(), 64)
                 .unwrap();
         let channels: Vec<u32> = back.model_texture_files().iter().map(|f| f.channel).collect();
         assert_eq!(channels, [0, 1, 2, 3, 4]);
@@ -2533,7 +2599,7 @@ f 1/1 2/2",
     #[test]
     fn a_model_exports_as_a_glb_for_viewers() {
         let two = CUBE.replacen("f 1/1", "usemtl front\nf 1/1", 1).replacen("f 1/1 2/2", "usemtl sides\nf 1/1 2/2", 1);
-        let s = CanvasSession::open_model(two.into_bytes(), "two.obj".into(), None, "Two".into(), 64).unwrap();
+        let s = CanvasSession::open_model(two.into_bytes(), "two.obj".into(), Vec::new(), "Two".into(), 64).unwrap();
         if !shown(&s) {
             return;
         }
@@ -2563,7 +2629,7 @@ f 1/1 2/2",
 
     #[test]
     fn a_saved_model_exports_once_opened_again() {
-        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), None, "Cube".into(), 64).unwrap();
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
         if !shown(&s) {
             return;
         }
@@ -2583,7 +2649,7 @@ f 1/1 2/2",
     fn a_model_saves_with_each_texture_set_and_how_it_was_seen() {
         // the cube's front, top and back in one material, its bottom and sides in another
         let two = CUBE.replacen("f 1/1", "usemtl front\nf 1/1", 1).replacen("f 1/1 2/2", "usemtl sides\nf 1/1 2/2", 1);
-        let s = CanvasSession::open_model(two.into_bytes(), "two.OBJ".into(), None, "Two".into(), 128).unwrap();
+        let s = CanvasSession::open_model(two.into_bytes(), "two.OBJ".into(), Vec::new(), "Two".into(), 128).unwrap();
         assert_eq!(s.model_info().unwrap().texture_sets, ["front", "sides"]);
         if !shown(&s) {
             return;

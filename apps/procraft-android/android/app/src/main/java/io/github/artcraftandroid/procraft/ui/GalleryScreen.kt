@@ -148,8 +148,9 @@ fun GalleryScreen(vm: CanvasViewModel) {
         selected.clear()
         moreOpen = false
     }
-    val importFile = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let(vm::importFile)
+    // several at once, as a model's material file and images come with it
+    val importFile = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) vm.importFiles(uris)
     }
     val photo = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()) { uri ->
         uri?.let(vm::newFromPicture)

@@ -9,7 +9,7 @@ use std::num::NonZeroU64;
 use std::sync::mpsc;
 
 use procraft_engine::animation::{self, FrameLook};
-use procraft_engine::brush::{BRUSH_BEHIND, Brush, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering, Source};
+use procraft_engine::brush::{BRUSH_BEHIND, Brush, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering, Source, run_out};
 use procraft_engine::document::{BlendMode, Document, Layer, LayerId, LayerKind};
 use procraft_engine::geom::{Affine, IRect};
 use procraft_engine::stroke::{MOST_ROUNDNESS, Stamp};
@@ -112,6 +112,9 @@ pub struct StrokeStyle {
     pub load: f32,
     /// Wet mix: water in the paint, 0..1: it goes on thinner.
     pub dilution: f32,
+    /// The brush's fall off, 0..1: the paint it mixes in runs out along the stroke as its stamps
+    /// fade.
+    pub falloff: f32,
     /// Wet mix: how hard the paint goes on over what is there (less of it pulled in), its grain
     /// (the mix uneven from pixel to pixel), how blurred what it pulls in is, and how much the
     /// pull varies from stamp to stamp; each 0..1.
@@ -171,6 +174,7 @@ impl StrokeStyle {
             wet_pull: None,
             load: 0.0,
             dilution: 0.0,
+            falloff: 0.0,
             attack: 0.0,
             grade: 0.0,
             blur: 0.0,
@@ -222,6 +226,7 @@ impl StrokeStyle {
             wet_pull: wet.then(|| brush.setting("wet_pull").clamp(0.0, 1.0)),
             load: if wet { brush.setting("wet_charge").clamp(0.0, 1.0) } else { 0.0 },
             dilution: if wet { brush.setting("wet_dilution").clamp(0.0, 1.0) } else { 0.0 },
+            falloff: brush.setting("falloff").clamp(0.0, 1.0),
             attack: if wet { brush.setting("wet_attack").clamp(0.0, 1.0) } else { 0.0 },
             // the grade goes both ways; drawn yet only as how uneven the mix is
             grade: if wet { brush.setting("wet_grade").abs().clamp(0.0, 1.0) } else { 0.0 },
@@ -653,23 +658,26 @@ fn unit_hash(n: u32) -> f32 {
 /// Resolution of what a smudge brush carries, cells on a side.
 const SMUDGE_GRID: u32 = 32;
 const SMUDGE_UNIFORM_SIZE: u64 = std::mem::size_of::<SmudgeUniform>() as u64;
-/// Wet mix: the stroke's length (canvas pixels) over which paint loaded at nothing runs out, by the
-/// cube root of the length (see [`wet_mixture`]).
-const CHARGE_LENGTH: f32 = 33.0;
 
 /// A wet stamp's (mixture, final mixture, pull) once the stroke has gone `length` canvas pixels:
-/// the paint the brush mixes into what it carries is what its dilution leaves (by 2.4) and its
-/// charge (running out by the cube root of the length), at least its attack (the stamp's
+/// the paint the brush mixes into what it carries is what its dilution leaves (by 2.4, and as
+/// far as the fall off has not run it out) and its charge (running out by the cube root of the
+/// length), at least its attack (the stamp's
 /// `attack` share of it: its pressure), times `jitter`; it
 /// lays down what it carries by the mixture, a share of it by the grade; the pull is the wet
-/// pull's eighth root (a pull of 0.9 keeps 0.99 a stamp).
-fn wet_mixture(style: &StrokeStyle, length: f32, jitter: f32, attack: f32) -> (f32, f32, f32) {
-    let charge = if style.load > 0.0 {
-        1.0 - ((1.0 - style.load) * (length.max(0.0) / CHARGE_LENGTH).cbrt()).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let diluted = (1.0 - style.dilution.clamp(0.0, 1.0)).powf(2.4);
+/// pull's eighth root (a pull of 0.9 keeps 0.99 a stamp). The stamp's pressure scales the
+/// dilution and the charge by `dilution_by` and `charge_by` (their curves).
+fn wet_mixture(
+    style: &StrokeStyle,
+    length: f32,
+    jitter: f32,
+    attack: f32,
+    dilution_by: f32,
+    charge_by: f32,
+) -> (f32, f32, f32) {
+    let charge = if style.load > 0.0 { 1.0 - run_out(1.0 - style.load, length) } else { 0.0 } * charge_by;
+    let diluted =
+        (1.0 - run_out(style.falloff, length)) * (1.0 - style.dilution.clamp(0.0, 1.0) * dilution_by).powf(2.4);
     let attack = style.attack.clamp(0.0, 1.0) * attack.clamp(0.0, 1.0);
     let mixture = ((diluted + charge).max(attack) * jitter).clamp(0.0, 1.0);
     let pull = style.wet_pull.unwrap_or(0.0).clamp(0.0, 1.0).powf(0.125);
@@ -775,7 +783,7 @@ enum Op {
     Stamps {
         instances: Vec<StampInstance>,
         /// Each stamp's wet-mix scaling (see [`Stamp::wet`]), for the wet paint drawn in place.
-        wet: Vec<[f32; 4]>,
+        wet: Vec<[f32; 8]>,
         style: StrokeStyle,
         clear: bool,
         layer: LayerId,
@@ -1577,7 +1585,7 @@ impl Canvas {
         let capped = self.pipelines.stamp_capped.is_some();
         let drawn: Vec<&Stamp> =
             stamps.iter().filter(|s| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite()).collect();
-        let wet: Vec<[f32; 4]> =
+        let wet: Vec<[f32; 8]> =
             drawn.iter().map(|s| s.wet.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 })).collect();
         let instances: Vec<StampInstance> = drawn
             .iter()
@@ -2739,7 +2747,7 @@ impl Canvas {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         params: &mut UniformData,
-        (instances, wet): (&[StampInstance], &[[f32; 4]]),
+        (instances, wet): (&[StampInstance], &[[f32; 8]]),
         style: &StrokeStyle,
         target: LayerId,
         restart: bool,
@@ -2904,15 +2912,19 @@ impl Canvas {
             }
             smudge.last = Some(s.center);
             // the grade, blur and jitters as far as this stamp's pressure takes them
-            let [grade_by, blur_by, blur_jitter_by, wet_jitter_by] = wet.get(k).copied().unwrap_or([1.0; 4]);
+            let [grade_by, blur_by, blur_jitter_by, wet_jitter_by, charge_by, dilution_by, wet_pull_by, smudge_pull_by] =
+                wet.get(k).copied().unwrap_or([1.0; 8]);
             let stamp_style = StrokeStyle { grade: style.grade * grade_by, ..*style };
             // the mixture varies from stamp to stamp by the wetness jitter
             let jitter = 1.0 - style.wet_jitter * wet_jitter_by * unit_hash(smudge.stamps);
             smudge.stamps = smudge.stamps.saturating_add(1);
+            // the pull as far as the stamp's pressure takes it (the wet pull's or the smudge's)
             let (mixture, final_mixture, wet_pull) = if wet_paint {
-                wet_mixture(&stamp_style, smudge.length, jitter, s.more[3])
+                let (mixture, laid, pull) =
+                    wet_mixture(&stamp_style, smudge.length, jitter, s.more[3], dilution_by, charge_by);
+                (mixture, laid, pull * wet_pull_by)
             } else {
-                (0.0, 1.0, style.pull.clamp(0.0, 1.0))
+                (0.0, 1.0, style.pull.clamp(0.0, 1.0) * smudge_pull_by)
             };
             let moving = style.grain_mode == GrainMode::Moving;
             let offset = params.push(&SmudgeUniform {
@@ -5307,4 +5319,42 @@ pub fn read_texture(gpu: &Gpu, texture: &wgpu::Texture, width: u32, height: u32)
     drop(mapped);
     buffer.unmap();
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stamps_pressure_scales_the_wet_mixes_dilution_and_charge() {
+        let style = StrokeStyle {
+            dilution: 0.5,
+            load: 0.5,
+            wet_pull: Some(0.5),
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0)
+        };
+        // no dilution at no pressure: the paint goes on whole
+        assert_eq!(wet_mixture(&style, 0.0, 1.0, 0.0, 0.0, 1.0).0, 1.0);
+        // diluted by half: what it leaves, by 2.4, with no charge
+        let (mixed, ..) = wet_mixture(&style, 33.0, 1.0, 0.0, 1.0, 0.0);
+        assert!((mixed - 0.5f32.powf(2.4)).abs() < 1e-5);
+        // and the charge, half run out by 33 px, as far as its curve lets it
+        let (charged, ..) = wet_mixture(&style, 33.0, 1.0, 0.0, 1.0, 1.0);
+        assert!((charged - (0.5f32.powf(2.4) + 0.5)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_fall_off_runs_the_wet_mixes_paint_out_along_the_stroke() {
+        let style = StrokeStyle {
+            dilution: 0.5,
+            falloff: 0.5,
+            wet_pull: Some(0.5),
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0)
+        };
+        let diluted = 0.5f32.powf(2.4);
+        // whole where the stroke starts, half gone by 33 px, all gone by 264
+        assert!((wet_mixture(&style, 0.0, 1.0, 0.0, 1.0, 1.0).0 - diluted).abs() < 1e-5);
+        assert!((wet_mixture(&style, 33.0, 1.0, 0.0, 1.0, 1.0).0 - diluted * 0.5).abs() < 1e-5);
+        assert!(wet_mixture(&style, 264.0, 1.0, 0.0, 1.0, 1.0).0.abs() < 1e-5);
+    }
 }

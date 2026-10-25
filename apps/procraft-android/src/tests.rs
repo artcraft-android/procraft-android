@@ -875,7 +875,9 @@ fn a_held_stroke_snaps_to_a_shape_and_is_edited() {
     assert_eq!(info.kind, QuickShapeKind::Ellipse);
     assert_eq!(info.handles.len(), 8);
     s.stroke_end(vec![]);
-    // still open: shown as a circle, then a handle dragged
+    // still open, and undo is there for it
+    assert!(s.info().can_undo);
+    // shown as a circle, then a handle dragged
     let circle = s.quickshape_choose(QuickShapeKind::Circle).unwrap();
     assert_eq!(circle.kind, QuickShapeKind::Circle);
     let moved = s.quickshape_move_handle(0, 190.0, 100.0).unwrap();

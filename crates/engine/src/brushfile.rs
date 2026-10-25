@@ -399,7 +399,7 @@ fn escape(s: &str) -> String {
 }
 
 /// Where brush files keep each [`PressureCurve`].
-pub const PRESSURE_CURVES: [(PressureCurve, &str); 27] = [
+pub const PRESSURE_CURVES: [(PressureCurve, &str); 36] = [
     (PressureCurve::LateralJitter, "dynamicsPressurePlotJitterCurve"),
     (PressureCurve::LinearJitter, "dynamicsPressurePlotJitterLongitudinalCurve"),
     (PressureCurve::Count, "dynamicsPressureStampCountCurve"),
@@ -427,6 +427,15 @@ pub const PRESSURE_CURVES: [(PressureCurve, &str); 27] = [
     (PressureCurve::LightnessJitter, "dynamicsPressureLightnessJitterCurve"),
     (PressureCurve::DarknessJitter, "dynamicsPressureDarknessJitterCurve"),
     (PressureCurve::SecondaryJitter, "dynamicsPressureSecondaryColorJitterCurve"),
+    (PressureCurve::Flow, "dynamicsPressureTransferModulationCurve"),
+    (PressureCurve::Bleed, "dynamicsPressureBleedCurve"),
+    (PressureCurve::Roundness, "dynamicsPressureShapeRoundnessCurve"),
+    (PressureCurve::Dilution, "dynamicsPressureDilutionCurve"),
+    (PressureCurve::Charge, "dynamicsPressureCharge"),
+    (PressureCurve::Attack, "dynamicsPressureAttackCurve"),
+    (PressureCurve::WetPull, "dynamicsPressureWetPullCurve"),
+    (PressureCurve::SmudgePull, "dynamicsPressureSmudgePullCurve"),
+    (PressureCurve::SpacingJitter, "dynamicsPressurePlotSpacingJitter"),
 ];
 
 /// The key brush files keep `kind` under.
@@ -467,6 +476,23 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
             && let Some(v) = f.num(touch)
         {
             set(control, v as f32);
+        }
+    }
+    // a file from before the linear jitter had its own keys jitters along the stroke as it does
+    // across (its tilt switch and angle then follow the lateral's, see `Brush::setting`); one with
+    // its own but no tilt keys has the switch off and the angle the tilt angle
+    if f.num("plotJitterLongitudinal").is_none() {
+        if let Some(v) = f.num("plotJitter") {
+            set("jitter_linear", to_control(Kept::Curve(3.0), v));
+        }
+    } else {
+        if f.num("plotJitterLongitudinalTilt").is_none() {
+            set("jitter_linear_tilt", 0.0);
+        }
+        if f.num("plotJitterLongitudinalTiltAngle").is_none()
+            && let Some(v) = f.num("dynamicsTiltAngle")
+        {
+            set("jitter_linear_tilt_angle", v as f32);
         }
     }
     if let Some(v) = f.num("shapeCount") {
@@ -930,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_without_linear_jitter_keys_gives_it_the_laterals_curve() {
+    fn a_file_without_linear_jitter_keys_gives_it_the_laterals_jitter() {
         use crate::brush::PressureCurve;
         let mut b = Builder::new();
         let root = b.reserve();
@@ -949,6 +975,34 @@ mod tests {
         let curve = |kind| back.pressure_curves.iter().find(|(k, _)| *k == kind).map(|(_, c)| c.clone());
         assert!(curve(PressureCurve::LateralJitter).is_some());
         assert_eq!(curve(PressureCurve::LinearJitter), curve(PressureCurve::LateralJitter));
+        let get = |k: &str| back.settings.iter().rev().find(|(key, _)| key == k).map(|(_, v)| *v);
+        assert!(get("jitter_lateral").is_some());
+        assert_eq!(get("jitter_linear"), get("jitter_lateral"));
+    }
+
+    #[test]
+    fn a_file_with_its_own_linear_jitter_but_no_tilt_keys_has_its_tilt_off() {
+        let mut b = Builder::new();
+        let root = b.reserve();
+        let name = b.string("Newer");
+        b.fill(
+            &root,
+            &["SilicaBrush", "ValkyrieBrush", "NSObject"],
+            vec![
+                ("name", name),
+                ("plotJitterLongitudinal", Value::Real(0.2)),
+                ("plotJitterTilt", Value::Bool(true)),
+                ("plotJitterTiltAngle", Value::Real(0.6)),
+                ("dynamicsTiltAngle", Value::Real(0.3)),
+            ],
+        );
+        let mut zip = ZipWriter::new();
+        zip.add("Brush.archive", &b.finish(root));
+        let back = read(&zip.finish()).unwrap();
+        let get = |k: &str| back.settings.iter().rev().find(|(key, _)| key == k).map(|(_, v)| *v);
+        assert_eq!(get("jitter_linear_tilt"), Some(0.0));
+        assert_eq!(get("jitter_linear_tilt_angle"), Some(0.3));
+        assert_eq!(get("jitter_lateral_tilt"), Some(1.0));
     }
 
     #[test]

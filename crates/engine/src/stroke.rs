@@ -2,7 +2,9 @@
 //! response, spacing, the shape's placement (rotation, scatter, count, jitter, roundness) and
 //! taper.
 
-use crate::brush::{Brush, CLASSIC_TAPER_SPAN, FLOW_POWER, PressureCurve, Rendering, TAPER_TIME_MS, Taper, Tilt};
+use crate::brush::{
+    Brush, CLASSIC_TAPER_SPAN, FLOW_POWER, PressureCurve, Rendering, TAPER_TIME_MS, Taper, Tilt, run_out,
+};
 use crate::curve::Curve;
 use crate::geom::{IRect, Vec2};
 use crate::input::{Pointer, Sample};
@@ -50,9 +52,10 @@ pub struct Stamp {
     /// How much of the brush's wet-mix attack this stamp has: the pressure (as opacity follows
     /// it), as far as the attack's tilt switch lets it, 0..1.
     pub attack: f32,
-    /// The wet mix's grade, blur, blur jitter and wetness jitter as this stamp's pressure scales
-    /// them (the brush's own pressure curves; 1 each without them).
-    pub wet: [f32; 4],
+    /// The wet mix as this stamp's pressure scales it, by the brush's own pressure curves: its
+    /// grade, blur, blur jitter, wetness jitter and charge (1 each without a curve), its
+    /// dilution, wet pull and smudge pull (the pressure as it is without one).
+    pub wet: [f32; 8],
 }
 
 impl Stamp {
@@ -76,7 +79,7 @@ impl Stamp {
             taper: 1.0,
             transfer: 1.0,
             attack: 1.0,
-            wet: [1.0; 4],
+            wet: [1.0; 8],
         }
     }
 
@@ -136,9 +139,9 @@ struct Placed {
     gradation: f32,
     transfer: f32,
     attack: f32,
-    wet: [f32; 4],
-    /// The pressure as the size, opacity, bleed and roundness took it.
-    pressed: [f32; 4],
+    wet: [f32; 8],
+    /// The pressure as the size, opacity, bleed and roundness took it (and the stamp's own).
+    pressed: [f32; 5],
     /// How much of the stamp's roundness is the drawn shape's, which the pressure squeezes (the
     /// rest is what leaning adds).
     drawn_share: f32,
@@ -148,8 +151,9 @@ struct Placed {
 struct PathPoint {
     pos: Vec2,
     pressure: f32,
-    /// The pressure as size, opacity, bleed and roundness each follow it (see `soften`).
-    soft: [f32; 4],
+    /// The pressure as size, opacity, bleed, roundness and the stamp's other controls each
+    /// follow it (see `soften`).
+    soft: [f32; 5],
     tilt: f32,
     azimuth: f32,
     /// How fast the input moves, 0..1 of [`FAST`].
@@ -161,7 +165,7 @@ impl PathPoint {
         PathPoint {
             pos: self.pos.lerp(to.pos, t),
             pressure: self.pressure + (to.pressure - self.pressure) * t,
-            soft: [0, 1, 2, 3].map(|k| {
+            soft: [0, 1, 2, 3, 4].map(|k| {
                 let (a, b) = (self.soft.get(k).copied().unwrap_or(1.0), to.soft.get(k).copied().unwrap_or(1.0));
                 a + (b - a) * t
             }),
@@ -187,6 +191,10 @@ const MOST_AVERAGED: usize = 32;
 /// expression, how much of the way back to the pen it comes.
 const MOTION_FILTER_MOST: f32 = 0.9;
 const EXPRESSION_MOST: f32 = 0.5;
+/// Brush files keep the spacing jitter and the speed's spacing at ten times the studio's
+/// controls: the share of a gap they widen it by.
+const SPACING_FILE_SCALE: f32 = 10.0;
+
 /// The most a stamp's height may be of its width (a roundness jitter can make it taller than
 /// wide).
 pub const MOST_ROUNDNESS: f32 = 20.0;
@@ -194,8 +202,6 @@ pub const MOST_ROUNDNESS: f32 = 20.0;
 /// The lateral and linear jitter as brush files keep them: the control to the power 2.2, times
 /// this; each moves a stamp up to that many times half its diagonal (plus a pixel).
 const JITTER_FILE_SCALE: f32 = 3.0;
-/// A fall off of 1 fades a stroke out over this many diameters.
-const FALLOFF_SPAN: f32 = 30.0;
 
 /// The brush's controls the builder reads beyond its own fields (see `studio`), read once.
 #[derive(Clone, Copy, Debug, Default)]
@@ -228,7 +234,7 @@ struct Extras {
     /// Light pressure lowering (or, negative, raising) each stamp's flow, −1..1.
     pressure_flow: f32,
     /// How slowly size, opacity, bleed and roundness follow the pressure when the pen moves fast.
-    pressure_response: [f32; 4],
+    pressure_response: [f32; 5],
     /// Light pressure, and leaning, letting more of a moving grain through (bleed), 0..1.
     pressure_bleed: f32,
     tilt_bleed: f32,
@@ -324,10 +330,12 @@ impl Extras {
             grain_movement: unit("grain_movement"),
             grain_offset_jitter: b.setting("grain_offset_jitter") >= 0.5,
             pressure_flow: both("pressure_flow"),
+            // the stamp's own pressure follows as the roundness does
             pressure_response: [
                 "pressure_size_response",
                 "pressure_opacity_response",
                 "pressure_bleed_response",
+                "pressure_roundness_response",
                 "pressure_roundness_response",
             ]
             .map(unit),
@@ -439,7 +447,7 @@ pub struct StrokeBuilder {
     /// Whether the speed has been measured (the first move is taken as it is).
     speed_known: bool,
     /// The pressure as each use follows it, at the last sample; and how many samples so far.
-    soft: Option<[f32; 4]>,
+    soft: Option<[f32; 5]>,
     segments: u32,
     /// A sample stroke drawn for show: no speed, and the pressure taken as it comes.
     steady: bool,
@@ -447,7 +455,9 @@ pub struct StrokeBuilder {
     exact: bool,
     /// Drawn on the studio's pad, and whether the brush previews tilt there.
     pad: Option<bool>,
-    gap_jitter: f32,
+    /// A gap drawn that the last input segment ended before reaching: the next one goes on
+    /// with it.
+    pending_gap: Option<f32>,
     /// The whole stroke's colour shift, drawn once.
     stroke_shift: Tint,
     /// The stroke's share of the secondary colour, picked as it starts.
@@ -600,7 +610,7 @@ impl StrokeBuilder {
             steady: false,
             exact: false,
             pad: None,
-            gap_jitter: 1.0,
+            pending_gap: None,
             stroke_shift: Tint::NONE,
             stroke_secondary: 0.0,
             stroke_turn: 0.0,
@@ -931,10 +941,20 @@ impl StrokeBuilder {
         self.direction = d.y.atan2(d.x);
         self.last_seg = seg;
         let mut done = 0.0f32;
+        // each input segment goes on from the plain gap where it starts
+        let mut last = self.step(from);
         while self.placed.len() < MAX_STAMPS {
-            let need = self.step(from.lerp(to, done / seg)) - self.carry;
+            let gap = match self.pending_gap.take() {
+                Some(gap) => gap,
+                None => {
+                    last = self.gap(from.lerp(to, done / seg), last);
+                    last
+                }
+            };
+            let need = gap - self.carry;
             if done + need > seg {
                 self.carry += seg - done;
+                self.pending_gap = Some(gap);
                 break;
             }
             done += need.max(0.0);
@@ -989,13 +1009,25 @@ impl StrokeBuilder {
         ((1.0 - compression) + compression * across * (across + long).max(0.0).sqrt()).clamp(0.0, 1.0)
     }
 
-    /// Distance to the next stamp: the spacing's share of the stamp's square, and half a pixel
-    /// more (and a little with the spacing), wider apart the faster the input, jittered per gap.
+    /// The plain distance to the next stamp: the spacing's share of the stamp's square, and half
+    /// a pixel more (and a little with the spacing).
     fn step(&self, p: PathPoint) -> f32 {
         let spacing = self.brush.spacing.max(0.005);
         let extra = 0.5 + (spacing - SPACING_FLOOR).max(0.0) / (SPACING_SPAN / 2.0);
-        let speed = 1.0 + 2.0 * self.extras.speed_spacing * p.speed;
-        ((spacing * self.square_at(p) * self.extras.spacing_stride + extra) * speed * self.gap_jitter).max(0.25)
+        (spacing * self.square_at(p) * self.extras.spacing_stride + extra).max(0.25)
+    }
+
+    /// The gap to the next stamp at `p`, the one before it `last`: the two gaps' mean, widened
+    /// by the spacing jitter (a random share of it, as far as its curve lets it) and by the
+    /// input's speed. Gaps only ever widen.
+    fn gap(&mut self, p: PathPoint, last: f32) -> f32 {
+        let x = self.extras;
+        let mut widen = p.speed * x.speed_spacing * SPACING_FILE_SCALE;
+        if x.spacing_jitter > 0.0 {
+            let by = self.brush.pressure_curves.at(PressureCurve::SpacingJitter, p.soft[4].clamp(0.0, 1.0));
+            widen += by * x.spacing_jitter * SPACING_FILE_SCALE * self.random.next();
+        }
+        ((1.0 + widen.max(0.0)) * (last + self.step(p)) * 0.5).max(0.25)
     }
 
     /// Each use's pressure followed from `before` towards `now` over `frames` (of a 60 Hz display)
@@ -1003,11 +1035,11 @@ impl StrokeBuilder {
     /// speed lags (to (frames / pixels, at least 0.2) to the power twice its response, each
     /// sample), and every use is evened out with what it was, more so the more often the pen
     /// reports (eased in over the stroke's first frames).
-    fn soften(&self, now: [f32; 4], before: [f32; 4], frames: f32, moved: f32) -> [f32; 4] {
+    fn soften(&self, now: [f32; 5], before: [f32; 5], frames: f32, moved: f32) -> [f32; 5] {
         let pace = if moved > 0.0 { (frames / moved).clamp(0.2, 1.0) } else { 1.0 };
         let held = 2.0 / frames.max(1e-3);
         let ramp = (self.segments as f32 / held).clamp(0.0, 1.0) * held;
-        [0, 1, 2, 3].map(|k| {
+        [0, 1, 2, 3, 4].map(|k| {
             let (n, b) = (now.get(k).copied().unwrap_or(1.0), before.get(k).copied().unwrap_or(1.0));
             let response = self.extras.pressure_response.get(k).copied().unwrap_or(0.0);
             let followed = b + (n - b) * pace.powf(2.0 * response);
@@ -1065,18 +1097,29 @@ impl StrokeBuilder {
         let x = self.extras;
         let start_span = self.start_span();
         let sw = x.tilt_switches;
-        if x.spacing_jitter > 0.0 {
-            self.gap_jitter = (1.0 + x.spacing_jitter * (self.random.next() * 2.0 - 1.0)).max(0.05);
-        }
         let diameter = self.diameter_at(p);
         let (_, pressure_alpha) = self.brush.factors(p.soft[0], p.soft[1]);
         // leaning fades the stamp by the square root of how far it has gone
         let fade = self.leaning(p, x.tilt_angles.opacity).sqrt() * self.brush.tilt.opacity;
         let tilt_alpha = if fade >= 0.0 { 1.0 - fade } else { 1.0 - (fade + self.brush.tilt.opacity) };
         let speed_alpha = (1.0 - x.speed_opacity * p.speed).clamp(0.0, 1.0);
-        let falloff = (1.0 - distance * x.falloff / (FALLOFF_SPAN * self.diameter)).max(0.0);
-        let light = 1.0 - p.soft[2].clamp(0.0, 1.0);
-        let pressure_flow = (1.0 - x.pressure_flow * light).clamp(0.0, 1.0);
+        // the fall off fades the stroke out by the cube root of how far it has gone
+        let falloff = 1.0 - run_out(x.falloff, distance);
+        use PressureCurve as PC;
+        // the brush's own pressure curves for its other controls, at the stamp's pressure (a
+        // finger's is full): each control scaled by its curve, or left as it is without one
+        let pressure = p.soft[4].clamp(0.0, 1.0);
+        let curves = &self.brush.pressure_curves;
+        let by = |k: PressureCurve| curves.at(k, pressure);
+        // the flow lets through as much as its pressure amount and curve say (an amount below 0
+        // the other way)
+        let flowing = curves.through(PC::Flow, pressure);
+        let pressure_flow = if x.pressure_flow >= 0.0 {
+            1.0 - x.pressure_flow * (1.0 - flowing)
+        } else {
+            1.0 + x.pressure_flow * flowing
+        }
+        .clamp(0.0, 1.0);
         // flow, pressure, tilt and speed together through the opacity range, eased; then what
         // pressure lets through (the brush's pressure flow) and the fall off
         let b = &self.brush;
@@ -1090,13 +1133,7 @@ impl StrokeBuilder {
         if self.brush.rendering == Rendering::Gradual && !self.brush.mixes_wet() {
             alpha = StrokeBuilder::gradual(alpha, diameter / self.step(p));
         }
-        use PressureCurve as PC;
         let shape = self.brush.shape.clone();
-        // the brush's own pressure curves for its other controls, at the stamp's pressure (a
-        // finger's is full): each control scaled by its curve, or left as it is without one
-        let pressure = p.soft[2].clamp(0.0, 1.0);
-        let curves = &self.brush.pressure_curves;
-        let by = |k: PressureCurve| curves.at(k, pressure);
         let [count_by, count_jitter_by, lateral_by, linear_by, size_jitter_by, opacity_jitter_by, scatter_by] = [
             PC::Count,
             PC::CountJitter,
@@ -1117,7 +1154,17 @@ impl StrokeBuilder {
             PC::GrainDepthJitter,
         ]
         .map(by);
-        let wet = [PC::WetGrade, PC::WetBlur, PC::WetBlurJitter, PC::WetnessJitter].map(by);
+        let along = |k: PressureCurve| curves.through(k, pressure);
+        let wet = [
+            by(PC::WetGrade),
+            by(PC::WetBlur),
+            by(PC::WetBlurJitter),
+            by(PC::WetnessJitter),
+            by(PC::Charge),
+            along(PC::Dilution),
+            along(PC::WetPull),
+            along(PC::SmudgePull),
+        ];
         let color_jitter_by =
             [PC::HueJitter, PC::SaturationJitter, PC::LightnessJitter, PC::DarknessJitter, PC::SecondaryJitter];
         let color_has_curve = color_jitter_by.map(|k| curves.get(k).is_some());
@@ -1170,7 +1217,7 @@ impl StrokeBuilder {
             Some(theta) if self.pointer.has_pressure() => Tilt::reach(p.tilt, theta),
             Some(theta) => Tilt::reach(std::f32::consts::FRAC_PI_2, theta),
         };
-        let attack = (p.soft[1].clamp(0.0, 1.0) * attack_tilt).clamp(0.0, 1.0);
+        let attack = (p.soft[1].clamp(0.0, 1.0) * attack_tilt * curves.through(PC::Attack, pressure)).clamp(0.0, 1.0);
         let [hue_by, saturation_by, lightness_by, darkness_by, secondary_by] = color_first;
         let [hue_more, saturation_more, lightness_more, darkness_more, secondary_more] = color_more;
         for _ in 0..count {
@@ -1245,7 +1292,7 @@ impl StrokeBuilder {
             };
             let mut depth = base * (1.0 - jitter) * depth_by;
             depth += (1.0 - depth) * (x.tilt_bleed * self.leaning(p, x.tilt_angles.bleed)).clamp(0.0, 1.0);
-            let grain_press = (1.0 - light).clamp(0.0, 1.0);
+            let grain_press = p.soft[2].clamp(0.0, 1.0);
             let mut depth = depth.max(x.grain_depth_min).clamp(0.0, 1.0);
             // the depth tilt: leaning takes the depth down to its least
             if sw.grain_depth.is_some() {
@@ -1319,7 +1366,7 @@ impl StrokeBuilder {
         let (mut grain_press, mut roundness) = (p.grain_press, p.roundness);
         if self.pointer.has_pressure() && fade > 0.0 {
             let kept = (1.0 - fade) + fade * (start * finish).powf(Taper::tip_power(tip));
-            let [s, o, b, r] = p.pressed;
+            let [s, o, b, r, _] = p.pressed;
             let (s0, o0) = self.brush.factors(s, o);
             let (s1, o1) = self.brush.factors(s * kept, o * kept);
             if s0 > 0.0 {
@@ -1815,6 +1862,59 @@ mod tests {
     }
 
     #[test]
+    fn spacing_jitter_and_speed_only_widen_the_gaps() {
+        // 600 px in 200 ms: fast input
+        let gaps = |settings: &[(&str, f32)]| {
+            let mut b = plain();
+            for &(k, v) in settings {
+                b.set_setting(k, v);
+            }
+            let samples: Vec<Sample> =
+                (0..=50).map(|i| Sample::at(Vec2::new(i as f32 * 12.0, 50.0), 1.0, i as f64 * 4.0)).collect();
+            let mut s = StrokeBuilder::new(b, 10.0, Pointer::Stylus);
+            let all = s.add(&samples);
+            all.windows(2).map(|w| w[1].center.x - w[0].center.x).collect::<Vec<f32>>()
+        };
+        let mean = |g: &[f32]| g.iter().sum::<f32>() / g.len() as f32;
+        let plain_gaps = gaps(&[]);
+        let least = plain_gaps.iter().copied().fold(f32::MAX, f32::min);
+        let jittered = gaps(&[("spacing_jitter", 0.1)]);
+        assert!(jittered.iter().all(|&g| g > least - 1e-3));
+        assert!(mean(&jittered) > 1.2 * mean(&plain_gaps), "{} {}", mean(&jittered), mean(&plain_gaps));
+        let sped = gaps(&[("speed_spacing", 0.05)]);
+        assert!(mean(&sped) > 1.2 * mean(&plain_gaps), "{} {}", mean(&sped), mean(&plain_gaps));
+    }
+
+    #[test]
+    fn flow_bleed_and_roundness_follow_their_own_curves() {
+        use crate::curve::Curve;
+        let middle = |settings: &[(&str, f32)], level: Option<PressureCurve>| {
+            let mut b = Brush { pressure_size: 0.0, ..plain() };
+            for &(k, v) in settings {
+                b.set_setting(k, v);
+            }
+            // a curve that holds full pressure throughout
+            if let Some(kind) = level {
+                b.pressure_curves.set(kind, Some(Curve::new(&[Vec2::new(0.0, 1.0), Vec2::new(1.0, 1.0)])));
+            }
+            let samples: Vec<Sample> =
+                (0..=30).map(|i| Sample::at(Vec2::new(i as f32 * 4.0, 50.0), 0.3, i as f64 * 4.0)).collect();
+            let mut s = StrokeBuilder::new(b, 10.0, Pointer::Stylus);
+            s.add(&samples);
+            let all = s.finish();
+            all[all.len() / 2]
+        };
+        let flow = [("pressure_flow", 1.0)];
+        assert!(middle(&flow, None).alpha < 0.5 * middle(&flow, Some(PressureCurve::Flow)).alpha);
+        let bleed = [("pressure_bleed", 1.0)];
+        assert!(middle(&bleed, None).grain_press < 0.4);
+        assert!(middle(&bleed, Some(PressureCurve::Bleed)).grain_press > 0.99);
+        let round = [("pressure_roundness", 1.0)];
+        assert!(middle(&round, None).roundness < 0.4);
+        assert!(middle(&round, Some(PressureCurve::Roundness)).roundness > 0.99);
+    }
+
+    #[test]
     fn the_wet_attack_follows_the_pressure_and_its_tilt_switch() {
         let attack = |pressure: f32, tilt: f32, switch: bool, pointer: Pointer| {
             let mut b = Brush { pressure_size: 0.0, ..plain() };
@@ -1826,7 +1926,8 @@ mod tests {
             StrokeBuilder::new(b, 10.0, pointer).preview(&[s])[0].attack
         };
         assert!((attack(1.0, 0.0, false, Pointer::Stylus) - 1.0).abs() < 1e-4);
-        assert!((attack(0.4, 0.0, false, Pointer::Stylus) - 0.4).abs() < 0.05);
+        // the pressure counts twice: as the opacity takes it, and through the attack's own curve
+        assert!((attack(0.4, 0.0, false, Pointer::Stylus) - 0.16).abs() < 0.03);
         // switched on: an upright pen next to none, a leaning one more, a finger as a flat pen
         assert!(attack(1.0, 0.0, true, Pointer::Stylus) < 0.01);
         let flat = Tilt::reach(crate::brush::FLAT_TILT, 0.0);
@@ -1921,9 +2022,13 @@ mod tests {
         assert!(base.iter().all(|s| (s.center.y - 50.0).abs() < 1e-3));
         // spacing jitter changes how many stamps there are
         assert_ne!(with("spacing_jitter", 1.0).len(), base.len());
-        // fall off fades the far end
+        // fall off fades the far end: by 33 px a fall off of 1 has faded it out, a half by 264
         let faded = with("falloff", 1.0);
-        assert!(faded.last().unwrap().alpha < faded[0].alpha * 0.5);
+        assert!(faded.last().unwrap().alpha < 1e-6 && faded[0].alpha > 0.5);
+        let half = with("falloff", 0.5);
+        let near = |x: f32| half.iter().min_by(|a, b| (a.center.x - x).abs().total_cmp(&(b.center.x - x).abs()));
+        let (start, by_33) = (near(0.0).map_or(0.0, |s| s.alpha), near(33.0).map_or(0.0, |s| s.alpha));
+        assert!((by_33 / start - 0.5).abs() < 0.05, "{start} {by_33}");
         // fast input (600 px in 200 ms: 50 px a frame) thins the stroke with speed size
         let fast = |b: Brush| {
             let mut s = StrokeBuilder::new(b, 10.0, Pointer::Stylus);

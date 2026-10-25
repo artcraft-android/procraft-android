@@ -1153,7 +1153,8 @@ impl CanvasSession {
             size: sliders.size,
             opacity: sliders.opacity,
             brush_diameter: st.brush(st.tool).diameter(sliders.size) * st.brush_scale(),
-            can_undo: st.canvas.as_ref().is_some_and(Canvas::can_undo) || st.crop_undo.is_some(),
+            // an open shape is kept, then undone
+            can_undo: st.canvas.as_ref().is_some_and(Canvas::can_undo) || st.crop_undo.is_some() || st.shape.is_some(),
             // keeping an open shape drops what could be redone
             can_redo: st.shape.is_none() && (st.canvas.as_ref().is_some_and(Canvas::can_redo) || st.crop_redo_ready()),
             zoom: st.view.map_or(1.0, |v| v.zoom()),

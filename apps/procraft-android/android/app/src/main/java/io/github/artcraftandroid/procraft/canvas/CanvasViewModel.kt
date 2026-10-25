@@ -26,6 +26,7 @@ import io.github.artcraftandroid.procraft.ui.gradientColorAt
 import io.github.artcraftandroid.procraft.core.BrushInfo
 import io.github.artcraftandroid.procraft.core.BrushSetInfo
 import io.github.artcraftandroid.procraft.core.CanvasSession
+import io.github.artcraftandroid.procraft.core.ModelFile
 import io.github.artcraftandroid.procraft.core.ChromaticKind
 import io.github.artcraftandroid.procraft.core.GlitchKind
 import io.github.artcraftandroid.procraft.core.GuideInfo
@@ -984,23 +985,25 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A new artwork from a photo or picture file, its size, the picture as its one layer. */
     fun newFromPicture(uri: android.net.Uri) {
-        viewModelScope.launch {
-            // in Display P3 if the picture is, else in sRGB
-            val p3 = withContext(Dispatchers.IO) { pictureIsP3(uri) }
-            val image = withContext(Dispatchers.IO) { decodePicture(uri, p3) }
-            if (image == null) {
-                message = "This picture can't be opened."
-                return@launch
-            }
-            val s = withContext(Dispatchers.IO) {
-                CanvasSession.fromImage(image, "Untitled Artwork").also {
-                    if (p3) it.setNewProfile(io.github.artcraftandroid.procraft.gallery.CanvasPreset.P3)
-                    loadBrushes(it)
-                }
-            }
-            start(s, store.newFolder(galleryDir), brushesLoaded = true)
-            startedNew()
+        viewModelScope.launch { pictureArtwork(uri) }
+    }
+
+    private suspend fun pictureArtwork(uri: android.net.Uri) {
+        // in Display P3 if the picture is, else in sRGB
+        val p3 = withContext(Dispatchers.IO) { pictureIsP3(uri) }
+        val image = withContext(Dispatchers.IO) { decodePicture(uri, p3) }
+        if (image == null) {
+            message = "This picture can't be opened."
+            return
         }
+        val s = withContext(Dispatchers.IO) {
+            CanvasSession.fromImage(image, "Untitled Artwork").also {
+                if (p3) it.setNewProfile(io.github.artcraftandroid.procraft.gallery.CanvasPreset.P3)
+                loadBrushes(it)
+            }
+        }
+        start(s, store.newFolder(galleryDir), brushesLoaded = true)
+        startedNew()
     }
 
     /** The open artwork paints on a model: one finger turns it. */
@@ -1276,13 +1279,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refreshThumbnails()
     }
 
-    /** A new artwork painting on the model in the file [uri] (named [name]: OBJ, USDZ or USDC). */
-    private suspend fun newFromModel(uri: android.net.Uri, name: String) {
+    /**
+     * A new artwork painting on the model in the file [uri] (named [name]: OBJ, USDZ or USDC),
+     * with the files picked along with it ([picked], by name: an OBJ's material file and images).
+     */
+    private suspend fun newFromModel(uri: android.net.Uri, name: String, picked: List<Pair<android.net.Uri, String>> = emptyList()) {
         val resolver = getApplication<Application>().contentResolver
         val s = withContext(Dispatchers.IO) {
             runCatching {
                 val file = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
-                CanvasSession.openModel(file, name, null, name.substringBeforeLast('.').ifBlank { "Untitled Artwork" }, 0u)
+                val files = picked.mapNotNull { (u, n) ->
+                    runCatching { resolver.openInputStream(u)?.use { ModelFile(n, it.readBytes()) } }.getOrNull()
+                }
+                CanvasSession.openModel(file, name, files, name.substringBeforeLast('.').ifBlank { "Untitled Artwork" }, 0u)
                     .also(::loadModelTextures).also(::loadBrushes)
             }.onFailure { android.util.Log.e("ProCraft", "opening a model", it) }.getOrNull()
         }
@@ -1332,34 +1341,63 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A file from elsewhere into the gallery: an artwork file, or a picture as a new artwork. */
     fun importFile(uri: android.net.Uri) {
-        val resolver = getApplication<Application>().contentResolver
+        viewModelScope.launch { importOne(uri) }
+    }
+
+    /**
+     * Files from elsewhere into the gallery, one after another as [importFile] takes each; a
+     * model among them takes the rest as the files picked with it (an OBJ's material file and
+     * the images it maps).
+     */
+    fun importFiles(uris: List<android.net.Uri>) {
         viewModelScope.launch {
-            val head = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { s -> ByteArray(4).also { s.read(it) } } }.getOrNull() }
-            val name = withContext(Dispatchers.IO) { fileName(uri) }
-            // another program's palette
-            val foreign = head != null && io.github.artcraftandroid.procraft.gallery.ColourSwatches.isExchange(head) || name?.endsWith(".aco", ignoreCase = true) == true
-            val zip = head != null && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()
-            // a zip of brushes
-            val brushes = if (zip) withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }?.takeIf(::isBrushFile) else null
-            // a zip: brushes, a palette, an artwork file of ours, or a layered package
-            if (brushes != null) {
-                if (!addBrushes(brushes)) message = "This file has no brushes in it."
-            } else if (head != null && (foreign || zip) && importSwatches(uri)) {
-                message = "Palette added."
-            } else if (foreign) {
-                message = "This palette can't be read."
-            } else if (name != null && MODEL_EXTENSIONS.any { name.endsWith(".$it", ignoreCase = true) }) {
-                newFromModel(uri, name)
-            } else if (head != null && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()) {
-                val ok = withContext(Dispatchers.IO) {
-                    val dir = store.newFolder(galleryDir)
-                    val ours = runCatching { resolver.openInputStream(uri)?.use { io.github.artcraftandroid.procraft.gallery.ArtworkFile.read(it, dir) } }.getOrNull() == true
-                    (ours || importPackage(uri, dir)).also { if (!it) dir.deleteRecursively() }
+            val names = withContext(Dispatchers.IO) { uris.map(::fileName) }
+            val models = uris.indices.filter { i -> names[i]?.let(::isModelName) == true }
+            // each one opened is kept (closed, so saved) as the next comes in
+            if (models.isEmpty()) {
+                for (uri in uris) {
+                    if (session != null) closeArtwork()
+                    importOne(uri)
                 }
-                if (ok) refreshGallery() else message = "This file can't be opened."
-            } else {
-                newFromPicture(uri)
+                return@launch
             }
+            val picked = (uris.indices - models.toSet()).mapNotNull { i -> names[i]?.let { uris[i] to it } }
+            for (i in models) {
+                if (session != null) closeArtwork()
+                newFromModel(uris[i], names[i] ?: continue, picked)
+            }
+        }
+    }
+
+    private fun isModelName(name: String) = MODEL_EXTENSIONS.any { name.endsWith(".$it", ignoreCase = true) }
+
+    private suspend fun importOne(uri: android.net.Uri) {
+        val resolver = getApplication<Application>().contentResolver
+        val head = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { s -> ByteArray(4).also { s.read(it) } } }.getOrNull() }
+        val name = withContext(Dispatchers.IO) { fileName(uri) }
+        // another program's palette
+        val foreign = head != null && io.github.artcraftandroid.procraft.gallery.ColourSwatches.isExchange(head) || name?.endsWith(".aco", ignoreCase = true) == true
+        val zip = head != null && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()
+        // a zip of brushes
+        val brushes = if (zip) withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }?.takeIf(::isBrushFile) else null
+        // a zip: brushes, a palette, an artwork file of ours, or a layered package
+        if (brushes != null) {
+            if (!addBrushes(brushes)) message = "This file has no brushes in it."
+        } else if (head != null && (foreign || zip) && importSwatches(uri)) {
+            message = "Palette added."
+        } else if (foreign) {
+            message = "This palette can't be read."
+        } else if (name != null && isModelName(name)) {
+            newFromModel(uri, name)
+        } else if (head != null && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()) {
+            val ok = withContext(Dispatchers.IO) {
+                val dir = store.newFolder(galleryDir)
+                val ours = runCatching { resolver.openInputStream(uri)?.use { io.github.artcraftandroid.procraft.gallery.ArtworkFile.read(it, dir) } }.getOrNull() == true
+                (ours || importPackage(uri, dir)).also { if (!it) dir.deleteRecursively() }
+            }
+            if (ok) refreshGallery() else message = "This file can't be opened."
+        } else {
+            pictureArtwork(uri)
         }
     }
 

@@ -458,8 +458,7 @@ pub fn read_mtl(mtl: &str) -> Vec<Material> {
             continue;
         }
         let Some(m) = out.last_mut() else { continue };
-        // a map's file is its last word (options such as -bm 1 come before it)
-        let file = || rest.last().map(|s| (*s).to_owned());
+        let file = || map_file(&rest);
         let number = || rest.first().and_then(|s| s.parse::<f32>().ok());
         match key {
             "Kd" => {
@@ -479,6 +478,21 @@ pub fn read_mtl(mtl: &str) -> Vec<Material> {
         }
     }
     out
+}
+
+/// A map line's file: what follows its options (such as `-bm 1` or `-s 1 1 1`), spaces and all.
+fn map_file(words: &[&str]) -> Option<String> {
+    let mut rest = words;
+    while let Some((option, after)) = rest.split_first().filter(|(w, _)| w.starts_with('-')) {
+        let takes = match *option {
+            "-mm" => 2,
+            // up to three numbers
+            "-o" | "-s" | "-t" => after.iter().take(3).take_while(|w| w.parse::<f32>().is_ok()).count(),
+            _ => 1,
+        };
+        rest = after.get(takes..).unwrap_or(&[]);
+    }
+    (!rest.is_empty()).then(|| rest.join(" "))
 }
 
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -572,9 +586,11 @@ f -8/1 -4/2 -1/3 -5/4
 
     #[test]
     fn a_cube_reads_as_triangles_by_material() {
-        let mesh =
-            read_obj(CUBE, Some("newmtl body\nKd 1 0 0\nmap_Kd -bm 1 body color.png\nnewmtl lid\nmap_Pr rough.png\n"))
-                .unwrap();
+        let mesh = read_obj(
+            CUBE,
+            Some("newmtl body\nKd 1 0 0\nmap_Kd -bm 1 -s 2 2 body color.png\nnewmtl lid\nmap_Pr rough.png\n"),
+        )
+        .unwrap();
         // six quads, fanned
         assert_eq!(mesh.triangles.len(), 12);
         // the two bodies' runs joined, first as they first came
@@ -588,7 +604,8 @@ f -8/1 -4/2 -1/3 -5/4
         assert_eq!(mesh.material_file.as_deref(), Some("cube.mtl"));
         assert_eq!(mesh.materials.len(), 2);
         assert_eq!(mesh.materials.first().unwrap().color, Some([1.0, 0.0, 0.0]));
-        assert_eq!(mesh.materials.first().unwrap().color_map.as_deref(), Some("color.png"));
+        // a map's file after its options, spaces kept
+        assert_eq!(mesh.materials.first().unwrap().color_map.as_deref(), Some("body color.png"));
         assert_eq!(mesh.materials.get(1).unwrap().roughness_map.as_deref(), Some("rough.png"));
         assert_eq!(mesh.bounds(), Some(([0.0; 3], [1.0; 3])));
         // corners sharing position and texture coordinate kept once
