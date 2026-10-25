@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
@@ -33,6 +34,28 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 private val ReplayFill = Color(0xFF252525)
+private val GridLine = Color(0xFF2E2E2E)
+
+/**
+ * The surround's grid drawn as the canvas draws it (1 1/3 pt lines every 16, fixed to the glass
+ * from [origin], none under the top bar), for screens shown in the canvas's place.
+ */
+internal fun androidx.compose.ui.graphics.drawscope.DrawScope.surroundGrid(origin: androidx.compose.ui.geometry.Offset?) {
+    val step = 16.dp.toPx()
+    val width = (4f / 3f).dp.toPx()
+    val top = 44.dp.toPx()
+    val o = origin ?: androidx.compose.ui.geometry.Offset(0.5.dp.toPx(), 0.5.dp.toPx())
+    var x = o.x - kotlin.math.floor(o.x / step) * step
+    while (x < size.width) {
+        drawRect(GridLine, androidx.compose.ui.geometry.Offset(x - width / 2f, top), androidx.compose.ui.geometry.Size(width, size.height - top))
+        x += step
+    }
+    var y = o.y - kotlin.math.floor((o.y - top) / step) * step
+    while (y < size.height) {
+        if (y - width / 2f >= top) drawRect(GridLine, androidx.compose.ui.geometry.Offset(0f, y - width / 2f), androidx.compose.ui.geometry.Size(size.width, width))
+        y += step
+    }
+}
 
 /**
  * The time-lapse replayed over everything at its frame rate; dragging across the screen scrubs
@@ -58,7 +81,7 @@ fun TimeLapseReplay(vm: CanvasViewModel) {
         if (image != null) shown = image
     }
     Box(
-        Modifier.fillMaxSize().background(ReplayFill).pointerInput(count) {
+        Modifier.fillMaxSize().background(ReplayFill).drawBehind { surroundGrid(vm.gridOrigin) }.pointerInput(count) {
             var start = 0f
             var from = 0
             detectHorizontalDragGestures(

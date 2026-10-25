@@ -56,7 +56,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -564,7 +563,7 @@ private fun HarmonyKindButton(vm: CanvasViewModel) {
         Text(vm.harmonyKind.label, color = Pc.PanelTitle, fontSize = 17.sp)
         MenuPresence(open, androidx.compose.ui.graphics.TransformOrigin(1f, 0f)) { look ->
             // the menu opens to the left of the panel, its top level with the wheel
-            Popup(offset = with(LocalDensity.current) { IntOffset((-204).dp.roundToPx(), 36.dp.roundToPx()) }, properties = PopupProperties(focusable = true), onDismissRequest = { open = false }) {
+            PcPopup(textScale = MATCHED_POPUP_TEXT, offset = with(LocalDensity.current) { IntOffset((-204).dp.roundToPx(), 36.dp.roundToPx()) }, properties = PopupProperties(focusable = true), onDismissRequest = { open = false }) {
                 Column(look.width(195.dp).clip(RoundedCornerShape(24.dp)).background(Pc.MenuFill).padding(vertical = 9.dp)) {
                     for (kind in HarmonyKind.entries) {
                         Row(
@@ -1048,7 +1047,7 @@ private fun HexRow(rgb: Int, fill: Color = Pc.HexRow, field: Color = Pc.HexField
         if (editing) {
             // beside the panel, its middle level with this row
             val gap = with(LocalDensity.current) { HexPadGap.roundToPx() }
-            Popup(popupPositionProvider = remember(gap) { BesidePanel(gap) }, onDismissRequest = { typed = null }, properties = PopupProperties(focusable = true)) {
+            PcPopup(textScale = MATCHED_POPUP_TEXT, popupPositionProvider = remember(gap) { BesidePanel(gap) }, onDismissRequest = { typed = null }, properties = PopupProperties(focusable = true)) {
                 HexPad(
                     onKey = { c ->
                         // a seventh digit starts a new code
@@ -1200,7 +1199,7 @@ private fun ShortBottomMenu(vm: CanvasViewModel, history: Boolean, modifier: Mod
     ) {
         MenuPresence(open, androidx.compose.ui.graphics.TransformOrigin(1f, 0f)) { look ->
             // its right edge 16 left of the dots, its top 15 below them
-            Popup(offset = with(LocalDensity.current) { IntOffset((-246).dp.roundToPx(), 32.dp.roundToPx()) }, properties = PopupProperties(focusable = true), onDismissRequest = { open = false }) {
+            PcPopup(textScale = MATCHED_POPUP_TEXT, offset = with(LocalDensity.current) { IntOffset((-246).dp.roundToPx(), 32.dp.roundToPx()) }, properties = PopupProperties(focusable = true), onDismissRequest = { open = false }) {
                 Column(
                     look.width(252.dp).clip(RoundedCornerShape(17.dp)).background(Pc.GlassMenuOverPanel)
                         .border(1.dp, Pc.GlassMenuEdge, RoundedCornerShape(17.dp)).padding(top = 6.dp, bottom = if (history) 9.5.dp else 7.dp),

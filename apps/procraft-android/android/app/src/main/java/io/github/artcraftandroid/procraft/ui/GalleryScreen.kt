@@ -876,6 +876,8 @@ private fun StackCell(
 @Composable
 private fun ArtworkPreview(list: List<Artwork>, version: Int, onClose: () -> Unit) {
     var index by remember { mutableIntStateOf(0) }
+    // a tap shows (or hides) the close button and the arrows to the other picked artworks
+    var controls by remember { mutableStateOf(false) }
     val a = list.getOrNull(index) ?: return onClose()
     BackHandler(onBack = onClose)
     Box(
@@ -890,14 +892,57 @@ private fun ArtworkPreview(list: List<Artwork>, version: Int, onClose: () -> Uni
                 c.consume()
                 moved += dx
             }
-        }.pointerInput(Unit) { detectTapGestures { onClose() } },
+        }.pointerInput(Unit) { detectTapGestures { controls = !controls } },
         contentAlignment = Alignment.Center,
     ) {
         val image by produceState<ImageBitmap?>(null, a.dir.path, version) {
             value = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(a.thumbnail.path)?.asImageBitmap() }
         }
         image?.let { Image(it, contentDescription = a.name, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
+        androidx.compose.animation.AnimatedVisibility(controls, Modifier.fillMaxSize(), enter = androidx.compose.animation.fadeIn(), exit = androidx.compose.animation.fadeOut()) {
+            Box(Modifier.fillMaxSize()) {
+                // a light disc with a black cross, 41 in from the top right
+                Box(
+                    Modifier.align(Alignment.TopEnd).offset(x = (-41).dp + 22.dp, y = 22.dp - 22.dp).size(44.dp).clickable(onClick = onClose),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(Modifier.size(23.5.dp).clip(CircleShape).background(PreviewClose), contentAlignment = Alignment.Center) {
+                        Icon(PcIcons.Cross, contentDescription = "Close", tint = Color.Black, modifier = Modifier.size(15.dp))
+                    }
+                }
+                PreviewArrow(left = true, Modifier.align(Alignment.CenterStart)) { if (index > 0) index-- }
+                PreviewArrow(left = false, Modifier.align(Alignment.CenterEnd)) { if (index < list.size - 1) index++ }
+            }
+        }
     }
+}
+
+private val PreviewClose = Color(0xFFD7D7D7)
+private val PreviewArrowInk = Color(0xFFB4B4B4)
+
+/** One of Preview's arrows: a 13.5 x 23.5 chevron 40 in from its side, in a 44 wide touch area. */
+@Composable
+private fun PreviewArrow(left: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    Box(
+        modifier.padding(start = if (left) 18.dp else 0.dp, end = if (left) 0.dp else 18.dp).size(44.dp, 60.dp).clickable(onClick = onClick)
+            .drawBehind {
+                // drawn a little larger than the 13.5 x 23.5 it shows (the stroke's edges soften)
+                val w = 14.5.dp.toPx()
+                val h = 25.5.dp.toPx()
+                val stroke = 4.dp.toPx()
+                val cx = size.width / 2f
+                val tip = if (left) cx - w / 2f + stroke / 2f else cx + w / 2f - stroke / 2f
+                val back = if (left) cx + w / 2f - stroke / 2f else cx - w / 2f + stroke / 2f
+                val top = size.height / 2f - h / 2f + stroke / 2f
+                val bottom = size.height / 2f + h / 2f - stroke / 2f
+                val path = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(back, top)
+                    lineTo(tip, size.height / 2f)
+                    lineTo(back, bottom)
+                }
+                drawPath(path, PreviewArrowInk, style = androidx.compose.ui.graphics.drawscope.Stroke(stroke, join = androidx.compose.ui.graphics.StrokeJoin.Miter))
+            },
+    )
 }
 
 /**

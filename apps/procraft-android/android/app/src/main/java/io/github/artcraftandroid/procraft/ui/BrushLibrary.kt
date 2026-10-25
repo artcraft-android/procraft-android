@@ -80,7 +80,6 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
@@ -376,7 +375,8 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                         val below = with(density) { MenuTop.roundToPx() }
                         // the icons to choose from, beside the menu on its left
                         MenuPresence(setMenu == i && iconPicker, androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f)) { look ->
-                            Popup(
+                            PcPopup(
+                                textScale = MATCHED_POPUP_TEXT,
                                 popupPositionProvider = MenuPlace(below) { a, size -> IntOffset(a.left - left - size.width + with(density) { 6.dp.roundToPx() }, a.center.y - size.height / 2 + with(density) { 40.dp.roundToPx() }) },
                                 onDismissRequest = { iconPicker = false },
                             ) {
@@ -612,7 +612,7 @@ internal fun LibraryMenu(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     MenuPresence(open, origin) { look ->
-        Popup(popupPositionProvider = place, onDismissRequest = onDismiss, properties = PopupProperties(focusable = true)) {
+        PcPopup(textScale = MATCHED_POPUP_TEXT, popupPositionProvider = place, onDismissRequest = onDismiss, properties = PopupProperties(focusable = true)) {
             val shape = RoundedCornerShape(16.dp)
             // frosted over the canvas; over the library itself, nearly solid
             val glass = if (overPanel) Modifier.background(Pc.GlassMenuOverPanel) else rememberFrost(16.dp).background(Pc.GlassMenu)

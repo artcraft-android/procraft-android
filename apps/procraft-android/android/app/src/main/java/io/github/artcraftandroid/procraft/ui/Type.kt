@@ -77,3 +77,45 @@ fun ProCraftTheme(content: @Composable () -> Unit) {
         )
     }
 }
+
+/**
+ * The text scale the popups made before [PcPopup] were matched to the reference at: they ran at
+ * the Legion's system font scale (0.85) then, so their sizes are set for it. Kept for them, now
+ * on any device.
+ */
+const val MATCHED_POPUP_TEXT = 0.85f
+
+/**
+ * A popup whose text keeps one size whatever the system font scale. A popup is a window of its
+ * own, composed with the system's font scale, so its text followed it where the rest of the
+ * interface doesn't; this hands it the theme's density, its text scaled by [textScale].
+ */
+@Composable
+fun PcPopup(
+    alignment: androidx.compose.ui.Alignment = androidx.compose.ui.Alignment.TopStart,
+    offset: androidx.compose.ui.unit.IntOffset = androidx.compose.ui.unit.IntOffset(0, 0),
+    onDismissRequest: (() -> Unit)? = null,
+    properties: androidx.compose.ui.window.PopupProperties = androidx.compose.ui.window.PopupProperties(),
+    textScale: Float = 1f,
+    content: @Composable () -> Unit,
+) {
+    val density = Density(LocalDensity.current.density, textScale)
+    androidx.compose.ui.window.Popup(alignment, offset, onDismissRequest, properties) {
+        CompositionLocalProvider(LocalDensity provides density, content = content)
+    }
+}
+
+/** [PcPopup] placed by a [popupPositionProvider]. */
+@Composable
+fun PcPopup(
+    popupPositionProvider: androidx.compose.ui.window.PopupPositionProvider,
+    onDismissRequest: (() -> Unit)? = null,
+    properties: androidx.compose.ui.window.PopupProperties = androidx.compose.ui.window.PopupProperties(),
+    textScale: Float = 1f,
+    content: @Composable () -> Unit,
+) {
+    val density = Density(LocalDensity.current.density, textScale)
+    androidx.compose.ui.window.Popup(popupPositionProvider, onDismissRequest, properties) {
+        CompositionLocalProvider(LocalDensity provides density, content = content)
+    }
+}

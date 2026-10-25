@@ -333,6 +333,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             else -> half to half
         }
         s.setGridOrigin(x, y)
+        vm.gridOrigin = Offset(x, y)
     }
 
     /**

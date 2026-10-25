@@ -36,7 +36,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 
 // buttons keep their width and the panel grows with them: 428 across for two, 632 for three
@@ -83,7 +82,8 @@ fun <T : Any> Alert(
     @Suppress("UNCHECKED_CAST")
     val kept = last[0] as T? ?: return
     if (shown <= 0f) return
-    Popup(
+    PcPopup(
+        textScale = MATCHED_POPUP_TEXT,
         alignment = Alignment.Center,
         onDismissRequest = { if (value != null) onCancel() },
         properties = PopupProperties(focusable = value != null, clippingEnabled = false),

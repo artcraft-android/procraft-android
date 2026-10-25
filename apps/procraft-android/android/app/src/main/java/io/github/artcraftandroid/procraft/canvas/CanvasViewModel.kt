@@ -1682,6 +1682,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Gesture controls is open. */
     var gestureControlsOpen by mutableStateOf(false)
 
+    /** Where the middle of one of the surround grid's lines falls (window pixels), for screens drawn over the canvas. */
+    var gridOrigin by mutableStateOf<androidx.compose.ui.geometry.Offset?>(null)
+
     /** The page Gesture controls was last on: it opens there again. */
     var gesturePage by mutableStateOf(GesturePurpose.EYEDROPPER)
 

@@ -405,7 +405,7 @@ private fun BlendModeList(modes: List<io.github.artcraftandroid.procraft.core.Bl
             }
         }
     }
-    androidx.compose.ui.window.Popup(popupPositionProvider = place, onDismissRequest = { onDone(null) }, properties = androidx.compose.ui.window.PopupProperties(focusable = true)) {
+    PcPopup(textScale = MATCHED_POPUP_TEXT, popupPositionProvider = place, onDismissRequest = { onDone(null) }, properties = androidx.compose.ui.window.PopupProperties(focusable = true)) {
         androidx.compose.foundation.lazy.LazyColumn(
             Modifier.size(ModeListWidth, height).shadow(24.dp, RoundedCornerShape(13.dp)).clip(RoundedCornerShape(13.dp)).background(ModeListFill),
             state = list,
@@ -905,14 +905,24 @@ internal fun StudioSlider(label: String, value: Float, shown: Shown, most: Float
     val change by rememberUpdatedState(onChange)
     val current by rememberUpdatedState(value)
     val both = shown == Shown.BOTH || shown == Shown.FOLLOW || shown == Shown.GRADE
+    // a tap on the value types it on a keypad beside it (the pill blue meanwhile)
+    val typed = typedNumber(shown)
+    var typing by remember { mutableStateOf(false) }
+    var pill by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
     Column(Modifier.fillMaxWidth().height(55.dp)) {
         // the name and value 2 below the top half's middle
         Row(Modifier.offset(y = 2.dp).fillMaxWidth().height(28.dp).padding(start = 10.dp, end = 3.5.dp), verticalAlignment = Alignment.CenterVertically) {
             FittedLabel(label, Modifier.weight(1f).padding(end = 12.dp))
             // as wide as its words need, 13 either side, and never narrower than 73
-            Box(Modifier.height(28.dp).widthIn(min = 73.dp).clip(RoundedCornerShape(14.dp)).background(if (enabled) StudioPill else StudioPillOff).padding(horizontal = 13.dp),
-                contentAlignment = Alignment.Center) {
-                Text(shownValue(value, shown, most), color = if (enabled) StudioLabel else StudioValueOff, fontSize = 16.sp, maxLines = 1, softWrap = false)
+            Box(
+                Modifier.height(28.dp).widthIn(min = 73.dp).onGloballyPositioned { pill = it.boundsInWindow() }.clip(RoundedCornerShape(14.dp))
+                    .background(if (typing) Pc.Accent else if (enabled) StudioPill else StudioPillOff)
+                    .then(if (enabled && typed != null) Modifier.tap { typing = true } else Modifier)
+                    .padding(horizontal = 13.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(shownValue(value, shown, most), color = if (typing) Color.White else if (enabled) StudioLabel else StudioValueOff, fontSize = 16.sp, maxLines = 1, softWrap = false)
+                if (typing && typed != null) SliderKeypad(label, pill, typed.first, typed.second, { change(it) }) { typing = false }
             }
         }
         Box(
@@ -950,6 +960,76 @@ internal fun StudioSlider(label: String, value: Float, shown: Shown, most: Float
                 drawRoundRect(if (enabled) Color.White else StudioKnobOff, Offset(x - knob.width / 2, y - knob.height / 2), knob, CornerRadius(knob.height / 2))
             },
         )
+    }
+}
+
+/**
+ * How a slider's value can be typed: the largest number and what a number makes of the value (a
+ * percent of the slider, or of its doubled scale); none for the others.
+ */
+private fun typedNumber(shown: Shown): Pair<Int, (Int) -> Float>? = when (shown) {
+    Shown.PERCENT, Shown.ZERO, Shown.TIP, Shown.MOVEMENT, Shown.ZOOM, Shown.CHARGE -> 100 to { n -> n / 100f }
+    Shown.DOUBLE, Shown.TWICE -> 200 to { n -> n / 200f }
+    else -> null
+}
+
+private val KeypadFill = Color(0xFFD5D5D5)
+private val KeypadKey = Color(0xFFE6E6E6)
+private val KeypadInk = Color(0xFF1D1D1D)
+private val KeypadWidth = 275.dp
+private val KeypadHeight = 360.dp
+
+/**
+ * A slider's keypad, a light popover to the right of its value ([pill], window pixels), its arrow
+ * at the value: the slider's name, then 7 8 9 / 4 5 6 / 1 2 3 / 0 and backspace (81 x 66 keys).
+ * Each key sets the value at once: the digits typed so far are the number (over [most], [most]);
+ * backspace takes the last one off (none left: nothing).
+ */
+@Composable
+private fun SliderKeypad(title: String, pill: androidx.compose.ui.geometry.Rect, most: Int, toValue: (Int) -> Float, onValue: (Float) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    fun type(next: String) {
+        val n = next.toIntOrNull()?.coerceAtMost(most) ?: 0
+        text = if (next.isEmpty()) "" else n.toString()
+        onValue(toValue(n))
+    }
+    val density = LocalDensity.current
+    val screen = with(density) { androidx.compose.ui.platform.LocalView.current.rootView.height.toDp() }
+    val (top, arrowAt) = with(density) {
+        val middle = (pill.top + pill.height / 2f).toDp()
+        val top = (middle - KeypadHeight / 2).coerceIn(2.dp, (screen - KeypadHeight - 2.dp).coerceAtLeast(2.dp))
+        top to (middle - top)
+    }
+    // the arrow's tip a little into the pill, the body 3 past its end
+    val offset = with(density) { androidx.compose.ui.unit.IntOffset((pill.width - (Pc.ArrowHeight - 3.dp).toPx()).roundToInt(), (top.toPx() - pill.top).roundToInt()) }
+    PcPopup(
+        offset = offset,
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.PopupProperties(focusable = true, clippingEnabled = false),
+    ) {
+        Popover(KeypadWidth, arrowAt, Modifier.height(KeypadHeight), fill = KeypadFill, corner = 22.dp, side = ArrowSide.LEFT) {
+            Text(title, color = KeypadInk, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 25.dp, top = 19.dp).height(51.dp))
+            Column(Modifier.padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                for (row in listOf(listOf("7", "8", "9"), listOf("4", "5", "6"), listOf("1", "2", "3"))) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) { for (k in row) KeypadKey(k, 81.dp) { type(text + k) } }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    KeypadKey("0", 166.dp) { type(text + "0") }
+                    KeypadKey("⌫", 81.dp) { type(text.dropLast(1)) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun KeypadKey(label: String, width: Dp, onClick: () -> Unit) {
+    Box(Modifier.size(width, 66.dp).clip(RoundedCornerShape(12.dp)).background(KeypadKey).tap(onClick = onClick), contentAlignment = Alignment.Center) {
+        if (label == "⌫") {
+            Icon(PcIcons.Backspace, contentDescription = "Back space", tint = KeypadInk, modifier = Modifier.size(26.dp))
+        } else {
+            Text(label, color = KeypadInk, fontSize = 29.sp)
+        }
     }
 }
 

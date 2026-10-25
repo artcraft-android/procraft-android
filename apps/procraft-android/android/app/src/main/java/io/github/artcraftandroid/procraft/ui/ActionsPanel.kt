@@ -88,6 +88,9 @@ private class Slide(val label: String, val value: String, val fraction: Float, v
 private enum class ActionsPage { TABS, PRESSURE, CURSOR }
 
 private val CurveFill = Color(0xFF262626)
+
+/** Advanced cursor's section headings: bold, as large as the rows, lighter than the tabs' names. */
+private val CursorHeading get() = if (Pc.light) Pc.TabIdle else Color(0xFFB5B5B5)
 private val CurveEdge = Color(0xFF666666)
 private val CurveGrid = Color(0xFF353535)
 
@@ -457,7 +460,8 @@ private fun modelGroups(
 @Composable
 private fun ChoiceMenu(look: Modifier, choices: List<String>, chosen: Int, offsetY: Dp, onPick: (Int) -> Unit, onDismiss: () -> Unit) {
     val density = androidx.compose.ui.platform.LocalDensity.current
-    androidx.compose.ui.window.Popup(
+    PcPopup(
+        textScale = MATCHED_POPUP_TEXT,
         alignment = Alignment.TopEnd,
         offset = with(density) { androidx.compose.ui.unit.IntOffset(130.dp.roundToPx(), offsetY.roundToPx()) },
         onDismissRequest = onDismiss,
@@ -487,11 +491,11 @@ private fun CursorPage(vm: CanvasViewModel, onBack: () -> Unit) {
         Text("Advanced cursor", color = Pc.PanelTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1)
     }
     Column(Modifier.padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp)) {
-        Text("Brush cursor visibility", color = Pc.TabIdle, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 14.dp, top = 6.dp, bottom = 8.dp))
+        Text("Brush cursor visibility", color = CursorHeading, fontSize = 17.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 14.dp, top = 6.dp, bottom = 8.dp))
         ChoiceGroup(listOf("Show while hovering", "Show while painting", "Show both"), vm.cursorShows.ordinal) {
             vm.changeCursorShows(CanvasViewModel.CursorShows.entries[it])
         }
-        Text("Brush outline style", color = Pc.TabIdle, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 14.dp, top = 18.dp, bottom = 8.dp))
+        Text("Brush outline style", color = CursorHeading, fontSize = 17.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 14.dp, top = 28.dp, bottom = 8.dp))
         ChoiceGroup(listOf("High contrast", "Active color", "Per brush"), vm.cursorStyle.ordinal) {
             vm.changeCursorStyle(CanvasViewModel.CursorStyle.entries[it])
         }

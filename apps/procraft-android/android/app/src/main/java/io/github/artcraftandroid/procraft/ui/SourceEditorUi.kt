@@ -55,7 +55,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import kotlin.math.roundToInt
@@ -208,7 +207,8 @@ private fun CapsuleButton(label: String, width: Int, on: Boolean = false, onClic
 private fun ImportMenu(open: Boolean, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     MenuPresence(open, androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f)) { look ->
-        Popup(
+        PcPopup(
+            textScale = MATCHED_POPUP_TEXT,
             alignment = Alignment.TopCenter,
             offset = with(density) { androidx.compose.ui.unit.IntOffset(0, 48.dp.roundToPx()) },
             onDismissRequest = onDismiss,

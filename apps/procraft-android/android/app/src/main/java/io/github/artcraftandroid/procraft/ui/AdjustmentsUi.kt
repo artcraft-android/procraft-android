@@ -525,7 +525,8 @@ private fun GradientEditor(vm: CanvasViewModel, index: Int) {
                 val tip = barAt.y + with(density) { (22.dp - StopSize / 2).toPx() }
                 // room round it for its shadow to fade out in
                 val room = with(density) { PopupShadowRoom.toPx() }
-                androidx.compose.ui.window.Popup(
+                PcPopup(
+                    textScale = MATCHED_POPUP_TEXT,
                     popupPositionProvider = object : androidx.compose.ui.window.PopupPositionProvider {
                         override fun calculatePosition(
                             anchorBounds: androidx.compose.ui.unit.IntRect,
@@ -1017,7 +1018,7 @@ fun NoisePanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                 MoreButton("Channel") {
                     OptionsGroup {
                         Row(Modifier.fillMaxWidth().height(44.dp).padding(start = 12.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("Additive", color = MenuText, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                            Text("Additive", color = MenuText, fontSize = 15.sp, maxLines = 1, modifier = Modifier.weight(1f))
                             Box(Modifier.tap { vm.toggleNoiseAdded() }) { Switch(vm.noiseAdded, enabled = true) }
                         }
                     }
@@ -1109,14 +1110,14 @@ private fun MoreButton(title: String, content: @Composable androidx.compose.foun
         }
         if (open) {
             val lift = with(androidx.compose.ui.platform.LocalDensity.current) { (40.dp + 16.dp).roundToPx() }
-            androidx.compose.ui.window.Popup(
+            PcPopup(
                 alignment = Alignment.BottomCenter,
                 offset = androidx.compose.ui.unit.IntOffset(0, -lift),
                 onDismissRequest = { open = false },
                 properties = androidx.compose.ui.window.PopupProperties(focusable = true),
             ) {
                 Column(Modifier.width(260.dp).clip(RoundedCornerShape(26.dp)).background(OptionsMenuFill).padding(start = 10.dp, end = 10.dp, bottom = 10.dp)) {
-                    Text(title, color = MenuText, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 12.dp, top = 16.dp, bottom = 16.dp))
+                    Text(title, color = MenuText, fontSize = 23.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 12.dp, top = 16.dp, bottom = 16.dp))
                     content { open = false }
                 }
             }
@@ -1138,7 +1139,7 @@ private fun OptionsChoice(label: String, chosen: Boolean, height: Dp, first: Boo
         Modifier.fillMaxWidth().height(height).background(if (chosen) Pc.Accent else Color.Transparent).tap(onClick = onChoose).padding(start = 12.dp, end = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, color = if (chosen) Color.White else MenuText, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+        Text(label, color = if (chosen) Color.White else MenuText, fontSize = 15.sp, maxLines = 1, modifier = Modifier.weight(1f))
         if (chosen) Icon(PcIcons.Tick, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
     }
 }

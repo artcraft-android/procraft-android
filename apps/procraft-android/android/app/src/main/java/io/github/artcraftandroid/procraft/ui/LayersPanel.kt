@@ -74,7 +74,6 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
@@ -857,7 +856,7 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
         OptionsPlace(with(density) { (-183).dp.roundToPx() }, rowY, with(density) { OptionsTop.roundToPx() })
     }
     MenuPresence(open, androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f)) { look ->
-        Popup(popupPositionProvider = place, onDismissRequest = onDone, properties = PopupProperties(focusable = true)) {
+        PcPopup(textScale = MATCHED_POPUP_TEXT, popupPositionProvider = place, onDismissRequest = onDone, properties = PopupProperties(focusable = true)) {
             // frosted over the canvas, as the library's menus are
             Column(look.width(194.dp).clip(RoundedCornerShape(24.dp)).then(rememberFrost(24.dp)).background(Pc.GlassMenu).padding(vertical = 7.dp)) {
                 val then = { f: () -> Unit -> { f(); onDone() } }
