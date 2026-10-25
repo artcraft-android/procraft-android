@@ -1682,6 +1682,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Gesture controls is open. */
     var gestureControlsOpen by mutableStateOf(false)
 
+    /** The page Gesture controls was last on: it opens there again. */
+    var gesturePage by mutableStateOf(GesturePurpose.EYEDROPPER)
+
     /** Canvas information is open. */
     var canvasInfoOpen by mutableStateOf(false)
 
@@ -1858,7 +1861,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         closePanels()
         if (guide?.on != true) s.setGuideOn(true)
         val d = density
-        guide = s.guideEditBegin(GUIDE_FIT_SIDE_DP * d, GUIDE_FIT_TOP_DP * d, windowSize.x - GUIDE_FIT_SIDE_DP * d, windowSize.y - GUIDE_FIT_BOTTOM_DP * d)
+        // fitted between a fifth of the screen's height above and below (either way up), 40 in from the sides
+        val band = windowSize.y * GUIDE_FIT_BAND
+        guide = s.guideEditBegin(GUIDE_FIT_SIDE_DP * d, band, windowSize.x - GUIDE_FIT_SIDE_DP * d, windowSize.y - band)
         guideEditing = true
         refreshView()
     }
@@ -1947,9 +1952,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (cut != null) showNotice("Layer cut")
     }
 
-    fun paste() {
+    /** What was cut or copied, on a new layer; a [private] one is left out of the gallery's thumbnail. */
+    fun paste(private: Boolean = false) {
         val image = clipboard ?: return
-        if (session?.paste(image) == null) message = noRoom()
+        val s = session
+        if ((if (private) s?.pastePrivate(image) else s?.paste(image)) == null) message = noRoom()
         closePanels()
         refresh()
         if (panel == Panel.LAYERS) refreshThumbnails()
@@ -2117,8 +2124,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
     }
 
-    /** A photo or picture file comes in as a new layer, fitted to the canvas, ready to transform. */
-    fun insertPicture(uri: android.net.Uri) {
+    /**
+     * A photo or picture file comes in as a new layer, fitted to the canvas, ready to transform; a
+     * [private] one is left out of the gallery's thumbnail.
+     */
+    fun insertPicture(uri: android.net.Uri, private: Boolean = false) {
         val s = session ?: return
         closePanels()
         viewModelScope.launch {
@@ -2127,7 +2137,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 message = "This picture can't be opened."
                 return@launch
             }
-            if (s.insertImage(image) != null) {
+            if (s.insertImage(image, private) != null) {
                 refresh()
                 toggleTransform()
             } else {
@@ -3761,7 +3771,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             ?.playSoundEffect(android.media.AudioManager.FX_KEY_CLICK)
     }
 
+    /** The library's brush swiped open to its buttons ("set-index"), if one is. */
+    var swipedBrush by mutableStateOf<String?>(null)
+
     fun toggle(p: Panel) {
+        // with a brush swiped open, its button only closes the swipe
+        if (p == Panel.BRUSHES && panel == Panel.BRUSHES && swipedBrush != null) {
+            swipedBrush = null
+            return
+        }
         feedback()
         endQuickShape()
         if (transforming) endTransform(true)
@@ -3773,6 +3791,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun closePanels() {
         panel = Panel.NONE
+        swipedBrush = null
+    }
+
+    /** A tap outside the open panel closes it; with a brush swiped open, only the swipe. */
+    fun tapOutsidePanel() {
+        if (panel == Panel.BRUSHES && swipedBrush != null) swipedBrush = null else closePanels()
     }
 
     /** Closes the open panel by fading it away, as picking something that takes the screen does. */
@@ -5206,8 +5230,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val SELECTION_VISIBILITY = "selection_visibility"
         /** The guide editor fits the canvas this far in from the window's sides, top and bottom (points). */
         const val GUIDE_FIT_SIDE_DP = 40f
-        const val GUIDE_FIT_TOP_DP = 226f
-        const val GUIDE_FIT_BOTTOM_DP = 228f
+        const val GUIDE_FIT_BAND = 0.2f
         /** The largest side a picture brought in is decoded at (pixels). */
         const val MAX_PICTURE = 4096
         /** How long a stroke is held still to snap (milliseconds), how still (points), and how near a handle a touch takes it. */

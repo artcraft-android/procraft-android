@@ -20,6 +20,8 @@ pub struct LayerInfo {
     /// Picked to act on together with the current layer.
     pub picked: bool,
     pub reference: bool,
+    /// Left out of the gallery's thumbnail (put in by a private insert or paste).
+    pub private: bool,
     pub kind: LayerType,
     /// A mask's layer, or the group a layer is in.
     pub parent: Option<u64>,
@@ -170,6 +172,7 @@ impl CanvasSession {
                 current: l.id == current,
                 picked: st.doc.is_picked(l.id),
                 reference: l.reference,
+                private: l.private,
                 kind: match l.kind {
                     LayerKind::Paint => LayerType::Paint,
                     LayerKind::Group => LayerType::Group,

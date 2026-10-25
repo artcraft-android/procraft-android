@@ -1,9 +1,9 @@
 //! The eyedropper: what is shown around a window point, and the canvas colour under it.
 
 use procraft_engine::geom::{Affine, Vec2};
-use procraft_gpu::{SurroundGrid, Target, read_texture, wgpu};
+use procraft_gpu::{Target, read_texture, wgpu};
 
-use crate::{CanvasSession, GRID_LINE, GRID_SPACING_PT, GRID_TOP_PT, SURROUND};
+use crate::{CanvasSession, SURROUND};
 
 /// What the eyedropper sees.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -25,6 +25,9 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let view = st.view?;
+        // the window shifted so that the point lands in the middle of the small target
+        let corner = Vec2::new(x - side as f32 / 2.0, y - side as f32 / 2.0);
+        let grid = st.surround_grid(Vec2::ZERO - corner);
         let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -38,16 +41,7 @@ impl CanvasSession {
             view_formats: &[],
         });
         let target_view = texture.create_view(&Default::default());
-        // the window shifted so that the point lands in the middle of the small target
-        let corner = Vec2::new(x - side as f32 / 2.0, y - side as f32 / 2.0);
         let to_screen = view.to_screen().then(Affine::translate(Vec2::ZERO - corner));
-        let s = st.display_scale;
-        let grid = SurroundGrid {
-            spacing: GRID_SPACING_PT * s,
-            origin: [-corner.x, GRID_TOP_PT * s - corner.y],
-            width: s,
-            color: GRID_LINE,
-        };
         canvas.render(
             gpu,
             &mut st.doc,

@@ -98,12 +98,18 @@ impl CanvasSession {
     /// A new layer above the current one holding `image` where it was copied from (centred when
     /// it is another size); returns its id.
     pub fn paste(&self, image: ThumbnailImage) -> Option<u64> {
-        self.add_picture(&image, false)
+        self.add_picture(&image, false, false)
+    }
+
+    /// As [`paste`](Self::paste), on a private layer: one the gallery's thumbnail leaves out.
+    pub fn paste_private(&self, image: ThumbnailImage) -> Option<u64> {
+        self.add_picture(&image, false, true)
     }
 
     /// A new layer above the current one holding `image` (a photo or file, straight RGBA8),
-    /// centred and scaled down to fit; returns its id.
-    pub fn insert_image(&self, image: ThumbnailImage) -> Option<u64> {
+    /// centred and scaled down to fit (on a private layer, one the gallery's thumbnail leaves
+    /// out, if `private`); returns its id.
+    pub fn insert_image(&self, image: ThumbnailImage, private: bool) -> Option<u64> {
         let mut premultiplied = image;
         for px in premultiplied.rgba.as_chunks_mut::<4>().0 {
             let a = u16::from(px[3]);
@@ -111,7 +117,7 @@ impl CanvasSession {
                 *c = ((u16::from(*c) * a + 127) / 255) as u8;
             }
         }
-        self.add_picture(&premultiplied, true)
+        self.add_picture(&premultiplied, true, private)
     }
 
     /// Mirrors every layer of the canvas, left to right or (not `horizontal`) top to bottom, as
@@ -137,13 +143,21 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
-    fn add_picture(&self, image: &ThumbnailImage, fit: bool) -> Option<u64> {
+    fn add_picture(&self, image: &ThumbnailImage, fit: bool, private: bool) -> Option<u64> {
         let (w, h) = {
             let st = self.shared.lock();
             (st.doc.width(), st.doc.height())
         };
         let pixels = placed(image, w, h, fit)?;
-        let id = self.add_layer();
+        let id = self
+            .change("new layer", |d| {
+                d.has_room(1).then(|| {
+                    let id = d.add_layer();
+                    d.set_private(id, private);
+                    id.0
+                })
+            })
+            .unwrap_or(0);
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if !st.doc.has_room(1) {

@@ -13,6 +13,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -85,6 +86,35 @@ private val CapsuleEdge = Color(0xFF373737)
 private val DoneBlue = Color(0xFF0190FF)
 private val CardCorner = 25.dp
 
+/** Where a wide screen's page starts and ends, beside the pages' card. */
+private val WideContentStart = 358.dp
+private val WideContentEnd = 28.dp
+private val CardEdge = Color(0xFF373737)
+private val PageInk = Color(0xFF797979)
+
+/** The pages by icon and name on a card headed "Canvas Info" (a wide screen's), as the brush studio's. */
+@Composable
+private fun InfoPagesCard(page: Int, onPage: (Int) -> Unit) {
+    val shape = RoundedCornerShape(20.dp)
+    Column(Modifier.padding(start = 10.dp, top = 10.dp, bottom = 10.dp).width(320.dp).fillMaxHeight().clip(shape).background(RailFill).border(1.dp, CardEdge, shape)) {
+        Text("Canvas Info", color = Ink, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 24.dp, top = 19.dp))
+        Column(Modifier.padding(start = 8.dp, end = 8.dp, top = 17.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            InfoTabs.forEachIndexed { i, tab ->
+                val chosen = i == page
+                Row(
+                    Modifier.fillMaxWidth().height(53.dp).clip(CircleShape).background(if (chosen) Pc.Accent else Color.Transparent).clickable { onPage(i) },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.width(60.dp), contentAlignment = Alignment.Center) {
+                        Icon(tab.icon, contentDescription = null, tint = if (chosen) Color.White else RailIdle, modifier = Modifier.requiredSize(tab.size))
+                    }
+                    Text(tab.label, color = if (chosen) Color.White else PageInk, fontSize = 17.sp, maxLines = 1)
+                }
+            }
+        }
+    }
+}
+
 /** A page of the rail: its name, and its icon shown [size] across (each its own). */
 private class InfoTab(val label: String, val icon: ImageVector, val size: Dp)
 
@@ -152,28 +182,39 @@ fun CanvasInfo(vm: CanvasViewModel) {
         close()
     }
     BackHandler { close() }
+    // on a wide screen the pages are named on a card, the page and the name to its right
+    val screen = androidx.compose.ui.platform.LocalConfiguration.current
+    val wide = screen.screenWidthDp > screen.screenHeightDp
     Box(Modifier.fillMaxSize().background(ScreenFill).pointerInput(Unit) { detectTapGestures { } }) {
-        // the rail of pages
-        Column(Modifier.width(81.dp).fillMaxHeight().background(RailFill).padding(start = 8.dp, top = 46.dp)) {
-            InfoTabs.forEachIndexed { i, tab ->
-                val chosen = i == page
-                Box(
-                    Modifier.size(65.dp, 53.dp).clip(CircleShape).background(if (chosen) Pc.Accent else Color.Transparent).clickable { page = i },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(tab.icon, contentDescription = tab.label, tint = if (chosen) Color.White else RailIdle, modifier = Modifier.requiredSize(tab.size))
+        if (wide) {
+            InfoPagesCard(page) { page = it }
+        } else {
+            // the rail of pages
+            Column(Modifier.width(81.dp).fillMaxHeight().background(RailFill).padding(start = 8.dp, top = 46.dp)) {
+                InfoTabs.forEachIndexed { i, tab ->
+                    val chosen = i == page
+                    Box(
+                        Modifier.size(65.dp, 53.dp).clip(CircleShape).background(if (chosen) Pc.Accent else Color.Transparent).clickable { page = i },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(tab.icon, contentDescription = tab.label, tint = if (chosen) Color.White else RailIdle, modifier = Modifier.requiredSize(tab.size))
+                    }
+                    Spacer(Modifier.height(3.dp))
                 }
-                Spacer(Modifier.height(3.dp))
             }
         }
-        // the name, Cancel and Done
+        // the name (centred over the page when wide), Cancel and Done
         BasicTextField(
             name,
             { name = it.take(256) },
             singleLine = true,
-            textStyle = TextStyle(color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold),
+            textStyle = TextStyle(color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold, textAlign = if (wide) androidx.compose.ui.text.style.TextAlign.Center else androidx.compose.ui.text.style.TextAlign.Start),
             cursorBrush = SolidColor(Color.White),
-            modifier = Modifier.offset(x = 101.dp, y = 30.dp).width(400.dp),
+            modifier = if (wide) {
+                Modifier.padding(start = WideContentStart, end = WideContentEnd).offset(y = 30.dp).fillMaxWidth()
+            } else {
+                Modifier.offset(x = 101.dp, y = 30.dp).width(400.dp)
+            },
         )
         Row(Modifier.align(Alignment.TopEnd).padding(top = 20.dp, end = 20.dp), verticalAlignment = Alignment.CenterVertically) {
             // Cancel, with Import before it on the colour profile page
@@ -186,7 +227,7 @@ fun CanvasInfo(vm: CanvasViewModel) {
                 Icon(PcIcons.DoneTick, contentDescription = "Done", tint = Color.White, modifier = Modifier.requiredSize(40.dp))
             }
         }
-        Column(Modifier.padding(start = 105.dp, end = 24.dp, top = 100.dp).verticalScroll(rememberScrollState())) {
+        Column(Modifier.padding(start = if (wide) WideContentStart else 105.dp, end = if (wide) WideContentEnd else 24.dp, top = 100.dp).verticalScroll(rememberScrollState())) {
             when (page) {
                 0 -> {
                     AboutCard(photo, author, { author = it.take(256) }, { pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }, signature)

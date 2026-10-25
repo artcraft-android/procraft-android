@@ -51,11 +51,12 @@ import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.core.AnimationPlayback
 import kotlin.math.roundToInt
 
-private val BarWidth = 446.dp
+/** The bar is 657 wide on a wide screen, 446 upright; the timeline 12 in from each side. */
+private val WideBarWidth = 657.dp
+private val UprightBarWidth = 446.dp
 private val BarHeight = 96.dp
 private val BarGap = 25.dp
-private val FrameWidth = 27.dp
-private val FramePitch = 28.dp
+private val FrameHeight = 40.dp
 private val BarFill get() = if (Pc.light) Color(0xFFE4E4E4) else Color(0xFF2A2A2A)
 private val TrackFill get() = if (Pc.light) Color(0xFFD0D0D0) else Color(0xFF474747)
 private val TrackEdge get() = if (Pc.light) Color(0xFFBDBDBD) else Color(0xFF5C5C5C)
@@ -69,17 +70,19 @@ private const val MAX_ONION = 12
 @Composable
 fun BoxScope.AnimationBar(vm: CanvasViewModel) {
     if (vm.animation == null) return
+    val screen = androidx.compose.ui.platform.LocalConfiguration.current
+    val barWidth = if (screen.screenWidthDp > screen.screenHeightDp) WideBarWidth else UprightBarWidth
     Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
         // where Settings' middle is along the bar, for the arrow of its popover
         var settingsAt by remember { mutableStateOf(281.5.dp) }
         val density = LocalDensity.current
         Column(Modifier.align(Alignment.BottomCenter)) {
             if (vm.animationSettingsOpen) {
-                DownPopover(290.dp, 145.dp, Modifier.offset(x = (settingsAt - 145.dp).coerceIn(0.dp, BarWidth - 290.dp))) { AnimationSettingsPage(vm) }
+                DownPopover(290.dp, 145.dp, Modifier.offset(x = (settingsAt - 145.dp).coerceIn(0.dp, barWidth - 290.dp))) { AnimationSettingsPage(vm) }
             } else if (vm.frameOptionsOpen) {
-                DownPopover(268.dp, 134.dp, Modifier.offset(x = BarWidth / 2 - 134.dp)) { FrameOptionsPage(vm) }
+                DownPopover(268.dp, 134.dp, Modifier.offset(x = barWidth / 2 - 134.dp)) { FrameOptionsPage(vm) }
             }
-            Box(Modifier.padding(bottom = BarGap).size(BarWidth, BarHeight).clip(RoundedCornerShape(30.dp)).background(BarFill)) {
+            Box(Modifier.padding(bottom = BarGap).size(barWidth, BarHeight).clip(RoundedCornerShape(30.dp)).background(BarFill)) {
                 val pages = vm.animation?.pages == true
                 Row(Modifier.fillMaxWidth().padding(start = 26.dp, end = 26.dp, top = 8.dp).height(30.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -97,7 +100,7 @@ fun BoxScope.AnimationBar(vm: CanvasViewModel) {
                     Spacer(Modifier.width(23.dp))
                     BarText(if (pages) "New Page" else "Add Frame", Modifier) { vm.addFrame() }
                 }
-                Timeline(vm, Modifier.offset(x = 12.dp, y = 42.dp))
+                Timeline(vm, barWidth - 24.dp, Modifier.offset(x = 12.dp, y = 42.dp))
             }
         }
     }
@@ -110,18 +113,24 @@ private fun BarText(label: String, modifier: Modifier, onClick: () -> Unit) {
     }
 }
 
-/** The frames in a rounded track, the current (or played) one in the middle with a blue line under it. */
+/**
+ * The frames in a rounded track [width] wide, the current (or played) one in the middle with a
+ * blue line under it; each frame's card is 40 tall and as wide as the canvas's shape makes it.
+ */
 @Composable
-private fun Timeline(vm: CanvasViewModel, modifier: Modifier) {
+private fun Timeline(vm: CanvasViewModel, width: Dp, modifier: Modifier) {
     val frames = vm.animationFrames
     val focus = vm.playingFrame ?: vm.currentFrame ?: 0
-    val width = 422.dp
+    val (cw, ch) = vm.canvasSize()
+    val aspect = if (cw > 0 && ch > 0) (cw.toFloat() / ch).coerceIn(0.25f, 2f) else 0.66f
+    val frameWidth = FrameHeight * aspect + 1.dp
+    val pitch = frameWidth + 1.dp
     Box(modifier.size(width, 44.dp).clip(RoundedCornerShape(18.dp)).background(TrackFill).border(1.dp, TrackEdge, RoundedCornerShape(18.dp))) {
         frames.forEachIndexed { i, id ->
-            val x = width / 2 - FrameWidth / 2 + FramePitch * (i - focus)
-            if (x > -FrameWidth && x < width) {
+            val x = width / 2 - frameWidth / 2 + pitch * (i - focus)
+            if (x > -frameWidth && x < width) {
                 Box(
-                    Modifier.offset(x = x, y = 2.dp).size(FrameWidth, 40.dp).clip(RoundedCornerShape(6.dp)).background(Color.White)
+                    Modifier.offset(x = x, y = 2.dp).size(frameWidth, FrameHeight).clip(RoundedCornerShape(6.dp)).background(Color.White)
                         .border(1.dp, Color(0xFF9A9A9A), RoundedCornerShape(6.dp)).clickable { vm.tapFrame(i) },
                 ) {
                     vm.frameThumbnails[id]?.let { Image(it, contentDescription = "Frame ${i + 1}", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(2.dp)) }

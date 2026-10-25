@@ -99,8 +99,6 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import kotlin.math.max
-import kotlin.math.min
 
 /**
  * A gallery cell's sizes: its pitch both ways (the screen's width over the columns, three upright
@@ -167,10 +165,22 @@ fun GalleryScreen(vm: CanvasViewModel) {
         )
         Column(Modifier.fillMaxSize().then(if (blur > 0.dp) Modifier.blur(blur) else Modifier)) {
             if (selecting) {
+                val screen = androidx.compose.ui.platform.LocalConfiguration.current
                 SelectHeader(
                     title = vm.openStack?.name ?: "ProCraft",
-                    any = selected.isNotEmpty(),
+                    count = selected.size,
+                    wide = screen.screenWidthDp > screen.screenHeightDp,
+                    canStack = vm.openStack == null,
+                    onStack = {
+                        vm.stackArtworks(picked())
+                        endSelecting()
+                    },
+                    onPreview = { previewing = picked() },
                     onShare = { sharing = GalleryShare(picked(), null) },
+                    onDuplicate = {
+                        picked().forEach(vm::duplicateArtwork)
+                        endSelecting()
+                    },
                     onDelete = { deletingSelected = true },
                     onMore = { moreOpen = !moreOpen },
                     onDone = ::endSelecting,
@@ -575,21 +585,48 @@ private fun GalleryHeader(stack: String?, onBack: () -> Unit, onSelect: () -> Un
     }
 }
 
+/** One of Select's buttons: its label, width, whether it can act now, and what it does. */
+private class SelectAction(val label: String, val width: Dp, val enabled: Boolean, val onClick: () -> Unit)
+
 /**
- * Select's title row: Share, Delete and More (dimmed until an artwork is picked), and the blue
- * round button that ends selecting.
+ * Select's title row: upright, Share, Delete and More; on a wide screen Stack, Preview, Share,
+ * Duplicate and Delete side by side ([wide]). Each is dimmed until it can act on the [count]
+ * picked artworks (Stack on two or more; More always opens, its rows greyed). Then the blue round
+ * button that ends selecting.
  */
 @Composable
-private fun SelectHeader(title: String, any: Boolean, onShare: () -> Unit, onDelete: () -> Unit, onMore: () -> Unit, onDone: () -> Unit) {
+private fun SelectHeader(
+    title: String,
+    count: Int,
+    wide: Boolean,
+    canStack: Boolean,
+    onStack: () -> Unit,
+    onPreview: () -> Unit,
+    onShare: () -> Unit,
+    onDuplicate: () -> Unit,
+    onDelete: () -> Unit,
+    onMore: () -> Unit,
+    onDone: () -> Unit,
+) {
+    val any = count > 0
+    val actions = if (wide) {
+        listOf(
+            SelectAction("Stack", 65.dp, canStack && count >= 2, onStack),
+            SelectAction("Preview", 80.dp, any, onPreview),
+            SelectAction("Share", 65.dp, any, onShare),
+            SelectAction("Duplicate", 91.dp, any, onDuplicate),
+            SelectAction("Delete", 70.dp, any, onDelete),
+        )
+    } else {
+        listOf(SelectAction("Share", 65.dp, any, onShare), SelectAction("Delete", 70.dp, any, onDelete), SelectAction("More", 61.dp, true, onMore))
+    }
     Box(Modifier.fillMaxWidth().height(55.dp)) {
         Text(title, color = Pc.GalleryTitle, fontSize = 36.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 32.dp, top = 11.dp))
         Row(Modifier.align(Alignment.TopEnd).padding(top = 10.dp, end = 20.dp), verticalAlignment = Alignment.CenterVertically) {
             Row(Modifier.height(45.dp).clip(CircleShape).background(Pc.Capsule).border(1.dp, Pc.CapsuleEdge, CircleShape), verticalAlignment = Alignment.CenterVertically) {
-                // More opens with nothing picked too (its rows greyed then)
-                for ((label, width, action) in listOf(Triple("Share", 65.dp, onShare), Triple("Delete", 70.dp, onDelete), Triple("More", 61.dp, onMore))) {
-                    val enabled = any || label == "More"
-                    Box(Modifier.width(width).height(45.dp).clickable(enabled = enabled, onClick = action), contentAlignment = Alignment.Center) {
-                        Text(label, color = if (enabled) Pc.GalleryTitle else Pc.GallerySize, fontSize = 16.sp)
+                for (a in actions) {
+                    Box(Modifier.width(a.width).height(45.dp).clickable(enabled = a.enabled, onClick = a.onClick), contentAlignment = Alignment.Center) {
+                        Text(a.label, color = if (a.enabled) Pc.GalleryTitle else Pc.GallerySize, fontSize = 16.sp)
                     }
                 }
             }
@@ -757,7 +794,12 @@ private fun formatsPlace(from: androidx.compose.ui.geometry.Rect?, screenWidth: 
     val arrowAt = (centreY - top).coerceIn(Pc.PopoverCorner + Pc.ArrowHeight, FormatsHeight - Pc.PopoverCorner - Pc.ArrowHeight)
     val total = FormatsWidth + Pc.ArrowHeight
     val y = arrowAt / FormatsHeight
-    return if (from.right.dp + gap + total <= screenWidth - 2.dp) {
+    // on the side of the pill with more room (right of a pill left of the middle), the other if
+    // that side is too narrow
+    val roomRight = screenWidth - 2.dp - from.right.dp - gap
+    val roomLeft = from.left.dp - gap - 2.dp
+    val right = if (roomRight >= roomLeft) roomRight >= total || roomLeft < total else roomLeft < total && roomRight >= total
+    return if (right) {
         FormatsPlace(from.right.dp + gap, top, ArrowSide.LEFT, arrowAt, androidx.compose.ui.graphics.TransformOrigin(0f, y))
     } else {
         FormatsPlace((from.left.dp - gap - total).coerceAtLeast(2.dp), top, ArrowSide.RIGHT, arrowAt, androidx.compose.ui.graphics.TransformOrigin(1f, y))
@@ -917,8 +959,9 @@ private fun NewCanvasPanel(
     onPick: (CanvasPreset) -> Unit,
     onScreenSize: (Int, Int) -> Unit,
 ) {
+    // the screen as it is turned now (2560 x 1600 in landscape, 1600 x 2560 upright)
     val root = LocalView.current.rootView
-    val (sw, sh) = min(root.width, root.height).coerceAtLeast(1) to max(root.width, root.height).coerceAtLeast(1)
+    val (sw, sh) = root.width.coerceAtLeast(1) to root.height.coerceAtLeast(1)
     // the row swiped open, if one is
     var opened by remember { mutableStateOf<Int?>(null) }
     Popover(NewCanvasWidth, arrowX, modifier, fill = Pc.LightPanel, corner = 32.dp) {

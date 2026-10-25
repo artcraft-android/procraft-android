@@ -173,10 +173,20 @@ fun CustomCanvasScreen(vm: CanvasViewModel, onMade: () -> Unit) {
             }
         }
         // the name, Cancel and Done
+        // on a wide screen centred over the page, upright from its left
+        val wide = maxWidth > maxHeight
         BasicTextField(
             name, { name = it.take(64) }, singleLine = true,
-            textStyle = TextStyle(color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold), cursorBrush = SolidColor(Color.White),
-            modifier = Modifier.offset(x = 394.dp, y = 28.dp).width(maxWidth - 394.dp - 160.dp),
+            textStyle = TextStyle(
+                color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                textAlign = if (wide) androidx.compose.ui.text.style.TextAlign.Center else androidx.compose.ui.text.style.TextAlign.Start,
+            ),
+            cursorBrush = SolidColor(Color.White),
+            modifier = if (wide) {
+                Modifier.padding(start = 372.dp, end = 32.dp).offset(y = 28.dp).fillMaxWidth()
+            } else {
+                Modifier.offset(x = 394.dp, y = 28.dp).width(maxWidth - 394.dp - 160.dp)
+            },
         )
         Row(Modifier.align(Alignment.TopEnd).padding(top = 20.dp, end = 20.dp), verticalAlignment = Alignment.CenterVertically) {
             // Cancel, and Import beside it on the colour profile page
@@ -252,6 +262,7 @@ fun CustomCanvasScreen(vm: CanvasViewModel, onMade: () -> Unit) {
         if (section == 0 && field != null) {
             Keypad(
                 Modifier.align(Alignment.BottomCenter),
+                wide,
                 unit,
                 onUnit = {
                     commit()
@@ -350,37 +361,48 @@ private fun SwitchLine(label: String, on: Boolean, onChange: (Boolean) -> Unit) 
     }
 }
 
-/** The keypad: units on the left, the digits, and Backspace, Next and Done on the right. */
+/**
+ * The keypad: units on the left, the digits, and Backspace, Next and Done on the right. Upright its
+ * keys are 120 x 71 (8 apart down) in a 342 panel; on a [wide] screen 150 x 87.5 (9 apart) in a
+ * 457 one, the rows from 47 below its top.
+ */
 @Composable
-private fun Keypad(modifier: Modifier, unit: SizeUnit, onUnit: (SizeUnit) -> Unit, onKey: (String) -> Unit, onNext: () -> Unit, onDone: () -> Unit) {
-    Box(modifier.fillMaxWidth().height(342.dp).background(KeypadFill), contentAlignment = Alignment.Center) {
+private fun Keypad(modifier: Modifier, wide: Boolean, unit: SizeUnit, onUnit: (SizeUnit) -> Unit, onKey: (String) -> Unit, onNext: () -> Unit, onDone: () -> Unit) {
+    val w = if (wide) 150.dp else 120.dp
+    val h = if (wide) 87.5.dp else 71.dp
+    val down = if (wide) 9.dp else 8.dp
+    val across = 9.dp
+    Box(
+        modifier.fillMaxWidth().height(if (wide) 457.dp else 342.dp).background(KeypadFill).padding(top = if (wide) 47.dp else 0.dp),
+        contentAlignment = if (wide) Alignment.TopCenter else Alignment.Center,
+    ) {
         Row(horizontalArrangement = Arrangement.spacedBy(30.dp)) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(down)) {
                 for (u in listOf(SizeUnit.MILLIMETERS, SizeUnit.CENTIMETERS, SizeUnit.INCHES, SizeUnit.PIXELS)) {
-                    Key(u.label, if (u == unit) UnitChosen else KeyFill, if (u == unit) Color(0xFF1F1F1F) else Ink, 15.sp) { onUnit(u) }
+                    Key(u.label, if (u == unit) UnitChosen else KeyFill, if (u == unit) Color(0xFF1F1F1F) else Ink, 15.sp, w, h) { onUnit(u) }
                 }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(down)) {
                 for (row in listOf(listOf("7", "8", "9"), listOf("4", "5", "6"), listOf("1", "2", "3"))) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) { for (k in row) Key(k, DigitFill, Ink, 26.sp) { onKey(k) } }
+                    Row(horizontalArrangement = Arrangement.spacedBy(across)) { for (k in row) Key(k, DigitFill, Ink, 26.sp, w, h) { onKey(k) } }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                    Key("0", DigitFill, Ink, 26.sp, width = 249) { onKey("0") }
-                    Key(".", DigitFill, Ink, 26.sp) { onKey(".") }
+                Row(horizontalArrangement = Arrangement.spacedBy(across)) {
+                    Key("0", DigitFill, Ink, 26.sp, w * 2 + across, h) { onKey("0") }
+                    Key(".", DigitFill, Ink, 26.sp, w, h) { onKey(".") }
                 }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Key("Backspace", KeyFill, Ink, 15.sp) { onKey("⌫") }
-                Key("Next", KeyFill, Ink, 15.sp) { onNext() }
-                Key("Done", KeyFill, Ink, 15.sp, height = 150) { onDone() }
+            Column(verticalArrangement = Arrangement.spacedBy(down)) {
+                Key("Backspace", KeyFill, Ink, 15.sp, w, h) { onKey("⌫") }
+                Key("Next", KeyFill, Ink, 15.sp, w, h) { onNext() }
+                Key("Done", KeyFill, Ink, 15.sp, w, h * 2 + down) { onDone() }
             }
         }
     }
 }
 
 @Composable
-private fun Key(label: String, fill: Color, ink: Color, size: androidx.compose.ui.unit.TextUnit, width: Int = 120, height: Int = 71, onClick: () -> Unit) {
-    Box(Modifier.size(width.dp, height.dp).clip(RoundedCornerShape(8.dp)).background(fill).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+private fun Key(label: String, fill: Color, ink: Color, size: androidx.compose.ui.unit.TextUnit, width: Dp, height: Dp, onClick: () -> Unit) {
+    Box(Modifier.size(width, height).clip(RoundedCornerShape(8.dp)).background(fill).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
         Text(label, color = ink, fontSize = size)
     }
 }

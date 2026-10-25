@@ -334,7 +334,7 @@ private fun Classic(c: ColorPick, compact: Boolean = false, square: Dp = 344.dp)
         val pure = hsvColor(c.hue, 1f, 1f)
         SliderRow(huePosition(SliderHues, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }) { c.setHsv(hueAt(SliderHues, it), c.saturation, c.brightness) }
         SliderRow(c.saturation, listOf(Pc.SaturationGrey, pure)) { c.setHsv(c.hue, it, c.brightness) }
-        SliderRow(c.brightness, listOf(Color.Black, hsvColor(c.hue, c.saturation, 1f))) { c.setHsv(c.hue, c.saturation, it) }
+        SliderRow(c.brightness, BrightnessTrack) { c.setHsv(c.hue, c.saturation, it) }
     }
 }
 
@@ -480,6 +480,9 @@ private fun SaturationBrightness(c: ColorPick, compact: Boolean, height: Dp = 34
     }
 }
 
+/** A brightness slider runs from black to white whatever the colour, its knob grey at the value. */
+private val BrightnessTrack = listOf(Color.Black, Color.White)
+
 /**
  * A 36-tall slider row: a 4-dp track through [colours] and a pill showing the colour under it.
  * Touching anywhere on the row moves the pill there.
@@ -618,7 +621,7 @@ private fun Harmony(vm: CanvasViewModel, c: ColorPick, compact: Boolean = false,
                 },
         )
         Box(Modifier.padding(start = if (compact) 10.dp else 20.dp, end = if (compact) 10.dp else 20.dp, top = if (compact) 8.dp else if (short) 10.dp else 31.dp)) {
-            SliderRow(hsv[2], listOf(Color.Black, rgbColor(p3HsvToRgb(hsv[0], hsv[1], 1f)))) { c.setRgb(p3HsvToRgb(state[0], state[1], it)) }
+            SliderRow(hsv[2], BrightnessTrack) { c.setRgb(p3HsvToRgb(state[0], state[1], it)) }
         }
     }
 }
@@ -888,7 +891,7 @@ private fun Value(c: ColorPick, compact: Boolean = false, short: Boolean = false
             ValueRow("S", c.saturation, listOf(Pc.SaturationGrey, hsvColor(c.hue, 1f, 1f)), "${(c.saturation * 100f).roundToInt()}%") {
                 c.setHsv(c.hue, it, c.brightness)
             }
-            ValueRow("B", c.brightness, listOf(Color.Black, hsvColor(c.hue, c.saturation, 1f)), "${(c.brightness * 100f).roundToInt()}%") {
+            ValueRow("B", c.brightness, BrightnessTrack, "${(c.brightness * 100f).roundToInt()}%") {
                 c.setHsv(c.hue, c.saturation, it)
             }
         }
@@ -920,7 +923,7 @@ private fun InkValue(c: ColorPick, inks: Inks) {
             ValueRow("S", c.saturation, listOf(Pc.SaturationGrey, hsvColor(c.hue, 1f, 1f)), "${(c.saturation * 100f).roundToInt()}%") {
                 c.setHsv(c.hue, it, c.brightness)
             }
-            ValueRow("B", c.brightness, listOf(Color.Black, hsvColor(c.hue, c.saturation, 1f)), "${(c.brightness * 100f).roundToInt()}%") {
+            ValueRow("B", c.brightness, BrightnessTrack, "${(c.brightness * 100f).roundToInt()}%") {
                 c.setHsv(c.hue, c.saturation, it)
             }
         }
@@ -974,7 +977,7 @@ private fun CompactValue(c: ColorPick) {
                 CompactValueRow("S", c.saturation, listOf(Pc.SaturationGrey, hsvColor(c.hue, 1f, 1f)), "${(c.saturation * 100f).roundToInt()}%") {
                     c.setHsv(c.hue, it, c.brightness)
                 }
-                CompactValueRow("B", c.brightness, listOf(Color.Black, hsvColor(c.hue, c.saturation, 1f)), "${(c.brightness * 100f).roundToInt()}%") {
+                CompactValueRow("B", c.brightness, BrightnessTrack, "${(c.brightness * 100f).roundToInt()}%") {
                     c.setHsv(c.hue, c.saturation, it)
                 }
             }

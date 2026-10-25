@@ -1,10 +1,12 @@
-// Grid lines over the colour around the canvas, fixed to the window.
+// Grid lines over the colour around the canvas.
 
 struct SurroundUniform {
-    // (spacing, origin x, origin y, line width), in target pixels
+    // (spacing, a line's middle across and down, line width), in target pixels
     v0: vec4<f32>,
     // (line colour, 1 when the target encodes sRGB itself)
     v1: vec4<f32>,
+    // (the colour under the lines, the top above which there are none)
+    v2: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> su: SurroundUniform;
@@ -23,14 +25,20 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_surround(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let p = pos.xy - su.v0.yz;
-    let s = su.v0.x;
-    // how far this pixel's centre is from the nearest line across and down
-    let d = abs(p - round(p / s) * s);
-    if (p.y < 0.0 || min(d.x, d.y) >= su.v0.w * 0.5) {
+    if (pos.y < su.v2.w) {
         discard;
     }
-    var rgb = su.v1.rgb;
+    let p = pos.xy - su.v0.yz;
+    let s = su.v0.x;
+    // how far this pixel's centre is from the nearest line across and down, and how much of the
+    // pixel that line covers
+    let d = min(abs(p - round(p / s) * s).x, abs(p - round(p / s) * s).y);
+    let w = su.v0.w;
+    let cover = clamp(min(w, w * 0.5 + 0.5 - d), 0.0, 1.0);
+    if (cover <= 0.0) {
+        discard;
+    }
+    var rgb = mix(su.v2.rgb, su.v1.rgb, cover);
     if (su.v1.w > 0.5) {
         rgb = srgb_to_linear(rgb);
     }

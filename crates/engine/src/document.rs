@@ -276,6 +276,10 @@ pub struct Layer {
     /// A text layer's text, until its pixels are changed some other way.
     #[serde(default)]
     pub text: Option<LayerText>,
+    /// Left out of the gallery's thumbnail and the file's preview (put in by a private insert or
+    /// paste).
+    #[serde(default)]
+    pub private: bool,
 }
 
 /// Largest canvas edge, pixels.
@@ -775,6 +779,7 @@ impl Document {
             parent,
             collapsed: false,
             text: None,
+            private: false,
         }
     }
 
@@ -1176,6 +1181,15 @@ impl Document {
 
     pub fn set_visible(&mut self, id: LayerId, visible: bool) -> bool {
         self.layer_mut(id).map(|l| l.visible = visible).is_some()
+    }
+
+    pub fn set_private(&mut self, id: LayerId, private: bool) -> bool {
+        self.layer_mut(id).map(|l| l.private = private).is_some()
+    }
+
+    /// The layers the gallery's thumbnail leaves out (see [`Layer::private`]).
+    pub fn private_layers(&self) -> Vec<LayerId> {
+        self.layers.iter().filter(|l| l.private).map(|l| l.id).collect()
     }
 
     pub fn set_opacity(&mut self, id: LayerId, opacity: f32) -> bool {

@@ -256,6 +256,7 @@ fn add_item(
                 parent,
                 collapsed: item.bool("isCollapsed").unwrap_or(false),
                 text: None,
+                private: false,
             });
         }
         _ => {
@@ -283,6 +284,7 @@ fn add_item(
                 parent,
                 collapsed: false,
                 text: None,
+                private: item.bool("private").unwrap_or(false),
             });
             if !uuid.is_empty() {
                 pixels.push((lid, canvas.pixels(&uuid, 4, 0)?));
@@ -304,6 +306,7 @@ fn add_item(
                     parent: Some(lid),
                     collapsed: false,
                     text: None,
+                    private: false,
                 });
                 if let Some(m) = mask.string("UUID") {
                     // a mask stores only the tiles painted on: the rest shows the layer
@@ -548,6 +551,7 @@ fn write_item(
             locked: ml.locked,
             clipped: false,
             alpha_lock: false,
+            private: false,
         };
         Some(layer_record(b, doc_ref, &mask_uuid, None, rec, w, h))
     });
@@ -561,6 +565,7 @@ fn write_item(
         locked: l.locked,
         clipped: l.clipped,
         alpha_lock: l.alpha_lock,
+        private: l.private,
     };
     let r = layer_record(b, doc_ref, &uuid, mask, rec, w, h);
     if id == doc.current() {
@@ -583,6 +588,8 @@ struct LayerRecord<'a> {
     locked: bool,
     clipped: bool,
     alpha_lock: bool,
+    /// Left out of the file's preview.
+    private: bool,
 }
 
 impl LayerRecord<'_> {
@@ -597,6 +604,7 @@ impl LayerRecord<'_> {
             locked: false,
             clipped: false,
             alpha_lock: false,
+            private: false,
         }
     }
 }
@@ -650,7 +658,7 @@ fn layer_record(
             ("opacity", Value::Real(f64::from(r.opacity))),
             ("perspectiveAssisted", Value::Bool(false)),
             ("preserve", Value::Bool(r.alpha_lock)),
-            ("private", Value::Bool(false)),
+            ("private", Value::Bool(r.private)),
             ("sizeHeight", Value::Int(i64::from(h))),
             ("sizeWidth", Value::Int(i64::from(w))),
             ("text", Builder::null()),
@@ -771,6 +779,7 @@ mod tests {
         let top = doc.add_layer();
         doc.rename(top, "Ink");
         doc.set_clipped(top, true);
+        doc.set_private(top, true);
         let mask = doc.add_mask(base).unwrap();
         doc.background = [0.2, 0.4, 0.6];
         let mut pixels = HashMap::new();
@@ -807,7 +816,8 @@ mod tests {
         assert_eq!(kinds, [(LayerKind::Paint, "Sketch"), (LayerKind::Mask, "Layer Mask"), (LayerKind::Paint, "Ink")]);
         let sk = d.layers().first().unwrap();
         assert_eq!((sk.blend, sk.opacity), (BlendMode::Multiply, 0.75));
-        assert!(d.layers().get(2).unwrap().clipped);
+        assert!(d.layers().get(2).unwrap().clipped && d.layers().get(2).unwrap().private);
+        assert!(!d.layers().first().unwrap().private);
         let px = |i: usize| &back.pixels.iter().find(|(id, _)| *id == d.layers().get(i).unwrap().id).unwrap().1;
         assert_eq!(px(0), &sketch);
         assert_eq!(px(1), &grey);

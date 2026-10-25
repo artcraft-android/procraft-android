@@ -363,13 +363,23 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                 val thumb = Size(Pc.ThumbWidth.toPx(), Pc.ThumbHeight.toPx())
                 val at = Offset((size.width - thumb.width) / 2f, inset + (size.height - thumb.height - inset * 2) * (1f - value))
                 val knob = RoundRect(at.x, at.y, at.x + thumb.width, at.y + thumb.height, CornerRadius(thumb.height / 2f))
-                // the track has a window where the thumb is, so the thumb shows over the bar alone
+                // the track has a window where the thumb is, so the thumb shows over the bar alone;
+                // a lighter rim runs round it
+                val corner = Pc.SliderCorner.toPx()
+                val rim = Pc.SliderRimWidth.toPx()
+                val inside = RoundRect(rim, rim, size.width - rim, size.height - rim, CornerRadius(corner - rim))
                 val track = Path().apply {
                     fillType = PathFillType.EvenOdd
-                    addRoundRect(RoundRect(0f, 0f, size.width, size.height, CornerRadius(Pc.SliderCorner.toPx())))
+                    addRoundRect(inside)
                     addRoundRect(knob)
                 }
                 drawPath(track, Pc.SliderTrack)
+                val ring = Path().apply {
+                    fillType = PathFillType.EvenOdd
+                    addRoundRect(RoundRect(0f, 0f, size.width, size.height, CornerRadius(corner)))
+                    addRoundRect(inside)
+                }
+                drawPath(ring, Pc.SliderRim)
                 // the notches: short bars across the track; on one, the thumb shows a blue bar
                 val bar = Size(NotchWidth.toPx(), NotchHeight.toPx())
                 val travel = size.height - thumb.height - inset * 2

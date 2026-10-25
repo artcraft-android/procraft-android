@@ -4,14 +4,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ndk::native_window::NativeWindow;
+use procraft_engine::geom::Vec2;
 use procraft_engine::profile::Profile;
 use procraft_engine::view::View;
-use procraft_gpu::{Backdrop, Gpu, SelectionLook, Stripes, SurroundGrid, Target, wgpu};
+use procraft_gpu::{Backdrop, Gpu, SelectionLook, Stripes, Target, wgpu};
 
 use crate::selection::SelectionDisplay;
 use crate::{
-    BACKDROP_SIGMA_PT, GRID_LINE, GRID_SPACING_PT, GRID_TOP_PT, SELECTION_FILL, SELECTION_TINT, STRIPE_COVERAGE,
-    STRIPE_PERIOD_PT, STRIPE_SPEED_PT, SURROUND, Shared,
+    BACKDROP_SIGMA_PT, SELECTION_FILL, SELECTION_TINT, STRIPE_COVERAGE, STRIPE_PERIOD_PT, STRIPE_SPEED_PT, SURROUND,
+    Shared,
 };
 
 pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
@@ -109,6 +110,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
                 st.needs_frame = true;
             }
             let to_screen = st.view.map(|v| v.to_screen());
+            let grid = st.surround_grid(Vec2::ZERO);
             // a model is drawn in place of the flat canvas
             if st.scene_shown() {
                 let convert = colours_to(st.doc.profile, screen);
@@ -117,12 +119,6 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
             } else if let (Some(canvas), Some(gpu), Some(to_screen)) = (st.canvas.as_mut(), st.gpu.as_ref(), to_screen)
             {
                 let s = st.display_scale;
-                let grid = SurroundGrid {
-                    spacing: GRID_SPACING_PT * s,
-                    origin: [0.0, GRID_TOP_PT * s],
-                    width: s,
-                    color: GRID_LINE,
-                };
                 // the bands over what is not selected drift, so they keep drawing
                 let look = canvas.has_selection().then(|| match st.selection_display {
                     SelectionDisplay::Stripes => {

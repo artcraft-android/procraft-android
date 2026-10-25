@@ -71,7 +71,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 if (vm.selecting) SelectionOverlay(vm, Pc.BarHeight)
                 if (vm.panel != Panel.NONE) {
                     // a tap outside an open panel closes it (and does not paint)
-                    Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { vm.closePanels() } })
+                    Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { vm.tapOutsidePanel() } })
                 }
                 vm.picking?.let { pick ->
                     Loupe(pick, CanvasSpace.color(vm.colorRgb()))
@@ -116,7 +116,8 @@ fun AppRoot(vm: CanvasViewModel) {
                     TopBar(vm, Modifier.align(Alignment.TopCenter).then(up).then(fade))
                     // a mode taking the screen slides it off its edge, and back when it ends
                     androidx.compose.animation.AnimatedVisibility(
-                        vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && (vm.adjustment == null || vm.adjustPencil),
+                        vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
+                            (vm.adjustment == null || vm.adjustPencil),
                         Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = maxHeight * Pc.SIDE_BAR_CENTRE - Pc.SideBarHeight / 2),
                         enter = Motion.sideBarIn(vm.rightHanded),
                         exit = Motion.sideBarOut(vm.rightHanded),
@@ -165,9 +166,9 @@ fun AppRoot(vm: CanvasViewModel) {
                             }
                             Panel.COLOR -> ColorPanel(vm, place.arrowX, maxHeight, at)
                             Panel.BRUSHES -> BrushLibrary(vm, place.arrowX, at.height(maxHeight - Pc.BarHeight - 25.dp))
-                            // ending 25 above the screen's edge, its rows scrolling (as measured)
+                            // ending 25 above the screen's edge, their rows scrolling (as measured)
                             Panel.ACTIONS -> ActionsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
-                            Panel.ADJUSTMENTS -> AdjustmentsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - Pc.PopoverGap))
+                            Panel.ADJUSTMENTS -> AdjustmentsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
                             Panel.NONE -> Unit
                         }
                     }

@@ -102,6 +102,9 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
                 vm.endText(true)
                 return@awaitEachGesture
             }
+            // a touch on the text brings the keyboard back if it was put away
+            focus.requestFocus()
+            keyboard?.show()
             var last = down.position
             while (true) {
                 val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
@@ -120,8 +123,10 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
             keyboard?.show()
         }
     }
+    // the bar rides on the keyboard: put away, it goes with it
+    val keyboardUp = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
     Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.ime)) {
-        if (vm.textStyleOpen) TextStyleSheet(vm, info) else TextBar(vm)
+        if (vm.textStyleOpen) TextStyleSheet(vm, info) else if (keyboardUp) TextBar(vm)
     }
 }
 

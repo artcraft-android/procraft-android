@@ -236,7 +236,6 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     var setMenu by remember { mutableStateOf<Int?>(null) }
     // the set menu's icon grid is open
     var iconPicker by remember { mutableStateOf(false) }
-    var swiped by remember { mutableStateOf<String?>(null) }
     // the search: what is typed, and whether the field is in use
     var query by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
@@ -447,8 +446,8 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                         LaunchedEffect(key, preview == null) { if (preview == null) vm.loadPreview(b) }
                         Box(Modifier.animateItem(Motion.rowFade(), Motion.rowMove(), Motion.rowFade())) {
                             SwipeBrush(
-                                open = swiped == key,
-                                onOpen = { swiped = if (it) key else null },
+                                open = vm.swipedBrush == key,
+                                onOpen = { vm.swipedBrush = if (it) key else null },
                                 onShare = { share(b) },
                                 onDuplicate = { vm.duplicateBrush(b) },
                                 onDelete = { deleting = "Delete this brush?" to { vm.deleteBrush(b) } },
@@ -459,7 +458,7 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                                         .pointerInput(key) {
                                             detectDragGesturesAfterLongPress(
                                                 onDragStart = { at ->
-                                                    swiped = null
+                                                    vm.swipedBrush = null
                                                     val top = brushBounds[key]?.topLeft ?: Offset.Zero
                                                     grab = at
                                                     dragAt = top + at
@@ -476,7 +475,11 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                                         .clip(RoundedCornerShape(12.dp))
                                         .background(if (selected) Pc.RowSelected else Color.Transparent)
                                         .clickable {
-                                            swiped = null
+                                            // with a brush swiped open, a tap only closes it
+                                            if (vm.swipedBrush != null) {
+                                                vm.swipedBrush = null
+                                                return@clickable
+                                            }
                                             // a highlighted brush opens in the studio
                                             vm.chooseBrush(b)
                                             if (selected) vm.openStudio()

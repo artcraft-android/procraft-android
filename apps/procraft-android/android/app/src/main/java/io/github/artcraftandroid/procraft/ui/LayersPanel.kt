@@ -614,13 +614,18 @@ private fun LayerRow(
             else -> 0.dp
         }
         Box(Modifier.padding(start = 4.dp).offset(y = shift)) { Thumb(vm, l, thumbShape) }
-        if (subtitle == null) {
-            LockedName(l, ink, name, Modifier.weight(1f))
-        } else {
-            // a model's layer shared by its texture set's meshes says so under its name
-            Column(Modifier.weight(1f)) {
-                LockedName(l, ink, name, Modifier)
-                Text(subtitle, color = ink, fontSize = 13.sp, maxLines = 1, modifier = Modifier.padding(start = 29.dp))
+        // what the layer is, under its name (which stays in the middle): the reference layer, a
+        // private one, a model's layer shared by its texture set's meshes
+        val tag = when {
+            l.reference -> subtitle?.let { "$it Reference" } ?: "Reference"
+            subtitle != null -> subtitle
+            l.private -> "Private"
+            else -> null
+        }
+        Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.CenterStart) {
+            LockedName(l, ink, name, Modifier)
+            if (tag != null) {
+                Text(tag, color = ink, fontSize = 13.sp, maxLines = 1, modifier = Modifier.offset(y = 17.5.dp).padding(start = 29.dp))
             }
         }
         // a model's layer: the button that shows its channels, blue while one of them is painted

@@ -26,6 +26,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -144,17 +146,36 @@ private fun Adjustment.icon() = when (this) {
     Adjustment.CLONE -> PcIcons.AdjustClone
 }
 
+/**
+ * Whether the adjustment toolbars lay their sliders side by side: on a screen wider than tall, as
+ * the reference does in landscape (upright they stack).
+ */
+@Composable
+private fun widePanels(): Boolean {
+    val screen = androidx.compose.ui.platform.LocalConfiguration.current
+    return screen.screenWidthDp > screen.screenHeightDp
+}
+
 /** The floating panel of hue, saturation and brightness, each 0..100% with 50% leaving the layer as it was. */
 @Composable
 fun HsbPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
-    Column(
-        modifier.offset(y = (-25).dp).size(532.dp, 220.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(horizontal = 26.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        val (h, s, b) = Triple(vm.hue50, vm.saturation50, vm.brightness50)
-        HsbRow("Hue", h, Brush.horizontalGradient(HUE_STOPS.map { Color(it) }), { Color.hsv((it * 360f) % 360f, 1f, 1f) }) { vm.setHsb(it, s, b) }
-        HsbRow("Saturation", s, Brush.horizontalGradient(listOf(Color(0xFF808080), Color(0xFFFF0000))), { lerp(Color(0xFF808080), Color.Red, it) }) { vm.setHsb(h, it, b) }
-        HsbRow("Brightness", b, Brush.horizontalGradient(listOf(Color.Black, Color.White)), { lerp(Color.Black, Color.White, it) }) { vm.setHsb(h, s, it) }
+    val (h, s, b) = Triple(vm.hue50, vm.saturation50, vm.brightness50)
+    val rows: @Composable (Modifier) -> Unit = { m ->
+        HsbRow("Hue", h, Brush.horizontalGradient(HUE_STOPS.map { Color(it) }), { Color.hsv((it * 360f) % 360f, 1f, 1f) }, m) { vm.setHsb(it, s, b) }
+        HsbRow("Saturation", s, Brush.horizontalGradient(listOf(Color(0xFF808080), Color(0xFFFF0000))), { lerp(Color(0xFF808080), Color.Red, it) }, m) { vm.setHsb(h, it, b) }
+        HsbRow("Brightness", b, Brush.horizontalGradient(listOf(Color.Black, Color.White)), { lerp(Color.Black, Color.White, it) }, m) { vm.setHsb(h, s, it) }
+    }
+    if (widePanels()) {
+        // side by side, 301 wide and 13 apart
+        Row(
+            modifier.offset(y = (-25).dp).size(961.dp, 95.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(13.dp),
+        ) { rows(Modifier.weight(1f)) }
+    } else {
+        Column(
+            modifier.offset(y = (-25).dp).size(532.dp, 220.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(horizontal = 26.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) { rows(Modifier.fillMaxWidth()) }
     }
 }
 
@@ -162,9 +183,9 @@ private val HUE_STOPS = listOf(0xFFFF0000, 0xFFFFFF00, 0xFF00FF00, 0xFF00FFFF, 0
 
 /** A labelled slider over a coloured track, its knob taking the track's colour where it sits. */
 @Composable
-private fun HsbRow(label: String, value: Float, track: Brush, knobColor: (Float) -> Color, onChange: (Float) -> Unit) {
+private fun HsbRow(label: String, value: Float, track: Brush, knobColor: (Float) -> Color, modifier: Modifier, onChange: (Float) -> Unit) {
     val change by rememberUpdatedState(onChange)
-    Column(Modifier.fillMaxWidth().height(55.dp)) {
+    Column(modifier.height(55.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
             Text(label, color = HsbLabel, fontSize = 16.sp, maxLines = 1, modifier = Modifier.weight(1f))
             Text("${(value * 100).roundToInt()}%", color = HsbValue, fontSize = 16.sp, maxLines = 1)
@@ -198,25 +219,49 @@ private val PanelButton = Color(0xFF303030)
 private val PanelButtonText = Color(0xFFA6A6A6)
 private val GridLine = Color(0xFF8A8A8A)
 
-/** The colour balance panel: three sliders between opposite colours, for the tone chosen below them. */
+private val BALANCE_PAIRS = listOf(
+    Triple("Cyan", "Red", listOf(Color(0xFF00FFFF), Color(0xFF808080), Color(0xFFFF0000))),
+    Triple("Magenta", "Green", listOf(Color(0xFFFF00FF), Color(0xFF808080), Color(0xFF00FF00))),
+    Triple("Yellow", "Blue", listOf(Color(0xFFFFFF00), Color(0xFF808080), Color(0xFF0000FF))),
+)
+
+private val BALANCE_TONES = listOf("Shadows", "Midtones", "Highlights")
+
+/**
+ * The colour balance panel: three sliders between opposite colours, for the tone chosen below them
+ * (side by side on a wide screen, the tones then in the menu of the "•••" button after them).
+ */
 @Composable
 fun ColorBalancePanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
+    val tone = vm.balanceTone
+    if (widePanels()) {
+        Row(
+            modifier.offset(y = (-25).dp).size(903.dp, 95.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, top = 24.dp, bottom = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(19.dp),
+        ) {
+            BALANCE_PAIRS.forEachIndexed { k, (left, right, colours) ->
+                BalanceRow(left, right, vm.balance[tone * 3 + k], Brush.horizontalGradient(colours), Modifier.width(251.dp)) { vm.setBalance(k, it) }
+            }
+            MoreButton("Color Balance") {
+                OptionsGroup {
+                    BALANCE_TONES.forEachIndexed { i, name ->
+                        OptionsChoice(name, tone == i, 40.dp, first = i == 0) { vm.chooseBalanceTone(i) }
+                    }
+                }
+            }
+        }
+        return
+    }
     Column(
         modifier.offset(y = (-25).dp).size(532.dp, 272.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(horizontal = 26.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        val tone = vm.balanceTone
-        val pairs = listOf(
-            Triple("Cyan", "Red", listOf(Color(0xFF00FFFF), Color(0xFF808080), Color(0xFFFF0000))),
-            Triple("Magenta", "Green", listOf(Color(0xFFFF00FF), Color(0xFF808080), Color(0xFF00FF00))),
-            Triple("Yellow", "Blue", listOf(Color(0xFFFFFF00), Color(0xFF808080), Color(0xFF0000FF))),
-        )
-        pairs.forEachIndexed { k, (left, right, colours) ->
+        BALANCE_PAIRS.forEachIndexed { k, (left, right, colours) ->
             val value = vm.balance[tone * 3 + k]
-            BalanceRow(left, right, value, Brush.horizontalGradient(colours)) { vm.setBalance(k, it) }
+            BalanceRow(left, right, value, Brush.horizontalGradient(colours), Modifier.fillMaxWidth()) { vm.setBalance(k, it) }
         }
         Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            listOf("Shadows", "Midtones", "Highlights").forEachIndexed { i, name ->
+            BALANCE_TONES.forEachIndexed { i, name ->
                 val chosen = tone == i
                 Box(
                     Modifier.weight(1f).height(40.dp).clip(RoundedCornerShape(20.dp)).background(if (chosen) Pc.Accent else PanelButton).tap { vm.chooseBalanceTone(i) },
@@ -231,9 +276,9 @@ fun ColorBalancePanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
 
 /** A slider between two named colours, its middle leaving the colour as it was. */
 @Composable
-private fun BalanceRow(left: String, right: String, value: Float, track: Brush, onChange: (Float) -> Unit) {
+private fun BalanceRow(left: String, right: String, value: Float, track: Brush, modifier: Modifier, onChange: (Float) -> Unit) {
     val change by rememberUpdatedState(onChange)
-    Column(Modifier.fillMaxWidth().height(55.dp)) {
+    Column(modifier.height(55.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
             Text(left, color = MenuText, fontSize = 16.sp, maxLines = 1, modifier = Modifier.weight(1f))
             Text(right, color = HsbValue, fontSize = 16.sp, maxLines = 1)
@@ -324,7 +369,9 @@ private val CurveNode = Color(0xFF0171EA)
 @Composable
 fun GradientMapPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
     val editing = vm.gradientEditing
-    Column(modifier.offset(y = (-25).dp).size(544.dp, 159.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(horizontal = 14.dp, vertical = 12.dp)) {
+    // wider on a wide screen, showing more of the library
+    val width = if (widePanels()) 835.dp else 544.dp
+    Column(modifier.offset(y = (-25).dp).size(width, 159.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(horizontal = 14.dp, vertical = 12.dp)) {
         Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(if (editing != null) "Gradient Map" else "Gradient Library", color = MenuText, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f).padding(start = 14.dp))
             if (editing != null) {
@@ -601,6 +648,108 @@ private val LIQUIFY_NAMES = listOf(
 /** The liquify panel: the brush's size, pressure, distortion and momentum; its way, adjust and reset. */
 @Composable
 fun LiquifyPanel(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp, modifier: Modifier = Modifier) {
+    val wide = widePanels()
+    if (wide) LiquifyWide(vm, modifier) else LiquifyUpright(vm, modifier)
+    // the way's list and the adjust slider open over the panel's buttons
+    val panelLeft = (screenWidth - 654.dp) / 2
+    val buttonsTop = if (wide) screenHeight - 25.dp - 162.dp + 28.dp else screenHeight - 25.dp - 16.dp - 40.dp
+    when (vm.liquifyPopup) {
+        1 -> if (!wide) {
+            val centre = panelLeft + 16.dp + (654.dp - 32.dp - 16.dp) / 6
+            val left = (centre - 130.dp).coerceIn(0.dp, screenWidth - 260.dp)
+            MenuPopover(centre - left, left, buttonsTop) {
+                MenuTitle("Liquify Mode")
+                Spacer(Modifier.height(10.dp))
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(MenuGroup)) {
+                    LIQUIFY_NAMES.forEachIndexed { i, (kind, label) ->
+                        if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(MenuLine))
+                        val chosen = vm.liquifyKind == kind
+                        Row(
+                            Modifier.fillMaxWidth().height(44.dp).background(if (chosen) Pc.Accent else Color.Transparent).tap { vm.chooseLiquifyKind(kind) }.padding(start = 16.dp, end = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            MenuLabel(label, if (chosen) Color.White else MenuText, Modifier.weight(1f))
+                            if (chosen) Icon(PcIcons.MenuTick, contentDescription = null, tint = Color.White, modifier = Modifier.size(29.dp))
+                        }
+                    }
+                }
+            }
+        }
+        2 -> {
+            // over the Adjust button: the middle one upright, the ninth of the row when wide
+            val centre = if (wide) (screenWidth - 1093.dp) / 2 + 86.dp + 94.dp * 8 + 37.5.dp else screenWidth / 2
+            val left = (centre - 130.dp).coerceIn(0.dp, screenWidth - 260.dp)
+            MenuPopover(centre - left, left, buttonsTop) {
+                MenuTitle("Adjust")
+                Spacer(Modifier.height(4.dp))
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(MenuGroup).padding(vertical = 8.dp)) {
+                    SliderRow("Amount", vm.liquifyAmount, "${(vm.liquifyAmount * 100).roundToInt()}%") { vm.changeLiquifyAmount(it) }
+                }
+            }
+        }
+    }
+}
+
+private val LiquifyIcons = mapOf(
+    LiquifyKind.PUSH to { PcIcons.LiquifyPush },
+    LiquifyKind.TWIRL_RIGHT to { PcIcons.LiquifyTwirlRight },
+    LiquifyKind.TWIRL_LEFT to { PcIcons.LiquifyTwirlLeft },
+    LiquifyKind.PINCH to { PcIcons.LiquifyPinch },
+    LiquifyKind.EXPAND to { PcIcons.LiquifyExpand },
+    LiquifyKind.CRYSTALS to { PcIcons.LiquifyCrystals },
+    LiquifyKind.EDGE to { PcIcons.LiquifyEdge },
+    LiquifyKind.RECONSTRUCT to { PcIcons.LiquifyReconstruct },
+)
+private val LiquifyIdle = Color(0xFFAAAAAA)
+private val LiquifyLabel = Color(0xFFA3A3A3)
+private val LiquifyDim = Color(0xFF575757)
+
+/**
+ * Liquify on a wide screen (1093 x 162): its ways, Adjust and Reset as a row of icon buttons (75
+ * wide, 94 apart; the chosen way's icon blue), and the four sliders side by side under them.
+ */
+@Composable
+private fun LiquifyWide(vm: CanvasViewModel, modifier: Modifier) {
+    val percent = { v: Float, none: String? -> if (v >= 1f) "Max" else if (v <= 0f && none != null) none else "${(v * 100).roundToInt()}%" }
+    Column(
+        modifier.offset(y = (-25).dp).size(1093.dp, 162.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(start = 16.dp, end = 16.dp, top = 28.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        val canAdjust = vm.liquified
+        Row(Modifier.height(60.dp), horizontalArrangement = Arrangement.spacedBy(19.dp)) {
+            for ((kind, label) in LIQUIFY_NAMES) {
+                val chosen = vm.liquifyKind == kind
+                LiquifyButton(LiquifyIcons[kind]?.invoke() ?: PcIcons.AdjustLiquify, label, if (chosen) Pc.Accent else LiquifyIdle, LiquifyLabel, 24.dp) { vm.chooseLiquifyKind(kind) }
+            }
+            val ink = if (canAdjust) LiquifyIdle else LiquifyDim
+            val words = if (canAdjust) LiquifyLabel else LiquifyDim
+            LiquifyButton(PcIcons.AdjustKnob, "Adjust", ink, words, 39.5.dp, canAdjust) { vm.liquifyPopup = if (vm.liquifyPopup == 2) 0 else 2 }
+            LiquifyButton(PcIcons.PieReset, "Reset", ink, words, 23.dp, canAdjust) { vm.resetLiquify() }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(11.dp)) {
+            Box(Modifier.weight(1f)) { SliderRow("Size", vm.liquifySize, percent(vm.liquifySize, null)) { vm.liquifySize = it } }
+            Box(Modifier.weight(1f)) { SliderRow("Pressure", vm.liquifyPressure, percent(vm.liquifyPressure, null)) { vm.liquifyPressure = it } }
+            Box(Modifier.weight(1f)) { SliderRow("Distortion", vm.liquifyDistortion, percent(vm.liquifyDistortion, "None")) { vm.liquifyDistortion = it } }
+            Box(Modifier.weight(1f)) { SliderRow("Momentum", vm.liquifyMomentum, percent(vm.liquifyMomentum, "None")) { vm.liquifyMomentum = it } }
+        }
+    }
+}
+
+/** One of wide Liquify's buttons: its icon ([iconSize] across, centred 9 down) over its name. */
+@Composable
+private fun LiquifyButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, ink: Color, words: Color, iconSize: Dp, enabled: Boolean = true, onClick: () -> Unit) {
+    Box(Modifier.size(75.dp, 60.dp).then(if (enabled) Modifier.tap(onClick = onClick) else Modifier)) {
+        Box(Modifier.align(Alignment.TopCenter).offset(y = 9.dp - 12.dp).size(24.dp), contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription = label, tint = ink, modifier = Modifier.requiredSize(iconSize))
+        }
+        Text(label, color = words, fontSize = 13.sp, maxLines = 1, modifier = Modifier.align(Alignment.TopCenter).padding(top = 22.dp))
+    }
+}
+
+/** Liquify upright: two rows of two sliders, then the way, Adjust and Reset. */
+@Composable
+private fun LiquifyUpright(vm: CanvasViewModel, modifier: Modifier) {
     Column(
         modifier.offset(y = (-25).dp).size(654.dp, 200.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(16.dp),
         verticalArrangement = Arrangement.SpaceBetween,
@@ -643,42 +792,6 @@ fun LiquifyPanel(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp, modifie
                 Icon(PcIcons.PieReset, contentDescription = null, tint = tint, modifier = Modifier.requiredSize(23.dp))
                 Spacer(Modifier.width(2.5.dp))
                 Text("Reset", color = tint, fontSize = 15.sp, maxLines = 1)
-            }
-        }
-    }
-    // the way's list and the adjust slider open over the panel's buttons
-    val panelLeft = (screenWidth - 654.dp) / 2
-    val buttonsTop = screenHeight - 25.dp - 16.dp - 40.dp
-    when (vm.liquifyPopup) {
-        1 -> {
-            val centre = panelLeft + 16.dp + (654.dp - 32.dp - 16.dp) / 6
-            val left = (centre - 130.dp).coerceIn(0.dp, screenWidth - 260.dp)
-            MenuPopover(centre - left, left, buttonsTop) {
-                MenuTitle("Liquify Mode")
-                Spacer(Modifier.height(10.dp))
-                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(MenuGroup)) {
-                    LIQUIFY_NAMES.forEachIndexed { i, (kind, label) ->
-                        if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(MenuLine))
-                        val chosen = vm.liquifyKind == kind
-                        Row(
-                            Modifier.fillMaxWidth().height(44.dp).background(if (chosen) Pc.Accent else Color.Transparent).tap { vm.chooseLiquifyKind(kind) }.padding(start = 16.dp, end = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            MenuLabel(label, if (chosen) Color.White else MenuText, Modifier.weight(1f))
-                            if (chosen) Icon(PcIcons.MenuTick, contentDescription = null, tint = Color.White, modifier = Modifier.size(29.dp))
-                        }
-                    }
-                }
-            }
-        }
-        2 -> {
-            val centre = screenWidth / 2
-            MenuPopover(130.dp, centre - 130.dp, buttonsTop) {
-                MenuTitle("Adjust")
-                Spacer(Modifier.height(4.dp))
-                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(MenuGroup).padding(vertical = 8.dp)) {
-                    SliderRow("Amount", vm.liquifyAmount, "${(vm.liquifyAmount * 100).roundToInt()}%") { vm.changeLiquifyAmount(it) }
-                }
             }
         }
     }
@@ -738,8 +851,9 @@ private val GLITCH_KINDS = listOf(
 /** The glitch toolbar: its four kinds above the kind's sliders, two to a row. */
 @Composable
 fun GlitchPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
+    val wide = widePanels()
     Column(
-        modifier.offset(y = (-25).dp).size(640.dp, 167.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(top = 8.dp),
+        modifier.offset(y = (-25).dp).size(if (wide) 973.dp else 640.dp, if (wide) 120.dp else 167.dp).clip(RoundedCornerShape(33.dp)).background(HsbPanelFill).padding(top = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         KindsSwitch(466.dp, GLITCH_KINDS.map { (kind, label, width) -> Kind(kind.icon(), label, width) }, GLITCH_KINDS.indexOfFirst { it.first == vm.glitchKind }) {
@@ -752,6 +866,18 @@ fun GlitchPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
         }
         val values = vm.glitchValues[vm.glitchKind].orEmpty()
         Spacer(Modifier.height(12.dp))
+        // on a wide screen all in one row, 19 apart
+        if (wide) {
+            val each = (941.dp - 19.dp * (names.size - 1)) / names.size
+            Row(Modifier.width(941.dp).height(54.dp), horizontalArrangement = Arrangement.spacedBy(19.dp)) {
+                for (k in names.indices) {
+                    val both = vm.glitchKind == GlitchKind.DIVERGE && k < 3
+                    val v = values.getOrElse(k) { 0f }
+                    OptionSlider(names[k], v, "${(v * 100).roundToInt()}%", each, both) { vm.setGlitchValue(k, it) }
+                }
+            }
+            return@Column
+        }
         for (row in names.indices.chunked(2)) {
             Row(Modifier.width(608.dp).height(54.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 for (k in row) {
@@ -808,14 +934,23 @@ internal fun shown(v: Float, max: Boolean = false) = when {
     else -> "${(v * 100).roundToInt()}%"
 }
 
-/** A labelled toolbar slider [width] wide: [both] ways runs −1..1 with its fill from the middle, else 0..1. */
+/**
+ * A labelled toolbar slider [width] wide: [both] ways runs −1..1 with its fill from the middle, else
+ * 0..1. A [chip] value sits on a rounded chip (one that can be typed).
+ */
 @Composable
-internal fun OptionSlider(label: String, value: Float, shown: String, width: Dp, both: Boolean = false, labelColor: Color = HsbLabel, onChange: (Float) -> Unit) {
+internal fun OptionSlider(label: String, value: Float, shown: String, width: Dp, both: Boolean = false, labelColor: Color = HsbLabel, chip: Boolean = false, onChange: (Float) -> Unit) {
     val change by rememberUpdatedState(onChange)
     Column(Modifier.width(width).height(54.dp)) {
         Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 15.dp, top = 6.dp)) {
             Text(label, color = labelColor, fontSize = 16.sp, maxLines = 1, modifier = Modifier.weight(1f))
-            Text(shown, color = HsbValue, fontSize = 16.sp, maxLines = 1)
+            if (chip) {
+                Box(Modifier.offset(x = 8.dp, y = (-4).dp).clip(RoundedCornerShape(14.dp)).background(ValueChip).padding(horizontal = 12.dp, vertical = 3.dp)) {
+                    Text(shown, color = HsbValue, fontSize = 16.sp, maxLines = 1)
+                }
+            } else {
+                Text(shown, color = HsbValue, fontSize = 16.sp, maxLines = 1)
+            }
         }
         Box(
             Modifier.fillMaxWidth().height(24.dp).padding(start = 10.dp, end = 11.dp).pointerInput(both) {
@@ -852,6 +987,7 @@ internal fun OptionSlider(label: String, value: Float, shown: String, width: Dp,
 }
 
 private val ModesText = Color(0xFFD0D0D0)
+private val ValueChip = Color(0xFF2A2A2A)
 
 private fun GlitchKind.icon() = when (this) {
     GlitchKind.ARTIFACT -> PcIcons.GlitchArtifact
@@ -863,11 +999,41 @@ private fun GlitchKind.icon() = when (this) {
 /** The noise toolbar: its three kinds, scale, octaves and turbulence, single or multi channel, added or not. */
 @Composable
 fun NoisePanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
-    OptionsPanel(532.dp, 292.dp, modifier, 10.dp) {
-        val kinds = listOf(NoiseKind.CLOUDS, NoiseKind.BILLOWS, NoiseKind.RIDGES)
+    val kinds = listOf(NoiseKind.CLOUDS, NoiseKind.BILLOWS, NoiseKind.RIDGES)
+    val switch: @Composable () -> Unit = {
         KindsSwitch(472.dp, listOf(Kind(PcIcons.NoiseClouds, "Clouds", 149.dp), Kind(PcIcons.NoiseBillows, "Billows", 149.dp), Kind(PcIcons.NoiseRidges, "Ridges", 148.dp)), kinds.indexOf(vm.noiseKind)) {
             vm.chooseNoiseKind(kinds[it])
         }
+    }
+    if (widePanels()) {
+        // the sliders side by side, single or multi channel and additive in the "•••" menu
+        OptionsPanel(903.dp, 113.dp, modifier, 8.dp) {
+            switch()
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth().padding(start = 16.dp), horizontalArrangement = Arrangement.spacedBy(19.dp)) {
+                OptionSlider("Scale", vm.noiseScale, shown(vm.noiseScale), 251.dp, labelColor = ModesText) { vm.setNoiseValue(0, it) }
+                OptionSlider("Octaves", vm.noiseOctaves, shown(vm.noiseOctaves), 251.dp, labelColor = ModesText) { vm.setNoiseValue(1, it) }
+                OptionSlider("Turbulence", vm.noiseTurbulence, shown(vm.noiseTurbulence), 251.dp, labelColor = ModesText) { vm.setNoiseValue(2, it) }
+                MoreButton("Channel") {
+                    OptionsGroup {
+                        Row(Modifier.fillMaxWidth().height(44.dp).padding(start = 12.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Additive", color = MenuText, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                            Box(Modifier.tap { vm.toggleNoiseAdded() }) { Switch(vm.noiseAdded, enabled = true) }
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    OptionsGroup {
+                        for ((i, pair) in listOf(false to "Single", true to "Multi").withIndex()) {
+                            OptionsChoice(pair.second, vm.noiseMulti == pair.first, 44.dp, first = i == 0) { vm.chooseNoiseMulti(pair.first) }
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
+    OptionsPanel(532.dp, 292.dp, modifier, 10.dp) {
+        switch()
         Spacer(Modifier.height(8.dp))
         Column(Modifier.width(500.dp), verticalArrangement = Arrangement.spacedBy(8.5.dp)) {
             OptionSlider("Scale", vm.noiseScale, shown(vm.noiseScale), 500.dp, labelColor = ModesText) { vm.setNoiseValue(0, it) }
@@ -899,12 +1065,81 @@ private val NoiseButton = Color(0xFF1E1E1E)
 /** The bloom toolbar: transition, size and burn. */
 @Composable
 fun BloomPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
+    if (widePanels()) {
+        // side by side, 301 wide and 39 apart
+        OptionsPanel(1013.dp, 95.dp, modifier, 24.dp) {
+            Row(Modifier.width(981.dp), horizontalArrangement = Arrangement.spacedBy(39.dp)) {
+                OptionSlider("Transition", vm.bloomTransition, shown(vm.bloomTransition, max = true), 301.dp) { vm.setBloomValue(0, it) }
+                OptionSlider("Size", vm.bloomSize, shown(vm.bloomSize, max = true), 301.dp) { vm.setBloomValue(1, it) }
+                OptionSlider("Burn", vm.bloomBurn, shown(vm.bloomBurn, max = true), 301.dp) { vm.setBloomValue(2, it) }
+            }
+        }
+        return
+    }
     OptionsPanel(532.dp, 220.dp, modifier, 24.dp) {
         Column(Modifier.width(500.dp), verticalArrangement = Arrangement.spacedBy(8.5.dp)) {
             OptionSlider("Transition", vm.bloomTransition, shown(vm.bloomTransition, max = true), 500.dp) { vm.setBloomValue(0, it) }
             OptionSlider("Size", vm.bloomSize, shown(vm.bloomSize, max = true), 500.dp) { vm.setBloomValue(1, it) }
             OptionSlider("Burn", vm.bloomBurn, shown(vm.bloomBurn, max = true), 500.dp) { vm.setBloomValue(2, it) }
         }
+    }
+}
+
+private val MoreFill = Color(0xFF1C1C1C)
+private val MoreEdge = Color(0xFF3A3A3A)
+private val MoreDots = Color(0xFF9A9A9A)
+private val OptionsMenuFill = Color(0xF2262626)
+private val OptionsGroupFill = Color(0xFF1B1B1B)
+private val OptionsLine = Color(0xFF2E2E2E)
+
+/**
+ * A toolbar's "•••" button (41 × 40, 3 lower than the sliders' top): it opens a small menu over
+ * it, [title] above the [content], 16 above the button; a tap outside closes it.
+ */
+@Composable
+private fun MoreButton(title: String, content: @Composable androidx.compose.foundation.layout.ColumnScope.(close: () -> Unit) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box(
+        Modifier.padding(top = 3.dp).size(41.dp, 40.dp).clip(androidx.compose.foundation.shape.CircleShape).background(MoreFill)
+            .border(1.dp, MoreEdge, androidx.compose.foundation.shape.CircleShape).tap { open = !open },
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            repeat(3) { Box(Modifier.size(6.dp).clip(androidx.compose.foundation.shape.CircleShape).background(MoreDots)) }
+        }
+        if (open) {
+            val lift = with(androidx.compose.ui.platform.LocalDensity.current) { (40.dp + 16.dp).roundToPx() }
+            androidx.compose.ui.window.Popup(
+                alignment = Alignment.BottomCenter,
+                offset = androidx.compose.ui.unit.IntOffset(0, -lift),
+                onDismissRequest = { open = false },
+                properties = androidx.compose.ui.window.PopupProperties(focusable = true),
+            ) {
+                Column(Modifier.width(260.dp).clip(RoundedCornerShape(26.dp)).background(OptionsMenuFill).padding(start = 10.dp, end = 10.dp, bottom = 10.dp)) {
+                    Text(title, color = MenuText, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 12.dp, top = 16.dp, bottom = 16.dp))
+                    content { open = false }
+                }
+            }
+        }
+    }
+}
+
+/** Rows in a rounded group of an options menu. */
+@Composable
+private fun OptionsGroup(rows: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(OptionsGroupFill), content = rows)
+}
+
+/** One choice of an options menu: blue with a tick when [chosen], a line above all but the [first]. */
+@Composable
+private fun OptionsChoice(label: String, chosen: Boolean, height: Dp, first: Boolean, onChoose: () -> Unit) {
+    if (!first) Box(Modifier.fillMaxWidth().height(1.dp).background(OptionsLine))
+    Row(
+        Modifier.fillMaxWidth().height(height).background(if (chosen) Pc.Accent else Color.Transparent).tap(onClick = onChoose).padding(start = 12.dp, end = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = if (chosen) Color.White else MenuText, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+        if (chosen) Icon(PcIcons.Tick, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
     }
 }
 

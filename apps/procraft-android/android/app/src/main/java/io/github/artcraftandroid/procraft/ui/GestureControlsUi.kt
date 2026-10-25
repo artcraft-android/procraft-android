@@ -5,6 +5,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -61,6 +63,38 @@ private val TrackOff = Color(0xFF1D1D1D)
 private val KnobOff = Color(0xFF333333)
 private val DoneBlue = Color(0xFF0190FF)
 
+/** Where a wide screen's page starts and ends, beside the card of what gestures can do. */
+private val WideContentStart = 358.dp
+private val WideContentEnd = 28.dp
+private val CardEdge = Color(0xFF373737)
+private val PageInk = Color(0xFF797979)
+
+/** What gestures can do, by icon and name on a card headed "Gesture controls" (a wide screen's). */
+@Composable
+private fun GesturePagesCard(page: GesturePurpose, onPage: (GesturePurpose) -> Unit) {
+    val shape = RoundedCornerShape(20.dp)
+    Column(Modifier.padding(start = 10.dp, top = 10.dp, bottom = 10.dp).width(320.dp).fillMaxHeight().clip(shape).background(RailFill).border(1.dp, CardEdge, shape)) {
+        Text("Gesture controls", color = Ink, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 24.dp, top = 19.dp))
+        Column(
+            Modifier.verticalScroll(rememberScrollState()).padding(start = 8.dp, end = 8.dp, top = 17.dp, bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            for (p in GesturePurpose.entries) {
+                val chosen = p == page
+                Row(
+                    Modifier.fillMaxWidth().height(53.dp).clip(CircleShape).background(if (chosen) Pc.Accent else Color.Transparent).clickable { onPage(p) },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.width(54.dp), contentAlignment = Alignment.Center) {
+                        Icon(icon(p), contentDescription = null, tint = if (chosen) Color.White else RailIdle, modifier = Modifier.requiredSize(37.dp))
+                    }
+                    Text(p.title, color = if (chosen) Color.White else PageInk, fontSize = 17.sp, maxLines = 1)
+                }
+            }
+        }
+    }
+}
+
 private fun icon(p: GesturePurpose): ImageVector = when (p) {
     GesturePurpose.SMUDGE -> PcIcons.Smudge
     GesturePurpose.ERASE -> PcIcons.Erase
@@ -82,32 +116,47 @@ private fun icon(p: GesturePurpose): ImageVector = when (p) {
  */
 @Composable
 fun GestureControls(vm: CanvasViewModel) {
-    var page by remember { mutableStateOf(GesturePurpose.EYEDROPPER) }
+    // it opens on the page it was last on
+    var page by vm::gesturePage
     var resetting by remember { mutableStateOf(false) }
     val settings = vm.gestures
     BackHandler { vm.gestureControlsOpen = false }
+    // on a wide screen what gestures can do is named on a card, the page and its title to its right
+    val screen = androidx.compose.ui.platform.LocalConfiguration.current
+    val wide = screen.screenWidthDp > screen.screenHeightDp
     Box(Modifier.fillMaxSize().background(ScreenFill).pointerInput(Unit) { detectTapGestures { } }) {
-        Column(Modifier.width(81.dp).fillMaxHeight().background(RailFill).verticalScroll(rememberScrollState()).padding(start = 8.dp, top = 46.dp, bottom = 20.dp)) {
-            for (p in GesturePurpose.entries) {
-                val chosen = p == page
-                Box(
-                    Modifier.size(65.dp, 53.dp).clip(CircleShape).background(if (chosen) Pc.Accent else Color.Transparent).clickable { page = p },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    // each drawn in a padded frame, fitted 37 across
-                    Icon(icon(p), contentDescription = p.title, tint = if (chosen) Color.White else RailIdle, modifier = Modifier.requiredSize(37.dp))
+        if (wide) {
+            GesturePagesCard(page) { page = it }
+        } else {
+            Column(Modifier.width(81.dp).fillMaxHeight().background(RailFill).verticalScroll(rememberScrollState()).padding(start = 8.dp, top = 46.dp, bottom = 20.dp)) {
+                for (p in GesturePurpose.entries) {
+                    val chosen = p == page
+                    Box(
+                        Modifier.size(65.dp, 53.dp).clip(CircleShape).background(if (chosen) Pc.Accent else Color.Transparent).clickable { page = p },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        // each drawn in a padded frame, fitted 37 across
+                        Icon(icon(p), contentDescription = p.title, tint = if (chosen) Color.White else RailIdle, modifier = Modifier.requiredSize(37.dp))
+                    }
+                    Spacer(Modifier.height(3.dp))
                 }
-                Spacer(Modifier.height(3.dp))
             }
         }
-        Text(page.heading, color = Ink, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.offset(x = 101.dp, y = 28.dp))
+        if (wide) {
+            Text(
+                page.heading, color = Ink, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier.padding(start = WideContentStart, end = WideContentEnd).offset(y = 28.dp).fillMaxWidth(),
+            )
+        } else {
+            Text(page.heading, color = Ink, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.offset(x = 101.dp, y = 28.dp))
+        }
         Box(
             Modifier.align(Alignment.TopEnd).padding(top = 20.dp, end = 20.dp).size(44.dp, 45.dp).clip(CircleShape).background(DoneBlue).clickable { vm.gestureControlsOpen = false },
             contentAlignment = Alignment.Center,
         ) {
             Icon(PcIcons.DoneTick, contentDescription = "Done", tint = Color.White, modifier = Modifier.requiredSize(40.dp))
         }
-        Column(Modifier.padding(start = 105.dp, end = 24.dp, top = 100.dp).verticalScroll(rememberScrollState())) {
+        Column(Modifier.padding(start = if (wide) WideContentStart else 105.dp, end = if (wide) WideContentEnd else 24.dp, top = 100.dp).verticalScroll(rememberScrollState())) {
             Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(25.dp)).background(CardFill)) {
                 val options = GestureOptions[page].orEmpty()
                 options.forEachIndexed { i, o ->

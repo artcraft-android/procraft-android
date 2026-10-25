@@ -278,6 +278,7 @@ struct GridDraw {
 struct GridUniform {
     v0: [f32; 4],
     v1: [f32; 4],
+    v2: [f32; 4],
 }
 
 impl GridDraw {
@@ -1246,6 +1247,7 @@ impl MeshView {
                 let u = GridUniform {
                     v0: [g.spacing, g.origin[0], g.origin[1], g.width],
                     v1: [g.color[0], g.color[1], g.color[2], srgb],
+                    v2: [clear[0] as f32, clear[1] as f32, clear[2] as f32, g.top],
                 };
                 gpu.queue.write_buffer(&draw.buffer, 0, bytemuck::bytes_of(&u));
                 Some(&*draw)

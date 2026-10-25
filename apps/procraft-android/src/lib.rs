@@ -53,12 +53,15 @@ use procraft_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) const SURROUND: [f32; 3] = [37.0 / 255.0, 37.0 / 255.0, 37.0 / 255.0];
 
-/// The grid over the surround: its line colour (sRGB), and its spacing, line width and top (the
-/// bar's height), in interface points.
+/// The grid over the surround: its line colour (sRGB), and its spacing, line width (a point, its
+/// edges smoothed a third of a pixel out on a 2x screen) and top (the bar's height, none under
+/// it), in interface points. It is fixed to the glass: see [`CanvasSession::set_grid_origin`].
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub(crate) const GRID_LINE: [f32; 3] = [40.0 / 255.0, 40.0 / 255.0, 40.0 / 255.0];
+pub(crate) const GRID_LINE: [f32; 3] = [46.0 / 255.0, 46.0 / 255.0, 46.0 / 255.0];
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) const GRID_SPACING_PT: f32 = 16.0;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) const GRID_WIDTH_PT: f32 = 4.0 / 3.0;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) const GRID_TOP_PT: f32 = 44.0;
 
@@ -290,6 +293,9 @@ pub(crate) struct State {
     pub(crate) error: Option<String>,
     /// Window pixels per interface point.
     pub(crate) display_scale: f32,
+    /// Where the middle of one of the surround grid's lines is, across and down (window pixels);
+    /// none given, half a point in from the top-left corner.
+    grid_origin: Option<[f32; 2]>,
     /// The document before a continuous change (a slider drag) began.
     pending_doc: Option<Document>,
     /// What undo calls that change.
@@ -360,10 +366,25 @@ pub(crate) struct State {
     /// Where the stroke began (canvas pixels), for assisted drawing; the guide and view as the
     /// guide editor opened.
     assist_from: Option<Vec2>,
-    guide_before: Option<(procraft_engine::guide::Guide, Option<View>)>,
+    pub(crate) guide_before: Option<(procraft_engine::guide::Guide, Option<View>)>,
 }
 
 impl State {
+    /// The surround's grid in window pixels, shifted by `by` (where the window's corner lands on
+    /// the target).
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn surround_grid(&self, by: Vec2) -> procraft_gpu::SurroundGrid {
+        let s = self.display_scale;
+        let [x, y] = self.grid_origin.unwrap_or([0.5 * s, 0.5 * s]);
+        procraft_gpu::SurroundGrid {
+            spacing: GRID_SPACING_PT * s,
+            origin: [x + by.x, y + by.y],
+            top: GRID_TOP_PT * s + by.y,
+            width: GRID_WIDTH_PT * s,
+            color: GRID_LINE,
+        }
+    }
+
     /// The whole canvas fitted in the window, clear of the insets, turned by the right angle the
     /// view is nearest (fitting straightens a turned canvas, but keeps it on its side if it is).
     pub(crate) fn fitted_view(&self) -> View {
@@ -678,6 +699,7 @@ impl CanvasSession {
             frame_interval_ms: 0.0,
             error: None,
             display_scale: 2.0,
+            grid_origin: None,
             pending_doc: None,
             pending_name: None,
             info: project::ArtworkInfo {
@@ -987,6 +1009,17 @@ impl CanvasSession {
         if pixels_per_point.is_finite() && pixels_per_point > 0.0 {
             let mut st = self.shared.lock();
             st.display_scale = pixels_per_point;
+            self.shared.frame(&mut st);
+        }
+    }
+
+    /// The surround's grid is fixed to the glass as the canvas is: its lines run from the panel's
+    /// own corner, so the window gives where the middle of one of them lands (window pixels) as
+    /// the display turns.
+    pub fn set_grid_origin(&self, x: f32, y: f32) {
+        if x.is_finite() && y.is_finite() {
+            let mut st = self.shared.lock();
+            st.grid_origin = Some([x, y]);
             self.shared.frame(&mut st);
         }
     }

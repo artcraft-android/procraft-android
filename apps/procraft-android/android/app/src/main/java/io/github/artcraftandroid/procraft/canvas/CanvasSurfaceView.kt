@@ -309,12 +309,30 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     }
 
     private fun remember(width: Int, height: Int, rotation: Int) {
+        vm.session?.let { placeGrid(it, width, height, rotation) }
         vm.screenCentre = Offset(width / 2f, height / 2f)
         windowWidth = width
         windowHeight = height
         vm.windowSize = Offset(width.toFloat(), height.toFloat())
         vm.density = resources.displayMetrics.density
         windowRotation = rotation
+    }
+
+    /**
+     * The surround's grid is fixed to the glass as the canvas is: its 1 pt lines lie every 16 pt
+     * from the panel's own top-left corner in its natural orientation, so in the window a line's
+     * middle is half a point in from whichever corner that is.
+     */
+    private fun placeGrid(s: CanvasSession, width: Int, height: Int, rotation: Int) {
+        val half = 0.5f * resources.displayMetrics.density
+        val (nw, nh) = if (rotation % 2 == 0) width.toFloat() to height.toFloat() else height.toFloat() to width.toFloat()
+        val (x, y) = when (rotation) {
+            Surface.ROTATION_90 -> half to nw - half
+            Surface.ROTATION_180 -> nw - half to nh - half
+            Surface.ROTATION_270 -> nh - half to half
+            else -> half to half
+        }
+        s.setGridOrigin(x, y)
     }
 
     /**

@@ -387,6 +387,7 @@ fn without_its_environment_the_model_stands_on_the_surround_grid() {
     view.set_grid(Some(procraft_gpu::SurroundGrid {
         spacing: 8.0,
         origin: [0.0, 4.0],
+        top: 4.0,
         width: 2.0,
         color: [0.5, 0.5, 0.5],
     }));

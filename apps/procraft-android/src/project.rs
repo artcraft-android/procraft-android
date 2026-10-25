@@ -143,8 +143,15 @@ impl crate::State {
             name: self.name.clone(),
             document: self.doc.clone(),
             info: self.info.clone(),
-            // as shown, or as it opened if it hasn't been shown
-            view: self.view.as_ref().and_then(|v| SavedView::of(v, self.window_size)).or(self.saved_view),
+            // as shown (while the guide editor is open, as it was before it), or as it opened if it
+            // hasn't been shown
+            view: self
+                .guide_before
+                .as_ref()
+                .map_or(self.view, |(_, before)| *before)
+                .as_ref()
+                .and_then(|v| SavedView::of(v, self.window_size))
+                .or(self.saved_view),
             model: model.as_ref().map(|m| m.saved.clone()),
         };
         let mut layers = Vec::new();
@@ -155,7 +162,13 @@ impl crate::State {
                 let rgba = canvas.read_layer(gpu, layer.id).map_err(|e| file_error("reading a layer", e))?;
                 layers.push((layer.id, rgba));
             }
-            composite = Some(canvas.read_composite(gpu).map_err(|e| file_error("reading the picture", e))?);
+            // for the gallery's thumbnail: private layers left out
+            let private = self.doc.private_layers();
+            composite = Some(
+                canvas
+                    .read_composite_without(gpu, &mut self.doc, &private)
+                    .map_err(|e| file_error("reading the picture", e))?,
+            );
         } else {
             // not shown yet: what was opened is still what there is
             layers = self.pending_pixels.clone();
@@ -407,8 +420,11 @@ impl CanvasSession {
             let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else {
                 return Err(file_error("reading the picture", "the canvas is not shown yet"));
             };
-            canvas.render(gpu, &mut st.doc, None);
-            let composite = canvas.read_composite(gpu).map_err(|e| file_error("reading the picture", e))?;
+            // the file's preview leaves private layers out
+            let private = st.doc.private_layers();
+            let composite = canvas
+                .read_composite_without(gpu, &mut st.doc, &private)
+                .map_err(|e| file_error("reading the picture", e))?;
             let mut pixels = std::collections::HashMap::new();
             for l in st.doc.layers() {
                 if l.kind != LayerKind::Group {

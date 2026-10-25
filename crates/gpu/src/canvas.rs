@@ -375,12 +375,14 @@ struct SelectionGpu {
     bind: wgpu::BindGroup,
 }
 
-/// Grid lines around the canvas, fixed to the target: `width` pixels wide, every `spacing` pixels
-/// across and down from `origin` (none above it), in `color` (sRGB 0..1).
+/// Grid lines around the canvas, fixed to the target: `width` pixels wide (their edges smoothed),
+/// every `spacing` pixels across and down from one whose middle is at `origin`, none above `top`,
+/// in `color` (sRGB 0..1).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurroundGrid {
     pub spacing: f32,
     pub origin: [f32; 2],
+    pub top: f32,
     pub width: f32,
     pub color: [f32; 3],
 }
@@ -637,6 +639,7 @@ struct TransformUniform {
 struct SurroundUniform {
     v0: [f32; 4],
     v1: [f32; 4],
+    v2: [f32; 4],
 }
 
 const STROKE_NONE: u32 = 0;
@@ -3749,6 +3752,7 @@ impl Canvas {
             let offset = uniforms.push(&SurroundUniform {
                 v0: [g.spacing, g.origin[0], g.origin[1], g.width],
                 v1: [g.color[0], g.color[1], g.color[2], if srgb { 1.0 } else { 0.0 }],
+                v2: [target.surround[0], target.surround[1], target.surround[2], g.top],
             });
             (&*pipeline, offset)
         });
@@ -4246,6 +4250,30 @@ impl Canvas {
     /// The composite's pixels (premultiplied RGBA8, rows top to bottom). Waits for the GPU.
     pub fn read_composite(&self, gpu: &Gpu) -> Result<Vec<u8>, GpuError> {
         read_texture(gpu, &self.composite[0], self.width, self.height)
+    }
+
+    /// The composite's pixels as they would be without the layers `left_out` (the gallery's
+    /// thumbnail leaves private layers out); the canvas's own composite is made again after.
+    pub fn read_composite_without(
+        &mut self,
+        gpu: &Gpu,
+        doc: &mut Document,
+        left_out: &[LayerId],
+    ) -> Result<Vec<u8>, GpuError> {
+        self.render(gpu, doc, None);
+        if left_out.is_empty() {
+            return self.read_composite(gpu);
+        }
+        let mut shown = doc.clone();
+        for &id in left_out {
+            shown.set_visible(id, false);
+        }
+        self.invalidate();
+        self.render(gpu, &mut shown, None);
+        let read = self.read_composite(gpu);
+        self.invalidate();
+        self.render(gpu, doc, None);
+        read
     }
 
     /// A layer's pixels (premultiplied RGBA8). Waits for the GPU.

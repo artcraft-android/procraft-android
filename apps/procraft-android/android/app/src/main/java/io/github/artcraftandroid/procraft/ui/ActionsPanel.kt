@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -42,6 +43,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -65,7 +67,14 @@ private val ActionsWidth = 390.dp
 /** One row of the actions panel. Rows whose features are still to come show dimmed. */
 private sealed interface ActionRow
 
-private class Act(val label: String, val value: String? = null, val onClick: (() -> Unit)? = null) : ActionRow
+/** A button row; with a [private] label, a swipe to the left shows a second button doing it privately. */
+private class Act(
+    val label: String,
+    val value: String? = null,
+    val private: String? = null,
+    val onPrivate: (() -> Unit)? = null,
+    val onClick: (() -> Unit)? = null,
+) : ActionRow
 
 /** A switch row; [fixed] is a setting shown as it is, its name not dimmed. */
 private class Toggle(val label: String, val checked: Boolean, val fixed: Boolean = false, val onChange: ((Boolean) -> Unit)? = null) : ActionRow
@@ -139,11 +148,13 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             if (file != null) shareFile(context, file, if (jpeg) "image/jpeg" else "image/png") else dialog = "Share" to "The picture could not be exported."
         }
     }
+    // whether the picture being picked or taken goes on a private layer
+    var privately by remember { mutableStateOf(false) }
     val pickPhoto = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()) { uri ->
-        uri?.let { vm.insertPicture(it) }
+        uri?.let { vm.insertPicture(it, privately) }
     }
     val pickFile = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { vm.insertPicture(it) }
+        uri?.let { vm.insertPicture(it, privately) }
     }
     // the camera writes its picture to a file of ours, which goes in like a photo
     val photo = remember {
@@ -151,7 +162,19 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         FileProvider.getUriForFile(context, context.packageName + ".files", File(dir, "camera.jpg"))
     }
     val takePhoto = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.TakePicture()) { taken ->
-        if (taken) vm.insertPicture(photo)
+        if (taken) vm.insertPicture(photo, privately)
+    }
+    fun file(private: Boolean) {
+        privately = private
+        pickFile.launch(arrayOf("image/*"))
+    }
+    fun photoFrom(private: Boolean) {
+        privately = private
+        pickPhoto.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
+    }
+    fun camera(private: Boolean) {
+        privately = private
+        runCatching { takePhoto.launch(photo) }.onFailure { dialog = "Take a photo" to "No camera app is available." }
     }
     val model = vm.modelOpen
     val tabs = if (model) ModelTabs else Tabs
@@ -160,16 +183,25 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         takePhoto = { runCatching { takePhoto.launch(photo) }.onFailure { dialog = "Take a photo" to "No camera app is available." } },
     ) else when (shownTab) {
         0 -> listOf(
+            // swiped to the left, the first three and Paste put what they bring on a private layer
             listOf(
-                Act("Insert a file") { pickFile.launch(arrayOf("image/*")) },
-                Act("Insert a photo") {
-                    pickPhoto.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
-                },
-                Act("Take a photo") { runCatching { takePhoto.launch(photo) }.onFailure { dialog = "Take a photo" to "No camera app is available." } },
+                Act("Insert a file", private = "Insert a private file", onPrivate = { file(true) }) { file(false) },
+                Act("Insert a photo", private = "Insert a private photo", onPrivate = { photoFrom(true) }) { photoFrom(false) },
+                Act("Take a photo", private = "Take a private photo", onPrivate = { camera(true) }) { camera(false) },
                 Act("Add text") { vm.addText() },
             ),
             // Paste is grey until something has been cut or copied
-            listOf(Act("Cut") { vm.cutLayer() }, Act("Copy") { vm.copyLayer() }, Act("Copy canvas") { vm.copyCanvas() }, Act("Paste", onClick = if (vm.canPaste) ({ vm.paste() }) else null)),
+            listOf(
+                Act("Cut") { vm.cutLayer() },
+                Act("Copy") { vm.copyLayer() },
+                Act("Copy canvas") { vm.copyCanvas() },
+                Act(
+                    "Paste",
+                    private = "Paste Private",
+                    onPrivate = if (vm.canPaste) ({ vm.paste(private = true) }) else null,
+                    onClick = if (vm.canPaste) ({ vm.paste() }) else null,
+                ),
+            ),
         )
         1 -> listOf(
             listOf(Act("Crop & Resize") { vm.beginCrop() }),
@@ -562,8 +594,70 @@ private fun SlideRow(row: Slide) {
     }
 }
 
+/** How far a row with a private action slides open, that action's button and its look. */
+private val PrivateSlide = 248.dp
+private val PrivateWidth = 245.dp
+private val PrivateFill = Color(0xFF454545)
+private val PrivateInk = Color(0xFFA8A8A8)
+
+/**
+ * A row that a swipe to the left slides open, its private action's button coming in from the
+ * right; let go past halfway it stays open. A tap on the row closes it again.
+ */
+@Composable
+private fun PrivateSwipe(row: Act, content: @Composable () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val slide = remember { androidx.compose.animation.core.Animatable(0f) }
+    val full = with(androidx.compose.ui.platform.LocalDensity.current) { PrivateSlide.toPx() }
+    fun settle(open: Boolean) {
+        scope.launch { slide.animateTo(if (open) full else 0f, Motion.swipeSettle()) }
+    }
+    Box(
+        Modifier.fillMaxWidth().height(44.dp).clipToBounds()
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(
+                    onDragEnd = { settle(slide.value > full / 2f) },
+                    onDragCancel = { settle(false) },
+                ) { c, dx ->
+                    c.consume()
+                    scope.launch { slide.snapTo((slide.value - dx).coerceIn(0f, full)) }
+                }
+            },
+    ) {
+        Box(Modifier.fillMaxSize().graphicsLayer { translationX = -slide.value }) { content() }
+        if (slide.value > 0f) {
+            Box(Modifier.matchParentSize().clickable(remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) { settle(false) })
+            Box(
+                Modifier.align(Alignment.CenterEnd).width(PrivateWidth).fillMaxHeight()
+                    .graphicsLayer { translationX = full - slide.value }
+                    .clip(RoundedCornerShape(13.dp)).background(PrivateFill)
+                    .then(
+                        row.onPrivate?.let { act ->
+                            Modifier.clickable {
+                                scope.launch { slide.snapTo(0f) }
+                                act()
+                            }
+                        } ?: Modifier,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(row.private.orEmpty(), color = if (row.onPrivate != null) PrivateInk else Pc.ActionsDisabled, fontSize = 17.sp, maxLines = 1)
+            }
+        }
+    }
+}
+
 @Composable
 private fun ActionRowView(row: ActionRow) {
+    if (row is Act && row.private != null) {
+        PrivateSwipe(row) { ActionRowContent(row) }
+    } else {
+        ActionRowContent(row)
+    }
+}
+
+@Composable
+private fun ActionRowContent(row: ActionRow) {
     val enabled = when (row) {
         is Act -> row.onClick != null
         is Toggle -> row.onChange != null

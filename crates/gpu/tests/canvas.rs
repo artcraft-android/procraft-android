@@ -215,7 +215,7 @@ fn the_surround_grid_is_fixed_to_the_target() {
     let view = target.create_view(&Default::default());
     // a tiny canvas in the top-left corner, the rest surround with a line every 20 px from y = 10
     let to_screen = View::fit((10, 10), (10, 10)).to_screen();
-    let grid = SurroundGrid { spacing: 20.0, origin: [0.0, 10.0], width: 2.0, color: [1.0, 0.0, 0.0] };
+    let grid = SurroundGrid { spacing: 20.0, origin: [0.0, 10.0], top: 10.0, width: 2.0, color: [1.0, 0.0, 0.0] };
     canvas.render(
         &gpu,
         &mut doc,
@@ -238,6 +238,33 @@ fn the_surround_grid_is_fixed_to_the_target() {
     assert_eq!(pixel(&px, 100, 50, 45), [51, 51, 51, 255], "between lines");
     assert_eq!(pixel(&px, 100, 50, 5), [51, 51, 51, 255], "above the origin");
     assert_eq!(pixel(&px, 100, 5, 5), [255, 255, 255, 255], "the canvas covers the grid");
+    // a line wider than its pixels smooths into the ones beside it
+    let grid = SurroundGrid { spacing: 20.0, origin: [41.0, 0.0], top: 0.0, width: 8.0 / 3.0, color: [1.0, 0.0, 0.0] };
+    canvas.render(
+        &gpu,
+        &mut doc,
+        Some(Target {
+            view: &view,
+            format,
+            size: (100, 100),
+            to_screen,
+            surround: [0.2, 0.2, 0.2],
+            grid: Some(grid),
+            selection: None,
+            backdrop: None,
+            convert: None,
+            lut: None,
+        }),
+    );
+    let px = read(&gpu, &target, 100, 100);
+    assert_eq!(pixel(&px, 100, 40, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&px, 100, 41, 50), [255, 0, 0, 255]);
+    for x in [39, 42] {
+        let side = pixel(&px, 100, x, 50);
+        // a third of the way from the surround (51) to the line
+        assert!((side[0] as i32 - 119).abs() <= 2 && (side[1] as i32 - 34).abs() <= 2, "{x}: {side:?}");
+    }
+    assert_eq!(pixel(&px, 100, 43, 50), [51, 51, 51, 255]);
 }
 
 #[test]

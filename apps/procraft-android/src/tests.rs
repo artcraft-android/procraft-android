@@ -921,9 +921,33 @@ fn copy_cut_paste_and_flip() {
     assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
     // a photo comes in as straight colour, premultiplied
     let photo = crate::layers::ThumbnailImage { width: 2, height: 2, rgba: [255, 0, 0, 128].repeat(4) };
-    assert!(s.insert_image(photo).is_some());
+    assert!(s.insert_image(photo, false).is_some());
     let canvas = s.copy_canvas().unwrap();
     assert_eq!(canvas.rgba.len(), 100 * 100 * 4);
+}
+
+#[test]
+fn a_private_picture_shows_on_the_canvas_but_not_in_the_thumbnail() {
+    let Some(s) = session(100, 100) else { return };
+    let photo = crate::layers::ThumbnailImage { width: 100, height: 100, rgba: [255, 0, 0, 255].repeat(100 * 100) };
+    let id = s.insert_image(photo, true).unwrap();
+    assert!(s.layers().iter().any(|l| l.id == id && l.private));
+    assert_eq!(pixel(&s, 50, 50), [255, 0, 0, 255]);
+    let dir = std::env::temp_dir().join(format!("procraft-private-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let png = std::fs::read(dir.join("thumbnail.png")).unwrap();
+    let (w, h, rgba) = crate::brush_files::thumbnail_pixels(&png).unwrap();
+    let middle = ((h / 2 * w + w / 2) * 4) as usize;
+    assert_eq!(&rgba[middle..middle + 3], &[255, 255, 255], "the thumbnail shows the white background");
+    // the canvas itself still shows it, and a paste can be private too
+    assert_eq!(pixel(&s, 50, 50), [255, 0, 0, 255]);
+    let copied = s.copy_layer().unwrap();
+    let pasted = s.paste_private(copied).unwrap();
+    assert!(s.layers().iter().any(|l| l.id == pasted && l.private));
+    s.undo();
+    assert!(s.layers().iter().all(|l| l.id != pasted));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

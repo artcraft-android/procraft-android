@@ -1765,6 +1765,7 @@ impl State {
             }
         }
         self.carry_stroke();
+        let grid = self.surround_grid(Vec2::ZERO);
         let (Some(gpu), Some(scene)) = (self.gpu.as_ref(), self.scene.as_mut()) else { return };
         // a new environment: prefiltered now, shown behind the model unless that's turned off
         if let (Some(view), Some(panorama)) = (scene.view.as_mut(), scene.environment.take()) {
@@ -1780,13 +1781,7 @@ impl State {
         }
         let Some(view) = scene.view.as_mut() else { return };
         view.set_convert(convert);
-        let d = self.display_scale;
-        view.set_grid(Some(procraft_gpu::SurroundGrid {
-            spacing: crate::GRID_SPACING_PT * d,
-            origin: [0.0, crate::GRID_TOP_PT * d],
-            width: d,
-            color: crate::GRID_LINE,
-        }));
+        view.set_grid(Some(grid));
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("3D view") });
         // each set's texture, its smaller levels made again when its picture has changed (the
         // current part's colour is the session's own unless a channel is painted on)

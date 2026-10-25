@@ -138,6 +138,10 @@ object Pc {
     // over white); the thumbs opaque (#a6a6a6 over white and over the dark surround alike)
     val SideBar: Color get() = pick(0xE7171717, 0xF2E8E8E8)
     val SliderTrack: Color get() = pick(0xC93E3E3E, 0xFFEDEDED)
+    // a lighter rim round each track, more of what is behind showing through it (#5a5a5a over the
+    // dark surround, #969696 over white)
+    val SliderRim: Color get() = pick(0xB96E6E6E, 0xFFEDEDED)
+    val SliderRimWidth = 0.8.dp
     val SliderThumb: Color get() = pick(0xFFA6A6A6, 0xFFF8F8F8)
     val SideGlyph: Color get() = pick(0xFF969696, 0xFF646464)
     val SideGlyphDisabled: Color get() = pick(0x1AFFFFFF, 0x33000000)
