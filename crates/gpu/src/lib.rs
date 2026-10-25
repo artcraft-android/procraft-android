@@ -7,6 +7,7 @@
 mod canvas;
 mod lighting;
 mod scene;
+mod sphere;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -17,6 +18,7 @@ pub use canvas::{
 };
 pub use lighting::Lighting;
 pub use scene::{Light, MOST_LIGHTS, MeshView, Orbit, SurfaceMap};
+pub use sphere::{SphereLook, SpherePreview, preview_environment};
 pub use wgpu;
 
 #[derive(Debug, thiserror::Error)]

@@ -328,6 +328,16 @@ impl Default for Shape {
     }
 }
 
+/// What a brush paints a model's metalness or roughness through, tiled like a grain: white takes
+/// the brush's amount, black none of it. Neither image: the amount all over.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MaterialSource {
+    /// A grain image (see `textures::grain`), or none.
+    pub image: Option<u32>,
+    /// An image of the user's own, in place of `image`.
+    pub source: Option<Source>,
+}
+
 /// The texture inside the stroke.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Grain {
@@ -416,6 +426,9 @@ pub struct Brush {
     pub touch_taper: Taper,
     pub shape: Shape,
     pub grain: Grain,
+    /// What it paints a model's metalness and roughness through (their amounts are studio controls).
+    pub metallic: MaterialSource,
+    pub roughness: MaterialSource,
     pub tilt: Tilt,
     pub rendering: Rendering,
     /// Brush studio controls the engine does not draw yet, by key (see `studio`).
@@ -429,16 +442,19 @@ pub struct Brush {
     pub author: Option<Author>,
     /// What resetting the brush puts back: set the first time it is opened in the studio.
     pub reset_point: Option<ResetPoint>,
-    /// The stock images its file named for its shape and grain, which our own stand in for.
+    /// The stock images its file named for its shape, grain and materials, which our own stand in
+    /// for.
     pub stock: StockImages,
 }
 
-/// The stock images a brush's file names for its shape and grain (drawn with ours standing in),
-/// kept so that they are named again when the brush is written out.
+/// The stock images a brush's file names for its shape, grain, metalness and roughness (drawn with
+/// ours standing in), kept so that they are named again when the brush is written out.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StockImages {
     pub shape: Option<StockImage>,
     pub grain: Option<StockImage>,
+    pub metallic: Option<StockImage>,
+    pub roughness: Option<StockImage>,
 }
 
 /// A stock image as a brush file names it, and whether the file has it inverted.
@@ -563,6 +579,8 @@ impl Brush {
             touch_taper: Taper { start: 0.1, end: 0.1, size: 0.6, opacity: 0.0 },
             shape: Shape::default(),
             grain: Grain::default(),
+            metallic: MaterialSource::default(),
+            roughness: MaterialSource::default(),
             tilt: Tilt::default(),
             rendering: Rendering::BuildUp,
             extra: BTreeMap::new(),

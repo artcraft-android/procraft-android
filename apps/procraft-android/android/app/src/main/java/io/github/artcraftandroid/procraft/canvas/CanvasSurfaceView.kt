@@ -714,11 +714,18 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                         // a tap off the nodes nudges the content a pixel towards it
                         vm.transformMoved(s.transformNudge(e.x, e.y))
                     } else if (e.eventTime - tapStart <= TAP_MS) {
-                        // a tap on a node types its numbers: the rotation handle its angle, the others the size
-                        when (transformHandle) {
-                            TransformHandle.Rotate -> vm.transformNumeric = CanvasViewModel.TransformNumeric(true, Offset(downX, downY))
-                            is TransformHandle.Corner, is TransformHandle.Edge -> vm.transformNumeric = CanvasViewModel.TransformNumeric(false, Offset(downX, downY))
-                            else -> Unit
+                        // a tap on a node types its numbers beside it: the rotation handle its angle, the others the size
+                        val shown = vm.transformBox?.let { boxOnScreen(it, vm.viewMatrix, resources.displayMetrics.density) }
+                        val node = when (val h = transformHandle) {
+                            TransformHandle.Rotate -> shown?.rotate
+                            is TransformHandle.Corner -> shown?.corners?.getOrNull(h.index.toInt())
+                            is TransformHandle.Edge -> shown?.edges?.getOrNull(h.index.toInt())
+                            else -> null
+                        }
+                        if (shown != null && node != null) {
+                            val middle = shown.corners.fold(Offset.Zero) { sum, c -> sum + c } / 4f
+                            val right = node.x > middle.x + 1f
+                            vm.transformNumeric = CanvasViewModel.TransformNumeric(transformHandle == TransformHandle.Rotate, node, right)
                         }
                     }
                     Mode.NONE -> Unit

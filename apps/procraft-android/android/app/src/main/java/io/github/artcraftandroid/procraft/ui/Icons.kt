@@ -115,6 +115,32 @@ object PcIcons {
         )
     }
 
+    /** A keypad: two rows of three keys over a wide key and one more. */
+    val Keypad by lazy {
+        val key = { x: Float, y: Float, w: Float -> Part("M${x + 0.8f} ${y}h${w - 1.6f}a0.8 0.8 0 0 1 0.8 0.8v2.6a0.8 0.8 0 0 1-0.8 0.8h-${w - 1.6f}a0.8 0.8 0 0 1-0.8-0.8v-2.6a0.8 0.8 0 0 1 0.8-0.8z", 0f, true) }
+        val cells = (0 until 6).map { k -> key(7.5f + (k % 3) * 5.4f, 8f + (k / 3) * 5.4f, 4.2f) } +
+            listOf(key(7.5f, 18.8f, 9.6f), key(18.3f, 18.8f, 4.2f))
+        icon("keypad", *cells.toTypedArray(), viewport = 30f)
+    }
+    /** A pen's tip pressed down on a surface. */
+    val PenPressure by lazy {
+        icon(
+            "pen-pressure",
+            Part("M11.6 5.2L18.4 5.2L17 14.6L13 14.6Z", 0f, true),
+            Part("M13.3 15.8L16.7 15.8L15.35 22.2L14.65 22.2Z", 0f, true),
+            Part("M8 23.4a7 1.9 0 1 0 14 0a7 1.9 0 1 0 -14 0Z", 0f, true),
+            viewport = 30f,
+        )
+    }
+    /** A pen leaning over, its tip down to the left. */
+    val PenTilt by lazy {
+        icon(
+            "pen-tilt",
+            Part("M17.73 6.46L22.94 10.83L15.83 17.13L12.76 14.56Z", 0f, true),
+            Part("M12.22 15.67L14.82 17.85L9.68 21.89L9.14 21.44Z", 0f, true),
+            viewport = 30f,
+        )
+    }
     /** Nine small squares. */
     val MenuGrid by lazy {
         val cells = (0 until 9).map { k ->
@@ -474,6 +500,25 @@ object PcIcons {
     // the shape and grain editors' Import menu
     val SourcePhoto by lazy { outline("source-photo", 1.6f, "M4 5.5h16v13H4z", "M4 16l5-5 4 4 2.5-2.5L20 17", "M15.5 9.5a1 1 0 1 0 0-.01") }
     val SourceBooks by lazy { outline("source-books", 1.6f, "M4.5 4.5h3.5v15H4.5z", "M9.5 4.5H13v15H9.5z", "M14.5 5.5l3.3-1 3.7 14.2-3.3 1z") }
+    // filled, for the Import menu's rows
+    /** A picture (a landscape cut out of it) in front of another. */
+    val SourcePhotoFill by lazy {
+        icon(
+            "source-photo-fill",
+            Part("M4.5 8h12.5a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H4.5A1.5 1.5 0 0 1 3 18.5v-9A1.5 1.5 0 0 1 4.5 8zM5 18l4-4 2.8 2.8 1.7-1.7 3 2.9zM14.2 11.2a1.2 1.2 0 1 0 0.01 0z", 0f, true, evenOdd = true),
+            Part("M6.5 5.5h13a1.5 1.5 0 0 1 1.5 1.5v9.5", 1.6f, false),
+        )
+    }
+    val FolderFill by lazy { shape("folder-fill", 24f, "M4.5 5h4.3l2 2h8.7a1.5 1.5 0 0 1 1.5 1.5v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18V6.5A1.5 1.5 0 0 1 4.5 5z") }
+    /** Two books standing and one leaning. */
+    val SourceBooksFill by lazy {
+        icon(
+            "source-books-fill",
+            Part("M4.6 4.5h2.8a0.6 0.6 0 0 1 0.6 0.6v13.8a0.6 0.6 0 0 1-0.6 0.6H4.6a0.6 0.6 0 0 1-0.6-0.6V5.1a0.6 0.6 0 0 1 0.6-0.6z", 0f, true),
+            Part("M9.6 4.5h2.8a0.6 0.6 0 0 1 0.6 0.6v13.8a0.6 0.6 0 0 1-0.6 0.6H9.6a0.6 0.6 0 0 1-0.6-0.6V5.1a0.6 0.6 0 0 1 0.6-0.6z", 0f, true),
+            Part("M14.4 5.7l2.7-0.8a0.6 0.6 0 0 1 0.75 0.42l3.6 13.4a0.6 0.6 0 0 1-0.42 0.74l-2.7 0.8a0.6 0.6 0 0 1-0.74-0.42L14 6.4a0.6 0.6 0 0 1 0.4-0.7z", 0f, true),
+        )
+    }
     val Clip by lazy { outline("clip", 1.7f, "M8 4v9a4 4 0 0 0 4 4h6", "M15 14l3 3-3 3") }
 
     // the transform toolbar: its four ways (shown 30 across) and its buttons

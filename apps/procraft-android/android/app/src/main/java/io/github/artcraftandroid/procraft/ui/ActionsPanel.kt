@@ -699,7 +699,7 @@ private fun ActionRowContent(row: ActionRow) {
  * into a clear lens as it slides across, the track's colour fading under it, then settles white.
  */
 @Composable
-internal fun Switch(checked: Boolean, enabled: Boolean, fixedTrack: Color = Pc.SwitchFixed, fixedKnob: Color = Pc.SwitchFixedKnob) {
+internal fun Switch(checked: Boolean, enabled: Boolean, fixedTrack: Color = Pc.SwitchFixed, fixedKnob: Color = Pc.SwitchFixedKnob, offTrack: Color = Pc.SwitchOff) {
     val on = androidx.compose.animation.core.animateFloatAsState(if (checked) 1f else 0f, Motion.switchKnob(), label = "knob").value
     val lens = remember { androidx.compose.animation.core.Animatable(0f) }
     var flipped by remember { mutableStateOf(false) }
@@ -714,7 +714,7 @@ internal fun Switch(checked: Boolean, enabled: Boolean, fixedTrack: Color = Pc.S
         lens.animateTo(0f, Motion.switchSettle())
     }
     val g = lens.value
-    val track = if (!enabled) fixedTrack else androidx.compose.ui.graphics.lerp(Pc.SwitchOff, Pc.Accent, on)
+    val track = if (!enabled) fixedTrack else androidx.compose.ui.graphics.lerp(offTrack, Pc.Accent, on)
     // not clipped to the track: the swollen knob spills over it
     Box(Modifier.size(63.dp, 28.dp)) {
         Box(Modifier.matchParentSize().clip(CircleShape).background(track))

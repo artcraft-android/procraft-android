@@ -4,7 +4,7 @@
 
 use std::f32::consts::PI;
 
-use crate::brush::{BRUSH_BEHIND, Brush, FLOW_POWER, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering};
+use crate::brush::{BRUSH_BEHIND, Brush, FLOW_POWER, GRAIN_LINEAR_HEIGHT, GrainMode, PressureCurve, Rendering};
 use crate::document::BlendMode;
 
 /// The most size (in brush-file units, see [`Brush::size_unit`]) the size controls can reach, for
@@ -52,6 +52,12 @@ const STARTS: &[(&str, f32)] = &[
     ("preview_pressure_scale", 0.5),
     // the hover outline in contrasting rings
     ("cursor_outline", 1.0),
+    // half rough, its height halfway, each source tiled at a tenth (the file's 0.16)
+    ("roughness_amount", 0.5),
+    ("height_amount", 0.5),
+    ("metallic_scale", 0.1),
+    ("roughness_scale", 0.1),
+    ("height_scale", 0.1),
 ];
 
 /// The controls drawn from the brush's own fields (the others are kept in its `extra`).
@@ -342,9 +348,138 @@ impl Brush {
     }
 }
 
+/// A studio slider's own pressure curve: one of the brush's [`PressureCurve`]s, or its size's or
+/// opacity's own response to pressure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SliderCurve {
+    Own(PressureCurve),
+    Size,
+    Opacity,
+}
+
+/// A studio slider's own tilt: the switch that turns it on (none: the slider is the tilt's own
+/// amount) and the control holding the angle it starts from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SliderTilt {
+    pub switch: Option<&'static str>,
+    pub angle: &'static str,
+}
+
+/// What a studio slider's keypad offers besides typing its value: its own pressure curve and its
+/// own tilt, those it has (as the reference's keypads show them).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SliderExtras {
+    pub curve: Option<SliderCurve>,
+    pub tilt: Option<SliderTilt>,
+}
+
+/// The extras of the slider for control `key`.
+pub fn slider_extras(key: &str) -> SliderExtras {
+    use PressureCurve as P;
+    use SliderCurve::Own;
+    let tilt = |switch, angle| Some(SliderTilt { switch: Some(switch), angle });
+    let angle_only = |angle| Some(SliderTilt { switch: None, angle });
+    let (curve, tilt) = match key {
+        "spacing_jitter" => (Some(Own(P::SpacingJitter)), None),
+        "jitter_lateral" => (Some(Own(P::LateralJitter)), tilt("jitter_lateral_tilt", "jitter_lateral_tilt_angle")),
+        "jitter_linear" => (Some(Own(P::LinearJitter)), tilt("jitter_linear_tilt", "jitter_linear_tilt_angle")),
+        "scatter" => (Some(Own(P::Scatter)), None),
+        "count" => (Some(Own(P::Count)), tilt("count_tilt", "count_tilt_angle")),
+        "count_jitter" => (Some(Own(P::CountJitter)), None),
+        "pressure_roundness" => (Some(Own(P::Roundness)), None),
+        "tilt_roundness" => (None, angle_only("roundness_tilt_angle")),
+        "roundness_jitter_y" => (Some(Own(P::RoundnessJitterY)), None),
+        "roundness_jitter_x" => (Some(Own(P::RoundnessJitterX)), None),
+        "grain_movement" => (Some(Own(P::GrainMovement)), None),
+        "grain_scale" => (Some(Own(P::GrainScale)), None),
+        "grain_zoom" => (Some(Own(P::GrainZoom)), None),
+        "grain_depth" => (Some(Own(P::GrainDepth)), tilt("grain_depth_tilt", "grain_depth_tilt_angle")),
+        "grain_depth_jitter" => (Some(Own(P::GrainDepthJitter)), None),
+        "wet_dilution" => (Some(Own(P::Dilution)), None),
+        "wet_charge" => (Some(Own(P::Charge)), None),
+        "wet_attack" => (Some(Own(P::Attack)), tilt("attack_tilt", "attack_tilt_angle")),
+        "wet_pull" => (Some(Own(P::WetPull)), None),
+        "wet_grade" => (Some(Own(P::WetGrade)), None),
+        "wet_blur" => (Some(Own(P::WetBlur)), None),
+        "wet_blur_jitter" => (Some(Own(P::WetBlurJitter)), None),
+        "wet_jitter" => (Some(Own(P::WetnessJitter)), None),
+        "stamp_hue" => (Some(Own(P::HueJitter)), tilt("stamp_hue_tilt", "stamp_hue_tilt_angle")),
+        "stamp_saturation" => {
+            (Some(Own(P::SaturationJitter)), tilt("stamp_saturation_tilt", "stamp_saturation_tilt_angle"))
+        }
+        "stamp_lightness" => {
+            (Some(Own(P::LightnessJitter)), tilt("stamp_lightness_tilt", "stamp_lightness_tilt_angle"))
+        }
+        "stamp_darkness" => (Some(Own(P::DarknessJitter)), tilt("stamp_darkness_tilt", "stamp_darkness_tilt_angle")),
+        "stamp_secondary" => {
+            (Some(Own(P::SecondaryJitter)), tilt("stamp_secondary_tilt", "stamp_secondary_tilt_angle"))
+        }
+        "pressure_hue" => (Some(Own(P::Hue)), None),
+        "pressure_saturation" => (Some(Own(P::Saturation)), None),
+        "pressure_brightness" => (Some(Own(P::Brightness)), None),
+        "pressure_secondary" => (Some(Own(P::Secondary)), None),
+        "tilt_hue" => (None, angle_only("hue_tilt_angle")),
+        "tilt_saturation" => (None, angle_only("saturation_tilt_angle")),
+        "tilt_brightness" => (None, angle_only("brightness_tilt_angle")),
+        "tilt_secondary" => (None, angle_only("secondary_tilt_angle")),
+        "jitter_size" => (Some(Own(P::SizeJitter)), None),
+        "jitter_opacity" => (Some(Own(P::OpacityJitter)), None),
+        // the stylus page's pressure: size, the opacity (kept as "pressure_flow") and the flow
+        // (kept as "pressure_opacity"), bleed; its tilt the angles each starts from
+        "pressure_size" => (Some(SliderCurve::Size), None),
+        "pressure_flow" => (Some(SliderCurve::Opacity), None),
+        "pressure_opacity" => (Some(Own(P::Flow)), None),
+        "pressure_bleed" => (Some(Own(P::Bleed)), None),
+        "tilt_opacity" => (None, angle_only("opacity_tilt_angle")),
+        "tilt_gradation" => (None, angle_only("gradation_tilt_angle")),
+        "tilt_bleed" => (None, angle_only("bleed_tilt_angle")),
+        "tilt_size" => (None, angle_only("size_tilt_angle")),
+        "smudge_pull" => (Some(Own(P::SmudgePull)), None),
+        _ => (None, None),
+    };
+    SliderExtras { curve, tilt }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_slider_tilt_is_a_control_the_brush_keeps() {
+        let keys = [
+            "jitter_lateral",
+            "jitter_linear",
+            "count",
+            "tilt_roundness",
+            "grain_depth",
+            "wet_attack",
+            "stamp_hue",
+            "stamp_saturation",
+            "stamp_lightness",
+            "stamp_darkness",
+            "stamp_secondary",
+            "tilt_hue",
+            "tilt_saturation",
+            "tilt_brightness",
+            "tilt_secondary",
+            "tilt_opacity",
+            "tilt_gradation",
+            "tilt_bleed",
+            "tilt_size",
+        ];
+        for k in keys {
+            let tilt = slider_extras(k).tilt.unwrap_or_else(|| panic!("{k} has no tilt"));
+            let mut b = Brush::round_pen();
+            b.set_setting(tilt.angle, 0.3);
+            assert!((b.setting(tilt.angle) - 0.3).abs() < 1e-4, "{k}");
+            if let Some(switch) = tilt.switch {
+                b.set_setting(switch, 1.0);
+                assert_eq!(b.setting(switch), 1.0, "{k}");
+            }
+        }
+        // a slider without extras has none
+        assert_eq!(slider_extras("spacing"), SliderExtras::default());
+    }
 
     #[test]
     fn the_linear_jitters_tilt_follows_the_laterals_unless_it_has_its_own() {

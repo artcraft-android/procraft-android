@@ -677,19 +677,25 @@ private fun Palettes(vm: CanvasViewModel, c: ColorPick, short: Boolean) {
     }
 }
 
-/** The ... button of a palette card and its menu: Set as active, Duplicate, Share; Delete. */
+/**
+ * The ... button of a palette card and its menu: Set as active (unless it is), Duplicate, Share;
+ * Delete.
+ */
 @Composable
 private fun PaletteMenu(vm: CanvasViewModel, i: Int) {
     var open by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
+    // the menu's right edge 5 left of the button, its top 25 below the button's (2.5 below its middle)
+    val (gap, drop) = with(androidx.compose.ui.platform.LocalDensity.current) { 5.dp.roundToPx() to 25.dp.roundToPx() }
     Box(Modifier.padding(end = 8.5.dp).size(30.dp, 44.dp).clickable { open = true }, contentAlignment = Alignment.Center) {
         Icon(PcIcons.More, contentDescription = "More", tint = Pc.PanelTitle, modifier = Modifier.size(20.dp))
-        // under the button, its right edge near the button's
-        LibraryMenu(open, androidx.compose.ui.graphics.TransformOrigin(1f, 0f), MenuPlace { a, size -> IntOffset(a.right - size.width, a.bottom) }, onDismiss = { open = false }, overPanel = true) {
-            MenuItem(PcIcons.MenuCheckCircle, "Set as active") {
-                open = false
-                vm.chooseDefaultPalette(i)
+        LibraryMenu(open, androidx.compose.ui.graphics.TransformOrigin(1f, 0f), MenuPlace { a, size -> IntOffset(a.left - gap - size.width, a.top + drop) }, onDismiss = { open = false }, overPanel = true) {
+            if (vm.defaultPalette != i) {
+                MenuItem(PcIcons.MenuCheckCircle, "Set as active") {
+                    open = false
+                    vm.chooseDefaultPalette(i)
+                }
             }
             MenuItem(PcIcons.MenuDuplicate, "Duplicate") {
                 open = false

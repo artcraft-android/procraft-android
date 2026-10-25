@@ -270,7 +270,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 GuideEditor(vm)
                 LightingStudio(vm)
                 BrushStudio(vm)
-                PadMenu(vm)
+                PadMenu(vm, maxWidth)
             }
         }
     }

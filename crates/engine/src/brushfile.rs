@@ -35,6 +35,9 @@ pub struct BrushFile {
     pub pressure_curves: Vec<(PressureCurve, Vec<Vec2>)>,
     pub shape: Texture,
     pub grain: Texture,
+    /// What it paints a model's metalness and roughness through.
+    pub metallic: Texture,
+    pub roughness: Texture,
     /// Where the size and opacity sliders start when it is picked, 0..1.
     pub paint_size: f32,
     pub paint_opacity: f32,
@@ -268,6 +271,7 @@ const PLAIN: &[(&str, &str, Kept)] = &[
     ("stamp_lightness_tilt", "lightnessJitterTilt", Kept::Switch),
     ("stamp_lightness_tilt_angle", "lightnessJitterTiltAngle", Kept::Same),
     ("stamp_darkness_tilt", "darknessJitterTilt", Kept::Switch),
+    ("stamp_darkness_tilt_angle", "darknessJitterTiltAngle", Kept::Same),
     ("stamp_secondary_tilt", "secondaryColorJitterTilt", Kept::Switch),
     ("stamp_secondary_tilt_angle", "secondaryColorJitterTiltAngle", Kept::Same),
     ("attack_tilt", "attackTilt", Kept::Switch),
@@ -295,6 +299,14 @@ const PLAIN: &[(&str, &str, Kept)] = &[
     ("preview_pressure_scale", "previewPressureScale", Kept::Times(2.0)),
     ("preview_wet_mix", "previewWetMixEnabled", Kept::Switch),
     ("preview_tilt", "previewTiltEnabled", Kept::Switch),
+    // the materials it paints on a model: metalness, roughness and height, each source tiled as
+    // the grain is
+    ("metallic_amount", "metallicAmount", Kept::Same),
+    ("metallic_scale", "metallicScale", Kept::Squared16),
+    ("roughness_amount", "roughnessAmount", Kept::Same),
+    ("roughness_scale", "roughnessScale", Kept::Squared16),
+    ("height_amount", "heightAmount", Kept::Same),
+    ("height_scale", "heightScale", Kept::Squared16),
     ("pressure_size_response", "dynamicsPressureSizeSpeed", Kept::Same),
     ("pressure_opacity_response", "dynamicsPressureOpacitySpeed", Kept::Same),
     ("pressure_bleed_response", "dynamicsPressureBleedSpeed", Kept::Same),
@@ -603,6 +615,8 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         pressure_curves,
         shape: texture("bundledShapePath", "Shape.png", "shapeInverted"),
         grain: texture("bundledGrainPath", "Grain.png", "textureInverted"),
+        metallic: texture("bundledMetallicPath", "Metallic.png", "metallicGrainInverted"),
+        roughness: texture("bundledRoughnessPath", "Roughness.png", "roughnessGrainInverted"),
         paint_size: f.num("paintSize").unwrap_or(0.5) as f32,
         paint_opacity: f.num("paintOpacity").unwrap_or(1.0) as f32,
         notches,
@@ -622,6 +636,9 @@ pub struct Pictures<'a> {
     pub shape_png: &'a [u8],
     /// The grain (PNG), or none for no grain.
     pub grain_png: Option<&'a [u8]>,
+    /// The metalness and roughness sources (PNG), or none for the amount all over.
+    pub metallic_png: Option<&'a [u8]>,
+    pub roughness_png: Option<&'a [u8]>,
     /// The brush's preview stroke (PNG).
     pub thumbnail_png: &'a [u8],
     /// Its author's picture and signature (PNG), if it has them.
@@ -723,6 +740,8 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
     for (stock, path, inverted) in [
         (&brush.stock.shape, "bundledShapePath", "shapeInverted"),
         (&brush.stock.grain, "bundledGrainPath", "textureInverted"),
+        (&brush.stock.metallic, "bundledMetallicPath", "metallicGrainInverted"),
+        (&brush.stock.roughness, "bundledRoughnessPath", "roughnessGrainInverted"),
     ] {
         match stock {
             Some(s) => {
@@ -771,8 +790,14 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
     let archive = b.finish(root);
     zip.add(&format!("{prefix}Brush.archive"), &archive);
     zip.add(&format!("{prefix}Shape.png"), pictures.shape_png);
-    if let Some(grain) = pictures.grain_png {
-        zip.add(&format!("{prefix}Grain.png"), grain);
+    for (name, png) in [
+        ("Grain.png", pictures.grain_png),
+        ("Metallic.png", pictures.metallic_png),
+        ("Roughness.png", pictures.roughness_png),
+    ] {
+        if let Some(png) = png {
+            zip.add(&format!("{prefix}{name}"), png);
+        }
     }
     zip.add(&format!("{prefix}QuickLook/Thumbnail.png"), pictures.thumbnail_png);
     for (path, png) in [(AUTHOR_PICTURE, pictures.author_png), (SIGNATURE, pictures.signature_png)] {
@@ -811,6 +836,8 @@ mod tests {
         brush.set_setting("count", 4.0 / 15.0);
         brush.set_setting("wet_pull", 0.6);
         brush.set_setting("input_style", 1.0);
+        brush.set_setting("metallic_amount", 0.7);
+        brush.set_setting("roughness_scale", 0.3);
         brush.notches.sizes[0] = vec![0.25, 0.5];
         brush.size_curve = crate::curve::Curve::new(&[Vec2::new(0.0, 0.0), Vec2::new(0.42, 0.2), Vec2::new(1.0, 1.0)]);
         let file = write(
@@ -819,6 +846,8 @@ mod tests {
             &Pictures {
                 shape_png: b"shape",
                 grain_png: Some(b"grain"),
+                metallic_png: Some(b"metal"),
+                roughness_png: None,
                 thumbnail_png: b"thumb",
                 author_png: Some(b"face"),
                 signature_png: None,
@@ -831,6 +860,8 @@ mod tests {
         assert_eq!(back.signature, None);
         assert_eq!(back.shape, Texture::Image { bytes: b"shape".to_vec(), inverted: false });
         assert_eq!(back.grain, Texture::Image { bytes: b"grain".to_vec(), inverted: false });
+        assert_eq!(back.metallic, Texture::Image { bytes: b"metal".to_vec(), inverted: false });
+        assert_eq!(back.roughness, Texture::None);
         assert_eq!(back.notches.sizes[0], vec![0.25, 0.5]);
         let size_curve = back.size_curve.as_ref().unwrap();
         assert!((size_curve[1] - Vec2::new(0.42, 0.2)).length() < 1e-5);
@@ -854,6 +885,10 @@ mod tests {
             "flow",
             "pressure_size",
             "grain_scale",
+            "metallic_amount",
+            "roughness_amount",
+            "roughness_scale",
+            "metallic_scale",
         ] {
             assert!(
                 (again.setting(key) - brush.setting(key)).abs() < 1e-3,
@@ -873,6 +908,8 @@ mod tests {
             let pictures = Pictures {
                 shape_png: b"s",
                 grain_png: None,
+                metallic_png: None,
+                roughness_png: None,
                 thumbnail_png: b"t",
                 author_png: None,
                 signature_png: None,
@@ -892,8 +929,15 @@ mod tests {
         let mut brush = Brush::round_pen();
         brush.set_setting("blend_mode", BRUSH_BEHIND as f32);
         brush.set_setting("burnt_blend", BRUSH_BEHIND as f32);
-        let pictures =
-            Pictures { shape_png: b"s", grain_png: None, thumbnail_png: b"t", author_png: None, signature_png: None };
+        let pictures = Pictures {
+            shape_png: b"s",
+            grain_png: None,
+            metallic_png: None,
+            roughness_png: None,
+            thumbnail_png: b"t",
+            author_png: None,
+            signature_png: None,
+        };
         let back = read(&write(&brush, "", &pictures)).unwrap();
         for key in ["blend_mode", "burnt_blend"] {
             let mode = back.settings.iter().find(|(k, _)| k == key).map(|(_, v)| *v);
@@ -923,6 +967,8 @@ mod tests {
         let pictures = || Pictures {
             shape_png: b"shape",
             grain_png: None,
+            metallic_png: None,
+            roughness_png: None,
             thumbnail_png: b"thumb",
             author_png: None,
             signature_png: None,
@@ -946,8 +992,15 @@ mod tests {
         let bend = Curve::new(&[Vec2::new(0.0, 0.0), Vec2::new(0.5, 0.8), Vec2::new(1.0, 1.0)]);
         brush.pressure_curves.set(PressureCurve::Count, Some(bend));
         brush.pressure_curves.set(PressureCurve::HueJitter, Some(Curve::linear()));
-        let pictures =
-            Pictures { shape_png: b"s", grain_png: None, thumbnail_png: b"t", author_png: None, signature_png: None };
+        let pictures = Pictures {
+            shape_png: b"s",
+            grain_png: None,
+            metallic_png: None,
+            roughness_png: None,
+            thumbnail_png: b"t",
+            author_png: None,
+            signature_png: None,
+        };
         let back = read(&write(&brush, "", &pictures)).unwrap();
         let kinds: Vec<PressureCurve> = back.pressure_curves.iter().map(|(k, _)| *k).collect();
         assert_eq!(kinds, [PressureCurve::Count, PressureCurve::HueJitter]);

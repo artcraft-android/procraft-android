@@ -1,12 +1,16 @@
 //! The brush studio: the brush the current tool uses, edited control by control while the studio
 //! is open (strokes and previews use it as it is), kept or put back when it closes.
 
-use procraft_engine::brush::{Brush, ResetPoint, Source};
-use procraft_engine::curve::Curve;
-use procraft_engine::geom::Vec2;
-use procraft_engine::textures;
+use std::sync::Arc;
 
-use crate::{CanvasSession, State};
+use procraft_engine::brush::{Brush, MaterialSource, ResetPoint, Source, StockImage};
+use procraft_engine::curve::Curve;
+use procraft_engine::geom::{Affine, Vec2};
+use procraft_engine::studio::{MAX_GRAIN_SCALE, SliderCurve};
+use procraft_engine::textures;
+use procraft_gpu::{SphereLook, SpherePreview, wgpu};
+
+use crate::{CanvasSession, PenSample, PointerKind, State, ToolKind};
 
 /// The curve through `points` (x, y pairs on the unit square) at `count` (2 to 1024) evenly
 /// spaced x from 0 to 1: the curve as strokes apply it, for drawing.
@@ -50,6 +54,46 @@ pub fn repeatable_source(
     let repeat =
         textures::Repeat { scale, rotation: rotation_degrees.to_radians(), overlap, hardness, mirror, pyramid };
     textures::repeatable(&pixels, repeat)
+}
+
+/// Which of a brush's images the studio's editors change: its shape, its grain, or what it paints a
+/// model's metalness or roughness through (tiled as the grain is, from the same library).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SourceKind {
+    Shape,
+    Grain,
+    Metallic,
+    Roughness,
+}
+
+impl SourceKind {
+    /// Whether it draws from the grain images (all but the shape).
+    fn grain_like(self) -> bool {
+        self != SourceKind::Shape
+    }
+}
+
+/// What a studio slider's keypad offers besides typing its value: its own pressure curve
+/// (`pressure`), its own tilt (`tilt`) with the control of the switch that turns it on (empty: the
+/// slider is the tilt's own amount, always on) and of the angle it starts from.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct SliderExtrasInfo {
+    pub pressure: bool,
+    pub tilt: bool,
+    pub tilt_switch: String,
+    pub tilt_angle: String,
+}
+
+/// The keypad extras of the slider for studio control `key`.
+#[uniffi::export]
+pub fn slider_extras(key: String) -> SliderExtrasInfo {
+    let e = procraft_engine::studio::slider_extras(&key);
+    SliderExtrasInfo {
+        pressure: e.curve.is_some(),
+        tilt: e.tilt.is_some(),
+        tilt_switch: e.tilt.and_then(|t| t.switch).unwrap_or("").to_owned(),
+        tilt_angle: e.tilt.map_or("", |t| t.angle).to_owned(),
+    }
 }
 
 /// The edge of a shape or grain image, pixels.
@@ -150,56 +194,86 @@ impl CanvasSession {
         }
     }
 
-    /// The image the brush's shape (or, `grain`, its grain) uses now: its own, else the shipped
-    /// one (`source_size` square greyscale, white = paint); empty for the round tip, or no grain.
-    pub fn studio_source(&self, grain: bool) -> Vec<u8> {
+    /// The image the brush's `kind` of source uses now: its own, else the shipped one
+    /// (`source_size` square greyscale, white = paint); empty for the round tip, no grain, or a
+    /// material's amount all over.
+    pub fn studio_source(&self, kind: SourceKind) -> Vec<u8> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let Some(brush) = st.studio_brush() else { return Vec::new() };
-        let (own, shipped) =
-            if grain { (&brush.grain.source, brush.grain.image) } else { (&brush.shape.source, brush.shape.image) };
+        let (own, shipped) = match kind {
+            SourceKind::Shape => (&brush.shape.source, brush.shape.image),
+            SourceKind::Grain => (&brush.grain.source, brush.grain.image),
+            SourceKind::Metallic => (&brush.metallic.source, brush.metallic.image),
+            SourceKind::Roughness => (&brush.roughness.source, brush.roughness.image),
+        };
         if let Some(source) = own {
             return source.pixels.to_vec();
         }
-        let images = if grain { textures::grains() } else { textures::shapes() };
+        let images = if kind.grain_like() { textures::grains() } else { textures::shapes() };
         shipped.and_then(|i| images.into_iter().nth(i as usize)).map_or_else(Vec::new, |i| i.pixels)
     }
 
-    /// The brush's shape (or, `grain`, grain) becomes an image of the user's own (`source_size`
-    /// square greyscale, white = paint). False if the pixels aren't that size.
-    pub fn set_studio_source(&self, grain: bool, pixels: Vec<u8>) -> bool {
+    /// The brush's `kind` of source becomes an image of the user's own (`source_size` square
+    /// greyscale, white = paint). False if the pixels aren't that size.
+    pub fn set_studio_source(&self, kind: SourceKind, pixels: Vec<u8>) -> bool {
         let Some(source) = Source::new(pixels) else { return false };
         let mut st = self.shared.lock();
         let Some(brush) = st.studio_change() else { return false };
         // an image of the user's own: no longer the stock one its file named
-        if grain {
-            brush.grain.source = Some(source);
-            brush.stock.grain = None;
-        } else {
-            brush.shape.source = Some(source);
-            brush.stock.shape = None;
-        }
+        let (own, _, stock) = sources(brush, kind);
+        *own = Some(source);
+        *stock = None;
         true
     }
 
-    /// The brush's shape (or, `grain`, grain) becomes shipped image `index` of the source library.
-    pub fn set_studio_shipped_source(&self, grain: bool, index: u32) -> bool {
-        let count = if grain { textures::grains().len() } else { textures::shapes().len() };
+    /// The brush's `kind` of source becomes shipped image `index` of the source library (the
+    /// grains for all but the shape).
+    pub fn set_studio_shipped_source(&self, kind: SourceKind, index: u32) -> bool {
+        let count = if kind.grain_like() { textures::grains().len() } else { textures::shapes().len() };
         if index as usize >= count {
             return false;
         }
         let mut st = self.shared.lock();
         let Some(brush) = st.studio_change() else { return false };
-        if grain {
-            brush.grain.source = None;
-            brush.grain.image = Some(index);
-            brush.stock.grain = None;
-        } else {
-            brush.shape.source = None;
-            brush.shape.image = Some(index);
-            brush.stock.shape = None;
-        }
+        let (own, shipped, stock) = sources(brush, kind);
+        *own = None;
+        *shipped = Some(index);
+        *stock = None;
         true
+    }
+
+    /// Studio control `key`'s own pressure curve, as x, y pairs (0..1); empty while it has none
+    /// (or for a slider that can't have one).
+    pub fn studio_slider_curve(&self, key: String) -> Vec<f32> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let Some(brush) = st.studio_brush() else { return Vec::new() };
+        let curve = match procraft_engine::studio::slider_extras(&key).curve {
+            Some(SliderCurve::Own(kind)) => brush.pressure_curves.get(kind),
+            // the size's and opacity's own responses: on unless straight
+            Some(SliderCurve::Size) => Some(&brush.size_curve).filter(|c| **c != Curve::linear()),
+            Some(SliderCurve::Opacity) => Some(&brush.opacity_curve).filter(|c| **c != Curve::linear()),
+            None => None,
+        };
+        curve.map_or_else(Vec::new, |c| c.points().iter().flat_map(|p| [p.x, p.y]).collect())
+    }
+
+    /// Gives studio control `key` its own pressure curve through `points` (x, y pairs, 0..1), or
+    /// takes it away (`points` empty).
+    pub fn set_studio_slider_curve(&self, key: String, points: Vec<f32>) {
+        let curve = (points.len() >= 4).then(|| {
+            let pts: Vec<Vec2> = points.as_chunks::<2>().0.iter().map(|&[x, y]| Vec2::new(x, y)).collect();
+            Curve::new(&pts)
+        });
+        let mut st = self.shared.lock();
+        let Some(brush) = st.studio_change() else { return };
+        match procraft_engine::studio::slider_extras(&key).curve {
+            Some(SliderCurve::Own(kind)) => brush.pressure_curves.set(kind, curve),
+            Some(SliderCurve::Size) => brush.size_curve = curve.unwrap_or_else(Curve::linear),
+            Some(SliderCurve::Opacity) => brush.opacity_curve = curve.unwrap_or_else(Curve::linear),
+            None => {}
+        }
     }
 
     /// The pressure curve's points, as x, y pairs (0..1).
@@ -328,16 +402,51 @@ impl CanvasSession {
         st.pad_sample = false;
     }
 
-    /// Draws the pad's sample scribble across it, kept like a stroke until one's own replaces it.
+    /// Draws the pad's sample scribble across it (wrapped round the sphere when it is one), kept
+    /// like a stroke until one's own replaces it.
     pub fn draw_sample_scribble(&self) {
         {
             let mut st = self.shared.lock();
             let (w, h) = (st.doc.width() as f32, st.doc.height() as f32);
             let scale = st.display_scale;
-            st.pad_strokes = Some(vec![(crate::PointerKind::Stylus, pad_scribble(w, h, scale))]);
+            let scribble = if st.sphere.is_some() { sphere_scribble(w, h, scale) } else { pad_scribble(w, h, scale) };
+            st.pad_strokes = Some(vec![(crate::PointerKind::Stylus, scribble)]);
             st.pad_sample = true;
         }
         self.replay_strokes();
+    }
+
+    /// Draws the pad as a sphere showing the brush's materials (`shown`), starting from its own
+    /// sample scribble each time; or flat again, with its strokes as they were.
+    pub fn show_sphere(&self, shown: bool) {
+        {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            if shown == st.sphere.is_some() {
+                return;
+            }
+            st.finish_stroke();
+            if shown {
+                let flat = st.pad_strokes.as_mut().map(std::mem::take).unwrap_or_default();
+                st.sphere = Some(SpherePad { flat, flat_sample: st.pad_sample, preview: None, sources: [None, None] });
+            } else if let Some(sphere) = st.sphere.take() {
+                if let Some(kept) = st.pad_strokes.as_mut() {
+                    *kept = sphere.flat;
+                }
+                st.pad_sample = sphere.flat_sample;
+            }
+            // the sphere shows what is painted over its own colour, the flat pad over the pad's
+            st.doc.background_visible = !shown;
+            if let Some(canvas) = st.canvas.as_mut() {
+                canvas.invalidate();
+            }
+        }
+        let flat_empty = !shown && self.shared.lock().pad_strokes.as_ref().is_none_or(Vec::is_empty);
+        if shown || flat_empty {
+            self.draw_sample_scribble();
+        } else {
+            self.replay_strokes();
+        }
     }
 
     /// A stroke of one's own starts on the pad: its sample scribble goes, if it is still there.
@@ -377,6 +486,96 @@ impl CanvasSession {
             let reset = brush.reset_point.take();
             *brush = Brush { reset_point: reset, ..before };
         }
+    }
+}
+
+/// Where `brush` keeps its `kind` of source: its own image, the shipped one, and the stock one its
+/// file named.
+fn sources(brush: &mut Brush, kind: SourceKind) -> (&mut Option<Source>, &mut Option<u32>, &mut Option<StockImage>) {
+    let stock = &mut brush.stock;
+    match kind {
+        SourceKind::Shape => (&mut brush.shape.source, &mut brush.shape.image, &mut stock.shape),
+        SourceKind::Grain => (&mut brush.grain.source, &mut brush.grain.image, &mut stock.grain),
+        SourceKind::Metallic => material(&mut brush.metallic, &mut stock.metallic),
+        SourceKind::Roughness => material(&mut brush.roughness, &mut stock.roughness),
+    }
+}
+
+fn material<'a>(
+    m: &'a mut MaterialSource,
+    stock: &'a mut Option<StockImage>,
+) -> (&'a mut Option<Source>, &'a mut Option<u32>, &'a mut Option<StockImage>) {
+    (&mut m.source, &mut m.image, stock)
+}
+
+/// The drawing pad while it is a sphere: the flat pad's strokes set aside (and whether they were
+/// its sample scribble), the preview once drawn, and the brush's material sources as last given
+/// to it (a key for each and its pixels).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) struct SpherePad {
+    flat: Vec<(PointerKind, Vec<PenSample>)>,
+    flat_sample: bool,
+    preview: Option<SpherePreview>,
+    sources: [Option<(u64, Arc<Vec<u8>>)>; 2],
+}
+
+/// What tells a material source's image from another's: its own image's, else the shipped one's.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn source_key(m: &MaterialSource) -> Option<u64> {
+    m.source.as_ref().map(|s| s.id).or_else(|| m.image.map(|i| (1 << 63) | u64::from(i)))
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+impl State {
+    /// Draws the pad as a sphere into `target` (`size`): [`SPHERE_RADIUS_PT`] round, in its
+    /// middle, showing the canvas painted with the pad's brush, its metalness and roughness.
+    pub(crate) fn render_sphere(
+        &mut self,
+        target: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        size: (u32, u32),
+        convert: Option<[[f32; 3]; 3]>,
+    ) {
+        let (metallic, roughness, tiles, materials) = {
+            let b = self.brush(ToolKind::Paint);
+            let tile = |key: &str| (b.setting(key) * MAX_GRAIN_SCALE).max(4.0);
+            (
+                b.setting("metallic_amount"),
+                b.setting("roughness_amount"),
+                [tile("metallic_scale"), tile("roughness_scale")],
+                [b.metallic.clone(), b.roughness.clone()],
+            )
+        };
+        let to_canvas = self.view.and_then(|v| v.to_screen().inverse()).unwrap_or(Affine::IDENTITY);
+        let behind = self.doc.background;
+        let (Some(gpu), Some(canvas), Some(sphere)) = (self.gpu.as_ref(), self.canvas.as_mut(), self.sphere.as_mut())
+        else {
+            return;
+        };
+        canvas.render(gpu, &mut self.doc, None);
+        for (slot, m) in sphere.sources.iter_mut().zip(&materials) {
+            let key = source_key(m);
+            if slot.as_ref().map(|(k, _)| *k) != key {
+                *slot = key.zip(crate::brush_files::material_pixels(m)).map(|(k, p)| (k, Arc::new(p)));
+            }
+        }
+        let [metallic_source, roughness_source] =
+            sphere.sources.each_ref().map(|s| s.as_ref().map(|(k, p)| (*k, p.as_slice())));
+        let look = SphereLook {
+            metallic,
+            roughness,
+            metallic_source,
+            roughness_source,
+            metallic_tile: tiles[0],
+            roughness_tile: tiles[1],
+            behind,
+            convert,
+        };
+        let (w, h) = (size.0 as f32, size.1 as f32);
+        let Affine { a, b, c, d, e, f } = to_canvas;
+        let radius = SPHERE_RADIUS_PT * self.display_scale;
+        let preview = sphere.preview.get_or_insert_with(|| SpherePreview::new(gpu, format));
+        preview.render(gpu, target, [w / 2.0, h / 2.0], radius, canvas, [a, b, c, d, e, f], &look);
     }
 }
 
@@ -560,6 +759,32 @@ fn pad_scribble(w: f32, h: f32, scale: f32) -> Vec<crate::PenSample> {
                 orientation: 0.0,
                 time_ms: f64::from(along(&SCRIBBLE_PACE, t)) * SCRIBBLE_SECONDS * 1000.0,
             }
+        })
+        .collect()
+}
+
+/// The sphere's radius on the pad, points, whatever the pad's size (as the reference's, which runs
+/// a little past a landscape pad's sides).
+const SPHERE_RADIUS_PT: f32 = 240.25;
+
+/// How the sample scribble wraps round the sphere: each of its points (see [`SCRIBBLE`]) this many
+/// radians of longitude and latitude, the scribble's middle turned this far right and up from the
+/// sphere's front (as the reference's lies, drawn on the sphere's surface).
+const SPHERE_LONGITUDE: f32 = 0.003_538_5;
+const SPHERE_LATITUDE: f32 = 0.001_788_6;
+const SPHERE_TURN: f32 = 0.089_121;
+const SPHERE_TILT: f32 = -0.014_435;
+
+/// The sample scribble wrapped round the sphere on a pad `w` x `h` (canvas pixels, `scale` a
+/// point): the sphere in its middle, seen straight on.
+fn sphere_scribble(w: f32, h: f32, scale: f32) -> Vec<crate::PenSample> {
+    let radius = SPHERE_RADIUS_PT * scale;
+    pad_scribble(0.0, 0.0, 1.0)
+        .into_iter()
+        .map(|s| {
+            let lon = s.x * SPHERE_LONGITUDE + SPHERE_TURN;
+            let lat = s.y * SPHERE_LATITUDE + SPHERE_TILT;
+            crate::PenSample { x: w / 2.0 + radius * lat.cos() * lon.sin(), y: h / 2.0 + radius * lat.sin(), ..s }
         })
         .collect()
 }

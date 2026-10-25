@@ -73,9 +73,11 @@ fun SelectionToolbar(vm: CanvasViewModel, screenWidth: Dp, modifier: Modifier = 
     ) { w ->
         // a long name smaller only where the buttons are narrow
         val long = if (w < SelectionButtonRoomy) 11.sp else 12.5.sp
-        // selecting by colour always adds
+        // selecting by colour always adds: Add shows chosen, and only the other ways can remove
         val joins = vm.selectionKind != SelectionKind.AUTOMATIC
-        ToolbarButton(PcIcons.SelectAdd, "Add", active = joins && !vm.selectionRemoves, enabled = joins, width = w, iconSize = 44.dp) { vm.chooseSelectionRemoves(false) }
+        ToolbarButton(PcIcons.SelectAdd, "Add", active = !joins || !vm.selectionRemoves, width = w, iconSize = 44.dp) {
+            if (joins) vm.chooseSelectionRemoves(false)
+        }
         ToolbarButton(PcIcons.SelectRemove, "Remove", active = joins && vm.selectionRemoves, enabled = joins, width = w, iconSize = 44.dp) { vm.chooseSelectionRemoves(true) }
         ToolbarButton(PcIcons.Invert, "Invert", enabled = has, width = w, iconSize = 44.dp) { vm.invertSelection() }
         ToolbarButton(PcIcons.SelectCopyPaste, "Copy & Paste", enabled = has || drawing, width = w, iconSize = 44.dp, labelSize = long) { vm.copySelectionToLayer() }

@@ -289,6 +289,8 @@ pub(crate) struct State {
     pub(crate) pad_strokes: Option<Vec<(PointerKind, Vec<PenSample>)>>,
     /// The pad shows only its sample scribble: a stroke of one's own takes it away.
     pub(crate) pad_sample: bool,
+    /// The pad drawn as a sphere, the flat pad's strokes set aside meanwhile.
+    pub(crate) sphere: Option<crate::studio::SpherePad>,
     pub(crate) frame_interval_ms: f32,
     pub(crate) error: Option<String>,
     /// Window pixels per interface point.
@@ -696,6 +698,7 @@ impl CanvasSession {
             frames: 0,
             pad_strokes: None,
             pad_sample: false,
+            sphere: None,
             frame_interval_ms: 0.0,
             error: None,
             display_scale: 2.0,

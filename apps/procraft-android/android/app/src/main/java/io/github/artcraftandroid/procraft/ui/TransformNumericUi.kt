@@ -23,11 +23,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
@@ -41,6 +44,8 @@ private val DigitKey = Color(0xFF414141)
 private val KeyInk = Color(0xFFDADADA)
 private val LinkOn = Color(0xFF1F436B)
 private const val NUMERIC_WIDTH = 248
+/** How far the arrow's tip stands from the node's middle (the panel's edge 17 from it). */
+private val NUMERIC_NODE_GAP = 5.dp
 
 /**
  * Numeric entry for an open transform, from a tap on a node: "Dimensions" (the box's width and
@@ -86,13 +91,26 @@ fun TransformNumeric(vm: CanvasViewModel) {
         }
         apply()
     }
+    // the panel's height once laid out (it shows from then on)
+    var tall by remember(open) { mutableStateOf<Dp?>(null) }
     BoxWithConstraints(Modifier.fillMaxSize().pointerInput(open) { detectTapGestures { vm.transformNumeric = null } }) {
-        // under the node, its arrow pointing at it, kept on the screen
+        // beside the node, on its side of the box, level with it and its arrow pointing at it, kept on the screen
         val width = NUMERIC_WIDTH.dp
+        val whole = width + Pc.ArrowHeight
         val at = with(density) { open.at.x.toDp() to open.at.y.toDp() }
-        val left = (at.first - width / 2).coerceIn(8.dp, maxWidth - width - 8.dp)
-        val top = (at.second + 14.dp).coerceIn(8.dp, (maxHeight - 420.dp).coerceAtLeast(8.dp))
-        Popover(width, at.first - left, Modifier.offset(left, top).pointerInput(Unit) { detectTapGestures { } }, corner = 20.dp) {
+        val left = (if (open.right) at.first + NUMERIC_NODE_GAP else at.first - NUMERIC_NODE_GAP - whole)
+            .coerceIn(8.dp, (maxWidth - whole - 8.dp).coerceAtLeast(8.dp))
+        val height = tall ?: 0.dp
+        val top = (at.second - height / 2).coerceIn(8.dp, (maxHeight - height - 8.dp).coerceAtLeast(8.dp))
+        Popover(
+            width,
+            (at.second - top).coerceIn(28.dp, (height - 28.dp).coerceAtLeast(28.dp)),
+            Modifier.offset(left, top).alpha(if (tall == null) 0f else 1f)
+                .onSizeChanged { tall = with(density) { it.height.toDp() } }
+                .pointerInput(Unit) { detectTapGestures { } },
+            corner = 20.dp,
+            side = if (open.right) ArrowSide.LEFT else ArrowSide.RIGHT,
+        ) {
             Column(Modifier.padding(start = 10.dp, end = 10.dp, bottom = 10.dp)) {
                 Text(if (open.angle) "Rotation" else "Dimensions", color = KeyInk, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 10.dp, top = 12.dp, bottom = 12.dp))
                 if (open.angle) {

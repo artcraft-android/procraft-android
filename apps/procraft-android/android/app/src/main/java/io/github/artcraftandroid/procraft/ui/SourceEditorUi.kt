@@ -27,7 +27,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -57,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
+import io.github.artcraftandroid.procraft.core.SourceKind
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
@@ -69,22 +69,30 @@ private val CapsuleInk = Color(0xFFAAAAAA)
 private val DoneBlue = Color(0xFF0190FF)
 private val RepeatLabel = Color(0xFF808080)
 private val LibraryVeil = Color(0x80000000)
-private val LibraryBar = Color(0xF21C1C1C)
+private val LibrarySheet = Color(0xFF1C1C1E)
+private val LibraryTitle = Color(0xFFC1C1C1)
+private val LibraryDim = Color(0xFF868686)
+private val LibraryEdge = Color(0xFF5A5A5A)
+private val LibrarySearchFill = Color(0xFF1B1B1B)
+private val LibrarySearchEdge = Color(0xFF363636)
+private val LibraryHint = Color(0xFF787878)
 private val MenuBlue = Color(0xFF0A84FF)
 
 /**
- * The shape or grain editor of the brush studio (the one [CanvasViewModel.sourceEditing] says):
- * the image in a 600 square, changed by Import (a photo, a file, the source library or the
- * clipboard) or turned negative by a two-finger tap; the grain editor can also make it repeat
- * without seams. Cancel leaves the brush as it was, the tick keeps the change.
+ * The brush studio's editor for the source [CanvasViewModel.sourceEditing] says (the shape, the
+ * grain, or what the brush paints metalness or roughness through): the image in a 600 square,
+ * changed by Import (a photo, a file, the source library or the clipboard) or turned negative by a
+ * two-finger tap; all but the shape's can also make it repeat without seams, and take the grains
+ * from the library. Cancel leaves the brush as it was, the tick keeps the change.
  */
 @Composable
 fun SourceEditor(vm: CanvasViewModel) {
-    val grain = vm.sourceEditing ?: return
+    val kind = vm.sourceEditing ?: return
+    val grain = kind != SourceKind.SHAPE
     val scope = rememberCoroutineScope()
-    // the image as edited here (empty: the round tip), and the shipped one it is if it is one
-    var image by remember(grain) { mutableStateOf(vm.studioSourcePixels(grain)) }
-    var shipped by remember(grain) { mutableStateOf<Int?>(null) }
+    // the image as edited here (empty: the round tip, or white all over), and the shipped one it is if it is one
+    var image by remember(kind) { mutableStateOf(vm.studioSourcePixels(kind)) }
+    var shipped by remember(kind) { mutableStateOf<Int?>(null) }
     var importing by remember { mutableStateOf(false) }
     var library by remember { mutableStateOf(false) }
     // Auto repeat and its settings
@@ -144,7 +152,13 @@ fun SourceEditor(vm: CanvasViewModel) {
                 }
             }
             Text(
-                if (grain) "Grain Editor" else "Shape Editor", color = EditorTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                when (kind) {
+                    SourceKind.SHAPE -> "Shape Editor"
+                    SourceKind.GRAIN -> "Grain Editor"
+                    SourceKind.METALLIC -> "Metallic Editor"
+                    SourceKind.ROUGHNESS -> "Roughness Editor"
+                },
+                color = EditorTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.offset(24.dp, if (landscape) 16.dp else 26.dp),
             )
             Row(
@@ -170,7 +184,7 @@ fun SourceEditor(vm: CanvasViewModel) {
                 Spacer(Modifier.width(13.dp))
                 Box(
                     Modifier.size(44.dp, 45.dp).clip(CircleShape).background(DoneBlue).tap {
-                        vm.keepStudioSource(grain, result(), shipped.takeIf { !repeating })
+                        vm.keepStudioSource(kind, result(), shipped.takeIf { !repeating })
                     },
                     contentAlignment = Alignment.Center,
                 ) {
@@ -207,25 +221,27 @@ private fun CapsuleButton(label: String, width: Int, on: Boolean = false, onClic
 private fun ImportMenu(open: Boolean, onDismiss: () -> Unit, onPick: (Int) -> Unit) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     MenuPresence(open, androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f)) { look ->
+        // under Import, its arrow pointing up at it
         PcPopup(
-            textScale = MATCHED_POPUP_TEXT,
             alignment = Alignment.TopCenter,
-            offset = with(density) { androidx.compose.ui.unit.IntOffset(0, 48.dp.roundToPx()) },
+            offset = with(density) { androidx.compose.ui.unit.IntOffset(0, 47.dp.roundToPx()) },
             onDismissRequest = onDismiss,
             properties = PopupProperties(focusable = true),
         ) {
-            Column(look.width(320.dp).clip(RoundedCornerShape(24.dp)).background(Pc.LightPanel).padding(start = 8.dp, end = 8.dp, bottom = 8.dp)) {
-                Text("Image source", color = Pc.LightText, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 12.dp, top = 16.dp, bottom = 12.dp))
-                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Pc.LightRow)) {
-                    MenuRow(PcIcons.SourcePhoto, "Import a photo") { onPick(0) }
-                    Box(Modifier.padding(start = 52.dp).fillMaxWidth().height(1.dp).background(Pc.LightSeparator))
-                    MenuRow(PcIcons.Folder, "Import a file") { onPick(1) }
-                    Box(Modifier.padding(start = 52.dp).fillMaxWidth().height(1.dp).background(Pc.LightSeparator))
-                    MenuRow(PcIcons.SourceBooks, "Source Library") { onPick(2) }
-                }
-                Spacer(Modifier.height(20.dp))
-                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Pc.LightRow)) {
-                    MenuRow(PcIcons.TextPaste, "Paste", iconSize = 40.dp) { onPick(3) }
+            Popover(320.dp, 160.dp, look, fill = Pc.LightPanel, corner = 24.dp, side = ArrowSide.TOP) {
+                Column(Modifier.padding(start = 8.dp, end = 8.dp, bottom = 8.dp)) {
+                    Text("Image source options", color = Pc.LightText, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 12.dp, top = 16.dp, bottom = 12.dp))
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Pc.LightRow)) {
+                        MenuRow(PcIcons.SourcePhotoFill, "Import a photo", iconSize = 30.dp) { onPick(0) }
+                        Box(Modifier.padding(start = 52.dp).fillMaxWidth().height(1.dp).background(Pc.LightSeparator))
+                        MenuRow(PcIcons.FolderFill, "Import a file", iconSize = 30.dp) { onPick(1) }
+                        Box(Modifier.padding(start = 52.dp).fillMaxWidth().height(1.dp).background(Pc.LightSeparator))
+                        MenuRow(PcIcons.SourceBooksFill, "Source Library", iconSize = 30.dp) { onPick(2) }
+                    }
+                    Spacer(Modifier.height(20.dp))
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Pc.LightRow)) {
+                        MenuRow(PcIcons.TextPaste, "Paste", iconSize = 40.dp) { onPick(3) }
+                    }
                 }
             }
         }
@@ -317,51 +333,99 @@ private fun SimpleSlider(value: Float, onChange: (Float) -> Unit, modifier: Modi
 }
 
 /**
- * The source library: the shipped shape or grain images in 180 cells (the image 146 square, its
- * name under it) under a bar with the title, Cancel, and Shape Source and Grain Source.
+ * The source library: a sheet (580 x 575, 74 down) over the editor with its title and Cancel, Shape
+ * Source and Grain Source with a search by name, then the shipped images three across (147 square,
+ * their names under them). A pick of the other kind than the one being edited isn't taken.
  */
 @Composable
 private fun SourceLibrary(vm: CanvasViewModel, grain: Boolean, onPick: (Int) -> Unit, onCancel: () -> Unit) {
     var showGrains by remember { mutableStateOf(grain) }
-    val images: List<Pair<String, ImageBitmap?>> = if (showGrains) vm.grainLibrary else vm.shapeLibrary
-    BackHandler(onBack = onCancel)
-    Box(Modifier.fillMaxSize().background(LibraryVeil)) {
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(180.dp),
-            contentPadding = PaddingValues(top = 183.dp, start = 12.dp, end = 12.dp, bottom = 24.dp),
-            modifier = Modifier.fillMaxSize(),
+    var query by remember { mutableStateOf("") }
+    val all: List<Pair<String, ImageBitmap?>> = if (showGrains) vm.grainLibrary else vm.shapeLibrary
+    val shown = all.withIndex().filter { query.isBlank() || it.value.first.contains(query.trim(), ignoreCase = true) }
+    // over the whole window, the studio's pages dimmed too, the sheet in the window's middle
+    val atOrigin = remember {
+        object : androidx.compose.ui.window.PopupPositionProvider {
+            override fun calculatePosition(
+                anchorBounds: androidx.compose.ui.unit.IntRect,
+                windowSize: androidx.compose.ui.unit.IntSize,
+                layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+                popupContentSize: androidx.compose.ui.unit.IntSize,
+            ) = androidx.compose.ui.unit.IntOffset.Zero
+        }
+    }
+    PcPopup(atOrigin, onDismissRequest = onCancel, properties = PopupProperties(focusable = true, clippingEnabled = false)) {
+    Box(Modifier.fillMaxSize().background(LibraryVeil).pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } }) {
+        Column(
+            Modifier.align(Alignment.TopCenter).offset(y = 74.dp).size(580.dp, 575.dp).clip(RoundedCornerShape(26.dp)).background(LibrarySheet)
+                .pointerInput(Unit) { awaitEachGesture { awaitFirstDown(requireUnconsumed = false) } },
         ) {
-            itemsIndexed(images) { i, (name, image) ->
-                Column(
-                    Modifier.size(180.dp).tap {
-                        // each kind takes its own: a grain picked in the shape editor is not taken
-                        if (showGrains == grain) onPick(i)
-                    },
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Box(Modifier.padding(top = 6.dp).size(146.dp).clip(RoundedCornerShape(8.dp)).background(Color.Black)) {
-                        image?.let { Image(it, contentDescription = name, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
+            Row(Modifier.fillMaxWidth().padding(start = 19.dp, end = 19.dp, top = 69.dp).height(39.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Source Library", color = LibraryTitle, fontSize = 32.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
+                Text("Cancel", color = LibraryDim, fontSize = 17.sp, maxLines = 1, modifier = Modifier.tap(onCancel))
+            }
+            Row(Modifier.padding(start = 43.dp, top = 25.dp).height(45.dp), verticalAlignment = Alignment.CenterVertically) {
+                for ((label, isGrain) in listOf("Shape Source" to false, "Grain Source" to true)) {
+                    Box(Modifier.padding(end = 11.dp).size(115.dp, 41.dp).tap { showGrains = isGrain }, contentAlignment = Alignment.Center) {
+                        Text(label, color = if (showGrains == isGrain) Color.White else LibraryDim, fontSize = 17.sp, maxLines = 1)
                     }
-                    Text(name, color = Color.White, fontSize = 17.sp, maxLines = 1, modifier = Modifier.padding(top = 5.dp))
+                }
+                Spacer(Modifier.width(8.dp))
+                LibrarySearch(query) { query = it }
+            }
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 11.dp, bottom = 24.dp),
+                horizontalArrangement = Arrangement.spacedBy(53.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                items(shown.size) { k ->
+                    val (i, item) = shown[k]
+                    val (name, image) = item
+                    Column(
+                        Modifier.width(147.dp).tap {
+                            // each kind takes its own: a grain picked in the shape editor is not taken
+                            if (showGrains == grain) onPick(i)
+                        },
+                    ) {
+                        Box(Modifier.size(147.dp, 146.dp).clip(RoundedCornerShape(8.dp)).background(Color.Black).border(1.dp, LibraryEdge, RoundedCornerShape(8.dp))) {
+                            image?.let { Image(it, contentDescription = name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
+                        }
+                        Text(name, color = LibraryTitle, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 3.dp, top = 5.dp).height(21.dp))
+                    }
                 }
             }
         }
-        Column(Modifier.fillMaxWidth().height(183.dp).background(LibraryBar)) {
-            Row(Modifier.fillMaxWidth().height(128.dp).padding(start = 20.dp, end = 20.dp, bottom = 20.dp), verticalAlignment = Alignment.Bottom) {
-                Text("Source Library", color = Color.White, fontSize = 27.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
-                Text("Cancel", color = Color.White, fontSize = 18.sp, maxLines = 1, modifier = Modifier.tap(onCancel))
-            }
-            Row(Modifier.fillMaxWidth().height(55.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                for ((label, isGrain) in listOf("Shape Source" to false, "Grain Source" to true)) {
-                    Box(
-                        Modifier.padding(horizontal = 6.dp).size(114.dp, 40.dp).clip(RoundedCornerShape(8.dp))
-                            .background(if (showGrains == isGrain) Pc.Accent else Color.Transparent).tap { showGrains = isGrain },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(label, color = Color.White, fontSize = 15.sp, maxLines = 1)
-                    }
-                }
-            }
+    }
+    }
+}
+
+/** The library's search: a round field with a magnifier and its hint, matching names as typed. */
+@Composable
+private fun LibrarySearch(query: String, onQuery: (String) -> Unit) {
+    Row(
+        Modifier.size(225.dp, 45.dp).clip(RoundedCornerShape(22.5.dp)).background(LibrarySearchFill).border(1.dp, LibrarySearchEdge, RoundedCornerShape(22.5.dp)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        androidx.compose.foundation.Canvas(Modifier.padding(start = 11.dp).size(23.dp, 22.dp)) {
+            // a magnifier: a ring and its handle
+            val c = androidx.compose.ui.geometry.Offset(size.width * 0.44f, size.height * 0.44f)
+            val r = 7.dp.toPx()
+            drawCircle(LibraryHint, r, c, style = androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))
+            val d = r * 0.7071f
+            drawLine(LibraryHint, c + androidx.compose.ui.geometry.Offset(d, d), c + androidx.compose.ui.geometry.Offset(d + 5.dp.toPx(), d + 5.dp.toPx()), 2.4.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        }
+        Box(Modifier.padding(start = 9.dp, end = 12.dp).weight(1f), contentAlignment = Alignment.CenterStart) {
+            if (query.isEmpty()) Text("Search Library", color = LibraryHint, fontSize = 17.sp, maxLines = 1)
+            androidx.compose.foundation.text.BasicTextField(
+                query,
+                onValueChange = onQuery,
+                singleLine = true,
+                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 17.sp),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(Pc.Accent),
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
 }

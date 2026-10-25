@@ -111,10 +111,14 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
             }
             let to_screen = st.view.map(|v| v.to_screen());
             let grid = st.surround_grid(Vec2::ZERO);
-            // a model is drawn in place of the flat canvas
+            // a model is drawn in place of the flat canvas, and the drawing pad may be a sphere
             if st.scene_shown() {
                 let convert = colours_to(st.doc.profile, screen);
                 st.render_scene(&view, format, size, convert);
+                st.frames += 1;
+            } else if st.sphere.is_some() {
+                let convert = colours_to(st.doc.profile, screen);
+                st.render_sphere(&view, format, size, convert);
                 st.frames += 1;
             } else if let (Some(canvas), Some(gpu), Some(to_screen)) = (st.canvas.as_mut(), st.gpu.as_ref(), to_screen)
             {

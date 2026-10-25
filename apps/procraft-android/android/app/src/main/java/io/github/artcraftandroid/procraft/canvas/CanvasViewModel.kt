@@ -27,6 +27,7 @@ import io.github.artcraftandroid.procraft.core.BrushInfo
 import io.github.artcraftandroid.procraft.core.BrushSetInfo
 import io.github.artcraftandroid.procraft.core.CanvasSession
 import io.github.artcraftandroid.procraft.core.ModelFile
+import io.github.artcraftandroid.procraft.core.SourceKind
 import io.github.artcraftandroid.procraft.core.ChromaticKind
 import io.github.artcraftandroid.procraft.core.GlitchKind
 import io.github.artcraftandroid.procraft.core.GuideInfo
@@ -746,6 +747,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var padColor by mutableStateOf(PAD_WHITE)
         private set
     var padMenuOpen by mutableStateOf(false)
+    /** Where the pad's Drawing Pad button's middle is across the window (pixels): its menu opens under it. */
+    var padButtonCentre by mutableStateOf(0f)
     val blendModeList: List<BlendModeInfo> = blendModes()
     /** The modes a brush and its burnt edges blend by, as the studio lists them (the layers' and behind). */
     val brushBlendModeList: List<BlendModeInfo> = brushBlendModes()
@@ -3013,16 +3016,25 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         syncPad()
     }
 
-    // the studio brush's shape and grain images
+    /** Studio control [key]'s own pressure curve (none while it has none). */
+    fun studioSliderCurve(key: String): List<Offset>? =
+        session?.studioSliderCurve(key)?.takeIf { it.size >= 4 }?.chunked(2) { Offset(it[0], it[1]) }
 
-    /** The images the studio brush's shape and grain use (white on black), for their rows and editors. */
-    var studioShapeSource by mutableStateOf<ImageBitmap?>(null)
-        private set
-    var studioGrainSource by mutableStateOf<ImageBitmap?>(null)
+    /** Gives studio control [key] its own pressure curve through [points], or takes it away (none). */
+    fun setStudioSliderCurve(key: String, points: List<Offset>?) {
+        session?.setStudioSliderCurve(key, points?.flatMap { listOf(it.x, it.y) } ?: emptyList())
+        refreshStudioPreview()
+        syncPad()
+    }
+
+    // the studio brush's shape, grain and material images
+
+    /** The images the studio brush's sources use (white on black), by kind, for their rows; none for the round tip, no grain or a material's amount all over. */
+    var studioSources by mutableStateOf<Map<SourceKind, ImageBitmap>>(emptyMap())
         private set
 
-    /** The shape (false) or grain (true) editor is open. */
-    var sourceEditing by mutableStateOf<Boolean?>(null)
+    /** The editor open for the studio brush's source of this kind, if one is. */
+    var sourceEditing by mutableStateOf<SourceKind?>(null)
 
     /** The shipped shape and grain images, by name, for the source library. */
     val shapeLibrary by lazy { io.github.artcraftandroid.procraft.core.sourceLibrary(false).map { it.name to grayBitmap(it.pixels) } }
@@ -3030,18 +3042,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun readStudioSources() {
         val s = session ?: return
-        val shape = sourceBitmap(s.studioSource(false), shape = true)
-        val grain = sourceBitmap(s.studioSource(true), shape = false)
-        studioShapeSource = shape?.let { small(it, SOURCE_ROW_PX) }
-        studioGrainSource = grain?.let { small(it, SOURCE_ROW_PX) }
-        studioShapeSourceBig = shape?.let { small(it, SOURCE_BOX_PX) }
-        studioGrainSourceBig = grain?.let { small(it, SOURCE_BOX_PX) }
+        val images = SourceKind.entries.mapNotNull { k -> sourceBitmap(s.studioSource(k), shape = k == SourceKind.SHAPE)?.let { k to it } }
+        studioSources = images.associate { (k, b) -> k to small(b, SOURCE_ROW_PX) }
+        studioSourcesBig = images.associate { (k, b) -> k to small(b, SOURCE_BOX_PX) }
     }
 
     /** The same images as big as the landscape studio's square shows them. */
-    var studioShapeSourceBig by mutableStateOf<ImageBitmap?>(null)
-        private set
-    var studioGrainSourceBig by mutableStateOf<ImageBitmap?>(null)
+    var studioSourcesBig by mutableStateOf<Map<SourceKind, ImageBitmap>>(emptyMap())
         private set
 
     /** [image] shrunk by halves to about [side] pixels across, each step averaging, so fine detail evens out. */
@@ -3059,8 +3066,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return Bitmap.createBitmap(argb, n, n, Bitmap.Config.ARGB_8888).asImageBitmap()
     }
 
-    /** The image the studio brush's shape (or [grain]) uses now: square greyscale, white = paint; empty for the round tip. */
-    fun studioSourcePixels(grain: Boolean): ByteArray = session?.studioSource(grain) ?: ByteArray(0)
+    /** The image the studio brush's [kind] of source uses now: square greyscale, white = paint; empty for the round tip, no grain or the amount all over. */
+    fun studioSourcePixels(kind: SourceKind): ByteArray = session?.studioSource(kind) ?: ByteArray(0)
 
     /** [pixels] made to repeat without seams (the grain editor's Auto repeat). */
     fun repeatSource(pixels: ByteArray, scale: Float, rotation: Float, overlap: Float, hardness: Float, mirror: Boolean, pyramid: Boolean): ByteArray =
@@ -3127,12 +3134,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return decodeSource(uri)
     }
 
-    /** The editor's tick: the studio brush's shape (or [grain]) becomes [pixels], or shipped image [shipped]. */
-    fun keepStudioSource(grain: Boolean, pixels: ByteArray, shipped: Int?) {
+    /** The editor's tick: the studio brush's [kind] of source becomes [pixels], or shipped image [shipped]. */
+    fun keepStudioSource(kind: SourceKind, pixels: ByteArray, shipped: Int?) {
         val s = session ?: return
         val changed = when {
-            shipped != null -> s.setStudioShippedSource(grain, shipped.toUInt())
-            pixels.isNotEmpty() -> s.setStudioSource(grain, pixels)
+            shipped != null -> s.setStudioShippedSource(kind, shipped.toUInt())
+            pixels.isNotEmpty() -> s.setStudioSource(kind, pixels)
             else -> false
         }
         sourceEditing = null
@@ -3153,10 +3160,33 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         syncPad()
     }
 
-    /** The pad has drawn its first frame: it shows the brush's sample scribble. */
+    /**
+     * The pad has drawn its first frame: it shows the brush's sample scribble, flat or on the sphere
+     * (drawn again here: a sphere asked for before now had nothing to draw on).
+     */
     fun padReady(p: CanvasSession) {
-        if (pad === p) p.drawSampleScribble()
+        if (pad !== p) return
+        p.showSphere(padSphere)
+        p.drawSampleScribble()
     }
+
+    /** The pad shown as a sphere with the brush's materials (the Materials page, or the 3D preview on). */
+    var padSphere = false
+        private set
+
+    fun showPadSphere(shown: Boolean) {
+        padSphere = shown
+        pad?.showSphere(shown)
+    }
+
+    /** The pad menu's 3D preview: the pad a sphere on every page, kept from one session to the next. */
+    private var pad3dState by mutableStateOf(interfacePrefs.getBoolean(PAD_3D, false))
+    var pad3d: Boolean
+        get() = pad3dState
+        set(on) {
+            pad3dState = on
+            interfacePrefs.edit().putBoolean(PAD_3D, on).apply()
+        }
 
     /** The pad paints with the brush as it is now, and what is on it is drawn again that way. */
     private fun syncPad() {
@@ -4055,6 +4085,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return index
     }
 
+    /** Takes point [index] off the channel shown (the curve keeps two at least). */
+    fun deleteCurvePoint(index: Int) {
+        val pts = curves[curveChannel]
+        if (index !in pts.indices || pts.size <= 2) return
+        setCurve(pts.filterIndexed { k, _ -> k != index })
+    }
+
     private fun setCurve(points: List<Offset>) {
         curves = curves.toMutableList().also { it[curveChannel] = points }
         val flat = curves.map { c -> c.flatMap { listOf(it.x, it.y) } }
@@ -4620,8 +4657,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (box != null) transformBox = box
     }
 
-    /** Numeric entry open beside window point [at]: for the box's angle (the rotation handle) or its size. */
-    data class TransformNumeric(val angle: Boolean, val at: Offset)
+    /**
+     * Numeric entry open beside the node at window point [at]: for the box's angle (the rotation
+     * handle) or its size; to the node's right when it is on the box's right side ([right]), else to its left.
+     */
+    data class TransformNumeric(val angle: Boolean, val at: Offset, val right: Boolean = false)
 
     var transformNumeric by mutableStateOf<TransformNumeric?>(null)
 
@@ -5158,6 +5198,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val COLOR_MODE = "color_mode"
         const val ACTIONS_TAB = "actions_tab"
         const val STUDIO_TAB = "studio_tab"
+        const val PAD_3D = "pad_3d_preview"
         const val RAPID_UNDO_DELAY = "rapid_undo_delay"
         const val LIGHT_INTERFACE = "light_interface"
         const val BRUSH_CURSOR = "brush_cursor"

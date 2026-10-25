@@ -2,7 +2,7 @@
 //! library, and written from it. A brush's shape and grain images go with it; an image a file only
 //! names (one that came with the app that made it) is stood in for by the nearest of ours.
 
-use procraft_engine::brush::{Author, Brush, Source, StockImage, StockImages};
+use procraft_engine::brush::{Author, Brush, MaterialSource, Source, StockImage, StockImages};
 use procraft_engine::brushfile::{self, BrushFile, Pictures, Texture};
 use procraft_engine::curve::Curve;
 use procraft_engine::textures::{self, TEXTURE_SIZE, grain, shape};
@@ -20,6 +20,8 @@ const THUMBNAIL: (u32, u32) = (327, 100);
 struct Made {
     shape: Vec<u8>,
     grain: Option<Vec<u8>>,
+    metallic: Option<Vec<u8>>,
+    roughness: Option<Vec<u8>>,
     thumbnail: Vec<u8>,
     author: Option<std::sync::Arc<[u8]>>,
     signature: Option<std::sync::Arc<[u8]>>,
@@ -30,6 +32,8 @@ impl Made {
         Pictures {
             shape_png: &self.shape,
             grain_png: self.grain.as_deref(),
+            metallic_png: self.metallic.as_deref(),
+            roughness_png: self.roughness.as_deref(),
             thumbnail_png: &self.thumbnail,
             author_png: self.author.as_deref(),
             signature_png: self.signature.as_deref(),
@@ -54,6 +58,8 @@ impl CanvasSession {
         Made {
             shape: gray_png(&shape_pixels(brush)),
             grain: grain_pixels(brush).map(|p| gray_png(&p)),
+            metallic: material_pixels(&brush.metallic).map(|p| gray_png(&p)),
+            roughness: material_pixels(&brush.roughness).map(|p| gray_png(&p)),
             thumbnail,
             author: author.and_then(|a| a.picture.clone()),
             signature: author.and_then(|a| a.signature.clone()),
@@ -174,12 +180,21 @@ fn brush_from(file: &BrushFile) -> Brush {
     let (image, source) = grain_for(&file.grain, file.thumbnail.as_deref());
     b.grain.image = image;
     b.grain.source = source;
+    for (texture, material) in [(&file.metallic, &mut b.metallic), (&file.roughness, &mut b.roughness)] {
+        let (image, source) = material_for(texture);
+        *material = MaterialSource { image, source };
+    }
     // the stock images it names, to name again when it is written out
     let stock = |t: &Texture| match t {
         Texture::Stock { name, inverted } => Some(StockImage { name: name.clone(), inverted: *inverted }),
         _ => None,
     };
-    b.stock = StockImages { shape: stock(&file.shape), grain: stock(&file.grain) };
+    b.stock = StockImages {
+        shape: stock(&file.shape),
+        grain: stock(&file.grain),
+        metallic: stock(&file.metallic),
+        roughness: stock(&file.roughness),
+    };
     // its own preview, if it can be shown
     b.thumbnail = file.thumbnail.as_deref().filter(|t| thumbnail_pixels(t).is_some()).map(Into::into);
     // who made it, if the file says
@@ -364,49 +379,64 @@ pub(crate) fn grain_for(t: &Texture, preview: Option<&[u8]>) -> (Option<u32>, Op
             if n.contains("blank") {
                 return (None, None);
             }
-            let table: &[(&[&str], u32)] = &[
-                (&["recycled"], grain::RECYCLED),
-                (&["canvas", "weave", "burlap", "cloth", "fabric"], grain::WEAVE),
-                (&["linen"], grain::LINEN),
-                (&["denim", "twill"], grain::TWILL),
-                (&["wood"], grain::WOOD),
-                (&["brick"], grain::BRICK),
-                (&["concrete", "stone", "rock", "wall", "asphalt"], grain::CONCRETE),
-                (&["halftone", "dot"], grain::HALFTONE),
-                (&["hatch"], grain::HATCHING),
-                (&["crumple", "crease", "fold"], grain::CRUMPLED),
-                (&["stipple"], grain::STIPPLE),
-                (&["wash", "water", "wet"], grain::WASH),
-                (&["marble"], grain::MARBLE),
-                (&["cell", "organic"], grain::CELLS),
-                (&["scale"], grain::SCALES),
-                (&["hex", "honeycomb"], grain::HEXAGONS),
-                (&["leather", "skin"], grain::LEATHER),
-                (&["bark"], grain::BARK),
-                (&["rust"], grain::RUST),
-                (&["scratch"], grain::SCRATCHES),
-                // a sheet of paper: a worn, light one, or crumpled
-                (&["dirty-paper", "dirty paper", "worn-paper", "worn paper"], grain::WORN),
-                (&["paper"], grain::SHEET),
-                (&["grunge", "dirt", "dust", "dirty"], grain::GRUNGE),
-                (&["fibre", "fiber", "hair", "straw"], grain::FIBRE),
-                (&["sand", "grit"], grain::SAND),
-                (&["noise", "static"], grain::FINE_NOISE),
-                (&["charcoal", "willow", "chalk", "pastel", "rough", "coarse", "corse"], grain::CHARCOAL),
-            ];
             let unknown = || match preview.and_then(preview_look) {
                 Some(PreviewLook::Faint) => Some(grain::SPECKLED),
                 // about white: as good as none
                 Some(PreviewLook::Even) => None,
                 _ => Some(grain::MOTTLED),
             };
-            let g = table
-                .iter()
-                .find(|(words, _)| words.iter().any(|w| n.contains(w)))
-                .map_or_else(unknown, |(_, g)| Some(*g));
-            (g, None)
+            (named_grain(&n).map_or_else(unknown, Some), None)
         }
     }
+}
+
+/// The source a file's metalness or roughness is painted through: its image, or our nearest grain
+/// to a stock image it names, or none (the amount all over) for one it can't show or names in
+/// words we don't know.
+pub(crate) fn material_for(t: &Texture) -> (Option<u32>, Option<Source>) {
+    match t {
+        Texture::None => (None, None),
+        Texture::Image { bytes, inverted } => (None, gray_texture(bytes, *inverted)),
+        Texture::Stock { name, .. } => {
+            let n = name.to_lowercase();
+            (if n.contains("blank") { None } else { named_grain(&n) }, None)
+        }
+    }
+}
+
+/// Our grain nearest to a stock image named `n` (lower case), if its name says what it is.
+fn named_grain(n: &str) -> Option<u32> {
+    let table: &[(&[&str], u32)] = &[
+        (&["recycled"], grain::RECYCLED),
+        (&["canvas", "weave", "burlap", "cloth", "fabric"], grain::WEAVE),
+        (&["linen"], grain::LINEN),
+        (&["denim", "twill"], grain::TWILL),
+        (&["wood"], grain::WOOD),
+        (&["brick"], grain::BRICK),
+        (&["concrete", "stone", "rock", "wall", "asphalt"], grain::CONCRETE),
+        (&["halftone", "dot"], grain::HALFTONE),
+        (&["hatch"], grain::HATCHING),
+        (&["crumple", "crease", "fold"], grain::CRUMPLED),
+        (&["stipple"], grain::STIPPLE),
+        (&["wash", "water", "wet"], grain::WASH),
+        (&["marble"], grain::MARBLE),
+        (&["cell", "organic"], grain::CELLS),
+        (&["scale"], grain::SCALES),
+        (&["hex", "honeycomb"], grain::HEXAGONS),
+        (&["leather", "skin"], grain::LEATHER),
+        (&["bark"], grain::BARK),
+        (&["rust"], grain::RUST),
+        (&["scratch"], grain::SCRATCHES),
+        // a sheet of paper: a worn, light one, or crumpled
+        (&["dirty-paper", "dirty paper", "worn-paper", "worn paper"], grain::WORN),
+        (&["paper"], grain::SHEET),
+        (&["grunge", "dirt", "dust", "dirty"], grain::GRUNGE),
+        (&["fibre", "fiber", "hair", "straw"], grain::FIBRE),
+        (&["sand", "grit"], grain::SAND),
+        (&["noise", "static"], grain::FINE_NOISE),
+        (&["charcoal", "willow", "chalk", "pastel", "rough", "coarse", "corse"], grain::CHARCOAL),
+    ];
+    table.iter().find(|(words, _)| words.iter().any(|w| n.contains(w))).map(|(_, g)| *g)
 }
 
 /// An image (PNG) as a shape or grain: grey (its alpha taken in), [`TEXTURE_SIZE`] square, white
@@ -488,6 +518,14 @@ fn grain_pixels(b: &Brush) -> Option<Vec<u8>> {
         return Some(s.pixels.to_vec());
     }
     b.grain.image.and_then(|i| textures::grains().into_iter().nth(i as usize)).map(|g| g.pixels)
+}
+
+/// A metalness or roughness source as an image, if it has one.
+pub(crate) fn material_pixels(m: &MaterialSource) -> Option<Vec<u8>> {
+    if let Some(s) = &m.source {
+        return Some(s.pixels.to_vec());
+    }
+    m.image.and_then(|i| textures::grains().into_iter().nth(i as usize)).map(|g| g.pixels)
 }
 
 /// A square grey PNG of `pixels`.

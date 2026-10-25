@@ -146,6 +146,21 @@ struct SavedBrush {
     shape_stock: Option<(String, bool)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     grain_stock: Option<(String, bool)>,
+    /// What it paints a model's metalness and roughness through: its own images (as text), the
+    /// shipped grains where they differ from its origin's (-1: none), and the stock images its
+    /// file named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metallic_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    roughness_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metallic_image: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    roughness_image: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metallic_stock: Option<(String, bool)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    roughness_stock: Option<(String, bool)>,
 }
 
 /// A brush's maker as kept: their name, and their picture and signature (PNG, as text).
@@ -299,6 +314,12 @@ impl State {
                 .map(|r| SavedReset { made: r.made, brush: Box::new(self.saved_brush(&r.brush, from)) }),
             shape_stock: brush.stock.shape.as_ref().map(|s| (s.name.clone(), s.inverted)),
             grain_stock: brush.stock.grain.as_ref().map(|s| (s.name.clone(), s.inverted)),
+            metallic_source: brush.metallic.source.as_ref().map(Source::to_text),
+            roughness_source: brush.roughness.source.as_ref().map(Source::to_text),
+            metallic_image: image(brush.metallic.image, base.metallic.image),
+            roughness_image: image(brush.roughness.image, base.roughness.image),
+            metallic_stock: brush.stock.metallic.as_ref().map(|s| (s.name.clone(), s.inverted)),
+            roughness_stock: brush.stock.roughness.as_ref().map(|s| (s.name.clone(), s.inverted)),
         }
     }
 
@@ -309,7 +330,12 @@ impl State {
             brush.name = b.name.chars().take(256).collect();
         }
         // the images first: a brush's own shape sets the unit its sizes are kept in
-        for (kept, image) in [(b.shape_image, &mut brush.shape.image), (b.grain_image, &mut brush.grain.image)] {
+        for (kept, image) in [
+            (b.shape_image, &mut brush.shape.image),
+            (b.grain_image, &mut brush.grain.image),
+            (b.metallic_image, &mut brush.metallic.image),
+            (b.roughness_image, &mut brush.roughness.image),
+        ] {
             if let Some(k) = kept {
                 *image = u32::try_from(k).ok();
             }
@@ -320,11 +346,22 @@ impl State {
         if let Some(text) = &b.grain_source {
             brush.grain.source = Source::from_text(text);
         }
+        for (text, material) in [(&b.metallic_source, &mut brush.metallic), (&b.roughness_source, &mut brush.roughness)]
+        {
+            if let Some(text) = text {
+                material.source = Source::from_text(text);
+            }
+        }
         // the stock images its file named, stood in for by our nearest as they are now
         let stock = |kept: &Option<(String, bool)>| {
             kept.as_ref().map(|(name, inverted)| StockImage { name: name.clone(), inverted: *inverted })
         };
-        brush.stock = StockImages { shape: stock(&b.shape_stock), grain: stock(&b.grain_stock) };
+        brush.stock = StockImages {
+            shape: stock(&b.shape_stock),
+            grain: stock(&b.grain_stock),
+            metallic: stock(&b.metallic_stock),
+            roughness: stock(&b.roughness_stock),
+        };
         let png = |text: &Option<String>| text.as_deref().and_then(procraft_engine::base64::decode).map(Into::into);
         brush.thumbnail = png(&b.thumbnail);
         if let Some(s) = &brush.stock.shape {
@@ -334,6 +371,14 @@ impl State {
         if let Some(s) = &brush.stock.grain {
             let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };
             brush.grain.image = crate::brush_files::grain_for(&texture, brush.thumbnail.as_deref()).0;
+        }
+        for (stock, material) in
+            [(&brush.stock.metallic, &mut brush.metallic), (&brush.stock.roughness, &mut brush.roughness)]
+        {
+            if let Some(s) = stock {
+                let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };
+                material.image = crate::brush_files::material_for(&texture).0;
+            }
         }
         brush.set_settings(b.settings.iter().map(|(k, v)| (k.as_str(), *v)));
         for (points, curve) in [

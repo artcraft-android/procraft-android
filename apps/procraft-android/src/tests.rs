@@ -723,6 +723,8 @@ fn an_imported_brush_shows_its_own_preview_until_changed() {
         &Pictures {
             shape_png: &shape,
             grain_png: None,
+            metallic_png: None,
+            roughness_png: None,
             thumbnail_png: &thumbnail,
             author_png: None,
             signature_png: None,
@@ -781,28 +783,89 @@ fn a_brush_keeps_its_images_and_their_sizes() {
     let sizes = vec!["max_size".to_owned()];
     // its own shape (sizes kept in that shape's unit), a shipped grain
     s.studio_begin();
-    assert!(s.set_studio_source(false, vec![200; size * size]));
-    assert!(s.set_studio_shipped_source(true, 2));
+    assert!(s.set_studio_source(crate::studio::SourceKind::Shape, vec![200; size * size]));
+    assert!(s.set_studio_shipped_source(crate::studio::SourceKind::Grain, 2));
     s.set_studio_setting("max_size".to_owned(), 0.6);
-    let grain = s.studio_source(true);
+    let grain = s.studio_source(crate::studio::SourceKind::Grain);
     s.studio_end(true);
     let Some(other) = session(100, 100) else { return };
     assert!(other.load_brush_library(s.saved_brush_library()));
     other.studio_begin();
     assert!((other.studio_settings(sizes.clone())[0] - 0.6).abs() < 1e-3);
-    assert_eq!(other.studio_source(false), vec![200; size * size]);
-    assert_eq!(other.studio_source(true), grain);
+    assert_eq!(other.studio_source(crate::studio::SourceKind::Shape), vec![200; size * size]);
+    assert_eq!(other.studio_source(crate::studio::SourceKind::Grain), grain);
     other.studio_end(false);
     // a shipped shape in place of the round tip
     s.studio_begin();
     s.studio_reset();
-    assert!(s.set_studio_shipped_source(false, 1));
-    let shape = s.studio_source(false);
+    assert!(s.set_studio_shipped_source(crate::studio::SourceKind::Shape, 1));
+    let shape = s.studio_source(crate::studio::SourceKind::Shape);
     s.studio_end(true);
     let Some(third) = session(100, 100) else { return };
     assert!(third.load_brush_library(s.saved_brush_library()));
     third.studio_begin();
-    assert_eq!(third.studio_source(false), shape);
+    assert_eq!(third.studio_source(crate::studio::SourceKind::Shape), shape);
+}
+
+#[test]
+fn a_brush_keeps_what_it_paints_materials_through() {
+    use crate::studio::SourceKind::{Metallic, Roughness};
+    let Some(s) = session(100, 100) else { return };
+    let size = crate::studio::source_size() as usize;
+    let amounts = || vec!["metallic_amount".to_owned(), "roughness_amount".to_owned(), "metallic_scale".to_owned()];
+    s.studio_begin();
+    // not metallic, half rough, each source tiled at a tenth, and neither an image (the amount all over)
+    assert_eq!(s.studio_settings(amounts()), vec![0.0, 0.5, 0.1]);
+    assert!(s.studio_source(Metallic).is_empty() && s.studio_source(Roughness).is_empty());
+    assert!(s.set_studio_source(Metallic, vec![90; size * size]));
+    assert!(s.set_studio_shipped_source(Roughness, 3));
+    s.set_studio_setting("metallic_amount".to_owned(), 0.7);
+    let rough = s.studio_source(Roughness);
+    assert_eq!(rough.len(), size * size);
+    s.studio_end(true);
+    // kept with the library
+    let Some(other) = session(100, 100) else { return };
+    assert!(other.load_brush_library(s.saved_brush_library()));
+    other.studio_begin();
+    assert_eq!(other.studio_source(Metallic), vec![90; size * size]);
+    assert_eq!(other.studio_source(Roughness), rough);
+    assert!((other.studio_settings(amounts())[0] - 0.7).abs() < 1e-3);
+    other.studio_end(false);
+    // and with a brush file: both images its own, the amount as it was
+    let b = s.current_brush();
+    let set = other.import_brushes(s.brush_as_file(b.set, b.index).unwrap()).unwrap();
+    assert!(other.select_brush(set, 0));
+    other.studio_begin();
+    assert_eq!(other.studio_source(Metallic), vec![90; size * size]);
+    assert_eq!(other.studio_source(Roughness), rough);
+    assert!((other.studio_settings(amounts())[0] - 0.7).abs() < 1e-3);
+}
+
+#[test]
+fn a_studio_slider_has_its_own_pressure_curve_and_tilt() {
+    let s = CanvasSession::new(64, 64);
+    s.studio_begin();
+    // which sliders offer what
+    let scatter = crate::studio::slider_extras("scatter".into());
+    assert!(scatter.pressure && !scatter.tilt);
+    let count = crate::studio::slider_extras("count".into());
+    assert!(count.pressure && count.tilt && count.tilt_switch == "count_tilt");
+    let gradation = crate::studio::slider_extras("tilt_gradation".into());
+    assert!(!gradation.pressure && gradation.tilt && gradation.tilt_switch.is_empty());
+    // a curve given, read back, and taken away
+    assert!(s.studio_slider_curve("scatter".into()).is_empty());
+    s.set_studio_slider_curve("scatter".into(), vec![0.0, 0.0, 0.5, 0.8, 1.0, 1.0]);
+    assert_eq!(s.studio_slider_curve("scatter".into()), vec![0.0, 0.0, 0.5, 0.8, 1.0, 1.0]);
+    s.set_studio_slider_curve("scatter".into(), Vec::new());
+    assert!(s.studio_slider_curve("scatter".into()).is_empty());
+    // the size's own response: straight reads as off
+    s.set_studio_slider_curve("pressure_size".into(), vec![0.0, 0.0, 0.5, 0.2, 1.0, 1.0]);
+    assert_eq!(s.studio_slider_curve("pressure_size".into()).len(), 6);
+    s.set_studio_slider_curve("pressure_size".into(), Vec::new());
+    assert!(s.studio_slider_curve("pressure_size".into()).is_empty());
+    // a slider without a curve keeps none
+    s.set_studio_slider_curve("spacing".into(), vec![0.0, 0.0, 1.0, 1.0]);
+    assert!(s.studio_slider_curve("spacing".into()).is_empty());
 }
 
 #[test]
@@ -1601,9 +1664,9 @@ fn a_brush_paints_with_a_shape_of_the_users_own_and_keeps_it() {
     let n = crate::studio::source_size() as usize;
     // a filled square: square stamps where the round pen's are round
     s.studio_begin();
-    assert!(!s.set_studio_source(false, vec![255; 10]), "the wrong size is refused");
-    assert!(s.set_studio_source(false, vec![255; n * n]));
-    assert_eq!(s.studio_source(false).len(), n * n);
+    assert!(!s.set_studio_source(crate::studio::SourceKind::Shape, vec![255; 10]), "the wrong size is refused");
+    assert!(s.set_studio_source(crate::studio::SourceKind::Shape, vec![255; n * n]));
+    assert_eq!(s.studio_source(crate::studio::SourceKind::Shape).len(), n * n);
     s.studio_end(true);
     s.stroke_begin(PointerKind::Finger, vec![sample(50.0, 50.0, 0.0)]);
     s.stroke_end(vec![]);
@@ -1617,10 +1680,10 @@ fn a_brush_paints_with_a_shape_of_the_users_own_and_keeps_it() {
     let t = CanvasSession::new(64, 64);
     assert!(t.load_brush_library(saved));
     t.studio_begin();
-    assert_eq!(t.studio_source(false), vec![255; n * n]);
+    assert_eq!(t.studio_source(crate::studio::SourceKind::Shape), vec![255; n * n]);
     // a shipped shape again
-    assert!(t.set_studio_shipped_source(false, 0));
-    assert_ne!(t.studio_source(false), vec![255; n * n]);
+    assert!(t.set_studio_shipped_source(crate::studio::SourceKind::Shape, 0));
+    assert_ne!(t.studio_source(crate::studio::SourceKind::Shape), vec![255; n * n]);
     assert_eq!(crate::studio::source_library(true).len(), procraft_engine::textures::grains().len());
 }
 
@@ -2007,6 +2070,63 @@ fn a_pad_keeps_its_strokes_and_its_sample_gives_way() {
 }
 
 #[test]
+fn the_pad_turns_into_a_sphere_of_its_own_and_back() {
+    let Some(pad) = session(300, 300) else { return };
+    // where each kept stroke's samples are
+    let kept = |p: &CanvasSession| {
+        let k = p.shared.lock().pad_strokes.clone().unwrap_or_default();
+        k.iter().map(|(_, s)| s.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>()).collect::<Vec<_>>()
+    };
+    pad.keep_strokes();
+    pad.set_background_color(0.1, 0.1, 0.1, true);
+    // half a pixel a point: the sphere 120 pixels round
+    pad.set_display_scale(0.5);
+    pad.draw_sample_scribble();
+    pad.begin_own_stroke();
+    pad.stroke_begin(PointerKind::Finger, vec![sample(10.0, 10.0, 0.0)]);
+    pad.stroke_end(vec![sample(290.0, 20.0, 32.0)]);
+    let flat = kept(&pad);
+    pad.show_sphere(true);
+    // its own sample scribble, on the sphere's face (in the pad's middle), over nothing
+    {
+        let st = pad.shared.lock();
+        assert!(st.pad_sample && !st.doc.background_visible);
+    }
+    let k = kept(&pad);
+    assert_eq!(k.len(), 1);
+    assert!(k[0].iter().all(|(x, y)| (x - 150.0).hypot(y - 150.0) < 120.0));
+    // drawn: the pad's colour round the sphere, the sphere lit inside
+    let px = {
+        let mut guard = pad.shared.lock();
+        let st = &mut *guard;
+        let format = procraft_gpu::wgpu::TextureFormat::Rgba8Unorm;
+        let gpu = st.gpu.clone().unwrap();
+        let target = gpu.device.create_texture(&procraft_gpu::wgpu::TextureDescriptor {
+            label: Some("test frame"),
+            size: procraft_gpu::wgpu::Extent3d { width: 300, height: 300, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: procraft_gpu::wgpu::TextureDimension::D2,
+            format,
+            usage: procraft_gpu::wgpu::TextureUsages::RENDER_ATTACHMENT | procraft_gpu::wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&procraft_gpu::wgpu::TextureViewDescriptor::default());
+        st.render_sphere(&view, format, (300, 300), None);
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+        procraft_gpu::read_texture(&gpu, &target, 300, 300).unwrap()
+    };
+    let at = |x: usize, y: usize| px[(y * 300 + x) * 4];
+    assert!(at(2, 2).abs_diff(26) <= 1, "{}", at(2, 2));
+    assert!(at(150, 40) > at(2, 2) + 30, "{} {}", at(150, 40), at(2, 2));
+    // flat again: its strokes as they were, over the pad's colour
+    pad.show_sphere(false);
+    assert_eq!(kept(&pad), flat);
+    let st = pad.shared.lock();
+    assert!(!st.pad_sample && st.doc.background_visible && st.sphere.is_none());
+}
+
+#[test]
 fn choosing_a_layer_is_an_undo_step() {
     let Some(s) = session(32, 32) else { return };
     let current = |s: &CanvasSession| s.layers().iter().find(|l| l.current).map(|l| l.id);
@@ -2259,6 +2379,8 @@ fn a_brush_keeps_its_maker_and_a_reset_point() {
         &Pictures {
             shape_png: &shape,
             grain_png: None,
+            metallic_png: None,
+            roughness_png: None,
             thumbnail_png: &shape,
             author_png: Some(&face),
             signature_png: Some(b"not a png"),
@@ -2395,11 +2517,24 @@ fn stock_images_a_file_names_are_kept_and_named_again() {
     let file = brushfile::write(
         &Brush {
             name: "Stocked".to_owned(),
-            stock: StockImages { shape: named("Hard-Round.png"), grain: named("Old-Recycled-Paper.png") },
+            stock: StockImages {
+                shape: named("Hard-Round.png"),
+                grain: named("Old-Recycled-Paper.png"),
+                metallic: named("Brushed-Metal.png"),
+                roughness: None,
+            },
             ..Brush::round_pen()
         },
         "",
-        &Pictures { shape_png: &png, grain_png: None, thumbnail_png: &png, author_png: None, signature_png: None },
+        &Pictures {
+            shape_png: &png,
+            grain_png: None,
+            metallic_png: None,
+            roughness_png: None,
+            thumbnail_png: &png,
+            author_png: None,
+            signature_png: None,
+        },
     );
     let set = s.import_brushes(file).unwrap();
     {
@@ -2417,10 +2552,15 @@ fn stock_images_a_file_names_are_kept_and_named_again() {
         let b = &st.library[set].brushes[0];
         assert_eq!(b.stock.shape.as_ref().map(|g| (g.name.as_str(), g.inverted)), Some(("Hard-Round.png", true)));
         assert_eq!(b.grain.image, Some(grain::RECYCLED));
+        // a stock metalness source we have nothing like: the amount all over, its name kept
+        assert_eq!(b.metallic, procraft_engine::brush::MaterialSource::default());
+        assert!(b.stock.metallic.is_some() && b.stock.roughness.is_none());
         set as u32
     };
     // written out, it names them again
     let out = brushfile::read(&t.brush_as_file(set, 0).unwrap()).unwrap();
     assert_eq!(out.grain, Texture::Stock { name: "Old-Recycled-Paper.png".to_owned(), inverted: true });
+    assert_eq!(out.metallic, Texture::Stock { name: "Brushed-Metal.png".to_owned(), inverted: true });
+    assert_eq!(out.roughness, Texture::None);
     assert_eq!(out.shape, Texture::Stock { name: "Hard-Round.png".to_owned(), inverted: true });
 }

@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
@@ -308,7 +310,10 @@ private fun BalanceRow(left: String, right: String, value: Float, track: Brush, 
     }
 }
 
-/** The curves panel: the chosen channel's curve over a grid (drag its points; touch elsewhere to add one), and the channels. */
+/**
+ * The curves panel: the chosen channel's curve over a grid (drag its points; touch elsewhere to add
+ * one; tap a point for Delete over it), and the channels.
+ */
 @Composable
 fun CurvesPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
     Row(
@@ -316,24 +321,34 @@ fun CurvesPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
         horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         val points = vm.curves[vm.curveChannel]
+        // the point whose Delete shows, and the graph's size for placing it
+        var tapped by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<Int?>(null) }
+        var graph by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
         Box(
-            Modifier.weight(1f).fillMaxHeight().padding(8.dp).pointerInput(vm.curveChannel) {
+            Modifier.weight(1f).fillMaxHeight().padding(8.dp).onSizeChanged { graph = it }.pointerInput(vm.curveChannel) {
                 awaitEachGesture {
                     val down = awaitFirstDown()
                     down.consume()
+                    tapped = null
                     val w = size.width.toFloat()
                     val h = size.height.toFloat()
                     fun toCurve(p: Offset) = Offset((p.x / w).coerceIn(0f, 1f), (1f - p.y / h).coerceIn(0f, 1f))
                     val reach = 22.dp.toPx()
                     val current = vm.curves[vm.curveChannel]
                     var index = current.indexOfFirst { (Offset(it.x * w, (1f - it.y) * h) - down.position).getDistance() <= reach }
-                    if (index < 0) index = vm.addCurvePoint(toCurve(down.position))
+                    val added = index < 0
+                    if (added) index = vm.addCurvePoint(toCurve(down.position))
+                    var moved = false
                     while (true) {
                         val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
                         if (!c.pressed) break
+                        if (!moved && (c.position - down.position).getDistance() < viewConfiguration.touchSlop) continue
+                        moved = true
                         index = vm.moveCurvePoint(index, toCurve(c.position))
                         c.consume()
                     }
+                    // a tap on a point: Delete over it
+                    if (!moved && !added) tapped = index
                 }
             }.drawBehind {
                 val w = size.width
@@ -348,7 +363,28 @@ fun CurvesPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                 }
                 for (p in points) node(Offset(p.x * w, (1f - p.y) * h), CurveNode, 1f)
             },
-        )
+        ) {
+            tapped?.let { i -> points.getOrNull(i) }?.let { p ->
+                // a pill 78 x 44 over the point, its bottom 14 above it
+                val at = with(androidx.compose.ui.platform.LocalDensity.current) {
+                    androidx.compose.ui.unit.IntOffset(
+                        (p.x * graph.width - 39.dp.toPx()).roundToInt(),
+                        ((1f - p.y) * graph.height - (14 + 44).dp.toPx()).roundToInt(),
+                    )
+                }
+                PcPopup(offset = at, onDismissRequest = { tapped = null }, properties = androidx.compose.ui.window.PopupProperties(focusable = true, clippingEnabled = false)) {
+                    Box(
+                        Modifier.size(78.dp, 44.dp).clip(CircleShape).background(CurveMenuFill).tap {
+                            tapped?.let(vm::deleteCurvePoint)
+                            tapped = null
+                        },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("Delete", color = Color.White, fontSize = 17.sp, maxLines = 1)
+                    }
+                }
+            }
+        }
         Column(Modifier.width(111.dp).fillMaxHeight().clip(RoundedCornerShape(13.dp)), verticalArrangement = Arrangement.spacedBy(1.dp)) {
             listOf("Gamma", "Red", "Green", "Blue").forEachIndexed { i, name ->
                 val chosen = vm.curveChannel == i
@@ -361,6 +397,8 @@ fun CurvesPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
 }
 
 private val CurveNode = Color(0xFF0171EA)
+/** The Delete pill over a tapped point. */
+private val CurveMenuFill = Color(0xFF262626)
 
 /**
  * The gradient map panel: the gradient library (a tap chooses one, a tap on the chosen one edits
