@@ -9,9 +9,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -66,101 +68,225 @@ private val CapsuleEdge = Color(0xFF373737)
 private val DoneBlue = Color(0xFF0190FF)
 
 /**
- * Sharing the layers as an animation: the frames playing in a square, Export Settings (the size,
- * and per format dithering and a transparent background) in a panel on the left, Cancel, and
- * the round Done that exports and shares.
+ * Sharing the layers as an animation: the frames playing, the settings (the size, and per format
+ * dithering and a transparent background), Cancel, and the round Done that exports and shares.
+ * The file is made as the settings change, to show its size.
  */
 @Composable
 fun AnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var settingsOpen by remember { mutableStateOf(false) }
     var webReady by remember { mutableStateOf(false) }
     var dither by remember { mutableStateOf(true) }
     var transparent by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
-    fun cancel() {
-        if (settingsOpen) settingsOpen = false else vm.endAnimatedExport()
+    val canTransparent = format == CanvasViewModel.Animated.GIF || format == CanvasViewModel.Animated.PNG
+    // the file as the settings make it, for its size
+    var bytes by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(webReady, dither, transparent) {
+        bytes = null
+        bytes = vm.exportAnimation(format, webReady, dither, transparent)?.length()
     }
-    BackHandler { cancel() }
-    BoxWithConstraints(Modifier.fillMaxSize().background(ScreenFill).pointerInput(Unit) { detectTapGestures { } }) {
-        val box = maxWidth - 48.dp
-        val side = with(LocalDensity.current) { box.roundToPx() }
-        // the frames, fitted to the square, played over and over
-        var frames by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
-        var shown by remember { mutableIntStateOf(0) }
-        val canTransparent = format == CanvasViewModel.Animated.GIF || format == CanvasViewModel.Animated.PNG
-        LaunchedEffect(transparent && canTransparent, side) {
-            val loaded = withContext(Dispatchers.IO) { List(vm.animationFrameCount()) { vm.animationFrame(it, side, transparent && canTransparent) }.filterNotNull() }
-            frames = loaded
-            shown = 0
-        }
-        LaunchedEffect(frames) {
-            while (frames.size > 1) {
-                delay(1000L / CanvasViewModel.ANIMATION_FPS)
-                shown = (shown + 1) % frames.size
+    ExportScreen(
+        title = format.title,
+        name = vm.artworkTitle(),
+        size = bytes?.let(::fileSize),
+        exporting = exporting,
+        onCancel = { vm.endAnimatedExport() },
+        onDone = {
+            exporting = true
+            scope.launch {
+                val file = vm.exportAnimation(format, webReady, dither, transparent)
+                exporting = false
+                if (file != null) {
+                    vm.endAnimatedExport()
+                    shareFile(context, file, format.mime)
+                } else {
+                    vm.message = "The animation could not be exported."
+                }
             }
-        }
-        Box(Modifier.offset(x = 24.dp, y = 96.dp).size(box), contentAlignment = Alignment.Center) {
+        },
+        preview = { side ->
+            // the frames, fitted to the box, played over and over
+            var frames by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
+            var shown by remember { mutableIntStateOf(0) }
+            LaunchedEffect(transparent && canTransparent, side) {
+                val loaded = withContext(Dispatchers.IO) { List(vm.animationFrameCount()) { vm.animationFrame(it, side, transparent && canTransparent) }.filterNotNull() }
+                frames = loaded
+                shown = 0
+            }
+            LaunchedEffect(frames) {
+                while (frames.size > 1) {
+                    delay(1000L / CanvasViewModel.ANIMATION_FPS)
+                    shown = (shown + 1) % frames.size
+                }
+            }
             frames.getOrNull(shown)?.let { Image(it.asImageBitmap(), contentDescription = "Preview", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
-        }
-        // the header: Export Settings on the left, Cancel and Done on the right
-        Row(Modifier.offset(x = 14.dp, y = 20.dp).height(44.dp).clickable { settingsOpen = !settingsOpen }.padding(end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.width(60.dp), contentAlignment = Alignment.Center) {
-                Icon(PcIcons.ChevronLeft, contentDescription = null, tint = TitleInk, modifier = Modifier.size(28.dp))
+        },
+    ) {
+        Segments(listOf("Max Resolution", "Web Ready"), if (webReady) 1 else 0) { webReady = it == 1 }
+        Spacer(Modifier.height(6.5.dp))
+        if (format == CanvasViewModel.Animated.GIF) SettingRow("Dithering", dither) { dither = it }
+        if (canTransparent) SettingRow("Transparent background", transparent) { transparent = it }
+    }
+}
+
+/** A file's size as the export screen shows it: "1.3 MB", "850 KB". */
+private fun fileSize(bytes: Long): String =
+    if (bytes >= 1_000_000) "%.1f MB".format(bytes / 1_000_000.0) else "${(bytes / 1000).coerceAtLeast(1)} KB"
+
+/**
+ * An export screen. Wide, the settings stay in a 400-wide panel on the left, and the artwork's
+ * name and the file's [size] sit over the preview, which fills the rest (41 in at the sides,
+ * 110 down). Upright, "Export Settings" opens the panel over a square preview (24 in), a tap
+ * beside it closing it again. Cancel and the round Done are at the top right.
+ */
+@Composable
+private fun ExportScreen(
+    title: String,
+    name: String,
+    size: String?,
+    exporting: Boolean,
+    onCancel: () -> Unit,
+    onDone: () -> Unit,
+    preview: @Composable (side: Int) -> Unit,
+    panel: @Composable ColumnScope.() -> Unit,
+) {
+    var settingsOpen by remember { mutableStateOf(false) }
+    BoxWithConstraints(Modifier.fillMaxSize().background(ScreenFill).pointerInput(Unit) { detectTapGestures { } }) {
+        val wide = maxWidth > maxHeight
+        BackHandler { if (settingsOpen && !wide) settingsOpen = false else onCancel() }
+        val left = if (wide) PanelWidth + 10.dp else 0.dp
+        val inset = if (wide) 41.dp else 24.dp
+        val boxWidth = maxWidth - left - inset * 2
+        val boxHeight = if (wide) minOf(boxWidth, maxHeight - 104.dp) else boxWidth
+        val side = with(LocalDensity.current) { minOf(boxWidth, boxHeight).roundToPx() }
+        Box(Modifier.offset(x = left + inset, y = 110.dp).size(boxWidth, boxHeight), contentAlignment = Alignment.Center) { preview(side) }
+        if (wide) {
+            // the name and size centred between the panel and the buttons
+            Column(
+                Modifier.offset(x = left + 24.dp, y = 23.dp).width(maxWidth - left - 24.dp - 224.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(name, color = TitleInk, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.height(30.dp))
+                Text(size ?: "", color = SizeInk, fontSize = 13.sp, maxLines = 1, modifier = Modifier.height(20.dp))
             }
-            Text("Export Settings", color = TitleInk, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+        } else {
+            Row(Modifier.offset(x = 14.dp, y = 20.dp).clickable { settingsOpen = !settingsOpen }.padding(end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.width(60.dp), contentAlignment = Alignment.Center) {
+                    Icon(PcIcons.ChevronLeft, contentDescription = null, tint = TitleInk, modifier = Modifier.size(28.dp))
+                }
+                // on two lines, as there
+                Text("Export\nSettings", color = TitleInk, fontSize = 24.sp, fontWeight = FontWeight.Bold, lineHeight = 29.sp)
+            }
         }
         Row(Modifier.align(Alignment.TopEnd).padding(top = 16.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
-                Modifier.height(43.dp).clip(CircleShape).background(CapsuleFill).border(1.dp, CapsuleEdge, CircleShape).clickable { cancel() }.padding(horizontal = 13.dp),
+                Modifier.height(43.dp).clip(CircleShape).background(CapsuleFill).border(1.dp, CapsuleEdge, CircleShape).clickable(onClick = onCancel).padding(horizontal = 13.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Text("Cancel", color = Color(0xFFA5A5A5), fontSize = 17.sp)
             }
             Spacer(Modifier.width(13.dp))
             Box(
-                Modifier.size(44.dp, 45.dp).clip(CircleShape).background(DoneBlue).clickable(enabled = !exporting) {
-                    exporting = true
-                    scope.launch {
-                        val file = vm.exportAnimation(format, webReady, dither, transparent)
-                        exporting = false
-                        if (file != null) {
-                            vm.endAnimatedExport()
-                            shareFile(context, file, format.mime)
-                        } else {
-                            vm.message = "The animation could not be exported."
-                        }
-                    }
-                },
+                Modifier.size(44.dp, 45.dp).clip(CircleShape).background(DoneBlue).clickable(enabled = !exporting, onClick = onDone),
                 contentAlignment = Alignment.Center,
             ) {
                 if (exporting) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(24.dp))
                 else Icon(PcIcons.DoneTick, contentDescription = "Export", tint = Color.White, modifier = Modifier.requiredSize(40.dp))
             }
         }
-        if (settingsOpen) {
-            // a tap outside the panel closes it
-            Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { settingsOpen = false } })
+        if (wide || settingsOpen) {
+            // upright, a tap outside the panel closes it
+            if (!wide) Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { settingsOpen = false } })
             Column(
-                Modifier.padding(10.dp).width(400.dp).fillMaxHeight().clip(RoundedCornerShape(20.dp)).background(PanelFill).border(1.dp, PanelEdge, RoundedCornerShape(20.dp))
+                Modifier.padding(10.dp).width(PanelWidth).fillMaxHeight().clip(RoundedCornerShape(20.dp)).background(PanelFill).border(1.dp, PanelEdge, RoundedCornerShape(20.dp))
                     .pointerInput(Unit) { detectTapGestures { } },
             ) {
-                Text(format.title, color = TitleInk, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 24.dp, top = 15.dp).height(36.dp))
-                Spacer(Modifier.height(8.dp))
-                Segments(listOf("Max Resolution", "Web Ready"), if (webReady) 1 else 0) { webReady = it == 1 }
-                Spacer(Modifier.height(15.dp))
-                if (format == CanvasViewModel.Animated.GIF) SettingRow("Dithering", dither) { dither = it }
-                if (canTransparent) SettingRow("Transparent background", transparent) { transparent = it }
+                Text(title, color = TitleInk, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 24.dp, top = 19.dp).height(36.dp))
+                Spacer(Modifier.height(11.5.dp))
+                panel()
             }
         }
     }
 }
 
-/** Two or more choices side by side in a grey track, the chosen one blue. */
+private val PanelWidth = 400.dp
+private val SizeInk = Color(0xFF8E8E8E)
+
+/**
+ * Sharing a model on a turntable: it turning as it will, the settings (the size, once round or
+ * swinging, how long a turn takes, how far the camera pulls back, the easing, and whether the
+ * environment shows), Cancel, and the round Done that exports and shares.
+ */
+@Composable
+fun ModelAnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var exporting by remember { mutableStateOf(false) }
+    ExportScreen(
+        title = format.title,
+        name = vm.artworkTitle(),
+        size = null,
+        exporting = exporting,
+        onCancel = { vm.modelAnimatedExport = null },
+        onDone = {
+            exporting = true
+            scope.launch {
+                val file = vm.exportModelAnimation(format)
+                exporting = false
+                if (file != null) {
+                    vm.modelAnimatedExport = null
+                    shareFile(context, file, format.mime)
+                } else {
+                    vm.message = "The animation could not be exported."
+                }
+            }
+        },
+        preview = { side ->
+            // the turntable's frames, made again whenever its settings change, played over and over
+            var frames by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
+            var shown by remember { mutableIntStateOf(0) }
+            LaunchedEffect(vm.turntable, side) {
+                frames = vm.turntablePreview(side / 2, PREVIEW_FPS)
+                shown = 0
+            }
+            LaunchedEffect(frames) {
+                while (frames.size > 1) {
+                    delay(1000L / PREVIEW_FPS)
+                    shown = (shown + 1) % frames.size
+                }
+            }
+            frames.getOrNull(shown)?.let { Image(it.asImageBitmap(), contentDescription = "Preview", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
+        },
+    ) {
+        val t = vm.turntable
+        Segments(listOf("720p", "1080p", "4K", "Square"), vm.turntableSize) { vm.turntableSize = it }
+        Spacer(Modifier.height(14.5.dp))
+        Column(Modifier.padding(horizontal = 16.dp).clip(RoundedCornerShape(14.dp)).background(ChoiceFill)) {
+            ChoiceRow("Animated rotate", !t.swing) { vm.turntable = t.copy(swing = false) }
+            ChoiceRow("Animated swing", t.swing) { vm.turntable = t.copy(swing = true) }
+        }
+        Spacer(Modifier.height(26.dp))
+        val seconds = if (t.seconds < 1f) "%.1f".format(t.seconds) else "${t.seconds.roundToInt()}"
+        TurntableSlider("Animation duration", seconds, (t.seconds - 0.5f) / 4.5f) { vm.turntable = vm.turntable.copy(seconds = 0.5f + it * 4.5f) }
+        TurntableSlider("Zoom distance", "${(t.zoom * 100).roundToInt()}%", t.zoom) { vm.turntable = vm.turntable.copy(zoom = it) }
+        TurntableSlider("Ease", "${(t.ease * 100).roundToInt()}%", t.ease) { vm.turntable = vm.turntable.copy(ease = it) }
+        Spacer(Modifier.height(10.dp))
+        SettingRow("Show environment", t.environment) { vm.turntable = vm.turntable.copy(environment = it) }
+    }
+}
+
+/** The turntable preview's frame rate. */
+private const val PREVIEW_FPS = 15
+
+/** Two or more choices side by side in a grey track 384 wide, 12 apart, the chosen one blue. */
 @Composable
 private fun Segments(labels: List<String>, chosen: Int, onChoose: (Int) -> Unit) {
-    Row(Modifier.padding(start = 9.dp).width(382.dp).height(33.dp).clip(CircleShape).background(SegmentTrack).padding(1.5.dp)) {
+    Row(
+        Modifier.padding(start = 7.5.dp).width(384.dp).height(34.dp).clip(CircleShape).background(SegmentTrack).padding(2.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
         labels.forEachIndexed { i, label ->
             Box(
                 Modifier.weight(1f).fillMaxHeight().clip(CircleShape).background(if (i == chosen) Pc.Accent else Color.Transparent).clickable { onChoose(i) },
@@ -184,104 +310,6 @@ private fun SettingRow(label: String, on: Boolean, onChange: (Boolean) -> Unit) 
 private val ChoiceFill = Color(0xFF2E2E2E)
 private val SliderTrack = Color(0xFF3E3E3E)
 
-/**
- * Sharing a model on a turntable: it turning in a square as it will, Export Settings (the size,
- * once round or swinging, how long a turn takes, how far the camera pulls back, the easing, and
- * whether the environment shows) in a panel on the left, Cancel, and the round Done that exports
- * and shares.
- */
-@Composable
-fun ModelAnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var settingsOpen by remember { mutableStateOf(false) }
-    var exporting by remember { mutableStateOf(false) }
-    fun cancel() {
-        if (settingsOpen) settingsOpen = false else vm.modelAnimatedExport = null
-    }
-    BackHandler { cancel() }
-    BoxWithConstraints(Modifier.fillMaxSize().background(ScreenFill).pointerInput(Unit) { detectTapGestures { } }) {
-        val box = minOf(maxWidth - 48.dp, maxHeight - 120.dp)
-        val side = with(LocalDensity.current) { box.roundToPx() }
-        // the turntable's frames, made again whenever its settings change, played over and over
-        var frames by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
-        var shown by remember { mutableIntStateOf(0) }
-        LaunchedEffect(vm.turntable, side) {
-            frames = vm.turntablePreview(side / 2, PREVIEW_FPS)
-            shown = 0
-        }
-        LaunchedEffect(frames) {
-            while (frames.size > 1) {
-                delay(1000L / PREVIEW_FPS)
-                shown = (shown + 1) % frames.size
-            }
-        }
-        Box(Modifier.align(Alignment.TopCenter).offset(y = 96.dp).size(box), contentAlignment = Alignment.Center) {
-            frames.getOrNull(shown)?.let { Image(it.asImageBitmap(), contentDescription = "Preview", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
-        }
-        Row(Modifier.offset(x = 14.dp, y = 20.dp).height(44.dp).clickable { settingsOpen = !settingsOpen }.padding(end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.width(60.dp), contentAlignment = Alignment.Center) {
-                Icon(PcIcons.ChevronLeft, contentDescription = null, tint = TitleInk, modifier = Modifier.size(28.dp))
-            }
-            Text("Export Settings", color = TitleInk, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-        }
-        Row(Modifier.align(Alignment.TopEnd).padding(top = 16.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.height(43.dp).clip(CircleShape).background(CapsuleFill).border(1.dp, CapsuleEdge, CircleShape).clickable { cancel() }.padding(horizontal = 13.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("Cancel", color = Color(0xFFA5A5A5), fontSize = 17.sp)
-            }
-            Spacer(Modifier.width(13.dp))
-            Box(
-                Modifier.size(44.dp, 45.dp).clip(CircleShape).background(DoneBlue).clickable(enabled = !exporting) {
-                    exporting = true
-                    scope.launch {
-                        val file = vm.exportModelAnimation(format)
-                        exporting = false
-                        if (file != null) {
-                            vm.modelAnimatedExport = null
-                            shareFile(context, file, format.mime)
-                        } else {
-                            vm.message = "The animation could not be exported."
-                        }
-                    }
-                },
-                contentAlignment = Alignment.Center,
-            ) {
-                if (exporting) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(24.dp))
-                else Icon(PcIcons.DoneTick, contentDescription = "Export", tint = Color.White, modifier = Modifier.requiredSize(40.dp))
-            }
-        }
-        if (settingsOpen) {
-            Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { settingsOpen = false } })
-            val t = vm.turntable
-            Column(
-                Modifier.padding(10.dp).width(400.dp).fillMaxHeight().clip(RoundedCornerShape(20.dp)).background(PanelFill).border(1.dp, PanelEdge, RoundedCornerShape(20.dp))
-                    .pointerInput(Unit) { detectTapGestures { } },
-            ) {
-                Text(format.title, color = TitleInk, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 24.dp, top = 15.dp).height(36.dp))
-                Spacer(Modifier.height(8.dp))
-                Segments(listOf("720p", "1080p", "4K", "Square"), vm.turntableSize) { vm.turntableSize = it }
-                Spacer(Modifier.height(23.dp))
-                Column(Modifier.padding(horizontal = 16.dp).clip(RoundedCornerShape(14.dp)).background(ChoiceFill)) {
-                    ChoiceRow("Animated rotate", !t.swing) { vm.turntable = t.copy(swing = false) }
-                    ChoiceRow("Animated swing", t.swing) { vm.turntable = t.copy(swing = true) }
-                }
-                Spacer(Modifier.height(26.dp))
-                val seconds = if (t.seconds < 1f) "%.1f".format(t.seconds) else "${t.seconds.roundToInt()}"
-                TurntableSlider("Animation duration", seconds, (t.seconds - 0.5f) / 4.5f) { vm.turntable = vm.turntable.copy(seconds = 0.5f + it * 4.5f) }
-                TurntableSlider("Zoom distance", "${(t.zoom * 100).roundToInt()}%", t.zoom) { vm.turntable = vm.turntable.copy(zoom = it) }
-                TurntableSlider("Ease", "${(t.ease * 100).roundToInt()}%", t.ease) { vm.turntable = vm.turntable.copy(ease = it) }
-                Spacer(Modifier.height(10.dp))
-                SettingRow("Show environment", t.environment) { vm.turntable = vm.turntable.copy(environment = it) }
-            }
-        }
-    }
-}
-
-/** The turntable preview's frame rate. */
-private const val PREVIEW_FPS = 15
 
 /** One of two choices in a group, 40 tall: the chosen one blue with a tick. */
 @Composable

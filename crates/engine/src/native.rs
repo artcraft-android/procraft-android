@@ -420,16 +420,23 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
         &["ValkyrieColorProfile", "NSObject"],
         vec![("SiColorProfileArchiveICCNameKey", icc_name), ("SiColorProfileArchiveICCDataKey", Value::Data(icc_data))],
     );
+    // the canvas's settings; whether Animation Assist is on isn't written (its number unknown yet)
+    let a = doc.animation.clone().unwrap_or_default();
+    let playback = match a.playback {
+        crate::animation::Playback::OneShot => 0,
+        crate::animation::Playback::Loop => 1,
+        crate::animation::Playback::PingPong => 2,
+    };
     let animation = b.object(
         &["ValkyrieDocumentAnimation", "NSObject"],
         vec![
             ("animationMode", Value::Int(0)),
-            ("frameRate", Value::Int(15)),
-            ("onionSkinCount", Value::Int(12)),
-            ("onionSkinOpacity", Value::Real(0.6)),
+            ("frameRate", Value::Int(i64::from(a.fps))),
+            ("onionSkinCount", Value::Int(i64::from(a.onion_frames))),
+            ("onionSkinOpacity", Value::Real(f64::from(a.onion_opacity))),
             ("playbackDirection", Value::Int(0)),
-            ("playbackMode", Value::Int(1)),
-            ("primaryMixed", Value::Bool(false)),
+            ("playbackMode", Value::Int(playback)),
+            ("primaryMixed", Value::Bool(a.blend_primary)),
         ],
     );
     let size = b.string(&format!("{{{w}, {h}}}"));
@@ -516,7 +523,7 @@ fn write_item(
         return b.object(
             &["SilicaGroup", "ValkyrieGroup", "NSObject"],
             vec![
-                ("animationHeldLength", Value::Int(0)),
+                ("animationHeldLength", Value::Int(held(doc, id))),
                 ("children", children),
                 ("document", doc_ref.clone()),
                 ("isClipped", Value::Bool(l.clipped)),
@@ -552,6 +559,7 @@ fn write_item(
             clipped: false,
             alpha_lock: false,
             private: false,
+            held: 0,
         };
         Some(layer_record(b, doc_ref, &mask_uuid, None, rec, w, h))
     });
@@ -566,6 +574,7 @@ fn write_item(
         clipped: l.clipped,
         alpha_lock: l.alpha_lock,
         private: l.private,
+        held: held(doc, id),
     };
     let r = layer_record(b, doc_ref, &uuid, mask, rec, w, h);
     if id == doc.current() {
@@ -590,6 +599,13 @@ struct LayerRecord<'a> {
     alpha_lock: bool,
     /// Left out of the file's preview.
     private: bool,
+    /// Animation Assist: how many more frames this frame is held for.
+    held: i64,
+}
+
+/// How many more frames Animation Assist holds layer `id` for (0 without a hold).
+fn held(doc: &Document, id: LayerId) -> i64 {
+    doc.animation.as_ref().map_or(0, |a| i64::from(a.hold(id)))
 }
 
 impl LayerRecord<'_> {
@@ -605,6 +621,7 @@ impl LayerRecord<'_> {
             clipped: false,
             alpha_lock: false,
             private: false,
+            held: 0,
         }
     }
 }
@@ -640,7 +657,7 @@ fn layer_record(
         &["SilicaLayer", "ValkyrieLayer", "NSObject"],
         vec![
             ("UUID", uuid),
-            ("animationHeldLength", Value::Int(0)),
+            ("animationHeldLength", Value::Int(r.held)),
             ("blend", Value::Int(older_blends(r.blend).0)),
             ("bundledImagePath", Builder::null()),
             ("bundledMaskPath", Builder::null()),
@@ -956,6 +973,44 @@ mod tests {
             d.layers().iter().map(|l| (l.kind, l.parent.and_then(|p| d.index_of(p)))).collect::<Vec<_>>()
         };
         assert_eq!(shape(d), shape(&doc));
+    }
+
+    #[test]
+    fn animation_settings_are_the_canvases_own() {
+        let mut doc = Document::new(16, 16);
+        let id = doc.current();
+        let mut a = crate::animation::Animation {
+            fps: 24,
+            onion_frames: 3,
+            onion_opacity: 0.25,
+            playback: crate::animation::Playback::PingPong,
+            blend_primary: true,
+            ..Default::default()
+        };
+        a.set_hold(id, 2);
+        doc.animation = Some(a);
+        let pixels = HashMap::from([(id, vec![0u8; 16 * 16 * 4])]);
+        let bytes = write(&Export {
+            document: &doc,
+            pixels: &pixels,
+            composite: &[0; 16 * 16 * 4],
+            thumbnail_png: &[],
+            name: "",
+            author: "",
+            strokes: 0,
+            tracked_seconds: 0.0,
+            seed: 1,
+        });
+        let zip = ZipReader::new(&bytes).unwrap();
+        let archive = Archive::read(&zip.read("Document.archive").unwrap()).unwrap();
+        let root = archive.root().unwrap();
+        let anim = root.object("animation").unwrap();
+        assert_eq!(anim.int("frameRate"), Some(24));
+        assert_eq!(anim.int("onionSkinCount"), Some(3));
+        assert_eq!(anim.real("onionSkinOpacity"), Some(0.25));
+        assert_eq!(anim.int("playbackMode"), Some(2));
+        assert_eq!(anim.bool("primaryMixed"), Some(true));
+        assert_eq!(root.object("selectedLayer").unwrap().int("animationHeldLength"), Some(2));
     }
 
     #[test]

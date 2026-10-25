@@ -29,7 +29,7 @@ struct LayerUniform {
     stroke_on_mask: f32,
     // how the stroke blends into the layer: a blend mode's number (0: normal)
     stroke_blend: u32,
-    // an onion skin's colour (rgb) and how far towards it the layer goes (a)
+    // an onion skin's colour (rgb), screened over the layer, and how much (a)
     tint: vec4<f32>,
     // the stroke's texturized grain turned, radians, and how it and the burnt edges combine with
     // the stroke (blend modes' numbers)
@@ -176,7 +176,8 @@ fn layer_color(p: vec2<i32>) -> vec4<f32> {
         c = c * textureLoad(clip_tex, p, 0).a;
     }
     if (lu.tint.a > 0.0) {
-        c = vec4<f32>(mix(c.rgb, lu.tint.rgb * c.a, lu.tint.a), c.a);
+        // screen, premultiplied: black leaves the layer as it is
+        c = vec4<f32>(mix(c.rgb, c.rgb + lu.tint.rgb * (vec3<f32>(c.a) - c.rgb), lu.tint.a), c.a);
     }
     return c * lu.opacity;
 }

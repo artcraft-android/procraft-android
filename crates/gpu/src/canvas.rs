@@ -511,7 +511,7 @@ struct LayerUniform {
     stroke_on_mask: f32,
     /// How the stroke blends into the layer (a blend mode's number).
     stroke_blend: u32,
-    /// An onion skin's colour and how far towards it the layer goes (none at 0).
+    /// An onion skin's colour, screened over the layer, and how much (none at 0).
     tint: [f32; 4],
     /// The stroke's texturized grain turned, radians, and how it and the burnt edges combine
     /// with the stroke (blend modes' numbers).

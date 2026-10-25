@@ -71,6 +71,8 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.input.TextFieldValue
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.ByteBuffer
@@ -3592,13 +3594,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return Bitmap.createBitmap(argb, w, h, Bitmap.Config.ARGB_8888)
     }
 
+    /** The artwork's name, or the name an unnamed one shows. */
+    fun artworkTitle(): String = session?.name()?.trim()?.takeIf { it.isNotEmpty() } ?: "Untitled Artwork"
+
+    /** One animation export at a time: they write the same file. */
+    private val animationExports = Mutex()
+
     /**
      * The animation written as [format] into the cache, to share: Web Ready fits 480 pixels, else
      * the canvas size (a video as large as the encoder takes, up to 4096).
      */
     suspend fun exportAnimation(format: Animated, webReady: Boolean, dither: Boolean, transparent: Boolean): File? {
         val s = session ?: return null
-        return withContext(Dispatchers.IO) {
+        return animationExports.withLock { withContext(Dispatchers.IO) {
             val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
             val base = s.name().filter { it.isLetterOrDigit() || it in " _-" }.trim().ifEmpty { "Untitled Artwork" }
             val file = File(dir, "$base.${format.extension}")
@@ -3635,7 +3643,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 Log.e(TAG, "exporting an animation", e)
                 null
             }
-        }
+        } }
     }
 
     suspend fun exportImage(jpeg: Boolean): File? {

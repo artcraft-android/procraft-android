@@ -160,10 +160,12 @@ private class BrushColor(private val vm: CanvasViewModel) : ColorPick {
     override fun setRgb(rgb: Int) = vm.setRgb(rgb)
 }
 
-/** A colour of its own, starting at [rgb]; [onChange] hears every change. Greys keep their hue. */
-class HeldColor(rgb: Int, private val onChange: (Int) -> Unit) : ColorPick {
-    // a grey has no hue of its own: it opens at 180 degrees, as measured
-    override var hue by mutableFloatStateOf(0.5f)
+/**
+ * A colour of its own, starting at [rgb]; [onChange] hears every change. Greys keep their hue, and
+ * a grey opens at [greyHue] (180 degrees, as measured; some pickers open at 0).
+ */
+class HeldColor(rgb: Int, greyHue: Float = 0.5f, private val onChange: (Int) -> Unit) : ColorPick {
+    override var hue by mutableFloatStateOf(greyHue)
         private set
     override var saturation by mutableFloatStateOf(0f)
         private set
@@ -275,19 +277,31 @@ fun CompactColors(vm: CanvasViewModel, c: ColorPick, arrowX: Dp, modifier: Modif
     var mode by remember { mutableStateOf(ColorMode.DISC) }
     Popover(CompactWidth, arrowX, modifier, fill = CompactFill, side = side) {
         Text("Colors", color = Pc.PanelTitle, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 18.dp, top = 9.dp, bottom = 5.dp))
-        when (mode) {
-            ColorMode.DISC -> Disc(c, compact = true)
-            ColorMode.VALUE -> Value(c, compact = true)
-            ColorMode.HARMONY -> Harmony(vm, c, compact = true)
-            ColorMode.PALETTES -> CompactPalettes(vm, c)
-            else -> Classic(c, compact = true)
-        }
-        Row(Modifier.fillMaxWidth().height(52.dp)) {
-            for ((m, icon, label) in Modes) {
-                Box(Modifier.weight(1f).fillMaxSize().clickable { mode = m }, contentAlignment = Alignment.Center) {
-                    // the tabs' 36-unit glyphs, a little smaller here
-                    Icon(icon, contentDescription = label, tint = if (m == mode) Pc.Accent else Pc.PanelTitle, modifier = Modifier.requiredSize(33.dp))
-                }
+        CompactBody(vm, c, mode)
+        CompactTabs(mode) { mode = it }
+    }
+}
+
+/** The compact picker for [mode], 260 wide: the disc, the square, harmony, values or the palettes. */
+@Composable
+internal fun CompactBody(vm: CanvasViewModel, c: ColorPick, mode: ColorMode) {
+    when (mode) {
+        ColorMode.DISC -> Disc(c, compact = true)
+        ColorMode.VALUE -> Value(c, compact = true)
+        ColorMode.HARMONY -> Harmony(vm, c, compact = true)
+        ColorMode.PALETTES -> CompactPalettes(vm, c)
+        else -> Classic(c, compact = true)
+    }
+}
+
+/** The compact picker's modes as a row of icons, the chosen one blue. */
+@Composable
+internal fun CompactTabs(mode: ColorMode, onMode: (ColorMode) -> Unit) {
+    Row(Modifier.fillMaxWidth().height(52.dp)) {
+        for ((m, icon, label) in Modes) {
+            Box(Modifier.weight(1f).fillMaxSize().clickable { onMode(m) }, contentAlignment = Alignment.Center) {
+                // the tabs' 36-unit glyphs, a little smaller here
+                Icon(icon, contentDescription = label, tint = if (m == mode) Pc.Accent else Pc.PanelTitle, modifier = Modifier.requiredSize(33.dp))
             }
         }
     }

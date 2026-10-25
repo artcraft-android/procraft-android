@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalDensity
@@ -63,6 +66,9 @@ private val TrackEdge get() = if (Pc.light) Color(0xFFBDBDBD) else Color(0xFF5C5
 private val BarInk get() = if (Pc.light) Color(0xFF393939) else Color(0xFFC5C5C5)
 private const val MAX_ONION = 12
 
+/** Play's and Add Frame's inset from the bar's ends. */
+private val BarInset = 26.dp
+
 /**
  * Animation Assist's bar at the bottom: Play, Settings and Add Frame over the timeline of frames,
  * the current one in the middle; with its settings or the current frame's options above it.
@@ -77,14 +83,19 @@ fun BoxScope.AnimationBar(vm: CanvasViewModel) {
         var settingsAt by remember { mutableStateOf(281.5.dp) }
         val density = LocalDensity.current
         Column(Modifier.align(Alignment.BottomCenter)) {
+            // Onion skin colors opens a page in the settings' place; closed, they open on settings again
+            var colorsPage by remember { mutableStateOf(false) }
+            if (!vm.animationSettingsOpen) colorsPage = false
             if (vm.animationSettingsOpen) {
-                DownPopover(290.dp, 145.dp, Modifier.offset(x = (settingsAt - 145.dp).coerceIn(0.dp, barWidth - 290.dp))) { AnimationSettingsPage(vm) }
+                DownPopover(290.dp, 145.dp, Modifier.offset(x = (settingsAt - 145.dp).coerceIn(0.dp, barWidth - 290.dp))) {
+                    if (colorsPage) OnionColorsPage(vm) { colorsPage = false } else AnimationSettingsPage(vm) { colorsPage = true }
+                }
             } else if (vm.frameOptionsOpen) {
-                DownPopover(268.dp, 134.dp, Modifier.offset(x = barWidth / 2 - 134.dp)) { FrameOptionsPage(vm) }
+                DownPopover(260.dp, 130.dp, Modifier.offset(x = barWidth / 2 - 130.dp)) { FrameOptionsPage(vm) }
             }
             Box(Modifier.padding(bottom = BarGap).size(barWidth, BarHeight).clip(RoundedCornerShape(30.dp)).background(BarFill)) {
                 val pages = vm.animation?.pages == true
-                Row(Modifier.fillMaxWidth().padding(start = 26.dp, end = 26.dp, top = 8.dp).height(30.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().padding(start = BarInset, end = BarInset, top = 8.dp).height(30.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         if (pages) "Page Assist" else if (vm.playingFrame != null) "Pause" else "Play", color = BarInk, fontSize = 17.sp, fontWeight = FontWeight.Bold,
                         modifier = if (pages) Modifier else Modifier.clickable { vm.togglePlaying() },
@@ -92,7 +103,8 @@ fun BoxScope.AnimationBar(vm: CanvasViewModel) {
                     Spacer(Modifier.weight(1f))
                     if (!pages) BarText(
                         "Settings",
-                        Modifier.onGloballyPositioned { c -> settingsAt = with(density) { (c.positionInParent().x + c.size.width / 2f).toDp() } },
+                        // measured inside the row's padding
+                        Modifier.onGloballyPositioned { c -> settingsAt = BarInset + with(density) { (c.positionInParent().x + c.size.width / 2f).toDp() } },
                     ) {
                         vm.animationSettingsOpen = !vm.animationSettingsOpen
                         vm.frameOptionsOpen = false
@@ -165,12 +177,14 @@ private fun DownPopover(width: Dp, arrowX: Dp, modifier: Modifier, content: @Com
 
 /** Animation Assist's settings: playback, frames a second, onion skins, the primary frame. */
 @Composable
-private fun ColumnScope.AnimationSettingsPage(vm: CanvasViewModel) {
+private fun ColumnScope.AnimationSettingsPage(vm: CanvasViewModel, onColors: () -> Unit) {
     val a = vm.animation ?: return
-    Text("Settings", color = Pc.PanelTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 12.dp))
+    Text("Settings", color = Pc.PanelTitle, fontSize = 23.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 14.dp, top = 11.dp, bottom = 21.dp))
     Group {
-        for ((mode, label) in listOf(AnimationPlayback.LOOP to "Loop", AnimationPlayback.PING_PONG to "Ping-Pong", AnimationPlayback.ONE_SHOT to "One Shot")) {
+        for ((i, pair) in listOf(AnimationPlayback.LOOP to "Loop", AnimationPlayback.PING_PONG to "Ping-Pong", AnimationPlayback.ONE_SHOT to "One Shot").withIndex()) {
+            val (mode, label) = pair
             val chosen = a.playback == mode
+            if (i > 0) RowLine()
             Row(
                 Modifier.fillMaxWidth().height(40.dp).background(if (chosen) Pc.Accent else Color.Transparent).clickable { vm.changeAnimation { it.copy(playback = mode) } }.padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -181,7 +195,7 @@ private fun ColumnScope.AnimationSettingsPage(vm: CanvasViewModel) {
         }
     }
     Spacer(Modifier.height(10.dp))
-    Group {
+    SliderGroup {
         ValueSlider("Frames Per Second", "${a.fps}", (a.fps.toFloat() - 1f) / 59f) { v -> vm.changeAnimation { it.copy(fps = (1 + (v * 59f).roundToInt()).toUInt()) } }
         val onion = a.onionFrames.toInt()
         ValueSlider("Onion skin frames", when (onion) { 0 -> "None"; MAX_ONION -> "Max"; else -> "$onion" }, onion / MAX_ONION.toFloat()) { v ->
@@ -189,20 +203,80 @@ private fun ColumnScope.AnimationSettingsPage(vm: CanvasViewModel) {
         }
         ValueSlider("Onion skin opacity", "${(a.onionOpacity * 100).roundToInt()} %", a.onionOpacity) { v -> vm.changeAnimation { it.copy(onionOpacity = v) } }
     }
-    Spacer(Modifier.height(10.dp))
+    Spacer(Modifier.height(9.dp))
     Group {
-        Row(Modifier.fillMaxWidth().height(45.dp).clickable { vm.changeAnimation { it.copy(blendPrimary = !it.blendPrimary) } }.padding(start = 16.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Blend primary frame", color = Pc.PanelTitle, fontSize = 17.sp, modifier = Modifier.weight(1f))
-            Switch(a.blendPrimary, enabled = true)
-        }
-        Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
-        Box(Modifier.fillMaxWidth().height(45.dp).padding(start = 16.dp), contentAlignment = Alignment.CenterStart) {
-            Text("Onion skin colors", color = Pc.ActionsDisabled, fontSize = 17.sp)
+        ToggleRow("Blend primary frame", a.blendPrimary, 44.5.dp) { vm.changeAnimation { it.copy(blendPrimary = !it.blendPrimary) } }
+        RowLine()
+        Box(Modifier.fillMaxWidth().height(44.5.dp).clickable(onClick = onColors).padding(start = 16.dp), contentAlignment = Alignment.CenterStart) {
+            Text("Onion skin colors", color = Pc.PanelTitle, fontSize = 17.sp)
         }
     }
 }
 
-/** The current frame's options: how long it is held, Duplicate, Delete, and Background or Foreground. */
+/**
+ * The onion skins' colours: back to the settings, "Colors" and Reset over two swatches (the frames
+ * before the current one, then those after; a tap picks which the picker below edits) and the
+ * compact picker with its mode tabs. Black leaves the skins as they are.
+ */
+@Composable
+private fun ColumnScope.OnionColorsPage(vm: CanvasViewModel, onBack: () -> Unit) {
+    val a = vm.animation ?: return
+    var after by remember { mutableStateOf(false) }
+    var mode by remember { mutableStateOf(io.github.artcraftandroid.procraft.canvas.ColorMode.DISC) }
+    val rgbOf = { v: List<Float> -> v.take(3).fold(0) { acc, x -> (acc shl 8) or (x.coerceIn(0f, 1f) * 255f).roundToInt() } }
+    val unit = { rgb: Int -> listOf((rgb shr 16) and 0xFF, (rgb shr 8) and 0xFF, rgb and 0xFF).map { it / 255f } }
+    val c = remember(after) {
+        HeldColor(rgbOf(if (after) a.after else a.before), greyHue = 0f) { rgb -> vm.changeAnimation { if (after) it.copy(after = unit(rgb)) else it.copy(before = unit(rgb)) } }
+    }
+    // the back button at the panel's very edge
+    Row(Modifier.offset(x = (-8).dp).fillMaxWidth().height(34.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(44.dp, 34.dp).clickable(onClick = onBack), contentAlignment = Alignment.Center) {
+            Icon(PcIcons.ChevronLeft, contentDescription = "Back", tint = Pc.SlideValue, modifier = Modifier.requiredSize(34.dp))
+        }
+        Text("Colors", color = Pc.PanelTitle, fontSize = 23.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+        Text(
+            "Reset", color = Pc.SlideValue, fontSize = 17.sp,
+            modifier = Modifier.clickable {
+                vm.changeAnimation { it.copy(before = listOf(0f, 0f, 0f), after = listOf(0f, 0f, 0f)) }
+                c.setRgb(0)
+            }.padding(start = 12.dp, end = 0.dp),
+        )
+    }
+    Row(Modifier.padding(start = 13.dp, top = 7.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        for ((i, v) in listOf(a.before, a.after).withIndex()) {
+            Box(
+                Modifier.size(44.dp, 26.dp).clip(RoundedCornerShape(7.dp)).background(SwatchRim).padding(1.dp)
+                    .clip(RoundedCornerShape(6.dp)).background(Color(0xFF000000.toInt() or rgbOf(v))).clickable { after = i == 1 },
+            )
+        }
+    }
+    // the 260-wide compact picker drawn 282 wide, in a body of fixed height over the tabs
+    Box(Modifier.offset(x = (-4).dp).padding(top = 11.dp).size(282.dp, 365.dp)) {
+        Box(Modifier.scaledFrom(260.dp, 282.dp)) { CompactBody(vm, c, mode) }
+    }
+    Box(Modifier.offset(x = (-4).dp).width(282.dp)) { CompactTabs(mode) { mode = it } }
+}
+
+private val SwatchRim = Color(0xFF969696)
+
+/** Lays out its content [from] wide and shows it scaled up to [to] wide, touches and all. */
+private fun Modifier.scaledFrom(from: Dp, to: Dp): Modifier = layout { measurable, _ ->
+    val k = to / from
+    val p = measurable.measure(androidx.compose.ui.unit.Constraints.fixedWidth(from.roundToPx()))
+    layout((p.width * k).roundToInt(), (p.height * k).roundToInt()) {
+        p.placeWithLayer(0, 0) {
+            scaleX = k
+            scaleY = k
+            transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+        }
+    }
+}
+
+/**
+ * The current frame's options: how long it is held, Duplicate, Delete, and Foreground for the last
+ * frame and Background for the first (both for a lone frame). Pages: Duplicate, Delete, and
+ * Background for the first.
+ */
 @Composable
 private fun ColumnScope.FrameOptionsPage(vm: CanvasViewModel) {
     val a = vm.animation ?: return
@@ -210,9 +284,9 @@ private fun ColumnScope.FrameOptionsPage(vm: CanvasViewModel) {
     val last = vm.animationFrames.size - 1
     // re-read when the hold changes
     val hold = vm.holdVersion.let { vm.frameHold() }
-    Text(if (a.pages) "Page options" else "Frame options", color = Pc.PanelTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 14.dp, top = 2.dp, bottom = 12.dp))
+    Text(if (a.pages) "Page options" else "Frame options", color = Pc.PanelTitle, fontSize = 23.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 14.dp, top = 11.dp, bottom = 15.dp))
     if (!a.pages) {
-        Group {
+        SliderGroup(top = 4.dp) {
             ValueSlider("Hold duration", if (hold == 0) "None" else "$hold", hold / CanvasViewModel.MAX_HOLD.toFloat()) { v ->
                 vm.changeFrameHold((v * CanvasViewModel.MAX_HOLD).roundToInt())
             }
@@ -220,28 +294,38 @@ private fun ColumnScope.FrameOptionsPage(vm: CanvasViewModel) {
         Spacer(Modifier.height(10.dp))
     }
     Group {
-        Row(Modifier.fillMaxWidth().height(45.dp).clickable { vm.duplicateFrame() }.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().height(44.dp).clickable { vm.duplicateFrame() }.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Duplicate", color = Pc.PanelTitle, fontSize = 17.sp)
         }
-        Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
-        Row(Modifier.fillMaxWidth().height(45.dp).clickable { vm.deleteFrame() }.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        RowLine()
+        Row(Modifier.fillMaxWidth().height(44.dp).clickable { vm.deleteFrame() }.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Delete", color = Pc.PanelTitle, fontSize = 17.sp)
         }
     }
-    if (!a.pages && (index == 0 || (index == last && last > 0))) {
+    val foreground = !a.pages && index == last
+    val background = index == 0
+    if (foreground || background) {
         Spacer(Modifier.height(10.dp))
-        val background = index == 0
-        val on = if (background) a.background else a.foreground
         Group {
-            Row(
-                Modifier.fillMaxWidth().height(45.dp).clickable { vm.changeAnimation { if (background) it.copy(background = !on) else it.copy(foreground = !on) } }.padding(start = 16.dp, end = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(if (background) "Background" else "Foreground", color = Pc.PanelTitle, fontSize = 17.sp, modifier = Modifier.weight(1f))
-                Switch(on, enabled = true)
-            }
+            if (foreground) ToggleRow("Foreground", a.foreground, 44.dp) { vm.changeAnimation { it.copy(foreground = !it.foreground) } }
+            if (foreground && background) RowLine()
+            if (background) ToggleRow("Background", a.background, 44.dp) { vm.changeAnimation { it.copy(background = !it.background) } }
         }
     }
+}
+
+@Composable
+private fun ToggleRow(label: String, on: Boolean, height: Dp, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().height(height).clickable(onClick = onClick).padding(start = 16.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Pc.PanelTitle, fontSize = 17.sp, modifier = Modifier.weight(1f))
+        Switch(on, enabled = true)
+    }
+}
+
+/** The faint 2 pt line between a group's rows. */
+@Composable
+private fun RowLine() {
+    Box(Modifier.fillMaxWidth().height(2.dp).background(RowLineFill))
 }
 
 @Composable
@@ -249,12 +333,24 @@ private fun Group(content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Pc.ActionsGroup), content = content)
 }
 
+/** A group of sliders: [top] above the first, 11.5 between. */
+@Composable
+private fun SliderGroup(top: Dp = 8.dp, content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Pc.ActionsGroup).padding(top = top),
+        verticalArrangement = Arrangement.spacedBy(11.5.dp),
+        content = content,
+    )
+}
+
+private val RowLineFill = Color(0x09FFFFFF)
+
 /** A setting's name and value over a bar dragged or tapped along. */
 @Composable
 private fun ValueSlider(label: String, value: String, fraction: Float, onChange: (Float) -> Unit) {
     val change by rememberUpdatedState(onChange)
-    Column(Modifier.fillMaxWidth().height(62.dp).padding(horizontal = 16.dp)) {
-        Row(Modifier.fillMaxWidth().padding(top = 12.dp)) {
+    Column(Modifier.fillMaxWidth().height(55.dp).padding(horizontal = 16.dp)) {
+        Row(Modifier.fillMaxWidth().padding(top = 6.5.dp)) {
             Text(label, color = Pc.SlideLabel, fontSize = 17.sp, modifier = Modifier.weight(1f), maxLines = 1)
             Text(value, color = Pc.SlideValue, fontSize = 17.sp, maxLines = 1)
         }

@@ -31,7 +31,8 @@ pub struct Animation {
     pub playback: Playback,
     /// The current frame shows blended with the onion skins instead of over them.
     pub blend_primary: bool,
-    /// The colours onion skin frames take: before the current frame and after it (sRGB 0..1).
+    /// The colours onion skin frames are screened with, before the current frame and after it
+    /// (sRGB 0..1); black leaves them as they are.
     pub before: [f32; 3],
     pub after: [f32; 3],
     /// The first frame always shows, behind every other.
@@ -52,8 +53,8 @@ impl Default for Animation {
             onion_opacity: 0.6,
             playback: Playback::Loop,
             blend_primary: false,
-            before: [0.9, 0.12, 0.12],
-            after: [0.12, 0.7, 0.2],
+            before: [0.0; 3],
+            after: [0.0; 3],
             background: false,
             foreground: false,
             holds: Vec::new(),
@@ -92,7 +93,7 @@ impl Animation {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FrameLook {
     Shown,
-    /// An onion skin: tinted towards `color` and at `opacity`.
+    /// An onion skin: screened with `color` (black: unchanged) and at `opacity`.
     Onion {
         color: [f32; 3],
         opacity: f32,
@@ -122,7 +123,8 @@ pub fn current_frame(doc: &Document) -> Option<usize> {
 /// one played: no onion skins then).
 pub fn look(a: &Animation, index: usize, count: usize, current: usize, playing: bool) -> FrameLook {
     if a.pages {
-        return if index == current { FrameLook::Shown } else { FrameLook::Hidden };
+        // a background page shows behind every page
+        return if index == current || (a.background && index == 0) { FrameLook::Shown } else { FrameLook::Hidden };
     }
     let last = count.saturating_sub(1);
     if index == current || (a.background && index == 0) || (a.foreground && index == last && count > 1) {
@@ -136,10 +138,10 @@ pub fn look(a: &Animation, index: usize, count: usize, current: usize, playing: 
     if distance == 0 || distance > n {
         return FrameLook::Hidden;
     }
-    // the nearest at the set opacity, fading to nothing past the furthest
+    // the nearest at the set opacity squared (60% shows at 36%), fading to nothing past the furthest
     let fade = 1.0 - (distance - 1) as f32 / n as f32;
     let color = if index < current { a.before } else { a.after };
-    FrameLook::Onion { color, opacity: a.onion_opacity * fade }
+    FrameLook::Onion { color, opacity: a.onion_opacity * a.onion_opacity * fade }
 }
 
 #[cfg(test)]
@@ -152,21 +154,24 @@ mod tests {
         assert_eq!(look(&a, 3, 6, 3, false), FrameLook::Shown);
         let FrameLook::Onion { color, opacity } = look(&a, 2, 6, 3, false) else { panic!() };
         assert_eq!(color, a.before);
-        assert!((opacity - 0.6).abs() < 1e-6);
+        assert!((opacity - 0.36).abs() < 1e-6);
         let FrameLook::Onion { color, opacity } = look(&a, 5, 6, 3, false) else { panic!() };
         assert_eq!(color, a.after);
-        assert!((opacity - 0.3).abs() < 1e-6);
+        assert!((opacity - 0.18).abs() < 1e-6);
         assert_eq!(look(&a, 0, 6, 3, false), FrameLook::Hidden);
         // playing, only the played frame (and a background) shows
         assert_eq!(look(&a, 2, 6, 3, true), FrameLook::Hidden);
-        let b = Animation { background: true, foreground: true, ..a };
+        let b = Animation { background: true, foreground: true, ..a.clone() };
         assert_eq!(look(&b, 0, 6, 3, true), FrameLook::Shown);
         assert_eq!(look(&b, 5, 6, 3, true), FrameLook::Shown);
-        // pages: only the current one
-        let p = Animation { pages: true, ..b };
+        // pages: only the current one, and a background page behind it
+        let p = Animation { pages: true, ..a };
         assert_eq!(look(&p, 3, 6, 3, false), FrameLook::Shown);
         assert_eq!(look(&p, 0, 6, 3, false), FrameLook::Hidden);
         assert_eq!(look(&p, 2, 6, 3, false), FrameLook::Hidden);
+        let p = Animation { pages: true, ..b };
+        assert_eq!(look(&p, 0, 6, 3, false), FrameLook::Shown);
+        assert_eq!(look(&p, 5, 6, 3, false), FrameLook::Hidden);
     }
 
     #[test]
