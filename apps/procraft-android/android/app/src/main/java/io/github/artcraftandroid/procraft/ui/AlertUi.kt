@@ -4,9 +4,11 @@ import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,10 +40,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 
-// buttons keep their width and the panel grows with them: 428 across for two, 632 for three
+// buttons keep their width and the panel grows with them: 426 across for two, 630 for three
 private val AlertButtonWidth = 192.dp
 private val AlertButtonGap = 12.dp
-private val AlertSide = 16.dp
+private val AlertSide = 15.dp
 // dark glass, or light with the light interface
 private val AlertFill get() = if (Pc.light) Color(0xF2E3E3E3) else Color(0xF21E1E1E)
 private val AlertInk get() = if (Pc.light) Color(0xFF222222) else Color(0xFFC5C5C5)
@@ -55,7 +57,8 @@ private const val ALERT_START_SCALE = 1.1f
  * An alert over everything while [value] is not null: the screen dims to 70% black as a dark glass
  * panel fades in, settling from a little larger (0.3 s); in it a title (after an [icon]), a
  * message, and [cancel] beside the action, red when it [destructive]ly destroys; an [extra] choice
- * (blue, as the action) can sit between them, the panel widening for it. It goes over 0.35 s.
+ * (blue, as the action) can sit between them, the panel widening for it. A tap beside the panel
+ * cancels. It goes over 0.35 s.
  */
 @Composable
 fun <T : Any> Alert(
@@ -79,6 +82,7 @@ fun <T : Any> Alert(
         if (value != null) tween(300, easing = Motion.EaseInOut) else tween(350, easing = CubicBezierEasing(0f, 0f, 0.58f, 1f)),
         label = "alert",
     )
+    val cancelling = androidx.compose.runtime.rememberUpdatedState(if (value != null) onCancel else null)
     @Suppress("UNCHECKED_CAST")
     val kept = last[0] as T? ?: return
     if (shown <= 0f) return
@@ -90,8 +94,13 @@ fun <T : Any> Alert(
     ) {
         Box(
             Modifier.fillMaxSize().background(Color.Black.copy(alpha = ALERT_DIM * shown))
-                // nothing under it is touched while it is up
-                .pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } },
+                // nothing under it is touched while it is up, and a tap beside the panel cancels
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown().consume()
+                        if (waitForUpOrCancellation() != null) cancelling.value?.invoke()
+                    }
+                },
             contentAlignment = Alignment.Center,
         ) {
             val buttons = if (extra != null) 3 else 2
@@ -101,15 +110,18 @@ fun <T : Any> Alert(
                     val k = ALERT_START_SCALE + (1f - ALERT_START_SCALE) * shown
                     scaleX = k
                     scaleY = k
-                }.clip(RoundedCornerShape(24.dp)).background(AlertFill).padding(start = AlertSide, end = AlertSide, top = 21.dp, bottom = 15.dp),
+                }.clip(RoundedCornerShape(24.dp)).background(AlertFill).border(1.dp, Pc.GlassMenuEdge, RoundedCornerShape(24.dp))
+                    // a tap on the panel itself is not one beside it
+                    .pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } }
+                    .padding(start = AlertSide, end = AlertSide, top = 21.dp, bottom = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Row(Modifier.height(29.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.height(31.dp), verticalAlignment = Alignment.CenterVertically) {
                     icon?.let {
                         Icon(it, contentDescription = null, tint = Pc.Accent, modifier = Modifier.size(24.dp))
                         Spacer(Modifier.width(8.dp))
                     }
-                    Text(title(kept), color = AlertInk, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    Text(title(kept), color = AlertInk, fontSize = 26.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                 }
                 Spacer(Modifier.height(13.dp))
                 message(kept).takeIf { it.isNotEmpty() }?.let { Text(it, color = AlertInk, fontSize = 16.sp, lineHeight = 20.sp, textAlign = TextAlign.Center) }

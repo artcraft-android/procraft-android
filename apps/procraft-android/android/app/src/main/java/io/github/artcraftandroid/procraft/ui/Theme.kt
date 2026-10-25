@@ -83,8 +83,8 @@ object Pc {
     val MenuFill: Color get() = pick(0xFF5A5C5B, 0xFFF0F0F0)
     /** The small frosted menus: over the canvas what is behind shows through, blurred. */
     val GlassMenu: Color get() = pick(0xCF313135, 0xFAF0F0F0)
-    /** A small menu over a panel: the panel can't show through blurred, so it is nearly solid. */
-    val GlassMenuOverPanel: Color get() = pick(0xFA1F232A, 0xFAF0F0F0)
+    /** A small menu over a panel: the panel can't show through blurred, so it is nearly solid, grey. */
+    val GlassMenuOverPanel: Color get() = pick(0xFA222222, 0xFAF0F0F0)
     val GlassMenuEdge: Color get() = pick(0x24FFFFFF, 0x14000000)
     val RadioRing: Color get() = pick(0xFF606060, 0xFFB0B0B0)
     val MenuDanger: Color get() = pick(0xFFE84F51, 0xFFD93A3D)

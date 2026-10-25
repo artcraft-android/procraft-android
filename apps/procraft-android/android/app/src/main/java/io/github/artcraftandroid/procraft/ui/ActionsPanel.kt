@@ -358,7 +358,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                             if (rows.any { it is Act && it.label == "Brush scaling" }) MenuPresence(scalingMenu, androidx.compose.ui.graphics.TransformOrigin(0f, 0f)) { look ->
                                 ChoiceMenu(
                                     look,
-                                    listOf("Relative to canvas", "Relative to screen"), if (vm.brushOnScreen) 1 else 0, offsetY = 89.dp,
+                                    listOf("Relative to canvas", "Relative to screen"), if (vm.brushOnScreen) 1 else 0, offsetY = 82.dp,
                                     onPick = {
                                         vm.changeBrushScaling(it == 1)
                                         scalingMenu = false
@@ -456,27 +456,38 @@ private fun modelGroups(
     else -> emptyList()
 }
 
-/** A small menu beside a row: its choices, the chosen one marked with a blue dot. */
+/**
+ * A small menu over a row's right end: its choices, each with a round mark, the chosen one ticked;
+ * 254 wide, its top 7 above the row.
+ */
 @Composable
 private fun ChoiceMenu(look: Modifier, choices: List<String>, chosen: Int, offsetY: Dp, onPick: (Int) -> Unit, onDismiss: () -> Unit) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     PcPopup(
         textScale = MATCHED_POPUP_TEXT,
         alignment = Alignment.TopEnd,
-        offset = with(density) { androidx.compose.ui.unit.IntOffset(130.dp.roundToPx(), offsetY.roundToPx()) },
+        // its left edge 54 in from the row's right end
+        offset = with(density) { androidx.compose.ui.unit.IntOffset(200.dp.roundToPx(), offsetY.roundToPx()) },
         onDismissRequest = onDismiss,
         properties = androidx.compose.ui.window.PopupProperties(focusable = true),
     ) {
-        Column(look.width(250.dp).clip(RoundedCornerShape(16.dp)).background(Pc.MenuFill).padding(vertical = 6.dp)) {
+        val shape = RoundedCornerShape(26.dp)
+        Column(look.width(254.dp).clip(shape).background(Pc.MenuFill).border(1.dp, ChoiceMenuRim, shape).padding(vertical = 8.dp)) {
             choices.forEachIndexed { i, label ->
-                Row(Modifier.fillMaxWidth().height(40.dp).clickable { onPick(i) }.padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(label, color = Pc.Text, fontSize = 15.sp, modifier = Modifier.weight(1f))
-                    if (i == chosen) Box(Modifier.size(8.dp).clip(CircleShape).background(Pc.Accent))
+                Row(
+                    Modifier.fillMaxWidth().height(40.dp).clickable { onPick(i) }.padding(start = 20.dp, end = 19.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(label, color = Pc.Text, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                    Radio(i == chosen)
                 }
             }
         }
     }
 }
+
+/** The choice menu's light rim. */
+private val ChoiceMenuRim = Color(0x33FFFFFF)
 
 /**
  * Advanced cursor settings, a page of the panel: when the brush cursor shows, and how it is drawn.

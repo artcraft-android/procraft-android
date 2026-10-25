@@ -192,8 +192,15 @@ object PcIcons {
     val HexBackspace by lazy {
         icon(
             "hex-backspace",
-            // the cross cut out of the tag
-            Part("M9.2 5.5h10.3a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-10.3l-6.7-6.5zM15.99 9.21L17.19 10.41L15.60 12.00L17.19 13.59L15.99 14.79L14.40 13.20L12.81 14.79L11.61 13.59L13.20 12.00L11.61 10.41L12.81 9.21L14.40 10.80z", 0f, true, evenOdd = true),
+            // a 23 x 18 tag pointing left, a round-ended cross cut out of it
+            Part(
+                "M8.5 3H22a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1-1.5 1.5H8.5L1.2 12.7Q0.5 12 1.2 11.3z" +
+                    "M14.5 10.657L16.828 8.328a0.95 0.95 0 0 1 1.344 1.344L15.843 12L18.172 14.328a0.95 0.95 0 0 1-1.344 1.344" +
+                    "L14.5 13.343L12.172 15.672a0.95 0.95 0 0 1-1.344-1.344L13.157 12L10.828 9.672a0.95 0.95 0 0 1 1.344-1.344z",
+                0f,
+                true,
+                evenOdd = true,
+            ),
         )
     }
     /** Three overlapping rings: RGB. */
@@ -212,8 +219,9 @@ object PcIcons {
     val Clock by lazy {
         icon(
             "clock",
-            Part("M12 3.5a8.5 8.5 0 1 1 0 17a8.5 8.5 0 1 1 0-17z", 1.6f, false),
-            Part("M12 7.5V12l3 1.8", 1.6f, false),
+            // a ring 20 across, the hands at nine o'clock
+            Part("M12 3.05a8.95 8.95 0 1 1 0 17.9a8.95 8.95 0 1 1 0-17.9z", 2.1f, false),
+            Part("M11 6.5H13V13.5H6.9V11.5H11z", 0f, true),
         )
     }
 
@@ -221,8 +229,14 @@ object PcIcons {
     val Page by lazy {
         icon(
             "page",
-            Part("M7 3h6.5l4.5 4.5V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z", 1.6f, false),
-            Part("M13.5 3v4.5H18", 1.6f, false),
+            // 14 x 18, its folded corner solid
+            Part(
+                "M7 3H13.25L19 8.75V19a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" +
+                    "M7.5 4.75H12.5V10.75H17.25V18.5a0.75 0.75 0 0 1-0.75 0.75H7.5a0.75 0.75 0 0 1-0.75-0.75V5.5a0.75 0.75 0 0 1 0.75-0.75z",
+                0f,
+                true,
+                evenOdd = true,
+            ),
         )
     }
 

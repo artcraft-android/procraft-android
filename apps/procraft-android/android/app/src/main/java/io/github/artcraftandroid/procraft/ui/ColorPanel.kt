@@ -1053,7 +1053,7 @@ private fun HexRow(rgb: Int, fill: Color = Pc.HexRow, field: Color = Pc.HexField
         if (editing) {
             // beside the panel, its middle level with this row
             val gap = with(LocalDensity.current) { HexPadGap.roundToPx() }
-            PcPopup(textScale = MATCHED_POPUP_TEXT, popupPositionProvider = remember(gap) { BesidePanel(gap) }, onDismissRequest = { typed = null }, properties = PopupProperties(focusable = true)) {
+            PcPopup(popupPositionProvider = remember(gap) { BesidePanel(gap) }, onDismissRequest = { typed = null }, properties = PopupProperties(focusable = true)) {
                 HexPad(
                     onKey = { c ->
                         // a seventh digit starts a new code
@@ -1069,7 +1069,7 @@ private fun HexRow(rgb: Int, fill: Color = Pc.HexRow, field: Color = Pc.HexField
 }
 
 /** From the hex row to the keypad's right edge: the panel's padding, then a small gap. */
-private val HexPadGap = 12.5.dp
+private val HexPadGap = 12.dp
 
 /** Puts a popup to the left of the anchor, its middle level with the anchor's, inside the window. */
 private class BesidePanel(private val gap: Int) : androidx.compose.ui.window.PopupPositionProvider {
@@ -1085,36 +1085,36 @@ private class BesidePanel(private val gap: Int) : androidx.compose.ui.window.Pop
     }
 }
 
-/** The hex keypad: D E F, A B C, 7 8 9, 4 5 6, 1 2 3, then a wide 0 and backspace; 259 × 338. */
+/** The hex keypad: D E F, A B C, 7 8 9, 4 5 6, 1 2 3, then a wide 0 and backspace; 259 × 340. */
 @Composable
 private fun HexPad(onKey: (Char) -> Unit, onBack: () -> Unit) {
     val rows = listOf("DEF", "ABC", "789", "456", "123")
     Column(
-        Modifier.size(259.dp, 338.dp).clip(RoundedCornerShape(22.dp)).background(HexPadFill).border(0.5.dp, HexPadEdge, RoundedCornerShape(22.dp))
-            .padding(horizontal = 10.5.dp, vertical = 9.5.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp),
+        Modifier.size(259.dp, 340.dp).clip(RoundedCornerShape(30.dp)).background(HexPadFill).border(1.dp, HexPadEdge, RoundedCornerShape(30.dp))
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         for (row in rows) {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.5.dp)) {
-                for (c in row) HexKey(Modifier.width(76.5.dp), { onKey(c) }) { Text("$c", color = HexKeyInk, fontSize = 21.sp) }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                for (c in row) HexKey(Modifier.width(77.dp), { onKey(c) }) { Text("$c", color = HexKeyInk, fontSize = 21.sp) }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(4.5.dp)) {
-            HexKey(Modifier.width(157.5.dp), { onKey('0') }) { Text("0", color = HexKeyInk, fontSize = 21.sp) }
-            HexKey(Modifier.width(76.5.dp), onBack) {
-                Icon(PcIcons.HexBackspace, contentDescription = "Delete", tint = HexBackInk, modifier = Modifier.size(26.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            HexKey(Modifier.width(158.dp), { onKey('0') }) { Text("0", color = HexKeyInk, fontSize = 21.sp) }
+            HexKey(Modifier.width(77.dp), onBack) {
+                Icon(PcIcons.HexBackspace, contentDescription = "Delete", tint = HexBackInk, modifier = Modifier.size(24.dp))
             }
         }
     }
 }
 
-/** One key of the hex keypad, 49 tall, lighter while held. */
+/** One key of the hex keypad, 50 tall, lighter while held. */
 @Composable
 private fun HexKey(modifier: Modifier, onClick: () -> Unit, label: @Composable () -> Unit) {
     val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     val held by press.collectIsPressedAsState()
     Box(
-        modifier.height(49.dp).clip(RoundedCornerShape(18.dp)).background(if (held) HexKeyHeld else HexKeyFill)
+        modifier.height(50.dp).clip(RoundedCornerShape(21.dp)).background(if (held) HexKeyHeld else HexKeyFill)
             .clickable(interactionSource = press, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) { label() }
@@ -1244,7 +1244,7 @@ private fun ShortBottomMenu(vm: CanvasViewModel, history: Boolean, modifier: Mod
 
 /** A round choice mark, 18 across: a grey ring, or filled blue with a white tick when chosen. */
 @Composable
-private fun Radio(chosen: Boolean) {
+internal fun Radio(chosen: Boolean) {
     Box(
         Modifier.size(18.dp).clip(CircleShape).then(if (chosen) Modifier.background(Pc.Accent) else Modifier.border(1.5.dp, Pc.RadioRing, CircleShape)),
         contentAlignment = Alignment.Center,

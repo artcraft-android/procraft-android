@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -75,6 +76,7 @@ private val SheetFill = Color(0xFF535353)
 private val SheetBar = Color(0xFF4F4F4F)
 private val SheetCapsule = Color(0xFF3E3E3E)
 private val CardFill = Color(0xFF373737)
+private val CardCorner = 22.dp
 private val ButtonFill = Color(0xFF474747)
 private val SegmentTrack = Color(0xFF646464)
 private val CapsuleInk = Color(0xFFC5C5C5)
@@ -241,7 +243,12 @@ private fun TextStyleSheet(vm: CanvasViewModel, info: TextInfo) {
     var page by remember { mutableIntStateOf(0) }
     val sheetWide = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp >= WIDE_SHEET
     val importFont = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(vm::importFont) }
-    Column(Modifier.fillMaxWidth().height(561.dp).background(SheetFill)) {
+    // wide, the cards end 33 above the bottom
+    Column(
+        Modifier.fillMaxWidth().height(if (sheetWide) 521.dp else 561.dp).background(SheetFill)
+            // a touch on the sheet between its controls stays in it: it doesn't end the editing
+            .pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } },
+    ) {
         Row(Modifier.fillMaxWidth().height(62.dp).background(SheetBar).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             SheetIcon(PcIcons.Keyboard, "Keyboard", Modifier.size(44.dp).clip(CircleShape).background(KeyboardDisc), 40.dp) { vm.textStyleOpen = false }
             Spacer(Modifier.width(13.dp))
@@ -268,26 +275,27 @@ private fun TextStyleSheet(vm: CanvasViewModel, info: TextInfo) {
         // wide (landscape), the four cards side by side; narrow, Typeface or Design, switched below
         BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
             val wide = maxWidth >= WIDE_SHEET
-            Row(Modifier.fillMaxSize().padding(horizontal = if (wide) 9.dp else 3.dp)) {
+            Row(Modifier.fillMaxSize().padding(horizontal = 10.dp)) {
                 if (wide) {
-                    FontCard(vm, info, Modifier.weight(264f))
+                    FontCard(vm, info, Modifier.weight(263.5f))
                     Spacer(Modifier.width(2.dp))
-                    StyleCard(vm, info, Modifier.weight(184f))
-                    Spacer(Modifier.width(8.dp))
-                    DesignCard(vm, info, Modifier.weight(326f))
-                    Spacer(Modifier.width(8.dp))
+                    StyleCard(vm, info, Modifier.weight(184.5f))
+                    Spacer(Modifier.width(5.dp))
+                    DesignCard(vm, info, Modifier.weight(328f))
+                    Spacer(Modifier.width(5.dp))
                     AttributesCard(vm, info, Modifier.weight(325f), wide = true)
                 } else if (page == 0) {
-                    FontCard(vm, info, Modifier.weight(417f))
+                    FontCard(vm, info, Modifier.weight(424.5f))
                     Spacer(Modifier.width(2.dp))
-                    StyleCard(vm, info, Modifier.weight(296f))
+                    StyleCard(vm, info, Modifier.weight(297.5f))
                 } else {
-                    DesignCard(vm, info, Modifier.weight(598f))
-                    Spacer(Modifier.width(10.dp))
-                    AttributesCard(vm, info, Modifier.weight(130f), wide = false)
+                    DesignCard(vm, info, Modifier.weight(584f))
+                    Spacer(Modifier.width(5.dp))
+                    AttributesCard(vm, info, Modifier.weight(135f), wide = false)
                 }
             }
         }
+        if (sheetWide) Spacer(Modifier.height(33.dp))
         // Typeface | Design, when the cards don't all fit
         if (!sheetWide) Box(Modifier.fillMaxWidth().height(81.dp).background(SheetFill)) {
             Row(
@@ -312,8 +320,9 @@ private val WIDE_SHEET = 900.dp
 
 @Composable
 private fun FontCard(vm: CanvasViewModel, info: TextInfo, modifier: Modifier) {
-    Card("Font", modifier) {
-        LazyColumn(Modifier.padding(horizontal = 7.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+    // Font and Style are one card split by a line: square where they meet
+    Card("Font", modifier, RoundedCornerShape(topStart = CardCorner, bottomStart = CardCorner)) {
+        LazyColumn(Modifier.padding(start = 10.dp, end = 17.dp), contentPadding = PaddingValues(top = 6.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             items(TextRenderer.families) { f ->
                 Cell(f.name, f.family == info.font, TextRenderer.typeface(f.family, "Regular")) { vm.changeText { it.copy(font = f.family) } }
             }
@@ -323,8 +332,8 @@ private fun FontCard(vm: CanvasViewModel, info: TextInfo, modifier: Modifier) {
 
 @Composable
 private fun StyleCard(vm: CanvasViewModel, info: TextInfo, modifier: Modifier) {
-    Card("Style", modifier) {
-        LazyColumn(Modifier.padding(horizontal = 7.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+    Card("Style", modifier, RoundedCornerShape(topEnd = CardCorner, bottomEnd = CardCorner)) {
+        LazyColumn(Modifier.padding(start = 10.dp, end = 17.dp), contentPadding = PaddingValues(top = 6.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             items(TextRenderer.styles) { st ->
                 Cell(st.name, st.name == info.style, TextRenderer.typeface(info.font, st.name)) { vm.changeText { it.copy(style = st.name) } }
             }
@@ -337,7 +346,7 @@ private fun DesignCard(vm: CanvasViewModel, info: TextInfo, modifier: Modifier) 
     val dpi = vm.canvasDpi()
     val pt = { px: Float -> px * 72f / dpi }
     Card("Design", modifier) {
-        Column(Modifier.padding(horizontal = 5.dp)) {
+        Column(Modifier.padding(horizontal = 4.dp)) {
             DesignRow("Size", sizeToSlider(info.size), "%.1fpt".format(pt(info.size)), fromMiddle = false) { v -> vm.changeText { it.copy(size = sliderToSize(v)) } }
             DesignRow("Kerning", info.kerning / 2f + 0.5f, "%.1f%%".format(info.kerning * 100f)) { v -> vm.changeText { it.copy(kerning = v * 2f - 1f) } }
             DesignRow("Tracking", info.tracking / 2f + 0.5f, "%.1f%%".format(info.tracking * 100f)) { v -> vm.changeText { it.copy(tracking = v * 2f - 1f) } }
@@ -358,27 +367,33 @@ private fun AttributesCard(vm: CanvasViewModel, info: TextInfo, modifier: Modifi
         TextAlignment.LEFT to PcIcons.AlignLeft, TextAlignment.CENTER to PcIcons.AlignCenter,
         TextAlignment.RIGHT to PcIcons.AlignRight, TextAlignment.JUSTIFY to PcIcons.AlignJustify,
     )
+    // the buttons 36 tall, but the alignments 35 when two by two
+    val gridTall = if (wide) 36.dp else 35.dp
     Card("Attributes", modifier) {
-        Column(Modifier.padding(horizontal = if (wide) 9.dp else 4.dp), verticalArrangement = Arrangement.spacedBy(if (wide) 19.dp else 2.dp)) {
+        Column(
+            Modifier.padding(start = if (wide) 10.dp else 6.5.dp, end = if (wide) 10.dp else 6.5.dp, top = if (wide) 6.dp else 7.dp),
+            verticalArrangement = Arrangement.spacedBy(if (wide) 20.dp else 4.dp),
+        ) {
             for (row in aligns.chunked(if (wide) 4 else 2)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                    for ((a, icon) in row) Attribute(icon, a.name, info.align == a, Modifier.weight(1f), 32.dp) { vm.changeText { it.copy(align = a) } }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    for ((a, icon) in row) Attribute(icon, a.name, info.align == a, Modifier.weight(1f), 32.dp, gridTall) { vm.changeText { it.copy(align = a) } }
                 }
             }
-            if (!wide) Spacer(Modifier.height(14.dp))
+            if (!wide) Spacer(Modifier.height(13.dp))
             val looks: @Composable (Modifier, Modifier, Modifier) -> Unit = { u, o, v ->
-                Attribute(PcIcons.TextUnderline, "Underline", info.underline, u, 38.dp) { vm.changeText { it.copy(underline = !it.underline) } }
-                Attribute(PcIcons.TextOutline, "Outline", info.outline, o, 38.dp) { vm.changeText { it.copy(outline = !it.outline) } }
-                Attribute(PcIcons.TextVertical, "Vertical", info.vertical, v, 41.dp) { vm.changeText { it.copy(vertical = !it.vertical) } }
+                Attribute(PcIcons.TextUnderline, "Underline", info.underline, u, 38.dp, 36.dp) { vm.changeText { it.copy(underline = !it.underline) } }
+                Attribute(PcIcons.TextOutline, "Outline", info.outline, o, 38.dp, 36.dp) { vm.changeText { it.copy(outline = !it.outline) } }
+                Attribute(PcIcons.TextVertical, "Vertical", info.vertical, v, 41.dp, 36.dp) { vm.changeText { it.copy(vertical = !it.vertical) } }
             }
             if (wide) {
-                Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) { looks(Modifier.weight(94f), Modifier.weight(94f), Modifier.weight(111f)) }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) { looks(Modifier.weight(94f), Modifier.weight(94f), Modifier.weight(111f)) }
             } else {
                 looks(Modifier.fillMaxWidth(), Modifier.fillMaxWidth(), Modifier.fillMaxWidth())
                 Spacer(Modifier.height(16.dp))
             }
-            Row(Modifier.clickable { vm.changeText { it.copy(allCaps = !it.allCaps) } }, verticalAlignment = Alignment.CenterVertically) {
-                Text("TT", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 8.dp).width(48.dp))
+            Row(Modifier.padding(top = if (wide) 4.dp else 0.dp).clickable { vm.changeText { it.copy(allCaps = !it.allCaps) } }, verticalAlignment = Alignment.CenterVertically) {
+                // two serif capitals all but touching
+                Text("TT", color = Color.White, fontSize = 26.5.sp, fontFamily = FontFamily.Serif, letterSpacing = (-0.5).sp, modifier = Modifier.padding(start = 10.dp).width(50.5.dp))
                 if (wide) Spacer(Modifier.weight(1f))
                 Switch(info.allCaps, enabled = true)
             }
@@ -395,9 +410,9 @@ private fun SheetIcon(icon: ImageVector, label: String, modifier: Modifier, icon
 }
 
 @Composable
-private fun Card(title: String, modifier: Modifier, content: @Composable ColumnScope.() -> Unit) {
-    Column(modifier.fillMaxHeight().clip(RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp)).background(CardFill)) {
-        Text(title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 17.dp, top = 14.dp, bottom = 9.dp))
+private fun Card(title: String, modifier: Modifier, shape: RoundedCornerShape = RoundedCornerShape(CardCorner), content: @Composable ColumnScope.() -> Unit) {
+    Column(modifier.fillMaxHeight().clip(shape).background(CardFill)) {
+        Text(title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 20.dp, top = 16.5.dp, bottom = 9.dp))
         content()
     }
 }
@@ -416,9 +431,9 @@ private fun Cell(name: String, selected: Boolean, face: android.graphics.Typefac
 
 /** An attribute's button: its icon, blue when on. */
 @Composable
-private fun Attribute(icon: ImageVector, label: String, on: Boolean, modifier: Modifier, iconSize: Dp, onClick: () -> Unit) {
+private fun Attribute(icon: ImageVector, label: String, on: Boolean, modifier: Modifier, iconSize: Dp, tall: Dp, onClick: () -> Unit) {
     Box(
-        modifier.height(37.dp).clip(RoundedCornerShape(8.dp)).background(if (on) Pc.Accent else ButtonFill).clickable(onClick = onClick),
+        modifier.height(tall).clip(RoundedCornerShape(8.dp)).background(if (on) Pc.Accent else ButtonFill).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.requiredSize(iconSize))
@@ -430,7 +445,7 @@ private fun Attribute(icon: ImageVector, label: String, on: Boolean, modifier: M
 private fun DesignRow(label: String, value: Float, shown: String, fromMiddle: Boolean = true, onChange: (Float) -> Unit) {
     val change by rememberUpdatedState(onChange)
     Column(Modifier.fillMaxWidth().height(58.5.dp).padding(horizontal = 16.dp)) {
-        Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().padding(top = 1.5.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(label, color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
             Box(Modifier.height(24.dp).clip(CircleShape).background(ButtonFill).padding(horizontal = 10.dp), contentAlignment = Alignment.Center) {
                 Text(shown, color = Color.White, fontSize = 13.sp)
