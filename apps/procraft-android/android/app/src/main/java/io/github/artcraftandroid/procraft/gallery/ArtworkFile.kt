@@ -2,28 +2,13 @@ package io.github.artcraftandroid.procraft.gallery
 
 import java.io.File
 import java.io.InputStream
-import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
-import java.util.zip.ZipOutputStream
 
 /**
- * An artwork as one file to share or keep elsewhere: its folder (the document, every layer, the
- * thumbnail and the time-lapse) in a zip.
+ * An artwork as one file, as earlier versions shared it: its folder (the document, every layer, the
+ * thumbnail and the time-lapse) in a zip. Still read; artworks are shared as packages now.
  */
 object ArtworkFile {
-    const val EXTENSION = "procraft"
-
-    /** Zips the artwork folder [dir] into [out]. */
-    fun write(dir: File, out: File) {
-        ZipOutputStream(out.outputStream().buffered()).use { zip ->
-            dir.walkTopDown().filter { it.isFile && !it.name.endsWith(".tmp") }.forEach { f ->
-                zip.putNextEntry(ZipEntry(f.relativeTo(dir).invariantSeparatorsPath))
-                f.inputStream().use { it.copyTo(zip) }
-                zip.closeEntry()
-            }
-        }
-    }
-
     /**
      * Unzips an artwork file into the empty folder [dir]; false (and nothing kept) if it isn't
      * one. Only the files an artwork has are taken, and none outside the folder.

@@ -57,7 +57,7 @@ class DragProvider : ContentProvider() {
     override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?) = 0
 
     companion object {
-        private val Extensions = mapOf("ProCraft" to ArtworkFile.EXTENSION, "PSD" to "psd", "JPEG" to "jpg", "PNG" to "png", "TIFF" to "tif")
+        private val Extensions = mapOf(CanvasViewModel.OWN_LABEL to CanvasViewModel.OWN_EXTENSION, "PSD" to "psd", "JPEG" to "jpg", "PNG" to "png", "TIFF" to "tif")
 
         fun mime(format: String): String = when (format) {
             "PSD" -> "image/vnd.adobe.photoshop"
@@ -89,14 +89,11 @@ class DragProvider : ContentProvider() {
  * of the gallery's still [CanvasViewModel.SHARE_FORMATS]).
  */
 fun exportArtwork(dir: File, format: String, out: File, pdfQuality: Int = 100): Boolean = runCatching {
-    if (format == "ProCraft") {
-        ArtworkFile.write(dir, out)
-        return@runCatching true
-    }
     CanvasSession.open(dir.path).use { s ->
         if (!s.prepareOffscreen()) return@runCatching false
         when (format) {
-            CanvasViewModel.PACKAGE_LABEL -> s.exportPackage(out.path, System.nanoTime().toULong())
+            // ours and the other app's are the same package
+            CanvasViewModel.OWN_LABEL, CanvasViewModel.PACKAGE_LABEL -> s.exportPackage(out.path, System.nanoTime().toULong())
             "PDF" -> s.exportPdf(out.path, false, pdfQuality.toUByte())
             "PSD" -> s.exportPsd(out.path)
             "TIFF" -> s.exportTiff(out.path)

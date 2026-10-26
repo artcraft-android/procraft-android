@@ -1521,31 +1521,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** The open artwork as a layered package in the cache, to share. */
-    suspend fun exportPackageFile(): File? {
+    /** The open artwork as a layered package in the cache, to share, named with [extension] (ours or the other app's). */
+    suspend fun exportPackageFile(extension: String = OWN_EXTENSION): File? {
         val s = session ?: return null
         return withContext(Dispatchers.IO) {
             runCatching {
                 val base = s.name().filter { it.isLetterOrDigit() || it in " _-" }.trim().replace(' ', '_').ifEmpty { "Untitled_Artwork" }
-                val out = File(File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }, "$base.$PACKAGE_EXTENSION")
+                val out = File(File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }, "$base.$extension")
                 s.exportPackage(out.path, System.nanoTime().toULong())
                 out
             }.onFailure { android.util.Log.e("ProCraft", "exporting a package", it) }.getOrNull()
-        }
-    }
-
-    /** The open artwork saved and zipped into the cache as one file, to share. */
-    suspend fun exportArtworkFile(): File? {
-        val s = session ?: return null
-        val dir = artworkDir ?: return null
-        return withContext(Dispatchers.IO) {
-            runCatching {
-                s.save(dir.path)
-                val out = File(File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() },
-                    s.name().filter { it.isLetterOrDigit() || it in " _-" }.trim().ifEmpty { "Untitled Artwork" } + "." + io.github.artcraftandroid.procraft.gallery.ArtworkFile.EXTENSION)
-                io.github.artcraftandroid.procraft.gallery.ArtworkFile.write(dir, out)
-                out
-            }.getOrNull()
         }
     }
 
@@ -1641,7 +1626,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             "JPEG" -> "jpg" to "image/jpeg"
             "PNG" -> "png" to "image/png"
             "TIFF" -> "tif" to "image/tiff"
-            else -> PACKAGE_EXTENSION to "application/octet-stream"
+            PACKAGE_LABEL -> PACKAGE_EXTENSION to "application/octet-stream"
+            else -> OWN_EXTENSION to "application/octet-stream"
         }
         val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
         val used = mutableSetOf<String>()
@@ -5837,7 +5823,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val SINGLE_TOUCH_COMPANION = "single_touch_companion"
         const val TAP_ASSISTANCE = "tap_assistance"
 
-        /** The layered package's file extension, and its name in the Share lists. */
+        /**
+         * The layered package's file extensions, and their names in the Share lists: ours, and the
+         * other app's (the same package, so either opens in both).
+         */
+        const val OWN_EXTENSION = "pcraft"
+        const val OWN_LABEL = "ProCraft"
         const val PACKAGE_EXTENSION = "procreate"
 
         /** Brush and brush set files, as other painting apps share them. */
@@ -5846,7 +5837,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val PACKAGE_LABEL = PACKAGE_EXTENSION.replaceFirstChar(Char::titlecase)
 
         /** What the gallery's Share offers, in order: still pictures, then animations. */
-        val SHARE_FORMATS = listOf(PACKAGE_LABEL, "PSD", "PDF", "JPEG", "PNG", "TIFF") + Animated.entries.map { it.title }
+        val SHARE_FORMATS = listOf(OWN_LABEL, PACKAGE_LABEL, "PSD", "PDF", "JPEG", "PNG", "TIFF") + Animated.entries.map { it.title }
 
         /** How often, and for how long at most, opening waits for the canvas's first frame, milliseconds. */
         const val CANVAS_POLL_MS = 32L
@@ -5866,7 +5857,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         /** What an artwork dragged out of the gallery becomes (an index into [DRAG_FORMATS]), and a picture's format when one is wanted. */
         const val DRAG_FORMAT = "drag_format"
         const val DRAG_IMAGE_FORMAT = "drag_image_format"
-        val DRAG_FORMATS = listOf("ProCraft", "PSD", "JPEG", "PNG", "TIFF")
+        val DRAG_FORMATS = listOf(OWN_LABEL, "PSD", "JPEG", "PNG", "TIFF")
         val DRAG_IMAGE_FORMATS = listOf("JPEG", "PNG", "TIFF")
         const val QUICK_MENU = "quick_menu"
         /** A press of □ this short, used by nothing, is a tap. */

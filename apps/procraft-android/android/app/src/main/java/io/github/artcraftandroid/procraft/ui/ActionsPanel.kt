@@ -146,6 +146,13 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             if (files.isNotEmpty()) shareFiles(context, files, kind.mime) else dialog = "Share" to "The artwork could not be exported."
         }
     }
+    // the layered package, named with ours or the other app's extension
+    fun sharePackage(extension: String) {
+        scope.launch {
+            val file = vm.exportPackageFile(extension)
+            if (file != null) shareFile(context, file, "application/octet-stream") else dialog = "Share" to "The artwork could not be exported."
+        }
+    }
     fun share(jpeg: Boolean) {
         scope.launch {
             val file = vm.exportImage(jpeg)
@@ -224,12 +231,9 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         2 -> listOf(
             listOf(
                 Heading("Share Image"),
-                Act(CanvasViewModel.PACKAGE_LABEL) {
-                    scope.launch {
-                        val file = vm.exportPackageFile()
-                        if (file != null) shareFile(context, file, "application/octet-stream") else dialog = "Share" to "The artwork could not be exported."
-                    }
-                },
+                // ours first, then the same package named for the other app
+                Act(CanvasViewModel.OWN_LABEL) { sharePackage(CanvasViewModel.OWN_EXTENSION) },
+                Act(CanvasViewModel.PACKAGE_LABEL) { sharePackage(CanvasViewModel.PACKAGE_EXTENSION) },
                 Act("PSD") { share(CanvasViewModel.Export.PSD) },
                 Act("PDF") { pdfAsking = CanvasViewModel.Export.PDF },
                 Act("JPEG") { share(jpeg = true) },
@@ -426,6 +430,7 @@ private fun modelGroups(
         listOf(
             Heading("Share Model"),
             // the native package doesn't hold a model yet
+            Act(CanvasViewModel.OWN_LABEL),
             Act(CanvasViewModel.PACKAGE_LABEL),
             Act("USDZ") { share(CanvasViewModel.Export.MODEL_USDZ, 100) },
             Act("OBJ") { share(CanvasViewModel.Export.MODEL_OBJ, 100) },
