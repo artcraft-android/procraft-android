@@ -11,8 +11,7 @@ use procraft_gpu::{Backdrop, Gpu, SelectionLook, Stripes, Target, wgpu};
 
 use crate::selection::SelectionDisplay;
 use crate::{
-    BACKDROP_SIGMA_PT, SELECTION_FILL, SELECTION_TINT, STRIPE_COVERAGE, STRIPE_PERIOD_PT, STRIPE_SPEED_PT, SURROUND,
-    Shared,
+    BACKDROP_SIGMA_PT, SELECTION_FILL, SELECTION_TINT, STRIPE_COVERAGE, STRIPE_PERIOD_PT, STRIPE_SPEED_PT, Shared,
 };
 
 pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
@@ -111,6 +110,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
             }
             let to_screen = st.view.map(|v| v.to_screen());
             let grid = st.surround_grid(Vec2::ZERO);
+            let surround = st.surround();
             // a model is drawn in place of the flat canvas, and the drawing pad may be a sphere
             if st.scene_shown() {
                 let convert = colours_to(st.doc.profile, screen);
@@ -157,7 +157,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
                         format,
                         size,
                         to_screen,
-                        surround: SURROUND,
+                        surround,
                         grid: Some(grid),
                         selection: look,
                         backdrop,

@@ -57,13 +57,16 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-private val FrameLine = Color(0xCCFFFFFF)
-private val GridLine = Color(0x66C8C8C8)
-private val Mark = Color(0xFFD0D0D0)
-private val PopoverFill = Color(0xF21F1F1F)
-private val FieldFill = Color(0xFF242424)
-private val GroupFill = Color(0xFF2A2A2A)
-private val RowLine = Color(0xFF3A3A3A)
+// light over the dark surround; dark with the light interface
+private val FrameLine get() = if (Pc.light) Color(0xCC303030) else Color(0xCCFFFFFF)
+private val GridLine get() = if (Pc.light) Color(0x99606060) else Color(0x66C8C8C8)
+private val Mark get() = if (Pc.light) Color(0xFF3A3A3A) else Color(0xFFD0D0D0)
+// Settings: dark, or with the light interface #dbdedf behind #e4e4e6 groups, #d3d3d5 fields, dark words
+private val PopoverFill get() = if (Pc.light) Color(0xF2DBDEDF) else Color(0xF21F1F1F)
+private val FieldFill get() = if (Pc.light) Color(0xFFD3D3D5) else Color(0xFF242424)
+private val GroupFill get() = if (Pc.light) Color(0xFFE4E4E6) else Color(0xFF2A2A2A)
+private val RowLine get() = if (Pc.light) Color(0xFFD6D6D8) else Color(0xFF3A3A3A)
+private val SettingsInk get() = if (Pc.light) Color(0xFF3B3B3B) else Color(0xFFD2D2D2)
 private val Muted = Color(0xFF8E8E93)
 
 /** Which part of the crop's frame a drag takes. */
@@ -210,19 +213,19 @@ private fun CropSettings(vm: CanvasViewModel, modifier: Modifier) {
     Popover(348.dp, 174.5.dp, modifier, fill = PopoverFill, corner = 24.dp) {
         Column(Modifier.padding(10.dp)) {
             Box(Modifier.height(40.dp), contentAlignment = Alignment.CenterStart) {
-                Text("Settings", color = Color(0xFFD2D2D2), fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 14.dp))
+                Text("Settings", color = SettingsInk, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 14.dp))
             }
             val (w, h) = vm.cropSize
             Row(Modifier.padding(top = 10.dp).fillMaxWidth().height(44.dp).padding(horizontal = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                 NumberField(w.toString(), "px", Modifier.width(137.dp)) { it.toIntOrNull()?.let { v -> vm.changeCropSize(v, null) } }
                 Box(Modifier.padding(horizontal = 8.dp).size(34.dp, 40.dp).clickable { vm.cropAspectLocked = !vm.cropAspectLocked }, contentAlignment = Alignment.Center) {
-                    Icon(PcIcons.Link, contentDescription = "Aspect lock", tint = if (vm.cropAspectLocked) Pc.Accent else Color(0xFFD2D2D2), modifier = Modifier.size(20.dp))
+                    Icon(PcIcons.Link, contentDescription = "Aspect lock", tint = if (vm.cropAspectLocked) Pc.Accent else SettingsInk, modifier = Modifier.size(20.dp))
                 }
                 NumberField(h.toString(), "px", Modifier.width(137.dp)) { it.toIntOrNull()?.let { v -> vm.changeCropSize(null, v) } }
             }
             Column(Modifier.padding(top = 10.dp).fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(GroupFill)) {
                 Row(Modifier.fillMaxWidth().height(44.dp).padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("DPI", color = Color(0xFFD2D2D2), fontSize = 17.sp, modifier = Modifier.weight(1f))
+                    Text("DPI", color = SettingsInk, fontSize = 17.sp, modifier = Modifier.weight(1f))
                     NumberField("%.1f".format(vm.cropDpi), null, Modifier.width(80.dp).height(36.dp)) { it.toFloatOrNull()?.let(vm::changeCropDpi) }
                 }
                 Box(Modifier.fillMaxWidth().height(1.dp).background(RowLine))
@@ -240,7 +243,7 @@ private fun CropSettings(vm: CanvasViewModel, modifier: Modifier) {
 @Composable
 private fun SwitchRow(label: String, on: Boolean, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth().height(44.dp).clickable { onChange(!on) }.padding(start = 12.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = Color(0xFFD2D2D2), fontSize = 17.sp, modifier = Modifier.weight(1f))
+        Text(label, color = SettingsInk, fontSize = 17.sp, modifier = Modifier.weight(1f))
         Switch(on, enabled = true)
     }
 }
@@ -249,7 +252,7 @@ private fun SwitchRow(label: String, on: Boolean, onChange: (Boolean) -> Unit) {
 @Composable
 private fun NumberField(value: String, unit: String?, modifier: Modifier, onChange: (String) -> Unit) {
     var text by remember(value) { mutableStateOf(value) }
-    val style = TextStyle(color = Color(0xFFD2D2D2), fontSize = 17.sp, textAlign = TextAlign.Center)
+    val style = TextStyle(color = SettingsInk, fontSize = 17.sp, textAlign = TextAlign.Center)
     // as wide as its text (and the cursor), so the number and unit sit together in the middle
     val measurer = rememberTextMeasurer()
     val textWidth = with(LocalDensity.current) { measurer.measure(text, style).size.width.toDp() } + 2.dp
@@ -266,7 +269,7 @@ private fun NumberField(value: String, unit: String?, modifier: Modifier, onChan
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
             modifier = Modifier.width(textWidth),
         )
-        if (unit != null) Text(" $unit", color = Color(0xFFD2D2D2), fontSize = 17.sp)
+        if (unit != null) Text(" $unit", color = SettingsInk, fontSize = 17.sp)
     }
 }
 
@@ -277,8 +280,8 @@ private fun RotationSlider(radians: Float, onChange: (Float) -> Unit) {
     val degrees = Math.toDegrees(radians.toDouble()).toFloat()
     Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
         Row {
-            Text("Rotation", color = Color(0xFFD2D2D2), fontSize = 17.sp, modifier = Modifier.weight(1f))
-            Text("%.1f°".format(degrees), color = Color(0xFFD2D2D2), fontSize = 17.sp)
+            Text("Rotation", color = SettingsInk, fontSize = 17.sp, modifier = Modifier.weight(1f))
+            Text("%.1f°".format(degrees), color = SettingsInk, fontSize = 17.sp)
         }
         Box(
             Modifier.fillMaxWidth().height(22.dp).pointerInput(Unit) {
@@ -296,7 +299,7 @@ private fun RotationSlider(radians: Float, onChange: (Float) -> Unit) {
             }.drawBehind {
                 val y = size.height / 2f
                 val h = 3.dp.toPx()
-                drawRoundRect(Color(0xFF555555), Offset(0f, y - h / 2f), Size(size.width, h), CornerRadius(h / 2f))
+                drawRoundRect(if (Pc.light) Color(0xFFCFCFD1) else Color(0xFF555555), Offset(0f, y - h / 2f), Size(size.width, h), CornerRadius(h / 2f))
                 drawLine(Muted, Offset(size.width / 2f, y - 6.dp.toPx()), Offset(size.width / 2f, y + 6.dp.toPx()), 1.dp.toPx())
                 val knob = Size(26.dp.toPx(), 15.dp.toPx())
                 val x = (((degrees + 180f) / 360f).coerceIn(0f, 1f) * size.width).coerceIn(knob.width / 2f, size.width - knob.width / 2f)

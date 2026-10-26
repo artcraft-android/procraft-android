@@ -50,19 +50,19 @@ import io.github.artcraftandroid.procraft.gallery.CanvasPreset
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-private val ScreenFill = Color(0xFF1F1F1F)
-private val PanelFill = Color(0xFF282828)
-private val Ink = Color(0xFFAAAAAA)
-private val IdleInk = Color(0xFF797979)
+private val ScreenFill get() = if (Pc.light) Color(0xFFF2F2F2) else Color(0xFF1F1F1F)
+private val PanelFill get() = if (Pc.light) Color(0xFFDFDFDF) else Color(0xFF282828)
+private val Ink get() = if (Pc.light) Color(0xFF3E3E3E) else Color(0xFFAAAAAA)
+private val IdleInk get() = if (Pc.light) Color(0xFF3E3E3E) else Color(0xFF797979)
 private val Editing = Color(0xFF436BF0)
-private val KeypadFill = Color(0xFF1A1A1A)
-private val DigitFill = Color(0xFF525252)
-private val KeyFill = Color(0xFF2B2B2B)
-private val UnitChosen = Color(0xFFA1A1A1)
-private val SwitchTrack = Color(0xFF353535)
-private val SwitchIdle = Color(0xFFC1C1C1)
-private val CapsuleFill = Color(0xFF1A1A1A)
-private val CapsuleEdge = Color(0xFF373737)
+private val KeypadFill get() = if (Pc.light) Color(0xFFD1D3D8) else Color(0xFF1A1A1A)
+private val DigitFill get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF525252)
+private val KeyFill get() = if (Pc.light) Color(0xFFABB2BB) else Color(0xFF2B2B2B)
+private val UnitChosen get() = if (Pc.light) Color(0xFF818C96) else Color(0xFFA1A1A1)
+private val SwitchTrack get() = if (Pc.light) Color(0xFFD5D5D5) else Color(0xFF353535)
+private val SwitchIdle get() = if (Pc.light) Color(0xFF3B3B3B) else Color(0xFFC1C1C1)
+private val CapsuleFill get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF1A1A1A)
+private val CapsuleEdge get() = if (Pc.light) Color(0xFFE0E0E0) else Color(0xFF373737)
 private val DoneBlue = Color(0xFF0190FF)
 
 /** The units sizes are typed in: the key's name, the unit's (as presets keep it) and its mark. */
@@ -181,7 +181,7 @@ fun CustomCanvasScreen(vm: CanvasViewModel, onMade: () -> Unit) {
                 color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold,
                 textAlign = if (wide) androidx.compose.ui.text.style.TextAlign.Center else androidx.compose.ui.text.style.TextAlign.Start,
             ),
-            cursorBrush = SolidColor(Color.White),
+            cursorBrush = SolidColor(Pc.Accent),
             modifier = if (wide) {
                 Modifier.padding(start = 372.dp, end = 32.dp).offset(y = 28.dp).fillMaxWidth()
             } else {
@@ -379,7 +379,7 @@ private fun Keypad(modifier: Modifier, wide: Boolean, unit: SizeUnit, onUnit: (S
         Row(horizontalArrangement = Arrangement.spacedBy(30.dp)) {
             Column(verticalArrangement = Arrangement.spacedBy(down)) {
                 for (u in listOf(SizeUnit.MILLIMETERS, SizeUnit.CENTIMETERS, SizeUnit.INCHES, SizeUnit.PIXELS)) {
-                    Key(u.label, if (u == unit) UnitChosen else KeyFill, if (u == unit) Color(0xFF1F1F1F) else Ink, 15.sp, w, h) { onUnit(u) }
+                    Key(u.label, if (u == unit) UnitChosen else KeyFill, if (u != unit) Ink else if (Pc.light) Color.White else Color(0xFF1F1F1F), 15.sp, w, h) { onUnit(u) }
                 }
             }
             Column(verticalArrangement = Arrangement.spacedBy(down)) {

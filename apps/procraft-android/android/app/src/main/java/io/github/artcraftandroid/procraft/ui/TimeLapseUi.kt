@@ -33,8 +33,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
-private val ReplayFill = Color(0xFF252525)
-private val GridLine = Color(0xFF2E2E2E)
+// the canvas's surround and grid, light with the light interface
+private val ReplayFill get() = if (Pc.light) Color(0xFFCED1D2) else Color(0xFF252525)
+private val GridLine get() = if (Pc.light) Color(0xFFCACDCE) else Color(0xFF2E2E2E)
 
 /**
  * The surround's grid drawn as the canvas draws it (1 1/3 pt lines every 16, fixed to the glass
@@ -105,7 +106,7 @@ fun TimeLapseReplay(vm: CanvasViewModel) {
         val frames = index
         val seconds = frames / TimeLapse.FPS
         val time = "%02d:%02d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60, frames % TimeLapse.FPS)
-        ToolHeader("Time-lapse Replay", listOf(ToolButton(time)), onDone = { vm.timeLapseReplaying = false }, colors = LightToolHeader)
+        ToolHeader("Time-lapse Replay", listOf(ToolButton(time)), onDone = { vm.timeLapseReplaying = false }, colors = if (Pc.light) DarkToolHeader else LightToolHeader)
         // how far it has played
         Box(Modifier.padding(top = ToolHeaderHeight).fillMaxWidth().height(4.dp)) {
             val f = if (count > 1) index / (count - 1).toFloat() else 1f

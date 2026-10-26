@@ -44,15 +44,15 @@ import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import kotlin.math.roundToInt
 
-private val BarFill = Color(0xFF393939)
-private val PictureFill = Color(0xFF262626)
-private val GrabLine = Color(0xFF7C7C7C)
-private val TitleInk = Color(0xFFC5C5C5)
-private val CloseFill = Color(0xFF262626)
-private val CloseEdge = Color(0xFF454545)
-private val CloseInk = Color(0xFFA5A5A5)
-private val SegmentTrack = Color(0xFF4D4D4D)
-private val Muted = Color(0xFFAAAAAA)
+private val BarFill get() = if (Pc.light) Color(0xFFEDEDED) else Color(0xFF393939)
+private val PictureFill get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF262626)
+private val GrabLine get() = if (Pc.light) Color(0xFF909090) else Color(0xFF7C7C7C)
+private val TitleInk get() = if (Pc.light) Color(0xFF3A3A3A) else Color(0xFFC5C5C5)
+private val CloseFill get() = if (Pc.light) Color(0xFFFAFAFA) else Color(0xFF262626)
+private val CloseEdge get() = if (Pc.light) Color(0xFFE0E0E0) else Color(0xFF454545)
+private val CloseInk get() = if (Pc.light) Color(0xFF595959) else Color(0xFFA5A5A5)
+private val SegmentTrack get() = if (Pc.light) Color(0xFFD7D7D7) else Color(0xFF4D4D4D)
+private val Muted get() = if (Pc.light) Color(0xFF3B3B3B) else Color(0xFFAAAAAA)
 private val TopBarHeight = 64.dp
 private val BottomBarHeight = 45.dp
 private val ReferenceCorner = 24.dp

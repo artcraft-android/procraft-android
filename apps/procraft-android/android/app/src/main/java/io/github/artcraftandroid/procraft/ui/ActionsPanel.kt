@@ -87,12 +87,13 @@ private class Slide(val label: String, val value: String, val fraction: Float, v
 /** The pages the panel shows: its tabs, or a page of settings reached from one of them. */
 private enum class ActionsPage { TABS, PRESSURE, CURSOR }
 
-private val CurveFill = Color(0xFF262626)
+private val CurveFill get() = if (Pc.light) Color(0xFFE7E7E9) else Color(0xFF262626)
 
 /** Advanced cursor's section headings: bold, as large as the rows, lighter than the tabs' names. */
 private val CursorHeading get() = if (Pc.light) Pc.TabIdle else Color(0xFFB5B5B5)
-private val CurveEdge = Color(0xFF666666)
-private val CurveGrid = Color(0xFF353535)
+private val CurveEdge get() = if (Pc.light) Color(0xFF999999) else Color(0xFF666666)
+private val CurveGrid get() = if (Pc.light) Color(0xFFCACACA) else Color(0xFF353535)
+private val CurveLine get() = if (Pc.light) Color.Black else Color.White
 
 /** A fraction shown as the panel's sliders show it: "None" at nothing, else a percentage. */
 private fun percent(v: Float) = if (v <= 0f) "None" else "%.1f%%".format(v * 100f)
@@ -567,7 +568,7 @@ private fun PressurePage(vm: CanvasViewModel, onBack: () -> Unit) {
         Spacer(Modifier.height(24.dp))
         Text("App Pressure Sensitivity", color = Pc.SlideLabel, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 13.dp).height(19.dp))
         Box(Modifier.padding(horizontal = 7.dp).fillMaxWidth().aspectRatio(1f).background(CurveFill)) {
-            PressureCurve(vm.inputCurve, Modifier.fillMaxSize(), grid = CurveGrid, edge = CurveEdge) { vm.changeInput(curve = it) }
+            PressureCurve(vm.inputCurve, Modifier.fillMaxSize(), grid = CurveGrid, edge = CurveEdge, line = CurveLine) { vm.changeInput(curve = it) }
         }
         Spacer(Modifier.height(27.dp))
         Group(listOf(Act("Reset all") { vm.resetInput() }))

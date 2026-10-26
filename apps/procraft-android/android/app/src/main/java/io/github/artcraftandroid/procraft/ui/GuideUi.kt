@@ -42,12 +42,14 @@ import io.github.artcraftandroid.procraft.core.SymmetryType
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-private val GuideTop = Color(0xFF1F1F1F)
-private val GuideButton = Color(0xFF1C1C1C)
-private val GuideButtonEdge = Color(0xFF383838)
-private val GuideTitle = Color(0xFFD8D8D8)
+private val GuideTop get() = if (Pc.light) Color(0xFFE1E1E3) else Color(0xFF1F1F1F)
+private val GuideButton get() = if (Pc.light) Color(0xFFF5F8F9) else Color(0xFF1C1C1C)
+private val GuideButtonEdge get() = if (Pc.light) Color(0xFFDCDEDF) else Color(0xFF383838)
+private val GuideTitle get() = if (Pc.light) Color(0xFF3A3A3A) else Color(0xFFD8D8D8)
 private val GuideDone = Color(0xFF0190FF)
-private val GuideNote = Color(0xFF4A4A4A)
+private val GuideNote get() = if (Pc.light) Color(0xFFB5B5B5) else Color(0xFF4A4A4A)
+/** The toolbar's words: light, or dark grey with the light interface. */
+private val GuideLabel get() = if (Pc.light) Color(0xFF414141) else Color(0xFFD0D0D0)
 private val GuideNodeCentre = Color(0xFF0A84FF)
 private val GuideNodeTurn = Color(0xFF30D158)
 
@@ -118,7 +120,7 @@ fun GuideEditor(vm: CanvasViewModel) {
             Row(Modifier.align(Alignment.TopEnd).padding(top = 20.dp, end = 20.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(73.dp, 43.dp).clip(CircleShape).background(GuideButton).border(1.dp, GuideButtonEdge, CircleShape).tap { vm.closeGuideEditor(keep = false) },
                     contentAlignment = Alignment.Center) {
-                    Text("Cancel", color = GuideTitle, fontSize = 17.sp, maxLines = 1)
+                    Text("Cancel", color = if (Pc.light) Color(0xFF585858) else GuideTitle, fontSize = 17.sp, maxLines = 1)
                 }
                 Spacer(Modifier.width(13.dp))
                 Box(Modifier.size(44.dp).clip(CircleShape).background(GuideDone).tap { vm.closeGuideEditor(keep = true) }, contentAlignment = Alignment.Center) {
@@ -203,12 +205,12 @@ private fun GuideToolbar(vm: CanvasViewModel, modifier: Modifier) {
                         Modifier.size(257.dp, 40.dp).clip(RoundedCornerShape(20.dp)).background(Color(0xFF303030)).tap { vm.symmetryOptionsOpen = !vm.symmetryOptionsOpen },
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text("Options", color = Color(0xFFD0D0D0), fontSize = 15.sp, maxLines = 1)
+                        Text("Options", color = GuideLabel, fontSize = 15.sp, maxLines = 1)
                     }
                     GuideType.PERSPECTIVE -> Unit
                 }
                 Spacer(Modifier.weight(1f))
-                Text("Assisted Drawing", color = Color(0xFFD0D0D0), fontSize = 15.sp, maxLines = 1)
+                Text("Assisted Drawing", color = GuideLabel, fontSize = 15.sp, maxLines = 1)
                 Box(Modifier.tap { vm.setGuideAssisted(!g.assisted) }) { Switch(g.assisted, enabled = true) }
             }
         }
@@ -235,7 +237,7 @@ private fun GuideToolbar(vm: CanvasViewModel, modifier: Modifier) {
                     Modifier.size(300.dp, 40.dp).clip(RoundedCornerShape(20.dp)).background(Color(0xFF303030)).tap { vm.symmetryOptionsOpen = !vm.symmetryOptionsOpen },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text("Options", color = Color(0xFFD0D0D0), fontSize = 15.sp, maxLines = 1)
+                    Text("Options", color = GuideLabel, fontSize = 15.sp, maxLines = 1)
                 }
             }
         }
@@ -245,7 +247,7 @@ private fun GuideToolbar(vm: CanvasViewModel, modifier: Modifier) {
 @Composable
 private fun AssistedSwitch(vm: CanvasViewModel, on: Boolean) {
     Row(Modifier.width(300.dp).padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("Assisted Drawing", color = Color(0xFFD0D0D0), fontSize = 15.sp, maxLines = 1, modifier = Modifier.weight(1f))
+        Text("Assisted Drawing", color = GuideLabel, fontSize = 15.sp, maxLines = 1, modifier = Modifier.weight(1f))
         Box(Modifier.tap { vm.setGuideAssisted(!on) }) { Switch(on, enabled = true) }
     }
 }

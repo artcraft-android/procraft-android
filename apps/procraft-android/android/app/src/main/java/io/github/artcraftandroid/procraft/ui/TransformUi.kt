@@ -101,14 +101,15 @@ private val ToolbarWidth = 728.dp
 private val ToolbarHeight = 126.dp
 private val ToolbarBottom = 25.dp
 private val ToolbarCorner = 33.dp
-// translucent: #282828 to #252525 over white, #212121 to #1e1e1e over the surround
-private val ToolbarTop = Color(0xF7212121)
-private val ToolbarFill = Color(0xF71E1E1E)
-private val SegmentTrack = Color(0xFF535353)
-private val SegmentEdge = Color(0xFF7E7E7E)
-private val SegmentText = Color(0xFFC1C1C1)
-private val ButtonText = Color(0xFFA3A3A3)
-private val ButtonDimmed = Color(0xFF575757)
+// translucent: #282828 to #252525 over white, #212121 to #1e1e1e over the surround; light, #f2f2f2
+// with a white track, dark labels, and grey ones for what can't be used yet
+private val ToolbarTop get() = if (Pc.light) Color(0xF7F2F2F2) else Color(0xF7212121)
+private val ToolbarFill get() = if (Pc.light) Color(0xF7F2F2F2) else Color(0xF71E1E1E)
+private val SegmentTrack get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF535353)
+private val SegmentEdge get() = if (Pc.light) Color(0xFFEBEBEB) else Color(0xFF7E7E7E)
+private val SegmentText get() = if (Pc.light) Color(0xFF3B3B3B) else Color(0xFFC1C1C1)
+private val ButtonText get() = if (Pc.light) Color(0xFF414141) else Color(0xFFA3A3A3)
+private val ButtonDimmed get() = if (Pc.light) Color(0xFF989898) else Color(0xFF575757)
 private val SegmentGap = 11.33.dp
 /** The transform toolbar's buttons: with room (landscape), and where the screen is narrow. */
 private val TransformButtonRoomy = 89.dp
@@ -120,9 +121,9 @@ private val ButtonGap = 19.dp
 internal val MenuWidth = 260.dp
 private val MenuArrow = 15.dp
 private val MenuCorner = 26.dp
-private val MenuFill = Color(0xEB2A2A2A)
-internal val MenuGroup = Color(0xFF313131)
-internal val MenuLine = Color(0xFF373737)
+private val MenuFill get() = if (Pc.light) Color(0xEBF0F0F0) else Color(0xEB2A2A2A)
+internal val MenuGroup get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF313131)
+internal val MenuLine get() = if (Pc.light) Color(0xFFE2E2E2) else Color(0xFF373737)
 internal val MenuText: Color get() = if (Pc.light) Color(0xFF393939) else Color(0xFFC5C5C5)
 internal val MenuGroupCorner = 13.dp
 
@@ -579,4 +580,4 @@ private fun MenuSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifi
 /** Where the slider's knob centre runs, from the row's left edge and from its right. */
 private val SliderStart = 21.5.dp
 private val SliderEnd = 15.dp
-private val SliderRest = Color(0xFF5A5A5A)
+private val SliderRest get() = if (Pc.light) Color(0xFFDDDDDD) else Color(0xFF5A5A5A)

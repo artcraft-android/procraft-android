@@ -62,11 +62,12 @@ import io.github.artcraftandroid.procraft.core.QuickShapeKind
 import io.github.artcraftandroid.procraft.core.LiquifyKind
 import kotlin.math.roundToInt
 
-private val ModeBar = Color(0xFF5A5A5A)
-private val ModeText = Color(0xFFC5C5C5)
-private val HsbPanelFill = Color(0xF71E1E1E)
-private val HsbLabel = Color(0xFF808080)
-private val HsbValue = Color(0xFFEDEDED)
+// light: the band see-through (241 over white, 228 over the surround), the panel near white
+private val ModeBar get() = if (Pc.light) Color(0xBAECECEC) else Color(0xFF5A5A5A)
+private val ModeText get() = if (Pc.light) Color(0xFF6A6A6A) else Color(0xFFC5C5C5)
+private val HsbPanelFill get() = if (Pc.light) Color(0xF7F1F1F1) else Color(0xF71E1E1E)
+private val HsbLabel get() = if (Pc.light) Color(0xFF595959) else Color(0xFF808080)
+private val HsbValue get() = if (Pc.light) Color(0xFF363636) else Color(0xFFEDEDED)
 
 /** The adjustments menu hanging from its button, in groups: colour, blurs, effects, painting. */
 @Composable
@@ -217,8 +218,8 @@ private fun HsbRow(label: String, value: Float, track: Brush, knobColor: (Float)
     }
 }
 
-private val PanelButton = Color(0xFF303030)
-private val PanelButtonText = Color(0xFFA6A6A6)
+private val PanelButton get() = if (Pc.light) Color(0xFFF8F8F8) else Color(0xFF303030)
+private val PanelButtonText get() = if (Pc.light) Color(0xFF515151) else Color(0xFFA6A6A6)
 private val GridLine = Color(0xFF8A8A8A)
 
 private val BALANCE_PAIRS = listOf(
@@ -359,7 +360,7 @@ fun CurvesPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                 }
                 val curve = vm.curveShape(vm.curveChannel)
                 for (i in 1 until curve.size) {
-                    drawLine(Color.White, Offset(curve[i - 1].x * w, (1f - curve[i - 1].y) * h), Offset(curve[i].x * w, (1f - curve[i].y) * h), 1.5.dp.toPx())
+                    drawLine(CurveInk, Offset(curve[i - 1].x * w, (1f - curve[i - 1].y) * h), Offset(curve[i].x * w, (1f - curve[i].y) * h), 1.5.dp.toPx())
                 }
                 for (p in points) node(Offset(p.x * w, (1f - p.y) * h), CurveNode, 1f)
             },
@@ -397,8 +398,10 @@ fun CurvesPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
 }
 
 private val CurveNode = Color(0xFF0171EA)
+/** The curve: white, or black with the light interface. */
+private val CurveInk get() = if (Pc.light) Color.Black else Color.White
 /** The Delete pill over a tapped point. */
-private val CurveMenuFill = Color(0xFF262626)
+private val CurveMenuFill get() = if (Pc.light) Color(0xFFF0F0F0) else Color(0xFF262626)
 
 /**
  * The gradient map panel: the gradient library (a tap chooses one, a tap on the chosen one edits
@@ -564,7 +567,6 @@ private fun GradientEditor(vm: CanvasViewModel, index: Int) {
                 // room round it for its shadow to fade out in
                 val room = with(density) { PopupShadowRoom.toPx() }
                 PcPopup(
-                    textScale = MATCHED_POPUP_TEXT,
                     popupPositionProvider = object : androidx.compose.ui.window.PopupPositionProvider {
                         override fun calculatePosition(
                             anchorBounds: androidx.compose.ui.unit.IntRect,
@@ -598,15 +600,15 @@ private fun GradientEditor(vm: CanvasViewModel, index: Int) {
     }
 }
 
-private val GradientBand = Color(0xFF535353)
+private val GradientBand get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF535353)
 private val GradientDone = Color(0xFF0190FF)
-private val PlusDisc = Color(0xFF1B1B1B)
-private val PlusRim = Color(0xFF373737)
-private val PlusGlyph = Color(0xFFAAAAAA)
-private val EditorCard = Color(0xFF383838)
-private val EditorName = Color(0xFFC5C5C5)
-private val GradientCard = Color(0xFF282828)
-private val GradientName = Color(0xFFC1C1C1)
+private val PlusDisc get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF1B1B1B)
+private val PlusRim get() = if (Pc.light) Color(0xFFE1E1E1) else Color(0xFF373737)
+private val PlusGlyph get() = if (Pc.light) Color(0xFF595959) else Color(0xFFAAAAAA)
+private val EditorCard get() = if (Pc.light) Color(0xFFEEEEEE) else Color(0xFF383838)
+private val EditorName get() = if (Pc.light) Color(0xFF3A3A3A) else Color(0xFFC5C5C5)
+private val GradientCard get() = if (Pc.light) Color(0xFFEEEEEE) else Color(0xFF282828)
+private val GradientName get() = if (Pc.light) Color(0xFF5D5D5D) else Color(0xFFC1C1C1)
 
 /** A gradient to map by: its name and colour stops (position, 0xAARRGGBB), in any order. */
 data class GradientPreset(val name: String, val stops: List<Pair<Float, Long>>)
@@ -637,8 +639,8 @@ val GRADIENTS = listOf(
     GradientPreset("Lagoon", listOf(0f to 0xFF06202A, 0.55f to 0xFF1B9A8E, 1f to 0xFFF4F1D0)),
 )
 
-private val MenuButton = Color(0xFF3B3B3B)
-private val MenuButtonText = Color(0xFFD8D8D8)
+private val MenuButton get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF3B3B3B)
+private val MenuButtonText get() = if (Pc.light) Color(0xFF414141) else Color(0xFFD8D8D8)
 
 /**
  * The menu a tap on the canvas opens during an adjustment: apply above, undo to the left, preview
@@ -739,9 +741,9 @@ private val LiquifyIcons = mapOf(
     LiquifyKind.EDGE to { PcIcons.LiquifyEdge },
     LiquifyKind.RECONSTRUCT to { PcIcons.LiquifyReconstruct },
 )
-private val LiquifyIdle = Color(0xFFAAAAAA)
-private val LiquifyLabel = Color(0xFFA3A3A3)
-private val LiquifyDim = Color(0xFF575757)
+private val LiquifyIdle get() = if (Pc.light) Color(0xFF414141) else Color(0xFFAAAAAA)
+private val LiquifyLabel get() = if (Pc.light) Color(0xFF414141) else Color(0xFFA3A3A3)
+private val LiquifyDim get() = if (Pc.light) Color(0xFF989898) else Color(0xFF575757)
 
 /**
  * Liquify on a wide screen (1093 x 162): its ways, Adjust and Reset as a row of icon buttons (75
@@ -836,7 +838,7 @@ private fun LiquifyUpright(vm: CanvasViewModel, modifier: Modifier) {
     }
 }
 
-private val ModesFill = Color(0xFF7B7B7B)
+private val ModesFill get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF7B7B7B)
 
 /** The Layer / Pencil choice under the mode bar: the adjustment changes the layer, or is painted on. */
 @Composable
@@ -875,10 +877,10 @@ fun ClonePuck(vm: CanvasViewModel) {
     }
 }
 
-private val KindsFill = Color(0xFF535353)
-private val KindsEdge = Color(0xFF747474)
-private val GlitchTrack = Color(0xFF2E2E2E)
-private val GlitchTick = Color(0xFF4A4A4A)
+private val KindsFill get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF535353)
+private val KindsEdge get() = if (Pc.light) Color(0xFFFAFAFA) else Color(0xFF747474)
+private val GlitchTrack get() = if (Pc.light) Color(0xFFDDDDDD) else Color(0xFF2E2E2E)
+private val GlitchTick get() = if (Pc.light) Color(0xFFC8C8C8) else Color(0xFF4A4A4A)
 
 private val GLITCH_KINDS = listOf(
     Triple(GlitchKind.ARTIFACT, "Artifact", 111.dp),
@@ -1025,8 +1027,8 @@ internal fun OptionSlider(label: String, value: Float, shown: String, width: Dp,
     }
 }
 
-private val ModesText = Color(0xFFD0D0D0)
-private val ValueChip = Color(0xFF2A2A2A)
+private val ModesText get() = if (Pc.light) Color(0xFF3B3B3B) else Color(0xFFD0D0D0)
+private val ValueChip get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF2A2A2A)
 
 private fun GlitchKind.icon() = when (this) {
     GlitchKind.ARTIFACT -> PcIcons.GlitchArtifact
@@ -1099,7 +1101,7 @@ fun NoisePanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
     }
 }
 
-private val NoiseButton = Color(0xFF1E1E1E)
+private val NoiseButton get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF1E1E1E)
 
 /** The bloom toolbar: transition, size and burn. */
 @Composable
@@ -1124,12 +1126,12 @@ fun BloomPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
     }
 }
 
-private val MoreFill = Color(0xFF1C1C1C)
-private val MoreEdge = Color(0xFF3A3A3A)
-private val MoreDots = Color(0xFF9A9A9A)
-private val OptionsMenuFill = Color(0xF2262626)
-private val OptionsGroupFill = Color(0xFF1B1B1B)
-private val OptionsLine = Color(0xFF2E2E2E)
+private val MoreFill get() = if (Pc.light) Color(0xFFFAFAFA) else Color(0xFF1C1C1C)
+private val MoreEdge get() = if (Pc.light) Color(0xFFE1E1E1) else Color(0xFF3A3A3A)
+private val MoreDots get() = if (Pc.light) Color(0xFF595959) else Color(0xFF9A9A9A)
+private val OptionsMenuFill get() = if (Pc.light) Color(0xF2F0F0F0) else Color(0xF2262626)
+private val OptionsGroupFill get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF1B1B1B)
+private val OptionsLine get() = if (Pc.light) Color(0xFFE2E2E2) else Color(0xFF2E2E2E)
 
 /**
  * A toolbar's "•••" button (41 × 40, 3 lower than the sliders' top): it opens a small menu over

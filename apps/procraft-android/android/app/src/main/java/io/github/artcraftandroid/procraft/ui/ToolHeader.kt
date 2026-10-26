@@ -25,10 +25,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-private val HeaderLabel = Color(0xFFC5C5C5)
-private val ButtonLabel = Color(0xFFA5A5A5)
-private val ChosenLabel = Color(0xFFC0C0C0)
-private val CapsuleChosen = Color(0xFF464646)
+private val HeaderLabel get() = if (Pc.light) Color(0xFF3A3A3A) else Color(0xFFC5C5C5)
+private val ButtonLabel get() = if (Pc.light) Color(0xFF565656) else Color(0xFFA5A5A5)
+private val ChosenLabel get() = if (Pc.light) Color(0xFF3A3A3A) else Color(0xFFC0C0C0)
+private val CapsuleChosen get() = if (Pc.light) Color(0xFFA5A5A5) else Color(0xFF464646)
 private val DoneBlue = Color(0xFF0190FF)
 
 /** A full-screen tool's header is this tall. */
@@ -40,8 +40,9 @@ class ToolButton(val label: String, val chosen: Boolean = false, val onClick: ((
 /** A tool header's colours: its band, and its capsule's fill and edge. */
 class ToolHeaderColors(val band: Color, val capsule: Color, val edge: Color)
 
-/** Over the dark surround of a tool that edits the canvas. */
-val DarkToolHeader = ToolHeaderColors(Color(0xFF1D1D1D), Color(0xFF1A1A1A), Color(0xFF373737))
+/** Over the surround of a tool that edits the canvas: dark, or light with the light interface (then every tool's header is this one). */
+val DarkToolHeader get() = if (Pc.light) ToolHeaderColors(Color(0xFFDFE2E3), Color(0xFFF5F8F9), Color(0xFFDCDEDF))
+    else ToolHeaderColors(Color(0xFF1D1D1D), Color(0xFF1A1A1A), Color(0xFF373737))
 
 /** Over a picture shown edge to edge. */
 val LightToolHeader = ToolHeaderColors(Color(0xFF333333), Color(0xFF232323), Color(0xFF424242))

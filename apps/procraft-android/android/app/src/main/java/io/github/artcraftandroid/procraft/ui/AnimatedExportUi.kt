@@ -57,14 +57,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
-private val ScreenFill = Color(0xFF1F1F1F)
-private val TitleInk = Color(0xFFAAAAAA)
-private val RowInk = Color(0xFFC1C1C1)
-private val PanelFill = Color(0xFF262626)
-private val PanelEdge = Color(0xFF363636)
-private val SegmentTrack = Color(0xFF3C3C3C)
-private val CapsuleFill = Color(0xFF1A1A1A)
-private val CapsuleEdge = Color(0xFF373737)
+private val ScreenFill get() = if (Pc.light) Color(0xFFF2F2F2) else Color(0xFF1F1F1F)
+private val TitleInk get() = if (Pc.light) Color(0xFF3D3D3D) else Color(0xFFAAAAAA)
+private val RowInk get() = if (Pc.light) Color(0xFF595959) else Color(0xFFC1C1C1)
+private val PanelFill get() = if (Pc.light) Color(0xFFEBEBEB) else Color(0xFF262626)
+private val PanelEdge get() = if (Pc.light) Color(0xFFDADADA) else Color(0xFF363636)
+private val SegmentTrack get() = if (Pc.light) Color(0xFFD5D5D5) else Color(0xFF3C3C3C)
+private val CapsuleFill get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF1A1A1A)
+private val CapsuleEdge get() = if (Pc.light) Color(0xFFE0E0E0) else Color(0xFF373737)
 private val DoneBlue = Color(0xFF0190FF)
 
 /**
@@ -212,7 +212,7 @@ private fun ExportScreen(
 }
 
 private val PanelWidth = 400.dp
-private val SizeInk = Color(0xFF8E8E8E)
+private val SizeInk get() = if (Pc.light) Color(0xFF3F3F3F) else Color(0xFF8E8E8E)
 
 /**
  * Sharing a model on a turntable: it turning as it will, the settings (the size, once round or
@@ -307,8 +307,8 @@ private fun SettingRow(label: String, on: Boolean, onChange: (Boolean) -> Unit) 
     }
 }
 
-private val ChoiceFill = Color(0xFF2E2E2E)
-private val SliderTrack = Color(0xFF3E3E3E)
+private val ChoiceFill get() = if (Pc.light) Color(0xFFE3E3E3) else Color(0xFF2E2E2E)
+private val SliderTrack get() = if (Pc.light) Color(0xFFDDDDDD) else Color(0xFF3E3E3E)
 
 
 /** One of two choices in a group, 40 tall: the chosen one blue with a tick. */

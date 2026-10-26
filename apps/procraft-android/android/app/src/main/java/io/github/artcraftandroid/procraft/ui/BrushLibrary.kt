@@ -68,6 +68,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -233,8 +234,10 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     val density = LocalDensity.current
     var adding by remember { mutableStateOf(false) }
     var setMenu by remember { mutableStateOf<Int?>(null) }
-    // the set menu's icon grid is open
+    // the set menu's icon grid is open; where its Customize icon row and the set are on screen
     var iconPicker by remember { mutableStateOf(false) }
+    var customizeRow by remember { mutableStateOf<Pair<Float, Float>?>(null) }
+    var setScreenTop by remember { mutableStateOf(0f) }
     // the search: what is typed, and whether the field is in use
     var query by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
@@ -346,7 +349,10 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                     val selected = i == vm.shownSet
                     Box {
                         Row(
-                            Modifier.fillMaxWidth().height(50.dp).onGloballyPositioned { setBounds[i] = it.boundsInWindow() }.clip(RoundedCornerShape(12.dp))
+                            Modifier.fillMaxWidth().height(50.dp).onGloballyPositioned {
+                                setBounds[i] = it.boundsInWindow()
+                                if (selected) setScreenTop = it.positionOnScreen().y
+                            }.clip(RoundedCornerShape(12.dp))
                                 .background(if (overSet == i) Pc.Accent else if (selected) Pc.RowSelected else Pc.SetCell)
                                 .clickable { if (selected) setMenu = i else vm.showSet(i) },
                             verticalAlignment = Alignment.CenterVertically,
@@ -373,22 +379,35 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                         // centred on the set, a little left of it
                         val left = with(density) { 6.dp.roundToPx() }
                         val below = with(density) { MenuTop.roundToPx() }
-                        // the icons to choose from, beside the menu on its left
-                        MenuPresence(setMenu == i && iconPicker, androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f)) { look ->
+                        // the icons to choose from, right of the menu over the library: under the Customize icon
+                        // row, or over it when there is no room below; scrolled to the set's own icon
+                        MenuPresence(setMenu == i && iconPicker, androidx.compose.ui.graphics.TransformOrigin(0f, 0f)) { look ->
                             PcPopup(
-                                textScale = MATCHED_POPUP_TEXT,
-                                popupPositionProvider = MenuPlace(below) { a, size -> IntOffset(a.left - left - size.width + with(density) { 6.dp.roundToPx() }, a.center.y - size.height / 2 + with(density) { 40.dp.roundToPx() }) },
+                                popupPositionProvider = remember(customizeRow, setScreenTop, density) {
+                                    MenuPlace(below) { a, size ->
+                                        val x = a.left - with(density) { PickerInset.roundToPx() }
+                                        val row = customizeRow ?: return@MenuPlace IntOffset(x, a.top)
+                                        val top = a.top + (row.first - setScreenTop).roundToInt()
+                                        val bottom = a.top + (row.second - setScreenTop).roundToInt()
+                                        val room = (vm.windowSize.y - with(density) { PickerMargin.toPx() }).roundToInt()
+                                        IntOffset(x, if (bottom + size.height <= room) bottom else top - size.height)
+                                    }
+                                },
                                 onDismissRequest = { iconPicker = false },
                             ) {
-                                val shape = RoundedCornerShape(16.dp)
+                                val shape = RoundedCornerShape(26.dp)
+                                // an icon that isn't one of the picker's starts it at the top
+                                val own = set.icon.toInt().takeIf { it in 0 until PcIcons.PICKED_SET_ICONS }
+                                val first = if (own == null) 0 else (own / PICKER_COLUMNS - 3).coerceAtLeast(0) * PICKER_COLUMNS
                                 LazyVerticalGrid(
-                                    columns = GridCells.Fixed(5),
-                                    modifier = look.size(252.dp, 327.dp).clip(shape).background(MenuFill).border(1.dp, MenuEdge, shape).padding(4.dp),
+                                    columns = GridCells.Fixed(PICKER_COLUMNS),
+                                    state = androidx.compose.foundation.lazy.grid.rememberLazyGridState(initialFirstVisibleItemIndex = first),
+                                    modifier = look.size(250.dp, 325.dp).clip(shape).background(MenuFill).border(1.dp, MenuEdge, shape).padding(3.dp),
                                 ) {
                                     items(PcIcons.PICKED_SET_ICONS) { k ->
                                         val chosen = k == set.icon.toInt()
                                         Box(
-                                            Modifier.size(48.dp).clip(CircleShape).background(if (chosen) Pc.Accent else Color.Transparent).clickable {
+                                            Modifier.size(48.dp).clip(RoundedCornerShape(21.dp)).background(if (chosen) Pc.Accent else Color.Transparent).clickable {
                                                 vm.changeBrushSetIcon(i, k)
                                                 iconPicker = false
                                                 setMenu = null
@@ -411,8 +430,10 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                                 setMenu = null
                                 vm.duplicateBrushSet(i)
                             }
-                            MenuItem(PcIcons.SetIcons.getOrElse(set.icon.toInt()) { PcIcons.BrushSet }, "Customize icon", trailing = PcIcons.MenuChevron) {
-                                iconPicker = !iconPicker
+                            Box(Modifier.onGloballyPositioned { c -> c.positionOnScreen().y.let { customizeRow = it to it + c.size.height } }) {
+                                MenuItem(PcIcons.SetIcons.getOrElse(set.icon.toInt()) { PcIcons.BrushSet }, "Customize icon", trailing = PcIcons.MenuChevron) {
+                                    iconPicker = !iconPicker
+                                }
                             }
                             MenuDivider()
                             MenuItem(PcIcons.MenuShare, "Share") {
@@ -623,7 +644,7 @@ internal fun LibraryMenu(
 
 /** A menu row: its icon (a 40 frame) centred 29.5 in, the label from 52, a chevron 27.5 from the right. */
 @Composable
-internal fun MenuItem(icon: ImageVector, label: String, ink: Color = Color.White, trailing: ImageVector? = null, iconSize: Dp = 40.dp, onClick: () -> Unit) {
+internal fun MenuItem(icon: ImageVector, label: String, ink: Color = Pc.MenuInk, trailing: ImageVector? = null, iconSize: Dp = 40.dp, onClick: () -> Unit) {
     Row(Modifier.fillMaxWidth().height(40.dp).clickable(onClick = onClick), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.padding(start = 9.5.dp).size(40.dp), contentAlignment = Alignment.Center) {
             Icon(icon, contentDescription = null, tint = ink, modifier = Modifier.requiredSize(iconSize))
@@ -640,6 +661,11 @@ internal fun MenuDivider(gap: Dp = 10.dp) {
 }
 
 /** Places a menu from its anchor's bounds and its own size, kept in the window below [top]. */
+/** The set icon picker: its columns, how far left of the set it starts, and the room it keeps below. */
+private const val PICKER_COLUMNS = 5
+private val PickerInset = 11.dp
+private val PickerMargin = 25.dp
+
 internal class MenuPlace(private val top: Int = 0, private val place: (IntRect, IntSize) -> IntOffset) : PopupPositionProvider {
     override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
         val p = place(anchorBounds, popupContentSize)

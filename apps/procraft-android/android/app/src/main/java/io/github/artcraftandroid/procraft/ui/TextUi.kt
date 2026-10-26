@@ -72,18 +72,23 @@ import io.github.artcraftandroid.procraft.core.TextAlignment
 import io.github.artcraftandroid.procraft.core.TextInfo
 import kotlin.math.roundToInt
 
-private val SheetFill = Color(0xFF535353)
-private val SheetBar = Color(0xFF4F4F4F)
-private val SheetCapsule = Color(0xFF3E3E3E)
-private val CardFill = Color(0xFF373737)
+private val SheetFill get() = if (Pc.light) Color(0xFFF3F6F7) else Color(0xFF535353)
+private val SheetBar get() = if (Pc.light) Color(0xFFF3F6F7) else Color(0xFF4F4F4F)
+private val SheetCapsule get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF3E3E3E)
+private val CardFill get() = if (Pc.light) Color(0xFFFAFAFA) else Color(0xFF373737)
 private val CardCorner = 22.dp
-private val ButtonFill = Color(0xFF474747)
-private val SegmentTrack = Color(0xFF646464)
-private val CapsuleInk = Color(0xFFC5C5C5)
-private val KeyboardDisc = Color(0xFF393939)
-private val KeyboardBar = Color(0xFF2B2B2B)
+private val ButtonFill get() = if (Pc.light) Color(0xFFE6E6E6) else Color(0xFF474747)
+private val SegmentTrack get() = if (Pc.light) Color(0xFFE3E3E3) else Color(0xFF646464)
+private val CapsuleInk get() = if (Pc.light) Color(0xFF565656) else Color(0xFFC5C5C5)
+private val KeyboardDisc get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF393939)
+private val KeyboardBar get() = if (Pc.light) Color(0xFFE9ECED) else Color(0xFF2B2B2B)
 private val DoneBlue = Color(0xFF0190FF)
 private val BoxLine = Color(0xFF0076FD)
+/** The sheet's words: white, black on the light interface. */
+// a design row's track and the middle tick of one that runs both ways
+private val DesignTrack get() = if (Pc.light) Color(0xFFE3E3E3) else Color(0xFF5A5A5A)
+private val DesignTick get() = if (Pc.light) Color(0xFFC8C8C8) else Color(0xFF8A8A8A)
+private val SheetInk get() = if (Pc.light) Color.Black else Color.White
 
 /**
  * Text being edited: its box drawn over the canvas, a hidden field the keyboard types into, and a
@@ -393,7 +398,7 @@ private fun AttributesCard(vm: CanvasViewModel, info: TextInfo, modifier: Modifi
             }
             Row(Modifier.padding(top = if (wide) 4.dp else 0.dp).clickable { vm.changeText { it.copy(allCaps = !it.allCaps) } }, verticalAlignment = Alignment.CenterVertically) {
                 // two serif capitals all but touching
-                Text("TT", color = Color.White, fontSize = 26.5.sp, fontFamily = FontFamily.Serif, letterSpacing = (-0.5).sp, modifier = Modifier.padding(start = 10.dp).width(50.5.dp))
+                Text("TT", color = SheetInk, fontSize = 26.5.sp, fontFamily = FontFamily.Serif, letterSpacing = (-0.5).sp, modifier = Modifier.padding(start = 10.dp).width(50.5.dp))
                 if (wide) Spacer(Modifier.weight(1f))
                 Switch(info.allCaps, enabled = true)
             }
@@ -412,7 +417,7 @@ private fun SheetIcon(icon: ImageVector, label: String, modifier: Modifier, icon
 @Composable
 private fun Card(title: String, modifier: Modifier, shape: RoundedCornerShape = RoundedCornerShape(CardCorner), content: @Composable ColumnScope.() -> Unit) {
     Column(modifier.fillMaxHeight().clip(shape).background(CardFill)) {
-        Text(title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 20.dp, top = 16.5.dp, bottom = 9.dp))
+        Text(title, color = SheetInk, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 20.dp, top = 16.5.dp, bottom = 9.dp))
         content()
     }
 }
@@ -425,7 +430,7 @@ private fun Cell(name: String, selected: Boolean, face: android.graphics.Typefac
         Modifier.fillMaxWidth().height(33.dp).background(if (selected) Pc.Accent else Color.Transparent).clickable(onClick = onClick).padding(start = 12.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
-        Text(name, color = Color.White, fontSize = 15.sp, fontFamily = family, maxLines = 1)
+        Text(name, color = if (selected) Color.White else SheetInk, fontSize = 15.sp, fontFamily = family, maxLines = 1)
     }
 }
 
@@ -436,7 +441,7 @@ private fun Attribute(icon: ImageVector, label: String, on: Boolean, modifier: M
         modifier.height(tall).clip(RoundedCornerShape(8.dp)).background(if (on) Pc.Accent else ButtonFill).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.requiredSize(iconSize))
+        Icon(icon, contentDescription = label, tint = if (on) Color.White else SheetInk, modifier = Modifier.requiredSize(iconSize))
     }
 }
 
@@ -446,9 +451,9 @@ private fun DesignRow(label: String, value: Float, shown: String, fromMiddle: Bo
     val change by rememberUpdatedState(onChange)
     Column(Modifier.fillMaxWidth().height(58.5.dp).padding(horizontal = 16.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 1.5.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(label, color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
+            Text(label, color = SheetInk, fontSize = 15.sp, modifier = Modifier.weight(1f))
             Box(Modifier.height(24.dp).clip(CircleShape).background(ButtonFill).padding(horizontal = 10.dp), contentAlignment = Alignment.Center) {
-                Text(shown, color = Color.White, fontSize = 13.sp)
+                Text(shown, color = SheetInk, fontSize = 13.sp)
             }
         }
         Box(
@@ -468,9 +473,9 @@ private fun DesignRow(label: String, value: Float, shown: String, fromMiddle: Bo
                 val y = size.height / 2f
                 val h = 2.dp.toPx()
                 val v = value.coerceIn(0f, 1f)
-                drawRoundRect(Color(0xFF5A5A5A), Offset(0f, y - h / 2f), Size(size.width, h), CornerRadius(h / 2f))
+                drawRoundRect(DesignTrack, Offset(0f, y - h / 2f), Size(size.width, h), CornerRadius(h / 2f))
                 if (fromMiddle) {
-                    drawLine(Color(0xFF8A8A8A), Offset(size.width / 2f, y - 5.dp.toPx()), Offset(size.width / 2f, y + 5.dp.toPx()), 1.dp.toPx())
+                    drawLine(DesignTick, Offset(size.width / 2f, y - 5.dp.toPx()), Offset(size.width / 2f, y + 5.dp.toPx()), 1.dp.toPx())
                 } else {
                     drawRoundRect(Pc.Accent, Offset(0f, y - h / 2f), Size(size.width * v, h), CornerRadius(h / 2f))
                 }

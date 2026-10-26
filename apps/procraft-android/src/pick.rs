@@ -3,7 +3,7 @@
 use procraft_engine::geom::{Affine, Vec2};
 use procraft_gpu::{Target, read_texture, wgpu};
 
-use crate::{CanvasSession, SURROUND};
+use crate::CanvasSession;
 
 /// What the eyedropper sees.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -28,6 +28,7 @@ impl CanvasSession {
         // the window shifted so that the point lands in the middle of the small target
         let corner = Vec2::new(x - side as f32 / 2.0, y - side as f32 / 2.0);
         let grid = st.surround_grid(Vec2::ZERO - corner);
+        let surround = st.surround();
         let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -50,7 +51,7 @@ impl CanvasSession {
                 format,
                 size: (side, side),
                 to_screen,
-                surround: SURROUND,
+                surround,
                 grid: Some(grid),
                 selection: None,
                 backdrop: None,

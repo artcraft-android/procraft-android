@@ -51,23 +51,23 @@ import io.github.artcraftandroid.procraft.canvas.GestureOptions
 import io.github.artcraftandroid.procraft.canvas.GesturePurpose
 import io.github.artcraftandroid.procraft.canvas.GestureSettings
 
-private val ScreenFill = Color(0xFF1F1F1F)
-private val RailFill = Color(0xFF272727)
-private val CardFill = Color(0xFF252525)
-private val Ink = Color(0xFFC1C1C1)
-private val Detail = Color(0xFF9A9A9A)
-private val RailIdle = Color(0xFFAAAAAA)
-private val Track = Color(0xFF414141)
+private val ScreenFill get() = if (Pc.light) Color(0xFFF3F3F3) else Color(0xFF1F1F1F)
+private val RailFill get() = if (Pc.light) Color(0xFFEBEBEB) else Color(0xFF272727)
+private val CardFill get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF252525)
+private val Ink get() = if (Pc.light) Color(0xFF414141) else Color(0xFFC1C1C1)
+private val Detail get() = if (Pc.light) Color(0xFF6A6A6A) else Color(0xFF9A9A9A)
+private val RailIdle get() = if (Pc.light) Color(0xFF3F3F3F) else Color(0xFFAAAAAA)
+private val Track get() = if (Pc.light) Color(0xFFE5E5E5) else Color(0xFF414141)
 // a delay whose way of touching is off: a dark line and a dim knob, no blue
-private val TrackOff = Color(0xFF1D1D1D)
-private val KnobOff = Color(0xFF333333)
+private val TrackOff get() = if (Pc.light) Color(0xFFE9E9EB) else Color(0xFF1D1D1D)
+private val KnobOff get() = if (Pc.light) Color(0xFFD0D0D0) else Color(0xFF333333)
 private val DoneBlue = Color(0xFF0190FF)
 
 /** Where a wide screen's page starts and ends, beside the card of what gestures can do. */
 private val WideContentStart = 358.dp
 private val WideContentEnd = 28.dp
-private val CardEdge = Color(0xFF373737)
-private val PageInk = Color(0xFF797979)
+private val CardEdge get() = if (Pc.light) Color(0xFFDADADA) else Color(0xFF373737)
+private val PageInk get() = if (Pc.light) Color(0xFF3E3E3E) else Color(0xFF797979)
 
 /** What gestures can do, by icon and name on a card headed "Gesture controls" (a wide screen's). */
 @Composable

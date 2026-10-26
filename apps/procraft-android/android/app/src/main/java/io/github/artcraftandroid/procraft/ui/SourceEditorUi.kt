@@ -60,22 +60,22 @@ import io.github.artcraftandroid.procraft.core.SourceKind
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
-private val EditorPage = Color(0xFF2A2A2A)
-private val EditorView = Color(0xFF262626)
-private val EditorTitle = Color(0xFFEEEEEE)
-private val CapsuleFill = Color(0xFF1C1C1C)
-private val CapsuleEdge = Color(0xFF383838)
-private val CapsuleInk = Color(0xFFAAAAAA)
+private val EditorPage get() = if (Pc.light) Color(0xFFE5E5E5) else Color(0xFF2A2A2A)
+private val EditorView get() = if (Pc.light) Color(0xFFE5E5E5) else Color(0xFF262626)
+private val EditorTitle get() = if (Pc.light) Color(0xFF333333) else Color(0xFFEEEEEE)
+private val CapsuleFill get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF1C1C1C)
+private val CapsuleEdge get() = if (Pc.light) Color(0xFFE0E0E0) else Color(0xFF383838)
+private val CapsuleInk get() = if (Pc.light) Color(0xFF585858) else Color(0xFFAAAAAA)
 private val DoneBlue = Color(0xFF0190FF)
-private val RepeatLabel = Color(0xFF808080)
+private val RepeatLabel get() = if (Pc.light) Color(0xFF808080) else Color(0xFF808080)
 private val LibraryVeil = Color(0x80000000)
-private val LibrarySheet = Color(0xFF1C1C1E)
-private val LibraryTitle = Color(0xFFC1C1C1)
-private val LibraryDim = Color(0xFF868686)
-private val LibraryEdge = Color(0xFF5A5A5A)
-private val LibrarySearchFill = Color(0xFF1B1B1B)
-private val LibrarySearchEdge = Color(0xFF363636)
-private val LibraryHint = Color(0xFF787878)
+private val LibrarySheet get() = if (Pc.light) Color(0xFFF2F2F7) else Color(0xFF1C1C1E)
+private val LibraryTitle get() = if (Pc.light) Color(0xFF3A3A3A) else Color(0xFFC1C1C1)
+private val LibraryDim get() = if (Pc.light) Color(0xFF868686) else Color(0xFF868686)
+private val LibraryEdge get() = if (Pc.light) Color(0xFFC8C8C8) else Color(0xFF5A5A5A)
+private val LibrarySearchFill get() = if (Pc.light) Color(0xFFE6E6EA) else Color(0xFF1B1B1B)
+private val LibrarySearchEdge get() = if (Pc.light) Color(0xFFD8D8DC) else Color(0xFF363636)
+private val LibraryHint get() = if (Pc.light) Color(0xFF8A8A8E) else Color(0xFF787878)
 private val MenuBlue = Color(0xFF0A84FF)
 
 /**
@@ -367,7 +367,7 @@ private fun SourceLibrary(vm: CanvasViewModel, grain: Boolean, onPick: (Int) -> 
             Row(Modifier.padding(start = 43.dp, top = 25.dp).height(45.dp), verticalAlignment = Alignment.CenterVertically) {
                 for ((label, isGrain) in listOf("Shape Source" to false, "Grain Source" to true)) {
                     Box(Modifier.padding(end = 11.dp).size(115.dp, 41.dp).tap { showGrains = isGrain }, contentAlignment = Alignment.Center) {
-                        Text(label, color = if (showGrains == isGrain) Color.White else LibraryDim, fontSize = 17.sp, maxLines = 1)
+                        Text(label, color = if (showGrains == isGrain) Pc.MenuInk else LibraryDim, fontSize = 17.sp, maxLines = 1)
                     }
                 }
                 Spacer(Modifier.width(8.dp))
@@ -422,7 +422,7 @@ private fun LibrarySearch(query: String, onQuery: (String) -> Unit) {
                 query,
                 onValueChange = onQuery,
                 singleLine = true,
-                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 17.sp),
+                textStyle = androidx.compose.ui.text.TextStyle(color = Pc.MenuInk, fontSize = 17.sp),
                 cursorBrush = androidx.compose.ui.graphics.SolidColor(Pc.Accent),
                 modifier = Modifier.fillMaxWidth(),
             )

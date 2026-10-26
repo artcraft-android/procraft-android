@@ -276,7 +276,8 @@ private val CompactHexField = Color(0xFF343434)
 fun CompactColors(vm: CanvasViewModel, c: ColorPick, arrowX: Dp, modifier: Modifier = Modifier, side: ArrowSide = ArrowSide.TOP) {
     var mode by remember { mutableStateOf(ColorMode.DISC) }
     Popover(CompactWidth, arrowX, modifier, fill = CompactFill, side = side) {
-        Text("Colors", color = Pc.PanelTitle, fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 18.dp, top = 9.dp, bottom = 5.dp))
+        // a 16.5 cap, as measured over a gradient stop
+        Text("Colors", color = Pc.PanelTitle, fontSize = 23.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 18.dp, top = 9.dp, bottom = 5.dp))
         CompactBody(vm, c, mode)
         CompactTabs(mode) { mode = it }
     }
@@ -587,8 +588,8 @@ private fun HarmonyKindButton(vm: CanvasViewModel) {
                             }.padding(start = 20.dp, end = 18.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(kind.label, color = Color.White, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
-                            if (kind == vm.harmonyKind) Icon(PcIcons.Tick, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                            Text(kind.label, color = Pc.MenuInk, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                            if (kind == vm.harmonyKind) Icon(PcIcons.Tick, contentDescription = null, tint = Pc.MenuInk, modifier = Modifier.size(18.dp))
                         }
                     }
                 }
@@ -1232,7 +1233,7 @@ private fun ShortBottomMenu(vm: CanvasViewModel, history: Boolean, modifier: Mod
                             }.padding(start = 20.dp, end = 19.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(label, color = Color.White, fontSize = 18.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                            Text(label, color = Pc.MenuInk, fontSize = 18.sp, maxLines = 1, modifier = Modifier.weight(1f))
                             Radio(on == history)
                         }
                     }
@@ -1298,7 +1299,8 @@ private fun ModeTab(icon: ImageVector, label: String, selected: Boolean, modifie
         )
         Text(
             label,
-            color = if (selected) Color.White else Pc.PanelTitle,
+            // the chosen one white, or black with the light interface
+            color = if (!selected) Pc.PanelTitle else if (Pc.light) Color.Black else Color.White,
             fontSize = 13.sp,
             fontWeight = FontWeight.Medium,
             maxLines = 1,

@@ -49,15 +49,20 @@ use procraft_engine::stroke::StrokeBuilder;
 use procraft_engine::view::View;
 use procraft_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
 
-/// Colour around the canvas, sRGB.
+/// Colour around the canvas, sRGB; and with the light interface.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) const SURROUND: [f32; 3] = [37.0 / 255.0, 37.0 / 255.0, 37.0 / 255.0];
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) const SURROUND_LIGHT: [f32; 3] = [206.0 / 255.0, 209.0 / 255.0, 210.0 / 255.0];
 
 /// The grid over the surround: its line colour (sRGB), and its spacing, line width (a point, its
 /// edges smoothed a third of a pixel out on a 2x screen) and top (the bar's height, none under
 /// it), in interface points. It is fixed to the glass: see [`CanvasSession::set_grid_origin`].
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) const GRID_LINE: [f32; 3] = [46.0 / 255.0, 46.0 / 255.0, 46.0 / 255.0];
+/// The grid's lines with the light interface: a little darker than its surround.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) const GRID_LINE_LIGHT: [f32; 3] = [202.0 / 255.0, 205.0 / 255.0, 206.0 / 255.0];
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) const GRID_SPACING_PT: f32 = 16.0;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -298,6 +303,8 @@ pub(crate) struct State {
     /// Where the middle of one of the surround grid's lines is, across and down (window pixels);
     /// none given, half a point in from the top-left corner.
     grid_origin: Option<[f32; 2]>,
+    /// The light interface: a light surround and grid.
+    light: bool,
     /// The document before a continuous change (a slider drag) began.
     pending_doc: Option<Document>,
     /// What undo calls that change.
@@ -383,8 +390,14 @@ impl State {
             origin: [x + by.x, y + by.y],
             top: GRID_TOP_PT * s + by.y,
             width: GRID_WIDTH_PT * s,
-            color: GRID_LINE,
+            color: if self.light { GRID_LINE_LIGHT } else { GRID_LINE },
         }
+    }
+
+    /// The colour around the canvas.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn surround(&self) -> [f32; 3] {
+        if self.light { SURROUND_LIGHT } else { SURROUND }
     }
 
     /// The whole canvas fitted in the window, clear of the insets, turned by the right angle the
@@ -703,6 +716,7 @@ impl CanvasSession {
             error: None,
             display_scale: 2.0,
             grid_origin: None,
+            light: false,
             pending_doc: None,
             pending_name: None,
             info: project::ArtworkInfo {
@@ -1025,6 +1039,13 @@ impl CanvasSession {
             st.grid_origin = Some([x, y]);
             self.shared.frame(&mut st);
         }
+    }
+
+    /// The light interface: the surround and its grid go light.
+    pub fn set_light_interface(&self, on: bool) {
+        let mut st = self.shared.lock();
+        st.light = on;
+        self.shared.frame(&mut st);
     }
 
     /// Fits the whole canvas in the window again, at once.

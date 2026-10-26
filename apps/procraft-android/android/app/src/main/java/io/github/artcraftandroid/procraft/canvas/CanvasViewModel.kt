@@ -357,6 +357,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun changeLightInterface(on: Boolean) {
         lightInterface = on
         io.github.artcraftandroid.procraft.ui.Pc.light = on
+        session?.setLightInterface(on)
         interfacePrefs.edit().putBoolean(LIGHT_INTERFACE, on).apply()
     }
 
@@ -1770,6 +1771,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (memory.totalMem > 0) io.github.artcraftandroid.procraft.core.setLayerBudget((memory.totalMem / 4).toULong())
         s.setSelectionVisibility(selectionVisibility)
         s.setBrushScaling(brushOnScreen)
+        s.setLightInterface(lightInterface)
         // as it was left, or fitted
         if (!orientationMemory) s.forgetSavedView()
         s.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputCurve.flatMap { listOf(it.x, it.y) })
@@ -2974,6 +2976,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // the brush library stays open under it, so Cancel and Done go back to it
         if (panel != Panel.BRUSHES) closePanels()
         studioName = s.studioBegin()
+        // each visit's pad paints in white, black with the light interface
+        padColor = if (lightInterface) PAD_BLACK else PAD_WHITE
         readStudio()
         studioOpen = true
     }
@@ -3157,7 +3161,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The drawing pad's canvas is made: dark, painting with the brush being edited, keeping its strokes. */
     fun startPad(p: CanvasSession) {
         pad = p
-        p.setBackgroundColor(PAD_BACK, PAD_BACK, PAD_BACK, true)
+        val back = if (lightInterface) PAD_BACK_LIGHT else PAD_BACK
+        p.setBackgroundColor(back, back, back, true)
         p.keepStrokes()
         syncPad()
     }
@@ -5292,7 +5297,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         /** The drawing pad's colours (0xRRGGBB), the white one, and its background's grey. */
         val PAD_COLORS = listOf(0xF83045, 0xFCBD03, 0x85D921, 0x2BB5E6, 0x4956A5, 0xDA3D92, 0xFFFFFF, 0x000000)
         const val PAD_WHITE = 6
+        const val PAD_BLACK = 7
         const val PAD_BACK = 31f / 255f
+        /** With the light interface the pad is light and paints in black. */
+        const val PAD_BACK_LIGHT = 243f / 255f
         /** How long after a studio control stops moving its sample stroke is drawn again (milliseconds). */
         const val STUDIO_PREVIEW_DELAY_MS = 60L
         /** Bloom's size and burn sliders when painted on. */

@@ -72,25 +72,28 @@ import java.util.Date
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
-private val ScreenFill = Color(0xFF1F1F1F)
-private val RailFill = Color(0xFF272727)
-private val CardFill = Color(0xFF252525)
-private val Ink = Color(0xFFC1C1C1)
-private val RailIdle = Color(0xFFAAAAAA)
-private val PhotoFill = Color(0xFF303030)
-private val PhotoGlyph = Color(0xFF4E4E4E)
-private val Placeholder = Color(0xFF605F63)
-private val SignLine = Color(0xFF494949)
-private val CapsuleFill = Color(0xFF1A1A1A)
-private val CapsuleEdge = Color(0xFF373737)
+private val ScreenFill get() = if (Pc.light) Color(0xFFF3F3F3) else Color(0xFF1F1F1F)
+private val RailFill get() = if (Pc.light) Color(0xFFEBEBEB) else Color(0xFF272727)
+private val CardFill get() = if (Pc.light) Color(0xFFEBEBEB) else Color(0xFF252525)
+private val Ink get() = if (Pc.light) Color(0xFF3B3B3B) else Color(0xFFC1C1C1)
+private val RailIdle get() = if (Pc.light) Color(0xFF3D3D3D) else Color(0xFFAAAAAA)
+private val PhotoFill get() = if (Pc.light) Color(0xFFB3B3B3) else Color(0xFF303030)
+private val PhotoGlyph get() = if (Pc.light) Color(0xFFF5F5F5) else Color(0xFF4E4E4E)
+private val Placeholder get() = if (Pc.light) Color(0xFFB8B8BC) else Color(0xFF605F63)
+private val SignLine get() = if (Pc.light) Color(0xFF9A9A9A) else Color(0xFF494949)
+private val CapsuleFill get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF1A1A1A)
+private val CapsuleEdge get() = if (Pc.light) Color(0xFFE0E0E0) else Color(0xFF373737)
 private val DoneBlue = Color(0xFF0190FF)
 private val CardCorner = 25.dp
 
 /** Where a wide screen's page starts and ends, beside the pages' card. */
 private val WideContentStart = 358.dp
 private val WideContentEnd = 28.dp
-private val CardEdge = Color(0xFF373737)
-private val PageInk = Color(0xFF797979)
+private val CardEdge get() = if (Pc.light) Color(0xFFDADADA) else Color(0xFF373737)
+private val PageInk get() = if (Pc.light) Color(0xFF3E3E3E) else Color(0xFF797979)
+// "Sign here" and its clear button: the photo's glyph in dark, darker greys on light
+private val SignInk get() = if (Pc.light) Color(0xFF666666) else PhotoGlyph
+private val SignClear get() = if (Pc.light) Color(0xFF393939) else PhotoGlyph
 
 /** The pages by icon and name on a card headed "Canvas Info" (a wide screen's), as the brush studio's. */
 @Composable
@@ -311,7 +314,7 @@ fun CanvasInfo(vm: CanvasViewModel) {
 @Composable
 private fun CapsuleText(label: String, onClick: () -> Unit) {
     Box(Modifier.fillMaxHeight().clickable(onClick = onClick).padding(horizontal = 13.dp), contentAlignment = Alignment.Center) {
-        Text(label, color = Color(0xFFA5A5A5), fontSize = 17.sp)
+        Text(label, color = if (Pc.light) Color(0xFF585858) else Color(0xFFA5A5A5), fontSize = 17.sp)
     }
 }
 
@@ -400,9 +403,9 @@ private fun AboutCard(photo: ImageBitmap?, author: String, onAuthor: (String) ->
                     drawPath(path, Ink, style = Stroke(2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
                 }
             }
-            Text("Sign here", color = PhotoGlyph, fontSize = 11.sp, modifier = Modifier.offset(x = 50.dp, y = 90.dp))
+            Text("Sign here", color = SignInk, fontSize = 11.sp, modifier = Modifier.offset(x = 50.dp, y = 90.dp))
             // always there, at the line's end
-            Box(Modifier.offset(x = 330.dp, y = 58.dp).size(22.dp).clip(CircleShape).background(PhotoGlyph).clickable { signature.clear() }, contentAlignment = Alignment.Center) {
+            Box(Modifier.offset(x = 330.dp, y = 58.dp).size(22.dp).clip(CircleShape).background(SignClear).clickable { signature.clear() }, contentAlignment = Alignment.Center) {
                 Icon(PcIcons.Cross, contentDescription = "Clear the signature", tint = CardFill, modifier = Modifier.size(14.dp))
             }
         }

@@ -883,10 +883,8 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
                         Option("Alpha Lock", checked = l.alphaLock) { vm.toggleAlphaLock(l) }
                         Option("Mask", enabled = !vm.hasMask(l), onClick = then { vm.addMask(l) })
                         if (l.canClip) Option("Clipping Mask", checked = l.clipped) { vm.toggleClipped(l) }
-                        // only while the drawing guide is on
-                        if (vm.guide?.on == true) {
-                            Option("Drawing Assist", checked = vm.guide?.assisted == true) { vm.setGuideAssisted(vm.guide?.assisted != true) }
-                        }
+                        // offered with the drawing guide on or off
+                        Option("Drawing Assist", checked = vm.guide?.assisted == true) { vm.setGuideAssisted(vm.guide?.assisted != true) }
                         if (!l.text) Option("Invert", enabled = !l.locked, onClick = then { vm.invertLayer(l) })
                         Option("Reference", checked = l.reference) { vm.toggleReference(l) }
                     }
@@ -922,7 +920,7 @@ private fun Option(label: String, checked: Boolean? = null, enabled: Boolean = t
         val color = when {
             !enabled -> Pc.MenuDisabled
             destructive -> Color(0xFFFF453A)
-            else -> Color.White
+            else -> Pc.MenuInk
         }
         Text(label, color = color, fontSize = 17.sp, modifier = Modifier.weight(1f))
         if (checked == true) Icon(PcIcons.Tick, contentDescription = null, tint = color, modifier = Modifier.size(18.dp))
