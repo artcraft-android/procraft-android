@@ -2681,7 +2681,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         startText(info)
     }
 
-    private fun startText(info: TextInfo) {
+    /** Text layer [id] back in its box, selected but with the keyboard away (undo and redo of it). */
+    private fun resumeText(id: ULong): Boolean {
+        val s = session ?: return false
+        val info = s.layerText(id) ?: return false
+        s.textBegin(id, info) ?: return false
+        startText(info, keyboard = false)
+        return true
+    }
+
+    /** Whether the keyboard is wanted for the text being edited (a touch on the text asks for it). */
+    var textKeyboard by mutableStateOf(true)
+
+    private fun startText(info: TextInfo, keyboard: Boolean = true) {
+        textKeyboard = keyboard
         textInfo = info
         textField = TextFieldValue(info.text, TextRange(0, info.text.length))
         textStyleOpen = false
@@ -3853,6 +3866,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun undo() {
         feedback()
+        // a finished text's step goes back to editing that text first, as a step of its own
+        if (textInfo == null && !transforming) session?.textUndoLayer()?.let { if (resumeText(it)) return }
         // undoing while editing text undoes the whole edit
         if (textInfo != null) {
             textInfo = null
@@ -3900,9 +3915,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             puckAfter.removeLastOrNull()?.let { after -> clonePuck?.let { puckBefore.addLast(it) }; clonePuck = after }
         }
         val could = canRedo
+        // a text edit redone is edited again
+        val text = if (textInfo == null) session?.textRedoLayer() else null
         val name = session?.redo()
         if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
         refresh()
+        text?.let { resumeText(it) }
     }
 
     // ---- adjustments ----

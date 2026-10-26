@@ -110,6 +110,7 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
                 return@awaitEachGesture
             }
             // a touch on the text brings the keyboard back if it was put away
+            vm.textKeyboard = true
             focus.requestFocus()
             keyboard?.show()
             var last = down.position
@@ -124,8 +125,8 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
     })
     TextBox(vm, info)
     BasicTextField(vm.textField, vm::changeTextField, Modifier.size(1.dp).alpha(0f).focusRequester(focus))
-    LaunchedEffect(vm.textStyleOpen) {
-        if (vm.textStyleOpen) keyboard?.hide() else {
+    LaunchedEffect(vm.textStyleOpen, vm.textKeyboard) {
+        if (vm.textStyleOpen || !vm.textKeyboard) keyboard?.hide() else {
             focus.requestFocus()
             keyboard?.show()
         }

@@ -105,6 +105,9 @@ impl From<TextInfo> for LayerText {
     }
 }
 
+/// How many finished text edits are remembered for undo and redo to edit again.
+const TEXT_STEPS_KEPT: usize = 256;
+
 #[uniffi::export]
 impl CanvasSession {
     /// Starts editing text: a new text layer above the current one with `info` (`id` none), or
@@ -160,22 +163,53 @@ impl CanvasSession {
     }
 
     /// Ends editing text: `keep` makes the edit one undo step; otherwise the layer goes back to
-    /// how it was (a new one goes away). New text left empty goes away too.
+    /// how it was (a new one goes away). New text left empty goes away too, and an edit that
+    /// changed nothing makes no step.
     pub fn text_end(&self, keep: bool) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let Some((layer, before)) = st.text_edit.take() else { return };
         let new = before.layer(layer).is_none();
         let empty = st.doc.layer(layer).and_then(|l| l.text.as_ref()).is_none_or(|t| t.text.trim().is_empty());
-        let keep = keep && !(new && empty);
+        let unchanged = !new && before.layer(layer).map(|l| &l.text) == st.doc.layer(layer).map(|l| &l.text);
+        let keep = keep && !(new && empty) && !unchanged;
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.release_layer(keep, keep.then(|| before.clone()));
         }
         if !keep {
             st.doc = before;
         }
+        if keep {
+            // the step made, so undo and redo of it can go back to editing this text
+            st.flush();
+            if let Some(step) = st.canvas.as_ref().and_then(procraft_gpu::Canvas::undo_step) {
+                st.text_steps.push((step, layer));
+                let over = st.text_steps.len().saturating_sub(TEXT_STEPS_KEPT);
+                st.text_steps.drain(..over);
+            }
+        }
         st.revision += 1;
         self.shared.frame(st);
+    }
+
+    /// The text layer undo would take back to editing first: the next step undone is a finished
+    /// text edit, its layer still text. None while text is being edited.
+    pub fn text_undo_layer(&self) -> Option<u64> {
+        let st = self.shared.lock();
+        if st.text_edit.is_some() {
+            return None;
+        }
+        let step = st.canvas.as_ref()?.undo_step()?;
+        let layer = st.text_steps.iter().rev().find(|(s, _)| *s == step)?.1;
+        st.doc.layer(layer).filter(|l| l.text.is_some() && !l.locked).map(|_| layer.0)
+    }
+
+    /// The text layer the next redo brings back, when that step is a finished text edit: after
+    /// the redo it is edited again.
+    pub fn text_redo_layer(&self) -> Option<u64> {
+        let st = self.shared.lock();
+        let step = st.canvas.as_ref()?.redo_step()?;
+        st.text_steps.iter().rev().find(|(s, _)| *s == step).map(|(_, l)| l.0)
     }
 
     /// The text layer being edited, if any.

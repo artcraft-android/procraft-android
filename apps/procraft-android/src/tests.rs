@@ -1334,8 +1334,16 @@ fn text_is_edited_as_one_step_and_rasterized() {
     s.stroke_begin(PointerKind::Finger, vec![sample(5.0, 5.0, 0.0)]);
     s.stroke_end(vec![]);
     assert_eq!(pixel(&s, 5, 5), [255, 0, 0, 255]);
-    // one undo takes the new text layer away; redo brings it back
+    // the step undo would undo next is that text's, so the app edits it again first
+    assert_eq!(s.text_undo_layer(), Some(id));
+    // edited again without a change, ending it makes no step: the text step is still next
+    assert_eq!(s.text_begin(Some(id), s.layer_text(id).unwrap()), Some(id));
+    assert_eq!(s.text_undo_layer(), None);
+    s.text_end(true);
+    assert_eq!(s.text_undo_layer(), Some(id));
+    // one undo takes the new text layer away; redo brings it back, to edit again
     s.undo();
+    assert_eq!(s.text_redo_layer(), Some(id));
     assert_eq!((s.layers().len(), pixel(&s, 5, 5)), (1, [255, 255, 255, 255]));
     s.redo();
     assert_eq!(s.layer_text(id).unwrap().text, "Hello");

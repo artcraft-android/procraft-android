@@ -258,6 +258,9 @@ pub(crate) struct State {
     crop_redo: Option<(Canvas, Document, u64)>,
     /// The text layer being edited, and the document as the edit began.
     text_edit: Option<(procraft_engine::document::LayerId, Document)>,
+    /// The steps finished text edits made (by [`Canvas::undo_step`]'s numbering) and their layers:
+    /// undo and redo of one go back to editing that text.
+    pub(crate) text_steps: Vec<(u64, procraft_engine::document::LayerId)>,
     /// The library as the user has it, and as it ships.
     library: Vec<brush_library::LibrarySet>,
     shipped: Vec<BrushSet>,
@@ -683,6 +686,7 @@ impl CanvasSession {
             reconfigure: false,
             tool: ToolKind::Paint,
             text_edit: None,
+            text_steps: Vec::new(),
             crop_undo: None,
             selection_visibility: 0.25,
             brush_on_screen: false,

@@ -1472,6 +1472,16 @@ impl Canvas {
         self.redo.last().and_then(|s| s.name.clone())
     }
 
+    /// Which step undo would undo next, and redo would redo, numbered as [`Canvas::steps_made`]
+    /// counted them when they were made.
+    pub fn undo_step(&self) -> Option<u64> {
+        self.undo.last().map(|s| s.made)
+    }
+
+    pub fn redo_step(&self) -> Option<u64> {
+        self.redo.last().map(|s| s.made)
+    }
+
     /// Marks where the history is once the queued work is done, for [`Canvas::collapse_steps`].
     pub fn mark_steps(&mut self) {
         self.end_stroke();
