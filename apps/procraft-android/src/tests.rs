@@ -2824,3 +2824,115 @@ fn a_photoshop_brush_files_tips_become_a_set() {
     assert_eq!(set.brushes.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Tip"]);
     assert_eq!(s.import_abr(b"nothing".to_vec(), String::new()), None);
 }
+
+/// Real brush files, when a folder of them is given (`BRUSH_CORPUS=folder`, never committed):
+/// every `.brush`, `.brushset` and `.abr` in it and below imports, each brush draws in its
+/// preview, and a brush written out, read back and written out again comes out the same.
+#[test]
+fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
+    use procraft_engine::brushfile::{self, BrushFile};
+    let Ok(root) = std::env::var("BRUSH_CORPUS") else { return };
+    let extension =
+        |p: &std::path::Path| p.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let mut files = Vec::new();
+    let mut folders = vec![std::path::PathBuf::from(&root)];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                folders.push(path);
+            } else if matches!(extension(&path).as_str(), "brush" | "brushset" | "abr") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    assert!(!files.is_empty(), "no brush files in {root}");
+    // the preview left out: drawn again each time
+    let read = |b: &[u8]| brushfile::read(b).map(|f| BrushFile { thumbnail: None, ..f });
+    let mut failures = Vec::new();
+    let mut brushes = 0;
+    for path in &files {
+        let Some(s) = session(64, 64) else { return };
+        let bytes = std::fs::read(path).unwrap();
+        let kind = extension(path);
+        let set = if kind == "abr" { s.import_abr(bytes, "Corpus".to_owned()) } else { s.import_brushes(bytes) };
+        let Some(set) = set else {
+            failures.push(format!("{}: not imported", path.display()));
+            continue;
+        };
+        // a brush goes in at the top of its set; a set's brushes, or the tips, fill one of their own
+        let count = if kind == "brush" { 1 } else { s.brush_library()[set as usize].brushes.len() as u32 };
+        for i in 0..count {
+            brushes += 1;
+            let at = format!("{} #{}", path.display(), i + 1);
+            let drawn =
+                s.brush_preview(set, i, 200, 60).is_some_and(|p| p.rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
+            if !drawn {
+                failures.push(format!("{at}: draws nothing"));
+            }
+            let Some(once) = s.brush_as_file(set, i) else {
+                failures.push(format!("{at}: not written"));
+                continue;
+            };
+            let Some(t) = session(64, 64) else { return };
+            let again = t.import_brushes(once.clone()).and_then(|back| t.brush_as_file(back, 0));
+            match (read(&once), again.as_deref().and_then(read)) {
+                (Some(a), Some(b)) => {
+                    let changed = changes(&a, &b);
+                    if !changed.is_empty() {
+                        failures.push(format!("{at}: changed when written out again: {changed}"));
+                    }
+                }
+                _ => failures.push(format!("{at}: written out unreadable")),
+            }
+        }
+    }
+    eprintln!("{} files, {brushes} brushes", files.len());
+    assert!(failures.is_empty(), "{} failed:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// What differs between two brush files (nothing: empty): the settings that changed, and the other
+/// fields.
+fn changes(a: &procraft_engine::brushfile::BrushFile, b: &procraft_engine::brushfile::BrushFile) -> String {
+    let mut out = Vec::new();
+    for (k, v) in &a.settings {
+        match b.settings.iter().find(|(k2, _)| k2 == k) {
+            // a float's last place may move: controls go through powers on their way
+            Some((_, w)) if (v - w).abs() <= 1e-6 * v.abs().max(1.0) => {}
+            Some((_, w)) => out.push(format!("{k} {v} to {w}")),
+            None => out.push(format!("{k} gone")),
+        }
+    }
+    for (k, _) in &b.settings {
+        if !a.settings.iter().any(|(k2, _)| k2 == k) {
+            out.push(format!("{k} added"));
+        }
+    }
+    let fields: [(&str, bool); 15] = [
+        ("name", a.name == b.name),
+        ("author", a.author == b.author),
+        ("max_size", a.max_size == b.max_size),
+        ("min_size", a.min_size == b.min_size),
+        ("shape_angle", a.shape_angle == b.shape_angle),
+        ("pressure_curve", a.pressure_curve == b.pressure_curve),
+        ("size_curve", a.size_curve == b.size_curve),
+        ("opacity_curve", a.opacity_curve == b.opacity_curve),
+        ("pressure_curves", a.pressure_curves == b.pressure_curves),
+        ("shape", a.shape == b.shape),
+        ("grain", a.grain == b.grain),
+        ("metallic and roughness", a.metallic == b.metallic && a.roughness == b.roughness),
+        ("paint sliders", a.paint_size == b.paint_size && a.paint_opacity == b.paint_opacity),
+        ("notches", a.notches == b.notches),
+        ("author pictures", a.author_picture == b.author_picture && a.signature == b.signature),
+    ];
+    out.extend(fields.iter().filter(|f| !f.1).map(|f| f.0.to_owned()));
+    let order = |f: &procraft_engine::brushfile::BrushFile| f.settings.iter().map(|s| s.0.clone()).collect::<Vec<_>>();
+    if order(a) != order(b) {
+        out.push("settings' order".to_owned());
+    }
+    if out.iter().any(|o| o == "max_size" || o == "min_size") {
+        out.push(format!("sizes {} {:?} to {} {:?}", a.max_size, a.min_size, b.max_size, b.min_size));
+    }
+    out.join(", ")
+}
