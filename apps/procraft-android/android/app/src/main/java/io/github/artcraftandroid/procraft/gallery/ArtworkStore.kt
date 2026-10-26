@@ -35,6 +35,13 @@ class ArtworkStore(val root: File) {
         read(dir) ?: if (at == root) readStack(dir) else null
     }.sortedByDescending { it.modified }
 
+    /** The artwork changed last, in the gallery or a stack. */
+    fun mostRecent(): Artwork? = when (val e = list().firstOrNull()) {
+        is Artwork -> e
+        is Stack -> e.artworks.firstOrNull()
+        null -> null
+    }
+
     fun newFolder(at: File = root): File = File(at, UUID.randomUUID().toString()).also { it.mkdirs() }
 
     fun delete(a: Artwork) {

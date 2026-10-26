@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">ProCraft</string>
+    <string name="widget_recent_name">Recent artwork</string>
+    <string name="widget_recent_description">Opens ProCraft at the artwork you worked on last.</string>
 </resources>

@@ -781,6 +781,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 refreshGallery()
             }
         }
+        // the home screen's widget shows the newest artwork
+        viewModelScope.launch(Dispatchers.IO) { io.github.artcraftandroid.procraft.gallery.RecentArtworkWidget.refresh(getApplication<Application>()) }
     }
 
     fun showStack(s: io.github.artcraftandroid.procraft.gallery.Stack?) {
@@ -1592,6 +1594,23 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * The home screen's Recent artwork widget was tapped: the newest artwork opens, once the window
+     * has its size (the app may only now be starting); nothing if one is already open.
+     */
+    fun openMostRecent() {
+        if (opening || session != null) return
+        viewModelScope.launch {
+            var waited = 0L
+            while (windowPx.width <= 1 && waited < WINDOW_WAIT_MS) {
+                kotlinx.coroutines.delay(CANVAS_POLL_MS)
+                waited += CANVAS_POLL_MS
+            }
+            val a = withContext(Dispatchers.IO) { store.mostRecent() } ?: return@launch
+            openArtwork(a)
+        }
+    }
+
     /** Opens artwork [a], the gallery zooming into its cell; then [then]. */
     fun openArtwork(a: Artwork, then: (() -> Unit)? = null) {
         // one artwork open at a time: a second session on it would leave the screen on the first
@@ -1824,7 +1843,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val dir = artworkDir ?: return
         noteTime()
         keepChoices(s)
-        viewModelScope.launch(Dispatchers.IO) { runCatching { s.save(dir.path) } }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { s.save(dir.path) }
+            // its new picture on the home screen's widget
+            io.github.artcraftandroid.procraft.gallery.RecentArtworkWidget.refresh(getApplication<Application>())
+        }
     }
 
     /**
@@ -5904,6 +5927,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private const val SELECTION_KIND = "selectionKind"
         private const val SELECTION_THRESHOLD = "selectionThreshold"
         private const val DROP_THRESHOLD = "dropThreshold"
+
+        /** How long a widget's tap waits for the window to be measured before opening anyway. */
+        private const val WINDOW_WAIT_MS = 3000L
         private const val RECOLOR_THRESHOLD = "recolorThreshold"
 
         /** What undo and redo call a Recolor fill. */

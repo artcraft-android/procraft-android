@@ -60,6 +60,12 @@ class MainActivity : ComponentActivity() {
      */
     private fun importOpened(intent: android.content.Intent?) {
         intent ?: return
+        // the home screen's Recent artwork widget: straight into the newest artwork
+        if (intent.action == io.github.artcraftandroid.procraft.gallery.RecentArtworkWidget.OPEN_RECENT) {
+            intent.action = null
+            vm.openMostRecent()
+            return
+        }
         val uri = when (intent.action) {
             android.content.Intent.ACTION_VIEW -> intent.data
             android.content.Intent.ACTION_SEND ->
