@@ -1035,6 +1035,18 @@ fn the_drawing_guide_mirrors_and_assists_strokes() {
     assert_eq!(pixel(&s, 60, 80), [255, 255, 255, 255]);
     let info = s.guide();
     assert!(info.on && info.assisted && !info.lines.is_empty());
+    // drawing assist belongs to the layer: a new one draws freely
+    let assisted = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
+    assert!(s.layers().iter().any(|l| l.id == assisted && l.assisted));
+    s.add_layer();
+    assert!(!s.guide().assisted);
+    s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 90.0, 0.0)]);
+    s.stroke_add((1..=20).map(|i| sample(10.0 + i as f32 * 3.0, 90.0 - i as f32 * 0.6, f64::from(i) * 8.0)).collect());
+    s.stroke_end(vec![]);
+    assert_eq!(pixel(&s, 70, 78)[0], 0);
+    assert_eq!(pixel(&s, 70, 90), [255, 255, 255, 255]);
+    assert!(s.select_layer(assisted));
+    assert!(s.guide().assisted);
     // the editor fits the canvas inside a rectangle, and cancelling puts the guide back
     let before = s.view_matrix();
     s.guide_edit_begin(10.0, 10.0, 60.0, 60.0);

@@ -619,11 +619,13 @@ private fun LayerRow(
             else -> 0.dp
         }
         Box(Modifier.padding(start = 4.dp).offset(y = shift)) { Thumb(vm, l, thumbShape) }
-        // what the layer is, under its name (which stays in the middle): the reference layer, a
-        // private one, a model's layer shared by its texture set's meshes
+        // what the layer is, under its name (which stays in the middle): the reference layer, one
+        // drawing assist is on for, a private one, a model's layer shared by its texture set's meshes
         val tag = when {
+            l.reference && l.assisted -> "Assisted Reference"
             l.reference -> subtitle?.let { "$it Reference" } ?: "Reference"
             subtitle != null -> subtitle
+            l.assisted -> "Assisted"
             l.private -> "Private"
             else -> null
         }
@@ -890,7 +892,7 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
                         Option("Mask", enabled = !vm.hasMask(l), onClick = then { vm.addMask(l) })
                         if (l.canClip) Option("Clipping Mask", checked = l.clipped) { vm.toggleClipped(l) }
                         // offered with the drawing guide on or off
-                        Option("Drawing Assist", checked = vm.guide?.assisted == true) { vm.setGuideAssisted(vm.guide?.assisted != true) }
+                        Option("Drawing Assist", checked = l.assisted) { vm.setGuideAssisted(!l.assisted) }
                         if (!l.text) Option("Invert", enabled = !l.locked, onClick = then { vm.invertLayer(l) })
                         Option("Reference", checked = l.reference) { vm.toggleReference(l) }
                     }

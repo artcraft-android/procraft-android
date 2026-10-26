@@ -96,7 +96,8 @@ impl State {
                 g.assisted = true;
                 g
             });
-            let guide = forced.as_ref().unwrap_or(&self.doc.guide);
+            let layer_guide = self.doc.stroke_guide();
+            let guide = forced.as_ref().unwrap_or(&layer_guide);
             for s in &mut samples {
                 s.pos = guide.assist(start, s.pos);
             }
@@ -130,7 +131,7 @@ impl State {
                 SymmetryKind::Radial => SymmetryType::Radial,
             },
             rotational: g.rotational,
-            assisted: g.assisted,
+            assisted: self.doc.layer(self.doc.current()).is_some_and(|l| l.assisted),
             centre: point(c).to_vec(),
             handle: point(c + up).to_vec(),
             vanishing: g.vanishing.iter().flat_map(|v| point(Vec2::new(v[0], v[1]))).collect(),
@@ -196,8 +197,15 @@ impl CanvasSession {
         self.shared.lock().force_assist = on;
     }
 
+    /// Drawing assist on the current layer: strokes on it follow the guide.
     pub fn set_guide_assisted(&self, assisted: bool) -> GuideInfo {
-        self.change_guide(|g| g.assisted = assisted)
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let current = st.doc.current();
+        st.doc.set_assisted(current, assisted);
+        st.revision += 1;
+        self.shared.frame(st);
+        st.guide_info()
     }
 
     /// The guide's centre dragged to window point (`x`, `y`).

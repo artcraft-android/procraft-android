@@ -563,6 +563,7 @@ fn paint_layer(id: LayerId, name: String, parent: Option<LayerId>) -> Layer {
         collapsed: false,
         text: None,
         private: false,
+        assisted: false,
     }
 }
 

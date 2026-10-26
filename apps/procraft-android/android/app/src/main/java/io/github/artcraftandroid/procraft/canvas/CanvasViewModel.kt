@@ -1929,8 +1929,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         guide = session?.setGuideSymmetry(kind, rotational)
     }
 
+    /** Drawing assist on the current layer. */
     fun setGuideAssisted(on: Boolean) {
         guide = session?.setGuideAssisted(on)
+        refresh()
     }
 
     /** What a touch at [p] in the guide editor takes: the turn handle (-2), the centre (-1), or a vanishing point (its index); a tap elsewhere in perspective adds one. */
@@ -5403,6 +5405,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             quickShapeEditing = false
         }
         layers = s.layers()
+        // drawing assist is the current layer's
+        if (guide != null) guide = s.guide()
         background = s.background()
         // undoing may put the canvas back in another profile
         refreshCanvasSpace(s)

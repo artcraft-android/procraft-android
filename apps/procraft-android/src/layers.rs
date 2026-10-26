@@ -22,6 +22,8 @@ pub struct LayerInfo {
     pub reference: bool,
     /// Left out of the gallery's thumbnail (put in by a private insert or paste).
     pub private: bool,
+    /// Strokes on it follow the drawing guide.
+    pub assisted: bool,
     pub kind: LayerType,
     /// A mask's layer, or the group a layer is in.
     pub parent: Option<u64>,
@@ -173,6 +175,7 @@ impl CanvasSession {
                 picked: st.doc.is_picked(l.id),
                 reference: l.reference,
                 private: l.private,
+                assisted: l.assisted,
                 kind: match l.kind {
                     LayerKind::Paint => LayerType::Paint,
                     LayerKind::Group => LayerType::Group,

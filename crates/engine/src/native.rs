@@ -257,6 +257,7 @@ fn add_item(
                 collapsed: item.bool("isCollapsed").unwrap_or(false),
                 text: None,
                 private: false,
+                assisted: false,
             });
         }
         _ => {
@@ -285,6 +286,7 @@ fn add_item(
                 collapsed: false,
                 text: None,
                 private: item.bool("private").unwrap_or(false),
+                assisted: item.bool("perspectiveAssisted").unwrap_or(false),
             });
             if !uuid.is_empty() {
                 pixels.push((lid, canvas.pixels(&uuid, 4, 0)?));
@@ -307,6 +309,7 @@ fn add_item(
                     collapsed: false,
                     text: None,
                     private: false,
+                    assisted: false,
                 });
                 if let Some(m) = mask.string("UUID") {
                     // a mask stores only the tiles painted on: the rest shows the layer
@@ -560,6 +563,7 @@ fn write_item(
             alpha_lock: false,
             private: false,
             held: 0,
+            assisted: false,
         };
         Some(layer_record(b, doc_ref, &mask_uuid, None, rec, w, h))
     });
@@ -575,6 +579,7 @@ fn write_item(
         alpha_lock: l.alpha_lock,
         private: l.private,
         held: held(doc, id),
+        assisted: l.assisted,
     };
     let r = layer_record(b, doc_ref, &uuid, mask, rec, w, h);
     if id == doc.current() {
@@ -601,6 +606,8 @@ struct LayerRecord<'a> {
     private: bool,
     /// Animation Assist: how many more frames this frame is held for.
     held: i64,
+    /// Drawing assist on.
+    assisted: bool,
 }
 
 /// How many more frames Animation Assist holds layer `id` for (0 without a hold).
@@ -622,6 +629,7 @@ impl LayerRecord<'_> {
             alpha_lock: false,
             private: false,
             held: 0,
+            assisted: false,
         }
     }
 }
@@ -673,7 +681,7 @@ fn layer_record(
             ("mask", mask.unwrap_or_else(Builder::null)),
             ("name", name),
             ("opacity", Value::Real(f64::from(r.opacity))),
-            ("perspectiveAssisted", Value::Bool(false)),
+            ("perspectiveAssisted", Value::Bool(r.assisted)),
             ("preserve", Value::Bool(r.alpha_lock)),
             ("private", Value::Bool(r.private)),
             ("sizeHeight", Value::Int(i64::from(h))),
@@ -797,6 +805,7 @@ mod tests {
         doc.rename(top, "Ink");
         doc.set_clipped(top, true);
         doc.set_private(top, true);
+        doc.set_assisted(top, true);
         let mask = doc.add_mask(base).unwrap();
         doc.background = [0.2, 0.4, 0.6];
         let mut pixels = HashMap::new();
@@ -834,6 +843,7 @@ mod tests {
         let sk = d.layers().first().unwrap();
         assert_eq!((sk.blend, sk.opacity), (BlendMode::Multiply, 0.75));
         assert!(d.layers().get(2).unwrap().clipped && d.layers().get(2).unwrap().private);
+        assert!(d.layers().get(2).unwrap().assisted && !d.layers().first().unwrap().assisted);
         assert!(!d.layers().first().unwrap().private);
         let px = |i: usize| &back.pixels.iter().find(|(id, _)| *id == d.layers().get(i).unwrap().id).unwrap().1;
         assert_eq!(px(0), &sketch);

@@ -417,7 +417,7 @@ impl State {
     fn finish_stroke(&mut self) {
         self.shape = None;
         if let (Some(open), Some(canvas)) = (self.stroke.take(), self.canvas.as_mut()) {
-            close_stroke(canvas, open, &self.doc.guide);
+            close_stroke(canvas, open, &self.doc.stroke_guide());
             self.bake_painted_on();
         }
     }
@@ -917,7 +917,7 @@ impl CanvasSession {
             });
         let Some(canvas) = st.canvas.as_mut() else { return };
         canvas.begin_stroke(current, style);
-        draw_samples(canvas, &mut builder, &canvas_samples, &st.doc.guide);
+        draw_samples(canvas, &mut builder, &canvas_samples, &st.doc.stroke_guide());
         st.stroke = Some(builder);
         self.shared.frame(st);
     }
@@ -939,7 +939,7 @@ impl CanvasSession {
         }
         st.remember_input(&canvas_samples);
         let (Some(builder), Some(canvas)) = (st.stroke.as_mut(), st.canvas.as_mut()) else { return };
-        if draw_samples(canvas, builder, &canvas_samples, &st.doc.guide) {
+        if draw_samples(canvas, builder, &canvas_samples, &st.doc.stroke_guide()) {
             st.redraw_painted_on();
             self.shared.frame(st);
         }
@@ -957,7 +957,7 @@ impl CanvasSession {
         let (Some(builder), Some(canvas)) = (st.stroke.as_ref(), st.canvas.as_mut()) else { return };
         // a stroke shown with its tip ends it where the input is predicted to go
         if canvas.shows_tip() && builder.shows_tip() {
-            canvas.set_tip(&guide::mirrored(&st.doc.guide, &builder.preview_tip(&canvas_samples)));
+            canvas.set_tip(&guide::mirrored(&st.doc.stroke_guide(), &builder.preview_tip(&canvas_samples)));
         } else {
             canvas.set_prediction(&builder.preview(&canvas_samples));
         }
@@ -982,8 +982,8 @@ impl CanvasSession {
         }
         let (Some(mut builder), Some(canvas)) = (st.stroke.take(), st.canvas.as_mut()) else { return };
         let stamps = builder.add(&canvas_samples);
-        canvas.add_stamps(&guide::mirrored(&st.doc.guide, &stamps));
-        close_stroke(canvas, builder, &st.doc.guide);
+        canvas.add_stamps(&guide::mirrored(&st.doc.stroke_guide(), &stamps));
+        close_stroke(canvas, builder, &st.doc.stroke_guide());
         st.redraw_painted_on();
         st.bake_painted_on();
         st.remember_last_stroke();

@@ -280,6 +280,9 @@ pub struct Layer {
     /// paste).
     #[serde(default)]
     pub private: bool,
+    /// Strokes on it follow the drawing guide (drawing assist).
+    #[serde(default)]
+    pub assisted: bool,
 }
 
 /// Largest canvas edge, pixels.
@@ -794,6 +797,7 @@ impl Document {
             collapsed: false,
             text: None,
             private: false,
+            assisted: false,
         }
     }
 
@@ -1197,6 +1201,22 @@ impl Document {
         self.layer_mut(id).map(|l| l.visible = visible).is_some()
     }
 
+    /// Drawing assist on layer `id`: strokes on it follow the drawing guide.
+    pub fn set_assisted(&mut self, id: LayerId, on: bool) -> bool {
+        self.layer_mut(id).map(|l| l.assisted = on).is_some()
+    }
+
+    /// The drawing guide as strokes on the current layer follow it: assisted when that layer
+    /// has drawing assist.
+    pub fn stroke_guide(&self) -> std::borrow::Cow<'_, crate::guide::Guide> {
+        let assisted = self.layer(self.current).is_some_and(|l| l.assisted);
+        if self.guide.assisted == assisted {
+            std::borrow::Cow::Borrowed(&self.guide)
+        } else {
+            std::borrow::Cow::Owned(crate::guide::Guide { assisted, ..self.guide.clone() })
+        }
+    }
+
     pub fn set_private(&mut self, id: LayerId, private: bool) -> bool {
         self.layer_mut(id).map(|l| l.private = private).is_some()
     }
@@ -1303,6 +1323,13 @@ impl Document {
         }
         if self.solo.is_some_and(|s| self.layer(s).is_none()) {
             self.solo = None;
+        }
+        // drawing assist was once the guide's, not each layer's: it goes to the current layer
+        if self.guide.assisted && !self.layers.iter().any(|l| l.assisted) {
+            let current = self.current;
+            if let Some(l) = self.layer_mut(current) {
+                l.assisted = true;
+            }
         }
         let (current, ids): (LayerId, Vec<LayerId>) = (self.current, self.layers.iter().map(|l| l.id).collect());
         self.picked.retain(|p| *p != current && ids.contains(p));
