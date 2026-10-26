@@ -4680,6 +4680,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var dropSliding by mutableStateOf(false)
         private set
 
+    /** Where a dragged colour let go fills nothing (the colour panel, while open), window pixels. */
+    var dropAvoid: androidx.compose.ui.geometry.Rect? = null
+
     /** The swatch's colour when a swatch was dropped (filling goes on with it); else the current colour. */
     private var dropSwatch: Int? = null
     private var dropBandTimer: kotlinx.coroutines.Job? = null
@@ -4700,7 +4703,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The dragged colour let go at [at] (null: somewhere it doesn't fill, like the top bar). */
     fun dropDragEnd(at: Offset?) {
         dropDot = null
-        if (at != null && pourBegin(at)) {
+        if (at != null && dropAvoid?.contains(at) != true && pourBegin(at)) {
             pourEnd(keep = true)
             // the band offers to go on filling for a moment
             dropBand = DropBand.DROPPED

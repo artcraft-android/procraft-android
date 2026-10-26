@@ -37,6 +37,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
@@ -215,7 +217,9 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
     } else {
         remember(vm) { BrushColor(vm) }
     }
-    Popover(PanelWidth, arrowX, modifier) {
+    // a swatch dragged out and let go over the panel itself fills nothing
+    if (!background) androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.dropAvoid = null } }
+    Popover(PanelWidth, arrowX, if (background) modifier else modifier.onGloballyPositioned { vm.dropAvoid = it.boundsInRoot() }) {
         Box {
             if (background) {
                 PanelHeader("Background", start = 20.dp, end = 12.dp, height = headerHeight, chevron = false) {
@@ -686,7 +690,7 @@ private fun Palettes(vm: CanvasViewModel, c: ColorPick, short: Boolean) {
                     }
                     PaletteMenu(vm, i)
                 }
-                if (cards) PaletteTiles(vm, c, i, p) else SwatchGrid(vm, c, i, p, Modifier)
+                if (cards) PaletteTiles(vm, c, i, p) else SwatchGrid(vm, c, i, p, Modifier, droppable = false)
             }
         }
     }
@@ -784,24 +788,27 @@ private fun NewPaletteButton(vm: CanvasViewModel) {
 
 /**
  * A palette's swatches, ten by three, 36 dp each. Tap a colour to paint with it, tap an empty
- * slot to keep the current colour there, hold a colour to take it out.
+ * slot to keep the current colour there, hold a colour to take it out. Where it doesn't scroll
+ * ([droppable]), a colour dragged out onto the canvas fills there (SwatchDrop).
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SwatchGrid(vm: CanvasViewModel, c: ColorPick, index: Int, p: Palette, modifier: Modifier) {
+private fun SwatchGrid(vm: CanvasViewModel, c: ColorPick, index: Int, p: Palette, modifier: Modifier, droppable: Boolean = true) {
     Column(modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))) {
         for (row in 0 until 3) {
             Row {
                 for (col in 0 until 10) {
                     val slot = row * 10 + col
                     val rgb = p.colors[slot]
-                    Box(
-                        Modifier.weight(1f).height(36.dp).pressScale().background(if (rgb != null) rgbColor(rgb) else Pc.EmptySlot)
-                            .combinedClickable(
-                                onClick = { if (rgb != null) c.setRgb(rgb) else vm.setSwatch(index, slot, c.rgb()) },
-                                onLongClick = { if (rgb != null) vm.setSwatch(index, slot, null) },
-                            ),
-                    )
+                    val touch = if (rgb != null && droppable && c is BrushColor) {
+                        Modifier.dropSource(vm, swatch = { rgb }, onHold = { vm.setSwatch(index, slot, null) }) { c.setRgb(rgb) }
+                    } else {
+                        Modifier.combinedClickable(
+                            onClick = { if (rgb != null) c.setRgb(rgb) else vm.setSwatch(index, slot, c.rgb()) },
+                            onLongClick = { if (rgb != null) vm.setSwatch(index, slot, null) },
+                        )
+                    }
+                    Box(Modifier.weight(1f).height(36.dp).pressScale().background(if (rgb != null) rgbColor(rgb) else Pc.EmptySlot).then(touch))
                 }
             }
         }
