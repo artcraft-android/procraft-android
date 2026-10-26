@@ -126,6 +126,7 @@ fun AppRoot(vm: CanvasViewModel) {
                     }
                 }
                 NoticeBand(vm)
+                DropBandUi(vm)
                 // each panel hangs from its button: colour, layers, then the tool that opened the library;
                 // it grows out of its arrow as it opens and fades as it closes
                 PanelPresence(vm.panel, Panel.NONE, fading = vm.panelFading, onFaded = { vm.panelFading = false }) { shown, alpha, scale, origin ->
@@ -271,6 +272,8 @@ fun AppRoot(vm: CanvasViewModel) {
                 LightingStudio(vm)
                 BrushStudio(vm)
                 PadMenu(vm, maxWidth)
+                // a colour dragged out goes over everything
+                DropDot(vm)
             }
         }
     }

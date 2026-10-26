@@ -146,7 +146,8 @@ private fun ColorButton(vm: CanvasViewModel) {
     // on the light bar
     val ringed = if (Pc.light) vm.brightness > LIGHT_RING_ABOVE else vm.brightness < DARK_RING_BELOW
     // held, the colour painted with before
-    Box(Modifier.size(Pc.BarButtonWidth, Pc.BarButtonHeight).tapOrHold({ vm.toggle(Panel.COLOR) }, { vm.previousColor() }), contentAlignment = Alignment.Center) {
+    // dragged out onto the canvas, it fills there (ColorDrop)
+    Box(Modifier.size(Pc.BarButtonWidth, Pc.BarButtonHeight).dropSource(vm, onHold = { vm.previousColor() }) { vm.toggle(Panel.COLOR) }, contentAlignment = Alignment.Center) {
         val dot = Modifier.size(Pc.ColorDot).clip(CircleShape).background(CanvasSpace.color(rgb))
         Box(if (ringed) dot.border(1.dp, Pc.ColorRing, CircleShape) else dot)
     }

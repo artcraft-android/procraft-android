@@ -13,6 +13,7 @@ pub mod crop;
 pub mod curve;
 pub mod document;
 pub mod environment;
+pub mod fill;
 pub mod formats;
 pub mod geom;
 pub mod gltf;

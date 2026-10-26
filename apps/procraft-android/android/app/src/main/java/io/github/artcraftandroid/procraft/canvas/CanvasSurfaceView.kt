@@ -45,7 +45,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     // IDLE: a finger that doesn't paint, waiting for a hold or more fingers; HOVER: fingers
     // setting the brush while the pen hovers
-    private enum class Mode { NONE, PEN, FINGER, IDLE, GESTURE, PICK, TRANSFORM, SELECT, ADJUST, PUCK, SHAPE, HOVER, TURN }
+    private enum class Mode { NONE, PEN, FINGER, IDLE, GESTURE, PICK, TRANSFORM, SELECT, ADJUST, PUCK, SHAPE, HOVER, TURN, POUR }
 
     /** The pen is hovering over the canvas. */
     private var penHovering = false
@@ -216,6 +216,10 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     private var lastSelectX = 0f
     private var lastSelectTime = 0L
     private var threshold = 0f
+
+    // Continue filling's touch: where it filled from, and whether it has slid past the slop
+    private var pourStart = Offset.Zero
+    private var pourMoved = false
 
     // where the finger went down, for the hold that opens the eyedropper
     private var downX = 0f
@@ -426,6 +430,16 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     vm.pickAt(e.x, e.y, pickSide)
                     return true
                 }
+                if (vm.dropBand == CanvasViewModel.DropBand.FILLING) {
+                    // Continue filling: the touch fills where it lands; slid, it changes the threshold
+                    pourStart = Offset(e.x, e.y)
+                    pourMoved = false
+                    lastSelectX = e.x
+                    lastSelectTime = e.eventTime
+                    threshold = vm.dropThreshold
+                    mode = if (vm.pourBegin(pourStart)) Mode.POUR else Mode.IDLE
+                    return true
+                }
                 tapStart = e.eventTime
                 tapPointers = 1
                 tapMoved = 0f
@@ -591,7 +605,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     vm.shapeDrag = null
                     vm.thresholdDrag?.let { (p, t) -> vm.selectByColour(p, t, live = false) }
                 }
-                if (mode == Mode.FINGER || mode == Mode.IDLE || mode == Mode.TRANSFORM || mode == Mode.SELECT || mode == Mode.TURN) {
+                // a second finger takes back the fill the first one made
+                if (mode == Mode.POUR) vm.pourEnd(keep = false)
+                if (mode == Mode.FINGER || mode == Mode.IDLE || mode == Mode.TRANSFORM || mode == Mode.SELECT || mode == Mode.TURN || mode == Mode.POUR) {
                     gestureStart = e.eventTime
                     gestureScale = 1f
                 }
@@ -635,6 +651,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 Mode.SHAPE -> vm.moveQuickShapeHandle(shapeHandle, Offset(e.x, e.y))
                 Mode.GESTURE -> if (fingers >= 3) scrub(e) else moveGesture(e, s)
                 Mode.SELECT -> select(e, done = false)
+                Mode.POUR -> pour(e, done = false)
                 Mode.ADJUST -> if (vm.adjustment == Adjustment.LIQUIFY) {
                     vm.liquifyStroke(liquifyPoints(e), start = false)
                     followLiquify(e)
@@ -699,6 +716,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     Mode.PICK -> vm.finishPick()
                     Mode.PUCK, Mode.SHAPE, Mode.IDLE, Mode.HOVER, Mode.TURN -> Unit
                     Mode.SELECT -> select(e, done = true)
+                    Mode.POUR -> pour(e, done = true)
                     Mode.ADJUST -> if (vm.adjustment == Adjustment.LIQUIFY) {
                         // still moving when it lifts, liquify carries on
                         if (e.eventTime - liquifyTime <= LIQUIFY_STILL_MS) vm.liquifyLifted(liquifyVelocity.x, liquifyVelocity.y)
@@ -742,6 +760,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 if (mode == Mode.PEN || mode == Mode.FINGER) s.strokeCancel()
                 restoreTool(s)
                 if (mode == Mode.PICK) vm.cancelPick()
+                if (mode == Mode.POUR) vm.pourEnd(keep = false)
                 if (mode == Mode.TRANSFORM && transformGrabbed) vm.transformMoved(s.transformCancelDrag())
                 vm.transformHeld = null
                 transformGrabbed = false
@@ -849,6 +868,21 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 else if (selectMoved) vm.selectByColour(start, threshold, live = true)
             }
         }
+    }
+
+    /** Continue filling's touch slid across the screen changes the fill's threshold; lifted, the fill is kept. */
+    private fun pour(e: MotionEvent, done: Boolean) {
+        val p = Offset(e.x, e.y)
+        if ((p - pourStart).getDistance() > transformSlop) pourMoved = true
+        if (pourMoved) {
+            // as a selection's threshold follows a drag, only more gently
+            val dx = (p.x - lastSelectX) / resources.displayMetrics.density
+            threshold = (threshold + dragStep(dx, e.eventTime - lastSelectTime) / POUR_SLIDE_GENTLER).coerceIn(0f, 1f)
+            vm.pourThreshold(threshold)
+        }
+        lastSelectX = p.x
+        lastSelectTime = e.eventTime
+        if (done) vm.pourEnd(keep = true)
     }
 
     /**
@@ -1036,5 +1070,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
         /** The window the eyedropper shows (magnified twice), dp across. */
         const val PICK_WINDOW_DP = 54f
+
+        /** How many times more gently a fill's threshold follows a slide than a selection's. */
+        const val POUR_SLIDE_GENTLER = 2.7f
     }
 }

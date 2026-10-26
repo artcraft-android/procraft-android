@@ -21,6 +21,7 @@ mod guide;
 mod layer_ops;
 mod layers;
 mod pick;
+mod pour;
 mod project;
 mod projection;
 mod quickshape;
@@ -261,6 +262,8 @@ pub(crate) struct State {
     /// The steps finished text edits made (by [`Canvas::undo_step`]'s numbering) and their layers:
     /// undo and redo of one go back to editing that text.
     pub(crate) text_steps: Vec<(u64, procraft_engine::document::LayerId)>,
+    /// A colour dropped on the canvas whose threshold can still change.
+    pub(crate) pour: Option<pour::Pour>,
     /// The library as the user has it, and as it ships.
     library: Vec<brush_library::LibrarySet>,
     shipped: Vec<BrushSet>,
@@ -687,6 +690,7 @@ impl CanvasSession {
             tool: ToolKind::Paint,
             text_edit: None,
             text_steps: Vec::new(),
+            pour: None,
             crop_undo: None,
             selection_visibility: 0.25,
             brush_on_screen: false,

@@ -9,7 +9,7 @@ use crate::{CanvasSession, State};
 
 impl State {
     /// A layer's pixels, everything queued drawn first.
-    fn layer_pixels(&mut self, id: LayerId) -> Option<Vec<u8>> {
+    pub(crate) fn layer_pixels(&mut self, id: LayerId) -> Option<Vec<u8>> {
         self.finish_stroke();
         self.settle();
         self.flush();

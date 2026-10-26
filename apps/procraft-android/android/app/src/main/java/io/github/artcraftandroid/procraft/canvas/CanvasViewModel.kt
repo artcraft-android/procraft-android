@@ -1580,6 +1580,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Saves the open artwork and goes back to the gallery. */
     fun closeArtwork() {
+        endFilling()
         endTransform(true)
         endAdjustment(true)
         val s = session ?: return
@@ -4399,6 +4400,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The adjustments button: closes an open adjustment (keeping it), or opens the menu. */
     fun adjustmentsPressed() {
         endQuickShape()
+        endFilling()
         if (adjustment != null) endAdjustment(true) else toggle(Panel.ADJUSTMENTS)
     }
 
@@ -4407,6 +4409,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The selection button: opens or closes the selection tool (a selection made stays). */
     fun toggleSelecting() {
         endQuickShape()
+        endFilling()
         if (selecting) {
             closeSelecting()
             return
@@ -4493,6 +4496,119 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         selectionChanged(fill = !live)
     }
+
+    // ColorDrop: the colour dragged from the colour button (or a swatch) and dropped on the canvas
+    // fills the area around where it lands
+
+    /** What the ColorDrop band under the top bar shows. */
+    enum class DropBand { NONE, DRAGGING, DROPPED, FILLING }
+
+    var dropBand by mutableStateOf(DropBand.NONE)
+        private set
+
+    /** The dragged colour's dot (window pixels) and its colour (0xRRGGBB), while it is dragged. */
+    var dropDot by mutableStateOf<Pair<Offset, Int>?>(null)
+        private set
+
+    /** The threshold the colour fills with (0..1), kept from one drop to the next. */
+    var dropThreshold by mutableFloatStateOf(transformPrefs.getFloat(DROP_THRESHOLD, 0.5f))
+        private set
+
+    /** Whether the threshold is being slid: its row shows under the band. */
+    var dropSliding by mutableStateOf(false)
+        private set
+
+    /** The swatch's colour when a swatch was dropped (filling goes on with it); else the current colour. */
+    private var dropSwatch: Int? = null
+    private var dropBandTimer: kotlinx.coroutines.Job? = null
+
+    /** A colour starts being dragged from the colour button, or [swatch] from the palette. */
+    fun dropDragStart(at: Offset, swatch: Int? = null) {
+        if (swatch == null) closePanels()
+        dropBandTimer?.cancel()
+        dropSwatch = swatch
+        dropDot = at to (swatch ?: colorRgb())
+        dropBand = DropBand.DRAGGING
+    }
+
+    fun dropDragMove(at: Offset) {
+        dropDot = dropDot?.let { at to it.second }
+    }
+
+    /** The dragged colour let go at [at] (null: somewhere it doesn't fill, like the top bar). */
+    fun dropDragEnd(at: Offset?) {
+        dropDot = null
+        if (at != null && pourBegin(at)) {
+            pourEnd(keep = true)
+            // the band offers to go on filling for a moment
+            dropBand = DropBand.DROPPED
+            dropBandTimer = viewModelScope.launch {
+                kotlinx.coroutines.delay(DROP_BAND_MS)
+                if (dropBand == DropBand.DROPPED) dropBand = DropBand.NONE
+            }
+        } else {
+            dropBand = DropBand.NONE
+        }
+    }
+
+    /** Continue filling: each touch on the canvas fills, until [endFilling]. */
+    fun continueFilling() {
+        dropBandTimer?.cancel()
+        dropBand = DropBand.FILLING
+    }
+
+    fun endFilling() {
+        dropBandTimer?.cancel()
+        if (dropBand != DropBand.NONE) dropBand = DropBand.NONE
+        dropSliding = false
+    }
+
+    /** Fills from window point [p] with the dropped colour; false if nothing was filled. */
+    fun pourBegin(p: Offset): Boolean {
+        val s = session ?: return false
+        if (!currentTakesChanges()) return false
+        // text takes no colour until it is rasterized
+        if (currentIsText()) {
+            askRasterize = true
+            return false
+        }
+        val c = dropSwatch ?: colorRgb()
+        val t = dropThreshold
+        return pourNow { s.pourBegin(p.x, p.y, ((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, t) }
+    }
+
+    /** The fill under way redone with [threshold], which is kept for the next. */
+    fun pourThreshold(threshold: Float) {
+        val s = session ?: return
+        dropThreshold = threshold.coerceIn(0f, 1f)
+        dropSliding = true
+        // redone away from the main thread, only ever with the latest threshold
+        pourWanted = dropThreshold
+        if (pourQueued.compareAndSet(false, true)) {
+            pourThread.execute {
+                pourQueued.set(false)
+                s.pourThreshold(pourWanted)
+            }
+        }
+    }
+
+    /** The fill under way ends: [keep] makes it an undo step, else it is taken back. */
+    fun pourEnd(keep: Boolean) {
+        val s = session ?: return
+        pourNow { s.pourEnd(keep) }
+        if (dropSliding) transformPrefs.edit().putFloat(DROP_THRESHOLD, dropThreshold).apply()
+        dropSliding = false
+        refresh()
+    }
+
+    /** A fill's work, in order, off the main thread (a slid threshold redoes the whole fill). */
+    private val pourThread = java.util.concurrent.Executors.newSingleThreadExecutor()
+    @Volatile
+    private var pourWanted = 0f
+    private val pourQueued = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Runs [block] on the fill's thread once what is queued there is done, and waits for it. */
+    private fun <T> pourNow(block: () -> T): T = pourThread.submit(java.util.concurrent.Callable(block)).get()
 
     fun invertSelection() {
         session?.selectInvert()
@@ -4601,6 +4717,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The transform button: opens transform on the current layer, or keeps it and closes. */
     fun toggleTransform() {
         endQuickShape()
+        endFilling()
         if (transforming) {
             endTransform(true)
             return
@@ -5161,6 +5278,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         saveNow()
         session = null
+        pourThread.shutdown()
     }
 
     companion object {
@@ -5340,6 +5458,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private const val ADVANCED_MESH = "advancedMesh"
         private const val SELECTION_KIND = "selectionKind"
         private const val SELECTION_THRESHOLD = "selectionThreshold"
+        private const val DROP_THRESHOLD = "dropThreshold"
+
+        /** How long the band offers Continue filling after a drop. */
+        private const val DROP_BAND_MS = 2_500L
 
         fun hsvToRgb(h: Float, s: Float, v: Float): Int {
             val hsv = floatArrayOf((h * 360f) % 360f, s, v)

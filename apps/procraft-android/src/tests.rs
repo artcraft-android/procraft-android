@@ -2572,3 +2572,39 @@ fn stock_images_a_file_names_are_kept_and_named_again() {
     assert_eq!(out.roughness, Texture::None);
     assert_eq!(out.shape, Texture::Stock { name: "Hard-Round.png".to_owned(), inverted: true });
 }
+
+#[test]
+fn a_dropped_colour_fills_up_to_lines_and_is_one_undo_step() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    // a line down the middle splits the canvas in two
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, -10.0, 0.0)]);
+    s.stroke_add((1..30).map(|i| sample(50.0, -10.0 + i as f32 * 4.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![sample(50.0, 110.0, 250.0)]);
+    let layer = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
+    // off the canvas nothing is poured
+    assert!(!s.pour_begin(-5.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    // red on the left half only
+    assert!(s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+    // the threshold all the way: the right half too, the line kept
+    s.pour_threshold(1.0);
+    assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
+    s.pour_threshold(0.5);
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+    s.pour_end(true);
+    assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
+    // one undo takes the pour back; the line stays
+    s.undo();
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
+    // a pour taken back leaves nothing to undo for it
+    assert!(s.pour_begin(80.0, 50.0, 0.0, 0.0, 1.0, 0.5));
+    s.pour_end(false);
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+    // a locked layer takes none
+    assert!(s.set_layer_locked(layer, true));
+    assert!(!s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+}
