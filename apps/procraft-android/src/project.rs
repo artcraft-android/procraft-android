@@ -776,6 +776,63 @@ pub(crate) fn straight_alpha(rgba: &[u8]) -> Vec<u8> {
     out
 }
 
+/// How bringing in a PSD went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PsdOutcome {
+    Imported,
+    /// More layers than a canvas its size holds (`most`).
+    TooManyLayers {
+        most: u32,
+    },
+    /// A kind of PSD not read here (bitmap, indexed, Lab, 32 bits a channel).
+    Unsupported,
+    /// Not a PSD, or damaged.
+    Unreadable,
+}
+
+/// Makes the layered PSD (or PSB) at `path` an artwork named `name` in the folder `dir`: its
+/// layers, groups and masks, and its flattened picture as the gallery's thumbnail until opened.
+#[uniffi::export]
+pub fn import_psd(path: String, dir: String, name: String) -> PsdOutcome {
+    use procraft_engine::psd::{self, PsdError};
+    let Ok(bytes) = fs::read(&path) else { return PsdOutcome::Unreadable };
+    let imported = match psd::read(&bytes) {
+        Ok(i) => i,
+        Err(PsdError::TooManyLayers(most)) => {
+            return PsdOutcome::TooManyLayers { most: u32::try_from(most).unwrap_or(u32::MAX) };
+        }
+        Err(PsdError::Unsupported(_)) => return PsdOutcome::Unsupported,
+        Err(e) => {
+            log::error!("reading a PSD: {e:?}");
+            return PsdOutcome::Unreadable;
+        }
+    };
+    let name = if name.trim().is_empty() { imported.name } else { name };
+    let session = CanvasSession::with_document(imported.document, name, imported.pixels);
+    if let Err(e) = session.save(dir.clone()) {
+        log::error!("saving an imported PSD: {e}");
+        return PsdOutcome::Unreadable;
+    }
+    if let Some((w, h, flat)) = psd::flattened(&bytes) {
+        // on the white of a new canvas
+        let opaque: Vec<u8> = flat
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b, a]| {
+                let over = |c: u8| ((u16::from(c) * u16::from(a) + 255 * (255 - u16::from(a)) + 127) / 255) as u8;
+                [over(r), over(g), over(b), 255]
+            })
+            .collect();
+        let (tw, th, thumb) = thumbnail(&opaque, w, h, THUMBNAIL_SIDE);
+        if let Err(e) = write_atomically(&Path::new(&dir).join("thumbnail.png"), |p| write_png(p, tw, th, &thumb, &[]))
+        {
+            log::error!("an imported PSD's thumbnail: {e}");
+        }
+    }
+    PsdOutcome::Imported
+}
+
 /// The picture scaled down (box filter) to fit `side`, straight alpha, for viewing elsewhere.
 pub(crate) fn thumbnail(rgba: &[u8], width: u32, height: u32, side: u32) -> (u32, u32, Vec<u8>) {
     let scale = (side as f32 / width.max(height).max(1) as f32).min(1.0);

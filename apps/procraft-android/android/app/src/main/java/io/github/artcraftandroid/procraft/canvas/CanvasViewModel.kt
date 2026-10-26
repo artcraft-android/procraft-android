@@ -1395,6 +1395,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             message = "This palette can't be read."
         } else if (name != null && isModelName(name)) {
             newFromModel(uri, name)
+        } else if (head != null && String(head, Charsets.ISO_8859_1) == "8BPS") {
+            importPsd(uri, name)
         } else if (head != null && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()) {
             val ok = withContext(Dispatchers.IO) {
                 val dir = store.newFolder(galleryDir)
@@ -1404,6 +1406,31 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             if (ok) refreshGallery() else message = "This file can't be opened."
         } else {
             pictureArtwork(uri)
+        }
+    }
+
+    /** A layered PSD from [uri] made into a new artwork, named after its file; a message says why if it can't be. */
+    private suspend fun importPsd(uri: android.net.Uri, name: String?) {
+        val app = getApplication<Application>()
+        val outcome = withContext(Dispatchers.IO) {
+            val temp = File(app.cacheDir, "import-${System.nanoTime()}.psd")
+            val dir = store.newFolder(galleryDir)
+            try {
+                app.contentResolver.openInputStream(uri)?.use { input -> temp.outputStream().use { input.copyTo(it) } }
+                io.github.artcraftandroid.procraft.core.importPsd(temp.path, dir.path, name?.substringBeforeLast('.')?.trim().orEmpty())
+            } catch (e: Exception) {
+                android.util.Log.e("ProCraft", "importing a PSD", e)
+                io.github.artcraftandroid.procraft.core.PsdOutcome.Unreadable
+            } finally {
+                temp.delete()
+            }.also { if (it != io.github.artcraftandroid.procraft.core.PsdOutcome.Imported) dir.deleteRecursively() }
+        }
+        when (outcome) {
+            io.github.artcraftandroid.procraft.core.PsdOutcome.Imported -> refreshGallery()
+            is io.github.artcraftandroid.procraft.core.PsdOutcome.TooManyLayers ->
+                message = "This file has more layers than a canvas its size can hold (${outcome.most})."
+            io.github.artcraftandroid.procraft.core.PsdOutcome.Unsupported -> message = "This kind of PSD can't be opened."
+            io.github.artcraftandroid.procraft.core.PsdOutcome.Unreadable -> message = "This file can't be opened."
         }
     }
 

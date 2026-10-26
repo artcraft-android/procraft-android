@@ -29,6 +29,7 @@
                 <data android:mimeType="application/octet-stream" />
                 <data android:mimeType="application/zip" />
                 <data android:mimeType="image/*" />
+                <data android:mimeType="application/x-photoshop" />
             </intent-filter>
         </activity>
 

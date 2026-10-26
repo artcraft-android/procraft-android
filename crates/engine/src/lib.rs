@@ -29,6 +29,7 @@ pub mod native;
 pub mod plist;
 pub mod preview;
 pub mod profile;
+pub mod psd;
 pub mod quickshape;
 pub mod selection;
 pub mod stroke;

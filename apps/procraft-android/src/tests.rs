@@ -2608,3 +2608,58 @@ fn a_dropped_colour_fills_up_to_lines_and_is_one_undo_step() {
     assert!(s.set_layer_locked(layer, true));
     assert!(!s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
 }
+
+#[test]
+fn a_layered_psd_comes_in_as_an_artwork() {
+    use procraft_engine::document::BlendMode;
+    use procraft_engine::formats::{PsdKind, PsdLayer, psd};
+    let dir = std::env::temp_dir().join(format!("procraft-psd-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (w, h) = (8, 6);
+    let px = |c: [u8; 4]| -> Vec<u8> { std::iter::repeat_n(c, (w * h) as usize).flatten().collect() };
+    let (green, flat) = (px([0, 200, 0, 255]), px([0, 200, 0, 255]));
+    let layers = [
+        PsdLayer {
+            name: "Ink",
+            kind: PsdKind::Pixels { rgba: &green, mask: None },
+            opacity: 0.75,
+            visible: true,
+            blend: BlendMode::Overlay,
+            clipped: false,
+        },
+        PsdLayer {
+            name: "Background",
+            kind: PsdKind::Pixels { rgba: &flat, mask: None },
+            opacity: 1.0,
+            visible: true,
+            blend: BlendMode::Normal,
+            clipped: false,
+        },
+    ];
+    let file = dir.join("in.psd");
+    std::fs::write(&file, psd(w, h, 72.0, &[], &layers, &flat, None)).unwrap();
+    let art = dir.join("art");
+    let outcome = crate::project::import_psd(
+        file.to_string_lossy().into_owned(),
+        art.to_string_lossy().into_owned(),
+        "Imported".into(),
+    );
+    assert_eq!(outcome, crate::project::PsdOutcome::Imported);
+    assert!(art.join("thumbnail.png").exists());
+    let s = CanvasSession::open(art.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(s.name(), "Imported");
+    let names: Vec<String> = s.layers().iter().map(|l| l.name.clone()).collect();
+    assert!(names.contains(&"Ink".to_owned()) && names.contains(&"Background".to_owned()), "{names:?}");
+    // not a PSD
+    std::fs::write(&file, b"nothing").unwrap();
+    assert_eq!(
+        crate::project::import_psd(
+            file.to_string_lossy().into_owned(),
+            dir.join("bad").to_string_lossy().into_owned(),
+            String::new()
+        ),
+        crate::project::PsdOutcome::Unreadable
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
