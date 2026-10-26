@@ -199,7 +199,7 @@ fun SourceEditor(vm: CanvasViewModel) {
             )
             if (library) SourceLibrary(vm, grain, onPick = { i ->
                 image = vm.librarySource(grain, i)
-                shipped = i
+                shipped = vm.shippedOf(grain, i)
                 library = false
             }) { library = false }
         }

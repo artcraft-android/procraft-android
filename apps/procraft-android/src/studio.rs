@@ -30,11 +30,20 @@ pub struct SourceImage {
     pub pixels: Vec<u8>,
 }
 
-/// The shipped shape images (or, `grain`, grain images), in order: the source library.
+/// The shipped shape images (or, `grain`, grain images after a blank one), in order: the source
+/// library.
 #[uniffi::export]
 pub fn source_library(grain: bool) -> Vec<SourceImage> {
     let images = if grain { textures::grains() } else { textures::shapes() };
-    images.into_iter().map(|i| SourceImage { name: i.name.to_owned(), pixels: i.pixels }).collect()
+    // the grains start with a blank one: plain white, no texture
+    let blank = grain.then(|| SourceImage {
+        name: "Blank".to_owned(),
+        pixels: vec![255; textures::TEXTURE_SIZE * textures::TEXTURE_SIZE],
+    });
+    blank
+        .into_iter()
+        .chain(images.into_iter().map(|i| SourceImage { name: i.name.to_owned(), pixels: i.pixels }))
+        .collect()
 }
 
 /// `pixels` (a `source_size` square greyscale image) made to repeat without seams: the grain

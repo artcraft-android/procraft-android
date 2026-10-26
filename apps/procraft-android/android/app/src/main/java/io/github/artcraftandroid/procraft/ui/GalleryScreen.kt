@@ -125,6 +125,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
     // where each stack's cell is (window pixels), for its artworks to fly out of as it opens
     val stackCellAt = remember { mutableMapOf<String, androidx.compose.ui.geometry.Rect>() }
     var renaming by remember { mutableStateOf<Artwork?>(null) }
+    // the app's name tapped: what it is and its version, over the gallery
+    var about by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<Artwork?>(null) }
     // the artwork (by folder) whose actions a swipe left is showing
     var swiped by remember { mutableStateOf<String?>(null) }
@@ -159,8 +161,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
         vm.windowPx = androidx.compose.ui.unit.IntSize(constraints.maxWidth, constraints.maxHeight)
         // out of focus while an artwork is being renamed
         val blur by androidx.compose.animation.core.animateDpAsState(
-            if (renaming != null) RenameBlur else 0.dp,
-            if (renaming != null) tween(300) else tween(150),
+            if (renaming != null || about) RenameBlur else 0.dp,
+            if (renaming != null || about) tween(300) else tween(150),
             label = "blur",
         )
         Column(Modifier.fillMaxSize().then(if (blur > 0.dp) Modifier.blur(blur) else Modifier)) {
@@ -189,6 +191,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                 GalleryHeader(
                     stack = vm.openStack?.name,
                     onBack = { vm.showStack(null) },
+                    onAbout = { about = true },
                     onSelect = { selecting = true },
                     onNew = { newCanvas = !newCanvas },
                     onImport = { importFile.launch(arrayOf("*/*")) },
@@ -483,6 +486,11 @@ fun GalleryScreen(vm: CanvasViewModel) {
                     .background(Pc.Panel).padding(horizontal = 18.dp, vertical = 12.dp),
             )
         }
+        androidx.compose.animation.AnimatedVisibility(
+            about,
+            enter = androidx.compose.animation.fadeIn(tween(300)),
+            exit = androidx.compose.animation.fadeOut(tween(150)),
+        ) { AboutApp { about = false } }
     }
 
     // deleting the picked artworks, or one swiped to
@@ -515,7 +523,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
 
 /** The title row: the app's name, the select/import/photo capsule and the new-canvas button. */
 @Composable
-private fun GalleryHeader(stack: String?, onBack: () -> Unit, onSelect: () -> Unit, onNew: () -> Unit, onImport: () -> Unit, onPhoto: () -> Unit) {
+private fun GalleryHeader(stack: String?, onBack: () -> Unit, onAbout: () -> Unit, onSelect: () -> Unit, onNew: () -> Unit, onImport: () -> Unit, onPhoto: () -> Unit) {
     Box(Modifier.fillMaxWidth().height(55.dp)) {
         // into a stack the title changes at once; back out, the stack's name fades out as the
         // gallery's fades in
@@ -557,7 +565,8 @@ private fun GalleryHeader(stack: String?, onBack: () -> Unit, onSelect: () -> Un
                     color = Pc.GalleryTitle,
                     fontSize = 36.sp,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(start = 32.dp, top = 11.dp),
+                    modifier = Modifier.padding(start = 32.dp, top = 11.dp)
+                        .clickable(remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null, onClick = onAbout),
                 )
             }
         }
@@ -1130,3 +1139,51 @@ private fun Chip(text: String, modifier: Modifier = Modifier) {
         Text(text, color = Pc.LightText, fontSize = 13.sp, maxLines = 1)
     }
 }
+
+/**
+ * What the app is, over the gallery (blurred and dimmed under it): its icon 300 across, its name,
+ * its version; a round button at the top right closes it, as back does.
+ */
+@Composable
+private fun AboutApp(onClose: () -> Unit) {
+    BackHandler(onBack = onClose)
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val version = remember {
+        runCatching {
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            "Version ${info.versionName} Build ${androidx.core.content.pm.PackageInfoCompat.getLongVersionCode(info)}"
+        }.getOrDefault("")
+    }
+    Box(Modifier.fillMaxSize().background(AboutVeil).pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } }) {
+        Column(Modifier.fillMaxWidth().padding(top = 95.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            // the launcher icon: its field, and its picture drawn at the adaptive icon's full size
+            Box(Modifier.size(300.dp).clip(RoundedCornerShape(67.dp)).background(AboutIconField), contentAlignment = Alignment.Center) {
+                androidx.compose.foundation.Image(
+                    androidx.compose.ui.res.painterResource(io.github.artcraftandroid.procraft.R.drawable.ic_launcher_foreground),
+                    contentDescription = null,
+                    modifier = Modifier.requiredSize(450.dp),
+                )
+            }
+            Text("ProCraft", color = Color.White, fontSize = 64.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(top = 12.dp))
+            Text(version, color = AboutInk, fontSize = 13.sp, maxLines = 1, modifier = Modifier.padding(top = 14.dp))
+        }
+        Box(
+            Modifier.align(Alignment.TopEnd).padding(top = 31.dp, end = 31.5.dp).size(22.5.dp).clip(CircleShape).background(AboutClose)
+                .clickable(onClick = onClose),
+            contentAlignment = Alignment.Center,
+        ) {
+            androidx.compose.foundation.Canvas(Modifier.size(8.dp)) {
+                val w = 1.8.dp.toPx()
+                drawLine(AboutCloseInk, androidx.compose.ui.geometry.Offset.Zero, androidx.compose.ui.geometry.Offset(size.width, size.height), w, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                drawLine(AboutCloseInk, androidx.compose.ui.geometry.Offset(size.width, 0f), androidx.compose.ui.geometry.Offset(0f, size.height), w, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+            }
+        }
+    }
+}
+
+// as measured: the gallery under a near-black veil, the light round close button
+private val AboutVeil = Color(0xD90B0B0B)
+private val AboutIconField = Color(0xFF1C1C1E)
+private val AboutInk = Color(0xFFBDBDBD)
+private val AboutClose = Color(0xFFE3E3E3)
+private val AboutCloseInk = Color(0xFF1C1C1C)

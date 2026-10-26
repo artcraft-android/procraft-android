@@ -3262,6 +3262,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return Bitmap.createBitmap(argb, n, n, Bitmap.Config.ARGB_8888).asImageBitmap()
     }
 
+    /** Library image [index]'s place among the shipped images: none for the grains' Blank, which isn't one. */
+    fun shippedOf(grain: Boolean, index: Int): Int? = if (grain) (index - 1).takeIf { it >= 0 } else index
+
     /** Shipped image [index] of the source library. */
     fun librarySource(grain: Boolean, index: Int): ByteArray =
         io.github.artcraftandroid.procraft.core.sourceLibrary(grain).getOrNull(index)?.pixels ?: ByteArray(0)

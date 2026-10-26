@@ -1704,7 +1704,10 @@ fn a_brush_paints_with_a_shape_of_the_users_own_and_keeps_it() {
     // a shipped shape again
     assert!(t.set_studio_shipped_source(crate::studio::SourceKind::Shape, 0));
     assert_ne!(t.studio_source(crate::studio::SourceKind::Shape), vec![255; n * n]);
-    assert_eq!(crate::studio::source_library(true).len(), procraft_engine::textures::grains().len());
+    // the grains' library starts with the Blank, which isn't a shipped grain
+    let library = crate::studio::source_library(true);
+    assert_eq!(library.len(), procraft_engine::textures::grains().len() + 1);
+    assert!(library.first().is_some_and(|b| b.name == "Blank" && b.pixels.iter().all(|&v| v == 255)));
 }
 
 #[test]
