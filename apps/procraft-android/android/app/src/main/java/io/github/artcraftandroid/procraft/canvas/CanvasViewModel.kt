@@ -2339,6 +2339,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun insertPicture(uri: android.net.Uri, private: Boolean = false) {
         val s = session ?: return
         closePanels()
+        if (getApplication<Application>().contentResolver.getType(uri)?.startsWith("video/") == true) {
+            insertFrames(uri, private)
+            return
+        }
         viewModelScope.launch {
             val image = withContext(Dispatchers.IO) { decodePicture(uri, io.github.artcraftandroid.procraft.ui.CanvasSpace.p3) }
             if (image == null) {
@@ -2352,6 +2356,64 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 message = noRoom()
             }
         }
+    }
+
+    /**
+     * A video's frames come in as layers above the current one, each fitted to the canvas, at the
+     * animation's frame rate (or its first one's), for as many as there is room; Animation Assist
+     * comes on with them in its timeline.
+     */
+    private fun insertFrames(uri: android.net.Uri, private: Boolean) {
+        val s = session ?: return
+        val fps = (animation?.fps?.toInt() ?: DEFAULT_FPS).coerceIn(1, 60)
+        viewModelScope.launch {
+            var added = 0
+            var full = false
+            withContext(Dispatchers.IO) {
+                val retriever = android.media.MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(getApplication<Application>(), uri)
+                    val ms = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                    val count = (ms * fps / 1000L).toInt().coerceIn(1, MAX_VIDEO_FRAMES)
+                    for (i in 0 until count) {
+                        val us = i * 1_000_000L / fps
+                        val frame = retriever.getFrameAtTime(us, android.media.MediaMetadataRetriever.OPTION_CLOSEST) ?: continue
+                        val image = frameImage(frame)
+                        frame.recycle()
+                        if (s.insertImage(image, private) == null) {
+                            full = true
+                            break
+                        }
+                        added++
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("ProCraft", "a video's frames", e)
+                } finally {
+                    retriever.release()
+                }
+            }
+            if (added == 0) {
+                message = if (full) noRoom() else "This video can't be opened."
+                return@launch
+            }
+            if (animation == null || animation?.pages == true) changeAnimationAssist(true) else refresh()
+            showNotice("Frames saved to timeline")
+            if (full) message = noRoom()
+        }
+    }
+
+    /** A video frame's straight RGBA pixels, at most [MAX_PICTURE] on a side. */
+    private fun frameImage(frame: Bitmap): io.github.artcraftandroid.procraft.core.ThumbnailImage {
+        val scale = minOf(1f, MAX_PICTURE / maxOf(frame.width, frame.height).toFloat())
+        val sized = if (scale < 1f) Bitmap.createScaledBitmap(frame, (frame.width * scale).roundToInt().coerceAtLeast(1), (frame.height * scale).roundToInt().coerceAtLeast(1), true) else frame
+        val argb = if (sized.config == Bitmap.Config.ARGB_8888) sized else sized.copy(Bitmap.Config.ARGB_8888, false)
+        val buffer = ByteBuffer.allocate(argb.width * argb.height * 4)
+        // frames are opaque, so premultiplied and straight are the same
+        argb.copyPixelsToBuffer(buffer)
+        val image = io.github.artcraftandroid.procraft.core.ThumbnailImage(argb.width.toUInt(), argb.height.toUInt(), buffer.array())
+        if (argb !== frame) argb.recycle()
+        if (sized !== frame && sized !== argb) sized.recycle()
+        return image
     }
 
     /** Whether the picture at [uri] is in Display P3. */
@@ -5689,6 +5751,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private const val SELECTION_KIND = "selectionKind"
         private const val SELECTION_THRESHOLD = "selectionThreshold"
         private const val DROP_THRESHOLD = "dropThreshold"
+
+        /** A video's frames come in at Animation Assist's starting frame rate unless it is on. */
+        private const val DEFAULT_FPS = 15
+        /** The most frames a video brings in. */
+        private const val MAX_VIDEO_FRAMES = 999
 
         /** A PDF's pages come in at this resolution, their long side at most [PDF_MOST_SIDE] pixels. */
         private const val PDF_DPI = 300f

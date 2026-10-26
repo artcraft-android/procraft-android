@@ -170,11 +170,12 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     }
     fun file(private: Boolean) {
         privately = private
-        pickFile.launch(arrayOf("image/*"))
+        // a video's frames come in too
+        pickFile.launch(arrayOf("image/*", "video/*"))
     }
     fun photoFrom(private: Boolean) {
         privately = private
-        pickPhoto.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
+        pickPhoto.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageAndVideo))
     }
     fun camera(private: Boolean) {
         privately = private
