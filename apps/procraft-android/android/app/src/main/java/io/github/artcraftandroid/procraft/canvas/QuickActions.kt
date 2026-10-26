@@ -1,56 +1,99 @@
 package io.github.artcraftandroid.procraft.canvas
 
-/** What a QuickMenu button can be set to do. */
-enum class QuickAction(val label: String) {
+/**
+ * What a QuickMenu button can be set to, by the name its picker lists. The adjustments are listed
+ * under Adjustments ([adjustment] says which). The names saved are the entries' names, so an
+ * entry keeps its name when its label changes.
+ */
+enum class QuickAction(val label: String, val adjustment: Adjustment? = null, val ready: Boolean = true) {
     NONE("No Action"),
-    NEW_LAYER("New Layer"),
-    DUPLICATE_LAYER("Duplicate Layer"),
-    DELETE_LAYER("Delete Layer"),
-    MERGE_DOWN("Merge Down"),
-    CLEAR_LAYER("Clear Layer"),
-    FILL_LAYER("Fill Layer"),
-    SELECT_LAYER("Select Layer"),
+    GUIDE_2D("2D Guide visibility"),
+    ACTUAL_SIZE("Actual size"),
+    ADD_TEXT("Add Text"),
     ALPHA_LOCK("Alpha Lock"),
-    LAYER_VISIBILITY("Layer Visibility"),
+    ANIMATION_ASSIST("Animation Assist"),
+    BRUSH_SCALING("Brush scaling"),
+    CLEAR_LAYER("Clear layer"),
+    COPY_PASTE_MENU("Clipboard"),
+    CLONE("Clone"),
     COPY("Copy"),
+    COPY_CANVAS("Copy canvas"),
     CUT("Cut"),
-    PASTE("Paste"),
-    COPY_PASTE_MENU("Copy & Paste Menu"),
-    FLIP_HORIZONTAL("Flip Horizontal"),
-    FLIP_VERTICAL("Flip Vertical"),
-    UNDO("Undo"),
-    REDO("Redo"),
-    PAINT("Paint"),
-    SMUDGE("Smudge"),
+    DELETE_LAYER("Delete layer"),
+    DRAWING_ASSIST("Drawing Assist"),
+    DUPLICATE_LAYER("Duplicate layer"),
     ERASE("Erase"),
     EYEDROPPER("Eyedropper"),
-    SWAP_COLORS("Swap Colors"),
-    SELECTION("Selection"),
-    INVERT_SELECTION("Invert Selection"),
-    TRANSFORM("Transform"),
-    ADJUSTMENTS("Adjustments"),
-    COLORS("Colors"),
-    LAYERS("Layers"),
-    BRUSHES("Brushes"),
-    ACTIONS("Actions"),
-    INTERFACE("Interface"),
-    FIT_CANVAS("Fit Canvas"),
-    ADD_TEXT("Add Text"),
-    QUICKSHAPE("QuickShape"),
+    FILL_LAYER("Fill layer"),
+    FIT_CANVAS("Fit canvas"),
+    FLIP_HORIZONTAL("Flip horizontally"),
+    FLIP_VERTICAL("Flip vertically"),
+    INTERFACE("Full screen"),
+    GUIDE_ISOMETRIC("Isometric Guide visibility"),
     LAYER_SELECT("Layer Select"),
-    DRAWING_GUIDE("Drawing Guide"),
+    LAYER_OPACITY("Layer opacity"),
+    LAYER_VISIBILITY("Layer visibility"),
+    LIQUIFY("Liquify"),
+    MERGE_DOWN("Merge down"),
+    NEW_LAYER("New layer"),
+    NEXT_FRAME("Next frame"),
+    ONION_SKIN("Onion skin"),
+    ADJUSTMENTS("Open Adjustments"),
+    COLORS("Open Color panel"),
+    LAYERS("Open Layers panel"),
+    PAGE_ASSIST("Page Assist"),
+    PAINT("Paint"),
+    PASTE("Paste"),
+    GUIDE_PERSPECTIVE("Perspective Guide visibility"),
+    PREVIOUS_BRUSH("Previous brush"),
+    SWAP_COLORS("Previous color"),
+    PREVIOUS_FRAME("Previous frame"),
+    PROJECT_CANVAS("Project canvas"),
+    QUICKSHAPE_ON("QuickShape"),
+    QUICKSHAPE("QuickShape stroke"),
+    // not built yet: left out of the picker
+    RECOLOR("Recolor", ready = false),
+    REDO("Redo"),
+    REFERENCE("Reference"),
+    BRUSHES("Select brush"),
+    SELECT_LAYER("Select layer contents"),
+    SELECTION("Selection tool"),
+    COMPANION_MOVE("Single touch move"),
+    COMPANION_ZOOM("Single touch zoom"),
+    SMUDGE("Smudge"),
+    SOLO("Solo visibility"),
+    GUIDE_SYMMETRY("Symmetry Guide visibility"),
+    TRANSFORM("Transform tool"),
+    UNDO("Undo"),
+
+    // under Adjustments
+    BLOOM("Bloom", Adjustment.BLOOM),
+    CHROMATIC_ABERRATION("Chromatic Aberration", Adjustment.CHROMATIC_ABERRATION),
+    COLOR_BALANCE("Color Balance", Adjustment.COLOR_BALANCE),
+    CURVES("Curves", Adjustment.CURVES),
+    GAUSSIAN_BLUR("Gaussian Blur", Adjustment.GAUSSIAN_BLUR),
+    GLITCH("Glitch", Adjustment.GLITCH),
+    GRADIENT_MAP("Gradient Map", Adjustment.GRADIENT_MAP),
+    HALFTONE("Halftone", Adjustment.HALFTONE),
+    HSB("Hue, Saturation, Brightness", Adjustment.HSB),
+    MOTION_BLUR("Motion Blur", Adjustment.MOTION_BLUR),
+    NOISE("Noise", Adjustment.NOISE),
+    PERSPECTIVE_BLUR("Perspective Blur", Adjustment.PERSPECTIVE_BLUR),
+    SHARPEN("Sharpen", Adjustment.SHARPEN),
     ;
 
-    /** What its button in the menu says: the name in sentence case, the flips as verbs. */
-    val button: String
-        get() = when (this) {
-            FLIP_HORIZONTAL -> "Flip horizontally"
-            FLIP_VERTICAL -> "Flip vertically"
-            else -> label.take(1) + label.drop(1).lowercase()
-        }
+    /** What its button in the menu says. */
+    val button: String get() = label
 
     companion object {
         /** The buttons a QuickMenu starts with, clockwise from the top. */
         val DEFAULTS = listOf(NEW_LAYER, FLIP_HORIZONTAL, COPY, MERGE_DOWN, CLEAR_LAYER, FLIP_VERTICAL)
+
+        /** The picker's rows: the actions by name (as written, capitals first), null for Adjustments. */
+        val LISTED: List<QuickAction?> = (entries.filter { it.adjustment == null && it.ready }.map { it.label to it } + ("Adjustments" to null))
+            .sortedBy { it.first }.map { it.second }
+
+        /** The rows under Adjustments, by name. */
+        val ADJUSTMENTS_LISTED: List<QuickAction> = entries.filter { it.adjustment != null }.sortedBy { it.label }
     }
 }

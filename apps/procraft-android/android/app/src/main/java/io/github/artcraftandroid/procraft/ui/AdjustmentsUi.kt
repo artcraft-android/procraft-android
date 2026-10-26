@@ -40,6 +40,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -63,7 +65,8 @@ import io.github.artcraftandroid.procraft.core.LiquifyKind
 import kotlin.math.roundToInt
 
 // light: the band see-through (241 over white, 228 over the surround), the panel near white
-private val ModeBar get() = if (Pc.light) Color(0xBAECECEC) else Color(0xFF5A5A5A)
+// translucent over the canvas (as measured over white and over a colour)
+private val ModeBar get() = if (Pc.light) Color(0xD6EEEEEE) else Color(0xD63B3B3B)
 private val ModeText get() = if (Pc.light) Color(0xFF6A6A6A) else Color(0xFFC5C5C5)
 private val HsbPanelFill get() = if (Pc.light) Color(0xF7F1F1F1) else Color(0xF71E1E1E)
 private val HsbLabel get() = if (Pc.light) Color(0xFF595959) else Color(0xFF808080)
@@ -127,6 +130,46 @@ fun AdjustmentBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
         }
         if (a.swiped) {
             Box(Modifier.fillMaxWidth(vm.adjustAmount.coerceIn(0f, 1f)).height(4.dp).background(Pc.Accent))
+        }
+    }
+}
+
+/** Layer opacity's band: its glyph, "Opacity" and the opacity, the blue line across the screen under it. */
+@Composable
+fun LayerOpacityBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
+    Column(modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().height(32.dp).background(ModeBar), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(33.dp, 32.dp), contentAlignment = Alignment.Center) { OpacityGlyph(ModeText) }
+            Text("Opacity", color = ModeText, fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Spacer(Modifier.width(3.dp))
+            Text("${(vm.opacityValue * 100).roundToInt()}%", color = ModeText, fontSize = 14.sp, maxLines = 1)
+        }
+        Box(Modifier.fillMaxWidth(vm.opacityValue.coerceIn(0f, 1f)).height(4.dp).background(Pc.Accent))
+    }
+}
+
+/**
+ * Opacity's glyph, 14 across: a ring behind and up to the right, a disc in front, striped where
+ * it covers the ring (the stripes cut through to what is behind).
+ */
+@Composable
+private fun OpacityGlyph(ink: Color) {
+    androidx.compose.foundation.Canvas(
+        Modifier.size(14.dp).graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen },
+    ) {
+        val u = size.width / 14f
+        val back = Offset(8.7f * u, 5.3f * u)
+        val front = Offset(5.4f * u, 8.6f * u)
+        val r = 4.9f * u
+        drawCircle(ink, r, back, style = androidx.compose.ui.graphics.drawscope.Stroke(1.1f * u))
+        drawCircle(ink, r, front)
+        // the stripes, only where the disc covers the ring's inside
+        val inside = androidx.compose.ui.graphics.Path().apply { addOval(androidx.compose.ui.geometry.Rect(back, r)) }
+        clipPath(inside) {
+            for (k in -1..1) {
+                val o = k * 2.2f * u
+                drawLine(Color.Black, Offset(front.x + o - 5f * u, front.y - o - 5f * u), Offset(front.x + o + 5f * u, front.y - o + 5f * u), 1f * u, blendMode = androidx.compose.ui.graphics.BlendMode.Clear)
+            }
         }
     }
 }

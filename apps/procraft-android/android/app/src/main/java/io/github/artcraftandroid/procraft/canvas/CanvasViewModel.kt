@@ -1608,6 +1608,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Saves the open artwork and goes back to the gallery. */
     fun closeArtwork() {
         endFilling()
+        endLayerOpacity()
         endTransform(true)
         endAdjustment(true)
         val s = session ?: return
@@ -2091,8 +2092,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Does [a], a QuickMenu button opened at window point [at]. */
     fun runQuickAction(a: QuickAction, at: Offset) {
         val current = layers.firstOrNull { it.current }
+        a.adjustment?.let {
+            startAdjustment(it)
+            return
+        }
         when (a) {
-            QuickAction.NONE -> Unit
             QuickAction.NEW_LAYER -> addLayer()
             QuickAction.DUPLICATE_LAYER -> current?.let(::duplicate)
             QuickAction.DELETE_LAYER -> current?.let(::delete)
@@ -2102,7 +2106,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             QuickAction.SELECT_LAYER -> current?.let(::selectLayerContents)
             QuickAction.ALPHA_LOCK -> current?.let(::toggleAlphaLock)
             QuickAction.LAYER_VISIBILITY -> current?.let(::toggleVisible)
+            QuickAction.LAYER_OPACITY -> startLayerOpacity()
+            QuickAction.SOLO -> current?.let(::toggleSolo)
             QuickAction.COPY -> copyLayer()
+            QuickAction.COPY_CANVAS -> copyCanvas()
             QuickAction.CUT -> cutLayer()
             QuickAction.PASTE -> paste()
             QuickAction.COPY_PASTE_MENU -> copyPasteOpen = true
@@ -2115,21 +2122,125 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             QuickAction.ERASE -> select(ToolKind.ERASE)
             QuickAction.EYEDROPPER -> pickNext = true
             QuickAction.SWAP_COLORS -> swapColors()
+            QuickAction.PREVIOUS_BRUSH -> previousBrush()
             QuickAction.SELECTION -> toggleSelecting()
-            QuickAction.INVERT_SELECTION -> invertSelection()
             QuickAction.TRANSFORM -> toggleTransform()
             QuickAction.ADJUSTMENTS -> adjustmentsPressed()
+            QuickAction.LIQUIFY -> startAdjustment(Adjustment.LIQUIFY)
+            QuickAction.CLONE -> startAdjustment(Adjustment.CLONE)
             QuickAction.COLORS -> toggle(Panel.COLOR)
             QuickAction.LAYERS -> toggle(Panel.LAYERS)
             QuickAction.BRUSHES -> toggle(Panel.BRUSHES)
-            QuickAction.ACTIONS -> toggle(Panel.ACTIONS)
             QuickAction.INTERFACE -> toggleBars()
             QuickAction.FIT_CANVAS -> settleToFit()
+            QuickAction.ACTUAL_SIZE -> {
+                session?.settleToActualSize()
+                followView()
+            }
             QuickAction.ADD_TEXT -> addText()
             QuickAction.QUICKSHAPE -> quickShapeLast()
+            QuickAction.QUICKSHAPE_ON -> gestures.set(GesturePurpose.QUICKSHAPE, "DRAW_HOLD", !gestures.isOn(GesturePurpose.QUICKSHAPE, "DRAW_HOLD"))
             QuickAction.LAYER_SELECT -> layerSelectAt(at)
-            QuickAction.DRAWING_GUIDE -> setGuideOn(guide?.on != true)
+            QuickAction.GUIDE_2D -> toggleGuideKind(GuideType.GRID)
+            QuickAction.GUIDE_ISOMETRIC -> toggleGuideKind(GuideType.ISOMETRIC)
+            QuickAction.GUIDE_PERSPECTIVE -> toggleGuideKind(GuideType.PERSPECTIVE)
+            QuickAction.GUIDE_SYMMETRY -> toggleGuideKind(GuideType.SYMMETRY)
+            QuickAction.DRAWING_ASSIST -> guide?.let { setGuideAssisted(!it.assisted) }
+            QuickAction.ANIMATION_ASSIST -> changeAnimationAssist(!(animation != null && animation?.pages == false))
+            QuickAction.PAGE_ASSIST -> changePageAssist(animation?.pages != true)
+            QuickAction.NEXT_FRAME -> stepFrame(1)
+            QuickAction.PREVIOUS_FRAME -> stepFrame(-1)
+            QuickAction.ONION_SKIN -> toggleOnionSkin()
+            QuickAction.BRUSH_SCALING -> changeBrushScaling(!brushOnScreen)
+            QuickAction.PROJECT_CANVAS -> changeProjectCanvas(!projectCanvas)
+            QuickAction.REFERENCE -> changeReferenceOn(!referenceOn)
+            QuickAction.COMPANION_MOVE -> toggleCompanionMode(CompanionMode.MOVE)
+            QuickAction.COMPANION_ZOOM -> toggleCompanionMode(CompanionMode.ZOOM)
+            // nothing, Recolor (not built yet), and the adjustments (done above)
+            else -> Unit
         }
+    }
+
+    /** The drawing guide on as [kind], or off if it already is that. */
+    private fun toggleGuideKind(kind: GuideType) {
+        val g = guide
+        if (g?.on == true && g.kind == kind) {
+            setGuideOn(false)
+            return
+        }
+        if (g?.on != true) setGuideOn(true)
+        chooseGuideKind(kind)
+    }
+
+    /** Animation Assist's next or previous frame drawn on ([by] frames along), staying in its frames. */
+    private fun stepFrame(by: Int) {
+        val at = currentFrame ?: return
+        val to = (at + by).coerceIn(0, animationFrames.size - 1)
+        if (to != at) tapFrame(to)
+    }
+
+    /** How many onion skin frames there were before they were last turned off. */
+    private var onionKept = 1u
+
+    /** Onion skins off, or back to as many as they were. */
+    private fun toggleOnionSkin() {
+        changeAnimation {
+            if (it.onionFrames > 0u) {
+                onionKept = it.onionFrames
+                it.copy(onionFrames = 0u)
+            } else {
+                it.copy(onionFrames = onionKept)
+            }
+        }
+    }
+
+    /** Layer [l] shown alone, or, already alone, every layer again; a message says which. */
+    fun toggleSolo(l: LayerInfo) {
+        val s = session ?: return
+        val on = s.solo() != l.id
+        if (!s.setSolo(if (on) l.id else null)) return
+        showNotice(if (on) "Solo visibility on" else "Solo visibility off")
+    }
+
+    // Layer opacity: a drag across the canvas changes the current layer's opacity, read in the band
+    // under the top bar
+
+    /** The layer whose opacity a drag changes, while the mode is on. */
+    var opacityLayer by mutableStateOf<LayerInfo?>(null)
+        private set
+
+    /** Its opacity as it is being dragged. */
+    var opacityValue by mutableFloatStateOf(1f)
+        private set
+
+    fun startLayerOpacity() {
+        val l = layers.firstOrNull { it.current } ?: return
+        if (l.kind != LayerType.PAINT && l.kind != LayerType.GROUP) return
+        endQuickShape()
+        endFilling()
+        if (transforming) endTransform(true)
+        endAdjustment(true)
+        closeSelecting()
+        closePanels()
+        opacityLayer = l
+        opacityValue = l.opacity
+    }
+
+    /** A step of the drag: the opacity changed by [by]. */
+    fun dragLayerOpacity(by: Float) {
+        val l = opacityLayer ?: return
+        opacityValue = (opacityValue + by).coerceIn(0f, 1f)
+        setLayerOpacity(l, opacityValue, done = false)
+    }
+
+    /** The drag let go: its change is one undo step. */
+    fun liftLayerOpacity() {
+        val l = opacityLayer ?: return
+        setLayerOpacity(l, opacityValue, done = true)
+    }
+
+    fun endLayerOpacity() {
+        opacityLayer = null
     }
 
     /** Does what a gesture set to the QuickMenu does: opens it at [at], or closes it if open. */
@@ -2977,10 +3088,28 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return
         val before = currentBrush
         if (s.selectBrush(b.set, b.index)) {
+            if (before != null && (before.set != b.set || before.index != b.index)) lastBrush = before.set to before.index
             // the set left behind keeps showing the brush it had
             before?.let { setChoice[it.set.toInt()] = it.index.toInt() }
             currentBrush = s.currentBrush()
             setChoice[b.set.toInt()] = b.index.toInt()
+            readSliders()
+            keepChoices(s)
+        }
+    }
+
+    /** The brush chosen before the current one (set, place in it), for Previous brush. */
+    private var lastBrush: Pair<UInt, UInt>? = null
+
+    /** Back to the brush chosen before this one (and Previous brush again comes back here). */
+    fun previousBrush() {
+        val s = session ?: return
+        val (set, index) = lastBrush ?: return
+        val now = currentBrush
+        if (s.selectBrush(set, index)) {
+            lastBrush = now?.let { it.set to it.index }
+            currentBrush = s.currentBrush()
+            setChoice[set.toInt()] = index.toInt()
             readSliders()
             keepChoices(s)
         }
@@ -4428,6 +4557,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun adjustmentsPressed() {
         endQuickShape()
         endFilling()
+        // in Layer opacity, the button ends it
+        if (opacityLayer != null) {
+            endLayerOpacity()
+            return
+        }
         if (adjustment != null) endAdjustment(true) else toggle(Panel.ADJUSTMENTS)
     }
 
@@ -4437,6 +4571,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleSelecting() {
         endQuickShape()
         endFilling()
+        endLayerOpacity()
         if (selecting) {
             closeSelecting()
             return
@@ -4745,6 +4880,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleTransform() {
         endQuickShape()
         endFilling()
+        endLayerOpacity()
         if (transforming) {
             endTransform(true)
             return

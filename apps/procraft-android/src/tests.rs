@@ -2663,3 +2663,33 @@ fn a_layered_psd_comes_in_as_an_artwork() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_layer_shown_alone_hides_the_others_until_solo_ends() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    let dot = |x: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 50.0, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    dot(20.0);
+    let top = s.add_layer();
+    dot(80.0);
+    assert_eq!(pixel(&s, 20, 50), [0, 0, 0, 255]);
+    assert!(s.set_solo(Some(top)));
+    assert_eq!(s.solo(), Some(top));
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 80, 50), [0, 0, 0, 255]);
+    // undo changes the artwork, not how it is looked at
+    s.undo();
+    assert_eq!(s.solo(), Some(top));
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    assert!(s.set_solo(None));
+    assert_eq!(pixel(&s, 20, 50), [0, 0, 0, 255]);
+    assert!(!s.set_solo(Some(999)));
+    // the layer shown alone undone away: every layer shows again
+    assert!(s.set_solo(Some(top)));
+    s.undo();
+    assert_eq!(s.solo(), None);
+    assert_eq!(pixel(&s, 20, 50), [0, 0, 0, 255]);
+}

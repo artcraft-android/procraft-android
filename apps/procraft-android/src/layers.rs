@@ -447,6 +447,30 @@ impl CanvasSession {
         .is_some()
     }
 
+    /// Shows layer `id` alone, the others left out of the picture (solo visibility), or with
+    /// none every layer as it is set again. Not an undo step; false if `id` isn't a layer.
+    pub fn set_solo(&self, id: Option<u64>) -> bool {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let solo = id.map(LayerId);
+        if solo.is_some_and(|s| st.doc.layer(s).is_none()) {
+            return false;
+        }
+        st.doc.solo = solo;
+        if let Some(canvas) = st.canvas.as_mut() {
+            canvas.invalidate();
+        }
+        st.revision += 1;
+        self.shared.frame(st);
+        true
+    }
+
+    /// The layer shown alone, if one is.
+    pub fn solo(&self) -> Option<u64> {
+        let st = self.shared.lock();
+        st.doc.solo.filter(|s| st.doc.layer(*s).is_some()).map(|s| s.0)
+    }
+
     /// Opacity 0..1; `done` ends the drag (one undo step for the whole drag).
     pub fn set_layer_opacity(&self, id: u64, opacity: f32, done: bool) -> bool {
         self.change_live("layer opacity", done, |d| d.set_opacity(LayerId(id), opacity))

@@ -3292,8 +3292,11 @@ impl Canvas {
             }
             self.dirty = self.dirty.union(s.rect);
         }
+        let solo = doc.solo;
         let replaced = step.doc.map(|before| Box::new(std::mem::replace(doc, *before)));
         if replaced.is_some() {
+            // a layer shown alone is how the artwork is looked at, not a change to undo
+            doc.solo = solo.filter(|s| doc.layer(*s).is_some());
             self.dirty = self.full();
         }
         let selection = step.selection.map(|before| {
@@ -3530,6 +3533,10 @@ impl Canvas {
         let focus = animation.and_then(|_| self.play_frame.or_else(|| animation::current_frame(doc)));
         for id in doc.members(group) {
             let Some(layer) = doc.layer(id) else { continue };
+            // another layer shown alone
+            if doc.soloed_out(id) {
+                continue;
+            }
             let look = match (animation, focus, frames.iter().position(|f| *f == id)) {
                 (Some(a), Some(c), Some(i)) => {
                     match animation::look(a, i, frames.len(), c, self.play_frame.is_some()) {

@@ -9,6 +9,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.snapping.SnapPosition
 import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.layout.Arrangement
@@ -206,6 +207,11 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                         .zIndex(if (dragging) 1f else 0f).graphicsLayer {
                             translationY = if (dragging) dragOffset else 0f
                             alpha = if (blendAt in 0 until index) belowShown else 1f
+                        }
+                        .twoFingerTap(l.kind != LayerType.MASK) {
+                            // two fingers tapped on a layer: its opacity, dragged across the canvas
+                            vm.selectLayer(l.id)
+                            vm.startLayerOpacity()
                         }
                         .pointerInput(l.id) {
                             if (l.kind == LayerType.MASK) return@pointerInput
@@ -566,7 +572,7 @@ private fun GroupRow(
         Box(Modifier.offset(x = 8.dp).size(44.dp, GroupHeight).clickable(onClick = onToggle), contentAlignment = Alignment.Center) {
             Icon(if (l.collapsed) PcIcons.ChevronRight else PcIcons.ChevronDown, contentDescription = if (l.collapsed) "Open" else "Close", tint = ink, modifier = Modifier.size(16.dp))
         }
-        Box(Modifier.size(44.dp, GroupHeight).clickable { vm.toggleVisible(l) }, contentAlignment = Alignment.Center) {
+        Box(Modifier.size(44.dp, GroupHeight).visibilityTouch(vm, l), contentAlignment = Alignment.Center) {
             CheckBox(l.visible, if (l.current || l.picked) Color.White else Pc.CheckFill)
         }
         Spacer(Modifier.width(8.dp))
@@ -643,7 +649,7 @@ private fun LayerRow(
                 Text(blendCode(vm, l.blend), color = letter, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             }
         }
-        Box(Modifier.size(44.dp, 47.dp).clickable { vm.toggleVisible(l) }, contentAlignment = Alignment.Center) {
+        Box(Modifier.size(44.dp, 47.dp).visibilityTouch(vm, l), contentAlignment = Alignment.Center) {
             CheckBox(l.visible, if (selected || l.picked) Color.White else Pc.CheckFill)
         }
         Spacer(Modifier.width(8.dp))
@@ -984,3 +990,28 @@ private fun BackgroundRow(vm: CanvasViewModel) {
         Spacer(Modifier.width(8.dp))
     }
 }
+
+/** A layer's visibility box: tapped, shown or hidden; held, shown alone (or every layer again). */
+private fun Modifier.visibilityTouch(vm: CanvasViewModel, l: LayerInfo): Modifier =
+    pointerInput(l) { detectTapGestures(onTap = { vm.toggleVisible(l) }, onLongPress = { vm.toggleSolo(l) }) }
+
+/** Two fingers tapping (down and up together, still) do [onTap]; the touches go on to the rest as they are. */
+private fun Modifier.twoFingerTap(enabled: Boolean, onTap: () -> Unit): Modifier = if (!enabled) this else pointerInput(Unit) {
+    awaitEachGesture {
+        val first = awaitFirstDown(requireUnconsumed = false, pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+        var two = false
+        var moved = false
+        while (true) {
+            val e = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+            if (e.changes.count { it.pressed } >= 2) two = true
+            e.changes.firstOrNull { it.id == first.id }?.let { if ((it.position - first.position).getDistance() > viewConfiguration.touchSlop) moved = true }
+            if (e.changes.none { it.pressed }) {
+                if (two && !moved && (e.changes.maxOfOrNull { it.uptimeMillis } ?: 0L) - first.uptimeMillis <= TWO_FINGER_TAP_MS) onTap()
+                break
+            }
+        }
+    }
+}
+
+/** How long two fingers may stay down and still tap, milliseconds. */
+private const val TWO_FINGER_TAP_MS = 400L

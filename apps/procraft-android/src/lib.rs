@@ -1077,6 +1077,21 @@ impl CanvasSession {
         self.shared.frame(&mut st);
     }
 
+    /// Zooms to the canvas's actual size (a canvas pixel to a window pixel) about the middle of
+    /// the window, keeping its turn, settling into place as [`CanvasSession::settle_to_fit`] does.
+    pub fn settle_to_actual_size(&self) {
+        let mut st = self.shared.lock();
+        let Some(from) = st.view else { return };
+        let middle = Vec2::new(st.window_size.0 as f32 / 2.0, st.window_size.1 as f32 / 2.0);
+        let Some(to) =
+            from.screen_to_canvas(middle).and_then(|c| View::centred(c, 1.0, from.rotation(), st.window_size))
+        else {
+            return;
+        };
+        st.view_motion = Some(ViewMotion { from, to, start: std::time::Instant::now(), curve: ViewCurve::Settle });
+        self.shared.frame(&mut st);
+    }
+
     /// Fits the whole canvas in the window again, growing back into place over 0.3 s, slowing to
     /// a stop (as leaving crop without cropping does).
     pub fn ease_to_fit(&self) {

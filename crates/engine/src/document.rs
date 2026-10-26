@@ -328,6 +328,9 @@ pub struct Document {
     /// built-in profiles.
     #[serde(default, deserialize_with = "crate::cms::lenient", skip_serializing_if = "Option::is_none")]
     pub icc: Option<crate::cms::CanvasIcc>,
+    /// The layer shown alone, the others left out of the picture (solo visibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solo: Option<LayerId>,
 }
 
 /// A document's profile settings apart from it.
@@ -369,6 +372,7 @@ impl Document {
             animation: None,
             profile: crate::profile::Profile::Srgb,
             icc: None,
+            solo: None,
         };
         doc.add_layer();
         doc
@@ -512,6 +516,16 @@ impl Document {
             l.reference = on && l.id == id;
         }
         true
+    }
+
+    /// Whether layer `id` is left out of the picture while another is shown alone (solo): all
+    /// but that layer, its mask and the groups it is in.
+    pub fn soloed_out(&self, id: LayerId) -> bool {
+        let Some(solo) = self.solo.filter(|s| self.layer(*s).is_some()) else { return false };
+        if id == solo || self.mask_of(solo) == Some(id) {
+            return false;
+        }
+        !(self.layer(id).is_some_and(|l| l.kind == LayerKind::Group) && self.is_inside(solo, id))
     }
 
     /// The reference layer, if one is set.
@@ -1286,6 +1300,9 @@ impl Document {
         self.fix_clips();
         if self.layer(self.current).is_none() {
             self.current = self.layers.last().map_or(LayerId(0), |l| l.id);
+        }
+        if self.solo.is_some_and(|s| self.layer(s).is_none()) {
+            self.solo = None;
         }
         let (current, ids): (LayerId, Vec<LayerId>) = (self.current, self.layers.iter().map(|l| l.id).collect());
         self.picked.retain(|p| *p != current && ids.contains(p));

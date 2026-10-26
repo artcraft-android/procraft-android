@@ -45,7 +45,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     // IDLE: a finger that doesn't paint, waiting for a hold or more fingers; HOVER: fingers
     // setting the brush while the pen hovers
-    private enum class Mode { NONE, PEN, FINGER, IDLE, GESTURE, PICK, TRANSFORM, SELECT, ADJUST, PUCK, SHAPE, HOVER, TURN, POUR }
+    private enum class Mode { NONE, PEN, FINGER, IDLE, GESTURE, PICK, TRANSFORM, SELECT, ADJUST, PUCK, SHAPE, HOVER, TURN, POUR, OPACITY }
 
     /** The pen is hovering over the canvas. */
     private var penHovering = false
@@ -430,6 +430,13 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     vm.pickAt(e.x, e.y, pickSide)
                     return true
                 }
+                if (vm.opacityLayer != null) {
+                    // Layer opacity: one pen or finger drags the layer's opacity across the canvas
+                    mode = Mode.OPACITY
+                    lastSelectX = e.x
+                    lastSelectTime = e.eventTime
+                    return true
+                }
                 if (vm.dropBand == CanvasViewModel.DropBand.FILLING) {
                     // Continue filling: the touch fills where it lands; slid, it changes the threshold
                     pourStart = Offset(e.x, e.y)
@@ -607,6 +614,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 }
                 // a second finger takes back the fill the first one made
                 if (mode == Mode.POUR) vm.pourEnd(keep = false)
+                if (mode == Mode.OPACITY) vm.liftLayerOpacity()
                 if (mode == Mode.FINGER || mode == Mode.IDLE || mode == Mode.TRANSFORM || mode == Mode.SELECT || mode == Mode.TURN || mode == Mode.POUR) {
                     gestureStart = e.eventTime
                     gestureScale = 1f
@@ -652,6 +660,12 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 Mode.GESTURE -> if (fingers >= 3) scrub(e) else moveGesture(e, s)
                 Mode.SELECT -> select(e, done = false)
                 Mode.POUR -> pour(e, done = false)
+                Mode.OPACITY -> {
+                    val dx = (e.x - lastSelectX) / resources.displayMetrics.density
+                    vm.dragLayerOpacity(dragStep(dx, e.eventTime - lastSelectTime))
+                    lastSelectX = e.x
+                    lastSelectTime = e.eventTime
+                }
                 Mode.ADJUST -> if (vm.adjustment == Adjustment.LIQUIFY) {
                     vm.liquifyStroke(liquifyPoints(e), start = false)
                     followLiquify(e)
@@ -717,6 +731,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     Mode.PUCK, Mode.SHAPE, Mode.IDLE, Mode.HOVER, Mode.TURN -> Unit
                     Mode.SELECT -> select(e, done = true)
                     Mode.POUR -> pour(e, done = true)
+                    Mode.OPACITY -> vm.liftLayerOpacity()
                     Mode.ADJUST -> if (vm.adjustment == Adjustment.LIQUIFY) {
                         // still moving when it lifts, liquify carries on
                         if (e.eventTime - liquifyTime <= LIQUIFY_STILL_MS) vm.liquifyLifted(liquifyVelocity.x, liquifyVelocity.y)

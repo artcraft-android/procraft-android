@@ -117,6 +117,7 @@ fun AppRoot(vm: CanvasViewModel) {
                     // a mode taking the screen slides it off its edge, and back when it ends
                     androidx.compose.animation.AnimatedVisibility(
                         vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
+                            vm.opacityLayer == null &&
                             (vm.adjustment == null || vm.adjustPencil),
                         Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = maxHeight * Pc.SIDE_BAR_CENTRE - Pc.SideBarHeight / 2),
                         enter = Motion.sideBarIn(vm.rightHanded),
@@ -228,6 +229,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 QuickMenu(vm)
                 LayerChoice(vm)
                 if (!vm.barsHidden) QuickShapeBar(vm, Modifier.offset(y = Pc.BarHeight))
+                if (vm.opacityLayer != null && !vm.barsHidden) LayerOpacityBar(vm, Modifier.offset(y = Pc.BarHeight))
                 if (vm.adjustment != null && !vm.barsHidden) {
                     AdjustmentBar(vm, Modifier.offset(y = Pc.BarHeight))
                     AdjustModes(vm, Modifier.align(Alignment.TopCenter).offset(y = Pc.BarHeight + 52.dp))
