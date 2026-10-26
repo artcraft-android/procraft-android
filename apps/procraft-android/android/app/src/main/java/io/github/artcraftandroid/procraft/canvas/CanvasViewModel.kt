@@ -1397,6 +1397,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             newFromModel(uri, name)
         } else if (head != null && String(head, Charsets.ISO_8859_1) == "8BPS") {
             importPsd(uri, name)
+        } else if (head != null && String(head, Charsets.ISO_8859_1) == "%PDF") {
+            importPdf(uri, name)
         } else if (head != null && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()) {
             val ok = withContext(Dispatchers.IO) {
                 val dir = store.newFolder(galleryDir)
@@ -1406,6 +1408,61 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             if (ok) refreshGallery() else message = "This file can't be opened."
         } else {
             pictureArtwork(uri)
+        }
+    }
+
+    /**
+     * A PDF from [uri] made into a new artwork named after its file: each page a layer ("Page 1"
+     * at the bottom), drawn on white at [PDF_DPI] (the long side kept within [PDF_MOST_SIDE]) and
+     * fitted to the first page's size, with Page Assist on; a message says why if it can't be.
+     */
+    private suspend fun importPdf(uri: android.net.Uri, name: String?) {
+        val app = getApplication<Application>()
+        val outcome = withContext(Dispatchers.IO) {
+            val pages = File(app.cacheDir, "pdf-${System.nanoTime()}").apply { mkdirs() }
+            val dir = store.newFolder(galleryDir)
+            try {
+                app.contentResolver.openFileDescriptor(uri, "r")?.use { fd ->
+                    android.graphics.pdf.PdfRenderer(fd).use { pdf ->
+                        if (pdf.pageCount == 0) return@use io.github.artcraftandroid.procraft.core.PagesOutcome.Unreadable
+                        // the canvas: the first page's size at the resolution, within the most side
+                        val (w, h) = pdf.openPage(0).use { p ->
+                            val scale = minOf(PDF_DPI / 72f, PDF_MOST_SIDE / maxOf(p.width, p.height).toFloat())
+                            (p.width * scale).roundToInt().coerceAtLeast(1) to (p.height * scale).roundToInt().coerceAtLeast(1)
+                        }
+                        val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                        for (i in 0 until pdf.pageCount) {
+                            pdf.openPage(i).use { p ->
+                                bitmap.eraseColor(android.graphics.Color.WHITE)
+                                // each page fitted into the canvas, in its middle
+                                val s = minOf(w / p.width.toFloat(), h / p.height.toFloat())
+                                val m = android.graphics.Matrix().apply {
+                                    postScale(s, s)
+                                    postTranslate((w - p.width * s) / 2f, (h - p.height * s) / 2f)
+                                }
+                                p.render(bitmap, null, m, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            }
+                            File(pages, "page-${i + 1}.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                        }
+                        bitmap.recycle()
+                        io.github.artcraftandroid.procraft.core.importPages(
+                            pages.path, pdf.pageCount.toUInt(), w.toUInt(), h.toUInt(), PDF_DPI, dir.path,
+                            name?.substringBeforeLast('.')?.trim().orEmpty(),
+                        )
+                    }
+                } ?: io.github.artcraftandroid.procraft.core.PagesOutcome.Unreadable
+            } catch (e: Exception) {
+                android.util.Log.e("ProCraft", "importing a PDF", e)
+                io.github.artcraftandroid.procraft.core.PagesOutcome.Unreadable
+            } finally {
+                pages.deleteRecursively()
+            }.also { if (it != io.github.artcraftandroid.procraft.core.PagesOutcome.Imported) dir.deleteRecursively() }
+        }
+        when (outcome) {
+            io.github.artcraftandroid.procraft.core.PagesOutcome.Imported -> refreshGallery()
+            is io.github.artcraftandroid.procraft.core.PagesOutcome.TooManyPages ->
+                message = "This PDF has more pages than a canvas its size can hold as layers (${outcome.most})."
+            io.github.artcraftandroid.procraft.core.PagesOutcome.Unreadable -> message = "This PDF can't be opened."
         }
     }
 
@@ -5632,6 +5689,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private const val SELECTION_KIND = "selectionKind"
         private const val SELECTION_THRESHOLD = "selectionThreshold"
         private const val DROP_THRESHOLD = "dropThreshold"
+
+        /** A PDF's pages come in at this resolution, their long side at most [PDF_MOST_SIDE] pixels. */
+        private const val PDF_DPI = 300f
+        private const val PDF_MOST_SIDE = 4096
 
         /** How long the band offers Continue filling after a drop. */
         private const val DROP_BAND_MS = 2_500L

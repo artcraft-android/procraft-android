@@ -776,6 +776,91 @@ pub(crate) fn straight_alpha(rgba: &[u8]) -> Vec<u8> {
     out
 }
 
+/// How bringing in a document's pages went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PagesOutcome {
+    Imported,
+    /// More pages than a canvas their size holds as layers (`most`).
+    TooManyPages {
+        most: u32,
+    },
+    /// A page couldn't be read.
+    Unreadable,
+}
+
+/// Makes an artwork named `name` in the folder `dir` from `count` pages, each a `width` x `height`
+/// PNG `page-N.png` (N from 1) in the folder `pages`: a layer each, "Page N", the first at the
+/// bottom, with Page Assist on and `dpi` its resolution. Used for a PDF's pages.
+#[uniffi::export]
+pub fn import_pages(
+    pages: String,
+    count: u32,
+    width: u32,
+    height: u32,
+    dpi: f32,
+    dir: String,
+    name: String,
+) -> PagesOutcome {
+    use procraft_engine::document::Layer;
+    let (w, h) = (
+        width.clamp(1, procraft_engine::document::MAX_CANVAS_EDGE),
+        height.clamp(1, procraft_engine::document::MAX_CANVAS_EDGE),
+    );
+    let most = Document::new(w, h).layer_cap();
+    if count as usize > most {
+        return PagesOutcome::TooManyPages { most: u32::try_from(most).unwrap_or(u32::MAX) };
+    }
+    let mut layers = Vec::new();
+    let mut pixels = Vec::new();
+    for n in 1..=count.max(1) {
+        let id = LayerId(u64::from(n));
+        match read_png(&Path::new(&pages).join(format!("page-{n}.png")), w, h) {
+            Ok(rgba) => pixels.push((id, rgba)),
+            Err(e) => {
+                log::error!("a page: {e}");
+                return PagesOutcome::Unreadable;
+            }
+        }
+        layers.push(Layer {
+            id,
+            name: format!("Page {n}"),
+            visible: true,
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            alpha_lock: false,
+            clipped: false,
+            locked: false,
+            reference: false,
+            kind: LayerKind::Paint,
+            parent: None,
+            collapsed: false,
+            text: None,
+            private: false,
+            assisted: false,
+        });
+    }
+    let mut doc = Document::from_layers(w, h, layers, LayerId(1));
+    if dpi.is_finite() && dpi > 0.0 {
+        doc.dpi = dpi.clamp(1.0, 9999.0);
+    }
+    doc.animation = Some(procraft_engine::animation::Animation { pages: true, ..Default::default() });
+    let name =
+        if name.trim().is_empty() { "Untitled Artwork".to_owned() } else { name.trim().chars().take(256).collect() };
+    // the first page is the gallery's thumbnail until the artwork is opened
+    let first = pixels.first().map(|(_, p)| thumbnail(p, w, h, THUMBNAIL_SIDE));
+    let session = CanvasSession::with_document(doc, name, pixels);
+    if let Err(e) = session.save(dir.clone()) {
+        log::error!("saving imported pages: {e}");
+        return PagesOutcome::Unreadable;
+    }
+    if let Some((tw, th, thumb)) = first
+        && let Err(e) = write_atomically(&Path::new(&dir).join("thumbnail.png"), |p| write_png(p, tw, th, &thumb, &[]))
+    {
+        log::error!("imported pages' thumbnail: {e}");
+    }
+    PagesOutcome::Imported
+}
+
 /// How bringing in a PSD went.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum PsdOutcome {

@@ -2708,3 +2708,47 @@ fn a_layer_shown_alone_hides_the_others_until_solo_ends() {
     assert_eq!(s.solo(), None);
     assert_eq!(pixel(&s, 20, 50), [0, 0, 0, 255]);
 }
+
+#[test]
+fn a_documents_pages_come_in_as_page_layers() {
+    let dir = std::env::temp_dir().join(format!("procraft-pages-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (w, h) = (6, 4);
+    for (n, v) in [(1, 200u8), (2, 40u8)] {
+        let rgba: Vec<u8> = std::iter::repeat_n([v, v, v, 255], (w * h) as usize).flatten().collect();
+        crate::project::write_png(&dir.join(format!("page-{n}.png")), w, h, &rgba, &[]).unwrap();
+    }
+    let art = dir.join("art");
+    let outcome = crate::project::import_pages(
+        dir.to_string_lossy().into_owned(),
+        2,
+        w,
+        h,
+        300.0,
+        art.to_string_lossy().into_owned(),
+        "Comic".into(),
+    );
+    assert_eq!(outcome, crate::project::PagesOutcome::Imported);
+    assert!(art.join("thumbnail.png").exists());
+    let s = CanvasSession::open(art.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(s.name(), "Comic");
+    let names: Vec<String> = s.layers().iter().map(|l| l.name.clone()).collect();
+    // listed top first: the first page at the bottom
+    assert_eq!(names, ["Page 2", "Page 1"]);
+    assert!(s.animation_settings().is_some_and(|a| a.pages));
+    // a page missing
+    assert_eq!(
+        crate::project::import_pages(
+            dir.to_string_lossy().into_owned(),
+            3,
+            w,
+            h,
+            300.0,
+            dir.join("bad").to_string_lossy().into_owned(),
+            String::new()
+        ),
+        crate::project::PagesOutcome::Unreadable
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
