@@ -2,6 +2,7 @@
 //! view. No GPU and no platform code: `procraft-gpu` draws what this crate describes, and the app
 //! feeds it input.
 
+pub mod abr;
 pub mod animation;
 pub mod applz4;
 pub mod base64;

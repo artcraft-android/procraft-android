@@ -2752,3 +2752,39 @@ fn a_documents_pages_come_in_as_page_layers() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_photoshop_brush_files_tips_become_a_set() {
+    // a version 2 file with one sampled 2 x 2 tip, its rows packed
+    let mut body = Vec::new();
+    body.extend_from_slice(&0u32.to_be_bytes());
+    body.extend_from_slice(&40u16.to_be_bytes());
+    let name: Vec<u16> = "Tip".encode_utf16().chain([0]).collect();
+    body.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    for u in name {
+        body.extend_from_slice(&u.to_be_bytes());
+    }
+    body.push(1);
+    body.extend_from_slice(&[0; 8]);
+    for v in [0u32, 0, 2, 2] {
+        body.extend_from_slice(&v.to_be_bytes());
+    }
+    body.extend_from_slice(&8u16.to_be_bytes());
+    body.push(1);
+    body.extend_from_slice(&2u16.to_be_bytes());
+    body.extend_from_slice(&2u16.to_be_bytes());
+    body.extend_from_slice(&[0xFF, 255, 0xFF, 255]);
+    let mut file = Vec::new();
+    for v in [2u16, 1, 2] {
+        file.extend_from_slice(&v.to_be_bytes());
+    }
+    file.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    file.extend_from_slice(&body);
+    let s = CanvasSession::new(64, 64);
+    assert_eq!(s.import_abr(file, "Chalk".into()), Some(0));
+    let library = s.brush_library();
+    let set = library.first().unwrap();
+    assert_eq!(set.name, "Chalk");
+    assert_eq!(set.brushes.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Tip"]);
+    assert_eq!(s.import_abr(b"nothing".to_vec(), String::new()), None);
+}

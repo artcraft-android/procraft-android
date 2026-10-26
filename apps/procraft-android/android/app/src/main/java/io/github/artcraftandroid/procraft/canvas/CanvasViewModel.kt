@@ -1395,6 +1395,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             message = "This palette can't be read."
         } else if (name != null && isModelName(name)) {
             newFromModel(uri, name)
+        } else if (name != null && name.endsWith(".abr", ignoreCase = true)) {
+            val bytes = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }
+            if (bytes == null || !addAbr(bytes, name)) message = "This file has no brushes in it."
         } else if (head != null && String(head, Charsets.ISO_8859_1) == "8BPS") {
             importPsd(uri, name)
         } else if (head != null && String(head, Charsets.ISO_8859_1) == "%PDF") {
@@ -3151,8 +3154,31 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             val bytes = withContext(Dispatchers.IO) {
                 runCatching { getApplication<Application>().contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
             } ?: return@launch
-            if (!addBrushes(bytes)) message = "This file has no brushes in it."
+            val name = withContext(Dispatchers.IO) { fileName(uri) }
+            val added = if (name?.endsWith(".abr", ignoreCase = true) == true) addAbr(bytes, name) else addBrushes(bytes)
+            if (!added) message = "This file has no brushes in it."
         }
+    }
+
+    /**
+     * A Photoshop brush file's tips [bytes] as a set of brushes named after the file [name] (shown),
+     * or, with no canvas open, kept until one opens; false if the file has none.
+     */
+    private suspend fun addAbr(bytes: ByteArray, name: String): Boolean {
+        val setName = name.substringBeforeLast('.').trim()
+        val s = session
+        if (s == null) {
+            withContext(Dispatchers.IO) {
+                pendingBrushDir.mkdirs()
+                File(pendingBrushDir, "${System.nanoTime()}-${setName.replace(Regex("[^A-Za-z0-9 _-]"), "_")}.abr").writeBytes(bytes)
+            }
+            message = "Brushes will be added to the library when a canvas opens."
+            return true
+        }
+        val set = withContext(Dispatchers.Default) { s.importAbr(bytes, setName) } ?: return false
+        shownSet = set.toInt()
+        libraryChanged()
+        return true
     }
 
     /**
@@ -3184,7 +3210,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val files = pendingBrushDir.listFiles()?.sortedBy { it.name } ?: return
         var any = false
         for (f in files) {
-            runCatching { s.importBrushes(f.readBytes()) }.getOrNull()?.let {
+            val abr = f.name.endsWith(".abr")
+            runCatching { if (abr) s.importAbr(f.readBytes(), f.nameWithoutExtension.substringAfter('-')) else s.importBrushes(f.readBytes()) }.getOrNull()?.let {
                 shownSet = it.toInt()
                 any = true
             }

@@ -107,6 +107,34 @@ impl CanvasSession {
         Some(at as u32)
     }
 
+    /// Adds the sampled tips of a Photoshop brush file (`bytes`) as brushes in a set of their own
+    /// named `name` (else "Imported") at the top of the library: each tip its shape, with the
+    /// file's spacing. Returns the set, or none if the file holds no tips.
+    pub fn import_abr(&self, bytes: Vec<u8>, name: String) -> Option<u32> {
+        let tips = procraft_engine::abr::read(&bytes)?;
+        let brushes: Vec<Brush> = tips
+            .iter()
+            .map(|t| {
+                let mut b = Brush { name: t.name.clone(), ..Brush::round_pen() };
+                b.shape.image = None;
+                b.shape.source = Source::new(fitted(t));
+                if let Some(spacing) = t.spacing {
+                    b.spacing = spacing.clamp(0.01, 10.0);
+                }
+                b
+            })
+            .collect();
+        if brushes.is_empty() {
+            return None;
+        }
+        let mut st = self.shared.lock();
+        let name = if name.trim().is_empty() { IMPORTED.to_owned() } else { name.trim().to_owned() };
+        let origins = vec![None; brushes.len()];
+        st.library.insert(0, LibrarySet { name, brushes, origins, icon: crate::brush_library::IMPORTED_ICON });
+        st.move_brush_refs(|(rs, ri)| Some((rs + 1, ri)));
+        Some(0)
+    }
+
     /// Brush `index` of `set` as a brush file.
     pub fn brush_as_file(&self, set: u32, index: u32) -> Option<Vec<u8>> {
         let brush = self.shared.lock().library.get(set as usize)?.brushes.get(index as usize)?.clone();
@@ -151,6 +179,41 @@ fn folder_id(seed: u64, i: usize) -> String {
 
 /// A brush from a brush file: the studio's controls on a fresh brush, its images found or stood in
 /// for.
+/// A Photoshop tip fitted into a shape's square, centred on black: each pixel the average of the
+/// tip's pixels it covers (or the nearest one, drawn up).
+fn fitted(t: &procraft_engine::abr::AbrTip) -> Vec<u8> {
+    let n = TEXTURE_SIZE;
+    let (w, h) = (t.width as usize, t.height as usize);
+    let mut out = vec![0u8; n * n];
+    if w == 0 || h == 0 {
+        return out;
+    }
+    let scale = n as f32 / w.max(h) as f32;
+    let (tw, th) =
+        (((w as f32 * scale).round() as usize).clamp(1, n), ((h as f32 * scale).round() as usize).clamp(1, n));
+    let (ox, oy) = ((n - tw) / 2, (n - th) / 2);
+    let span = |i: usize, most: usize| {
+        let from = ((i as f32 / scale) as usize).min(most - 1);
+        (from, (((i + 1) as f32 / scale).ceil() as usize).clamp(from + 1, most))
+    };
+    for y in 0..th {
+        let (y0, y1) = span(y, h);
+        for x in 0..tw {
+            let (x0, x1) = span(x, w);
+            let mut sum = 0u32;
+            for sy in y0..y1 {
+                let row = t.pixels.get(sy * w + x0..sy * w + x1).unwrap_or_default();
+                sum += row.iter().map(|&v| u32::from(v)).sum::<u32>();
+            }
+            let count = ((y1 - y0) * (x1 - x0)).max(1) as u32;
+            if let Some(v) = out.get_mut((oy + y) * n + ox + x) {
+                *v = (sum / count) as u8;
+            }
+        }
+    }
+    out
+}
+
 fn brush_from(file: &BrushFile) -> Brush {
     // only the curves the file has (a control without one doesn't follow the pressure)
     let mut b = Brush { name: file.name.clone(), pressure_curves: Default::default(), ..Brush::round_pen() };
