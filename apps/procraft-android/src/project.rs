@@ -67,6 +67,22 @@ impl SavedView {
     }
 }
 
+/// An artwork's time-lapse in a package: whether it records, its video's settings (quality 0 to 3,
+/// resolution 0 to 2, HEVC or H.264), and its video so far as MP4 files in order, `width` ×
+/// `height` at `fps` and `bitrate` bits a second.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct PackageTimeLapse {
+    pub recording: bool,
+    pub quality: u8,
+    pub resolution: u8,
+    pub hevc: bool,
+    pub segments: Vec<String>,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate: u64,
+}
+
 /// What an artwork keeps about itself besides the picture.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct ArtworkInfo {
@@ -410,8 +426,32 @@ impl CanvasSession {
         Ok(session)
     }
 
-    /// The artwork as a layered package at `path`; `seed` makes its layers' ids.
-    pub fn export_package(&self, path: String, seed: u64) -> Result<(), MobileError> {
+    /// The artwork as a layered package at `path`, with its time-lapse; `seed` makes its layers' ids.
+    pub fn export_package(
+        &self,
+        path: String,
+        seed: u64,
+        time_lapse: Option<PackageTimeLapse>,
+    ) -> Result<(), MobileError> {
+        let time_lapse = match time_lapse {
+            Some(t) => {
+                let mut segments = Vec::with_capacity(t.segments.len());
+                for s in &t.segments {
+                    segments.push(fs::read(s).map_err(|e| file_error("reading the time-lapse", e))?);
+                }
+                Some(procraft_engine::native::TimeLapse {
+                    recording: t.recording,
+                    quality: t.quality,
+                    resolution: t.resolution,
+                    hevc: t.hevc,
+                    segments,
+                    frame_size: (t.width, t.height),
+                    fps: t.fps,
+                    bitrate: t.bitrate,
+                })
+            }
+            None => None,
+        };
         let (doc, pixels, composite, name, info) = {
             let mut guard = self.shared.lock();
             let st = &mut *guard;
@@ -449,6 +489,7 @@ impl CanvasSession {
             strokes: info.strokes,
             tracked_seconds: info.tracked_ms as f64 / 1000.0,
             seed,
+            time_lapse: time_lapse.as_ref(),
         });
         write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))
     }
@@ -873,6 +914,39 @@ pub enum PsdOutcome {
     Unsupported,
     /// Not a PSD, or damaged.
     Unreadable,
+}
+
+/// The time-lapse the package at `path` keeps, its segments written into the folder `dir` as
+/// `segment-N.mp4` (N from 1, in order); none if it keeps none.
+#[uniffi::export]
+pub fn package_time_lapse(path: String, dir: String) -> Result<Option<PackageTimeLapse>, MobileError> {
+    let bytes = fs::read(&path).map_err(|e| file_error("opening the file", e))?;
+    let Some(t) = procraft_engine::native::read_time_lapse(&bytes)
+        .map_err(|e| file_error("opening the file", format!("{e:?}")))?
+    else {
+        return Ok(None);
+    };
+    let dir = Path::new(&dir);
+    if !t.segments.is_empty() {
+        fs::create_dir_all(dir).map_err(|e| file_error("saving the time-lapse", e))?;
+    }
+    let mut segments = Vec::with_capacity(t.segments.len());
+    for (i, data) in t.segments.iter().enumerate() {
+        let file = dir.join(format!("segment-{}.mp4", i + 1));
+        fs::write(&file, data).map_err(|e| file_error("saving the time-lapse", e))?;
+        segments.push(file.to_string_lossy().into_owned());
+    }
+    Ok(Some(PackageTimeLapse {
+        recording: t.recording,
+        quality: t.quality,
+        resolution: t.resolution,
+        hevc: t.hevc,
+        segments,
+        width: t.frame_size.0,
+        height: t.frame_size.1,
+        fps: t.fps,
+        bitrate: t.bitrate,
+    }))
 }
 
 /// Makes the layered PSD (or PSB) at `path` an artwork named `name` in the folder `dir`: its

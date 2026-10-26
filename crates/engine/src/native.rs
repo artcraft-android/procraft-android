@@ -5,6 +5,9 @@
 //! Tiles are `tileSize` squares (smaller along the right and top edges), rows stored bottom-up,
 //! pixels premultiplied RGBA (masks: one grey byte). A missing tile is empty. The canvas is stored
 //! unturned; `orientation` (1 to 4) says how many quarter turns it is shown at.
+//!
+//! The time-lapse is kept as numbered video segments (`video/segments/segment-N.mp4`, played in
+//! order), described by the archive's segment info and its document's video settings.
 
 use std::sync::Arc;
 
@@ -20,6 +23,47 @@ use crate::zip::{ZipReader, ZipWriter};
 pub const EXTENSION: &str = "procreate";
 /// The edge of a tile written.
 const TILE: u32 = 256;
+
+/// The names the video settings are kept by: quality Low, Good, Studio and Lossless; resolution
+/// 1080p, 2K and 4K.
+const QUALITY_NAMES: [&str; 4] = ["pro50.vqLow", "pro50.vqGood", "pro50.vqStudio", "pro50.vqLossless"];
+const RESOLUTION_NAMES: [&str; 3] = ["pro50.vr1080", "pro50.vr2K", "pro50.vr4K"];
+/// Where the segments are, and what they are named.
+const SEGMENT_PREFIX: &str = "video/segments/segment-";
+const SEGMENT_EXTENSIONS: [&str; 3] = ["mp4", "mov", "m4v"];
+
+/// A canvas's time-lapse as a package keeps it: whether it records, its video's settings, and the
+/// video recorded so far as segments (MP4s, in order), `frame_size` at `fps`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimeLapse {
+    pub recording: bool,
+    /// Low, Good, Studio or Lossless (0 to 3).
+    pub quality: u8,
+    /// 1080p, 2K or 4K (0 to 2).
+    pub resolution: u8,
+    /// HEVC, or H.264.
+    pub hevc: bool,
+    pub segments: Vec<Vec<u8>>,
+    pub frame_size: (u32, u32),
+    pub fps: u32,
+    /// Bits a second.
+    pub bitrate: u64,
+}
+
+impl Default for TimeLapse {
+    fn default() -> TimeLapse {
+        TimeLapse {
+            recording: true,
+            quality: 1,
+            resolution: 0,
+            hevc: false,
+            segments: Vec::new(),
+            frame_size: (0, 0),
+            fps: 30,
+            bitrate: 0,
+        }
+    }
+}
 
 /// An artwork read from a package.
 pub struct Imported {
@@ -384,6 +428,8 @@ pub struct Export<'a> {
     pub tracked_seconds: f64,
     /// Seeds the layers' UUIDs.
     pub seed: u64,
+    /// The time-lapse, if the canvas has one.
+    pub time_lapse: Option<&'a TimeLapse>,
 }
 
 /// Writes a package.
@@ -448,56 +494,172 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
     let strokes = b.add(Value::Int(i64::try_from(e.strokes).unwrap_or(i64::MAX)));
     let reference_kind = b.string("{0, 0}");
     let reference_size = b.string("{350, 532}");
-    b.fill(
-        &doc_ref,
-        &["SilicaDocument", "ValkyrieDocument", "NSObject"],
-        vec![
-            ("SilicaDocumentArchiveDPIKey", Value::Real(f64::from(doc.dpi))),
-            ("SilicaDocumentArchiveUnitKey", Value::Int(0)),
-            ("SilicaDocumentTrackedTimeKey", Value::Real(e.tracked_seconds)),
-            ("SilicaDocumentVideoPurgedKey", Value::Bool(false)),
-            ("animation", animation),
-            ("authorName", author),
-            ("backgroundColor", background),
-            ("backgroundColorHSBA", hsba),
-            ("backgroundHidden", Value::Bool(!doc.background_visible)),
-            ("colorProfile", profile),
-            ("composite", composite),
-            ("faceBackgroundHidden", Value::Bool(false)),
-            ("featureSet", Value::Int(1)),
-            ("flippedHorizontally", Value::Bool(false)),
-            ("flippedVertically", Value::Bool(false)),
-            ("isFirstItemAnimationForeground", Value::Bool(false)),
-            ("isLastItemAnimationBackground", Value::Bool(false)),
-            ("layers", layers),
-            ("legacyBehaviour", Value::Int(1)),
-            ("mask", mask),
-            ("name", name),
-            ("orientation", Value::Int(1)),
-            ("primaryItem", selected.clone()),
-            ("reference3D", Value::Bool(false)),
-            ("referenceAnchor", Value::Int(0)),
-            ("referenceCorner", Value::Int(0)),
-            ("referenceDocked", Value::Bool(false)),
-            ("referenceKind", reference_kind),
-            ("referenceOrientation", Value::Int(0)),
-            ("referenceSize", reference_size),
-            ("referenceVisibility", Value::Bool(false)),
-            ("selectedLayer", selected),
-            ("selectedSamplerLayer", Builder::null()),
-            ("size", size),
-            ("solo", Builder::null()),
-            ("strokeCount", strokes),
-            ("tileSize", Value::Int(i64::from(TILE))),
-            ("unwrappedLayers", unwrapped),
-            ("userSavedSelectionMasks", saved_masks),
-            ("version", Value::Int(2)),
-            ("videoEnabled", Value::Bool(false)),
-        ],
-    );
+    let video = write_time_lapse(&mut b, &mut zip, e.time_lapse);
+    let mut fields = vec![
+        ("SilicaDocumentArchiveDPIKey", Value::Real(f64::from(doc.dpi))),
+        ("SilicaDocumentArchiveUnitKey", Value::Int(0)),
+        ("SilicaDocumentTrackedTimeKey", Value::Real(e.tracked_seconds)),
+        ("SilicaDocumentVideoPurgedKey", Value::Bool(false)),
+        ("animation", animation),
+        ("authorName", author),
+        ("backgroundColor", background),
+        ("backgroundColorHSBA", hsba),
+        ("backgroundHidden", Value::Bool(!doc.background_visible)),
+        ("colorProfile", profile),
+        ("composite", composite),
+        ("faceBackgroundHidden", Value::Bool(false)),
+        ("featureSet", Value::Int(1)),
+        ("flippedHorizontally", Value::Bool(false)),
+        ("flippedVertically", Value::Bool(false)),
+        ("isFirstItemAnimationForeground", Value::Bool(false)),
+        ("isLastItemAnimationBackground", Value::Bool(false)),
+        ("layers", layers),
+        ("legacyBehaviour", Value::Int(1)),
+        ("mask", mask),
+        ("name", name),
+        ("orientation", Value::Int(1)),
+        ("primaryItem", selected.clone()),
+        ("reference3D", Value::Bool(false)),
+        ("referenceAnchor", Value::Int(0)),
+        ("referenceCorner", Value::Int(0)),
+        ("referenceDocked", Value::Bool(false)),
+        ("referenceKind", reference_kind),
+        ("referenceOrientation", Value::Int(0)),
+        ("referenceSize", reference_size),
+        ("referenceVisibility", Value::Bool(false)),
+        ("selectedLayer", selected),
+        ("selectedSamplerLayer", Builder::null()),
+        ("size", size),
+        ("solo", Builder::null()),
+        ("strokeCount", strokes),
+        ("tileSize", Value::Int(i64::from(TILE))),
+        ("unwrappedLayers", unwrapped),
+        ("userSavedSelectionMasks", saved_masks),
+        ("version", Value::Int(2)),
+    ];
+    fields.extend(video);
+    fields.sort_by(|a, b| a.0.cmp(b.0));
+    b.fill(&doc_ref, &["SilicaDocument", "ValkyrieDocument", "NSObject"], fields);
     zip.add("Document.archive", &b.finish(doc_ref));
     zip.add("QuickLook/Thumbnail.png", e.thumbnail_png);
     zip.finish()
+}
+
+/// The document's time-lapse fields, its segments added to `zip` (stored: video doesn't deflate).
+fn write_time_lapse(b: &mut Builder, zip: &mut ZipWriter, t: Option<&TimeLapse>) -> Vec<(&'static str, Value)> {
+    let Some(t) = t else { return vec![("videoEnabled", Value::Bool(false))] };
+    let quality = QUALITY_NAMES.get(usize::from(t.quality)).unwrap_or(&"pro50.vqLossless");
+    let resolution = RESOLUTION_NAMES.get(usize::from(t.resolution)).unwrap_or(&"pro50.vr4K");
+    // the codecs by number: H.264, HEVC, HEVC with alpha, ProRes 4444
+    let codec = i64::from(t.hevc);
+    let quality_name = b.string(quality);
+    let resolution_name = b.string(resolution);
+    let mut fields = vec![
+        ("videoCodec2020Key", Value::Int(codec)),
+        ("videoCodecKey", Value::Int(codec)),
+        ("videoEnabled", Value::Bool(t.recording)),
+        ("videoQualityKey", quality_name.clone()),
+        ("videoResolutionKey", resolution_name.clone()),
+    ];
+    if !t.segments.is_empty() {
+        for (i, s) in t.segments.iter().enumerate() {
+            zip.add_aligned(&format!("{SEGMENT_PREFIX}{}.mp4", i + 1), s, 1);
+        }
+        let (w, h) = t.frame_size;
+        let size = b.string(&format!("{{{w}, {h}}}"));
+        let bitrate = b.add(Value::Int(i64::try_from(t.bitrate).unwrap_or(i64::MAX)));
+        let info = b.object(
+            &["VideoSegmentInfo", "NSObject"],
+            vec![
+                ("bitrate", bitrate),
+                ("codec", Value::Int(codec)),
+                ("codec2020", Value::Int(codec)),
+                ("colorSpace", Value::Int(0)),
+                ("frameSize", size),
+                ("framesPerSecond", Value::Int(i64::from(t.fps))),
+                ("qualityPreferenceKey", quality_name),
+                ("resolutionPreferenceKey", resolution_name),
+                ("sourceOrientation", Value::Int(1)),
+            ],
+        );
+        fields.push(("SilicaDocumentVideoSegmentInfoKey", info));
+    }
+    fields
+}
+
+/// The time-lapse a package keeps, or none if it keeps none (no recording setting and no video).
+pub fn read_time_lapse(bytes: &[u8]) -> Result<Option<TimeLapse>, ReadError> {
+    let zip = ZipReader::new(bytes).ok_or(ReadError::NotAPackage)?;
+    let archive = Archive::read(&zip.read("Document.archive").ok_or(ReadError::NotAPackage)?)
+        .ok_or(ReadError::Damaged("document"))?;
+    let root = archive.root().ok_or(ReadError::Damaged("document"))?;
+    let mut numbered: Vec<(u64, String)> =
+        zip.names().filter_map(|n| segment_number(n).map(|k| (k, n.to_owned()))).collect();
+    numbered.sort();
+    let segments: Vec<Vec<u8>> = numbered.iter().filter_map(|(_, n)| zip.read(n)).collect();
+    let recording = root.bool("videoEnabled");
+    if recording.is_none() && segments.is_empty() {
+        return Ok(None);
+    }
+    let info = root.object("SilicaDocumentVideoSegmentInfoKey");
+    let named = |key: &str, of_info: &str| root.string(key).or_else(|| info.as_ref().and_then(|i| i.string(of_info)));
+    let codec = root
+        .int("videoCodec2020Key")
+        .or_else(|| root.int("videoCodecKey"))
+        .or_else(|| info.as_ref().and_then(|i| i.int("codec2020").or_else(|| i.int("codec"))));
+    let d = TimeLapse::default();
+    Ok(Some(TimeLapse {
+        recording: recording.unwrap_or(d.recording),
+        quality: named("videoQualityKey", "qualityPreferenceKey")
+            .as_deref()
+            .and_then(quality_number)
+            .unwrap_or(d.quality),
+        resolution: named("videoResolutionKey", "resolutionPreferenceKey")
+            .as_deref()
+            .and_then(resolution_number)
+            .unwrap_or(d.resolution),
+        // HEVC, with or without alpha
+        hevc: codec.map_or(d.hevc, |c| c == 1 || c == 2),
+        frame_size: info.as_ref().and_then(|i| i.string("frameSize")).and_then(|s| parse_size(&s)).unwrap_or((0, 0)),
+        fps: info
+            .as_ref()
+            .and_then(|i| i.int("framesPerSecond"))
+            .and_then(|f| u32::try_from(f).ok())
+            .filter(|f| (1..=240).contains(f))
+            .unwrap_or(d.fps),
+        bitrate: info.as_ref().and_then(|i| i.int("bitrate")).and_then(|b| u64::try_from(b).ok()).unwrap_or(0),
+        segments,
+    }))
+}
+
+/// A segment's number from its entry's name.
+fn segment_number(name: &str) -> Option<u64> {
+    let (n, ext) = name.strip_prefix(SEGMENT_PREFIX)?.split_once('.')?;
+    if !SEGMENT_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)) {
+        return None;
+    }
+    n.parse().ok()
+}
+
+/// A quality's number from its name, older names too.
+fn quality_number(name: &str) -> Option<u8> {
+    match name {
+        "vqNormal" | "pro50.vqLow" => Some(0),
+        "vqHigh" | "pro50.vqGood" => Some(1),
+        "vqStudio" | "pro50.vqStudio" => Some(2),
+        "vqStudio4K" | "pro50.vqLossless" => Some(3),
+        _ => None,
+    }
+}
+
+/// A resolution's number from its name; the older quality names stood for one too.
+fn resolution_number(name: &str) -> Option<u8> {
+    match name {
+        "pro50.vr1080" | "vqNormal" | "vqHigh" | "vqStudio" => Some(0),
+        "pro50.vr2K" => Some(1),
+        "pro50.vr4K" | "vqStudio4K" => Some(2),
+        _ => None,
+    }
 }
 
 /// The ids of what is directly in `group` (or at the top), top first; masks left out.
@@ -830,6 +992,7 @@ mod tests {
             strokes: 7,
             tracked_seconds: 12.5,
             seed: 42,
+            time_lapse: None,
         });
 
         let back = read(&bytes).unwrap();
@@ -867,6 +1030,7 @@ mod tests {
                 strokes: 0,
                 tracked_seconds: 0.0,
                 seed: 1,
+                time_lapse: None,
             }))
             .unwrap()
             .document
@@ -929,6 +1093,7 @@ mod tests {
             strokes: 0,
             tracked_seconds: 0.0,
             seed: 3,
+            time_lapse: None,
         });
         // the picture's 6 tiles, the mask's one, none for the clear layer
         let zip = ZipReader::new(&bytes).unwrap();
@@ -971,6 +1136,7 @@ mod tests {
             strokes: 0,
             tracked_seconds: 0.0,
             seed: 1,
+            time_lapse: None,
         });
         let back = read(&bytes).unwrap();
         let d = &back.document;
@@ -1010,6 +1176,7 @@ mod tests {
             strokes: 0,
             tracked_seconds: 0.0,
             seed: 1,
+            time_lapse: None,
         });
         let zip = ZipReader::new(&bytes).unwrap();
         let archive = Archive::read(&zip.read("Document.archive").unwrap()).unwrap();
@@ -1033,6 +1200,67 @@ mod tests {
         assert_eq!(orient(&src, 3, 2, 1, 0, true, false), [2, 1, 0, 5, 4, 3]);
         assert_eq!(parse_size("{1488, 2266}"), Some((1488, 2266)));
         assert_eq!(parse_size("1488x2266"), None);
+    }
+
+    #[test]
+    fn the_time_lapse_round_trips() {
+        let doc = Document::new(16, 16);
+        let id = doc.layers().first().map(|l| l.id).unwrap();
+        let pixels = HashMap::from([(id, vec![0u8; 16 * 16 * 4])]);
+        let export = |t: Option<&TimeLapse>| {
+            write(&Export {
+                document: &doc,
+                pixels: &pixels,
+                composite: &[0; 16 * 16 * 4],
+                thumbnail_png: &[],
+                name: "",
+                author: "",
+                strokes: 0,
+                tracked_seconds: 0.0,
+                seed: 1,
+                time_lapse: t,
+            })
+        };
+        let t = TimeLapse {
+            recording: false,
+            quality: 2,
+            resolution: 1,
+            hevc: true,
+            segments: vec![b"first".to_vec(), b"second".to_vec()],
+            frame_size: (1920, 1080),
+            fps: 30,
+            bitrate: 8_000_000,
+        };
+        let bytes = export(Some(&t));
+        let zip = ZipReader::new(&bytes).unwrap();
+        assert_eq!(zip.read("video/segments/segment-1.mp4").as_deref(), Some(&b"first"[..]));
+        let archive = Archive::read(&zip.read("Document.archive").unwrap()).unwrap();
+        let root = archive.root().unwrap();
+        assert_eq!(root.string("videoQualityKey").as_deref(), Some("pro50.vqStudio"));
+        let info = root.object("SilicaDocumentVideoSegmentInfoKey").unwrap();
+        assert_eq!(info.string("resolutionPreferenceKey").as_deref(), Some("pro50.vr2K"));
+        assert_eq!(info.int("bitrate"), Some(8_000_000));
+        assert_eq!(read_time_lapse(&bytes).unwrap(), Some(t));
+        // the layers read as before
+        assert!(read(&bytes).is_ok());
+
+        // none: not recording, and nothing kept
+        let none = read_time_lapse(&export(None)).unwrap().unwrap();
+        assert!(!none.recording && none.segments.is_empty());
+        let mut z = ZipWriter::new();
+        let mut b = Builder::new();
+        let root = b.object(&["SilicaDocument", "NSObject"], vec![]);
+        z.add("Document.archive", &b.finish(root));
+        assert_eq!(read_time_lapse(&z.finish()), Ok(None));
+    }
+
+    #[test]
+    fn segments_are_ordered_by_number_and_older_names_read() {
+        assert_eq!(segment_number("video/segments/segment-12.mov"), Some(12));
+        assert_eq!(segment_number("video/segments/segment-3.txt"), None);
+        assert_eq!(segment_number("video/segment-3.mp4"), None);
+        assert_eq!(quality_number("vqHigh"), Some(1));
+        assert_eq!(resolution_number("vqStudio4K"), Some(2));
     }
 
     #[test]
@@ -1096,6 +1324,7 @@ mod tests {
                 strokes: back.strokes,
                 tracked_seconds: back.tracked_seconds,
                 seed: 7,
+                time_lapse: None,
             });
             std::fs::write(out, package).unwrap();
         }

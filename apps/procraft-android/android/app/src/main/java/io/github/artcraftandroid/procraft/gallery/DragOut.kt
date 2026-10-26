@@ -93,7 +93,8 @@ fun exportArtwork(dir: File, format: String, out: File, pdfQuality: Int = 100): 
         if (!s.prepareOffscreen()) return@runCatching false
         when (format) {
             // ours and the other app's are the same package
-            CanvasViewModel.OWN_LABEL, CanvasViewModel.PACKAGE_LABEL -> s.exportPackage(out.path, System.nanoTime().toULong())
+            CanvasViewModel.OWN_LABEL, CanvasViewModel.PACKAGE_LABEL ->
+                s.exportPackage(out.path, System.nanoTime().toULong(), io.github.artcraftandroid.procraft.canvas.TimeLapse(dir).forPackage())
             "PDF" -> s.exportPdf(out.path, false, pdfQuality.toUByte())
             "PSD" -> s.exportPsd(out.path)
             "TIFF" -> s.exportTiff(out.path)

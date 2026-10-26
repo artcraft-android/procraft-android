@@ -1507,6 +1507,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             resolver.openInputStream(uri)?.use { input -> temp.outputStream().use { input.copyTo(it) } } ?: return false
             val s = runCatching { CanvasSession.openPackage(temp.path) }.getOrNull() ?: return false
             s.save(dir.path)
+            // its time-lapse: the settings, and the video as frames
+            val segments = File(getApplication<Application>().cacheDir, "segments-${System.nanoTime()}")
+            try {
+                runCatching { io.github.artcraftandroid.procraft.core.packageTimeLapse(temp.path, segments.path) }
+                    .getOrNull()?.let { TimeLapse(dir).take(it) }
+            } finally {
+                segments.deleteRecursively()
+            }
             java.util.zip.ZipFile(temp).use { zip ->
                 zip.getEntry("QuickLook/Thumbnail.png")?.let { e ->
                     zip.getInputStream(e).use { input -> File(dir, "thumbnail.png").outputStream().use { input.copyTo(it) } }
@@ -1528,7 +1536,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             runCatching {
                 val base = s.name().filter { it.isLetterOrDigit() || it in " _-" }.trim().replace(' ', '_').ifEmpty { "Untitled_Artwork" }
                 val out = File(File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }, "$base.$extension")
-                s.exportPackage(out.path, System.nanoTime().toULong())
+                s.exportPackage(out.path, System.nanoTime().toULong(), timeLapse?.forPackage())
                 out
             }.onFailure { android.util.Log.e("ProCraft", "exporting a package", it) }.getOrNull()
         }

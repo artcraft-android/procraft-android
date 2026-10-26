@@ -42,7 +42,7 @@ object VideoWriter {
     ): Boolean {
         val format = MediaFormat.createVideoFormat(mime, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
-            setInteger(MediaFormat.KEY_BIT_RATE, (width * height * bitsPerPixel).coerceAtLeast(1_000_000))
+            setInteger(MediaFormat.KEY_BIT_RATE, bitRate(width, height, bitsPerPixel))
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         }
@@ -106,24 +106,54 @@ object VideoWriter {
         }
     }
 
+    /** The bit rate a [width] × [height] video is encoded at, bits a second. */
+    fun bitRate(width: Int, height: Int, bitsPerPixel: Int = BITS_PER_PIXEL): Int = (width * height * bitsPerPixel).coerceAtLeast(1_000_000)
+
     /** ARGB pixels into the encoder's YUV 4:2:0 planes (BT.601, video range). */
     private fun writeYuv(image: android.media.Image, argb: IntArray, w: Int, h: Int) {
         val planes = image.planes
         val y = planes[0]
         val u = planes[1]
         val v = planes[2]
+        val yb = y.buffer
+        val ub = u.buffer
+        val vb = v.buffer
+        // a row at a time where a plane's samples are packed; interleaved chroma one by one
+        val luma = ByteArray(w)
+        val half = (w + 1) / 2
+        val cus = ByteArray(half)
+        val cvs = ByteArray(half)
+        val packedChroma = u.pixelStride == 1 && v.pixelStride == 1
         for (row in 0 until h) {
+            val even = row % 2 == 0
             for (col in 0 until w) {
                 val c = argb[row * w + col]
                 val r = (c shr 16) and 255
                 val g = (c shr 8) and 255
                 val b = c and 255
-                y.buffer.put(row * y.rowStride + col * y.pixelStride, (((66 * r + 129 * g + 25 * b + 128) shr 8) + 16).toByte())
-                if (row % 2 == 0 && col % 2 == 0) {
-                    val cu = ((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128
-                    val cv = ((112 * r - 94 * g - 18 * b + 128) shr 8) + 128
-                    u.buffer.put((row / 2) * u.rowStride + (col / 2) * u.pixelStride, cu.toByte())
-                    v.buffer.put((row / 2) * v.rowStride + (col / 2) * v.pixelStride, cv.toByte())
+                luma[col] = (((66 * r + 129 * g + 25 * b + 128) shr 8) + 16).toByte()
+                if (even && col % 2 == 0) {
+                    cus[col / 2] = (((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128).toByte()
+                    cvs[col / 2] = (((112 * r - 94 * g - 18 * b + 128) shr 8) + 128).toByte()
+                }
+            }
+            if (y.pixelStride == 1) {
+                yb.position(row * y.rowStride)
+                yb.put(luma, 0, w)
+            } else {
+                for (col in 0 until w) yb.put(row * y.rowStride + col * y.pixelStride, luma[col])
+            }
+            if (!even) continue
+            val at = row / 2
+            if (packedChroma) {
+                ub.position(at * u.rowStride)
+                ub.put(cus, 0, half)
+                vb.position(at * v.rowStride)
+                vb.put(cvs, 0, half)
+            } else {
+                for (i in 0 until half) {
+                    ub.put(at * u.rowStride + i * u.pixelStride, cus[i])
+                    vb.put(at * v.rowStride + i * v.pixelStride, cvs[i])
                 }
             }
         }
