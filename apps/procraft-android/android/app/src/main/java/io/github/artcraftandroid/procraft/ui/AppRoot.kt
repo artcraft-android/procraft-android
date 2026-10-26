@@ -223,6 +223,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 ZoomingGallery(vm, overlay = true)
                 GuideOverlay(vm)
                 if (vm.adjustment == Adjustment.CLONE) ClonePuck(vm)
+                if (vm.recoloring) RecolorReticle(vm)
                 QuickShapeHandles(vm)
                 if (!vm.barsHidden) AnimationBar(vm)
                 CopyPastePanel(vm)
@@ -261,6 +262,12 @@ fun AppRoot(vm: CanvasViewModel) {
                         }
                     }
                 }
+                androidx.compose.animation.AnimatedVisibility(
+                    vm.recoloring && !vm.barsHidden,
+                    Modifier.align(Alignment.BottomCenter),
+                    enter = Motion.toolbarIn(),
+                    exit = Motion.toolbarOut(),
+                ) { RecolorPanel(vm, Modifier) }
                 androidx.compose.animation.AnimatedVisibility(
                     vm.selecting && !vm.barsHidden,
                     Modifier.align(Alignment.BottomCenter),

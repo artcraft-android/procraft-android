@@ -908,6 +908,34 @@ fun AdjustModes(vm: CanvasViewModel, modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * Recolor's reticle: four short bars around the point it fills from, 44 across, black over a light
+ * colour and white over a dark one.
+ */
+@Composable
+fun RecolorReticle(vm: CanvasViewModel) {
+    val at = vm.recolorPoint?.let(vm::canvasToWindow) ?: return
+    val c = vm.colorRgb()
+    val light = 0.2126f * ((c shr 16) and 0xFF) + 0.7152f * ((c shr 8) and 0xFF) + 0.0722f * (c and 0xFF) > 0.5f * 255f
+    val ink = if (light) Color.Black else Color.White
+    androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+        val gap = 2.5.dp.toPx()
+        val reach = 11.5.dp.toPx()
+        val w = 1.dp.toPx()
+        for ((dx, dy) in listOf(1f to 0f, -1f to 0f, 0f to 1f, 0f to -1f)) {
+            drawLine(ink, at + Offset(dx * gap, dy * gap), at + Offset(dx * reach, dy * reach), w)
+        }
+    }
+}
+
+/** Recolor's toolbar: the Flood slider, how far from the colour under the reticle the fill reaches. */
+@Composable
+fun RecolorPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
+    OptionsPanel(332.dp, 70.dp, modifier, 8.dp) {
+        OptionSlider("Flood", vm.recolorThreshold, "${(vm.recolorThreshold * 100).roundToInt()}%", 300.dp) { vm.recolorThresholdTo(it) }
+    }
+}
+
 /** The clone source: a dark ring with a light edge, so it shows on any colour. */
 @Composable
 fun ClonePuck(vm: CanvasViewModel) {

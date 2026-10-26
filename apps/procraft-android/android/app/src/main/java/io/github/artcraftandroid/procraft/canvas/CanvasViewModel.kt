@@ -1940,6 +1940,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun select(tool: ToolKind) {
         feedback()
+        endRecolor()
         session?.setTool(tool)
         this.tool = tool
         readSliders()
@@ -2218,7 +2219,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             QuickAction.REFERENCE -> changeReferenceOn(!referenceOn)
             QuickAction.COMPANION_MOVE -> toggleCompanionMode(CompanionMode.MOVE)
             QuickAction.COMPANION_ZOOM -> toggleCompanionMode(CompanionMode.ZOOM)
-            // nothing, Recolor (not built yet), and the adjustments (done above)
+            QuickAction.RECOLOR -> toggleRecolor()
+            // nothing, and the adjustments (done above)
             else -> Unit
         }
     }
@@ -2508,8 +2510,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun toolPressed(tool: ToolKind) {
         endQuickShape()
-        if (transforming || selecting || adjustment != null) {
-            // leaving transform, selection or an adjustment for a tool keeps what they made, and only picks the tool
+        if (transforming || selecting || adjustment != null || recoloring) {
+            // leaving transform, selection, an adjustment or Recolor for a tool keeps what they made, and only picks the tool
             endTransform(true)
             closeSelecting()
             endAdjustment(true)
@@ -4110,8 +4112,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun applyColor() {
         val c = colorRgb()
-        session?.setColor(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f)
+        val (r, g, b) = Triple(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f)
+        session?.setColor(r, g, b)
         if (colorNames) nameColorSoon()
+        // recoloring, the area under the reticle takes the new colour
+        val s = session
+        if (recolorOpen && s != null) pourLater("colour") { s.pourColour(r, g, b) }
     }
 
     private var naming: kotlinx.coroutines.Job? = null
@@ -4149,6 +4155,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         feedback()
         endQuickShape()
+        if (p != Panel.COLOR) endRecolor()
         if (transforming) endTransform(true)
         endAdjustment(true)
         closeSelecting()
@@ -4189,6 +4196,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (adjustment == Adjustment.CLONE) {
             puckBefore.removeLastOrNull()?.let { before -> clonePuck?.let { puckAfter.addLast(it) }; clonePuck = before }
         }
+        // recoloring, the fill under the reticle is taken back first
+        if (recolorOpen) {
+            session?.let { s -> pourNow { s.pourEnd(false, null) } }
+            recolorOpen = false
+            showNotice("Undo $RECOLOR_STEP")
+            refresh()
+            return
+        }
         val could = canUndo
         val name = session?.undo()
         if (could) showNotice("Undo" + name?.let { " $it" }.orEmpty())
@@ -4222,6 +4237,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (adjustment == Adjustment.CLONE) {
             puckAfter.removeLastOrNull()?.let { after -> clonePuck?.let { puckBefore.addLast(it) }; clonePuck = after }
         }
+        // recoloring, the open fill steps aside for the redo and is made again over what it brings back
+        if (recolorOpen) {
+            session?.let { s -> pourNow { s.pourEnd(false, null) } }
+            recolorOpen = false
+            val could = canRedo
+            val name = session?.redo()
+            if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
+            recolorPoint?.let { recolorOpen = recolorBegin(canvasToWindow(it)) }
+            refresh()
+            return
+        }
         val could = canRedo
         // a text edit redone is edited again
         val text = if (textInfo == null) session?.textRedoLayer() else null
@@ -4237,6 +4263,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun startAdjustment(a: Adjustment) {
         val s = session ?: return
         if (!currentTakesChanges()) return
+        endRecolor()
         endAdjustment(true)
         endTransform(true)
         closeSelecting()
@@ -4708,9 +4735,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun adjustmentsPressed() {
         endQuickShape()
         endFilling()
-        // in Layer opacity, the button ends it
+        // in Layer opacity or Recolor, the button ends it
         if (opacityLayer != null) {
             endLayerOpacity()
+            return
+        }
+        if (recoloring) {
+            endRecolor()
             return
         }
         if (adjustment != null) endAdjustment(true) else toggle(Panel.ADJUSTMENTS)
@@ -4873,10 +4904,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         dropBand = DropBand.FILLING
     }
 
+    /** ColorDrop's filling ends, and Recolor with it. */
     fun endFilling() {
         dropBandTimer?.cancel()
         if (dropBand != DropBand.NONE) dropBand = DropBand.NONE
         dropSliding = false
+        endRecolor()
     }
 
     /** Fills from window point [p] with the dropped colour; false if nothing was filled. */
@@ -4896,22 +4929,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The fill under way redone with [threshold], which is kept for the next. */
     fun pourThreshold(threshold: Float) {
         val s = session ?: return
-        dropThreshold = threshold.coerceIn(0f, 1f)
+        val t = threshold.coerceIn(0f, 1f)
+        dropThreshold = t
         dropSliding = true
-        // redone away from the main thread, only ever with the latest threshold
-        pourWanted = dropThreshold
-        if (pourQueued.compareAndSet(false, true)) {
-            pourThread.execute {
-                pourQueued.set(false)
-                s.pourThreshold(pourWanted)
-            }
-        }
+        pourLater("threshold") { s.pourThreshold(t) }
     }
 
     /** The fill under way ends: [keep] makes it an undo step, else it is taken back. */
     fun pourEnd(keep: Boolean) {
         val s = session ?: return
-        pourNow { s.pourEnd(keep) }
+        pourNow { s.pourEnd(keep, null) }
         if (dropSliding) transformPrefs.edit().putFloat(DROP_THRESHOLD, dropThreshold).apply()
         dropSliding = false
         refresh()
@@ -4919,12 +4946,111 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A fill's work, in order, off the main thread (a slid threshold redoes the whole fill). */
     private val pourThread = java.util.concurrent.Executors.newSingleThreadExecutor()
-    @Volatile
-    private var pourWanted = 0f
-    private val pourQueued = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** The latest of each kind of change waiting for the fill's thread (a threshold, a point, a colour). */
+    private val pourLatest = java.util.concurrent.ConcurrentHashMap<String, () -> Unit>()
+
+    /** Runs [block] on the fill's thread, unless another of its [kind] is given before it gets there. */
+    private fun pourLater(kind: String, block: () -> Unit) {
+        if (pourLatest.put(kind, block) == null) pourThread.execute { pourLatest.remove(kind)?.invoke() }
+    }
 
     /** Runs [block] on the fill's thread once what is queued there is done, and waits for it. */
     private fun <T> pourNow(block: () -> T): T = pourThread.submit(java.util.concurrent.Callable(block)).get()
+
+    // Recolor: the area under a reticle takes the current colour. Dragged about, the fill follows it;
+    // a tap keeps the fill and starts again where it lands
+
+    /** Recolor is on. */
+    var recoloring by mutableStateOf(false)
+        private set
+
+    /** Where the reticle is, canvas pixels. */
+    var recolorPoint by mutableStateOf<Offset?>(null)
+        private set
+
+    /** Recolor's threshold (its Flood slider, 0..1), kept from one time to the next. */
+    var recolorThreshold by mutableFloatStateOf(transformPrefs.getFloat(RECOLOR_THRESHOLD, 0f))
+        private set
+
+    /** A fill is open under the reticle (none while the reticle is off the canvas, or once undone). */
+    private var recolorOpen = false
+
+    /** Recolor on, the reticle in the middle of the screen, or off (keeping what it filled). */
+    fun toggleRecolor() {
+        if (recoloring) {
+            endRecolor()
+            return
+        }
+        if (session == null || !currentTakesChanges()) return
+        // text takes no colour until it is rasterized
+        if (currentIsText()) {
+            askRasterize = true
+            return
+        }
+        endQuickShape()
+        endFilling()
+        endLayerOpacity()
+        if (transforming) endTransform(true)
+        endAdjustment(true)
+        closeSelecting()
+        closePanels()
+        recoloring = true
+        recolorPoint = windowToCanvas(screenCentre)
+        recolorOpen = recolorBegin(screenCentre)
+        refresh()
+    }
+
+    /** A fill under the reticle at window point [at]; false where there is nothing to fill. */
+    private fun recolorBegin(at: Offset): Boolean {
+        val s = session ?: return false
+        val c = colorRgb()
+        val t = recolorThreshold
+        return pourNow { s.pourBegin(at.x, at.y, ((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, t) }
+    }
+
+    /** The reticle dragged by [by] window pixels: the fill follows it. */
+    fun recolorDrag(by: Offset) {
+        val s = session ?: return
+        val from = recolorPoint?.let(::canvasToWindow) ?: screenCentre
+        val at = from + by
+        recolorPoint = windowToCanvas(at) ?: return
+        if (!recolorOpen) {
+            recolorOpen = recolorBegin(at)
+            return
+        }
+        pourLater("point") { s.pourMove(at.x, at.y) }
+    }
+
+    /** A tap while recoloring: the fill so far is kept, and the reticle starts again at [p]. */
+    fun recolorTap(p: Offset) {
+        val s = session ?: return
+        if (recolorOpen) pourNow { s.pourEnd(true, RECOLOR_STEP) }
+        recolorOpen = false
+        recolorPoint = windowToCanvas(p) ?: return
+        recolorOpen = recolorBegin(p)
+        refresh()
+    }
+
+    /** The Flood slider moved to [t]: the fill redone with it. */
+    fun recolorThresholdTo(t: Float) {
+        val s = session ?: return
+        val v = t.coerceIn(0f, 1f)
+        recolorThreshold = v
+        if (recolorOpen) pourLater("threshold") { s.pourThreshold(v) }
+    }
+
+    /** Recolor ends, keeping what it filled. */
+    fun endRecolor() {
+        if (!recoloring) return
+        val s = session
+        if (recolorOpen && s != null) pourNow { s.pourEnd(true, RECOLOR_STEP) }
+        recolorOpen = false
+        recoloring = false
+        recolorPoint = null
+        transformPrefs.edit().putFloat(RECOLOR_THRESHOLD, recolorThreshold).apply()
+        refresh()
+    }
 
     fun invertSelection() {
         session?.selectInvert()
@@ -5778,6 +5904,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private const val SELECTION_KIND = "selectionKind"
         private const val SELECTION_THRESHOLD = "selectionThreshold"
         private const val DROP_THRESHOLD = "dropThreshold"
+        private const val RECOLOR_THRESHOLD = "recolorThreshold"
+
+        /** What undo and redo call a Recolor fill. */
+        private const val RECOLOR_STEP = "Recolor"
 
         /** A video's frames come in at Animation Assist's starting frame rate unless it is on. */
         private const val DEFAULT_FPS = 15

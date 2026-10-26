@@ -79,7 +79,7 @@ fun TopBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                 Text("Gallery", color = Pc.BarText, fontSize = 18.sp, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false, modifier = Modifier.offset(y = (-1).dp))
             }
             ActionButton(PcIcons.Actions, "Actions", selected = vm.panel == Panel.ACTIONS) { vm.toggle(Panel.ACTIONS) }
-            ActionButton(PcIcons.Adjustments, "Adjustments", selected = vm.panel == Panel.ADJUSTMENTS || vm.adjustment != null || vm.opacityLayer != null) { vm.adjustmentsPressed() }
+            ActionButton(PcIcons.Adjustments, "Adjustments", selected = vm.panel == Panel.ADJUSTMENTS || vm.adjustment != null || vm.opacityLayer != null || vm.recoloring) { vm.adjustmentsPressed() }
             ActionButton(PcIcons.Selection, "Selection", selected = vm.selecting, glyph = 33.dp) { vm.toggleSelecting() }
             ActionButton(PcIcons.Transform, "Transform", selected = vm.transforming, glyph = 44.dp) { vm.toggleTransform() }
         }

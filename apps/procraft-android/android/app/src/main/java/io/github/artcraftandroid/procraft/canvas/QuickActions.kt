@@ -52,7 +52,7 @@ enum class QuickAction(val label: String, val adjustment: Adjustment? = null, va
     QUICKSHAPE_ON("QuickShape"),
     QUICKSHAPE("QuickShape stroke"),
     // not built yet: left out of the picker
-    RECOLOR("Recolor", ready = false),
+    RECOLOR("Recolor"),
     REDO("Redo"),
     REFERENCE("Reference"),
     BRUSHES("Select brush"),

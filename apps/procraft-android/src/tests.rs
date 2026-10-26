@@ -2609,7 +2609,7 @@ fn a_dropped_colour_fills_up_to_lines_and_is_one_undo_step() {
     assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
     s.pour_threshold(0.5);
     assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
-    s.pour_end(true);
+    s.pour_end(true, None);
     assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
     // one undo takes the pour back; the line stays
     s.undo();
@@ -2617,11 +2617,47 @@ fn a_dropped_colour_fills_up_to_lines_and_is_one_undo_step() {
     assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
     // a pour taken back leaves nothing to undo for it
     assert!(s.pour_begin(80.0, 50.0, 0.0, 0.0, 1.0, 0.5));
-    s.pour_end(false);
+    s.pour_end(false, None);
     assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
     // a locked layer takes none
     assert!(s.set_layer_locked(layer, true));
     assert!(!s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+}
+
+#[test]
+fn recolor_follows_its_point_and_colour_and_is_a_named_step() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, -10.0, 0.0)]);
+    s.stroke_add((1..30).map(|i| sample(50.0, -10.0 + i as f32 * 4.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![sample(50.0, 110.0, 250.0)]);
+    // nothing open, nothing to move
+    assert!(!s.pour_move(80.0, 50.0));
+    assert!(s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.0));
+    assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
+    // moved across the line: the left half as it was, the right half filled
+    assert!(s.pour_move(80.0, 50.0));
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
+    // a new colour refills
+    s.pour_colour(0.0, 0.0, 1.0);
+    assert_eq!(pixel(&s, 80, 50), [0, 0, 255, 255]);
+    // off the canvas nothing is filled, back on it is again
+    assert!(s.pour_move(-5.0, 50.0));
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+    assert!(s.pour_move(80.0, 50.0));
+    s.pour_end(true, Some("Recolor".to_owned()));
+    assert_eq!(pixel(&s, 80, 50), [0, 0, 255, 255]);
+    assert_eq!(s.undo().as_deref(), Some("Recolor"));
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
+    s.redo();
+    // ended off the canvas, it makes no step
+    assert!(s.pour_begin(20.0, 50.0, 0.0, 1.0, 0.0, 0.0));
+    assert!(s.pour_move(-5.0, 50.0));
+    s.pour_end(true, Some("Recolor".to_owned()));
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    assert_eq!(s.undo().as_deref(), Some("Recolor"));
+    assert_eq!(pixel(&s, 80, 50), [255, 255, 255, 255]);
 }
 
 #[test]
