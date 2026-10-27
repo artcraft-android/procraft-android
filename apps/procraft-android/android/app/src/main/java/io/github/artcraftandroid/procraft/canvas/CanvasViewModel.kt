@@ -1954,8 +1954,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readSetChoices()
         currentBrush = s.currentBrush()
         screen = Screen.CANVAS
-        // a new artwork exists in the gallery from the start
-        viewModelScope.launch(Dispatchers.IO) { runCatching { s.save(dir.path) } }
+        // a new artwork exists in the gallery from the start (an opened one is there already)
+        if (!File(dir, "artwork.json").exists()) viewModelScope.launch(Dispatchers.IO) { runCatching { s.save(dir.path) } }
         startAutosave(s, dir)
     }
 
