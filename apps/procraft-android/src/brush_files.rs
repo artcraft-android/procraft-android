@@ -24,6 +24,9 @@ const MOST_PNG_BYTES: usize = 256 << 20;
 /// 1448%).
 const ABR_SIZE_PER_PIXEL: f32 = 0.03277;
 
+/// How much closer a Photoshop preset's stamps come than its spacing says, in pixels of its tip.
+const ABR_SPACING_LESS_PX: f32 = 0.5;
+
 /// A brush file's pictures, made: the shape, the grain if any and the preview (PNGs).
 struct Made {
     shape: Vec<u8>,
@@ -298,7 +301,10 @@ fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
         b.shape.roundness = r.clamp(0.01, 1.0);
     }
     if let Some(spacing) = a.spacing {
-        b.spacing = Brush::spacing_within_reach(spacing);
+        // half a pixel less, as a share of the tip's diameter: a small tip's stamps come closer,
+        // and a spacing of under half a pixel is none
+        let less = a.diameter.filter(|d| *d > 0.0).map_or(0.0, |d| ABR_SPACING_LESS_PX / d);
+        b.spacing = Brush::spacing_within_reach((spacing - less).max(0.0));
     }
     // Photoshop turns the other way (its 129 degrees are -129 here)
     b.shape.rotation = -a.angle;
@@ -977,6 +983,14 @@ mod tests {
         );
         assert_eq!(b.setting("rendering_mode"), 1.0);
         assert!((b.shape.rotation + 129f32.to_radians()).abs() < 1e-6);
+        // spacing, as the studio's control shows it: half a pixel closer than the file says, so
+        // 9% at 10 px reads 13%, 7% at 35 px 16%, 7% at 12 px 11%, 1% at 35 px none, 9% at 201 px 20%
+        for (spacing, diameter, reads) in
+            [(0.09, 10.0, 13.0), (0.07, 35.0, 16.0), (0.07, 12.0, 11.0), (0.01, 35.0, 0.0), (0.09, 201.0, 20.0)]
+        {
+            let b = abr_brush(&AbrBrush { spacing: Some(spacing), diameter: Some(diameter), ..round.clone() });
+            assert_eq!(shown(&b, "spacing"), reads, "{spacing} at {diameter} px");
+        }
         // a sampled 165 x 91 tip at 165 px: no taller than its picture, 298%
         let tip = AbrTip { name: "Tip".into(), spacing: None, width: 165, height: 91, pixels: vec![255; 165 * 91] };
         let sampled = abr_brush(&AbrBrush {
