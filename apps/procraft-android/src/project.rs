@@ -109,6 +109,8 @@ pub(crate) fn file_error(context: &str, e: impl std::fmt::Display) -> MobileErro
 pub(crate) struct SaveSnapshot {
     file: ArtworkFile,
     layers: Vec<(LayerId, u64, Vec<u8>)>,
+    /// Layers still the PNG files they were opened from (not shown yet), written as they are.
+    files: Vec<(LayerId, Vec<u8>)>,
     composite: Option<Vec<u8>>,
     model: Option<crate::scene3d::ModelSnapshot>,
 }
@@ -189,6 +191,7 @@ impl crate::State {
             model: model.as_ref().map(|m| m.saved.clone()),
         };
         let mut layers = Vec::new();
+        let mut files = Vec::new();
         let mut composite = None;
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.render(gpu, &mut self.doc, None);
@@ -204,18 +207,27 @@ impl crate::State {
                     .map_err(|e| file_error("reading the picture", e))?,
             );
         } else {
-            // not shown yet: what was opened is still what there is
-            let opened = opened_pixels(self.pending_pixels.clone(), self.doc.width(), self.doc.height());
-            layers = opened.into_iter().filter_map(|(id, rgba)| changed(id, rgba)).collect();
+            // not shown yet: what was opened is still what there is. A layer still its file's
+            // bytes isn't decoded: it is written as they are, or not at all if that file is there
+            for (id, layer) in &self.pending_pixels {
+                match layer {
+                    Opened::Png(bytes) => {
+                        if fs::read(layer_path(dir, *id)).ok().as_ref() != Some(bytes) {
+                            files.push((*id, bytes.clone()));
+                        }
+                    }
+                    Opened::Pixels(rgba) => layers.extend(changed(*id, rgba.clone())),
+                }
+            }
         }
-        Ok(SaveSnapshot { file, layers, composite, model })
+        Ok(SaveSnapshot { file, layers, files, composite, model })
     }
 }
 
 /// Writes a save into `dir` (made if missing): the layers that changed since the last save there,
 /// the thumbnail and the document.
 fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Result<(), MobileError> {
-    let SaveSnapshot { file, layers, composite, model } = snapshot;
+    let SaveSnapshot { file, layers, files, composite, model } = snapshot;
     if saved.dir != dir {
         saved.dir = dir.to_path_buf();
         saved.layers.clear();
@@ -227,6 +239,11 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     for (id, hash, rgba) in &layers {
         write_atomically(&layer_path(dir, *id), |p| write_png(p, w, h, rgba, &[]))?;
         saved.layers.insert(*id, *hash);
+    }
+    for (id, bytes) in &files {
+        write_atomically(&layer_path(dir, *id), |p| fs::write(p, bytes).map_err(|e| file_error("writing a layer", e)))?;
+        // its pixels' hash isn't known: the next save writes it again
+        saved.layers.remove(id);
     }
     // layer files the document no longer has
     saved.layers.retain(|id, _| file.document.layer(*id).is_some());

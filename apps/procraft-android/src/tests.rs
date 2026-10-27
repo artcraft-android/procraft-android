@@ -347,6 +347,19 @@ fn artworks_save_and_open() {
     }
     assert_eq!(compared, 2);
     let _ = std::fs::remove_dir_all(&again);
+    // into its own folder none is written (nor decoded): its files are there as they are
+    let written = |d: &std::path::Path| -> Vec<std::time::SystemTime> {
+        opened
+            .layers()
+            .iter()
+            .filter_map(|l| {
+                std::fs::metadata(d.join("layers").join(format!("{}.png", l.id))).and_then(|m| m.modified()).ok()
+            })
+            .collect()
+    };
+    let before = written(&dir);
+    opened.save(dir.to_string_lossy().into_owned()).unwrap();
+    assert_eq!((written(&dir), before.len()), (before, 2));
     {
         let gpu = Gpu::headless().unwrap();
         let mut st = opened.shared.lock();
