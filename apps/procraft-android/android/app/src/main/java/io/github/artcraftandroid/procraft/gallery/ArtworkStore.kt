@@ -19,9 +19,30 @@ data class Artwork(override val dir: File, override val name: String, val width:
     val thumbnail: File get() = File(dir, "thumbnail.png")
 }
 
-/** Artworks kept together: a folder holding their folders, newest first. */
+/** Artworks kept together: a folder holding their folders, in their own order. */
 data class Stack(override val dir: File, override val name: String, val artworks: List<Artwork>) : GalleryEntry {
     override val modified: Long get() = artworks.maxOfOrNull { it.modified } ?: dir.lastModified()
+}
+
+/**
+ * Where things sit in the gallery (or a stack): an order of folder names kept beside them. New
+ * folders go first, newest first, and keep their place from then on: changing an artwork doesn't
+ * move it; only a drag does.
+ */
+internal object GalleryOrder {
+    /** The order of the folders [present] (name to time changed), given the order [saved] before. */
+    fun arrange(present: List<Pair<String, Long>>, saved: List<String>): List<String> {
+        val names = present.mapTo(HashSet()) { it.first }
+        val placed = saved.filter { it in names }.distinct()
+        val known = placed.toHashSet()
+        return present.filter { it.first !in known }.sortedByDescending { it.second }.map { it.first } + placed
+    }
+
+    /** [order] with [name] taken out and put back at [to] (its place in the order without it). */
+    fun moved(order: List<String>, name: String, to: Int): List<String> {
+        val rest = order.filter { it != name }
+        return rest.take(to.coerceIn(0, rest.size)) + name + rest.drop(to.coerceIn(0, rest.size))
+    }
 }
 
 /** The artworks in the app's private storage, one folder each, some in stacks (a folder of them). */
@@ -30,17 +51,26 @@ class ArtworkStore(val root: File) {
         root.mkdirs()
     }
 
-    /** What is in [at] (the gallery, or a stack's folder), newest first; empty stacks go away. */
-    fun list(at: File = root): List<GalleryEntry> = at.listFiles { f -> f.isDirectory }.orEmpty().mapNotNull { dir ->
-        read(dir) ?: if (at == root) readStack(dir) else null
-    }.sortedByDescending { it.modified }
-
-    /** The artwork changed last, in the gallery or a stack. */
-    fun mostRecent(): Artwork? = when (val e = list().firstOrNull()) {
-        is Artwork -> e
-        is Stack -> e.artworks.firstOrNull()
-        null -> null
+    /** What is in [at] (the gallery, or a stack's folder) in its order; empty stacks go away. */
+    fun list(at: File = root): List<GalleryEntry> {
+        val dirs = at.listFiles { f -> f.isDirectory }.orEmpty()
+        val entries = dirs.mapNotNull { dir -> read(dir) ?: if (at == root) readStack(dir) else null }.associateBy { it.dir.name }
+        return order(at, dirs, entries).mapNotNull(entries::get)
     }
+
+    /** Every folder in [at] in order, those that can't be read this moment (being written) too. */
+    private fun order(at: File): List<String> {
+        val dirs = at.listFiles { f -> f.isDirectory }.orEmpty()
+        return order(at, dirs, dirs.mapNotNull(::read).associateBy { it.dir.name })
+    }
+
+    /** The artwork changed last, in the gallery or a stack (each is saved when it is left). */
+    fun mostRecent(): Artwork? = list().flatMap {
+        when (it) {
+            is Artwork -> listOf(it)
+            is Stack -> it.artworks
+        }
+    }.maxByOrNull { it.modified }
 
     fun newFolder(at: File = root): File = File(at, UUID.randomUUID().toString()).also { it.mkdirs() }
 
@@ -48,19 +78,33 @@ class ArtworkStore(val root: File) {
         a.dir.deleteRecursively()
     }
 
-    /** A copy beside the original, named "<name> copy" (the copy's title is set by the caller when opened). */
+    /** A copy under the same name, right after the original. */
     fun duplicate(a: Artwork): File {
-        val copy = newFolder(a.dir.parentFile ?: root)
+        val at = a.dir.parentFile ?: root
+        val before = order(at)
+        val copy = newFolder(at)
         a.dir.copyRecursively(copy, overwrite = true)
-        File(copy, "artwork.json").let { f ->
-            runCatching {
-                val json = JSONObject(f.readText())
-                json.put("name", "${a.name} copy")
-                f.writeText(json.toString())
-            }
-        }
-        copy.setLastModified(System.currentTimeMillis())
+        // not worked on yet: as recent as the original
+        File(copy, "artwork.json").setLastModified(a.modified)
+        writeOrder(at, GalleryOrder.moved(before + copy.name, copy.name, before.indexOf(a.dir.name) + 1))
         return copy
+    }
+
+    /** [e] moved to [to] in the gallery or stack it is in (its place in the order without it). */
+    fun move(e: GalleryEntry, to: Int) {
+        val at = e.dir.parentFile ?: return
+        writeOrder(at, GalleryOrder.moved(order(at), e.dir.name, to))
+    }
+
+    /** Artwork [a] (from the gallery) dropped onto [onto]: an artwork makes a stack with it there, [a] first; a stack takes it in first. */
+    fun putOnto(a: Artwork, onto: GalleryEntry) {
+        if (onto is Artwork) {
+            stack(listOf(a, onto), place = onto)
+            return
+        }
+        val inside = order(onto.dir)
+        if (!a.dir.renameTo(File(onto.dir, a.dir.name))) return
+        writeOrder(onto.dir, listOf(a.dir.name) + inside)
     }
 
     fun rename(a: Artwork, name: String) {
@@ -72,11 +116,21 @@ class ArtworkStore(val root: File) {
         }
     }
 
-    /** A new stack in the gallery holding [artworks] (moved into it). */
-    fun stack(artworks: List<Artwork>): File {
+    /**
+     * A new stack in the gallery holding [artworks] (moved into it), where [place] was: by default
+     * the first of them, and they keep the gallery's order; with [place], in the order given.
+     */
+    fun stack(artworks: List<Artwork>, place: Artwork? = null): File {
+        val before = order(root)
+        val names = artworks.map { it.dir.name }
+        val inside = if (place != null) names else before.filter { it in names }
+        val at = (place?.dir?.name ?: inside.firstOrNull())?.let(before::indexOf) ?: 0
         val dir = newFolder(root)
         File(dir, STACK_FILE).writeText(JSONObject().put("name", "Stack").toString())
         for (a in artworks) a.dir.renameTo(File(dir, a.dir.name))
+        writeOrder(dir, inside)
+        val rest = before.filter { it !in names }
+        writeOrder(root, GalleryOrder.moved(rest + dir.name, dir.name, before.take(at.coerceAtLeast(0)).count { it !in names }))
         return dir
     }
 
@@ -106,8 +160,33 @@ class ArtworkStore(val root: File) {
         return Stack(dir, name, artworks)
     }
 
+    /** The order of the folders [dirs] in [at] ([entries] those read), kept up to date on disk. */
+    private fun order(at: File, dirs: Array<out File>, entries: Map<String, GalleryEntry>): List<String> {
+        val f = File(at, ORDER_FILE)
+        val saved = runCatching { f.readLines().filter { it.isNotBlank() } }.getOrDefault(emptyList())
+        // a folder being written keeps its place; if new, its folder's time places it
+        val order = GalleryOrder.arrange(dirs.map { it.name to (entries[it.name]?.modified ?: it.lastModified()) }, saved)
+        if (order != saved) writeOrder(at, order)
+        return order
+    }
+
+    private fun writeOrder(at: File, order: List<String>) {
+        runCatching {
+            val f = File(at, ORDER_FILE)
+            val next = File(at, "$ORDER_FILE.new")
+            next.writeText(order.joinToString("\n", postfix = "\n"))
+            if (!next.renameTo(f)) {
+                f.delete()
+                next.renameTo(f)
+            }
+        }
+    }
+
     private companion object {
         const val STACK_FILE = "stack.json"
+
+        /** The folders' order, one name a line, first first. */
+        const val ORDER_FILE = "order.txt"
     }
 }
 

@@ -125,11 +125,19 @@ fun pngToJpeg(png: File, jpg: File): Boolean {
     return true
 }
 
+/** What the gallery's own drags carry, so it can tell them from another app's. */
+class GalleryDrag(val entry: GalleryEntry)
+
+/** How opaque a dragged artwork's (or stack's) picture is. */
+private const val DRAG_PICTURE_ALPHA = 204
+
 /**
- * Starts dragging artwork [a] (in the gallery at [root]) from [view] out to other apps: the
- * preferred file format, and the preferred picture format too when that file isn't a picture.
+ * Starts dragging artwork [a] (in the gallery at [root]) from [view]: out to other apps in the
+ * preferred file format (and the preferred picture format too when that file isn't a picture),
+ * and within the gallery. Its picture is the thumbnail at [width] x [height] pixels, a little
+ * see-through, held at [touch] (from its top left).
  */
-fun startArtworkDrag(view: View, a: Artwork, root: File): Boolean {
+fun startArtworkDrag(view: View, a: Artwork, root: File, width: Int, height: Int, touch: Point): Boolean {
     val ctx = view.context
     val prefs = ctx.getSharedPreferences("interface", Context.MODE_PRIVATE)
     val file = CanvasViewModel.DRAG_FORMATS.getOrElse(prefs.getInt(CanvasViewModel.DRAG_FORMAT, 0)) { "ProCraft" }
@@ -137,24 +145,36 @@ fun startArtworkDrag(view: View, a: Artwork, root: File): Boolean {
     val formats = if (file in CanvasViewModel.DRAG_IMAGE_FORMATS) listOf(file) else listOf(file, image)
     val clip = ClipData(ClipDescription(a.name, formats.map(DragProvider::mime).toTypedArray()), ClipData.Item(DragProvider.uri(ctx, formats[0], a, root)))
     formats.drop(1).forEach { clip.addItem(ClipData.Item(DragProvider.uri(ctx, it, a, root))) }
-    val thumb = BitmapFactory.decodeFile(a.thumbnail.path)
-    val shadow = object : View.DragShadowBuilder(view) {
-        // the thumbnail, 160 dp on its long side, held at its middle
-        private val side = 160f * ctx.resources.displayMetrics.density
-        private val scale = thumb?.let { side / maxOf(it.width, it.height) } ?: 1f
+    // opaque, so the picture keeps its own alpha rather than the system's
+    val flags = View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ or View.DRAG_FLAG_OPAQUE
+    return view.startDragAndDrop(clip, dragPicture(view, a.thumbnail, width, height, touch), GalleryDrag(a), flags)
+}
 
-        override fun onProvideShadowMetrics(size: Point, touch: Point) {
-            val w = ((thumb?.width ?: 1) * scale).toInt().coerceAtLeast(1)
-            val h = ((thumb?.height ?: 1) * scale).toInt().coerceAtLeast(1)
+/** Starts dragging stack [s] from [view], within the gallery only; its picture as an artwork's is, its top artwork's. */
+fun startStackDrag(view: View, s: Stack, width: Int, height: Int, touch: Point): Boolean {
+    val top = s.artworks.firstOrNull() ?: return false
+    return view.startDragAndDrop(null, dragPicture(view, top.thumbnail, width, height, touch), GalleryDrag(s), View.DRAG_FLAG_OPAQUE)
+}
+
+/** A dragged thing's picture: [thumbnail] at [width] x [height] pixels on white with rounded corners, a little see-through, held at [touch]. */
+private fun dragPicture(view: View, thumbnail: File, width: Int, height: Int, touch: Point): View.DragShadowBuilder {
+    val thumb = BitmapFactory.decodeFile(thumbnail.path)
+    val w = width.coerceAtLeast(1)
+    val h = height.coerceAtLeast(1)
+    val r = 8f * view.resources.displayMetrics.density
+    return object : View.DragShadowBuilder(view) {
+        override fun onProvideShadowMetrics(size: Point, at: Point) {
             size.set(w, h)
-            touch.set(w / 2, h / 2)
+            at.set(touch.x.coerceIn(0, w - 1), touch.y.coerceIn(0, h - 1))
         }
 
         override fun onDrawShadow(canvas: android.graphics.Canvas) {
-            val t = thumb ?: return
-            canvas.scale(scale, scale)
-            canvas.drawBitmap(t, 0f, 0f, null)
+            val frame = android.graphics.RectF(0f, 0f, w.toFloat(), h.toFloat())
+            val layer = canvas.saveLayerAlpha(frame, DRAG_PICTURE_ALPHA)
+            canvas.clipPath(android.graphics.Path().apply { addRoundRect(frame, r, r, android.graphics.Path.Direction.CW) })
+            canvas.drawColor(android.graphics.Color.WHITE)
+            thumb?.let { canvas.drawBitmap(it, null, frame, android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)) }
+            canvas.restoreToCount(layer)
         }
     }
-    return view.startDragAndDrop(clip, shadow, null, View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ)
 }

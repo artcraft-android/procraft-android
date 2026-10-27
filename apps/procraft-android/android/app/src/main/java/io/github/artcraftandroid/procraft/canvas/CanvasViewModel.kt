@@ -781,7 +781,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 refreshGallery()
             }
         }
-        // the home screen's widget shows the newest artwork
+        // the home screen's widget shows the artwork worked on last
         viewModelScope.launch(Dispatchers.IO) { io.github.artcraftandroid.procraft.gallery.RecentArtworkWidget.refresh(getApplication<Application>()) }
     }
 
@@ -1588,7 +1588,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * The home screen's Recent artwork widget was tapped: the newest artwork opens, once the window
+     * The home screen's Recent artwork widget was tapped: the artwork worked on last opens, once the window
      * has its size (the app may only now be starting); nothing if one is already open.
      */
     fun openMostRecent() {
@@ -1666,6 +1666,28 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun duplicateArtwork(a: Artwork) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { store.duplicate(a) }
+            refreshGallery()
+        }
+    }
+
+    /** [e] dragged to [to] in the gallery or stack showing (its place in the list without it). */
+    fun moveInGallery(e: io.github.artcraftandroid.procraft.gallery.GalleryEntry, to: Int) {
+        // at once, so the cells move as the finger lifts
+        val shown = galleryEntries.filter { it.dir != e.dir }.toMutableList()
+        shown.add(to.coerceIn(0, shown.size), e)
+        galleryEntries = shown
+        artworks = shown.filterIsInstance<Artwork>()
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.move(e, to) }
+            refreshGallery()
+        }
+    }
+
+    /** Artwork [a] dropped onto [onto] in the gallery: with an artwork it makes a stack, [a] first; a stack takes it in first. */
+    fun dropOnto(a: Artwork, onto: io.github.artcraftandroid.procraft.gallery.GalleryEntry) {
+        if (openStack != null || a.dir == onto.dir) return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.putOnto(a, onto) }
             refreshGallery()
         }
     }

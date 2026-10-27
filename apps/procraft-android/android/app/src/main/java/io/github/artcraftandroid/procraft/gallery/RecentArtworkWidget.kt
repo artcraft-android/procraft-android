@@ -15,7 +15,7 @@ import io.github.artcraftandroid.procraft.R
 import java.io.File
 
 /**
- * The home screen's Recent artwork widget: the newest artwork's picture filling it (the app's mark
+ * The home screen's Recent artwork widget: the picture of the artwork worked on last filling it (the app's mark
  * when there is none); a tap opens the app at that artwork.
  */
 class RecentArtworkWidget : AppWidgetProvider() {
@@ -31,7 +31,7 @@ class RecentArtworkWidget : AppWidgetProvider() {
         /** The longest side the picture is given at (the home screen holds it in memory). */
         private const val PICTURE_MOST = 720
 
-        /** Shows the newest artwork on every Recent artwork widget there is. */
+        /** Shows the artwork worked on last on every Recent artwork widget there is. */
         fun refresh(context: Context) {
             val manager = AppWidgetManager.getInstance(context)
             val ids = runCatching { manager.getAppWidgetIds(ComponentName(context, RecentArtworkWidget::class.java)) }.getOrNull()
