@@ -107,11 +107,11 @@ impl CanvasSession {
         Some(at as u32)
     }
 
-    /// Adds the sampled tips of a Photoshop brush file (`bytes`) as brushes in a set of their own
-    /// named `name` (else "Imported") at the top of the library: each tip its shape, with the
-    /// file's spacing. Returns the set, or none if the file holds no tips.
+    /// Adds the sampled tips of a Photoshop brush file or a GIMP brush or pipe (`bytes`) as brushes
+    /// in a set of their own named `name` (else "Imported") at the top of the library: each tip its
+    /// shape, with the file's spacing. Returns the set, or none if the file holds no tips.
     pub fn import_abr(&self, bytes: Vec<u8>, name: String) -> Option<u32> {
-        let tips = procraft_engine::abr::read(&bytes)?;
+        let tips = procraft_engine::abr::read(&bytes).or_else(|| procraft_engine::gbr::read(&bytes))?;
         let brushes: Vec<Brush> = tips
             .iter()
             .map(|t| {

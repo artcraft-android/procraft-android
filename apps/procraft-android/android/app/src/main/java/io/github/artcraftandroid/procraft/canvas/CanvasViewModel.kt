@@ -1397,7 +1397,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             message = "This palette can't be read."
         } else if (name != null && isModelName(name)) {
             newFromModel(uri, name)
-        } else if (name != null && name.endsWith(".abr", ignoreCase = true)) {
+        } else if (name != null && isTipFile(name)) {
             val bytes = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }
             if (bytes == null || !addAbr(bytes, name)) message = "This file has no brushes in it."
         } else if (head != null && String(head, Charsets.ISO_8859_1) == "8BPS") {
@@ -2361,11 +2361,28 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun insertPicture(uri: android.net.Uri, private: Boolean = false) {
         val s = session ?: return
         closePanels()
-        if (getApplication<Application>().contentResolver.getType(uri)?.startsWith("video/") == true) {
+        val resolver = getApplication<Application>().contentResolver
+        val type = resolver.getType(uri)
+        if (type?.startsWith("video/") == true) {
             insertFrames(uri, private)
             return
         }
         viewModelScope.launch {
+            // a moving GIF: its frames, as a video's (a still one is a picture)
+            if (type == "image/gif" || withContext(Dispatchers.IO) { fileName(uri) }?.endsWith(".gif", ignoreCase = true) == true) {
+                val bytes = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }
+                val done = bytes?.let { withContext(Dispatchers.Default) { runCatching { s.insertGifFrames(it, private) }.getOrNull() } }
+                if (done != null) {
+                    if (done.added == 0u) {
+                        message = if (done.full) noRoom() else "This picture can't be opened."
+                        return@launch
+                    }
+                    refresh()
+                    showNotice("Frames saved to timeline")
+                    if (done.full) message = noRoom()
+                    return@launch
+                }
+            }
             val image = withContext(Dispatchers.IO) { decodePicture(uri, io.github.artcraftandroid.procraft.ui.CanvasSpace.p3) }
             if (image == null) {
                 message = "This picture can't be opened."
@@ -3174,7 +3191,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 runCatching { getApplication<Application>().contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
             } ?: return@launch
             val name = withContext(Dispatchers.IO) { fileName(uri) }
-            val added = if (name?.endsWith(".abr", ignoreCase = true) == true) addAbr(bytes, name) else addBrushes(bytes)
+            val added = if (name != null && isTipFile(name)) addAbr(bytes, name) else addBrushes(bytes)
             if (!added) message = "This file has no brushes in it."
         }
     }
@@ -3223,6 +3240,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         libraryChanged()
         return true
     }
+
+    /** Whether a file named [name] holds brush tips: Photoshop's, or GIMP's brushes and pipes. */
+    private fun isTipFile(name: String) = TIP_EXTENSIONS.any { name.endsWith(".$it", ignoreCase = true) }
 
     /** Brush files kept while no canvas was open, added now. */
     private fun addPendingBrushes(s: CanvasSession) {
@@ -5842,6 +5862,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         /** Brush and brush set files, as other painting apps share them. */
         const val BRUSH_EXTENSION = "brush"
         const val BRUSH_SET_EXTENSION = "brushset"
+        /** Files of brush tips to make brushes of: Photoshop's, GIMP's brushes and pipes. */
+        val TIP_EXTENSIONS = listOf("abr", "gbr", "gih")
         val PACKAGE_LABEL = PACKAGE_EXTENSION.replaceFirstChar(Char::titlecase)
 
         /** What the gallery's Share offers, in order: still pictures, then animations. */

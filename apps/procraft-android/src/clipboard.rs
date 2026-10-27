@@ -5,6 +5,17 @@ use procraft_engine::document::LayerId;
 use crate::layers::ThumbnailImage;
 use crate::{CanvasSession, State};
 
+/// What bringing in a moving picture's frames did: how many came in as layers, and whether the
+/// canvas ran out of room for more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FramesInserted {
+    pub added: u32,
+    pub full: bool,
+}
+
+/// The most frames brought in from one moving picture.
+const MOST_FRAMES: usize = 999;
+
 impl State {
     /// The current layer's pixels within the selection (all of it without one).
     fn selected_pixels(&mut self) -> Option<Vec<u8>> {
@@ -118,6 +129,54 @@ impl CanvasSession {
             }
         }
         self.add_picture(&premultiplied, true, private)
+    }
+
+    /// The frames of the animated GIF `bytes` as layers above the current one, each fitted to the
+    /// canvas, for as many as there is room: Animation Assist comes on (unless it is on already),
+    /// and each frame is held for as long as the file shows it at the animation's frame rate.
+    /// None if it isn't a GIF of more than one frame (a still picture: insert it as one).
+    pub fn insert_gif_frames(&self, bytes: Vec<u8>, private: bool) -> Option<FramesInserted> {
+        if procraft_engine::gif::frame_count(&bytes) < 2 {
+            return None;
+        }
+        let fps = {
+            let st = self.shared.lock();
+            st.doc.animation.as_ref().map_or(procraft_engine::animation::Animation::default().fps, |a| a.fps).max(1)
+        };
+        let (width, height) = procraft_engine::gif::size(&bytes)?;
+        let mut held: Vec<(LayerId, u32)> = Vec::new();
+        let mut full = false;
+        procraft_engine::gif::frames(&bytes, |rgba, ms| {
+            let mut image = ThumbnailImage { width, height, rgba: rgba.to_vec() };
+            // straight to premultiplied
+            for px in image.rgba.as_chunks_mut::<4>().0 {
+                let a = u16::from(px[3]);
+                for c in px.iter_mut().take(3) {
+                    *c = ((u16::from(*c) * a + 127) / 255) as u8;
+                }
+            }
+            let Some(id) = self.add_picture(&image, true, private) else {
+                full = true;
+                return false;
+            };
+            // shown for as many of the animation's frames as its time takes
+            let shown = ((f64::from(ms) * f64::from(fps) / 1000.0).round() as u32).max(1);
+            held.push((LayerId(id), shown - 1));
+            held.len() < MOST_FRAMES
+        })?;
+        if held.is_empty() {
+            return Some(FramesInserted { added: 0, full });
+        }
+        let assisted = self.shared.lock().doc.animation.as_ref().is_some_and(|a| !a.pages);
+        if !assisted {
+            self.set_animation_assist(true);
+        }
+        if let Some(a) = self.shared.lock().doc.animation.as_mut() {
+            for &(id, n) in &held {
+                a.set_hold(id, n);
+            }
+        }
+        Some(FramesInserted { added: held.len() as u32, full })
     }
 
     /// Mirrors every layer of the canvas, left to right or (not `horizontal`) top to bottom, as

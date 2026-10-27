@@ -2936,3 +2936,68 @@ fn changes(a: &procraft_engine::brushfile::BrushFile, b: &procraft_engine::brush
     }
     out.join(", ")
 }
+
+#[test]
+fn a_gimp_brush_becomes_a_brush_with_its_spacing() {
+    let s = CanvasSession::new(64, 64);
+    // version 2: header, size, grey, the magic word, 40% spacing, the name, a 4 × 4 image
+    let name = b"Charcoal\0";
+    let mut file = Vec::new();
+    for v in [28 + name.len() as u32, 2, 4, 4, 1] {
+        file.extend_from_slice(&v.to_be_bytes());
+    }
+    file.extend_from_slice(b"GIMP");
+    file.extend_from_slice(&40u32.to_be_bytes());
+    file.extend_from_slice(name);
+    file.extend((0..16).map(|i| (i * 16) as u8));
+    let set = s.import_abr(file, "Charcoal pack".to_owned()).unwrap();
+    let library = s.brush_library();
+    let set = &library[set as usize];
+    assert_eq!(set.name, "Charcoal pack");
+    assert_eq!(set.brushes.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Charcoal"]);
+}
+
+#[test]
+fn a_moving_gif_comes_in_as_held_frames() {
+    let Some(s) = session(8, 8) else { return };
+    // a 2 × 2 GIF of two frames, red for 0.2 s then blue for 0.1 s (no compression: each index a
+    // code of 3 bits after a clear code)
+    let frame = |index: u8, centiseconds: u8| {
+        let mut f = vec![0x21, 0xF9, 4, 0, centiseconds, 0, 0, 0, 0x2C, 0, 0, 0, 0, 2, 0, 2, 0, 0, 2];
+        // clear (4), the index twice, clear, twice more, end (5), 3 bits each, low bits first
+        let codes = [4u32, index.into(), index.into(), 4, index.into(), index.into(), 5];
+        let (mut data, mut acc, mut bits) = (Vec::new(), 0u32, 0);
+        for c in codes {
+            acc |= c << bits;
+            bits += 3;
+            while bits >= 8 {
+                data.push(acc as u8);
+                acc >>= 8;
+                bits -= 8;
+            }
+        }
+        data.push(acc as u8);
+        f.push(data.len() as u8);
+        f.extend(data);
+        f.push(0);
+        f
+    };
+    let mut gif = b"GIF89a".to_vec();
+    gif.extend_from_slice(&[2, 0, 2, 0, 0x81, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0, 0]);
+    gif.extend(frame(0, 20));
+    gif.extend(frame(1, 10));
+    gif.push(0x3B);
+    let before = s.shared.lock().doc.layers().len();
+    let done = s.insert_gif_frames(gif, false).unwrap();
+    assert_eq!(done, crate::clipboard::FramesInserted { added: 2, full: false });
+    assert_eq!(s.shared.lock().doc.layers().len(), before + 2);
+    // Animation Assist is on; at 15 frames a second, 0.2 s is three frames: held two more
+    let animation = s.shared.lock().doc.animation.clone().unwrap();
+    assert!(!animation.pages);
+    let holds: Vec<u32> = animation.holds.iter().map(|h| h.1).collect();
+    assert_eq!(holds, [2, 1]);
+    // the top frame is blue, filling the canvas
+    assert_eq!(pixel(&s, 4, 4), [0, 0, 255, 255]);
+    // a still picture isn't taken
+    assert_eq!(s.insert_gif_frames(b"GIF89a".to_vec(), false), None);
+}
