@@ -302,13 +302,9 @@ fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
     }
     // Photoshop turns the other way (its 129 degrees are -129 here)
     b.shape.rotation = -a.angle;
-    if let Some(t) = &a.texture {
-        let png = sized_gray_png(t.width, t.height, &t.pixels);
-        paper(&mut b, &[png], t.invert, t.depth.unwrap_or(1.0), t.scale.unwrap_or(1.0));
-    }
-    // as a preset comes in elsewhere: no taper, no StreamLine, glazed uniformly at full flow, down
-    // to the least size; the pen's pressure on the size (half of what the shape dynamics let go
-    // of), the opacity and the flow only as the preset's dynamics have them
+    let d = a.dynamics;
+    let flow = d.tool_flow.unwrap_or(1.0);
+    // as a preset comes in elsewhere: no taper, no StreamLine, glazed uniformly at its tool's flow
     for (key, value) in [
         ("pen_taper_size", 0.0),
         ("pen_taper_opacity", 0.0),
@@ -316,9 +312,23 @@ fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
         ("touch_taper_opacity", 0.0),
         ("streamline", 0.0),
         ("rendering_mode", 1.0),
-        ("flow", 1.0),
+        ("flow", flow),
     ] {
         b.set_setting(key, value);
+    }
+    if let Some(t) = &a.texture {
+        let png = sized_gray_png(t.width, t.height, &t.pixels);
+        paper(&mut b, &[png], t.invert, t.depth.unwrap_or(1.0), t.scale.unwrap_or(1.0));
+        if b.grain.source.is_some() {
+            // a stamp's own texture moves with it; else it lies still under the stroke
+            b.set_setting("grain_behavior", if t.each_tip { 0.0 } else { 1.0 });
+            b.set_setting("grain_depth_min", t.min_depth.unwrap_or(0.0));
+            b.set_setting("grain_brightness", (t.brightness as f32 / 255.0).clamp(-1.0, 1.0));
+            b.set_setting("grain_contrast", (t.contrast as f32 / 100.0).clamp(-1.0, 1.0));
+            if let Some(mode) = t.blend.as_deref().and_then(texture_blend) {
+                b.set_setting("grain_blend", mode as f32);
+            }
+        }
     }
     // its most size from its tip's pixels (a sampled tip's no taller than its picture), the least 1%
     let pixels = match (&a.tip, a.diameter) {
@@ -328,12 +338,38 @@ fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
     if let Some(px) = pixels {
         procraft_engine::brushfile::set_sizes(&mut b, px * ABR_SIZE_PER_PIXEL, Some(0.01));
     }
-    let d = a.dynamics;
-    b.set_setting("pressure_size", if d.tip && d.size_by_pressure { (1.0 - d.min_diameter) / 2.0 } else { 0.0 });
-    // the stylus page's opacity is kept as "pressure_flow", its flow as "pressure_opacity"
-    b.set_setting("pressure_flow", if d.paint && d.opacity_by_pressure { 1.0 } else { 0.0 });
-    b.set_setting("pressure_opacity", if d.paint && d.flow_by_pressure { 1.0 } else { 0.0 });
+    // the shape dynamics: pressure or tilt (controls 2, 3) on the size, half of what it lets go
+    // of; tilt to the full; its size jitter
+    let sized = d.tip && matches!(d.size_control, 2 | 3);
+    b.set_setting("pressure_size", if sized { (1.0 - d.min_diameter) / 2.0 } else { 0.0 });
+    b.set_setting("tilt_size", if d.tip && d.size_control == 3 { 1.0 } else { 0.0 });
+    b.set_setting("jitter_size", if d.tip { d.size_jitter } else { 0.0 });
+    // the paint dynamics, pressure's (control 2): the opacity down to its least, the flow from the
+    // tool's down to its least; the flow's jitter as the opacity's. The stylus page's opacity is
+    // kept as "pressure_flow", its flow as "pressure_opacity".
+    let pressed = |control: i32| d.paint && control == 2;
+    b.set_setting("pressure_flow", if pressed(d.opacity_control) { 1.0 - d.opacity_min } else { 0.0 });
+    b.set_setting("pressure_opacity", if pressed(d.flow_control) { flow * (1.0 - d.flow_min) } else { 0.0 });
+    b.set_setting("jitter_opacity", if d.paint { d.flow_jitter } else { 0.0 });
     b
+}
+
+/// The grain blend mode of a Photoshop texture's mode (its four-letter name), if we have it.
+fn texture_blend(name: &str) -> Option<u32> {
+    use procraft_engine::document::BlendMode;
+    Some(match name {
+        "Mltp" => BlendMode::Multiply.id(),
+        "Sbtr" => BlendMode::Subtract.id(),
+        "Drkn" => BlendMode::Darken.id(),
+        "Ovrl" => BlendMode::Overlay.id(),
+        "CDdg" => BlendMode::ColorDodge.id(),
+        "CBrn" => BlendMode::ColorBurn.id(),
+        "linearBurn" => BlendMode::LinearBurn.id(),
+        "hardMix" => BlendMode::HardMix.id(),
+        "Hght" => procraft_engine::brush::GRAIN_HEIGHT,
+        "linearHeight" => procraft_engine::brush::GRAIN_LINEAR_HEIGHT,
+        _ => return None,
+    })
 }
 
 /// A brush of a GIMP generated brush: round with its hardness and how round it is, or its square
@@ -918,11 +954,11 @@ mod tests {
             texture: None,
             dynamics: AbrDynamics {
                 tip: true,
+                size_control: 2,
                 min_diameter: 0.87,
-                size_by_pressure: true,
                 paint: true,
-                opacity_by_pressure: true,
-                flow_by_pressure: false,
+                opacity_control: 2,
+                ..AbrDynamics::default()
             },
         };
         let b = abr_brush(&round);
@@ -943,10 +979,54 @@ mod tests {
         assert!((b.shape.rotation + 129f32.to_radians()).abs() < 1e-6);
         // a sampled 165 x 91 tip at 165 px: no taller than its picture, 298%
         let tip = AbrTip { name: "Tip".into(), spacing: None, width: 165, height: 91, pixels: vec![255; 165 * 91] };
-        let sampled =
-            abr_brush(&AbrBrush { tip: Some(tip), diameter: Some(165.0), dynamics: AbrDynamics::default(), ..round });
+        let sampled = abr_brush(&AbrBrush {
+            tip: Some(tip),
+            diameter: Some(165.0),
+            dynamics: AbrDynamics::default(),
+            ..round.clone()
+        });
         assert_eq!((sampled.max_size / sampled.size_unit() * 100.0).round(), 298.0);
         assert_eq!(sampled.setting("pressure_size"), 0.0);
+        // as Kyle's charcoal: its tool's flow 76%, the flow by pressure down to 20% (61% on the
+        // stylus page), size by tilt, and a still texture of its own in the Height mode
+        let paper = (0..64 * 64).map(|i| (i * 7 % 251) as u8).collect();
+        let kyle = abr_brush(&AbrBrush {
+            texture: Some(procraft_engine::abr::AbrTexture {
+                name: "Grainy".into(),
+                width: 64,
+                height: 64,
+                pixels: paper,
+                scale: Some(1.0),
+                depth: Some(0.32),
+                invert: false,
+                min_depth: Some(0.17),
+                brightness: 30,
+                contrast: 20,
+                blend: Some("Hght".into()),
+                each_tip: false,
+            }),
+            dynamics: AbrDynamics {
+                tip: true,
+                size_control: 3,
+                size_jitter: 0.09,
+                paint: true,
+                flow_control: 2,
+                flow_min: 0.2,
+                flow_jitter: 0.1,
+                tool_flow: Some(0.76),
+                ..AbrDynamics::default()
+            },
+            ..round
+        });
+        assert_eq!(
+            (shown(&kyle, "flow"), shown(&kyle, "pressure_opacity"), shown(&kyle, "pressure_flow")),
+            (76.0, 61.0, 0.0)
+        );
+        assert_eq!((shown(&kyle, "pressure_size"), shown(&kyle, "tilt_size")), (50.0, 100.0));
+        assert_eq!((shown(&kyle, "jitter_size"), shown(&kyle, "jitter_opacity")), (9.0, 10.0));
+        assert_eq!(kyle.setting("grain_blend") as u32, procraft_engine::brush::GRAIN_HEIGHT);
+        assert_eq!((shown(&kyle, "grain_brightness"), shown(&kyle, "grain_contrast")), (12.0, 20.0));
+        assert_eq!((shown(&kyle, "grain_depth_min"), kyle.setting("grain_behavior")), (17.0, 1.0));
     }
 
     #[test]

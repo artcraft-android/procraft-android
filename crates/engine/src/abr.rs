@@ -40,16 +40,22 @@ pub struct AbrBrush {
 /// What a preset's shape and paint dynamics have the pen's pressure change.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AbrDynamics {
-    /// Whether its shape dynamics are on, and the least share of the size pressure leaves.
+    /// Whether its shape dynamics are on; what controls the size (0 nothing, 2 the pen's
+    /// pressure, 3 its tilt), the least share of the size it goes down to, and how much it jitters.
     pub tip: bool,
+    pub size_control: i32,
     pub min_diameter: f32,
-    /// Whether pressure changes the size (with the shape dynamics on).
-    pub size_by_pressure: bool,
-    /// Whether its paint (transfer) dynamics are on, and whether pressure changes the opacity and
-    /// the flow.
+    pub size_jitter: f32,
+    /// Whether its paint (transfer) dynamics are on; what controls the opacity and the flow, the
+    /// least of each, and how much the flow jitters.
     pub paint: bool,
-    pub opacity_by_pressure: bool,
-    pub flow_by_pressure: bool,
+    pub opacity_control: i32,
+    pub opacity_min: f32,
+    pub flow_control: i32,
+    pub flow_min: f32,
+    pub flow_jitter: f32,
+    /// The flow its tool options keep, 0 to 1, if they do.
+    pub tool_flow: Option<f32>,
 }
 
 /// A preset's texture: a pattern from the file, grey, and how the preset uses it.
@@ -66,6 +72,15 @@ pub struct AbrTexture {
     pub depth: Option<f32>,
     /// Whether dark lets paint through instead of light.
     pub invert: bool,
+    /// The least it shows (pressure and the like lower it to this), 0 to 1, if given.
+    pub min_depth: Option<f32>,
+    /// Its brightness (-150 to 150) and contrast (-50 to 100), as the preset keeps them.
+    pub brightness: i32,
+    pub contrast: i32,
+    /// How it is laid over the paint, by the preset's four-letter name ("Mltp", "Hght"...), if given.
+    pub blend: Option<String>,
+    /// Whether each stamp has it afresh (else it lies still under the stroke).
+    pub each_tip: bool,
 }
 
 /// The largest tip side read, pixels.
@@ -202,6 +217,11 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
                 scale: p.texture_scale,
                 depth: p.texture_depth,
                 invert: p.texture_invert,
+                min_depth: p.texture_min_depth,
+                brightness: p.texture_brightness,
+                contrast: p.texture_contrast,
+                blend: p.texture_blend.clone(),
+                each_tip: p.texture_each_tip,
             });
         out.push(AbrBrush {
             name: named(&p.name, out.len()),
@@ -433,6 +453,11 @@ struct Preset {
     texture_scale: Option<f32>,
     texture_depth: Option<f32>,
     texture_invert: bool,
+    texture_min_depth: Option<f32>,
+    texture_brightness: i32,
+    texture_contrast: i32,
+    texture_blend: Option<String>,
+    texture_each_tip: bool,
     dynamics: AbrDynamics,
 }
 
@@ -442,7 +467,7 @@ struct Preset {
 /// aren't the preset's: the samples they name come after the presets. Its texture comes after its
 /// brushes, so it goes to what was kept of the preset, and to the preset as it is still read.
 fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
-    const KEYS: [&[u8]; 23] = [
+    const KEYS: [&[u8]; 32] = [
         b"brushPreset",
         b"Nm  TEXT",
         b"SpcnUntF#Prc",
@@ -466,6 +491,16 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
         b"prVrObjc",
         b"bVTylong",
         b"DmtrUntF#Pxl",
+        b"minimumDepthUntF#Prc",
+        b"textureBrightnesslong",
+        b"textureContrastlong",
+        b"textureBlendModeenum",
+        b"jitterUntF#Prc",
+        b"Mnm UntF#Prc",
+        b"flowlong",
+        b"TxtCbool",
+        // any other object: the end of a dynamics' own settings
+        b"Objc",
     ];
     let (mut out, mut others) = (Vec::new(), Vec::new());
     // the preset being read, whether its brush is computed, and whether its brush is done
@@ -486,6 +521,8 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
         let mut r = Reader::new(data.get(from..).unwrap_or_default());
         let percent = |r: &mut Reader<'_>| r.f64().map(|v| (v / 100.0) as f32).filter(|v| v.is_finite());
         match key {
+            // a preset's tool options keep a switch named so: not a new preset
+            0 if data.get(from..from + 4) == Some(&b"bool"[..]) => {}
             // a new preset: its name is the next one
             0 => {
                 end(&p, computed, &mut done, &mut out);
@@ -493,7 +530,7 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
                 (first, in_texture, controlled) = (out.len(), false, None);
             }
             // its texture and dynamics, after its brushes
-            9..=21 => {
+            9..=21 | 23..=31 => {
                 let switch = |r: &mut Reader<'_>| r.u8().is_some_and(|v| v != 0);
                 let later = match key {
                     9 => Later::TextureOn(switch(&mut r)),
@@ -512,11 +549,28 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
                         continue;
                     }
                     18 => Later::PaintDynamics(switch(&mut r)),
-                    // a control of 2 is the pen's pressure
-                    21 => match controlled.take() {
-                        Some(of) => Later::ByPressure(of, r.i32() == Some(2)),
+                    23 => Later::MinDepth(percent(&mut r).map(|v| v.clamp(0.0, 1.0))),
+                    24 => Later::Brightness(r.i32().unwrap_or(0)),
+                    25 => Later::Contrast(r.i32().unwrap_or(0)),
+                    26 => Later::Blend(enum_value(&mut r)),
+                    21 => match controlled {
+                        Some(of) => Later::Control(of, r.i32().unwrap_or(0)),
                         None => continue,
                     },
+                    27 => match controlled {
+                        Some(of) => Later::Jitter(of, percent(&mut r).map_or(0.0, |v| v.clamp(0.0, 1.0))),
+                        None => continue,
+                    },
+                    28 => match controlled {
+                        Some(of) => Later::Minimum(of, percent(&mut r).map_or(0.0, |v| v.clamp(0.0, 1.0))),
+                        None => continue,
+                    },
+                    29 => Later::ToolFlow(r.i32().map(|v| (v as f32 / 100.0).clamp(0.0, 1.0))),
+                    30 => Later::EachTip(switch(&mut r)),
+                    31 => {
+                        controlled = None;
+                        continue;
+                    }
                     _ => continue,
                 };
                 later.set(&mut p);
@@ -560,8 +614,16 @@ enum Later {
     TipDynamics(bool),
     MinDiameter(f32),
     PaintDynamics(bool),
-    /// Whether the pen's pressure controls the size (key 17), opacity (19) or flow (20).
-    ByPressure(usize, bool),
+    MinDepth(Option<f32>),
+    Brightness(i32),
+    Contrast(i32),
+    Blend(Option<String>),
+    EachTip(bool),
+    /// The size's (key 17), opacity's (19) or flow's (20) control, jitter and least.
+    Control(usize, i32),
+    Jitter(usize, f32),
+    Minimum(usize, f32),
+    ToolFlow(Option<f32>),
 }
 
 impl Later {
@@ -576,11 +638,34 @@ impl Later {
             Later::TipDynamics(v) => d.tip = *v,
             Later::MinDiameter(v) => d.min_diameter = *v,
             Later::PaintDynamics(v) => d.paint = *v,
-            Later::ByPressure(17, v) => d.size_by_pressure = *v,
-            Later::ByPressure(19, v) => d.opacity_by_pressure = *v,
-            Later::ByPressure(_, v) => d.flow_by_pressure = *v,
+            Later::MinDepth(v) => p.texture_min_depth = *v,
+            Later::Brightness(v) => p.texture_brightness = *v,
+            Later::Contrast(v) => p.texture_contrast = *v,
+            Later::Blend(v) => p.texture_blend.clone_from(v),
+            Later::EachTip(v) => p.texture_each_tip = *v,
+            Later::Control(17, v) => d.size_control = *v,
+            Later::Control(19, v) => d.opacity_control = *v,
+            Later::Control(_, v) => d.flow_control = *v,
+            Later::Jitter(17, v) => d.size_jitter = *v,
+            Later::Jitter(20, v) => d.flow_jitter = *v,
+            Later::Minimum(19, v) => d.opacity_min = *v,
+            Later::Minimum(20, v) => d.flow_min = *v,
+            Later::Jitter(..) | Later::Minimum(..) => {}
+            Later::ToolFlow(v) => d.tool_flow = *v,
         }
     }
+}
+
+/// An enumerated value's name: its type's key, then its own (each a 4-letter key when its length
+/// reads 0, else that many letters).
+fn enum_value(r: &mut Reader<'_>) -> Option<String> {
+    let key = |r: &mut Reader<'_>| {
+        let n = r.u32()? as usize;
+        let bytes = r.take(if n == 0 { 4 } else { n.min(64) })?;
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    };
+    key(r)?;
+    key(r)
 }
 
 /// Where the first of `keys` next appears in `data` from `from`: which one, and just past it.
@@ -795,11 +880,11 @@ mod tests {
             d,
             AbrDynamics {
                 tip: true,
+                size_control: 2,
                 min_diameter: 0.4,
-                size_by_pressure: true,
                 paint: true,
-                opacity_by_pressure: true,
-                flow_by_pressure: false
+                opacity_control: 2,
+                ..AbrDynamics::default()
             }
         );
     }
@@ -826,6 +911,13 @@ mod tests {
             number(desc, b"textureScaleUntF#Prc", 50.0);
             number(desc, b"textureDepthUntF#Prc", 40.0);
             desc.extend_from_slice(b"InvTbool\x01");
+            number(desc, b"minimumDepthUntF#Prc", 17.0);
+            desc.extend_from_slice(b"textureBrightnesslong");
+            put32(desc, 30);
+            desc.extend_from_slice(b"textureContrastlong");
+            put32(desc, (-20i32) as u32);
+            // an enum: its type's key and its own, each 4 letters (a length of 0)
+            desc.extend_from_slice(b"textureBlendModeenum\0\0\0\0BlnM\0\0\0\0Hght");
         };
         let mut desc = Vec::new();
         preset(&mut desc, "Grainy", true);
@@ -871,6 +963,7 @@ mod tests {
         let t = brushes[0].texture.as_ref().unwrap();
         assert_eq!((t.name.as_str(), t.width, t.height, t.pixels.as_slice()), ("Paper", 2, 2, &[10, 20, 30, 40][..]));
         assert_eq!((t.scale, t.depth, t.invert), (Some(0.5), Some(0.4), true));
+        assert_eq!((t.min_depth, t.brightness, t.contrast, t.blend.as_deref()), (Some(0.17), 30, -20, Some("Hght")));
         // the other's texture is off
         assert_eq!(brushes[1].texture, None);
         crate::damaged::survives("ABR with a pattern", &file, |b| {
