@@ -12,10 +12,6 @@ import java.nio.ByteBuffer
 import kotlin.math.roundToInt
 
 /**
- * An artwork's time-lapse: a picture of the whole canvas after each change, kept as numbered JPEG
- * frames in the artwork's folder, replayed or made into a video at [FPS] frames a second.
- */
-/**
  * A time-lapse's video: 1080p, 2K or 4K ([resolution] 0 to 2), Low, Good, Studio quality or
  * Lossless ([quality] 0 to 3), and HEVC or H.264.
  */
@@ -25,12 +21,15 @@ data class TimeLapseSettings(val resolution: Int = 0, val quality: Int = 1, val 
     val bitsPerPixel: Int get() = listOf(2, 4, 8, 16).getOrElse(quality) { 4 }
 }
 
+/**
+ * An artwork's time-lapse: a picture of the whole canvas after each change, kept as numbered JPEG
+ * frames in the artwork's folder, replayed or made into a video at [FPS] frames a second.
+ */
 class TimeLapse(artwork: File) {
     private val dir = File(artwork, "timelapse")
     private val off = File(dir, "off")
     private val settingsFile = File(dir, "settings.json")
-    private val segmentFile = File(dir, "segment.mp4")
-    private val segmentAbout = File(dir, "segment.json")
+    private val segmentsAbout = File(dir, "segments.json")
 
     /** The video's size, quality and codec, kept with the artwork. */
     var settings: TimeLapseSettings = runCatching {
@@ -60,6 +59,8 @@ class TimeLapse(artwork: File) {
     private var last: Int? = null
 
     private fun file(i: Int) = File(dir, "frame-%06d.jpg".format(i))
+
+    private fun segmentFile(i: Int) = File(dir, "segment-${i + 1}.mp4")
 
     /** Keeps a frame (premultiplied RGBA, [width] × [height]) unless it is the same as the last. */
     fun record(rgba: ByteArray, width: Int, height: Int) {
@@ -100,20 +101,27 @@ class TimeLapse(artwork: File) {
      * The frames as an H.264 MP4 at [out]: all of them, or (with [seconds]) spread evenly over
      * that long. False if there are none or the encoder fails.
      */
-    fun export(out: File, seconds: Int?): Boolean = encode(out, seconds, count) != null
-
-    /** The first [frames] frames as a video at [out], as [export] makes it; its size, or null. */
-    private fun encode(out: File, seconds: Int?, frames: Int): Pair<Int, Int>? {
-        if (frames == 0) return null
+    fun export(out: File, seconds: Int?): Boolean {
+        val frames = count
         val picks = if (seconds != null && frames > seconds * FPS) {
             val n = seconds * FPS
             List(n) { (it.toLong() * (frames - 1) / (n - 1).coerceAtLeast(1)).toInt() }
         } else List(frames) { it }
-        val first = frame(picks.first()) ?: return null
+        return encode(out, picks, null) != null
+    }
+
+    /**
+     * The frames [picks] as a video at [out], each fitted on white into [size] (else into the first
+     * one's, within the settings' side); its size, or null if there are none or the encoder fails.
+     */
+    private fun encode(out: File, picks: List<Int>, size: Pair<Int, Int>?): Pair<Int, Int>? {
+        if (picks.isEmpty()) return null
         val video = settings
         val mime = if (video.hevc) android.media.MediaFormat.MIMETYPE_VIDEO_HEVC else android.media.MediaFormat.MIMETYPE_VIDEO_AVC
-        val (w, h) = VideoWriter.fit(first.width, first.height, video.side, mime) ?: return null
-        first.recycle()
+        val (w, h) = size ?: run {
+            val first = frame(picks.first()) ?: return null
+            VideoWriter.fit(first.width, first.height, video.side, mime).also { first.recycle() }
+        } ?: return null
         val frameBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val paint = Paint(Paint.FILTER_BITMAP_FLAG)
         try {
@@ -138,53 +146,97 @@ class TimeLapse(artwork: File) {
     }
 
     /**
-     * Every frame as one video, for a package, with its size and bit rate: made again only when
-     * frames were added or the settings changed. Null with no frames, or if the encoder fails.
+     * The videos made of the frames for packages: the settings they were made with, their size and
+     * bit rate, and the frame each ends before ([ends], rising), their files numbered from 1.
      */
-    private fun segment(): Triple<File, Pair<Int, Int>, Long>? {
-        val frames = count
-        if (frames == 0) return null
-        val video = settings
+    private data class Segments(val video: TimeLapseSettings, val width: Int, val height: Int, val bitrate: Long, val ends: List<Int>)
+
+    private fun readSegments(): Segments? = runCatching {
+        val j = org.json.JSONObject(segmentsAbout.readText())
+        val ends = j.getJSONArray("ends").let { a -> List(a.length()) { a.getInt(it) } }
+        Segments(
+            TimeLapseSettings(j.getInt("resolution"), j.getInt("quality"), j.getBoolean("hevc")),
+            j.getInt("width"), j.getInt("height"), j.getLong("bitrate"), ends,
+        )
+    }.getOrNull()
+
+    private fun writeSegments(s: Segments) {
         runCatching {
-            val j = org.json.JSONObject(segmentAbout.readText())
-            if (segmentFile.exists() && j.getInt("frames") == frames && j.getInt("resolution") == video.resolution &&
-                j.getInt("quality") == video.quality && j.getBoolean("hevc") == video.hevc
-            ) return Triple(segmentFile, j.getInt("width") to j.getInt("height"), j.getLong("bitrate"))
-        }
-        segmentAbout.delete()
-        val size = encode(segmentFile, null, frames) ?: return null.also { segmentFile.delete() }
-        val bitrate = VideoWriter.bitRate(size.first, size.second, video.bitsPerPixel).toLong()
-        runCatching {
-            segmentAbout.writeText(
-                org.json.JSONObject().put("frames", frames).put("resolution", video.resolution).put("quality", video.quality)
-                    .put("hevc", video.hevc).put("width", size.first).put("height", size.second).put("bitrate", bitrate).toString(),
+            segmentsAbout.writeText(
+                org.json.JSONObject().put("resolution", s.video.resolution).put("quality", s.video.quality).put("hevc", s.video.hevc)
+                    .put("width", s.width).put("height", s.height).put("bitrate", s.bitrate).put("ends", org.json.JSONArray(s.ends)).toString(),
             )
         }
-        return Triple(segmentFile, size, bitrate)
     }
 
-    /** The time-lapse as a package keeps it: its settings, and its frames made into a video. */
+    /** Every package video, and the note of them, gone. */
+    private fun dropSegments() {
+        segmentsAbout.delete()
+        dir.listFiles { f -> f.name.startsWith("segment-") && f.name.endsWith(".mp4") }?.forEach { it.delete() }
+    }
+
+    /**
+     * Every frame as videos, for a package: the ones made before, and one more of the frames since
+     * (so a share makes only what is new); all made again when the settings changed or there
+     * would be more than [MOST_SEGMENTS]. Null with no frames, or if the encoder fails.
+     */
+    private fun segments(): Segments? {
+        val frames = count
+        val video = settings
+        var kept = readSegments()?.takeIf { s ->
+            s.video == video && s.width > 0 && s.height > 0 && s.ends.size < MOST_SEGMENTS &&
+                (s.ends.firstOrNull() ?: 1) > 0 && s.ends.zipWithNext().all { (a, b) -> a < b } &&
+                (s.ends.lastOrNull() ?: 0) <= frames && s.ends.indices.all { segmentFile(it).exists() }
+        }
+        if (kept == null) dropSegments()
+        val done = kept?.ends?.lastOrNull() ?: 0
+        if (done == frames) return kept
+        // the frames since, the same size as the videos before them (another app's may be a size
+        // the encoder here can't make: then all of them, at a size it can)
+        val file = segmentFile(kept?.ends?.size ?: 0)
+        val size = kept?.let { encode(file, (done until frames).toList(), it.width to it.height) }
+        if (size != null && kept != null) {
+            kept = kept.copy(ends = kept.ends + frames)
+        } else {
+            dropSegments()
+            val whole = encode(segmentFile(0), List(frames) { it }, null) ?: return null.also { dropSegments() }
+            kept = Segments(video, whole.first, whole.second, VideoWriter.bitRate(whole.first, whole.second, video.bitsPerPixel).toLong(), listOf(frames))
+        }
+        writeSegments(kept)
+        return kept
+    }
+
+    /** The time-lapse as a package keeps it: its settings, and its frames made into videos. */
     fun forPackage(): PackageTimeLapse {
         val video = settings
-        val segment = segment()
+        val segments = segments()
         return PackageTimeLapse(
             recording = recording,
             quality = video.quality.toUByte(),
             resolution = video.resolution.toUByte(),
             hevc = video.hevc,
-            segments = listOfNotNull(segment?.first?.path),
-            width = (segment?.second?.first ?: 0).toUInt(),
-            height = (segment?.second?.second ?: 0).toUInt(),
+            segments = segments?.ends?.indices?.map { segmentFile(it).path }.orEmpty(),
+            width = (segments?.width ?: 0).toUInt(),
+            height = (segments?.height ?: 0).toUInt(),
             fps = FPS.toUInt(),
-            bitrate = (segment?.third ?: 0L).toULong(),
+            bitrate = (segments?.bitrate ?: 0L).toULong(),
         )
     }
 
-    /** Takes a package's time-lapse [t]: its settings, and its video's frames after these. */
+    /**
+     * Takes a package's time-lapse [t]: its settings, and its videos' frames after these. The
+     * videos themselves are kept to go back into a package as they are, when every frame of them
+     * came in and there were no frames before.
+     */
     fun take(t: PackageTimeLapse) {
-        settings = TimeLapseSettings(t.resolution.toInt(), t.quality.toInt(), t.hevc)
+        val video = TimeLapseSettings(t.resolution.toInt(), t.quality.toInt(), t.hevc)
+        settings = video
         recording = t.recording
+        dropSegments()
+        var whole = count == 0 && t.width > 0u && t.height > 0u
+        val ends = mutableListOf<Int>()
         for (path in t.segments) {
+            val before = count
             val retriever = android.media.MediaMetadataRetriever()
             try {
                 retriever.setDataSource(path)
@@ -197,11 +249,20 @@ class TimeLapse(artwork: File) {
                     pictures.forEach { keep(it); it.recycle() }
                     i += run
                 }
+                whole = whole && n > 0 && count - before == n
             } catch (e: Exception) {
                 android.util.Log.e("ProCraft", "a time-lapse's video", e)
+                whole = false
             } finally {
                 retriever.release()
             }
+            if (whole) whole = runCatching { File(path).copyTo(segmentFile(ends.size), overwrite = true) }.isSuccess
+            ends += count
+        }
+        if (whole && ends.isNotEmpty() && ends.size < MOST_SEGMENTS) {
+            writeSegments(Segments(video, t.width.toInt(), t.height.toInt(), t.bitrate.toLong(), ends))
+        } else {
+            dropSegments()
         }
     }
 
@@ -212,5 +273,7 @@ class TimeLapse(artwork: File) {
         private const val JPEG_QUALITY = 85
         /** Frames decoded together from a package's video. */
         private const val DECODE_RUN = 8
+        /** A package's videos are made again as one rather than be more than this. */
+        private const val MOST_SEGMENTS = 32
     }
 }
