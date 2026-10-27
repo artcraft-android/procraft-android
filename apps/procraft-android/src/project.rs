@@ -104,11 +104,11 @@ pub(crate) fn file_error(context: &str, e: impl std::fmt::Display) -> MobileErro
     MobileError::File { reason: format!("{context}: {e}") }
 }
 
-/// What a save writes, read under the lock: the artwork's file, every layer and the picture (if
-/// shown).
+/// What a save writes, read under the lock: the artwork's file, the layers not already in the
+/// folder as they are (each with its hash) and the picture (if shown).
 pub(crate) struct SaveSnapshot {
     file: ArtworkFile,
-    layers: Vec<(LayerId, Vec<u8>)>,
+    layers: Vec<(LayerId, u64, Vec<u8>)>,
     composite: Option<Vec<u8>>,
     model: Option<crate::scene3d::ModelSnapshot>,
 }
@@ -120,6 +120,13 @@ pub(crate) struct Saved {
     dir: PathBuf,
     layers: std::collections::HashMap<LayerId, u64>,
     sets: crate::scene3d::SavedSets,
+}
+
+impl Saved {
+    /// The hashes of the layers the last saves wrote to `dir`; none for another folder.
+    pub(crate) fn known(&self, dir: &Path) -> std::collections::HashMap<LayerId, u64> {
+        if self.dir == dir { self.layers.clone() } else { Default::default() }
+    }
 }
 
 /// A quick hash of pixels, to tell a changed layer from one saved already.
@@ -150,8 +157,19 @@ impl crate::State {
             && self.scene.as_ref().is_none_or(|s| !s.stroking)
     }
 
-    /// The artwork as it is now, for saving.
-    pub(crate) fn save_snapshot(&mut self) -> Result<SaveSnapshot, MobileError> {
+    /// The artwork as it is now, for saving into `dir`: a layer already there as it is (its hash
+    /// among the `known` and its file there) is let go as soon as it is read, so a save holds only
+    /// the layers that changed.
+    pub(crate) fn save_snapshot(
+        &mut self,
+        dir: &Path,
+        known: &std::collections::HashMap<LayerId, u64>,
+    ) -> Result<SaveSnapshot, MobileError> {
+        let changed = |id: LayerId, rgba: Vec<u8>| {
+            let hash = pixels_hash(&rgba);
+            let there = known.get(&id) == Some(&hash) && layer_path(dir, id).exists();
+            (!there).then_some((id, hash, rgba))
+        };
         let model = self.model_snapshot()?;
         let file = ArtworkFile {
             format: FORMAT.to_owned(),
@@ -176,7 +194,7 @@ impl crate::State {
             canvas.render(gpu, &mut self.doc, None);
             for layer in self.doc.layers() {
                 let rgba = canvas.read_layer(gpu, layer.id).map_err(|e| file_error("reading a layer", e))?;
-                layers.push((layer.id, rgba));
+                layers.extend(changed(layer.id, rgba));
             }
             // for the gallery's thumbnail: private layers left out
             let private = self.doc.private_layers();
@@ -187,7 +205,8 @@ impl crate::State {
             );
         } else {
             // not shown yet: what was opened is still what there is
-            layers = opened_pixels(self.pending_pixels.clone(), self.doc.width(), self.doc.height());
+            let opened = opened_pixels(self.pending_pixels.clone(), self.doc.width(), self.doc.height());
+            layers = opened.into_iter().filter_map(|(id, rgba)| changed(id, rgba)).collect();
         }
         Ok(SaveSnapshot { file, layers, composite, model })
     }
@@ -204,14 +223,10 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     }
     let (w, h) = (file.document.width(), file.document.height());
     fs::create_dir_all(dir.join("layers")).map_err(|e| file_error("making the folder", e))?;
-    for (id, rgba) in &layers {
-        let hash = pixels_hash(rgba);
-        let path = layer_path(dir, *id);
-        if saved.layers.get(id) == Some(&hash) && path.exists() {
-            continue;
-        }
-        write_atomically(&path, |p| write_png(p, w, h, rgba, &[]))?;
-        saved.layers.insert(*id, hash);
+    // only those not already there as they are
+    for (id, hash, rgba) in &layers {
+        write_atomically(&layer_path(dir, *id), |p| write_png(p, w, h, rgba, &[]))?;
+        saved.layers.insert(*id, *hash);
     }
     // layer files the document no longer has
     saved.layers.retain(|id, _| file.document.layer(*id).is_some());
@@ -342,7 +357,8 @@ impl CanvasSession {
             st.finish_stroke();
             st.settle();
             // a model saves its colour as the artwork's document
-            st.with_colour(crate::State::save_snapshot)?
+            let known = saved.known(Path::new(&dir));
+            st.with_colour(|st| st.save_snapshot(Path::new(&dir), &known))?
         };
         write_artwork(&mut saved, Path::new(&dir), snapshot)
     }
@@ -358,7 +374,8 @@ impl CanvasSession {
                 return Ok(false);
             }
             // a model saves its colour as the artwork's document
-            st.with_colour(crate::State::save_snapshot)?
+            let known = saved.known(Path::new(&dir));
+            st.with_colour(|st| st.save_snapshot(Path::new(&dir), &known))?
         };
         write_artwork(&mut saved, Path::new(&dir), snapshot).map(|()| true)
     }

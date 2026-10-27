@@ -1946,6 +1946,18 @@ fn saving_while_idle_writes_only_what_changed() {
     assert!(s.save_if_idle(path.clone()).unwrap());
     assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), written);
     assert_eq!(dir.join("layers").read_dir().unwrap().count(), 2);
+    // a layer whose file has gone is written again, though it hasn't changed
+    std::fs::remove_file(&file).unwrap();
+    assert!(s.save_if_idle(path.clone()).unwrap());
+    assert!(file.exists());
+    // and one painted on is
+    let written = std::fs::metadata(&file).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert!(s.select_layer(first));
+    s.stroke_begin(PointerKind::Finger, vec![sample(5.0, 5.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert!(s.save_if_idle(path.clone()).unwrap());
+    assert_ne!(std::fs::metadata(&file).unwrap().modified().unwrap(), written);
     let t = CanvasSession::open(path).unwrap();
     assert_eq!(t.layers().len(), 2);
     assert!(t.layers().iter().any(|l| l.id == first));
