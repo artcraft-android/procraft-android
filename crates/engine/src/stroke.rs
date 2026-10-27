@@ -185,8 +185,15 @@ const SPAN: f32 = 100.0;
 const SPEED_FRAMES: f32 = 3.0;
 /// The frames between two samples with the same time: those of a pen sampled 240 times a second.
 const SAMPLE_FRAMES: f32 = 0.25;
-/// Stabilisation averages up to this many of the latest input points.
-const MOST_AVERAGED: usize = 32;
+/// The input rates stabilisation, motion filtering and pressure smoothing are tuned for, samples a
+/// second: a pen's and a finger's. They work per sample at these rates; at others each sample
+/// counts for the time it covers, so they feel the same however fast the input comes.
+const PEN_RATE: f64 = 240.0;
+const FINGER_RATE: f64 = 120.0;
+/// Stabilisation averages the latest points: at full strength this many samples' worth (at the
+/// rate above), fewer as the strength to this power falls.
+const MOST_AVERAGED: f32 = 120.0;
+const STABILIZATION_POWER: f32 = 2.2;
 /// At full motion filtering, how little the filtered pen moves toward each new point; and at full
 /// expression, how much of the way back to the pen it comes.
 const MOTION_FILTER_MOST: f32 = 0.9;
@@ -389,6 +396,9 @@ impl Extras {
 
 /// Streamline is tuned for input at this interval; other rates are scaled to match.
 const REFERENCE_INTERVAL_MS: f64 = 1000.0 / 120.0;
+/// The most samples at the tuned rate one sample stands for (after a pause, the filters catch up
+/// rather than wait).
+const MOST_STEPS: f64 = 24.0;
 /// When a classic taper ends, the stroke runs on past the last point by this many steps (touch,
 /// pen), each this much of the one before and turning this much more than it, and the end taper
 /// comes to its tip over them.
@@ -441,8 +451,9 @@ pub struct StrokeBuilder {
     bounds: IRect,
     random: Random,
     extras: Extras,
-    /// The latest input points, for stabilisation; the speed, smoothed; the next gap's jitter.
-    recent: Vec<Vec2>,
+    /// The latest input points and their times, for stabilisation; the speed, smoothed; the next
+    /// gap's jitter.
+    recent: Vec<(Vec2, f64)>,
     speed: f32,
     /// Whether the speed has been measured (the first move is taken as it is).
     speed_known: bool,
@@ -523,7 +534,8 @@ fn together(a: f32, b: f32) -> f32 {
 impl StrokeBuilder {
     /// The stroke with the app's own smoothing and pressure as well as the brush's.
     pub fn with_input(mut self, input: InputSettings) -> StrokeBuilder {
-        self.extras.stabilization = together(self.extras.stabilization, input.stabilization);
+        // the stronger of the app's and the brush's
+        self.extras.stabilization = self.extras.stabilization.max(input.stabilization.clamp(0.0, 1.0));
         self.input = input;
         self
     }
@@ -769,11 +781,15 @@ impl StrokeBuilder {
 
     fn push(&mut self, s: Sample, out: &mut Vec<Stamp>) {
         let pen = self.pointer.has_pressure();
+        // the samples at the tuned rate this one stands for (one if it came with the last's time)
+        let interval = 1000.0 / if pen { PEN_RATE } else { FINGER_RATE };
+        let since = self.last_sample.map_or(0.0, |last| (s.time_ms - last.time_ms).abs());
+        let steps = if since > 0.0 { (since / interval).min(MOST_STEPS) as f32 } else { 1.0 };
         let raw = if pen { self.input.pressure_curve.eval(s.pressure.clamp(0.0, 1.0)).clamp(0.0, 1.0) } else { 1.0 };
         let smoothing = together(self.brush.pressure_smoothing, self.input.pressure_smoothing).min(0.95);
         let pressure = match self.pressure {
             None => raw,
-            Some(p) => p + (raw - p) * (1.0 - smoothing),
+            Some(p) => p + (raw - p) * (1.0 - smoothing.powf(steps)),
         };
         self.pressure = Some(pressure);
         let (tilt, azimuth) = if pen { (s.tilt, s.azimuth) } else { (0.0, 0.0) };
@@ -806,19 +822,21 @@ impl StrokeBuilder {
         let mut pos = s.pos;
         let filtering = together(self.extras.motion_filtering, self.input.motion_filtering);
         if filtering > 0.0 && !self.exact {
-            let follow = 1.0 - filtering * MOTION_FILTER_MOST;
+            let follow = 1.0 - (filtering * MOTION_FILTER_MOST).powf(steps);
             let f = self.filtered.map_or(s.pos, |f| f.lerp(s.pos, follow));
             self.filtered = Some(f);
             let expression = together(self.extras.motion_expression, self.input.motion_expression);
             pos = f.lerp(s.pos, expression * EXPRESSION_MOST);
         }
-        // stabilisation: the average of the latest points, more of them the stronger it is
-        if self.extras.stabilization > 0.0 && !self.exact {
-            self.recent.push(pos);
-            let keep = 1 + (self.extras.stabilization * (MOST_AVERAGED - 1) as f32) as usize;
-            let over = self.recent.len().saturating_sub(keep);
+        // stabilisation: the average of the latest points, those of a longer time the stronger it
+        // is (as many samples as it averages at the tuned rate; half a sample's leeway)
+        let averaged = (self.extras.stabilization.clamp(0.0, 1.0).powf(STABILIZATION_POWER) * MOST_AVERAGED) as usize;
+        if averaged > 1 && !self.exact {
+            self.recent.push((pos, s.time_ms));
+            let from = s.time_ms - (averaged as f64 - 0.5) * interval;
+            let over = self.recent.iter().take_while(|r| r.1 < from).count().min(self.recent.len() - 1);
             self.recent.drain(..over);
-            let sum = self.recent.iter().fold(Vec2::ZERO, |a, &p| a + p);
+            let sum = self.recent.iter().fold(Vec2::ZERO, |a, r| a + r.0);
             pos = sum * (1.0 / self.recent.len() as f32);
         }
         let target = PathPoint { pos, pressure, soft, tilt, azimuth, speed: self.speed };
@@ -2142,6 +2160,44 @@ mod tests {
             ys.iter().cloned().fold(f32::MIN, f32::max) - ys.iter().cloned().fold(f32::MAX, f32::min)
         };
         assert!(spread(1.0) < spread(0.0) * 0.5, "{} {}", spread(1.0), spread(0.0));
+    }
+
+    #[test]
+    fn smoothing_takes_the_same_time_at_any_input_rate() {
+        // a pen moving 1 px a millisecond for 800 ms, pressure rising from 0.2 to 1, sampled at
+        // the tuned rate and at three times it
+        let path = |rate: f64| -> Vec<Sample> {
+            let n = (rate * 0.8) as usize;
+            (0..=n)
+                .map(|i| {
+                    let t = i as f64 * 1000.0 / rate;
+                    Sample::at(Vec2::new(t as f32, 50.0), 0.2 + 0.8 * (t / 800.0) as f32, t)
+                })
+                .collect()
+        };
+        // how far the stroke's end is behind the pen's, and the last stamp's size
+        let end = |b: &Brush, rate: f64| {
+            let mut s = StrokeBuilder::new(b.clone(), 4.0, Pointer::Stylus);
+            s.add(&path(rate));
+            let last = *s.stamps().last().unwrap();
+            (800.0 - last.center.x, last.radius)
+        };
+        let close = |a: f32, b: f32, share: f32| (a - b).abs() <= share * a.abs().max(b.abs());
+        for (setting, behind) in [("stabilization", 200.0), ("motion_filtering", 15.0)] {
+            let mut b = plain();
+            b.set_setting(setting, 1.0);
+            let (slow, fast) = (end(&b, PEN_RATE).0, end(&b, PEN_RATE * 3.0).0);
+            assert!(slow > behind, "{setting} lags {slow}");
+            assert!(close(slow, fast, 0.1), "{setting}: {slow} behind at 240 Hz, {fast} at 720 Hz");
+        }
+        let b = Brush { pressure_smoothing: 0.9, pressure_size: 1.0, ..plain() };
+        let unsmoothed = end(&Brush { pressure_smoothing: 0.0, ..b.clone() }, PEN_RATE).1;
+        let (slow, fast) = (end(&b, PEN_RATE).1, end(&b, PEN_RATE * 3.0).1);
+        assert!(slow < unsmoothed, "{slow} vs {unsmoothed}");
+        assert!(
+            close(unsmoothed - slow, unsmoothed - fast, 0.15),
+            "pressure: {slow} at 240 Hz, {fast} at 720 Hz, {unsmoothed} unsmoothed"
+        );
     }
 
     #[test]
