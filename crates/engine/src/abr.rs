@@ -97,7 +97,7 @@ fn read_old(r: &mut Reader<'_>, version: u16) -> Option<Vec<AbrTip>> {
 
 /// Version 6 on: "8BIM" sections; "samp" holds the tips by id, "desc" the presets.
 fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
-    r.u16()?;
+    let minor = r.u16()?;
     let mut samples: Vec<(String, u32, u32, Vec<u8>)> = Vec::new();
     let (mut presets, mut others): (Vec<Preset>, Vec<String>) = (Vec::new(), Vec::new());
     while r.remaining() >= 12 {
@@ -108,8 +108,10 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
         let len = r.u32()? as usize;
         // a section cut short ends the file
         let Some(data) = r.take(len) else { break };
+        // each is padded to a multiple of four
+        r.take(((4 - len % 4) % 4).min(r.remaining()));
         match key {
-            b"samp" => samples = read_samples(data),
+            b"samp" => samples = read_samples(data, minor),
             b"desc" => (presets, others) = read_presets(data),
             _ => {}
         }
@@ -159,8 +161,9 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
     Some(out)
 }
 
-/// The samples: each its id and its image (the one channel written of its array).
-fn read_samples(data: &[u8]) -> Vec<(String, u32, u32, Vec<u8>)> {
+/// The samples: each its id and its image (version 6.1: straight after a short rectangle; later:
+/// the one channel written of its array).
+fn read_samples(data: &[u8], minor: u16) -> Vec<(String, u32, u32, Vec<u8>)> {
     let mut r = Reader::new(data);
     let mut out = Vec::new();
     while r.remaining() >= 4 {
@@ -168,17 +171,26 @@ fn read_samples(data: &[u8]) -> Vec<(String, u32, u32, Vec<u8>)> {
         // samples are padded to a multiple of four
         let padded = (len as usize).div_ceil(4) * 4;
         let Some(body) = r.take(padded.min(r.remaining())) else { break };
-        if let Some(sample) = read_sample(body.get(..len as usize).unwrap_or(body)) {
+        if let Some(sample) = read_sample(body.get(..len as usize).unwrap_or(body), minor) {
             out.push(sample);
         }
     }
     out
 }
 
-fn read_sample(body: &[u8]) -> Option<(String, u32, u32, Vec<u8>)> {
+fn read_sample(body: &[u8], minor: u16) -> Option<(String, u32, u32, Vec<u8>)> {
     let mut b = Reader::new(body);
     let n = usize::from(b.u8()?);
     let id = String::from_utf8_lossy(b.take(n)?).into_owned();
+    if minor == 1 {
+        // a short rectangle and depth, then the one used
+        b.take(10)?;
+        let (top, left, bottom, right) = (b.i32()?, b.i32()?, b.i32()?, b.i32()?);
+        let depth = b.u16()?;
+        let compression = b.u8()?;
+        let pixels = image(&mut b, top, left, bottom, right, depth, compression)?;
+        return Some((id, span(left, right)?, span(top, bottom)?, pixels));
+    }
     b.take(4)?;
     // an array of channels: its version, length and rectangle, then each channel
     b.u32()?;
@@ -476,6 +488,48 @@ mod tests {
             out.extend_from_slice(data);
         }
         out
+    }
+
+    #[test]
+    fn a_version_6_1_tip_is_read_after_its_short_rectangle_and_padding_is_passed_over() {
+        let id = "tip-old";
+        let mut sample = vec![id.len() as u8];
+        sample.extend_from_slice(id.as_bytes());
+        for v in [0u16, 0, 2, 3, 8] {
+            put16(&mut sample, v);
+        }
+        for v in [0u32, 0, 2, 3] {
+            put32(&mut sample, v);
+        }
+        put16(&mut sample, 8);
+        sample.push(0);
+        sample.extend_from_slice(&[9, 8, 7, 6, 5, 4]);
+        let mut samp = Vec::new();
+        put32(&mut samp, sample.len() as u32);
+        samp.extend_from_slice(&sample);
+        let mut desc = b"brushPreset".to_vec();
+        desc.extend_from_slice(b"Nm  TEXT");
+        unicode(&mut desc, "Old Stamp");
+        desc.extend_from_slice(b"BrshObjcsampledBrushsampledDataTEXT");
+        unicode(&mut desc, id);
+        let mut out = Vec::new();
+        put16(&mut out, 6);
+        put16(&mut out, 1);
+        // a section of three bytes, padded to four, before the ones read
+        for (key, data) in [(b"patt", &vec![1, 2, 3]), (b"samp", &samp), (b"desc", &desc)] {
+            out.extend_from_slice(b"8BIM");
+            out.extend_from_slice(key);
+            put32(&mut out, data.len() as u32);
+            out.extend_from_slice(data);
+            while out.len() % 4 != 0 {
+                out.push(0);
+            }
+        }
+        let brushes = read_brushes(&out).unwrap();
+        assert_eq!(brushes.len(), 1);
+        let tip = brushes[0].tip.as_ref().unwrap();
+        assert_eq!((brushes[0].name.as_str(), tip.width, tip.height), ("Old Stamp", 3, 2));
+        assert_eq!(tip.pixels, [9, 8, 7, 6, 5, 4]);
     }
 
     #[test]
