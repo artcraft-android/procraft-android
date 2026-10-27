@@ -55,8 +55,10 @@ pub fn read(bytes: &[u8]) -> Option<Vec<CspBrush>> {
     for row in &nodes.rows {
         let Some(name) = named(row) else { continue };
         let id = nodes.get(row, "NodeVariantID").and_then(Value::as_int);
+        // a brush's settings give it a size: a fill's, or another tool's, don't
         let variant = variants.as_ref().and_then(|v| {
             id.and_then(|id| v.rows.iter().find(|r| v.get(r, "VariantID").and_then(Value::as_int) == Some(id)))
+                .filter(|r| v.get(r, "BrushSize").and_then(Value::as_real).is_some())
                 .map(|r| (v, r))
         });
         if variant.is_some() {
@@ -66,8 +68,8 @@ pub fn read(bytes: &[u8]) -> Option<Vec<CspBrush>> {
             break;
         }
     }
-    // none: the first named node, round
-    if out.is_empty() {
+    // no settings at all to go by: the first named node, round
+    if out.is_empty() && variants.is_none() {
         out.extend(nodes.rows.iter().find_map(named).map(|name| brush(&name, None, materials.as_ref(), &mut left)));
     }
     (!out.is_empty()).then_some(out)
@@ -205,10 +207,11 @@ mod tests {
             ),
             (
                 "Variant",
-                "CREATE TABLE Variant(_PW_ID INTEGER PRIMARY KEY, VariantID INTEGER, BrushHardness REAL, BrushInterval REAL, BrushThickness REAL, BrushRotation REAL, BrushPatternImageArray BLOB, TextureImage BLOB, TextureDensity REAL, TextureScale2 REAL, TextureReverseDensity INTEGER)",
+                "CREATE TABLE Variant(_PW_ID INTEGER PRIMARY KEY, VariantID INTEGER, BrushSize REAL, BrushHardness REAL, BrushInterval REAL, BrushThickness REAL, BrushRotation REAL, BrushPatternImageArray BLOB, TextureImage BLOB, TextureDensity REAL, TextureScale2 REAL, TextureReverseDensity INTEGER)",
                 vec![vec![
                     Value::Null,
                     Value::Int(7),
+                    Value::Real(12.0),
                     Value::Real(80.0),
                     Value::Real(25.0),
                     Value::Real(50.0),
@@ -260,8 +263,8 @@ mod tests {
             ),
             (
                 "Variant",
-                "CREATE TABLE Variant(VariantID INTEGER, TextureImage BLOB)",
-                vec![vec![Value::Int(1), Value::Blob(utf16("0:data:gone"))]],
+                "CREATE TABLE Variant(VariantID INTEGER, BrushSize REAL, TextureImage BLOB)",
+                vec![vec![Value::Int(1), Value::Real(5.0), Value::Blob(utf16("0:data:gone"))]],
             ),
             ("MaterialFile", "CREATE TABLE MaterialFile(FileData BLOB)", vec![vec![Value::Blob(png(8, 8))]]),
         ]);
@@ -273,6 +276,20 @@ mod tests {
     #[test]
     fn other_files_and_damaged_ones_are_refused_not_a_crash() {
         assert!(read(b"nothing").is_none());
+        // a fill tool: settings, but none of a brush's
+        let fill = database(&[
+            (
+                "Node",
+                "CREATE TABLE Node(NodeName TEXT, NodeVariantID INTEGER)",
+                vec![vec![Value::Text("Bucket".into()), Value::Int(1)]],
+            ),
+            (
+                "Variant",
+                "CREATE TABLE Variant(VariantID INTEGER, FillCloseGap INTEGER)",
+                vec![vec![Value::Int(1), Value::Int(1)]],
+            ),
+        ]);
+        assert!(read(&fill).is_none());
         crate::damaged::survives("Clip Studio sub tool", &sample(), |b| {
             let _ = read(b);
         });
