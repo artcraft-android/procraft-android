@@ -13,6 +13,41 @@ val rustAbis: List<String> =
     providers.gradleProperty("procraft.abis").getOrElse("arm64-v8a,x86_64").split(',').map { it.trim() }.filter { it.isNotEmpty() }
 val minApi = 29
 
+// The app's version: gradle.properties' procraft.version, or the version tag's when the release
+// workflow builds a release. The version code follows from it (0.0.1-beta → 101, 0.0.1-beta.2 →
+// 102, 0.0.1 → 199, 0.1.0-beta → 10001), so a pre-release comes before its release and every
+// release before the next version's pre-releases; times ten plus the ABI of a one-ABI build
+// (arm64-v8a 2, x86_64 3; 0 for several), so each APK of a release has its own code.
+val appVersion: String = providers.gradleProperty("procraft.version").get()
+val appVersionCode: Int = run {
+    val m = requireNotNull(Regex("""(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z-]+?(\.(\d+))?)?""").matchEntire(appVersion)) {
+        "procraft.version $appVersion is not a version like 1.2.3, 1.2.3-beta or 1.2.3-beta.4"
+    }
+    val (major, minor, patch) = m.groupValues.subList(1, 4).map { it.toInt() }
+    val pre = if (m.groupValues[4].isEmpty()) null else m.groupValues[6].toIntOrNull() ?: 1
+    require(minor < 100 && patch < 100 && (pre ?: 1) in 1..98) {
+        "procraft.version $appVersion: minor and patch must be under 100, and a pre-release's number 1 to 98"
+    }
+    val base = ((major * 100 + minor) * 100 + patch) * 100 + (pre ?: 99)
+    providers.gradleProperty("procraft.versionCode").orNull?.let { listed ->
+        require(listed.trim().toIntOrNull() == base) {
+            "gradle.properties: procraft.versionCode=$listed, but version $appVersion's is $base (set both before tagging)"
+        }
+    }
+    val abi = when (rustAbis.singleOrNull()) {
+        "arm64-v8a" -> 2
+        "x86_64" -> 3
+        else -> 0
+    }
+    base * 10 + abi
+}
+
+// The release key, when the build is given one (the release workflow passes it from the
+// repository's secrets). Without one a release build is signed with the debug key: it installs,
+// but it can't update a published release; or, with -Pprocraft.unsigned=true, not signed at all.
+val releaseKeystore: String? = providers.environmentVariable("PROCRAFT_KEYSTORE").orNull
+val unsignedRelease: Boolean = providers.gradleProperty("procraft.unsigned").orNull == "true"
+
 /** rustup's `cargo` (Android Studio may not see rustup's PATH), else `cargo` from PATH; `CARGO` overrides. */
 val cargoExecutable: String = run {
     val exe = if (System.getProperty("os.name").lowercase().startsWith("windows")) "cargo.exe" else "cargo"
@@ -86,9 +121,20 @@ android {
         applicationId = "io.github.artcraftandroid.procraft"
         minSdk = minApi
         targetSdk = 36
-        versionCode = providers.gradleProperty("procraft.versionCode").get().toInt()
-        versionName = providers.gradleProperty("procraft.version").get()
+        versionCode = appVersionCode
+        versionName = appVersion
         ndk { abiFilters.addAll(rustAbis) }
+    }
+
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = providers.environmentVariable("PROCRAFT_KEYSTORE_PASSWORD").orNull
+                keyAlias = providers.environmentVariable("PROCRAFT_KEY_ALIAS").orNull
+                keyPassword = providers.environmentVariable("PROCRAFT_KEY_PASSWORD").orNull
+            }
+        }
     }
 
     buildTypes {
@@ -99,8 +145,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // signed with the debug key until there is a release key
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (unsignedRelease) null else signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             vcsInfo { include = false }
         }
     }
