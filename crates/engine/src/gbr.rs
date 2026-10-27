@@ -52,10 +52,13 @@ pub struct Generated {
     pub spacing: f32,
     /// The edge, 0 soft to 1 hard.
     pub hardness: f32,
-    /// How many times wider than tall it is (1 to 20).
+    /// How many times wider than tall it is (1 to 20); with more than two spikes, how sharp
+    /// they are.
     pub aspect: f32,
     /// Its angle, radians.
     pub angle: f32,
+    /// How many points it has around: two is the plain shape, more a star of the shape.
+    pub spikes: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,9 +71,12 @@ pub enum GeneratedShape {
 /// The side a generated brush's drawn tip is made at, pixels.
 const DRAWN_SIDE: usize = 128;
 
+/// The most spikes a generated brush is drawn with.
+const MOST_SPIKES: u32 = 20;
+
 /// The generated brush in `bytes`; none if it isn't one. Version 1.0 is a circle (its spacing,
 /// radius, hardness, aspect and angle a line each); 1.5 names its shape first and has the number
-/// of spikes after the radius (drawn as two here: the plain shape).
+/// of spikes after the radius.
 pub fn read_generated(bytes: &[u8]) -> Option<Generated> {
     let text = String::from_utf8_lossy(bytes.get(..bytes.len().min(4096))?);
     let mut lines = text.lines().map(str::trim);
@@ -92,9 +98,7 @@ pub fn read_generated(bytes: &[u8]) -> Option<Generated> {
     };
     let spacing = number(lines.next())?;
     let _radius = number(lines.next())?;
-    if version == "1.5" {
-        let _spikes = number(lines.next())?;
-    }
+    let spikes = if version == "1.5" { number(lines.next())? } else { 2.0 };
     let (hardness, aspect, angle) = (number(lines.next())?, number(lines.next())?, number(lines.next())?);
     Some(Generated {
         name,
@@ -103,24 +107,37 @@ pub fn read_generated(bytes: &[u8]) -> Option<Generated> {
         hardness: hardness.clamp(0.0, 1.0),
         aspect: aspect.clamp(1.0, 20.0),
         angle: angle.to_radians(),
+        spikes: (spikes.round() as u32).clamp(2, MOST_SPIKES),
     })
 }
 
-/// A generated brush's tip drawn, `aspect` times as wide as tall, solid to its hardness of the
-/// way out and fading to the edge; none for a circle (a round tip, not an image).
+/// A generated brush's tip drawn, solid to its hardness of the way out and fading to the edge;
+/// none for a plain circle (a round tip, not an image).
+///
+/// The shape is the same in each of `spikes` slices around: a point's angle is folded into the
+/// first half slice, its distance up from that slice's middle taken `aspect` times, and the shape
+/// measured there. Two spikes is the plain shape `aspect` times as wide as tall; more make a star
+/// whose points `aspect` sharpens.
 pub fn generated_tip(g: &Generated) -> Option<AbrTip> {
     let reach: fn(f32, f32) -> f32 = match g.shape {
-        GeneratedShape::Circle => return None,
-        GeneratedShape::Square => |x, y| x.max(y),
+        GeneratedShape::Circle if g.spikes == 2 => return None,
+        GeneratedShape::Circle => f32::hypot,
+        GeneratedShape::Square => f32::max,
         GeneratedShape::Diamond => |x, y| x + y,
     };
-    let (w, h) = (DRAWN_SIDE, ((DRAWN_SIDE as f32 / g.aspect).round() as usize).max(1));
+    // the plain shape is drawn as wide as it is, a star square
+    let squeeze = if g.spikes == 2 { g.aspect } else { 1.0 };
+    let (w, h) = (DRAWN_SIDE, ((DRAWN_SIDE as f32 / squeeze).round() as usize).max(1));
+    let slice = std::f32::consts::TAU / g.spikes as f32;
     let mut pixels = Vec::with_capacity(w * h);
     for y in 0..h {
-        let ty = ((y as f32 + 0.5) / h as f32 * 2.0 - 1.0).abs();
+        let py = ((y as f32 + 0.5) / h as f32 * 2.0 - 1.0) / squeeze;
         for x in 0..w {
-            let tx = ((x as f32 + 0.5) / w as f32 * 2.0 - 1.0).abs();
-            let d = reach(tx, ty);
+            let px = (x as f32 + 0.5) / w as f32 * 2.0 - 1.0;
+            let folded = py.atan2(px).rem_euclid(slice);
+            let folded = folded.min(slice - folded);
+            let r = px.hypot(py);
+            let d = reach(r * folded.cos(), r * folded.sin() * g.aspect);
             let v = if d <= g.hardness {
                 1.0
             } else if g.hardness >= 1.0 {
@@ -230,6 +247,19 @@ mod tests {
         let diamond = Generated { shape: GeneratedShape::Diamond, aspect: 1.0, ..block };
         let tip = generated_tip(&diamond).unwrap();
         assert_eq!((tip.pixels[64 * 128 + 64], tip.pixels[0]), (255, 0));
+        // five spikes: a square star, solid out along a point, empty between two
+        let star = read_generated(b"GIMP-VBR\n1.5\n2. Star\ndiamond\n50.0\n25.0\n5\n1.0\n2.5\n17.5\n").unwrap();
+        assert_eq!(star.spikes, 5);
+        let tip = generated_tip(&star).unwrap();
+        assert_eq!((tip.width, tip.height), (128, 128));
+        let at = |r: f32, degrees: f32| {
+            let (s, c) = degrees.to_radians().sin_cos();
+            let (x, y) = ((64.0 + r * 64.0 * c) as usize, (64.0 + r * 64.0 * s) as usize);
+            tip.pixels[y * 128 + x]
+        };
+        assert_eq!((at(0.9, 0.0), at(0.9, 72.0), at(0.6, 36.0), at(0.6, 108.0)), (255, 255, 0, 0));
+        // a circle with spikes is drawn; a plain one is a round tip
+        assert!(generated_tip(&Generated { shape: GeneratedShape::Circle, ..star }).is_some());
         assert!(read_generated(b"GIMP-VBR\n2.0\nx\n").is_none());
         crate::damaged::survives("GIMP generated brush", b"GIMP-VBR\n1.5\nB\ndiamond\n10\n25\n2\n0.5\n1\n0\n", |b| {
             let _ = read_generated(b).as_ref().map(generated_tip);
