@@ -2855,7 +2855,7 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
     // the preview left out: drawn again each time
     let read = |b: &[u8]| brushfile::read(b).map(|f| BrushFile { thumbnail: None, ..f });
     let mut failures = Vec::new();
-    let mut brushes = 0;
+    let (mut brushes, mut grained) = (0, 0);
     for path in &files {
         let Some(s) = session(64, 64) else { return };
         let bytes = std::fs::read(path).unwrap();
@@ -2873,6 +2873,15 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
         let count = if kind == "brush" { 1 } else { s.brush_library()[set as usize].brushes.len() as u32 };
         for i in 0..count {
             brushes += 1;
+            if s.shared
+                .lock()
+                .library
+                .get(set as usize)
+                .and_then(|l| l.brushes.get(i as usize))
+                .is_some_and(|b| b.grain.source.is_some())
+            {
+                grained += 1;
+            }
             let at = format!("{} #{}", path.display(), i + 1);
             let drawn =
                 s.brush_preview(set, i, 200, 60).is_some_and(|p| p.rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
@@ -2896,7 +2905,7 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
             }
         }
     }
-    eprintln!("{} files, {brushes} brushes", files.len());
+    eprintln!("{} files, {brushes} brushes, {grained} with a grain of their own", files.len());
     assert!(failures.is_empty(), "{} failed:\n{}", failures.len(), failures.join("\n"));
 }
 
@@ -3013,7 +3022,14 @@ fn a_moving_gif_comes_in_as_held_frames() {
 #[test]
 fn a_krita_preset_becomes_a_round_brush_with_its_settings() {
     let s = CanvasSession::new(64, 64);
-    let xml = r#"<Preset paintopid="paintbrush" name="Soft Round"><param name="PressureSize"><![CDATA[false]]></param><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.2" useAutoSpacing="0"><MaskGenerator type="circle" ratio="0.5" hfade="0.25" vfade="0.25"/></Brush>]]></param></Preset>"#;
+    // its texture: a 100 px picture, half white, kept as the base64 of its base64
+    let px: Vec<u8> = (0..100 * 100).flat_map(|i| if i % 100 < 50 { [255; 4] } else { [0, 0, 0, 255] }).collect();
+    let paper = procraft_engine::base64::encode(
+        procraft_engine::base64::encode(&crate::project::rgba_png(100, 100, &px)).as_bytes(),
+    );
+    let xml = format!(
+        r#"<Preset paintopid="paintbrush" name="Soft Round"><param name="PressureSize"><![CDATA[false]]></param><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.2" useAutoSpacing="0"><MaskGenerator type="circle" ratio="0.5" hfade="0.25" vfade="0.25"/></Brush>]]></param><param name="Texture/Pattern/Enabled"><![CDATA[true]]></param><param name="Texture/Pattern/Pattern"><![CDATA[{paper}]]></param><param name="Texture/Pattern/Scale"><![CDATA[0.5]]></param><param name="Texture/Pattern/Strength"><![CDATA[0.7]]></param></Preset>"#
+    );
     let chunk = |kind: &[u8], data: &[u8]| {
         let mut out = (data.len() as u32).to_be_bytes().to_vec();
         out.extend_from_slice(kind);
@@ -3034,4 +3050,7 @@ fn a_krita_preset_becomes_a_round_brush_with_its_settings() {
     assert!((b.spacing - 0.2).abs() < 1e-6 && (b.hardness - 0.25).abs() < 1e-6 && b.shape.roundness == 0.5);
     assert_eq!(b.pressure_size, 0.0);
     assert!(b.shape.source.is_none());
+    // the texture as paper grain: 70 % strong, its 100 px tiles at half size
+    assert!(b.grain.source.is_some());
+    assert_eq!((b.grain.depth, b.grain.scale), (0.7, 50.0));
 }

@@ -19,6 +19,18 @@ pub struct KritaBrush {
     /// Whether pen pressure changes the size and the opacity.
     pub pressure_size: bool,
     pub pressure_opacity: bool,
+    /// The texture it paints through, if it has one.
+    pub texture: Option<KritaTexture>,
+}
+
+/// A preset's texture: its picture (a PNG), its scale (1 the picture's own size), how strongly it
+/// shows (0 to 1) and whether it is inverted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KritaTexture {
+    pub png: Vec<u8>,
+    pub scale: f32,
+    pub strength: f32,
+    pub invert: bool,
 }
 
 /// What a preset's tip is.
@@ -39,6 +51,7 @@ const MOST_TIP_BYTES: usize = 256 << 20;
 const MOST_TEXT: usize = 16 << 20;
 /// The side a drawn rectangular tip is made at.
 const DRAWN_SIDE: usize = 128;
+const PNG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
 /// The preset in `kpp`, its tip images looked up by file name with `file`; none if it isn't one.
 pub fn read_preset(kpp: &[u8], file: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option<KritaBrush> {
@@ -57,6 +70,28 @@ pub fn read_preset(kpp: &[u8], file: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option
     };
     let automatic = brush.and_then(|b| b.attribute("useAutoSpacing")).is_some_and(|v| v == "1" || v == "true");
     let tip = brush.and_then(|b| tip(b, file)).unwrap_or(KritaTip::Round { hardness: 1.0, roundness: 1.0 });
+    let flag = |name: &str| param(name).is_some_and(|v| v == "true");
+    let value = |name: &str| param(name).and_then(|v| v.parse::<f32>().ok()).filter(|v| v.is_finite());
+    // the texture's picture: in the preset, as the base64 of its base64; else one it names
+    let embedded = || {
+        let once = crate::base64::decode(&param("Texture/Pattern/Pattern")?.split_whitespace().collect::<String>())?;
+        if once.starts_with(&PNG) {
+            return Some(once);
+        }
+        crate::base64::decode(&String::from_utf8_lossy(&once).split_whitespace().collect::<String>())
+    };
+    let texture = flag("Texture/Pattern/Enabled")
+        .then(|| embedded().filter(|p| p.starts_with(&PNG)).or_else(|| file(&param("Texture/Pattern/Name")?)))
+        .flatten()
+        .map(|png| KritaTexture {
+            png,
+            scale: value("Texture/Pattern/Scale").filter(|s| *s > 0.0).unwrap_or(1.0),
+            strength: value("Texture/Pattern/Strength")
+                .or_else(|| value("Texture/Strength/Value"))
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0),
+            invert: flag("Texture/Pattern/Invert"),
+        });
     Some(KritaBrush {
         name: root.attribute("name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Krita Brush").to_owned(),
         tip,
@@ -64,6 +99,7 @@ pub fn read_preset(kpp: &[u8], file: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option
         angle: number(brush, "angle").unwrap_or(0.0),
         pressure_size: param("PressureSize").is_none_or(|v| v == "true"),
         pressure_opacity: param("PressureOpacity").is_some_and(|v| v == "true"),
+        texture,
     })
 }
 
@@ -82,22 +118,31 @@ pub fn read_bundle(bytes: &[u8]) -> Option<(String, Vec<KritaBrush>)> {
         .and_then(|m| ["title", "name"].iter().find_map(|k| m.find(k).map(|e| e.text.trim().to_owned())))
         .filter(|t| !t.is_empty())
         .unwrap_or_default();
-    // a tip named by a preset: in the brushes folder, by its file name; each preset has its own
-    // copy, so all of them together may be only so big (round tips after that)
+    // a tip or texture named by a preset: in the brushes or patterns folder, by its file name; each
+    // preset has its own copy, so all of them together may be only so big (round tips and no
+    // textures after that)
     let left = std::cell::Cell::new(MOST_TIP_BYTES);
+    let take = |n: usize| left.get().checked_sub(n).map(|l| left.set(l)).is_some();
     let file = |wanted: &str| {
         let wanted = wanted.rsplit(['/', '\\']).next().unwrap_or(wanted).to_ascii_lowercase();
         let name = names.iter().find(|n| {
-            n.starts_with("brushes/") && n.rsplit('/').next().is_some_and(|f| f.to_ascii_lowercase() == wanted)
+            (n.starts_with("brushes/") || n.starts_with("patterns/"))
+                && n.rsplit('/').next().is_some_and(|f| f.to_ascii_lowercase() == wanted)
         })?;
-        left.set(left.get().checked_sub(zip.size(name)?)?);
-        zip.read(name)
+        take(zip.size(name)?).then(|| zip.read(name)).flatten()
     };
     let presets: Vec<KritaBrush> = names
         .iter()
         .filter(|n| n.starts_with("paintoppresets/") && n.to_ascii_lowercase().ends_with(".kpp"))
         .take(MOST_PRESETS)
         .filter_map(|n| read_preset(&zip.read(n)?, &file))
+        .map(|mut p| {
+            // its texture counts as well (one the bundle had, twice over: a rough budget)
+            if p.texture.as_ref().is_some_and(|t| !take(t.png.len())) {
+                p.texture = None;
+            }
+            p
+        })
         .collect();
     (!presets.is_empty()).then_some((title, presets))
 }
@@ -165,7 +210,7 @@ fn rectangle(ratio: f32, hfade: f32, vfade: f32) -> AbrTip {
 /// A PNG's text chunks (`tEXt`, `zTXt`, `iTXt`), keyword and text; none if it isn't a PNG.
 pub fn png_text(png: &[u8]) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    if png.get(..8) != Some(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A][..]) {
+    if png.get(..8) != Some(&PNG[..]) {
         return out;
     }
     let mut at = 8usize;
@@ -289,6 +334,45 @@ mod tests {
         let missing = r#"<Brush type="gbr_brush" filename="gone.gbr"/>"#;
         let b = read_preset(&kpp(&preset("Gone", missing, true)), &|_| None).unwrap();
         assert!(matches!(b.tip, KritaTip::Round { .. }));
+    }
+
+    #[test]
+    fn a_texture_comes_from_the_preset_itself_or_the_bundle() {
+        let round = r#"<Brush type="auto_brush"><MaskGenerator type="circle"/></Brush>"#;
+        let with = |params: &str| {
+            let xml = preset("Pencil", round, true);
+            xml.replace("</Preset>", &format!("{params}</Preset>"))
+        };
+        let param =
+            |name: &str, value: &str| format!(r#"<param type="string" name="{name}"><![CDATA[{value}]]></param>"#);
+        let picture = [&PNG[..], b"rest of a picture"].concat();
+        // kept in the preset as the base64 of its base64
+        let twice = crate::base64::encode(crate::base64::encode(&picture).as_bytes());
+        let xml = with(
+            &[
+                param("Texture/Pattern/Enabled", "true"),
+                param("Texture/Pattern/Pattern", &twice),
+                param("Texture/Pattern/Scale", "0.35"),
+                param("Texture/Pattern/Strength", "0.8"),
+                param("Texture/Pattern/Invert", "true"),
+            ]
+            .concat(),
+        );
+        let t = read_preset(&kpp(&xml), &|_| None).unwrap().texture.unwrap();
+        assert_eq!((t.png, t.scale, t.strength, t.invert), (picture.clone(), 0.35, 0.8, true));
+        // turned off: none
+        let off = with(&[param("Texture/Pattern/Enabled", "false"), param("Texture/Pattern/Pattern", &twice)].concat());
+        assert_eq!(read_preset(&kpp(&off), &|_| None).unwrap().texture, None);
+        // not in the preset: the one it names, from the bundle's patterns
+        let named =
+            with(&[param("Texture/Pattern/Enabled", "true"), param("Texture/Pattern/Name", "paper.png")].concat());
+        let mut z = ZipWriter::new();
+        z.add("mimetype", b"application/x-krita-resourcebundle");
+        z.add("patterns/Paper.png", &picture);
+        z.add("paintoppresets/pencil.kpp", &kpp(&named));
+        let (_, presets) = read_bundle(&z.finish()).unwrap();
+        let t = presets[0].texture.as_ref().unwrap();
+        assert_eq!((&t.png, t.scale, t.strength, t.invert), (&picture, 1.0, 1.0, false));
     }
 
     #[test]

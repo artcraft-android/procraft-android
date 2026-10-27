@@ -250,21 +250,27 @@ fn csp_brush(c: &procraft_engine::csp::CspBrush) -> Brush {
         b.spacing = Brush::spacing_within_reach(spacing);
     }
     b.shape.rotation = c.angle;
-    // its texture, the first of its pictures that lets paint through anywhere (one may be blank):
-    // paper the stroke paints through, at the picture's own size times its scale
-    let paper = c.texture.as_ref().and_then(|t| {
-        t.pngs.iter().find_map(|png| {
-            let source = gray_texture(png, t.reverse).filter(|s| s.pixels.iter().any(|&v| v > 0))?;
-            Some((source, decode_png(png)?.0, t))
-        })
-    });
-    if let Some((source, width, t)) = paper {
-        b.grain.image = None;
-        b.grain.source = Some(source);
-        b.grain.depth = t.density.unwrap_or(1.0);
-        b.set_setting("grain_scale", width as f32 * t.scale.unwrap_or(1.0) / procraft_engine::studio::MAX_GRAIN_SCALE);
+    if let Some(t) = &c.texture {
+        paper(&mut b, &t.pngs, t.reverse, t.density.unwrap_or(1.0), t.scale.unwrap_or(1.0));
     }
     b
+}
+
+/// Gives `b` another app's texture as its grain, paper the stroke paints through: the first of
+/// `pngs` that lets paint through anywhere (one may be blank), dark letting it through if
+/// `inverted`, showing `depth` strongly, tiled at the picture's own size times `scale`. Nothing if
+/// none of them will do.
+fn paper(b: &mut Brush, pngs: &[Vec<u8>], inverted: bool, depth: f32, scale: f32) {
+    let found = pngs.iter().find_map(|png| {
+        let source = gray_texture(png, inverted).filter(|s| s.pixels.iter().any(|&v| v > 0))?;
+        Some((source, decode_png(png)?.0))
+    });
+    if let Some((source, width)) = found {
+        b.grain.image = None;
+        b.grain.source = Some(source);
+        b.grain.depth = depth.clamp(0.0, 1.0);
+        b.set_setting("grain_scale", width as f32 * scale / procraft_engine::studio::MAX_GRAIN_SCALE);
+    }
 }
 
 /// A brush of a GIMP generated brush: round with its hardness and how round it is, or its square
@@ -326,6 +332,9 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
     }
     if k.pressure_opacity {
         b.pressure_opacity = 1.0;
+    }
+    if let Some(t) = &k.texture {
+        paper(&mut b, std::slice::from_ref(&t.png), t.invert, t.strength, t.scale);
     }
     b
 }
