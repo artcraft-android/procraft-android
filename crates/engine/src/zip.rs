@@ -56,6 +56,11 @@ impl<'a> ZipReader<'a> {
         self.entries.iter().map(|e| e.name.as_str())
     }
 
+    /// The size entry `name` says it has once read (`read` gives no more).
+    pub fn size(&self, name: &str) -> Option<usize> {
+        self.entries.iter().find(|e| e.name == name).map(|e| e.size)
+    }
+
     /// The contents of entry `name`; `None` if it is missing, damaged or of a kind not read.
     pub fn read(&self, name: &str) -> Option<Vec<u8>> {
         let e = self.entries.iter().find(|e| e.name == name)?;

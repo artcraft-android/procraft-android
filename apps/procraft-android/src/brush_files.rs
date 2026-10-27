@@ -16,6 +16,9 @@ const IMPORTED: &str = "Imported";
 /// The size of the preview a brush file carries.
 const THUMBNAIL: (u32, u32) = (327, 100);
 
+/// The most a brush file's picture may decode to (8192 × 8192 in colour), bytes.
+const MOST_PNG_BYTES: usize = 256 << 20;
+
 /// A brush file's pictures, made: the shape, the grain if any and the preview (PNGs).
 struct Made {
     shape: Vec<u8>,
@@ -224,11 +227,12 @@ fn other_brushes(bytes: &[u8], name: String) -> Option<(String, Vec<Brush>)> {
 /// A brush of a Clip Studio sub tool: its tip (an image, else round with its edge and roundness),
 /// spacing and angle.
 fn csp_brush(c: &procraft_engine::csp::CspBrush) -> Brush {
-    // its tips paint white, or else dark
+    // the first of its pictures that paints anything: white, or else dark
+    let paints = |t: &procraft_engine::abr::AbrTip| t.pixels.iter().any(|&v| v > 0);
     let tip = c
-        .tip_png
-        .as_deref()
-        .and_then(|png| png_tip(png, true).filter(|t| t.pixels.iter().any(|&v| v > 0)).or_else(|| png_tip(png, false)));
+        .tip_pngs
+        .iter()
+        .find_map(|png| png_tip(png, true).filter(paints).or_else(|| png_tip(png, false).filter(paints)));
     let mut b = match tip {
         Some(t) => tip_brush(&procraft_engine::abr::AbrTip { name: c.name.clone(), ..t }),
         None => Brush { name: c.name.clone(), ..Brush::round_pen() },
@@ -240,7 +244,7 @@ fn csp_brush(c: &procraft_engine::csp::CspBrush) -> Brush {
         b.shape.roundness = r.clamp(0.01, 1.0);
     }
     if let Some(spacing) = c.spacing {
-        b.spacing = spacing.clamp(0.01, 10.0);
+        b.spacing = Brush::spacing_within_reach(spacing);
     }
     b.shape.rotation = c.angle;
     b
@@ -252,7 +256,7 @@ fn tip_brush(t: &procraft_engine::abr::AbrTip) -> Brush {
     b.shape.image = None;
     b.shape.source = Source::new(fitted(t));
     if let Some(spacing) = t.spacing {
-        b.spacing = spacing.clamp(0.01, 10.0);
+        b.spacing = Brush::spacing_within_reach(spacing);
     }
     b
 }
@@ -280,7 +284,7 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
         b.shape.roundness = roundness.clamp(0.01, 1.0);
     }
     if let Some(spacing) = k.spacing {
-        b.spacing = spacing.clamp(0.01, 10.0);
+        b.spacing = Brush::spacing_within_reach(spacing);
     }
     b.shape.rotation = k.angle;
     if !k.pressure_size {
@@ -399,7 +403,8 @@ fn decode_png(bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
-    let mut buf = vec![0; reader.output_buffer_size()?];
+    // a small file can claim a picture of gigabytes
+    let mut buf = vec![0; reader.output_buffer_size().filter(|n| *n <= MOST_PNG_BYTES)?];
     let info = reader.next_frame(&mut buf).ok()?;
     let (w, h) = (info.width as usize, info.height as usize);
     (w > 0 && h > 0).then_some((w, h, info.color_type.samples(), buf))

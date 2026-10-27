@@ -35,7 +35,9 @@ pub fn frames(bytes: &[u8], mut frame: impl FnMut(&[u8], u32) -> bool) -> Option
         if stopped {
             return None;
         }
-        let indices = lzw(data, image.min_code, usize::from(image.width) * usize::from(image.height))?;
+        // a frame may be no bigger than a canvas may (it can be bigger than its own canvas)
+        let count = u64::from(image.width) * u64::from(image.height);
+        let indices = lzw(data, image.min_code, usize::try_from(count).ok().filter(|_| count <= MOST_PIXELS)?)?;
         let before = (image.disposal == 3).then(|| canvas.clone());
         draw(&mut canvas, wu, hu, &image, &indices);
         given += 1;
@@ -462,6 +464,15 @@ mod tests {
         let g = sample();
         // cut in its last frame: the two before it come
         assert_eq!(frames(&g[..g.len() - 6], |_, _| true).map(|f| f.2), Some(2));
+        // a frame far bigger than any canvas (a few bytes asking for gigabytes) ends it there
+        let mut huge = b"GIF89a".to_vec();
+        huge.extend_from_slice(&[1, 0, 1, 0, 0x80, 0, 0, 0, 0, 0, 255, 255, 255]);
+        for _ in 0..2 {
+            huge.extend_from_slice(&[0x2C, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 2, 0]);
+        }
+        huge.push(0x3B);
+        assert_eq!(frame_count(&huge), 2);
+        assert_eq!(frames(&huge, |_, _| true).map(|f| f.2), Some(0));
         crate::damaged::survives("GIF", &g, |b| {
             let _ = frames(b, |_, _| true);
             let _ = frame_count(b);

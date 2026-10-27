@@ -162,7 +162,8 @@ pub fn unescape(s: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(rest.get(..amp).unwrap_or_default());
         let after = rest.get(amp + 1..).unwrap_or_default();
-        let Some(semi) = after.find(';').filter(|&n| n <= 10) else {
+        // an entity is short: only that far is looked at (else a run of `&` scans to the end each)
+        let Some(semi) = after.bytes().take(11).position(|b| b == b';') else {
             out.push('&');
             rest = after;
             continue;
@@ -226,6 +227,11 @@ mod tests {
         assert_eq!(root.child("b").map(|b| b.text.as_str()), Some("text"));
         assert_eq!(parse("no markup"), None);
         assert_eq!(unescape("a &bogus; b & c"), "a &bogus; b & c");
+        // a long run of `&` with no `;` takes a moment, not hours
+        let run = "&".repeat(4 << 20);
+        let started = std::time::Instant::now();
+        assert_eq!(unescape(&run).len(), run.len());
+        assert!(started.elapsed().as_secs() < 5);
         let deep = "<a>".repeat(1000);
         assert_eq!(parse(&deep), None);
         crate::damaged::survives("XML", br#"<a k="v"><b><![CDATA[x]]></b>&amp;<!-- c --></a>"#, |b| {

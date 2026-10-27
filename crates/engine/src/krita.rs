@@ -32,8 +32,9 @@ pub enum KritaTip {
     Png(Vec<u8>),
 }
 
-/// The most presets read from a bundle.
+/// The most presets read from a bundle, and the most bytes their tip files may come to together.
 const MOST_PRESETS: usize = 512;
+const MOST_TIP_BYTES: usize = 256 << 20;
 /// The most a text chunk inflates to.
 const MOST_TEXT: usize = 16 << 20;
 /// The side a drawn rectangular tip is made at.
@@ -81,15 +82,16 @@ pub fn read_bundle(bytes: &[u8]) -> Option<(String, Vec<KritaBrush>)> {
         .and_then(|m| ["title", "name"].iter().find_map(|k| m.find(k).map(|e| e.text.trim().to_owned())))
         .filter(|t| !t.is_empty())
         .unwrap_or_default();
-    // a tip named by a preset: in the brushes folder, by its file name
+    // a tip named by a preset: in the brushes folder, by its file name; each preset has its own
+    // copy, so all of them together may be only so big (round tips after that)
+    let left = std::cell::Cell::new(MOST_TIP_BYTES);
     let file = |wanted: &str| {
         let wanted = wanted.rsplit(['/', '\\']).next().unwrap_or(wanted).to_ascii_lowercase();
-        names
-            .iter()
-            .find(|n| {
-                n.starts_with("brushes/") && n.rsplit('/').next().is_some_and(|f| f.to_ascii_lowercase() == wanted)
-            })
-            .and_then(|n| zip.read(n))
+        let name = names.iter().find(|n| {
+            n.starts_with("brushes/") && n.rsplit('/').next().is_some_and(|f| f.to_ascii_lowercase() == wanted)
+        })?;
+        left.set(left.get().checked_sub(zip.size(name)?)?);
+        zip.read(name)
     };
     let presets: Vec<KritaBrush> = names
         .iter()
@@ -179,15 +181,18 @@ pub fn png_text(png: &[u8]) -> Vec<(String, String)> {
             ),
             None => continue,
         };
+        // tEXt and zTXt are Latin-1, iTXt UTF-8
+        let latin1 = |b: &[u8]| b.iter().map(|&b| char::from(b)).collect::<String>();
         let text = match kind {
-            b"tEXt" => Some(rest.iter().map(|&b| char::from(b)).collect()),
-            b"zTXt" => rest.get(1..).and_then(inflate),
+            b"tEXt" => Some(latin1(rest)),
+            b"zTXt" => rest.get(1..).and_then(inflate).map(|t| latin1(&t)),
             b"iTXt" => {
                 // compressed or not, the method, then the language and translated keyword
                 let (Some(&compressed), Some(body)) = (rest.first(), rest.get(2..)) else { continue };
                 let mut parts = body.splitn(3, |&b| b == 0);
                 let (_, _, text) = (parts.next(), parts.next(), parts.next().unwrap_or_default());
-                if compressed == 1 { inflate(text) } else { Some(String::from_utf8_lossy(text).into_owned()) }
+                let utf8 = if compressed == 1 { inflate(text) } else { Some(text.to_vec()) };
+                utf8.map(|t| String::from_utf8_lossy(&t).into_owned())
             }
             b"IEND" => break,
             _ => None,
@@ -199,9 +204,8 @@ pub fn png_text(png: &[u8]) -> Vec<(String, String)> {
     out
 }
 
-fn inflate(data: &[u8]) -> Option<String> {
-    let bytes = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, MOST_TEXT).ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+fn inflate(data: &[u8]) -> Option<Vec<u8>> {
+    miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, MOST_TEXT).ok()
 }
 
 #[cfg(test)]

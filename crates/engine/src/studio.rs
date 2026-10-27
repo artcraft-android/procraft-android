@@ -109,6 +109,12 @@ pub(crate) const SPACING_SPAN: f32 = 2.0 * std::f32::consts::SQRT_2;
 const SPACING_CURVE: f32 = 2.2;
 
 impl Brush {
+    /// `spacing` (stamp diameters, as another app's file has it) within what the studio's control
+    /// reaches.
+    pub fn spacing_within_reach(spacing: f32) -> f32 {
+        spacing.clamp(SPACING_FLOOR, SPACING_FLOOR + SPACING_SPAN)
+    }
+
     /// The most size (brush-file units) the brush may have: [`MOST_SIZE`] when spaced at least
     /// [`ROOMY_SPACING`] apart, less the closer its stamps are (so a stroke stays a manageable
     /// number of stamps), 1 at no spacing.

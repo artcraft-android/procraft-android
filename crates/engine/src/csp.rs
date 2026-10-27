@@ -16,13 +16,16 @@ pub struct CspBrush {
     pub roundness: Option<f32>,
     /// The tip's angle, radians.
     pub angle: f32,
-    /// The tip's image (a PNG), if it isn't round.
-    pub tip_png: Option<Vec<u8>>,
+    /// The pictures (PNGs) its tip may be, largest first (one may be empty), none if it is round.
+    pub tip_pngs: Vec<Vec<u8>>,
 }
 
-/// The most brushes read from one file, and PNGs looked at in a material.
+/// The most brushes read from one file, PNGs looked at in a material, pictures a tip may be, and
+/// bytes of them all the brushes may have together (each has its own copy).
 const MOST_BRUSHES: usize = 256;
 const MOST_PNGS: usize = 32;
+const MOST_TIPS: usize = 4;
+const MOST_TIP_BYTES: usize = 256 << 20;
 const PNG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
 /// The brushes in a sub tool file, in its order; none if it isn't one.
@@ -36,6 +39,7 @@ pub fn read(bytes: &[u8]) -> Option<Vec<CspBrush>> {
     };
     // the nodes with settings of their own (a folder of sub tools has none)
     let mut out = Vec::new();
+    let mut left = MOST_TIP_BYTES;
     for row in &nodes.rows {
         let Some(name) = named(row) else { continue };
         let id = nodes.get(row, "NodeVariantID").and_then(Value::as_int);
@@ -44,7 +48,7 @@ pub fn read(bytes: &[u8]) -> Option<Vec<CspBrush>> {
                 .map(|r| (v, r))
         });
         if variant.is_some() {
-            out.push(brush(&name, variant, materials.as_ref()));
+            out.push(brush(&name, variant, materials.as_ref(), &mut left));
         }
         if out.len() >= MOST_BRUSHES {
             break;
@@ -52,23 +56,27 @@ pub fn read(bytes: &[u8]) -> Option<Vec<CspBrush>> {
     }
     // none: the first named node, round
     if out.is_empty() {
-        out.extend(nodes.rows.iter().find_map(named).map(|name| brush(&name, None, materials.as_ref())));
+        out.extend(nodes.rows.iter().find_map(named).map(|name| brush(&name, None, materials.as_ref(), &mut left)));
     }
     (!out.is_empty()).then_some(out)
 }
 
-fn brush(name: &str, variant: Option<(&Table, &Vec<Value>)>, materials: Option<&Table>) -> CspBrush {
+/// A brush from its settings; its tip's pictures taken from what is `left` of the bytes they may
+/// have (round once that runs out).
+fn brush(name: &str, variant: Option<(&Table, &Vec<Value>)>, materials: Option<&Table>, left: &mut usize) -> CspBrush {
     let number =
         |key: &str| variant.and_then(|(t, r)| t.get(r, key)).and_then(Value::as_real).filter(|v| v.is_finite());
     let pattern =
         variant.and_then(|(t, r)| t.get(r, "BrushPatternImageArray")).and_then(Value::as_blob).and_then(pattern_key);
+    let mut tips = pattern.and_then(|key| materials.map(|m| material_pngs(m, &key))).unwrap_or_default();
+    tips.retain(|png| left.checked_sub(png.len()).map(|l| *left = l).is_some());
     CspBrush {
         name: name.to_owned(),
         hardness: number("BrushHardness").filter(|v| (0.0..=100.0).contains(v)).map(|v| (v / 100.0) as f32),
         spacing: number("BrushInterval").filter(|v| *v > 0.0).map(|v| (v / 100.0) as f32),
         roundness: number("BrushThickness").filter(|v| (1.0..=100.0).contains(v)).map(|v| (v / 100.0) as f32),
         angle: number("BrushRotation").map_or(0.0, |v| v.to_radians() as f32),
-        tip_png: pattern.and_then(|key| materials.and_then(|m| material_png(m, &key))),
+        tip_pngs: tips,
     }
 }
 
@@ -86,9 +94,9 @@ fn pattern_key(blob: &[u8]) -> Option<String> {
     found.into_iter().find(|s| s.contains(":data:") && s.len() >= 8)
 }
 
-/// The largest PNG in the material `key` names (a row with it in a text column), else in one that
-/// holds a brush pattern, else in any.
-fn material_png(table: &Table, key: &str) -> Option<Vec<u8>> {
+/// The PNGs in the material `key` names (a row with it in a text column), else in one that holds a
+/// brush pattern, else in any; the [`MOST_TIPS`] largest, largest first.
+fn material_pngs(table: &Table, key: &str) -> Vec<Vec<u8>> {
     let named: Vec<&Vec<Value>> =
         table.rows.iter().filter(|r| r.iter().any(|v| v.as_text().is_some_and(|t| t.contains(key)))).collect();
     let rows = if !named.is_empty() {
@@ -101,10 +109,11 @@ fn material_png(table: &Table, key: &str) -> Option<Vec<u8>> {
             .collect();
         if patterns.is_empty() { table.rows.iter().collect() } else { patterns }
     };
-    rows.into_iter()
-        .flat_map(|r| r.iter().filter_map(Value::as_blob).flat_map(pngs))
-        .max_by_key(|(area, _)| *area)
-        .map(|(_, png)| png.to_vec())
+    let mut found: Vec<(u64, &[u8])> =
+        rows.into_iter().flat_map(|r| r.iter().filter_map(Value::as_blob).flat_map(pngs)).take(MOST_PNGS).collect();
+    // largest first, in the material's order where they are as large
+    found.sort_by_key(|(area, _)| std::cmp::Reverse(*area));
+    found.into_iter().take(MOST_TIPS).map(|(_, png)| png.to_vec()).collect()
 }
 
 /// The PNGs inside `bytes` (each from its signature through its end chunk), with their areas.
@@ -201,9 +210,9 @@ mod tests {
         assert_eq!(b.name, "Dry Pencil");
         assert_eq!((b.hardness, b.spacing, b.roundness), (Some(0.8), Some(0.25), Some(0.5)));
         assert!((b.angle - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
-        // the material its pattern names, the larger of its two pictures
-        let tip = b.tip_png.as_ref().unwrap();
-        assert_eq!(&tip[16..24], &[0, 0, 0, 64, 0, 0, 0, 32]);
+        // the material its pattern names, the larger of its two pictures first
+        let sizes: Vec<&[u8]> = b.tip_pngs.iter().map(|t| &t[16..24]).collect();
+        assert_eq!(sizes, [&[0, 0, 0, 64, 0, 0, 0, 32][..], &[0, 0, 0, 4, 0, 0, 0, 4][..]]);
     }
 
     #[test]

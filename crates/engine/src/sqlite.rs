@@ -128,6 +128,9 @@ impl Database<'_> {
         let mut out = Vec::new();
         let mut seen = vec![false; self.bytes.len() / self.page_size + 1];
         let mut pending = vec![root];
+        // each byte of a table's payloads is in the file once: more than that is cells sharing
+        // their bytes (a damaged or crafted file asking for far more memory than it has)
+        let mut budget = self.bytes.len();
         while let Some(n) = pending.pop() {
             if out.len() >= MOST_ROWS {
                 break;
@@ -153,7 +156,10 @@ impl Database<'_> {
                 0x0D => {
                     for i in 0..count {
                         let Some(at) = be16(page, h + 8 + 2 * usize::from(i)) else { break };
-                        if let Some(row) = self.cell(page, usize::from(at)) {
+                        if out.len() >= MOST_ROWS {
+                            break;
+                        }
+                        if let Some(row) = self.cell(page, usize::from(at), &mut budget) {
                             out.push(row);
                         }
                     }
@@ -164,11 +170,13 @@ impl Database<'_> {
         out
     }
 
-    /// A leaf cell: its row id and record, the payload gathered from overflow pages.
-    fn cell(&self, page: &[u8], at: usize) -> Option<(i64, Vec<Value>)> {
+    /// A leaf cell: its row id and record, the payload gathered from overflow pages (taken from
+    /// `budget`, none if more than is left).
+    fn cell(&self, page: &[u8], at: usize, budget: &mut usize) -> Option<(i64, Vec<Value>)> {
         let (len, a) = varint(page, at)?;
         let (id, b) = varint(page, at + a)?;
         let len = usize::try_from(len).ok().filter(|l| *l <= MOST_PAYLOAD)?;
+        *budget = budget.checked_sub(len)?;
         let start = at + a + b;
         // how much of the payload is on this page (the rest on overflow pages)
         let u = self.usable;
@@ -275,26 +283,40 @@ fn columns(sql: &str) -> (Vec<String>, Option<usize>) {
         }
     }
     parts.push(inside.get(from..).unwrap_or_default());
+    let unquote =
+        |s: &str| s.trim().trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']' || c == '\'').to_owned();
     let mut names = Vec::new();
+    let mut integer = Vec::new();
+    // the primary key: a column's own (and whether it is the row's id), or the table's columns
     let mut rowid = None;
+    let mut table_key = Vec::new();
     for part in parts {
-        let part = part.trim();
-        let first = part.split_whitespace().next().unwrap_or_default();
-        let upper = part.to_ascii_uppercase();
+        // the words in capitals, one space apart (as `PRIMARY KEY` may not be)
+        let flat = part.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
+        let key = flat.find("PRIMARY KEY").and_then(|at| flat.get(at + "PRIMARY KEY".len()..));
         // table constraints, not columns (their keyword may run into a parenthesis)
-        let word: String = part
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect::<String>()
-            .to_ascii_uppercase();
+        let word: String = flat.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
         if ["PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "CONSTRAINT"].contains(&word.as_str()) {
+            if let Some(list) = key.and_then(|k| k.split_once('(')).and_then(|(_, l)| l.split_once(')')).map(|(l, _)| l)
+            {
+                table_key = list.split(',').map(|c| unquote(c.split_whitespace().next().unwrap_or_default())).collect();
+            }
             continue;
         }
-        let name = first.trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']' || c == '\'');
-        if upper.contains("INTEGER") && upper.contains("PRIMARY KEY") {
+        let mut words = part.split_whitespace();
+        let name = unquote(words.next().unwrap_or_default());
+        let is_integer = words.next().is_some_and(|t| t.eq_ignore_ascii_case("INTEGER"));
+        // the row's id: an INTEGER PRIMARY KEY, though not one declared DESC there
+        if is_integer && key.is_some_and(|k| !k.trim_start().starts_with("DESC")) {
             rowid = Some(names.len());
         }
-        names.push(name.to_owned());
+        names.push(name);
+        integer.push(is_integer);
+    }
+    if rowid.is_none()
+        && let [only] = table_key.as_slice()
+    {
+        rowid = names.iter().position(|n| n.eq_ignore_ascii_case(only)).filter(|&at| integer.get(at) == Some(&true));
     }
     (names, rowid)
 }
@@ -469,6 +491,35 @@ pub(crate) mod tests {
         assert_eq!(m.get(&m.rows[0], "FileData").and_then(Value::as_blob), Some(&long[..]));
         assert_eq!(m.get(&m.rows[0], "Size").and_then(Value::as_real), Some(2.5));
         assert!(d.table("Nothing").is_none());
+    }
+
+    #[test]
+    fn the_row_id_column_is_found_however_the_key_is_written() {
+        let rowid = |sql: &str| columns(sql).1;
+        assert_eq!(rowid("CREATE TABLE t(id INTEGER PRIMARY KEY, x)"), Some(0));
+        assert_eq!(rowid("CREATE TABLE t(x, id integer not null primary\n  key autoincrement)"), Some(1));
+        assert_eq!(rowid("CREATE TABLE t(x TEXT, id INTEGER, PRIMARY KEY(id))"), Some(1));
+        assert_eq!(rowid("CREATE TABLE t(\"id\" INTEGER, CONSTRAINT k PRIMARY KEY (\"ID\" ASC))"), Some(0));
+        // not the row's id: another type, a key of two columns, the DESC quirk
+        assert_eq!(rowid("CREATE TABLE t(IntegerName TEXT PRIMARY KEY)"), None);
+        assert_eq!(rowid("CREATE TABLE t(a INTEGER, b INTEGER, PRIMARY KEY(a, b))"), None);
+        assert_eq!(rowid("CREATE TABLE t(id INTEGER PRIMARY KEY DESC)"), None);
+        assert_eq!(rowid("CREATE TABLE t(id INT PRIMARY KEY)"), None);
+    }
+
+    #[test]
+    fn cells_sharing_their_bytes_take_no_more_than_the_file_has() {
+        let db = database(&[("T", "CREATE TABLE T (b BLOB)", vec![vec![Value::Blob(vec![7; 3000])]])]);
+        // the table's leaf (page 2) made to list its one cell 500 times
+        let mut bad = db.clone();
+        let leaf = 4096;
+        let at = [bad[leaf + 8], bad[leaf + 9]];
+        bad[leaf + 3..leaf + 5].copy_from_slice(&500u16.to_be_bytes());
+        for i in 0..500 {
+            bad[leaf + 8 + 2 * i..leaf + 10 + 2 * i].copy_from_slice(&at);
+        }
+        let rows = open(&bad).unwrap().table("T").unwrap().rows;
+        assert!(!rows.is_empty() && rows.len() * 3000 <= bad.len(), "{} rows", rows.len());
     }
 
     #[test]
