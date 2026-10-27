@@ -2844,7 +2844,7 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
                 folders.push(path);
             } else if matches!(
                 extension(&path).as_str(),
-                "brush" | "brushset" | "abr" | "gbr" | "gih" | "kpp" | "bundle" | "sut"
+                "brush" | "brushset" | "abr" | "gbr" | "gih" | "vbr" | "kpp" | "bundle" | "sut"
             ) {
                 files.push(path);
             }

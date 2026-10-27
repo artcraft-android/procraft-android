@@ -212,6 +212,9 @@ fn other_brushes(bytes: &[u8], name: String) -> Option<(String, Vec<Brush>)> {
     if let Some(tips) = procraft_engine::abr::read(bytes).or_else(|| procraft_engine::gbr::read(bytes)) {
         return Some((name, tips.iter().map(tip_brush).collect()));
     }
+    if let Some(g) = procraft_engine::gbr::read_generated(bytes) {
+        return Some((name, vec![generated_brush(&g)]));
+    }
     if let Some((title, presets)) = krita::read_bundle(bytes) {
         let name = if title.trim().is_empty() { name } else { title };
         return Some((name, presets.iter().map(krita_brush).collect()));
@@ -247,6 +250,23 @@ fn csp_brush(c: &procraft_engine::csp::CspBrush) -> Brush {
         b.spacing = Brush::spacing_within_reach(spacing);
     }
     b.shape.rotation = c.angle;
+    b
+}
+
+/// A brush of a GIMP generated brush: round with its hardness and how round it is, or its square
+/// or diamond drawn; its spacing and angle.
+fn generated_brush(g: &procraft_engine::gbr::Generated) -> Brush {
+    let mut b = match procraft_engine::gbr::generated_tip(g) {
+        Some(tip) => tip_brush(&tip),
+        None => {
+            let mut b = Brush { name: g.name.clone(), ..Brush::round_pen() };
+            b.hardness = g.hardness;
+            b.shape.roundness = (1.0 / g.aspect).clamp(0.01, 1.0);
+            b
+        }
+    };
+    b.spacing = Brush::spacing_within_reach(g.spacing);
+    b.shape.rotation = g.angle;
     b
 }
 

@@ -5863,8 +5863,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         /** Brush and brush set files, as other painting apps share them. */
         const val BRUSH_EXTENSION = "brush"
         const val BRUSH_SET_EXTENSION = "brushset"
-        /** Other apps' brush files: Photoshop's, GIMP's brushes and pipes, Krita's presets and bundles, Clip Studio's sub tools. */
-        val OTHER_BRUSH_EXTENSIONS = listOf("abr", "gbr", "gih", "kpp", "bundle", "sut")
+        /** Other apps' brush files: Photoshop's, GIMP's brushes, pipes and generated brushes, Krita's presets and bundles, Clip Studio's sub tools. */
+        val OTHER_BRUSH_EXTENSIONS = listOf("abr", "gbr", "gih", "vbr", "kpp", "bundle", "sut")
         val PACKAGE_LABEL = PACKAGE_EXTENSION.replaceFirstChar(Char::titlecase)
 
         /** What the gallery's Share offers, in order: still pictures, then animations. */

@@ -1,7 +1,7 @@
 //! Reading GIMP brushes: a brush (`.gbr`, versions 1 and 2) is a header, its name and its image
 //! (grey, how much each pixel paints; or RGBA, whose alpha paints); a pipe (`.gih`) is a name
 //! line, a line of its parameters and its brushes one after another. Each image is read as the
-//! tips ABR files give.
+//! tips ABR files give. A generated brush (`.vbr`) is text: a shape and a few numbers.
 
 use crate::abr::AbrTip;
 
@@ -41,6 +41,97 @@ fn brush(bytes: &[u8]) -> Option<(AbrTip, usize)> {
     let pixels = if depth == 1 { image.to_vec() } else { image.iter().skip(3).step_by(4).copied().collect() };
     let tip = AbrTip { name, spacing: spacing.filter(|s| *s > 0.0), width, height, pixels };
     Some((tip, header + size))
+}
+
+/// A GIMP generated brush (`.vbr`): a shape made from a few numbers, kept as text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Generated {
+    pub name: String,
+    pub shape: GeneratedShape,
+    /// Space between stamps as a share of the size.
+    pub spacing: f32,
+    /// The edge, 0 soft to 1 hard.
+    pub hardness: f32,
+    /// How many times wider than tall it is (1 to 20).
+    pub aspect: f32,
+    /// Its angle, radians.
+    pub angle: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeneratedShape {
+    Circle,
+    Square,
+    Diamond,
+}
+
+/// The side a generated brush's drawn tip is made at, pixels.
+const DRAWN_SIDE: usize = 128;
+
+/// The generated brush in `bytes`; none if it isn't one. Version 1.0 is a circle (its spacing,
+/// radius, hardness, aspect and angle a line each); 1.5 names its shape first and has the number
+/// of spikes after the radius (drawn as two here: the plain shape).
+pub fn read_generated(bytes: &[u8]) -> Option<Generated> {
+    let text = String::from_utf8_lossy(bytes.get(..bytes.len().min(4096))?);
+    let mut lines = text.lines().map(str::trim);
+    if lines.next()? != "GIMP-VBR" {
+        return None;
+    }
+    let version = lines.next()?;
+    let name = lines.next()?.to_owned();
+    let number = |line: Option<&str>| line?.parse::<f32>().ok().filter(|v| v.is_finite());
+    let shape = match version {
+        "1.0" => GeneratedShape::Circle,
+        "1.5" => match lines.next()? {
+            "circle" => GeneratedShape::Circle,
+            "square" => GeneratedShape::Square,
+            "diamond" => GeneratedShape::Diamond,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let spacing = number(lines.next())?;
+    let _radius = number(lines.next())?;
+    if version == "1.5" {
+        let _spikes = number(lines.next())?;
+    }
+    let (hardness, aspect, angle) = (number(lines.next())?, number(lines.next())?, number(lines.next())?);
+    Some(Generated {
+        name,
+        shape,
+        spacing: (spacing / 100.0).max(0.0),
+        hardness: hardness.clamp(0.0, 1.0),
+        aspect: aspect.clamp(1.0, 20.0),
+        angle: angle.to_radians(),
+    })
+}
+
+/// A generated brush's tip drawn, `aspect` times as wide as tall, solid to its hardness of the
+/// way out and fading to the edge; none for a circle (a round tip, not an image).
+pub fn generated_tip(g: &Generated) -> Option<AbrTip> {
+    let reach: fn(f32, f32) -> f32 = match g.shape {
+        GeneratedShape::Circle => return None,
+        GeneratedShape::Square => |x, y| x.max(y),
+        GeneratedShape::Diamond => |x, y| x + y,
+    };
+    let (w, h) = (DRAWN_SIDE, ((DRAWN_SIDE as f32 / g.aspect).round() as usize).max(1));
+    let mut pixels = Vec::with_capacity(w * h);
+    for y in 0..h {
+        let ty = ((y as f32 + 0.5) / h as f32 * 2.0 - 1.0).abs();
+        for x in 0..w {
+            let tx = ((x as f32 + 0.5) / w as f32 * 2.0 - 1.0).abs();
+            let d = reach(tx, ty);
+            let v = if d <= g.hardness {
+                1.0
+            } else if g.hardness >= 1.0 {
+                0.0
+            } else {
+                ((1.0 - d) / (1.0 - g.hardness)).clamp(0.0, 1.0)
+            };
+            pixels.push((v * 255.0).round() as u8);
+        }
+    }
+    Some(AbrTip { name: g.name.clone(), spacing: Some(g.spacing), width: w as u32, height: h as u32, pixels })
 }
 
 /// A pipe: its name, a line starting with how many brushes it has, then the brushes.
@@ -114,6 +205,35 @@ mod tests {
         let names: Vec<&str> = tips.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["Leaves 1", "Leaf"]);
         assert_eq!(tips[1].spacing, Some(0.5));
+    }
+
+    #[test]
+    fn generated_brushes_read_in_both_versions() {
+        let old =
+            read_generated(b"GIMP-VBR\n1.0\n2. Hardness 050\n10.000000\n25.000000\n0.500000\n2.5\n30.0\n").unwrap();
+        assert_eq!(
+            (old.name.as_str(), old.shape, old.hardness, old.aspect),
+            ("2. Hardness 050", GeneratedShape::Circle, 0.5, 2.5)
+        );
+        assert!((old.spacing - 0.1).abs() < 1e-6 && (old.angle - 30f32.to_radians()).abs() < 1e-6);
+        assert!(generated_tip(&old).is_none());
+        let block =
+            read_generated(b"GIMP-VBR\r\n1.5\r\n2. Block 01\r\nsquare\r\n10.0\r\n25.0\r\n2\r\n0.95\r\n4.0\r\n0.0\r\n")
+                .unwrap();
+        assert_eq!((block.shape, block.aspect), (GeneratedShape::Square, 4.0));
+        // a square four times as wide as tall, solid to its edge's last twentieth
+        let tip = generated_tip(&block).unwrap();
+        assert_eq!((tip.width, tip.height), (128, 32));
+        assert_eq!((tip.pixels[16 * 128 + 64], tip.pixels[16 * 128 + 4]), (255, 255));
+        assert!(tip.pixels[16 * 128] < 128);
+        // a diamond's corners are empty
+        let diamond = Generated { shape: GeneratedShape::Diamond, aspect: 1.0, ..block };
+        let tip = generated_tip(&diamond).unwrap();
+        assert_eq!((tip.pixels[64 * 128 + 64], tip.pixels[0]), (255, 0));
+        assert!(read_generated(b"GIMP-VBR\n2.0\nx\n").is_none());
+        crate::damaged::survives("GIMP generated brush", b"GIMP-VBR\n1.5\nB\ndiamond\n10\n25\n2\n0.5\n1\n0\n", |b| {
+            let _ = read_generated(b).as_ref().map(generated_tip);
+        });
     }
 
     #[test]
