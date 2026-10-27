@@ -11,6 +11,7 @@ pub mod brushfile;
 pub mod cms;
 pub mod cmyk;
 pub mod crop;
+pub mod csp;
 pub mod curve;
 #[cfg(test)]
 mod damaged;
@@ -38,6 +39,7 @@ pub mod profile;
 pub mod psd;
 pub mod quickshape;
 pub mod selection;
+pub mod sqlite;
 pub mod stroke;
 pub mod studio;
 pub mod textures;

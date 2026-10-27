@@ -2826,7 +2826,8 @@ fn a_photoshop_brush_files_tips_become_a_set() {
 }
 
 /// Real brush files, when a folder of them is given (`BRUSH_CORPUS=folder`, never committed):
-/// every `.brush`, `.brushset` and `.abr` in it and below imports, each brush draws in its
+/// every brush file in it and below (ours, and Photoshop's, GIMP's, Krita's and Clip Studio's)
+/// imports, each brush draws in its
 /// preview, and a brush written out, read back and written out again comes out the same.
 #[test]
 fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
@@ -2841,7 +2842,10 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
             let path = entry.path();
             if path.is_dir() {
                 folders.push(path);
-            } else if matches!(extension(&path).as_str(), "brush" | "brushset" | "abr") {
+            } else if matches!(
+                extension(&path).as_str(),
+                "brush" | "brushset" | "abr" | "gbr" | "gih" | "kpp" | "bundle" | "sut"
+            ) {
                 files.push(path);
             }
         }
@@ -2856,8 +2860,11 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
         let Some(s) = session(64, 64) else { return };
         let bytes = std::fs::read(path).unwrap();
         let kind = extension(path);
-        let set =
-            if kind == "abr" { s.import_other_brushes(bytes, "Corpus".to_owned()) } else { s.import_brushes(bytes) };
+        let set = if kind == "brush" || kind == "brushset" {
+            s.import_brushes(bytes)
+        } else {
+            s.import_other_brushes(bytes, "Corpus".to_owned())
+        };
         let Some(set) = set else {
             failures.push(format!("{}: not imported", path.display()));
             continue;

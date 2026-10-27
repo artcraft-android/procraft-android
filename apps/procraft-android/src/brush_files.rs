@@ -108,7 +108,7 @@ impl CanvasSession {
     }
 
     /// Adds the brushes in another app's file (`bytes`): a Photoshop brush file's sampled tips, a
-    /// GIMP brush or pipe, or a Krita preset or bundle. They go in a set of their own named `name`
+    /// GIMP brush or pipe, a Krita preset or bundle, or a Clip Studio sub tool. They go in a set of their own named `name`
     /// (a bundle's own name first; else "Imported") at the top of the library, each with the
     /// file's shape and spacing. Returns the set, or none if the file holds none.
     pub fn import_other_brushes(&self, bytes: Vec<u8>, name: String) -> Option<u32> {
@@ -213,9 +213,37 @@ fn other_brushes(bytes: &[u8], name: String) -> Option<(String, Vec<Brush>)> {
         let name = if title.trim().is_empty() { name } else { title };
         return Some((name, presets.iter().map(krita_brush).collect()));
     }
+    if let Some(brushes) = procraft_engine::csp::read(bytes) {
+        return Some((name, brushes.iter().map(csp_brush).collect()));
+    }
     // a preset alone has no images of its own: one it names comes round
     let preset = krita::read_preset(bytes, &|_| None)?;
     Some((name, vec![krita_brush(&preset)]))
+}
+
+/// A brush of a Clip Studio sub tool: its tip (an image, else round with its edge and roundness),
+/// spacing and angle.
+fn csp_brush(c: &procraft_engine::csp::CspBrush) -> Brush {
+    // its tips paint white, or else dark
+    let tip = c
+        .tip_png
+        .as_deref()
+        .and_then(|png| png_tip(png, true).filter(|t| t.pixels.iter().any(|&v| v > 0)).or_else(|| png_tip(png, false)));
+    let mut b = match tip {
+        Some(t) => tip_brush(&procraft_engine::abr::AbrTip { name: c.name.clone(), ..t }),
+        None => Brush { name: c.name.clone(), ..Brush::round_pen() },
+    };
+    if let Some(h) = c.hardness {
+        b.hardness = h.clamp(0.0, 1.0);
+    }
+    if let Some(r) = c.roundness {
+        b.shape.roundness = r.clamp(0.01, 1.0);
+    }
+    if let Some(spacing) = c.spacing {
+        b.spacing = spacing.clamp(0.01, 10.0);
+    }
+    b.shape.rotation = c.angle;
+    b
 }
 
 /// A brush of a sampled tip: its shape, with its spacing.
@@ -236,7 +264,7 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
     let image = match &k.tip {
         KritaTip::Round { .. } => None,
         KritaTip::Image(t) => Some(fitted(t)),
-        KritaTip::Png(png) => png_tip(png).map(|t| fitted(&t)),
+        KritaTip::Png(png) => png_tip(png, false).map(|t| fitted(&t)),
     };
     let mut b = match image {
         Some(pixels) => {
@@ -264,8 +292,8 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
     b
 }
 
-/// A PNG tip as a grey one: dark, opaque pixels paint.
-fn png_tip(png: &[u8]) -> Option<procraft_engine::abr::AbrTip> {
+/// A PNG tip as a grey one: its opaque pixels paint, the light ones if `white`, else the dark.
+fn png_tip(png: &[u8], white: bool) -> Option<procraft_engine::abr::AbrTip> {
     let (w, h, channels, buf) = decode_png(png)?;
     let pixels: Vec<u8> = buf
         .chunks_exact(channels.max(1))
@@ -278,7 +306,8 @@ fn png_tip(png: &[u8]) -> Option<procraft_engine::abr::AbrTip> {
                 3 => ((get(0) * 299 + get(1) * 587 + get(2) * 114) / 1000, 255),
                 _ => ((get(0) * 299 + get(1) * 587 + get(2) * 114) / 1000, get(3)),
             };
-            ((255 - grey.min(255)) * alpha / 255) as u8
+            let ink = if white { grey.min(255) } else { 255 - grey.min(255) };
+            (ink * alpha / 255) as u8
         })
         .collect();
     (pixels.len() == w * h).then(|| procraft_engine::abr::AbrTip {
