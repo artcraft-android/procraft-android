@@ -12,6 +12,8 @@ pub mod cms;
 pub mod cmyk;
 pub mod crop;
 pub mod curve;
+#[cfg(test)]
+mod damaged;
 pub mod document;
 pub mod environment;
 pub mod fill;

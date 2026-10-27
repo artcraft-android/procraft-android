@@ -319,6 +319,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_damaged_file_is_refused_not_a_crash() {
+        let good = version6();
+        assert!(read(&good).is_some());
+        crate::damaged::survives("ABR", &good, |b| {
+            let _ = read(b);
+        });
+    }
+
     /// A version 6 file with one 3 x 2 tip (raw) named by its preset.
     fn version6() -> Vec<u8> {
         let id = "tip-one";
