@@ -183,6 +183,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                 galleryDrop(
                     dropPlaces, vm.galleryEntries, dropCell, stacking = vm.openStack == null,
                     onBack = { vm.showStack(null) },
+                    onOpen = vm::showStack,
                     onBackLit = { backLit = it },
                     onOver = { dropOnto = it },
                     onEnded = {
@@ -840,7 +841,7 @@ private const val DRAGGED_ALPHA = 0.3f
 /** The blue over an artwork (or stack) a dragged artwork would be stacked with. */
 private val DropWash = Color(0x800064DC)
 
-/** How long a dragged artwork rests on a stack's way back before the gallery opens. */
+/** How long a dragged artwork rests on a stack (or a stack's way back) before it opens (the gallery). */
 private const val SPRING_MS = 600L
 
 /** Where the gallery's own drags land: the grid showing (its state, and its place and height in the root), and a stack's way back. */
@@ -892,9 +893,10 @@ private fun dropAt(grid: androidx.compose.foundation.lazy.grid.LazyGridState, en
 /**
  * The gallery taking its own drags: let go over another artwork's picture (or a stack's), the
  * dragged artwork is stacked with it ([onOver] names it meanwhile), anywhere else on the grid it
- * goes where it is let go. Near the grid's top or bottom the grid scrolls. In a stack, resting on
- * the way back ([onBackLit] meanwhile) opens the gallery ([onBack]) with the drag going on, so an
- * artwork can be taken out of the stack.
+ * goes where it is let go. Near the grid's top or bottom the grid scrolls. An artwork resting on a
+ * stack opens it ([onOpen]) and, in a stack, on the way back ([onBackLit] meanwhile) opens the
+ * gallery ([onBack]), the drag going on, so it can be put in a stack where it is let go, or taken
+ * out of one.
  */
 @Composable
 private fun galleryDrop(
@@ -903,6 +905,7 @@ private fun galleryDrop(
     cell: CellSize,
     stacking: Boolean,
     onBack: () -> Unit,
+    onOpen: (io.github.artcraftandroid.procraft.gallery.Stack) -> Unit,
     onBackLit: (Boolean) -> Unit,
     onOver: (String?) -> Unit,
     onEnded: () -> Unit,
@@ -912,6 +915,7 @@ private fun galleryDrop(
     val now = androidx.compose.runtime.rememberUpdatedState(entries)
     val inGallery = androidx.compose.runtime.rememberUpdatedState(stacking)
     val back = androidx.compose.runtime.rememberUpdatedState(onBack)
+    val open = androidx.compose.runtime.rememberUpdatedState(onOpen)
     val backLit = androidx.compose.runtime.rememberUpdatedState(onBackLit)
     val over = androidx.compose.runtime.rememberUpdatedState(onOver)
     val ended = androidx.compose.runtime.rememberUpdatedState(onEnded)
@@ -936,10 +940,27 @@ private fun galleryDrop(
             var at: DropAt? = null
             var spring: kotlinx.coroutines.Job? = null
 
+            // what it rests on: "" the way back, else a stack (by folder)
+            var springOn: String? = null
+
             fun stopSpring() {
                 spring?.cancel()
                 spring = null
+                springOn = null
                 backLit.value(false)
+            }
+
+            /** After a moment resting on [on] (the same each time it moves), [then]. */
+            fun springOn(on: String, then: () -> Unit) {
+                if (springOn == on) return
+                stopSpring()
+                springOn = on
+                backLit.value(on.isEmpty())
+                spring = scope.launch {
+                    kotlinx.coroutines.delay(SPRING_MS)
+                    stopSpring()
+                    then()
+                }
             }
 
             fun dragged(e: androidx.compose.ui.draganddrop.DragAndDropEvent) = (e.toAndroidDragEvent().localState as? io.github.artcraftandroid.procraft.gallery.GalleryDrag)?.entry
@@ -952,18 +973,9 @@ private fun galleryDrop(
                     at = null
                     edge = 0
                     over.value(null)
-                    if (spring == null) {
-                        backLit.value(true)
-                        spring = scope.launch {
-                            kotlinx.coroutines.delay(SPRING_MS)
-                            spring = null
-                            backLit.value(false)
-                            back.value()
-                        }
-                    }
+                    springOn("") { back.value() }
                     return
                 }
-                stopSpring()
                 val p = r - places.gridAt
                 val (top, box, near) = sizes.value
                 edge = when {
@@ -973,6 +985,8 @@ private fun galleryDrop(
                 }
                 at = places.grid?.let { dropAt(it, now.value, entry.dir.name, p, top, box, inGallery.value && entry is Artwork) }
                 over.value(at?.onto)
+                val stack = at?.onto?.let { name -> now.value.firstOrNull { it.dir.name == name } } as? io.github.artcraftandroid.procraft.gallery.Stack
+                if (stack != null) springOn(stack.dir.name) { open.value(stack) } else stopSpring()
             }
 
             override fun onEntered(event: androidx.compose.ui.draganddrop.DragAndDropEvent) = track(event)
@@ -1186,12 +1200,11 @@ private fun StackCell(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(Modifier.padding(top = 39.dp).size(cell.width, cell.thumb), contentAlignment = Alignment.BottomCenter) {
-            // the cards under the top one, a little turned
-            for (turn in listOf(5f, -4f)) {
-                Box(
-                    Modifier.fillMaxHeight().aspectRatio(0.75f).graphicsLayer { rotationZ = turn }
-                        .clip(RoundedCornerShape(8.dp)).background(Color(0xFFF2F2F2)),
-                )
+            // the top artwork drawn again on two cards under it, a little turned (none for one)
+            if (s.artworks.size > 1) {
+                for (turn in listOf(5f, -4f)) {
+                    Box(Modifier.graphicsLayer { rotationZ = turn }, contentAlignment = Alignment.BottomCenter) { Thumbnail(top, version) }
+                }
             }
             Thumbnail(top, version, wash = wash)
         }
