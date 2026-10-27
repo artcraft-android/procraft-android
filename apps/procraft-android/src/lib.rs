@@ -958,11 +958,12 @@ impl CanvasSession {
         }
         let canvas_samples = st.to_canvas(&samples);
         let (Some(builder), Some(canvas)) = (st.stroke.as_ref(), st.canvas.as_mut()) else { return };
+        let guide = st.doc.stroke_guide();
         // a stroke shown with its tip ends it where the input is predicted to go
         if canvas.shows_tip() && builder.shows_tip() {
-            canvas.set_tip(&guide::mirrored(&st.doc.stroke_guide(), &builder.preview_tip(&canvas_samples)));
+            canvas.set_tip(&guide::mirrored(&guide, &builder.preview_tip(&canvas_samples)));
         } else {
-            canvas.set_prediction(&builder.preview(&canvas_samples));
+            canvas.set_prediction(&guide::mirrored(&guide, &builder.preview(&canvas_samples)));
         }
         self.shared.frame(st);
     }
