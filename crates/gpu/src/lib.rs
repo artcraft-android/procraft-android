@@ -55,6 +55,15 @@ impl Gpu {
         wgpu::Instance::new(desc)
     }
 
+    /// Sends the writes queued so far to the device and waits for them, so the copies they were
+    /// staged in are let go.
+    pub fn flush(&self) {
+        self.queue.submit(std::iter::empty());
+        if let Err(e) = self.device.poll(wgpu::PollType::wait_indefinitely()) {
+            log::error!("flushing uploads: {e}");
+        }
+    }
+
     /// A device for offscreen work (tests, exports).
     pub fn headless() -> Result<Gpu, GpuError> {
         Gpu::create(Gpu::instance(), None)

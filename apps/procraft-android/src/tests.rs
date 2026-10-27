@@ -340,8 +340,10 @@ fn artworks_save_and_open() {
         st.window_size = (100, 100);
         st.view = Some(View::fit((100, 100), (100, 100)));
         st.gpu = Some(gpu);
-        st.ensure_canvas();
     }
+    // as the render thread makes it: the layers go up with the state let go between them
+    opened.shared.make_canvas();
+    assert!(opened.shared.lock().pending_pixels.is_empty());
     assert_eq!(opened.name(), "Test Piece");
     assert_eq!(opened.artwork_info().author, "A. Painter");
     assert_eq!(opened.artwork_info().created_ms, info.created_ms);

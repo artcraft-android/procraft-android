@@ -42,9 +42,9 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
         // it holds the session's layers from now on
         shared.lock().gpu.get_or_insert(gpu);
     }
+    shared.make_canvas();
     let queue = {
         let mut st = shared.lock();
-        st.ensure_canvas();
         st.reconfigure = true;
         st.needs_frame = true;
         st.gpu.as_ref().map(|g| g.queue.clone())

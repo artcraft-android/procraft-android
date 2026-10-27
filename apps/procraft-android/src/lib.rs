@@ -648,6 +648,48 @@ impl Shared {
         st.needs_frame = true;
         self.wake.notify_all();
     }
+
+    /// Creates the canvas once there is a GPU, as [`State::ensure_canvas`] does, but with the
+    /// opened layers sent to the GPU between holds of the state: an artwork of many layers takes
+    /// seconds, and the app's own thread would wait that long on any call. Each layer is copied
+    /// out as it goes, so what was opened stays in the state (a save meanwhile still has it); if
+    /// the document or what was opened changed meanwhile, the canvas is made again under the hold.
+    #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
+    pub(crate) fn make_canvas(&self) {
+        let (gpu, doc, ids) = {
+            let st = self.lock();
+            let Some(gpu) = st.gpu.as_ref().filter(|_| st.canvas.is_none()) else { return };
+            (gpu.clone(), st.doc.clone(), st.pending_pixels.iter().map(|(id, _)| *id).collect::<Vec<_>>())
+        };
+        let made = Canvas::new(&gpu, &doc).map(|mut c| {
+            for (i, id) in ids.iter().enumerate() {
+                let Some(pixels) = self.lock().pending_pixels.get(i).filter(|(at, _)| at == id).map(|(_, p)| p.clone())
+                else {
+                    break;
+                };
+                if let Err(e) = c.upload_layer(&gpu, *id, &pixels) {
+                    log::error!("opening a layer: {e}");
+                }
+            }
+            c
+        });
+        let mut st = self.lock();
+        if st.canvas.is_some() {
+            return;
+        }
+        let same = st.doc == doc && st.pending_pixels.iter().map(|(id, _)| *id).eq(ids.iter().copied());
+        match made {
+            Ok(c) if same => {
+                st.pending_pixels.clear();
+                st.canvas = Some(c);
+            }
+            Ok(_) => st.ensure_canvas(),
+            Err(e) => {
+                log::error!("canvas: {e}");
+                st.error = Some(e.to_string());
+            }
+        }
+    }
 }
 
 /// A canvas being painted: the document, the brush, the input and the renderer.

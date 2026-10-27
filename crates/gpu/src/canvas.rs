@@ -4247,6 +4247,9 @@ impl Canvas {
             },
             extent(self.width, self.height),
         );
+        // sent now, so many layers in a row (an artwork opening, a moving picture pasted) don't
+        // each keep a staged copy until the next frame
+        gpu.flush();
         self.invalidate();
         Ok(())
     }
