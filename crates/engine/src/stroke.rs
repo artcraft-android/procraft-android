@@ -394,6 +394,24 @@ impl Extras {
     }
 }
 
+/// The path curves through its points in chords this long at most (canvas pixels), and at most
+/// this many to a stretch: input this close together walks straight, as it comes.
+const CURVE_STEP: f32 = 4.0;
+const MOST_PIECES: usize = 64;
+
+/// The point at `t` (0 at `p1`, 1 at `p2`) of the centripetal Catmull–Rom curve through four
+/// points: through each of them, with no loops or cusps where they bunch up.
+fn catmull_rom(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: f32) -> Vec2 {
+    let knot = |a: Vec2, b: Vec2| a.distance(b).sqrt().max(1e-4);
+    let (t1, t2) = (knot(p0, p1), knot(p0, p1) + knot(p1, p2));
+    let t3 = t2 + knot(p2, p3);
+    let u = t1 + (t2 - t1) * t;
+    let mix = |a: Vec2, b: Vec2, from: f32, to: f32| a * ((to - u) / (to - from)) + b * ((u - from) / (to - from));
+    let (a1, a2, a3) = (mix(p0, p1, 0.0, t1), mix(p1, p2, t1, t2), mix(p2, p3, t2, t3));
+    let (b1, b2) = (mix(a1, a2, 0.0, t2), mix(a2, a3, t1, t3));
+    mix(b1, b2, t1, t2)
+}
+
 /// Streamline is tuned for input at this interval; other rates are scaled to match.
 const REFERENCE_INTERVAL_MS: f64 = 1000.0 / 120.0;
 /// The most samples at the tuned rate one sample stands for (after a pause, the filters catch up
@@ -439,6 +457,10 @@ pub struct StrokeBuilder {
     smoothed: Option<PathPoint>,
     last_sample: Option<Sample>,
     head: Option<PathPoint>,
+    /// The path point before the head, and the newest one not yet walked to: the path curves
+    /// through them, each stretch walked once the point after it is known.
+    behind: Option<PathPoint>,
+    ahead: Option<PathPoint>,
     direction: f32,
     /// The length of the last stretch of path walked (canvas pixels), none before the first.
     last_seg: f32,
@@ -607,6 +629,8 @@ impl StrokeBuilder {
             head: None,
             direction: 0.0,
             last_seg: 0.0,
+            behind: None,
+            ahead: None,
             scale: 1.0,
             carry: 0.0,
             length: 0.0,
@@ -705,9 +729,21 @@ impl StrokeBuilder {
         out
     }
 
-    /// The stamps `samples` would add, without adding them (for drawing predicted input).
+    /// The stamps `samples` would add, without adding them (for drawing predicted input): the
+    /// path walked on to the last of them.
     pub fn preview(&self, samples: &[Sample]) -> Vec<Stamp> {
-        self.clone().add(samples)
+        let mut ahead = self.clone();
+        let mut out = ahead.add(samples);
+        ahead.flush(&mut out);
+        out
+    }
+
+    /// Walks the stretch to the newest path point, as if nothing came after it.
+    fn flush(&mut self, out: &mut Vec<Stamp>) {
+        if let (Some(c), Some(b)) = (self.ahead.take(), self.head) {
+            self.walk_curve(self.behind.unwrap_or(b), b, c, c, out);
+            self.behind = Some(b);
+        }
     }
 
     /// Whether the stroke shows its end tapered as it is drawn: a pen's, with a taper that lasts a
@@ -727,7 +763,10 @@ impl StrokeBuilder {
         let kept = self.placed.get(self.kept..to).unwrap_or_default();
         let kept = kept.iter().map(|p| self.finish_stamp(p, start, None)).collect();
         self.kept = to;
-        (kept, self.tip_from(to))
+        // the tip as if the stroke ended here: walked on to its newest point
+        let mut ended = self.clone();
+        ended.flush(&mut Vec::new());
+        (kept, ended.tip_from(to))
     }
 
     /// The tip as it would be with `samples` added (for drawing predicted input), the stroke
@@ -735,6 +774,7 @@ impl StrokeBuilder {
     pub fn preview_tip(&self, samples: &[Sample]) -> Vec<Stamp> {
         let mut ahead = self.clone();
         ahead.add(samples);
+        ahead.flush(&mut Vec::new());
         ahead.tip_from(self.kept)
     }
 
@@ -755,6 +795,8 @@ impl StrokeBuilder {
     /// the stroke's stamps, as they should finally be drawn.
     pub fn finish(&mut self) -> Vec<Stamp> {
         let mut run_on = 0.0;
+        // the last stretch of the curve, with nothing after it
+        self.flush(&mut Vec::new());
         if let (Some(last), Some(head)) = (self.last_sample, self.head) {
             let to = PathPoint {
                 pos: last.pos,
@@ -854,7 +896,32 @@ impl StrokeBuilder {
             self.before_last = [self.before_last[1], Some(last.pos)];
         }
         self.last_sample = Some(s);
-        self.walk_to(smoothed, out);
+        self.path_to(smoothed, out);
+    }
+
+    /// Takes the path on to `to`: the stretch before it walked along the curve through the points
+    /// around it (an exact path goes straight, keeping its corners).
+    fn path_to(&mut self, to: PathPoint, out: &mut Vec<Stamp>) {
+        let Some(head) = self.head.filter(|_| !self.exact) else {
+            self.walk_to(to, out);
+            return;
+        };
+        let Some(next) = self.ahead.replace(to) else { return };
+        self.walk_curve(self.behind.unwrap_or(head), head, next, to, out);
+        self.behind = Some(head);
+    }
+
+    /// Walks from the head `b` to `c` along the centripetal Catmull–Rom curve through `a`, `b`,
+    /// `c` and `d`, in chords of at most [`CURVE_STEP`] (one, straight, if it is that short); the
+    /// pressure and the rest change evenly along it.
+    fn walk_curve(&mut self, a: PathPoint, b: PathPoint, c: PathPoint, d: PathPoint, out: &mut Vec<Stamp>) {
+        let whole = b.pos.distance(c.pos);
+        let pieces = if whole.is_finite() { ((whole / CURVE_STEP).ceil() as usize).clamp(1, MOST_PIECES) } else { 1 };
+        for i in 1..=pieces {
+            let t = i as f32 / pieces as f32;
+            let pos = if i == pieces { c.pos } else { catmull_rom(a.pos, b.pos, c.pos, d.pos, t) };
+            self.walk_piece(PathPoint { pos, ..b.lerp(c, t) }, Some(whole), out);
+        }
     }
 
     /// Notes how far the input has come with `s`, and when (samples without times of their own
@@ -944,6 +1011,12 @@ impl StrokeBuilder {
 
     /// Walks the path from its head to `to`, placing stamps at the brush's spacing.
     fn walk_to(&mut self, to: PathPoint, out: &mut Vec<Stamp>) {
+        self.walk_piece(to, None, out);
+    }
+
+    /// As [`walk_to`](Self::walk_to), a piece of a stretch of input `whole` long (for how much
+    /// a lean compresses), else a stretch of its own.
+    fn walk_piece(&mut self, to: PathPoint, whole: Option<f32>, out: &mut Vec<Stamp>) {
         let Some(from) = self.head else {
             // the first point always gets a stamp, so a tap leaves a dot
             self.head = Some(to);
@@ -957,7 +1030,7 @@ impl StrokeBuilder {
         }
         let d = to.pos - from.pos;
         self.direction = d.y.atan2(d.x);
-        self.last_seg = seg;
+        self.last_seg = whole.unwrap_or(seg);
         let mut done = 0.0f32;
         // each input segment goes on from the plain gap where it starts
         let mut last = self.step(from);
@@ -1651,15 +1724,18 @@ mod tests {
         let (kept, tip) = b.add_tipped(samples.get(..60).unwrap());
         assert!(kept.iter().all(|s| s.radius == 5.0));
         assert!(tip.len() < 30 && tip.last().unwrap().radius < 1.0, "{} {}", tip.len(), tip.last().unwrap().radius);
-        assert_eq!(kept.len() + tip.len(), b.stamp_count());
+        // the tip reaches the newest point, past the stamps placed for good (the path waits a point
+        // to curve)
+        assert!((tip.last().unwrap().center.x - 118.0).abs() < 3.0, "{}", tip.last().unwrap().center.x);
+        assert!(kept.len() + tip.len() >= b.stamp_count());
         // drawn on, the old tip is kept whole and a new one shown
         let (more, tip) = b.add_tipped(samples.get(60..).unwrap());
         assert!(more.iter().all(|s| s.radius == 5.0) && more.first().unwrap().center.x < 118.0);
-        assert_eq!(kept.len() + more.len() + tip.len(), b.stamp_count());
+        assert!(kept.len() + more.len() + tip.len() >= b.stamp_count());
         // a predicted tip runs on to where the input is predicted to go, the stroke left as it is
         let ahead = b.preview_tip(&[Sample::at(Vec2::new(240.0, 50.0), 1.0, 420.0)]);
         assert!(ahead.last().unwrap().center.x > 230.0 && ahead.last().unwrap().radius < 1.0);
-        assert_eq!(kept.len() + more.len() + tip.len(), b.stamp_count());
+        assert!(kept.len() + more.len() + tip.len() >= b.stamp_count());
         // a finger, a classic taper or the animation off show no tip
         assert!(!StrokeBuilder::new(brush.clone(), 10.0, Pointer::Finger).shows_tip());
         let mut classic = brush.clone();
@@ -2160,6 +2236,44 @@ mod tests {
             ys.iter().cloned().fold(f32::MIN, f32::max) - ys.iter().cloned().fold(f32::MAX, f32::min)
         };
         assert!(spread(1.0) < spread(0.0) * 0.5, "{} {}", spread(1.0), spread(0.0));
+    }
+
+    #[test]
+    fn sparse_input_curves_through_its_points_and_an_exact_path_keeps_its_corners() {
+        // a finger round a circle of 100 px in 8 samples: straight between them, the middles
+        // would fall 7.6 px inside it
+        let round: Vec<Sample> = (0..=8)
+            .map(|i| {
+                let a = i as f32 / 8.0 * std::f32::consts::TAU;
+                Sample::at(Vec2::new(200.0 + 100.0 * a.cos(), 200.0 + 100.0 * a.sin()), 1.0, f64::from(i) * 8.0)
+            })
+            .collect();
+        let mut s = StrokeBuilder::new(plain(), 4.0, Pointer::Finger);
+        s.add(&round);
+        let stamps = s.finish();
+        // away from the ends (whose stretches have nothing beyond them to curve by)
+        let inside = |p: &&Stamp| {
+            let a = (p.center.y - 200.0).atan2(p.center.x - 200.0).rem_euclid(std::f32::consts::TAU);
+            (std::f32::consts::FRAC_PI_4..std::f32::consts::TAU - std::f32::consts::FRAC_PI_4).contains(&a)
+        };
+        let off = stamps
+            .iter()
+            .filter(inside)
+            .map(|p| (p.center.distance(Vec2::new(200.0, 200.0)) - 100.0).abs())
+            .fold(0.0, f32::max);
+        assert!(off < 1.5, "{off} px off the circle");
+        // a square drawn exactly: its corner is a corner, its sides straight
+        let square = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)];
+        let samples: Vec<Sample> = square
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y))| Sample::at(Vec2::new(x + 50.0, y + 50.0), 1.0, i as f64 * 8.0))
+            .collect();
+        let mut s = StrokeBuilder::new(plain(), 4.0, Pointer::Finger).exact_path();
+        s.add(&samples);
+        let stamps = s.finish();
+        assert!(stamps.iter().all(|p| (p.center.y - 50.0).abs() < 1e-3 || (p.center.x - 150.0).abs() < 1e-3));
+        assert!(stamps.iter().any(|p| p.center.distance(Vec2::new(150.0, 50.0)) < 1.0));
     }
 
     #[test]
