@@ -114,6 +114,7 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
     let mut layers: Vec<Layer> = Vec::new();
     let mut pixels: Vec<(LayerId, Vec<u8>)> = Vec::new();
     let mut next = 1u64;
+    let mut holds = Vec::new();
     let mut selected = None;
     let selected_uuid = root.object("selectedLayer").and_then(|l| l.string("UUID"));
     let mut items = root.array("unwrappedLayers");
@@ -122,7 +123,17 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
     }
     // the archive lists the top first; ours goes bottom first
     for item in items.iter().rev() {
-        add_item(&canvas, item, None, &mut layers, &mut pixels, &mut next, selected_uuid.as_deref(), &mut selected)?;
+        add_item(
+            &canvas,
+            item,
+            None,
+            &mut layers,
+            &mut pixels,
+            &mut holds,
+            &mut next,
+            selected_uuid.as_deref(),
+            &mut selected,
+        )?;
     }
     let mut document = Document::from_layers(dw, dh, layers, selected.unwrap_or(LayerId(1)));
     if let Some(c) = root.data("backgroundColor").and_then(floats4) {
@@ -152,6 +163,9 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
         }
         _ => document.profile = nearest,
     }
+    if let Some(a) = root.object("animation").and_then(|a| animation(&a, holds)) {
+        document.animation = Some(a);
+    }
     let document = document.repaired();
     Ok(Imported {
         document,
@@ -163,6 +177,40 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
             .real("SilicaDocumentTrackedTimeKey")
             .filter(|t| t.is_finite() && *t >= 0.0)
             .unwrap_or(0.0),
+    })
+}
+
+/// The canvas's animation settings, if Animation or Page Assist is on: older files say whether
+/// with `enabled` (Animation Assist), newer ones with `animationMode` (1 Animation, 2 Page Assist).
+/// `holds` are the frames held longer.
+fn animation(a: &Object<'_>, holds: Vec<(LayerId, u32)>) -> Option<crate::animation::Animation> {
+    use crate::animation::{Animation, MAX_ONION_FRAMES, Playback};
+    let mode = a.bool("enabled").map_or_else(|| a.int("animationMode").unwrap_or(0), i64::from);
+    if mode != 1 && mode != 2 {
+        return None;
+    }
+    let d = Animation::default();
+    let (before, after) =
+        if a.bool("coloredSkins").unwrap_or(false) { ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]) } else { (d.before, d.after) };
+    Some(Animation {
+        fps: a.int("frameRate").and_then(|f| u32::try_from(f).ok()).filter(|f| (1..=60).contains(f)).unwrap_or(d.fps),
+        // one when the file doesn't say
+        onion_frames: a.int("onionSkinCount").map_or(1, |n| u32::try_from(n.max(0)).unwrap_or(0).min(MAX_ONION_FRAMES)),
+        onion_opacity: a
+            .real("onionSkinOpacity")
+            .filter(|o| o.is_finite())
+            .map_or(d.onion_opacity, |o| o.clamp(0.0, 1.0) as f32),
+        playback: match a.int("playbackMode") {
+            Some(0) => Playback::OneShot,
+            Some(2) => Playback::PingPong,
+            _ => Playback::Loop,
+        },
+        blend_primary: a.bool("primaryMixed").unwrap_or(d.blend_primary),
+        before,
+        after,
+        holds,
+        pages: mode == 2,
+        ..d
     })
 }
 
@@ -267,6 +315,7 @@ fn add_item(
     parent: Option<LayerId>,
     layers: &mut Vec<Layer>,
     pixels: &mut Vec<(LayerId, Vec<u8>)>,
+    holds: &mut Vec<(LayerId, u32)>,
     next: &mut u64,
     selected_uuid: Option<&str>,
     selected: &mut Option<LayerId>,
@@ -279,12 +328,14 @@ fn add_item(
         *next += 1;
         i
     };
+    let held = item.int("animationHeldLength").and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0);
     match item.class() {
         Some("SilicaGroup") | Some("ValkyrieGroup") => {
             let gid = id();
+            holds.extend(held.map(|n| (gid, n)));
             // the group sits above what it holds
             for child in item.array("children").iter().rev() {
-                add_item(canvas, child, Some(gid), layers, pixels, next, selected_uuid, selected)?;
+                add_item(canvas, child, Some(gid), layers, pixels, holds, next, selected_uuid, selected)?;
             }
             layers.push(Layer {
                 id: gid,
@@ -306,6 +357,7 @@ fn add_item(
         }
         _ => {
             let lid = id();
+            holds.extend(held.map(|n| (lid, n)));
             let uuid = item.string("UUID").unwrap_or_default();
             if selected_uuid == Some(uuid.as_str()) {
                 *selected = Some(lid);
@@ -469,7 +521,8 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
         &["ValkyrieColorProfile", "NSObject"],
         vec![("SiColorProfileArchiveICCNameKey", icc_name), ("SiColorProfileArchiveICCDataKey", Value::Data(icc_data))],
     );
-    // the canvas's settings; whether Animation Assist is on isn't written (its number unknown yet)
+    // the canvas's settings, and which assist is on: none 0, Animation Assist 1, Page Assist 2
+    let mode = doc.animation.as_ref().map_or(0, |a| if a.pages { 2 } else { 1 });
     let a = doc.animation.clone().unwrap_or_default();
     let playback = match a.playback {
         crate::animation::Playback::OneShot => 0,
@@ -479,7 +532,7 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
     let animation = b.object(
         &["ValkyrieDocumentAnimation", "NSObject"],
         vec![
-            ("animationMode", Value::Int(0)),
+            ("animationMode", Value::Int(mode)),
             ("frameRate", Value::Int(i64::from(a.fps))),
             ("onionSkinCount", Value::Int(i64::from(a.onion_frames))),
             ("onionSkinOpacity", Value::Real(f64::from(a.onion_opacity))),
@@ -1188,6 +1241,36 @@ mod tests {
         assert_eq!(anim.int("playbackMode"), Some(2));
         assert_eq!(anim.bool("primaryMixed"), Some(true));
         assert_eq!(root.object("selectedLayer").unwrap().int("animationHeldLength"), Some(2));
+        assert_eq!(anim.int("animationMode"), Some(1));
+        // read back as it was written
+        let back = read(&bytes).unwrap();
+        let b = back.document.animation.as_ref().unwrap();
+        assert_eq!(
+            (b.fps, b.onion_frames, b.onion_opacity, b.playback, b.blend_primary, b.pages),
+            (24, 3, 0.25, crate::animation::Playback::PingPong, true, false)
+        );
+        assert_eq!(b.hold(back.document.current()), 2);
+        // Page Assist is the other mode; with neither, the settings aren't the canvas's
+        let pack = |doc: &Document| {
+            write(&Export {
+                document: doc,
+                pixels: &pixels,
+                composite: &[0; 16 * 16 * 4],
+                thumbnail_png: &[],
+                name: "",
+                author: "",
+                strokes: 0,
+                tracked_seconds: 0.0,
+                seed: 1,
+                time_lapse: None,
+            })
+        };
+        if let Some(a) = doc.animation.as_mut() {
+            a.pages = true;
+        }
+        assert!(read(&pack(&doc)).unwrap().document.animation.unwrap().pages);
+        doc.animation = None;
+        assert!(read(&pack(&doc)).unwrap().document.animation.is_none());
     }
 
     #[test]
