@@ -2920,6 +2920,12 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
             if !drawn {
                 failures.push(format!("{at}: draws nothing"));
             }
+            // to look at beside another app's: each preview as a picture, if asked for
+            if let (Ok(out), Some(p)) = (std::env::var("BRUSH_CORPUS_PREVIEWS"), s.brush_preview(set, i, 600, 180)) {
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+                let file = std::path::Path::new(&out).join(format!("{stem}-{:02}.png", i + 1));
+                crate::project::write_png(&file, p.width, p.height, &p.rgba, &[]).unwrap();
+            }
             let Some(once) = s.brush_as_file(set, i) else {
                 failures.push(format!("{at}: not written"));
                 continue;
