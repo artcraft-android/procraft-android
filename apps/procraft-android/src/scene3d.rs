@@ -521,7 +521,7 @@ impl CanvasSession {
         if set == scene.current && channel == scene.channel {
             match st.canvas.as_mut() {
                 Some(canvas) => canvas.put_layer(base, rgba),
-                None => st.pending_pixels.push((base, rgba)),
+                None => st.pending_pixels.push((base, crate::project::Opened::Pixels(rgba))),
             }
         } else {
             let Some(slot) = scene.slot(set, channel) else { return false };
@@ -1525,7 +1525,7 @@ impl State {
         let old = TextureSet {
             doc: std::mem::replace(&mut self.doc, Document::new(1, 1)),
             canvas: self.canvas.take(),
-            pending: std::mem::take(&mut self.pending_pixels),
+            pending: crate::project::opened_pixels(std::mem::take(&mut self.pending_pixels), side, side),
         };
         let structure = old.doc.clone();
         if let Some(slot) = scene.slot(part, from) {
@@ -1535,7 +1535,7 @@ impl State {
         follow_layers(&mut new, &structure);
         self.doc = new.doc;
         self.canvas = new.canvas;
-        self.pending_pixels = new.pending;
+        self.pending_pixels = crate::project::opened(new.pending);
         scene.channel = channel;
         self.ensure_canvas();
     }
@@ -1566,10 +1566,12 @@ impl State {
         self.settle();
         let Some(scene) = self.scene.as_mut() else { return };
         let Some(set) = scene.sets.get_mut(index).and_then(Option::take) else { return };
+        let (w, h) = (self.doc.width(), self.doc.height());
+        let pending = std::mem::replace(&mut self.pending_pixels, crate::project::opened(set.pending));
         let old = TextureSet {
             doc: std::mem::replace(&mut self.doc, set.doc),
             canvas: std::mem::replace(&mut self.canvas, set.canvas),
-            pending: std::mem::replace(&mut self.pending_pixels, set.pending),
+            pending: crate::project::opened_pixels(pending, w, h),
         };
         if let Some(slot) = scene.sets.get_mut(scene.current) {
             *slot = Some(old);

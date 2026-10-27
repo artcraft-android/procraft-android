@@ -320,7 +320,7 @@ pub(crate) struct State {
     /// What the artwork keeps about itself: when it was made, strokes, time spent, its author.
     pub(crate) info: project::ArtworkInfo,
     /// Saved layer pixels waiting for the canvas (an opened artwork before it is shown).
-    pub(crate) pending_pixels: Vec<(procraft_engine::document::LayerId, Vec<u8>)>,
+    pub(crate) pending_pixels: Vec<(procraft_engine::document::LayerId, project::Opened)>,
     /// A model open to paint on, in place of the flat canvas (the document is its current
     /// texture set's).
     pub(crate) scene: Option<scene3d::Scene>,
@@ -555,7 +555,8 @@ impl State {
         let Some(gpu) = self.gpu.as_ref() else { return };
         match Canvas::new(gpu, &self.doc) {
             Ok(mut c) => {
-                for (id, pixels) in std::mem::take(&mut self.pending_pixels) {
+                let (w, h) = (self.doc.width(), self.doc.height());
+                for (id, pixels) in project::opened_pixels(std::mem::take(&mut self.pending_pixels), w, h) {
                     if let Err(e) = c.upload_layer(gpu, id, &pixels) {
                         log::error!("opening a layer: {e}");
                     }
@@ -652,7 +653,8 @@ impl Shared {
     /// Creates the canvas once there is a GPU, as [`State::ensure_canvas`] does, but with the
     /// opened layers sent to the GPU between holds of the state: an artwork of many layers takes
     /// seconds, and the app's own thread would wait that long on any call. Each layer is copied
-    /// out as it goes, so what was opened stays in the state (a save meanwhile still has it); if
+    /// out (and decoded) as it goes, so what was opened stays in the state (a save meanwhile still
+    /// has it); if
     /// the document or what was opened changed meanwhile, the canvas is made again under the hold.
     #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
     pub(crate) fn make_canvas(&self) {
@@ -663,12 +665,17 @@ impl Shared {
         };
         let made = Canvas::new(&gpu, &doc).map(|mut c| {
             for (i, id) in ids.iter().enumerate() {
-                let Some(pixels) = self.lock().pending_pixels.get(i).filter(|(at, _)| at == id).map(|(_, p)| p.clone())
+                let Some(layer) = self.lock().pending_pixels.get(i).filter(|(at, _)| at == id).map(|(_, p)| p.clone())
                 else {
                     break;
                 };
-                if let Err(e) = c.upload_layer(&gpu, *id, &pixels) {
-                    log::error!("opening a layer: {e}");
+                match layer.pixels(doc.width(), doc.height()) {
+                    Ok(pixels) => {
+                        if let Err(e) = c.upload_layer(&gpu, *id, &pixels) {
+                            log::error!("opening a layer: {e}");
+                        }
+                    }
+                    Err(e) => log::error!("layer {id:?}: {e}"),
                 }
             }
             c
@@ -811,7 +818,7 @@ impl CanvasSession {
             assist_from: None,
             guide_before: None,
             name,
-            pending_pixels: pixels,
+            pending_pixels: project::opened(pixels),
             fit_insets: [0.0; 4],
             backdrops: Vec::new(),
             saved_view: None,

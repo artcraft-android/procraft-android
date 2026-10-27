@@ -187,7 +187,7 @@ impl crate::State {
             );
         } else {
             // not shown yet: what was opened is still what there is
-            layers = self.pending_pixels.clone();
+            layers = opened_pixels(self.pending_pixels.clone(), self.doc.width(), self.doc.height());
         }
         Ok(SaveSnapshot { file, layers, composite, model })
     }
@@ -307,22 +307,24 @@ impl CanvasSession {
             });
         }
         let doc = file.document.repaired();
-        let mut pixels = Vec::new();
+        // each layer's file as it is, decoded as it goes to the GPU
+        let mut pngs = Vec::new();
         for layer in doc.layers() {
             let path = layer_path(&dir, layer.id);
             // a layer with no file is empty
             if !path.exists() {
                 continue;
             }
-            match read_png(&path, doc.width(), doc.height()) {
-                Ok(rgba) => pixels.push((layer.id, rgba)),
+            match fs::read(&path) {
+                Ok(bytes) => pngs.push((layer.id, Opened::Png(bytes))),
                 Err(e) => log::error!("layer {:?}: {e}", layer.id),
             }
         }
         let scene = file.model.as_ref().map(|m| crate::scene3d::open_saved_model(&dir, m)).transpose()?;
-        let session = CanvasSession::with_document(doc, file.name, pixels);
+        let session = CanvasSession::with_document(doc, file.name, Vec::new());
         {
             let mut st = session.shared.lock();
+            st.pending_pixels = pngs;
             st.info = file.info;
             st.saved_view = file.view;
             st.scene = scene;
@@ -786,10 +788,52 @@ fn png_bytes(width: u32, height: u32, rgba: &[u8], icc: &[u8]) -> Result<Vec<u8>
     Ok(out)
 }
 
+/// A layer's pixels waiting for the GPU: as they are, or (an opened artwork's) still the PNG they
+/// were read from, decoded only as each goes up, so a large artwork isn't all in memory at once.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Opened {
+    Pixels(Vec<u8>),
+    Png(Vec<u8>),
+}
+
+impl Opened {
+    /// The pixels, which must be `width` × `height`.
+    pub(crate) fn pixels(self, width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
+        match self {
+            Opened::Pixels(rgba) => Ok(rgba),
+            Opened::Png(bytes) => decode_png(std::io::Cursor::new(bytes), width, height),
+        }
+    }
+}
+
+/// Layers' pixels as they are, waiting for the GPU.
+pub(crate) fn opened(layers: Vec<(LayerId, Vec<u8>)>) -> Vec<(LayerId, Opened)> {
+    layers.into_iter().map(|(id, rgba)| (id, Opened::Pixels(rgba))).collect()
+}
+
+/// Waiting layers' pixels, `width` × `height`; one that can't be read is left out.
+pub(crate) fn opened_pixels(layers: Vec<(LayerId, Opened)>, width: u32, height: u32) -> Vec<(LayerId, Vec<u8>)> {
+    layers
+        .into_iter()
+        .filter_map(|(id, layer)| match layer.pixels(width, height) {
+            Ok(rgba) => Some((id, rgba)),
+            Err(e) => {
+                log::error!("layer {id:?}: {e}");
+                None
+            }
+        })
+        .collect()
+}
+
 /// A PNG's RGBA8 pixels, which must be `width` × `height`.
 pub(crate) fn read_png(path: &Path, width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
     let file = fs::File::open(path).map_err(|e| file_error("opening a layer", e))?;
-    let decoder = png::Decoder::new(BufReader::new(file));
+    decode_png(BufReader::new(file), width, height)
+}
+
+/// The RGBA8 pixels of the PNG `from` reads, which must be `width` × `height`.
+fn decode_png(from: impl std::io::BufRead + std::io::Seek, width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
+    let decoder = png::Decoder::new(from);
     let mut reader = decoder.read_info().map_err(|e| file_error("opening a layer", e))?;
     let size = reader.output_buffer_size().ok_or_else(|| file_error("opening a layer", "too large"))?;
     let mut buf = vec![0; size];

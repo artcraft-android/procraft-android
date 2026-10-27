@@ -334,6 +334,19 @@ fn artworks_save_and_open() {
     assert!(dir.join("artwork.json").exists() && dir.join("thumbnail.png").exists());
 
     let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    // saved before it is shown, its layers (still their files) are written back as they were
+    let again = dir.with_extension("again");
+    opened.save(again.to_string_lossy().into_owned()).unwrap();
+    let mut compared = 0;
+    for layer in opened.layers() {
+        let file = |d: &std::path::Path| std::fs::read(d.join("layers").join(format!("{}.png", layer.id))).ok();
+        let (before, after) = (file(&dir), file(&again));
+        compared += usize::from(before.is_some());
+        let rgba = |png: Option<Vec<u8>>| png.map(|b| crate::project::Opened::Png(b).pixels(100, 100).unwrap());
+        assert_eq!(rgba(after), rgba(before));
+    }
+    assert_eq!(compared, 2);
+    let _ = std::fs::remove_dir_all(&again);
     {
         let gpu = Gpu::headless().unwrap();
         let mut st = opened.shared.lock();
@@ -1437,8 +1450,8 @@ fn an_artwork_from_a_picture() {
     assert_eq!((s.info().width, s.info().height), (6, 4));
     assert_eq!(s.name(), "Photo");
     let st = s.shared.lock();
-    let (_, pixels) = st.pending_pixels.first().unwrap();
-    assert_eq!(&pixels[..4], &[128, 0, 0, 128]);
+    let (_, layer) = st.pending_pixels.first().unwrap();
+    assert_eq!(&layer.clone().pixels(6, 4).unwrap()[..4], &[128, 0, 0, 128]);
 }
 
 #[test]
@@ -1752,7 +1765,12 @@ fn saves_at_the_same_time_keep_the_layers_whole() {
         });
     }
     let back = CanvasSession::open(path).unwrap();
-    let pending = back.shared.lock().pending_pixels.clone();
+    let (pending, w, h) = {
+        let st = back.shared.lock();
+        (st.pending_pixels.clone(), st.doc.width(), st.doc.height())
+    };
+    let pending = crate::project::opened_pixels(pending, w, h);
+    assert!(!pending.is_empty());
     let painted = pending.iter().map(|(_, px)| px.chunks(4).filter(|p| p[3] > 0).count()).sum::<usize>();
     assert!(painted > 5000, "{painted}");
     // nothing left over from the writes
