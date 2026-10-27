@@ -19,6 +19,11 @@ const THUMBNAIL: (u32, u32) = (327, 100);
 /// The most a brush file's picture may decode to (8192 × 8192 in colour), bytes.
 const MOST_PNG_BYTES: usize = 256 << 20;
 
+/// A Photoshop preset's most size (as brush files keep it) for each pixel of its tip: 3.28% of
+/// the scale a pixel, as 35 presets of a real file come in elsewhere (8 px reading 26%, 442 px
+/// 1448%).
+const ABR_SIZE_PER_PIXEL: f32 = 0.03277;
+
 /// A brush file's pictures, made: the shape, the grain if any and the preview (PNGs).
 struct Made {
     shape: Vec<u8>,
@@ -312,9 +317,16 @@ fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
         ("streamline", 0.0),
         ("rendering_mode", 1.0),
         ("flow", 1.0),
-        ("min_size", 0.01),
     ] {
         b.set_setting(key, value);
+    }
+    // its most size from its tip's pixels (a sampled tip's no taller than its picture), the least 1%
+    let pixels = match (&a.tip, a.diameter) {
+        (None, d) => d,
+        (Some(t), d) => Some(d.map_or(t.height as f32, |d| d.min(t.height as f32))),
+    };
+    if let Some(px) = pixels {
+        procraft_engine::brushfile::set_sizes(&mut b, px * ABR_SIZE_PER_PIXEL, Some(0.01));
     }
     let d = a.dynamics;
     b.set_setting("pressure_size", if d.tip && d.size_by_pressure { (1.0 - d.min_diameter) / 2.0 } else { 0.0 });
@@ -888,6 +900,53 @@ mod tests {
         // none: no grain
         let plain = csp_brush(&procraft_engine::csp::CspBrush { texture: None, ..c });
         assert!(plain.grain.source.is_none());
+    }
+
+    #[test]
+    fn a_photoshop_preset_comes_in_at_its_size_with_its_dynamics() {
+        use procraft_engine::abr::{AbrBrush, AbrDynamics, AbrTip};
+        let shown = |b: &Brush, key: &str| (b.setting(key) * 100.0).round();
+        // a computed 10 px round, pressure on its size (down to 87%) and opacity
+        let round = AbrBrush {
+            name: "Hard".into(),
+            tip: None,
+            spacing: Some(0.09),
+            angle: 129f32.to_radians(),
+            roundness: Some(1.0),
+            hardness: Some(1.0),
+            diameter: Some(10.0),
+            texture: None,
+            dynamics: AbrDynamics {
+                tip: true,
+                min_diameter: 0.87,
+                size_by_pressure: true,
+                paint: true,
+                opacity_by_pressure: true,
+                flow_by_pressure: false,
+            },
+        };
+        let b = abr_brush(&round);
+        // most size 33% (as the file keeps it), the least 1%
+        assert_eq!(
+            ((b.max_size / b.size_unit() * 100.0).round(), (b.min_size / b.size_unit() * 100.0).round()),
+            (33.0, 1.0)
+        );
+        // pressure: size 6.5% (half of what the dynamics let go), the stylus page's opacity full
+        assert!((b.setting("pressure_size") - 0.065).abs() < 1e-6);
+        assert_eq!((shown(&b, "pressure_flow"), shown(&b, "pressure_opacity")), (100.0, 0.0));
+        // untapered, no StreamLine, a uniformed glaze; turned the other way
+        assert_eq!(
+            (b.setting("pen_taper_size"), b.setting("touch_taper_size"), b.setting("streamline")),
+            (0.0, 0.0, 0.0)
+        );
+        assert_eq!(b.setting("rendering_mode"), 1.0);
+        assert!((b.shape.rotation + 129f32.to_radians()).abs() < 1e-6);
+        // a sampled 165 x 91 tip at 165 px: no taller than its picture, 298%
+        let tip = AbrTip { name: "Tip".into(), spacing: None, width: 165, height: 91, pixels: vec![255; 165 * 91] };
+        let sampled =
+            abr_brush(&AbrBrush { tip: Some(tip), diameter: Some(165.0), dynamics: AbrDynamics::default(), ..round });
+        assert_eq!((sampled.max_size / sampled.size_unit() * 100.0).round(), 298.0);
+        assert_eq!(sampled.setting("pressure_size"), 0.0);
     }
 
     #[test]

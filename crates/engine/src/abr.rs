@@ -29,6 +29,8 @@ pub struct AbrBrush {
     pub roundness: Option<f32>,
     /// A computed tip's edge, 0 soft to 1 hard.
     pub hardness: Option<f32>,
+    /// Its tip's diameter, pixels, if the preset gives it.
+    pub diameter: Option<f32>,
     /// The pattern the preset paints through, if it uses one that is in the file.
     pub texture: Option<AbrTexture>,
     /// What the pen's pressure changes.
@@ -91,6 +93,7 @@ pub fn read_brushes(bytes: &[u8]) -> Option<Vec<AbrBrush>> {
         angle: 0.0,
         roundness: None,
         hardness: None,
+        diameter: None,
         texture: None,
         dynamics: AbrDynamics::default(),
     };
@@ -207,6 +210,7 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
             angle: p.angle,
             roundness: p.roundness,
             hardness: p.hardness,
+            diameter: p.diameter,
             texture,
             dynamics: p.dynamics,
         });
@@ -223,6 +227,7 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
                 angle: 0.0,
                 roundness: None,
                 hardness: None,
+                diameter: None,
                 texture: None,
                 dynamics: AbrDynamics::default(),
             });
@@ -421,6 +426,7 @@ struct Preset {
     angle: f32,
     roundness: Option<f32>,
     hardness: Option<f32>,
+    diameter: Option<f32>,
     /// Whether its texture is on, and the pattern's id, scale, depth and inversion.
     use_texture: bool,
     texture: Option<String>,
@@ -436,7 +442,7 @@ struct Preset {
 /// aren't the preset's: the samples they name come after the presets. Its texture comes after its
 /// brushes, so it goes to what was kept of the preset, and to the preset as it is still read.
 fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
-    const KEYS: [&[u8]; 22] = [
+    const KEYS: [&[u8]; 23] = [
         b"brushPreset",
         b"Nm  TEXT",
         b"SpcnUntF#Prc",
@@ -459,6 +465,7 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
         b"opVrObjc",
         b"prVrObjc",
         b"bVTylong",
+        b"DmtrUntF#Pxl",
     ];
     let (mut out, mut others) = (Vec::new(), Vec::new());
     // the preset being read, whether its brush is computed, and whether its brush is done
@@ -533,6 +540,7 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
             4 => p.angle = r.f64().filter(|v| v.is_finite()).map_or(0.0, |v| v.to_radians() as f32),
             5 => p.roundness = percent(&mut r).filter(|v| *v > 0.0 && *v <= 1.0),
             6 => p.hardness = percent(&mut r).map(|v| v.clamp(0.0, 1.0)),
+            22 => p.diameter = r.f64().filter(|v| v.is_finite() && *v > 0.0).map(|v| v as f32),
             7 => computed = true,
             8 => end(&p, computed, &mut done, &mut out),
             _ => {}
