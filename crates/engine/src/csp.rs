@@ -1,6 +1,6 @@
 //! Reading Clip Studio sub tools (`.sut`): a SQLite database whose `Node` table names the brushes,
 //! each pointing (`NodeVariantID`) at its settings in `Variant`, and whose `MaterialFile` table
-//! holds the tip images (PNGs, often inside a tar) that the settings name by key.
+//! holds the tip and texture images (PNGs, often inside a tar) that the settings name by key.
 
 use crate::sqlite::{self, Table, Value};
 
@@ -18,6 +18,18 @@ pub struct CspBrush {
     pub angle: f32,
     /// The pictures (PNGs) its tip may be, largest first (one may be empty), none if it is round.
     pub tip_pngs: Vec<Vec<u8>>,
+    /// The paper texture it paints through, if it has one.
+    pub texture: Option<CspTexture>,
+}
+
+/// A sub tool's texture: the pictures it may be (as a tip's), how strongly it shows (0 to 1), its
+/// scale (1 the picture's own size) and whether it is reversed (dark showing, not light).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CspTexture {
+    pub pngs: Vec<Vec<u8>>,
+    pub density: Option<f32>,
+    pub scale: Option<f32>,
+    pub reverse: bool,
 }
 
 /// The most brushes read from one file, PNGs looked at in a material, pictures a tip may be, and
@@ -66,10 +78,21 @@ pub fn read(bytes: &[u8]) -> Option<Vec<CspBrush>> {
 fn brush(name: &str, variant: Option<(&Table, &Vec<Value>)>, materials: Option<&Table>, left: &mut usize) -> CspBrush {
     let number =
         |key: &str| variant.and_then(|(t, r)| t.get(r, key)).and_then(Value::as_real).filter(|v| v.is_finite());
-    let pattern =
-        variant.and_then(|(t, r)| t.get(r, "BrushPatternImageArray")).and_then(Value::as_blob).and_then(pattern_key);
-    let mut tips = pattern.and_then(|key| materials.map(|m| material_pngs(m, &key))).unwrap_or_default();
-    tips.retain(|png| left.checked_sub(png.len()).map(|l| *left = l).is_some());
+    // the pictures a column names (by the key in its list) from the materials
+    let mut pictures = |column: &str, guess: bool| {
+        let key = variant.and_then(|(t, r)| t.get(r, column)).and_then(Value::as_blob).and_then(pattern_key)?;
+        let mut pngs = materials.map(|m| material_pngs(m, &key, guess)).unwrap_or_default();
+        pngs.retain(|png| left.checked_sub(png.len()).map(|l| *left = l).is_some());
+        Some(pngs)
+    };
+    let tips = pictures("BrushPatternImageArray", true).unwrap_or_default();
+    // a texture only as its key names it
+    let texture = pictures("TextureImage", false).filter(|p| !p.is_empty()).map(|pngs| CspTexture {
+        pngs,
+        density: number("TextureDensity").filter(|v| (0.0..=100.0).contains(v)).map(|v| (v / 100.0) as f32),
+        scale: number("TextureScale2").filter(|v| *v > 0.0).map(|v| (v / 100.0) as f32),
+        reverse: number("TextureReverseDensity").is_some_and(|v| v != 0.0),
+    });
     CspBrush {
         name: name.to_owned(),
         hardness: number("BrushHardness").filter(|v| (0.0..=100.0).contains(v)).map(|v| (v / 100.0) as f32),
@@ -77,6 +100,7 @@ fn brush(name: &str, variant: Option<(&Table, &Vec<Value>)>, materials: Option<&
         roundness: number("BrushThickness").filter(|v| (1.0..=100.0).contains(v)).map(|v| (v / 100.0) as f32),
         angle: number("BrushRotation").map_or(0.0, |v| v.to_radians() as f32),
         tip_pngs: tips,
+        texture,
     }
 }
 
@@ -94,12 +118,12 @@ fn pattern_key(blob: &[u8]) -> Option<String> {
     found.into_iter().find(|s| s.contains(":data:") && s.len() >= 8)
 }
 
-/// The PNGs in the material `key` names (a row with it in a text column), else in one that holds a
-/// brush pattern, else in any; the [`MOST_TIPS`] largest, largest first.
-fn material_pngs(table: &Table, key: &str) -> Vec<Vec<u8>> {
+/// The PNGs in the material `key` names (a row with it in a text column), else (a tip's, `guess`)
+/// in one that holds a brush pattern, else in any; the [`MOST_TIPS`] largest, largest first.
+fn material_pngs(table: &Table, key: &str, guess: bool) -> Vec<Vec<u8>> {
     let named: Vec<&Vec<Value>> =
         table.rows.iter().filter(|r| r.iter().any(|v| v.as_text().is_some_and(|t| t.contains(key)))).collect();
-    let rows = if !named.is_empty() {
+    let rows = if !named.is_empty() || !guess {
         named
     } else {
         let patterns: Vec<&Vec<Value>> = table
@@ -168,6 +192,8 @@ mod tests {
         tar.extend(png(4, 4));
         tar.extend(b"more");
         tar.extend(png(64, 32));
+        let mut texture = vec![0u8; 6];
+        texture.extend(utf16("0:data:paper-2"));
         database(&[
             (
                 "Node",
@@ -179,7 +205,7 @@ mod tests {
             ),
             (
                 "Variant",
-                "CREATE TABLE Variant(_PW_ID INTEGER PRIMARY KEY, VariantID INTEGER, BrushHardness REAL, BrushInterval REAL, BrushThickness REAL, BrushRotation REAL, BrushPatternImageArray BLOB)",
+                "CREATE TABLE Variant(_PW_ID INTEGER PRIMARY KEY, VariantID INTEGER, BrushHardness REAL, BrushInterval REAL, BrushThickness REAL, BrushRotation REAL, BrushPatternImageArray BLOB, TextureImage BLOB, TextureDensity REAL, TextureScale2 REAL, TextureReverseDensity INTEGER)",
                 vec![vec![
                     Value::Null,
                     Value::Int(7),
@@ -188,6 +214,10 @@ mod tests {
                     Value::Real(50.0),
                     Value::Real(90.0),
                     Value::Blob(pattern),
+                    Value::Blob(texture),
+                    Value::Real(60.0),
+                    Value::Real(150.0),
+                    Value::Int(1),
                 ]],
             ),
             (
@@ -196,6 +226,7 @@ mod tests {
                 vec![
                     vec![Value::Null, Value::Text("other".into()), Value::Blob(png(500, 500))],
                     vec![Value::Null, Value::Text("x/0:data:tip-1/y".into()), Value::Blob(tar)],
+                    vec![Value::Null, Value::Text("x/0:data:paper-2/y".into()), Value::Blob(png(8, 8))],
                 ],
             ),
         ])
@@ -213,6 +244,30 @@ mod tests {
         // the material its pattern names, the larger of its two pictures first
         let sizes: Vec<&[u8]> = b.tip_pngs.iter().map(|t| &t[16..24]).collect();
         assert_eq!(sizes, [&[0, 0, 0, 64, 0, 0, 0, 32][..], &[0, 0, 0, 4, 0, 0, 0, 4][..]]);
+        // its texture: the material its key names, how strongly, how big, reversed
+        let t = b.texture.as_ref().unwrap();
+        assert_eq!((t.pngs.len(), &t.pngs[0][16..24]), (1, &[0, 0, 0, 8, 0, 0, 0, 8][..]));
+        assert_eq!((t.density, t.scale, t.reverse), (Some(0.6), Some(1.5), true));
+    }
+
+    #[test]
+    fn a_texture_its_key_doesnt_find_is_none() {
+        let db = database(&[
+            (
+                "Node",
+                "CREATE TABLE Node(NodeName TEXT, NodeVariantID INTEGER)",
+                vec![vec![Value::Text("Pen".into()), Value::Int(1)]],
+            ),
+            (
+                "Variant",
+                "CREATE TABLE Variant(VariantID INTEGER, TextureImage BLOB)",
+                vec![vec![Value::Int(1), Value::Blob(utf16("0:data:gone"))]],
+            ),
+            ("MaterialFile", "CREATE TABLE MaterialFile(FileData BLOB)", vec![vec![Value::Blob(png(8, 8))]]),
+        ]);
+        let b = &read(&db).unwrap()[0];
+        // not guessed from what else there is, as a tip is
+        assert_eq!(b.texture, None);
     }
 
     #[test]

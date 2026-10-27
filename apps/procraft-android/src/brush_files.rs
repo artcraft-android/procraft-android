@@ -250,6 +250,20 @@ fn csp_brush(c: &procraft_engine::csp::CspBrush) -> Brush {
         b.spacing = Brush::spacing_within_reach(spacing);
     }
     b.shape.rotation = c.angle;
+    // its texture, the first of its pictures that lets paint through anywhere (one may be blank):
+    // paper the stroke paints through, at the picture's own size times its scale
+    let paper = c.texture.as_ref().and_then(|t| {
+        t.pngs.iter().find_map(|png| {
+            let source = gray_texture(png, t.reverse).filter(|s| s.pixels.iter().any(|&v| v > 0))?;
+            Some((source, decode_png(png)?.0, t))
+        })
+    });
+    if let Some((source, width, t)) = paper {
+        b.grain.image = None;
+        b.grain.source = Some(source);
+        b.grain.depth = t.density.unwrap_or(1.0);
+        b.set_setting("grain_scale", width as f32 * t.scale.unwrap_or(1.0) / procraft_engine::studio::MAX_GRAIN_SCALE);
+    }
     b
 }
 
@@ -782,6 +796,33 @@ mod tests {
             grain_for(&Texture::Stock { name: "Willow-Grain.jpg".into(), inverted: false }, None).0,
             Some(grain::CHARCOAL)
         );
+    }
+
+    #[test]
+    fn a_sub_tools_texture_becomes_its_grain() {
+        let px: Vec<u8> = (0..64 * 64).flat_map(|i| [(i % 64 * 4) as u8, 0, 0, 255]).collect();
+        let paper = crate::project::rgba_png(64, 64, &px);
+        let c = procraft_engine::csp::CspBrush {
+            name: "Pencil".into(),
+            hardness: None,
+            spacing: None,
+            roundness: None,
+            angle: 0.0,
+            tip_pngs: Vec::new(),
+            texture: Some(procraft_engine::csp::CspTexture {
+                pngs: vec![b"not a picture".to_vec(), crate::project::rgba_png(8, 8, &[0; 256]), paper],
+                density: Some(0.6),
+                scale: Some(2.0),
+                reverse: false,
+            }),
+        };
+        let b = csp_brush(&c);
+        // the picture that reads and isn't blank, shown at 60 %, its 64 px tiles twice as big
+        assert!(b.grain.source.is_some() && b.grain.image.is_none());
+        assert_eq!((b.grain.depth, b.grain.scale), (0.6, 128.0));
+        // none: no grain
+        let plain = csp_brush(&procraft_engine::csp::CspBrush { texture: None, ..c });
+        assert!(plain.grain.source.is_none());
     }
 
     #[test]
