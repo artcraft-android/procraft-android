@@ -139,11 +139,8 @@ impl CanvasSession {
         if procraft_engine::gif::frame_count(&bytes) < 2 {
             return None;
         }
-        let fps = {
-            let st = self.shared.lock();
-            st.doc.animation.as_ref().map_or(procraft_engine::animation::Animation::default().fps, |a| a.fps).max(1)
-        };
         let (width, height) = procraft_engine::gif::size(&bytes)?;
+        // each frame's layer and how long it shows, ms
         let mut held: Vec<(LayerId, u32)> = Vec::new();
         let mut full = false;
         procraft_engine::gif::frames(&bytes, |rgba, ms| {
@@ -159,9 +156,7 @@ impl CanvasSession {
                 full = true;
                 return false;
             };
-            // shown for as many of the animation's frames as its time takes
-            let shown = ((f64::from(ms) * f64::from(fps) / 1000.0).round() as u32).max(1);
-            held.push((LayerId(id), shown - 1));
+            held.push((LayerId(id), ms));
             held.len() < MOST_FRAMES
         })?;
         if held.is_empty() {
@@ -171,9 +166,13 @@ impl CanvasSession {
         if !assisted {
             self.set_animation_assist(true);
         }
+        // each shown for as many of the animation's frames as its time takes, at the rate it has
+        // now (turned on from Page Assist, its own)
         if let Some(a) = self.shared.lock().doc.animation.as_mut() {
-            for &(id, n) in &held {
-                a.set_hold(id, n);
+            let fps = f64::from(a.fps.max(1));
+            for &(id, ms) in &held {
+                let shown = ((f64::from(ms) * fps / 1000.0).round() as u32).max(1);
+                a.set_hold(id, shown - 1);
             }
         }
         Some(FramesInserted { added: held.len() as u32, full })
@@ -208,20 +207,16 @@ impl CanvasSession {
             (st.doc.width(), st.doc.height())
         };
         let pixels = placed(image, w, h, fit)?;
-        let id = self
-            .change("new layer", |d| {
-                d.has_room(1).then(|| {
-                    let id = d.add_layer();
-                    d.set_private(id, private);
-                    id.0
-                })
+        // none if there is no room for it (the new layer may take the last)
+        let id = self.change("new layer", |d| {
+            d.has_room(1).then(|| {
+                let id = d.add_layer();
+                d.set_private(id, private);
+                id.0
             })
-            .unwrap_or(0);
+        })?;
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if !st.doc.has_room(1) {
-            return None;
-        }
         if let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
             canvas.upload_layer(gpu, LayerId(id), &pixels).ok()?;
         }
