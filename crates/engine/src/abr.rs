@@ -1,7 +1,8 @@
 //! Reading the brushes in Photoshop brush files (ABR): each sampled tip's grey image (white
 //! paints), with its preset's name, spacing, angle and roundness where the file gives them.
 //! Versions 1 and 2 (the tips one after another; their computed tips left out) and 6 and later (a
-//! section of samples and a descriptor of presets, computed round ones with their hardness too).
+//! section of samples, one of patterns and a descriptor of presets, computed round ones with their
+//! hardness too, and a preset's texture from the patterns).
 
 /// One brush tip from the file.
 #[derive(Clone, Debug, PartialEq)]
@@ -28,6 +29,24 @@ pub struct AbrBrush {
     pub roundness: Option<f32>,
     /// A computed tip's edge, 0 soft to 1 hard.
     pub hardness: Option<f32>,
+    /// The pattern the preset paints through, if it uses one that is in the file.
+    pub texture: Option<AbrTexture>,
+}
+
+/// A preset's texture: a pattern from the file, grey, and how the preset uses it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AbrTexture {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// Grey, `width` x `height`, rows top to bottom.
+    pub pixels: Vec<u8>,
+    /// Its tile's size as a share of the pattern's own, if the preset gives it.
+    pub scale: Option<f32>,
+    /// How strongly it shows, 0 to 1, if the preset gives it.
+    pub depth: Option<f32>,
+    /// Whether dark lets paint through instead of light.
+    pub invert: bool,
 }
 
 /// The largest tip side read, pixels.
@@ -35,6 +54,8 @@ const MOST_SIDE: u32 = 5000;
 /// The most bytes of tip images the brushes may have together (presets sharing one sample each
 /// have a copy).
 const MOST_TIP_BYTES: usize = 256 << 20;
+/// The most bytes of patterns read, and of their copies the presets have together.
+const MOST_PATTERN_BYTES: usize = 256 << 20;
 
 /// The sampled tips in an ABR file, in the file's order; none if it isn't one.
 pub fn read(bytes: &[u8]) -> Option<Vec<AbrTip>> {
@@ -53,6 +74,7 @@ pub fn read_brushes(bytes: &[u8]) -> Option<Vec<AbrBrush>> {
         angle: 0.0,
         roundness: None,
         hardness: None,
+        texture: None,
     };
     match version {
         1 | 2 => Some(read_old(&mut r, version)?.into_iter().map(sampled).collect()),
@@ -99,6 +121,7 @@ fn read_old(r: &mut Reader<'_>, version: u16) -> Option<Vec<AbrTip>> {
 fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
     let minor = r.u16()?;
     let mut samples: Vec<(String, u32, u32, Vec<u8>)> = Vec::new();
+    let mut patterns: Vec<Pattern> = Vec::new();
     let (mut presets, mut others): (Vec<Preset>, Vec<String>) = (Vec::new(), Vec::new());
     while r.remaining() >= 12 {
         if r.take(4)? != b"8BIM" {
@@ -112,6 +135,7 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
         r.take(((4 - len % 4) % 4).min(r.remaining()));
         match key {
             b"samp" => samples = read_samples(data, minor),
+            b"patt" => patterns = read_patterns(data),
             b"desc" => (presets, others) = read_presets(data),
             _ => {}
         }
@@ -120,6 +144,7 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
     // a sample only a dual brush names isn't a brush of its own
     let mut used: Vec<bool> = samples.iter().map(|s| others.contains(&s.0)).collect();
     let mut left = MOST_TIP_BYTES;
+    let mut patterns_left = MOST_PATTERN_BYTES;
     let named = |name: &str, n: usize| {
         if name.trim().is_empty() { format!("Brush {}", n + 1) } else { name.to_owned() }
     };
@@ -141,6 +166,22 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
                 })
             }
         };
+        // its texture, if it uses one the file has (and there is room for its copy)
+        let texture = p
+            .texture
+            .as_ref()
+            .filter(|_| p.use_texture)
+            .and_then(|id| patterns.iter().find(|t| t.id == *id))
+            .filter(|t| patterns_left.checked_sub(t.pixels.len()).map(|l| patterns_left = l).is_some())
+            .map(|t| AbrTexture {
+                name: t.name.clone(),
+                width: t.width,
+                height: t.height,
+                pixels: t.pixels.clone(),
+                scale: p.texture_scale,
+                depth: p.texture_depth,
+                invert: p.texture_invert,
+            });
         out.push(AbrBrush {
             name: named(&p.name, out.len()),
             tip,
@@ -148,6 +189,7 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
             angle: p.angle,
             roundness: p.roundness,
             hardness: p.hardness,
+            texture,
         });
     }
     // samples nothing names, as they are
@@ -155,7 +197,15 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
         if !u {
             let name = named("", out.len());
             let tip = AbrTip { name: name.clone(), spacing: None, width, height, pixels };
-            out.push(AbrBrush { name, tip: Some(tip), spacing: None, angle: 0.0, roundness: None, hardness: None });
+            out.push(AbrBrush {
+                name,
+                tip: Some(tip),
+                spacing: None,
+                angle: 0.0,
+                roundness: None,
+                hardness: None,
+                texture: None,
+            });
         }
     }
     Some(out)
@@ -192,13 +242,25 @@ fn read_sample(body: &[u8], minor: u16) -> Option<(String, u32, u32, Vec<u8>)> {
         return Some((id, span(left, right)?, span(top, bottom)?, pixels));
     }
     b.take(4)?;
-    // an array of channels: its version, length and rectangle, then each channel
+    let (width, height, pixels) = channels(&mut b, 1)?.into_iter().next()?;
+    Some((id, width, height, pixels))
+}
+
+/// The first `most` channels written in an array of them (its version, length and rectangle, then
+/// each channel's rectangle, depth, compression and image), as grey images; none if there are none.
+fn channels(b: &mut Reader<'_>, most: usize) -> Option<Vec<(u32, u32, Vec<u8>)>> {
     b.u32()?;
     b.u32()?;
     b.take(16)?;
-    let channels = b.u32()?;
-    for _ in 0..channels.min(64) {
-        if b.u32()? == 0 {
+    let count = b.u32()?;
+    let mut out = Vec::new();
+    // the colour channels, then a mask's and a sheet's
+    for _ in 0..count.saturating_add(2).min(64) {
+        if out.len() >= most {
+            break;
+        }
+        let Some(written) = b.u32() else { break };
+        if written == 0 {
             continue;
         }
         let len = b.u32()? as usize;
@@ -211,9 +273,66 @@ fn read_sample(body: &[u8], minor: u16) -> Option<(String, u32, u32, Vec<u8>)> {
         let depth = c.u16()?;
         let compression = c.u8()?;
         let pixels = image(&mut c, top, left, bottom, right, depth, compression)?;
-        return Some((id, span(left, right)?, span(top, bottom)?, pixels));
+        out.push((span(left, right)?, span(top, bottom)?, pixels));
     }
-    None
+    (!out.is_empty()).then_some(out)
+}
+
+/// A pattern from the file, grey.
+struct Pattern {
+    id: String,
+    name: String,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+/// The patterns: each its version, colour mode, size, name, id (an indexed one's palette after)
+/// and its channels, made grey: an RGB one's three by how bright each looks, an indexed one's
+/// through its palette. Up to [`MOST_PATTERN_BYTES`] of them.
+fn read_patterns(data: &[u8]) -> Vec<Pattern> {
+    let mut r = Reader::new(data);
+    let mut out = Vec::new();
+    let mut left = MOST_PATTERN_BYTES;
+    while r.remaining() >= 4 {
+        let Some(len) = r.u32() else { break };
+        // patterns are padded to a multiple of four
+        let padded = (len as usize).div_ceil(4) * 4;
+        let Some(body) = r.take(padded.min(r.remaining())) else { break };
+        let Some(p) = read_pattern(body.get(..len as usize).unwrap_or(body)) else { continue };
+        let Some(rest) = left.checked_sub(p.pixels.len()) else { break };
+        left = rest;
+        out.push(p);
+    }
+    out
+}
+
+fn read_pattern(body: &[u8]) -> Option<Pattern> {
+    let mut b = Reader::new(body);
+    b.u32()?;
+    let mode = b.u32()?;
+    b.take(4)?;
+    let name = b.unicode()?;
+    let n = usize::from(b.u8()?);
+    let id = String::from_utf8_lossy(b.take(n)?).into_owned();
+    let palette = if mode == 2 { Some(b.take(768)?) } else { None };
+    let found = channels(&mut b, if mode == 3 { 3 } else { 1 })?;
+    let (width, height, first) = found.first()?;
+    let bright = |r: u8, g: u8, b: u8| ((299 * u32::from(r) + 587 * u32::from(g) + 114 * u32::from(b)) / 1000) as u8;
+    let pixels = match (palette, found.as_slice()) {
+        (_, [(_, _, r), (_, _, g), (_, _, bl)]) if r.len() == g.len() && g.len() == bl.len() => {
+            r.iter().zip(g).zip(bl).map(|((&r, &g), &bl)| bright(r, g, bl)).collect()
+        }
+        (Some(colours), _) => first
+            .iter()
+            .map(|&i| {
+                let c = |k: usize| colours.get(usize::from(i) * 3 + k).copied().unwrap_or(0);
+                bright(c(0), c(1), c(2))
+            })
+            .collect(),
+        _ => first.clone(),
+    };
+    Some(Pattern { id, name, width: *width, height: *height, pixels })
 }
 
 /// A tip's image: raw or packed (each row's length first), 8 or 16 bits; read as 8.
@@ -282,14 +401,21 @@ struct Preset {
     angle: f32,
     roundness: Option<f32>,
     hardness: Option<f32>,
+    /// Whether its texture is on, and the pattern's id, scale, depth and inversion.
+    use_texture: bool,
+    texture: Option<String>,
+    texture_scale: Option<f32>,
+    texture_depth: Option<f32>,
+    texture_invert: bool,
 }
 
 /// The presets in the descriptor, found by their keys in order. A preset's name comes first, then
 /// its own brush: a computed one's diameter, hardness, angle, roundness and spacing, or a sampled
 /// one's the same without hardness and then its sample's id. Brushes after it (a dual brush's)
-/// aren't the preset's: the samples they name come after the presets.
+/// aren't the preset's: the samples they name come after the presets. Its texture comes after its
+/// brushes, so it goes to what was kept of the preset, and to the preset as it is still read.
 fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
-    const KEYS: [&[u8]; 9] = [
+    const KEYS: [&[u8]; 15] = [
         b"brushPreset",
         b"Nm  TEXT",
         b"SpcnUntF#Prc",
@@ -299,11 +425,19 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
         b"HrdnUntF#Prc",
         b"computedBrush",
         b"dualBrush",
+        b"useTexturebool",
+        b"TxtrObjc",
+        b"IdntTEXT",
+        b"textureScaleUntF#Prc",
+        b"textureDepthUntF#Prc",
+        b"InvTbool",
     ];
     let (mut out, mut others) = (Vec::new(), Vec::new());
     // the preset being read, whether its brush is computed, and whether its brush is done
     let (mut p, mut computed, mut done) = (Preset::default(), false, false);
     let mut named = false;
+    // where the preset's own entries begin among those kept, and whether its pattern is being read
+    let (mut first, mut in_texture) = (0, false);
     let mut at = 0;
     let end = |p: &Preset, computed: bool, done: &mut bool, out: &mut Vec<Preset>| {
         if computed && !*done {
@@ -320,6 +454,26 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
             0 => {
                 end(&p, computed, &mut done, &mut out);
                 (p, computed, done, named) = (Preset::default(), false, false, false);
+                (first, in_texture) = (out.len(), false);
+            }
+            // its texture, after its brushes
+            9..=14 => {
+                let texture = match key {
+                    9 => Texture::On(r.u8().is_some_and(|v| v != 0)),
+                    10 => {
+                        in_texture = true;
+                        continue;
+                    }
+                    11 if in_texture => Texture::Pattern(r.unicode()),
+                    12 => Texture::Scale(percent(&mut r).filter(|v| *v > 0.0)),
+                    13 => Texture::Depth(percent(&mut r).map(|v| v.clamp(0.0, 1.0))),
+                    14 => Texture::Invert(r.u8().is_some_and(|v| v != 0)),
+                    _ => continue,
+                };
+                texture.set(&mut p);
+                for kept in out.get_mut(first..).into_iter().flatten() {
+                    texture.set(kept);
+                }
             }
             3 if done => others.extend(r.unicode()),
             _ if done => {}
@@ -344,6 +498,27 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
     }
     end(&p, computed, &mut done, &mut out);
     (out, others)
+}
+
+/// One of a preset's texture settings, as read.
+enum Texture {
+    On(bool),
+    Pattern(Option<String>),
+    Scale(Option<f32>),
+    Depth(Option<f32>),
+    Invert(bool),
+}
+
+impl Texture {
+    fn set(&self, p: &mut Preset) {
+        match self {
+            Texture::On(v) => p.use_texture = *v,
+            Texture::Pattern(id) => p.texture.clone_from(id),
+            Texture::Scale(v) => p.texture_scale = *v,
+            Texture::Depth(v) => p.texture_depth = *v,
+            Texture::Invert(v) => p.texture_invert = *v,
+        }
+    }
 }
 
 /// Where the first of `keys` next appears in `data` from `from`: which one, and just past it.
@@ -474,7 +649,7 @@ mod tests {
         let mut samp = Vec::new();
         put32(&mut samp, sample.len() as u32);
         samp.extend_from_slice(&sample);
-        while samp.len() % 4 != 0 {
+        while !samp.len().is_multiple_of(4) {
             samp.push(0);
         }
         let desc = desc.to_vec();
@@ -521,7 +696,7 @@ mod tests {
             out.extend_from_slice(key);
             put32(&mut out, data.len() as u32);
             out.extend_from_slice(data);
-            while out.len() % 4 != 0 {
+            while !out.len().is_multiple_of(4) {
                 out.push(0);
             }
         }
@@ -530,6 +705,80 @@ mod tests {
         let tip = brushes[0].tip.as_ref().unwrap();
         assert_eq!((brushes[0].name.as_str(), tip.width, tip.height), ("Old Stamp", 3, 2));
         assert_eq!(tip.pixels, [9, 8, 7, 6, 5, 4]);
+    }
+
+    #[test]
+    fn a_preset_paints_through_the_pattern_it_names() {
+        let number = |out: &mut Vec<u8>, key: &[u8], v: f64| {
+            out.extend_from_slice(key);
+            out.extend_from_slice(&v.to_be_bytes());
+        };
+        let preset = |desc: &mut Vec<u8>, name: &str, textured: bool| {
+            desc.extend_from_slice(b"brushPreset");
+            desc.extend_from_slice(b"Nm  TEXT");
+            unicode(desc, name);
+            desc.extend_from_slice(b"BrshObjcsampledBrushsampledDataTEXT");
+            unicode(desc, "tip-one");
+            // after the brush: the texture, on or off
+            desc.extend_from_slice(b"useTexturebool");
+            desc.push(u8::from(textured));
+            desc.extend_from_slice(b"TxtrObjcPtrnNm  TEXT");
+            unicode(desc, "Paper");
+            desc.extend_from_slice(b"IdntTEXT");
+            unicode(desc, "pat-1");
+            number(desc, b"textureScaleUntF#Prc", 50.0);
+            number(desc, b"textureDepthUntF#Prc", 40.0);
+            desc.extend_from_slice(b"InvTbool\x01");
+        };
+        let mut desc = Vec::new();
+        preset(&mut desc, "Grainy", true);
+        preset(&mut desc, "Smooth", false);
+        // a grey 2 x 2 pattern, its channels after its name and id
+        let mut pattern = Vec::new();
+        put32(&mut pattern, 1);
+        put32(&mut pattern, 1);
+        put16(&mut pattern, 2);
+        put16(&mut pattern, 2);
+        unicode(&mut pattern, "Paper");
+        pattern.push(5);
+        pattern.extend_from_slice(b"pat-1");
+        let mut channel = Vec::new();
+        put32(&mut channel, 8);
+        for v in [0u32, 0, 2, 2] {
+            put32(&mut channel, v);
+        }
+        put16(&mut channel, 8);
+        channel.push(0);
+        channel.extend_from_slice(&[10, 20, 30, 40]);
+        put32(&mut pattern, 3);
+        put32(&mut pattern, 0);
+        for v in [0u32, 0, 2, 2] {
+            put32(&mut pattern, v);
+        }
+        put32(&mut pattern, 24);
+        put32(&mut pattern, 1);
+        put32(&mut pattern, channel.len() as u32);
+        pattern.extend_from_slice(&channel);
+        let mut patt = Vec::new();
+        put32(&mut patt, pattern.len() as u32);
+        patt.extend_from_slice(&pattern);
+        let mut file = with_presets(&desc);
+        while !file.len().is_multiple_of(4) {
+            file.push(0);
+        }
+        file.extend_from_slice(b"8BIMpatt");
+        put32(&mut file, patt.len() as u32);
+        file.extend_from_slice(&patt);
+        let brushes = read_brushes(&file).unwrap();
+        assert_eq!(brushes.len(), 2);
+        let t = brushes[0].texture.as_ref().unwrap();
+        assert_eq!((t.name.as_str(), t.width, t.height, t.pixels.as_slice()), ("Paper", 2, 2, &[10, 20, 30, 40][..]));
+        assert_eq!((t.scale, t.depth, t.invert), (Some(0.5), Some(0.4), true));
+        // the other's texture is off
+        assert_eq!(brushes[1].texture, None);
+        crate::damaged::survives("ABR with a pattern", &file, |b| {
+            let _ = read_brushes(b);
+        });
     }
 
     #[test]

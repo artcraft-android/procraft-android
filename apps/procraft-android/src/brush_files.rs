@@ -277,7 +277,7 @@ fn paper(b: &mut Brush, pngs: &[Vec<u8>], inverted: bool, depth: f32, scale: f32
 }
 
 /// A brush of a Photoshop preset: its sampled tip, or round with its hardness; its roundness,
-/// spacing and angle.
+/// spacing and angle; its texture as its grain.
 fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
     let mut b = match &a.tip {
         Some(t) => tip_brush(t),
@@ -296,6 +296,10 @@ fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
         b.spacing = Brush::spacing_within_reach(spacing);
     }
     b.shape.rotation = a.angle;
+    if let Some(t) = &a.texture {
+        let png = sized_gray_png(t.width, t.height, &t.pixels);
+        paper(&mut b, &[png], t.invert, t.depth.unwrap_or(1.0), t.scale.unwrap_or(1.0));
+    }
     b
 }
 
@@ -773,8 +777,13 @@ pub(crate) fn material_pixels(m: &MaterialSource) -> Option<Vec<u8>> {
 /// A square grey PNG of `pixels`.
 fn gray_png(pixels: &[u8]) -> Vec<u8> {
     let n = TEXTURE_SIZE as u32;
+    sized_gray_png(n, n, pixels)
+}
+
+/// A grey PNG of `pixels`, `width` x `height`.
+fn sized_gray_png(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
-    let mut encoder = png::Encoder::new(&mut out, n, n);
+    let mut encoder = png::Encoder::new(&mut out, width, height);
     encoder.set_color(png::ColorType::Grayscale);
     encoder.set_depth(png::BitDepth::Eight);
     if let Ok(mut writer) = encoder.write_header() {
