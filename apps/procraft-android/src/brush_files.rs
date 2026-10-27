@@ -209,7 +209,10 @@ fn fitted(t: &procraft_engine::abr::AbrTip) -> Vec<u8> {
 /// The brushes in another app's file, with the set's name (a bundle's own, else `name`).
 fn other_brushes(bytes: &[u8], name: String) -> Option<(String, Vec<Brush>)> {
     use procraft_engine::krita;
-    if let Some(tips) = procraft_engine::abr::read(bytes).or_else(|| procraft_engine::gbr::read(bytes)) {
+    if let Some(brushes) = procraft_engine::abr::read_brushes(bytes) {
+        return Some((name, brushes.iter().map(abr_brush).collect()));
+    }
+    if let Some(tips) = procraft_engine::gbr::read(bytes) {
         return Some((name, tips.iter().map(tip_brush).collect()));
     }
     if let Some(g) = procraft_engine::gbr::read_generated(bytes) {
@@ -271,6 +274,29 @@ fn paper(b: &mut Brush, pngs: &[Vec<u8>], inverted: bool, depth: f32, scale: f32
         b.grain.depth = depth.clamp(0.0, 1.0);
         b.set_setting("grain_scale", width as f32 * scale / procraft_engine::studio::MAX_GRAIN_SCALE);
     }
+}
+
+/// A brush of a Photoshop preset: its sampled tip, or round with its hardness; its roundness,
+/// spacing and angle.
+fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
+    let mut b = match &a.tip {
+        Some(t) => tip_brush(t),
+        None => {
+            let mut b = Brush { name: a.name.clone(), ..Brush::round_pen() };
+            if let Some(h) = a.hardness {
+                b.hardness = h;
+            }
+            b
+        }
+    };
+    if let Some(r) = a.roundness {
+        b.shape.roundness = r.clamp(0.01, 1.0);
+    }
+    if let Some(spacing) = a.spacing {
+        b.spacing = Brush::spacing_within_reach(spacing);
+    }
+    b.shape.rotation = a.angle;
+    b
 }
 
 /// A brush of a GIMP generated brush: round with its hardness and how round it is, or its square

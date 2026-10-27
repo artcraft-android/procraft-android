@@ -1,7 +1,7 @@
-//! Reading the brush tips in Photoshop brush files (ABR): each sampled tip's grey image (white
-//! paints), with its preset's name and spacing where the file gives them. Versions 1 and 2 (the
-//! tips one after another) and 6 and later (a section of samples and a descriptor naming them) are
-//! read; computed (round) tips have no image and are left out.
+//! Reading the brushes in Photoshop brush files (ABR): each sampled tip's grey image (white
+//! paints), with its preset's name, spacing, angle and roundness where the file gives them.
+//! Versions 1 and 2 (the tips one after another; their computed tips left out) and 6 and later (a
+//! section of samples and a descriptor of presets, computed round ones with their hardness too).
 
 /// One brush tip from the file.
 #[derive(Clone, Debug, PartialEq)]
@@ -15,15 +15,47 @@ pub struct AbrTip {
     pub pixels: Vec<u8>,
 }
 
+/// One of the file's brushes: a sampled tip, or (none) a computed round one, with its preset's
+/// name, spacing, angle and roundness where the file gives them, and a computed one's hardness.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AbrBrush {
+    pub name: String,
+    pub tip: Option<AbrTip>,
+    pub spacing: Option<f32>,
+    /// Radians.
+    pub angle: f32,
+    /// How round the tip is, 1 a circle.
+    pub roundness: Option<f32>,
+    /// A computed tip's edge, 0 soft to 1 hard.
+    pub hardness: Option<f32>,
+}
+
 /// The largest tip side read, pixels.
 const MOST_SIDE: u32 = 5000;
+/// The most bytes of tip images the brushes may have together (presets sharing one sample each
+/// have a copy).
+const MOST_TIP_BYTES: usize = 256 << 20;
 
 /// The sampled tips in an ABR file, in the file's order; none if it isn't one.
 pub fn read(bytes: &[u8]) -> Option<Vec<AbrTip>> {
+    Some(read_brushes(bytes)?.into_iter().filter_map(|b| b.tip).collect())
+}
+
+/// The brushes in an ABR file: its presets in order (from version 6; samples nothing names after
+/// them), or its sampled tips (versions 1 and 2); none if it isn't one.
+pub fn read_brushes(bytes: &[u8]) -> Option<Vec<AbrBrush>> {
     let mut r = Reader::new(bytes);
     let version = r.u16()?;
+    let sampled = |t: AbrTip| AbrBrush {
+        name: t.name.clone(),
+        spacing: t.spacing,
+        tip: Some(t),
+        angle: 0.0,
+        roundness: None,
+        hardness: None,
+    };
     match version {
-        1 | 2 => read_old(&mut r, version),
+        1 | 2 => Some(read_old(&mut r, version)?.into_iter().map(sampled).collect()),
         6 | 7 | 10 => read_sections(&mut r),
         _ => None,
     }
@@ -63,12 +95,11 @@ fn read_old(r: &mut Reader<'_>, version: u16) -> Option<Vec<AbrTip>> {
     Some(tips)
 }
 
-/// Version 6 on: "8BIM" sections; "samp" holds the tips by id, "desc" their presets' names and
-/// spacing.
-fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrTip>> {
+/// Version 6 on: "8BIM" sections; "samp" holds the tips by id, "desc" the presets.
+fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
     r.u16()?;
     let mut samples: Vec<(String, u32, u32, Vec<u8>)> = Vec::new();
-    let mut presets: Vec<Preset> = Vec::new();
+    let (mut presets, mut others): (Vec<Preset>, Vec<String>) = (Vec::new(), Vec::new());
     while r.remaining() >= 12 {
         if r.take(4)? != b"8BIM" {
             break;
@@ -79,25 +110,53 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrTip>> {
         let Some(data) = r.take(len) else { break };
         match key {
             b"samp" => samples = read_samples(data),
-            b"desc" => presets = read_presets(data),
+            b"desc" => (presets, others) = read_presets(data),
             _ => {}
         }
     }
-    let mut tips = Vec::new();
-    for (n, (id, width, height, pixels)) in samples.into_iter().enumerate() {
-        let preset = presets.iter().find(|p| p.sample == id);
-        tips.push(AbrTip {
-            name: preset
-                .map(|p| p.name.clone())
-                .filter(|n| !n.trim().is_empty())
-                .unwrap_or_else(|| format!("Brush {}", n + 1)),
-            spacing: preset.and_then(|p| p.spacing),
-            width,
-            height,
-            pixels,
+    let mut out: Vec<AbrBrush> = Vec::new();
+    // a sample only a dual brush names isn't a brush of its own
+    let mut used: Vec<bool> = samples.iter().map(|s| others.contains(&s.0)).collect();
+    let mut left = MOST_TIP_BYTES;
+    let named = |name: &str, n: usize| {
+        if name.trim().is_empty() { format!("Brush {}", n + 1) } else { name.to_owned() }
+    };
+    for p in &presets {
+        // a sampled preset's tip, if its sample is there (and there is room for its copy)
+        let tip = match &p.sample {
+            None => None,
+            Some(id) => {
+                let Some(k) = samples.iter().position(|s| s.0 == *id) else { continue };
+                let (Some((_, width, height, pixels)), Some(u)) = (samples.get(k), used.get_mut(k)) else { continue };
+                let Some(rest) = left.checked_sub(pixels.len()) else { continue };
+                (left, *u) = (rest, true);
+                Some(AbrTip {
+                    name: named(&p.name, out.len()),
+                    spacing: p.spacing,
+                    width: *width,
+                    height: *height,
+                    pixels: pixels.clone(),
+                })
+            }
+        };
+        out.push(AbrBrush {
+            name: named(&p.name, out.len()),
+            tip,
+            spacing: p.spacing,
+            angle: p.angle,
+            roundness: p.roundness,
+            hardness: p.hardness,
         });
     }
-    Some(tips)
+    // samples nothing names, as they are
+    for ((_, width, height, pixels), u) in samples.into_iter().zip(used) {
+        if !u {
+            let name = named("", out.len());
+            let tip = AbrTip { name: name.clone(), spacing: None, width, height, pixels };
+            out.push(AbrBrush { name, tip: Some(tip), spacing: None, angle: 0.0, roundness: None, hardness: None });
+        }
+    }
+    Some(out)
 }
 
 /// The samples: each its id and its image (the one channel written of its array).
@@ -201,44 +260,78 @@ fn unpack(packed: &[u8], row: usize, out: &mut Vec<u8>) {
     out.resize(end, 0);
 }
 
-/// A preset as the descriptor names it: its name, its sample's id, its spacing.
+/// A preset as the descriptor has it: its name, its sample's id (none for a computed tip), and its
+/// tip's spacing, angle, roundness and (computed) hardness.
+#[derive(Clone, Debug, Default)]
 struct Preset {
     name: String,
-    sample: String,
+    sample: Option<String>,
     spacing: Option<f32>,
+    angle: f32,
+    roundness: Option<f32>,
+    hardness: Option<f32>,
 }
 
-/// The presets in the descriptor, found by their keys in order: a preset's name comes first,
-/// then (for a sampled tip) its spacing and its sample's id.
-fn read_presets(data: &[u8]) -> Vec<Preset> {
-    let mut out = Vec::new();
-    let mut name: Option<String> = None;
-    let mut spacing = None;
+/// The presets in the descriptor, found by their keys in order. A preset's name comes first, then
+/// its own brush: a computed one's diameter, hardness, angle, roundness and spacing, or a sampled
+/// one's the same without hardness and then its sample's id. Brushes after it (a dual brush's)
+/// aren't the preset's: the samples they name come after the presets.
+fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
+    const KEYS: [&[u8]; 9] = [
+        b"brushPreset",
+        b"Nm  TEXT",
+        b"SpcnUntF#Prc",
+        b"sampledDataTEXT",
+        b"AnglUntF#Ang",
+        b"RndnUntF#Prc",
+        b"HrdnUntF#Prc",
+        b"computedBrush",
+        b"dualBrush",
+    ];
+    let (mut out, mut others) = (Vec::new(), Vec::new());
+    // the preset being read, whether its brush is computed, and whether its brush is done
+    let (mut p, mut computed, mut done) = (Preset::default(), false, false);
+    let mut named = false;
     let mut at = 0;
-    while let Some(i) = find(data, at, &[b"brushPreset", b"Nm  TEXT", b"SpcnUntF#Prc", b"sampledDataTEXT"]) {
-        let (key, from) = i;
+    let end = |p: &Preset, computed: bool, done: &mut bool, out: &mut Vec<Preset>| {
+        if computed && !*done {
+            out.push(p.clone());
+        }
+        *done = true;
+    };
+    while let Some((key, from)) = find(data, at, &KEYS) {
         at = from;
         let mut r = Reader::new(data.get(from..).unwrap_or_default());
+        let percent = |r: &mut Reader<'_>| r.f64().map(|v| (v / 100.0) as f32).filter(|v| v.is_finite());
         match key {
             // a new preset: its name is the next one
             0 => {
-                name = None;
-                spacing = None;
+                end(&p, computed, &mut done, &mut out);
+                (p, computed, done, named) = (Preset::default(), false, false, false);
             }
-            1 => {
-                if name.is_none() {
-                    name = r.unicode();
-                }
+            3 if done => others.extend(r.unicode()),
+            _ if done => {}
+            1 if !named => {
+                p.name = r.unicode().unwrap_or_default();
+                named = true;
             }
-            2 => spacing = r.f64().map(|p| (p / 100.0) as f32).filter(|s| s.is_finite() && *s > 0.0),
-            _ => {
+            2 => p.spacing = percent(&mut r).filter(|s| *s > 0.0),
+            3 => {
                 if let Some(sample) = r.unicode() {
-                    out.push(Preset { name: name.clone().unwrap_or_default(), sample, spacing });
+                    out.push(Preset { sample: Some(sample), ..p.clone() });
                 }
+                done = true;
             }
+            4 => p.angle = r.f64().filter(|v| v.is_finite()).map_or(0.0, |v| v.to_radians() as f32),
+            5 => p.roundness = percent(&mut r).filter(|v| *v > 0.0 && *v <= 1.0),
+            6 => p.hardness = percent(&mut r).map(|v| v.clamp(0.0, 1.0)),
+            7 => computed = true,
+            8 => end(&p, computed, &mut done, &mut out),
+            _ => {}
         }
     }
-    out
+    end(&p, computed, &mut done, &mut out);
+    (out, others)
 }
 
 /// Where the first of `keys` next appears in `data` from `from`: which one, and just past it.
@@ -330,6 +423,20 @@ mod tests {
 
     /// A version 6 file with one 3 x 2 tip (raw) named by its preset.
     fn version6() -> Vec<u8> {
+        let mut desc = b"brushPreset".to_vec();
+        desc.extend_from_slice(b"Nm  TEXT");
+        unicode(&mut desc, "Chalky");
+        desc.extend_from_slice(b"Nm  TEXT");
+        unicode(&mut desc, "Sampled Brush 1");
+        desc.extend_from_slice(b"SpcnUntF#Prc");
+        desc.extend_from_slice(&40.0f64.to_be_bytes());
+        desc.extend_from_slice(b"sampledDataTEXT");
+        unicode(&mut desc, "tip-one");
+        with_presets(&desc)
+    }
+
+    /// A version 6 file of the 3 x 2 tip "tip-one" and the descriptor `desc`.
+    fn with_presets(desc: &[u8]) -> Vec<u8> {
         let id = "tip-one";
         let mut channel = Vec::new();
         put32(&mut channel, 8);
@@ -358,15 +465,7 @@ mod tests {
         while samp.len() % 4 != 0 {
             samp.push(0);
         }
-        let mut desc = b"brushPreset".to_vec();
-        desc.extend_from_slice(b"Nm  TEXT");
-        unicode(&mut desc, "Chalky");
-        desc.extend_from_slice(b"Nm  TEXT");
-        unicode(&mut desc, "Sampled Brush 1");
-        desc.extend_from_slice(b"SpcnUntF#Prc");
-        desc.extend_from_slice(&40.0f64.to_be_bytes());
-        desc.extend_from_slice(b"sampledDataTEXT");
-        unicode(&mut desc, id);
+        let desc = desc.to_vec();
         let mut out = Vec::new();
         put16(&mut out, 6);
         put16(&mut out, 2);
@@ -388,6 +487,52 @@ mod tests {
         assert_eq!(t.pixels, [0, 128, 255, 10, 20, 30]);
         assert_eq!(t.name, "Chalky");
         assert_eq!(t.spacing, Some(0.4));
+    }
+
+    #[test]
+    fn computed_presets_come_round_and_a_dual_brush_is_not_one_of_them() {
+        let number = |out: &mut Vec<u8>, key: &[u8], v: f64| {
+            out.extend_from_slice(key);
+            out.extend_from_slice(&v.to_be_bytes());
+        };
+        let mut desc = Vec::new();
+        // a computed round preset, whose dual brush is the sample (not a brush of its own)
+        desc.extend_from_slice(b"brushPreset");
+        desc.extend_from_slice(b"Nm  TEXT");
+        unicode(&mut desc, "Hard Round");
+        desc.extend_from_slice(b"BrshObjccomputedBrush");
+        number(&mut desc, b"HrdnUntF#Prc", 50.0);
+        number(&mut desc, b"AnglUntF#Ang", 30.0);
+        number(&mut desc, b"RndnUntF#Prc", 40.0);
+        number(&mut desc, b"SpcnUntF#Prc", 25.0);
+        desc.extend_from_slice(b"dualBrushObjcdualBrushsampledBrush");
+        number(&mut desc, b"AnglUntF#Ang", 5.0);
+        desc.extend_from_slice(b"sampledDataTEXT");
+        unicode(&mut desc, "tip-one");
+        // the sample only its dual brush names isn't a brush of its own
+        let alone = read_brushes(&with_presets(&desc)).unwrap();
+        assert_eq!(alone.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Hard Round"]);
+        // a sampled preset turned a quarter
+        desc.extend_from_slice(b"brushPreset");
+        desc.extend_from_slice(b"Nm  TEXT");
+        unicode(&mut desc, "Leaf");
+        desc.extend_from_slice(b"BrshObjcsampledBrush");
+        number(&mut desc, b"AnglUntF#Ang", 90.0);
+        number(&mut desc, b"RndnUntF#Prc", 100.0);
+        desc.extend_from_slice(b"sampledDataTEXT");
+        unicode(&mut desc, "tip-one");
+        let brushes = read_brushes(&with_presets(&desc)).unwrap();
+        let names: Vec<&str> = brushes.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["Hard Round", "Leaf"]);
+        let round = &brushes[0];
+        assert!(round.tip.is_none());
+        assert_eq!((round.hardness, round.roundness, round.spacing), (Some(0.5), Some(0.4), Some(0.25)));
+        assert!((round.angle - 30f32.to_radians()).abs() < 1e-6);
+        let leaf = &brushes[1];
+        assert_eq!((leaf.tip.as_ref().map(|t| t.width), leaf.roundness, leaf.hardness), (Some(3), Some(1.0), None));
+        assert!((leaf.angle - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        // the tips alone: the sampled one
+        assert_eq!(read(&with_presets(&desc)).unwrap().len(), 1);
     }
 
     #[test]
