@@ -31,6 +31,23 @@ pub struct AbrBrush {
     pub hardness: Option<f32>,
     /// The pattern the preset paints through, if it uses one that is in the file.
     pub texture: Option<AbrTexture>,
+    /// What the pen's pressure changes.
+    pub dynamics: AbrDynamics,
+}
+
+/// What a preset's shape and paint dynamics have the pen's pressure change.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AbrDynamics {
+    /// Whether its shape dynamics are on, and the least share of the size pressure leaves.
+    pub tip: bool,
+    pub min_diameter: f32,
+    /// Whether pressure changes the size (with the shape dynamics on).
+    pub size_by_pressure: bool,
+    /// Whether its paint (transfer) dynamics are on, and whether pressure changes the opacity and
+    /// the flow.
+    pub paint: bool,
+    pub opacity_by_pressure: bool,
+    pub flow_by_pressure: bool,
 }
 
 /// A preset's texture: a pattern from the file, grey, and how the preset uses it.
@@ -75,6 +92,7 @@ pub fn read_brushes(bytes: &[u8]) -> Option<Vec<AbrBrush>> {
         roundness: None,
         hardness: None,
         texture: None,
+        dynamics: AbrDynamics::default(),
     };
     match version {
         1 | 2 => Some(read_old(&mut r, version)?.into_iter().map(sampled).collect()),
@@ -190,6 +208,7 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
             roundness: p.roundness,
             hardness: p.hardness,
             texture,
+            dynamics: p.dynamics,
         });
     }
     // samples nothing names, as they are
@@ -205,6 +224,7 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
                 roundness: None,
                 hardness: None,
                 texture: None,
+                dynamics: AbrDynamics::default(),
             });
         }
     }
@@ -407,6 +427,7 @@ struct Preset {
     texture_scale: Option<f32>,
     texture_depth: Option<f32>,
     texture_invert: bool,
+    dynamics: AbrDynamics,
 }
 
 /// The presets in the descriptor, found by their keys in order. A preset's name comes first, then
@@ -415,7 +436,7 @@ struct Preset {
 /// aren't the preset's: the samples they name come after the presets. Its texture comes after its
 /// brushes, so it goes to what was kept of the preset, and to the preset as it is still read.
 fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
-    const KEYS: [&[u8]; 15] = [
+    const KEYS: [&[u8]; 22] = [
         b"brushPreset",
         b"Nm  TEXT",
         b"SpcnUntF#Prc",
@@ -431,13 +452,21 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
         b"textureScaleUntF#Prc",
         b"textureDepthUntF#Prc",
         b"InvTbool",
+        b"useTipDynamicsbool",
+        b"minimumDiameterUntF#Prc",
+        b"szVrObjc",
+        b"usePaintDynamicsbool",
+        b"opVrObjc",
+        b"prVrObjc",
+        b"bVTylong",
     ];
     let (mut out, mut others) = (Vec::new(), Vec::new());
     // the preset being read, whether its brush is computed, and whether its brush is done
     let (mut p, mut computed, mut done) = (Preset::default(), false, false);
     let mut named = false;
-    // where the preset's own entries begin among those kept, and whether its pattern is being read
-    let (mut first, mut in_texture) = (0, false);
+    // where the preset's own entries begin among those kept, whether its pattern is being read,
+    // and which of its dynamics' control is next
+    let (mut first, mut in_texture, mut controlled) = (0, false, None);
     let mut at = 0;
     let end = |p: &Preset, computed: bool, done: &mut bool, out: &mut Vec<Preset>| {
         if computed && !*done {
@@ -454,25 +483,38 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
             0 => {
                 end(&p, computed, &mut done, &mut out);
                 (p, computed, done, named) = (Preset::default(), false, false, false);
-                (first, in_texture) = (out.len(), false);
+                (first, in_texture, controlled) = (out.len(), false, None);
             }
-            // its texture, after its brushes
-            9..=14 => {
-                let texture = match key {
-                    9 => Texture::On(r.u8().is_some_and(|v| v != 0)),
+            // its texture and dynamics, after its brushes
+            9..=21 => {
+                let switch = |r: &mut Reader<'_>| r.u8().is_some_and(|v| v != 0);
+                let later = match key {
+                    9 => Later::TextureOn(switch(&mut r)),
                     10 => {
                         in_texture = true;
                         continue;
                     }
-                    11 if in_texture => Texture::Pattern(r.unicode()),
-                    12 => Texture::Scale(percent(&mut r).filter(|v| *v > 0.0)),
-                    13 => Texture::Depth(percent(&mut r).map(|v| v.clamp(0.0, 1.0))),
-                    14 => Texture::Invert(r.u8().is_some_and(|v| v != 0)),
+                    11 if in_texture => Later::Pattern(r.unicode()),
+                    12 => Later::Scale(percent(&mut r).filter(|v| *v > 0.0)),
+                    13 => Later::Depth(percent(&mut r).map(|v| v.clamp(0.0, 1.0))),
+                    14 => Later::Invert(switch(&mut r)),
+                    15 => Later::TipDynamics(switch(&mut r)),
+                    16 => Later::MinDiameter(percent(&mut r).map_or(0.0, |v| v.clamp(0.0, 1.0))),
+                    17 | 19 | 20 => {
+                        controlled = Some(key);
+                        continue;
+                    }
+                    18 => Later::PaintDynamics(switch(&mut r)),
+                    // a control of 2 is the pen's pressure
+                    21 => match controlled.take() {
+                        Some(of) => Later::ByPressure(of, r.i32() == Some(2)),
+                        None => continue,
+                    },
                     _ => continue,
                 };
-                texture.set(&mut p);
+                later.set(&mut p);
                 for kept in out.get_mut(first..).into_iter().flatten() {
-                    texture.set(kept);
+                    later.set(kept);
                 }
             }
             3 if done => others.extend(r.unicode()),
@@ -500,23 +542,35 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
     (out, others)
 }
 
-/// One of a preset's texture settings, as read.
-enum Texture {
-    On(bool),
+/// One of a preset's settings that come after its brushes (its texture and dynamics), as read.
+enum Later {
+    TextureOn(bool),
     Pattern(Option<String>),
     Scale(Option<f32>),
     Depth(Option<f32>),
     Invert(bool),
+    TipDynamics(bool),
+    MinDiameter(f32),
+    PaintDynamics(bool),
+    /// Whether the pen's pressure controls the size (key 17), opacity (19) or flow (20).
+    ByPressure(usize, bool),
 }
 
-impl Texture {
+impl Later {
     fn set(&self, p: &mut Preset) {
+        let d = &mut p.dynamics;
         match self {
-            Texture::On(v) => p.use_texture = *v,
-            Texture::Pattern(id) => p.texture.clone_from(id),
-            Texture::Scale(v) => p.texture_scale = *v,
-            Texture::Depth(v) => p.texture_depth = *v,
-            Texture::Invert(v) => p.texture_invert = *v,
+            Later::TextureOn(v) => p.use_texture = *v,
+            Later::Pattern(id) => p.texture.clone_from(id),
+            Later::Scale(v) => p.texture_scale = *v,
+            Later::Depth(v) => p.texture_depth = *v,
+            Later::Invert(v) => p.texture_invert = *v,
+            Later::TipDynamics(v) => d.tip = *v,
+            Later::MinDiameter(v) => d.min_diameter = *v,
+            Later::PaintDynamics(v) => d.paint = *v,
+            Later::ByPressure(17, v) => d.size_by_pressure = *v,
+            Later::ByPressure(19, v) => d.opacity_by_pressure = *v,
+            Later::ByPressure(_, v) => d.flow_by_pressure = *v,
         }
     }
 }
@@ -705,6 +759,41 @@ mod tests {
         let tip = brushes[0].tip.as_ref().unwrap();
         assert_eq!((brushes[0].name.as_str(), tip.width, tip.height), ("Old Stamp", 3, 2));
         assert_eq!(tip.pixels, [9, 8, 7, 6, 5, 4]);
+    }
+
+    #[test]
+    fn a_presets_dynamics_say_what_pressure_changes() {
+        let mut desc = b"brushPreset".to_vec();
+        desc.extend_from_slice(b"Nm  TEXT");
+        unicode(&mut desc, "Soft");
+        desc.extend_from_slice(b"BrshObjcsampledBrushsampledDataTEXT");
+        unicode(&mut desc, "tip-one");
+        // after the brush: shape dynamics with size by pressure (control 2) down to 40%
+        desc.extend_from_slice(b"useTipDynamicsbool\x01");
+        desc.extend_from_slice(b"minimumDiameterUntF#Prc");
+        desc.extend_from_slice(&40.0f64.to_be_bytes());
+        desc.extend_from_slice(b"szVrObjcbVTylong");
+        put32(&mut desc, 2);
+        // an angle's control between isn't the size's
+        desc.extend_from_slice(b"angleDynamicsObjcbVTylong");
+        put32(&mut desc, 2);
+        // paint dynamics: opacity by pressure, flow by nothing
+        desc.extend_from_slice(b"usePaintDynamicsbool\x01prVrObjcbVTylong");
+        put32(&mut desc, 0);
+        desc.extend_from_slice(b"opVrObjcbVTylong");
+        put32(&mut desc, 2);
+        let d = read_brushes(&with_presets(&desc)).unwrap()[0].dynamics;
+        assert_eq!(
+            d,
+            AbrDynamics {
+                tip: true,
+                min_diameter: 0.4,
+                size_by_pressure: true,
+                paint: true,
+                opacity_by_pressure: true,
+                flow_by_pressure: false
+            }
+        );
     }
 
     #[test]

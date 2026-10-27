@@ -295,11 +295,32 @@ fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
     if let Some(spacing) = a.spacing {
         b.spacing = Brush::spacing_within_reach(spacing);
     }
-    b.shape.rotation = a.angle;
+    // Photoshop turns the other way (its 129 degrees are -129 here)
+    b.shape.rotation = -a.angle;
     if let Some(t) = &a.texture {
         let png = sized_gray_png(t.width, t.height, &t.pixels);
         paper(&mut b, &[png], t.invert, t.depth.unwrap_or(1.0), t.scale.unwrap_or(1.0));
     }
+    // as a preset comes in elsewhere: no taper, no StreamLine, glazed uniformly at full flow, down
+    // to the least size; the pen's pressure on the size (half of what the shape dynamics let go
+    // of), the opacity and the flow only as the preset's dynamics have them
+    for (key, value) in [
+        ("pen_taper_size", 0.0),
+        ("pen_taper_opacity", 0.0),
+        ("touch_taper_size", 0.0),
+        ("touch_taper_opacity", 0.0),
+        ("streamline", 0.0),
+        ("rendering_mode", 1.0),
+        ("flow", 1.0),
+        ("min_size", 0.01),
+    ] {
+        b.set_setting(key, value);
+    }
+    let d = a.dynamics;
+    b.set_setting("pressure_size", if d.tip && d.size_by_pressure { (1.0 - d.min_diameter) / 2.0 } else { 0.0 });
+    // the stylus page's opacity is kept as "pressure_flow", its flow as "pressure_opacity"
+    b.set_setting("pressure_flow", if d.paint && d.opacity_by_pressure { 1.0 } else { 0.0 });
+    b.set_setting("pressure_opacity", if d.paint && d.flow_by_pressure { 1.0 } else { 0.0 });
     b
 }
 
