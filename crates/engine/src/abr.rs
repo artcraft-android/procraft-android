@@ -4,7 +4,7 @@
 //! read; computed (round) tips have no image and are left out.
 
 /// One brush tip from the file.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AbrTip {
     pub name: String,
     /// Space between stamps, as a share of the tip's size, if the file gives it.

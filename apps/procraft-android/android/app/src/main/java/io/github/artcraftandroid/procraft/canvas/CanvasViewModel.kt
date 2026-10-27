@@ -1397,9 +1397,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             message = "This palette can't be read."
         } else if (name != null && isModelName(name)) {
             newFromModel(uri, name)
-        } else if (name != null && isTipFile(name)) {
+        } else if (name != null && isOtherBrushFile(name)) {
             val bytes = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }
-            if (bytes == null || !addAbr(bytes, name)) message = "This file has no brushes in it."
+            if (bytes == null || !addOtherBrushes(bytes, name)) message = "This file has no brushes in it."
         } else if (head != null && String(head, Charsets.ISO_8859_1) == "8BPS") {
             importPsd(uri, name)
         } else if (head != null && String(head, Charsets.ISO_8859_1) == "%PDF") {
@@ -3191,27 +3191,27 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 runCatching { getApplication<Application>().contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
             } ?: return@launch
             val name = withContext(Dispatchers.IO) { fileName(uri) }
-            val added = if (name != null && isTipFile(name)) addAbr(bytes, name) else addBrushes(bytes)
+            val added = if (name != null && isOtherBrushFile(name)) addOtherBrushes(bytes, name) else addBrushes(bytes)
             if (!added) message = "This file has no brushes in it."
         }
     }
 
     /**
-     * A Photoshop brush file's tips [bytes] as a set of brushes named after the file [name] (shown),
+     * Another app's brushes [bytes] as a set of brushes named after the file [name] (shown),
      * or, with no canvas open, kept until one opens; false if the file has none.
      */
-    private suspend fun addAbr(bytes: ByteArray, name: String): Boolean {
+    private suspend fun addOtherBrushes(bytes: ByteArray, name: String): Boolean {
         val setName = name.substringBeforeLast('.').trim()
         val s = session
         if (s == null) {
             withContext(Dispatchers.IO) {
                 pendingBrushDir.mkdirs()
-                File(pendingBrushDir, "${System.nanoTime()}-${setName.replace(Regex("[^A-Za-z0-9 _-]"), "_")}.abr").writeBytes(bytes)
+                File(pendingBrushDir, "${System.nanoTime()}-${setName.replace(Regex("[^A-Za-z0-9 _-]"), "_")}.other").writeBytes(bytes)
             }
             message = "Brushes will be added to the library when a canvas opens."
             return true
         }
-        val set = withContext(Dispatchers.Default) { s.importAbr(bytes, setName) } ?: return false
+        val set = withContext(Dispatchers.Default) { s.importOtherBrushes(bytes, setName) } ?: return false
         shownSet = set.toInt()
         libraryChanged()
         return true
@@ -3241,16 +3241,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
-    /** Whether a file named [name] holds brush tips: Photoshop's, or GIMP's brushes and pipes. */
-    private fun isTipFile(name: String) = TIP_EXTENSIONS.any { name.endsWith(".$it", ignoreCase = true) }
+    /** Whether a file named [name] holds another app's brushes (see [OTHER_BRUSH_EXTENSIONS]). */
+    private fun isOtherBrushFile(name: String) = OTHER_BRUSH_EXTENSIONS.any { name.endsWith(".$it", ignoreCase = true) }
 
     /** Brush files kept while no canvas was open, added now. */
     private fun addPendingBrushes(s: CanvasSession) {
         val files = pendingBrushDir.listFiles()?.sortedBy { it.name } ?: return
         var any = false
         for (f in files) {
-            val abr = f.name.endsWith(".abr")
-            runCatching { if (abr) s.importAbr(f.readBytes(), f.nameWithoutExtension.substringAfter('-')) else s.importBrushes(f.readBytes()) }.getOrNull()?.let {
+            // another app's (kept as .abr by earlier versions)
+            val other = f.name.endsWith(".other") || f.name.endsWith(".abr")
+            runCatching { if (other) s.importOtherBrushes(f.readBytes(), f.nameWithoutExtension.substringAfter('-')) else s.importBrushes(f.readBytes()) }.getOrNull()?.let {
                 shownSet = it.toInt()
                 any = true
             }
@@ -5862,8 +5863,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         /** Brush and brush set files, as other painting apps share them. */
         const val BRUSH_EXTENSION = "brush"
         const val BRUSH_SET_EXTENSION = "brushset"
-        /** Files of brush tips to make brushes of: Photoshop's, GIMP's brushes and pipes. */
-        val TIP_EXTENSIONS = listOf("abr", "gbr", "gih")
+        /** Other apps' brush files: Photoshop's, GIMP's brushes and pipes, Krita's presets and bundles. */
+        val OTHER_BRUSH_EXTENSIONS = listOf("abr", "gbr", "gih", "kpp", "bundle")
         val PACKAGE_LABEL = PACKAGE_EXTENSION.replaceFirstChar(Char::titlecase)
 
         /** What the gallery's Share offers, in order: still pictures, then animations. */

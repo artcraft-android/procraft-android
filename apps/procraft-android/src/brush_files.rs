@@ -107,23 +107,12 @@ impl CanvasSession {
         Some(at as u32)
     }
 
-    /// Adds the sampled tips of a Photoshop brush file or a GIMP brush or pipe (`bytes`) as brushes
-    /// in a set of their own named `name` (else "Imported") at the top of the library: each tip its
-    /// shape, with the file's spacing. Returns the set, or none if the file holds no tips.
-    pub fn import_abr(&self, bytes: Vec<u8>, name: String) -> Option<u32> {
-        let tips = procraft_engine::abr::read(&bytes).or_else(|| procraft_engine::gbr::read(&bytes))?;
-        let brushes: Vec<Brush> = tips
-            .iter()
-            .map(|t| {
-                let mut b = Brush { name: t.name.clone(), ..Brush::round_pen() };
-                b.shape.image = None;
-                b.shape.source = Source::new(fitted(t));
-                if let Some(spacing) = t.spacing {
-                    b.spacing = spacing.clamp(0.01, 10.0);
-                }
-                b
-            })
-            .collect();
+    /// Adds the brushes in another app's file (`bytes`): a Photoshop brush file's sampled tips, a
+    /// GIMP brush or pipe, or a Krita preset or bundle. They go in a set of their own named `name`
+    /// (a bundle's own name first; else "Imported") at the top of the library, each with the
+    /// file's shape and spacing. Returns the set, or none if the file holds none.
+    pub fn import_other_brushes(&self, bytes: Vec<u8>, name: String) -> Option<u32> {
+        let (name, brushes) = other_brushes(&bytes, name)?;
         if brushes.is_empty() {
             return None;
         }
@@ -212,6 +201,93 @@ fn fitted(t: &procraft_engine::abr::AbrTip) -> Vec<u8> {
         }
     }
     out
+}
+
+/// The brushes in another app's file, with the set's name (a bundle's own, else `name`).
+fn other_brushes(bytes: &[u8], name: String) -> Option<(String, Vec<Brush>)> {
+    use procraft_engine::krita;
+    if let Some(tips) = procraft_engine::abr::read(bytes).or_else(|| procraft_engine::gbr::read(bytes)) {
+        return Some((name, tips.iter().map(tip_brush).collect()));
+    }
+    if let Some((title, presets)) = krita::read_bundle(bytes) {
+        let name = if title.trim().is_empty() { name } else { title };
+        return Some((name, presets.iter().map(krita_brush).collect()));
+    }
+    // a preset alone has no images of its own: one it names comes round
+    let preset = krita::read_preset(bytes, &|_| None)?;
+    Some((name, vec![krita_brush(&preset)]))
+}
+
+/// A brush of a sampled tip: its shape, with its spacing.
+fn tip_brush(t: &procraft_engine::abr::AbrTip) -> Brush {
+    let mut b = Brush { name: t.name.clone(), ..Brush::round_pen() };
+    b.shape.image = None;
+    b.shape.source = Source::new(fitted(t));
+    if let Some(spacing) = t.spacing {
+        b.spacing = spacing.clamp(0.01, 10.0);
+    }
+    b
+}
+
+/// A brush of a Krita preset: its tip (round, or an image), spacing, angle, and what pressure
+/// changes.
+fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
+    use procraft_engine::krita::KritaTip;
+    let image = match &k.tip {
+        KritaTip::Round { .. } => None,
+        KritaTip::Image(t) => Some(fitted(t)),
+        KritaTip::Png(png) => png_tip(png).map(|t| fitted(&t)),
+    };
+    let mut b = match image {
+        Some(pixels) => {
+            let mut b = Brush { name: k.name.clone(), ..Brush::round_pen() };
+            b.shape.image = None;
+            b.shape.source = Source::new(pixels);
+            b
+        }
+        None => Brush { name: k.name.clone(), ..Brush::round_pen() },
+    };
+    if let KritaTip::Round { hardness, roundness } = k.tip {
+        b.hardness = hardness.clamp(0.0, 1.0);
+        b.shape.roundness = roundness.clamp(0.01, 1.0);
+    }
+    if let Some(spacing) = k.spacing {
+        b.spacing = spacing.clamp(0.01, 10.0);
+    }
+    b.shape.rotation = k.angle;
+    if !k.pressure_size {
+        b.pressure_size = 0.0;
+    }
+    if k.pressure_opacity {
+        b.pressure_opacity = 1.0;
+    }
+    b
+}
+
+/// A PNG tip as a grey one: dark, opaque pixels paint.
+fn png_tip(png: &[u8]) -> Option<procraft_engine::abr::AbrTip> {
+    let (w, h, channels, buf) = decode_png(png)?;
+    let pixels: Vec<u8> = buf
+        .chunks_exact(channels.max(1))
+        .take(w * h)
+        .map(|px| {
+            let get = |k: usize| u32::from(px.get(k).copied().unwrap_or(0));
+            let (grey, alpha) = match channels {
+                1 => (get(0), 255),
+                2 => (get(0), get(1)),
+                3 => ((get(0) * 299 + get(1) * 587 + get(2) * 114) / 1000, 255),
+                _ => ((get(0) * 299 + get(1) * 587 + get(2) * 114) / 1000, get(3)),
+            };
+            ((255 - grey.min(255)) * alpha / 255) as u8
+        })
+        .collect();
+    (pixels.len() == w * h).then(|| procraft_engine::abr::AbrTip {
+        name: String::new(),
+        spacing: None,
+        width: w as u32,
+        height: h as u32,
+        pixels,
+    })
 }
 
 fn brush_from(file: &BrushFile) -> Brush {

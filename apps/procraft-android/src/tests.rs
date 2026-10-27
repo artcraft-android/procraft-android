@@ -2817,12 +2817,12 @@ fn a_photoshop_brush_files_tips_become_a_set() {
     file.extend_from_slice(&(body.len() as u32).to_be_bytes());
     file.extend_from_slice(&body);
     let s = CanvasSession::new(64, 64);
-    assert_eq!(s.import_abr(file, "Chalk".into()), Some(0));
+    assert_eq!(s.import_other_brushes(file, "Chalk".into()), Some(0));
     let library = s.brush_library();
     let set = library.first().unwrap();
     assert_eq!(set.name, "Chalk");
     assert_eq!(set.brushes.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Tip"]);
-    assert_eq!(s.import_abr(b"nothing".to_vec(), String::new()), None);
+    assert_eq!(s.import_other_brushes(b"nothing".to_vec(), String::new()), None);
 }
 
 /// Real brush files, when a folder of them is given (`BRUSH_CORPUS=folder`, never committed):
@@ -2856,7 +2856,8 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
         let Some(s) = session(64, 64) else { return };
         let bytes = std::fs::read(path).unwrap();
         let kind = extension(path);
-        let set = if kind == "abr" { s.import_abr(bytes, "Corpus".to_owned()) } else { s.import_brushes(bytes) };
+        let set =
+            if kind == "abr" { s.import_other_brushes(bytes, "Corpus".to_owned()) } else { s.import_brushes(bytes) };
         let Some(set) = set else {
             failures.push(format!("{}: not imported", path.display()));
             continue;
@@ -2950,7 +2951,7 @@ fn a_gimp_brush_becomes_a_brush_with_its_spacing() {
     file.extend_from_slice(&40u32.to_be_bytes());
     file.extend_from_slice(name);
     file.extend((0..16).map(|i| (i * 16) as u8));
-    let set = s.import_abr(file, "Charcoal pack".to_owned()).unwrap();
+    let set = s.import_other_brushes(file, "Charcoal pack".to_owned()).unwrap();
     let library = s.brush_library();
     let set = &library[set as usize];
     assert_eq!(set.name, "Charcoal pack");
@@ -3000,4 +3001,30 @@ fn a_moving_gif_comes_in_as_held_frames() {
     assert_eq!(pixel(&s, 4, 4), [0, 0, 255, 255]);
     // a still picture isn't taken
     assert_eq!(s.insert_gif_frames(b"GIF89a".to_vec(), false), None);
+}
+
+#[test]
+fn a_krita_preset_becomes_a_round_brush_with_its_settings() {
+    let s = CanvasSession::new(64, 64);
+    let xml = r#"<Preset paintopid="paintbrush" name="Soft Round"><param name="PressureSize"><![CDATA[false]]></param><param name="brush_definition"><![CDATA[<Brush type="auto_brush" spacing="0.2" useAutoSpacing="0"><MaskGenerator type="circle" ratio="0.5" hfade="0.25" vfade="0.25"/></Brush>]]></param></Preset>"#;
+    let chunk = |kind: &[u8], data: &[u8]| {
+        let mut out = (data.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        out.extend_from_slice(&[0; 4]);
+        out
+    };
+    let mut kpp = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    kpp.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]));
+    let mut text = b"preset\0".to_vec();
+    text.extend_from_slice(xml.as_bytes());
+    kpp.extend(chunk(b"tEXt", &text));
+    kpp.extend(chunk(b"IEND", &[]));
+    let set = s.import_other_brushes(kpp, "Krita".to_owned()).unwrap() as usize;
+    let st = s.shared.lock();
+    let b = &st.library[set].brushes[0];
+    assert_eq!(b.name, "Soft Round");
+    assert!((b.spacing - 0.2).abs() < 1e-6 && (b.hardness - 0.25).abs() < 1e-6 && b.shape.roundness == 0.5);
+    assert_eq!(b.pressure_size, 0.0);
+    assert!(b.shape.source.is_none());
 }
