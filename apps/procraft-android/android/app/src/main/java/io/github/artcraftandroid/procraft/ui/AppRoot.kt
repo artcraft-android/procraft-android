@@ -225,7 +225,10 @@ fun AppRoot(vm: CanvasViewModel) {
                 if (vm.adjustment == Adjustment.CLONE) ClonePuck(vm)
                 if (vm.recoloring) RecolorReticle(vm)
                 QuickShapeHandles(vm)
-                if (!vm.barsHidden) AnimationBar(vm)
+                // a full-screen page covers the timeline, as it covers the canvas
+                val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.timeLapseReplaying ||
+                    vm.animatedExport != null || vm.modelAnimatedExport != null
+                if (!vm.barsHidden && !pageOver) AnimationBar(vm)
                 CopyPastePanel(vm)
                 QuickMenu(vm)
                 LayerChoice(vm)
