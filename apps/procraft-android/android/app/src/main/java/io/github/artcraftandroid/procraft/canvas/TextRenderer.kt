@@ -116,7 +116,7 @@ object TextRenderer {
             .setAlignment(align)
             .setLineSpacing(t.leading * t.size, 1f)
             .setIncludePad(false)
-            .setJustificationMode(if (t.align == TextAlignment.JUSTIFY) Layout.JUSTIFICATION_MODE_INTER_WORD else Layout.JUSTIFICATION_MODE_NONE)
+            .setJustificationMode(if (t.align == TextAlignment.JUSTIFY) android.graphics.text.LineBreaker.JUSTIFICATION_MODE_INTER_WORD else android.graphics.text.LineBreaker.JUSTIFICATION_MODE_NONE)
             .build()
     }
 

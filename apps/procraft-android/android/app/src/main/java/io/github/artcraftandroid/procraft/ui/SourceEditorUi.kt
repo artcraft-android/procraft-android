@@ -118,7 +118,7 @@ fun SourceEditor(vm: CanvasViewModel) {
     // landscape: a page sliding over the studio from the right, its pages' card still showing
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     Box(Modifier.fillMaxSize().pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } }) {
-        BoxWithConstraints(
+        Box(
             Modifier.fillMaxSize()
                 .then(if (landscape) Modifier.padding(start = 246.dp).clip(RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp)) else Modifier)
                 .background(EditorPage),
