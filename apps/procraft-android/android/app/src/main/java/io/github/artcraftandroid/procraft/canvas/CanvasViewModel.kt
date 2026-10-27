@@ -1670,7 +1670,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** [e] dragged to [to] in the gallery or stack showing (its place in the list without it). */
+    /** [e] dragged to [to] in the gallery or stack showing (its place in the list without it), out of its stack if it was in one. */
     fun moveInGallery(e: io.github.artcraftandroid.procraft.gallery.GalleryEntry, to: Int) {
         // at once, so the cells move as the finger lifts
         val shown = galleryEntries.filter { it.dir != e.dir }.toMutableList()
@@ -1678,7 +1678,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         galleryEntries = shown
         artworks = shown.filterIsInstance<Artwork>()
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { store.move(e, to) }
+            val into = galleryDir
+            withContext(Dispatchers.IO) { store.move(e, to, into) }
             refreshGallery()
         }
     }

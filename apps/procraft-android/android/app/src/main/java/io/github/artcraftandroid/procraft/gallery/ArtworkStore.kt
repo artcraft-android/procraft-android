@@ -90,10 +90,13 @@ class ArtworkStore(val root: File) {
         return copy
     }
 
-    /** [e] moved to [to] in the gallery or stack it is in (its place in the order without it). */
-    fun move(e: GalleryEntry, to: Int) {
-        val at = e.dir.parentFile ?: return
-        writeOrder(at, GalleryOrder.moved(order(at), e.dir.name, to))
+    /**
+     * [e] moved to [to] (its place in the order without it) in folder [into]: the gallery or a
+     * stack, by default the one it is in; from a stack to the gallery, it is taken out of it.
+     */
+    fun move(e: GalleryEntry, to: Int, into: File = e.dir.parentFile ?: root) {
+        if (e.dir.parentFile != into && !e.dir.renameTo(File(into, e.dir.name))) return
+        writeOrder(into, GalleryOrder.moved(order(into), e.dir.name, to))
     }
 
     /** Artwork [a] (from the gallery) dropped onto [onto]: an artwork makes a stack with it there, [a] first; a stack takes it in first. */

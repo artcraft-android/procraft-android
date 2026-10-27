@@ -61,6 +61,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.ui.draganddrop.toAndroidDragEvent
 import androidx.compose.foundation.gestures.scrollBy
@@ -135,9 +136,12 @@ fun GalleryScreen(vm: CanvasViewModel) {
     var deleting by remember { mutableStateOf<Artwork?>(null) }
     // the artwork (by folder) whose actions a swipe left is showing
     var swiped by remember { mutableStateOf<String?>(null) }
-    // a drag in the gallery: the artwork dragged, and the cell it would be stacked onto (by folder)
+    // a drag in the gallery: the artwork dragged, and the cell it would be stacked onto (by folder);
+    // where it can go, and the way back out of a stack lit while it rests there
     var dragging by remember { mutableStateOf<String?>(null) }
     var dropOnto by remember { mutableStateOf<String?>(null) }
+    val dropPlaces = remember { DropPlaces() }
+    var backLit by remember { mutableStateOf(false) }
     // Select: the artworks picked, by folder
     var selecting by remember { mutableStateOf(false) }
     val selected = remember { mutableStateListOf<String>() }
@@ -173,7 +177,23 @@ fun GalleryScreen(vm: CanvasViewModel) {
             if (renaming != null || about) tween(300) else tween(150),
             label = "blur",
         )
-        Column(Modifier.fillMaxSize().then(if (blur > 0.dp) Modifier.blur(blur) else Modifier)) {
+        val dropCell = cellSize(screenWidth, if (screenWidth > screenHeight) 4 else 3)
+        Column(
+            Modifier.fillMaxSize().then(if (blur > 0.dp) Modifier.blur(blur) else Modifier).then(
+                galleryDrop(
+                    dropPlaces, vm.galleryEntries, dropCell, stacking = vm.openStack == null,
+                    onBack = { vm.showStack(null) },
+                    onBackLit = { backLit = it },
+                    onOver = { dropOnto = it },
+                    onEnded = {
+                        dragging = null
+                        dropOnto = null
+                    },
+                    onMove = vm::moveInGallery,
+                    onStack = vm::dropOnto,
+                ),
+            ),
+        ) {
             if (selecting) {
                 val screen = androidx.compose.ui.platform.LocalConfiguration.current
                 SelectHeader(
@@ -198,6 +218,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
             } else {
                 GalleryHeader(
                     stack = vm.openStack?.name,
+                    backLit = backLit,
+                    onBackPlaced = { dropPlaces.back = it },
                     onBack = { vm.showStack(null) },
                     onAbout = { about = true },
                     onSelect = { selecting = true },
@@ -243,18 +265,14 @@ fun GalleryScreen(vm: CanvasViewModel) {
                     // aren't clipped by a grid of one short row
                     val grid = if (stack == null) vm.galleryGrid else androidx.compose.foundation.lazy.grid.rememberLazyGridState()
                     LazyVerticalGrid(
-                        modifier = Modifier.fillMaxSize().then(
-                            galleryDrop(
-                                grid, entries, cell, stacking = stack == null,
-                                onOver = { dropOnto = it },
-                                onEnded = {
-                                    dragging = null
-                                    dropOnto = null
-                                },
-                                onMove = vm::moveInGallery,
-                                onStack = vm::dropOnto,
-                            ),
-                        ),
+                        // the grid showing (not one going) is where drags land
+                        modifier = Modifier.fillMaxSize().onGloballyPositioned {
+                            if (stack?.dir == vm.openStack?.dir) {
+                                dropPlaces.grid = grid
+                                dropPlaces.gridAt = it.positionInRoot()
+                                dropPlaces.gridHeight = it.size.height.toFloat()
+                            }
+                        },
                         state = grid,
                         columns = GridCells.Fixed(columns),
                         contentPadding = PaddingValues(bottom = 24.dp),
@@ -590,7 +608,17 @@ fun GalleryScreen(vm: CanvasViewModel) {
 
 /** The title row: the app's name, the select/import/photo capsule and the new-canvas button. */
 @Composable
-private fun GalleryHeader(stack: String?, onBack: () -> Unit, onAbout: () -> Unit, onSelect: () -> Unit, onNew: () -> Unit, onImport: () -> Unit, onPhoto: () -> Unit) {
+private fun GalleryHeader(
+    stack: String?,
+    backLit: Boolean,
+    onBackPlaced: (androidx.compose.ui.geometry.Rect) -> Unit,
+    onBack: () -> Unit,
+    onAbout: () -> Unit,
+    onSelect: () -> Unit,
+    onNew: () -> Unit,
+    onImport: () -> Unit,
+    onPhoto: () -> Unit,
+) {
     Box(Modifier.fillMaxWidth().height(55.dp)) {
         // into a stack the title changes at once; back out, the stack's name fades out as the
         // gallery's fades in
@@ -614,11 +642,13 @@ private fun GalleryHeader(stack: String?, onBack: () -> Unit, onAbout: () -> Uni
             label = "title",
         ) { name ->
             if (name != null) {
-                // in a stack: back to the gallery (blue while touched), and the stack's name
+                // in a stack: back to the gallery (blue while touched, or while an artwork dragged
+                // rests on it to go back), and the stack's name
                 val touch = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-                val ink = if (heldOf(touch)) Pc.Accent else Pc.GalleryTitle
+                val ink = if (heldOf(touch) || backLit) Pc.Accent else Pc.GalleryTitle
                 Row(
-                    Modifier.padding(start = 20.dp, top = 12.dp).height(41.dp).clickable(touch, indication = null, onClick = onBack),
+                    Modifier.padding(start = 20.dp, top = 12.dp).height(41.dp).onGloballyPositioned { onBackPlaced(it.boundsInRoot()) }
+                        .clickable(touch, indication = null, onClick = onBack),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box(Modifier.width(40.dp), contentAlignment = Alignment.Center) {
@@ -810,6 +840,17 @@ private const val DRAGGED_ALPHA = 0.3f
 /** The blue over an artwork (or stack) a dragged artwork would be stacked with. */
 private val DropWash = Color(0x800064DC)
 
+/** How long a dragged artwork rests on a stack's way back before the gallery opens. */
+private const val SPRING_MS = 600L
+
+/** Where the gallery's own drags land: the grid showing (its state, and its place and height in the root), and a stack's way back. */
+private class DropPlaces {
+    var grid: androidx.compose.foundation.lazy.grid.LazyGridState? = null
+    var gridAt = Offset.Zero
+    var gridHeight = 0f
+    var back: androidx.compose.ui.geometry.Rect? = null
+}
+
 /** How near the grid's top or bottom a drag scrolls it, and how far each frame. */
 private val DragScrollEdge = 60.dp
 private val DragScrollStep = 12.dp
@@ -849,22 +890,29 @@ private fun dropAt(grid: androidx.compose.foundation.lazy.grid.LazyGridState, en
 }
 
 /**
- * The gallery's grid taking the gallery's own drags: let go over another artwork's picture (or a
- * stack's), the dragged artwork is stacked with it ([onOver] names it meanwhile), anywhere else it
- * goes where it is let go. Near the grid's top or bottom the grid scrolls.
+ * The gallery taking its own drags: let go over another artwork's picture (or a stack's), the
+ * dragged artwork is stacked with it ([onOver] names it meanwhile), anywhere else on the grid it
+ * goes where it is let go. Near the grid's top or bottom the grid scrolls. In a stack, resting on
+ * the way back ([onBackLit] meanwhile) opens the gallery ([onBack]) with the drag going on, so an
+ * artwork can be taken out of the stack.
  */
 @Composable
 private fun galleryDrop(
-    grid: androidx.compose.foundation.lazy.grid.LazyGridState,
+    places: DropPlaces,
     entries: List<GalleryEntry>,
     cell: CellSize,
     stacking: Boolean,
+    onBack: () -> Unit,
+    onBackLit: (Boolean) -> Unit,
     onOver: (String?) -> Unit,
     onEnded: () -> Unit,
     onMove: (GalleryEntry, Int) -> Unit,
     onStack: (Artwork, GalleryEntry) -> Unit,
 ): Modifier {
     val now = androidx.compose.runtime.rememberUpdatedState(entries)
+    val inGallery = androidx.compose.runtime.rememberUpdatedState(stacking)
+    val back = androidx.compose.runtime.rememberUpdatedState(onBack)
+    val backLit = androidx.compose.runtime.rememberUpdatedState(onBackLit)
     val over = androidx.compose.runtime.rememberUpdatedState(onOver)
     val ended = androidx.compose.runtime.rememberUpdatedState(onEnded)
     val move = androidx.compose.runtime.rememberUpdatedState(onMove)
@@ -873,34 +921,57 @@ private fun galleryDrop(
     val sizes = androidx.compose.runtime.rememberUpdatedState(
         with(density) { Triple(39.dp.toPx(), androidx.compose.ui.geometry.Size(cell.width.toPx(), cell.thumb.toPx()), DragScrollEdge.toPx()) },
     )
-    // the grid's place in the window and its height
-    val placed = remember { arrayOf(Offset.Zero, Offset.Zero) }
+    val scope = rememberCoroutineScope()
     // -1 scrolling up, 1 down
     var edge by remember { mutableIntStateOf(0) }
     LaunchedEffect(edge) {
         val step = with(density) { DragScrollStep.toPx() }
         while (edge != 0) {
-            grid.scrollBy(edge * step)
+            places.grid?.scrollBy(edge * step)
             androidx.compose.runtime.withFrameNanos { }
         }
     }
-    val target = remember(grid, stacking) {
+    val target = remember {
         object : androidx.compose.ui.draganddrop.DragAndDropTarget {
             var at: DropAt? = null
+            var spring: kotlinx.coroutines.Job? = null
+
+            fun stopSpring() {
+                spring?.cancel()
+                spring = null
+                backLit.value(false)
+            }
 
             fun dragged(e: androidx.compose.ui.draganddrop.DragAndDropEvent) = (e.toAndroidDragEvent().localState as? io.github.artcraftandroid.procraft.gallery.GalleryDrag)?.entry
 
             fun track(e: androidx.compose.ui.draganddrop.DragAndDropEvent) {
                 val d = e.toAndroidDragEvent()
                 val entry = dragged(e) ?: return
-                val p = Offset(d.x, d.y) - placed[0]
+                val r = Offset(d.x, d.y)
+                if (!inGallery.value && places.back?.contains(r) == true) {
+                    at = null
+                    edge = 0
+                    over.value(null)
+                    if (spring == null) {
+                        backLit.value(true)
+                        spring = scope.launch {
+                            kotlinx.coroutines.delay(SPRING_MS)
+                            spring = null
+                            backLit.value(false)
+                            back.value()
+                        }
+                    }
+                    return
+                }
+                stopSpring()
+                val p = r - places.gridAt
                 val (top, box, near) = sizes.value
                 edge = when {
                     p.y < near -> -1
-                    p.y > placed[1].y - near -> 1
+                    p.y > places.gridHeight - near -> 1
                     else -> 0
                 }
-                at = dropAt(grid, now.value, entry.dir.name, p, top, box, stacking && entry is Artwork)
+                at = places.grid?.let { dropAt(it, now.value, entry.dir.name, p, top, box, inGallery.value && entry is Artwork) }
                 over.value(at?.onto)
             }
 
@@ -911,6 +982,7 @@ private fun galleryDrop(
             override fun onExited(event: androidx.compose.ui.draganddrop.DragAndDropEvent) {
                 at = null
                 edge = 0
+                stopSpring()
                 over.value(null)
             }
 
@@ -922,9 +994,10 @@ private fun galleryDrop(
                 if (onto != null && e is Artwork) {
                     stack.value(e, onto)
                 } else {
+                    // from a stack it comes in at the slot; from here, the slot counted without it
                     val from = list.indexOfFirst { it.dir.name == e.dir.name }
-                    val to = if (drop.slot > from) drop.slot - 1 else drop.slot
-                    if (from >= 0 && to != from) move.value(e, to)
+                    val to = if (from >= 0 && drop.slot > from) drop.slot - 1 else drop.slot
+                    if (from < 0 || to != from) move.value(e, to)
                 }
                 return true
             }
@@ -932,14 +1005,12 @@ private fun galleryDrop(
             override fun onEnded(event: androidx.compose.ui.draganddrop.DragAndDropEvent) {
                 at = null
                 edge = 0
+                stopSpring()
                 ended.value()
             }
         }
     }
-    return Modifier.onGloballyPositioned {
-        placed[0] = it.positionInRoot()
-        placed[1] = Offset(it.size.width.toFloat(), it.size.height.toFloat())
-    }.dragAndDropTarget(
+    return Modifier.dragAndDropTarget(
         shouldStartDragAndDrop = { it.toAndroidDragEvent().localState is io.github.artcraftandroid.procraft.gallery.GalleryDrag },
         target = target,
     )
