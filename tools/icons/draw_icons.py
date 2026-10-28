@@ -571,6 +571,108 @@ def knob():
     return disc.difference(capsule((12, 12), (12 + 5.0 * math.cos(a), 12 + 5.0 * math.sin(a)), 0.7))
 
 
+def dotted_path():
+    """Stroke path: a stroke's dabs, a row of dots along a curve."""
+    dots = []
+    for k in range(6):
+        a = math.radians(180 + 90 * k / 5)
+        dots.append(Point(20 + 15 * math.cos(a), 20 + 15 * math.sin(a)).buffer(1.8, quad_segs=12))
+    return unary_union(dots)
+
+
+def smoothed():
+    """Stabilisation: a shaky line whose shake dies away."""
+    pts = [(2.8 + 2.3 * k, 12.0 + 6.4 * max(0.0, 1 - k / 6) * (-1) ** k) for k in range(9)]
+    return LineString(pts).buffer(1.1, join_style='round')
+
+
+def spindle():
+    """Taper: a stroke that thins out at both ends."""
+    n = 40
+    top, bottom = [], []
+    for i in range(n + 1):
+        t = i / n
+        x, y, w = 2.0 + 20.0 * t, 12.6 - 1.2 * math.sin(math.pi * t), 2.8 * math.sin(math.pi * t) ** 0.7
+        top.append((x, y - w))
+        bottom.append((x, y + w))
+    return Polygon(top + bottom[::-1]).buffer(0.3)
+
+
+def three_shapes():
+    """Shape: a circle, a square and a triangle."""
+    return unary_union([Point(16.5, 7.2).buffer(4.0, quad_segs=16), soft(box(2.6, 12.6, 10.8, 20.8), 0.8),
+                        soft(Polygon([(17.1, 13.0), (21.6, 21.0), (12.6, 21.0)]), 0.6)])
+
+
+def grain_tile():
+    """Grain: a tile pitted with holes of a few sizes."""
+    tile = soft(box(3, 3, 21, 21), 1.2)
+    for x, y, r in ((6.4, 6.4, 1.3), (12.0, 5.8, 0.9), (17.4, 6.8, 1.3), (8.8, 10.6, 0.9), (14.0, 10.4, 1.4),
+                    (18.4, 12.4, 0.9), (5.8, 14.6, 1.4), (10.8, 15.2, 1.0), (15.6, 16.4, 1.3), (7.6, 18.8, 0.9),
+                    (12.8, 18.8, 0.9)):
+        tile = tile.difference(Point(x, y).buffer(r, quad_segs=10))
+    return tile
+
+
+def roller():
+    """Rendering: a paint roller."""
+    frame_ = LineString([(17.0, 6.2), (20.6, 6.2), (20.6, 12.0), (12.0, 12.0), (12.0, 14.4)]).buffer(0.9, join_style='round')
+    return unary_union([soft(box(3.0, 3.0, 17.0, 9.4), 1.2), frame_, soft(box(10.0, 14.2, 14.0, 21.2), 1.2)])
+
+
+def drop(cx, cy, r):
+    """A drop: a circle drawn up to a point."""
+    return unary_union([Point(cx, cy).buffer(r, quad_segs=20), Point(cx, cy - 2.0 * r).buffer(0.2)]).convex_hull
+
+
+def two_drops():
+    """Wet mix: two drops, a small one beside a large one."""
+    big = drop(14.5, 14.8, 6.0)
+    return unary_union([big, drop(5.5, 10.8, 3.2).difference(big.buffer(1.2))])
+
+
+def colour_circles():
+    """Colour dynamics: three overlapping circles, their edges cut through."""
+    discs = [Point(c).buffer(5.8, quad_segs=24) for c in ((12.0, 7.4), (7.6, 15.0), (16.4, 15.0))]
+    shape = unary_union(discs)
+    for d in discs:
+        shape = shape.difference(d.exterior.buffer(0.5))
+    return shape
+
+
+def chevrons():
+    """Dynamics: three chevrons, heavier as they go."""
+    return unary_union([LineString([(tip - 3.5, 5.0), (tip, 12.0), (tip - 3.5, 19.0)]).buffer(r, join_style='round')
+                        for tip, r in ((8.6, 0.9), (14.6, 1.2), (20.6, 1.5))])
+
+
+def stylus():
+    """Stylus: a pen-shaped stylus, its point down to the left."""
+    cone = soft(Polygon([(0, 0), (4.4, -2.0), (4.4, 2.0)]), 0.3)
+    body = unary_union([box(5.4, -2.0, 19.4, 2.0), Point(19.4, 0).buffer(2.0, quad_segs=12)])
+    return along_diagonal(unary_union([cone, body]), (3.4, 20.6))
+
+
+def gear():
+    """Properties: a gear."""
+    teeth = [rotate(soft(box(10.4, 2.6, 13.6, 12.0), 0.5), 45 * k, origin=(12, 12)) for k in range(8)]
+    return unary_union([Point(12, 12).buffer(6.8, quad_segs=24)] + teeth).difference(Point(12, 12).buffer(2.6, quad_segs=16))
+
+
+def material_ball():
+    """Materials: a ball with a rim of light round its shaded side."""
+    ball = Point(12, 12).buffer(9.5, quad_segs=32)
+    wedge = Polygon([(12, 12)] + [(12 + 20 * math.cos(math.radians(a)), 12 + 20 * math.sin(math.radians(a))) for a in range(-10, 101, 10)])
+    return ball.difference(ring(12, 12, 7.4, 1.2).intersection(wedge))
+
+
+def name_tag():
+    """About this brush: a name tag, its hole and two lines of writing."""
+    tag = soft(Polygon([(2.6, 12.0), (8.0, 6.0), (21.4, 6.0), (21.4, 18.0), (8.0, 18.0)]), 1.0)
+    tag = tag.difference(Point(8.2, 12.0).buffer(1.6, quad_segs=12))
+    return tag.difference(capsule((11.8, 10.2), (18.2, 10.2), 0.6)).difference(capsule((11.8, 13.8), (16.2, 13.8), 0.6))
+
+
 DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
@@ -592,6 +694,10 @@ DRAWINGS = {
     'modepalettes': palette, 'modelayer': one_sheet, 'modepencil': pencil, 'apply': check_in_disc, 'preview': eye,
     'canceladjust': cross_in_disc, 'pieundo': lambda: turning_arrow(False), 'piereset': reset_transform,
     'adjustknob': knob,
+    'studiostroke': dotted_path, 'studiostabilize': smoothed, 'studiotaper': spindle, 'studioshape': three_shapes,
+    'studiograin': grain_tile, 'studiorendering': roller, 'studiowet': two_drops, 'studiocolor': colour_circles,
+    'studiodynamics': chevrons, 'studiostylus': stylus, 'studioproperties': gear, 'studiomaterials': material_ball,
+    'studiopreview': eye, 'studioabout': name_tag,
 }
 
 

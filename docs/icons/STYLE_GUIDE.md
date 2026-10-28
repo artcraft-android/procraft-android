@@ -131,3 +131,22 @@ by one.
 | Preview | an eye, its outline and its pupil |
 | Undo / Reset | the bar's Undo arrow / the Transform toolbar's Reset |
 | Adjust (Liquify) | a knurled knob with its pointer |
+
+## The Brush Studio's tabs
+
+| Tab | Idea |
+|---|---|
+| Stroke path | a stroke's dabs, a row of dots along a curve |
+| Stabilization | a shaky line whose shake dies away |
+| Taper | a stroke that thins out at both ends |
+| Shape | a circle, a square and a triangle |
+| Grain | a tile pitted with holes of a few sizes |
+| Rendering | a paint roller |
+| Wet Mix | two drops, a small one beside a large one |
+| Color dynamics | three overlapping circles, their edges cut through |
+| Dynamics | three chevrons, heavier as they go |
+| Stylus | a pen-shaped stylus, point down to the left |
+| Properties | a gear |
+| Materials | a ball with a rim of light round its shaded side |
+| Preview | the adjustment menus' eye |
+| About this brush | a name tag with its hole and two lines of writing |
