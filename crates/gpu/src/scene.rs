@@ -21,6 +21,9 @@ const ISLANDS: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 const GRAIN: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// How far past its islands a projected stroke is grown (texels; as the shader's `DILATE`).
 const DILATE: i32 = 2;
+/// A stroke's footprint is told in tiles: this many across a texture at most, each a multiple
+/// of 8 texels (as the shader's groups are) and 8 at least.
+const FOOTPRINT_TILES: u32 = 32;
 /// A brush's tiling is in canvas pixels; on a model each pixel counts as this many framing units
 /// (the model's largest side counted as 4).
 const TILE_UNITS_PER_PIXEL: f32 = 0.00225;
@@ -259,7 +262,8 @@ impl Orbit {
 struct PartGpu {
     first: u32,
     count: u32,
-    texture: wgpu::Texture,
+    /// Its own albedo texture, while it shows one given as pixels ([`MeshView::set_albedo`]).
+    texture: Option<wgpu::Texture>,
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
     /// What it shows: its albedo, its roughness and metalness painted over the material's, and
@@ -293,6 +297,8 @@ pub struct MeshView {
     projector: Option<Projector>,
     /// What builds the albedos' smaller levels.
     mipper: Option<Mipper>,
+    /// What finds which tiles of a texture a stroke reaches.
+    footprint: Option<Footprint>,
     /// The environment it is lit by, and the layout and samplers to bind it with.
     lighting: Lighting,
     view_layout: wgpu::BindGroupLayout,
@@ -667,17 +673,6 @@ impl MeshView {
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("mesh albedo"),
-                    size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: ALBEDO,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                 // the material's own colour, roughness and metalness under what is painted
                 let ([r, g, b], roughness, metallic) = mesh.surface(i);
                 let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -688,12 +683,13 @@ impl MeshView {
                     }),
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 });
-                let views = [view, blank.clone(), blank.clone(), blank.clone(), blank.clone()];
+                // nothing painted yet: its base colour shows through a clear albedo
+                let views = [blank.clone(), blank.clone(), blank.clone(), blank.clone(), blank.clone()];
                 let bind = part_bind(device, &part_layout, &sampler, &views, &uniform);
                 PartGpu {
                     first: (p.first * 3) as u32,
                     count: (p.count * 3) as u32,
-                    texture,
+                    texture: None,
                     uniform,
                     bind,
                     views,
@@ -760,6 +756,7 @@ impl MeshView {
             triangles: mesh.triangles.clone(),
             projector: None,
             mipper: None,
+            footprint: None,
             lighting,
             view_layout,
             cube_sampler,
@@ -863,13 +860,29 @@ impl MeshView {
     /// False if there is no such part or the pixels aren't that size.
     pub fn set_albedo(&mut self, gpu: &Gpu, part: usize, rgba: &[u8]) -> bool {
         let side = self.texture_size;
-        let Some(p) = self.parts.get(part) else { return false };
+        let Some(p) = self.parts.get_mut(part) else { return false };
         if rgba.len() != (side as usize) * (side as usize) * 4 {
             return false;
         }
+        // its own texture, made the first time and shown from now on in place of any other
+        let texture = p.texture.get_or_insert_with(|| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("mesh albedo"),
+                size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: ALBEDO,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        });
+        p.views[0] = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        p.mips = None;
+        p.bind = part_bind(&gpu.device, &self.part_layout, &self.sampler, &p.views, &p.uniform);
         gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &p.texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -886,6 +899,7 @@ impl MeshView {
     pub fn set_albedo_view(&mut self, gpu: &Gpu, part: usize, albedo: &wgpu::TextureView) {
         let Some(p) = self.parts.get_mut(part) else { return };
         p.views[0] = albedo.clone();
+        p.texture = None;
         p.bind = part_bind(&gpu.device, &self.part_layout, &self.sampler, &p.views, &p.uniform);
     }
 
@@ -1003,6 +1017,8 @@ impl MeshView {
             source = target;
         }
         p.views[0] = all.clone();
+        // its own texture, if it had one, is shown no more
+        p.texture = None;
         p.bind = part_bind(&gpu.device, &self.part_layout, &self.sampler, &p.views, &p.uniform);
     }
 
@@ -1716,6 +1732,61 @@ impl MeshView {
         pass.draw(0..3, 0..1);
     }
 
+    /// Where `stroke` (a stroke as carried into a part's texture: the texture's size) holds
+    /// anything within `reach`: rectangles of whole tiles (a 32nd of the side, 8 texels at least),
+    /// each tile reached in one of them; none reached, none. Waits for the GPU to tell; none if it
+    /// can't.
+    pub fn footprint(&mut self, gpu: &Gpu, stroke: &wgpu::TextureView, reach: IRect) -> Option<Vec<IRect>> {
+        let side = self.texture_size;
+        let reach = reach.intersect(IRect::from_size(side, side));
+        if reach.is_empty() {
+            return Some(Vec::new());
+        }
+        let tile = (side / FOOTPRINT_TILES).max(8).next_multiple_of(8);
+        let across = side.div_ceil(tile);
+        let f = self.footprint.get_or_insert_with(|| Footprint::new(gpu));
+        // from a multiple of 8 each way, so each group of the shader's lies within one tile
+        let (ox, oy) = ((reach.x0.max(0) as u32) & !7, (reach.y0.max(0) as u32) & !7);
+        let (w, h) = ((reach.x1.max(0) as u32).saturating_sub(ox), (reach.y1.max(0) as u32).saturating_sub(oy));
+        let region = [ox, oy, w, h, tile, across, 0, 0];
+        gpu.queue.write_buffer(&f.uniform, 0, bytemuck::cast_slice(&region));
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stroke footprint"),
+            layout: &f.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: f.uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(stroke) },
+                wgpu::BindGroupEntry { binding: 2, resource: f.marks.as_entire_binding() },
+            ],
+        });
+        let mut encoder =
+            gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("stroke footprint") });
+        encoder.clear_buffer(&f.marks, 0, None);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("stroke footprint"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&f.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+        }
+        encoder.copy_buffer_to_buffer(&f.marks, 0, &f.read, 0, FOOTPRINT_BYTES);
+        gpu.queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        f.read.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        rx.recv().ok()?.ok()?;
+        let words: Vec<u32> = {
+            let mapped = f.read.slice(..).get_mapped_range().ok()?;
+            mapped.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect()
+        };
+        f.read.unmap();
+        Some(tile_rects(&words, across, tile, side))
+    }
+
     /// Grain space from the model's (columns): framing units about the model's middle, or (when
     /// the grain follows the camera) about the camera, turned with it.
     fn grain_space(&self, follows_camera: bool) -> [[f32; 4]; 4] {
@@ -1934,6 +2005,139 @@ impl MeshView {
         }
         out.intersect(IRect::from_size(self.texture_size, self.texture_size))
     }
+}
+
+/// The marks' bytes: a bit for each of the most tiles there can be.
+const FOOTPRINT_BYTES: u64 = (FOOTPRINT_TILES * FOOTPRINT_TILES / 8) as u64;
+
+/// What finds a stroke's footprint: its pipeline and layout, where it is told the region, the
+/// tiles' marks (a bit each) and where they are read back.
+struct Footprint {
+    pipeline: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+    uniform: wgpu::Buffer,
+    marks: wgpu::Buffer,
+    read: wgpu::Buffer,
+}
+
+impl Footprint {
+    fn new(gpu: &Gpu) -> Footprint {
+        let device = &gpu.device;
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("stroke footprint"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("stroke footprint"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/footprint.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("stroke footprint"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("stroke footprint"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let buffer = |label, size, usage| {
+            device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false })
+        };
+        let uniform = buffer("stroke footprint", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+        let marks = buffer(
+            "stroke footprint marks",
+            FOOTPRINT_BYTES,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        );
+        let read = buffer(
+            "stroke footprint read",
+            FOOTPRINT_BYTES,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        Footprint { pipeline, layout, uniform, marks, read }
+    }
+}
+
+/// The tiles marked in `words` (a bit each, row by row, `across` to a row; each `tile` texels
+/// square) as rectangles of texels within a `side` square: each row's runs of marked tiles, a run
+/// joined to the one above when they span the same tiles.
+fn tile_rects(words: &[u32], across: u32, tile: u32, side: u32) -> Vec<IRect> {
+    let marked = |x: u32, y: u32| {
+        let t = y * across + x;
+        words.get((t / 32) as usize).is_some_and(|w| w & (1 << (t % 32)) != 0)
+    };
+    let px = |t: u32| (t * tile).min(side) as i32;
+    let mut out: Vec<IRect> = Vec::new();
+    // the rectangles still growing down, by the run of tiles they span
+    let mut open: Vec<(u32, u32, usize)> = Vec::new();
+    for y in 0..across {
+        let mut runs = Vec::new();
+        let mut x = 0;
+        while x < across {
+            if marked(x, y) {
+                let start = x;
+                while x < across && marked(x, y) {
+                    x += 1;
+                }
+                runs.push((start, x));
+            } else {
+                x += 1;
+            }
+        }
+        let mut still = Vec::new();
+        for (a, b) in runs {
+            match open.iter().find(|(oa, ob, _)| (*oa, *ob) == (a, b)) {
+                Some(&(_, _, i)) => {
+                    if let Some(r) = out.get_mut(i) {
+                        r.y1 = px(y + 1);
+                    }
+                    still.push((a, b, i));
+                }
+                None => {
+                    out.push(IRect::new(px(a), px(y), px(b), px(y + 1)));
+                    still.push((a, b, out.len() - 1));
+                }
+            }
+        }
+        open = still;
+    }
+    out.retain(|r| !r.is_empty());
+    out
 }
 
 /// What makes an albedo's smaller levels: a copy into the first, then each level the average of
@@ -2431,6 +2635,26 @@ fn mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marked_tiles_become_rectangles_joined_down_their_runs() {
+        // tiles of 8 on a 20 texel side: three across, the last cut short
+        let mark = |tiles: &[(u32, u32)]| {
+            let mut words = vec![0u32; 1];
+            for (x, y) in tiles {
+                let t = y * 3 + x;
+                words[(t / 32) as usize] |= 1 << (t % 32);
+            }
+            words
+        };
+        assert!(tile_rects(&mark(&[]), 3, 8, 20).is_empty());
+        // an L: two rows of the same run joined, then a longer run on its own
+        let rects = tile_rects(&mark(&[(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2), (2, 2)]), 3, 8, 20);
+        assert_eq!(rects, [IRect::new(0, 0, 16, 16), IRect::new(0, 16, 20, 20)]);
+        // two runs side by side in a row
+        let rects = tile_rects(&mark(&[(0, 1), (2, 1)]), 3, 8, 20);
+        assert_eq!(rects, [IRect::new(0, 8, 8, 16), IRect::new(16, 8, 20, 16)]);
+    }
 
     #[test]
     fn a_trackball_turns_the_camera_freely() {

@@ -796,6 +796,9 @@ enum Op {
         pencil: bool,
     },
     Commit(ActiveStroke),
+    /// The next stroke committed changed pixels only within these rectangles: its undo step
+    /// keeps only them.
+    Within(Vec<IRect>),
     Cancel,
     /// What the stroke has under this rectangle is put aside, for a tip drawn over it.
     SaveTip(IRect),
@@ -1200,6 +1203,8 @@ pub struct Canvas {
     mark: Option<u64>,
     /// The name the next step made takes.
     next_name: Option<String>,
+    /// Where the next stroke committed changes pixels, if known more closely than its bounds.
+    within: Option<Vec<IRect>>,
     smudge_params: wgpu::Buffer,
     smudge_capacity: u64,
     /// Stand-ins for a smudge's grain buffers when its stroke has none.
@@ -1465,6 +1470,7 @@ impl Canvas {
             steps_made: 0,
             mark: None,
             next_name: None,
+            within: None,
             smudge_params: smudge_params(device, 64),
             smudge_spare: [spare_buffer(device), spare_buffer(device)],
             smudge_capacity: 64,
@@ -1894,6 +1900,23 @@ impl Canvas {
         if let Some(active) = self.active.take() {
             self.ops.push(Op::Commit(active));
         }
+    }
+
+    /// Ends the open stroke as [`Canvas::end_stroke`] does, knowing that it changes pixels only
+    /// within `rects` (a stroke drawn in from elsewhere, whose reach is known more closely than
+    /// its bounds): its undo step keeps only what is under them, and none if they are empty.
+    pub fn end_stroke_within(&mut self, rects: Vec<IRect>) {
+        self.prediction.clear();
+        self.untip();
+        if let Some(active) = self.active.take() {
+            self.ops.push(Op::Within(rects));
+            self.ops.push(Op::Commit(active));
+        }
+    }
+
+    /// What the undo and redo history's pixels take on the GPU, bytes.
+    pub fn history_bytes(&self) -> u64 {
+        self.undo.iter().chain(&self.redo).map(Step::bytes).sum()
     }
 
     /// Drops the open stroke.
@@ -2721,11 +2744,13 @@ impl Canvas {
                     }
                 }
                 Op::Commit(stroke) if stroke.style.in_place() => {
+                    self.within = None;
                     self.finish_smudge(device, &mut encoder, stroke.bounds, false);
                     history_changed = true;
                 }
                 // painting an adjustment on leaves the layer to the adjustment
                 Op::Commit(stroke) if stroke.pencil => {
+                    self.within = None;
                     if let Some(mask) = self.pencil.as_mut() {
                         mask.bounds = mask.bounds.union(stroke.bounds);
                     }
@@ -2786,6 +2811,7 @@ impl Canvas {
                         history_changed = true;
                     }
                 }
+                Op::Within(rects) => self.within = Some(rects),
                 Op::Mark => self.mark = Some(self.steps_made),
                 Op::Name(name) => self.next_name = Some(name),
                 Op::Collapse => {
@@ -3538,9 +3564,14 @@ impl Canvas {
         stroke: ActiveStroke,
     ) {
         let rect = stroke.bounds.intersect(self.full());
+        let within = self.within.take();
         if !rect.is_empty() && self.layers.contains_key(&stroke.layer) {
-            if let Some(snapshot) = self.snapshot(device, encoder, stroke.layer, rect) {
-                self.push_step(Step { made: 0, name: None, doc: None, pixels: vec![snapshot], selection: None });
+            // what the stroke can change: its bounds, or only the rectangles it was said to reach
+            let parts = within.unwrap_or_else(|| vec![rect]);
+            let pixels: Vec<Snapshot> =
+                parts.iter().filter_map(|r| self.snapshot(device, encoder, stroke.layer, r.intersect(rect))).collect();
+            if !pixels.is_empty() {
+                self.push_step(Step { made: 0, name: None, doc: None, pixels, selection: None });
             }
             let opacity = stroke.style.opacity.clamp(0.0, 1.0);
             let locked = stroke.style.preserve_alpha;
@@ -4495,7 +4526,7 @@ impl Canvas {
         match op {
             Op::Stamps { layer, .. } => live.contains(layer),
             Op::Commit(stroke) => live.contains(&stroke.layer),
-            Op::Cancel | Op::SaveTip(_) | Op::Untip(_) | Op::Mark | Op::Name(_) | Op::Collapse => true,
+            Op::Cancel | Op::SaveTip(_) | Op::Untip(_) | Op::Mark | Op::Name(_) | Op::Collapse | Op::Within(_) => true,
             Op::Undo => only_live(self.undo.last()),
             Op::Redo => only_live(self.redo.last()),
             Op::TransformBegin(id)
