@@ -353,6 +353,9 @@ pub(crate) struct Scene {
     /// Strokes that painted the colour, roughness and metalness together: the step each made in
     /// each one's canvas, so undo and redo take them together.
     joint_steps: Vec<JointStep>,
+    /// The brush's grain as a texture, with its key (its own image's, or its built-in one's with
+    /// the top bit set), for a stroke's grain read along the model's axes.
+    grain_source: Option<(u64, wgpu::TextureView)>,
     /// The stroke textures the texture sets' canvases draw their strokes in by turns, made when
     /// first wanted: the colours', and the roughness and metalness's (a stroke on a colour draws
     /// in one of each at once, one channel after the other).
@@ -367,6 +370,8 @@ struct MaterialPaint {
     amount: f32,
     tile: f32,
     source: Option<u64>,
+    /// The source is read about the camera, as the brush's grain is, not fixed to the model.
+    follows_camera: bool,
 }
 
 /// A stroke that painted part `part`'s colour, roughness and metalness: the step it made in each
@@ -432,6 +437,7 @@ impl Scene {
             material_paint: None,
             material_sources: [None, None],
             joint_steps: Vec::new(),
+            grain_source: None,
             strokes: [None, None],
         }
     }
@@ -1897,9 +1903,18 @@ impl State {
                 Err(e) => return log::error!("3D stroke canvas: {e}"),
             }
         }
+        // a grain fixed to the canvas is read along the model's three axes (moving grain stays in
+        // the stamps drawn on the screen), and shows in the colour's coverage alone
+        let grain = stroke_grain(gpu, scene, &brush, style.grain_scale);
+        let mut canvas_style = style;
+        if grain.is_some() {
+            canvas_style.grain = Some(0);
+            canvas_style.grain_mode = procraft_engine::brush::GrainMode::Texturized;
+        } else if canvas_style.grain_mode == procraft_engine::brush::GrainMode::Texturized {
+            canvas_style.grain = None;
+        }
         let Some((screen_doc, screen)) = scene.screen.as_mut() else { return };
         // the screen's canvas holds its own copies of the brush's shape and grain
-        let canvas_style = style;
         screen.use_sources(gpu, &mut style, &brush);
         screen.begin_stroke(screen_doc.current(), style);
         screen.add_stamps(&stamps);
@@ -1908,6 +1923,9 @@ impl State {
         scene.ending = false;
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.begin_drawn_stroke(current, canvas_style);
+            if let Some(grain) = &grain {
+                canvas.set_stroke_grain(&gpu.device, grain);
+            }
         }
         self.stroke = Some(builder);
         self.begin_material_strokes(&brush, canvas_style, current);
@@ -1928,12 +1946,13 @@ impl State {
             (brush.setting("roughness_amount"), brush.setting("roughness_scale"), &brush.roughness),
             (brush.setting("metallic_amount"), brush.setting("metallic_scale"), &brush.metallic),
         ];
-        let mut paint = [MaterialPaint { amount: 0.0, tile: 1.0, source: None }; 2];
+        let follows_camera = brush.setting("grain_follows_camera") >= 0.5;
+        let mut paint = [MaterialPaint { amount: 0.0, tile: 1.0, source: None, follows_camera }; 2];
         for (k, ((amount, scale, source), out)) in channels.into_iter().zip(&mut paint).enumerate() {
             let value = scene.channel_value(part, k + 1);
             let amount = amount.clamp(0.0, 1.0);
             let key = crate::studio::source_key(source);
-            *out = MaterialPaint { amount, tile: (scale * MAX_GRAIN_SCALE).max(4.0), source: key };
+            *out = MaterialPaint { amount, tile: (scale * MAX_GRAIN_SCALE).max(4.0), source: key, follows_camera };
             // a channel never painted is the material's value all over (its Base Layer filled with
             // it): a plain stroke of that very value onto that layer changes nothing, and the
             // channel waits to be made until one does
@@ -2087,7 +2106,12 @@ impl State {
                     .and_then(Option::as_ref)
                     .filter(|(key, _)| Some(*key) == look.source)
                     .map(|(_, view)| view);
-                let look = procraft_gpu::MaterialLook { amount: look.amount, source, tile: look.tile };
+                let look = procraft_gpu::MaterialLook {
+                    amount: look.amount,
+                    source,
+                    tile: look.tile,
+                    follows_camera: look.follows_camera,
+                };
                 let mut encoder =
                     gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("3D material") });
                 view.project_material(gpu, &mut encoder, part, k, canvas.stroke_view(), &look, target.stroke_target());
@@ -2290,6 +2314,38 @@ impl State {
             });
         }
     }
+}
+
+/// A stroke's grain fixed to the canvas read along the model's three axes into the current
+/// part's texture space, one tile every `tile` canvas pixels, if the brush has one and the model
+/// has been drawn: for [`Canvas::set_stroke_grain`].
+fn stroke_grain(
+    gpu: &Gpu,
+    scene: &mut Scene,
+    brush: &procraft_engine::brush::Brush,
+    tile: f32,
+) -> Option<wgpu::TextureView> {
+    let g = &brush.grain;
+    if g.mode != procraft_engine::brush::GrainMode::Texturized || g.depth <= 0.0 {
+        return None;
+    }
+    let key = g.source.as_ref().map(|s| s.id).or_else(|| g.image.map(|i| (1 << 63) | u64::from(i)))?;
+    if scene.grain_source.as_ref().map(|(k, _)| *k) != Some(key) {
+        let pixels = crate::brush_files::grain_pixels(brush)?;
+        let made = procraft_gpu::material_source(gpu, procraft_engine::textures::TEXTURE_SIZE as u32, &pixels);
+        scene.grain_source = made.map(|v| (key, v));
+    }
+    let source = scene.grain_source.as_ref().map(|(_, v)| v)?;
+    let look = procraft_gpu::GrainLook {
+        source,
+        tile: tile.max(1.0),
+        follows_camera: brush.setting("grain_follows_camera") >= 0.5,
+    };
+    let view = scene.view.as_mut()?;
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("3D grain") });
+    let grain = view.project_grain(gpu, &mut encoder, scene.current, &look);
+    gpu.queue.submit([encoder.finish()]);
+    grain
 }
 
 /// Input as window pixels (3D strokes are built on the screen).
@@ -2854,6 +2910,40 @@ mod tests {
         assert!(grey.abs_diff(128) <= 2, "{grey}");
         s.set_model_channel(1);
         assert_eq!(covered_grey(&s), Some(0));
+    }
+
+    #[test]
+    fn a_grain_fixed_to_the_canvas_shows_in_the_colour_read_along_the_models_axes() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        // stripes down the grain image, eight to a tile, fully deep and fixed to the canvas
+        let n = crate::studio::source_size() as usize;
+        let stripes: Vec<u8> =
+            (0..n * n).map(|i| if ((i % n) / (n / 8)).is_multiple_of(2) { 0 } else { 255 }).collect();
+        s.studio_begin();
+        assert!(s.set_studio_source(crate::studio::SourceKind::Grain, stripes));
+        s.set_studio_setting("grain_behavior".into(), 1.0);
+        s.set_studio_setting("grain_depth".into(), 1.0);
+        s.set_studio_setting("grain_scale".into(), 0.5);
+        s.set_studio_setting("roughness_amount".into(), 0.4);
+        s.studio_end(true);
+        frame(&s, 200);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(60.0, 100.0, 0.0)]);
+        s.stroke_add((1..20).map(|i| sample(60.0 + i as f32 * 4.0, 100.0, f64::from(i) * 8.0)).collect());
+        s.stroke_end(vec![sample(140.0, 100.0, 170.0)]);
+        frame(&s, 200);
+        // the colour has gaps where the grain is dark; the roughness takes the whole stroke
+        let colour = painted(&s);
+        s.set_model_channel(1);
+        let rough = painted(&s);
+        s.set_model_channel(0);
+        assert!(rough > 100, "{rough}");
+        assert!(colour > 20 && colour * 10 < rough * 8, "colour {colour}, roughness {rough}");
+        // undone together
+        s.undo();
+        assert_eq!(painted(&s), 0);
     }
 
     #[test]
