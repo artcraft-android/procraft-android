@@ -35,3 +35,6 @@ JDK 17.
 bundles (the Inter font, Lucide icons, light panoramas) and the libraries it is built with are listed
 in [NOTICE](NOTICE); every asset, with its author, source and licence, in
 [ATTRIBUTION.md](ATTRIBUTION.md).
+
+Icons drawn using vector outlines ([`tools/icons/draw_icons.py`](tools/icons/draw_icons.py), to the
+[style guide](docs/icons/STYLE_GUIDE.md)).
