@@ -62,8 +62,8 @@ class Pen:
     def __init__(self):
         self.s = Script(map_xy=screen_to_pen)
 
-    def stroke(self, pts, step_ms=8):
-        self.s.stroke(pts, step_ms)
+    def stroke(self, pts, step_ms=8, **timing):
+        self.s.stroke(pts, step_ms, **timing)
         return self
 
     def pause(self, ms):

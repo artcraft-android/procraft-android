@@ -68,14 +68,17 @@ class Script:
         self.events.append({"id": 1, "command": "report",
                             "report": [1, buttons, xi & 255, xi >> 8, yi & 255, yi >> 8, pi & 255, pi >> 8]})
 
-    def stroke(self, points, step_ms=8):
-        """points: (x, y, pressure) in 0..1; the pen comes into range, touches, moves and lifts."""
+    def stroke(self, points, step_ms=8, dts=None, hover_ms=None):
+        """points: (x, y, pressure) in 0..1; the pen comes into range, touches, moves and lifts.
+        `dts` gives each point's own delay in ms (else `step_ms` each); `hover_ms` how long the
+        pen hovers before touching."""
+        dts = dts or [step_ms] * len(points)
         x0, y0, _ = points[0]
         self.report(False, True, x0, y0, 0)
-        self.delay(step_ms * 2)
-        for x, y, p in points:
+        self.delay(hover_ms if hover_ms is not None else step_ms * 2)
+        for (x, y, p), dt in zip(points, dts):
             self.report(True, True, x, y, max(p, 0.02))
-            self.delay(step_ms)
+            self.delay(dt)
         x1, y1, _ = points[-1]
         self.report(False, True, x1, y1, 0)
         self.delay(step_ms)

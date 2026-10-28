@@ -36,9 +36,9 @@
 <br>
 
 <p align="center">
-  <img src="docs/images/demo.gif" alt="Dusk painted in ProCraft from a blank canvas: the sky filled indigo and airbrushed in bands of purple, magenta, orange and gold; a glow and a sun drawn as a circle that snaps round and is filled by dragging the colour in; two ranges of hills outlined and filled the same way; pines and birds inked; stars airbrushed and made to glow with Bloom; the Layers panel opened on its seven layers" width="100%">
+  <img src="docs/images/demo.webp" alt="Dusk painted in ProCraft from a blank canvas, at a person's pace: the Soft Airbrush picked in the brush library and its size set; colours picked on the Classic square; the sky filled indigo by dragging the colour onto the canvas and airbrushed in bands of purple, magenta, orange and gold; a new layer for a glow and one for the sun, a circle that snaps round and is filled; two ranges of hills outlined and filled; pines and birds inked; stars airbrushed and made to glow with Bloom; the Layers panel opened on its seven layers" width="100%">
   <br>
-  <sub><b>Dusk</b>, painted from a blank canvas on a Lenovo Legion Tab: the sky filled and airbrushed, a sun snapped round and filled by dragging the colour in, hills filled the same way, pines inked, stars with Bloom. 4× playback with the idle pauses cut; <a href="docs/images/demo.mp4">full video</a> (2×). Every stroke is a pen stroke with pressure, played by the <a href="tools/showcase">demo script</a>.</sub>
+  <sub><b>Dusk</b>, painted from a blank canvas on a Lenovo Legion Tab: every menu shown at close to real speed, the drawing about 3x. The brush library, the colour picker, the layers, a sun snapped round and filled, hills filled the same way, pines, stars with Bloom. <a href="docs/images/demo.mp4">Video</a> (MP4, 2:21). Every stroke is a pen stroke with pressure, eased in and out, played by the <a href="tools/showcase">demo script</a>.</sub>
 </p>
 
 <br>
