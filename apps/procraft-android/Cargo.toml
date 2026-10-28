@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 description = "ProCraft on Android: the engine and renderer as a native library with Kotlin bindings (UniFFI); the app is in android/"
 
 [lib]

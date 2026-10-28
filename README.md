@@ -25,3 +25,8 @@ cd apps/procraft-android/android
 
 You need Rust with the Android targets, `cargo-ndk`, the Android SDK with NDK 29.0.14206865, and
 JDK 17.
+
+## Licence
+
+[MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE), at your option. The third-party material the app
+bundles (fonts, light panoramas) and the libraries it is built with are listed in [NOTICE](NOTICE).
