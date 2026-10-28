@@ -5977,9 +5977,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
         /**
          * The layered package's file extensions, and their names in the Share lists: ours, and the
-         * other app's (the same package, so either opens in both).
+         * other app's (the same package, so either opens in both). Files are told apart by what is
+         * in them, so `.pcraft` ones from before and other apps' `.procraft` zips still open.
          */
-        const val OWN_EXTENSION = "pcraft"
+        const val OWN_EXTENSION = "procraft"
         const val OWN_LABEL = "ProCraft"
         const val PACKAGE_EXTENSION = "procreate"
 
