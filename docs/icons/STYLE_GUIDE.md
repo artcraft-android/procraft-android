@@ -231,3 +231,11 @@ by one.
 | Moving / Texturized (grain) | rows of grain with an arrow along under them / the pitted Grain tile |
 | Paint, painting an adjustment on | the Paint brush with an adjustment ring |
 | Brush swipe: Share / Duplicate | the tray and rising arrow / the Duplicate sheets |
+
+## Brush set icons
+
+Each of the 48 is the object its name says, drawn plainly in this guide's shapes (`SET_ICONS` in
+`tools/icons/draw_icons.py`, in the picker's order). Where the name is a way of working, the icon is
+its tool: Sketching a pencil, Inking an ink bottle, Painting the palette, Airbrushing a spray can,
+Charcoals a stick of charcoal, Textures the pitted Grain tile. Brush, Wand and Checkmark are the
+bar's brush, the Adjustments wand and Done's tick.

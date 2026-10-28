@@ -1013,6 +1013,318 @@ def painted_on():
     return unary_union([scale(paintbrush(), 0.86, 0.86, origin=(2, 22)), ring(6.0, 6.0, 3.0, 1.8)])
 
 
+# The brush set icons, one for each name in the set icon picker, in its order.
+
+
+def angled_brush():
+    """Angled Brush: a flat brush, its bristles cut on a slant."""
+    bristles = soft(Polygon([(0, 2.6), (3.6, -2.6), (7.8, -2.6), (7.8, 2.6)]), 0.3)
+    ferrule = soft(box(8.8, -2.4, 11.6, 2.4), 0.4)
+    handle = unary_union([Polygon([(12.4, -1.5), (21.0, -1.0), (21.0, 1.0), (12.4, 1.5)]), Point(21.0, 0).buffer(1.0, quad_segs=12)])
+    return along_diagonal(unary_union([bristles, ferrule, handle]), (3.6, 20.4))
+
+
+def artboard():
+    """Artboard: a board on an easel's three legs."""
+    return unary_union([soft(box(4.0, 2.5, 20.0, 13.0), 1.0), capsule((12.0, 13.0), (12.0, 21.0), 1.1),
+                        capsule((8.6, 13.0), (5.0, 21.0), 1.1), capsule((15.4, 13.0), (19.0, 21.0), 1.1)])
+
+
+def asterisk():
+    """Asterisk: three bars crossing at the middle."""
+    return unary_union([rotate(capsule((12.0, 3.0), (12.0, 21.0), 1.7), a, origin=(12, 12)) for a in (0, 60, 120)])
+
+
+def bell():
+    """Bell: a bell, its lip and its clapper."""
+    dome = Point(12, 10.0).buffer(6.0, quad_segs=24).intersection(box(0, 0, 24, 10.0))
+    body = unary_union([dome, box(6.0, 10.0, 18.0, 15.6), soft(box(3.6, 15.0, 20.4, 18.0), 0.8)])
+    return unary_union([body, Point(12, 3.4).buffer(1.5, quad_segs=10), Point(12, 20.6).buffer(1.8, quad_segs=12)])
+
+
+def bookmark():
+    """Bookmark: a ribbon with a notch cut in its end."""
+    return soft(Polygon([(6.0, 2.5), (18.0, 2.5), (18.0, 21.5), (12.0, 16.6), (6.0, 21.5)]), 1.0)
+
+
+def cactus():
+    """Cactus: a stem with two raised arms."""
+    return unary_union([capsule((12.0, 4.0), (12.0, 19.6), 2.6), capsule((5.6, 7.6), (5.6, 12.6), 1.8),
+                        capsule((5.6, 12.6), (12.0, 12.6), 1.8), capsule((18.4, 5.6), (18.4, 10.4), 1.8),
+                        capsule((18.4, 10.4), (12.0, 10.4), 1.8)])
+
+
+def cloud():
+    """Cloud: a cloud, flat underneath."""
+    puffs = unary_union([Point(7.6, 14.0).buffer(4.4, quad_segs=16), Point(12.8, 10.4).buffer(5.6, quad_segs=16),
+                         Point(17.8, 14.4).buffer(4.0, quad_segs=16), box(7.6, 13.0, 17.8, 18.4)])
+    return puffs.intersection(box(0, 0, 24, 18.4))
+
+
+def controller():
+    """Controller: a game controller, its pad and buttons cut out."""
+    body = unary_union([capsule((7.0, 11.4), (17.0, 11.4), 5.0), Point(5.4, 15.4).buffer(3.6, quad_segs=16),
+                        Point(18.6, 15.4).buffer(3.6, quad_segs=16)])
+    pad = unary_union([capsule((5.4, 11.4), (9.4, 11.4), 0.65), capsule((7.4, 9.4), (7.4, 13.4), 0.65)])
+    return body.difference(pad).difference(Point(15.6, 10.2).buffer(1.1, quad_segs=8)).difference(Point(18.2, 12.8).buffer(1.1, quad_segs=8))
+
+
+def dart():
+    """Dart: a dart, its point down to the left."""
+    point = soft(Polygon([(0, 0), (4.2, -1.2), (4.2, 1.2)]), 0.2)
+    barrel = soft(box(4.0, -1.8, 10.4, 1.8), 0.6)
+    shaft = box(10.0, -0.8, 15.0, 0.8)
+    flights = soft(Polygon([(13.8, 0), (21.6, -4.8), (21.6, 4.8)]), 0.5)
+    return along_diagonal(unary_union([point, barrel, shaft, flights]), (3.2, 20.8))
+
+
+def rhombus():
+    """Diamond: a diamond, as on a playing card."""
+    return soft(Polygon([(12.0, 2.5), (19.5, 12.0), (12.0, 21.5), (4.5, 12.0)]), 1.0)
+
+
+def die():
+    """Dice: a die showing five."""
+    d = soft(box(3.0, 3.0, 21.0, 21.0), 3.0)
+    for x, y in ((7.6, 7.6), (16.4, 7.6), (12.0, 12.0), (7.6, 16.4), (16.4, 16.4)):
+        d = d.difference(Point(x, y).buffer(1.7, quad_segs=10))
+    return d
+
+
+def a_drop():
+    """Drop: a drop."""
+    return drop(12.0, 14.6, 6.6)
+
+
+def fan_brush():
+    """Fan Brush: a fan of bristles on a handle."""
+    c = (12.0, 15.0)
+    fan = Polygon([c] + [(c[0] + 10.0 * math.cos(math.radians(a)), c[1] + 10.0 * math.sin(math.radians(a))) for a in range(-150, -29, 5)])
+    fan = fan.difference(Point(c).buffer(3.4, quad_segs=16))
+    for a in (-110, -70):
+        fan = fan.difference(LineString([c, (c[0] + 11 * math.cos(math.radians(a)), c[1] + 11 * math.sin(math.radians(a)))]).buffer(0.55))
+    return unary_union([fan, soft(box(10.2, 13.2, 13.8, 17.0), 0.4), capsule((12.0, 17.6), (12.0, 21.6), 1.2)])
+
+
+def film_strip():
+    """Film Tape: a strip of film, its holes along both edges."""
+    strip = soft(box(2.0, 4.5, 22.0, 19.5), 1.0)
+    for x in (4.6, 8.8, 13.0, 17.2):
+        for y in (6.9, 17.1):
+            strip = strip.difference(soft(box(x, y - 0.8, x + 2.2, y + 0.8), 0.3))
+    for x0, x1 in ((4.0, 11.4), (12.6, 20.0)):
+        strip = strip.difference(soft(box(x0, 9.4, x1, 14.6), 0.6))
+    return strip
+
+
+def fish():
+    """Fish: a fish, its tail and its eye."""
+    from shapely.affinity import scale
+    body = scale(Point(10.0, 12.0).buffer(1.0, quad_segs=32), 7.8, 5.2)
+    tail = soft(Polygon([(16.6, 12.0), (22.0, 6.8), (22.0, 17.2)]), 0.6)
+    return unary_union([body, tail]).difference(Point(6.4, 10.6).buffer(1.1, quad_segs=10))
+
+
+def flag():
+    """Flag: a pennant on its pole."""
+    return unary_union([capsule((5.0, 3.0), (5.0, 21.4), 1.1),
+                        soft(Polygon([(7.2, 3.4), (20.4, 3.4), (16.6, 8.6), (20.4, 13.8), (7.2, 13.8)]), 0.6)])
+
+
+def flame():
+    """Flame: a flame, its heart cut out."""
+    return drop(12.0, 15.2, 6.6).difference(drop(12.0, 17.4, 2.6))
+
+
+def flash():
+    """Flash: a bolt of lightning."""
+    return soft(Polygon([(14.0, 2.0), (5.0, 13.6), (11.0, 13.6), (9.4, 22.0), (19.0, 9.6), (13.0, 9.6), (16.0, 2.0)]), 0.5)
+
+
+def flower():
+    """Flower: five petals round a centre."""
+    petals = unary_union([Point(12 + 5.8 * math.cos(math.radians(-90 + 72 * k)), 12 + 5.8 * math.sin(math.radians(-90 + 72 * k))).buffer(3.8, quad_segs=16)
+                          for k in range(5)])
+    return unary_union([petals.difference(Point(12, 12).buffer(3.6, quad_segs=16)), Point(12, 12).buffer(2.4, quad_segs=16)])
+
+
+def hammer():
+    """Hammer: a hammer, its head across the top of the handle."""
+    head = soft(Polygon([(3.0, 3.6), (16.0, 3.6), (21.0, 2.0), (21.0, 9.6), (16.0, 8.4), (3.0, 8.4)]), 0.8)
+    return rotate(unary_union([head, soft(box(9.6, 8.0, 13.0, 21.8), 0.8)]), -20, origin=(12, 12))
+
+
+def headphones():
+    """Headphones: a band over two ear cups."""
+    band = ring(12, 13.4, 8.0, 2.0).intersection(box(0, 0, 24, 13.4))
+    return unary_union([band, soft(box(2.6, 12.4, 7.6, 20.6), 1.4), soft(box(16.4, 12.4, 21.4, 20.6), 1.4)])
+
+
+def heart():
+    """Heart: a heart."""
+    return soft(unary_union([Point(8.2, 9.0).buffer(4.8, quad_segs=24), Point(15.8, 9.0).buffer(4.8, quad_segs=24),
+                             Polygon([(3.6, 10.6), (20.4, 10.6), (12.0, 20.8)])]), 0.6)
+
+
+def home():
+    """Home: a house, its roof and its door."""
+    roof = soft(Polygon([(12.0, 2.4), (22.0, 11.0), (2.0, 11.0)]), 0.8)
+    walls = box(5.0, 10.0, 19.0, 21.0)
+    return unary_union([roof, soft(walls, 0.6)]).difference(soft(box(10.2, 14.4, 13.8, 22.0), 0.6))
+
+
+def moon():
+    """Moon: a crescent."""
+    return Point(12, 12).buffer(9.0, quad_segs=32).difference(Point(16.4, 8.6).buffer(7.6, quad_segs=32))
+
+
+def note():
+    """Note: a musical note, its head, stem and flag."""
+    head = rotate(soft(box(4.4, 15.6, 11.4, 20.8), 2.4), -20, origin=(8, 18))
+    return unary_union([head, capsule((10.6, 18.0), (10.6, 3.6), 1.1),
+                        soft(Polygon([(9.6, 2.6), (12.0, 2.6), (18.4, 7.0), (18.4, 10.4), (11.6, 7.4)]), 0.5)])
+
+
+def pen_nib():
+    """Pen: a fountain pen, its nib down to the left."""
+    nib = soft(Polygon([(0, 0), (6.0, -2.8), (8.0, -2.8), (8.0, 2.8), (6.0, 2.8)]), 0.4)
+    nib = nib.difference(capsule((1.6, 0), (5.0, 0), 0.5)).difference(Point(5.4, 0).buffer(0.9, quad_segs=8))
+    body = unary_union([box(9.0, -2.8, 19.4, 2.8), Point(19.4, 0).buffer(2.8, quad_segs=12)])
+    return along_diagonal(unary_union([nib, body]), (3.2, 20.8))
+
+
+def map_pin():
+    """Pin: a map pin, its hole cut out."""
+    head = unary_union([Point(12, 9.4).buffer(6.8, quad_segs=24), Point(12, 22.0).buffer(0.3)]).convex_hull
+    return head.difference(Point(12, 9.4).buffer(2.6, quad_segs=16))
+
+
+def plane():
+    """Plane: an aeroplane seen from above."""
+    return unary_union([capsule((12.0, 2.4), (12.0, 20.6), 1.8),
+                        soft(Polygon([(12.0, 7.6), (22.0, 13.4), (22.0, 15.6), (12.0, 12.6), (2.0, 15.6), (2.0, 13.4)]), 0.4),
+                        soft(Polygon([(12.0, 17.0), (16.6, 20.2), (16.6, 21.8), (12.0, 20.4), (7.4, 21.8), (7.4, 20.2)]), 0.3)])
+
+
+def puzzle_piece():
+    """Puzzle: a jigsaw piece, a knob out on two sides and in on one."""
+    piece = unary_union([soft(box(4.0, 7.0, 18.0, 21.0), 1.0), Point(20.0, 14.0).buffer(2.6, quad_segs=16),
+                         Point(11.0, 5.0).buffer(2.6, quad_segs=16)])
+    return piece.difference(Point(4.0, 14.0).buffer(2.4, quad_segs=16))
+
+
+def rocket():
+    """Rocket: a rocket, its window, fins and flame."""
+    body = soft(Polygon([(12.0, 1.8), (16.0, 7.6), (16.0, 16.8), (8.0, 16.8), (8.0, 7.6)]), 1.2)
+    body = body.difference(Point(12.0, 9.8).buffer(1.9, quad_segs=12))
+    fins = [soft(Polygon([(7.0, 11.6), (3.6, 16.6), (3.6, 19.2), (7.0, 17.0)]), 0.4),
+            soft(Polygon([(17.0, 11.6), (20.4, 16.6), (20.4, 19.2), (17.0, 17.0)]), 0.4)]
+    return unary_union([body] + fins + [soft(Polygon([(9.8, 18.2), (14.2, 18.2), (12.0, 22.6)]), 0.4)])
+
+
+def spark():
+    """Spark: a large four-point sparkle and a small one."""
+    return unary_union([star(10.6, 13.0, 9.6, 0.3), star(19.0, 5.0, 3.6, 0.3)])
+
+
+def five_point_star():
+    """Star: a five-point star."""
+    pts = []
+    for k in range(10):
+        a = math.radians(-90 + 36 * k)
+        r = 10.0 if k % 2 == 0 else 4.2
+        pts.append((12 + r * math.cos(a), 12.6 + r * math.sin(a)))
+    return soft(Polygon(pts), 0.6)
+
+
+def sun_object():
+    """Sun: a sun, its disc and eight rays."""
+    parts = [Point(12, 12).buffer(4.6, quad_segs=16)]
+    for i in range(8):
+        a = math.radians(45 * i)
+        parts.append(capsule((12 + 7.2 * math.cos(a), 12 + 7.2 * math.sin(a)), (12 + 9.8 * math.cos(a), 12 + 9.8 * math.sin(a)), 1.2))
+    return unary_union(parts)
+
+
+def swoosh():
+    """Swoosh: a curved stroke, thin at its ends."""
+    n = 40
+    top, bottom = [], []
+    for i in range(n + 1):
+        t = i / n
+        x, y, w = 2.0 + 20.0 * t, 17.0 - 11.0 * t * t, 3.0 * math.sin(math.pi * t) ** 0.6
+        top.append((x, y - w))
+        bottom.append((x, y + w))
+    return Polygon(top + bottom[::-1]).buffer(0.3)
+
+
+def sword():
+    """Sword: a sword, its point down to the left."""
+    blade = soft(Polygon([(0, 0), (3.0, -1.7), (14.6, -1.7), (14.6, 1.7), (3.0, 1.7)]), 0.3)
+    guard = soft(box(15.4, -4.6, 17.2, 4.6), 0.6)
+    grip = box(17.8, -1.1, 20.4, 1.1)
+    return along_diagonal(unary_union([blade, guard, grip, Point(21.2, 0).buffer(1.6, quad_segs=12)]), (2.8, 21.2))
+
+
+def ticket():
+    """Ticket: a ticket, notched at both sides, a tear line across."""
+    t = soft(box(2.0, 6.0, 22.0, 18.0), 1.0)
+    t = t.difference(Point(2.0, 12.0).buffer(2.4, quad_segs=12)).difference(Point(22.0, 12.0).buffer(2.4, quad_segs=12))
+    return t.difference(dashes([(15.6, 7.6), (15.6, 16.4)], False, 1.6, 1.4, 0.5))
+
+
+def pine():
+    """Tree: a pine, three tiers on a trunk."""
+    tiers = [soft(Polygon(p), 0.6) for p in (((12.0, 1.8), (17.6, 8.8), (6.4, 8.8)), ((12.0, 5.6), (19.6, 14.0), (4.4, 14.0)),
+                                             ((12.0, 10.0), (21.6, 19.0), (2.4, 19.0)))]
+    return unary_union(tiers + [box(10.6, 18.0, 13.4, 22.0)])
+
+
+def umbrella():
+    """Umbrella: a canopy with a scalloped edge, a hooked handle."""
+    canopy = Point(12, 12.0).buffer(9.6, quad_segs=32).intersection(box(0, 0, 24, 12.0))
+    for x in (5.6, 12.0, 18.4):
+        canopy = canopy.difference(Point(x, 12.6).buffer(3.0, quad_segs=16))
+    hook = [(9.4 + 1.6 * math.cos(math.radians(a)), 19.4 + 1.6 * math.sin(math.radians(a))) for a in range(0, 181, 15)]
+    handle = unary_union([capsule((11.0, 10.0), (11.0, 19.4), 1.0), LineString(hook).buffer(1.0)])
+    return unary_union([canopy, handle])
+
+
+def wizard_hat():
+    """Wizard Hat: a pointed hat with a star cut out, on its brim."""
+    cone = soft(Polygon([(13.6, 1.6), (18.0, 16.2), (6.0, 16.2), (10.4, 6.0)]), 0.8)
+    cone = cone.difference(star(12.0, 11.4, 2.8, 0.4))
+    return unary_union([cone, capsule((3.0, 19.0), (21.0, 19.0), 1.6)])
+
+
+def ink_bottle():
+    """Inking: an ink bottle, its cap and label."""
+    bottle = soft(Polygon([(4.6, 11.2), (8.6, 7.8), (15.4, 7.8), (19.4, 11.2), (19.4, 21.4), (4.6, 21.4)]), 1.2)
+    bottle = bottle.difference(soft(box(7.6, 13.6, 16.4, 18.6), 0.6))
+    return unary_union([bottle, soft(box(8.6, 2.4, 15.4, 6.6), 0.8)])
+
+
+def spray_can():
+    """Airbrushing: a spray can, its cap, and a puff of spray."""
+    can = soft(box(5.0, 8.2, 15.0, 21.6), 1.6)
+    cap = soft(box(7.0, 4.4, 13.0, 7.0), 0.5)
+    nozzle = box(9.0, 2.2, 11.6, 4.4)
+    puff = [Point(x, y).buffer(r, quad_segs=8) for x, y, r in ((15.0, 3.2, 0.9), (18.0, 2.4, 0.9), (17.4, 5.4, 0.9),
+                                                              (20.6, 4.4, 0.9), (20.2, 7.6, 0.9))]
+    return unary_union([can, cap, nozzle] + puff)
+
+
+def charcoal():
+    """Charcoals: a stick of charcoal, its end worn to a slant, and crumbs."""
+    stick = soft(Polygon([(0, 1.6), (4.8, -2.8), (21.0, -2.8), (21.0, 2.8), (3.6, 2.8)]), 0.5)
+    crumbs = [Point(x, y).buffer(r, quad_segs=8) for x, y, r in ((2.6, 15.0, 1.0), (7.6, 21.0, 0.9))]
+    return unary_union([along_diagonal(stick, (3.6, 20.4))] + crumbs)
+
+
+SET_ICONS = [angled_brush, artboard, asterisk, bell, bookmark, paintbrush, cactus, tick, cloud, controller, dart,
+             rhombus, die, a_drop, fan_brush, film_strip, fish, flag, flame, flash, flower, hammer, headphones, heart,
+             home, moon, note, pen_nib, map_pin, plane, puzzle_piece, rocket, spark, five_point_star, sun_object, swoosh,
+             sword, ticket, pine, umbrella, wand, wizard_hat, pencil, ink_bottle, palette, spray_can, charcoal, grain_tile]
 DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
@@ -1060,6 +1372,7 @@ DRAWINGS = {
     'glitchdiverge': fork, 'grainmoving': moving_grain, 'graintexturized': grain_tile, 'brushpaintedon': painted_on,
     'swipe-share': share_tab, 'swipe-duplicate': duplicate,
 }
+DRAWINGS.update({f'set-{k}': draw for k, draw in enumerate(SET_ICONS)})
 
 
 def fmt(v):
@@ -1105,7 +1418,7 @@ def main():
         oy = (y0 + y1) / 2 - s * (by0 + by1) / 2
         d = path_data(shape, lambda x, y: (ox + s * x, oy + s * y))
         frame = f'{fmt(w)}f' if w == h else f'{fmt(w)}f, {fmt(h)}f'
-        call = re.compile(r'(?:phosphor|ours)\("' + re.escape(name) + r'", [^\n]*?\)(?= \})')
+        call = re.compile(r'(?:phosphor|ours)\("' + re.escape(name) + r'", [^\n]*?\)(?= \}|,?\n)')
         src, n = call.subn(f'ours("{name}", {frame}, "{d}")', src)
         if n != 1:
             raise SystemExit(f'{name}: {n} places in Icons.kt')
