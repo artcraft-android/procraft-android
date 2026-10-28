@@ -75,6 +75,20 @@ pub fn set_layer_budget(bytes: u64) {
     procraft_engine::document::set_layer_budget(bytes);
 }
 
+/// What the layers' textures may take on this device, bytes: past it, layers not worked on are
+/// kept compressed off the GPU until needed. 0 keeps them all on it.
+static RESIDENT_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Sets what the layers' textures may take, bytes (see [`RESIDENT_BUDGET`]).
+#[uniffi::export]
+pub fn set_resident_budget(bytes: u64) {
+    RESIDENT_BUDGET.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn resident_budget() -> u64 {
+    RESIDENT_BUDGET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// How many layers a canvas holds, has, and of which kinds.
 #[derive(uniffi::Record)]
 pub struct LayerStats {

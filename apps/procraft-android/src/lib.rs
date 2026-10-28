@@ -555,9 +555,13 @@ impl State {
         let Some(gpu) = self.gpu.as_ref() else { return };
         match Canvas::new(gpu, &self.doc) {
             Ok(mut c) => {
+                c.set_resident_budget(crate::layers::resident_budget());
                 let (w, h) = (self.doc.width(), self.doc.height());
                 for (id, pixels) in project::opened_pixels(std::mem::take(&mut self.pending_pixels), w, h) {
-                    if let Err(e) = c.upload_layer(gpu, id, &pixels) {
+                    // past what fits, kept compressed until needed
+                    let opened =
+                        if c.has_room() { c.upload_layer(gpu, id, &pixels) } else { c.park_pixels(id, &pixels) };
+                    if let Err(e) = opened {
                         log::error!("opening a layer: {e}");
                     }
                 }
@@ -664,6 +668,7 @@ impl Shared {
             (gpu.clone(), st.doc.clone(), st.pending_pixels.iter().map(|(id, _)| *id).collect::<Vec<_>>())
         };
         let made = Canvas::new(&gpu, &doc).map(|mut c| {
+            c.set_resident_budget(crate::layers::resident_budget());
             for (i, id) in ids.iter().enumerate() {
                 let Some(layer) = self.lock().pending_pixels.get(i).filter(|(at, _)| at == id).map(|(_, p)| p.clone())
                 else {
@@ -671,7 +676,10 @@ impl Shared {
                 };
                 match layer.pixels(doc.width(), doc.height()) {
                     Ok(pixels) => {
-                        if let Err(e) = c.upload_layer(&gpu, *id, &pixels) {
+                        // past what fits, kept compressed until needed
+                        let opened =
+                            if c.has_room() { c.upload_layer(&gpu, *id, &pixels) } else { c.park_pixels(*id, &pixels) };
+                        if let Err(e) = opened {
                             log::error!("opening a layer: {e}");
                         }
                     }

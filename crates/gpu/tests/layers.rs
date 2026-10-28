@@ -538,3 +538,45 @@ fn an_artwork_opening_with_more_layers_than_fit_parks_the_rest() {
     t.same(&gpu, 2, "one opened parked, painted");
     assert!(t.canvases[0].parked_layers() > 0);
 }
+
+#[test]
+fn an_animation_keeps_only_the_frames_shown() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
+    t.each(|doc, canvas| {
+        let first = doc.current();
+        paint(canvas, doc, first, [0, 0, 0], Vec2::new(2.0, 8.0), 2.0, StrokeTool::Paint);
+        for i in 1..10u8 {
+            let id = doc.add_layer();
+            paint(
+                canvas,
+                doc,
+                id,
+                [i * 25, 100, 200 - i * 20],
+                Vec2::new(2.0 + f32::from(i) * 1.3, 8.0),
+                2.0,
+                StrokeTool::Paint,
+            );
+        }
+        doc.animation = Some(procraft_engine::animation::Animation { onion_frames: 1, ..Default::default() });
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "the last frame");
+    t.same(&gpu, 2, "the last frame, the rest parked");
+    assert!(t.canvases[0].parked_layers() >= 5, "parked: {}", t.canvases[0].parked_layers());
+    let ids: Vec<LayerId> = t.docs[0].layers().iter().map(|l| l.id).collect();
+    t.each(|doc, canvas| {
+        doc.set_current(ids[3]);
+        paint(canvas, doc, ids[3], [255, 255, 0], Vec2::new(8.0, 4.0), 2.0, StrokeTool::Paint);
+    });
+    t.same(&gpu, 2, "another frame painted");
+    for f in [0, 6, 9] {
+        t.each(|_, canvas| canvas.set_play_frame(Some(f)));
+        t.same(&gpu, 2, "played");
+    }
+    t.each(|_, canvas| canvas.set_play_frame(None));
+    t.same(&gpu, 2, "stopped");
+}

@@ -1894,10 +1894,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun start(s: CanvasSession, dir: File, brushesLoaded: Boolean = false) {
         // the canvas's colours are P3 or sRGB numbers: the colour panel and swatches follow
         refreshCanvasSpace(s)
-        // layers may take a quarter of the device's memory: every layer stays on the GPU
+        // layers may take half the device's memory, their textures a quarter: past that, those not
+        // worked on are kept compressed off the GPU until needed
         val memory = android.app.ActivityManager.MemoryInfo()
         getApplication<Application>().getSystemService(android.app.ActivityManager::class.java)?.getMemoryInfo(memory)
-        if (memory.totalMem > 0) io.github.artcraftandroid.procraft.core.setLayerBudget((memory.totalMem / 4).toULong())
+        if (memory.totalMem > 0) {
+            io.github.artcraftandroid.procraft.core.setLayerBudget((memory.totalMem / 2).toULong())
+            io.github.artcraftandroid.procraft.core.setResidentBudget((memory.totalMem / 4).toULong())
+        }
         s.setSelectionVisibility(selectionVisibility)
         s.setBrushScaling(brushOnScreen)
         s.setLightInterface(lightInterface)

@@ -1963,9 +1963,16 @@ impl Canvas {
         if self.resident_budget == 0 || self.layers.len() <= most {
             return;
         }
-        let Some(c) = &self.caches else { return };
-        let mut keep = c.live_layers.clone();
-        keep.extend(c.live.first().and_then(|first| doc.clip_base(*first)));
+        let mut keep = match (&self.caches, self.shown_frames(doc)) {
+            (Some(c), _) => {
+                let mut keep = c.live_layers.clone();
+                keep.extend(c.live.first().and_then(|first| doc.clip_base(*first)));
+                keep
+            }
+            // the frames shown, while Animation Assist is on
+            (None, Some(shown)) => shown,
+            (None, None) => return,
+        };
         keep.extend(self.active.map(|a| a.layer));
         keep.extend(self.held.as_ref().map(|h| h.layer));
         let mut gone: Vec<LayerId> = self.layers.keys().filter(|id| !keep.contains(*id)).copied().collect();
@@ -3772,9 +3779,13 @@ impl Canvas {
         let device = &gpu.device;
         let Some((tops, live)) = self.live_items(doc).filter(|_| self.cache_composites) else {
             self.caches = None;
-            // everything composites: every layer is needed
-            let all: Vec<LayerId> = doc.pixel_layer_ids().collect();
-            self.restore_all(gpu, all, false);
+            // everything shown composites: Animation Assist's frames around the current one, or
+            // every layer
+            let needed: Vec<LayerId> = match self.shown_frames(doc) {
+                Some(shown) => shown.into_iter().collect(),
+                None => doc.pixel_layer_ids().collect(),
+            };
+            self.restore_all(gpu, needed, false);
             return;
         };
         let below_items = tops.get(..live.start).unwrap_or_default().to_vec();
@@ -3888,6 +3899,28 @@ impl Canvas {
         caches.live = tops.get(live).unwrap_or_default().to_vec();
         caches.live_layers = caches.live.iter().flat_map(|t| item_layers(doc, *t)).collect();
         self.caches = Some(caches);
+    }
+
+    /// With Animation Assist on (and nothing else under way), the layers of the frames shown: the
+    /// current (or played) one, its onion skins, and a background or foreground frame.
+    fn shown_frames(&self, doc: &Document) -> Option<HashSet<LayerId>> {
+        let a = doc.animation.as_ref()?;
+        let busy =
+            self.transforming.is_some() || self.liquify.is_some() || self.pencil.is_some() || self.held.is_some();
+        if busy || self.smudge.is_some() {
+            return None;
+        }
+        let frames = animation::frames(doc);
+        let focus = self.play_frame.or_else(|| animation::current_frame(doc))?;
+        let shown: HashSet<LayerId> = frames
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                !matches!(animation::look(a, *i, frames.len(), focus, self.play_frame.is_some()), FrameLook::Hidden)
+            })
+            .flat_map(|(_, f)| item_layers(doc, *f))
+            .collect();
+        Some(shown)
     }
 
     /// How many layers' textures fit the budget (any number without one).
