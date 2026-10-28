@@ -3826,9 +3826,7 @@ impl Canvas {
     /// is below the run), with every layer in them; none while something else is under way
     /// (Animation Assist's frames, an adjustment, liquify, a transform, a stroke elsewhere).
     fn live_items(&self, doc: &Document) -> Option<(Vec<LayerId>, std::ops::Range<usize>)> {
-        let busy =
-            self.transforming.is_some() || self.liquify.is_some() || self.pencil.is_some() || self.held.is_some();
-        if doc.animation.is_some() || busy || self.smudge.is_some() {
+        if doc.animation.is_some() {
             return None;
         }
         let tops = doc.members(None);
@@ -3852,7 +3850,16 @@ impl Canvas {
             end += 1;
         }
         let live: HashSet<LayerId> = tops.get(start..end)?.iter().flat_map(|t| item_layers(doc, *t)).collect();
-        if self.active.is_some_and(|a| !live.contains(&a.layer)) {
+        // what is being worked on (a stroke, a smudge, a transform or adjustment, a held edit)
+        // must be among them
+        let worked = self
+            .active
+            .map(|a| a.layer)
+            .into_iter()
+            .chain(self.smudge.as_ref().map(|s| s.layer))
+            .chain(self.transforming.iter().chain(&self.transform_more).map(|t| t.layer))
+            .chain(self.held.as_ref().map(|h| h.layer));
+        if worked.into_iter().any(|id| !live.contains(&id)) {
             return None;
         }
         Some((tops, start..end))
@@ -4227,17 +4234,35 @@ impl Canvas {
         self.invalidate();
     }
 
-    /// Whether work keeps the caches: painting, or undoing or redoing it, on a layer worked on.
+    /// Whether work keeps the caches: it changes only the pixels of layers worked on (painting,
+    /// transforms and adjustments, held edits, clearing, and undoing or redoing those).
     fn keeps_caches(&self, op: &Op, live: &HashSet<LayerId>) -> bool {
         let only_live = |step: Option<&Step>| {
             step.is_some_and(|s| s.doc.is_none() && s.pixels.iter().all(|p| live.contains(&p.layer)))
         };
+        let transformed_live = || self.transforming.iter().chain(&self.transform_more).all(|t| live.contains(&t.layer));
         match op {
             Op::Stamps { layer, .. } => live.contains(layer),
             Op::Commit(stroke) => live.contains(&stroke.layer),
             Op::Cancel | Op::SaveTip(_) | Op::Untip(_) | Op::Mark | Op::Name(_) | Op::Collapse => true,
             Op::Undo => only_live(self.undo.last()),
             Op::Redo => only_live(self.redo.last()),
+            Op::TransformBegin(id)
+            | Op::TransformAlso(id)
+            | Op::Hold(id)
+            | Op::Put(id, _)
+            | Op::Clear(id)
+            | Op::Wipe(id) => live.contains(id),
+            Op::TransformSet { .. }
+            | Op::TransformMesh { .. }
+            | Op::FilterSet(_)
+            | Op::LiquifyBegin
+            | Op::PencilBegin
+            | Op::LiquifyStamps(_)
+            | Op::LiquifyClear
+            | Op::TransformEnd { .. } => transformed_live(),
+            Op::Release { before: None, .. } => self.held.as_ref().is_none_or(|h| live.contains(&h.layer)),
+            Op::Write { layers, before: None } => layers.iter().all(|(id, _)| live.contains(id)),
             _ => false,
         }
     }

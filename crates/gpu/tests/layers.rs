@@ -5,7 +5,7 @@
 use procraft_engine::document::{BlendMode, Document, LayerId};
 use procraft_engine::geom::Vec2;
 use procraft_engine::stroke::Stamp;
-use procraft_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
+use procraft_gpu::{Canvas, Filter, Gpu, Resample, StrokeStyle, StrokeTool};
 
 const W: u32 = 16;
 
@@ -727,4 +727,50 @@ fn a_layers_version_changes_with_its_pixels_only() {
     canvas.render(&gpu, &mut doc, None);
     assert_ne!(canvas.layer_version(b), painted, "undone");
     assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn transforms_and_adjustments_on_the_layer_worked_on_keep_the_caches() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    t.canvases[0].set_cache_composites(true);
+    let base = t.docs[0].current();
+    t.each(|doc, canvas| {
+        fill(canvas, doc, base, [200, 40, 40]);
+        for i in 0..4u8 {
+            let id = doc.add_layer();
+            let at = Vec2::new(f32::from(i) * 3.0 + 3.0, 8.0);
+            paint(canvas, doc, id, [i * 50, 100, 200 - i * 40], at, 3.0, StrokeTool::Paint);
+        }
+        canvas.invalidate();
+    });
+    let middle = t.docs[0].layers()[2].id;
+    t.each(|doc, _| {
+        doc.set_current(middle);
+    });
+    t.same(&gpu, 2, "made");
+    assert!(t.canvases[0].composites_cached());
+    // moved by (3, 2), applied, undone
+    t.each(|_, canvas| {
+        canvas.begin_transform(middle);
+        canvas.set_transform([1.0, 0.0, -3.0, 0.0, 1.0, -2.0, 0.0, 0.0, 1.0], Resample::Bilinear);
+    });
+    t.same(&gpu, 2, "moved");
+    assert!(t.canvases[0].composites_cached(), "kept while transforming");
+    t.each(|_, canvas| canvas.end_transform(true));
+    t.same(&gpu, 2, "applied");
+    t.each(|_, canvas| canvas.undo());
+    t.same(&gpu, 2, "undone");
+    // an adjustment on it, cancelled
+    t.each(|_, canvas| {
+        canvas.begin_transform(middle);
+        canvas.set_filter(Filter::Hsb { hue: 1.0, saturation: 0.5, brightness: 0.1 });
+    });
+    t.same(&gpu, 2, "adjusted");
+    assert!(t.canvases[0].composites_cached(), "kept while adjusting");
+    t.each(|_, canvas| canvas.end_transform(false));
+    t.same(&gpu, 2, "cancelled");
+    assert!(t.canvases[0].composites_cached());
 }
