@@ -1005,6 +1005,53 @@ fn a_held_stroke_snaps_to_a_shape_and_is_edited() {
 }
 
 #[test]
+fn a_shape_still_held_follows_the_pen_and_a_finger_makes_it_perfect() {
+    use crate::quickshape::QuickShapeKind;
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.2);
+    // a line, held at its end
+    let pts: Vec<PenSample> = (0..=40).map(|i| sample(20.0 + i as f32 * 2.0, 100.0, f64::from(i) * 8.0)).collect();
+    s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+    s.stroke_add(pts[1..].to_vec());
+    let info = s.quickshape_hold().expect("a shape");
+    assert_eq!(info.kind, QuickShapeKind::Line);
+    // the pen moves on: the line's end goes with it, turning about its start
+    s.stroke_add(vec![sample(80.0, 160.0, 400.0)]);
+    let moved = s.quickshape_info().unwrap();
+    assert!((moved.handles[2] - 80.0).abs() < 1.0 && (moved.handles[3] - 160.0).abs() < 1.0, "{:?}", moved.handles);
+    assert!((moved.handles[0] - 20.0).abs() < 1.0 && (moved.handles[1] - 100.0).abs() < 1.0);
+    // a finger: its angle in 15 degree steps from then on (here 45 degrees, nearest to 45)
+    let stepped = s.quickshape_perfect().unwrap();
+    let (dx, dy) = (stepped.handles[2] - stepped.handles[0], stepped.handles[3] - stepped.handles[1]);
+    assert!((dy.atan2(dx).to_degrees() - 45.0).abs() < 0.5, "{:?}", stepped.handles);
+    s.stroke_add(vec![sample(150.0, 130.0, 450.0)]);
+    let on = s.quickshape_info().unwrap();
+    let (dx, dy) = (on.handles[2] - on.handles[0], on.handles[3] - on.handles[1]);
+    assert!((dy.atan2(dx).to_degrees() - 15.0).abs() < 0.5, "{:?}", on.handles);
+    s.stroke_end(vec![]);
+    // let go, it stays put
+    s.stroke_add(vec![sample(30.0, 30.0, 500.0)]);
+    assert_eq!(s.quickshape_info().unwrap().handles, on.handles);
+    // and a finger then (the pen lifted) changes nothing
+    assert_eq!(s.quickshape_perfect().unwrap().handles, on.handles);
+    s.quickshape_done();
+    // a held ellipse a finger makes a circle
+    let pts: Vec<PenSample> = (0..=60)
+        .map(|i| {
+            let t = i as f32 / 60.0 * std::f32::consts::TAU;
+            sample(100.0 + 60.0 * t.cos() + 2.0 * (7.0 * t).sin(), 100.0 + 40.0 * t.sin(), f64::from(i) * 8.0)
+        })
+        .collect();
+    s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+    s.stroke_add(pts[1..].to_vec());
+    assert_eq!(s.quickshape_hold().unwrap().kind, QuickShapeKind::Ellipse);
+    let circle = s.quickshape_perfect().unwrap();
+    assert_eq!(circle.kind, QuickShapeKind::Circle);
+    s.stroke_end(vec![]);
+    s.quickshape_done();
+}
+
+#[test]
 fn copy_cut_paste_and_flip() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.4);

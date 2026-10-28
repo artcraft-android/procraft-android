@@ -1120,8 +1120,13 @@ impl CanvasSession {
         }
         st.keep_pad_input(&samples);
         let canvas_samples = st.assisted(st.to_canvas(&samples));
-        // a snapped shape follows the held finger no further
+        // a snapped shape turns and grows with the pen still holding it
         if st.shape.is_some() {
+            if let Some(to) = canvas_samples.iter().rev().find(|s| s.is_finite()).map(|s| s.pos)
+                && st.follow_shape(to)
+            {
+                self.shared.frame(st);
+            }
             return;
         }
         st.remember_input(&canvas_samples);
@@ -1138,6 +1143,10 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if st.scene_shown() {
+            return;
+        }
+        // a snapped shape is drawn whole: nothing runs ahead of it
+        if st.shape.is_some() {
             return;
         }
         let canvas_samples = st.to_canvas(&samples);
@@ -1165,6 +1174,10 @@ impl CanvasSession {
         let canvas_samples = st.assisted(st.to_canvas(&samples));
         // a snapped shape stays open to be edited, until the next thing done keeps it
         if st.shape.is_some() {
+            if let Some(to) = canvas_samples.iter().rev().find(|s| s.is_finite()).map(|s| s.pos) {
+                st.follow_shape(to);
+            }
+            st.let_go_shape();
             self.shared.frame(st);
             return;
         }

@@ -2577,6 +2577,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refreshFlags()
     }
 
+    /** A finger put down while the pen still holds the snapped shape makes it perfect. */
+    fun quickShapePerfect() {
+        quickShape = session?.quickshapePerfect() ?: quickShape
+    }
+
     fun chooseQuickShape(kind: QuickShapeKind) {
         quickShape = session?.quickshapeChoose(kind) ?: quickShape
     }
@@ -5448,6 +5453,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A stroke finished: its layer's thumbnail and the undo state changed. */
     fun strokeEnded() {
+        // a snapped shape the pen moved: its handles where it now is
+        if (quickShape != null) quickShape = session?.quickshapeInfo() ?: quickShape
         // a stroke on a locked or hidden layer drew nothing: say why (text layers ask to rasterize instead)
         if (adjustment == null && !currentIsText()) currentTakesChanges()
         refreshFlags()

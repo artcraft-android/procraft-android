@@ -76,6 +76,11 @@ pub(crate) struct ShapeEdit {
     /// The stroke as drawn (canvas points), which other kinds are fitted to.
     drawn: Vec<Vec2>,
     pressure: f32,
+    /// While the pen that drew it is still down: the shape as it snapped and where the pen was
+    /// then (canvas point), which the pen's moves turn and resize it from.
+    held: Option<(Shape, Vec2)>,
+    /// A finger was put down while it was held: it is shown made perfect.
+    perfect: bool,
 }
 
 /// A stroke as it began (and, once kept, what it drew), so that QuickShape can redraw it as a
@@ -119,9 +124,36 @@ impl State {
         builder.add(&samples);
         let stamps = builder.finish();
         if let Some(canvas) = self.canvas.as_mut() {
+            // nothing drawn ahead of the pen before it snapped stays over the shape
+            canvas.set_prediction(&[]);
+            canvas.set_tip(&[]);
             canvas.replace_stamps(&stamps);
         }
         self.stroke = Some(builder);
+    }
+
+    /// The pen still down after a snap moved to `to` (canvas point): the shape turns and grows
+    /// with it, about its start (open shapes) or centre (closed ones). Whether it changed.
+    pub(crate) fn follow_shape(&mut self, to: Vec2) -> bool {
+        let Some(edit) = self.shape.as_mut() else { return false };
+        let Some((snapped, from)) = edit.held.as_ref() else { return false };
+        let mut shape = snapped.moved_with(snapped.pivot(), *from, to);
+        if edit.perfect {
+            shape = shape.perfected();
+        }
+        if shape == edit.shape {
+            return false;
+        }
+        edit.shape = shape;
+        self.draw_shape();
+        true
+    }
+
+    /// The pen that drew the snapped shape lifted: it stays where it is, open to be edited.
+    pub(crate) fn let_go_shape(&mut self) {
+        if let Some(edit) = self.shape.as_mut() {
+            edit.held = None;
+        }
     }
 
     /// The stroke just kept is remembered, for QuickShape on the last stroke.
@@ -202,7 +234,15 @@ impl CanvasSession {
         let found = recognise(&st.drawn);
         let first = found.first()?.clone();
         let choices = found.iter().map(|s| s.kind).collect();
-        st.shape = Some(ShapeEdit { shape: first, choices, drawn: st.drawn.clone(), pressure: st.mean_pressure() });
+        let held = st.drawn.last().map(|&at| (first.clone(), at));
+        st.shape = Some(ShapeEdit {
+            shape: first,
+            choices,
+            drawn: st.drawn.clone(),
+            pressure: st.mean_pressure(),
+            held,
+            perfect: false,
+        });
         st.began = None;
         st.draw_shape();
         self.shared.frame(st);
@@ -230,7 +270,14 @@ impl CanvasSession {
         canvas.undo();
         canvas.begin_stroke(last.layer, last.style);
         st.stroke = Some(StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), 0x5eed_1234));
-        st.shape = Some(ShapeEdit { shape: first, choices, drawn: last.drawn, pressure: last.pressure });
+        st.shape = Some(ShapeEdit {
+            shape: first,
+            choices,
+            drawn: last.drawn,
+            pressure: last.pressure,
+            held: None,
+            perfect: false,
+        });
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()
@@ -246,6 +293,8 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let edit = st.shape.as_mut()?;
+        // a kind chosen is kept: the pen, if still down, no longer moves it
+        edit.held = None;
         let current = edit.shape.kind;
         // a kind already shown keeps its edits; another is fitted to the stroke as drawn
         edit.shape = edit.shape.as_kind(kind.into(), &edit.drawn);
@@ -262,9 +311,26 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let to = st.view?.screen_to_canvas(Vec2::new(x, y))?;
-        st.shape.as_mut()?.shape.move_handle(index as usize, to);
+        let edit = st.shape.as_mut()?;
+        edit.held = None;
+        edit.shape.move_handle(index as usize, to);
         st.draw_shape();
         self.shared.frame(st);
+        st.shape_info()
+    }
+
+    /// A finger put down while the pen still holds the snapped shape: it is made perfect (see
+    /// [`Shape::perfected`]) and stays so as the pen moves on.
+    pub fn quickshape_perfect(&self) -> Option<QuickShapeInfo> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let edit = st.shape.as_mut()?;
+        if edit.held.is_some() && !edit.perfect {
+            edit.perfect = true;
+            edit.shape = edit.shape.perfected();
+            st.draw_shape();
+            self.shared.frame(st);
+        }
         st.shape_info()
     }
 

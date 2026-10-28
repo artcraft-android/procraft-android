@@ -615,6 +615,11 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 }
                 removeCallbacks(holdToPick)
                 removeCallbacks(quickShapeHold)
+                // a finger put down while the stroke is held as a snapped shape makes it perfect
+                if ((mode == Mode.PEN || mode == Mode.FINGER) && vm.quickShape != null) {
+                    if (e.getToolType(e.actionIndex) == MotionEvent.TOOL_TYPE_FINGER) vm.quickShapePerfect()
+                    return true
+                }
                 if (mode == Mode.PEN || mode == Mode.PICK) return true
                 vm.showCursor(null)
                 if (mode == Mode.FINGER) s.strokeCancel()

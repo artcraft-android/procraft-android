@@ -126,7 +126,13 @@ impl Shape {
             ShapeKind::Circle => {
                 let (c, a, b) = self.ellipse_frame();
                 let r = (a.length() + b.length()) * 0.5;
-                axes_shape(ShapeKind::Circle, c, Vec2::new(r, 0.0), Vec2::new(0.0, r))
+                // along the ellipse's axes, so the outline still starts where the stroke began
+                axes_shape(
+                    ShapeKind::Circle,
+                    c,
+                    a.normalized_or(Vec2::new(1.0, 0.0)) * r,
+                    b.normalized_or(Vec2::new(0.0, 1.0)) * r,
+                )
             }
             ShapeKind::Ellipse => fit_ellipse(stroke),
             ShapeKind::Square | ShapeKind::Rectangle => {
@@ -137,6 +143,50 @@ impl Shape {
             ShapeKind::Triangle => polygon(stroke, 3).unwrap_or_else(|| self.clone()),
             ShapeKind::EquilateralTriangle => equilateral(&polygon(stroke, 3).unwrap_or_else(|| self.clone())),
             ShapeKind::Line => line_of(stroke),
+            _ => self.clone(),
+        }
+    }
+
+    /// What a shape still held turns and grows about: an open shape's start, a closed shape's
+    /// centre.
+    pub fn pivot(&self) -> Vec2 {
+        match self.kind {
+            ShapeKind::Line | ShapeKind::Polyline | ShapeKind::Arc => self.nodes.first().copied().unwrap_or(Vec2::ZERO),
+            ShapeKind::Ellipse | ShapeKind::Circle => self.ellipse_frame().0,
+            _ => centroid(&self.nodes),
+        }
+    }
+
+    /// The shape turned and scaled about `pivot` so that the point `from` lands on `to`, as the
+    /// pen still down after a snap turns and resizes it.
+    pub fn moved_with(&self, pivot: Vec2, from: Vec2, to: Vec2) -> Shape {
+        let (f, t) = (from - pivot, to - pivot);
+        let len2 = f.dot(f);
+        if !t.is_finite() || len2 < 1.0 {
+            return self.clone();
+        }
+        // t / f as complex numbers: the turn and the scale in one
+        let (re, im) = (t.dot(f) / len2, f.cross(t) / len2);
+        let nodes = self
+            .nodes
+            .iter()
+            .map(|&p| {
+                let d = p - pivot;
+                pivot + Vec2::new(d.x * re - d.y * im, d.x * im + d.y * re)
+            })
+            .collect();
+        Shape { kind: self.kind, nodes }
+    }
+
+    /// The shape made perfect, as a finger put down while the pen still holds it makes it: an
+    /// ellipse a circle, a quadrilateral or rectangle a square, a triangle equilateral, a line
+    /// turned to a whole number of 15 degree steps. Arcs and polylines stay as they are.
+    pub fn perfected(&self) -> Shape {
+        match self.kind {
+            ShapeKind::Ellipse => self.as_kind(ShapeKind::Circle, &[]),
+            ShapeKind::Quadrilateral | ShapeKind::Rectangle => squared(self),
+            ShapeKind::Triangle => equilateral(self),
+            ShapeKind::Line => stepped_line(self),
             _ => self.clone(),
         }
     }
@@ -468,18 +518,34 @@ fn fit_rect(pts: &[Vec2]) -> Shape {
     Shape { kind: ShapeKind::Rectangle, nodes: from_nearest(nodes, start) }
 }
 
-fn squared(rect: &Shape) -> Shape {
-    let get = |i: usize| rect.nodes.get(i).copied().unwrap_or(Vec2::ZERO);
-    let (p0, p1, p3) = (get(0), get(1), get(3));
-    let side = (p0.distance(p1) + p0.distance(p3)) * 0.5;
-    let c = p0.lerp(get(2), 0.5);
+/// The square with a quadrilateral's centre and mean side, along its first side and turning the
+/// same way.
+fn squared(quad: &Shape) -> Shape {
+    let get = |i: usize| quad.nodes.get(i).copied().unwrap_or(Vec2::ZERO);
+    let (p0, p1, p2, p3) = (get(0), get(1), get(2), get(3));
+    let side = (p0.distance(p1) + p1.distance(p2) + p2.distance(p3) + p3.distance(p0)) * 0.25;
+    let c = centroid(&[p0, p1, p2, p3]);
+    let turn = if (p1 - p0).cross(p2 - p1) >= 0.0 { 1.0 } else { -1.0 };
     let u = (p1 - p0).normalized_or(Vec2::new(1.0, 0.0)) * (side * 0.5);
-    let v = (p3 - p0).normalized_or(Vec2::new(0.0, 1.0)) * (side * 0.5);
+    let v = Vec2::new(-u.y, u.x) * turn;
     Shape { kind: ShapeKind::Square, nodes: vec![c - u - v, c + u - v, c + u + v, c - u + v] }
 }
 
+/// A line turned about its start to the nearest 15 degree step, its length kept.
+fn stepped_line(line: &Shape) -> Shape {
+    let (Some(&a), Some(&b)) = (line.nodes.first(), line.nodes.get(1)) else { return line.clone() };
+    let d = b - a;
+    let step = 15f32.to_radians();
+    let angle = (d.y.atan2(d.x) / step).round() * step;
+    Shape { kind: ShapeKind::Line, nodes: vec![a, a + Vec2::new(angle.cos(), angle.sin()) * d.length()] }
+}
+
+fn centroid(pts: &[Vec2]) -> Vec2 {
+    pts.iter().fold(Vec2::ZERO, |a, &p| a + p) * (1.0 / pts.len().max(1) as f32)
+}
+
 fn equilateral(t: &Shape) -> Shape {
-    let c = t.nodes.iter().fold(Vec2::ZERO, |a, &p| a + p) * (1.0 / t.nodes.len().max(1) as f32);
+    let c = centroid(&t.nodes);
     let first = t.nodes.first().copied().unwrap_or(c) - c;
     let r = t.nodes.iter().map(|p| p.distance(c)).sum::<f32>() / t.nodes.len().max(1) as f32;
     let a0 = first.y.atan2(first.x);
@@ -702,6 +768,68 @@ mod tests {
         line.move_handle(9, Vec2::new(5.0, 5.0));
         line.move_handle(0, Vec2::new(f32::NAN, 0.0));
         assert_eq!(line.nodes[0], Vec2::ZERO);
+    }
+
+    #[test]
+    fn a_held_shape_turns_and_grows_with_the_pen() {
+        let line = Shape { kind: ShapeKind::Line, nodes: vec![Vec2::ZERO, Vec2::new(100.0, 0.0)] };
+        assert_eq!(line.pivot(), Vec2::ZERO);
+        let moved = line.moved_with(line.pivot(), Vec2::new(100.0, 0.0), Vec2::new(0.0, 200.0));
+        assert!(
+            moved.nodes[0].distance(Vec2::ZERO) < 1e-3 && moved.nodes[1].distance(Vec2::new(0.0, 200.0)) < 1e-3,
+            "{moved:?}"
+        );
+        let ellipse = axes_shape(ShapeKind::Ellipse, Vec2::new(50.0, 50.0), Vec2::new(40.0, 0.0), Vec2::new(0.0, 20.0));
+        assert_eq!(ellipse.pivot(), Vec2::new(50.0, 50.0));
+        let moved = ellipse.moved_with(ellipse.pivot(), Vec2::new(90.0, 50.0), Vec2::new(50.0, 130.0));
+        let (c, a, b) = moved.ellipse_frame();
+        assert!(c.distance(Vec2::new(50.0, 50.0)) < 1e-3);
+        assert!(a.distance(Vec2::new(0.0, 80.0)) < 1e-3 && b.distance(Vec2::new(-40.0, 0.0)) < 1e-3, "{a:?} {b:?}");
+        let tri =
+            Shape { kind: ShapeKind::Triangle, nodes: vec![Vec2::ZERO, Vec2::new(90.0, 0.0), Vec2::new(0.0, 90.0)] };
+        assert_eq!(tri.pivot(), Vec2::new(30.0, 30.0));
+        // a pen on the pivot itself leaves the shape alone
+        assert_eq!(tri.moved_with(tri.pivot(), tri.pivot(), Vec2::new(5.0, 5.0)), tri);
+    }
+
+    #[test]
+    fn a_finger_makes_a_held_shape_perfect() {
+        let ellipse = axes_shape(ShapeKind::Ellipse, Vec2::ZERO, Vec2::new(0.0, 40.0), Vec2::new(-20.0, 0.0));
+        let circle = ellipse.perfected();
+        assert_eq!(circle.kind, ShapeKind::Circle);
+        // its radius the mean half-axis, and it still starts where the ellipse did
+        assert!(
+            circle.nodes[1].distance(Vec2::new(0.0, 30.0)) < 1e-3
+                && circle.nodes[2].distance(Vec2::new(-30.0, 0.0)) < 1e-3,
+            "{circle:?}"
+        );
+        let quad = Shape {
+            kind: ShapeKind::Quadrilateral,
+            nodes: vec![Vec2::new(0.0, 0.0), Vec2::new(100.0, 10.0), Vec2::new(110.0, 60.0), Vec2::new(-10.0, 50.0)],
+        };
+        let square = quad.perfected();
+        assert_eq!(square.kind, ShapeKind::Square);
+        let sides: Vec<f32> = (0..4).map(|i| square.nodes[i].distance(square.nodes[(i + 1) % 4])).collect();
+        assert!(sides.iter().all(|s| (s - sides[0]).abs() < 1e-3), "{sides:?}");
+        assert!((square.nodes[1] - square.nodes[0]).dot(square.nodes[3] - square.nodes[0]).abs() < 1e-2);
+        // turning as the quadrilateral did, its first corner nearest the quadrilateral's
+        assert!((square.nodes[1] - square.nodes[0]).cross(square.nodes[2] - square.nodes[1]) > 0.0);
+        assert!(square.nodes[0].distance(quad.nodes[0]) < square.nodes[2].distance(quad.nodes[0]));
+        let tri =
+            Shape { kind: ShapeKind::Triangle, nodes: vec![Vec2::ZERO, Vec2::new(90.0, 0.0), Vec2::new(0.0, 90.0)] };
+        let eq = tri.perfected();
+        assert_eq!(eq.kind, ShapeKind::EquilateralTriangle);
+        assert!((eq.nodes[0].distance(eq.nodes[1]) - eq.nodes[1].distance(eq.nodes[2])).abs() < 1e-2);
+        let line = Shape { kind: ShapeKind::Line, nodes: vec![Vec2::new(10.0, 10.0), Vec2::new(110.0, 30.0)] };
+        let stepped = line.perfected();
+        let d = stepped.nodes[1] - stepped.nodes[0];
+        assert_eq!(stepped.nodes[0], Vec2::new(10.0, 10.0));
+        assert!(
+            (d.y.atan2(d.x).to_degrees() - 15.0).abs() < 1e-3
+                && (d.length() - line.nodes[0].distance(line.nodes[1])).abs() < 1e-3
+        );
+        let arc = Shape { kind: ShapeKind::Arc, nodes: vec![Vec2::ZERO, Vec2::new(50.0, 20.0), Vec2::new(100.0, 0.0)] };
+        assert_eq!(arc.perfected(), arc);
     }
 
     #[test]
