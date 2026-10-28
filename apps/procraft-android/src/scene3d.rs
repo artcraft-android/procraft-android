@@ -73,12 +73,65 @@ pub(crate) struct TextureSet {
     doc: Document,
     canvas: Option<Canvas>,
     pending: Pixels,
+    /// A layer to fill with one colour (premultiplied RGBA8) when its canvas is made, unless
+    /// pixels wait for it: a new set's Base Layer, with what the model's material gives.
+    fill: Option<(LayerId, [u8; 4])>,
 }
 
 impl TextureSet {
     fn empty(side: u32) -> TextureSet {
-        TextureSet { doc: empty_texture(side), canvas: None, pending: Vec::new() }
+        TextureSet { doc: empty_texture(side), canvas: None, pending: Vec::new(), fill: None }
     }
+
+    /// A new set with `structure`'s layers, its Base Layer (if it still has it) filled with
+    /// `rgba` once it is drawn.
+    fn filled(side: u32, structure: &Document, rgba: [u8; 4]) -> TextureSet {
+        let mut set = TextureSet::empty(side);
+        follow_layers(&mut set, structure);
+        let base = base_layer();
+        set.fill = set.doc.layer(base).is_some().then_some((base, rgba));
+        set
+    }
+
+    /// The pixels waiting for its canvas, its fill made into pixels (taken: it is given once).
+    fn take_pending(&mut self) -> Pixels {
+        let mut out = std::mem::take(&mut self.pending);
+        if let Some((id, rgba)) = self.fill.take()
+            && self.doc.layer(id).is_some()
+            && !out.iter().any(|(l, _)| *l == id)
+        {
+            out.insert(0, (id, solid(self.doc.width(), rgba)));
+        }
+        out
+    }
+
+    /// The pixels waiting for its canvas with its fill, kept waiting.
+    fn pending_with_fill(&self) -> Pixels {
+        let mut out = self.pending.clone();
+        if let Some((id, rgba)) = self.fill
+            && self.doc.layer(id).is_some()
+            && !out.iter().any(|(l, _)| *l == id)
+        {
+            out.insert(0, (id, solid(self.doc.width(), rgba)));
+        }
+        out
+    }
+}
+
+/// The layer every texture set starts with: its Base Layer.
+fn base_layer() -> LayerId {
+    empty_texture(1).layers().first().map_or(LayerId(1), |l| l.id)
+}
+
+/// A `side` square of one colour (premultiplied RGBA8).
+fn solid(side: u32, rgba: [u8; 4]) -> Vec<u8> {
+    rgba.repeat((side as usize) * (side as usize))
+}
+
+/// A colour, roughness or metalness (0..1) as a Base Layer is filled with it: opaque.
+fn opaque(rgb: [f32; 3]) -> [u8; 4] {
+    let [r, g, b] = rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+    [r, g, b, 255]
 }
 
 /// A new texture set's document: `side` square, its one layer the Base Layer, nothing painted (the
@@ -413,7 +466,18 @@ impl CanvasSession {
         let side = if texture_size == 0 { DEFAULT_TEXTURE_SIZE } else { texture_size.clamp(64, MOST_TEXTURE_SIZE) };
         let mut scene = Scene::new(mesh, ModelSource { bytes: file, extension, mtl }, side, 0, Vec::new());
         scene.picked = picked;
-        let session = CanvasSession::with_document(empty_texture(side), name, Vec::new());
+        // each texture set's Base Layer the material's colour, where the model brings no image
+        let brings = scene.brings_colour();
+        let colour =
+            |part: usize| (!brings.get(part).copied().unwrap_or(false)).then(|| opaque(scene.mesh.surface(part).0));
+        let own = colour(0).map(|rgba| vec![(base_layer(), solid(side, rgba))]).unwrap_or_default();
+        for part in 1..scene.sets.len() {
+            let fill = colour(part).map(|rgba| (base_layer(), rgba));
+            if let Some(set) = scene.sets.get_mut(part).and_then(Option::as_mut) {
+                set.fill = fill;
+            }
+        }
+        let session = CanvasSession::with_document(empty_texture(side), name, own);
         session.shared.lock().scene = Some(scene);
         Ok(session)
     }
@@ -563,7 +627,7 @@ impl CanvasSession {
         let set = scene.slot(scene.current, channel)?.as_mut()?;
         if set.canvas.is_none() {
             let mut c = Canvas::new(gpu, &set.doc).ok()?;
-            for (lid, pixels) in std::mem::take(&mut set.pending) {
+            for (lid, pixels) in set.take_pending() {
                 let _ = c.upload_layer(gpu, lid, &pixels);
             }
             set.canvas = Some(c);
@@ -647,7 +711,10 @@ impl CanvasSession {
         if set == scene.current && channel == scene.channel {
             match st.canvas.as_mut() {
                 Some(canvas) => canvas.put_layer(base, rgba),
-                None => st.pending_pixels.push((base, crate::project::Opened::Pixels(rgba))),
+                None => {
+                    st.pending_pixels.retain(|(id, _)| *id != base);
+                    st.pending_pixels.push((base, crate::project::Opened::Pixels(rgba)));
+                }
             }
         } else {
             let Some(slot) = scene.slot(set, channel) else { return false };
@@ -658,7 +725,10 @@ impl CanvasSession {
             });
             match target.canvas.as_mut() {
                 Some(canvas) => canvas.put_layer(base, rgba),
-                None => target.pending.push((base, rgba)),
+                None => {
+                    target.pending.retain(|(id, _)| *id != base);
+                    target.pending.push((base, rgba));
+                }
             }
         }
         self.shared.frame(st);
@@ -1212,13 +1282,17 @@ fn flattened(side: u32, picture: Option<Vec<u8>>, under: [f32; 3], grey: bool) -
 /// A file packed in a USDZ by the path its layer gives (relative to the package; `./` and folders
 /// allowed for), else by its name alone.
 fn packed_file(zip: &procraft_engine::zip::ZipReader<'_>, path: &str) -> Option<Vec<u8>> {
+    zip.read(&packed_name(zip, path)?)
+}
+
+/// The entry [`packed_file`] reads for `path`, if there is one.
+fn packed_name(zip: &procraft_engine::zip::ZipReader<'_>, path: &str) -> Option<String> {
     let path = path.trim_start_matches("./");
-    if let Some(bytes) = zip.read(path) {
-        return Some(bytes);
+    if zip.names().any(|n| n == path) {
+        return Some(path.to_owned());
     }
     let name = path.rsplit('/').next().unwrap_or(path);
-    let found = zip.names().find(|n| n.rsplit('/').next() == Some(name))?.to_owned();
-    zip.read(&found)
+    zip.names().find(|n| n.rsplit('/').next() == Some(name)).map(str::to_owned)
 }
 
 /// A name made safe as part of a file name: letters, digits, `-` and `_` kept, the rest `_`.
@@ -1265,7 +1339,7 @@ fn waiting_picture(gpu: &procraft_gpu::Gpu, set: &mut TextureSet) -> Result<Vec<
         Some(c) => c,
         None => {
             let mut c = Canvas::new(gpu, &set.doc).map_err(|e| e.to_string())?;
-            for (id, pixels) in std::mem::take(&mut set.pending) {
+            for (id, pixels) in set.take_pending() {
                 c.upload_layer(gpu, id, &pixels).map_err(|e| e.to_string())?;
             }
             c
@@ -1366,7 +1440,7 @@ fn set_pixels(set: &mut TextureSet, gpu: Option<&procraft_gpu::Gpu>) -> Result<P
             }
             Ok(pixels)
         }
-        _ => Ok(set.pending.clone()),
+        _ => Ok(set.pending_with_fill()),
     }
 }
 
@@ -1545,7 +1619,7 @@ pub(crate) fn open_saved_model(dir: &Path, saved: &SavedModel) -> Result<Scene, 
                 return None;
             }
             let pending = read_set_layers(&dir.join("sets").join(part.to_string()), &doc, side);
-            Some(TextureSet { doc, canvas: None, pending })
+            Some(TextureSet { doc, canvas: None, pending, fill: None })
         })
         .collect();
     let channels = saved
@@ -1563,7 +1637,7 @@ pub(crate) fn open_saved_model(dir: &Path, saved: &SavedModel) -> Result<Scene, 
                 let folder = dir.join("sets").join(part.to_string()).join(format!("c{}", k + 1));
                 let pending = read_set_layers(&folder, &doc, side);
                 if let Some(slot) = out.get_mut(k) {
-                    *slot = Some(TextureSet { doc, canvas: None, pending });
+                    *slot = Some(TextureSet { doc, canvas: None, pending, fill: None });
                 }
             }
             out
@@ -1597,6 +1671,27 @@ pub(crate) fn open_saved_model(dir: &Path, saved: &SavedModel) -> Result<Scene, 
 }
 
 impl Scene {
+    /// What part `part`'s `channel` (1 roughness, 2 metalness) starts as, where the model's
+    /// material brings no image for it: the material's value, else the plain one.
+    fn channel_value(&self, part: usize, channel: usize) -> f32 {
+        let (_, roughness, metallic) = self.mesh.surface(part);
+        if channel == 1 { roughness } else { metallic }
+    }
+
+    /// Whether the model brings an image for each part's colour: a USDZ's packed one, or one
+    /// picked or zipped with it, that its material maps.
+    fn brings_colour(&self) -> Vec<bool> {
+        let zip = (self.source.extension == "usdz")
+            .then(|| procraft_engine::zip::ZipReader::new(&self.source.bytes))
+            .flatten();
+        let found = |path: &str| match &zip {
+            Some(zip) => packed_name(zip, path).is_some(),
+            None => companion(&self.picked, path).is_some(),
+        };
+        let material = |p: &procraft_engine::mesh::Part| self.mesh.materials.iter().find(|m| m.name == p.material);
+        self.mesh.parts.iter().map(|p| material(p).and_then(|m| m.color_map.as_deref()).is_some_and(found)).collect()
+    }
+
     /// Where part `part`'s `channel` document waits (0 colour, 1 roughness, 2 metalness).
     fn slot(&mut self, part: usize, channel: usize) -> Option<&mut Option<TextureSet>> {
         if channel == 0 {
@@ -1652,16 +1747,21 @@ impl State {
             doc: std::mem::replace(&mut self.doc, Document::new(1, 1)),
             canvas: self.canvas.take(),
             pending: crate::project::opened_pixels(std::mem::take(&mut self.pending_pixels), side, side),
+            fill: None,
         };
         let structure = old.doc.clone();
         if let Some(slot) = scene.slot(part, from) {
             *slot = Some(old);
         }
-        let mut new = scene.slot(part, channel).and_then(Option::take).unwrap_or_else(|| TextureSet::empty(side));
+        let value = scene.channel_value(part, channel);
+        let mut new = scene
+            .slot(part, channel)
+            .and_then(Option::take)
+            .unwrap_or_else(|| TextureSet::filled(side, &structure, opaque([value; 3])));
         follow_layers(&mut new, &structure);
+        self.pending_pixels = crate::project::opened(new.take_pending());
         self.doc = new.doc;
         self.canvas = new.canvas;
-        self.pending_pixels = crate::project::opened(new.pending);
         scene.channel = channel;
         self.ensure_canvas();
     }
@@ -1691,13 +1791,14 @@ impl State {
         self.scene_stroke_cancel();
         self.settle();
         let Some(scene) = self.scene.as_mut() else { return };
-        let Some(set) = scene.sets.get_mut(index).and_then(Option::take) else { return };
+        let Some(mut set) = scene.sets.get_mut(index).and_then(Option::take) else { return };
         let (w, h) = (self.doc.width(), self.doc.height());
-        let pending = std::mem::replace(&mut self.pending_pixels, crate::project::opened(set.pending));
+        let pending = std::mem::replace(&mut self.pending_pixels, crate::project::opened(set.take_pending()));
         let old = TextureSet {
             doc: std::mem::replace(&mut self.doc, set.doc),
             canvas: std::mem::replace(&mut self.canvas, set.canvas),
             pending: crate::project::opened_pixels(pending, w, h),
+            fill: None,
         };
         if let Some(slot) = scene.sets.get_mut(scene.current) {
             *slot = Some(old);
@@ -1776,12 +1877,13 @@ impl State {
         let mut paint = [MaterialPaint { amount: 0.0, tile: 1.0, source: None }; 2];
         for (k, ((amount, scale, source), out)) in channels.into_iter().zip(&mut paint).enumerate() {
             // the channel's document, made now if it never was, with the colour's layers
+            let value = scene.channel_value(part, k + 1);
             let Some(slot) = scene.slot(part, k + 1) else { return };
-            let set = slot.get_or_insert_with(|| TextureSet::empty(side));
+            let set = slot.get_or_insert_with(|| TextureSet::filled(side, &structure, opaque([value; 3])));
             follow_layers(set, &structure);
             if set.canvas.is_none() {
                 let Ok(mut made) = Canvas::new(gpu, &set.doc) else { return };
-                for (id, pixels) in std::mem::take(&mut set.pending) {
+                for (id, pixels) in set.take_pending() {
                     if let Err(e) = made.upload_layer(gpu, id, &pixels) {
                         log::error!("opening a texture set's layer: {e}");
                     }
@@ -2016,16 +2118,16 @@ impl State {
             }
             // the waiting texture sets' canvases (and channels), with the pixels they opened with
             for set in scene.sets.iter_mut().flatten().chain(scene.channels.iter_mut().flatten().flatten()) {
-                if set.canvas.is_none() {
-                    set.canvas = Canvas::new(gpu, &set.doc).ok();
-                    if let Some(c) = set.canvas.as_mut() {
-                        for (id, pixels) in std::mem::take(&mut set.pending) {
-                            if let Err(e) = c.upload_layer(gpu, id, &pixels) {
-                                log::error!("opening a texture set's layer: {e}");
-                            }
+                if set.canvas.is_none()
+                    && let Ok(mut c) = Canvas::new(gpu, &set.doc)
+                {
+                    for (id, pixels) in set.take_pending() {
+                        if let Err(e) = c.upload_layer(gpu, id, &pixels) {
+                            log::error!("opening a texture set's layer: {e}");
                         }
-                        c.render(gpu, &mut set.doc, None);
                     }
+                    c.render(gpu, &mut set.doc, None);
+                    set.canvas = Some(c);
                 }
             }
         }
@@ -2365,13 +2467,27 @@ mod tests {
         assert!((0..200).all(|y| (100..200).all(|x| at(&plain, x, y) == at(&frosted, x, y))));
     }
 
-    /// How many of the current texture set's pixels have paint.
+    /// What the current channel of the current texture set starts as (its Base Layer's fill).
+    fn fresh(s: &CanvasSession) -> [u8; 4] {
+        let st = s.shared.lock();
+        let scene = st.scene.as_ref().unwrap();
+        let (colour, roughness, metallic) = scene.mesh.surface(scene.current);
+        super::opaque(match scene.channel {
+            0 => colour,
+            1 => [roughness; 3],
+            _ => [metallic; 3],
+        })
+    }
+
+    /// How many of the current texture set's pixels have been painted: changed from what the
+    /// model's material gave them.
     fn painted(s: &CanvasSession) -> usize {
+        let fresh = fresh(s);
         let mut guard = s.shared.lock();
         let st = &mut *guard;
         let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
         canvas.render(gpu, &mut st.doc, None);
-        canvas.read_composite(gpu).unwrap().chunks(4).filter(|p| p[3] > 0).count()
+        canvas.read_composite(gpu).unwrap().chunks(4).filter(|p| *p != fresh).count()
     }
 
     #[test]
@@ -2555,7 +2671,7 @@ mod tests {
         // exports take every channel whichever is painted on: the colour and roughness as
         // painted, the metalness painted with the brush's (none, as the plain one)
         s.set_model_channel(2);
-        assert!(painted(&s).abs_diff(colour) * 10 < colour, "{} {colour}", painted(&s));
+        assert_eq!(painted(&s), 0);
         let dir = std::env::temp_dir().join(format!("procraft-channels-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let pngs = s.export_model_textures(dir.join("t").to_string_lossy().into_owned()).unwrap();
@@ -2602,11 +2718,17 @@ mod tests {
             .collect()
     }
 
-    /// The grey of the current channel's fully covered texels, if all are the same within one.
+    /// The grey most of the current channel's painted texels have (the middle of a dab).
     fn covered_grey(s: &CanvasSession) -> Option<u8> {
-        let full: Vec<u8> = channel_texels(s).into_iter().filter(|&(_, a)| a == 255).map(|(v, _)| v).collect();
-        let (lo, hi) = (*full.iter().min()?, *full.iter().max()?);
-        (hi - lo <= 1).then_some(lo)
+        let fresh = fresh(s)[0];
+        let mut counts = [0usize; 256];
+        for (v, a) in channel_texels(s) {
+            if a == 255 && v != fresh {
+                counts[usize::from(v)] += 1;
+            }
+        }
+        let (grey, &n) = counts.iter().enumerate().max_by_key(|&(_, n)| *n)?;
+        (n > 0).then_some(grey as u8)
     }
 
     /// Sets the paint brush's material controls as the studio does.
@@ -2631,10 +2753,11 @@ mod tests {
         // each the brush's amount where the stroke covers, nothing elsewhere
         s.set_model_channel(1);
         assert_eq!(covered_grey(&s), Some(51));
-        assert!(channel_texels(&s).iter().filter(|t| t.1 > 0).count().abs_diff(colour) * 10 < colour);
+        assert!(painted(&s).abs_diff(colour) * 10 < colour, "{} {colour}", painted(&s));
         s.set_model_channel(2);
         assert_eq!(covered_grey(&s), Some(204));
-        // a stroke on a channel paints that channel alone
+        // a stroke on a channel paints that channel alone, with the channel's own colour
+        s.set_color(1.0, 1.0, 1.0);
         s.stroke_begin(PointerKind::Stylus, vec![sample(60.0, 60.0, 0.0)]);
         s.stroke_end(vec![sample(140.0, 60.0, 50.0)]);
         frame(&s, 200);
@@ -2840,12 +2963,79 @@ mod tests {
         reader.next_frame(&mut px).unwrap();
         assert_eq!(px.len(), 64 * 64 * 4);
         assert!(!again.set_model_texture(0, 0, vec![0; 8]));
-        assert!(again.set_model_texture(0, 0, px));
+        assert!(again.set_model_texture(0, 0, px.clone()));
         assert!(shown(&again));
         frame(&again, 200);
-        // the exported picture is opaque (over white): every texel painted
-        assert_eq!(painted(&again), 64 * 64);
+        // the exported picture (opaque, over white) in place of the material's colour
+        let shown_px = {
+            let mut guard = again.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render(gpu, &mut st.doc, None);
+            canvas.read_composite(gpu).unwrap()
+        };
+        assert!(shown_px == px);
+        assert!(painted(&again) > 20);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_models_base_layers_start_as_its_materials_colour_roughness_and_metalness() {
+        let two = format!(
+            "mtllib m.mtl
+usemtl red
+{}",
+            CUBE.replacen(
+                "f 4/1",
+                "usemtl mapped
+f 4/1",
+                1
+            )
+        );
+        let mtl = b"newmtl red
+Kd 1 0 0
+Pr 0.25
+Pm 0.5
+newmtl mapped
+Kd 0 0 1
+map_Kd blue.png
+";
+        let files = vec![
+            ModelFile { name: "m.mtl".into(), bytes: mtl.to_vec() },
+            ModelFile { name: "blue.png".into(), bytes: b"an image".to_vec() },
+        ];
+        let s = CanvasSession::open_model(two.into_bytes(), "two.obj".into(), files, "Two".into(), 16).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let layer = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let id = st.doc.layers().first().unwrap().id;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render(gpu, &mut st.doc, None);
+            canvas.read_layer(gpu, id).unwrap()
+        };
+        // the Base Layer itself, opaque: the colour, and each channel's own value
+        assert!(layer(&s).chunks(4).all(|p| p == [255, 0, 0, 255]));
+        s.set_model_channel(1);
+        assert!(layer(&s).chunks(4).all(|p| p == [64, 64, 64, 255]));
+        s.set_model_channel(2);
+        assert!(layer(&s).chunks(4).all(|p| p == [128, 128, 128, 255]));
+        // a set whose material brings an image waits for it, its Base Layer clear
+        s.set_model_channel(0);
+        s.choose_texture_set(1);
+        assert!(layer(&s).chunks(4).all(|p| p[3] == 0));
+        // kept so when saved before it is drawn, and opened again so
+        let dir = std::env::temp_dir().join(format!("procraft-fill-{}", std::process::id()));
+        s.choose_texture_set(0);
+        s.save(dir.to_string_lossy().into_owned()).unwrap();
+        let again = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+        assert!(shown(&again));
+        frame(&again, 200);
+        assert!(layer(&again).chunks(4).all(|p| p == [255, 0, 0, 255]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
