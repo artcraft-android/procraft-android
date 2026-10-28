@@ -759,6 +759,73 @@ def keyboard():
     return board.difference(capsule((7.5, 15.4), (16.5, 15.4), 0.8))
 
 
+def guided_line():
+    """Assisted drawing: a straight line between two handles."""
+    return unary_union([ring(5.0, 19.0, 2.6, 1.8), ring(19.0, 5.0, 2.6, 1.8), capsule((7.2, 16.8), (16.8, 7.2), 1.2)])
+
+
+def eyedropper():
+    """Eyedropper: a dropper, its tip down to the left."""
+    tip = capsule((0.4, 0), (5.2, 0), 0.9)
+    glass = soft(box(5.0, -1.9, 12.6, 1.9), 0.4)
+    collar = soft(box(13.6, -3.0, 15.2, 3.0), 0.4)
+    bulb = capsule((15.8, 0), (20.4, 0), 2.4)
+    return along_diagonal(unary_union([tip, glass, collar, bulb]), (3.4, 20.6))
+
+
+def radial_menu():
+    """QuickMenu: six buttons round a centre."""
+    dots = [Point(12, 12).buffer(2.4, quad_segs=12)]
+    for k in range(6):
+        a = math.radians(-90 + 60 * k)
+        dots.append(Point(12 + 7.0 * math.cos(a), 12 + 7.0 * math.sin(a)).buffer(2.4, quad_segs=12))
+    return unary_union(dots)
+
+
+def hovering_pen():
+    """Hover: a stylus held just above the glass."""
+    body = unary_union([box(9.2, 4.6, 14.8, 13.6), Point(12.0, 4.6).buffer(2.8, quad_segs=12)]).difference(box(0, 6.6, 24, 7.6))
+    cone = soft(Polygon([(9.2, 14.6), (14.8, 14.6), (12.0, 19.0)]), 0.3)
+    return unary_union([body, cone, capsule((3.0, 21.6), (21.0, 21.6), 0.9)])
+
+
+def scissors():
+    """Cut: scissors, open, handles down."""
+    parts = [ring(7.0, 18.0, 2.6, 1.8), ring(17.0, 18.0, 2.6, 1.8)]
+    for (bx, by), (tx, ty) in (((8.4, 15.4), (17.2, 2.6)), ((15.6, 15.4), (6.8, 2.6))):
+        ux, uy = tx - bx, ty - by
+        n = math.hypot(ux, uy)
+        px, py = -uy / n, ux / n
+        parts.append(soft(Polygon([(bx + px * 1.5, by + py * 1.5), (tx + px * 0.4, ty + py * 0.4),
+                                   (tx - px * 0.4, ty - py * 0.4), (bx - px * 1.5, by - py * 1.5)]), 0.3))
+    return unary_union(parts).difference(Point(12.0, 10.2).buffer(0.8, quad_segs=8))
+
+
+def duplicate():
+    """Duplicate: two sheets, a plus cut out of the front one."""
+    return copy_paste().difference(capsule((11.6, 14.5), (17.4, 14.5), 1.1)).difference(capsule((14.5, 11.6), (14.5, 17.4), 1.1))
+
+
+def three_sheets():
+    """Copy all: three sheets, one behind another."""
+    s1, s2, s3 = (soft(box(8.5, 2.5, 21.5, 15.5), 1.4), soft(box(5.5, 5.5, 18.5, 18.5), 1.4),
+                  soft(box(2.5, 8.5, 15.5, 21.5), 1.4))
+    return unary_union([s1.difference(s2.buffer(1.2)), s2.difference(s3.buffer(1.2)), s3])
+
+
+def lifted_sheet():
+    """Cut and paste: a sheet with an arrow leaping off it."""
+    return unary_union([soft(box(2.5, 12.0, 12.5, 21.5), 1.2), arc_arrow(15.0, 12.0, 7.0, -160, -18)])
+
+
+def clipboard():
+    """Paste: a clipboard, its clip and two lines of writing."""
+    clip = soft(box(8.5, 2.5, 15.5, 6.6), 0.8)
+    board = soft(box(4.0, 4.5, 20.0, 21.5), 1.4).difference(clip.buffer(1.2))
+    board = board.difference(capsule((8.0, 11.8), (16.0, 11.8), 0.6)).difference(capsule((8.0, 15.8), (14.0, 15.8), 0.6))
+    return unary_union([board, clip])
+
+
 DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
@@ -788,6 +855,11 @@ DRAWINGS = {
     'infostatistics': pie, 'menunewbrush': new_brush, 'menunewset': new_set, 'menushare': share_tab,
     'menuchevron': chevron, 'disclose': lambda: chevron(90), 'donetick': tick, 'add': plus, 'fullscreen': full_screen,
     'cardcompact': rows, 'cardstack': stacked_cards, 'folder-fill': folder, 'sweep': bin_, 'keyboard': keyboard,
+    'gesturegeneral': prefs_tab, 'gesturecopypaste': copy_paste, 'gestureassisted': guided_line,
+    'gestureeyedropper': eyedropper, 'gesturequickshape': three_shapes, 'gesturequickmenu': radial_menu,
+    'gesturefullscreen': full_screen, 'gestureclearlayer': bin_, 'gesturelayerselect': layers, 'gesturehover': hovering_pen,
+    'copycut': scissors, 'copyduplicate': duplicate, 'copyone': copy_paste, 'copyall': three_sheets,
+    'cutpaste': lifted_sheet, 'pastedown': clipboard,
 }
 
 

@@ -172,3 +172,29 @@ by one.
 | Folder | a folder, its tab up to the left |
 | Clear the colour history | a bin, its lid and two slots |
 | Keyboard | a keyboard, its keys and space bar cut out |
+
+## Gesture controls
+
+| Gesture | Idea |
+|---|---|
+| Assisted Drawing | a straight line between two handles |
+| Eyedropper | a dropper, its tip down to the left |
+| QuickShape | the Brush Studio's circle, square and triangle |
+| QuickMenu | six buttons round a centre |
+| Full Screen | the menus' corner-to-corner arrow |
+| Clear Layer | the colour history's bin |
+| Copy & Paste | the Selection toolbar's two sheets |
+| Layer Select | the bar's two stacked sheets |
+| Hover | a stylus held just above the glass |
+| General | the Actions tab's switch |
+
+## The copy and paste panel
+
+| Button | Idea |
+|---|---|
+| Cut | scissors, open, handles down |
+| Copy | the two sheets |
+| Copy All | three sheets, one behind another |
+| Duplicate | the two sheets, a plus cut out of the front one |
+| Cut & Paste | a sheet with an arrow leaping off it |
+| Paste | a clipboard, its clip and two lines of writing |
