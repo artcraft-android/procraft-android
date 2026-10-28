@@ -213,8 +213,8 @@ private fun ChoiceRow(prefs: android.content.SharedPreferences, s: Choice) {
 }
 
 /**
- * The licences of what the app is made with: the interface font's, then the third-party software's
- * (assets/licenses.txt, written by tools/licenses.py), a paragraph a row.
+ * The licences of what the app is made with: the interface font's and icons', then the third-party
+ * software's (assets/licenses.txt, written by tools/licenses.py), a paragraph a row.
  */
 @Composable
 private fun Licences(onBack: () -> Unit) {
@@ -223,7 +223,9 @@ private fun Licences(onBack: () -> Unit) {
         fun asset(name: String) = runCatching { context.assets.open(name).bufferedReader().use { it.readText() } }.getOrDefault("")
         val gap = "\n\n"
         val text = "The interface font is Inter, by The Inter Project Authors, under the SIL Open Font License 1.1." + gap +
-            asset("fonts/Inter-OFL.txt").trim() + gap + asset("licenses.txt")
+            asset("fonts/Inter-OFL.txt").trim() + gap +
+            "Most interface icons are Lucide icons (lucide.dev), by Lucide Icons and Contributors, under the ISC License." + gap +
+            asset("icons/LICENSE-lucide.txt").trim() + gap + asset("licenses.txt")
         text.split(gap).map { it.trimEnd() }.filter { it.isNotBlank() }
     }
     androidx.activity.compose.BackHandler(onBack = onBack)

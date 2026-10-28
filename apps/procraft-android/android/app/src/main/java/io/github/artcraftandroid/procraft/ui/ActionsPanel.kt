@@ -754,8 +754,9 @@ private fun versionName(context: Context): String =
     runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: "?"
 
 private fun licences(context: Context): String {
-    val inter = runCatching { context.assets.open("fonts/Inter-OFL.txt").bufferedReader().use { it.readText() } }.getOrDefault("")
-    return "The interface font is Inter, by The Inter Project Authors.\n\n$inter"
+    fun asset(name: String) = runCatching { context.assets.open(name).bufferedReader().use { it.readText() } }.getOrDefault("")
+    return "The interface font is Inter, by The Inter Project Authors.\n\n${asset("fonts/Inter-OFL.txt")}\n\n" +
+        "Most interface icons are Lucide icons (lucide.dev), by Lucide Icons and Contributors.\n\n${asset("icons/LICENSE-lucide.txt")}"
 }
 
 /** Offers [files] to other apps through the share sheet. */
