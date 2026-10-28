@@ -2577,9 +2577,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refreshFlags()
     }
 
-    /** A finger put down while the pen still holds the snapped shape makes it perfect. */
-    fun quickShapePerfect() {
-        quickShape = session?.quickshapePerfect() ?: quickShape
+    /** A finger down ([down]) or lifted while the pen still holds the snapped shape. */
+    fun quickShapeFinger(down: Boolean) {
+        quickShape = session?.quickshapeFinger(down) ?: quickShape
     }
 
     fun chooseQuickShape(kind: QuickShapeKind) {

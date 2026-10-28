@@ -1005,10 +1005,13 @@ fn a_held_stroke_snaps_to_a_shape_and_is_edited() {
 }
 
 #[test]
-fn a_shape_still_held_follows_the_pen_and_a_finger_makes_it_perfect() {
+fn a_shape_still_held_follows_the_pen_and_a_finger_snaps_it() {
     use crate::quickshape::QuickShapeKind;
     let Some(s) = session(200, 200) else { return };
     s.set_brush_size(0.2);
+    let angle = |i: &crate::quickshape::QuickShapeInfo| {
+        (i.handles[3] - i.handles[1]).atan2(i.handles[2] - i.handles[0]).to_degrees()
+    };
     // a line, held at its end
     let pts: Vec<PenSample> = (0..=40).map(|i| sample(20.0 + i as f32 * 2.0, 100.0, f64::from(i) * 8.0)).collect();
     s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
@@ -1020,22 +1023,23 @@ fn a_shape_still_held_follows_the_pen_and_a_finger_makes_it_perfect() {
     let moved = s.quickshape_info().unwrap();
     assert!((moved.handles[2] - 80.0).abs() < 1.0 && (moved.handles[3] - 160.0).abs() < 1.0, "{:?}", moved.handles);
     assert!((moved.handles[0] - 20.0).abs() < 1.0 && (moved.handles[1] - 100.0).abs() < 1.0);
-    // a finger: its angle in 15 degree steps from then on (here 45 degrees, nearest to 45)
-    let stepped = s.quickshape_perfect().unwrap();
-    let (dx, dy) = (stepped.handles[2] - stepped.handles[0], stepped.handles[3] - stepped.handles[1]);
-    assert!((dy.atan2(dx).to_degrees() - 45.0).abs() < 0.5, "{:?}", stepped.handles);
+    // a finger down: the angle in 15 degree steps (45 already is one)
+    assert!((angle(&s.quickshape_finger(true).unwrap()) - 45.0).abs() < 0.5);
     s.stroke_add(vec![sample(150.0, 130.0, 450.0)]);
-    let on = s.quickshape_info().unwrap();
-    let (dx, dy) = (on.handles[2] - on.handles[0], on.handles[3] - on.handles[1]);
-    assert!((dy.atan2(dx).to_degrees() - 15.0).abs() < 0.5, "{:?}", on.handles);
+    assert!((angle(&s.quickshape_info().unwrap()) - 15.0).abs() < 0.5);
+    // lifted: back to following the pen freely (about 13 degrees)
+    let free = s.quickshape_finger(false).unwrap();
+    assert!((free.handles[2] - 150.0).abs() < 1.0 && (free.handles[3] - 130.0).abs() < 1.0, "{:?}", free.handles);
+    // down again, and the pen lifts first: the stepped line is kept
+    let on = s.quickshape_finger(true).unwrap();
+    assert!((angle(&on) - 15.0).abs() < 0.5);
     s.stroke_end(vec![]);
-    // let go, it stays put
+    // let go, it stays put, fingers or not
     s.stroke_add(vec![sample(30.0, 30.0, 500.0)]);
     assert_eq!(s.quickshape_info().unwrap().handles, on.handles);
-    // and a finger then (the pen lifted) changes nothing
-    assert_eq!(s.quickshape_perfect().unwrap().handles, on.handles);
+    assert_eq!(s.quickshape_finger(false).unwrap().handles, on.handles);
     s.quickshape_done();
-    // a held ellipse a finger makes a circle
+    // a held ellipse near round is a circle while a finger is down
     let pts: Vec<PenSample> = (0..=60)
         .map(|i| {
             let t = i as f32 / 60.0 * std::f32::consts::TAU;
@@ -1045,9 +1049,11 @@ fn a_shape_still_held_follows_the_pen_and_a_finger_makes_it_perfect() {
     s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
     s.stroke_add(pts[1..].to_vec());
     assert_eq!(s.quickshape_hold().unwrap().kind, QuickShapeKind::Ellipse);
-    let circle = s.quickshape_perfect().unwrap();
-    assert_eq!(circle.kind, QuickShapeKind::Circle);
+    assert_eq!(s.quickshape_finger(true).unwrap().kind, QuickShapeKind::Circle);
+    assert_eq!(s.quickshape_finger(false).unwrap().kind, QuickShapeKind::Ellipse);
+    assert_eq!(s.quickshape_finger(true).unwrap().kind, QuickShapeKind::Circle);
     s.stroke_end(vec![]);
+    assert_eq!(s.quickshape_info().unwrap().kind, QuickShapeKind::Circle);
     s.quickshape_done();
 }
 

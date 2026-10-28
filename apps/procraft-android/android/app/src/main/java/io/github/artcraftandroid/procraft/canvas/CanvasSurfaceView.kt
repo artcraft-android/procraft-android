@@ -615,9 +615,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 }
                 removeCallbacks(holdToPick)
                 removeCallbacks(quickShapeHold)
-                // a finger put down while the stroke is held as a snapped shape makes it perfect
+                // a finger down while the stroke is held as a snapped shape snaps it, until lifted
                 if ((mode == Mode.PEN || mode == Mode.FINGER) && vm.quickShape != null) {
-                    if (e.getToolType(e.actionIndex) == MotionEvent.TOOL_TYPE_FINGER) vm.quickShapePerfect()
+                    if (e.getToolType(e.actionIndex) == MotionEvent.TOOL_TYPE_FINGER) vm.quickShapeFinger(true)
                     return true
                 }
                 if (mode == Mode.PEN || mode == Mode.PICK) return true
@@ -725,6 +725,11 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             MotionEvent.ACTION_POINTER_UP -> {
                 fingers = e.pointerCount - 1
                 if (mode == Mode.GESTURE) followFingers(e, exclude = e.actionIndex)
+                // the last finger other than the stroke's lifted from a held snapped shape
+                if ((mode == Mode.PEN || mode == Mode.FINGER) && vm.quickShape != null && e.getPointerId(e.actionIndex) != strokePointer) {
+                    val strokeDown = e.findPointerIndex(strokePointer).let { it >= 0 && it != e.actionIndex }
+                    if (e.pointerCount - 1 - (if (strokeDown) 1 else 0) == 0) vm.quickShapeFinger(false)
+                }
             }
             MotionEvent.ACTION_UP -> {
                 vm.showCursor(null)
