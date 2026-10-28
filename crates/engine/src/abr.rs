@@ -114,7 +114,8 @@ pub fn read_brushes(bytes: &[u8]) -> Option<Vec<AbrBrush>> {
     };
     match version {
         1 | 2 => Some(read_old(&mut r, version)?.into_iter().map(sampled).collect()),
-        6 | 7 | 10 => read_sections(&mut r),
+        // 6, 7, 9 and 10 seen; any later one in the same sections is read the same way
+        6.. if bytes.get(4..8) == Some(b"8BIM".as_slice()) => read_sections(&mut r),
         _ => None,
     }
 }
@@ -810,6 +811,22 @@ mod tests {
             out.extend_from_slice(data);
         }
         out
+    }
+
+    #[test]
+    fn a_version_9_file_is_read_like_version_6_and_other_files_are_not() {
+        let six = version6();
+        let mut nine = six.clone();
+        nine[..2].copy_from_slice(&9u16.to_be_bytes());
+        let (a, b) = (read_brushes(&six).unwrap(), read_brushes(&nine).unwrap());
+        assert_eq!(a.len(), b.len());
+        assert!(!b.is_empty());
+        assert_eq!(a[0].name, b[0].name);
+        // a zip (a brush bundle, say) starts with a large first number but no sections
+        assert!(read_brushes(&[0x50, 0x4b, 3, 4, 20, 0, 0, 0, 8, 0]).is_none());
+        let mut no_sections = nine;
+        no_sections[4..8].copy_from_slice(b"XXXX");
+        assert!(read_brushes(&no_sections).is_none());
     }
 
     #[test]
