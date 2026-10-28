@@ -3234,12 +3234,48 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** A brush or set file from elsewhere: it joins the library and its set is shown. */
     fun importBrushes(uri: android.net.Uri) {
         viewModelScope.launch {
-            val bytes = withContext(Dispatchers.IO) {
-                runCatching { getApplication<Application>().contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
-            } ?: return@launch
+            val read = withContext(Dispatchers.IO) { runCatching { readAll(uri) } }
+            val bytes = read.getOrNull()
+            if (bytes == null) {
+                message = if (read.exceptionOrNull() is OutOfMemoryError) "This file is too large to import." else "This file could not be read."
+                return@launch
+            }
             val name = withContext(Dispatchers.IO) { fileName(uri) }
-            val added = if (name != null && isOtherBrushFile(name)) addOtherBrushes(bytes, name) else addBrushes(bytes)
+            // the name says which kind, when it has one we know; else our own kinds first, then
+            // the other apps' (each told apart by its contents)
+            val added = if (name != null && isOtherBrushFile(name)) {
+                addOtherBrushes(bytes, name)
+            } else {
+                addBrushes(bytes) || addOtherBrushes(bytes, name ?: "Imported")
+            }
             if (!added) message = "This file has no brushes in it."
+        }
+    }
+
+    /** All of [uri]'s bytes, read into one array of the file's own size when it is known. */
+    private fun readAll(uri: android.net.Uri): ByteArray {
+        val resolver = getApplication<Application>().contentResolver
+        val size = runCatching { resolver.openFileDescriptor(uri, "r")?.use { it.statSize } }.getOrNull() ?: -1L
+        val stream = resolver.openInputStream(uri) ?: throw java.io.IOException("no stream")
+        return stream.use { input ->
+            if (size in 0..Int.MAX_VALUE.toLong()) {
+                val out = ByteArray(size.toInt())
+                var at = 0
+                while (at < out.size) {
+                    val n = input.read(out, at, out.size - at)
+                    if (n < 0) break
+                    at += n
+                }
+                if (at < out.size) {
+                    out.copyOf(at)
+                } else {
+                    // a file that grew since its size was read
+                    val more = input.readBytes()
+                    if (more.isEmpty()) out else out + more
+                }
+            } else {
+                input.readBytes()
+            }
         }
     }
 
