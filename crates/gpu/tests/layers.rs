@@ -815,3 +815,38 @@ fn a_render_reads_back_only_a_few_layers_to_park() {
     assert!(canvas.parked_layers() >= 8, "parked in all: {}", canvas.parked_layers());
     t.same(&gpu, 2, "the frames shown, the rest parked");
 }
+
+#[test]
+fn a_remake_part_composites_a_few_items_at_most() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let mut doc = Document::new(W, W);
+    for _ in 0..39 {
+        doc.add_layer();
+    }
+    let ids: Vec<LayerId> = doc.layers().iter().map(|l| l.id).collect();
+    // each layer a short band of its own colour
+    let pixels: Vec<Vec<u8>> = (0..ids.len())
+        .map(|i| {
+            let mut px = vec![0u8; (W * W * 4) as usize];
+            let (y, x0) = (i / 8 * 3 + 1, i % 8 * 2);
+            for x in x0..x0 + 3 {
+                let o = (y * W as usize + x) * 4;
+                px[o..o + 4].copy_from_slice(&[(i * 6) as u8, 200 - (i * 4) as u8, 90, 255]);
+            }
+            px
+        })
+        .collect();
+    let docs = [doc.clone(), doc];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    // room for 30 of the 40, every one kept compressed (as an opening artwork's past what fits):
+    // the caches are remade from layers quick to bring back, with room for many a part
+    t.canvases[0].set_resident_budget(30 * u64::from(W * W * 4));
+    for (id, px) in ids.iter().zip(&pixels) {
+        t.canvases[0].park_pixels(*id, px).unwrap();
+        t.canvases[1].upload_layer(&gpu, *id, px).unwrap();
+    }
+    t.same(&gpu, 2, "opened");
+    let stats = t.canvases[0].last_remake().unwrap();
+    assert!((1..=8).contains(&stats.largest_part), "{stats:?}");
+}

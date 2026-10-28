@@ -1217,6 +1217,8 @@ pub struct Canvas {
     version: u64,
     /// Layers past the budget are still to be parked (a render parks only a few).
     parking_left: bool,
+    /// How the last remake of the caches went.
+    last_remake: Option<RemakeStats>,
     /// What the layers' textures may take before those needed least lately are parked (0: none
     /// are), and when each was last needed, counted in renders.
     resident_budget: u64,
@@ -1424,6 +1426,7 @@ impl Canvas {
             versions: HashMap::new(),
             version: 0,
             parking_left: false,
+            last_remake: None,
             resident_budget: 0,
             needed_at: HashMap::new(),
             renders: 0,
@@ -1895,6 +1898,11 @@ impl Canvas {
     /// parked): it wants another render soon.
     pub fn wants_render(&self) -> bool {
         self.busy() || self.parking_left
+    }
+
+    /// How the last remake of the caches went (none made yet).
+    pub fn last_remake(&self) -> Option<RemakeStats> {
+        self.last_remake
     }
 
     /// Whether the composite is being made around pictures of what isn't worked on.
@@ -4016,6 +4024,7 @@ impl Canvas {
                 keep,
                 started: std::time::Instant::now(),
                 slices: 0,
+                largest_part: 0,
                 restored: 0,
                 restoring: std::time::Duration::ZERO,
             });
@@ -4118,7 +4127,7 @@ impl Canvas {
         let device = &gpu.device;
         let full = self.full();
         let deadline = std::time::Instant::now() + REMAKE_SLICE;
-        let (mut restored, mut restoring) = (0, std::time::Duration::ZERO);
+        let (mut restored, mut restoring, mut largest) = (0, std::time::Duration::ZERO, 0);
         loop {
             let (below, items, progress) = match (r.below, r.above) {
                 (Some(p), _) => (true, &r.below_items, p),
@@ -4139,8 +4148,11 @@ impl Canvas {
             while let Some(&item) = items.get(at) {
                 let mut more = item_layers(doc, item);
                 more.extend(doc.clip_base(item));
+                // the time counts bringing layers back, not the compositing after: the count
+                // keeps a part whose layers come back quickly from compositing too long
                 let late = std::time::Instant::now() >= deadline;
-                if !part.is_empty() && (late || layers.len() + more.len() > room) {
+                let full_part = part.len() >= MOST_PART_ITEMS || layers.len() + more.len() > room;
+                if !part.is_empty() && (late || full_part) {
                     break;
                 }
                 at += 1;
@@ -4166,6 +4178,7 @@ impl Canvas {
                 layers.extend(more);
                 part.push((item, rect));
             }
+            largest = largest.max(part.len());
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cache part") });
             let mut uniforms = UniformData::default();
@@ -4205,18 +4218,21 @@ impl Canvas {
         r.slices += 1;
         r.restored += restored;
         r.restoring += restoring;
+        r.largest_part = r.largest_part.max(largest);
         if r.below.is_some() || r.above.is_some() {
             self.remake = Some(r);
             return;
         }
         log::info!(
-            "caches remade in {} ms over {} renders: {} items, {} layers brought back in {} ms",
+            "caches remade in {} ms over {} renders: {} items (at most {} a part), {} layers brought back in {} ms",
             r.started.elapsed().as_millis(),
             r.slices,
             r.below_items.len() + r.above_items.len(),
+            r.largest_part,
             r.restored,
             r.restoring.as_millis()
         );
+        self.last_remake = Some(RemakeStats { renders: r.slices, largest_part: r.largest_part });
         // made: they are the caches, and the whole picture is composited again around them
         let Remake { mut caches, below_items, below_key, above_items, above_key, .. } = r;
         caches.below_items = below_items;
@@ -5816,6 +5832,13 @@ fn painted_bounds(t: &Thumbnail, painted: impl Fn([u8; 4]) -> bool) -> Option<[u
 /// The longest side of a parked layer's small pictures, pixels: as big as any thumbnail asked for.
 const PARKED_PICTURE_SIDE: u32 = 192;
 
+/// How a remake of the caches went: over how many renders, and the most items one part took.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemakeStats {
+    pub renders: u32,
+    pub largest_part: usize,
+}
+
 /// A layer's pixels made ready to park: compressed, with its small pictures. Made on any thread
 /// (the slow part of [`Canvas::park_pixels`]), then given to [`Canvas::park_ready`].
 pub struct ReadyToPark {
@@ -5973,6 +5996,9 @@ struct Caches {
 const MOST_PARK_READS: usize = 4;
 const PARK_SLICE: std::time::Duration = std::time::Duration::from_millis(6);
 
+/// The most items a part of a remake composites before it is sent (and the time looked at).
+const MOST_PART_ITEMS: usize = 8;
+
 /// How long each render goes on remaking caches before it lets the app go on.
 const REMAKE_SLICE: std::time::Duration = std::time::Duration::from_millis(16);
 
@@ -5992,6 +6018,7 @@ struct Remake {
     /// and the time that took.
     started: std::time::Instant,
     slices: u32,
+    largest_part: usize,
     restored: usize,
     restoring: std::time::Duration,
 }

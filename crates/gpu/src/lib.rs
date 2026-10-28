@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 pub use canvas::{
-    Backdrop, Canvas, DisplayLut, Filter, LiquifyMode, LiquifyStamp, ReadyToPark, Resample, SelectionLook, SmallScene,
-    Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, read_texture,
+    Backdrop, Canvas, DisplayLut, Filter, LiquifyMode, LiquifyStamp, ReadyToPark, RemakeStats, Resample, SelectionLook,
+    SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, read_texture,
 };
 pub use lighting::Lighting;
 pub use scene::{Light, MOST_LIGHTS, MeshView, Orbit, SurfaceMap};
