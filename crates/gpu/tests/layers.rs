@@ -492,3 +492,49 @@ fn parked_layers_come_back_as_they_were() {
     t.same(&gpu, 2, "the duplicate undone");
     assert!(t.canvases[0].parked_layers() > 0);
 }
+
+#[test]
+fn an_artwork_opening_with_more_layers_than_fit_parks_the_rest() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let mut doc = Document::new(W, W);
+    for _ in 0..9 {
+        doc.add_layer();
+    }
+    let ids: Vec<LayerId> = doc.layers().iter().map(|l| l.id).collect();
+    // each layer a band of its own colour, half covering
+    let pixels: Vec<Vec<u8>> = (0..ids.len())
+        .map(|i| {
+            let mut px = vec![0u8; (W * W * 4) as usize];
+            for y in 0..W as usize {
+                for x in 0..W as usize {
+                    if (x + y + i) % 3 != 0 {
+                        let o = (y * W as usize + x) * 4;
+                        px[o..o + 4].copy_from_slice(&[(i * 25) as u8, 200 - (i * 20) as u8, 90, 255]);
+                    }
+                }
+            }
+            px
+        })
+        .collect();
+    let docs = [doc.clone(), doc];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
+    for (id, px) in ids.iter().zip(&pixels) {
+        if t.canvases[0].has_room() {
+            t.canvases[0].upload_layer(&gpu, *id, px).unwrap();
+        } else {
+            t.canvases[0].park_pixels(*id, px).unwrap();
+        }
+        t.canvases[1].upload_layer(&gpu, *id, px).unwrap();
+    }
+    assert!(t.canvases[0].parked_layers() >= 6);
+    t.same(&gpu, 2, "opened");
+    let middle = ids[5];
+    t.each(|doc, canvas| {
+        doc.set_current(middle);
+        paint(canvas, doc, middle, [250, 0, 0], Vec2::new(8.0, 8.0), 3.0, StrokeTool::Paint);
+    });
+    t.same(&gpu, 2, "one opened parked, painted");
+    assert!(t.canvases[0].parked_layers() > 0);
+}

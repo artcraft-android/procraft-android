@@ -2895,6 +2895,9 @@ impl Canvas {
             self.collect_layers(doc);
         }
 
+        if !smudge_uniforms.data.is_empty() {
+            gpu.queue.write_buffer(&self.smudge_params, 0, &smudge_uniforms.data);
+        }
         let dirty = self.dirty.intersect(self.full());
         self.make_groups(device, doc.max_depth());
         self.ensure_caches(gpu, doc, &mut encoder, &mut uniforms);
@@ -2913,9 +2916,6 @@ impl Canvas {
         }
         if !uniforms.data.is_empty() {
             gpu.queue.write_buffer(&self.uniform_buffer, 0, &uniforms.data);
-        }
-        if !smudge_uniforms.data.is_empty() {
-            gpu.queue.write_buffer(&self.smudge_params, 0, &smudge_uniforms.data);
         }
         gpu.queue.submit([encoder.finish()]);
         self.renders = self.renders.wrapping_add(1);
@@ -3819,6 +3819,39 @@ impl Canvas {
         if remake_above {
             needed.extend(above_items.iter().flat_map(|t| item_layers(doc, *t)));
         }
+        let most = self.most_resident();
+        let missing = needed.iter().filter(|id| !self.layers.contains_key(*id)).count();
+        if self.layers.len().saturating_add(missing) > most {
+            // more than fit: the work so far is sent first, so what is cached is made from it, then
+            // the caches a part at a time, each part's layers let go before the next comes back
+            let done =
+                std::mem::replace(encoder, device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default()));
+            if !uniforms.data.is_empty() {
+                gpu.queue.write_buffer(&self.uniform_buffer, 0, &uniforms.data);
+            }
+            gpu.queue.submit([done.finish()]);
+            *uniforms = UniformData::default();
+            let mut keep: HashSet<LayerId> =
+                tops.get(live.clone()).unwrap_or_default().iter().flat_map(|t| item_layers(doc, *t)).collect();
+            keep.extend(tops.get(live.start).and_then(|first| doc.clip_base(*first)));
+            keep.extend(self.active.map(|a| a.layer));
+            keep.extend(self.held.as_ref().map(|h| h.layer));
+            self.restore_all(gpu, keep.iter().copied().collect::<Vec<_>>(), false);
+            if remake_below {
+                self.stream_cache(gpu, doc, &caches.below, &caches.below_views, &below_items, true, &keep);
+                caches.below_items = below_items;
+                caches.below_key = below_key;
+            }
+            if remake_above {
+                self.stream_cache(gpu, doc, &caches.above, &caches.above_views, &above_items, false, &keep);
+                caches.above_items = above_items;
+                caches.above_key = above_key;
+            }
+            caches.live = tops.get(live).unwrap_or_default().to_vec();
+            caches.live_layers = caches.live.iter().flat_map(|t| item_layers(doc, *t)).collect();
+            self.caches = Some(caches);
+            return;
+        }
         self.restore_all(gpu, needed, false);
         if remake_below {
             let [r, g, b] = doc.background;
@@ -3855,6 +3888,103 @@ impl Canvas {
         caches.live = tops.get(live).unwrap_or_default().to_vec();
         caches.live_layers = caches.live.iter().flat_map(|t| item_layers(doc, *t)).collect();
         self.caches = Some(caches);
+    }
+
+    /// How many layers' textures fit the budget (any number without one).
+    fn most_resident(&self) -> usize {
+        let per = u64::from(self.width) * u64::from(self.height) * 4;
+        if self.resident_budget == 0 {
+            usize::MAX
+        } else {
+            usize::try_from(self.resident_budget / per.max(1)).unwrap_or(usize::MAX).max(1)
+        }
+    }
+
+    /// Lets go of the textures of layers unchanged since parked (their compressed copies kept),
+    /// but those in `keep`.
+    fn let_go_clean(&mut self, keep: &HashSet<LayerId>) {
+        let parked = &self.parked;
+        self.layers.retain(|id, _| keep.contains(id) || !parked.contains_key(id));
+    }
+
+    /// `items` composited onto a cache's pair of textures (over the background if `background`,
+    /// else over transparency) a part at a time: each part's layers brought back, composited and
+    /// sent, then let go (but `keep`) before the next part's come back.
+    #[allow(clippy::too_many_arguments)]
+    fn stream_cache(
+        &mut self,
+        gpu: &Gpu,
+        doc: &Document,
+        textures: &[wgpu::Texture; 2],
+        views: &[wgpu::TextureView; 2],
+        items: &[LayerId],
+        background: bool,
+        keep: &HashSet<LayerId>,
+    ) {
+        let device = &gpu.device;
+        let full = self.full();
+        let new_encoder =
+            || device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cache part") });
+        let mut encoder = new_encoder();
+        let mut uniforms = UniformData::default();
+        {
+            let [r, g, b] = doc.background;
+            let solid = if background && doc.background_visible { [r, g, b, 1.0] } else { [0.0; 4] };
+            let offset = uniforms.push(&LayerUniform { opacity: 1.0, solid, ..Default::default() });
+            let mut pass = render_pass(&mut encoder, "cache", &views[0], wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+            pass.set_pipeline(&self.pipelines.solid);
+            pass.set_bind_group(0, &self.stroke_bind, &[]);
+            pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+            pass.draw(0..3, 0..1);
+        }
+        let stack = Stack { textures, views };
+        let mut current = 0;
+        let room = self.most_resident().saturating_sub(self.layers.len()).max(1);
+        let mut at = 0;
+        while at < items.len() {
+            // as many whole items as fit (at least one)
+            let mut part = Vec::new();
+            let mut layers = Vec::new();
+            while let Some(&item) = items.get(at) {
+                let more = item_layers(doc, item);
+                if !part.is_empty() && layers.len() + more.len() > room {
+                    break;
+                }
+                layers.extend(more);
+                part.push(item);
+                at += 1;
+            }
+            self.restore_all(gpu, layers, false);
+            self.composite_items(device, doc, &mut encoder, &mut uniforms, full, &part, true, &stack, &mut current);
+            if !uniforms.data.is_empty() {
+                gpu.queue.write_buffer(&self.uniform_buffer, 0, &uniforms.data);
+            }
+            gpu.queue.submit([std::mem::replace(&mut encoder, new_encoder()).finish()]);
+            uniforms = UniformData::default();
+            self.let_go_clean(keep);
+            gpu.flush();
+        }
+        stack.settle(&mut encoder, full, current);
+        gpu.queue.submit([encoder.finish()]);
+    }
+
+    /// Whether another layer's texture fits the budget.
+    pub fn has_room(&self) -> bool {
+        self.layers.len() < self.most_resident()
+    }
+
+    /// Keeps layer `id`'s pixels (premultiplied RGBA, the canvas's size) compressed, without a
+    /// texture, as a layer parked: for an artwork opening with more layers than fit.
+    pub fn park_pixels(&mut self, id: LayerId, rgba: &[u8]) -> Result<(), GpuError> {
+        let expected = self.width as usize * self.height as usize * 4;
+        if rgba.len() != expected {
+            return Err(GpuError::Readback(format!("layer {id:?}: {} bytes, expected {expected}", rgba.len())));
+        }
+        self.layers.remove(&id);
+        self.parked.insert(id, procraft_engine::applz4::encode(rgba));
+        self.caches = None;
+        self.invalidate();
+        Ok(())
     }
 
     /// Whether work keeps the caches: painting, or undoing or redoing it, on a layer worked on.
