@@ -1,12 +1,20 @@
 //! Reading layered PSD (and large-document PSB) files as artworks: their layers with names,
-//! opacity, visibility, blend modes and clipping; groups; layer masks; the resolution and colour
-//! profile. A file without layers comes in as one layer of its flattened picture. Grey, RGB and
-//! CMYK files of 8 or 16 bits a channel are read.
+//! opacity, visibility, blend modes, clipping and locks; groups; layer masks; text layers as
+//! editable text; the resolution and colour profile. Grey, RGB and CMYK files of 8 or 16 bits a
+//! channel are read.
+//!
+//! What comes in is each layer's own pixels: effects, vector masks (beyond the mask the file
+//! renders from one), adjustments and fill opacity are left out, and so is a layer with no pixels
+//! on the canvas. A bottom layer of one colour becomes the canvas's background colour; otherwise
+//! the background is hidden. A file with no layers to bring comes in as one layer of its
+//! flattened picture.
+
+mod text;
 
 use std::sync::Arc;
 
 use crate::cms::{CanvasIcc, IccProfile, Space};
-use crate::document::{BlendMode, Document, Layer, LayerId, LayerKind, MAX_CANVAS_EDGE};
+use crate::document::{BlendMode, Document, Layer, LayerId, LayerKind, LayerText, MAX_CANVAS_EDGE};
 use crate::native::Imported;
 use crate::profile::Profile;
 
@@ -119,18 +127,27 @@ pub fn read(bytes: &[u8]) -> Result<Imported, PsdError> {
     let flat = merged(&mut r, &format, channels);
 
     let doc = Document::new(width, height);
-    let (layers, pixels, current) = if records.is_empty() {
+    let mut built = build(&records, &format);
+    // nothing to bring: the flattened picture
+    if built.layers.is_empty() {
         let rgba = flat.as_ref().map(|f| premultiplied(f)).ok_or(damaged("picture"))?;
-        let layer = paint_layer(LayerId(1), "Layer 1".to_owned(), None);
-        (vec![layer], vec![(LayerId(1), rgba)], LayerId(1))
-    } else {
-        build(&records, &format)?
-    };
+        let id = LayerId(1);
+        built = Built {
+            layers: vec![paint_layer(id, "Layer 1".to_owned(), None)],
+            pixels: vec![(id, rgba)],
+            top: id,
+            ..built
+        };
+    }
+    let Built { layers, pixels, top: current, background } = built;
     let with_pixels = layers.iter().filter(|l| l.kind != LayerKind::Group).count();
     if with_pixels > doc.layer_cap() {
         return Err(PsdError::TooManyLayers(doc.layer_cap()));
     }
     let mut document = Document::from_layers(width, height, layers, current);
+    // white and hidden unless the bottom layer was all one colour
+    document.background = background.map_or([1.0; 3], |c| c.map(|v| f32::from(v) / 255.0));
+    document.background_visible = background.is_some();
     if let Some(dpi) = resources.dpi {
         document.dpi = dpi;
     }
@@ -144,8 +161,17 @@ pub fn read(bytes: &[u8]) -> Result<Imported, PsdError> {
             None => {}
         }
     }
+    // a layer the document gained (when only groups came) starts empty
+    let document = document.repaired();
+    let mut pixels = pixels;
+    pixels.retain(|(id, _)| document.layer(*id).is_some());
+    for l in document.layers() {
+        if l.kind != LayerKind::Group && !pixels.iter().any(|(id, _)| *id == l.id) {
+            pixels.push((l.id, vec![0; width as usize * height as usize * 4]));
+        }
+    }
     Ok(Imported {
-        document: document.repaired(),
+        document,
         pixels,
         name: "Untitled Artwork".to_owned(),
         author: String::new(),
@@ -245,10 +271,22 @@ struct Record {
     name: String,
     /// A group's marker: 1 open, 2 closed, 3 the end of one (below its layers).
     section: Option<u32>,
-    section_blend: Option<[u8; 4]>,
-    fill: u8,
-    /// An adjustment or fill layer, whose pixels (if any) are drawn from its settings.
-    adjustment: bool,
+    /// What is locked: bit 0 transparency, bit 1 pixels, bit 2 position; past 6 all of it.
+    protection: u32,
+    /// A text layer's text, if it can be edited as text.
+    text: Option<LayerText>,
+}
+
+impl Record {
+    /// Locked against changes: its pixels or position, or all of it.
+    fn locked(&self) -> bool {
+        self.protection & 0b110 != 0 || self.protection > 6
+    }
+
+    /// Its transparency locked.
+    fn alpha_locked(&self) -> bool {
+        self.protection & 1 != 0 || self.protection > 6
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -259,14 +297,9 @@ struct MaskRect {
     right: i32,
     /// The mask outside its rectangle.
     outside: u8,
-    disabled: bool,
+    /// Turned off: kept, hidden.
+    hidden: bool,
 }
-
-/// Additional information keys that make an adjustment or fill layer.
-const ADJUSTMENTS: [&[u8; 4]; 20] = [
-    b"SoCo", b"GdFl", b"PtFl", b"brit", b"levl", b"curv", b"expA", b"vibA", b"hue ", b"hue2", b"blnc", b"blwh",
-    b"phfl", b"mixr", b"clrL", b"nvrt", b"post", b"thrs", b"grdm", b"selc",
-];
 
 /// The layer records, bottom first, each with its channels decoded.
 fn layer_info(bytes: &[u8], f: &Format) -> Result<Vec<Record>, PsdError> {
@@ -296,21 +329,23 @@ fn layer_info(bytes: &[u8], f: &Format) -> Result<Vec<Record>, PsdError> {
         r.u8().ok_or(damaged("layer"))?;
         let extra = r.u32().ok_or(damaged("layer"))?;
         let mut x = Reader::new(r.take(extra as usize).ok_or(damaged("layer"))?);
-        // the mask's rectangle and settings
+        // the mask's rectangle and settings: a plain mask's, or with a vector mask's after (the
+        // first rectangle is then the one the vector mask was drawn into); masks with density or
+        // feather settings are left out
         let n = x.u32().unwrap_or(0) as usize;
-        let mask = x.take(n).and_then(|m| {
+        let mask = x.take(n).filter(|_| n == 20 || n == 36).and_then(|m| {
             let mut m = Reader::new(m);
             let (top, left, bottom, right) = (m.i32()?, m.i32()?, m.i32()?, m.i32()?);
             let outside = m.u8()?;
             let flags = m.u8()?;
-            Some(MaskRect { top, left, bottom, right, outside, disabled: flags & 2 != 0 })
+            Some(MaskRect { top, left, bottom, right, outside, hidden: flags & 2 != 0 })
         });
         // blending ranges
         let n = x.u32().unwrap_or(0) as usize;
         x.take(n);
-        // the name, padded to four with its length byte
+        // the name, padded to four with its length byte (what isn't UTF-8 left out)
         let len = usize::from(x.u8().unwrap_or(0));
-        let mut name: String = x.take(len).unwrap_or_default().iter().map(|&b| char::from(b)).collect();
+        let mut name = String::from_utf8_lossy(x.take(len).unwrap_or_default()).replace('\u{FFFD}', "");
         x.take((4 - (len + 1) % 4) % 4);
         let mut record = Record {
             top,
@@ -325,10 +360,11 @@ fn layer_info(bytes: &[u8], f: &Format) -> Result<Vec<Record>, PsdError> {
             mask,
             name: String::new(),
             section: None,
-            section_blend: None,
-            fill: 255,
-            adjustment: false,
+            protection: 0,
+            text: None,
         };
+        // of the additional information, only the name, group marker, locks and text are kept:
+        // effects, vector masks, adjustments, fill opacity and the rest are left out
         while let Some(b) = block(&mut x, f.big) {
             let mut d = Reader::new(b.data);
             match &b.key {
@@ -340,14 +376,9 @@ fn layer_info(bytes: &[u8], f: &Format) -> Result<Vec<Record>, PsdError> {
                         name = unicode;
                     }
                 }
-                b"lsct" | b"lsdk" => {
-                    record.section = d.u32();
-                    if d.take(4) == Some(b"8BIM".as_slice()) {
-                        record.section_blend = d.take(4).and_then(|k| k.try_into().ok());
-                    }
-                }
-                b"iOpa" => record.fill = d.u8().unwrap_or(255),
-                key if ADJUSTMENTS.contains(&key) => record.adjustment = true,
+                b"lsct" => record.section = d.u32(),
+                b"lspf" => record.protection = d.u32().unwrap_or(0),
+                b"TySh" => record.text = text::layer_text(b.data),
                 _ => {}
             }
         }
@@ -567,10 +598,17 @@ fn paint_layer(id: LayerId, name: String, parent: Option<LayerId>) -> Layer {
     }
 }
 
-type Built = (Vec<Layer>, Vec<(LayerId, Vec<u8>)>, LayerId);
+/// The document's layers (bottom first) and pixels, the top layer and the background colour (if
+/// the bottom layer was all one colour).
+struct Built {
+    layers: Vec<Layer>,
+    pixels: Vec<(LayerId, Vec<u8>)>,
+    top: LayerId,
+    background: Option<[u8; 3]>,
+}
 
-/// The document's layers (bottom first) and pixels from the records, and the top layer.
-fn build(records: &[Record], f: &Format) -> Result<Built, PsdError> {
+/// The document's layers and pixels from the records.
+fn build(records: &[Record], f: &Format) -> Built {
     let (w, h) = (f.width as usize, f.height as usize);
     let mut layers = Vec::new();
     let mut pixels = Vec::new();
@@ -582,50 +620,63 @@ fn build(records: &[Record], f: &Format) -> Result<Built, PsdError> {
     // the groups open around the records being read
     let mut open: Vec<LayerId> = Vec::new();
     let mut top = None;
-    for r in records {
-        let opacity = f32::from(r.opacity) / 255.0 * f32::from(r.fill) / 255.0;
+    let mut background = None;
+    for (i, r) in records.iter().enumerate() {
+        // a layer without a name is numbered by where it is, counting from 2 at the bottom
+        let name = if r.name.is_empty() { format!("Layer {}", i + 2) } else { r.name.clone() };
         match r.section {
             Some(3) => {
                 open.push(new_id());
                 continue;
             }
+            // a group keeps its name, whether it is open, hidden or locked; not its blend mode,
+            // opacity or clipping
             Some(1 | 2) => {
                 let id = open.pop().unwrap_or_else(&mut new_id);
-                let blend = r.section_blend.unwrap_or(r.blend);
                 layers.push(Layer {
                     kind: LayerKind::Group,
                     visible: !r.hidden,
-                    opacity: f32::from(r.opacity) / 255.0,
-                    blend: blend_mode(&blend),
-                    clipped: r.clipped,
+                    locked: r.locked(),
                     collapsed: r.section == Some(2),
-                    ..paint_layer(id, r.name.clone(), open.last().copied())
+                    ..paint_layer(id, name, open.last().copied())
                 });
                 continue;
             }
             _ => {}
         }
-        // an adjustment has no pixels to bring; a fill layer keeps the ones drawn for it
-        if r.adjustment && span(r.left, r.right) * span(r.top, r.bottom) == 0 {
+        let picture = picture(r, f);
+        // the bottom layer all of one colour: the background
+        if i == 0
+            && let Some(colour) = picture.as_ref().and_then(Picture::uniform)
+        {
+            background = Some(colour);
+            continue;
+        }
+        // nothing on the canvas and no text: left out, its mask too
+        if picture.is_none() && r.text.is_none() {
             continue;
         }
         let id = new_id();
         layers.push(Layer {
             visible: !r.hidden,
-            opacity,
+            opacity: f32::from(r.opacity) / 255.0,
             blend: blend_mode(&r.blend),
             clipped: r.clipped,
-            ..paint_layer(id, r.name.clone(), open.last().copied())
+            locked: r.locked(),
+            alpha_lock: r.alpha_locked(),
+            text: r.text.clone(),
+            ..paint_layer(id, name, open.last().copied())
         });
-        pixels.push((id, place(r, f)));
+        pixels.push((id, picture.map_or_else(|| vec![0; w * h * 4], |p| p.on_canvas(w, h))));
         top = Some(id);
-        // its mask, just above it
-        if let (Some(m), Some((_, plane))) = (r.mask.filter(|m| !m.disabled), r.channels.iter().find(|(c, _)| *c == -2))
-        {
+        // its mask, just above it (hidden if turned off)
+        let mask = r.mask.filter(|m| span(m.left, m.right) * span(m.top, m.bottom) > 0);
+        if let (Some(m), Some((_, plane))) = (mask, r.channels.iter().find(|(c, _)| *c == -2)) {
             let mid = new_id();
             layers.push(Layer {
                 kind: LayerKind::Mask,
                 name: "Mask".to_owned(),
+                visible: !m.hidden,
                 ..paint_layer(mid, String::new(), Some(id))
             });
             let mut grey = vec![m.outside; w * h];
@@ -634,40 +685,64 @@ fn build(records: &[Record], f: &Format) -> Result<Built, PsdError> {
             pixels.push((mid, grey.into_iter().flat_map(|v| [v, v, v, 255]).collect()));
         }
     }
-    let current = top.ok_or(PsdError::Damaged("no layers"))?;
-    Ok((layers, pixels, current))
+    Built { layers, pixels, top: top.unwrap_or(LayerId(1)), background }
 }
 
-/// A layer's pixels on the canvas (premultiplied RGBA, the canvas's size).
-fn place(r: &Record, f: &Format) -> Vec<u8> {
-    let (w, h) = (f.width as usize, f.height as usize);
-    let (lw, lh) = (span(r.left, r.right), span(r.top, r.bottom));
-    let channel = |id: i16| r.channels.iter().find(|(c, _)| *c == id).map(|(_, p)| p);
-    let colours: Vec<Option<&Vec<u8>>> = (0..f.colour.channels() as i16).map(channel).collect();
-    let alpha = channel(-1);
-    let mut rgba = vec![0u8; w * h * 4];
-    for y in 0..lh {
-        let cy = i64::from(r.top) + y as i64;
-        if cy < 0 || cy >= h as i64 {
-            continue;
-        }
-        for x in 0..lw {
-            let cx = i64::from(r.left) + x as i64;
-            if cx < 0 || cx >= w as i64 {
-                continue;
+/// The part of a layer on the canvas: where it is and its straight RGBA.
+struct Picture {
+    left: usize,
+    top: usize,
+    width: usize,
+    rgba: Vec<u8>,
+}
+
+impl Picture {
+    /// Its colour, if every pixel of it is the same.
+    fn uniform(&self) -> Option<[u8; 3]> {
+        let mut px = self.rgba.as_chunks::<4>().0.iter();
+        let first = *px.next()?;
+        px.all(|p| *p == first).then_some([first[0], first[1], first[2]])
+    }
+
+    /// Premultiplied, on a transparent canvas `w` x `h`.
+    fn on_canvas(&self, w: usize, h: usize) -> Vec<u8> {
+        let mut out = vec![0u8; w * h * 4];
+        for (y, row) in self.rgba.chunks(self.width.max(1) * 4).enumerate() {
+            let at = ((self.top + y) * w + self.left) * 4;
+            if let Some(dst) = out.get_mut(at..at + row.len()) {
+                dst.copy_from_slice(&premultiplied(row));
             }
-            let j = y * lw + x;
-            let s = |c: usize| colours.get(c).copied().flatten().and_then(|p| p.get(j)).copied().unwrap_or(0);
+        }
+        out
+    }
+}
+
+/// A layer's pixels where it lies on the canvas: none if no part of it does, or one of its colour
+/// channels is missing.
+fn picture(r: &Record, f: &Format) -> Option<Picture> {
+    let (w, h) = (i64::from(f.width), i64::from(f.height));
+    let lw = span(r.left, r.right);
+    let (x0, y0) = (i64::from(r.left).max(0), i64::from(r.top).max(0));
+    let x1 = (i64::from(r.left) + lw as i64).min(w);
+    let y1 = (i64::from(r.top) + span(r.top, r.bottom) as i64).min(h);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let channel = |id: i16| r.channels.iter().find(|(c, _)| *c == id).map(|(_, p)| p);
+    let colours: Vec<&Vec<u8>> = (0..f.colour.channels() as i16).map(channel).collect::<Option<_>>()?;
+    let alpha = channel(-1);
+    let mut rgba = Vec::with_capacity(((x1 - x0) * (y1 - y0) * 4) as usize);
+    for cy in y0..y1 {
+        for cx in x0..x1 {
+            let j = (cy - i64::from(r.top)) as usize * lw + (cx - i64::from(r.left)) as usize;
+            let s = |c: usize| colours.get(c).and_then(|p| p.get(j)).copied().unwrap_or(0);
             // no alpha channel: opaque (as a background layer is)
             let a = alpha.map_or(255, |p| p.get(j).copied().unwrap_or(0));
-            let i = (cy as usize * w + cx as usize) * 4;
-            if let Some(px) = rgba.get_mut(i..i + 4) {
-                let [r, g, b] = rgb(f.colour, s).map(|c| ((u16::from(c) * u16::from(a) + 127) / 255) as u8);
-                px.copy_from_slice(&[r, g, b, a]);
-            }
+            let [r, g, b] = rgb(f.colour, s);
+            rgba.extend_from_slice(&[r, g, b, a]);
         }
     }
-    rgba
+    Some(Picture { left: x0 as usize, top: y0 as usize, width: (x1 - x0) as usize, rgba })
 }
 
 /// Copies a `pw` x `ph` patch whose top left is at (`left`, `top`) onto a `w` x `h` grid, taking
@@ -772,6 +847,10 @@ impl<'a> Reader<'a> {
         self.array().map(u64::from_be_bytes)
     }
 
+    fn f64(&mut self) -> Option<f64> {
+        self.u64().map(f64::from_bits)
+    }
+
     /// A length: four bytes, or eight in a PSB.
     fn len(&mut self, big: bool) -> Option<usize> {
         if big { usize::try_from(self.u64()?).ok() } else { self.u32().map(|n| n as usize) }
@@ -791,7 +870,8 @@ mod tests {
     #[test]
     fn layers_groups_and_masks_come_back_as_they_were_written() {
         let (w, h) = (4, 3);
-        let blue = solid(w, h, [0, 0, 255, 255]);
+        let mut blue = solid(w, h, [0, 0, 255, 255]);
+        blue[4..8].copy_from_slice(&[0, 255, 255, 255]);
         // red on the left half only, half covered
         let mut red = solid(w, h, [0, 0, 0, 0]);
         for y in 0..h as usize {
@@ -850,11 +930,14 @@ mod tests {
             ]
         );
         let [bottom, red_layer, mask_layer, group] = doc.layers() else { panic!() };
+        // the background hidden: no bottom layer of one colour
+        assert!(!doc.background_visible);
         assert!(!bottom.visible);
         assert_eq!(bottom.blend, BlendMode::Multiply);
         assert!((bottom.opacity - 0.5).abs() < 0.01);
         assert_eq!(red_layer.blend, BlendMode::Screen);
         assert_eq!(red_layer.parent, Some(group.id));
+        assert!(mask_layer.visible);
         assert_eq!(mask_layer.parent, Some(red_layer.id));
         assert!(group.collapsed);
         // pixels premultiplied, placed where they were
@@ -886,6 +969,386 @@ mod tests {
         bytes[25] = 3;
         bytes.truncate(40);
         assert!(read(&bytes).is_err());
+    }
+
+    /// A layer record for a PSD made by hand: its rectangle (top, left, bottom, right), channels
+    /// (id and samples, kept raw), mask data and additional information.
+    struct Raw<'a> {
+        rect: [i32; 4],
+        channels: Vec<(i16, Vec<u8>)>,
+        blend: &'a [u8; 4],
+        opacity: u8,
+        /// Bit 1: hidden.
+        flags: u8,
+        mask: Vec<u8>,
+        name: &'a str,
+        blocks: Vec<(&'a [u8; 4], Vec<u8>)>,
+    }
+
+    impl Default for Raw<'_> {
+        fn default() -> Self {
+            Raw {
+                rect: [0; 4],
+                channels: Vec::new(),
+                blend: b"norm",
+                opacity: 255,
+                flags: 0,
+                mask: Vec::new(),
+                name: "Layer",
+                blocks: Vec::new(),
+            }
+        }
+    }
+
+    impl Raw<'_> {
+        /// RGBA samples of one colour over its rectangle.
+        fn filled(mut self, px: [u8; 4]) -> Self {
+            let [top, left, bottom, right] = self.rect;
+            let n = ((bottom - top) * (right - left)).max(0) as usize;
+            self.channels = [(-1, 3), (0, 0), (1, 1), (2, 2)].map(|(id, c)| (id, vec![px[c]; n])).to_vec();
+            self
+        }
+    }
+
+    fn u32s(values: &[u32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_be_bytes()).collect()
+    }
+
+    /// Mask data: a rectangle, the colour outside it and flags, `len` bytes long.
+    fn mask_data([top, left, bottom, right]: [i32; 4], outside: u8, flags: u8, len: usize) -> Vec<u8> {
+        let mut m: Vec<u8> = [top, left, bottom, right].iter().flat_map(|v| v.to_be_bytes()).collect();
+        m.extend([outside, flags]);
+        m.resize(len, 0);
+        m
+    }
+
+    /// An RGB PSD `w` x `h` of `records` (bottom first) and a flattened picture of one colour.
+    fn raw_psd(w: u32, h: u32, records: &[Raw<'_>], flat: [u8; 4]) -> Vec<u8> {
+        let mut out = b"8BPS".to_vec();
+        out.extend(1u16.to_be_bytes());
+        out.extend([0; 6]);
+        out.extend(4u16.to_be_bytes());
+        out.extend(u32s(&[h, w]));
+        out.extend(8u16.to_be_bytes());
+        out.extend(3u16.to_be_bytes());
+        out.extend(u32s(&[0, 0]));
+        let mut info = (records.len() as u16).to_be_bytes().to_vec();
+        let mut data = Vec::new();
+        for r in records {
+            info.extend(r.rect.iter().flat_map(|v| v.to_be_bytes()));
+            info.extend((r.channels.len() as u16).to_be_bytes());
+            for (id, samples) in &r.channels {
+                info.extend(id.to_be_bytes());
+                info.extend((samples.len() as u32 + 2).to_be_bytes());
+                data.extend([0, 0]);
+                data.extend(samples);
+            }
+            info.extend(b"8BIM");
+            info.extend(r.blend);
+            info.extend([r.opacity, 0, r.flags, 0]);
+            let mut extra = (r.mask.len() as u32).to_be_bytes().to_vec();
+            extra.extend(&r.mask);
+            extra.extend(0u32.to_be_bytes());
+            extra.push(r.name.len() as u8);
+            extra.extend(r.name.as_bytes());
+            while !extra.len().is_multiple_of(4) {
+                extra.push(0);
+            }
+            for (key, block) in &r.blocks {
+                extra.extend(b"8BIM");
+                extra.extend(*key);
+                extra.extend((block.len() as u32).to_be_bytes());
+                extra.extend(block);
+            }
+            info.extend((extra.len() as u32).to_be_bytes());
+            info.extend(extra);
+        }
+        info.extend(data);
+        let mut section = (info.len() as u32).to_be_bytes().to_vec();
+        section.extend(info);
+        section.extend(0u32.to_be_bytes());
+        out.extend((section.len() as u32).to_be_bytes());
+        out.extend(section);
+        // the flattened picture, raw: four planes
+        out.extend(0u16.to_be_bytes());
+        for c in flat {
+            out.extend(std::iter::repeat_n(c, (w * h) as usize));
+        }
+        out
+    }
+
+    #[test]
+    fn effects_vector_masks_adjustments_and_fill_are_left_out_and_empty_layers_dropped() {
+        let (w, h) = (6, 4);
+        let mut bottom = Raw { rect: [0, 0, 4, 6], name: "Paper", ..Raw::default() }.filled([200, 10, 10, 255]);
+        // not all of one colour
+        bottom.channels[1].1[0] = 0;
+        let records = [
+            bottom,
+            // its own pixels, at its full opacity; the effects, fill and vector mask unread
+            Raw {
+                rect: [1, 1, 3, 4],
+                opacity: 128,
+                name: "Shape",
+                blocks: vec![
+                    (b"iOpa", vec![0, 0, 0, 0]),
+                    (b"lrFX", vec![0, 0, 0, 0]),
+                    (b"lfx2", vec![0; 8]),
+                    (b"vmsk", vec![0; 8]),
+                    (b"SoCo", vec![0; 8]),
+                ],
+                ..Raw::default()
+            }
+            .filled([0, 0, 255, 255]),
+            // an adjustment has no pixels: left out with its mask
+            Raw {
+                mask: mask_data([0, 0, 0, 0], 255, 0, 20),
+                channels: vec![(-2, vec![])],
+                name: "Curves 1",
+                blocks: vec![(b"curv", vec![0; 4])],
+                ..Raw::default()
+            },
+            // so is an empty layer, and one off the canvas
+            Raw { name: "Empty", ..Raw::default() },
+            Raw { rect: [10, 10, 12, 12], name: "Away", ..Raw::default() }.filled([1, 2, 3, 255]),
+            // a fill layer keeps the pixels drawn for it
+            Raw { rect: [0, 0, 4, 6], name: "Fill", blocks: vec![(b"SoCo", vec![0; 8])], ..Raw::default() }
+                .filled([0, 255, 0, 255]),
+        ];
+        let got = read(&raw_psd(w, h, &records, [9, 9, 9, 255])).unwrap();
+        let names: Vec<&str> = got.document.layers().iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Paper", "Shape", "Fill"]);
+        let shape = &got.document.layers()[1];
+        assert!((shape.opacity - 128.0 / 255.0).abs() < 1e-6);
+        let px = &got.pixels[1].1;
+        assert_eq!(&px[(6 + 1) * 4..][..4], &[0, 0, 255, 255]);
+        assert_eq!(&px[0..4], &[0, 0, 0, 0]);
+        // nothing on the canvas at all: the flattened picture
+        let got = read(&raw_psd(w, h, &records[2..5], [9, 9, 9, 255])).unwrap();
+        assert_eq!(got.document.layers().len(), 1);
+        assert_eq!(&got.pixels[0].1[0..4], &[9, 9, 9, 255]);
+    }
+
+    #[test]
+    fn a_bottom_layer_of_one_colour_becomes_the_background() {
+        let (w, h) = (4, 4);
+        let records = [
+            // part of the canvas only, but all of one colour
+            Raw { rect: [1, 1, 3, 3], name: "Background", ..Raw::default() }.filled([10, 20, 30, 255]),
+            Raw { rect: [0, 0, 1, 1], name: "Dot", ..Raw::default() }.filled([255, 0, 0, 255]),
+        ];
+        let got = read(&raw_psd(w, h, &records, [0; 4])).unwrap();
+        let doc = &got.document;
+        assert!(doc.background_visible);
+        assert_eq!(doc.background, [10.0 / 255.0, 20.0 / 255.0, 30.0 / 255.0]);
+        let names: Vec<&str> = doc.layers().iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Dot"]);
+        // above a bottom layer of two colours it stays a layer
+        let mut two = Raw { rect: [0, 0, 1, 2], name: "Two", ..Raw::default() }.filled([255, 0, 0, 255]);
+        two.channels[1].1[1] = 0;
+        let [solid, _] = records;
+        let got = read(&raw_psd(w, h, &[two, solid], [0; 4])).unwrap();
+        assert!(!got.document.background_visible);
+        assert_eq!(got.document.background, [1.0; 3]);
+        assert_eq!(got.document.layers().len(), 2);
+    }
+
+    #[test]
+    fn locks_groups_masks_and_names_come_in_as_the_file_has_them() {
+        let (w, h) = (4, 4);
+        let mut base = Raw { rect: [0, 0, 4, 4], name: "Base", ..Raw::default() }.filled([0, 0, 0, 255]);
+        base.channels[1].1[3] = 9;
+        // transparency, position and everything locked
+        base.blocks = vec![(b"lspf", u32s(&[1]))];
+        let lsct = |kind: u32| (b"lsct", u32s(&[kind]));
+        let records = [
+            base,
+            Raw { name: "</Layer group>", blocks: vec![lsct(3)], ..Raw::default() },
+            Raw {
+                rect: [0, 0, 2, 2],
+                name: "",
+                blocks: vec![(b"lspf", u32s(&[4]))],
+                // turned off: kept, hidden
+                mask: mask_data([0, 0, 2, 2], 0, 2, 20),
+                ..Raw::default()
+            }
+            .filled([5, 5, 5, 255]),
+            Raw {
+                rect: [2, 2, 4, 4],
+                name: "Feathered",
+                blocks: vec![(b"lspf", u32s(&[0x8000_0000]))],
+                // density or feather settings: the mask left out
+                mask: mask_data([2, 2, 4, 4], 0, 0x10, 28),
+                ..Raw::default()
+            }
+            .filled([6, 6, 6, 255]),
+            // its blend mode and opacity are left out
+            Raw {
+                blend: b"mul ",
+                opacity: 51,
+                flags: 2,
+                name: "Folder",
+                blocks: vec![lsct(2), (b"lspf", u32s(&[2]))],
+                ..Raw::default()
+            },
+        ];
+        let mut records = records;
+        records[2].channels.push((-2, vec![255, 0, 0, 255]));
+        records[3].channels.push((-2, vec![255; 4]));
+        let got = read(&raw_psd(w, h, &records, [0; 4])).unwrap();
+        let doc = &got.document;
+        let names: Vec<(&str, LayerKind)> = doc.layers().iter().map(|l| (l.name.as_str(), l.kind)).collect();
+        assert_eq!(
+            names,
+            [
+                ("Base", LayerKind::Paint),
+                ("Layer 4", LayerKind::Paint),
+                ("Mask", LayerKind::Mask),
+                ("Feathered", LayerKind::Paint),
+                ("Folder", LayerKind::Group)
+            ]
+        );
+        let [base, unnamed, mask, feathered, folder] = doc.layers() else { panic!() };
+        assert!(base.alpha_lock && !base.locked);
+        assert!(unnamed.locked && !unnamed.alpha_lock);
+        assert!(!mask.visible);
+        assert_eq!(&got.pixels[2].1[0..8], &[255, 255, 255, 255, 0, 0, 0, 255]);
+        assert!(feathered.locked && feathered.alpha_lock);
+        assert!(folder.collapsed && !folder.visible && folder.locked);
+        assert_eq!((folder.blend, folder.opacity), (BlendMode::Normal, 1.0));
+        assert_eq!((unnamed.parent, feathered.parent), (Some(folder.id), Some(folder.id)));
+    }
+
+    #[test]
+    fn a_text_layer_keeps_its_text_and_pixels() {
+        let (w, h) = (8, 4);
+        let tool = text::tests::type_tool(
+            "Hello",
+            "Helvetica-Bold",
+            10.0,
+            [0.0, 0.0, 1.0],
+            0,
+            [1.0, 0.0, 0.0, 1.0, 2.0, 3.0],
+            [0.0, -3.0, 5.0, 1.0],
+            false,
+        );
+        let mut paper = Raw { rect: [0, 0, 4, 8], name: "Paper", ..Raw::default() }.filled([255; 4]);
+        paper.channels[1].1[0] = 0;
+        let records = [
+            paper,
+            Raw { rect: [0, 2, 3, 6], name: "Hello", blocks: vec![(b"TySh", tool.clone())], ..Raw::default() }
+                .filled([0, 0, 255, 255]),
+            // turned: pixels only
+            Raw {
+                rect: [0, 2, 3, 6],
+                name: "Turned",
+                blocks: vec![(
+                    b"TySh",
+                    text::tests::type_tool(
+                        "Hi",
+                        "F",
+                        10.0,
+                        [0.0; 3],
+                        0,
+                        [0.0, 1.0, -1.0, 0.0, 2.0, 3.0],
+                        [0.0, -3.0, 5.0, 1.0],
+                        false,
+                    ),
+                )],
+                ..Raw::default()
+            }
+            .filled([0, 0, 0, 255]),
+            // text with nothing drawn yet still comes in
+            Raw { name: "Blank", blocks: vec![(b"TySh", tool)], ..Raw::default() },
+        ];
+        let got = read(&raw_psd(w, h, &records, [0; 4])).unwrap();
+        let [_, hello, turned, blank] = got.document.layers() else { panic!() };
+        let t = hello.text.as_ref().unwrap();
+        assert_eq!((t.text.as_str(), t.font.as_str(), t.style.as_str()), ("Hello", "Helvetica", "Bold"));
+        assert_eq!(t.origin, [2.0, 0.0]);
+        assert_eq!(t.color, [0.0, 0.0, 1.0]);
+        assert_eq!(hello.name, "Hello");
+        assert_eq!(&got.pixels[1].1[2 * 4..][..4], &[0, 0, 255, 255]);
+        assert!(turned.text.is_none());
+        assert!(blank.text.is_some());
+        assert!(got.pixels[3].1.iter().all(|&v| v == 0));
+    }
+
+    /// Real PSDs, when a folder of them is given (`PSD_CORPUS=folder`, never committed): each one
+    /// reads or is turned away as a kind not read, and what reads holds together.
+    #[test]
+    fn a_corpus_of_real_psds_reads() {
+        let Ok(root) = std::env::var("PSD_CORPUS") else { return };
+        let mut files = Vec::new();
+        let mut folders = vec![std::path::PathBuf::from(&root)];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+                let path = entry.path();
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+                if path.is_dir() {
+                    folders.push(path);
+                } else if ext == "psd" || ext == "psb" {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        assert!(!files.is_empty(), "no PSDs in {root}");
+        let (mut read_ok, mut refused, mut layers, mut texts, mut backgrounds, mut masks) = (0, 0, 0, 0, 0, 0);
+        let mut failures = Vec::new();
+        for path in &files {
+            let bytes = std::fs::read(path).unwrap();
+            match read(&bytes) {
+                Ok(got) => {
+                    read_ok += 1;
+                    let doc = &got.document;
+                    layers += doc.layers().len();
+                    texts += doc.layers().iter().filter(|l| l.text.is_some()).count();
+                    masks += doc.layers().iter().filter(|l| l.kind == LayerKind::Mask).count();
+                    backgrounds += usize::from(doc.background_visible);
+                    let size = doc.width() as usize * doc.height() as usize * 4;
+                    let painted = doc.layers().iter().filter(|l| l.kind != LayerKind::Group).count();
+                    if got.pixels.len() != painted || got.pixels.iter().any(|(_, p)| p.len() != size) {
+                        failures.push(format!("{}: pixels don't match the layers", path.display()));
+                    }
+                    if let Ok(dump) = std::env::var("PSD_CORPUS_LIST") {
+                        let mut out = format!("== {}\n", path.display());
+                        if doc.background_visible {
+                            out += &format!("   background {:?}\n", doc.background);
+                        }
+                        for l in doc.layers().iter().rev() {
+                            let text = l.text.as_ref().map(|t| {
+                                format!(
+                                    " text {:?} {} {} {:.1} {:?} w{:.0}",
+                                    t.text, t.font, t.style, t.size, t.origin, t.width
+                                )
+                            });
+                            out += &format!(
+                                "   {:?} {:?} {:?} vis={} op={:.2} lock={} alpha={}{}\n",
+                                l.kind,
+                                l.name,
+                                l.blend,
+                                l.visible,
+                                l.opacity,
+                                l.locked,
+                                l.alpha_lock,
+                                text.unwrap_or_default()
+                            );
+                        }
+                        use std::io::Write;
+                        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&dump).unwrap();
+                        f.write_all(out.as_bytes()).unwrap();
+                    }
+                }
+                Err(PsdError::Unsupported(_)) => refused += 1,
+                Err(e) => failures.push(format!("{}: {e:?}", path.display())),
+            }
+        }
+        eprintln!(
+            "{} files: {read_ok} read ({layers} layers, {texts} text, {masks} masks, {backgrounds} backgrounds), {refused} not read",
+            files.len()
+        );
+        assert!(failures.is_empty(), "{} failed:\n{}", failures.len(), failures.join("\n"));
     }
 
     #[test]
