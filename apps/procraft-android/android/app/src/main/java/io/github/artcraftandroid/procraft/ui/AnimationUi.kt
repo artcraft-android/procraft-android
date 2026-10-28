@@ -93,7 +93,8 @@ fun BoxScope.AnimationBar(vm: CanvasViewModel) {
             } else if (vm.frameOptionsOpen) {
                 DownPopover(260.dp, 130.dp, Modifier.offset(x = barWidth / 2 - 130.dp)) { FrameOptionsPage(vm) }
             }
-            Box(Modifier.padding(bottom = BarGap).size(barWidth, BarHeight).clip(RoundedCornerShape(30.dp)).background(BarFill)) {
+            // the whole bar takes its touches: none reach the canvas under it (a swipe would paint)
+            Box(Modifier.padding(bottom = BarGap).size(barWidth, BarHeight).clip(RoundedCornerShape(30.dp)).background(BarFill).pointerInput(Unit) { detectTapGestures { } }) {
                 val pages = vm.animation?.pages == true
                 Row(Modifier.fillMaxWidth().padding(start = BarInset, end = BarInset, top = 8.dp).height(30.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(

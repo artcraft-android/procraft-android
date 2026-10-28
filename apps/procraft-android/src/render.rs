@@ -58,7 +58,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
         let (size, reconfigure) = {
             let mut st = shared.lock();
             while !st.stop && !st.needs_frame {
-                st = shared.wake.wait(st).unwrap_or_else(|e| e.into_inner());
+                shared.wake.wait(&mut st);
             }
             if st.stop {
                 break;
@@ -98,6 +98,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
         {
             let mut guard = shared.lock();
             let st = &mut *guard;
+            let held = Instant::now();
             // the window changed size while the image was awaited (the device turned): the view is
             // already for the new size, so this image is let go and the surface configured again
             if st.window_size != size {
@@ -165,23 +166,37 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
                         lut,
                     }),
                 );
-                if animating {
+                // caches still being remade: another frame soon, and the artwork isn't shown yet
+                let busy = canvas.busy();
+                if animating || canvas.wants_render() {
                     st.needs_frame = true;
                 }
                 // counted only when the canvas was drawn, so a first frame means the artwork shows
-                st.frames += 1;
+                if !busy {
+                    st.frames += 1;
+                }
             }
             let now = Instant::now();
             if let Some(prev) = last_present {
                 st.frame_interval_ms = now.duration_since(prev).as_secs_f32() * 1000.0;
             }
             last_present = Some(now);
+            // everything else waits on the lock meanwhile
+            if held.elapsed() > SLOW_FRAME {
+                log::warn!("a frame held the canvas {} ms", held.elapsed().as_millis());
+            }
+            // whoever waited on the lock meanwhile (a touch) has it next, before this thread's
+            // next frame
+            parking_lot::MutexGuard::unlock_fair(guard);
         }
         queue.present(frame);
     }
     drop(surface);
     drop(window);
 }
+
+/// A frame that holds the canvas longer than this is logged: touches wait on it.
+const SLOW_FRAME: Duration = Duration::from_millis(200);
 
 /// How often the second display looks for a new frame of the main window.
 const PROJECTION_POLL: Duration = Duration::from_millis(8);

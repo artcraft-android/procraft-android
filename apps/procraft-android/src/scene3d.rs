@@ -1117,7 +1117,7 @@ impl State {
                 // the channel painted on is the session's; the others wait in the scene
                 *picture = if part == current && channel == painted {
                     let canvas = self.canvas.as_mut().ok_or_else(|| failed("the model is not shown yet".to_owned()))?;
-                    canvas.render(gpu, &mut self.doc, None);
+                    canvas.render_finished(gpu, &mut self.doc);
                     Some(canvas.read_composite(gpu).map_err(|e| failed(e.to_string()))?)
                 } else {
                     match scene.slot(part, channel).and_then(Option::as_mut) {
@@ -1146,7 +1146,7 @@ fn waiting_picture(gpu: &procraft_gpu::Gpu, set: &mut TextureSet) -> Result<Vec<
         }
     };
     let canvas = set.canvas.insert(canvas);
-    canvas.render(gpu, &mut set.doc, None);
+    canvas.render_finished(gpu, &mut set.doc);
     canvas.read_composite(gpu).map_err(|e| e.to_string())
 }
 

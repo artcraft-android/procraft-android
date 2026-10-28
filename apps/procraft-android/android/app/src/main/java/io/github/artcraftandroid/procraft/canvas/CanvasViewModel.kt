@@ -445,8 +445,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var transformBox by mutableStateOf<TransformBox?>(null)
         private set
     private val transformPrefs = app.getSharedPreferences("transform", android.content.Context.MODE_PRIVATE)
-    /** The brush library as edited, kept between artworks and launches. */
+    /** The brushes in use and what has shipped, kept between artworks and launches. */
     private val brushPrefs = app.getSharedPreferences("brushes", android.content.Context.MODE_PRIVATE)
+    /** The brush library as edited, in a file: brought-in brushes' images make it too big for preferences. */
+    private val brushLibraryFile = File(app.filesDir, "brushes/library.json")
+    /** Writes of the library, one at a time. */
+    private val brushLibraryWrites = Mutex()
     var transformKind by mutableStateOf(enumPref(TRANSFORM_KIND, TransformKind.FREEFORM))
         private set
     var interpolation by mutableStateOf(enumPref(INTERPOLATION, Interpolation.BILINEAR))
@@ -689,6 +693,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var canRedo by mutableStateOf(false)
         private set
     val thumbnails = mutableStateMapOf<ULong, ImageBitmap>()
+    /** The pixels' version each thumbnail was read at: it is read again only once its layer's is new. */
+    private val thumbnailVersions = HashMap<ULong, ULong>()
 
     var brushSets by mutableStateOf<List<BrushSetInfo>>(emptyList())
         private set
@@ -1728,7 +1734,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         panel = Panel.NONE
         screen = Screen.GALLERY
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { dir?.let { runCatching { s.save(it.path) } } }
+            withContext(Dispatchers.IO) {
+                dir?.let { runCatching { s.save(it.path) } }
+                // its memory free at once, not when the object is collected
+                s.releaseCanvas()
+            }
             galleryVersion++
             refreshGallery()
         }
@@ -1873,19 +1883,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * takes half a second, so callers off the main thread do this before [start].
      */
     private fun loadBrushes(s: CanvasSession) {
-        // the library as kept, else edits kept by earlier versions
-        val kept = brushPrefs.getString(BRUSH_LIBRARY, null)
-        val loaded = kept != null && s.loadBrushLibrary(kept)
+        // the library as kept (in its file; earlier versions kept it in preferences: moved once), else
+        // edits kept by earlier versions
+        var loaded = brushLibraryFile.exists() && s.loadBrushLibraryFile(brushLibraryFile.path)
+        if (!loaded) {
+            val kept = brushPrefs.getString(BRUSH_LIBRARY, null)
+            loaded = kept != null && s.loadBrushLibrary(kept)
+            if (loaded && s.saveBrushLibraryFile(brushLibraryFile.path)) brushPrefs.edit().remove(BRUSH_LIBRARY).apply()
+        }
         if (!loaded) brushPrefs.getString(BRUSH_CHANGES, null)?.let { s.applyBrushChanges(it) }
         // brushes and sets shipped since the library was kept join it, once
         val seen = brushPrefs.getString(BRUSHES_SEEN, null)?.split(',')?.mapNotNull { it.toUIntOrNull() } ?: FIRST_SHIPPED
         val shipped = if (loaded) s.addShippedBrushes(seen) else s.shippedBrushCounts()
         if (shipped != seen || !brushPrefs.contains(BRUSHES_SEEN)) {
-            brushPrefs.edit().apply {
-                // kept with them, or the next start would load the library without them
-                if (loaded) putString(BRUSH_LIBRARY, s.savedBrushLibrary())
-                putString(BRUSHES_SEEN, shipped.joinToString(","))
-            }.apply()
+            // kept with them, or the next start would load the library without them
+            if (loaded) s.saveBrushLibraryFile(brushLibraryFile.path)
+            brushPrefs.edit().putString(BRUSHES_SEEN, shipped.joinToString(",")).apply()
         }
         // the brushes in use as they were left (they go by place in the kept library)
         if (loaded) brushPrefs.getString(BRUSH_CHOICES, null)?.let { s.loadBrushChoices(it) }
@@ -1894,10 +1907,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun start(s: CanvasSession, dir: File, brushesLoaded: Boolean = false) {
         // the canvas's colours are P3 or sRGB numbers: the colour panel and swatches follow
         refreshCanvasSpace(s)
-        // layers may take a quarter of the device's memory: every layer stays on the GPU
+        // layers may take half the device's memory, their textures a quarter: past that, those not
+        // worked on are kept compressed off the GPU until needed
         val memory = android.app.ActivityManager.MemoryInfo()
         getApplication<Application>().getSystemService(android.app.ActivityManager::class.java)?.getMemoryInfo(memory)
-        if (memory.totalMem > 0) io.github.artcraftandroid.procraft.core.setLayerBudget((memory.totalMem / 4).toULong())
+        if (memory.totalMem > 0) {
+            io.github.artcraftandroid.procraft.core.setLayerBudget((memory.totalMem / 2).toULong())
+            io.github.artcraftandroid.procraft.core.setResidentBudget((memory.totalMem / 4).toULong())
+        }
         s.setSelectionVisibility(selectionVisibility)
         s.setBrushScaling(brushOnScreen)
         s.setLightInterface(lightInterface)
@@ -1937,6 +1954,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         attachProjection()
         activeSince = android.os.SystemClock.elapsedRealtime()
         thumbnails.clear()
+        thumbnailVersions.clear()
         previews.clear()
         shadedNames.clear()
         panel = Panel.NONE
@@ -2074,11 +2092,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun copyCanvas() {
-        val copied = session?.copyCanvas()
-        clipboard = copied ?: clipboard
-        canPaste = clipboard != null
+        val s = session ?: return
         closePanels()
-        if (copied != null) showNotice("Canvas copied")
+        // off the main thread: the picture waits for the canvas to finish any remaking first
+        viewModelScope.launch {
+            val copied = withContext(Dispatchers.IO) { runCatching { s.copyCanvas() }.getOrNull() }
+            clipboard = copied ?: clipboard
+            canPaste = clipboard != null
+            if (copied != null) showNotice("Canvas copied")
+        }
     }
 
     fun cutLayer() {
@@ -2780,6 +2802,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (s.cropCanvas(r.left, r.top, r.width, r.height, cropAngle, cropResample, w.toUInt(), h.toUInt())) {
             thumbnails.clear()
+            thumbnailVersions.clear()
             refresh()
             refreshView()
             if (panel == Panel.LAYERS) refreshThumbnails()
@@ -3136,7 +3159,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readSliders()
         previews.clear()
         shadedNames.clear()
-        brushPrefs.edit().putString(BRUSH_LIBRARY, s.savedBrushLibrary()).putString(BRUSH_CHOICES, s.savedBrushChoices()).apply()
+        keepBrushLibrary(s)
+        brushPrefs.edit().putString(BRUSH_CHOICES, s.savedBrushChoices()).apply()
     }
 
     fun duplicateBrush(b: BrushInfo) {
@@ -3708,7 +3732,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val value = if (size) this.size else opacity
         if (notchAt(size, value) != null) s.removeSliderNotch(size, value) else s.addSliderNotch(size, value)
         readNotches()
-        brushPrefs.edit().putString(BRUSH_LIBRARY, s.savedBrushLibrary()).apply()
+        keepBrushLibrary(s)
+    }
+
+    /** Keeps the library as it is now in its file, off the main thread. */
+    private fun keepBrushLibrary(s: CanvasSession) {
+        viewModelScope.launch(Dispatchers.IO) {
+            // each write takes the library as it is when it runs, so the last one is the latest
+            brushLibraryWrites.withLock { runCatching { s.saveBrushLibraryFile(brushLibraryFile.path) } }
+        }
     }
 
     private fun readNotches() {
@@ -4269,6 +4301,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val name = session?.undo()
         if (could) showNotice("Undo" + name?.let { " $it" }.orEmpty())
         refresh()
+        // the thumbnails of the layers it put back (only those) read again
+        if (panel == Panel.LAYERS) refreshThumbnails()
     }
 
     /**
@@ -4315,6 +4349,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val name = session?.redo()
         if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
         refresh()
+        if (panel == Panel.LAYERS) refreshThumbnails()
         text?.let { resumeText(it) }
     }
 
@@ -5547,7 +5582,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun addLayer() = layerChange { if (it.addLayer() == 0uL) message = noRoom() }
 
-    fun selectLayer(id: ULong) = layerChange { it.selectLayer(id) }
+    // no layer's pixels change, so the thumbnails stay (an artwork's hundreds would load again)
+    fun selectLayer(id: ULong) = layerChange(thumbs = false) { it.selectLayer(id) }
 
     fun toggleVisible(l: LayerInfo) = layerChange { it.setLayerVisible(l.id, !l.visible) }
 
@@ -5757,11 +5793,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         hasSelection = session?.hasSelection() ?: false
     }
 
+    /** Reads again the thumbnails of the layers whose pixels changed since theirs was read (or have none). */
     private fun refreshThumbnails() {
-        for (l in layers) loadThumbnail(l.id)
+        val s = session ?: return
+        viewModelScope.launch {
+            val versions = withContext(Dispatchers.Default) { runCatching { s.layerVersions() }.getOrNull() } ?: return@launch
+            if (session !== s) return@launch
+            for (v in versions) {
+                if (v.id !in thumbnails || thumbnailVersions[v.id] != v.version) loadThumbnail(v.id, v.version)
+            }
+        }
     }
 
-    private fun loadThumbnail(id: ULong) {
+    /** Reads layer [id]'s thumbnail; [version], its pixels' version when asked (none: not known). */
+    private fun loadThumbnail(id: ULong, version: ULong? = null) {
         val s = session ?: return
         viewModelScope.launch {
             val image = withContext(Dispatchers.Default) {
@@ -5770,7 +5815,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
                 bitmap.asImageBitmap()
             }
-            if (image != null) thumbnails[id] = image
+            if (image != null && session === s) {
+                thumbnails[id] = image
+                if (version != null) thumbnailVersions[id] = version else thumbnailVersions.remove(id)
+            }
         }
     }
 
@@ -5816,6 +5864,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             GlitchKind.DIVERGE to listOf(0.98f, -0.5f, 0.85f, 0.5f),
         )
         const val BRUSH_CHANGES = "changes"
+        /** Where earlier versions kept the library (now in a file). */
         const val BRUSH_LIBRARY = "library"
         /** How big the studio's Shape and Grain Source rows show their image (pixels across). */
         const val SOURCE_ROW_PX = 88

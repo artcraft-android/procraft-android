@@ -1197,6 +1197,33 @@ pub struct Canvas {
     prediction: Vec<StampInstance>,
     ops: Vec<Op>,
     dirty: IRect,
+    /// Whether the composite is made around pictures of what isn't being worked on, and them.
+    cache_composites: bool,
+    caches: Option<Caches>,
+    /// Caches being remade a little each render (more layers than fit), and the composite left
+    /// as it was until they are ready.
+    remake: Option<Remake>,
+    /// Layers' pixels kept compressed off the GPU: those parked (no texture), and copies of
+    /// resident ones unchanged since, so that letting them go again costs nothing.
+    parked: HashMap<LayerId, Parked>,
+    /// Small pictures of the parked layers, so their thumbnails need no texture.
+    pictures: HashMap<LayerId, Pictures>,
+    /// Layers whose pixels changed since [`Canvas::take_changed`] took them, so a save reads only
+    /// those.
+    changed: HashSet<LayerId>,
+    /// Each layer's pixels' version, from a count that goes up with every change: thumbnails are
+    /// read again only when theirs has.
+    versions: HashMap<LayerId, u64>,
+    version: u64,
+    /// Layers past the budget are still to be parked (a render parks only a few).
+    parking_left: bool,
+    /// How the last remake of the caches went.
+    last_remake: Option<RemakeStats>,
+    /// What the layers' textures may take before those needed least lately are parked (0: none
+    /// are), and when each was last needed, counted in renders.
+    resident_budget: u64,
+    needed_at: HashMap<LayerId, u64>,
+    renders: u64,
     undo: Vec<Step>,
     redo: Vec<Step>,
     transforming: Option<Transforming>,
@@ -1390,6 +1417,19 @@ impl Canvas {
             smudge_capacity: 64,
             prediction: Vec::new(),
             ops: Vec::new(),
+            cache_composites: false,
+            caches: None,
+            remake: None,
+            parked: HashMap::new(),
+            pictures: HashMap::new(),
+            changed: HashSet::new(),
+            versions: HashMap::new(),
+            version: 0,
+            parking_left: false,
+            last_remake: None,
+            resident_budget: 0,
+            needed_at: HashMap::new(),
+            renders: 0,
             dirty: IRect::from_size(width, height),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -1825,7 +1865,245 @@ impl Canvas {
     }
 
     /// Recomposite everything next frame (after a change to visibility, opacity, order...).
+    /// Whether the composite is made around pictures of the top level's items that aren't being
+    /// worked on, kept until something changes them, so that only the items worked on composite
+    /// each time (and the others' layers needn't be at hand): for artworks of more layers than
+    /// fit at once. Off, every layer composites every time.
+    pub fn set_cache_composites(&mut self, on: bool) {
+        self.cache_composites = on;
+        self.caches = None;
+        self.remake = None;
+    }
+
+    /// Whether the canvas is still remaking its caches (a little each render): it wants another
+    /// render soon, and the composite shows as it was until then.
+    pub fn busy(&self) -> bool {
+        self.remake.is_some()
+    }
+
+    /// Renders until the caches are remade, so the composite is the picture as it is (to read it
+    /// back: a save's, an export's).
+    pub fn render_finished(&mut self, gpu: &Gpu, doc: &mut Document) {
+        self.render(gpu, doc, None);
+        // each render remakes at least one item, so this ends well before the bound
+        for _ in 0..100_000 {
+            if !self.busy() {
+                break;
+            }
+            self.render(gpu, doc, None);
+        }
+    }
+
+    /// Whether the canvas has work that more renders do (caches being remade, layers being
+    /// parked): it wants another render soon.
+    pub fn wants_render(&self) -> bool {
+        self.busy() || self.parking_left
+    }
+
+    /// How the last remake of the caches went (none made yet).
+    pub fn last_remake(&self) -> Option<RemakeStats> {
+        self.last_remake
+    }
+
+    /// Whether the composite is being made around pictures of what isn't worked on.
+    pub fn composites_cached(&self) -> bool {
+        self.caches.is_some()
+    }
+
+    /// What the layers' textures may take, in bytes: past it, the layers needed least lately
+    /// that aren't being worked on are parked (kept compressed off the GPU, and the composite made
+    /// around pictures of them) until needed again. 0 keeps every layer on the GPU.
+    pub fn set_resident_budget(&mut self, bytes: u64) {
+        self.resident_budget = bytes;
+        self.set_cache_composites(bytes > 0);
+    }
+
+    /// A parked layer's small pictures, if they are big enough for a thumbnail `max_side` across.
+    fn parked_pictures(&self, id: LayerId, max_side: u32) -> Option<&Pictures> {
+        if self.layers.contains_key(&id) || max_side > PARKED_PICTURE_SIDE {
+            return None;
+        }
+        self.pictures.get(&id)
+    }
+
+    /// The layers whose pixels changed since this was last done (by painting, undo, uploads and
+    /// every other change), forgotten here: a save reads only these.
+    pub fn take_changed(&mut self) -> HashSet<LayerId> {
+        std::mem::take(&mut self.changed)
+    }
+
+    /// Layer `id`'s pixels are changing: counted for the next save, and given a new version.
+    fn touched(&mut self, id: LayerId) {
+        self.changed.insert(id);
+        self.version += 1;
+        self.versions.insert(id, self.version);
+    }
+
+    /// Layer `id`'s pixels' version as of the last render: it is new whenever they may have
+    /// changed (painting, undo, uploads, every other change), so a thumbnail of the same version
+    /// is still right.
+    pub fn layer_version(&self, id: LayerId) -> u64 {
+        self.versions.get(&id).copied().unwrap_or(0)
+    }
+
+    /// Layers to count as changed again (a save of them that failed).
+    pub fn mark_changed(&mut self, ids: impl IntoIterator<Item = LayerId>) {
+        self.changed.extend(ids);
+    }
+
+    /// How many layers are parked (kept compressed, without a texture).
+    pub fn parked_layers(&self) -> usize {
+        self.parked.keys().filter(|id| !self.layers.contains_key(*id)).count()
+    }
+
+    /// Gives layer `id` its texture again from its compressed pixels, if it is parked; whether
+    /// it has one now. Its pixels go up before any work recorded in this render.
+    fn restore(&mut self, gpu: &Gpu, id: LayerId) -> bool {
+        if self.layers.contains_key(&id) {
+            return true;
+        }
+        let Some((painted, rows)) = self.parked.get(&id).and_then(|p| Some((p.rect, p.rows()?))) else {
+            return false;
+        };
+        let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
+        // only where it is painted (a new texture is clear): nothing at all for an empty layer
+        if let Some(b) = painted {
+            gpu.queue.write_texture(
+                copy_at(&texture, b.x0, b.y0),
+                &rows,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(b.width() * 4),
+                    rows_per_image: Some(b.height()),
+                },
+                extent(b.width(), b.height()),
+            );
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.layers.insert(id, LayerGpu { texture, view });
+        true
+    }
+
+    /// Where an item's layers are painted, as far as is known (the whole canvas for a layer
+    /// with a texture of its own; empty if every one is parked and empty).
+    fn painted(&self, layers: &[LayerId]) -> IRect {
+        layers.iter().fold(IRect::EMPTY, |r, id| {
+            match self.pictures.get(id).filter(|_| !self.layers.contains_key(id)) {
+                Some(p) => p.bounds.map_or(r, |b| r.union(b)),
+                None => self.full(),
+            }
+        })
+    }
+
+    /// Every layer in `ids` given its texture again; those about to be written lose their
+    /// compressed copies.
+    fn restore_all(&mut self, gpu: &Gpu, ids: impl IntoIterator<Item = LayerId>, written: bool) {
+        for (n, id) in ids.into_iter().enumerate() {
+            let restored = !self.layers.contains_key(&id) && self.restore(gpu, id);
+            if written {
+                self.parked.remove(&id);
+                self.pictures.remove(&id);
+                self.touched(id);
+            }
+            self.needed_at.insert(id, self.renders);
+            // the staged pixels sent on now and then, so many in a row don't pile up
+            if restored && n % 8 == 7 {
+                gpu.queue.submit(std::iter::empty());
+            }
+        }
+    }
+
+    /// The layers the queued work reads and those it writes (which need their textures and lose
+    /// their compressed copies).
+    fn ops_layers(&self) -> (Vec<LayerId>, Vec<LayerId>) {
+        let (mut read, mut written) = (Vec::new(), Vec::new());
+        let contents = |d: &Document, id: LayerId| -> Vec<LayerId> {
+            if d.layer(id).is_some_and(|l| l.kind == LayerKind::Group) { d.contents(id) } else { vec![id] }
+        };
+        for op in &self.ops {
+            match op {
+                Op::Commit(s) => written.push(s.layer),
+                Op::Clear(id)
+                | Op::Wipe(id)
+                | Op::TransformBegin(id)
+                | Op::TransformAlso(id)
+                | Op::Put(id, _)
+                | Op::Hold(id) => written.push(*id),
+                Op::Write { layers, .. } => written.extend(layers.iter().map(|(id, _)| *id)),
+                Op::Duplicate { pairs, .. } => {
+                    read.extend(pairs.iter().map(|(from, _)| *from));
+                    written.extend(pairs.iter().map(|(_, to)| *to));
+                }
+                Op::MergeDown { upper, lower, before } => {
+                    read.extend(contents(before, *upper));
+                    written.push(*lower);
+                }
+                Op::MergeMany { uppers, lower, before } => {
+                    read.extend(uppers.iter().flat_map(|u| contents(before, *u)));
+                    written.push(*lower);
+                }
+                Op::Flatten { group, into, before, .. } => {
+                    read.extend(before.contents(*group));
+                    written.push(*into);
+                }
+                Op::Release { .. } => written.extend(self.held.as_ref().map(|h| h.layer)),
+                _ => {}
+            }
+        }
+        written.extend(self.active.map(|a| a.layer));
+        (read, written)
+    }
+
+    /// Parks the layers needed least lately until the textures fit the budget, keeping those
+    /// worked on (and what they are clipped to); none while the composite isn't made around
+    /// pictures of the others.
+    fn park_extra(&mut self, gpu: &Gpu, doc: &Document) {
+        self.parking_left = false;
+        let per = u64::from(self.width) * u64::from(self.height) * 4;
+        let most = usize::try_from(self.resident_budget / per.max(1)).unwrap_or(usize::MAX);
+        if self.resident_budget == 0 || self.layers.len() <= most {
+            return;
+        }
+        let mut keep = match (&self.caches, self.shown_frames(doc)) {
+            (Some(c), _) => {
+                let mut keep = c.live_layers.clone();
+                keep.extend(c.live.first().and_then(|first| doc.clip_base(*first)));
+                keep
+            }
+            // the frames shown, while Animation Assist is on
+            (None, Some(shown)) => shown,
+            (None, None) => return,
+        };
+        keep.extend(self.active.map(|a| a.layer));
+        keep.extend(self.held.as_ref().map(|h| h.layer));
+        let mut gone: Vec<LayerId> = self.layers.keys().filter(|id| !keep.contains(*id)).copied().collect();
+        gone.sort_by_key(|id| self.needed_at.get(id).copied().unwrap_or(0));
+        // a layer with no compressed copy yet is read back first, the slow part: a few a render
+        // (at least one), the rest left for the renders after
+        let started = std::time::Instant::now();
+        let mut reads = 0;
+        for id in gone {
+            if self.layers.len() <= most {
+                break;
+            }
+            if !self.parked.contains_key(&id) {
+                if reads > 0 && (reads >= MOST_PARK_READS || started.elapsed() >= PARK_SLICE) {
+                    self.parking_left = true;
+                    break;
+                }
+                reads += 1;
+                let Ok(pixels) = self.read_layer(gpu, id) else { continue };
+                let pictures = Pictures::of(&pixels, self.width, self.height);
+                self.parked.insert(id, Parked::of(&pixels, self.width, pictures.bounds));
+                self.pictures.insert(id, pictures);
+            }
+            self.layers.remove(&id);
+        }
+    }
+
     pub fn invalidate(&mut self) {
+        self.caches = None;
+        self.remake = None;
         self.dirty = self.full();
     }
 
@@ -2106,9 +2384,12 @@ impl Canvas {
         if let Some(s) = self.active {
             ids.push(s.layer);
         }
+        let (read, written) = self.ops_layers();
+        self.restore_all(gpu, read, false);
+        self.restore_all(gpu, written, true);
         let mut added = false;
         for id in ids {
-            if self.layers.contains_key(&id) {
+            if self.layers.contains_key(&id) || self.parked.contains_key(&id) {
                 continue;
             }
             let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
@@ -2144,6 +2425,9 @@ impl Canvas {
             }
         }
         self.layers.retain(|id, _| keep.contains(id));
+        self.parked.retain(|id, _| keep.contains(id));
+        self.pictures.retain(|id, _| keep.contains(id));
+        self.needed_at.retain(|id, _| keep.contains(id));
     }
 
     /// Records and submits everything queued, recomposites what changed and draws to `target`.
@@ -2183,7 +2467,9 @@ impl Canvas {
 
         // the display takes four slots, and frosted panels three and one for each
         let frosted = target.as_ref().and_then(|t| t.backdrop).map_or(0, |b| b.regions.len() + 3);
-        let slots = (ops.len() + doc.layers().len() + 4 + frosted) as u64;
+        // remaking the caches composites the layers once more
+        let cached = if self.cache_composites { doc.layers().len() + 2 } else { 0 };
+        let slots = (ops.len() + doc.layers().len() + 4 + frosted + cached) as u64;
         if slots > self.uniform_slots {
             self.uniform_slots = slots.next_power_of_two();
             let (buffer, bind) = uniforms(device, &self.pipelines.uniform_layout, self.uniform_slots);
@@ -2207,7 +2493,13 @@ impl Canvas {
 
         let mut next_instance = 0u32;
         let mut history_changed = false;
+        // what is worked on, for the caches: other work drops them
+        let live = self.caches.as_ref().or(self.remake.as_ref().map(|r| &r.caches)).map(|c| c.live_layers.clone());
         for op in ops {
+            if live.as_ref().is_some_and(|live| !self.keeps_caches(&op, live)) {
+                self.caches = None;
+                self.remake = None;
+            }
             match op {
                 Op::Stamps { instances, wet, style, layer, clear, .. } if style.in_place() => {
                     next_instance = next_instance.saturating_add(u32::try_from(instances.len()).unwrap_or(u32::MAX));
@@ -2725,13 +3017,22 @@ impl Canvas {
             self.collect_layers(doc);
         }
 
-        let dirty = self.dirty.intersect(self.full());
-        self.make_groups(device, doc.max_depth());
-        if !dirty.is_empty() {
-            self.composite(device, doc, &mut encoder, &mut uniforms, dirty);
-            self.composites = self.composites.wrapping_add(1);
+        if !smudge_uniforms.data.is_empty() {
+            gpu.queue.write_buffer(&self.smudge_params, 0, &smudge_uniforms.data);
         }
-        self.dirty = IRect::EMPTY;
+        self.make_groups(device, doc.max_depth());
+        self.ensure_caches(gpu, doc, &mut encoder, &mut uniforms);
+        // after the caches: caches just made want the whole picture composited again
+        let dirty = self.dirty.intersect(self.full());
+        let device = &gpu.device;
+        // while caches are remade the composite stays as it was, what changed kept for after
+        if self.remake.is_none() {
+            if !dirty.is_empty() {
+                self.composite(device, doc, &mut encoder, &mut uniforms, dirty);
+                self.composites = self.composites.wrapping_add(1);
+            }
+            self.dirty = IRect::EMPTY;
+        }
 
         if let Some(target) = target {
             self.display(device, &mut encoder, &mut uniforms, &target, predicted);
@@ -2742,10 +3043,9 @@ impl Canvas {
         if !uniforms.data.is_empty() {
             gpu.queue.write_buffer(&self.uniform_buffer, 0, &uniforms.data);
         }
-        if !smudge_uniforms.data.is_empty() {
-            gpu.queue.write_buffer(&self.smudge_params, 0, &smudge_uniforms.data);
-        }
         gpu.queue.submit([encoder.finish()]);
+        self.renders = self.renders.wrapping_add(1);
+        self.park_extra(gpu, doc);
     }
 
     /// Bytes per row of a layer copied into a buffer (rows are 256-byte aligned for copies).
@@ -3280,6 +3580,7 @@ impl Canvas {
         let name = step.name.clone();
         let mut pixels = Vec::with_capacity(step.pixels.len());
         for s in step.pixels {
+            self.restore_all(gpu, [s.layer], true);
             if let Some(current) = self.snapshot(device, encoder, s.layer, s.rect) {
                 pixels.push(current);
             }
@@ -3509,8 +3810,526 @@ impl Canvas {
         // the stack bottom up; a group's layers go onto its depth's pair of textures first, and
         // the group onto the stack where its entry is
         let main = Stack { textures: &self.composite, views: &self.composite_views };
+        if let Some(c) = &self.caches {
+            // what is below as it was, what is worked on, then what is above as it was
+            encoder.copy_texture_to_texture(
+                copy_at(&c.below[0], rect.x0, rect.y0),
+                copy_at(&self.composite[0], rect.x0, rect.y0),
+                extent(rect.width(), rect.height()),
+            );
+            let mut current = 0;
+            self.composite_items(device, doc, encoder, uniforms, rect, &c.live, true, &main, &mut current);
+            if !c.above_items.is_empty() {
+                let uniform = LayerUniform {
+                    opacity: 1.0,
+                    blend: BlendMode::Normal.id(),
+                    tint: Look::PLAIN.tint,
+                    ..Default::default()
+                };
+                let view = &c.above_views[0];
+                self.draw_onto(
+                    device,
+                    encoder,
+                    uniforms,
+                    rect,
+                    view,
+                    None,
+                    &self.stroke_view,
+                    uniform,
+                    BlendMode::Normal,
+                    &main,
+                    &mut current,
+                );
+            }
+            main.settle(encoder, rect, current);
+            return;
+        }
         let current = self.composite_members(device, doc, encoder, uniforms, rect, None, &main);
         main.settle(encoder, rect, current);
+    }
+
+    /// The top level's items composited live while caches are used (from the one holding the
+    /// current layer up to a run of plain items at the top: normal, the first not clipped to what
+    /// is below the run), with every layer in them; none while something else is under way
+    /// (Animation Assist's frames, an adjustment, liquify, a transform, a stroke elsewhere).
+    fn live_items(&self, doc: &Document) -> Option<(Vec<LayerId>, std::ops::Range<usize>)> {
+        if doc.animation.is_some() {
+            return None;
+        }
+        let tops = doc.members(None);
+        let mut top = doc.current();
+        if doc.layer(top).is_some_and(|l| l.kind == LayerKind::Mask) {
+            top = doc.layer(top)?.parent?;
+        }
+        for _ in 0..doc.layers().len() {
+            match doc.group_of(top) {
+                Some(g) => top = g,
+                None => break,
+            }
+        }
+        let start = tops.iter().position(|t| *t == top)?;
+        let layer = |i: usize| tops.get(i).and_then(|t| doc.layer(*t));
+        let mut end = tops.len();
+        while end > start + 1 && layer(end - 1).is_some_and(|l| l.blend == BlendMode::Normal) {
+            end -= 1;
+        }
+        while end < tops.len() && layer(end).is_some_and(|l| l.clipped) {
+            end += 1;
+        }
+        let live: HashSet<LayerId> = tops.get(start..end)?.iter().flat_map(|t| item_layers(doc, *t)).collect();
+        // what is being worked on (a stroke, a smudge, a transform or adjustment, a held edit)
+        // must be among them
+        let worked = self
+            .active
+            .map(|a| a.layer)
+            .into_iter()
+            .chain(self.smudge.as_ref().map(|s| s.layer))
+            .chain(self.transforming.iter().chain(&self.transform_more).map(|t| t.layer))
+            .chain(self.held.as_ref().map(|h| h.layer));
+        if worked.into_iter().any(|id| !live.contains(&id)) {
+            return None;
+        }
+        Some((tops, start..end))
+    }
+
+    /// Makes (or keeps) the caches the composite is made around, while they are used: what is
+    /// below the items worked on and what is above them, each remade only when what it was made
+    /// from changed.
+    fn ensure_caches(
+        &mut self,
+        gpu: &Gpu,
+        doc: &Document,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+    ) {
+        let device = &gpu.device;
+        let Some((tops, live)) = self.live_items(doc).filter(|_| self.cache_composites) else {
+            self.caches = None;
+            // everything shown composites: Animation Assist's frames around the current one, or
+            // every layer
+            let needed: Vec<LayerId> = match self.shown_frames(doc) {
+                Some(shown) => shown.into_iter().collect(),
+                None => doc.pixel_layer_ids().collect(),
+            };
+            self.restore_all(gpu, needed, false);
+            return;
+        };
+        let below_items = tops.get(..live.start).unwrap_or_default().to_vec();
+        let above_items = tops.get(live.end..).unwrap_or_default().to_vec();
+        let below_key = items_key(doc, &below_items, true);
+        let above_key = items_key(doc, &above_items, false);
+        // a remake of these same caches goes on; of others, starts again
+        let same = |r: &Remake| {
+            r.below_items == below_items
+                && r.below_key == below_key
+                && r.above_items == above_items
+                && r.above_key == above_key
+        };
+        if self.remake.as_ref().is_some_and(same) {
+            self.send_now(gpu, encoder, uniforms);
+            self.go_on_remaking(gpu, doc);
+            return;
+        }
+        self.remake = None;
+        let mut caches = self.caches.take().unwrap_or_else(|| {
+            let pair = |label| {
+                let textures = [
+                    texture(device, label, self.width, self.height, LAYER_FORMAT),
+                    texture(device, label, self.width, self.height, LAYER_FORMAT),
+                ];
+                let views = textures.each_ref().map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
+                (textures, views)
+            };
+            let ((below, below_views), (above, above_views)) = (pair("below"), pair("above"));
+            Caches {
+                live: Vec::new(),
+                live_layers: HashSet::new(),
+                below,
+                below_views,
+                below_items: Vec::new(),
+                // nothing matches until made
+                below_key: !below_key,
+                above,
+                above_views,
+                above_items: Vec::new(),
+                above_key: !above_key,
+            }
+        });
+        let full = self.full();
+        let remake_below = caches.below_items != below_items || caches.below_key != below_key;
+        let remake_above = caches.above_items != above_items || caches.above_key != above_key;
+        // what is composited needs its layers: the items worked on (and what the first is clipped
+        // to), and what is cached when it is made again
+        let mut needed: Vec<LayerId> =
+            tops.get(live.clone()).unwrap_or_default().iter().flat_map(|t| item_layers(doc, *t)).collect();
+        needed.extend(tops.get(live.start).and_then(|first| doc.clip_base(*first)));
+        if remake_below {
+            needed.extend(below_items.iter().flat_map(|t| item_layers(doc, *t)));
+        }
+        if remake_above {
+            needed.extend(above_items.iter().flat_map(|t| item_layers(doc, *t)));
+        }
+        let most = self.most_resident();
+        let missing = needed.iter().filter(|id| !self.layers.contains_key(*id)).count();
+        if self.layers.len().saturating_add(missing) > most {
+            // more than fit: remade a part at a time, a little each render, each part's layers let
+            // go before the next comes back; the composite waits for it
+            let mut keep: HashSet<LayerId> =
+                tops.get(live.clone()).unwrap_or_default().iter().flat_map(|t| item_layers(doc, *t)).collect();
+            keep.extend(tops.get(live.start).and_then(|first| doc.clip_base(*first)));
+            keep.extend(self.active.map(|a| a.layer));
+            keep.extend(self.held.as_ref().map(|h| h.layer));
+            self.restore_all(gpu, keep.iter().copied().collect::<Vec<_>>(), false);
+            // the work so far first, so what is cached is made from it
+            self.send_now(gpu, encoder, uniforms);
+            let mut start = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("remake") });
+            let mut start_uniforms = UniformData::default();
+            if remake_below {
+                let [r, g, b] = doc.background;
+                let solid = if doc.background_visible { [r, g, b, 1.0] } else { [0.0; 4] };
+                let offset = start_uniforms.push(&LayerUniform { opacity: 1.0, solid, ..Default::default() });
+                let mut pass = render_pass(
+                    &mut start,
+                    "below",
+                    &caches.below_views[0],
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                );
+                pass.set_pipeline(&self.pipelines.solid);
+                pass.set_bind_group(0, &self.stroke_bind, &[]);
+                pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+                pass.draw(0..3, 0..1);
+            }
+            if remake_above {
+                drop(render_pass(
+                    &mut start,
+                    "above",
+                    &caches.above_views[0],
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                ));
+            }
+            if !start_uniforms.data.is_empty() {
+                gpu.queue.write_buffer(&self.uniform_buffer, 0, &start_uniforms.data);
+            }
+            gpu.queue.submit([start.finish()]);
+            caches.live = tops.get(live).unwrap_or_default().to_vec();
+            caches.live_layers = caches.live.iter().flat_map(|t| item_layers(doc, *t)).collect();
+            self.remake = Some(Remake {
+                caches,
+                below: remake_below.then_some((0, 0)),
+                above: remake_above.then_some((0, 0)),
+                below_items,
+                below_key,
+                above_items,
+                above_key,
+                keep,
+                started: std::time::Instant::now(),
+                slices: 0,
+                largest_part: 0,
+                restored: 0,
+                restoring: std::time::Duration::ZERO,
+            });
+            self.go_on_remaking(gpu, doc);
+            return;
+        }
+        self.restore_all(gpu, needed, false);
+        if remake_below {
+            let [r, g, b] = doc.background;
+            let solid = if doc.background_visible { [r, g, b, 1.0] } else { [0.0; 4] };
+            let offset = uniforms.push(&LayerUniform { opacity: 1.0, solid, ..Default::default() });
+            {
+                let mut pass = render_pass(
+                    encoder,
+                    "below",
+                    &caches.below_views[0],
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                );
+                pass.set_pipeline(&self.pipelines.solid);
+                pass.set_bind_group(0, &self.stroke_bind, &[]);
+                pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+                pass.draw(0..3, 0..1);
+            }
+            let stack = Stack { textures: &caches.below, views: &caches.below_views };
+            let mut current = 0;
+            self.composite_items(device, doc, encoder, uniforms, full, &below_items, true, &stack, &mut current);
+            stack.settle(encoder, full, current);
+            caches.below_items = below_items;
+            caches.below_key = below_key;
+        }
+        if remake_above {
+            drop(render_pass(encoder, "above", &caches.above_views[0], wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
+            let stack = Stack { textures: &caches.above, views: &caches.above_views };
+            let mut current = 0;
+            self.composite_items(device, doc, encoder, uniforms, full, &above_items, true, &stack, &mut current);
+            stack.settle(encoder, full, current);
+            caches.above_items = above_items;
+            caches.above_key = above_key;
+        }
+        caches.live = tops.get(live).unwrap_or_default().to_vec();
+        caches.live_layers = caches.live.iter().flat_map(|t| item_layers(doc, *t)).collect();
+        self.caches = Some(caches);
+    }
+
+    /// With Animation Assist on (and nothing else under way), the layers of the frames shown: the
+    /// current (or played) one, its onion skins, and a background or foreground frame.
+    fn shown_frames(&self, doc: &Document) -> Option<HashSet<LayerId>> {
+        let a = doc.animation.as_ref()?;
+        let busy =
+            self.transforming.is_some() || self.liquify.is_some() || self.pencil.is_some() || self.held.is_some();
+        if busy || self.smudge.is_some() {
+            return None;
+        }
+        let frames = animation::frames(doc);
+        let focus = self.play_frame.or_else(|| animation::current_frame(doc))?;
+        let shown: HashSet<LayerId> = frames
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                !matches!(animation::look(a, *i, frames.len(), focus, self.play_frame.is_some()), FrameLook::Hidden)
+            })
+            .flat_map(|(_, f)| item_layers(doc, *f))
+            .collect();
+        Some(shown)
+    }
+
+    /// How many layers' textures fit the budget (any number without one).
+    pub fn most_resident(&self) -> usize {
+        let per = u64::from(self.width) * u64::from(self.height) * 4;
+        if self.resident_budget == 0 {
+            usize::MAX
+        } else {
+            usize::try_from(self.resident_budget / per.max(1)).unwrap_or(usize::MAX).max(1)
+        }
+    }
+
+    /// Lets go of the textures of layers unchanged since parked (their compressed copies kept),
+    /// but those in `keep`, as far as the next part of a remake wants room.
+    fn let_go_clean(&mut self, keep: &HashSet<LayerId>) {
+        // only as many as the next part wants room for, needed least lately first: layers that
+        // fit stay (letting many textures go at once holds a frame up)
+        let most = self.most_resident();
+        let wanted = most.saturating_sub(LET_GO_ROOM);
+        if self.layers.len() <= wanted {
+            return;
+        }
+        let mut clean: Vec<LayerId> =
+            self.layers.keys().filter(|id| !keep.contains(*id) && self.parked.contains_key(*id)).copied().collect();
+        clean.sort_by_key(|id| self.needed_at.get(id).copied().unwrap_or(0));
+        for id in clean {
+            if self.layers.len() <= wanted {
+                break;
+            }
+            self.layers.remove(&id);
+        }
+    }
+
+    /// Sends the work recorded so far (with its uniforms), going on with a new encoder.
+    fn send_now(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, uniforms: &mut UniformData) {
+        let fresh = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("canvas") });
+        let done = std::mem::replace(encoder, fresh);
+        if !uniforms.data.is_empty() {
+            gpu.queue.write_buffer(&self.uniform_buffer, 0, &uniforms.data);
+        }
+        gpu.queue.submit([done.finish()]);
+        *uniforms = UniformData::default();
+    }
+
+    /// Goes on remaking the caches for a while (parts of whole items, each part's layers brought
+    /// back, composited, sent, then let go before the next part's come back); once both are done,
+    /// they are the caches and the whole composite is made again.
+    fn go_on_remaking(&mut self, gpu: &Gpu, doc: &Document) {
+        let Some(mut r) = self.remake.take() else { return };
+        let device = &gpu.device;
+        let full = self.full();
+        let deadline = std::time::Instant::now() + REMAKE_SLICE;
+        let (mut restored, mut restoring, mut largest) = (0, std::time::Duration::ZERO, 0);
+        loop {
+            let (below, items, progress) = match (r.below, r.above) {
+                (Some(p), _) => (true, &r.below_items, p),
+                (None, Some(p)) => (false, &r.above_items, p),
+                (None, None) => break,
+            };
+            let (mut at, mut current) = progress;
+            let (textures, views) =
+                if below { (&r.caches.below, &r.caches.below_views) } else { (&r.caches.above, &r.caches.above_views) };
+            let stack = Stack { textures, views };
+            // as many whole items as fit and the slice's time allows (at least one), each with what
+            // it is clipped to; an item painted nowhere is passed over, a normal one composites only
+            // where it is painted
+            let room = self.most_resident().saturating_sub(self.layers.len()).max(1);
+            let mut part = Vec::new();
+            let mut layers = Vec::new();
+            let mut staged = 0;
+            while let Some(&item) = items.get(at) {
+                let mut more = item_layers(doc, item);
+                more.extend(doc.clip_base(item));
+                // the time counts bringing layers back, not the compositing after: the count
+                // keeps a part whose layers come back quickly from compositing too long
+                let late = std::time::Instant::now() >= deadline;
+                let full_part = part.len() >= MOST_PART_ITEMS || layers.len() + more.len() > room;
+                if !part.is_empty() && (late || full_part) {
+                    break;
+                }
+                at += 1;
+                let painted = self.painted(&more).intersect(full);
+                if painted.is_empty() {
+                    continue;
+                }
+                // a normal item draws in place; another mode writes the stack's other texture, which
+                // has to be whole
+                let normal = doc.layer(item).is_some_and(|l| l.blend == BlendMode::Normal);
+                let rect = if normal { painted } else { full };
+                // brought back now (the slow part, so the time taken counts), the staged pixels sent
+                // on now and then so they don't pile up
+                staged += more.len();
+                let restore_started = std::time::Instant::now();
+                self.restore_all(gpu, more.iter().copied(), false);
+                restoring += restore_started.elapsed();
+                restored += more.len();
+                if staged >= 8 {
+                    gpu.queue.submit(std::iter::empty());
+                    staged = 0;
+                }
+                layers.extend(more);
+                part.push((item, rect));
+            }
+            largest = largest.max(part.len());
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cache part") });
+            let mut uniforms = UniformData::default();
+            for (item, rect) in &part {
+                self.composite_items(
+                    device,
+                    doc,
+                    &mut encoder,
+                    &mut uniforms,
+                    *rect,
+                    &[*item],
+                    true,
+                    &stack,
+                    &mut current,
+                );
+            }
+            let done = at >= items.len();
+            if done {
+                stack.settle(&mut encoder, full, current);
+            }
+            if !uniforms.data.is_empty() {
+                gpu.queue.write_buffer(&self.uniform_buffer, 0, &uniforms.data);
+            }
+            gpu.queue.submit([encoder.finish()]);
+            self.let_go_clean(&r.keep);
+            gpu.flush();
+            let next = (!done).then_some((at, current));
+            if below {
+                r.below = next;
+            } else {
+                r.above = next;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+        r.slices += 1;
+        r.restored += restored;
+        r.restoring += restoring;
+        r.largest_part = r.largest_part.max(largest);
+        if r.below.is_some() || r.above.is_some() {
+            self.remake = Some(r);
+            return;
+        }
+        log::info!(
+            "caches remade in {} ms over {} renders: {} items (at most {} a part), {} layers brought back in {} ms",
+            r.started.elapsed().as_millis(),
+            r.slices,
+            r.below_items.len() + r.above_items.len(),
+            r.largest_part,
+            r.restored,
+            r.restoring.as_millis()
+        );
+        self.last_remake = Some(RemakeStats { renders: r.slices, largest_part: r.largest_part });
+        // made: they are the caches, and the whole picture is composited again around them
+        let Remake { mut caches, below_items, below_key, above_items, above_key, .. } = r;
+        caches.below_items = below_items;
+        caches.below_key = below_key;
+        caches.above_items = above_items;
+        caches.above_key = above_key;
+        self.caches = Some(caches);
+        self.dirty = self.full();
+    }
+
+    /// Whether another layer's texture fits the budget.
+    pub fn has_room(&self) -> bool {
+        self.layers.len() < self.most_resident()
+    }
+
+    /// Keeps layer `id`'s pixels (premultiplied RGBA, the canvas's size) compressed, without a
+    /// texture, as a layer parked: for an artwork opening with more layers than fit.
+    pub fn park_pixels(&mut self, id: LayerId, rgba: &[u8]) -> Result<(), GpuError> {
+        let expected = self.width as usize * self.height as usize * 4;
+        if rgba.len() != expected {
+            return Err(GpuError::Readback(format!("layer {id:?}: {} bytes, expected {expected}", rgba.len())));
+        }
+        self.park_ready(id, ReadyToPark::of(rgba, self.width, self.height));
+        Ok(())
+    }
+
+    /// As [`Canvas::upload_layer`], keeping `ready` (made from the same pixels by
+    /// [`ReadyToPark::of`]) as the layer's compressed copy: letting its texture go later, while
+    /// it is unchanged, costs nothing.
+    pub fn upload_layer_kept(
+        &mut self,
+        gpu: &Gpu,
+        id: LayerId,
+        rgba: &[u8],
+        ready: ReadyToPark,
+    ) -> Result<(), GpuError> {
+        self.upload_layer(gpu, id, rgba)?;
+        self.parked.insert(id, ready.parked);
+        self.pictures.insert(id, ready.pictures);
+        Ok(())
+    }
+
+    /// Parks layer `id` with pixels already made ready (by [`ReadyToPark::of`], with this
+    /// canvas's size).
+    pub fn park_ready(&mut self, id: LayerId, ready: ReadyToPark) {
+        self.layers.remove(&id);
+        self.parked.insert(id, ready.parked);
+        self.pictures.insert(id, ready.pictures);
+        self.caches = None;
+        self.invalidate();
+    }
+
+    /// Whether work keeps the caches: it changes only the pixels of layers worked on (painting,
+    /// transforms and adjustments, held edits, clearing, and undoing or redoing those).
+    fn keeps_caches(&self, op: &Op, live: &HashSet<LayerId>) -> bool {
+        let only_live = |step: Option<&Step>| {
+            step.is_some_and(|s| s.doc.is_none() && s.pixels.iter().all(|p| live.contains(&p.layer)))
+        };
+        let transformed_live = || self.transforming.iter().chain(&self.transform_more).all(|t| live.contains(&t.layer));
+        match op {
+            Op::Stamps { layer, .. } => live.contains(layer),
+            Op::Commit(stroke) => live.contains(&stroke.layer),
+            Op::Cancel | Op::SaveTip(_) | Op::Untip(_) | Op::Mark | Op::Name(_) | Op::Collapse => true,
+            Op::Undo => only_live(self.undo.last()),
+            Op::Redo => only_live(self.redo.last()),
+            Op::TransformBegin(id)
+            | Op::TransformAlso(id)
+            | Op::Hold(id)
+            | Op::Put(id, _)
+            | Op::Clear(id)
+            | Op::Wipe(id) => live.contains(id),
+            Op::TransformSet { .. }
+            | Op::TransformMesh { .. }
+            | Op::FilterSet(_)
+            | Op::LiquifyBegin
+            | Op::PencilBegin
+            | Op::LiquifyStamps(_)
+            | Op::LiquifyClear
+            | Op::TransformEnd { .. } => transformed_live(),
+            Op::Release { before: None, .. } => self.held.as_ref().is_none_or(|h| live.contains(&h.layer)),
+            Op::Write { layers, before: None } => layers.iter().all(|(id, _)| live.contains(id)),
+            _ => false,
+        }
     }
 
     /// The members of `group` (None: the top level) bottom up onto `stack`; returns which of its
@@ -3527,11 +4346,40 @@ impl Canvas {
         stack: &Stack<'_>,
     ) -> usize {
         let mut current = 0usize;
+        self.composite_items(
+            device,
+            doc,
+            encoder,
+            uniforms,
+            rect,
+            &doc.members(group),
+            group.is_none(),
+            stack,
+            &mut current,
+        );
+        current
+    }
+
+    /// `items` (a level's members, bottom up; `top` the top level's) onto `stack`, whose result
+    /// is in `stack.views[current]`.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_items(
+        &self,
+        device: &wgpu::Device,
+        doc: &Document,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        items: &[LayerId],
+        top: bool,
+        stack: &Stack<'_>,
+        current: &mut usize,
+    ) {
         // Animation Assist: the top level's frames show around the current (or played) one
-        let animation = if group.is_none() { doc.animation.as_ref() } else { None };
+        let animation = if top { doc.animation.as_ref() } else { None };
         let frames = animation.map(|_| animation::frames(doc)).unwrap_or_default();
         let focus = animation.and_then(|_| self.play_frame.or_else(|| animation::current_frame(doc)));
-        for id in doc.members(group) {
+        for &id in items {
             let Some(layer) = doc.layer(id) else { continue };
             // another layer shown alone
             if doc.soloed_out(id) {
@@ -3552,7 +4400,7 @@ impl Canvas {
             match layer.kind {
                 LayerKind::Mask => {}
                 LayerKind::Paint => {
-                    self.composite_layer(device, doc, encoder, uniforms, rect, layer, look, stack, &mut current)
+                    self.composite_layer(device, doc, encoder, uniforms, rect, layer, look, stack, current)
                 }
                 LayerKind::Group => {
                     if !layer.visible || layer.opacity <= 0.0 {
@@ -3576,12 +4424,11 @@ impl Canvas {
                         uniform,
                         layer.blend,
                         stack,
-                        &mut current,
+                        current,
                     );
                 }
             }
         }
-        current
     }
 
     /// Group `id`'s members composited over transparency on the textures for its depth; returns
@@ -4082,6 +4929,11 @@ impl Canvas {
         max_side: u32,
     ) -> Result<Thumbnail, GpuError> {
         self.render(gpu, doc, None);
+        let mask = doc.layer(id).is_some_and(|l| l.kind == LayerKind::Mask);
+        if let Some(p) = self.parked_pictures(id, max_side).filter(|_| !mask) {
+            return Ok(shrink(p.drawn.as_ref().unwrap_or(&p.whole), max_side));
+        }
+        self.restore_all(gpu, [id], false);
         let full = self.full();
         // a mask is white where nothing is painted on it
         let bounds = if doc.layer(id).is_some_and(|l| l.kind == LayerKind::Mask) { ink_bounds } else { alpha_bounds };
@@ -4118,15 +4970,21 @@ impl Canvas {
             return Ok(Vec::new());
         }
         self.render(gpu, doc, None);
-        let ids: Vec<LayerId> = doc
-            .layers()
+        let paint: Vec<LayerId> = doc.layers().iter().filter(|l| l.kind == LayerKind::Paint).map(|l| l.id).collect();
+        let ids: Vec<LayerId> = paint.iter().copied().filter(|id| self.layers.contains_key(id)).collect();
+        // a parked layer's from its small picture
+        let parked: HashMap<LayerId, u8> = paint
             .iter()
-            .filter(|l| l.kind == LayerKind::Paint)
-            .map(|l| l.id)
-            .filter(|id| self.layers.contains_key(id))
+            .filter(|id| !self.layers.contains_key(*id))
+            .filter_map(|id| {
+                let w = &self.pictures.get(id)?.whole;
+                let px = (u64::from(x) * u64::from(w.width) / u64::from(self.width.max(1))) as usize;
+                let py = (u64::from(y) * u64::from(w.height) / u64::from(self.height.max(1))) as usize;
+                Some((*id, *w.rgba.get((py * w.width as usize + px) * 4 + 3)?))
+            })
             .collect();
         if ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(paint.iter().filter_map(|id| Some((*id, *parked.get(id)?))).collect());
         }
         // one pixel of each layer, each in its own 256-byte row of a buffer
         let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -4160,10 +5018,12 @@ impl Canvas {
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| GpuError::Readback(e.to_string()))?;
         rx.recv().map_err(|e| GpuError::Readback(e.to_string()))?.map_err(|e| GpuError::Readback(e.to_string()))?;
         let mapped = buffer.slice(..).get_mapped_range().map_err(|e| GpuError::Readback(e.to_string()))?;
-        let out = ids.iter().enumerate().map(|(i, id)| (*id, mapped.get(256 * i + 3).copied().unwrap_or(0))).collect();
+        let read: HashMap<LayerId, u8> =
+            ids.iter().enumerate().map(|(i, id)| (*id, mapped.get(256 * i + 3).copied().unwrap_or(0))).collect();
         drop(mapped);
         buffer.unmap();
-        Ok(out)
+        // in the document's order, parked or not
+        Ok(paint.iter().filter_map(|id| Some((*id, *read.get(id).or_else(|| parked.get(id))?))).collect())
     }
 
     /// Layer `id` over the whole canvas (not cropped to what is drawn) fitted to `max_side`, as
@@ -4176,12 +5036,22 @@ impl Canvas {
         max_side: u32,
     ) -> Result<Thumbnail, GpuError> {
         self.render(gpu, doc, None);
+        if let Some(p) = self.parked_pictures(id, max_side) {
+            return Ok(shrink(&p.whole, max_side));
+        }
+        self.restore_all(gpu, [id], false);
         let full = self.full();
         self.sample_layer(gpu, id, full, max_side)
     }
 
+    /// The picture as it shows (while the caches are remade, as it was), scaled to fit
+    /// `max_side` pixels: quick enough to ask for while it is drawn on.
     pub fn composite_thumbnail(&mut self, gpu: &Gpu, doc: &mut Document, max_side: u32) -> Result<Thumbnail, GpuError> {
-        self.render(gpu, doc, None);
+        // while the caches are remade a render leaves the picture as it is: none, so this never
+        // does that work (on the main thread, as the artwork closes)
+        if !self.busy() {
+            self.render(gpu, doc, None);
+        }
         self.sample_view(gpu, &self.composite_views[0], self.full(), max_side)
     }
 
@@ -4236,7 +5106,12 @@ impl Canvas {
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             self.layers.insert(id, LayerGpu { texture, view });
         }
+        self.touched(id);
         let Some(layer) = self.layers.get(&id) else { return Ok(()) };
+        self.caches = None;
+        // its compressed copy no longer what it holds
+        self.parked.remove(&id);
+        self.pictures.remove(&id);
         gpu.queue.write_texture(
             copy_at(&layer.texture, 0, 0),
             rgba,
@@ -4267,7 +5142,8 @@ impl Canvas {
         DisplayLut { bind: lut_bind(gpu, &self.pipelines.lut_layout, lut.grid as u32, &rgba) }
     }
 
-    /// The composite's pixels (premultiplied RGBA8, rows top to bottom). Waits for the GPU.
+    /// The composite's pixels (premultiplied RGBA8, rows top to bottom) as last rendered: after
+    /// [`Canvas::render_finished`], the picture as it is. Waits for the GPU.
     pub fn read_composite(&self, gpu: &Gpu) -> Result<Vec<u8>, GpuError> {
         read_texture(gpu, &self.composite[0], self.width, self.height)
     }
@@ -4280,7 +5156,7 @@ impl Canvas {
         doc: &mut Document,
         left_out: &[LayerId],
     ) -> Result<Vec<u8>, GpuError> {
-        self.render(gpu, doc, None);
+        self.render_finished(gpu, doc);
         if left_out.is_empty() {
             return self.read_composite(gpu);
         }
@@ -4289,7 +5165,7 @@ impl Canvas {
             shown.set_visible(id, false);
         }
         self.invalidate();
-        self.render(gpu, &mut shown, None);
+        self.render_finished(gpu, &mut shown);
         let read = self.read_composite(gpu);
         self.invalidate();
         self.render(gpu, doc, None);
@@ -4298,6 +5174,11 @@ impl Canvas {
 
     /// A layer's pixels (premultiplied RGBA8). Waits for the GPU.
     pub fn read_layer(&self, gpu: &Gpu, id: LayerId) -> Result<Vec<u8>, GpuError> {
+        if let Some(parked) = self.parked.get(&id).filter(|_| !self.layers.contains_key(&id)) {
+            return parked
+                .pixels(self.width, self.height)
+                .ok_or_else(|| GpuError::Readback(format!("layer {id:?} parked damaged")));
+        }
         let layer = self.layers.get(&id).ok_or_else(|| GpuError::Readback(format!("no layer {id:?}")))?;
         read_texture(gpu, &layer.texture, self.width, self.height)
     }
@@ -4978,6 +5859,137 @@ fn painted_bounds(t: &Thumbnail, painted: impl Fn([u8; 4]) -> bool) -> Option<[u
     b
 }
 
+/// The longest side of a parked layer's small pictures, pixels: as big as any thumbnail asked for.
+const PARKED_PICTURE_SIDE: u32 = 192;
+
+/// How a remake of the caches went: over how many renders, and the most items one part took.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemakeStats {
+    pub renders: u32,
+    pub largest_part: usize,
+}
+
+/// A layer's pixels made ready to park: compressed, with its small pictures. Made on any thread
+/// (the slow part of [`Canvas::park_pixels`]), then given to [`Canvas::park_ready`].
+pub struct ReadyToPark {
+    parked: Parked,
+    pictures: Pictures,
+}
+
+impl ReadyToPark {
+    /// Of a layer's pixels (premultiplied RGBA, `width` x `height`).
+    pub fn of(rgba: &[u8], width: u32, height: u32) -> ReadyToPark {
+        let pictures = Pictures::of(rgba, width, height);
+        ReadyToPark { parked: Parked::of(rgba, width, pictures.bounds), pictures }
+    }
+
+    /// How many bytes the compressed pixels take.
+    pub fn bytes(&self) -> usize {
+        self.parked.lz4.len()
+    }
+}
+
+/// A parked layer's pixels: the rectangle painted (none if nothing), its rows compressed, so a
+/// layer drawn on in one place costs little to keep and to bring back.
+struct Parked {
+    rect: Option<IRect>,
+    lz4: Vec<u8>,
+}
+
+impl Parked {
+    /// Of a layer's pixels (premultiplied RGBA, `width` wide), painted only within `rect`.
+    fn of(rgba: &[u8], width: u32, rect: Option<IRect>) -> Parked {
+        let rect = rect.filter(|r| !r.is_empty());
+        let mut rows = Vec::new();
+        if let Some(r) = rect {
+            let row = r.width() as usize * 4;
+            rows.reserve(row * r.height() as usize);
+            for y in r.y0..r.y1 {
+                let start = (y as usize * width as usize + r.x0 as usize) * 4;
+                rows.extend_from_slice(rgba.get(start..start + row).unwrap_or_default());
+            }
+        }
+        Parked { rect, lz4: procraft_engine::applz4::encode(&rows) }
+    }
+
+    /// The painted rectangle's rows, one after another; none if damaged.
+    fn rows(&self) -> Option<Vec<u8>> {
+        let size = self.rect.map_or(0, |r| r.width() as usize * r.height() as usize * 4);
+        procraft_engine::applz4::decode(&self.lz4, size).filter(|p| p.len() == size)
+    }
+
+    /// The whole layer (`width` x `height`, clear outside the rectangle); none if damaged.
+    fn pixels(&self, width: u32, height: u32) -> Option<Vec<u8>> {
+        let rows = self.rows()?;
+        let mut full = vec![0u8; width as usize * height as usize * 4];
+        if let Some(r) = self.rect {
+            let row = r.width() as usize * 4;
+            for (y, src) in (r.y0..r.y1).zip(rows.chunks_exact(row.max(1))) {
+                let start = (y as usize * width as usize + r.x0 as usize) * 4;
+                full.get_mut(start..start + row)?.copy_from_slice(src);
+            }
+        }
+        Some(full)
+    }
+}
+
+/// A parked layer's small pictures: the whole layer, and what is drawn on it (none if nothing);
+/// and where it is drawn (none if nowhere).
+struct Pictures {
+    whole: Thumbnail,
+    drawn: Option<Thumbnail>,
+    bounds: Option<IRect>,
+}
+
+impl Pictures {
+    /// Of a layer's pixels (premultiplied RGBA, `width` x `height`).
+    fn of(rgba: &[u8], width: u32, height: u32) -> Pictures {
+        let full = Thumbnail { width, height, rgba: rgba.to_vec() };
+        let whole = shrink(&full, PARKED_PICTURE_SIDE);
+        let painted = alpha_bounds(&full);
+        let drawn = painted.map(|b| shrink(&crop(&full, b), PARKED_PICTURE_SIDE));
+        let bounds =
+            painted.map(|[x0, y0, x1, y1]| IRect { x0: x0 as i32, y0: y0 as i32, x1: x1 as i32, y1: y1 as i32 });
+        Pictures { whole, drawn, bounds }
+    }
+}
+
+/// A picture box-filtered to fit `side` pixels (never enlarged).
+fn shrink(t: &Thumbnail, side: u32) -> Thumbnail {
+    let (width, height) = (t.width.max(1), t.height.max(1));
+    let scale = (side.max(1) as f32 / width.max(height) as f32).min(1.0);
+    let w = ((width as f32 * scale).round() as u32).clamp(1, width);
+    let h = ((height as f32 * scale).round() as u32).clamp(1, height);
+    if (w, h) == (width, height) {
+        return Thumbnail { width, height, rgba: t.rgba.clone() };
+    }
+    let mut sums = vec![0u32; w as usize * h as usize * 4];
+    let mut counts = vec![0u32; w as usize * h as usize];
+    for (y, row) in t.rgba.chunks_exact(width as usize * 4).enumerate() {
+        let ty = (y as u64 * u64::from(h) / u64::from(height)) as usize;
+        for (x, px) in row.as_chunks::<4>().0.iter().enumerate() {
+            let tx = (x as u64 * u64::from(w) / u64::from(width)) as usize;
+            let i = ty * w as usize + tx;
+            if let Some(c) = counts.get_mut(i) {
+                *c += 1;
+            }
+            for (k, v) in px.iter().enumerate() {
+                if let Some(sum) = sums.get_mut(i * 4 + k) {
+                    *sum += u32::from(*v);
+                }
+            }
+        }
+    }
+    let rgba = sums
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(&counts)
+        .flat_map(|(sum, n)| sum.iter().map(move |v| ((v + n / 2) / (*n).max(1)) as u8).collect::<Vec<_>>())
+        .collect();
+    Thumbnail { width: w, height: h, rgba }
+}
+
 /// Part [x0, y0, x1, y1) of a thumbnail.
 fn crop(t: &Thumbnail, [x0, y0, x1, y1]: [u32; 4]) -> Thumbnail {
     let row = t.width as usize * 4;
@@ -4992,6 +6004,91 @@ fn crop(t: &Thumbnail, [x0, y0, x1, y1]: [u32; 4]) -> Thumbnail {
 struct Stack<'a> {
     textures: &'a [wgpu::Texture; 2],
     views: &'a [wgpu::TextureView; 2],
+}
+
+/// Pictures of the top level's items that aren't being worked on, so only those that are
+/// composite each time (and the others' layers needn't be at hand): the background with every
+/// item below them, and a run of plain items above them over transparency.
+struct Caches {
+    /// The top level's items composited live, and every layer in them.
+    live: Vec<LayerId>,
+    live_layers: HashSet<LayerId>,
+    /// The items below them, composited over the background (in the first texture), and what
+    /// that was made from.
+    below: [wgpu::Texture; 2],
+    below_views: [wgpu::TextureView; 2],
+    below_items: Vec<LayerId>,
+    below_key: u64,
+    /// The items above them, over transparency (in the first texture), and what from.
+    above: [wgpu::Texture; 2],
+    above_views: [wgpu::TextureView; 2],
+    above_items: Vec<LayerId>,
+    above_key: u64,
+}
+
+/// How many layers a render reads back to park, at most, and how long it goes on reading them
+/// (after the first).
+const MOST_PARK_READS: usize = 4;
+const PARK_SLICE: std::time::Duration = std::time::Duration::from_millis(6);
+
+/// The room (in layers' textures) a remake keeps free for its next part, letting go of the
+/// layers it brought back only so far.
+const LET_GO_ROOM: usize = 2 * MOST_PART_ITEMS;
+
+/// The most items a part of a remake composites before it is sent (and the time looked at).
+const MOST_PART_ITEMS: usize = 8;
+
+/// How long each render goes on remaking caches before it lets the app go on.
+const REMAKE_SLICE: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Caches being remade a little each render: their textures, how far each has got (the next item
+/// and where its stack's result is; none when done or not remade), what they are made from,
+/// and the layers worked on, which stay.
+struct Remake {
+    caches: Caches,
+    below: Option<(usize, usize)>,
+    above: Option<(usize, usize)>,
+    below_items: Vec<LayerId>,
+    below_key: u64,
+    above_items: Vec<LayerId>,
+    above_key: u64,
+    keep: HashSet<LayerId>,
+    /// For the log: when it started, over how many renders, and the layers brought back for it
+    /// and the time that took.
+    started: std::time::Instant,
+    slices: u32,
+    largest_part: usize,
+    restored: usize,
+    restoring: std::time::Duration,
+}
+
+/// What a top-level item composites from: itself and its mask, or a group and all it holds.
+fn item_layers(doc: &Document, item: LayerId) -> Vec<LayerId> {
+    let mut layers = vec![item];
+    match doc.layer(item).map(|l| l.kind) {
+        Some(LayerKind::Group) => layers.extend(doc.contents(item)),
+        Some(LayerKind::Paint) => layers.extend(doc.mask_of(item)),
+        _ => {}
+    }
+    layers
+}
+
+/// A fingerprint of how `items` composite (with the background, if `background`): every setting
+/// of every layer in them, and which layer is shown alone. Their pixels change only through work
+/// that drops the caches.
+fn items_key(doc: &Document, items: &[LayerId], background: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if background {
+        format!("{:?} {}", doc.background, doc.background_visible).hash(&mut h);
+    }
+    format!("{:?}", doc.solo).hash(&mut h);
+    for &item in items {
+        for id in item_layers(doc, item) {
+            format!("{:?}", doc.layer(id)).hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 impl Stack<'_> {

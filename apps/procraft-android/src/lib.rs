@@ -38,7 +38,7 @@ mod transform;
 mod window;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use procraft_engine::brush::Brush;
@@ -321,6 +321,8 @@ pub(crate) struct State {
     pub(crate) info: project::ArtworkInfo,
     /// Saved layer pixels waiting for the canvas (an opened artwork before it is shown).
     pub(crate) pending_pixels: Vec<(procraft_engine::document::LayerId, project::Opened)>,
+    /// Let go of (see [`CanvasSession::release_canvas`]): no canvas is made again.
+    pub(crate) closed: bool,
     /// A model open to paint on, in place of the flat canvas (the document is its current
     /// texture set's).
     pub(crate) scene: Option<scene3d::Scene>,
@@ -549,18 +551,24 @@ impl State {
     /// Creates the canvas once there is a GPU.
     #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
     pub(crate) fn ensure_canvas(&mut self) {
-        if self.canvas.is_some() {
+        if self.canvas.is_some() || self.closed {
             return;
         }
         let Some(gpu) = self.gpu.as_ref() else { return };
         match Canvas::new(gpu, &self.doc) {
             Ok(mut c) => {
+                c.set_resident_budget(crate::layers::resident_budget());
                 let (w, h) = (self.doc.width(), self.doc.height());
                 for (id, pixels) in project::opened_pixels(std::mem::take(&mut self.pending_pixels), w, h) {
-                    if let Err(e) = c.upload_layer(gpu, id, &pixels) {
+                    // past what fits, kept compressed until needed
+                    let opened =
+                        if c.has_room() { c.upload_layer(gpu, id, &pixels) } else { c.park_pixels(id, &pixels) };
+                    if let Err(e) = opened {
                         log::error!("opening a layer: {e}");
                     }
                 }
+                // as read: not changed
+                c.take_changed();
                 self.canvas = Some(c);
             }
             Err(e) => {
@@ -631,8 +639,9 @@ fn close_stroke(canvas: &mut Canvas, mut builder: StrokeBuilder, guide: &procraf
 }
 
 pub(crate) struct Shared {
-    state: Mutex<State>,
-    pub(crate) wake: Condvar,
+    /// Fair when it matters: the render thread hands it on to whoever waits.
+    state: parking_lot::Mutex<State>,
+    pub(crate) wake: parking_lot::Condvar,
     thread: Mutex<Option<JoinHandle<()>>>,
     /// Project canvas's render thread.
     projection: Mutex<Option<JoinHandle<()>>>,
@@ -641,8 +650,42 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    pub(crate) fn lock(&self) -> parking_lot::MutexGuard<'_, State> {
+        self.state.lock()
+    }
+
+    /// Lets the canvas finish remaking its caches a render at a time, the lock let go between,
+    /// so a save or export after reads the picture as it is without holding everything up.
+    fn finish_caches(&self) {
+        // each render remakes at least one item, so this ends well before the bound
+        for _ in 0..100_000 {
+            {
+                let mut guard = self.lock();
+                let st = &mut *guard;
+                let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return };
+                canvas.render(gpu, &mut st.doc, None);
+                if !canvas.busy() {
+                    return;
+                }
+                // whoever waits on the lock (a touch, the render thread) has it next
+                parking_lot::MutexGuard::unlock_fair(guard);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// The lock, taken once the canvas has finished remaking its caches (made a render at a
+    /// time, the lock let go between): what is read under it is the picture as it is, and
+    /// nothing waits on a whole remake.
+    pub(crate) fn lock_finished(&self) -> parking_lot::MutexGuard<'_, State> {
+        for _ in 0..1000 {
+            self.finish_caches();
+            let guard = self.lock();
+            if guard.canvas.as_ref().is_none_or(|c| !c.busy()) {
+                return guard;
+            }
+        }
+        self.lock()
     }
 
     fn frame(&self, st: &mut State) {
@@ -660,24 +703,104 @@ impl Shared {
     pub(crate) fn make_canvas(&self) {
         let (gpu, doc, ids) = {
             let st = self.lock();
-            let Some(gpu) = st.gpu.as_ref().filter(|_| st.canvas.is_none()) else { return };
+            let Some(gpu) = st.gpu.as_ref().filter(|_| st.canvas.is_none() && !st.closed) else { return };
             (gpu.clone(), st.doc.clone(), st.pending_pixels.iter().map(|(id, _)| *id).collect::<Vec<_>>())
         };
+        let started = std::time::Instant::now();
+        /// A layer read, for the GPU or (past what fits) to keep compressed.
+        enum Read {
+            /// With its compressed copy, when layers are paged.
+            Upload(Vec<u8>, Option<procraft_gpu::ReadyToPark>),
+            Park(procraft_gpu::ReadyToPark),
+        }
         let made = Canvas::new(&gpu, &doc).map(|mut c| {
-            for (i, id) in ids.iter().enumerate() {
-                let Some(layer) = self.lock().pending_pixels.get(i).filter(|(at, _)| at == id).map(|(_, p)| p.clone())
-                else {
-                    break;
-                };
-                match layer.pixels(doc.width(), doc.height()) {
-                    Ok(pixels) => {
-                        if let Err(e) = c.upload_layer(&gpu, *id, &pixels) {
-                            log::error!("opening a layer: {e}");
+            let budget = crate::layers::resident_budget();
+            c.set_resident_budget(budget);
+            let (w, h) = (doc.width(), doc.height());
+            // read on a few threads (each file decoded and its compressed copy made: those below
+            // the top layers that fit are parked, those that fit keep it, so letting them go
+            // later needs no reading back), put on the canvas here in order
+            let first_resident = ids.len().saturating_sub(c.most_resident());
+            // the copies of layers that go up take an eighth of the textures' budget at most, and
+            // only those that pack to a quarter or less are kept
+            let copy_room = budget / 8;
+            let mut copies = 0u64;
+            let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 6);
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let (send, receive) = std::sync::mpsc::sync_channel(workers);
+            std::thread::scope(|scope| {
+                for _ in 0..workers {
+                    let (send, next, ids) = (send.clone(), &next, &ids);
+                    scope.spawn(move || {
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(id) = ids.get(i) else { break };
+                            // none if the artwork changed meanwhile: what is made is let go
+                            let layer =
+                                self.lock().pending_pixels.get(i).filter(|(at, _)| at == id).map(|(_, p)| p.clone());
+                            let read = layer.map(|l| {
+                                l.pixels(w, h).map(|px| {
+                                    let hash = project::pixels_hash(&px);
+                                    if i >= first_resident {
+                                        let copy = (budget > 0).then(|| procraft_gpu::ReadyToPark::of(&px, w, h));
+                                        (Read::Upload(px, copy), hash)
+                                    } else {
+                                        (Read::Park(procraft_gpu::ReadyToPark::of(&px, w, h)), hash)
+                                    }
+                                })
+                            });
+                            if send.send((i, read)).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+                drop(send);
+                let mut waiting = std::collections::BTreeMap::new();
+                let mut at = 0;
+                for (i, read) in receive {
+                    waiting.insert(i, read);
+                    while let Some(read) = waiting.remove(&at) {
+                        let Some(id) = ids.get(at) else { break };
+                        at += 1;
+                        match read {
+                            None => {}
+                            Some(Ok((layer, hash))) => {
+                                if let Ok(mut saved) = self.saving.lock() {
+                                    saved.read(*id, hash);
+                                }
+                                let opened = match layer {
+                                    Read::Upload(px, Some(copy))
+                                        if copy.bytes() * 4 <= px.len()
+                                            && copies + copy.bytes() as u64 <= copy_room =>
+                                    {
+                                        copies += copy.bytes() as u64;
+                                        c.upload_layer_kept(&gpu, *id, &px, copy)
+                                    }
+                                    Read::Upload(px, _) => c.upload_layer(&gpu, *id, &px),
+                                    Read::Park(ready) => {
+                                        c.park_ready(*id, ready);
+                                        Ok(())
+                                    }
+                                };
+                                if let Err(e) = opened {
+                                    log::error!("opening a layer: {e}");
+                                }
+                            }
+                            Some(Err(e)) => log::error!("layer {id:?}: {e}"),
                         }
                     }
-                    Err(e) => log::error!("layer {id:?}: {e}"),
                 }
-            }
+            });
+            // as read: not changed
+            c.take_changed();
+            log::info!(
+                "canvas made in {} ms: {} layers, {} kept compressed, {} KB of copies of the rest",
+                started.elapsed().as_millis(),
+                ids.len(),
+                c.parked_layers(),
+                copies / 1024
+            );
             c
         });
         let mut st = self.lock();
@@ -819,14 +942,15 @@ impl CanvasSession {
             guide_before: None,
             name,
             pending_pixels: project::opened(pixels),
+            closed: false,
             fit_insets: [0.0; 4],
             backdrops: Vec::new(),
             saved_view: None,
         };
         Arc::new(CanvasSession {
             shared: Arc::new(Shared {
-                state: Mutex::new(state),
-                wake: Condvar::new(),
+                state: parking_lot::Mutex::new(state),
+                wake: parking_lot::Condvar::new(),
                 thread: Mutex::new(None),
                 projection: Mutex::new(None),
                 saving: Mutex::new(project::Saved::default()),
@@ -1193,6 +1317,17 @@ impl CanvasSession {
     /// pixels): the interface, with Fit Canvas Inside Interface on.
     pub fn set_fit_insets(&self, left: f32, top: f32, right: f32, bottom: f32) {
         self.shared.lock().fit_insets = [left, top, right, bottom];
+    }
+
+    /// Lets go of the canvas and everything it holds, on the GPU and off it (its layers, parked
+    /// or not, and a model's), once the artwork is saved and left: a large artwork's memory is
+    /// free at once rather than whenever this object is collected. Nothing is drawn after.
+    pub fn release_canvas(&self) {
+        let mut st = self.shared.lock();
+        st.closed = true;
+        st.canvas = None;
+        st.pending_pixels.clear();
+        st.scene = None;
     }
 
     /// The artwork opens fitted, not as it was left (Canvas Orientation Memory off).

@@ -370,6 +370,19 @@ fn artworks_save_and_open() {
     // as the render thread makes it: the layers go up with the state let go between them
     opened.shared.make_canvas();
     assert!(opened.shared.lock().pending_pixels.is_empty());
+    // shown, and nothing changed: its files are known as read, so a save rewrites none
+    let before = written(&dir);
+    opened.save(dir.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(written(&dir), before, "unchanged layers left as they were");
+    // a stroke on the bottom layer: only its file is written again
+    let bottom = opened.layers().first().map(|l| l.id).unwrap();
+    assert!(opened.select_layer(bottom));
+    opened.stroke_begin(PointerKind::Finger, vec![sample(50.0, 50.0, 0.0)]);
+    opened.stroke_end(vec![]);
+    opened.save(dir.to_string_lossy().into_owned()).unwrap();
+    let after = written(&dir);
+    assert_ne!(after.first(), before.first(), "the painted layer written");
+    assert_eq!(after.get(1), before.get(1), "the other left as it was");
     assert_eq!(opened.name(), "Test Piece");
     assert_eq!(opened.artwork_info().author, "A. Painter");
     assert_eq!(opened.artwork_info().created_ms, info.created_ms);
@@ -764,9 +777,14 @@ fn an_imported_brush_shows_its_own_preview_until_changed() {
         (p.rgba[((50 * w + 5) * 4 + 3) as usize], p.rgba[((10 * w + 160) * 4 + 3) as usize])
     };
     assert_eq!(alpha(&s), (255, 0));
-    // kept with the library, and written back out as it came
+    // kept with the library (in a file of its own), and written back out as it came
     let Some(other) = session(100, 100) else { return };
-    assert!(other.load_brush_library(s.saved_brush_library()));
+    let dir = std::env::temp_dir().join(format!("procraft-library-{}", std::process::id()));
+    let kept = dir.join("brushes").join("library.json").to_string_lossy().into_owned();
+    assert!(s.save_brush_library_file(kept.clone()));
+    assert!(other.load_brush_library_file(kept.clone()));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!other.load_brush_library_file(kept), "none kept");
     assert_eq!(alpha(&other), (255, 0));
     let out = brushfile::read(&s.brush_as_file(set, 0).unwrap()).unwrap();
     assert_eq!(out.thumbnail.as_deref(), Some(thumbnail.as_slice()));

@@ -5,7 +5,7 @@
 use procraft_engine::document::{BlendMode, Document, LayerId};
 use procraft_engine::geom::Vec2;
 use procraft_engine::stroke::Stamp;
-use procraft_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
+use procraft_gpu::{Canvas, Filter, Gpu, Resample, StrokeStyle, StrokeTool};
 
 const W: u32 = 16;
 
@@ -315,4 +315,613 @@ fn a_held_edit_is_one_undo_step_or_put_back() {
     canvas.release_layer(false, None);
     canvas.render(&gpu, &mut doc, None);
     assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, a, 3, 3), [10, 20, 30, 255]);
+}
+
+/// The same edits to an artwork composited fully and one composited around caches.
+struct Twins {
+    docs: [Document; 2],
+    canvases: [Canvas; 2],
+}
+
+impl Twins {
+    fn each(&mut self, f: impl Fn(&mut Document, &mut Canvas)) {
+        for (doc, canvas) in self.docs.iter_mut().zip(self.canvases.iter_mut()) {
+            f(doc, canvas);
+        }
+    }
+
+    /// Both composites, every pixel within `slack` of each other (a run of plain layers above is
+    /// flattened once, so its 8-bit picture can round a step apart).
+    fn same(&mut self, gpu: &Gpu, slack: u8, what: &str) {
+        let mut pictures = Vec::new();
+        for (doc, canvas) in self.docs.iter_mut().zip(self.canvases.iter_mut()) {
+            canvas.render(gpu, doc, None);
+            // caches remade and layers parked a little each render: until the caches are, the
+            // composite waits
+            for _ in 0..1000 {
+                if !canvas.wants_render() {
+                    break;
+                }
+                canvas.render(gpu, doc, None);
+            }
+            assert!(!canvas.wants_render(), "{what}: caches still being remade or layers parked");
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            pictures.push(canvas.read_composite(gpu).unwrap());
+        }
+        let worst = pictures[0].iter().zip(&pictures[1]).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+        assert!(worst <= slack, "{what}: cached composite differs by {worst}");
+    }
+}
+
+#[test]
+fn composites_made_around_cached_pictures_match_full_ones() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    t.canvases[0].set_cache_composites(true);
+    // bottom up: red; multiplied blue; a group of green and screened yellow; a masked layer with
+    // an overlay clipped to it (worked on); two plain layers at the top
+    let base = t.docs[0].current();
+    t.each(|doc, canvas| {
+        fill(canvas, doc, base, [200, 40, 40]);
+        let multiply = doc.add_layer();
+        doc.set_blend(multiply, BlendMode::Multiply);
+        paint(canvas, doc, multiply, [60, 60, 230], Vec2::new(5.0, 5.0), 4.0, StrokeTool::Paint);
+        let green = doc.add_layer();
+        paint(canvas, doc, green, [40, 200, 40], Vec2::new(10.0, 6.0), 4.0, StrokeTool::Paint);
+        let yellow = doc.add_layer();
+        doc.set_blend(yellow, BlendMode::Screen);
+        paint(canvas, doc, yellow, [230, 230, 30], Vec2::new(8.0, 10.0), 5.0, StrokeTool::Paint);
+        doc.set_current(green);
+        doc.toggle_pick(yellow);
+        // what comes next goes above the group, not in it
+        let group = doc.group_chosen().unwrap();
+        doc.set_current(group);
+        let masked = doc.add_layer();
+        paint(canvas, doc, masked, [250, 250, 250], Vec2::new(8.0, 8.0), 6.0, StrokeTool::Paint);
+        let mask = doc.add_mask(masked).unwrap();
+        paint(canvas, doc, mask, [0, 0, 0], Vec2::new(4.0, 12.0), 3.0, StrokeTool::Paint);
+        let overlay = doc.add_layer();
+        doc.set_blend(overlay, BlendMode::Overlay);
+        doc.set_clipped(overlay, true);
+        fill(canvas, doc, overlay, [30, 120, 220]);
+        let plain = doc.add_layer();
+        paint(canvas, doc, plain, [255, 140, 0], Vec2::new(3.0, 3.0), 3.0, StrokeTool::Paint);
+        doc.set_opacity(plain, 0.6);
+        let top = doc.add_layer();
+        paint(canvas, doc, top, [20, 20, 20], Vec2::new(13.0, 13.0), 2.0, StrokeTool::Paint);
+        doc.set_current(masked);
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "as made");
+    assert!(t.canvases[0].composites_cached(), "made around caches");
+    // painting what is worked on keeps the caches; undoing it too
+    let masked = t.docs[0].current();
+    t.each(|doc, canvas| paint(canvas, doc, masked, [0, 200, 200], Vec2::new(9.0, 4.0), 3.0, StrokeTool::Paint));
+    t.same(&gpu, 2, "painted");
+    assert!(t.canvases[0].composites_cached());
+    t.each(|_, canvas| canvas.undo());
+    t.same(&gpu, 2, "undone");
+    // a layer below changed, one above hidden, then another layer worked on (inside the group)
+    let ids: Vec<LayerId> = t.docs[0].layers().iter().map(|l| l.id).collect();
+    let multiply = ids[1];
+    // as the app makes them: an undo step
+    t.each(|doc, canvas| {
+        let before = doc.clone();
+        doc.set_opacity(multiply, 0.4);
+        canvas.record_document(before);
+    });
+    t.same(&gpu, 2, "a layer below changed");
+    let top = *ids.last().unwrap();
+    t.each(|doc, canvas| {
+        let before = doc.clone();
+        doc.set_visible(top, false);
+        canvas.record_document(before);
+    });
+    t.same(&gpu, 2, "a layer above hidden");
+    let green = t.docs[0].layers().iter().find(|l| l.blend == BlendMode::Screen).map(|l| l.id).unwrap();
+    t.each(|doc, canvas| {
+        doc.set_current(green);
+        paint(canvas, doc, green, [255, 0, 255], Vec2::new(6.0, 9.0), 3.0, StrokeTool::Paint);
+    });
+    t.same(&gpu, 2, "worked on inside the group");
+    // the bottom layer worked on: nothing below it but the background
+    t.each(|doc, canvas| {
+        doc.set_current(base);
+        paint(canvas, doc, base, [0, 0, 0], Vec2::new(12.0, 3.0), 2.0, StrokeTool::Erase);
+    });
+    t.same(&gpu, 2, "the bottom worked on");
+    assert!(t.canvases[0].composites_cached());
+}
+
+#[test]
+fn parked_layers_come_back_as_they_were() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    // room for three layers' textures only: the rest are parked
+    t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
+    let modes = [BlendMode::Normal, BlendMode::Multiply, BlendMode::Screen, BlendMode::Normal, BlendMode::Overlay];
+    t.each(|doc, canvas| {
+        let base = doc.current();
+        fill(canvas, doc, base, [180, 180, 180]);
+        for i in 0..9u8 {
+            let id = doc.add_layer();
+            doc.set_blend(id, modes[usize::from(i) % modes.len()]);
+            let at = Vec2::new(f32::from(i % 4) * 4.0 + 2.0, f32::from(i / 4) * 5.0 + 2.0);
+            paint(canvas, doc, id, [i * 25, 200 - i * 20, 90], at, 3.0, StrokeTool::Paint);
+        }
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "made");
+    // the composite is made around pictures of the rest, so layers can go
+    t.same(&gpu, 2, "made, parked");
+    assert!(t.canvases[0].parked_layers() >= 6, "parked: {}", t.canvases[0].parked_layers());
+    // a parked layer worked on again, painted, undone and redone
+    let ids: Vec<LayerId> = t.docs[0].layers().iter().map(|l| l.id).collect();
+    let low = ids[2];
+    t.each(|doc, canvas| {
+        doc.set_current(low);
+        paint(canvas, doc, low, [0, 0, 250], Vec2::new(8.0, 8.0), 4.0, StrokeTool::Paint);
+    });
+    t.same(&gpu, 2, "a parked layer painted");
+    t.each(|_, canvas| canvas.undo());
+    t.same(&gpu, 2, "undone");
+    t.each(|_, canvas| canvas.redo());
+    t.same(&gpu, 2, "redone");
+    // its pixels and picture read while parked again, as the other's
+    let top = *ids.last().unwrap();
+    t.each(|doc, _| {
+        doc.set_current(top);
+    });
+    t.same(&gpu, 2, "the top worked on");
+    let read: Vec<Vec<u8>> = t.canvases.iter().map(|c| c.read_layer(&gpu, low).unwrap()).collect();
+    assert_eq!(read[0], read[1], "a parked layer reads as it is");
+    let mut pictures = Vec::new();
+    for (doc, canvas) in t.docs.iter_mut().zip(t.canvases.iter_mut()) {
+        pictures.push(canvas.layer_picture(&gpu, doc, low, 8).unwrap().rgba);
+    }
+    // a parked layer's is box-filtered from its small picture, not sampled on the GPU: the edges
+    // soften a little differently
+    let near = |a: &[u8], b: &[u8]| {
+        let diffs = a.iter().zip(b).map(|(x, y)| u32::from(x.abs_diff(*y)));
+        a.len() == b.len() && diffs.clone().max().unwrap_or(0) <= 32 && diffs.sum::<u32>() <= 4 * a.len() as u32
+    };
+    assert!(near(&pictures[0], &pictures[1]), "its picture");
+    let mut thumbs = Vec::new();
+    for (doc, canvas) in t.docs.iter_mut().zip(t.canvases.iter_mut()) {
+        thumbs.push(canvas.layer_thumbnail(&gpu, doc, low, 8).unwrap());
+    }
+    // what is drawn on it, cropped a pixel or so differently
+    let [a, b] = [&thumbs[0], &thumbs[1]];
+    assert!(a.width.abs_diff(b.width) <= 2 && a.height.abs_diff(b.height) <= 2, "its thumbnail");
+    assert!(a.rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0), "something drawn on its thumbnail");
+    // every layer's coverage at a point, parked ones too
+    for (x, y) in [(2, 2), (8, 8), (13, 9)] {
+        let mut alphas = Vec::new();
+        for (doc, canvas) in t.docs.iter_mut().zip(t.canvases.iter_mut()) {
+            alphas.push(canvas.alphas_at(&gpu, doc, x, y).unwrap());
+        }
+        assert_eq!(alphas[0], alphas[1], "coverage at {x}, {y}");
+    }
+    // merged down, duplicated, hidden: the layers they read and write come back first
+    let (upper, lower) = (ids[5], ids[4]);
+    t.each(|doc, canvas| {
+        let before = doc.clone();
+        canvas.merge_down(upper, lower, before);
+        assert!(doc.finish_merge_down(upper));
+    });
+    t.same(&gpu, 2, "merged");
+    t.each(|doc, canvas| {
+        let before = doc.clone();
+        let copy = doc.duplicate_layer(ids[1]).unwrap();
+        canvas.duplicate_layer(ids[1], copy, before);
+    });
+    t.same(&gpu, 2, "duplicated");
+    t.each(|doc, canvas| {
+        let before = doc.clone();
+        doc.set_visible(ids[3], false);
+        canvas.record_document(before);
+    });
+    t.same(&gpu, 2, "hidden");
+    t.each(|_, canvas| canvas.undo());
+    t.same(&gpu, 2, "shown again");
+    t.each(|_, canvas| canvas.undo());
+    t.same(&gpu, 2, "the duplicate undone");
+    assert!(t.canvases[0].parked_layers() > 0);
+}
+
+#[test]
+fn an_artwork_opening_with_more_layers_than_fit_parks_the_rest() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let mut doc = Document::new(W, W);
+    for _ in 0..9 {
+        doc.add_layer();
+    }
+    let ids: Vec<LayerId> = doc.layers().iter().map(|l| l.id).collect();
+    // each layer a band of its own colour, half covering
+    let pixels: Vec<Vec<u8>> = (0..ids.len())
+        .map(|i| {
+            let mut px = vec![0u8; (W * W * 4) as usize];
+            for y in 0..W as usize {
+                for x in 0..W as usize {
+                    if (x + y + i) % 3 != 0 {
+                        let o = (y * W as usize + x) * 4;
+                        px[o..o + 4].copy_from_slice(&[(i * 25) as u8, 200 - (i * 20) as u8, 90, 255]);
+                    }
+                }
+            }
+            px
+        })
+        .collect();
+    let docs = [doc.clone(), doc];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
+    for (id, px) in ids.iter().zip(&pixels) {
+        if t.canvases[0].has_room() {
+            t.canvases[0].upload_layer(&gpu, *id, px).unwrap();
+        } else {
+            t.canvases[0].park_pixels(*id, px).unwrap();
+        }
+        t.canvases[1].upload_layer(&gpu, *id, px).unwrap();
+    }
+    assert!(t.canvases[0].parked_layers() >= 6);
+    t.same(&gpu, 2, "opened");
+    let middle = ids[5];
+    t.each(|doc, canvas| {
+        doc.set_current(middle);
+        paint(canvas, doc, middle, [250, 0, 0], Vec2::new(8.0, 8.0), 3.0, StrokeTool::Paint);
+    });
+    t.same(&gpu, 2, "one opened parked, painted");
+    assert!(t.canvases[0].parked_layers() > 0);
+}
+
+#[test]
+fn an_animation_keeps_only_the_frames_shown() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
+    t.each(|doc, canvas| {
+        let first = doc.current();
+        paint(canvas, doc, first, [0, 0, 0], Vec2::new(2.0, 8.0), 2.0, StrokeTool::Paint);
+        for i in 1..10u8 {
+            let id = doc.add_layer();
+            paint(
+                canvas,
+                doc,
+                id,
+                [i * 25, 100, 200 - i * 20],
+                Vec2::new(2.0 + f32::from(i) * 1.3, 8.0),
+                2.0,
+                StrokeTool::Paint,
+            );
+        }
+        doc.animation = Some(procraft_engine::animation::Animation { onion_frames: 1, ..Default::default() });
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "the last frame");
+    t.same(&gpu, 2, "the last frame, the rest parked");
+    assert!(t.canvases[0].parked_layers() >= 5, "parked: {}", t.canvases[0].parked_layers());
+    let ids: Vec<LayerId> = t.docs[0].layers().iter().map(|l| l.id).collect();
+    t.each(|doc, canvas| {
+        doc.set_current(ids[3]);
+        paint(canvas, doc, ids[3], [255, 255, 0], Vec2::new(8.0, 4.0), 2.0, StrokeTool::Paint);
+    });
+    t.same(&gpu, 2, "another frame painted");
+    for f in [0, 6, 9] {
+        t.each(|_, canvas| canvas.set_play_frame(Some(f)));
+        t.same(&gpu, 2, "played");
+    }
+    t.each(|_, canvas| canvas.set_play_frame(None));
+    t.same(&gpu, 2, "stopped");
+}
+
+#[test]
+fn empty_and_clipped_layers_cache_as_they_composite() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
+    t.each(|doc, canvas| {
+        let base = doc.current();
+        fill(canvas, doc, base, [120, 160, 200]);
+        for i in 0..10u8 {
+            let id = doc.add_layer();
+            match i % 5 {
+                // left empty
+                0 | 3 => {}
+                // clipped to what is under it (painted, or the empty one)
+                1 | 4 => {
+                    doc.set_clipped(id, true);
+                    fill(canvas, doc, id, [250, 40 + i * 20, 40]);
+                }
+                _ => paint(
+                    canvas,
+                    doc,
+                    id,
+                    [i * 20, 90, 200 - i * 15],
+                    Vec2::new(3.0 + f32::from(i), 9.0),
+                    3.0,
+                    StrokeTool::Paint,
+                ),
+            }
+        }
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "made");
+    t.same(&gpu, 2, "parked");
+    let ids: Vec<LayerId> = t.docs[0].layers().iter().map(|l| l.id).collect();
+    for current in [ids[0], ids[6], *ids.last().unwrap()] {
+        t.each(|doc, canvas| {
+            doc.set_current(current);
+            paint(canvas, doc, current, [10, 10, 10], Vec2::new(12.0, 4.0), 2.0, StrokeTool::Paint);
+        });
+        t.same(&gpu, 2, "another layer worked on");
+    }
+    assert!(t.canvases[0].parked_layers() > 0);
+}
+
+#[test]
+fn the_picture_read_back_waits_for_the_caches() {
+    let Some((gpu, _, _)) = setup() else { return };
+    // big enough that remaking the caches takes several renders
+    const SIDE: u32 = 768;
+    let docs = [Document::new(SIDE, SIDE), Document::new(SIDE, SIDE)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    t.canvases[0].set_resident_budget(3 * u64::from(SIDE * SIDE * 4));
+    t.each(|doc, canvas| {
+        for i in 0..40u8 {
+            let id = doc.add_layer();
+            let at = Vec2::new(f32::from(i % 8) * 90.0 + 40.0, f32::from(i / 8) * 140.0 + 60.0);
+            paint(canvas, doc, id, [i * 6, 220 - i * 5, 90], at, 70.0, StrokeTool::Paint);
+        }
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "made");
+    // a layer low down hidden (an undo step, as the app makes it), then the picture read at once
+    // (as a save does)
+    let low = t.docs[0].layers()[3].id;
+    t.each(|doc, canvas| {
+        let before = doc.clone();
+        doc.set_visible(low, false);
+        canvas.record_document(before);
+    });
+    let mut read = Vec::new();
+    for (doc, canvas) in t.docs.iter_mut().zip(t.canvases.iter_mut()) {
+        read.push(canvas.read_composite_without(&gpu, doc, &[]).unwrap());
+    }
+    let worst = read[0].iter().zip(&read[1]).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(worst <= 2, "read while the caches are remade: differs by {worst}");
+    assert!(!t.canvases[0].busy());
+}
+
+#[test]
+fn a_layers_version_changes_with_its_pixels_only() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    let a = doc.current();
+    let b = doc.add_layer();
+    canvas.render(&gpu, &mut doc, None);
+    let (va, vb) = (canvas.layer_version(a), canvas.layer_version(b));
+    paint(&mut canvas, &doc, b, [200, 0, 0], Vec2::new(8.0, 8.0), 3.0, StrokeTool::Paint);
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(canvas.layer_version(a), va, "the other layer's stays");
+    let painted = canvas.layer_version(b);
+    assert_ne!(painted, vb, "the painted one's is new");
+    // hidden, and another chosen: its pixels are as they were
+    let before = doc.clone();
+    doc.set_visible(b, false);
+    canvas.record_document(before);
+    doc.set_current(a);
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(canvas.layer_version(b), painted, "hidden and left");
+    // shown again, then the stroke undone: new again
+    canvas.undo();
+    canvas.render(&gpu, &mut doc, None);
+    canvas.undo();
+    canvas.render(&gpu, &mut doc, None);
+    assert_ne!(canvas.layer_version(b), painted, "undone");
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn transforms_and_adjustments_on_the_layer_worked_on_keep_the_caches() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    t.canvases[0].set_cache_composites(true);
+    let base = t.docs[0].current();
+    t.each(|doc, canvas| {
+        fill(canvas, doc, base, [200, 40, 40]);
+        for i in 0..4u8 {
+            let id = doc.add_layer();
+            let at = Vec2::new(f32::from(i) * 3.0 + 3.0, 8.0);
+            paint(canvas, doc, id, [i * 50, 100, 200 - i * 40], at, 3.0, StrokeTool::Paint);
+        }
+        canvas.invalidate();
+    });
+    let middle = t.docs[0].layers()[2].id;
+    t.each(|doc, _| {
+        doc.set_current(middle);
+    });
+    t.same(&gpu, 2, "made");
+    assert!(t.canvases[0].composites_cached());
+    // moved by (3, 2), applied, undone
+    t.each(|_, canvas| {
+        canvas.begin_transform(middle);
+        canvas.set_transform([1.0, 0.0, -3.0, 0.0, 1.0, -2.0, 0.0, 0.0, 1.0], Resample::Bilinear);
+    });
+    t.same(&gpu, 2, "moved");
+    assert!(t.canvases[0].composites_cached(), "kept while transforming");
+    t.each(|_, canvas| canvas.end_transform(true));
+    t.same(&gpu, 2, "applied");
+    t.each(|_, canvas| canvas.undo());
+    t.same(&gpu, 2, "undone");
+    // an adjustment on it, cancelled
+    t.each(|_, canvas| {
+        canvas.begin_transform(middle);
+        canvas.set_filter(Filter::Hsb { hue: 1.0, saturation: 0.5, brightness: 0.1 });
+    });
+    t.same(&gpu, 2, "adjusted");
+    assert!(t.canvases[0].composites_cached(), "kept while adjusting");
+    t.each(|_, canvas| canvas.end_transform(false));
+    t.same(&gpu, 2, "cancelled");
+    assert!(t.canvases[0].composites_cached());
+}
+
+#[test]
+fn a_render_reads_back_only_a_few_layers_to_park() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    // drawn with room for every layer, so none has a compressed copy yet
+    t.each(|doc, canvas| {
+        let first = doc.current();
+        paint(canvas, doc, first, [0, 0, 0], Vec2::new(2.0, 8.0), 2.0, StrokeTool::Paint);
+        for i in 1..12u8 {
+            let id = doc.add_layer();
+            let at = Vec2::new(1.0 + f32::from(i), 8.0);
+            paint(canvas, doc, id, [i * 20, 100, 200 - i * 15], at, 2.0, StrokeTool::Paint);
+        }
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "made");
+    // then room for three, and Animation Assist on: the frames not shown are parked, a few a render
+    t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
+    t.each(|doc, canvas| {
+        doc.animation = Some(procraft_engine::animation::Animation { onion_frames: 1, ..Default::default() });
+        canvas.invalidate();
+    });
+    let (doc, canvas) = (&mut t.docs[0], &mut t.canvases[0]);
+    canvas.render(&gpu, doc, None);
+    let first = canvas.parked_layers();
+    assert!((1..=4).contains(&first), "parked in one render: {first}");
+    assert!(canvas.wants_render(), "more to park");
+    for _ in 0..100 {
+        if !canvas.wants_render() {
+            break;
+        }
+        canvas.render(&gpu, doc, None);
+    }
+    assert!(!canvas.wants_render());
+    assert!(canvas.parked_layers() >= 8, "parked in all: {}", canvas.parked_layers());
+    t.same(&gpu, 2, "the frames shown, the rest parked");
+}
+
+#[test]
+fn a_remake_part_composites_a_few_items_at_most() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let mut doc = Document::new(W, W);
+    for _ in 0..39 {
+        doc.add_layer();
+    }
+    let ids: Vec<LayerId> = doc.layers().iter().map(|l| l.id).collect();
+    // each layer a short band of its own colour
+    let pixels: Vec<Vec<u8>> = (0..ids.len())
+        .map(|i| {
+            let mut px = vec![0u8; (W * W * 4) as usize];
+            let (y, x0) = (i / 8 * 3 + 1, i % 8 * 2);
+            for x in x0..x0 + 3 {
+                let o = (y * W as usize + x) * 4;
+                px[o..o + 4].copy_from_slice(&[(i * 6) as u8, 200 - (i * 4) as u8, 90, 255]);
+            }
+            px
+        })
+        .collect();
+    let docs = [doc.clone(), doc];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    // room for 30 of the 40, every one kept compressed (as an opening artwork's past what fits):
+    // the caches are remade from layers quick to bring back, with room for many a part
+    t.canvases[0].set_resident_budget(30 * u64::from(W * W * 4));
+    for (id, px) in ids.iter().zip(&pixels) {
+        t.canvases[0].park_pixels(*id, px).unwrap();
+        t.canvases[1].upload_layer(&gpu, *id, px).unwrap();
+    }
+    t.same(&gpu, 2, "opened");
+    let stats = t.canvases[0].last_remake().unwrap();
+    assert!((1..=8).contains(&stats.largest_part), "{stats:?}");
+}
+
+#[test]
+fn layers_uploaded_with_their_copies_are_let_go_without_reading_them_back() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let mut doc = Document::new(W, W);
+    for _ in 0..11 {
+        doc.add_layer();
+    }
+    let ids: Vec<LayerId> = doc.layers().iter().map(|l| l.id).collect();
+    let pixels: Vec<Vec<u8>> = (0..ids.len())
+        .map(|i| {
+            let mut px = vec![0u8; (W * W * 4) as usize];
+            let (y, x0) = (i / 4 * 4 + 2, i % 4 * 4);
+            for x in x0..x0 + 3 {
+                let o = (y * W as usize + x) * 4;
+                px[o..o + 4].copy_from_slice(&[(i * 20) as u8, 200 - (i * 15) as u8, 90, 255]);
+            }
+            px
+        })
+        .collect();
+    let docs = [doc.clone(), doc];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    // room for 3 of 12, every one uploaded with its compressed copy (as an opening artwork's)
+    t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
+    for (id, px) in ids.iter().zip(&pixels) {
+        let ready = procraft_gpu::ReadyToPark::of(px, W, W);
+        t.canvases[0].upload_layer_kept(&gpu, *id, px, ready).unwrap();
+        t.canvases[1].upload_layer(&gpu, *id, px).unwrap();
+    }
+    // one render lets all but what fits go: nothing to read back first
+    let (doc, canvas) = (&mut t.docs[0], &mut t.canvases[0]);
+    canvas.render(&gpu, doc, None);
+    assert!(canvas.parked_layers() >= 9, "parked in one render: {}", canvas.parked_layers());
+    t.same(&gpu, 2, "opened");
+    for (id, px) in ids.iter().zip(&pixels) {
+        assert_eq!(&t.canvases[0].read_layer(&gpu, *id).unwrap(), px, "{id:?} as uploaded");
+    }
+}
+
+#[test]
+fn a_remake_lets_go_only_what_its_parts_need_room_for() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let mut doc = Document::new(W, W);
+    for _ in 0..39 {
+        doc.add_layer();
+    }
+    let ids: Vec<LayerId> = doc.layers().iter().map(|l| l.id).collect();
+    let pixels: Vec<Vec<u8>> = (0..ids.len())
+        .map(|i| {
+            let mut px = vec![0u8; (W * W * 4) as usize];
+            let (y, x0) = (i / 8 * 3 + 1, i % 8 * 2);
+            for x in x0..x0 + 3 {
+                let o = (y * W as usize + x) * 4;
+                px[o..o + 4].copy_from_slice(&[(i * 6) as u8, 200 - (i * 4) as u8, 90, 255]);
+            }
+            px
+        })
+        .collect();
+    let docs = [doc.clone(), doc];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    // room for 30 of the 40, every one uploaded with its compressed copy: the caches are remade
+    // (40 needed), and of the clean textures only what the parts need room for goes
+    t.canvases[0].set_resident_budget(30 * u64::from(W * W * 4));
+    for (id, px) in ids.iter().zip(&pixels) {
+        let ready = procraft_gpu::ReadyToPark::of(px, W, W);
+        t.canvases[0].upload_layer_kept(&gpu, *id, px, ready).unwrap();
+        t.canvases[1].upload_layer(&gpu, *id, px).unwrap();
+    }
+    t.same(&gpu, 2, "opened");
+    assert!(t.canvases[0].last_remake().is_some(), "remade");
+    let parked = t.canvases[0].parked_layers();
+    assert!(parked <= 26, "parked {parked}: most that fit stay");
 }

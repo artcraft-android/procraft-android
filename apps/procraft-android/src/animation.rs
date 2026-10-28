@@ -138,7 +138,7 @@ impl CanvasSession {
                 return Err(file_error("reading the picture", "the canvas is not shown yet"));
             };
             canvas.invalidate();
-            canvas.render(gpu, &mut doc, None);
+            canvas.render_finished(gpu, &mut doc);
             let rgba = canvas.read_composite(gpu);
             canvas.invalidate();
             canvas.render(gpu, &mut st.doc, None);
