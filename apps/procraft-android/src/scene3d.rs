@@ -17,9 +17,10 @@ use procraft_engine::geom::{IRect, Vec2};
 use procraft_engine::input::Sample;
 use procraft_engine::mesh::{MAX_TRIANGLES, Mesh, MeshError, PartImages, read_obj};
 use procraft_engine::stroke::StrokeBuilder;
+use procraft_engine::studio::MAX_GRAIN_SCALE;
 use procraft_engine::usd::{read_usd, read_usdc, read_usdz};
 use procraft_engine::view::View;
-use procraft_gpu::{Canvas, Light, Lighting, MOST_LIGHTS, MeshView, Orbit, StrokeTool, wgpu};
+use procraft_gpu::{Canvas, Light, Lighting, MOST_LIGHTS, MeshView, Orbit, StrokeStyle, StrokeTool, wgpu};
 
 use crate::project::{THUMBNAIL_SIDE, file_error, pixels_hash, read_png, write_atomically, write_png};
 use crate::{CanvasSession, MobileError, PenSample, PointerKind, State, ToolKind};
@@ -282,7 +283,37 @@ pub(crate) struct Scene {
     /// A stroke is being carried onto the model each frame; `ending`: once more, then it ends.
     pub(crate) stroking: bool,
     ending: bool,
+    /// What the stroke on the current part's colour lays down in its roughness and metalness as
+    /// well (a stroke on the colour paints all three), while it goes on.
+    material_paint: Option<[MaterialPaint; 2]>,
+    /// The brush's roughness and metalness sources as textures, with their keys.
+    material_sources: [Option<(u64, wgpu::TextureView)>; 2],
+    /// Strokes that painted the colour, roughness and metalness together: the step each made in
+    /// each one's canvas, so undo and redo take them together.
+    joint_steps: Vec<JointStep>,
 }
+
+/// What a stroke on a part's colour lays down in its roughness or metalness: the brush's amount
+/// (0..1), one tile of its source every so many canvas pixels, and the source's key (none: the
+/// amount all over).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MaterialPaint {
+    amount: f32,
+    tile: f32,
+    source: Option<u64>,
+}
+
+/// A stroke that painted part `part`'s colour, roughness and metalness: the step it made in each
+/// (as [`Canvas::undo_step`] numbers them), if it made one there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct JointStep {
+    part: usize,
+    steps: [Option<u64>; 3],
+}
+
+/// The most strokes remembered as painting every channel (older ones are long out of the undo
+/// history).
+const MOST_JOINT_STEPS: usize = 512;
 
 impl Scene {
     /// `mesh` with a texture set `texture_size` square for each of its parts, set `current` the
@@ -332,6 +363,9 @@ impl Scene {
             surface_shown: false,
             stroking: false,
             ending: false,
+            material_paint: None,
+            material_sources: [None, None],
+            joint_steps: Vec::new(),
         }
     }
 
@@ -1721,6 +1755,58 @@ impl State {
             canvas.begin_drawn_stroke(current, canvas_style);
         }
         self.stroke = Some(builder);
+        self.begin_material_strokes(&brush, canvas_style, current);
+    }
+
+    /// A stroke on a part's colour paints its roughness and metalness too, on the same layer and
+    /// with the same coverage: the brush's amount of each through its source (an eraser takes
+    /// all three away). A stroke on one of those channels paints only it.
+    fn begin_material_strokes(&mut self, brush: &procraft_engine::brush::Brush, style: StrokeStyle, layer: LayerId) {
+        let structure = self.doc.clone();
+        let (Some(gpu), Some(scene)) = (self.gpu.as_ref(), self.scene.as_mut()) else { return };
+        scene.material_paint = None;
+        if scene.channel != 0 {
+            return;
+        }
+        let (part, side) = (scene.current, scene.texture_size);
+        let channels = [
+            (brush.setting("roughness_amount"), brush.setting("roughness_scale"), &brush.roughness),
+            (brush.setting("metallic_amount"), brush.setting("metallic_scale"), &brush.metallic),
+        ];
+        let mut paint = [MaterialPaint { amount: 0.0, tile: 1.0, source: None }; 2];
+        for (k, ((amount, scale, source), out)) in channels.into_iter().zip(&mut paint).enumerate() {
+            // the channel's document, made now if it never was, with the colour's layers
+            let Some(slot) = scene.slot(part, k + 1) else { return };
+            let set = slot.get_or_insert_with(|| TextureSet::empty(side));
+            follow_layers(set, &structure);
+            if set.canvas.is_none() {
+                let Ok(mut made) = Canvas::new(gpu, &set.doc) else { return };
+                for (id, pixels) in std::mem::take(&mut set.pending) {
+                    if let Err(e) = made.upload_layer(gpu, id, &pixels) {
+                        log::error!("opening a texture set's layer: {e}");
+                    }
+                }
+                set.canvas = Some(made);
+            }
+            let Some(canvas) = set.canvas.as_mut() else { return };
+            let amount = amount.clamp(0.0, 1.0);
+            // the colour's coverage, laid down plainly: no blend mode, grain or wet paint of its own
+            let plain =
+                StrokeStyle { color: [amount; 3], blend: 0, burnt_edges: 0.0, grain: None, wet_pull: None, ..style };
+            canvas.begin_drawn_stroke(layer, plain);
+            let key = crate::studio::source_key(source);
+            let cached = scene.material_sources.get(k).and_then(|c| c.as_ref()).map(|(key, _)| *key);
+            if key.is_some() && cached != key {
+                let made = crate::brush_files::material_pixels(source).and_then(|pixels| {
+                    procraft_gpu::material_source(gpu, procraft_engine::textures::TEXTURE_SIZE as u32, &pixels)
+                });
+                if let Some(slot) = scene.material_sources.get_mut(k) {
+                    *slot = key.zip(made);
+                }
+            }
+            *out = MaterialPaint { amount, tile: (scale * MAX_GRAIN_SCALE).max(4.0), source: key };
+        }
+        scene.material_paint = Some(paint);
     }
 
     pub(crate) fn scene_stroke_add(&mut self, samples: &[PenSample], last: bool) {
@@ -1748,6 +1834,13 @@ impl State {
         scene.ending = false;
         if let Some((_, screen)) = scene.screen.as_mut() {
             screen.cancel_stroke();
+        }
+        if scene.material_paint.take().is_some()
+            && let Some(channels) = scene.channels.get_mut(scene.current)
+        {
+            for canvas in channels.iter_mut().flatten().filter_map(|s| s.canvas.as_mut()) {
+                canvas.cancel_stroke();
+            }
         }
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.cancel_stroke();
@@ -1810,14 +1903,92 @@ impl State {
             size.1,
             canvas.stroke_target(),
         );
+        // the roughness and metalness take the colour's coverage as it is now
+        let part = scene.current;
+        let materials = scene.material_paint.zip(scene.channels.get_mut(part));
+        if let Some((paint, channels)) = &materials {
+            for (k, (look, set)) in paint.iter().zip(channels.iter()).enumerate() {
+                let Some(target) = set.as_ref().and_then(|s| s.canvas.as_ref()) else { continue };
+                let source = scene
+                    .material_sources
+                    .get(k)
+                    .and_then(Option::as_ref)
+                    .filter(|(key, _)| Some(*key) == look.source)
+                    .map(|(_, view)| view);
+                let look = procraft_gpu::MaterialLook { amount: look.amount, source, tile: look.tile };
+                view.project_material(gpu, &mut encoder, part, k, canvas.stroke_view(), &look, target.stroke_target());
+            }
+        }
         gpu.queue.submit([encoder.finish()]);
         canvas.stroke_drawn(reach);
+        let mut sets: Vec<&mut TextureSet> =
+            materials.map(|(_, channels)| channels.iter_mut().flatten().collect()).unwrap_or_default();
+        for set in &mut sets {
+            if let Some(c) = set.canvas.as_mut() {
+                c.stroke_drawn(reach);
+                c.render(gpu, &mut set.doc, None);
+            }
+        }
         if scene.ending {
-            canvas.end_stroke();
+            // each canvas's step made now, to be undone and redone together
+            let made = |c: &mut Canvas, doc: &mut Document| {
+                let before = c.steps_made();
+                c.end_stroke();
+                c.render(gpu, doc, None);
+                (c.steps_made() > before).then(|| c.undo_step()).flatten()
+            };
+            let mut steps = [made(canvas, &mut self.doc), None, None];
+            for (step, set) in steps.iter_mut().skip(1).zip(&mut sets) {
+                if let Some(c) = set.canvas.as_mut() {
+                    *step = made(c, &mut set.doc);
+                }
+            }
+            if scene.material_paint.take().is_some() && steps.iter().flatten().count() > 1 {
+                if scene.joint_steps.len() >= MOST_JOINT_STEPS {
+                    scene.joint_steps.remove(0);
+                }
+                scene.joint_steps.push(JointStep { part, steps });
+            }
             screen.cancel_stroke();
             screen.render(gpu, screen_doc, None);
             scene.stroking = false;
             scene.ending = false;
+        }
+    }
+
+    /// After an undo or redo (`before`: the session canvas's next undo and redo steps before
+    /// it), the rest of a stroke that painted every channel follows: the step it made in each
+    /// other channel is undone or redone too, if that is that channel's next step.
+    pub(crate) fn follow_joint_step(&mut self, before: (Option<u64>, Option<u64>)) {
+        let Some(canvas) = self.canvas.as_ref() else { return };
+        let after = (canvas.undo_step(), canvas.redo_step());
+        let (step, undone) = match (before, after) {
+            ((Some(s), _), (u, Some(r))) if r == s && u != Some(s) => (s, true),
+            ((_, Some(s)), (Some(u), r)) if u == s && r != Some(s) => (s, false),
+            _ => return,
+        };
+        let (Some(gpu), Some(scene)) = (self.gpu.as_ref(), self.scene.as_mut()) else { return };
+        let (part, channel) = (scene.current, scene.channel);
+        let Some(joint) =
+            scene.joint_steps.iter().find(|j| j.part == part && j.steps.get(channel) == Some(&Some(step))).copied()
+        else {
+            return;
+        };
+        for (k, want) in joint.steps.iter().enumerate() {
+            let Some(want) = *want else { continue };
+            if k == channel {
+                continue;
+            }
+            let Some(set) = scene.slot(part, k).and_then(Option::as_mut) else { continue };
+            let Some(c) = set.canvas.as_mut() else { continue };
+            if undone && c.undo_step() == Some(want) {
+                c.undo();
+            } else if !undone && c.redo_step() == Some(want) {
+                c.redo();
+            } else {
+                continue;
+            }
+            c.render(gpu, &mut set.doc, None);
         }
     }
 
@@ -2365,11 +2536,11 @@ mod tests {
         dab(&s);
         let colour = painted(&s);
         assert!(colour > 20, "{colour}");
-        // roughness: the same layers, nothing painted in them yet
+        // roughness: the same layers, the dab on the colour laid down there too
         assert_eq!(s.model_channel(), 0);
         s.set_model_channel(1);
         assert_eq!(s.model_channel(), 1);
-        assert_eq!(painted(&s), 0);
+        assert!(painted(&s).abs_diff(colour) * 10 < colour, "{} {colour}", painted(&s));
         s.stroke_begin(PointerKind::Stylus, vec![sample(70.0, 100.0, 0.0)]);
         s.stroke_end(vec![sample(130.0, 100.0, 50.0)]);
         frame(&s, 200);
@@ -2382,9 +2553,9 @@ mod tests {
         assert_eq!(painted(&s), colour);
         assert!(s.layers().iter().any(|l| l.id == added));
         // exports take every channel whichever is painted on: the colour and roughness as
-        // painted, the metalness (nothing painted) the plain one
+        // painted, the metalness painted with the brush's (none, as the plain one)
         s.set_model_channel(2);
-        assert_eq!(painted(&s), 0);
+        assert!(painted(&s).abs_diff(colour) * 10 < colour, "{} {colour}", painted(&s));
         let dir = std::env::temp_dir().join(format!("procraft-channels-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let pngs = s.export_model_textures(dir.join("t").to_string_lossy().into_owned()).unwrap();
@@ -2417,6 +2588,138 @@ mod tests {
         assert_eq!(painted(&again), rough);
         frame(&again, 200);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The current channel's texels as painted: each one's grey (unpremultiplied) and alpha.
+    fn channel_texels(s: &CanvasSession) -> Vec<(u8, u8)> {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+        let px = canvas.read_composite(gpu).unwrap();
+        px.chunks(4)
+            .map(|p| (if p[3] == 0 { 0 } else { (u16::from(p[0]) * 255 / u16::from(p[3])) as u8 }, p[3]))
+            .collect()
+    }
+
+    /// The grey of the current channel's fully covered texels, if all are the same within one.
+    fn covered_grey(s: &CanvasSession) -> Option<u8> {
+        let full: Vec<u8> = channel_texels(s).into_iter().filter(|&(_, a)| a == 255).map(|(v, _)| v).collect();
+        let (lo, hi) = (*full.iter().min()?, *full.iter().max()?);
+        (hi - lo <= 1).then_some(lo)
+    }
+
+    /// Sets the paint brush's material controls as the studio does.
+    fn materials(s: &CanvasSession, roughness: f32, metallic: f32) {
+        s.studio_begin();
+        s.set_studio_setting("roughness_amount".into(), roughness);
+        s.set_studio_setting("metallic_amount".into(), metallic);
+        s.studio_end(true);
+    }
+
+    #[test]
+    fn a_stroke_on_the_colour_lays_down_the_brushs_roughness_and_metalness() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        materials(&s, 0.2, 0.8);
+        frame(&s, 200);
+        dab(&s);
+        let colour = painted(&s);
+        assert!(colour > 20, "{colour}");
+        // each the brush's amount where the stroke covers, nothing elsewhere
+        s.set_model_channel(1);
+        assert_eq!(covered_grey(&s), Some(51));
+        assert!(channel_texels(&s).iter().filter(|t| t.1 > 0).count().abs_diff(colour) * 10 < colour);
+        s.set_model_channel(2);
+        assert_eq!(covered_grey(&s), Some(204));
+        // a stroke on a channel paints that channel alone
+        s.stroke_begin(PointerKind::Stylus, vec![sample(60.0, 60.0, 0.0)]);
+        s.stroke_end(vec![sample(140.0, 60.0, 50.0)]);
+        frame(&s, 200);
+        let metal = painted(&s);
+        assert!(metal > colour);
+        s.set_model_channel(1);
+        assert!(painted(&s).abs_diff(colour) * 10 < colour);
+        s.set_model_channel(0);
+        assert_eq!(painted(&s), colour);
+    }
+
+    #[test]
+    fn the_brushs_material_source_shapes_what_it_lays_down() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        let size = crate::studio::source_size() as usize;
+        s.studio_begin();
+        // the metalness through a mid grey, the roughness through black
+        assert!(s.set_studio_source(crate::studio::SourceKind::Metallic, vec![128; size * size]));
+        assert!(s.set_studio_source(crate::studio::SourceKind::Roughness, vec![0; size * size]));
+        s.set_studio_setting("metallic_amount".into(), 1.0);
+        s.set_studio_setting("roughness_amount".into(), 1.0);
+        s.studio_end(true);
+        frame(&s, 200);
+        dab(&s);
+        s.set_model_channel(2);
+        let grey = covered_grey(&s).unwrap();
+        assert!(grey.abs_diff(128) <= 2, "{grey}");
+        s.set_model_channel(1);
+        assert_eq!(covered_grey(&s), Some(0));
+    }
+
+    #[test]
+    fn undo_and_redo_take_a_strokes_channels_together() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        materials(&s, 0.4, 0.6);
+        frame(&s, 200);
+        dab(&s);
+        let colour = painted(&s);
+        let all = |s: &CanvasSession| {
+            let counts: Vec<usize> = (0..3)
+                .map(|c| {
+                    s.set_model_channel(c);
+                    painted(s)
+                })
+                .collect();
+            s.set_model_channel(0);
+            counts
+        };
+        let painted_all = all(&s);
+        assert!(painted_all.iter().all(|&n| n > 20), "{painted_all:?}");
+        s.undo();
+        assert_eq!(all(&s), [0, 0, 0]);
+        s.redo();
+        assert_eq!(all(&s), painted_all);
+        // undone from the roughness, the colour and metalness go too
+        s.set_model_channel(1);
+        s.undo();
+        assert_eq!(painted(&s), 0);
+        assert_eq!(all(&s), [0, 0, 0]);
+        // an eraser on the colour takes all three away
+        s.redo();
+        assert_eq!(all(&s), painted_all);
+        let cover = |s: &CanvasSession| {
+            let sums: Vec<u32> = (0..3)
+                .map(|c| {
+                    s.set_model_channel(c);
+                    channel_texels(s).iter().map(|t| u32::from(t.1)).sum()
+                })
+                .collect();
+            s.set_model_channel(0);
+            sums
+        };
+        let before = cover(&s);
+        s.stroke_begin(PointerKind::StylusEraser, vec![sample(80.0, 100.0, 0.0)]);
+        s.stroke_end(vec![sample(120.0, 100.0, 50.0)]);
+        frame(&s, 200);
+        let after = cover(&s);
+        assert!(after.iter().zip(&before).all(|(a, b)| a * 10 < b * 9), "{after:?} {before:?}");
+        assert_eq!(colour, painted_all[0]);
     }
 
     #[test]

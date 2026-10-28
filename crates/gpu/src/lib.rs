@@ -17,7 +17,7 @@ pub use canvas::{
     SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, read_texture,
 };
 pub use lighting::Lighting;
-pub use scene::{Light, MOST_LIGHTS, MeshView, Orbit, SurfaceMap};
+pub use scene::{Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, SurfaceMap, material_source};
 pub use sphere::{SphereLook, SpherePreview, preview_environment};
 pub use wgpu;
 

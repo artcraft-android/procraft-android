@@ -224,6 +224,84 @@ fn a_projected_stroke_grows_a_little_past_its_island() {
 }
 
 #[test]
+fn a_strokes_roughness_or_metalness_takes_its_coverage_and_the_brushs_amount() {
+    use procraft_engine::document::Document;
+    use procraft_engine::geom::{IRect, Vec2};
+    use procraft_engine::stroke::Stamp;
+    use procraft_gpu::{Canvas, MaterialLook, StrokeStyle, StrokeTool, material_source};
+    let Some(gpu) = gpu() else { return };
+    assert!(material_source(&gpu, 2, &[0; 3]).is_none());
+    let island = "v -1 -1 0
+v 1 -1 0
+v 1 1 0
+v -1 1 0
+vt 0.25 0.25
+vt 0.75 0.25
+vt 0.75 0.75
+vt 0.25 0.75
+f 1/1 2/2 3/3 4/4
+";
+    let mesh = read_obj(island, None).unwrap();
+    let mut view = MeshView::new(&gpu, &mesh, 16, wgpu::TextureFormat::Rgba8Unorm);
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.0, 0.0), distance: 6.0, fov: 0.9 };
+    let mut screen_doc = Document::new(SIDE, SIDE);
+    let mut screen = Canvas::new(&gpu, &screen_doc).unwrap();
+    let style = StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0);
+    screen.begin_stroke(screen_doc.current(), style);
+    let middle = SIDE as f32 / 2.0;
+    screen.add_stamps(&[Stamp::round(Vec2::new(middle, middle), 30.0, 1.0)]);
+    screen.render(&gpu, &mut screen_doc, None);
+    let mut doc = Document::new(16, 16);
+    doc.background_visible = false;
+    let mut colour = Canvas::new(&gpu, &doc).unwrap();
+    colour.begin_drawn_stroke(doc.current(), style);
+    // a material carried at half, and one through a black source (none of the amount)
+    let black = material_source(&gpu, 2, &[0; 4]).unwrap();
+    let looks = [
+        MaterialLook { amount: 0.5, source: None, tile: 100.0 },
+        MaterialLook { amount: 1.0, source: Some(&black), tile: 100.0 },
+    ];
+    let mut materials: Vec<(Document, Canvas)> = looks
+        .iter()
+        .map(|_| {
+            let mut d = Document::new(16, 16);
+            d.background_visible = false;
+            let mut c = Canvas::new(&gpu, &d).unwrap();
+            c.begin_drawn_stroke(d.current(), StrokeStyle::new(StrokeTool::Paint, [1.0; 3], 1.0));
+            (d, c)
+        })
+        .collect();
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("project") });
+    let bounds = IRect::from_size(SIDE, SIDE);
+    let reach =
+        view.project_stroke(&gpu, &mut encoder, 0, screen.stroke_view(), bounds, SIDE, SIDE, colour.stroke_target());
+    for (slot, (look, (_, c))) in looks.iter().zip(&materials).enumerate() {
+        view.project_material(&gpu, &mut encoder, 0, slot, colour.stroke_view(), look, c.stroke_target());
+    }
+    gpu.queue.submit([encoder.finish()]);
+    let read = |c: &mut Canvas, d: &mut Document| {
+        c.stroke_drawn(reach);
+        c.end_stroke();
+        c.render(&gpu, d, None);
+        c.read_layer(&gpu, d.current()).unwrap()
+    };
+    let colour_px = read(&mut colour, &mut doc);
+    let px: Vec<Vec<u8>> = materials.iter_mut().map(|(d, c)| read(c, d)).collect();
+    // the same coverage as the colour, grown past the island as it is; the grey its amount
+    for x in 0..16 {
+        let i = ((8 * 16 + x) * 4) as usize;
+        assert_eq!(px[0][i + 3], colour_px[i + 3], "texel {x}");
+        assert_eq!(px[1][i + 3], colour_px[i + 3], "texel {x}");
+        if colour_px[i + 3] == 255 {
+            assert!(px[0][i].abs_diff(128) <= 1, "texel {x}: {}", px[0][i]);
+            assert_eq!(px[1][i], 0, "texel {x}");
+        }
+    }
+    assert_eq!(colour_px[(8 * 16 + 8) * 4 + 3], 255);
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
 fn a_far_surface_shows_its_texture_filtered() {
     let Some(gpu) = gpu() else { return };
     let mesh = read_obj(QUADS, None).unwrap();

@@ -19,6 +19,45 @@ const DISTANCE: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 const ISLANDS: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// How far past its islands a projected stroke is grown (texels; as the shader's `DILATE`).
 const DILATE: i32 = 2;
+/// A brush's tiling is in canvas pixels; on a model each pixel counts as this many framing units
+/// (the model's largest side counted as 4).
+const TILE_UNITS_PER_PIXEL: f32 = 0.00225;
+
+/// What a stroke on a model's colour lays down in its roughness or metalness: the brush's
+/// `amount` (0..1), through its `source` if it has one (grey, white taking the amount, made with
+/// [`material_source`]), one tile of it every `tile` canvas pixels, seen from the model's three
+/// axes.
+pub struct MaterialLook<'a> {
+    pub amount: f32,
+    pub source: Option<&'a wgpu::TextureView>,
+    pub tile: f32,
+}
+
+/// A brush's material source (`side` square grey pixels) as [`MaterialLook`] takes it; none if
+/// the pixels aren't that size.
+pub fn material_source(gpu: &Gpu, side: u32, pixels: &[u8]) -> Option<wgpu::TextureView> {
+    (side > 0 && pixels.len() == (side as usize) * (side as usize)).then(|| grey_view(gpu, side, pixels))
+}
+
+/// `side` square grey `pixels` as a texture.
+fn grey_view(gpu: &Gpu, side: u32, pixels: &[u8]) -> wgpu::TextureView {
+    let texture = gpu.device.create_texture_with_data(
+        &gpu.queue,
+        &wgpu::TextureDescriptor {
+            label: Some("material source"),
+            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        pixels,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
 
 /// A model is framed as if its largest side were this long, seen from this far off, with this
 /// field of view (radians) across the screen's shorter side.
@@ -96,6 +135,15 @@ struct ProjectUniform {
     view_proj: [[f32; 4]; 4],
     screen: [f32; 4],
     eye: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MaterialUniform {
+    /// The model's middle, and framing units per model unit.
+    frame: [f32; 4],
+    /// The amount, a source tile's side (framing units), 1 with a source.
+    look: [f32; 4],
 }
 
 #[repr(C)]
@@ -442,6 +490,14 @@ struct Projector {
     dilate_pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
+    /// What carries a stroke's coverage into a roughness or metalness: its pipeline, the layout
+    /// of its look, a uniform for each of the two (so both can be drawn in one submission), the
+    /// sources' sampler (tiling) and white for no source.
+    material_pipeline: wgpu::RenderPipeline,
+    material_layout: wgpu::BindGroupLayout,
+    material_uniforms: [wgpu::Buffer; 2],
+    source_sampler: wgpu::Sampler,
+    white: wgpu::TextureView,
     screen: Option<(wgpu::Texture, wgpu::TextureView, wgpu::TextureView)>,
     /// The stroke as projected, before it is grown past the islands (the texture's size).
     scratch: Option<(wgpu::Texture, wgpu::TextureView)>,
@@ -1589,6 +1645,103 @@ impl MeshView {
         grown.intersect(IRect::from_size(self.texture_size, self.texture_size))
     }
 
+    /// Carries the coverage of a stroke projected onto part `part` (`coverage`: as
+    /// [`MeshView::project_stroke`] left it in the colour's target) into `target` (the same
+    /// part's roughness or metalness stroke, the texture's size square, the stroke format) as
+    /// `look` says: grey, the amount through its source where the stroke covers. `slot` (0 or 1)
+    /// keeps the roughness's look apart from the metalness's when both are drawn in one
+    /// submission. Does nothing before the part has taken a stroke.
+    pub fn project_material(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        part: usize,
+        slot: usize,
+        coverage: &wgpu::TextureView,
+        look: &MaterialLook<'_>,
+        target: &wgpu::TextureView,
+    ) {
+        let shown = self.shown_ranges(part);
+        let frame = [self.middle[0], self.middle[1], self.middle[2], 1.0 / self.unit.max(1e-6)];
+        let Some(projector) = self.projector.as_ref() else { return };
+        let (Some((_, scratch)), Some(Some((_, islands))), Some(uniform)) =
+            (&projector.scratch, projector.islands.get(part), projector.material_uniforms.get(slot))
+        else {
+            return;
+        };
+        let has_source = if look.source.is_some() { 1.0 } else { 0.0 };
+        let tile = (look.tile * TILE_UNITS_PER_PIXEL).max(1e-4);
+        gpu.queue.write_buffer(
+            uniform,
+            0,
+            bytemuck::bytes_of(&MaterialUniform { frame, look: [look.amount.clamp(0.0, 1.0), tile, has_source, 0.0] }),
+        );
+        let look_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("material look"),
+            layout: &projector.material_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(look.source.unwrap_or(&projector.white)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&projector.source_sampler),
+                },
+            ],
+        });
+        // the part in its texture's space, each texel the amount where the colour has coverage
+        {
+            let bind = projector.bind(gpu, coverage, None);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("material stroke"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: scratch,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&projector.material_pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(1, &look_bind, &[]);
+            pass.set_vertex_buffer(0, self.vertices.slice(..));
+            pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+            for range in shown {
+                pass.draw_indexed(range, 0, 0..1);
+            }
+        }
+        // grown past the islands' edges into the target, as the colour was
+        let bind = projector.bind(gpu, scratch, Some(islands));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("dilate material"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&projector.dilate_pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
     /// The texels of part `part` whose triangles land on the screen inside `bounds`.
     fn reach(&self, part: usize, view_proj: [[f32; 4]; 4], bounds: IRect, width: u32, height: u32) -> IRect {
         let Some(p) = self.parts.get(part) else { return IRect::EMPTY };
@@ -1834,6 +1987,89 @@ impl Projector {
             multiview_mask: None,
             cache: None,
         });
+        // a roughness or metalness from the colour's coverage: the look in a group of its own
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("material look"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let material_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("material"),
+            bind_group_layouts: &[Some(&layout), Some(&material_layout)],
+            immediate_size: 0,
+        });
+        let material_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("material stroke"),
+            layout: Some(&material_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_material"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<VertexGpu>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                })],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_material"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: STROKE,
+                    blend: Some(MAX),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let material_uniform = || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("material look"),
+                size: std::mem::size_of::<MaterialUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let source_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("material source"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let white = grey_view(gpu, 1, &[255]);
         Projector {
             distance_pipeline: pipeline("screen distance", "vs_distance", "fs_distance", DISTANCE, true, None),
             project_pipeline: pipeline("project stroke", "vs_project", "fs_project", STROKE, false, Some(MAX)),
@@ -1841,6 +2077,11 @@ impl Projector {
             dilate_pipeline,
             layout,
             uniform,
+            material_pipeline,
+            material_layout,
+            material_uniforms: [material_uniform(), material_uniform()],
+            source_sampler,
+            white,
             screen: None,
             scratch: None,
             islands: Vec::new(),
