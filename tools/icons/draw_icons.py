@@ -279,6 +279,104 @@ def cross():
     return unary_union([capsule((5.5, 5.5), (18.5, 18.5), 1.3), capsule((18.5, 5.5), (5.5, 18.5), 1.3)])
 
 
+def double_arrow(a, b, r=1.1, head=3.2):
+    """A line from a to b with an arrowhead at each end."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    n = math.hypot(dx, dy)
+    ux, uy = dx / n, dy / n
+    px, py = -uy, ux
+    parts = [capsule((a[0] + ux * head * 0.8, a[1] + uy * head * 0.8), (b[0] - ux * head * 0.8, b[1] - uy * head * 0.8), r)]
+    for (tx, ty), s_ in ((a, 1), (b, -1)):
+        bx, by = tx + s_ * ux * head * 1.3, ty + s_ * uy * head * 1.3
+        parts.append(soft(Polygon([(tx, ty), (bx + px * head, by + py * head), (bx - px * head, by - py * head)]), 0.35))
+    return unary_union(parts)
+
+
+def freeform():
+    """Freeform: a frame stretched across."""
+    return unary_union([frame(2.5, 5, 21.5, 19, 1.8, 1.8), double_arrow((6.5, 12), (17.5, 12), 1.0, 2.6)])
+
+
+def uniform():
+    """Uniform: a square frame scaled corner to corner."""
+    return unary_union([frame(3, 3, 21, 21, 1.8, 1.8), double_arrow((7.4, 16.6), (16.6, 7.4), 1.0, 2.6)])
+
+
+def distort():
+    """Distort: a skewed four-sided frame with a handle at each corner."""
+    corners = [(5.0, 4.5), (19.5, 7.0), (18.0, 19.5), (3.5, 17.0)]
+    edges = LineString(corners + [corners[0]]).buffer(0.9)
+    return unary_union([edges] + [Point(c).buffer(2.3, quad_segs=12) for c in corners])
+
+
+def warp():
+    """Warp: a frame whose inner lines bend."""
+    bends = []
+    for x in (9.0, 15.0):
+        bends.append(LineString([(x + 1.6 * math.sin(t * math.pi), 3.5 + 17 * t) for t in [i / 24 for i in range(25)]]).buffer(0.9))
+    for y in (9.0, 15.0):
+        bends.append(LineString([(3.5 + 17 * t, y - 1.6 * math.sin(t * math.pi)) for t in [i / 24 for i in range(25)]]).buffer(0.9))
+    return unary_union([frame(2.5, 2.5, 21.5, 21.5, 1.8, 2.0)] + bends)
+
+
+def magnet():
+    """Snapping: a magnet, its poles cut off."""
+    arc = [(12 - 5.6 * math.cos(math.pi * t), 12.8 + 5.6 * math.sin(math.pi * t)) for t in [i / 32 for i in range(33)]]
+    body = LineString([(6.4, 3.0)] + arc + [(17.6, 3.0)]).buffer(1.9, cap_style='flat', join_style='round')
+    return body.difference(box(0, 6.6, 24, 7.8))
+
+
+def flip(vertical):
+    """Flip: a solid triangle facing its hollow mirror image."""
+    left = soft(Polygon([(10.6, 3.0), (10.6, 21.0), (2.0, 21.0)]), 0.6)
+    right = soft(Polygon([(13.4, 3.0), (13.4, 21.0), (22.0, 21.0)]), 0.6)
+    right = right.difference(right.buffer(-2.0, join_style='mitre'))
+    shape = unary_union([left, right])
+    return rotate(shape, 90, origin=(12, 12)) if vertical else shape
+
+
+def arc_arrow(cx, cy, r, a0, a1, w=1.2, head=3.4):
+    """An arc from angle a0 to a1 (degrees, clockwise on screen) with an arrowhead at a1."""
+    angles = [math.radians(a0 + (a1 - a0) * i / 48) for i in range(49)]
+    arc = LineString([(cx + r * math.cos(a), cy + r * math.sin(a)) for a in angles]).buffer(w, cap_style='flat')
+    arc = arc.union(Point(cx + r * math.cos(angles[0]), cy + r * math.sin(angles[0])).buffer(w, quad_segs=10))
+    a = angles[-1]
+    ex, ey = cx + r * math.cos(a), cy + r * math.sin(a)
+    ahead, out = (-math.sin(a), math.cos(a)), (math.cos(a), math.sin(a))
+    tip = (ex + ahead[0] * head * 1.1, ey + ahead[1] * head * 1.1)
+    return unary_union([arc, soft(Polygon([tip, (ex + out[0] * head, ey + out[1] * head), (ex - out[0] * head, ey - out[1] * head)]), 0.45)])
+
+
+def rotate_step():
+    """Rotate: a tilted square with an arrow turning over it."""
+    square = rotate(soft(box(7.5, 10.5, 14.5, 17.5), 0.8), 45, origin=(11, 14))
+    return unary_union([square, arc_arrow(11, 14, 8.5, -160, -38)])
+
+
+def fit_to_canvas():
+    """Fit to canvas: four arrows pointing out to the corners."""
+    arrows = []
+    for dx, dy in ((1, 1), (-1, 1), (1, -1), (-1, -1)):
+        a = (12 + dx * 2.6, 12 + dy * 2.6)
+        b = (12 + dx * 8.6, 12 + dy * 8.6)
+        ux, uy = dx * SQ2, dy * SQ2
+        px, py = -uy, ux
+        head = soft(Polygon([b, (b[0] - ux * 4.4 + px * 3.0, b[1] - uy * 4.4 + py * 3.0), (b[0] - ux * 4.4 - px * 3.0, b[1] - uy * 4.4 - py * 3.0)]), 0.3)
+        arrows += [capsule(a, (b[0] - ux * 2.5, b[1] - uy * 2.5), 1.0), head]
+    return unary_union(arrows)
+
+
+def interpolation():
+    """Interpolation: square pixels turning into a smooth round one."""
+    cells = [soft(box(3, 3, 11, 11), 0.6), soft(box(3, 13, 11, 21), 0.6), soft(box(13, 13, 21, 21), 0.6)]
+    return unary_union(cells + [Point(17, 7).buffer(4.0, quad_segs=16)])
+
+
+def reset_transform():
+    """Reset: a turning arrow back, round a dot."""
+    return unary_union([turning_arrow(False), Point(13.0, 13.0).buffer(1.6, quad_segs=12)])
+
+
 DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
@@ -289,6 +387,9 @@ DRAWINGS = {
     'selectadd': lambda: sign_in_disc(False), 'selectremove': lambda: sign_in_disc(True), 'invert': invert,
     'selectcopypaste': copy_paste, 'feather': feather, 'saveload': save_load, 'colorfill': paint_bucket,
     'clearselection': cross,
+    'freeform': freeform, 'uniform': uniform, 'distort': distort, 'warp': warp, 'snapping': magnet,
+    'fliphorizontal': lambda: flip(False), 'flipvertical': lambda: flip(True), 'rotate45': rotate_step,
+    'fittocanvas': fit_to_canvas, 'interpolation': interpolation, 'transformreset': reset_transform,
 }
 
 

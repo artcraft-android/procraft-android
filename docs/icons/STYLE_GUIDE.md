@@ -50,3 +50,44 @@ by one.
 | Erase | an eraser block with a band, on a line |
 | Layers | two stacked sheets, the top one solid |
 | Undo / Redo | a curved arrow turning back / forward |
+
+## The Actions panel's tabs
+
+| Tab | Idea |
+|---|---|
+| Add | a plus |
+| Canvas | a canvas's frame with a stroke across it |
+| Share | a tray with an arrow rising out of it |
+| Video | a camera, its body and its lens |
+| Preferences | a switch, turned on |
+| Help | a question mark in a ring |
+
+## The Selection toolbar
+
+| Control | Idea |
+|---|---|
+| Automatic | the Adjustments wand |
+| Freehand | a lasso's loop with its tail |
+| Rectangle / Ellipse | a dashed rectangle / ellipse |
+| Add / Subtract | a plus / minus cut out of a disc |
+| Invert | a disc, one half solid, the other its outline |
+| Copy and paste | two sheets, the front one solid |
+| Feather | a feather, its vane split by the shaft |
+| Save and load | a tray with an arrow coming down into it |
+| Colour fill | a tipped bucket and a drop falling from it |
+| Clear | a cross |
+
+## The Transform toolbar
+
+| Control | Idea |
+|---|---|
+| Freeform | a frame stretched across: a two-headed arrow inside |
+| Uniform | a square frame scaled corner to corner |
+| Distort | a skewed four-sided frame with a handle at each corner |
+| Warp | a frame whose inner lines bend |
+| Snapping | an upright magnet, its poles cut off |
+| Flip horizontal / vertical | a solid triangle facing its hollow mirror image |
+| Rotate | a tilted square with an arrow turning over it |
+| Fit to canvas | four arrows pointing out to the corners |
+| Interpolation | three square pixels and a round one |
+| Reset | a turning arrow back, round a dot |
