@@ -354,15 +354,16 @@ def rotate_step():
 
 
 def fit_to_canvas():
-    """Fit to canvas: four arrows pointing out to the corners."""
+    """Fit to canvas: four broad arrows pointing out to the corners (the slot is small, so they're
+    heavier than the guide's line weight)."""
     arrows = []
     for dx, dy in ((1, 1), (-1, 1), (1, -1), (-1, -1)):
         a = (12 + dx * 2.6, 12 + dy * 2.6)
-        b = (12 + dx * 8.6, 12 + dy * 8.6)
+        b = (12 + dx * 9.4, 12 + dy * 9.4)
         ux, uy = dx * SQ2, dy * SQ2
         px, py = -uy, ux
-        head = soft(Polygon([b, (b[0] - ux * 4.4 + px * 3.0, b[1] - uy * 4.4 + py * 3.0), (b[0] - ux * 4.4 - px * 3.0, b[1] - uy * 4.4 - py * 3.0)]), 0.3)
-        arrows += [capsule(a, (b[0] - ux * 2.5, b[1] - uy * 2.5), 1.0), head]
+        head = soft(Polygon([b, (b[0] - ux * 5.6 + px * 4.0, b[1] - uy * 5.6 + py * 4.0), (b[0] - ux * 5.6 - px * 4.0, b[1] - uy * 5.6 - py * 4.0)]), 0.4)
+        arrows += [capsule(a, (b[0] - ux * 4.0, b[1] - uy * 4.0), 1.6), head]
     return unary_union(arrows)
 
 
