@@ -219,3 +219,15 @@ by one.
 | Grid | nine squares in three rows |
 | Isometric | a cube, its three faces apart |
 | Symmetry | a pair of wings and their mirror image across a dashed axis |
+
+## The adjustments' kinds, grain modes and the rest
+
+| Control | Idea |
+|---|---|
+| Clouds / Billows / Ridges (Noise) | wisps of mist / two rows of rounded humps / a range of sharp peaks |
+| Full colour / Screen / Newspaper (Halftone) | big and small dots in a checker / dots set out in a diamond / a page with a picture and columns |
+| Perspective / Displace (Chromatic Aberration) | four arrows out from a centre / a disc with its outline copy shifted off it |
+| Artifact / Wave / Signal / Diverge (Glitch) | a mosaic of blocks / a square wave / a screen with broken lines / a line that splits in two |
+| Moving / Texturized (grain) | rows of grain with an arrow along under them / the pitted Grain tile |
+| Paint, painting an adjustment on | the Paint brush with an adjustment ring |
+| Brush swipe: Share / Duplicate | the tray and rising arrow / the Duplicate sheets |

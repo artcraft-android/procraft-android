@@ -916,6 +916,103 @@ def symmetry():
     return unary_union([wing, scale(wing, -1, 1, origin=(12, 12)), dashes([(12, 2.4), (12, 21.6)], False, 2.0, 1.6, 0.6)])
 
 
+def wisps():
+    """Clouds (noise): wisps of mist drifting across."""
+    return unary_union([capsule((3.0, 7.0), (17.0, 7.0), 1.6), capsule((7.0, 12.0), (21.0, 12.0), 1.6),
+                        capsule((3.0, 17.0), (13.6, 17.0), 1.6), Point(17.6, 17.0).buffer(1.6, quad_segs=12)])
+
+
+def billows():
+    """Billows: two rows of rounded humps."""
+    rows_ = []
+    for y, xs in ((8.6, (5.0, 12.0, 19.0)), (16.6, (5.0, 12.0, 19.0))):
+        rows_.append(unary_union([Point(x, y).buffer(3.0, quad_segs=16) for x in xs] + [box(2.0, y, 22.0, y + 2.6)]))
+    return unary_union(rows_)
+
+
+def ridges():
+    """Ridges: a range of sharp peaks."""
+    return soft(Polygon([(2.0, 19.0), (8.0, 7.0), (11.5, 12.5), (15.5, 5.0), (22.0, 19.0)]), 0.8)
+
+
+def halftone_full():
+    """Full colour halftone: big and small dots in a checker."""
+    return unary_union([Point(x, y).buffer(2.6 if (i + j) % 2 == 0 else 1.4, quad_segs=12)
+                        for i, x in enumerate((4.5, 12.0, 19.5)) for j, y in enumerate((4.5, 12.0, 19.5))])
+
+
+def halftone_screen():
+    """Screen halftone: dots set out in a diamond, the screen's angle."""
+    return unary_union([Point(12 + 4.6 * i, 12 + 4.6 * j).buffer(1.6, quad_segs=10)
+                        for i in range(-2, 3) for j in range(-2, 3) if abs(i) + abs(j) <= 2])
+
+
+def newspaper():
+    """Newspaper halftone: a page with a picture and columns of text."""
+    page = soft(box(3.0, 3.5, 21.0, 20.5), 1.2).difference(soft(box(5.6, 6.0, 11.2, 11.6), 0.4))
+    for a, b, y in ((13.2, 18.4, 7.0), (13.2, 17.0, 10.4), (5.6, 18.4, 14.4), (5.6, 15.0, 17.6)):
+        page = page.difference(capsule((a, y), (b, y), 0.6))
+    return page
+
+
+def outward_arrows():
+    """Perspective (chromatic): four arrows pointing out from a centre."""
+    parts = [Point(12, 12).buffer(2.2, quad_segs=12)]
+    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        px, py = -dy, dx
+        parts.append(capsule((12 + dx * 4.4, 12 + dy * 4.4), (12 + dx * 7.6, 12 + dy * 7.6), 1.0))
+        tip, base = (12 + dx * 10.6, 12 + dy * 10.6), (12 + dx * 7.4, 12 + dy * 7.4)
+        parts.append(soft(Polygon([tip, (base[0] + px * 2.6, base[1] + py * 2.6), (base[0] - px * 2.6, base[1] - py * 2.6)]), 0.3))
+    return unary_union(parts)
+
+
+def displaced():
+    """Displace: a disc with its outline copy shifted off it."""
+    front = Point(9.4, 13.6).buffer(6.4, quad_segs=24)
+    return unary_union([front, ring(14.6, 10.4, 6.4, 1.6).difference(front.buffer(1.2))])
+
+
+def blocky():
+    """Artifact: a mosaic of blocks of all sizes."""
+    blocks = [(2.5, 4.0, 9.0, 10.5), (10.2, 4.0, 14.0, 7.8), (15.2, 4.0, 21.5, 8.5), (10.2, 9.0, 14.0, 13.0),
+              (15.2, 9.7, 19.0, 13.5), (2.5, 11.7, 7.0, 16.0), (8.2, 14.2, 16.0, 20.0), (17.2, 14.7, 21.5, 20.0),
+              (2.5, 17.2, 7.0, 20.0)]
+    return unary_union([soft(box(*b), 0.4) for b in blocks])
+
+
+def square_wave():
+    """Wave (glitch): a square wave."""
+    return LineString([(2.5, 15.0), (6.5, 15.0), (6.5, 8.0), (11.0, 8.0), (11.0, 16.5), (14.5, 16.5), (14.5, 6.5),
+                       (18.0, 6.5), (18.0, 13.0), (21.5, 13.0)]).buffer(1.2, join_style='round')
+
+
+def static_screen():
+    """Signal: a screen with broken lines across it."""
+    parts = [frame(2.0, 4.0, 22.0, 20.0, 1.6, 1.6)]
+    for y, cuts in ((8.4, ((5.6, 10.0), (12.2, 18.4))), (12.0, ((5.6, 7.0), (9.2, 18.4))), (15.6, ((5.6, 14.0), (16.2, 18.4)))):
+        parts += [capsule((a, y), (b, y), 0.8) for a, b in cuts]
+    return unary_union(parts)
+
+
+def fork():
+    """Diverge: a line that splits in two."""
+    ends = [(12.0, 20.6), (5.6, 4.6), (18.4, 4.6)]
+    return unary_union([capsule((12.0, 12.6), e, 1.2) for e in ends] + [Point(e).buffer(2.2, quad_segs=12) for e in ends])
+
+
+def moving_grain():
+    """Moving grain: two rows of grain and an arrow along under them."""
+    dots = [Point(x, y).buffer(1.6, quad_segs=10) for x in (4.5, 9.5, 14.5, 19.5) for y in (5.0, 10.0)]
+    arrow = [capsule((3.5, 17.5), (16.0, 17.5), 1.2), soft(Polygon([(21.5, 17.5), (16.4, 14.5), (16.4, 20.5)]), 0.4)]
+    return unary_union(dots + arrow)
+
+
+def painted_on():
+    """Painting an adjustment on: the Paint brush with an adjustment ring."""
+    from shapely.affinity import scale
+    return unary_union([scale(paintbrush(), 0.86, 0.86, origin=(2, 22)), ring(6.0, 6.0, 3.0, 1.8)])
+
+
 DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
@@ -957,6 +1054,11 @@ DRAWINGS = {
     'shapeellipse': solid_ellipse, 'shapecircle': solid_circle, 'shapetriangle': lambda: solid_triangle(False),
     'shapeequilateral': lambda: solid_triangle(True), 'shapequad': solid_quad, 'shaperect': lambda: solid_rect(False),
     'shapesquare': lambda: solid_rect(True), 'guidegrid': grid_guide, 'guideisometric': iso_cube, 'guidesymmetry': symmetry,
+    'noiseclouds': wisps, 'noisebillows': billows, 'noiseridges': ridges, 'halftonefull': halftone_full,
+    'halftonescreen': halftone_screen, 'halftonenews': newspaper, 'chromaperspective': outward_arrows,
+    'chromadisplace': displaced, 'glitchartifact': blocky, 'glitchwave': square_wave, 'glitchsignal': static_screen,
+    'glitchdiverge': fork, 'grainmoving': moving_grain, 'graintexturized': grain_tile, 'brushpaintedon': painted_on,
+    'swipe-share': share_tab, 'swipe-duplicate': duplicate,
 }
 
 
