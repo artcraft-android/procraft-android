@@ -217,6 +217,9 @@ object Motion {
     private val Rows = Spring(0.3f, 0.75f, 0f)
     fun rowMove(): androidx.compose.animation.core.FiniteAnimationSpec<androidx.compose.ui.unit.IntOffset> = tween(350, easing = Settle)
     fun rowFade(): androidx.compose.animation.core.FiniteAnimationSpec<Float> = tween(300, easing = Rows)
+
+    /** The timeline's frames sliding a frame into its middle, as rows move. */
+    fun frameSlide(): AnimationSpec<Float> = tween(350, easing = Settle)
 }
 
 /**

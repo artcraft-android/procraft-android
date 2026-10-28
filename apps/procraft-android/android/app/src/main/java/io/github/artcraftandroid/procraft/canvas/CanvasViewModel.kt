@@ -5559,6 +5559,26 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         animationFrames.getOrNull(i)?.let { selectLayer(it) }
     }
 
+    /** The timeline dragged: playing stops and the frame's options close. */
+    fun beginScrub() {
+        stopPlaying()
+        frameOptionsOpen = false
+    }
+
+    /** The timeline dragged past frame [i]: it shows alone, as playing shows frames. */
+    fun scrubFrame(i: Int) {
+        if (i in animationFrames.indices) session?.setPlayFrame(i.toUInt())
+    }
+
+    /**
+     * The timeline let go with frame [i] in its middle: it becomes the current frame, as a tap
+     * makes it (null: nothing chosen, the current frame shows again).
+     */
+    fun endScrub(i: Int?) {
+        if (i != null && i != currentFrame) animationFrames.getOrNull(i)?.let { selectLayer(it) }
+        session?.setPlayFrame(null)
+    }
+
     fun addFrame() {
         stopPlaying()
         frameOptionsOpen = false

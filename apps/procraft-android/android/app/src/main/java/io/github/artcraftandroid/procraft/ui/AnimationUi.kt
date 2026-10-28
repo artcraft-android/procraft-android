@@ -1,11 +1,17 @@
 package io.github.artcraftandroid.procraft.ui
 
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.calculateTargetValue
+import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -25,9 +31,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
@@ -53,6 +64,8 @@ import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.core.AnimationPlayback
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 /** The bar is 657 wide on a wide screen, 446 upright; the timeline 12 in from each side. */
 private val WideBarWidth = 657.dp
@@ -129,6 +142,8 @@ private fun BarText(label: String, modifier: Modifier, onClick: () -> Unit) {
 /**
  * The frames in a rounded track [width] wide, the current (or played) one in the middle with a
  * blue line under it; each frame's card is 40 tall and as wide as the canvas's shape makes it.
+ * Dragged, the track scrolls through the frames, each showing as it passes the middle; let go,
+ * it coasts and settles on a frame, which becomes the current one.
  */
 @Composable
 private fun Timeline(vm: CanvasViewModel, width: Dp, modifier: Modifier) {
@@ -138,9 +153,56 @@ private fun Timeline(vm: CanvasViewModel, width: Dp, modifier: Modifier) {
     val aspect = if (cw > 0 && ch > 0) (cw.toFloat() / ch).coerceIn(0.25f, 2f) else 0.66f
     val frameWidth = FrameHeight * aspect + 1.dp
     val pitch = frameWidth + 1.dp
-    Box(modifier.size(width, 44.dp).clip(RoundedCornerShape(18.dp)).background(TrackFill).border(1.dp, TrackEdge, RoundedCornerShape(18.dp))) {
+    val pitchPx = with(LocalDensity.current) { pitch.toPx() }
+    val last = (frames.size - 1).coerceAtLeast(0)
+    // the frame in the middle, fractional while the track moves
+    var at by remember { mutableFloatStateOf(focus.toFloat()) }
+    var dragging by remember { mutableStateOf(false) }
+    // the frame shown last while dragging
+    var shown by remember { mutableIntStateOf(focus) }
+    var settling by remember { mutableStateOf<Job?>(null) }
+    val scope = rememberCoroutineScope()
+    fun scrubTo(p: Float) {
+        at = p
+        val i = p.roundToInt()
+        if (i != shown) {
+            shown = i
+            vm.scrubFrame(i)
+        }
+    }
+    LaunchedEffect(focus) {
+        if (dragging) return@LaunchedEffect
+        // played frames step; a frame chosen or added slides into the middle (a drag takes over)
+        if (vm.playingFrame != null) at = focus.toFloat() else animate(at, focus.toFloat(), animationSpec = Motion.frameSlide()) { v, _ -> if (!dragging) at = v }
+    }
+    DisposableEffect(Unit) { onDispose { if (dragging) vm.endScrub(null) } }
+    val drag = rememberDraggableState { delta -> scrubTo((at - delta / pitchPx).coerceIn(0f, last.toFloat())) }
+    Box(
+        modifier.size(width, 44.dp).clip(RoundedCornerShape(18.dp)).background(TrackFill).border(1.dp, TrackEdge, RoundedCornerShape(18.dp))
+            .draggable(
+                drag,
+                Orientation.Horizontal,
+                enabled = frames.size > 1,
+                onDragStarted = {
+                    settling?.cancel()
+                    if (!dragging) {
+                        dragging = true
+                        shown = focus
+                        vm.beginScrub()
+                    }
+                },
+                onDragStopped = { velocity ->
+                    val target = exponentialDecay<Float>().calculateTargetValue(at, -velocity / pitchPx).roundToInt().coerceIn(0, last)
+                    settling = scope.launch {
+                        animate(at, target.toFloat(), -velocity / pitchPx, Motion.frameSlide()) { v, _ -> scrubTo(v.coerceIn(0f, last.toFloat())) }
+                        dragging = false
+                        vm.endScrub(target)
+                    }
+                },
+            ),
+    ) {
         frames.forEachIndexed { i, id ->
-            val x = width / 2 - frameWidth / 2 + pitch * (i - focus)
+            val x = width / 2 - frameWidth / 2 + pitch * (i - at)
             if (x > -frameWidth && x < width) {
                 Box(
                     Modifier.offset(x = x, y = 2.dp).size(frameWidth, FrameHeight).clip(RoundedCornerShape(6.dp)).background(Color.White)
