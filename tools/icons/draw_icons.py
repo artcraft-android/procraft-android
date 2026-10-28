@@ -191,12 +191,104 @@ def help_tab():
     return unary_union([ring(12, 12, 9.0, 2.0), hook.buffer(1.15, join_style='round'), Point(12, 17.4).buffer(1.35, quad_segs=10)])
 
 
+def dashes(points, closed, dash, gap_len, r):
+    """Short capsules along a line through `points`: a dashed outline."""
+    line = LineString(points + ([points[0]] if closed else []))
+    out, t = [], 0.0
+    while t < line.length:
+        a, b = line.interpolate(t), line.interpolate(min(t + dash, line.length))
+        out.append(capsule((a.x, a.y), (b.x, b.y), r))
+        t += dash + gap_len
+    return unary_union(out)
+
+
+def lasso():
+    """Freehand: a lasso's loop with its tail."""
+    loop = rotate(Point(12.5, 9.5).buffer(1.0, quad_segs=24), 0)
+    from shapely.affinity import scale
+    ellipse = scale(Point(12.5, 9.5).buffer(1.0, quad_segs=24), 8.0, 5.2)
+    loop = rotate(ellipse.buffer(1.1).difference(ellipse.buffer(-1.1)), -12, origin=(12.5, 9.5))
+    tail = LineString([(7.6, 13.6), (7.0, 16.2), (8.6, 18.0), (6.6, 20.6)]).buffer(1.1, join_style='round')
+    return unary_union([loop, tail, Point(7.8, 13.8).buffer(1.6, quad_segs=10)])
+
+
+def rectangle_tool():
+    """Rectangle: a dashed rectangle."""
+    return dashes([(3.5, 5.5), (20.5, 5.5), (20.5, 18.5), (3.5, 18.5)], True, 2.4, 2.4, 1.0)
+
+
+def ellipse_tool():
+    """Ellipse: a dashed ellipse."""
+    pts = [(12 + 8.5 * math.cos(a / 48 * 2 * math.pi), 12 + 6.5 * math.sin(a / 48 * 2 * math.pi)) for a in range(48)]
+    return dashes(pts, True, 2.4, 2.4, 1.0)
+
+
+def sign_in_disc(minus):
+    """Add (or Subtract): a plus (a minus) cut out of a disc."""
+    disc = Point(12, 12).buffer(9.0, quad_segs=24)
+    mark = capsule((7.2, 12), (16.8, 12), 1.2)
+    if not minus:
+        mark = mark.union(capsule((12, 7.2), (12, 16.8), 1.2))
+    return disc.difference(mark)
+
+
+def invert():
+    """Invert: a disc, one half solid, the other its outline."""
+    outline = ring(12, 12, 8.0, 2.0)
+    half = Point(12, 12).buffer(8.0, quad_segs=24).intersection(box(12, 0, 24, 24))
+    return unary_union([outline, half])
+
+
+def copy_paste():
+    """Copy and paste: two sheets, the front one solid."""
+    back = frame(3.5, 3.5, 15.5, 15.5, 2.0, 2.0)
+    front = soft(box(8.5, 8.5, 20.5, 20.5), 2.0)
+    return unary_union([back.difference(box(7.3, 7.3, 21.7, 21.7)), front])
+
+
+def feather():
+    """Feather: a feather, its vane split by the shaft."""
+    vane = Polygon([(19.5, 4.5)] + [(19.5 - 12 * t + 3.2 * math.sin(t * math.pi) * SQ2, 4.5 + 12 * t + 3.2 * math.sin(t * math.pi) * SQ2)
+                                    for t in [i / 20 for i in range(1, 21)]]
+                   + [(19.5 - 12 * t - 3.2 * math.sin(t * math.pi) * SQ2, 4.5 + 12 * t - 3.2 * math.sin(t * math.pi) * SQ2)
+                      for t in [i / 20 for i in range(19, 0, -1)]])
+    shaft = LineString([(19.0, 5.0), (5.5, 18.5)])
+    vane = soft(vane, 0.3).difference(shaft.buffer(0.55))
+    return unary_union([vane, capsule((7.8, 16.2), (4.0, 20.0), 1.0)])
+
+
+def save_load():
+    """Save and load: a tray with an arrow coming down into it."""
+    tray = LineString([(4, 12.5), (4, 20), (20, 20), (20, 12.5)]).buffer(1.2, join_style='round')
+    shaft = capsule((12, 3.5), (12, 12), 1.2)
+    head = soft(Polygon([(12, 16.6), (7, 11.4), (17, 11.4)]), 0.4)
+    return unary_union([tray, shaft, head])
+
+
+def paint_bucket():
+    """Colour fill: a tipped bucket and a drop falling from it."""
+    bucket = soft(Polygon([(4.5, 9.5), (13.5, 3.8), (19.0, 12.5), (10.0, 18.2)]), 1.2)
+    rim = capsule((4.5, 9.5), (13.5, 3.8), 0.6)
+    bucket = bucket.difference(LineString([(6.6, 11.2), (14.6, 6.1)]).buffer(0.55))
+    drop = unary_union([Point(19.2, 18.6).buffer(2.1, quad_segs=12), Point(19.2, 14.4).buffer(0.2)]).convex_hull
+    return unary_union([bucket, rim, drop])
+
+
+def cross():
+    """Clear: a cross."""
+    return unary_union([capsule((5.5, 5.5), (18.5, 18.5), 1.3), capsule((18.5, 5.5), (5.5, 18.5), 1.3)])
+
+
 DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
     'undo': lambda: turning_arrow(False), 'redo': lambda: turning_arrow(True),
     'tabadd': plus, 'tabcanvas': canvas_tab, 'tabshare': share_tab, 'tabvideo': video_tab,
     'tabprefs': prefs_tab, 'tabhelp': help_tab,
+    'automatic': wand, 'freehand': lasso, 'rectangleshape': rectangle_tool, 'ellipseshape': ellipse_tool,
+    'selectadd': lambda: sign_in_disc(False), 'selectremove': lambda: sign_in_disc(True), 'invert': invert,
+    'selectcopypaste': copy_paste, 'feather': feather, 'saveload': save_load, 'colorfill': paint_bucket,
+    'clearselection': cross,
 }
 
 
