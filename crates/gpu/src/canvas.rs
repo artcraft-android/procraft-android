@@ -1200,6 +1200,14 @@ pub struct Canvas {
     /// Whether the composite is made around pictures of what isn't being worked on, and them.
     cache_composites: bool,
     caches: Option<Caches>,
+    /// Layers' pixels kept compressed off the GPU: those parked (no texture), and copies of
+    /// resident ones unchanged since, so that letting them go again costs nothing.
+    parked: HashMap<LayerId, Vec<u8>>,
+    /// What the layers' textures may take before those needed least lately are parked (0: none
+    /// are), and when each was last needed, counted in renders.
+    resident_budget: u64,
+    needed_at: HashMap<LayerId, u64>,
+    renders: u64,
     undo: Vec<Step>,
     redo: Vec<Step>,
     transforming: Option<Transforming>,
@@ -1395,6 +1403,10 @@ impl Canvas {
             ops: Vec::new(),
             cache_composites: false,
             caches: None,
+            parked: HashMap::new(),
+            resident_budget: 0,
+            needed_at: HashMap::new(),
+            renders: 0,
             dirty: IRect::from_size(width, height),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -1844,6 +1856,132 @@ impl Canvas {
         self.caches.is_some()
     }
 
+    /// What the layers' textures may take, in bytes: past it, the layers needed least lately
+    /// that aren't being worked on are parked (kept compressed off the GPU, and the composite made
+    /// around pictures of them) until needed again. 0 keeps every layer on the GPU.
+    pub fn set_resident_budget(&mut self, bytes: u64) {
+        self.resident_budget = bytes;
+        self.set_cache_composites(bytes > 0);
+    }
+
+    /// How many layers are parked (kept compressed, without a texture).
+    pub fn parked_layers(&self) -> usize {
+        self.parked.keys().filter(|id| !self.layers.contains_key(*id)).count()
+    }
+
+    /// Gives layer `id` its texture again from its compressed pixels, if it is parked; whether
+    /// it has one now. Its pixels go up before any work recorded in this render.
+    fn restore(&mut self, gpu: &Gpu, id: LayerId) -> bool {
+        if self.layers.contains_key(&id) {
+            return true;
+        }
+        let size = self.width as usize * self.height as usize * 4;
+        let Some(pixels) =
+            self.parked.get(&id).and_then(|p| procraft_engine::applz4::decode(p, size)).filter(|p| p.len() == size)
+        else {
+            return false;
+        };
+        let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
+        gpu.queue.write_texture(
+            copy_at(&texture, 0, 0),
+            &pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(self.width * 4),
+                rows_per_image: Some(self.height),
+            },
+            extent(self.width, self.height),
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.layers.insert(id, LayerGpu { texture, view });
+        true
+    }
+
+    /// Every layer in `ids` given its texture again; those about to be written lose their
+    /// compressed copies.
+    fn restore_all(&mut self, gpu: &Gpu, ids: impl IntoIterator<Item = LayerId>, written: bool) {
+        for (n, id) in ids.into_iter().enumerate() {
+            let restored = !self.layers.contains_key(&id) && self.restore(gpu, id);
+            if written {
+                self.parked.remove(&id);
+            }
+            self.needed_at.insert(id, self.renders);
+            // the staged pixels sent on now and then, so many in a row don't pile up
+            if restored && n % 8 == 7 {
+                gpu.queue.submit(std::iter::empty());
+            }
+        }
+    }
+
+    /// The layers the queued work reads and those it writes (which need their textures and lose
+    /// their compressed copies).
+    fn ops_layers(&self) -> (Vec<LayerId>, Vec<LayerId>) {
+        let (mut read, mut written) = (Vec::new(), Vec::new());
+        let contents = |d: &Document, id: LayerId| -> Vec<LayerId> {
+            if d.layer(id).is_some_and(|l| l.kind == LayerKind::Group) { d.contents(id) } else { vec![id] }
+        };
+        for op in &self.ops {
+            match op {
+                Op::Commit(s) => written.push(s.layer),
+                Op::Clear(id)
+                | Op::Wipe(id)
+                | Op::TransformBegin(id)
+                | Op::TransformAlso(id)
+                | Op::Put(id, _)
+                | Op::Hold(id) => written.push(*id),
+                Op::Write { layers, .. } => written.extend(layers.iter().map(|(id, _)| *id)),
+                Op::Duplicate { pairs, .. } => {
+                    read.extend(pairs.iter().map(|(from, _)| *from));
+                    written.extend(pairs.iter().map(|(_, to)| *to));
+                }
+                Op::MergeDown { upper, lower, before } => {
+                    read.extend(contents(before, *upper));
+                    written.push(*lower);
+                }
+                Op::MergeMany { uppers, lower, before } => {
+                    read.extend(uppers.iter().flat_map(|u| contents(before, *u)));
+                    written.push(*lower);
+                }
+                Op::Flatten { group, into, before, .. } => {
+                    read.extend(before.contents(*group));
+                    written.push(*into);
+                }
+                Op::Release { .. } => written.extend(self.held.as_ref().map(|h| h.layer)),
+                _ => {}
+            }
+        }
+        written.extend(self.active.map(|a| a.layer));
+        (read, written)
+    }
+
+    /// Parks the layers needed least lately until the textures fit the budget, keeping those
+    /// worked on (and what they are clipped to); none while the composite isn't made around
+    /// pictures of the others.
+    fn park_extra(&mut self, gpu: &Gpu, doc: &Document) {
+        let per = u64::from(self.width) * u64::from(self.height) * 4;
+        let most = usize::try_from(self.resident_budget / per.max(1)).unwrap_or(usize::MAX);
+        if self.resident_budget == 0 || self.layers.len() <= most {
+            return;
+        }
+        let Some(c) = &self.caches else { return };
+        let mut keep = c.live_layers.clone();
+        keep.extend(c.live.first().and_then(|first| doc.clip_base(*first)));
+        keep.extend(self.active.map(|a| a.layer));
+        keep.extend(self.held.as_ref().map(|h| h.layer));
+        let mut gone: Vec<LayerId> = self.layers.keys().filter(|id| !keep.contains(*id)).copied().collect();
+        gone.sort_by_key(|id| self.needed_at.get(id).copied().unwrap_or(0));
+        for id in gone {
+            if self.layers.len() <= most {
+                break;
+            }
+            if !self.parked.contains_key(&id) {
+                let Ok(pixels) = self.read_layer(gpu, id) else { continue };
+                self.parked.insert(id, procraft_engine::applz4::encode(&pixels));
+            }
+            self.layers.remove(&id);
+        }
+    }
+
     pub fn invalidate(&mut self) {
         self.caches = None;
         self.dirty = self.full();
@@ -2126,9 +2264,12 @@ impl Canvas {
         if let Some(s) = self.active {
             ids.push(s.layer);
         }
+        let (read, written) = self.ops_layers();
+        self.restore_all(gpu, read, false);
+        self.restore_all(gpu, written, true);
         let mut added = false;
         for id in ids {
-            if self.layers.contains_key(&id) {
+            if self.layers.contains_key(&id) || self.parked.contains_key(&id) {
                 continue;
             }
             let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
@@ -2164,6 +2305,8 @@ impl Canvas {
             }
         }
         self.layers.retain(|id, _| keep.contains(id));
+        self.parked.retain(|id, _| keep.contains(id));
+        self.needed_at.retain(|id, _| keep.contains(id));
     }
 
     /// Records and submits everything queued, recomposites what changed and draws to `target`.
@@ -2754,7 +2897,8 @@ impl Canvas {
 
         let dirty = self.dirty.intersect(self.full());
         self.make_groups(device, doc.max_depth());
-        self.ensure_caches(device, doc, &mut encoder, &mut uniforms);
+        self.ensure_caches(gpu, doc, &mut encoder, &mut uniforms);
+        let device = &gpu.device;
         if !dirty.is_empty() {
             self.composite(device, doc, &mut encoder, &mut uniforms, dirty);
             self.composites = self.composites.wrapping_add(1);
@@ -2774,6 +2918,8 @@ impl Canvas {
             gpu.queue.write_buffer(&self.smudge_params, 0, &smudge_uniforms.data);
         }
         gpu.queue.submit([encoder.finish()]);
+        self.renders = self.renders.wrapping_add(1);
+        self.park_extra(gpu, doc);
     }
 
     /// Bytes per row of a layer copied into a buffer (rows are 256-byte aligned for copies).
@@ -3308,6 +3454,7 @@ impl Canvas {
         let name = step.name.clone();
         let mut pixels = Vec::with_capacity(step.pixels.len());
         for s in step.pixels {
+            self.restore_all(gpu, [s.layer], true);
             if let Some(current) = self.snapshot(device, encoder, s.layer, s.rect) {
                 pixels.push(current);
             }
@@ -3617,13 +3764,17 @@ impl Canvas {
     /// from changed.
     fn ensure_caches(
         &mut self,
-        device: &wgpu::Device,
+        gpu: &Gpu,
         doc: &Document,
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &mut UniformData,
     ) {
+        let device = &gpu.device;
         let Some((tops, live)) = self.live_items(doc).filter(|_| self.cache_composites) else {
             self.caches = None;
+            // everything composites: every layer is needed
+            let all: Vec<LayerId> = doc.pixel_layer_ids().collect();
+            self.restore_all(gpu, all, false);
             return;
         };
         let below_items = tops.get(..live.start).unwrap_or_default().to_vec();
@@ -3655,7 +3806,21 @@ impl Canvas {
             }
         });
         let full = self.full();
-        if caches.below_items != below_items || caches.below_key != below_key {
+        let remake_below = caches.below_items != below_items || caches.below_key != below_key;
+        let remake_above = caches.above_items != above_items || caches.above_key != above_key;
+        // what is composited needs its layers: the items worked on (and what the first is clipped
+        // to), and what is cached when it is made again
+        let mut needed: Vec<LayerId> =
+            tops.get(live.clone()).unwrap_or_default().iter().flat_map(|t| item_layers(doc, *t)).collect();
+        needed.extend(tops.get(live.start).and_then(|first| doc.clip_base(*first)));
+        if remake_below {
+            needed.extend(below_items.iter().flat_map(|t| item_layers(doc, *t)));
+        }
+        if remake_above {
+            needed.extend(above_items.iter().flat_map(|t| item_layers(doc, *t)));
+        }
+        self.restore_all(gpu, needed, false);
+        if remake_below {
             let [r, g, b] = doc.background;
             let solid = if doc.background_visible { [r, g, b, 1.0] } else { [0.0; 4] };
             let offset = uniforms.push(&LayerUniform { opacity: 1.0, solid, ..Default::default() });
@@ -3678,7 +3843,7 @@ impl Canvas {
             caches.below_items = below_items;
             caches.below_key = below_key;
         }
-        if caches.above_items != above_items || caches.above_key != above_key {
+        if remake_above {
             drop(render_pass(encoder, "above", &caches.above_views[0], wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
             let stack = Stack { textures: &caches.above, views: &caches.above_views };
             let mut current = 0;
@@ -4304,6 +4469,7 @@ impl Canvas {
         max_side: u32,
     ) -> Result<Thumbnail, GpuError> {
         self.render(gpu, doc, None);
+        self.restore_all(gpu, [id], false);
         let full = self.full();
         // a mask is white where nothing is painted on it
         let bounds = if doc.layer(id).is_some_and(|l| l.kind == LayerKind::Mask) { ink_bounds } else { alpha_bounds };
@@ -4398,6 +4564,7 @@ impl Canvas {
         max_side: u32,
     ) -> Result<Thumbnail, GpuError> {
         self.render(gpu, doc, None);
+        self.restore_all(gpu, [id], false);
         let full = self.full();
         self.sample_layer(gpu, id, full, max_side)
     }
@@ -4521,6 +4688,12 @@ impl Canvas {
 
     /// A layer's pixels (premultiplied RGBA8). Waits for the GPU.
     pub fn read_layer(&self, gpu: &Gpu, id: LayerId) -> Result<Vec<u8>, GpuError> {
+        let size = self.width as usize * self.height as usize * 4;
+        if let Some(pixels) = self.parked.get(&id).filter(|_| !self.layers.contains_key(&id)) {
+            return procraft_engine::applz4::decode(pixels, size)
+                .filter(|p| p.len() == size)
+                .ok_or_else(|| GpuError::Readback(format!("layer {id:?} parked damaged")));
+        }
         let layer = self.layers.get(&id).ok_or_else(|| GpuError::Readback(format!("no layer {id:?}")))?;
         read_texture(gpu, &layer.texture, self.width, self.height)
     }

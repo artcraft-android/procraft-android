@@ -420,3 +420,75 @@ fn composites_made_around_cached_pictures_match_full_ones() {
     t.same(&gpu, 2, "the bottom worked on");
     assert!(t.canvases[0].composites_cached());
 }
+
+#[test]
+fn parked_layers_come_back_as_they_were() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    // room for three layers' textures only: the rest are parked
+    t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
+    let modes = [BlendMode::Normal, BlendMode::Multiply, BlendMode::Screen, BlendMode::Normal, BlendMode::Overlay];
+    t.each(|doc, canvas| {
+        let base = doc.current();
+        fill(canvas, doc, base, [180, 180, 180]);
+        for i in 0..9u8 {
+            let id = doc.add_layer();
+            doc.set_blend(id, modes[usize::from(i) % modes.len()]);
+            let at = Vec2::new(f32::from(i % 4) * 4.0 + 2.0, f32::from(i / 4) * 5.0 + 2.0);
+            paint(canvas, doc, id, [i * 25, 200 - i * 20, 90], at, 3.0, StrokeTool::Paint);
+        }
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "made");
+    // the composite is made around pictures of the rest, so layers can go
+    t.same(&gpu, 2, "made, parked");
+    assert!(t.canvases[0].parked_layers() >= 6, "parked: {}", t.canvases[0].parked_layers());
+    // a parked layer worked on again, painted, undone and redone
+    let ids: Vec<LayerId> = t.docs[0].layers().iter().map(|l| l.id).collect();
+    let low = ids[2];
+    t.each(|doc, canvas| {
+        doc.set_current(low);
+        paint(canvas, doc, low, [0, 0, 250], Vec2::new(8.0, 8.0), 4.0, StrokeTool::Paint);
+    });
+    t.same(&gpu, 2, "a parked layer painted");
+    t.each(|_, canvas| canvas.undo());
+    t.same(&gpu, 2, "undone");
+    t.each(|_, canvas| canvas.redo());
+    t.same(&gpu, 2, "redone");
+    // its pixels and picture read while parked again, as the other's
+    let top = *ids.last().unwrap();
+    t.each(|doc, _| {
+        doc.set_current(top);
+    });
+    t.same(&gpu, 2, "the top worked on");
+    let read: Vec<Vec<u8>> = t.canvases.iter().map(|c| c.read_layer(&gpu, low).unwrap()).collect();
+    assert_eq!(read[0], read[1], "a parked layer reads as it is");
+    let mut pictures = Vec::new();
+    for (doc, canvas) in t.docs.iter_mut().zip(t.canvases.iter_mut()) {
+        pictures.push(canvas.layer_picture(&gpu, doc, low, 8).unwrap().rgba);
+    }
+    assert_eq!(pictures[0], pictures[1], "its picture");
+    // merged down, duplicated, hidden: the layers they read and write come back first
+    let (upper, lower) = (ids[5], ids[4]);
+    t.each(|doc, canvas| {
+        let before = doc.clone();
+        canvas.merge_down(upper, lower, before);
+        assert!(doc.finish_merge_down(upper));
+    });
+    t.same(&gpu, 2, "merged");
+    t.each(|doc, canvas| {
+        let before = doc.clone();
+        let copy = doc.duplicate_layer(ids[1]).unwrap();
+        canvas.duplicate_layer(ids[1], copy, before);
+    });
+    t.same(&gpu, 2, "duplicated");
+    t.each(|doc, _| {
+        doc.set_visible(ids[3], false);
+    });
+    t.same(&gpu, 2, "hidden");
+    t.each(|_, canvas| canvas.undo());
+    t.same(&gpu, 2, "the duplicate undone");
+    assert!(t.canvases[0].parked_layers() > 0);
+}
