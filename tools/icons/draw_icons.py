@@ -673,6 +673,92 @@ def name_tag():
     return tag.difference(capsule((11.8, 10.2), (18.2, 10.2), 0.6)).difference(capsule((11.8, 13.8), (16.2, 13.8), 0.6))
 
 
+def ruler():
+    """Dimensions: a ruler, its marks cut in from one edge."""
+    bar = soft(box(2.0, 7.5, 22.0, 16.5), 1.0)
+    for i in range(6):
+        x = 4.6 + 2.96 * i
+        bar = bar.difference(box(x - 0.55, 6.0, x + 0.55, 7.5 + (4.4 if i % 2 == 0 else 2.8)))
+    return bar
+
+
+def gamut():
+    """Colour profile: a triangle of colours inside the ring of all colours."""
+    return unary_union([ring(12, 12, 8.6, 1.8), soft(Polygon([(12.0, 6.2), (17.4, 15.6), (6.6, 15.6)]), 0.6)])
+
+
+def pie():
+    """Statistics: a pie chart with one slice pulled out."""
+    c = (11.0, 13.0)
+    wedge = Polygon([c] + [(c[0] + 8.5 * math.cos(math.radians(a)), c[1] + 8.5 * math.sin(math.radians(a))) for a in range(-90, 1, 5)])
+    body = Point(c).buffer(8.5, quad_segs=32).difference(wedge.buffer(0.6))
+    return unary_union([body, translate(wedge, 1.8, -1.8)])
+
+
+def new_brush():
+    """New brush: the Paint brush with a plus beside it."""
+    from shapely.affinity import scale
+    cross = unary_union([capsule((14.6, 17.6), (21.4, 17.6), 1.2), capsule((18.0, 14.2), (18.0, 21.0), 1.2)])
+    brush = scale(paintbrush(), 0.8, 0.8, origin=(2, 22)).difference(cross.buffer(1.2))
+    return unary_union([brush, cross])
+
+
+def folder():
+    """A folder, its tab up to the left."""
+    back = soft(Polygon([(2.5, 4.6), (9.6, 4.6), (11.6, 6.8), (21.5, 6.8), (21.5, 19.6), (2.5, 19.6)]), 1.0)
+    return back.difference(box(0, 9.0, 24, 10.2))
+
+
+def new_set():
+    """New set: a folder with a plus cut out of it."""
+    return folder().difference(capsule((8.6, 14.8), (15.4, 14.8), 1.1)).difference(capsule((12.0, 11.4), (12.0, 18.2), 1.1))
+
+
+def chevron(angle=0):
+    """A chevron pointing right (turned by `angle`)."""
+    return rotate(LineString([(9.0, 4.5), (16.0, 12.0), (9.0, 19.5)]).buffer(1.3, join_style='round'), angle, origin=(12, 12))
+
+
+def tick():
+    """Done: a tick."""
+    return LineString([(4.5, 12.5), (9.5, 17.5), (19.5, 6.5)]).buffer(1.3, join_style='round')
+
+
+def full_screen():
+    """Full screen: a two-headed arrow from corner to corner."""
+    return double_arrow((4.5, 19.5), (19.5, 4.5), 1.2, 3.4)
+
+
+def rows():
+    """Compact cards: three bars, one under another."""
+    return unary_union([capsule((3.8, y), (20.2, y), 1.8) for y in (6.0, 12.0, 18.0)])
+
+
+def stacked_cards():
+    """Stacked cards: a card in front of another."""
+    front = soft(box(2.5, 8.0, 17.5, 21.5), 1.2)
+    back = soft(box(6.5, 3.5, 21.5, 17.0), 1.2).difference(front.buffer(1.2))
+    return unary_union([front, back])
+
+
+def bin_():
+    """Clear the history: a bin, its lid and two slots."""
+    lid = unary_union([capsule((4.0, 6.4), (20.0, 6.4), 1.1), frame(9.2, 2.6, 14.8, 6.4, 1.4, 0.8)])
+    body = soft(Polygon([(5.4, 8.8), (18.6, 8.8), (17.4, 21.2), (6.6, 21.2)]), 1.0)
+    body = body.difference(capsule((10.0, 11.6), (10.0, 18.2), 0.6)).difference(capsule((14.0, 11.6), (14.0, 18.2), 0.6))
+    return unary_union([lid, body])
+
+
+def keyboard():
+    """Keyboard: a keyboard, its keys and space bar cut out."""
+    board = soft(box(2.0, 5.5, 22.0, 18.5), 1.4)
+    for y in (9.0, 12.2):
+        for k in range(5):
+            x = 5.5 + 3.25 * k
+            board = board.difference(soft(box(x - 0.8, y - 0.8, x + 0.8, y + 0.8), 0.2))
+    return board.difference(capsule((7.5, 15.4), (16.5, 15.4), 0.8))
+
+
 DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
@@ -698,6 +784,10 @@ DRAWINGS = {
     'studiograin': grain_tile, 'studiorendering': roller, 'studiowet': two_drops, 'studiocolor': colour_circles,
     'studiodynamics': chevrons, 'studiostylus': stylus, 'studioproperties': gear, 'studiomaterials': material_ball,
     'studiopreview': eye, 'studioabout': name_tag,
+    'infoabout': name_tag, 'infodimensions': ruler, 'infolayers': layers, 'infoprofile': gamut, 'infovideo': video_tab,
+    'infostatistics': pie, 'menunewbrush': new_brush, 'menunewset': new_set, 'menushare': share_tab,
+    'menuchevron': chevron, 'disclose': lambda: chevron(90), 'donetick': tick, 'add': plus, 'fullscreen': full_screen,
+    'cardcompact': rows, 'cardstack': stacked_cards, 'folder-fill': folder, 'sweep': bin_, 'keyboard': keyboard,
 }
 
 

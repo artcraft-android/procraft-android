@@ -150,3 +150,25 @@ by one.
 | Materials | a ball with a rim of light round its shaded side |
 | Preview | the adjustment menus' eye |
 | About this brush | a name tag with its hole and two lines of writing |
+
+## Canvas information, menus and panels
+
+| Control | Idea |
+|---|---|
+| About this artwork | the Brush Studio's name tag |
+| Dimensions | a ruler, its marks cut in from one edge |
+| Layers | the bar's two stacked sheets |
+| Colour profile | a triangle of colours inside the ring of all colours |
+| Video settings | the Actions tab's camera |
+| Statistics | a pie chart with one slice pulled out |
+| New brush | the Paint brush with a plus beside it |
+| New set | a folder with a plus cut out of it |
+| Share (menus) | the Actions tab's tray and rising arrow |
+| Open / disclose | a chevron, right / down |
+| Done | a tick |
+| Add | a plus |
+| Full screen | a two-headed arrow from corner to corner |
+| Compact / stacked cards | three bars / a card in front of another |
+| Folder | a folder, its tab up to the left |
+| Clear the colour history | a bin, its lid and two slots |
+| Keyboard | a keyboard, its keys and space bar cut out |
