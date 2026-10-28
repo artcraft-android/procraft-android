@@ -336,6 +336,14 @@ impl Twins {
         let mut pictures = Vec::new();
         for (doc, canvas) in self.docs.iter_mut().zip(self.canvases.iter_mut()) {
             canvas.render(gpu, doc, None);
+            // caches remade a little each render: until they are, the composite waits
+            for _ in 0..1000 {
+                if !canvas.busy() {
+                    break;
+                }
+                canvas.render(gpu, doc, None);
+            }
+            assert!(!canvas.busy(), "{what}: caches still being remade");
             assert_eq!(gpu.errors(), 0, "GPU validation errors");
             pictures.push(canvas.read_composite(gpu).unwrap());
         }
@@ -469,12 +477,21 @@ fn parked_layers_come_back_as_they_were() {
     for (doc, canvas) in t.docs.iter_mut().zip(t.canvases.iter_mut()) {
         pictures.push(canvas.layer_picture(&gpu, doc, low, 8).unwrap().rgba);
     }
-    assert_eq!(pictures[0], pictures[1], "its picture");
+    // a parked layer's is box-filtered from its small picture, not sampled on the GPU: the edges
+    // soften a little differently
+    let near = |a: &[u8], b: &[u8]| {
+        let diffs = a.iter().zip(b).map(|(x, y)| u32::from(x.abs_diff(*y)));
+        a.len() == b.len() && diffs.clone().max().unwrap_or(0) <= 32 && diffs.sum::<u32>() <= 4 * a.len() as u32
+    };
+    assert!(near(&pictures[0], &pictures[1]), "its picture");
     let mut thumbs = Vec::new();
     for (doc, canvas) in t.docs.iter_mut().zip(t.canvases.iter_mut()) {
-        thumbs.push(canvas.layer_thumbnail(&gpu, doc, low, 8).unwrap().rgba);
+        thumbs.push(canvas.layer_thumbnail(&gpu, doc, low, 8).unwrap());
     }
-    assert_eq!(thumbs[0], thumbs[1], "its thumbnail");
+    // what is drawn on it, cropped a pixel or so differently
+    let [a, b] = [&thumbs[0], &thumbs[1]];
+    assert!(a.width.abs_diff(b.width) <= 2 && a.height.abs_diff(b.height) <= 2, "its thumbnail");
+    assert!(a.rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0), "something drawn on its thumbnail");
     // every layer's coverage at a point, parked ones too
     for (x, y) in [(2, 2), (8, 8), (13, 9)] {
         let mut alphas = Vec::new();
@@ -592,4 +609,50 @@ fn an_animation_keeps_only_the_frames_shown() {
     }
     t.each(|_, canvas| canvas.set_play_frame(None));
     t.same(&gpu, 2, "stopped");
+}
+
+#[test]
+fn empty_and_clipped_layers_cache_as_they_composite() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
+    t.each(|doc, canvas| {
+        let base = doc.current();
+        fill(canvas, doc, base, [120, 160, 200]);
+        for i in 0..10u8 {
+            let id = doc.add_layer();
+            match i % 5 {
+                // left empty
+                0 | 3 => {}
+                // clipped to what is under it (painted, or the empty one)
+                1 | 4 => {
+                    doc.set_clipped(id, true);
+                    fill(canvas, doc, id, [250, 40 + i * 20, 40]);
+                }
+                _ => paint(
+                    canvas,
+                    doc,
+                    id,
+                    [i * 20, 90, 200 - i * 15],
+                    Vec2::new(3.0 + f32::from(i), 9.0),
+                    3.0,
+                    StrokeTool::Paint,
+                ),
+            }
+        }
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "made");
+    t.same(&gpu, 2, "parked");
+    let ids: Vec<LayerId> = t.docs[0].layers().iter().map(|l| l.id).collect();
+    for current in [ids[0], ids[6], *ids.last().unwrap()] {
+        t.each(|doc, canvas| {
+            doc.set_current(current);
+            paint(canvas, doc, current, [10, 10, 10], Vec2::new(12.0, 4.0), 2.0, StrokeTool::Paint);
+        });
+        t.same(&gpu, 2, "another layer worked on");
+    }
+    assert!(t.canvases[0].parked_layers() > 0);
 }

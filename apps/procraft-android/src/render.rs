@@ -165,11 +165,15 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
                         lut,
                     }),
                 );
-                if animating {
+                // caches still being remade: another frame soon, and the artwork isn't shown yet
+                let busy = canvas.busy();
+                if animating || busy {
                     st.needs_frame = true;
                 }
                 // counted only when the canvas was drawn, so a first frame means the artwork shows
-                st.frames += 1;
+                if !busy {
+                    st.frames += 1;
+                }
             }
             let now = Instant::now();
             if let Some(prev) = last_present {
