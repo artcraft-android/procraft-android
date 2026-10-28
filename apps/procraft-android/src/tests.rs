@@ -3105,3 +3105,21 @@ fn a_krita_preset_becomes_a_round_brush_with_its_settings() {
     assert!(b.grain.source.is_some());
     assert_eq!((b.grain.depth, b.grain.scale), (0.7, 50.0));
 }
+
+#[test]
+fn a_kept_view_that_leaves_the_canvas_off_the_page_is_not_used() {
+    use crate::project::shows_canvas;
+    let (window, canvas) = ((2560, 1600), (2048, 2048));
+    // fitted: shows
+    let fitted = View::fit(canvas, window);
+    assert!(shows_canvas(&fitted, window, canvas));
+    // centred on a point far beyond the canvas: none of it shows
+    let away = View::centred(procraft_engine::geom::Vec2::new(9000.0, -7000.0), 0.78, 0.0, window).unwrap();
+    assert!(!shows_canvas(&away, window, canvas));
+    // half off the right edge: still enough to work on
+    let half = View::centred(procraft_engine::geom::Vec2::new(0.0, 1024.0), 0.78, 0.0, window).unwrap();
+    assert!(shows_canvas(&half, window, canvas));
+    // zoomed far out, small but whole on screen
+    let tiny = View::centred(procraft_engine::geom::Vec2::new(1024.0, 1024.0), 0.01, 0.0, window).unwrap();
+    assert!(shows_canvas(&tiny, window, canvas));
+}

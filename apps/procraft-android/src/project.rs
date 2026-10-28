@@ -67,6 +67,22 @@ impl SavedView {
     }
 }
 
+/// Whether `view` shows enough of a `canvas`-sized canvas in a `window`-sized window to work on:
+/// its box on screen covers a tenth of the window, or half of it is in the window. A kept view
+/// that doesn't (the canvas pushed off the page) is not used again.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn shows_canvas(view: &View, window: (u32, u32), canvas: (u32, u32)) -> bool {
+    let m = view.to_screen();
+    let (cw, ch) = (canvas.0 as f32, canvas.1 as f32);
+    let corners = [Vec2::new(0.0, 0.0), Vec2::new(cw, 0.0), Vec2::new(0.0, ch), Vec2::new(cw, ch)].map(|p| m.apply(p));
+    let (x0, x1) = corners.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.x), b.max(p.x)));
+    let (y0, y1) = corners.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.y), b.max(p.y)));
+    let (ww, wh) = (window.0 as f32, window.1 as f32);
+    let seen = (x1.min(ww) - x0.max(0.0)).max(0.0) * (y1.min(wh) - y0.max(0.0)).max(0.0);
+    let whole = (x1 - x0) * (y1 - y0);
+    seen.is_finite() && (seen >= 0.1 * ww * wh || seen >= 0.5 * whole)
+}
+
 /// An artwork's time-lapse in a package: whether it records, its video's settings (quality 0 to 3,
 /// resolution 0 to 2, HEVC or H.264), and its video so far as MP4 files in order, `width` ×
 /// `height` at `fps` and `bitrate` bits a second.

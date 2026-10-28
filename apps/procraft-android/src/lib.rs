@@ -849,7 +849,13 @@ impl CanvasSession {
                 let mut st = self.shared.lock();
                 st.window_size = (width.max(1), height.max(1));
                 if st.view.is_none() {
-                    let kept = st.saved_view.take().and_then(|v| v.view(st.window_size));
+                    // the view kept with the artwork, unless it would leave the canvas off the page
+                    let canvas = (st.doc.width(), st.doc.height());
+                    let kept = st
+                        .saved_view
+                        .take()
+                        .and_then(|v| v.view(st.window_size))
+                        .filter(|v| project::shows_canvas(v, st.window_size, canvas));
                     st.view = Some(kept.unwrap_or_else(|| st.fitted_view()));
                 }
                 st.stop = false;
