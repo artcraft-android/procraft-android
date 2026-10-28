@@ -224,7 +224,9 @@ private fun Licences(onBack: () -> Unit) {
         val gap = "\n\n"
         val text = "The interface font is Inter, by The Inter Project Authors, under the SIL Open Font License 1.1." + gap +
             asset("fonts/Inter-OFL.txt").trim() + gap +
-            "Most interface icons are Lucide icons (lucide.dev), by Lucide Icons and Contributors, under the ISC License." + gap +
+            "Most interface icons are Phosphor icons (phosphoricons.com), by Phosphor Icons, under the MIT License." + gap +
+            asset("icons/LICENSE-phosphor.txt").trim() + gap +
+            "The app also keeps Lucide icons (lucide.dev), by Lucide Icons and Contributors, under the ISC License." + gap +
             asset("icons/LICENSE-lucide.txt").trim() + gap + asset("licenses.txt")
         text.split(gap).map { it.trimEnd() }.filter { it.isNotBlank() }
     }

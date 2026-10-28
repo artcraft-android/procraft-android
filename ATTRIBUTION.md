@@ -11,16 +11,255 @@ them.
 | Path | Title | Author | Source | Licence |
 |---|---|---|---|---|
 | `apps/procraft-android/android/app/src/main/assets/fonts/Inter-{Regular,Medium,SemiBold,Bold}.ttf` | Inter 4.1 (interface font) | The Inter Project Authors | <https://github.com/rsms/inter/releases/tag/v4.1> (`Inter-4.1.zip`, `extras/ttf/`; `SOURCE.md` beside them) | SIL OFL 1.1, `Inter-OFL.txt` |
-| `apps/procraft-android/android/app/src/main/java/io/github/artcraftandroid/procraft/ui/Icons.kt` (the icons listed below as Lucide) | Lucide icons, lucide-static 1.63.0 | Lucide Icons and Contributors (those derived from Feather: Cole Bemis) | <https://github.com/lucide-icons/lucide>; each icon's paths moved and scaled into the frame it is shown in, at the size shown | ISC (Feather-derived also MIT), [`LICENSE-lucide.txt`](apps/procraft-android/android/app/src/main/assets/icons/LICENSE-lucide.txt) |
+| `apps/procraft-android/android/app/src/main/java/io/github/artcraftandroid/procraft/ui/Icons.kt` (the icons listed below as Phosphor) | Phosphor icons, @phosphor-icons/core 2.1.1, Fill weight | Phosphor Icons | <https://github.com/phosphor-icons/core>; each icon's paths moved and scaled into the frame it is shown in, at the size shown | MIT, [`LICENSE-phosphor.txt`](apps/procraft-android/android/app/src/main/assets/icons/LICENSE-phosphor.txt) |
+| `apps/procraft-android/android/app/src/main/java/io/github/artcraftandroid/procraft/ui/LucideIcons.kt` (the same icons as Lucide draws them, kept beside them)  | Lucide icons, lucide-static 1.63.0 | Lucide Icons and Contributors (those derived from Feather: Cole Bemis) | <https://github.com/lucide-icons/lucide>; each icon's paths moved and scaled into the frame it is shown in, at the size shown | ISC (Feather-derived also MIT), [`LICENSE-lucide.txt`](apps/procraft-android/android/app/src/main/assets/icons/LICENSE-lucide.txt) |
 | `apps/procraft-android/android/app/src/main/java/io/github/artcraftandroid/procraft/ui/Icons.kt` (every other icon) | Interface icons | ProCraft contributors | Original work, on a 24-unit grid | MIT OR Apache-2.0 |
 | `apps/procraft-android/android/app/src/main/assets/environments/*.hdr` | 3D view light panoramas (11), halved to 512 x 256 and scaled by `tools/env/make_env.py` | Sergej Majboroda, Greg Zaal, Andreas Mischok, Rico Cilliers (per file in the folder's `README.md`) | <https://polyhaven.com> | CC0 1.0 |
-| `apps/procraft-android/android/app/src/main/res/drawable/ic_launcher_foreground.xml`, `apps/procraft-android/android/app/src/main/res/mipmap-anydpi/ic_launcher.xml` | App icon: a tapered stroke and a dot | ProCraft contributors | Original work | MIT OR Apache-2.0 |
+| `assets/app-icon/procraft-{1024,512}.png`, `apps/procraft-android/android/app/src/main/res/drawable-*dpi/ic_launcher_{foreground,monochrome}.png`, `apps/procraft-android/android/app/src/main/res/drawable-nodpi/procraft_mark.png`, `apps/procraft-android/android/app/src/main/res/mipmap-anydpi/ic_launcher.xml` | App icon: a paintbrush in a warm-to-cool blend on black | ProCraft contributors | Original work, drawn in code by `tools/app-icon/make_icon.py`; see [`assets/app-icon/README.md`](assets/app-icon/README.md) | MIT OR Apache-2.0 |
 | `apps/procraft-android/android/app/src/main/res/drawable/widget_back.xml`, `apps/procraft-android/android/app/src/main/res/drawable-v31/widget_back.xml` | Recent-artwork widget background | ProCraft contributors | Original work | MIT OR Apache-2.0 |
 | Brushes, brush shapes and grains | Made in code at run time (`crates/engine`) | ProCraft contributors | Original work | MIT OR Apache-2.0 |
 
-### Lucide icons in `Icons.kt`
+### Phosphor icons in `Icons.kt`
 
-Each with the Lucide icon it is:
+Each with the Phosphor icon it is (Fill weight):
+
+- `FullScreen`: `arrows-out-simple`
+- `Actions`: `wrench`
+- `Adjustments`: `magic-wand`
+- `Selection`: `lasso`
+- `Transform`: `navigation-arrow`
+- `Brush`: `paint-brush`
+- `Smudge`: `hand-pointing`
+- `Erase`: `eraser`
+- `Layers`: `stack`
+- `Undo`: `arrow-u-up-left`
+- `Redo`: `arrow-u-up-right`
+- `TransformReset`: `arrow-counter-clockwise`
+- `SelectCopyPaste`: `copy`
+- `StudioShape`: `shapes`
+- `GestureCopyPaste`: `clipboard`
+- `MenuNewBrush`: `paint-brush`
+- `MenuNewSet`: `folder-plus`
+- `MenuShare`: `export`
+- `MenuChevron`: `caret-right`
+- `PieUndo`: `arrow-u-up-left`
+- `PieReset`: `arrow-counter-clockwise`
+- `ShapeEquilateral`: `triangle`
+- `ShapeSquare`: `square`
+- `CopyCut`: `scissors`
+- `CopyDuplicate`: `copy`
+- `DoneTick`: `check`
+- `Add`: `plus`
+- `InfoAbout`: `info`
+- `InfoDimensions`: `ruler`
+- `InfoLayers`: `stack`
+- `InfoProfile`: `palette`
+- `InfoVideo`: `video`
+- `InfoStatistics`: `chart-bar`
+- `Keyboard`: `keyboard`
+- `TextCut`: `scissors`
+- `TextCopy`: `copy`
+- `TextPaste`: `clipboard-text`
+- `AlignLeft`: `text-align-left`
+- `AlignCenter`: `text-align-center`
+- `AlignRight`: `text-align-right`
+- `AlignJustify`: `text-align-justify`
+- `TextUnderline`: `text-underline`
+- `TextOutline`: `text-t`
+- `TextVertical`: `text-t` and `arrow-down`, side by side
+- `CopyOne`: `copy`
+- `CopyAll`: `copy`
+- `CutPaste`: `clipboard`
+- `PasteDown`: `clipboard-text`
+- `GestureAssisted`: `ruler`
+- `GestureEyedropper`: `eyedropper`
+- `GestureQuickShape`: `shapes`
+- `GestureQuickMenu`: `chart-pie`
+- `GestureFullScreen`: `arrows-out-simple`
+- `GestureClearLayer`: `eraser`
+- `GestureLayerSelect`: `stack`
+- `GestureHover`: `pencil-line`
+- `GestureGeneral`: `gear`
+- `ModeDisc`: `disc`
+- `ModeClassic`: `square`
+- `ModeHarmony`: `atom`
+- `ModeValue`: `sliders-horizontal`
+- `ModePalettes`: `palette`
+- `Sweep`: `broom`
+- `CardCompact`: `rows`
+- `CardStack`: `cards`
+- `TabAdd`: `plus`
+- `TabCanvas`: `frame-corners`
+- `TabShare`: `export`
+- `TabVideo`: `video`
+- `TabPrefs`: `toggle-right`
+- `TabHelp`: `question`
+- `FolderFill`: `folder`
+- `Freeform`: `arrows-out-line-horizontal`
+- `Uniform`: `arrows-out`
+- `Distort`: `bounding-box`
+- `Warp`: `bezier-curve`
+- `Snapping`: `magnet`
+- `FlipHorizontal`: `flip-horizontal`
+- `FlipVertical`: `flip-vertical`
+- `Rotate45`: `arrow-clockwise`
+- `FitToCanvas`: `corners-out`
+- `Interpolation`: `frame-corners`
+- `AdjustHsb`: `sun-dim`
+- `AdjustBlur`: `drop`
+- `AdjustBalance`: `scales`
+- `AdjustCurves`: `bezier-curve`
+- `AdjustGradient`: `intersect`
+- `AdjustMotion`: `wind`
+- `AdjustPerspective`: `cube`
+- `AdjustNoise`: `sparkle`
+- `StudioGrain`: `dots-nine`
+- `AdjustSharpen`: `diamond`
+- `AdjustBloom`: `sun`
+- `AdjustGlitch`: `lightning`
+- `AdjustHalftone`: `grid-nine`
+- `AdjustChromatic`: `aperture`
+- `AdjustLiquify`: `drop-half`
+- `AdjustClone`: `stamp`
+- `Disclose`: `caret-down`
+- `NoiseClouds`: `cloud`
+- `NoiseBillows`: `cloud-fog`
+- `NoiseRidges`: `mountains`
+- `HalftoneFull`: `radio-button`
+- `HalftoneScreen`: `dots-nine`
+- `HalftoneNews`: `newspaper`
+- `ChromaPerspective`: `crosshair`
+- `ChromaDisplace`: `arrows-horizontal`
+- `GuideGrid`: `grid-four`
+- `GuideIsometric`: `cube`
+- `GuideSymmetry`: `square-split-horizontal`
+- `ShapeLine`: `line-segment`
+- `ShapePolyline`: `trend-up`
+- `ShapeEllipse`: `circle`
+- `ShapeCircle`: `circle`
+- `ShapeTriangle`: `triangle`
+- `ShapeQuad`: `diamond`
+- `ShapeRect`: `rectangle`
+- `StudioStroke`: `bezier-curve`
+- `StudioStabilize`: `pulse`
+- `StudioTaper`: `triangle`
+- `StudioRendering`: `paint-brush-broad`
+- `StudioWet`: `drop-half`
+- `StudioColor`: `palette`
+- `StudioDynamics`: `gauge`
+- `StudioStylus`: `pencil-line`
+- `StudioProperties`: `gear-six`
+- `StudioMaterials`: `cube`
+- `StudioPreview`: `eye`
+- `StudioAbout`: `info`
+- `GrainMoving`: `waves`
+- `GrainTexturized`: `dots-six`
+- `GlitchArtifact`: `selection`
+- `GlitchWave`: `waveform`
+- `GlitchSignal`: `cell-signal-full`
+- `GlitchDiverge`: `arrows-split`
+- `BrushPaintedOn`: `paint-roller`
+- `ModeLayer`: `stack`
+- `ModePencil`: `pencil`
+- `AdjustKnob`: `gauge`
+- `Apply`: `check`
+- `Preview`: `eye`
+- `CancelAdjust`: `prohibit`
+- `Automatic`: `magic-wand`
+- `Freehand`: `lasso`
+- `RectangleShape`: `selection`
+- `EllipseShape`: `circle-dashed`
+- `SelectAdd`: `plus`
+- `SelectRemove`: `minus`
+- `Invert`: `circle-half`
+- `Feather`: `feather`
+- `SaveLoad`: `floppy-disk`
+- `ColorFill`: `paint-bucket`
+- `ClearSelection`: `broom`
+- `BlendGlyphs["Multiply"]`: `x-circle`
+- `BlendGlyphs["Darken"]`: `moon`
+- `BlendGlyphs["Shade"]`: `sun-horizon`
+- `BlendGlyphs["Color Burn"]`: `flame`
+- `BlendGlyphs["Linear Burn"]`: `campfire`
+- `BlendGlyphs["Darker Color"]`: `moon-stars`
+- `BlendGlyphs["Normal"]`: `circle`
+- `BlendGlyphs["Lighten"]`: `sun`
+- `BlendGlyphs["Screen"]`: `sun-dim`
+- `BlendGlyphs["Color Dodge"]`: `sparkle`
+- `BlendGlyphs["Add"]`: `plus-circle`
+- `BlendGlyphs["Lighter Color"]`: `sun-dim`
+- `BlendGlyphs["Overlay"]`: `intersect`
+- `BlendGlyphs["Soft Light"]`: `lamp`
+- `BlendGlyphs["Hard Light"]`: `lightbulb`
+- `BlendGlyphs["Vivid Light"]`: `lightning`
+- `BlendGlyphs["Linear Light"]`: `flashlight`
+- `BlendGlyphs["Pin Light"]`: `push-pin`
+- `BlendGlyphs["Hard Mix"]`: `grid-four`
+- `BlendGlyphs["Difference"]`: `minus-circle`
+- `BlendGlyphs["Exclusion"]`: `prohibit`
+- `BlendGlyphs["Subtract"]`: `minus`
+- `BlendGlyphs["Divide"]`: `divide`
+- `BlendGlyphs["Hue"]`: `palette`
+- `BlendGlyphs["Saturation"]`: `drop`
+- `BlendGlyphs["Color"]`: `paint-brush-broad`
+- `BlendGlyphs["Luminosity"]`: `circle-half-tilt`
+- `BlendGlyphs["Behind"]`: `selection-background`
+- `BlendGlyphs["Height"]`: `mountains`
+- `BlendGlyphs["Linear Height"]`: `mountains`
+- `SwipeShare`: `export`
+- `SwipeDuplicate`: `copy`
+- `SetIcons[0]`: `paint-brush`
+- `SetIcons[1]`: `presentation`
+- `SetIcons[2]`: `flower`
+- `SetIcons[3]`: `bell`
+- `SetIcons[4]`: `bookmark`
+- `SetIcons[5]`: `paint-brush-broad`
+- `SetIcons[6]`: `plant`
+- `SetIcons[7]`: `seal-check`
+- `SetIcons[8]`: `cloud`
+- `SetIcons[9]`: `game-controller`
+- `SetIcons[10]`: `target`
+- `SetIcons[11]`: `diamond`
+- `SetIcons[12]`: `dice-five`
+- `SetIcons[13]`: `drop`
+- `SetIcons[14]`: `paint-brush`
+- `SetIcons[15]`: `film-strip`
+- `SetIcons[16]`: `fish`
+- `SetIcons[17]`: `flag`
+- `SetIcons[18]`: `flame`
+- `SetIcons[19]`: `lightning`
+- `SetIcons[20]`: `clover`
+- `SetIcons[21]`: `hammer`
+- `SetIcons[22]`: `headphones`
+- `SetIcons[23]`: `heart`
+- `SetIcons[24]`: `house`
+- `SetIcons[25]`: `moon`
+- `SetIcons[26]`: `music-notes`
+- `SetIcons[27]`: `pen`
+- `SetIcons[28]`: `push-pin`
+- `SetIcons[29]`: `airplane`
+- `SetIcons[30]`: `puzzle-piece`
+- `SetIcons[31]`: `trophy`
+- `SetIcons[32]`: `sparkle`
+- `SetIcons[33]`: `star`
+- `SetIcons[34]`: `sun`
+- `SetIcons[35]`: `feather`
+- `SetIcons[36]`: `pencil`
+- `SetIcons[37]`: `ticket`
+- `SetIcons[38]`: `tree-evergreen`
+- `SetIcons[39]`: `umbrella`
+- `SetIcons[40]`: `magic-wand`
+- `SetIcons[41]`: `eyeglasses`
+- `SetIcons[42]`: `pen-nib`
+- `SetIcons[43]`: `drop-half`
+- `SetIcons[44]`: `pencil-line`
+- `SetIcons[45]`: `spray-bottle`
+- `SetIcons[46]`: `circle-dashed`
+- `SetIcons[47]`: `dots-nine`
+
+### Lucide icons in `LucideIcons.kt`
+
+The same icons, each with the Lucide icon it is:
 
 - `FullScreen`: `maximize-2`
 - `Actions`: `wrench`

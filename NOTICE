@@ -9,11 +9,15 @@ This product bundles third-party material under its own licenses, listed below.
 
 - Inter typeface (apps/procraft-android/android/app/src/main/assets/fonts/Inter-*.ttf), by The Inter
   Project Authors — SIL Open Font License 1.1. See Inter-OFL.txt and SOURCE.md beside the fonts.
-- Lucide icons (lucide.dev, lucide-static 1.63.0), by Lucide Icons and Contributors: ISC License; the
-  icons derived from Feather also MIT (Cole Bemis). Most interface icons in
+- Phosphor icons (phosphoricons.com, @phosphor-icons/core 2.1.1, Fill weight), by Phosphor Icons: MIT
+  License. Most interface icons in
   apps/procraft-android/android/app/src/main/java/io/github/artcraftandroid/procraft/ui/Icons.kt are
   their paths, placed and sized where each is shown. See
-  apps/procraft-android/android/app/src/main/assets/icons/LICENSE-lucide.txt.
+  apps/procraft-android/android/app/src/main/assets/icons/LICENSE-phosphor.txt.
+- Lucide icons (lucide.dev, lucide-static 1.63.0), by Lucide Icons and Contributors: ISC License; the
+  icons derived from Feather also MIT (Cole Bemis). The same interface icons as Lucide draws them, kept
+  in apps/procraft-android/android/app/src/main/java/io/github/artcraftandroid/procraft/ui/LucideIcons.kt.
+  See apps/procraft-android/android/app/src/main/assets/icons/LICENSE-lucide.txt.
 - Light panoramas for the 3D view (apps/procraft-android/android/app/src/main/assets/environments/*.hdr),
   from Poly Haven (https://polyhaven.com) — CC0 1.0. Authors per file in the folder's README.md.
 

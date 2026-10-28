@@ -1,10 +1,13 @@
+<img src="assets/app-icon/procraft-512.png" alt="ProCraft" width="96" align="right">
+
 # ProCraft
 
 A painting app for Android tablets, with a Rust engine and GPU renderer under a Kotlin / Jetpack
 Compose interface.
 
-**Status:** early. You can draw on the canvas with pen pressure and tapered strokes, erase, undo
-and redo, and move, zoom and turn the canvas with two fingers.
+**Status:** beta. Layers with blend modes, masks and groups; a brush engine with its studio and
+library; colour, adjustments, selection and transform; text, animation, 3D painting; and opening
+and sharing artworks, PSD, PDF, images and brushes.
 
 ## Layout
 
@@ -29,6 +32,6 @@ JDK 17.
 ## Licence
 
 [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE), at your option. The third-party material the app
-bundles (the Inter font, Lucide icons, light panoramas) and the libraries it is built with are listed
+bundles (the Inter font, Phosphor and Lucide icons, light panoramas) and the libraries it is built with are listed
 in [NOTICE](NOTICE); every asset, with its author, source and licence, in
 [ATTRIBUTION.md](ATTRIBUTION.md).
