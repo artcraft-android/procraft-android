@@ -4102,10 +4102,24 @@ impl Canvas {
     }
 
     /// Lets go of the textures of layers unchanged since parked (their compressed copies kept),
-    /// but those in `keep`.
+    /// but those in `keep`, as far as the next part of a remake wants room.
     fn let_go_clean(&mut self, keep: &HashSet<LayerId>) {
-        let parked = &self.parked;
-        self.layers.retain(|id, _| keep.contains(id) || !parked.contains_key(id));
+        // only as many as the next part wants room for, needed least lately first: layers that
+        // fit stay (letting many textures go at once holds a frame up)
+        let most = self.most_resident();
+        let wanted = most.saturating_sub(LET_GO_ROOM);
+        if self.layers.len() <= wanted {
+            return;
+        }
+        let mut clean: Vec<LayerId> =
+            self.layers.keys().filter(|id| !keep.contains(*id) && self.parked.contains_key(*id)).copied().collect();
+        clean.sort_by_key(|id| self.needed_at.get(id).copied().unwrap_or(0));
+        for id in clean {
+            if self.layers.len() <= wanted {
+                break;
+            }
+            self.layers.remove(&id);
+        }
     }
 
     /// Sends the work recorded so far (with its uniforms), going on with a new encoder.
@@ -6016,6 +6030,10 @@ struct Caches {
 /// (after the first).
 const MOST_PARK_READS: usize = 4;
 const PARK_SLICE: std::time::Duration = std::time::Duration::from_millis(6);
+
+/// The room (in layers' textures) a remake keeps free for its next part, letting go of the
+/// layers it brought back only so far.
+const LET_GO_ROOM: usize = 2 * MOST_PART_ITEMS;
 
 /// The most items a part of a remake composites before it is sent (and the time looked at).
 const MOST_PART_ITEMS: usize = 8;

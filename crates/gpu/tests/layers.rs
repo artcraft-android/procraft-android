@@ -889,3 +889,39 @@ fn layers_uploaded_with_their_copies_are_let_go_without_reading_them_back() {
         assert_eq!(&t.canvases[0].read_layer(&gpu, *id).unwrap(), px, "{id:?} as uploaded");
     }
 }
+
+#[test]
+fn a_remake_lets_go_only_what_its_parts_need_room_for() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let mut doc = Document::new(W, W);
+    for _ in 0..39 {
+        doc.add_layer();
+    }
+    let ids: Vec<LayerId> = doc.layers().iter().map(|l| l.id).collect();
+    let pixels: Vec<Vec<u8>> = (0..ids.len())
+        .map(|i| {
+            let mut px = vec![0u8; (W * W * 4) as usize];
+            let (y, x0) = (i / 8 * 3 + 1, i % 8 * 2);
+            for x in x0..x0 + 3 {
+                let o = (y * W as usize + x) * 4;
+                px[o..o + 4].copy_from_slice(&[(i * 6) as u8, 200 - (i * 4) as u8, 90, 255]);
+            }
+            px
+        })
+        .collect();
+    let docs = [doc.clone(), doc];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    // room for 30 of the 40, every one uploaded with its compressed copy: the caches are remade
+    // (40 needed), and of the clean textures only what the parts need room for goes
+    t.canvases[0].set_resident_budget(30 * u64::from(W * W * 4));
+    for (id, px) in ids.iter().zip(&pixels) {
+        let ready = procraft_gpu::ReadyToPark::of(px, W, W);
+        t.canvases[0].upload_layer_kept(&gpu, *id, px, ready).unwrap();
+        t.canvases[1].upload_layer(&gpu, *id, px).unwrap();
+    }
+    t.same(&gpu, 2, "opened");
+    assert!(t.canvases[0].last_remake().is_some(), "remade");
+    let parked = t.canvases[0].parked_layers();
+    assert!(parked <= 26, "parked {parked}: most that fit stay");
+}
