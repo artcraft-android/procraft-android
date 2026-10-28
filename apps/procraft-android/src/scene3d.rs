@@ -20,7 +20,9 @@ use procraft_engine::stroke::StrokeBuilder;
 use procraft_engine::studio::MAX_GRAIN_SCALE;
 use procraft_engine::usd::{read_usd, read_usdc, read_usdz};
 use procraft_engine::view::View;
-use procraft_gpu::{Canvas, Light, Lighting, MOST_LIGHTS, MeshView, Orbit, StrokeStyle, StrokeTool, wgpu};
+use procraft_gpu::{
+    Canvas, Gpu, Light, Lighting, MOST_LIGHTS, MeshView, Orbit, SharedStroke, StrokeStyle, StrokeTool, wgpu,
+};
 
 use crate::project::{THUMBNAIL_SIDE, file_error, pixels_hash, read_png, write_atomically, write_png};
 use crate::{CanvasSession, MobileError, PenSample, PointerKind, State, ToolKind};
@@ -116,6 +118,13 @@ impl TextureSet {
         }
         out
     }
+}
+
+/// Whether a stroke laying down `amount` (0..1) leaves a texel of `value` as it is: the same
+/// value, and one a byte holds exactly (so the texel, the material's own value, is the same).
+fn same_texel(amount: f32, value: f32) -> bool {
+    let byte = value * 255.0;
+    (amount - value).abs() < 1e-6 && (byte - byte.round()).abs() < 1e-3
 }
 
 /// The layer every texture set starts with: its Base Layer.
@@ -344,6 +353,13 @@ pub(crate) struct Scene {
     /// Strokes that painted the colour, roughness and metalness together: the step each made in
     /// each one's canvas, so undo and redo take them together.
     joint_steps: Vec<JointStep>,
+    /// The brush's grain as a texture, with its key (its own image's, or its built-in one's with
+    /// the top bit set), for a stroke's grain read along the model's axes.
+    grain_source: Option<(u64, wgpu::TextureView)>,
+    /// The stroke textures the texture sets' canvases draw their strokes in by turns, made when
+    /// first wanted: the colours', and the roughness and metalness's (a stroke on a colour draws
+    /// in one of each at once, one channel after the other).
+    strokes: [Option<SharedStroke>; 2],
 }
 
 /// What a stroke on a part's colour lays down in its roughness or metalness: the brush's amount
@@ -354,6 +370,8 @@ struct MaterialPaint {
     amount: f32,
     tile: f32,
     source: Option<u64>,
+    /// The source is read about the camera, as the brush's grain is, not fixed to the model.
+    follows_camera: bool,
 }
 
 /// A stroke that painted part `part`'s colour, roughness and metalness: the step it made in each
@@ -419,7 +437,18 @@ impl Scene {
             material_paint: None,
             material_sources: [None, None],
             joint_steps: Vec::new(),
+            grain_source: None,
+            strokes: [None, None],
         }
+    }
+
+    /// The stroke texture the canvases of the texture sets' colours (`material` false), or of
+    /// their roughness and metalness (true), draw in by turns.
+    fn stroke(&mut self, gpu: &Gpu, material: bool) -> SharedStroke {
+        let side = self.texture_size;
+        let [colour, materials] = &mut self.strokes;
+        let slot = if material { materials } else { colour };
+        slot.get_or_insert_with(|| SharedStroke::new(gpu, side, side)).clone()
     }
 
     /// Names of the texture sets: their materials', else numbered.
@@ -624,16 +653,11 @@ impl CanvasSession {
         }
         let gpu = st.gpu.as_ref()?;
         let scene = st.scene.as_mut()?;
+        let stroke = scene.stroke(gpu, channel != 0);
         let set = scene.slot(scene.current, channel)?.as_mut()?;
-        if set.canvas.is_none() {
-            let mut c = Canvas::new(gpu, &set.doc).ok()?;
-            for (lid, pixels) in set.take_pending() {
-                let _ = c.upload_layer(gpu, lid, &pixels);
-            }
-            set.canvas = Some(c);
-        }
-        let canvas = set.canvas.as_mut()?;
-        let t = canvas.layer_thumbnail(gpu, &mut set.doc, LayerId(id), max_side).ok()?;
+        set_canvas(gpu, set, &stroke).ok()?;
+        let TextureSet { canvas: Some(canvas), doc, .. } = set else { return None };
+        let t = canvas.layer_thumbnail(gpu, doc, LayerId(id), max_side).ok()?;
         Some(crate::layers::ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
     }
 
@@ -1320,8 +1344,9 @@ impl State {
                     canvas.render_finished(gpu, &mut self.doc);
                     Some(canvas.read_composite(gpu).map_err(|e| failed(e.to_string()))?)
                 } else {
+                    let stroke = scene.stroke(gpu, channel != 0);
                     match scene.slot(part, channel).and_then(Option::as_mut) {
-                        Some(set) => Some(waiting_picture(gpu, set).map_err(failed)?),
+                        Some(set) => Some(waiting_picture(gpu, set, &stroke).map_err(failed)?),
                         None => None,
                     }
                 };
@@ -1332,22 +1357,45 @@ impl State {
     }
 }
 
-/// A waiting texture set's picture, drawn now (its canvas made first if the model hasn't been
-/// drawn since it was opened).
-fn waiting_picture(gpu: &procraft_gpu::Gpu, set: &mut TextureSet) -> Result<Vec<u8>, String> {
-    let canvas = match set.canvas.take() {
-        Some(c) => c,
-        None => {
-            let mut c = Canvas::new(gpu, &set.doc).map_err(|e| e.to_string())?;
-            for (id, pixels) in set.take_pending() {
-                c.upload_layer(gpu, id, &pixels).map_err(|e| e.to_string())?;
-            }
-            c
-        }
-    };
-    let canvas = set.canvas.insert(canvas);
-    canvas.render_finished(gpu, &mut set.doc);
+/// A waiting texture set's picture, drawn now (its canvas made first, drawing in `stroke`, if
+/// the model hasn't been drawn since it was opened).
+fn waiting_picture(gpu: &Gpu, set: &mut TextureSet, stroke: &SharedStroke) -> Result<Vec<u8>, String> {
+    set_canvas(gpu, set, stroke)?;
+    let TextureSet { canvas: Some(canvas), doc, .. } = set else { return Err("no canvas".to_owned()) };
+    canvas.render_finished(gpu, doc);
     canvas.read_composite(gpu).map_err(|e| e.to_string())
+}
+
+/// Makes `set`'s canvas if it has none (with the pixels it waits with): one that takes the
+/// strokes carried onto the model, drawing them in `stroke`, and goes without brush images.
+fn set_canvas(gpu: &Gpu, set: &mut TextureSet, stroke: &SharedStroke) -> Result<(), String> {
+    if set.canvas.is_none() {
+        let mut c = Canvas::for_drawn_strokes(gpu, &set.doc, stroke).map_err(|e| e.to_string())?;
+        for (id, pixels) in set.take_pending() {
+            if let Err(e) = c.upload_layer(gpu, id, &pixels) {
+                log::error!("opening a texture set's layer: {e}");
+            }
+        }
+        set.canvas = Some(c);
+    }
+    Ok(())
+}
+
+/// A texture set's canvas left waiting while another is painted: its work done, it keeps no
+/// pictures to composite around and lets go of its brush images.
+fn to_waiting(gpu: &Gpu, set: &mut TextureSet) {
+    if let Some(canvas) = set.canvas.as_mut() {
+        canvas.render(gpu, &mut set.doc, None);
+        canvas.set_resident_budget(0);
+        canvas.let_go_of_brush_images(gpu);
+    }
+}
+
+/// A texture set's canvas becoming the session's: paged as the session's canvases are, its brush
+/// images made now so the first stroke doesn't wait for them.
+fn to_session(gpu: &Gpu, canvas: &mut Canvas) {
+    canvas.set_resident_budget(crate::layers::resident_budget());
+    canvas.prepare_brush_images(gpu);
 }
 
 /// Why a model can't be painted on, in words.
@@ -1743,12 +1791,15 @@ impl State {
         let side = self.doc.width();
         let Some(scene) = self.scene.as_mut() else { return };
         let (part, from) = (scene.current, scene.channel);
-        let old = TextureSet {
+        let mut old = TextureSet {
             doc: std::mem::replace(&mut self.doc, Document::new(1, 1)),
             canvas: self.canvas.take(),
             pending: crate::project::opened_pixels(std::mem::take(&mut self.pending_pixels), side, side),
             fill: None,
         };
+        if let Some(gpu) = self.gpu.as_ref() {
+            to_waiting(gpu, &mut old);
+        }
         let structure = old.doc.clone();
         if let Some(slot) = scene.slot(part, from) {
             *slot = Some(old);
@@ -1762,6 +1813,9 @@ impl State {
         self.pending_pixels = crate::project::opened(new.take_pending());
         self.doc = new.doc;
         self.canvas = new.canvas;
+        if let (Some(gpu), Some(canvas)) = (self.gpu.as_ref(), self.canvas.as_mut()) {
+            to_session(gpu, canvas);
+        }
         scene.channel = channel;
         self.ensure_canvas();
     }
@@ -1794,12 +1848,18 @@ impl State {
         let Some(mut set) = scene.sets.get_mut(index).and_then(Option::take) else { return };
         let (w, h) = (self.doc.width(), self.doc.height());
         let pending = std::mem::replace(&mut self.pending_pixels, crate::project::opened(set.take_pending()));
-        let old = TextureSet {
+        let mut old = TextureSet {
             doc: std::mem::replace(&mut self.doc, set.doc),
             canvas: std::mem::replace(&mut self.canvas, set.canvas),
             pending: crate::project::opened_pixels(pending, w, h),
             fill: None,
         };
+        if let Some(gpu) = self.gpu.as_ref() {
+            to_waiting(gpu, &mut old);
+            if let Some(canvas) = self.canvas.as_mut() {
+                to_session(gpu, canvas);
+            }
+        }
         if let Some(slot) = scene.sets.get_mut(scene.current) {
             *slot = Some(old);
         }
@@ -1843,9 +1903,18 @@ impl State {
                 Err(e) => return log::error!("3D stroke canvas: {e}"),
             }
         }
+        // a grain fixed to the canvas is read along the model's three axes (moving grain stays in
+        // the stamps drawn on the screen), and shows in the colour's coverage alone
+        let grain = stroke_grain(gpu, scene, &brush, style.grain_scale);
+        let mut canvas_style = style;
+        if grain.is_some() {
+            canvas_style.grain = Some(0);
+            canvas_style.grain_mode = procraft_engine::brush::GrainMode::Texturized;
+        } else if canvas_style.grain_mode == procraft_engine::brush::GrainMode::Texturized {
+            canvas_style.grain = None;
+        }
         let Some((screen_doc, screen)) = scene.screen.as_mut() else { return };
         // the screen's canvas holds its own copies of the brush's shape and grain
-        let canvas_style = style;
         screen.use_sources(gpu, &mut style, &brush);
         screen.begin_stroke(screen_doc.current(), style);
         screen.add_stamps(&stamps);
@@ -1854,6 +1923,9 @@ impl State {
         scene.ending = false;
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.begin_drawn_stroke(current, canvas_style);
+            if let Some(grain) = &grain {
+                canvas.set_stroke_grain(&gpu.device, grain);
+            }
         }
         self.stroke = Some(builder);
         self.begin_material_strokes(&brush, canvas_style, current);
@@ -1874,29 +1946,34 @@ impl State {
             (brush.setting("roughness_amount"), brush.setting("roughness_scale"), &brush.roughness),
             (brush.setting("metallic_amount"), brush.setting("metallic_scale"), &brush.metallic),
         ];
-        let mut paint = [MaterialPaint { amount: 0.0, tile: 1.0, source: None }; 2];
+        let follows_camera = brush.setting("grain_follows_camera") >= 0.5;
+        let mut paint = [MaterialPaint { amount: 0.0, tile: 1.0, source: None, follows_camera }; 2];
         for (k, ((amount, scale, source), out)) in channels.into_iter().zip(&mut paint).enumerate() {
-            // the channel's document, made now if it never was, with the colour's layers
             let value = scene.channel_value(part, k + 1);
+            let amount = amount.clamp(0.0, 1.0);
+            let key = crate::studio::source_key(source);
+            *out = MaterialPaint { amount, tile: (scale * MAX_GRAIN_SCALE).max(4.0), source: key, follows_camera };
+            // a channel never painted is the material's value all over (its Base Layer filled with
+            // it): a plain stroke of that very value onto that layer changes nothing, and the
+            // channel waits to be made until one does
+            let made = scene.slot(part, k + 1).is_some_and(|slot| slot.is_some());
+            let into_base = layer == base_layer() && structure.layer(layer).is_some();
+            if !made && into_base && key.is_none() && style.tool == StrokeTool::Paint && same_texel(amount, value) {
+                continue;
+            }
+            // the channel's document, made now if it never was, with the colour's layers
+            let stroke = scene.stroke(gpu, true);
             let Some(slot) = scene.slot(part, k + 1) else { return };
             let set = slot.get_or_insert_with(|| TextureSet::filled(side, &structure, opaque([value; 3])));
             follow_layers(set, &structure);
-            if set.canvas.is_none() {
-                let Ok(mut made) = Canvas::new(gpu, &set.doc) else { return };
-                for (id, pixels) in set.take_pending() {
-                    if let Err(e) = made.upload_layer(gpu, id, &pixels) {
-                        log::error!("opening a texture set's layer: {e}");
-                    }
-                }
-                set.canvas = Some(made);
+            if set_canvas(gpu, set, &stroke).is_err() {
+                return;
             }
             let Some(canvas) = set.canvas.as_mut() else { return };
-            let amount = amount.clamp(0.0, 1.0);
             // the colour's coverage, laid down plainly: no blend mode, grain or wet paint of its own
             let plain =
                 StrokeStyle { color: [amount; 3], blend: 0, burnt_edges: 0.0, grain: None, wet_pull: None, ..style };
             canvas.begin_drawn_stroke(layer, plain);
-            let key = crate::studio::source_key(source);
             let cached = scene.material_sources.get(k).and_then(|c| c.as_ref()).map(|(key, _)| *key);
             if key.is_some() && cached != key {
                 let made = crate::brush_files::material_pixels(source).and_then(|pixels| {
@@ -1906,7 +1983,6 @@ impl State {
                     *slot = key.zip(made);
                 }
             }
-            *out = MaterialPaint { amount, tile: (scale * MAX_GRAIN_SCALE).max(4.0), source: key };
         }
         scene.material_paint = Some(paint);
     }
@@ -2005,46 +2081,52 @@ impl State {
             size.1,
             canvas.stroke_target(),
         );
-        // the roughness and metalness take the colour's coverage as it is now
+        gpu.queue.submit([encoder.finish()]);
+        canvas.stroke_drawn(reach);
+        // each canvas's step made as the pen lifts, to be undone and redone together
+        let made = |c: &mut Canvas, doc: &mut Document| {
+            let before = c.steps_made();
+            c.end_stroke();
+            c.render(gpu, doc, None);
+            (c.steps_made() > before).then(|| c.undo_step()).flatten()
+        };
+        // the roughness and metalness take the colour's coverage as it is now, one after the
+        // other through the stroke texture they share: each drawn there, then shown (or kept)
         let part = scene.current;
-        let materials = scene.material_paint.zip(scene.channels.get_mut(part));
-        if let Some((paint, channels)) = &materials {
-            for (k, (look, set)) in paint.iter().zip(channels.iter()).enumerate() {
-                let Some(target) = set.as_ref().and_then(|s| s.canvas.as_ref()) else { continue };
+        let mut steps = [None, None, None];
+        if let Some((paint, channels)) = scene.material_paint.zip(scene.channels.get_mut(part)) {
+            for (k, ((look, set), step)) in
+                paint.iter().zip(channels.iter_mut()).zip(steps.iter_mut().skip(1)).enumerate()
+            {
+                let Some(set) = set.as_mut() else { continue };
+                let Some(target) = set.canvas.as_mut() else { continue };
                 let source = scene
                     .material_sources
                     .get(k)
                     .and_then(Option::as_ref)
                     .filter(|(key, _)| Some(*key) == look.source)
                     .map(|(_, view)| view);
-                let look = procraft_gpu::MaterialLook { amount: look.amount, source, tile: look.tile };
+                let look = procraft_gpu::MaterialLook {
+                    amount: look.amount,
+                    source,
+                    tile: look.tile,
+                    follows_camera: look.follows_camera,
+                };
+                let mut encoder =
+                    gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("3D material") });
                 view.project_material(gpu, &mut encoder, part, k, canvas.stroke_view(), &look, target.stroke_target());
-            }
-        }
-        gpu.queue.submit([encoder.finish()]);
-        canvas.stroke_drawn(reach);
-        let mut sets: Vec<&mut TextureSet> =
-            materials.map(|(_, channels)| channels.iter_mut().flatten().collect()).unwrap_or_default();
-        for set in &mut sets {
-            if let Some(c) = set.canvas.as_mut() {
-                c.stroke_drawn(reach);
-                c.render(gpu, &mut set.doc, None);
+                gpu.queue.submit([encoder.finish()]);
+                target.stroke_drawn(reach);
+                if scene.ending {
+                    *step = made(target, &mut set.doc);
+                } else {
+                    target.render(gpu, &mut set.doc, None);
+                }
             }
         }
         if scene.ending {
-            // each canvas's step made now, to be undone and redone together
-            let made = |c: &mut Canvas, doc: &mut Document| {
-                let before = c.steps_made();
-                c.end_stroke();
-                c.render(gpu, doc, None);
-                (c.steps_made() > before).then(|| c.undo_step()).flatten()
-            };
-            let mut steps = [made(canvas, &mut self.doc), None, None];
-            for (step, set) in steps.iter_mut().skip(1).zip(&mut sets) {
-                if let Some(c) = set.canvas.as_mut() {
-                    *step = made(c, &mut set.doc);
-                }
-            }
+            // the colour last: its stroke is what the others were drawn from
+            steps[0] = made(canvas, &mut self.doc);
             if scene.material_paint.take().is_some() && steps.iter().flatten().count() > 1 {
                 if scene.joint_steps.len() >= MOST_JOINT_STEPS {
                     scene.joint_steps.remove(0);
@@ -2116,18 +2198,21 @@ impl State {
                 scene.view = Some(view);
                 scene.surface_shown = false;
             }
-            // the waiting texture sets' canvases (and channels), with the pixels they opened with
-            for set in scene.sets.iter_mut().flatten().chain(scene.channels.iter_mut().flatten().flatten()) {
-                if set.canvas.is_none()
-                    && let Ok(mut c) = Canvas::new(gpu, &set.doc)
-                {
-                    for (id, pixels) in set.take_pending() {
-                        if let Err(e) = c.upload_layer(gpu, id, &pixels) {
-                            log::error!("opening a texture set's layer: {e}");
-                        }
+            // the waiting texture sets' canvases (and channels), with the pixels they opened with,
+            // drawing in the stroke textures of their kind
+            let unmade = |s: &Option<TextureSet>| s.as_ref().is_some_and(|s| s.canvas.is_none());
+            let colour = scene.sets.iter().any(unmade).then(|| scene.stroke(gpu, false));
+            let material = scene.channels.iter().flatten().any(unmade).then(|| scene.stroke(gpu, true));
+            let colours = scene.sets.iter_mut().flatten().map(|s| (s, &colour));
+            let channels = scene.channels.iter_mut().flatten().flatten().map(|s| (s, &material));
+            for (set, stroke) in colours.chain(channels) {
+                if let (None, Some(stroke)) = (set.canvas.as_ref(), stroke) {
+                    if let Err(e) = set_canvas(gpu, set, stroke) {
+                        log::error!("a texture set's canvas: {e}");
                     }
-                    c.render(gpu, &mut set.doc, None);
-                    set.canvas = Some(c);
+                    if let TextureSet { canvas: Some(c), doc, .. } = set {
+                        c.render(gpu, doc, None);
+                    }
                 }
             }
         }
@@ -2145,6 +2230,9 @@ impl State {
         }
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.render(gpu, &mut self.doc, None);
+            // the session's canvas draws its strokes in the texture its kind shares, as the others
+            let stroke = scene.stroke(gpu, scene.channel != 0);
+            canvas.draw_strokes_in(gpu, &stroke);
         }
         let Some(view) = scene.view.as_mut() else { return };
         view.set_convert(convert);
@@ -2226,6 +2314,38 @@ impl State {
             });
         }
     }
+}
+
+/// A stroke's grain fixed to the canvas read along the model's three axes into the current
+/// part's texture space, one tile every `tile` canvas pixels, if the brush has one and the model
+/// has been drawn: for [`Canvas::set_stroke_grain`].
+fn stroke_grain(
+    gpu: &Gpu,
+    scene: &mut Scene,
+    brush: &procraft_engine::brush::Brush,
+    tile: f32,
+) -> Option<wgpu::TextureView> {
+    let g = &brush.grain;
+    if g.mode != procraft_engine::brush::GrainMode::Texturized || g.depth <= 0.0 {
+        return None;
+    }
+    let key = g.source.as_ref().map(|s| s.id).or_else(|| g.image.map(|i| (1 << 63) | u64::from(i)))?;
+    if scene.grain_source.as_ref().map(|(k, _)| *k) != Some(key) {
+        let pixels = crate::brush_files::grain_pixels(brush)?;
+        let made = procraft_gpu::material_source(gpu, procraft_engine::textures::TEXTURE_SIZE as u32, &pixels);
+        scene.grain_source = made.map(|v| (key, v));
+    }
+    let source = scene.grain_source.as_ref().map(|(_, v)| v)?;
+    let look = procraft_gpu::GrainLook {
+        source,
+        tile: tile.max(1.0),
+        follows_camera: brush.setting("grain_follows_camera") >= 0.5,
+    };
+    let view = scene.view.as_mut()?;
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("3D grain") });
+    let grain = view.project_grain(gpu, &mut encoder, scene.current, &look);
+    gpu.queue.submit([encoder.finish()]);
+    grain
 }
 
 /// Input as window pixels (3D strokes are built on the screen).
@@ -2793,6 +2913,40 @@ mod tests {
     }
 
     #[test]
+    fn a_grain_fixed_to_the_canvas_shows_in_the_colour_read_along_the_models_axes() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        // stripes down the grain image, eight to a tile, fully deep and fixed to the canvas
+        let n = crate::studio::source_size() as usize;
+        let stripes: Vec<u8> =
+            (0..n * n).map(|i| if ((i % n) / (n / 8)).is_multiple_of(2) { 0 } else { 255 }).collect();
+        s.studio_begin();
+        assert!(s.set_studio_source(crate::studio::SourceKind::Grain, stripes));
+        s.set_studio_setting("grain_behavior".into(), 1.0);
+        s.set_studio_setting("grain_depth".into(), 1.0);
+        s.set_studio_setting("grain_scale".into(), 0.5);
+        s.set_studio_setting("roughness_amount".into(), 0.4);
+        s.studio_end(true);
+        frame(&s, 200);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(60.0, 100.0, 0.0)]);
+        s.stroke_add((1..20).map(|i| sample(60.0 + i as f32 * 4.0, 100.0, f64::from(i) * 8.0)).collect());
+        s.stroke_end(vec![sample(140.0, 100.0, 170.0)]);
+        frame(&s, 200);
+        // the colour has gaps where the grain is dark; the roughness takes the whole stroke
+        let colour = painted(&s);
+        s.set_model_channel(1);
+        let rough = painted(&s);
+        s.set_model_channel(0);
+        assert!(rough > 100, "{rough}");
+        assert!(colour > 20 && colour * 10 < rough * 8, "colour {colour}, roughness {rough}");
+        // undone together
+        s.undo();
+        assert_eq!(painted(&s), 0);
+    }
+
+    #[test]
     fn undo_and_redo_take_a_strokes_channels_together() {
         let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
         if !shown(&s) {
@@ -3190,6 +3344,57 @@ f 1/1 2/2",
         st.gpu = Some(gpu);
         st.ensure_canvas();
         true
+    }
+
+    /// What the current part's roughness and metalness canvases hold on the GPU, bytes (a texture
+    /// they share counted once); and which of the two are made.
+    fn channel_bytes(s: &CanvasSession) -> (u64, [bool; 2]) {
+        let st = s.shared.lock();
+        let scene = st.scene.as_ref().unwrap();
+        let pair = scene.channels.get(scene.current).unwrap();
+        let mut all: Vec<wgpu::Texture> = Vec::new();
+        for c in pair.iter().flatten().filter_map(|set| set.canvas.as_ref()) {
+            for t in c.textures() {
+                if !all.contains(&t) {
+                    all.push(t);
+                }
+            }
+        }
+        (procraft_gpu::textures_bytes(&all), [pair[0].is_some(), pair[1].is_some()])
+    }
+
+    #[test]
+    fn a_models_roughness_and_metalness_hold_their_layers_and_composites_and_share_a_stroke() {
+        let side = 512u64;
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 512).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        // the plain brush on a plain material: rough as the brush, as metal as the material
+        // (none), so the metalness isn't made
+        dab(&s);
+        assert_eq!(channel_bytes(&s).1, [true, false]);
+        // a stroke under way on both: each its layer and composite (RGBA8) and a few small
+        // textures, one stroke texture (half floats) between them, no brush images
+        materials(&s, 0.2, 0.8);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(90.0, 100.0, 0.0)]);
+        frame(&s, 200);
+        let small = 1024 + 1 + 2;
+        let undo = side * side * 4;
+        let (bytes, made) = channel_bytes(&s);
+        assert_eq!(made, [true, true]);
+        // the roughness keeps the first dab's undo step (the cube's faces each cover the texture)
+        assert_eq!(bytes, 2 * (side * side * 8 + small) + side * side * 8 + undo);
+        s.stroke_end(vec![sample(110.0, 100.0, 50.0)]);
+        frame(&s, 200);
+        assert_eq!(channel_bytes(&s).0, bytes + 2 * undo);
+        // painting the roughness itself gives it its brush images, and back on the colour it
+        // lets them go
+        s.set_model_channel(1);
+        assert!(s.shared.lock().canvas.as_ref().unwrap().has_brush_images());
+        s.set_model_channel(0);
+        assert_eq!(channel_bytes(&s).0, bytes + 2 * undo);
     }
 
     /// A dab in the middle of the window.

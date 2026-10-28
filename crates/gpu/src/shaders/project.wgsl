@@ -131,12 +131,14 @@ fn fs_dilate(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 }
 
 // ---- a stroke's roughness or metalness: the colour's coverage (binding 1, in the texture's
-// space) carrying the brush's amount, through its source seen from the model's three axes -----
+// space) carrying the brush's amount, through its source seen from the model's three axes; and
+// a stroke's grain, read the same way -----------------------------------------------------------
 
 struct Material {
-    // the model's middle, and how many framing units one of its own units is
-    frame: vec4<f32>,
-    // the amount, one source tile's side (framing units), and 1 when there is a source
+    // grain space from the model's (columns): framing units about the model's middle, or about
+    // the camera and turned with it when the grain follows the camera
+    space: mat4x4<f32>,
+    // the amount, one source tile's side (grain space units), and 1 when there is a source
     look: vec4<f32>,
 }
 
@@ -154,8 +156,8 @@ struct MaterialOut {
 fn vs_material(v: In) -> MaterialOut {
     var o: MaterialOut;
     o.clip = vec4<f32>(v.uv.x * 2.0 - 1.0, v.uv.y * 2.0 - 1.0, 0.0, 1.0);
-    o.framed = (v.position - material.frame.xyz) * material.frame.w;
-    o.normal = v.normal;
+    o.framed = (material.space * vec4<f32>(v.position, 1.0)).xyz;
+    o.normal = (material.space * vec4<f32>(v.normal, 0.0)).xyz;
     return o;
 }
 
@@ -164,13 +166,15 @@ const AXIS_SHARPNESS: f32 = 10.0;
 
 // the source where a surface at `p` facing `n` is, read along the axis it faces most: each
 // axis's reading weighted by how squarely the surface faces it, the weights' squares summing
-// to one; each read so it isn't mirrored from either side
+// to one; seen from the x side across z and up y (z turned about for the side facing +x), from
+// above across x and z (z turned about from above), from the front across x and up y (x turned
+// about from behind)
 fn from_three_axes(p: vec3<f32>, n: vec3<f32>, tile: f32) -> f32 {
     let along = pow(abs(n), vec3<f32>(AXIS_SHARPNESS));
     let weights = saturate(along * inverseSqrt(max(dot(along, along), 1e-12)));
     let q = p / tile;
     let across_x = vec2<f32>(select(q.z, -q.z, n.x >= 0.0), q.y);
-    let across_y = vec2<f32>(q.x, select(q.z, -q.z, n.y < 0.0));
+    let across_y = vec2<f32>(q.x, select(-q.z, q.z, n.y < 0.0));
     let across_z = vec2<f32>(select(-q.x, q.x, n.z > 0.0), q.y);
     let seen = vec3<f32>(
         textureSampleLevel(source, source_sampler, across_x, 0.0).r,
@@ -190,4 +194,12 @@ fn fs_material(i: MaterialOut) -> @location(0) vec4<f32> {
     }
     let v = clamp(amount, 0.0, 1.0) * cover;
     return vec4<f32>(v, v, v, cover);
+}
+
+// each texel the grain where its surface is (the source read along the model's three axes),
+// what a stroke's grain fixed to the canvas becomes on a model
+@fragment
+fn fs_grain(i: MaterialOut) -> @location(0) vec4<f32> {
+    let g = saturate(from_three_axes(i.framed, normalize(i.normal), max(material.look.y, 1e-4)));
+    return vec4<f32>(g, g, g, 1.0);
 }

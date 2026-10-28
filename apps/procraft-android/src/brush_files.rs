@@ -834,7 +834,7 @@ fn shape_pixels(b: &Brush) -> Vec<u8> {
 }
 
 /// The brush's grain as an image, if it has one.
-fn grain_pixels(b: &Brush) -> Option<Vec<u8>> {
+pub(crate) fn grain_pixels(b: &Brush) -> Option<Vec<u8>> {
     if let Some(s) = &b.grain.source {
         return Some(s.pixels.to_vec());
     }

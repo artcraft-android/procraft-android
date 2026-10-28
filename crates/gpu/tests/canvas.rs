@@ -1310,3 +1310,93 @@ fn a_stamp_taller_than_wide_draws_in_full() {
     assert!(painted(32, 32 + 9) && painted(32, 32 - 9), "its height");
     assert!(!painted(32 + 7, 32), "its width");
 }
+
+#[test]
+fn canvases_take_turns_with_a_shared_stroke_and_make_brush_images_when_wanted() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let shared = procraft_gpu::SharedStroke::new(&gpu, 64, 64);
+    let mut docs = [Document::new(64, 64), Document::new(64, 64)];
+    let mut a = Canvas::for_drawn_strokes(&gpu, &docs[0], &shared).unwrap();
+    let mut b = Canvas::for_drawn_strokes(&gpu, &docs[1], &shared).unwrap();
+    assert!(!a.has_brush_images() && !b.has_brush_images());
+    assert!(a.textures().contains(shared.texture()) && b.textures().contains(shared.texture()));
+    // a stroke on each in turn, through the one texture: each keeps only its own
+    let [da, db] = &mut docs;
+    a.begin_stroke(da.current(), style(StrokeTool::Paint, 1.0));
+    a.add_stamps(&[dot(Vec2::new(16.0, 16.0), 6.0)]);
+    a.end_stroke();
+    a.render(&gpu, da, None);
+    // stamps want the brush images: made then
+    assert!(a.has_brush_images());
+    b.begin_stroke(db.current(), style(StrokeTool::Paint, 1.0));
+    b.add_stamps(&[dot(Vec2::new(48.0, 48.0), 6.0)]);
+    b.end_stroke();
+    b.render(&gpu, db, None);
+    let (la, lb) = (a.read_layer(&gpu, da.current()).unwrap(), b.read_layer(&gpu, db.current()).unwrap());
+    assert_eq!(pixel(&la, 64, 16, 16)[3], 255);
+    assert_eq!(pixel(&la, 64, 48, 48)[3], 0);
+    assert_eq!(pixel(&lb, 64, 48, 48)[3], 255);
+    assert_eq!(pixel(&lb, 64, 16, 16)[3], 0);
+    // let go, and an ordinary canvas made to draw in the shared texture
+    a.let_go_of_brush_images(&gpu);
+    assert!(!a.has_brush_images());
+    let mut c = Canvas::new(&gpu, da).unwrap();
+    assert!(c.draw_strokes_in(&gpu, &shared));
+    assert!(c.textures().contains(shared.texture()));
+}
+
+#[test]
+fn a_drawn_stroke_takes_its_grain_from_a_picture_of_its_own() {
+    use wgpu::util::DeviceExt;
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(32, 32);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    // the grain: black on the left half, white on the right
+    let pixels: Vec<u8> = (0..32 * 32).map(|i| if i % 32 < 16 { 0 } else { 255 }).collect();
+    let picture = gpu.device.create_texture_with_data(
+        &gpu.queue,
+        &wgpu::TextureDescriptor {
+            label: Some("stroke grain"),
+            size: wgpu::Extent3d { width: 32, height: 32, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        &pixels,
+    );
+    let grain = picture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    // a stroke with a grain fixed to the canvas, all of it deep, drawn into from elsewhere: a
+    // band across the middle
+    let grained = StrokeStyle {
+        grain: Some(3),
+        grain_depth: 1.0,
+        grain_scale: 7.0,
+        grain_rotation: 0.4,
+        ..StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0)
+    };
+    canvas.begin_drawn_stroke(doc.current(), grained);
+    canvas.set_stroke_grain(&gpu.device, &grain);
+    // stamped into the stroke here (as a projection would draw it)
+    canvas.add_stamps(&(0..32).map(|x| dot(Vec2::new(x as f32, 16.0), 5.0)).collect::<Vec<_>>());
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    // painted where the picture is white, not where it is black, whatever the brush's own grain
+    assert_eq!(pixel(&layer, 32, 24, 16)[3], 255);
+    assert_eq!(pixel(&layer, 32, 8, 16)[3], 0);
+    // the picture goes with the stroke: the next one reads the brush's grains again
+    canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(8.0, 8.0), 3.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(pixel(&canvas.read_layer(&gpu, doc.current()).unwrap(), 32, 8, 8)[3], 255);
+}

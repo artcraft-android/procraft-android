@@ -14,10 +14,11 @@ use std::sync::{Arc, OnceLock};
 
 pub use canvas::{
     Backdrop, Canvas, DisplayLut, Filter, LiquifyMode, LiquifyStamp, ReadyToPark, RemakeStats, Resample, SelectionLook,
-    SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, read_texture,
+    SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, read_texture,
+    textures_bytes,
 };
 pub use lighting::Lighting;
-pub use scene::{Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, SurfaceMap, material_source};
+pub use scene::{GrainLook, Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, SurfaceMap, material_source};
 pub use sphere::{SphereLook, SpherePreview, preview_environment};
 pub use wgpu;
 

@@ -925,3 +925,55 @@ fn a_remake_lets_go_only_what_its_parts_need_room_for() {
     let parked = t.canvases[0].parked_layers();
     assert!(parked <= 26, "parked {parked}: most that fit stay");
 }
+
+/// What the GPU's allocator holds, bytes, once the work sent so far is done; none where the
+/// backend gives no report.
+fn allocated(gpu: &Gpu) -> Option<u64> {
+    gpu.flush();
+    gpu.device.generate_allocator_report().map(|r| r.total_allocated_bytes)
+}
+
+#[test]
+fn a_canvas_makes_its_scratch_and_second_composite_only_once_wanted() {
+    let Some(gpu) = Gpu::headless().ok() else { return eprintln!("skipped: no GPU") };
+    let side = 1024u32;
+    let mut doc = Document::new(side, side);
+    // the first canvas makes the device's pipelines; the second is measured
+    let _first = Canvas::new(&gpu, &doc).unwrap();
+    let before = allocated(&gpu);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    canvas.render(&gpu, &mut doc, None);
+    let per = u64::from(side * side);
+    // the layer, the composite and the stroke (half floats), the brush images and the small ones
+    let brushes = canvas.textures().iter().filter(|t| t.depth_or_array_layers() > 1).count();
+    assert_eq!(brushes, 2);
+    let images = procraft_gpu::textures_bytes(
+        &canvas.textures().into_iter().filter(|t| t.depth_or_array_layers() > 1).collect::<Vec<_>>(),
+    );
+    let small = 256 * 4 + 1;
+    assert_eq!(canvas.texture_bytes(), per * (4 + 4 + 8) + images + small);
+    // the allocator agrees, give or take its rounding of the small ones and the buffers
+    if let (Some(a), Some(b)) = (before, allocated(&gpu)) {
+        let made = b.saturating_sub(a);
+        assert!(
+            made.abs_diff(canvas.texture_bytes()) < 2 << 20,
+            "allocated {made}, counted {}",
+            canvas.texture_bytes()
+        );
+    }
+    // a layer of a blend mode wants the composite's second texture, a stroke by a mode the scratch
+    let id = doc.current();
+    doc.set_blend(id, BlendMode::Multiply);
+    canvas.invalidate();
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(canvas.texture_bytes(), per * (4 + 4 + 4 + 8) + images + small);
+    let by_mode = StrokeStyle { blend: 1, ..StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0) };
+    canvas.begin_stroke(id, by_mode);
+    canvas.add_stamps(&[Stamp::round(Vec2::new(8.0, 8.0), 4.0, 1.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    // the stroke's undo snapshot besides
+    let undo = 16 * 16 * 4;
+    assert!(canvas.texture_bytes() >= per * (4 + 4 + 4 + 4 + 8) + images + small + undo);
+    assert_eq!(gpu.errors(), 0);
+}
