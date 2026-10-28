@@ -1211,6 +1211,10 @@ pub struct Canvas {
     /// Layers whose pixels changed since [`Canvas::take_changed`] took them, so a save reads only
     /// those.
     changed: HashSet<LayerId>,
+    /// Each layer's pixels' version, from a count that goes up with every change: thumbnails are
+    /// read again only when theirs has.
+    versions: HashMap<LayerId, u64>,
+    version: u64,
     /// What the layers' textures may take before those needed least lately are parked (0: none
     /// are), and when each was last needed, counted in renders.
     resident_budget: u64,
@@ -1415,6 +1419,8 @@ impl Canvas {
             parked: HashMap::new(),
             pictures: HashMap::new(),
             changed: HashSet::new(),
+            versions: HashMap::new(),
+            version: 0,
             resident_budget: 0,
             needed_at: HashMap::new(),
             renders: 0,
@@ -1909,6 +1915,20 @@ impl Canvas {
         std::mem::take(&mut self.changed)
     }
 
+    /// Layer `id`'s pixels are changing: counted for the next save, and given a new version.
+    fn touched(&mut self, id: LayerId) {
+        self.changed.insert(id);
+        self.version += 1;
+        self.versions.insert(id, self.version);
+    }
+
+    /// Layer `id`'s pixels' version as of the last render: it is new whenever they may have
+    /// changed (painting, undo, uploads, every other change), so a thumbnail of the same version
+    /// is still right.
+    pub fn layer_version(&self, id: LayerId) -> u64 {
+        self.versions.get(&id).copied().unwrap_or(0)
+    }
+
     /// Layers to count as changed again (a save of them that failed).
     pub fn mark_changed(&mut self, ids: impl IntoIterator<Item = LayerId>) {
         self.changed.extend(ids);
@@ -1966,7 +1986,7 @@ impl Canvas {
             if written {
                 self.parked.remove(&id);
                 self.pictures.remove(&id);
-                self.changed.insert(id);
+                self.touched(id);
             }
             self.needed_at.insert(id, self.renders);
             // the staged pixels sent on now and then, so many in a row don't pile up
@@ -4996,9 +5016,9 @@ impl Canvas {
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             self.layers.insert(id, LayerGpu { texture, view });
         }
+        self.touched(id);
         let Some(layer) = self.layers.get(&id) else { return Ok(()) };
         self.caches = None;
-        self.changed.insert(id);
         // its compressed copy no longer what it holds
         self.parked.remove(&id);
         self.pictures.remove(&id);

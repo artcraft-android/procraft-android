@@ -700,3 +700,31 @@ fn the_picture_read_back_waits_for_the_caches() {
     assert!(worst <= 2, "read while the caches are remade: differs by {worst}");
     assert!(!t.canvases[0].busy());
 }
+
+#[test]
+fn a_layers_version_changes_with_its_pixels_only() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    let a = doc.current();
+    let b = doc.add_layer();
+    canvas.render(&gpu, &mut doc, None);
+    let (va, vb) = (canvas.layer_version(a), canvas.layer_version(b));
+    paint(&mut canvas, &doc, b, [200, 0, 0], Vec2::new(8.0, 8.0), 3.0, StrokeTool::Paint);
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(canvas.layer_version(a), va, "the other layer's stays");
+    let painted = canvas.layer_version(b);
+    assert_ne!(painted, vb, "the painted one's is new");
+    // hidden, and another chosen: its pixels are as they were
+    let before = doc.clone();
+    doc.set_visible(b, false);
+    canvas.record_document(before);
+    doc.set_current(a);
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(canvas.layer_version(b), painted, "hidden and left");
+    // shown again, then the stroke undone: new again
+    canvas.undo();
+    canvas.render(&gpu, &mut doc, None);
+    canvas.undo();
+    canvas.render(&gpu, &mut doc, None);
+    assert_ne!(canvas.layer_version(b), painted, "undone");
+    assert_eq!(gpu.errors(), 0);
+}

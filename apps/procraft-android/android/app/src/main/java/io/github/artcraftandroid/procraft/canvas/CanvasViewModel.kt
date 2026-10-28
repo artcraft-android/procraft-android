@@ -693,6 +693,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var canRedo by mutableStateOf(false)
         private set
     val thumbnails = mutableStateMapOf<ULong, ImageBitmap>()
+    /** The pixels' version each thumbnail was read at: it is read again only once its layer's is new. */
+    private val thumbnailVersions = HashMap<ULong, ULong>()
 
     var brushSets by mutableStateOf<List<BrushSetInfo>>(emptyList())
         private set
@@ -1952,6 +1954,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         attachProjection()
         activeSince = android.os.SystemClock.elapsedRealtime()
         thumbnails.clear()
+        thumbnailVersions.clear()
         previews.clear()
         shadedNames.clear()
         panel = Panel.NONE
@@ -2799,6 +2802,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (s.cropCanvas(r.left, r.top, r.width, r.height, cropAngle, cropResample, w.toUInt(), h.toUInt())) {
             thumbnails.clear()
+            thumbnailVersions.clear()
             refresh()
             refreshView()
             if (panel == Panel.LAYERS) refreshThumbnails()
@@ -5786,11 +5790,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         hasSelection = session?.hasSelection() ?: false
     }
 
+    /** Reads again the thumbnails of the layers whose pixels changed since theirs was read (or have none). */
     private fun refreshThumbnails() {
-        for (l in layers) loadThumbnail(l.id)
+        val s = session ?: return
+        viewModelScope.launch {
+            val versions = withContext(Dispatchers.Default) { runCatching { s.layerVersions() }.getOrNull() } ?: return@launch
+            if (session !== s) return@launch
+            for (v in versions) {
+                if (v.id !in thumbnails || thumbnailVersions[v.id] != v.version) loadThumbnail(v.id, v.version)
+            }
+        }
     }
 
-    private fun loadThumbnail(id: ULong) {
+    /** Reads layer [id]'s thumbnail; [version], its pixels' version when asked (none: not known). */
+    private fun loadThumbnail(id: ULong, version: ULong? = null) {
         val s = session ?: return
         viewModelScope.launch {
             val image = withContext(Dispatchers.Default) {
@@ -5799,7 +5812,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
                 bitmap.asImageBitmap()
             }
-            if (image != null) thumbnails[id] = image
+            if (image != null && session === s) {
+                thumbnails[id] = image
+                if (version != null) thumbnailVersions[id] = version else thumbnailVersions.remove(id)
+            }
         }
     }
 

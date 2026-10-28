@@ -39,6 +39,13 @@ pub struct LayerInfo {
     pub can_clip: bool,
 }
 
+/// A layer's pixels' version: new whenever they may have changed.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct LayerVersion {
+    pub id: u64,
+    pub version: u64,
+}
+
 /// What a layer in the list is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum LayerType {
@@ -565,6 +572,21 @@ impl CanvasSession {
     }
 
     /// The layer scaled to fit `max_side` pixels, or none before the canvas exists.
+    /// Each paint layer's and mask's pixels' version, the queued work done first: a thumbnail
+    /// need only be read again when its layer's is new.
+    pub fn layer_versions(&self) -> Vec<LayerVersion> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.flush();
+        let Some(canvas) = st.canvas.as_ref() else { return Vec::new() };
+        st.doc
+            .layers()
+            .iter()
+            .filter(|l| l.kind != LayerKind::Group)
+            .map(|l| LayerVersion { id: l.id.0, version: canvas.layer_version(l.id) })
+            .collect()
+    }
+
     pub fn layer_thumbnail(&self, id: u64, max_side: u32) -> Option<ThumbnailImage> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
