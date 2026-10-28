@@ -258,8 +258,8 @@ f 1/1 2/2 3/3 4/4
     // a material carried at half, and one through a black source (none of the amount)
     let black = material_source(&gpu, 2, &[0; 4]).unwrap();
     let looks = [
-        MaterialLook { amount: 0.5, source: None, tile: 100.0 },
-        MaterialLook { amount: 1.0, source: Some(&black), tile: 100.0 },
+        MaterialLook { amount: 0.5, source: None, tile: 100.0, follows_camera: false },
+        MaterialLook { amount: 1.0, source: Some(&black), tile: 100.0, follows_camera: true },
     ];
     let mut materials: Vec<(Document, Canvas)> = looks
         .iter()
@@ -650,4 +650,74 @@ f 1/1 2/2 3/3 4/4
     let (toward, away) = (lit([0.0, 6.0, 1.0], [128, 218, 218]), lit([0.0, 6.0, 1.0], [128, 38, 218]));
     assert!(toward > away + 20, "lit from +y: {toward} leaning +v, {away} leaning -v");
     assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
+fn a_strokes_grain_is_read_along_the_models_axes() {
+    use procraft_gpu::{GrainLook, material_source};
+    let Some(gpu) = gpu() else { return };
+    // a square facing up over the whole texture (its far edge at the texture's top), and the
+    // same facing down
+    let up = "v -1 0 1\nv 1 0 1\nv 1 0 -1\nv -1 0 -1\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nf 1/1 2/2 3/3 4/4\n";
+    let down = "v -1 0 1\nv 1 0 1\nv 1 0 -1\nv -1 0 -1\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nf 4/4 3/3 2/2 1/1\n";
+    // a grain whose grey goes once round a wave down the image, the same across it
+    let n = procraft_engine::textures::TEXTURE_SIZE;
+    let wave = |t: f32| 128.0 + 127.0 * (std::f32::consts::TAU * t).sin();
+    let pixels: Vec<u8> = (0..n * n).map(|i| wave(((i / n) as f32 + 0.5) / n as f32).round() as u8).collect();
+    let source = material_source(&gpu, n as u32, &pixels).unwrap();
+    // the square is 4 framing units across; one tile every 16 (16 / 0.00225 canvas pixels)
+    let tile_units = 16.0;
+    let side = 32u32;
+    for (obj, facing_up) in [(up, true), (down, false)] {
+        let mesh = read_obj(obj, None).unwrap();
+        let mut view = MeshView::new(&gpu, &mesh, side, wgpu::TextureFormat::Rgba8Unorm);
+        let look = GrainLook { source: &source, tile: tile_units / 0.00225, follows_camera: false };
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("grain") });
+        let grain = view.project_grain(&gpu, &mut encoder, 0, &look).unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        let px = read_texture_r8(&gpu, grain.texture(), side);
+        // texel rows run down from the square's far edge (z -1) to its near one (z 1); seen from
+        // above the image's rows run towards the far edge, from below towards the near one
+        for row in [4u32, 12, 20, 28] {
+            let z = -1.0 + 2.0 * (row as f32 + 0.5) / side as f32;
+            let q = z * 2.0 / tile_units;
+            let along = if facing_up { -q } else { q };
+            let expected = wave(along.rem_euclid(1.0));
+            for col in [3u32, 16, 29] {
+                let got = f32::from(px[(row * side + col) as usize]);
+                assert!((got - expected).abs() <= 4.0, "up {facing_up} row {row} col {col}: {got} vs {expected}");
+            }
+        }
+    }
+    assert_eq!(gpu.errors(), 0);
+}
+
+/// A one-grey texture `side` square read back.
+fn read_texture_r8(gpu: &Gpu, texture: &wgpu::Texture, side: u32) -> Vec<u8> {
+    let row = side.div_ceil(256) * 256;
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("read grain"),
+        size: u64::from(row * side),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("read") });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(side) },
+        },
+        wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+    (0..side).flat_map(|y| data[(y * row) as usize..(y * row + side) as usize].to_vec()).collect()
 }

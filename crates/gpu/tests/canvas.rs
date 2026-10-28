@@ -1345,3 +1345,58 @@ fn canvases_take_turns_with_a_shared_stroke_and_make_brush_images_when_wanted() 
     assert!(c.draw_strokes_in(&gpu, &shared));
     assert!(c.textures().contains(shared.texture()));
 }
+
+#[test]
+fn a_drawn_stroke_takes_its_grain_from_a_picture_of_its_own() {
+    use wgpu::util::DeviceExt;
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(32, 32);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    // the grain: black on the left half, white on the right
+    let pixels: Vec<u8> = (0..32 * 32).map(|i| if i % 32 < 16 { 0 } else { 255 }).collect();
+    let picture = gpu.device.create_texture_with_data(
+        &gpu.queue,
+        &wgpu::TextureDescriptor {
+            label: Some("stroke grain"),
+            size: wgpu::Extent3d { width: 32, height: 32, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        &pixels,
+    );
+    let grain = picture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    // a stroke with a grain fixed to the canvas, all of it deep, drawn into from elsewhere: a
+    // band across the middle
+    let grained = StrokeStyle {
+        grain: Some(3),
+        grain_depth: 1.0,
+        grain_scale: 7.0,
+        grain_rotation: 0.4,
+        ..StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0)
+    };
+    canvas.begin_drawn_stroke(doc.current(), grained);
+    canvas.set_stroke_grain(&gpu.device, &grain);
+    // stamped into the stroke here (as a projection would draw it)
+    canvas.add_stamps(&(0..32).map(|x| dot(Vec2::new(x as f32, 16.0), 5.0)).collect::<Vec<_>>());
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    // painted where the picture is white, not where it is black, whatever the brush's own grain
+    assert_eq!(pixel(&layer, 32, 24, 16)[3], 255);
+    assert_eq!(pixel(&layer, 32, 8, 16)[3], 0);
+    // the picture goes with the stroke: the next one reads the brush's grains again
+    canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(8.0, 8.0), 3.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(pixel(&canvas.read_layer(&gpu, doc.current()).unwrap(), 32, 8, 8)[3], 255);
+}

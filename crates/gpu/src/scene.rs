@@ -17,6 +17,8 @@ const STROKE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const DISTANCE: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 /// Where a part's triangles lie in its texture.
 const ISLANDS: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+/// A stroke's grain in a part's texture's space: one grey per texel.
+const GRAIN: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// How far past its islands a projected stroke is grown (texels; as the shader's `DILATE`).
 const DILATE: i32 = 2;
 /// A brush's tiling is in canvas pixels; on a model each pixel counts as this many framing units
@@ -26,11 +28,21 @@ const TILE_UNITS_PER_PIXEL: f32 = 0.00225;
 /// What a stroke on a model's colour lays down in its roughness or metalness: the brush's
 /// `amount` (0..1), through its `source` if it has one (grey, white taking the amount, made with
 /// [`material_source`]), one tile of it every `tile` canvas pixels, seen from the model's three
-/// axes.
+/// axes: fixed to the model, or (`follows_camera`) to the camera, as a stroke's grain is.
 pub struct MaterialLook<'a> {
     pub amount: f32,
     pub source: Option<&'a wgpu::TextureView>,
     pub tile: f32,
+    pub follows_camera: bool,
+}
+
+/// A stroke's grain on a model: its image (grey, made with [`material_source`]), one tile of it
+/// every `tile` canvas pixels, read along the model's three axes, fixed to the model or (as
+/// brushes have it unless set otherwise) to the camera.
+pub struct GrainLook<'a> {
+    pub source: &'a wgpu::TextureView,
+    pub tile: f32,
+    pub follows_camera: bool,
 }
 
 /// A brush's material source (`side` square grey pixels) as [`MaterialLook`] takes it; none if
@@ -140,9 +152,10 @@ struct ProjectUniform {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct MaterialUniform {
-    /// The model's middle, and framing units per model unit.
-    frame: [f32; 4],
-    /// The amount, a source tile's side (framing units), 1 with a source.
+    /// Grain space from the model's (columns): framing units about its middle, or about the
+    /// camera.
+    space: [[f32; 4]; 4],
+    /// The amount, a source tile's side (grain space units), 1 with a source.
     look: [f32; 4],
 }
 
@@ -498,6 +511,13 @@ struct Projector {
     material_uniforms: [wgpu::Buffer; 2],
     source_sampler: wgpu::Sampler,
     white: wgpu::TextureView,
+    /// What reads a stroke's grain along the model's axes into the texture's space: its pipeline,
+    /// the dilation into the grain's own format, its uniform, and the picture it makes (the
+    /// texture's size; viewed whole and as an array of one, as a canvas reads grains).
+    grain_pipeline: wgpu::RenderPipeline,
+    grain_dilate_pipeline: wgpu::RenderPipeline,
+    grain_uniform: wgpu::Buffer,
+    grain: Option<(wgpu::TextureView, wgpu::TextureView)>,
     screen: Option<(wgpu::Texture, wgpu::TextureView, wgpu::TextureView)>,
     /// The stroke as projected, before it is grown past the islands (the texture's size).
     scratch: Option<(wgpu::Texture, wgpu::TextureView)>,
@@ -1456,8 +1476,9 @@ impl MeshView {
         target: &wgpu::TextureView,
     ) -> IRect {
         let (width, height) = (width.max(1), height.max(1));
-        let Some(p) = self.parts.get(part) else { return IRect::EMPTY };
-        let (first, count) = (p.first, p.count);
+        if self.parts.get(part).is_none() {
+            return IRect::EMPTY;
+        }
         let view_proj = self.orbit.view_proj(width as f32 / height as f32);
         // what's shown of each part, worked out before the projector is borrowed
         let shown_by_part: Vec<Vec<std::ops::Range<u32>>> =
@@ -1488,57 +1509,10 @@ impl MeshView {
             let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
             projector.screen = Some((distance, distance_view, depth_view));
         }
-        let side = self.texture_size;
-        let make_square = |label, format| {
-            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            (texture, view)
-        };
-        if projector.scratch.is_none() {
-            projector.scratch = Some(make_square("projected stroke", STROKE));
+        if self.prepare_part(gpu, encoder, part).is_none() {
+            return IRect::EMPTY;
         }
-        if projector.islands.len() < self.parts.len() {
-            projector.islands.resize_with(self.parts.len(), || None);
-        }
-        // the part's islands, drawn the first time it is painted
-        if projector.islands.get(part).is_some_and(Option::is_none) {
-            let (texture, view) = make_square("islands", ISLANDS);
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("islands"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                pass.set_pipeline(&projector.islands_pipeline);
-                pass.set_bind_group(0, &projector.bind(gpu, stroke, None), &[]);
-                pass.set_vertex_buffer(0, self.vertices.slice(..));
-                pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(first..first + count, 0, 0..1);
-            }
-            if let Some(slot) = projector.islands.get_mut(part) {
-                *slot = Some((texture, view));
-            }
-        }
+        let Some(projector) = self.projector.as_ref() else { return IRect::EMPTY };
         let (Some((_, distance_view, depth_view)), Some((_, scratch)), Some(Some((_, islands)))) =
             (&projector.screen, &projector.scratch, projector.islands.get(part))
         else {
@@ -1662,7 +1636,7 @@ impl MeshView {
         target: &wgpu::TextureView,
     ) {
         let shown = self.shown_ranges(part);
-        let frame = [self.middle[0], self.middle[1], self.middle[2], 1.0 / self.unit.max(1e-6)];
+        let space = self.grain_space(look.follows_camera);
         let Some(projector) = self.projector.as_ref() else { return };
         let (Some((_, scratch)), Some(Some((_, islands))), Some(uniform)) =
             (&projector.scratch, projector.islands.get(part), projector.material_uniforms.get(slot))
@@ -1674,7 +1648,7 @@ impl MeshView {
         gpu.queue.write_buffer(
             uniform,
             0,
-            bytemuck::bytes_of(&MaterialUniform { frame, look: [look.amount.clamp(0.0, 1.0), tile, has_source, 0.0] }),
+            bytemuck::bytes_of(&MaterialUniform { space, look: [look.amount.clamp(0.0, 1.0), tile, has_source, 0.0] }),
         );
         let look_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material look"),
@@ -1740,6 +1714,193 @@ impl MeshView {
         pass.set_pipeline(&projector.dilate_pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
+    }
+
+    /// Grain space from the model's (columns): framing units about the model's middle, or (when
+    /// the grain follows the camera) about the camera, turned with it.
+    fn grain_space(&self, follows_camera: bool) -> [[f32; 4]; 4] {
+        let s = 1.0 / self.unit.max(1e-6);
+        let scale = [[s, 0.0, 0.0, 0.0], [0.0, s, 0.0, 0.0], [0.0, 0.0, s, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let [mx, my, mz] = self.middle;
+        let from = if follows_camera {
+            look_at(self.orbit.eye(), self.orbit.target, self.orbit.up())
+        } else {
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [-mx, -my, -mz, 1.0]]
+        };
+        mul(scale, from)
+    }
+
+    /// Reads `look` along part `part`'s three axes into its texture's space: each texel the grain
+    /// where its surface is, grown past the islands as strokes are. Returns the picture as an
+    /// array of one (as a canvas reads grains; see [`crate::Canvas::set_stroke_grain`]); kept
+    /// until the next call.
+    pub fn project_grain(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        part: usize,
+        look: &GrainLook<'_>,
+    ) -> Option<wgpu::TextureView> {
+        let shown = self.shown_ranges(part);
+        let space = self.grain_space(look.follows_camera);
+        self.prepare_part(gpu, encoder, part)?;
+        let side = self.texture_size;
+        let projector = self.projector.as_mut()?;
+        if projector.grain.is_none() {
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("stroke grain"),
+                size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: GRAIN,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let whole = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let array = texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+            projector.grain = Some((whole, array));
+        }
+        let projector = self.projector.as_ref()?;
+        let (Some((_, scratch)), Some(Some((_, islands))), Some((grain, array))) =
+            (&projector.scratch, projector.islands.get(part), &projector.grain)
+        else {
+            return None;
+        };
+        let tile = (look.tile * TILE_UNITS_PER_PIXEL).max(1e-4);
+        gpu.queue.write_buffer(
+            &projector.grain_uniform,
+            0,
+            bytemuck::bytes_of(&MaterialUniform { space, look: [1.0, tile, 1.0, 0.0] }),
+        );
+        let look_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stroke grain"),
+            layout: &projector.material_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: projector.grain_uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(look.source) },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&projector.source_sampler),
+                },
+            ],
+        });
+        // the part in its texture's space, each texel its surface's grain
+        {
+            let bind = projector.bind(gpu, islands, None);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("stroke grain"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: scratch,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&projector.grain_pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(1, &look_bind, &[]);
+            pass.set_vertex_buffer(0, self.vertices.slice(..));
+            pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+            for range in shown {
+                pass.draw_indexed(range, 0, 0..1);
+            }
+        }
+        // grown past the islands' edges, as strokes are
+        let bind = projector.bind(gpu, scratch, Some(islands));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("dilate grain"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: grain,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&projector.grain_dilate_pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..3, 0..1);
+        drop(pass);
+        Some(array.clone())
+    }
+
+    /// Makes what carrying strokes onto part `part` takes and doesn't change: the projector, the
+    /// texture-sized scratch and the part's islands (drawn the first time).
+    fn prepare_part(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, part: usize) -> Option<()> {
+        let (first, count) = self.parts.get(part).map(|p| (p.first, p.count))?;
+        let side = self.texture_size;
+        let projector = self.projector.get_or_insert_with(|| Projector::new(gpu));
+        let make_square = |label, format| {
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            (texture, view)
+        };
+        if projector.scratch.is_none() {
+            projector.scratch = Some(make_square("projected stroke", STROKE));
+        }
+        if projector.islands.len() < self.parts.len() {
+            projector.islands.resize_with(self.parts.len(), || None);
+        }
+        // the part's islands, drawn the first time it is painted
+        if projector.islands.get(part).is_some_and(Option::is_none) {
+            let (texture, view) = make_square("islands", ISLANDS);
+            {
+                let (_, scratch) = projector.scratch.as_ref()?;
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("islands"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&projector.islands_pipeline);
+                pass.set_bind_group(0, &projector.bind(gpu, scratch, None), &[]);
+                pass.set_vertex_buffer(0, self.vertices.slice(..));
+                pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(first..first + count, 0, 0..1);
+            }
+            if let Some(slot) = projector.islands.get_mut(part) {
+                *slot = Some((texture, view));
+            }
+        }
+        Some(())
     }
 
     /// The texels of part `part` whose triangles land on the screen inside `bounds`.
@@ -2070,6 +2231,61 @@ impl Projector {
             ..Default::default()
         });
         let white = grey_view(gpu, 1, &[255]);
+        // a stroke's grain: read as the materials' sources are, then grown into its own format
+        let grain_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("stroke grain"),
+            layout: Some(&material_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_material"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<VertexGpu>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                })],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_grain"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: STROKE,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let grain_dilate_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("dilate grain"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_full"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_dilate"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: GRAIN,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         Projector {
             distance_pipeline: pipeline("screen distance", "vs_distance", "fs_distance", DISTANCE, true, None),
             project_pipeline: pipeline("project stroke", "vs_project", "fs_project", STROKE, false, Some(MAX)),
@@ -2082,6 +2298,10 @@ impl Projector {
             material_uniforms: [material_uniform(), material_uniform()],
             source_sampler,
             white,
+            grain_pipeline,
+            grain_dilate_pipeline,
+            grain_uniform: material_uniform(),
+            grain: None,
             screen: None,
             scratch: None,
             islands: Vec::new(),

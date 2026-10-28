@@ -1162,6 +1162,9 @@ pub struct Canvas {
     shapes: wgpu::Texture,
     grains: wgpu::Texture,
     brush_images: bool,
+    /// The open stroke's grain fixed to the canvas, from a picture its size in place of a brush
+    /// image (see [`Canvas::set_stroke_grain`]); kept until the stroke has ended.
+    stroke_grain: Option<wgpu::TextureView>,
     shape_sources: SourceSlots,
     grain_sources: SourceSlots,
     /// Full coverage, stood in for the selection when there is none.
@@ -1489,6 +1492,7 @@ impl Canvas {
             shapes,
             grains,
             brush_images: images,
+            stroke_grain: None,
             shape_sources: SourceSlots::after(shape_images.len()),
             grain_sources: SourceSlots::after(grain_images.len()),
         };
@@ -1544,6 +1548,30 @@ impl Canvas {
         self.bind_brush_images(&gpu.device);
     }
 
+    /// The open stroke's grain fixed to the canvas is read from `grain` from now on, in place of a
+    /// brush image: a picture the canvas's size (square), one grey per pixel, viewed as an array
+    /// of one, such as 3D painting reads along a model's three axes. How the grain shows (its
+    /// depth, brightness, contrast and blend mode) stays the stroke's. Kept until the stroke has
+    /// ended; nothing without an open stroke whose grain is fixed to the canvas.
+    pub fn set_stroke_grain(&mut self, device: &wgpu::Device, grain: &wgpu::TextureView) {
+        let square = self.width == self.height;
+        let Some(active) = self.active.as_mut().filter(|a| square && a.style.canvas_grain().is_some()) else {
+            return;
+        };
+        // one tile the canvas, read texel for texel
+        active.style.grain = Some(0);
+        active.style.grain_scale = self.width as f32;
+        active.style.grain_rotation = 0.0;
+        active.style.grain_sharp = false;
+        self.stroke_grain = Some(grain.clone());
+        self.bind_brush_images(device);
+    }
+
+    /// The grains strokes read: the open stroke's own picture, else the brush images.
+    fn grain_view(&self) -> &wgpu::TextureView {
+        self.stroke_grain.as_ref().unwrap_or(&self.grains_view)
+    }
+
     /// Whether it holds its shape and grain images (else stand-ins until something wants them).
     pub fn has_brush_images(&self) -> bool {
         self.brush_images
@@ -1564,7 +1592,7 @@ impl Canvas {
             device,
             &self.pipelines.quad_layout,
             [&self.stroke_view; 5],
-            &self.grains_view,
+            self.grain_view(),
             &self.grain_sampler,
         );
     }
@@ -1572,7 +1600,7 @@ impl Canvas {
     /// Whether the queued work or the stroke open reads the shape or grain images: stamps, the
     /// predicted tail, a smudge, or a grain fixed to the canvas.
     fn wants_brush_images(&self) -> bool {
-        let grained = |s: &StrokeStyle| s.canvas_grain().is_some();
+        let grained = |s: &StrokeStyle| s.canvas_grain().is_some() && self.stroke_grain.is_none();
         !self.prediction.is_empty()
             || self.smudge.is_some()
             || self.active.is_some_and(|a| grained(&a.style))
@@ -3158,6 +3186,10 @@ impl Canvas {
         }
         if history_changed {
             self.collect_layers(doc);
+        }
+        // a stroke's own grain goes with it once it has ended
+        if self.active.is_none() && self.stroke_grain.take().is_some() {
+            self.bind_brush_images(device);
         }
 
         if !smudge_uniforms.data.is_empty() {
@@ -5352,7 +5384,7 @@ impl Canvas {
         mask: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         let [a, b, c, d] = views;
-        quad_bind(device, &self.pipelines.quad_layout, [a, b, c, d, mask], &self.grains_view, &self.grain_sampler)
+        quad_bind(device, &self.pipelines.quad_layout, [a, b, c, d, mask], self.grain_view(), &self.grain_sampler)
     }
 
     /// Layer textures held (the document's and those the history still needs).
