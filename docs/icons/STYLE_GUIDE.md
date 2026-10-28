@@ -1,0 +1,52 @@
+# ProCraft icon style guide
+
+The rules for ProCraft's own interface icons. Until an icon has its own drawing, it uses Phosphor's
+(Fill weight); `LucideIcons` keeps the Lucide set beside them. Our drawings replace Phosphor's one
+by one.
+
+## Where an icon comes from
+
+- **Draw from the idea, never from another app's icon.** Start from what the control does ("a
+  wrench", "a brush", "two stacked sheets") and build it from this guide's shapes. Don't trace,
+  redraw, adapt or work beside another app's glyph, and don't feed one to a tool.
+- **What we match is the slot, not the drawing.** Each icon's frame, its ink box in that frame
+  (where and how big it sits), its colour and its states are measured facts, kept in
+  [`assets/icons/slots.tsv`](../../assets/icons/slots.tsv). An icon fills its slot's ink box;
+  nothing else about the old glyph is used.
+- **A distinctive mark gets our own idea.** Where a control's usual picture is one app's own
+  invention rather than a common metaphor, pick a different, plain idea.
+- **Every drawing is recorded.** Its master SVG lives in `assets/icons/procraft/`, it is made by
+  `tools/icons/draw_icons.py`, and it has a line in `ATTRIBUTION.md` as original work.
+
+## Grid and shapes
+
+- A 24-unit square; the drawing stays inside the live area 2 to 22. It is then scaled into its
+  slot's ink box, keeping its proportions and centring it there.
+- Solid, filled shapes in one colour (white; the interface tints it, blue when chosen). No
+  outlines-only icons, gradients, shadows or text.
+- Built from plain geometry: circles, capsules (a line with round ends), rounded rectangles,
+  triangles with rounded corners, arcs. Outer corners are rounded by 1 unit, inner ones by 0.5.
+- Details are knockouts: gaps cut through a shape, 1.2 units wide (1 for small parts). Nothing
+  solid is thinner than 1.6 units, so it survives at 22 px.
+- Long tools (brush, pencil, wand) lie on the diagonal from lower left to upper right, writing
+  end down.
+
+## Weight
+
+- A square-ish icon's ink box is about 18 units across; a diagonal tool runs about 20.
+- Line-like parts (capsules, arcs, arrows) are 2.4 units thick; small accents (sparkles, dots)
+  1.6 to 3 units across.
+
+## The bar (first drawings)
+
+| Control | Idea |
+|---|---|
+| Actions | an open-end wrench with a hole in its handle |
+| Adjustments | a wand with a banded tip and three sparkles |
+| Selection | a selection's four corner marks around a solid square |
+| Transform | a solid arrow pointing up and to the right |
+| Paint | a round brush: handle, ferrule, bristles |
+| Smudge | a fingertip pressing on a smear |
+| Erase | an eraser block with a band, on a line |
+| Layers | two stacked sheets, the top one solid |
+| Undo / Redo | a curved arrow turning back / forward |
