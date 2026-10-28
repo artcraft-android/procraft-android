@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
-use std::sync::mpsc;
+use std::sync::{OnceLock, mpsc};
 
 use procraft_engine::animation::{self, FrameLook};
 use procraft_engine::brush::{BRUSH_BEHIND, Brush, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering, Source, run_out};
@@ -1136,16 +1136,19 @@ pub struct Canvas {
     /// Where the open stroke's tip is drawn (see [`Canvas::set_tip`]), and what it covered.
     tip: Option<IRect>,
     tip_backup: Option<wgpu::Texture>,
-    /// Ping-pong pair; the finished composite is always left in the first.
-    composite: [wgpu::Texture; 2],
-    composite_views: [wgpu::TextureView; 2],
+    /// The finished composite, and the other half of its ping-pong pair: where a layer of a
+    /// blend mode other than Normal goes, made the first time one does.
+    composite: wgpu::Texture,
+    composite_view: wgpu::TextureView,
+    composite_second: OnDemand,
     /// Where a group's layers are composited before the group goes onto the stack below: a pair
     /// for each depth of group (made when first needed).
     groups: Vec<([wgpu::Texture; 2], [wgpu::TextureView; 2])>,
     /// Animation Assist playing: the frame shown (alone, no onion skins).
     play_frame: Option<usize>,
-    scratch: wgpu::Texture,
-    scratch_view: wgpu::TextureView,
+    /// Where a stroke of a blend mode, or one on a locked layer, and a merge are drawn before
+    /// they go back into the layer; made the first time one is.
+    scratch: OnDemand,
     sampler: wgpu::Sampler,
     grains_view: wgpu::TextureView,
     grain_sampler: wgpu::Sampler,
@@ -1314,16 +1317,8 @@ impl Canvas {
         let pipelines = gpu.canvas_pipelines();
         let stroke_texture = texture(device, "stroke", width, height, STROKE_FORMAT);
         let stroke_view = stroke_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let composite = [
-            texture(device, "composite", width, height, LAYER_FORMAT),
-            texture(device, "composite 2", width, height, LAYER_FORMAT),
-        ];
-        let composite_views = [
-            composite[0].create_view(&wgpu::TextureViewDescriptor::default()),
-            composite[1].create_view(&wgpu::TextureViewDescriptor::default()),
-        ];
-        let scratch = texture(device, "scratch", width, height, LAYER_FORMAT);
-        let scratch_view = scratch.create_view(&wgpu::TextureViewDescriptor::default());
+        let composite = texture(device, "composite", width, height, LAYER_FORMAT);
+        let composite_view = composite.create_view(&wgpu::TextureViewDescriptor::default());
         let array_view =
             wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() };
         let (shape_images, grain_images) = (textures::shapes(), textures::grains());
@@ -1361,7 +1356,7 @@ impl Canvas {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let display_bind = sampled_bind(device, &pipelines.sampled_layout, &composite_views[0], &sampler);
+        let display_bind = sampled_bind(device, &pipelines.sampled_layout, &composite_view, &sampler);
         // two points on a side: each corner its own colour
         let corners: Vec<u8> = (0..8u8).flat_map(|i| [(i >> 2) & 1, (i >> 1) & 1, i & 1, 1].map(|c| c * 255)).collect();
         let identity_lut = lut_bind(gpu, &pipelines.lut_layout, 2, &corners);
@@ -1380,11 +1375,11 @@ impl Canvas {
             tip: None,
             tip_backup: None,
             composite,
-            composite_views,
+            composite_view,
+            composite_second: OnDemand::new("composite 2", width, height, LAYER_FORMAT),
             groups: Vec::new(),
             play_frame: None,
-            scratch,
-            scratch_view,
+            scratch: OnDemand::new("scratch", width, height, LAYER_FORMAT),
             sampler,
             grains_view,
             grain_sampler,
@@ -1574,7 +1569,7 @@ impl Canvas {
     /// The canvas as composited by the last render (premultiplied, its size, the background in
     /// if shown): what 3D painting shows on a model.
     pub fn composite_view(&self) -> &wgpu::TextureView {
-        &self.composite_views[0]
+        &self.composite_view
     }
 
     /// A drawn stroke now reaches `bounds` (canvas pixels): it is shown there, and kept there
@@ -3386,7 +3381,8 @@ impl Canvas {
                     if let Some(layer) = self.layers.get(&stroke.layer) {
                         let bind =
                             self.quad(device, [&layer.view, &self.stroke_view, &self.stroke_view, &self.stroke_view]);
-                        let mut pass = render_pass(encoder, "commit locked", &self.scratch_view, wgpu::LoadOp::Load);
+                        let (scratch, scratch_view) = self.scratch.get(device);
+                        let mut pass = render_pass(encoder, "commit locked", scratch_view, wgpu::LoadOp::Load);
                         pass.set_pipeline(&self.pipelines.commit_locked);
                         scissor(&mut pass, rect);
                         pass.set_bind_group(0, &bind, &[]);
@@ -3394,7 +3390,7 @@ impl Canvas {
                         pass.draw(0..3, 0..1);
                         drop(pass);
                         encoder.copy_texture_to_texture(
-                            copy_at(&self.scratch, rect.x0, rect.y0),
+                            copy_at(scratch, rect.x0, rect.y0),
                             copy_at(&layer.texture, rect.x0, rect.y0),
                             extent(rect.width(), rect.height()),
                         );
@@ -3477,14 +3473,15 @@ impl Canvas {
         let low = self.layers.get(&lower)?;
         let offset = uniforms.push(&uniform);
         let bind = self.quad(device, [upper, &self.stroke_view, clip.unwrap_or(&self.stroke_view), &low.view]);
-        let mut pass = render_pass(encoder, "merge", &self.scratch_view, wgpu::LoadOp::Load);
+        let (scratch, scratch_view) = self.scratch.get(device);
+        let mut pass = render_pass(encoder, "merge", scratch_view, wgpu::LoadOp::Load);
         pass.set_pipeline(&self.pipelines.blend);
         pass.set_bind_group(0, &bind, &[]);
         pass.set_bind_group(1, &self.uniform_bind, &[offset]);
         pass.draw(0..3, 0..1);
         drop(pass);
         encoder.copy_texture_to_texture(
-            copy_at(&self.scratch, 0, 0),
+            copy_at(scratch, 0, 0),
             copy_at(&low.texture, 0, 0),
             extent(self.width, self.height),
         );
@@ -3800,7 +3797,7 @@ impl Canvas {
         let solid = if doc.background_visible { [r, g, b, 1.0] } else { [0.0; 4] };
         {
             let offset = uniforms.push(&LayerUniform { opacity: 1.0, solid, ..Default::default() });
-            let mut pass = render_pass(encoder, "background", &self.composite_views[0], wgpu::LoadOp::Load);
+            let mut pass = render_pass(encoder, "background", &self.composite_view, wgpu::LoadOp::Load);
             scissor(&mut pass, rect);
             pass.set_pipeline(&self.pipelines.solid);
             pass.set_bind_group(0, &self.stroke_bind, &[]);
@@ -3809,12 +3806,15 @@ impl Canvas {
         }
         // the stack bottom up; a group's layers go onto its depth's pair of textures first, and
         // the group onto the stack where its entry is
-        let main = Stack { textures: &self.composite, views: &self.composite_views };
+        let main = Stack {
+            first: (&self.composite, &self.composite_view),
+            second: Second::OnDemand(&self.composite_second, device),
+        };
         if let Some(c) = &self.caches {
             // what is below as it was, what is worked on, then what is above as it was
             encoder.copy_texture_to_texture(
                 copy_at(&c.below[0], rect.x0, rect.y0),
-                copy_at(&self.composite[0], rect.x0, rect.y0),
+                copy_at(&self.composite, rect.x0, rect.y0),
                 extent(rect.width(), rect.height()),
             );
             let mut current = 0;
@@ -3903,7 +3903,13 @@ impl Canvas {
         uniforms: &mut UniformData,
     ) {
         let device = &gpu.device;
-        let Some((tops, live)) = self.live_items(doc).filter(|_| self.cache_composites) else {
+        let live = self.live_items(doc).filter(|_| self.cache_composites);
+        // nothing below or above what is worked on: no picture of it would save any compositing
+        let alone = live.as_ref().is_some_and(|(tops, live)| live.start == 0 && live.end >= tops.len());
+        if alone {
+            self.remake = None;
+        }
+        let Some((tops, live)) = live.filter(|_| !alone) else {
             self.caches = None;
             // everything shown composites: Animation Assist's frames around the current one, or
             // every layer
@@ -4048,7 +4054,7 @@ impl Canvas {
                 pass.set_bind_group(1, &self.uniform_bind, &[offset]);
                 pass.draw(0..3, 0..1);
             }
-            let stack = Stack { textures: &caches.below, views: &caches.below_views };
+            let stack = Stack::pair(&caches.below, &caches.below_views);
             let mut current = 0;
             self.composite_items(device, doc, encoder, uniforms, full, &below_items, true, &stack, &mut current);
             stack.settle(encoder, full, current);
@@ -4057,7 +4063,7 @@ impl Canvas {
         }
         if remake_above {
             drop(render_pass(encoder, "above", &caches.above_views[0], wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
-            let stack = Stack { textures: &caches.above, views: &caches.above_views };
+            let stack = Stack::pair(&caches.above, &caches.above_views);
             let mut current = 0;
             self.composite_items(device, doc, encoder, uniforms, full, &above_items, true, &stack, &mut current);
             stack.settle(encoder, full, current);
@@ -4151,7 +4157,7 @@ impl Canvas {
             let (mut at, mut current) = progress;
             let (textures, views) =
                 if below { (&r.caches.below, &r.caches.below_views) } else { (&r.caches.above, &r.caches.above_views) };
-            let stack = Stack { textures, views };
+            let stack = Stack::pair(textures, views);
             // as many whole items as fit and the slice's time allows (at least one), each with what
             // it is clipped to; an item painted nowhere is passed over, a normal one composites only
             // where it is painted
@@ -4361,7 +4367,7 @@ impl Canvas {
     }
 
     /// `items` (a level's members, bottom up; `top` the top level's) onto `stack`, whose result
-    /// is in `stack.views[current]`.
+    /// is in the stack's first texture (`current` 0) or its second (1).
     #[allow(clippy::too_many_arguments)]
     fn composite_items(
         &self,
@@ -4443,7 +4449,7 @@ impl Canvas {
         id: LayerId,
     ) -> Option<&wgpu::TextureView> {
         let (textures, views) = self.groups.get(doc.depth(id))?;
-        let inner = Stack { textures, views };
+        let inner = Stack::pair(textures, views);
         drop(render_pass(encoder, "group clear", &views[0], wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
         let at = self.composite_members(device, doc, encoder, uniforms, rect, Some(id), &inner);
         inner.settle(encoder, rect, at);
@@ -4451,7 +4457,7 @@ impl Canvas {
     }
 
     /// One paint layer (through its mask, with the stroke being drawn on it or its mask) onto a
-    /// stack whose result is in `stack.views[current]`.
+    /// stack whose result is in its first texture (`current` 0) or its second (1).
     #[allow(clippy::too_many_arguments)]
     fn composite_layer(
         &self,
@@ -4532,10 +4538,10 @@ impl Canvas {
     ) {
         let offset = uniforms.push(&uniform);
         let clip = clip.unwrap_or(&self.stroke_view);
-        let [first, second] = stack.views;
+        let first = stack.first.1;
         if blend == BlendMode::Normal {
             let bind = self.quad_masked(device, [view, &self.stroke_view, clip, &self.stroke_view], mask);
-            let target = if *current == 0 { first } else { second };
+            let target = if *current == 0 { first } else { stack.second().1 };
             let mut pass = render_pass(encoder, "layer", target, wgpu::LoadOp::Load);
             scissor(&mut pass, rect);
             pass.set_pipeline(&self.pipelines.layer);
@@ -4543,6 +4549,7 @@ impl Canvas {
             pass.set_bind_group(1, &self.uniform_bind, &[offset]);
             pass.draw(0..3, 0..1);
         } else {
+            let second = stack.second().1;
             let (backdrop, target) = if *current == 0 { (first, second) } else { (second, first) };
             let bind = self.quad_masked(device, [view, &self.stroke_view, clip, backdrop], mask);
             let mut pass = render_pass(encoder, "blend", target, wgpu::LoadOp::Load);
@@ -5052,7 +5059,7 @@ impl Canvas {
         if !self.busy() {
             self.render(gpu, doc, None);
         }
-        self.sample_view(gpu, &self.composite_views[0], self.full(), max_side)
+        self.sample_view(gpu, &self.composite_view, self.full(), max_side)
     }
 
     /// `rect` of a texture box-filtered to fit `max_side` pixels (never enlarged), read back.
@@ -5145,7 +5152,7 @@ impl Canvas {
     /// The composite's pixels (premultiplied RGBA8, rows top to bottom) as last rendered: after
     /// [`Canvas::render_finished`], the picture as it is. Waits for the GPU.
     pub fn read_composite(&self, gpu: &Gpu) -> Result<Vec<u8>, GpuError> {
-        read_texture(gpu, &self.composite[0], self.width, self.height)
+        read_texture(gpu, &self.composite, self.width, self.height)
     }
 
     /// The composite's pixels as they would be without the layers `left_out` (the gallery's
@@ -5204,6 +5211,60 @@ impl Canvas {
     pub fn layer_texture_count(&self) -> usize {
         self.layers.len()
     }
+
+    /// Every texture the canvas holds, each once: its layers, stroke, composite and what that is
+    /// made with, its brush images, the undo history's pixels and what any edit under way keeps.
+    pub fn textures(&self) -> Vec<wgpu::Texture> {
+        let mut all: Vec<&wgpu::Texture> = vec![&self.stroke, &self.composite, &self.shapes, &self.grains, &self.table];
+        all.extend(self.layers.values().map(|l| &l.texture));
+        all.extend(self.tip_backup.as_ref());
+        all.extend(self.composite_second.made());
+        all.extend(self.scratch.made());
+        all.extend(self.groups.iter().flat_map(|(pair, _)| pair));
+        all.push(self.everything.texture());
+        all.extend(self.pencil.as_ref().map(|p| p.view.texture()));
+        all.extend(self.liquify.as_ref().map(|l| l.view.texture()));
+        all.extend(self.selection.as_ref().map(|s| s.view.texture()));
+        all.extend(self.held.as_ref().map(|h| &h.texture));
+        all.extend(self.smudge.as_ref().map(|s| &s.before));
+        for caches in self.caches.iter().chain(self.remake.as_ref().map(|r| &r.caches)) {
+            all.extend(caches.below.iter().chain(&caches.above));
+        }
+        all.extend(self.undo.iter().chain(&self.redo).flat_map(|s| s.pixels.iter().map(|p| &p.texture)));
+        all.extend(self.transforming.iter().chain(&self.transform_more).map(|t| &t.before));
+        all.extend(self.backdrop.iter().flat_map(|b| b.views.iter().map(wgpu::TextureView::texture)));
+        let mut out: Vec<wgpu::Texture> = Vec::with_capacity(all.len());
+        for t in all {
+            if !out.contains(t) {
+                out.push(t.clone());
+            }
+        }
+        out
+    }
+
+    /// What the canvas's textures take, bytes (see [`Canvas::textures`]).
+    pub fn texture_bytes(&self) -> u64 {
+        textures_bytes(&self.textures())
+    }
+}
+
+/// What `textures` take on the GPU, bytes: every level and layer of each, as its format packs
+/// them (before the driver's own rounding up).
+pub fn textures_bytes(textures: &[wgpu::Texture]) -> u64 {
+    textures
+        .iter()
+        .map(|t| {
+            let (bw, bh) = t.format().block_dimensions();
+            let block = u64::from(t.format().block_copy_size(None).unwrap_or(4));
+            let layers = u64::from(t.depth_or_array_layers()) * u64::from(t.sample_count());
+            (0..t.mip_level_count())
+                .map(|level| {
+                    let (w, h) = ((t.width() >> level).max(1), (t.height() >> level).max(1));
+                    u64::from(w.div_ceil(bw)) * u64::from(h.div_ceil(bh)) * block * layers
+                })
+                .sum::<u64>()
+        })
+        .sum()
 }
 
 impl Pipelines {
@@ -6001,9 +6062,47 @@ fn crop(t: &Thumbnail, [x0, y0, x1, y1]: [u32; 4]) -> Thumbnail {
     Thumbnail { width: x1 - x0, height: y1 - y0, rgba }
 }
 
+/// A pair of textures layers are composited onto, the result in one of them: the first, and
+/// the second that blend modes other than Normal draw into.
 struct Stack<'a> {
-    textures: &'a [wgpu::Texture; 2],
-    views: &'a [wgpu::TextureView; 2],
+    first: (&'a wgpu::Texture, &'a wgpu::TextureView),
+    second: Second<'a>,
+}
+
+enum Second<'a> {
+    Made(&'a wgpu::Texture, &'a wgpu::TextureView),
+    /// Made the first time a blend needs it.
+    OnDemand(&'a OnDemand, &'a wgpu::Device),
+}
+
+/// A texture made the first time it is wanted, and kept from then on: one most canvases never
+/// want (a ping-pong partner, a scratch copy).
+struct OnDemand {
+    label: &'static str,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    made: OnceLock<(wgpu::Texture, wgpu::TextureView)>,
+}
+
+impl OnDemand {
+    fn new(label: &'static str, width: u32, height: u32, format: wgpu::TextureFormat) -> OnDemand {
+        OnDemand { label, width, height, format, made: OnceLock::new() }
+    }
+
+    fn get<'a>(&'a self, device: &wgpu::Device) -> (&'a wgpu::Texture, &'a wgpu::TextureView) {
+        let (texture, view) = self.made.get_or_init(|| {
+            let t = texture(device, self.label, self.width, self.height, self.format);
+            let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+            (t, v)
+        });
+        (texture, view)
+    }
+
+    /// The texture, if it has been made.
+    fn made(&self) -> Option<&wgpu::Texture> {
+        self.made.get().map(|(t, _)| t)
+    }
 }
 
 /// Pictures of the top level's items that aren't being worked on, so only those that are
@@ -6091,14 +6190,28 @@ fn items_key(doc: &Document, items: &[LayerId], background: bool) -> u64 {
     h.finish()
 }
 
-impl Stack<'_> {
+impl<'a> Stack<'a> {
+    /// Both made already.
+    fn pair(textures: &'a [wgpu::Texture; 2], views: &'a [wgpu::TextureView; 2]) -> Stack<'a> {
+        let [t0, t1] = textures;
+        let [v0, v1] = views;
+        Stack { first: (t0, v0), second: Second::Made(t1, v1) }
+    }
+
+    /// The second texture, made now if it has to be.
+    fn second(&self) -> (&'a wgpu::Texture, &'a wgpu::TextureView) {
+        match self.second {
+            Second::Made(t, v) => (t, v),
+            Second::OnDemand(lazy, device) => lazy.get(device),
+        }
+    }
+
     /// Leaves the result in the first texture (where `current` says it is, within `rect`).
     fn settle(&self, encoder: &mut wgpu::CommandEncoder, rect: IRect, current: usize) {
         if current == 1 {
-            let [first, second] = self.textures;
             encoder.copy_texture_to_texture(
-                copy_at(second, rect.x0, rect.y0),
-                copy_at(first, rect.x0, rect.y0),
+                copy_at(self.second().0, rect.x0, rect.y0),
+                copy_at(self.first.0, rect.x0, rect.y0),
                 extent(rect.width(), rect.height()),
             );
         }
