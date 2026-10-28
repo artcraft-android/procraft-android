@@ -445,8 +445,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var transformBox by mutableStateOf<TransformBox?>(null)
         private set
     private val transformPrefs = app.getSharedPreferences("transform", android.content.Context.MODE_PRIVATE)
-    /** The brush library as edited, kept between artworks and launches. */
+    /** The brushes in use and what has shipped, kept between artworks and launches. */
     private val brushPrefs = app.getSharedPreferences("brushes", android.content.Context.MODE_PRIVATE)
+    /** The brush library as edited, in a file: brought-in brushes' images make it too big for preferences. */
+    private val brushLibraryFile = File(app.filesDir, "brushes/library.json")
+    /** Writes of the library, one at a time. */
+    private val brushLibraryWrites = Mutex()
     var transformKind by mutableStateOf(enumPref(TRANSFORM_KIND, TransformKind.FREEFORM))
         private set
     var interpolation by mutableStateOf(enumPref(INTERPOLATION, Interpolation.BILINEAR))
@@ -1877,19 +1881,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * takes half a second, so callers off the main thread do this before [start].
      */
     private fun loadBrushes(s: CanvasSession) {
-        // the library as kept, else edits kept by earlier versions
-        val kept = brushPrefs.getString(BRUSH_LIBRARY, null)
-        val loaded = kept != null && s.loadBrushLibrary(kept)
+        // the library as kept (in its file; earlier versions kept it in preferences: moved once), else
+        // edits kept by earlier versions
+        var loaded = brushLibraryFile.exists() && s.loadBrushLibraryFile(brushLibraryFile.path)
+        if (!loaded) {
+            val kept = brushPrefs.getString(BRUSH_LIBRARY, null)
+            loaded = kept != null && s.loadBrushLibrary(kept)
+            if (loaded && s.saveBrushLibraryFile(brushLibraryFile.path)) brushPrefs.edit().remove(BRUSH_LIBRARY).apply()
+        }
         if (!loaded) brushPrefs.getString(BRUSH_CHANGES, null)?.let { s.applyBrushChanges(it) }
         // brushes and sets shipped since the library was kept join it, once
         val seen = brushPrefs.getString(BRUSHES_SEEN, null)?.split(',')?.mapNotNull { it.toUIntOrNull() } ?: FIRST_SHIPPED
         val shipped = if (loaded) s.addShippedBrushes(seen) else s.shippedBrushCounts()
         if (shipped != seen || !brushPrefs.contains(BRUSHES_SEEN)) {
-            brushPrefs.edit().apply {
-                // kept with them, or the next start would load the library without them
-                if (loaded) putString(BRUSH_LIBRARY, s.savedBrushLibrary())
-                putString(BRUSHES_SEEN, shipped.joinToString(","))
-            }.apply()
+            // kept with them, or the next start would load the library without them
+            if (loaded) s.saveBrushLibraryFile(brushLibraryFile.path)
+            brushPrefs.edit().putString(BRUSHES_SEEN, shipped.joinToString(",")).apply()
         }
         // the brushes in use as they were left (they go by place in the kept library)
         if (loaded) brushPrefs.getString(BRUSH_CHOICES, null)?.let { s.loadBrushChoices(it) }
@@ -3144,7 +3151,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readSliders()
         previews.clear()
         shadedNames.clear()
-        brushPrefs.edit().putString(BRUSH_LIBRARY, s.savedBrushLibrary()).putString(BRUSH_CHOICES, s.savedBrushChoices()).apply()
+        keepBrushLibrary(s)
+        brushPrefs.edit().putString(BRUSH_CHOICES, s.savedBrushChoices()).apply()
     }
 
     fun duplicateBrush(b: BrushInfo) {
@@ -3716,7 +3724,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val value = if (size) this.size else opacity
         if (notchAt(size, value) != null) s.removeSliderNotch(size, value) else s.addSliderNotch(size, value)
         readNotches()
-        brushPrefs.edit().putString(BRUSH_LIBRARY, s.savedBrushLibrary()).apply()
+        keepBrushLibrary(s)
+    }
+
+    /** Keeps the library as it is now in its file, off the main thread. */
+    private fun keepBrushLibrary(s: CanvasSession) {
+        viewModelScope.launch(Dispatchers.IO) {
+            // each write takes the library as it is when it runs, so the last one is the latest
+            brushLibraryWrites.withLock { runCatching { s.saveBrushLibraryFile(brushLibraryFile.path) } }
+        }
     }
 
     private fun readNotches() {
@@ -5824,6 +5840,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             GlitchKind.DIVERGE to listOf(0.98f, -0.5f, 0.85f, 0.5f),
         )
         const val BRUSH_CHANGES = "changes"
+        /** Where earlier versions kept the library (now in a file). */
         const val BRUSH_LIBRARY = "library"
         /** How big the studio's Shape and Grain Source rows show their image (pixels across). */
         const val SOURCE_ROW_PX = 88

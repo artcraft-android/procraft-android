@@ -606,6 +606,29 @@ impl CanvasSession {
         serde_json::to_string(&sets).unwrap_or_default()
     }
 
+    /// Keeps the library in the file at `path` (its folder made if missing), replaced whole: it
+    /// can be large, with the images of brushes brought in. False if it couldn't be written.
+    pub fn save_brush_library_file(&self, path: String) -> bool {
+        let json = self.saved_brush_library();
+        let path = std::path::Path::new(&path);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let written = crate::project::write_atomically(path, |p| {
+            std::fs::write(p, json.as_bytes()).map_err(|e| crate::project::file_error("keeping the brushes", e))
+        });
+        if let Err(e) = &written {
+            log::error!("{e}");
+        }
+        written.is_ok()
+    }
+
+    /// Puts back a library kept with [`Self::save_brush_library_file`]; false, changing nothing,
+    /// if there is none or it can't be read.
+    pub fn load_brush_library_file(&self, path: String) -> bool {
+        std::fs::read_to_string(&path).is_ok_and(|json| self.load_brush_library(json))
+    }
+
     /// Puts back a library kept with [`Self::saved_brush_library`]; false, changing nothing, if it
     /// can't be read.
     pub fn load_brush_library(&self, json: String) -> bool {

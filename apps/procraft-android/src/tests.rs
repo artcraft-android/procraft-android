@@ -777,9 +777,14 @@ fn an_imported_brush_shows_its_own_preview_until_changed() {
         (p.rgba[((50 * w + 5) * 4 + 3) as usize], p.rgba[((10 * w + 160) * 4 + 3) as usize])
     };
     assert_eq!(alpha(&s), (255, 0));
-    // kept with the library, and written back out as it came
+    // kept with the library (in a file of its own), and written back out as it came
     let Some(other) = session(100, 100) else { return };
-    assert!(other.load_brush_library(s.saved_brush_library()));
+    let dir = std::env::temp_dir().join(format!("procraft-library-{}", std::process::id()));
+    let kept = dir.join("brushes").join("library.json").to_string_lossy().into_owned();
+    assert!(s.save_brush_library_file(kept.clone()));
+    assert!(other.load_brush_library_file(kept.clone()));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!other.load_brush_library_file(kept), "none kept");
     assert_eq!(alpha(&other), (255, 0));
     let out = brushfile::read(&s.brush_as_file(set, 0).unwrap()).unwrap();
     assert_eq!(out.thumbnail.as_deref(), Some(thumbnail.as_slice()));
