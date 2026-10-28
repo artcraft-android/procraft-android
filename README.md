@@ -151,13 +151,14 @@ Build time dependencies:
 
 ## License
 
-[MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE), at your option. The third-party material the app
-bundles (the Inter font, Lucide icons, light panoramas) and the libraries it is built with are listed
-in [NOTICE](NOTICE); every asset, with its author, source and licence, in
-[ATTRIBUTION.md](ATTRIBUTION.md).
+[MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE), at your option.
 
-Icons drawn using vector outlines ([`tools/icons/draw_icons.py`](tools/icons/draw_icons.py), to the
-[style guide](docs/icons/STYLE_GUIDE.md)). The demo painting, *Dusk*, is our own, made in the app.
+- **Third-party material:** the Inter font, Lucide icons and the light panoramas the app bundles,
+  and the libraries it's built with, are listed in [NOTICE](NOTICE).
+- **Every asset**, with its author, source and licence, is in [ATTRIBUTION.md](ATTRIBUTION.md).
+- **Icons** drawn using vector outlines ([`tools/icons/draw_icons.py`](tools/icons/draw_icons.py),
+  to the [style guide](docs/icons/STYLE_GUIDE.md)).
+- **The demo painting**, *Dusk*, is our own, made in the app.
 
 <br>
 
