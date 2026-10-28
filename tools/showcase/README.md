@@ -20,7 +20,7 @@ on a Lenovo Legion Tab (2560 x 1600, held sideways), with ProCraft open on an em
 export ANDROID_SERIAL=<the tablet>
 python record_take.py take                 # take/take.mp4 and take/take.json
 python edit_take.py take 2.6 edit          # edit/demo_full.mp4 (2.6 s: the log's lag behind the video)
-ffmpeg -i edit/demo_full.mp4 -vf "fps=12,scale=960:-1:flags=lanczos" -c:v libwebp_anim -loop 0 -q:v 62 demo.webp
+ffmpeg -i edit/demo_full.mp4 -vf "setpts=PTS/1.8,fps=12,scale=960:-1:flags=lanczos" -c:v libwebp_anim -loop 0 -q:v 62 demo.webp
 ```
 
 Notes from making it: start pen strokes clear of the sidebar (left) and of any system handle on the
