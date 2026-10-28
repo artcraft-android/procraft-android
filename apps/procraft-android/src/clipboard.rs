@@ -89,8 +89,7 @@ impl CanvasSession {
 
     /// The whole canvas as it shows, to paste later.
     pub fn copy_canvas(&self) -> Option<ThumbnailImage> {
-        self.shared.finish_caches();
-        let mut guard = self.shared.lock();
+        let mut guard = self.shared.lock_finished();
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();

@@ -2089,11 +2089,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun copyCanvas() {
-        val copied = session?.copyCanvas()
-        clipboard = copied ?: clipboard
-        canPaste = clipboard != null
+        val s = session ?: return
         closePanels()
-        if (copied != null) showNotice("Canvas copied")
+        // off the main thread: the picture waits for the canvas to finish any remaking first
+        viewModelScope.launch {
+            val copied = withContext(Dispatchers.IO) { runCatching { s.copyCanvas() }.getOrNull() }
+            clipboard = copied ?: clipboard
+            canPaste = clipboard != null
+            if (copied != null) showNotice("Canvas copied")
+        }
     }
 
     fun cutLayer() {

@@ -411,9 +411,8 @@ impl CanvasSession {
     /// Saves started together run one after the other.
     pub fn save(&self, dir: String) -> Result<(), MobileError> {
         let mut saved = self.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
-        self.shared.finish_caches();
         let snapshot = {
-            let mut guard = self.shared.lock();
+            let mut guard = self.shared.lock_finished();
             let st = &mut *guard;
             st.finish_stroke();
             st.settle();
@@ -428,9 +427,8 @@ impl CanvasSession {
     /// would end (a stroke, a transform, an adjustment, text being edited...); false if it didn't.
     pub fn save_if_idle(&self, dir: String) -> Result<bool, MobileError> {
         let mut saved = self.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
-        self.shared.finish_caches();
         let snapshot = {
-            let mut guard = self.shared.lock();
+            let mut guard = self.shared.lock_finished();
             let st = &mut *guard;
             if !st.idle() {
                 return Ok(false);
@@ -468,9 +466,8 @@ impl CanvasSession {
 
     /// Writes the flattened picture, full size and with straight alpha, to `path` as a PNG.
     pub fn export_png(&self, path: String) -> Result<(), MobileError> {
-        self.shared.finish_caches();
         let (w, h, rgba, icc) = {
-            let mut guard = self.shared.lock();
+            let mut guard = self.shared.lock_finished();
             let st = &mut *guard;
             st.finish_stroke();
             st.settle();
@@ -534,9 +531,8 @@ impl CanvasSession {
             }
             None => None,
         };
-        self.shared.finish_caches();
         let (doc, pixels, composite, name, info) = {
-            let mut guard = self.shared.lock();
+            let mut guard = self.shared.lock_finished();
             let st = &mut *guard;
             st.finish_stroke();
             st.settle();
@@ -725,8 +721,7 @@ impl CanvasSession {
     }
 
     fn pictures(&self, with_layers: bool) -> Result<Pictures, MobileError> {
-        self.shared.finish_caches();
-        let mut guard = self.shared.lock();
+        let mut guard = self.shared.lock_finished();
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();

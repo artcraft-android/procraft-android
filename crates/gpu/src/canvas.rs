@@ -4084,15 +4084,18 @@ impl Canvas {
             let (textures, views) =
                 if below { (&r.caches.below, &r.caches.below_views) } else { (&r.caches.above, &r.caches.above_views) };
             let stack = Stack { textures, views };
-            // as many whole items as fit (at least one), each with what it is clipped to; an item
-            // painted nowhere is passed over, a normal one composites only where it is painted
+            // as many whole items as fit and the slice's time allows (at least one), each with what
+            // it is clipped to; an item painted nowhere is passed over, a normal one composites only
+            // where it is painted
             let room = self.most_resident().saturating_sub(self.layers.len()).max(1);
             let mut part = Vec::new();
             let mut layers = Vec::new();
+            let mut staged = 0;
             while let Some(&item) = items.get(at) {
                 let mut more = item_layers(doc, item);
                 more.extend(doc.clip_base(item));
-                if !part.is_empty() && layers.len() + more.len() > room {
+                let late = std::time::Instant::now() >= deadline;
+                if !part.is_empty() && (late || layers.len() + more.len() > room) {
                     break;
                 }
                 at += 1;
@@ -4104,10 +4107,17 @@ impl Canvas {
                 // has to be whole
                 let normal = doc.layer(item).is_some_and(|l| l.blend == BlendMode::Normal);
                 let rect = if normal { painted } else { full };
+                // brought back now (the slow part, so the time taken counts), the staged pixels sent
+                // on now and then so they don't pile up
+                staged += more.len();
+                self.restore_all(gpu, more.iter().copied(), false);
+                if staged >= 8 {
+                    gpu.queue.submit(std::iter::empty());
+                    staged = 0;
+                }
                 layers.extend(more);
                 part.push((item, rect));
             }
-            self.restore_all(gpu, layers, false);
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cache part") });
             let mut uniforms = UniformData::default();
@@ -4905,8 +4915,10 @@ impl Canvas {
         self.sample_layer(gpu, id, full, max_side)
     }
 
+    /// The picture as it shows (while the caches are remade, as it was), scaled to fit
+    /// `max_side` pixels: quick enough to ask for while it is drawn on.
     pub fn composite_thumbnail(&mut self, gpu: &Gpu, doc: &mut Document, max_side: u32) -> Result<Thumbnail, GpuError> {
-        self.render_finished(gpu, doc);
+        self.render(gpu, doc, None);
         self.sample_view(gpu, &self.composite_views[0], self.full(), max_side)
     }
 

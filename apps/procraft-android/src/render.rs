@@ -98,6 +98,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
         {
             let mut guard = shared.lock();
             let st = &mut *guard;
+            let held = Instant::now();
             // the window changed size while the image was awaited (the device turned): the view is
             // already for the new size, so this image is let go and the surface configured again
             if st.window_size != size {
@@ -180,12 +181,19 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
                 st.frame_interval_ms = now.duration_since(prev).as_secs_f32() * 1000.0;
             }
             last_present = Some(now);
+            // everything else waits on the lock meanwhile
+            if held.elapsed() > SLOW_FRAME {
+                log::warn!("a frame held the canvas {} ms", held.elapsed().as_millis());
+            }
         }
         queue.present(frame);
     }
     drop(surface);
     drop(window);
 }
+
+/// A frame that holds the canvas longer than this is logged: touches wait on it.
+const SLOW_FRAME: Duration = Duration::from_millis(200);
 
 /// How often the second display looks for a new frame of the main window.
 const PROJECTION_POLL: Duration = Duration::from_millis(8);

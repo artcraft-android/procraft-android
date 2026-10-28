@@ -655,17 +655,35 @@ impl Shared {
 
     /// Lets the canvas finish remaking its caches a render at a time, the lock let go between,
     /// so a save or export after reads the picture as it is without holding everything up.
-    pub(crate) fn finish_caches(&self) {
+    fn finish_caches(&self) {
         // each render remakes at least one item, so this ends well before the bound
         for _ in 0..100_000 {
-            let mut guard = self.lock();
-            let st = &mut *guard;
-            let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return };
-            canvas.render(gpu, &mut st.doc, None);
-            if !canvas.busy() {
-                return;
+            {
+                let mut guard = self.lock();
+                let st = &mut *guard;
+                let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return };
+                canvas.render(gpu, &mut st.doc, None);
+                if !canvas.busy() {
+                    return;
+                }
+            }
+            // a moment for whoever waits on the lock (a touch, the render thread)
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// The lock, taken once the canvas has finished remaking its caches (made a render at a
+    /// time, the lock let go between): what is read under it is the picture as it is, and
+    /// nothing waits on a whole remake.
+    pub(crate) fn lock_finished(&self) -> MutexGuard<'_, State> {
+        for _ in 0..1000 {
+            self.finish_caches();
+            let guard = self.lock();
+            if guard.canvas.as_ref().is_none_or(|c| !c.busy()) {
+                return guard;
             }
         }
+        self.lock()
     }
 
     fn frame(&self, st: &mut State) {
