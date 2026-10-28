@@ -1,8 +1,7 @@
 # ProCraft icon style guide
 
-The rules for ProCraft's own interface icons. Until an icon has its own drawing, it uses Phosphor's
-(Fill weight); `LucideIcons` keeps the Lucide set beside them. Our drawings replace Phosphor's one
-by one.
+The rules for ProCraft's interface icons, every one of them our own drawing. `LucideIcons` keeps the
+Lucide set beside them.
 
 ## Where an icon comes from
 
@@ -239,3 +238,16 @@ Each of the 48 is the object its name says, drawn plainly in this guide's shapes
 its tool: Sketching a pencil, Inking an ink bottle, Painting the palette, Airbrushing a spray can,
 Charcoals a stick of charcoal, Textures the pitted Grain tile. Brush, Wand and Checkmark are the
 bar's brush, the Adjustments wand and Done's tick.
+
+## Blend modes
+
+The arithmetic modes are two overlapping discs: Multiply two rings solid through their overlap,
+Overlay two rings, Exclusion two discs with the overlap cut away, Difference one disc with the
+other's share taken out. The rest picture their idea: Normal a disc; Darken and Darker Color a
+disc and a swatch with a chevron cut pointing down, Lighter Color a swatch's outline with one
+pointing up; Shade a sun half sunk; Color Burn a flame, Linear Burn a campfire; Lighten a sun,
+Screen a disc ringed with dots; Color Dodge a sparkle; Add a plus in a ring; Soft Light a lamp,
+Hard Light a spotlight, Vivid Light a bolt, Linear Light a torch, Pin Light a thumbtack; Hard Mix
+four squares; Subtract a minus, Divide a division sign; Hue the colour wheel, Saturation a drop
+filled halfway, Color three overlapping circles, Luminosity a disc half solid on the slant; Behind
+a solid sheet behind an outline; Height an arrow standing on a base, Linear Height a ramp.

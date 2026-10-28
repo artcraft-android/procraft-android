@@ -79,8 +79,7 @@ def main():
     shared = {}  # normalised text -> (title, text)
     lines = ['ProCraft is made with the following third-party software, under the licences given.', '',
              'The interface font, Inter, is under the SIL Open Font License 1.1 (its text above).', '',
-             'Most interface icons are Phosphor icons (phosphoricons.com), under the MIT License (its text above);',
-             'the app also keeps Lucide icons (lucide.dev), under the ISC License (its text above).', '',
+             'The app keeps Lucide icons (lucide.dev), under the ISC License (its text above).', '',
              'The 3D view environments are panoramas from Poly Haven (polyhaven.com), under CC0 (public',
              'domain); their authors are listed in assets/environments/README.md.', '',
              '== Rust crates ==', '']

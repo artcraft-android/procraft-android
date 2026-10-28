@@ -1,6 +1,6 @@
 """Draws ProCraft's own interface icons from plain geometry (docs/icons/STYLE_GUIDE.md) and puts them
 in place: an SVG master per icon (assets/icons/procraft/<name>.svg, a 24-unit grid), and its path
-data, scaled into its slot (assets/icons/slots.tsv), in Icons.kt instead of the Phosphor icon.
+data, scaled into its slot (assets/icons/slots.tsv), in Icons.kt.
 Needs shapely. Run from anywhere:
 
     python tools/icons/draw_icons.py
@@ -1325,6 +1325,166 @@ SET_ICONS = [angled_brush, artboard, asterisk, bell, bookmark, paintbrush, cactu
              rhombus, die, a_drop, fan_brush, film_strip, fish, flag, flame, flash, flower, hammer, headphones, heart,
              home, moon, note, pen_nib, map_pin, plane, puzzle_piece, rocket, spark, five_point_star, sun_object, swoosh,
              sword, ticket, pine, umbrella, wand, wizard_hat, pencil, ink_bottle, palette, spray_can, charcoal, grain_tile]
+# The blend mode glyphs. Two overlapping discs show the arithmetic modes; the rest are plain
+# pictures of their idea.
+
+LEFT, RIGHT, DISC_R = (9.4, 12.0), (14.6, 12.0), 6.6
+
+
+def overlap_dark():
+    """Multiply: two rings, solid all through where they overlap."""
+    l, r = (9.0, 12.0), (15.0, 12.0)
+    a, b = Point(l).buffer(DISC_R, quad_segs=24), Point(r).buffer(DISC_R, quad_segs=24)
+    return unary_union([ring(*l, DISC_R - 0.9, 1.8), ring(*r, DISC_R - 0.9, 1.8), a.intersection(b)])
+
+
+def overlap_rings():
+    """Overlay: two overlapping rings."""
+    return unary_union([ring(*LEFT, DISC_R - 0.9, 1.8), ring(*RIGHT, DISC_R - 0.9, 1.8)])
+
+
+def overlap_xor():
+    """Exclusion: two discs with their overlap cut away."""
+    a, b = Point(LEFT).buffer(DISC_R, quad_segs=24), Point(RIGHT).buffer(DISC_R, quad_segs=24)
+    return unary_union([a, b]).difference(a.intersection(b).buffer(1.2))
+
+
+def overlap_minus():
+    """Difference: a disc with a ring's worth taken out of it, and the ring."""
+    a, b = Point(LEFT).buffer(DISC_R, quad_segs=24), Point(RIGHT).buffer(DISC_R, quad_segs=24)
+    return unary_union([a.difference(b.buffer(1.2)), ring(*RIGHT, DISC_R - 0.9, 1.8)])
+
+
+def chevron_cut(container, up):
+    """A shape with a chevron cut out of it, pointing up or down."""
+    pts = [(7.6, 13.8), (12.0, 9.4), (16.4, 13.8)] if up else [(7.6, 10.2), (12.0, 14.6), (16.4, 10.2)]
+    return container.difference(LineString(pts).buffer(1.2, join_style='round'))
+
+
+def darken():
+    """Darken: a disc with a chevron pointing down cut out of it."""
+    return chevron_cut(Point(12, 12).buffer(8.6, quad_segs=32), False)
+
+
+def darker_colour():
+    """Darker Color: a swatch with a chevron pointing down cut out of it."""
+    return chevron_cut(soft(box(3.6, 3.6, 20.4, 20.4), 2.0), False)
+
+
+def lighter_colour():
+    """Lighter Color: a swatch's outline with a chevron pointing up inside."""
+    pts = [(7.8, 14.0), (12.0, 9.8), (16.2, 14.0)]
+    return unary_union([frame(3.6, 3.6, 20.4, 20.4, 1.8, 2.0), LineString(pts).buffer(1.2, join_style='round')])
+
+
+def sunset():
+    """Shade: a sun half sunk behind the horizon."""
+    half = Point(12, 15.0).buffer(6.6, quad_segs=24).intersection(box(0, 0, 24, 15.0))
+    return unary_union([half, capsule((3.0, 18.4), (21.0, 18.4), 1.2)])
+
+
+def campfire():
+    """Linear Burn: a flame over two crossed logs."""
+    fire = drop(12.0, 10.2, 4.6).difference(drop(12.0, 11.8, 1.8))
+    return unary_union([fire, capsule((4.6, 21.0), (19.4, 17.6), 1.1), capsule((4.6, 17.6), (19.4, 21.0), 1.1)])
+
+
+def dim_sun():
+    """Screen: a disc ringed with dots of light."""
+    dots = [Point(12 + 8.4 * math.cos(math.radians(45 * i)), 12 + 8.4 * math.sin(math.radians(45 * i))).buffer(1.3, quad_segs=8)
+            for i in range(8)]
+    return unary_union([Point(12, 12).buffer(4.8, quad_segs=24)] + dots)
+
+
+def plus_in_ring():
+    """Add: a plus inside a ring."""
+    return unary_union([ring(12, 12, 8.2, 1.8), capsule((8.0, 12.0), (16.0, 12.0), 1.2), capsule((12.0, 8.0), (12.0, 16.0), 1.2)])
+
+
+def lamp():
+    """Soft Light: a table lamp."""
+    return unary_union([soft(Polygon([(8.4, 3.0), (15.6, 3.0), (19.0, 10.4), (5.0, 10.4)]), 0.8),
+                        capsule((12.0, 11.6), (12.0, 18.0), 1.0), soft(box(7.0, 18.6, 17.0, 21.0), 1.0)])
+
+
+def spotlight():
+    """Hard Light: a spotlight overhead, its cone of light and the pool it lights."""
+    return unary_union([soft(box(8.6, 2.2, 15.4, 6.0), 0.8), soft(Polygon([(10.0, 7.2), (14.0, 7.2), (19.4, 18.4), (4.6, 18.4)]), 0.6),
+                        capsule((4.0, 21.0), (20.0, 21.0), 1.0)])
+
+
+def torch():
+    """Linear Light: a torch, its lens down to the left."""
+    head = soft(Polygon([(0, -3.6), (4.6, -2.2), (4.6, 2.2), (0, 3.6)]), 0.4)
+    body = unary_union([box(5.6, -2.2, 19.6, 2.2), Point(19.6, 0).buffer(2.2, quad_segs=12)])
+    body = body.difference(soft(box(9.0, -0.7, 12.0, 0.7), 0.3))
+    return along_diagonal(unary_union([head, body]), (3.4, 20.6))
+
+
+def thumbtack():
+    """Pin Light: a thumbtack."""
+    tack = unary_union([soft(box(7.0, 2.6, 17.0, 5.6), 1.0), box(9.4, 5.0, 14.6, 12.8), soft(box(5.6, 12.4, 18.4, 15.2), 0.8),
+                        capsule((12.0, 15.2), (12.0, 21.6), 0.8)])
+    return rotate(tack, -30, origin=(12, 12))
+
+
+def four_squares():
+    """Hard Mix: four squares."""
+    return unary_union([soft(box(x, y, x + 8.0, y + 8.0), 1.0) for x in (3.0, 13.0) for y in (3.0, 13.0)])
+
+
+def minus_bar():
+    """Subtract: a minus."""
+    return capsule((4.0, 12.0), (20.0, 12.0), 2.0)
+
+
+def divide_sign():
+    """Divide: a division sign."""
+    return unary_union([capsule((4.0, 12.0), (20.0, 12.0), 1.6), Point(12, 5.6).buffer(2.0, quad_segs=12),
+                        Point(12, 18.4).buffer(2.0, quad_segs=12)])
+
+
+def saturation_drop():
+    """Saturation: a drop's outline, filled to halfway."""
+    d = drop(12.0, 14.4, 6.6)
+    inside = d.buffer(-1.8)
+    return unary_union([d.difference(inside), inside.buffer(-1.2).intersection(box(0, 14.0, 24, 24))])
+
+
+def half_disc():
+    """Luminosity: a disc, one half solid, the other its outline, split on the slant."""
+    solid = Point(12, 12).buffer(9.0, quad_segs=32).intersection(rotate(box(-12, -12, 12, 36), 45, origin=(12, 12)))
+    return unary_union([solid, ring(12, 12, 8.1, 1.8)])
+
+
+def behind():
+    """Behind: a solid sheet behind a sheet's outline."""
+    front = soft(box(3.0, 9.0, 15.0, 21.0), 1.4)
+    back = soft(box(9.0, 3.0, 21.0, 15.0), 1.4).difference(front.buffer(1.2))
+    return unary_union([back, frame(3.0, 9.0, 15.0, 21.0, 1.8, 1.4)])
+
+
+def height_arrow():
+    """Height: an arrow standing up from a base."""
+    return unary_union([capsule((12.0, 8.0), (12.0, 17.6), 1.2), soft(Polygon([(12.0, 2.6), (17.0, 8.6), (7.0, 8.6)]), 0.5),
+                        capsule((4.0, 21.0), (20.0, 21.0), 1.2)])
+
+
+def ramp():
+    """Linear Height: a ramp rising evenly."""
+    return soft(Polygon([(3.0, 20.0), (21.0, 20.0), (21.0, 5.0)]), 0.8)
+
+
+BLENDS = {'multiply': overlap_dark, 'darken': darken, 'shade': sunset, 'color-burn': flame, 'linear-burn': campfire,
+          'darker-color': darker_colour, 'normal': lambda: Point(12, 12).buffer(8.0, quad_segs=32),
+          'lighten': sun_object, 'screen': dim_sun, 'color-dodge': lambda: star(12, 12, 10.0, 0.3), 'add': plus_in_ring,
+          'lighter-color': lighter_colour, 'overlay': overlap_rings, 'soft-light': lamp, 'hard-light': spotlight,
+          'vivid-light': flash, 'linear-light': torch, 'pin-light': thumbtack, 'hard-mix': four_squares,
+          'difference': overlap_minus, 'exclusion': overlap_xor, 'subtract': minus_bar, 'divide': divide_sign,
+          'hue': colour_wheel, 'saturation': saturation_drop, 'color': colour_circles, 'luminosity': half_disc,
+          'behind': behind, 'height': height_arrow, 'linear-height': ramp}
+# drawn smaller than the box they're placed in: a bare symbol filling a tile's box is too heavy
+SHRINK = {'blend-subtract': 0.75, 'blend-divide': 0.85}
 DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
@@ -1373,6 +1533,7 @@ DRAWINGS = {
     'swipe-share': share_tab, 'swipe-duplicate': duplicate,
 }
 DRAWINGS.update({f'set-{k}': draw for k, draw in enumerate(SET_ICONS)})
+DRAWINGS.update({f'blend-{k}': draw for k, draw in BLENDS.items()})
 
 
 def fmt(v):
@@ -1413,12 +1574,12 @@ def main():
                     f'  <path fill="currentColor" fill-rule="evenodd" d="{path_data(shape)}"/>\n</svg>\n')
         w, h, (x0, y0, x1, y1) = places[name]
         bx0, by0, bx1, by1 = shape.bounds
-        s = min((x1 - x0) / (bx1 - bx0), (y1 - y0) / (by1 - by0))
+        s = min((x1 - x0) / (bx1 - bx0), (y1 - y0) / (by1 - by0)) * SHRINK.get(name, 1.0)
         ox = (x0 + x1) / 2 - s * (bx0 + bx1) / 2
         oy = (y0 + y1) / 2 - s * (by0 + by1) / 2
         d = path_data(shape, lambda x, y: (ox + s * x, oy + s * y))
         frame = f'{fmt(w)}f' if w == h else f'{fmt(w)}f, {fmt(h)}f'
-        call = re.compile(r'(?:phosphor|ours)\("' + re.escape(name) + r'", [^\n]*?\)(?= \}|,?\n)')
+        call = re.compile(r'ours\("' + re.escape(name) + r'", [^\n]*?\)(?= \}|,?\n)')
         src, n = call.subn(f'ours("{name}", {frame}, "{d}")', src)
         if n != 1:
             raise SystemExit(f'{name}: {n} places in Icons.kt')

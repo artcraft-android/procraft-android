@@ -11,7 +11,7 @@ import androidx.compose.ui.unit.dp
 /**
  * The interface icons as Lucide draws them (lucide.dev, ISC licence, `LICENSE-lucide.txt` in the
  * app's assets), each placed in the frame its icon is shown in, at the size it is shown: kept
- * beside [PcIcons], whose icons are Phosphor's, under the same names.
+ * beside [PcIcons], whose icons are our own, under the same names.
  */
 object LucideIcons {
     val FullScreen by lazy { lucide("fullscreen", 50f, 2.51f, "M 28.76,13.2 l 7.52,0 l 0,7.52", "m 36.28,13.2 l-8.77,8.77", "m 13.72,35.76 l 8.77,-8.77", "M 21.24,35.76 L 13.72,35.76 l 0,-7.52") }

@@ -32,6 +32,6 @@ JDK 17.
 ## Licence
 
 [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE), at your option. The third-party material the app
-bundles (the Inter font, Phosphor and Lucide icons, light panoramas) and the libraries it is built with are listed
+bundles (the Inter font, Lucide icons, light panoramas) and the libraries it is built with are listed
 in [NOTICE](NOTICE); every asset, with its author, source and licence, in
 [ATTRIBUTION.md](ATTRIBUTION.md).
