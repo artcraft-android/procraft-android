@@ -106,11 +106,14 @@ pub struct ModelFile {
     pub bytes: Vec<u8>,
 }
 
-/// What an OBJ takes from the files picked with it: the material file it names (or the only
-/// one), and the rest as the images its materials may map.
+/// What a model takes from the files picked with it: an OBJ the material file it names (or the
+/// only one), and the rest as the images its materials may map. A USDZ packs its own.
 fn companions(model: &[u8], extension: &str, files: Vec<ModelFile>) -> (Option<String>, Vec<ModelFile>) {
-    if extension != "obj" {
+    if extension == "usdz" {
         return (None, Vec::new());
+    }
+    if extension != "obj" {
+        return (None, files);
     }
     let (libraries, images): (Vec<ModelFile>, Vec<ModelFile>) =
         files.into_iter().partition(|f| extension_of(&f.name) == "mtl");
@@ -119,14 +122,93 @@ fn companions(model: &[u8], extension: &str, files: Vec<ModelFile>) -> (Option<S
         rest.starts_with(char::is_whitespace).then(|| rest.trim().to_owned())
     });
     let only = if libraries.len() == 1 { libraries.first() } else { None };
-    let chosen = named.and_then(|n| libraries.iter().find(|f| same_file(&f.name, &n))).or(only);
+    let chosen = named.and_then(|n| companion(&libraries, &n)).or(only);
     (chosen.map(|f| String::from_utf8_lossy(&f.bytes).into_owned()), images)
+}
+
+/// The file among `files` that `path` (as a model's file gives it, relative to the model) names:
+/// the one at that path, else the one with its name, ignoring case either way.
+fn companion<'a>(files: &'a [ModelFile], path: &str) -> Option<&'a ModelFile> {
+    let wanted = tidy_path(path);
+    files.iter().find(|f| tidy_path(&f.name) == wanted).or_else(|| files.iter().find(|f| same_file(&f.name, path)))
+}
+
+/// A relative path as compared: forward slashes, no `./` parts, lower case.
+fn tidy_path(path: &str) -> String {
+    let path = path.trim().replace('\\', "/").to_lowercase();
+    path.split('/').filter(|p| !p.is_empty() && *p != ".").collect::<Vec<_>>().join("/")
 }
 
 /// Whether two paths name the same file: their last parts, ignoring case.
 fn same_file(a: &str, b: &str) -> bool {
     let last = |p: &str| p.trim().rsplit(['/', '\\']).next().unwrap_or("").to_lowercase();
     last(a) == last(b)
+}
+
+/// A model zipped up with the files it needs, as a folder of them would be: an OBJ with its
+/// material file and images, a USD with its images.
+struct Zipped {
+    /// The model's path in the zip.
+    name: String,
+    model: Vec<u8>,
+    /// Every other file in the zip, named by its path from the model's folder.
+    files: Vec<ModelFile>,
+}
+
+/// Whether a file's name is one of a model's kinds that open.
+fn is_model_name(name: &str) -> bool {
+    matches!(extension_of(name).as_str(), "obj" | "usdz" | "usdc" | "usda" | "usd")
+}
+
+/// The model in zip `bytes` (the first of those nearest its top), if it holds one and isn't a
+/// package of another kind (an artwork or brushes). Folders, and the hidden files another system
+/// adds when it zips (`__MACOSX/`, `._` files), are passed over.
+fn zipped_model_name(zip: &procraft_engine::zip::ZipReader<'_>) -> Option<String> {
+    let files: Vec<&str> = zip
+        .names()
+        .filter(|n| {
+            let last = n.rsplit('/').next().unwrap_or(n);
+            !n.ends_with('/') && !n.starts_with("__MACOSX/") && !last.starts_with("._") && !last.is_empty()
+        })
+        .collect();
+    let package = files.iter().any(|n| {
+        let last = n.rsplit('/').next().unwrap_or(n);
+        matches!(last, "Document.archive" | "artwork.json" | "Brush.archive" | "brushset.plist")
+    });
+    if package {
+        return None;
+    }
+    let depth = |n: &str| n.matches('/').count();
+    let models = files.iter().filter(|n| is_model_name(n));
+    let nearest = models.clone().map(|n| depth(n)).min()?;
+    models.into_iter().find(|n| depth(n) == nearest).map(|n| (*n).to_owned())
+}
+
+/// The model in a zip and the other files beside it (see [`zipped_model_name`]).
+fn unzip_model(bytes: &[u8]) -> Option<Zipped> {
+    let zip = procraft_engine::zip::ZipReader::new(bytes)?;
+    let name = zipped_model_name(&zip)?;
+    let model = zip.read(&name)?;
+    let folder = name.rsplit_once('/').map_or("", |(f, _)| f);
+    let mut files = Vec::new();
+    for entry in zip.names() {
+        let last = entry.rsplit('/').next().unwrap_or(entry);
+        if entry == name || entry.ends_with('/') || entry.starts_with("__MACOSX/") || last.starts_with("._") {
+            continue;
+        }
+        let Some(bytes) = zip.read(entry) else { continue };
+        let relative =
+            if folder.is_empty() { Some(entry) } else { entry.strip_prefix(folder).and_then(|r| r.strip_prefix('/')) };
+        files.push(ModelFile { name: relative.unwrap_or(entry).to_owned(), bytes });
+    }
+    Some(Zipped { name, model, files })
+}
+
+/// The model a zip of one holds (its path in the zip), as the gallery's Import opens it; none if
+/// it holds none or is an artwork, a layered package or brushes.
+#[uniffi::export]
+pub fn zip_model_name(bytes: Vec<u8>) -> Option<String> {
+    zipped_model_name(&procraft_engine::zip::ZipReader::new(&bytes)?)
 }
 
 /// The kinds of model file that open: OBJ (with its MTL), USDZ, and USD binary or text.
@@ -271,7 +353,9 @@ impl Scene {
 impl CanvasSession {
     /// Opens a model to paint on: `file` the model file named `file_name` (OBJ, USDZ or USDC, by
     /// its extension), with the `files` picked along with it (an OBJ's material file and the
-    /// images it maps). Each texture set is `texture_size` pixels square (0: the default).
+    /// images it maps). A zip (`.zip`) brings the model and those files in one: as a folder
+    /// holding them, its model the one nearest its top. Each texture set is `texture_size` pixels
+    /// square (0: the default).
     #[uniffi::constructor]
     pub fn open_model(
         file: Vec<u8>,
@@ -280,6 +364,14 @@ impl CanvasSession {
         name: String,
         texture_size: u32,
     ) -> Result<Arc<CanvasSession>, MobileError> {
+        let (file, file_name, files) = if extension_of(&file_name) == "zip" {
+            let zipped = unzip_model(&file).ok_or_else(|| file_error("opening the model", "no model in the zip"))?;
+            let mut all = zipped.files;
+            all.extend(files);
+            (zipped.model, zipped.name, all)
+        } else {
+            (file, file_name, files)
+        };
         let extension = extension_of(&file_name);
         let (mtl, picked) = companions(&file, &extension, files);
         let mesh = read_model(&file, &extension, mtl.as_deref())
@@ -448,9 +540,9 @@ impl CanvasSession {
     }
 
     /// The images the model brings for its texture sets (a USDZ's packed images, or those
-    /// picked with an OBJ that its materials map): to be decoded and given back with
-    /// [`CanvasSession::set_model_texture`]. Its normal and occlusion maps come as channels 3
-    /// and 4. An OBJ's picked images are given once.
+    /// picked or zipped with an OBJ or USD that its materials map): to be decoded and given back
+    /// with [`CanvasSession::set_model_texture`]. Its normal and occlusion maps come as channels
+    /// 3 and 4. Picked images are given once.
     pub fn model_texture_files(&self) -> Vec<ModelTextureFile> {
         let mut st = self.shared.lock();
         let Some(scene) = st.scene.as_mut() else { return Vec::new() };
@@ -460,7 +552,7 @@ impl CanvasSession {
             .flatten();
         let found = |path: &str| match &zip {
             Some(zip) => packed_file(zip, path),
-            None => picked.iter().find(|f| same_file(&f.name, path)).map(|f| f.bytes.clone()),
+            None => companion(&picked, path).map(|f| f.bytes.clone()),
         };
         let mut out = Vec::new();
         for (set, part) in scene.mesh.parts.iter().enumerate() {
@@ -2349,6 +2441,75 @@ mod tests {
         let only = vec![file("whatever.mtl", mtl), file("rough.png", b"rough")];
         let s = CanvasSession::open_model(obj.into(), "cube.obj".into(), only, "Cube".into(), 64).unwrap();
         assert_eq!(s.model_texture_files().len(), 1);
+    }
+
+    /// A zip of `files` (name, contents), in order.
+    fn zipped(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut zip = procraft_engine::zip::ZipWriter::new();
+        for (name, bytes) in files {
+            zip.add(name, bytes);
+        }
+        zip.finish()
+    }
+
+    #[test]
+    fn a_zipped_obj_comes_in_with_its_material_file_and_images() {
+        let obj = format!("mtllib cube.mtl\nusemtl body\n{CUBE}");
+        let mtl =
+            b"newmtl body\nmap_Kd textures/Body.png\nmap_roughness ./rough.png\nmap_tangentSpaceNormal flat.png\n";
+        let zip = zipped(&[
+            ("Cube Folder/", b""),
+            ("__MACOSX/Cube Folder/._cube.obj", b"junk"),
+            ("Cube Folder/cube.obj", obj.as_bytes()),
+            ("Cube Folder/cube.mtl", mtl),
+            ("Cube Folder/other/body.png", b"not this one"),
+            ("Cube Folder/textures/body.png", b"colour"),
+            ("Cube Folder/rough.png", b"rough"),
+            ("Cube Folder/flat.png", b"normal"),
+        ]);
+        assert_eq!(super::zip_model_name(zip.clone()).as_deref(), Some("Cube Folder/cube.obj"));
+        let s = CanvasSession::open_model(zip, "Cube Folder.zip".into(), Vec::new(), "Cube".into(), 64).unwrap();
+        let info = s.model_info().unwrap();
+        assert_eq!((info.texture_sets.as_slice(), info.triangles), (["body".to_owned()].as_slice(), 12));
+        // each map found by its path from the model, ignoring case; the normal map as channel 3
+        let found: Vec<(u32, Vec<u8>)> = s.model_texture_files().into_iter().map(|f| (f.channel, f.bytes)).collect();
+        assert_eq!(found, [(0, b"colour".to_vec()), (1, b"rough".to_vec()), (3, b"normal".to_vec())]);
+        // kept as the model it holds
+        let source = s.shared.lock().scene.as_ref().map(|sc| (sc.source.extension.clone(), sc.source.mtl.is_some()));
+        assert_eq!(source, Some(("obj".to_owned(), true)));
+    }
+
+    #[test]
+    fn a_zips_model_is_the_one_nearest_its_top() {
+        let deep = zipped(&[("parts/inner.obj", CUBE.as_bytes()), ("outer.OBJ", CUBE.as_bytes())]);
+        assert_eq!(super::zip_model_name(deep).as_deref(), Some("outer.OBJ"));
+        let usd = zipped(&[("readme.txt", b"hi"), ("scene/model.usdz", b"x")]);
+        assert_eq!(super::zip_model_name(usd).as_deref(), Some("scene/model.usdz"));
+        // nothing to paint, or another kind of package: not a model
+        assert_eq!(super::zip_model_name(zipped(&[("picture.png", b"p")])), None);
+        assert_eq!(super::zip_model_name(zipped(&[("Document.archive", b"d"), ("mesh.obj", CUBE.as_bytes())])), None);
+        assert_eq!(super::zip_model_name(zipped(&[("artwork.json", b"{}"), ("model.obj", CUBE.as_bytes())])), None);
+        assert_eq!(super::zip_model_name(b"not a zip".to_vec()), None);
+        let none = CanvasSession::open_model(zipped(&[("a.png", b"p")]), "a.zip".into(), Vec::new(), "A".into(), 64);
+        assert!(none.is_err());
+    }
+
+    #[test]
+    fn a_models_own_obj_zip_opens_again_textured() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        dab(&s);
+        let path = std::env::temp_dir().join(format!("procraft-obj-zip-{}.zip", std::process::id()));
+        s.export_model_obj(path.to_string_lossy().into_owned()).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let again = CanvasSession::open_model(bytes, "Cube.zip".into(), Vec::new(), "Again".into(), 64).unwrap();
+        // its colour, roughness and metalness, as its material file maps them
+        let channels: Vec<u32> = again.model_texture_files().iter().map(|f| f.channel).collect();
+        assert_eq!(channels, [0, 1, 2]);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

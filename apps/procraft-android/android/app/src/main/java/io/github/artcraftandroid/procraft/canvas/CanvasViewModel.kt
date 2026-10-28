@@ -1294,18 +1294,27 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * A new artwork painting on the model in the file [uri] (named [name]: OBJ, USDZ or USDC),
-     * with the files picked along with it ([picked], by name: an OBJ's material file and images).
+     * A new artwork painting on the model in the file [uri] (named [name]: OBJ, USDZ or USDC, or
+     * a zip holding one with its files), with the files picked along with it ([picked], by name:
+     * an OBJ's material file and images). [bytes] are the file's, if already read; the artwork
+     * is named [title], else after the file.
      */
-    private suspend fun newFromModel(uri: android.net.Uri, name: String, picked: List<Pair<android.net.Uri, String>> = emptyList()) {
+    private suspend fun newFromModel(
+        uri: android.net.Uri,
+        name: String,
+        picked: List<Pair<android.net.Uri, String>> = emptyList(),
+        bytes: ByteArray? = null,
+        title: String? = null,
+    ) {
         val resolver = getApplication<Application>().contentResolver
         val s = withContext(Dispatchers.IO) {
             runCatching {
-                val file = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
+                val file = bytes ?: resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
                 val files = picked.mapNotNull { (u, n) ->
                     runCatching { resolver.openInputStream(u)?.use { ModelFile(n, it.readBytes()) } }.getOrNull()
                 }
-                CanvasSession.openModel(file, name, files, name.substringBeforeLast('.').ifBlank { "Untitled Artwork" }, 0u)
+                val artwork = (title ?: name.substringBeforeLast('.')).ifBlank { "Untitled Artwork" }
+                CanvasSession.openModel(file, name, files, artwork, 0u)
                     .also(::loadModelTextures).also(::loadBrushes)
             }.onFailure { android.util.Log.e("ProCraft", "opening a model", it) }.getOrNull()
         }
@@ -1392,8 +1401,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // another program's palette
         val foreign = head != null && io.github.artcraftandroid.procraft.gallery.ColourSwatches.isExchange(head) || name?.endsWith(".aco", ignoreCase = true) == true
         val zip = head != null && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()
+        val zipBytes = if (zip) withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() } else null
         // a zip of brushes
-        val brushes = if (zip) withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }?.takeIf(::isBrushFile) else null
+        val brushes = zipBytes?.takeIf(::isBrushFile)
+        // a model zipped with its material file and images (as a folder of them)
+        val zippedModel = if (brushes == null && name?.let(::isModelName) != true) zipBytes?.let { io.github.artcraftandroid.procraft.core.zipModelName(it) } else null
         // a zip: brushes, a palette, an artwork file of ours, or a layered package
         if (brushes != null) {
             if (!addBrushes(brushes)) message = "This file has no brushes in it."
@@ -1403,6 +1415,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             message = "This palette can't be read."
         } else if (name != null && isModelName(name)) {
             newFromModel(uri, name)
+        } else if (zippedModel != null && zipBytes != null) {
+            val title = zippedModel.substringAfterLast('/').substringBeforeLast('.')
+            newFromModel(uri, if (name?.endsWith(".zip", ignoreCase = true) == true) name else "${name ?: "model"}.zip", bytes = zipBytes, title = title)
         } else if (name != null && isOtherBrushFile(name)) {
             val bytes = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }
             if (bytes == null || !addOtherBrushes(bytes, name)) message = "This file has no brushes in it."

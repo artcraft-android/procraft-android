@@ -467,8 +467,8 @@ pub fn read_mtl(mtl: &str) -> Vec<Material> {
                     m.color = Some([r, g, b]);
                 }
             }
-            "Pr" => m.roughness = number(),
-            "Pm" => m.metallic = number(),
+            "Pr" | "roughness" => m.roughness = number(),
+            "Pm" | "metallic" => m.metallic = number(),
             "map_Kd" => m.color_map = file(),
             "map_Pr" | "map_roughness" => m.roughness_map = file(),
             "map_Pm" | "map_metallic" => m.metallic_map = file(),
@@ -571,6 +571,23 @@ f -8/1 -4/2 -1/3 -5/4
         assert_eq!(m.normal_map.as_deref(), Some("body-normal.png"));
         assert_eq!(m.occlusion_map.as_deref(), Some("body-ambient_occlusion.png"));
         assert_eq!(m.color, Some([1.0; 3]));
+    }
+
+    #[test]
+    fn material_values_read_by_either_name() {
+        let both = read_mtl(
+            "newmtl a
+Pr 0.25
+Pm 0.75
+newmtl b
+	roughness 0.5
+	metallic 1
+",
+        );
+        assert_eq!(
+            both.iter().map(|m| (m.roughness, m.metallic)).collect::<Vec<_>>(),
+            [(Some(0.25), Some(0.75)), (Some(0.5), Some(1.0))]
+        );
     }
 
     #[test]
