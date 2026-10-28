@@ -1197,6 +1197,9 @@ pub struct Canvas {
     prediction: Vec<StampInstance>,
     ops: Vec<Op>,
     dirty: IRect,
+    /// Whether the composite is made around pictures of what isn't being worked on, and them.
+    cache_composites: bool,
+    caches: Option<Caches>,
     undo: Vec<Step>,
     redo: Vec<Step>,
     transforming: Option<Transforming>,
@@ -1390,6 +1393,8 @@ impl Canvas {
             smudge_capacity: 64,
             prediction: Vec::new(),
             ops: Vec::new(),
+            cache_composites: false,
+            caches: None,
             dirty: IRect::from_size(width, height),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -1825,7 +1830,22 @@ impl Canvas {
     }
 
     /// Recomposite everything next frame (after a change to visibility, opacity, order...).
+    /// Whether the composite is made around pictures of the top level's items that aren't being
+    /// worked on, kept until something changes them, so that only the items worked on composite
+    /// each time (and the others' layers needn't be at hand): for artworks of more layers than
+    /// fit at once. Off, every layer composites every time.
+    pub fn set_cache_composites(&mut self, on: bool) {
+        self.cache_composites = on;
+        self.caches = None;
+    }
+
+    /// Whether the composite is being made around pictures of what isn't worked on.
+    pub fn composites_cached(&self) -> bool {
+        self.caches.is_some()
+    }
+
     pub fn invalidate(&mut self) {
+        self.caches = None;
         self.dirty = self.full();
     }
 
@@ -2183,7 +2203,9 @@ impl Canvas {
 
         // the display takes four slots, and frosted panels three and one for each
         let frosted = target.as_ref().and_then(|t| t.backdrop).map_or(0, |b| b.regions.len() + 3);
-        let slots = (ops.len() + doc.layers().len() + 4 + frosted) as u64;
+        // remaking the caches composites the layers once more
+        let cached = if self.cache_composites { doc.layers().len() + 2 } else { 0 };
+        let slots = (ops.len() + doc.layers().len() + 4 + frosted + cached) as u64;
         if slots > self.uniform_slots {
             self.uniform_slots = slots.next_power_of_two();
             let (buffer, bind) = uniforms(device, &self.pipelines.uniform_layout, self.uniform_slots);
@@ -2207,7 +2229,12 @@ impl Canvas {
 
         let mut next_instance = 0u32;
         let mut history_changed = false;
+        // what is worked on, for the caches: other work drops them
+        let live = self.caches.as_ref().map(|c| c.live_layers.clone());
         for op in ops {
+            if live.as_ref().is_some_and(|live| !self.keeps_caches(&op, live)) {
+                self.caches = None;
+            }
             match op {
                 Op::Stamps { instances, wet, style, layer, clear, .. } if style.in_place() => {
                     next_instance = next_instance.saturating_add(u32::try_from(instances.len()).unwrap_or(u32::MAX));
@@ -2727,6 +2754,7 @@ impl Canvas {
 
         let dirty = self.dirty.intersect(self.full());
         self.make_groups(device, doc.max_depth());
+        self.ensure_caches(device, doc, &mut encoder, &mut uniforms);
         if !dirty.is_empty() {
             self.composite(device, doc, &mut encoder, &mut uniforms, dirty);
             self.composites = self.composites.wrapping_add(1);
@@ -3509,8 +3537,174 @@ impl Canvas {
         // the stack bottom up; a group's layers go onto its depth's pair of textures first, and
         // the group onto the stack where its entry is
         let main = Stack { textures: &self.composite, views: &self.composite_views };
+        if let Some(c) = &self.caches {
+            // what is below as it was, what is worked on, then what is above as it was
+            encoder.copy_texture_to_texture(
+                copy_at(&c.below[0], rect.x0, rect.y0),
+                copy_at(&self.composite[0], rect.x0, rect.y0),
+                extent(rect.width(), rect.height()),
+            );
+            let mut current = 0;
+            self.composite_items(device, doc, encoder, uniforms, rect, &c.live, true, &main, &mut current);
+            if !c.above_items.is_empty() {
+                let uniform = LayerUniform {
+                    opacity: 1.0,
+                    blend: BlendMode::Normal.id(),
+                    tint: Look::PLAIN.tint,
+                    ..Default::default()
+                };
+                let view = &c.above_views[0];
+                self.draw_onto(
+                    device,
+                    encoder,
+                    uniforms,
+                    rect,
+                    view,
+                    None,
+                    &self.stroke_view,
+                    uniform,
+                    BlendMode::Normal,
+                    &main,
+                    &mut current,
+                );
+            }
+            main.settle(encoder, rect, current);
+            return;
+        }
         let current = self.composite_members(device, doc, encoder, uniforms, rect, None, &main);
         main.settle(encoder, rect, current);
+    }
+
+    /// The top level's items composited live while caches are used (from the one holding the
+    /// current layer up to a run of plain items at the top: normal, the first not clipped to what
+    /// is below the run), with every layer in them; none while something else is under way
+    /// (Animation Assist's frames, an adjustment, liquify, a transform, a stroke elsewhere).
+    fn live_items(&self, doc: &Document) -> Option<(Vec<LayerId>, std::ops::Range<usize>)> {
+        let busy =
+            self.transforming.is_some() || self.liquify.is_some() || self.pencil.is_some() || self.held.is_some();
+        if doc.animation.is_some() || busy || self.smudge.is_some() {
+            return None;
+        }
+        let tops = doc.members(None);
+        let mut top = doc.current();
+        if doc.layer(top).is_some_and(|l| l.kind == LayerKind::Mask) {
+            top = doc.layer(top)?.parent?;
+        }
+        for _ in 0..doc.layers().len() {
+            match doc.group_of(top) {
+                Some(g) => top = g,
+                None => break,
+            }
+        }
+        let start = tops.iter().position(|t| *t == top)?;
+        let layer = |i: usize| tops.get(i).and_then(|t| doc.layer(*t));
+        let mut end = tops.len();
+        while end > start + 1 && layer(end - 1).is_some_and(|l| l.blend == BlendMode::Normal) {
+            end -= 1;
+        }
+        while end < tops.len() && layer(end).is_some_and(|l| l.clipped) {
+            end += 1;
+        }
+        let live: HashSet<LayerId> = tops.get(start..end)?.iter().flat_map(|t| item_layers(doc, *t)).collect();
+        if self.active.is_some_and(|a| !live.contains(&a.layer)) {
+            return None;
+        }
+        Some((tops, start..end))
+    }
+
+    /// Makes (or keeps) the caches the composite is made around, while they are used: what is
+    /// below the items worked on and what is above them, each remade only when what it was made
+    /// from changed.
+    fn ensure_caches(
+        &mut self,
+        device: &wgpu::Device,
+        doc: &Document,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+    ) {
+        let Some((tops, live)) = self.live_items(doc).filter(|_| self.cache_composites) else {
+            self.caches = None;
+            return;
+        };
+        let below_items = tops.get(..live.start).unwrap_or_default().to_vec();
+        let above_items = tops.get(live.end..).unwrap_or_default().to_vec();
+        let below_key = items_key(doc, &below_items, true);
+        let above_key = items_key(doc, &above_items, false);
+        let mut caches = self.caches.take().unwrap_or_else(|| {
+            let pair = |label| {
+                let textures = [
+                    texture(device, label, self.width, self.height, LAYER_FORMAT),
+                    texture(device, label, self.width, self.height, LAYER_FORMAT),
+                ];
+                let views = textures.each_ref().map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
+                (textures, views)
+            };
+            let ((below, below_views), (above, above_views)) = (pair("below"), pair("above"));
+            Caches {
+                live: Vec::new(),
+                live_layers: HashSet::new(),
+                below,
+                below_views,
+                below_items: Vec::new(),
+                // nothing matches until made
+                below_key: !below_key,
+                above,
+                above_views,
+                above_items: Vec::new(),
+                above_key: !above_key,
+            }
+        });
+        let full = self.full();
+        if caches.below_items != below_items || caches.below_key != below_key {
+            let [r, g, b] = doc.background;
+            let solid = if doc.background_visible { [r, g, b, 1.0] } else { [0.0; 4] };
+            let offset = uniforms.push(&LayerUniform { opacity: 1.0, solid, ..Default::default() });
+            {
+                let mut pass = render_pass(
+                    encoder,
+                    "below",
+                    &caches.below_views[0],
+                    wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                );
+                pass.set_pipeline(&self.pipelines.solid);
+                pass.set_bind_group(0, &self.stroke_bind, &[]);
+                pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+                pass.draw(0..3, 0..1);
+            }
+            let stack = Stack { textures: &caches.below, views: &caches.below_views };
+            let mut current = 0;
+            self.composite_items(device, doc, encoder, uniforms, full, &below_items, true, &stack, &mut current);
+            stack.settle(encoder, full, current);
+            caches.below_items = below_items;
+            caches.below_key = below_key;
+        }
+        if caches.above_items != above_items || caches.above_key != above_key {
+            drop(render_pass(encoder, "above", &caches.above_views[0], wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
+            let stack = Stack { textures: &caches.above, views: &caches.above_views };
+            let mut current = 0;
+            self.composite_items(device, doc, encoder, uniforms, full, &above_items, true, &stack, &mut current);
+            stack.settle(encoder, full, current);
+            caches.above_items = above_items;
+            caches.above_key = above_key;
+        }
+        caches.live = tops.get(live).unwrap_or_default().to_vec();
+        caches.live_layers = caches.live.iter().flat_map(|t| item_layers(doc, *t)).collect();
+        self.caches = Some(caches);
+    }
+
+    /// Whether work keeps the caches: painting, or undoing or redoing it, on a layer worked on.
+    fn keeps_caches(&self, op: &Op, live: &HashSet<LayerId>) -> bool {
+        let only_live = |step: Option<&Step>| {
+            step.is_some_and(|s| s.doc.is_none() && s.pixels.iter().all(|p| live.contains(&p.layer)))
+        };
+        match op {
+            Op::Stamps { layer, .. } => live.contains(layer),
+            Op::Commit(stroke) => live.contains(&stroke.layer),
+            Op::Cancel | Op::SaveTip(_) | Op::Untip(_) | Op::Mark | Op::Name(_) | Op::Collapse => true,
+            Op::Undo => only_live(self.undo.last()),
+            Op::Redo => only_live(self.redo.last()),
+            _ => false,
+        }
     }
 
     /// The members of `group` (None: the top level) bottom up onto `stack`; returns which of its
@@ -3527,11 +3721,40 @@ impl Canvas {
         stack: &Stack<'_>,
     ) -> usize {
         let mut current = 0usize;
+        self.composite_items(
+            device,
+            doc,
+            encoder,
+            uniforms,
+            rect,
+            &doc.members(group),
+            group.is_none(),
+            stack,
+            &mut current,
+        );
+        current
+    }
+
+    /// `items` (a level's members, bottom up; `top` the top level's) onto `stack`, whose result
+    /// is in `stack.views[current]`.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_items(
+        &self,
+        device: &wgpu::Device,
+        doc: &Document,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        rect: IRect,
+        items: &[LayerId],
+        top: bool,
+        stack: &Stack<'_>,
+        current: &mut usize,
+    ) {
         // Animation Assist: the top level's frames show around the current (or played) one
-        let animation = if group.is_none() { doc.animation.as_ref() } else { None };
+        let animation = if top { doc.animation.as_ref() } else { None };
         let frames = animation.map(|_| animation::frames(doc)).unwrap_or_default();
         let focus = animation.and_then(|_| self.play_frame.or_else(|| animation::current_frame(doc)));
-        for id in doc.members(group) {
+        for &id in items {
             let Some(layer) = doc.layer(id) else { continue };
             // another layer shown alone
             if doc.soloed_out(id) {
@@ -3552,7 +3775,7 @@ impl Canvas {
             match layer.kind {
                 LayerKind::Mask => {}
                 LayerKind::Paint => {
-                    self.composite_layer(device, doc, encoder, uniforms, rect, layer, look, stack, &mut current)
+                    self.composite_layer(device, doc, encoder, uniforms, rect, layer, look, stack, current)
                 }
                 LayerKind::Group => {
                     if !layer.visible || layer.opacity <= 0.0 {
@@ -3576,12 +3799,11 @@ impl Canvas {
                         uniform,
                         layer.blend,
                         stack,
-                        &mut current,
+                        current,
                     );
                 }
             }
         }
-        current
     }
 
     /// Group `id`'s members composited over transparency on the textures for its depth; returns
@@ -4237,6 +4459,7 @@ impl Canvas {
             self.layers.insert(id, LayerGpu { texture, view });
         }
         let Some(layer) = self.layers.get(&id) else { return Ok(()) };
+        self.caches = None;
         gpu.queue.write_texture(
             copy_at(&layer.texture, 0, 0),
             rgba,
@@ -4992,6 +5215,55 @@ fn crop(t: &Thumbnail, [x0, y0, x1, y1]: [u32; 4]) -> Thumbnail {
 struct Stack<'a> {
     textures: &'a [wgpu::Texture; 2],
     views: &'a [wgpu::TextureView; 2],
+}
+
+/// Pictures of the top level's items that aren't being worked on, so only those that are
+/// composite each time (and the others' layers needn't be at hand): the background with every
+/// item below them, and a run of plain items above them over transparency.
+struct Caches {
+    /// The top level's items composited live, and every layer in them.
+    live: Vec<LayerId>,
+    live_layers: HashSet<LayerId>,
+    /// The items below them, composited over the background (in the first texture), and what
+    /// that was made from.
+    below: [wgpu::Texture; 2],
+    below_views: [wgpu::TextureView; 2],
+    below_items: Vec<LayerId>,
+    below_key: u64,
+    /// The items above them, over transparency (in the first texture), and what from.
+    above: [wgpu::Texture; 2],
+    above_views: [wgpu::TextureView; 2],
+    above_items: Vec<LayerId>,
+    above_key: u64,
+}
+
+/// What a top-level item composites from: itself and its mask, or a group and all it holds.
+fn item_layers(doc: &Document, item: LayerId) -> Vec<LayerId> {
+    let mut layers = vec![item];
+    match doc.layer(item).map(|l| l.kind) {
+        Some(LayerKind::Group) => layers.extend(doc.contents(item)),
+        Some(LayerKind::Paint) => layers.extend(doc.mask_of(item)),
+        _ => {}
+    }
+    layers
+}
+
+/// A fingerprint of how `items` composite (with the background, if `background`): every setting
+/// of every layer in them, and which layer is shown alone. Their pixels change only through work
+/// that drops the caches.
+fn items_key(doc: &Document, items: &[LayerId], background: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if background {
+        format!("{:?} {}", doc.background, doc.background_visible).hash(&mut h);
+    }
+    format!("{:?}", doc.solo).hash(&mut h);
+    for &item in items {
+        for id in item_layers(doc, item) {
+            format!("{:?}", doc.layer(id)).hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 impl Stack<'_> {

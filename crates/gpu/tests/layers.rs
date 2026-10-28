@@ -316,3 +316,107 @@ fn a_held_edit_is_one_undo_step_or_put_back() {
     canvas.render(&gpu, &mut doc, None);
     assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, a, 3, 3), [10, 20, 30, 255]);
 }
+
+/// The same edits to an artwork composited fully and one composited around caches.
+struct Twins {
+    docs: [Document; 2],
+    canvases: [Canvas; 2],
+}
+
+impl Twins {
+    fn each(&mut self, f: impl Fn(&mut Document, &mut Canvas)) {
+        for (doc, canvas) in self.docs.iter_mut().zip(self.canvases.iter_mut()) {
+            f(doc, canvas);
+        }
+    }
+
+    /// Both composites, every pixel within `slack` of each other (a run of plain layers above is
+    /// flattened once, so its 8-bit picture can round a step apart).
+    fn same(&mut self, gpu: &Gpu, slack: u8, what: &str) {
+        let mut pictures = Vec::new();
+        for (doc, canvas) in self.docs.iter_mut().zip(self.canvases.iter_mut()) {
+            canvas.render(gpu, doc, None);
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            pictures.push(canvas.read_composite(gpu).unwrap());
+        }
+        let worst = pictures[0].iter().zip(&pictures[1]).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+        assert!(worst <= slack, "{what}: cached composite differs by {worst}");
+    }
+}
+
+#[test]
+fn composites_made_around_cached_pictures_match_full_ones() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    t.canvases[0].set_cache_composites(true);
+    // bottom up: red; multiplied blue; a group of green and screened yellow; a masked layer with
+    // an overlay clipped to it (worked on); two plain layers at the top
+    let base = t.docs[0].current();
+    t.each(|doc, canvas| {
+        fill(canvas, doc, base, [200, 40, 40]);
+        let multiply = doc.add_layer();
+        doc.set_blend(multiply, BlendMode::Multiply);
+        paint(canvas, doc, multiply, [60, 60, 230], Vec2::new(5.0, 5.0), 4.0, StrokeTool::Paint);
+        let green = doc.add_layer();
+        paint(canvas, doc, green, [40, 200, 40], Vec2::new(10.0, 6.0), 4.0, StrokeTool::Paint);
+        let yellow = doc.add_layer();
+        doc.set_blend(yellow, BlendMode::Screen);
+        paint(canvas, doc, yellow, [230, 230, 30], Vec2::new(8.0, 10.0), 5.0, StrokeTool::Paint);
+        doc.set_current(green);
+        doc.toggle_pick(yellow);
+        // what comes next goes above the group, not in it
+        let group = doc.group_chosen().unwrap();
+        doc.set_current(group);
+        let masked = doc.add_layer();
+        paint(canvas, doc, masked, [250, 250, 250], Vec2::new(8.0, 8.0), 6.0, StrokeTool::Paint);
+        let mask = doc.add_mask(masked).unwrap();
+        paint(canvas, doc, mask, [0, 0, 0], Vec2::new(4.0, 12.0), 3.0, StrokeTool::Paint);
+        let overlay = doc.add_layer();
+        doc.set_blend(overlay, BlendMode::Overlay);
+        doc.set_clipped(overlay, true);
+        fill(canvas, doc, overlay, [30, 120, 220]);
+        let plain = doc.add_layer();
+        paint(canvas, doc, plain, [255, 140, 0], Vec2::new(3.0, 3.0), 3.0, StrokeTool::Paint);
+        doc.set_opacity(plain, 0.6);
+        let top = doc.add_layer();
+        paint(canvas, doc, top, [20, 20, 20], Vec2::new(13.0, 13.0), 2.0, StrokeTool::Paint);
+        doc.set_current(masked);
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "as made");
+    assert!(t.canvases[0].composites_cached(), "made around caches");
+    // painting what is worked on keeps the caches; undoing it too
+    let masked = t.docs[0].current();
+    t.each(|doc, canvas| paint(canvas, doc, masked, [0, 200, 200], Vec2::new(9.0, 4.0), 3.0, StrokeTool::Paint));
+    t.same(&gpu, 2, "painted");
+    assert!(t.canvases[0].composites_cached());
+    t.each(|_, canvas| canvas.undo());
+    t.same(&gpu, 2, "undone");
+    // a layer below changed, one above hidden, then another layer worked on (inside the group)
+    let ids: Vec<LayerId> = t.docs[0].layers().iter().map(|l| l.id).collect();
+    let multiply = ids[1];
+    t.each(|doc, _| {
+        doc.set_opacity(multiply, 0.4);
+    });
+    t.same(&gpu, 2, "a layer below changed");
+    let top = *ids.last().unwrap();
+    t.each(|doc, _| {
+        doc.set_visible(top, false);
+    });
+    t.same(&gpu, 2, "a layer above hidden");
+    let green = t.docs[0].layers().iter().find(|l| l.blend == BlendMode::Screen).map(|l| l.id).unwrap();
+    t.each(|doc, canvas| {
+        doc.set_current(green);
+        paint(canvas, doc, green, [255, 0, 255], Vec2::new(6.0, 9.0), 3.0, StrokeTool::Paint);
+    });
+    t.same(&gpu, 2, "worked on inside the group");
+    // the bottom layer worked on: nothing below it but the background
+    t.each(|doc, canvas| {
+        doc.set_current(base);
+        paint(canvas, doc, base, [0, 0, 0], Vec2::new(12.0, 3.0), 2.0, StrokeTool::Erase);
+    });
+    t.same(&gpu, 2, "the bottom worked on");
+    assert!(t.canvases[0].composites_cached());
+}
