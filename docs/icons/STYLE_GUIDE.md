@@ -198,3 +198,24 @@ by one.
 | Duplicate | the two sheets, a plus cut out of the front one |
 | Cut & Paste | a sheet with an arrow leaping off it |
 | Paste | a clipboard, its clip and two lines of writing |
+
+## Text
+
+| Control | Idea |
+|---|---|
+| Cut / Copy / Paste | the copy and paste panel's scissors / two sheets / clipboard |
+| Align left, centre, right, justified | four lines of text, long and short, set that way |
+| Underline | a block of text with a line under it |
+| Outline | a shape with its outline drawn round it |
+| Vertical | three columns of writing, the first running down to an arrowhead |
+| Keyboard | the keyboard |
+
+## QuickShape and the drawing guides
+
+| Control | Idea |
+|---|---|
+| Line / Polyline | a line between its end points / three joined lines, a dot at each corner |
+| Ellipse, Circle, Triangle, Equilateral, Quadrilateral, Rectangle, Square | the shape itself, solid |
+| Grid | nine squares in three rows |
+| Isometric | a cube, its three faces apart |
+| Symmetry | a pair of wings and their mirror image across a dashed axis |

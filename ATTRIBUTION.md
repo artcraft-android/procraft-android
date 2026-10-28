@@ -13,7 +13,7 @@ them.
 | `apps/procraft-android/android/app/src/main/assets/fonts/Inter-{Regular,Medium,SemiBold,Bold}.ttf` | Inter 4.1 (interface font) | The Inter Project Authors | <https://github.com/rsms/inter/releases/tag/v4.1> (`Inter-4.1.zip`, `extras/ttf/`; `SOURCE.md` beside them) | SIL OFL 1.1, `Inter-OFL.txt` |
 | `apps/procraft-android/android/app/src/main/java/io/github/artcraftandroid/procraft/ui/Icons.kt` (the icons listed below as Phosphor) | Phosphor icons, @phosphor-icons/core 2.1.1, Fill weight | Phosphor Icons | <https://github.com/phosphor-icons/core>; each icon's paths moved and scaled into the frame it is shown in, at the size shown | MIT, [`LICENSE-phosphor.txt`](apps/procraft-android/android/app/src/main/assets/icons/LICENSE-phosphor.txt) |
 | `apps/procraft-android/android/app/src/main/java/io/github/artcraftandroid/procraft/ui/LucideIcons.kt` (the same icons as Lucide draws them, kept beside them)  | Lucide icons, lucide-static 1.63.0 | Lucide Icons and Contributors (those derived from Feather: Cole Bemis) | <https://github.com/lucide-icons/lucide>; each icon's paths moved and scaled into the frame it is shown in, at the size shown | ISC (Feather-derived also MIT), [`LICENSE-lucide.txt`](apps/procraft-android/android/app/src/main/assets/icons/LICENSE-lucide.txt) |
-| `assets/icons/procraft/*.svg`, and in `apps/procraft-android/android/app/src/main/java/io/github/artcraftandroid/procraft/ui/Icons.kt` the bar's icons (`Actions`, `Adjustments`, `Selection`, `Transform`, `Brush`, `Smudge`, `Erase`, `Layers`, `Undo`, `Redo`) and the Actions panel's tabs (`TabAdd`, `TabCanvas`, `TabShare`, `TabVideo`, `TabPrefs`, `TabHelp`) and the Selection toolbar's (`SelectCopyPaste`, `Automatic`, `Freehand`, `RectangleShape`, `EllipseShape`, `SelectAdd`, `SelectRemove`, `Invert`, `Feather`, `SaveLoad`, `ColorFill`, `ClearSelection`) and the Transform toolbar's (`Freeform`, `Uniform`, `Distort`, `Warp`, `Snapping`, `FlipHorizontal`, `FlipVertical`, `Rotate45`, `FitToCanvas`, `Interpolation`, `TransformReset`) and the Adjustments menu's (`AdjustHsb`, `AdjustBalance`, `AdjustCurves`, `AdjustGradient`, `AdjustBlur`, `AdjustMotion`, `AdjustPerspective`, `AdjustNoise`, `AdjustSharpen`, `AdjustBloom`, `AdjustGlitch`, `AdjustHalftone`, `AdjustChromatic`, `AdjustLiquify`, `AdjustClone`), the colour panel's modes and the adjustment menus' (`ModeDisc`, `ModeClassic`, `ModeHarmony`, `ModeValue`, `ModePalettes`, `ModeLayer`, `ModePencil`, `Apply`, `Preview`, `CancelAdjust`, `PieUndo`, `PieReset`, `AdjustKnob`) and the Brush Studio's tabs (`StudioStroke`, `StudioStabilize`, `StudioTaper`, `StudioShape`, `StudioGrain`, `StudioRendering`, `StudioWet`, `StudioColor`, `StudioDynamics`, `StudioStylus`, `StudioProperties`, `StudioMaterials`, `StudioPreview`, `StudioAbout`), the canvas information tabs, and these from the menus and panels: `InfoAbout`, `InfoDimensions`, `InfoLayers`, `InfoProfile`, `InfoVideo`, `InfoStatistics`, `MenuNewBrush`, `MenuNewSet`, `MenuShare`, `MenuChevron`, `Disclose`, `DoneTick`, `Add`, `FullScreen`, `CardCompact`, `CardStack`, `FolderFill`, `Sweep`, `Keyboard`; the gesture controls' and the copy and paste panel's `GestureGeneral`, `GestureCopyPaste`, `GestureAssisted`, `GestureEyedropper`, `GestureQuickShape`, `GestureQuickMenu`, `GestureFullScreen`, `GestureClearLayer`, `GestureLayerSelect`, `GestureHover`, `CopyCut`, `CopyDuplicate`, `CopyOne`, `CopyAll`, `CutPaste`, `PasteDown` | ProCraft's own interface icons | ProCraft contributors | Original work, drawn from the idea to [`docs/icons/STYLE_GUIDE.md`](docs/icons/STYLE_GUIDE.md) by `tools/icons/draw_icons.py`; placed by the measured slots in `assets/icons/slots.tsv` | MIT OR Apache-2.0 |
+| `assets/icons/procraft/*.svg`, and in `apps/procraft-android/android/app/src/main/java/io/github/artcraftandroid/procraft/ui/Icons.kt` the bar's icons (`Actions`, `Adjustments`, `Selection`, `Transform`, `Brush`, `Smudge`, `Erase`, `Layers`, `Undo`, `Redo`) and the Actions panel's tabs (`TabAdd`, `TabCanvas`, `TabShare`, `TabVideo`, `TabPrefs`, `TabHelp`) and the Selection toolbar's (`SelectCopyPaste`, `Automatic`, `Freehand`, `RectangleShape`, `EllipseShape`, `SelectAdd`, `SelectRemove`, `Invert`, `Feather`, `SaveLoad`, `ColorFill`, `ClearSelection`) and the Transform toolbar's (`Freeform`, `Uniform`, `Distort`, `Warp`, `Snapping`, `FlipHorizontal`, `FlipVertical`, `Rotate45`, `FitToCanvas`, `Interpolation`, `TransformReset`) and the Adjustments menu's (`AdjustHsb`, `AdjustBalance`, `AdjustCurves`, `AdjustGradient`, `AdjustBlur`, `AdjustMotion`, `AdjustPerspective`, `AdjustNoise`, `AdjustSharpen`, `AdjustBloom`, `AdjustGlitch`, `AdjustHalftone`, `AdjustChromatic`, `AdjustLiquify`, `AdjustClone`), the colour panel's modes and the adjustment menus' (`ModeDisc`, `ModeClassic`, `ModeHarmony`, `ModeValue`, `ModePalettes`, `ModeLayer`, `ModePencil`, `Apply`, `Preview`, `CancelAdjust`, `PieUndo`, `PieReset`, `AdjustKnob`) and the Brush Studio's tabs (`StudioStroke`, `StudioStabilize`, `StudioTaper`, `StudioShape`, `StudioGrain`, `StudioRendering`, `StudioWet`, `StudioColor`, `StudioDynamics`, `StudioStylus`, `StudioProperties`, `StudioMaterials`, `StudioPreview`, `StudioAbout`), the canvas information tabs, and these from the menus and panels: `InfoAbout`, `InfoDimensions`, `InfoLayers`, `InfoProfile`, `InfoVideo`, `InfoStatistics`, `MenuNewBrush`, `MenuNewSet`, `MenuShare`, `MenuChevron`, `Disclose`, `DoneTick`, `Add`, `FullScreen`, `CardCompact`, `CardStack`, `FolderFill`, `Sweep`, `Keyboard`; the gesture controls' and the copy and paste panel's `GestureGeneral`, `GestureCopyPaste`, `GestureAssisted`, `GestureEyedropper`, `GestureQuickShape`, `GestureQuickMenu`, `GestureFullScreen`, `GestureClearLayer`, `GestureLayerSelect`, `GestureHover`, `CopyCut`, `CopyDuplicate`, `CopyOne`, `CopyAll`, `CutPaste`, `PasteDown`; the text tools', QuickShape's and the drawing guides' `TextCut`, `TextCopy`, `TextPaste`, `AlignLeft`, `AlignCenter`, `AlignRight`, `AlignJustify`, `TextUnderline`, `TextOutline`, `TextVertical`, `ShapeLine`, `ShapePolyline`, `ShapeEllipse`, `ShapeCircle`, `ShapeTriangle`, `ShapeEquilateral`, `ShapeQuad`, `ShapeRect`, `ShapeSquare`, `GuideGrid`, `GuideIsometric`, `GuideSymmetry` | ProCraft's own interface icons | ProCraft contributors | Original work, drawn from the idea to [`docs/icons/STYLE_GUIDE.md`](docs/icons/STYLE_GUIDE.md) by `tools/icons/draw_icons.py`; placed by the measured slots in `assets/icons/slots.tsv` | MIT OR Apache-2.0 |
 | `apps/procraft-android/android/app/src/main/java/io/github/artcraftandroid/procraft/ui/Icons.kt` (every other icon) | Interface icons | ProCraft contributors | Original work, on a 24-unit grid | MIT OR Apache-2.0 |
 | `apps/procraft-android/android/app/src/main/assets/environments/*.hdr` | 3D view light panoramas (11), halved to 512 x 256 and scaled by `tools/env/make_env.py` | Sergej Majboroda, Greg Zaal, Andreas Mischok, Rico Cilliers (per file in the folder's `README.md`) | <https://polyhaven.com> | CC0 1.0 |
 | `assets/app-icon/procraft-{1024,512}.png`, `apps/procraft-android/android/app/src/main/res/drawable-*dpi/ic_launcher_{foreground,monochrome}.png`, `apps/procraft-android/android/app/src/main/res/drawable-nodpi/procraft_mark.png`, `apps/procraft-android/android/app/src/main/res/mipmap-anydpi/ic_launcher.xml` | App icon: a paintbrush in a warm-to-cool blend on black | ProCraft contributors | Original work, drawn in code by `tools/app-icon/make_icon.py`; see [`assets/app-icon/README.md`](assets/app-icon/README.md) | MIT OR Apache-2.0 |
@@ -24,18 +24,6 @@ them.
 
 Each with the Phosphor icon it is (Fill weight):
 
-- `ShapeEquilateral`: `triangle`
-- `ShapeSquare`: `square`
-- `TextCut`: `scissors`
-- `TextCopy`: `copy`
-- `TextPaste`: `clipboard-text`
-- `AlignLeft`: `text-align-left`
-- `AlignCenter`: `text-align-center`
-- `AlignRight`: `text-align-right`
-- `AlignJustify`: `text-align-justify`
-- `TextUnderline`: `text-underline`
-- `TextOutline`: `text-t`
-- `TextVertical`: `text-t` and `arrow-down`, side by side
 - `NoiseClouds`: `cloud`
 - `NoiseBillows`: `cloud-fog`
 - `NoiseRidges`: `mountains`
@@ -44,16 +32,6 @@ Each with the Phosphor icon it is (Fill weight):
 - `HalftoneNews`: `newspaper`
 - `ChromaPerspective`: `crosshair`
 - `ChromaDisplace`: `arrows-horizontal`
-- `GuideGrid`: `grid-four`
-- `GuideIsometric`: `cube`
-- `GuideSymmetry`: `square-split-horizontal`
-- `ShapeLine`: `line-segment`
-- `ShapePolyline`: `trend-up`
-- `ShapeEllipse`: `circle`
-- `ShapeCircle`: `circle`
-- `ShapeTriangle`: `triangle`
-- `ShapeQuad`: `diamond`
-- `ShapeRect`: `rectangle`
 - `GrainMoving`: `waves`
 - `GrainTexturized`: `dots-six`
 - `GlitchArtifact`: `selection`

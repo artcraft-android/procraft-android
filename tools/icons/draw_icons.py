@@ -826,6 +826,96 @@ def clipboard():
     return unary_union([board, clip])
 
 
+def aligned(how):
+    """Text alignment: four lines of text, long and short, set left, centre, right or justified."""
+    lines = []
+    for k, y in enumerate((5.0, 9.67, 14.33, 19.0)):
+        w = 18.0 if how == 'justify' or k % 2 == 0 else 11.0
+        x0 = {'left': 3.0, 'center': 12.0 - w / 2, 'right': 21.0 - w, 'justify': 3.0}[how]
+        lines.append(capsule((x0 + 1.2, y), (x0 + w - 1.2, y), 1.2))
+    return unary_union(lines)
+
+
+def underlined():
+    """Underline: a block of text with a line under it."""
+    return unary_union([soft(box(6.0, 3.0, 18.0, 14.2), 1.4), capsule((4.4, 19.4), (19.6, 19.4), 1.4)])
+
+
+def outlined():
+    """Outline: a shape with its outline drawn round it."""
+    return unary_union([Point(12, 12).buffer(5.8, quad_segs=20), ring(12, 12, 9.2, 1.6)])
+
+
+def vertical_text():
+    """Vertical text: three columns of writing, the first running down to an arrowhead."""
+    cols = [capsule((17.0, 3.0), (17.0, 14.6), 1.2), capsule((12.0, 3.0), (12.0, 21.0), 1.2),
+            capsule((7.0, 3.0), (7.0, 16.0), 1.2)]
+    head = soft(Polygon([(17.0, 21.4), (13.8, 16.6), (20.2, 16.6)]), 0.4)
+    return unary_union(cols + [head])
+
+
+def line_shape():
+    """Line: a line between its two end points."""
+    return unary_union([capsule((5.0, 19.0), (19.0, 5.0), 1.1), Point(5.0, 19.0).buffer(2.4, quad_segs=12),
+                        Point(19.0, 5.0).buffer(2.4, quad_segs=12)])
+
+
+def polyline_shape():
+    """Polyline: three joined lines, a dot at each corner."""
+    pts = [(3.5, 18.5), (9.0, 8.0), (15.0, 16.0), (20.5, 5.5)]
+    return unary_union([LineString(pts).buffer(1.1, join_style='round')] + [Point(p).buffer(2.2, quad_segs=12) for p in pts])
+
+
+def solid_ellipse():
+    """Ellipse: a solid ellipse."""
+    from shapely.affinity import scale
+    return scale(Point(12, 12).buffer(1.0, quad_segs=32), 9.5, 6.0)
+
+
+def solid_circle():
+    """Circle: a solid circle."""
+    return Point(12, 12).buffer(9.0, quad_segs=32)
+
+
+def solid_triangle(equal):
+    """Triangle: a solid triangle, wide (or with equal sides)."""
+    pts = [(12.0, 4.2), (21.0, 19.8), (3.0, 19.8)] if equal else [(12.0, 6.0), (22.0, 18.5), (2.0, 18.5)]
+    return soft(Polygon(pts), 1.0)
+
+
+def solid_quad():
+    """Quadrilateral: a solid trapezoid."""
+    return soft(Polygon([(6.5, 5.5), (17.5, 5.5), (22.0, 18.5), (2.0, 18.5)]), 1.0)
+
+
+def solid_rect(square):
+    """Rectangle (or square): a solid one, its corners rounded."""
+    return soft(box(3.0, 3.0, 21.0, 21.0) if square else box(2.0, 6.5, 22.0, 17.5), 1.4)
+
+
+def grid_guide():
+    """Grid: nine squares in three rows."""
+    return unary_union([soft(box(x, y, x + 5.2, y + 5.2), 0.6) for x in (3.0, 9.4, 15.8) for y in (3.0, 9.4, 15.8)])
+
+
+def iso_cube():
+    """Isometric: a cube, its three faces apart."""
+    h = 5.2
+    top = soft(Polygon([(12, 2.6), (20.2, 7.3), (12, 12.0), (3.8, 7.3)]), 0.6)
+    left = soft(Polygon([(3.2, 8.7), (11.3, 13.4), (11.3, 21.6), (3.2, 16.9)]), 0.6)
+    right = soft(Polygon([(20.8, 8.7), (12.7, 13.4), (12.7, 21.6), (20.8, 16.9)]), 0.6)
+    return unary_union([top, left, right])
+
+
+def symmetry():
+    """Symmetry: a wing and its mirror image across a dashed axis."""
+    from shapely.affinity import scale
+    upper = soft(Polygon([(9.4, 11.0), (9.4, 7.0), (4.6, 2.8), (2.2, 5.0), (3.0, 11.0)]), 1.0)
+    lower = soft(Polygon([(9.4, 13.2), (9.4, 17.6), (6.2, 21.2), (3.0, 19.6), (3.8, 13.2)]), 1.0)
+    wing = unary_union([upper, lower])
+    return unary_union([wing, scale(wing, -1, 1, origin=(12, 12)), dashes([(12, 2.4), (12, 21.6)], False, 2.0, 1.6, 0.6)])
+
+
 DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
@@ -860,6 +950,13 @@ DRAWINGS = {
     'gesturefullscreen': full_screen, 'gestureclearlayer': bin_, 'gesturelayerselect': layers, 'gesturehover': hovering_pen,
     'copycut': scissors, 'copyduplicate': duplicate, 'copyone': copy_paste, 'copyall': three_sheets,
     'cutpaste': lifted_sheet, 'pastedown': clipboard,
+    'textcut': scissors, 'textcopy': copy_paste, 'textpaste': clipboard, 'alignleft': lambda: aligned('left'),
+    'aligncenter': lambda: aligned('center'), 'alignright': lambda: aligned('right'),
+    'alignjustify': lambda: aligned('justify'), 'textunderline': underlined, 'textoutline': outlined,
+    'textvertical': vertical_text, 'shapeline': line_shape, 'shapepolyline': polyline_shape,
+    'shapeellipse': solid_ellipse, 'shapecircle': solid_circle, 'shapetriangle': lambda: solid_triangle(False),
+    'shapeequilateral': lambda: solid_triangle(True), 'shapequad': solid_quad, 'shaperect': lambda: solid_rect(False),
+    'shapesquare': lambda: solid_rect(True), 'guidegrid': grid_guide, 'guideisometric': iso_cube, 'guidesymmetry': symmetry,
 }
 
 
