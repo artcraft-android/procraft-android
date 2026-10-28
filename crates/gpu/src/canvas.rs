@@ -15,6 +15,8 @@ use procraft_engine::geom::{Affine, IRect};
 use procraft_engine::stroke::{MOST_ROUNDNESS, Stamp};
 use procraft_engine::textures::{self, GrayImage, TEXTURE_SIZE};
 
+use wgpu::util::DeviceExt;
+
 use crate::{Gpu, GpuError};
 
 const LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -1154,9 +1156,12 @@ pub struct Canvas {
     grain_sampler: wgpu::Sampler,
     shapes_view: wgpu::TextureView,
     shape_sampler: wgpu::Sampler,
-    /// The shape and grain arrays, and which images of the user's own their spare layers hold.
+    /// The shape and grain arrays, and which images of the user's own their spare layers hold;
+    /// and whether they hold the images yet (else one-texel stand-ins, for a canvas that takes
+    /// only drawn strokes until something wants them).
     shapes: wgpu::Texture,
     grains: wgpu::Texture,
+    brush_images: bool,
     shape_sources: SourceSlots,
     grain_sources: SourceSlots,
     /// Full coverage, stood in for the selection when there is none.
@@ -1306,8 +1311,49 @@ const DESTINATION_OUT: wgpu::BlendState = wgpu::BlendState {
     },
 };
 
+/// A stroke texture canvases of one size take turns to draw their strokes in, so that each
+/// needn't hold one of its own: a model's texture sets, one painted at a time. Clones are the
+/// same texture.
+#[derive(Clone)]
+pub struct SharedStroke {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+impl SharedStroke {
+    pub fn new(gpu: &Gpu, width: u32, height: u32) -> SharedStroke {
+        let texture = texture(&gpu.device, "shared stroke", width.max(1), height.max(1), STROKE_FORMAT);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        SharedStroke { texture, view }
+    }
+
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+}
+
+/// An array of brush images (shapes or grains) viewed whole.
+fn array_view(texture: &wgpu::Texture) -> wgpu::TextureView {
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    })
+}
+
 impl Canvas {
     pub fn new(gpu: &Gpu, doc: &Document) -> Result<Canvas, GpuError> {
+        Canvas::make(gpu, doc, None, true)
+    }
+
+    /// A canvas whose strokes are drawn into it from elsewhere ([`Canvas::begin_drawn_stroke`]),
+    /// as a model's texture sets take them from the screen: it draws them in `stroke` (shared
+    /// with other canvases its size, one stroke open among them at a time), and makes its shape
+    /// and grain images only once something wants them.
+    pub fn for_drawn_strokes(gpu: &Gpu, doc: &Document, stroke: &SharedStroke) -> Result<Canvas, GpuError> {
+        Canvas::make(gpu, doc, Some(stroke), false)
+    }
+
+    fn make(gpu: &Gpu, doc: &Document, stroke: Option<&SharedStroke>, images: bool) -> Result<Canvas, GpuError> {
         let (width, height) = (doc.width(), doc.height());
         let max = gpu.max_texture_size();
         if width > max || height > max {
@@ -1315,17 +1361,26 @@ impl Canvas {
         }
         let device = &gpu.device;
         let pipelines = gpu.canvas_pipelines();
-        let stroke_texture = texture(device, "stroke", width, height, STROKE_FORMAT);
-        let stroke_view = stroke_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let fits = stroke.filter(|s| (s.texture.width(), s.texture.height()) == (width, height));
+        let (stroke_texture, stroke_view) = match fits {
+            Some(s) => (s.texture.clone(), s.view.clone()),
+            None => {
+                let t = texture(device, "stroke", width, height, STROKE_FORMAT);
+                let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+                (t, v)
+            }
+        };
         let composite = texture(device, "composite", width, height, LAYER_FORMAT);
         let composite_view = composite.create_view(&wgpu::TextureViewDescriptor::default());
-        let array_view =
-            wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() };
-        let (shape_images, grain_images) = (textures::shapes(), textures::grains());
-        let shapes = brush_images(gpu, "shapes", &shape_images);
-        let grains = brush_images(gpu, "grains", &grain_images);
-        let shapes_view = shapes.create_view(&array_view);
-        let grains_view = grains.create_view(&array_view);
+        let (shape_images, grain_images) =
+            if images { (textures::shapes(), textures::grains()) } else { (Vec::new(), Vec::new()) };
+        let (shapes, grains) = if images {
+            (brush_images(gpu, "shapes", &shape_images), brush_images(gpu, "grains", &grain_images))
+        } else {
+            (stand_in_images(gpu, "shapes"), stand_in_images(gpu, "grains"))
+        };
+        let shapes_view = array_view(&shapes);
+        let grains_view = array_view(&grains);
         let mipmapped = |label, address| {
             device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some(label),
@@ -1433,6 +1488,7 @@ impl Canvas {
             backdrop: None,
             shapes,
             grains,
+            brush_images: images,
             shape_sources: SourceSlots::after(shape_images.len()),
             grain_sources: SourceSlots::after(grain_images.len()),
         };
@@ -1447,12 +1503,101 @@ impl Canvas {
     /// Points `style` at `brush`'s own shape and grain images, if it has them, putting them in
     /// the arrays' spare layers first if they aren't there.
     pub fn use_sources(&mut self, gpu: &Gpu, style: &mut StrokeStyle, brush: &Brush) {
+        if brush.shape.source.is_some() || brush.grain.source.is_some() {
+            self.prepare_brush_images(gpu);
+        }
         if let Some(source) = brush.shape.source.as_ref() {
             style.shape = Some(self.shape_sources.layer(gpu, &self.shapes, source));
         }
         if let Some(source) = brush.grain.source.as_ref() {
             style.grain = Some(self.grain_sources.layer(gpu, &self.grains, source));
         }
+    }
+
+    /// Makes the shape and grain images now if the canvas goes without them (see
+    /// [`Canvas::for_drawn_strokes`]), so the first stroke that wants them doesn't wait.
+    pub fn prepare_brush_images(&mut self, gpu: &Gpu) {
+        if self.brush_images {
+            return;
+        }
+        let (shape_images, grain_images) = (textures::shapes(), textures::grains());
+        self.shapes = brush_images(gpu, "shapes", &shape_images);
+        self.grains = brush_images(gpu, "grains", &grain_images);
+        self.shape_sources = SourceSlots::after(shape_images.len());
+        self.grain_sources = SourceSlots::after(grain_images.len());
+        self.brush_images = true;
+        self.bind_brush_images(&gpu.device);
+    }
+
+    /// Lets go of the shape and grain images until something wants them again (a canvas left
+    /// waiting); not while a stroke is open.
+    pub fn let_go_of_brush_images(&mut self, gpu: &Gpu) {
+        if !self.brush_images || self.active.is_some() || self.smudge.is_some() || !self.ops.is_empty() {
+            return;
+        }
+        self.shapes = stand_in_images(gpu, "shapes");
+        self.grains = stand_in_images(gpu, "grains");
+        self.shape_sources = SourceSlots::after(0);
+        self.grain_sources = SourceSlots::after(0);
+        self.brush_images = false;
+        self.prediction.clear();
+        self.bind_brush_images(&gpu.device);
+    }
+
+    /// Whether it holds its shape and grain images (else stand-ins until something wants them).
+    pub fn has_brush_images(&self) -> bool {
+        self.brush_images
+    }
+
+    /// The binds that hold the shape and grain arrays or the stroke, made again.
+    fn bind_brush_images(&mut self, device: &wgpu::Device) {
+        self.shapes_view = array_view(&self.shapes);
+        self.grains_view = array_view(&self.grains);
+        let mask = self.selection.as_ref().map_or(&self.everything, |s| &s.view);
+        self.brush_bind = brush_bind(
+            device,
+            &self.pipelines.brush_layout,
+            [&self.shapes_view, &self.grains_view, mask],
+            [&self.shape_sampler, &self.grain_sampler],
+        );
+        self.stroke_bind = quad_bind(
+            device,
+            &self.pipelines.quad_layout,
+            [&self.stroke_view; 5],
+            &self.grains_view,
+            &self.grain_sampler,
+        );
+    }
+
+    /// Whether the queued work or the stroke open reads the shape or grain images: stamps, the
+    /// predicted tail, a smudge, or a grain fixed to the canvas.
+    fn wants_brush_images(&self) -> bool {
+        let grained = |s: &StrokeStyle| s.canvas_grain().is_some();
+        !self.prediction.is_empty()
+            || self.smudge.is_some()
+            || self.active.is_some_and(|a| grained(&a.style))
+            || self.ops.iter().any(|op| match op {
+                Op::Stamps { .. } => true,
+                Op::Commit(stroke) => grained(&stroke.style),
+                _ => false,
+            })
+    }
+
+    /// From now on draws its strokes in `stroke` (a texture its size that other canvases take
+    /// turns with), letting go of its own; whether it does. Not while a stroke is open.
+    pub fn draw_strokes_in(&mut self, gpu: &Gpu, stroke: &SharedStroke) -> bool {
+        if self.stroke == stroke.texture {
+            return true;
+        }
+        let fits = (stroke.texture.width(), stroke.texture.height()) == (self.width, self.height);
+        let busy = self.active.is_some() || self.smudge.is_some() || self.tip.is_some() || !self.ops.is_empty();
+        if !fits || busy {
+            return false;
+        }
+        self.stroke = stroke.texture.clone();
+        self.stroke_view = stroke.view.clone();
+        self.bind_brush_images(&gpu.device);
+        true
     }
 
     fn full(&self) -> IRect {
@@ -2429,6 +2574,9 @@ impl Canvas {
     /// Undoing a structural step puts the earlier document into `doc`.
     pub fn render(&mut self, gpu: &Gpu, doc: &mut Document, target: Option<Target<'_>>) {
         self.sync_layers(gpu, doc);
+        if !self.brush_images && self.wants_brush_images() {
+            self.prepare_brush_images(gpu);
+        }
         let device = &gpu.device;
         let flattening = self.ops.iter().filter_map(|op| match op {
             Op::Flatten { before, .. } => Some(before.max_depth()),
@@ -6281,6 +6429,25 @@ impl SourceSlots {
         write_brush_image(gpu, texture, layer, &source.pixels);
         layer
     }
+}
+
+/// One white texel standing in for an array of brush images, until a canvas wants them.
+fn stand_in_images(gpu: &Gpu, label: &str) -> wgpu::Texture {
+    gpu.device.create_texture_with_data(
+        &gpu.queue,
+        &wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        &[255],
+    )
 }
 
 /// Greyscale brush images as one array texture with a full mip chain (each level a 2×2 average

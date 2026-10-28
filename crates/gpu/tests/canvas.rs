@@ -1310,3 +1310,38 @@ fn a_stamp_taller_than_wide_draws_in_full() {
     assert!(painted(32, 32 + 9) && painted(32, 32 - 9), "its height");
     assert!(!painted(32 + 7, 32), "its width");
 }
+
+#[test]
+fn canvases_take_turns_with_a_shared_stroke_and_make_brush_images_when_wanted() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let shared = procraft_gpu::SharedStroke::new(&gpu, 64, 64);
+    let mut docs = [Document::new(64, 64), Document::new(64, 64)];
+    let mut a = Canvas::for_drawn_strokes(&gpu, &docs[0], &shared).unwrap();
+    let mut b = Canvas::for_drawn_strokes(&gpu, &docs[1], &shared).unwrap();
+    assert!(!a.has_brush_images() && !b.has_brush_images());
+    assert!(a.textures().contains(shared.texture()) && b.textures().contains(shared.texture()));
+    // a stroke on each in turn, through the one texture: each keeps only its own
+    let [da, db] = &mut docs;
+    a.begin_stroke(da.current(), style(StrokeTool::Paint, 1.0));
+    a.add_stamps(&[dot(Vec2::new(16.0, 16.0), 6.0)]);
+    a.end_stroke();
+    a.render(&gpu, da, None);
+    // stamps want the brush images: made then
+    assert!(a.has_brush_images());
+    b.begin_stroke(db.current(), style(StrokeTool::Paint, 1.0));
+    b.add_stamps(&[dot(Vec2::new(48.0, 48.0), 6.0)]);
+    b.end_stroke();
+    b.render(&gpu, db, None);
+    let (la, lb) = (a.read_layer(&gpu, da.current()).unwrap(), b.read_layer(&gpu, db.current()).unwrap());
+    assert_eq!(pixel(&la, 64, 16, 16)[3], 255);
+    assert_eq!(pixel(&la, 64, 48, 48)[3], 0);
+    assert_eq!(pixel(&lb, 64, 48, 48)[3], 255);
+    assert_eq!(pixel(&lb, 64, 16, 16)[3], 0);
+    // let go, and an ordinary canvas made to draw in the shared texture
+    a.let_go_of_brush_images(&gpu);
+    assert!(!a.has_brush_images());
+    let mut c = Canvas::new(&gpu, da).unwrap();
+    assert!(c.draw_strokes_in(&gpu, &shared));
+    assert!(c.textures().contains(shared.texture()));
+}
