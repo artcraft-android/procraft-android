@@ -529,8 +529,7 @@ pub(crate) struct SpherePad {
 }
 
 /// What tells a material source's image from another's: its own image's, else the shipped one's.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn source_key(m: &MaterialSource) -> Option<u64> {
+pub(crate) fn source_key(m: &MaterialSource) -> Option<u64> {
     m.source.as_ref().map(|s| s.id).or_else(|| m.image.map(|i| (1 << 63) | u64::from(i)))
 }
 

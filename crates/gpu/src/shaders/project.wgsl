@@ -129,3 +129,65 @@ fn fs_dilate(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
     return best;
 }
+
+// ---- a stroke's roughness or metalness: the colour's coverage (binding 1, in the texture's
+// space) carrying the brush's amount, through its source seen from the model's three axes -----
+
+struct Material {
+    // the model's middle, and how many framing units one of its own units is
+    frame: vec4<f32>,
+    // the amount, one source tile's side (framing units), and 1 when there is a source
+    look: vec4<f32>,
+}
+
+@group(1) @binding(0) var<uniform> material: Material;
+@group(1) @binding(1) var source: texture_2d<f32>;
+@group(1) @binding(2) var source_sampler: sampler;
+
+struct MaterialOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) framed: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+}
+
+@vertex
+fn vs_material(v: In) -> MaterialOut {
+    var o: MaterialOut;
+    o.clip = vec4<f32>(v.uv.x * 2.0 - 1.0, v.uv.y * 2.0 - 1.0, 0.0, 1.0);
+    o.framed = (v.position - material.frame.xyz) * material.frame.w;
+    o.normal = v.normal;
+    return o;
+}
+
+// how sharply the three views part where the surface turns from one axis to another
+const AXIS_SHARPNESS: f32 = 10.0;
+
+// the source where a surface at `p` facing `n` is, read along the axis it faces most: each
+// axis's reading weighted by how squarely the surface faces it, the weights' squares summing
+// to one; each read so it isn't mirrored from either side
+fn from_three_axes(p: vec3<f32>, n: vec3<f32>, tile: f32) -> f32 {
+    let along = pow(abs(n), vec3<f32>(AXIS_SHARPNESS));
+    let weights = saturate(along * inverseSqrt(max(dot(along, along), 1e-12)));
+    let q = p / tile;
+    let across_x = vec2<f32>(select(q.z, -q.z, n.x >= 0.0), q.y);
+    let across_y = vec2<f32>(q.x, select(q.z, -q.z, n.y < 0.0));
+    let across_z = vec2<f32>(select(-q.x, q.x, n.z > 0.0), q.y);
+    let seen = vec3<f32>(
+        textureSampleLevel(source, source_sampler, across_x, 0.0).r,
+        textureSampleLevel(source, source_sampler, across_y, 0.0).r,
+        textureSampleLevel(source, source_sampler, across_z, 0.0).r,
+    );
+    return dot(seen, weights);
+}
+
+@fragment
+fn fs_material(i: MaterialOut) -> @location(0) vec4<f32> {
+    let cover = textureLoad(stroke, vec2<i32>(i.clip.xy), 0).a;
+    var amount = material.look.x;
+    if (material.look.z > 0.5) {
+        let n = normalize(i.normal);
+        amount = amount * from_three_axes(i.framed, n, max(material.look.y, 1e-4));
+    }
+    let v = clamp(amount, 0.0, 1.0) * cover;
+    return vec4<f32>(v, v, v, cover);
+}

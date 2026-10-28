@@ -17,9 +17,10 @@ use procraft_engine::geom::{IRect, Vec2};
 use procraft_engine::input::Sample;
 use procraft_engine::mesh::{MAX_TRIANGLES, Mesh, MeshError, PartImages, read_obj};
 use procraft_engine::stroke::StrokeBuilder;
+use procraft_engine::studio::MAX_GRAIN_SCALE;
 use procraft_engine::usd::{read_usd, read_usdc, read_usdz};
 use procraft_engine::view::View;
-use procraft_gpu::{Canvas, Light, Lighting, MOST_LIGHTS, MeshView, Orbit, StrokeTool, wgpu};
+use procraft_gpu::{Canvas, Light, Lighting, MOST_LIGHTS, MeshView, Orbit, StrokeStyle, StrokeTool, wgpu};
 
 use crate::project::{THUMBNAIL_SIDE, file_error, pixels_hash, read_png, write_atomically, write_png};
 use crate::{CanvasSession, MobileError, PenSample, PointerKind, State, ToolKind};
@@ -72,12 +73,65 @@ pub(crate) struct TextureSet {
     doc: Document,
     canvas: Option<Canvas>,
     pending: Pixels,
+    /// A layer to fill with one colour (premultiplied RGBA8) when its canvas is made, unless
+    /// pixels wait for it: a new set's Base Layer, with what the model's material gives.
+    fill: Option<(LayerId, [u8; 4])>,
 }
 
 impl TextureSet {
     fn empty(side: u32) -> TextureSet {
-        TextureSet { doc: empty_texture(side), canvas: None, pending: Vec::new() }
+        TextureSet { doc: empty_texture(side), canvas: None, pending: Vec::new(), fill: None }
     }
+
+    /// A new set with `structure`'s layers, its Base Layer (if it still has it) filled with
+    /// `rgba` once it is drawn.
+    fn filled(side: u32, structure: &Document, rgba: [u8; 4]) -> TextureSet {
+        let mut set = TextureSet::empty(side);
+        follow_layers(&mut set, structure);
+        let base = base_layer();
+        set.fill = set.doc.layer(base).is_some().then_some((base, rgba));
+        set
+    }
+
+    /// The pixels waiting for its canvas, its fill made into pixels (taken: it is given once).
+    fn take_pending(&mut self) -> Pixels {
+        let mut out = std::mem::take(&mut self.pending);
+        if let Some((id, rgba)) = self.fill.take()
+            && self.doc.layer(id).is_some()
+            && !out.iter().any(|(l, _)| *l == id)
+        {
+            out.insert(0, (id, solid(self.doc.width(), rgba)));
+        }
+        out
+    }
+
+    /// The pixels waiting for its canvas with its fill, kept waiting.
+    fn pending_with_fill(&self) -> Pixels {
+        let mut out = self.pending.clone();
+        if let Some((id, rgba)) = self.fill
+            && self.doc.layer(id).is_some()
+            && !out.iter().any(|(l, _)| *l == id)
+        {
+            out.insert(0, (id, solid(self.doc.width(), rgba)));
+        }
+        out
+    }
+}
+
+/// The layer every texture set starts with: its Base Layer.
+fn base_layer() -> LayerId {
+    empty_texture(1).layers().first().map_or(LayerId(1), |l| l.id)
+}
+
+/// A `side` square of one colour (premultiplied RGBA8).
+fn solid(side: u32, rgba: [u8; 4]) -> Vec<u8> {
+    rgba.repeat((side as usize) * (side as usize))
+}
+
+/// A colour, roughness or metalness (0..1) as a Base Layer is filled with it: opaque.
+fn opaque(rgb: [f32; 3]) -> [u8; 4] {
+    let [r, g, b] = rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+    [r, g, b, 255]
 }
 
 /// A new texture set's document: `side` square, its one layer the Base Layer, nothing painted (the
@@ -106,11 +160,14 @@ pub struct ModelFile {
     pub bytes: Vec<u8>,
 }
 
-/// What an OBJ takes from the files picked with it: the material file it names (or the only
-/// one), and the rest as the images its materials may map.
+/// What a model takes from the files picked with it: an OBJ the material file it names (or the
+/// only one), and the rest as the images its materials may map. A USDZ packs its own.
 fn companions(model: &[u8], extension: &str, files: Vec<ModelFile>) -> (Option<String>, Vec<ModelFile>) {
-    if extension != "obj" {
+    if extension == "usdz" {
         return (None, Vec::new());
+    }
+    if extension != "obj" {
+        return (None, files);
     }
     let (libraries, images): (Vec<ModelFile>, Vec<ModelFile>) =
         files.into_iter().partition(|f| extension_of(&f.name) == "mtl");
@@ -119,14 +176,93 @@ fn companions(model: &[u8], extension: &str, files: Vec<ModelFile>) -> (Option<S
         rest.starts_with(char::is_whitespace).then(|| rest.trim().to_owned())
     });
     let only = if libraries.len() == 1 { libraries.first() } else { None };
-    let chosen = named.and_then(|n| libraries.iter().find(|f| same_file(&f.name, &n))).or(only);
+    let chosen = named.and_then(|n| companion(&libraries, &n)).or(only);
     (chosen.map(|f| String::from_utf8_lossy(&f.bytes).into_owned()), images)
+}
+
+/// The file among `files` that `path` (as a model's file gives it, relative to the model) names:
+/// the one at that path, else the one with its name, ignoring case either way.
+fn companion<'a>(files: &'a [ModelFile], path: &str) -> Option<&'a ModelFile> {
+    let wanted = tidy_path(path);
+    files.iter().find(|f| tidy_path(&f.name) == wanted).or_else(|| files.iter().find(|f| same_file(&f.name, path)))
+}
+
+/// A relative path as compared: forward slashes, no `./` parts, lower case.
+fn tidy_path(path: &str) -> String {
+    let path = path.trim().replace('\\', "/").to_lowercase();
+    path.split('/').filter(|p| !p.is_empty() && *p != ".").collect::<Vec<_>>().join("/")
 }
 
 /// Whether two paths name the same file: their last parts, ignoring case.
 fn same_file(a: &str, b: &str) -> bool {
     let last = |p: &str| p.trim().rsplit(['/', '\\']).next().unwrap_or("").to_lowercase();
     last(a) == last(b)
+}
+
+/// A model zipped up with the files it needs, as a folder of them would be: an OBJ with its
+/// material file and images, a USD with its images.
+struct Zipped {
+    /// The model's path in the zip.
+    name: String,
+    model: Vec<u8>,
+    /// Every other file in the zip, named by its path from the model's folder.
+    files: Vec<ModelFile>,
+}
+
+/// Whether a file's name is one of a model's kinds that open.
+fn is_model_name(name: &str) -> bool {
+    matches!(extension_of(name).as_str(), "obj" | "usdz" | "usdc" | "usda" | "usd")
+}
+
+/// The model in zip `bytes` (the first of those nearest its top), if it holds one and isn't a
+/// package of another kind (an artwork or brushes). Folders, and the hidden files another system
+/// adds when it zips (`__MACOSX/`, `._` files), are passed over.
+fn zipped_model_name(zip: &procraft_engine::zip::ZipReader<'_>) -> Option<String> {
+    let files: Vec<&str> = zip
+        .names()
+        .filter(|n| {
+            let last = n.rsplit('/').next().unwrap_or(n);
+            !n.ends_with('/') && !n.starts_with("__MACOSX/") && !last.starts_with("._") && !last.is_empty()
+        })
+        .collect();
+    let package = files.iter().any(|n| {
+        let last = n.rsplit('/').next().unwrap_or(n);
+        matches!(last, "Document.archive" | "artwork.json" | "Brush.archive" | "brushset.plist")
+    });
+    if package {
+        return None;
+    }
+    let depth = |n: &str| n.matches('/').count();
+    let models = files.iter().filter(|n| is_model_name(n));
+    let nearest = models.clone().map(|n| depth(n)).min()?;
+    models.into_iter().find(|n| depth(n) == nearest).map(|n| (*n).to_owned())
+}
+
+/// The model in a zip and the other files beside it (see [`zipped_model_name`]).
+fn unzip_model(bytes: &[u8]) -> Option<Zipped> {
+    let zip = procraft_engine::zip::ZipReader::new(bytes)?;
+    let name = zipped_model_name(&zip)?;
+    let model = zip.read(&name)?;
+    let folder = name.rsplit_once('/').map_or("", |(f, _)| f);
+    let mut files = Vec::new();
+    for entry in zip.names() {
+        let last = entry.rsplit('/').next().unwrap_or(entry);
+        if entry == name || entry.ends_with('/') || entry.starts_with("__MACOSX/") || last.starts_with("._") {
+            continue;
+        }
+        let Some(bytes) = zip.read(entry) else { continue };
+        let relative =
+            if folder.is_empty() { Some(entry) } else { entry.strip_prefix(folder).and_then(|r| r.strip_prefix('/')) };
+        files.push(ModelFile { name: relative.unwrap_or(entry).to_owned(), bytes });
+    }
+    Some(Zipped { name, model, files })
+}
+
+/// The model a zip of one holds (its path in the zip), as the gallery's Import opens it; none if
+/// it holds none or is an artwork, a layered package or brushes.
+#[uniffi::export]
+pub fn zip_model_name(bytes: Vec<u8>) -> Option<String> {
+    zipped_model_name(&procraft_engine::zip::ZipReader::new(&bytes)?)
 }
 
 /// The kinds of model file that open: OBJ (with its MTL), USDZ, and USD binary or text.
@@ -200,7 +336,37 @@ pub(crate) struct Scene {
     /// A stroke is being carried onto the model each frame; `ending`: once more, then it ends.
     pub(crate) stroking: bool,
     ending: bool,
+    /// What the stroke on the current part's colour lays down in its roughness and metalness as
+    /// well (a stroke on the colour paints all three), while it goes on.
+    material_paint: Option<[MaterialPaint; 2]>,
+    /// The brush's roughness and metalness sources as textures, with their keys.
+    material_sources: [Option<(u64, wgpu::TextureView)>; 2],
+    /// Strokes that painted the colour, roughness and metalness together: the step each made in
+    /// each one's canvas, so undo and redo take them together.
+    joint_steps: Vec<JointStep>,
 }
+
+/// What a stroke on a part's colour lays down in its roughness or metalness: the brush's amount
+/// (0..1), one tile of its source every so many canvas pixels, and the source's key (none: the
+/// amount all over).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MaterialPaint {
+    amount: f32,
+    tile: f32,
+    source: Option<u64>,
+}
+
+/// A stroke that painted part `part`'s colour, roughness and metalness: the step it made in each
+/// (as [`Canvas::undo_step`] numbers them), if it made one there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct JointStep {
+    part: usize,
+    steps: [Option<u64>; 3],
+}
+
+/// The most strokes remembered as painting every channel (older ones are long out of the undo
+/// history).
+const MOST_JOINT_STEPS: usize = 512;
 
 impl Scene {
     /// `mesh` with a texture set `texture_size` square for each of its parts, set `current` the
@@ -250,6 +416,9 @@ impl Scene {
             surface_shown: false,
             stroking: false,
             ending: false,
+            material_paint: None,
+            material_sources: [None, None],
+            joint_steps: Vec::new(),
         }
     }
 
@@ -271,7 +440,9 @@ impl Scene {
 impl CanvasSession {
     /// Opens a model to paint on: `file` the model file named `file_name` (OBJ, USDZ or USDC, by
     /// its extension), with the `files` picked along with it (an OBJ's material file and the
-    /// images it maps). Each texture set is `texture_size` pixels square (0: the default).
+    /// images it maps). A zip (`.zip`) brings the model and those files in one: as a folder
+    /// holding them, its model the one nearest its top. Each texture set is `texture_size` pixels
+    /// square (0: the default).
     #[uniffi::constructor]
     pub fn open_model(
         file: Vec<u8>,
@@ -280,6 +451,14 @@ impl CanvasSession {
         name: String,
         texture_size: u32,
     ) -> Result<Arc<CanvasSession>, MobileError> {
+        let (file, file_name, files) = if extension_of(&file_name) == "zip" {
+            let zipped = unzip_model(&file).ok_or_else(|| file_error("opening the model", "no model in the zip"))?;
+            let mut all = zipped.files;
+            all.extend(files);
+            (zipped.model, zipped.name, all)
+        } else {
+            (file, file_name, files)
+        };
         let extension = extension_of(&file_name);
         let (mtl, picked) = companions(&file, &extension, files);
         let mesh = read_model(&file, &extension, mtl.as_deref())
@@ -287,7 +466,18 @@ impl CanvasSession {
         let side = if texture_size == 0 { DEFAULT_TEXTURE_SIZE } else { texture_size.clamp(64, MOST_TEXTURE_SIZE) };
         let mut scene = Scene::new(mesh, ModelSource { bytes: file, extension, mtl }, side, 0, Vec::new());
         scene.picked = picked;
-        let session = CanvasSession::with_document(empty_texture(side), name, Vec::new());
+        // each texture set's Base Layer the material's colour, where the model brings no image
+        let brings = scene.brings_colour();
+        let colour =
+            |part: usize| (!brings.get(part).copied().unwrap_or(false)).then(|| opaque(scene.mesh.surface(part).0));
+        let own = colour(0).map(|rgba| vec![(base_layer(), solid(side, rgba))]).unwrap_or_default();
+        for part in 1..scene.sets.len() {
+            let fill = colour(part).map(|rgba| (base_layer(), rgba));
+            if let Some(set) = scene.sets.get_mut(part).and_then(Option::as_mut) {
+                set.fill = fill;
+            }
+        }
+        let session = CanvasSession::with_document(empty_texture(side), name, own);
         session.shared.lock().scene = Some(scene);
         Ok(session)
     }
@@ -437,7 +627,7 @@ impl CanvasSession {
         let set = scene.slot(scene.current, channel)?.as_mut()?;
         if set.canvas.is_none() {
             let mut c = Canvas::new(gpu, &set.doc).ok()?;
-            for (lid, pixels) in std::mem::take(&mut set.pending) {
+            for (lid, pixels) in set.take_pending() {
                 let _ = c.upload_layer(gpu, lid, &pixels);
             }
             set.canvas = Some(c);
@@ -448,9 +638,9 @@ impl CanvasSession {
     }
 
     /// The images the model brings for its texture sets (a USDZ's packed images, or those
-    /// picked with an OBJ that its materials map): to be decoded and given back with
-    /// [`CanvasSession::set_model_texture`]. Its normal and occlusion maps come as channels 3
-    /// and 4. An OBJ's picked images are given once.
+    /// picked or zipped with an OBJ or USD that its materials map): to be decoded and given back
+    /// with [`CanvasSession::set_model_texture`]. Its normal and occlusion maps come as channels
+    /// 3 and 4. Picked images are given once.
     pub fn model_texture_files(&self) -> Vec<ModelTextureFile> {
         let mut st = self.shared.lock();
         let Some(scene) = st.scene.as_mut() else { return Vec::new() };
@@ -460,7 +650,7 @@ impl CanvasSession {
             .flatten();
         let found = |path: &str| match &zip {
             Some(zip) => packed_file(zip, path),
-            None => picked.iter().find(|f| same_file(&f.name, path)).map(|f| f.bytes.clone()),
+            None => companion(&picked, path).map(|f| f.bytes.clone()),
         };
         let mut out = Vec::new();
         for (set, part) in scene.mesh.parts.iter().enumerate() {
@@ -521,7 +711,10 @@ impl CanvasSession {
         if set == scene.current && channel == scene.channel {
             match st.canvas.as_mut() {
                 Some(canvas) => canvas.put_layer(base, rgba),
-                None => st.pending_pixels.push((base, crate::project::Opened::Pixels(rgba))),
+                None => {
+                    st.pending_pixels.retain(|(id, _)| *id != base);
+                    st.pending_pixels.push((base, crate::project::Opened::Pixels(rgba)));
+                }
             }
         } else {
             let Some(slot) = scene.slot(set, channel) else { return false };
@@ -532,7 +725,10 @@ impl CanvasSession {
             });
             match target.canvas.as_mut() {
                 Some(canvas) => canvas.put_layer(base, rgba),
-                None => target.pending.push((base, rgba)),
+                None => {
+                    target.pending.retain(|(id, _)| *id != base);
+                    target.pending.push((base, rgba));
+                }
             }
         }
         self.shared.frame(st);
@@ -1086,13 +1282,17 @@ fn flattened(side: u32, picture: Option<Vec<u8>>, under: [f32; 3], grey: bool) -
 /// A file packed in a USDZ by the path its layer gives (relative to the package; `./` and folders
 /// allowed for), else by its name alone.
 fn packed_file(zip: &procraft_engine::zip::ZipReader<'_>, path: &str) -> Option<Vec<u8>> {
+    zip.read(&packed_name(zip, path)?)
+}
+
+/// The entry [`packed_file`] reads for `path`, if there is one.
+fn packed_name(zip: &procraft_engine::zip::ZipReader<'_>, path: &str) -> Option<String> {
     let path = path.trim_start_matches("./");
-    if let Some(bytes) = zip.read(path) {
-        return Some(bytes);
+    if zip.names().any(|n| n == path) {
+        return Some(path.to_owned());
     }
     let name = path.rsplit('/').next().unwrap_or(path);
-    let found = zip.names().find(|n| n.rsplit('/').next() == Some(name))?.to_owned();
-    zip.read(&found)
+    zip.names().find(|n| n.rsplit('/').next() == Some(name)).map(str::to_owned)
 }
 
 /// A name made safe as part of a file name: letters, digits, `-` and `_` kept, the rest `_`.
@@ -1139,7 +1339,7 @@ fn waiting_picture(gpu: &procraft_gpu::Gpu, set: &mut TextureSet) -> Result<Vec<
         Some(c) => c,
         None => {
             let mut c = Canvas::new(gpu, &set.doc).map_err(|e| e.to_string())?;
-            for (id, pixels) in std::mem::take(&mut set.pending) {
+            for (id, pixels) in set.take_pending() {
                 c.upload_layer(gpu, id, &pixels).map_err(|e| e.to_string())?;
             }
             c
@@ -1240,7 +1440,7 @@ fn set_pixels(set: &mut TextureSet, gpu: Option<&procraft_gpu::Gpu>) -> Result<P
             }
             Ok(pixels)
         }
-        _ => Ok(set.pending.clone()),
+        _ => Ok(set.pending_with_fill()),
     }
 }
 
@@ -1419,7 +1619,7 @@ pub(crate) fn open_saved_model(dir: &Path, saved: &SavedModel) -> Result<Scene, 
                 return None;
             }
             let pending = read_set_layers(&dir.join("sets").join(part.to_string()), &doc, side);
-            Some(TextureSet { doc, canvas: None, pending })
+            Some(TextureSet { doc, canvas: None, pending, fill: None })
         })
         .collect();
     let channels = saved
@@ -1437,7 +1637,7 @@ pub(crate) fn open_saved_model(dir: &Path, saved: &SavedModel) -> Result<Scene, 
                 let folder = dir.join("sets").join(part.to_string()).join(format!("c{}", k + 1));
                 let pending = read_set_layers(&folder, &doc, side);
                 if let Some(slot) = out.get_mut(k) {
-                    *slot = Some(TextureSet { doc, canvas: None, pending });
+                    *slot = Some(TextureSet { doc, canvas: None, pending, fill: None });
                 }
             }
             out
@@ -1471,6 +1671,27 @@ pub(crate) fn open_saved_model(dir: &Path, saved: &SavedModel) -> Result<Scene, 
 }
 
 impl Scene {
+    /// What part `part`'s `channel` (1 roughness, 2 metalness) starts as, where the model's
+    /// material brings no image for it: the material's value, else the plain one.
+    fn channel_value(&self, part: usize, channel: usize) -> f32 {
+        let (_, roughness, metallic) = self.mesh.surface(part);
+        if channel == 1 { roughness } else { metallic }
+    }
+
+    /// Whether the model brings an image for each part's colour: a USDZ's packed one, or one
+    /// picked or zipped with it, that its material maps.
+    fn brings_colour(&self) -> Vec<bool> {
+        let zip = (self.source.extension == "usdz")
+            .then(|| procraft_engine::zip::ZipReader::new(&self.source.bytes))
+            .flatten();
+        let found = |path: &str| match &zip {
+            Some(zip) => packed_name(zip, path).is_some(),
+            None => companion(&self.picked, path).is_some(),
+        };
+        let material = |p: &procraft_engine::mesh::Part| self.mesh.materials.iter().find(|m| m.name == p.material);
+        self.mesh.parts.iter().map(|p| material(p).and_then(|m| m.color_map.as_deref()).is_some_and(found)).collect()
+    }
+
     /// Where part `part`'s `channel` document waits (0 colour, 1 roughness, 2 metalness).
     fn slot(&mut self, part: usize, channel: usize) -> Option<&mut Option<TextureSet>> {
         if channel == 0 {
@@ -1526,16 +1747,21 @@ impl State {
             doc: std::mem::replace(&mut self.doc, Document::new(1, 1)),
             canvas: self.canvas.take(),
             pending: crate::project::opened_pixels(std::mem::take(&mut self.pending_pixels), side, side),
+            fill: None,
         };
         let structure = old.doc.clone();
         if let Some(slot) = scene.slot(part, from) {
             *slot = Some(old);
         }
-        let mut new = scene.slot(part, channel).and_then(Option::take).unwrap_or_else(|| TextureSet::empty(side));
+        let value = scene.channel_value(part, channel);
+        let mut new = scene
+            .slot(part, channel)
+            .and_then(Option::take)
+            .unwrap_or_else(|| TextureSet::filled(side, &structure, opaque([value; 3])));
         follow_layers(&mut new, &structure);
+        self.pending_pixels = crate::project::opened(new.take_pending());
         self.doc = new.doc;
         self.canvas = new.canvas;
-        self.pending_pixels = crate::project::opened(new.pending);
         scene.channel = channel;
         self.ensure_canvas();
     }
@@ -1565,13 +1791,14 @@ impl State {
         self.scene_stroke_cancel();
         self.settle();
         let Some(scene) = self.scene.as_mut() else { return };
-        let Some(set) = scene.sets.get_mut(index).and_then(Option::take) else { return };
+        let Some(mut set) = scene.sets.get_mut(index).and_then(Option::take) else { return };
         let (w, h) = (self.doc.width(), self.doc.height());
-        let pending = std::mem::replace(&mut self.pending_pixels, crate::project::opened(set.pending));
+        let pending = std::mem::replace(&mut self.pending_pixels, crate::project::opened(set.take_pending()));
         let old = TextureSet {
             doc: std::mem::replace(&mut self.doc, set.doc),
             canvas: std::mem::replace(&mut self.canvas, set.canvas),
             pending: crate::project::opened_pixels(pending, w, h),
+            fill: None,
         };
         if let Some(slot) = scene.sets.get_mut(scene.current) {
             *slot = Some(old);
@@ -1629,6 +1856,59 @@ impl State {
             canvas.begin_drawn_stroke(current, canvas_style);
         }
         self.stroke = Some(builder);
+        self.begin_material_strokes(&brush, canvas_style, current);
+    }
+
+    /// A stroke on a part's colour paints its roughness and metalness too, on the same layer and
+    /// with the same coverage: the brush's amount of each through its source (an eraser takes
+    /// all three away). A stroke on one of those channels paints only it.
+    fn begin_material_strokes(&mut self, brush: &procraft_engine::brush::Brush, style: StrokeStyle, layer: LayerId) {
+        let structure = self.doc.clone();
+        let (Some(gpu), Some(scene)) = (self.gpu.as_ref(), self.scene.as_mut()) else { return };
+        scene.material_paint = None;
+        if scene.channel != 0 {
+            return;
+        }
+        let (part, side) = (scene.current, scene.texture_size);
+        let channels = [
+            (brush.setting("roughness_amount"), brush.setting("roughness_scale"), &brush.roughness),
+            (brush.setting("metallic_amount"), brush.setting("metallic_scale"), &brush.metallic),
+        ];
+        let mut paint = [MaterialPaint { amount: 0.0, tile: 1.0, source: None }; 2];
+        for (k, ((amount, scale, source), out)) in channels.into_iter().zip(&mut paint).enumerate() {
+            // the channel's document, made now if it never was, with the colour's layers
+            let value = scene.channel_value(part, k + 1);
+            let Some(slot) = scene.slot(part, k + 1) else { return };
+            let set = slot.get_or_insert_with(|| TextureSet::filled(side, &structure, opaque([value; 3])));
+            follow_layers(set, &structure);
+            if set.canvas.is_none() {
+                let Ok(mut made) = Canvas::new(gpu, &set.doc) else { return };
+                for (id, pixels) in set.take_pending() {
+                    if let Err(e) = made.upload_layer(gpu, id, &pixels) {
+                        log::error!("opening a texture set's layer: {e}");
+                    }
+                }
+                set.canvas = Some(made);
+            }
+            let Some(canvas) = set.canvas.as_mut() else { return };
+            let amount = amount.clamp(0.0, 1.0);
+            // the colour's coverage, laid down plainly: no blend mode, grain or wet paint of its own
+            let plain =
+                StrokeStyle { color: [amount; 3], blend: 0, burnt_edges: 0.0, grain: None, wet_pull: None, ..style };
+            canvas.begin_drawn_stroke(layer, plain);
+            let key = crate::studio::source_key(source);
+            let cached = scene.material_sources.get(k).and_then(|c| c.as_ref()).map(|(key, _)| *key);
+            if key.is_some() && cached != key {
+                let made = crate::brush_files::material_pixels(source).and_then(|pixels| {
+                    procraft_gpu::material_source(gpu, procraft_engine::textures::TEXTURE_SIZE as u32, &pixels)
+                });
+                if let Some(slot) = scene.material_sources.get_mut(k) {
+                    *slot = key.zip(made);
+                }
+            }
+            *out = MaterialPaint { amount, tile: (scale * MAX_GRAIN_SCALE).max(4.0), source: key };
+        }
+        scene.material_paint = Some(paint);
     }
 
     pub(crate) fn scene_stroke_add(&mut self, samples: &[PenSample], last: bool) {
@@ -1656,6 +1936,13 @@ impl State {
         scene.ending = false;
         if let Some((_, screen)) = scene.screen.as_mut() {
             screen.cancel_stroke();
+        }
+        if scene.material_paint.take().is_some()
+            && let Some(channels) = scene.channels.get_mut(scene.current)
+        {
+            for canvas in channels.iter_mut().flatten().filter_map(|s| s.canvas.as_mut()) {
+                canvas.cancel_stroke();
+            }
         }
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.cancel_stroke();
@@ -1718,14 +2005,92 @@ impl State {
             size.1,
             canvas.stroke_target(),
         );
+        // the roughness and metalness take the colour's coverage as it is now
+        let part = scene.current;
+        let materials = scene.material_paint.zip(scene.channels.get_mut(part));
+        if let Some((paint, channels)) = &materials {
+            for (k, (look, set)) in paint.iter().zip(channels.iter()).enumerate() {
+                let Some(target) = set.as_ref().and_then(|s| s.canvas.as_ref()) else { continue };
+                let source = scene
+                    .material_sources
+                    .get(k)
+                    .and_then(Option::as_ref)
+                    .filter(|(key, _)| Some(*key) == look.source)
+                    .map(|(_, view)| view);
+                let look = procraft_gpu::MaterialLook { amount: look.amount, source, tile: look.tile };
+                view.project_material(gpu, &mut encoder, part, k, canvas.stroke_view(), &look, target.stroke_target());
+            }
+        }
         gpu.queue.submit([encoder.finish()]);
         canvas.stroke_drawn(reach);
+        let mut sets: Vec<&mut TextureSet> =
+            materials.map(|(_, channels)| channels.iter_mut().flatten().collect()).unwrap_or_default();
+        for set in &mut sets {
+            if let Some(c) = set.canvas.as_mut() {
+                c.stroke_drawn(reach);
+                c.render(gpu, &mut set.doc, None);
+            }
+        }
         if scene.ending {
-            canvas.end_stroke();
+            // each canvas's step made now, to be undone and redone together
+            let made = |c: &mut Canvas, doc: &mut Document| {
+                let before = c.steps_made();
+                c.end_stroke();
+                c.render(gpu, doc, None);
+                (c.steps_made() > before).then(|| c.undo_step()).flatten()
+            };
+            let mut steps = [made(canvas, &mut self.doc), None, None];
+            for (step, set) in steps.iter_mut().skip(1).zip(&mut sets) {
+                if let Some(c) = set.canvas.as_mut() {
+                    *step = made(c, &mut set.doc);
+                }
+            }
+            if scene.material_paint.take().is_some() && steps.iter().flatten().count() > 1 {
+                if scene.joint_steps.len() >= MOST_JOINT_STEPS {
+                    scene.joint_steps.remove(0);
+                }
+                scene.joint_steps.push(JointStep { part, steps });
+            }
             screen.cancel_stroke();
             screen.render(gpu, screen_doc, None);
             scene.stroking = false;
             scene.ending = false;
+        }
+    }
+
+    /// After an undo or redo (`before`: the session canvas's next undo and redo steps before
+    /// it), the rest of a stroke that painted every channel follows: the step it made in each
+    /// other channel is undone or redone too, if that is that channel's next step.
+    pub(crate) fn follow_joint_step(&mut self, before: (Option<u64>, Option<u64>)) {
+        let Some(canvas) = self.canvas.as_ref() else { return };
+        let after = (canvas.undo_step(), canvas.redo_step());
+        let (step, undone) = match (before, after) {
+            ((Some(s), _), (u, Some(r))) if r == s && u != Some(s) => (s, true),
+            ((_, Some(s)), (Some(u), r)) if u == s && r != Some(s) => (s, false),
+            _ => return,
+        };
+        let (Some(gpu), Some(scene)) = (self.gpu.as_ref(), self.scene.as_mut()) else { return };
+        let (part, channel) = (scene.current, scene.channel);
+        let Some(joint) =
+            scene.joint_steps.iter().find(|j| j.part == part && j.steps.get(channel) == Some(&Some(step))).copied()
+        else {
+            return;
+        };
+        for (k, want) in joint.steps.iter().enumerate() {
+            let Some(want) = *want else { continue };
+            if k == channel {
+                continue;
+            }
+            let Some(set) = scene.slot(part, k).and_then(Option::as_mut) else { continue };
+            let Some(c) = set.canvas.as_mut() else { continue };
+            if undone && c.undo_step() == Some(want) {
+                c.undo();
+            } else if !undone && c.redo_step() == Some(want) {
+                c.redo();
+            } else {
+                continue;
+            }
+            c.render(gpu, &mut set.doc, None);
         }
     }
 
@@ -1753,16 +2118,16 @@ impl State {
             }
             // the waiting texture sets' canvases (and channels), with the pixels they opened with
             for set in scene.sets.iter_mut().flatten().chain(scene.channels.iter_mut().flatten().flatten()) {
-                if set.canvas.is_none() {
-                    set.canvas = Canvas::new(gpu, &set.doc).ok();
-                    if let Some(c) = set.canvas.as_mut() {
-                        for (id, pixels) in std::mem::take(&mut set.pending) {
-                            if let Err(e) = c.upload_layer(gpu, id, &pixels) {
-                                log::error!("opening a texture set's layer: {e}");
-                            }
+                if set.canvas.is_none()
+                    && let Ok(mut c) = Canvas::new(gpu, &set.doc)
+                {
+                    for (id, pixels) in set.take_pending() {
+                        if let Err(e) = c.upload_layer(gpu, id, &pixels) {
+                            log::error!("opening a texture set's layer: {e}");
                         }
-                        c.render(gpu, &mut set.doc, None);
                     }
+                    c.render(gpu, &mut set.doc, None);
+                    set.canvas = Some(c);
                 }
             }
         }
@@ -2102,13 +2467,27 @@ mod tests {
         assert!((0..200).all(|y| (100..200).all(|x| at(&plain, x, y) == at(&frosted, x, y))));
     }
 
-    /// How many of the current texture set's pixels have paint.
+    /// What the current channel of the current texture set starts as (its Base Layer's fill).
+    fn fresh(s: &CanvasSession) -> [u8; 4] {
+        let st = s.shared.lock();
+        let scene = st.scene.as_ref().unwrap();
+        let (colour, roughness, metallic) = scene.mesh.surface(scene.current);
+        super::opaque(match scene.channel {
+            0 => colour,
+            1 => [roughness; 3],
+            _ => [metallic; 3],
+        })
+    }
+
+    /// How many of the current texture set's pixels have been painted: changed from what the
+    /// model's material gave them.
     fn painted(s: &CanvasSession) -> usize {
+        let fresh = fresh(s);
         let mut guard = s.shared.lock();
         let st = &mut *guard;
         let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
         canvas.render(gpu, &mut st.doc, None);
-        canvas.read_composite(gpu).unwrap().chunks(4).filter(|p| p[3] > 0).count()
+        canvas.read_composite(gpu).unwrap().chunks(4).filter(|p| *p != fresh).count()
     }
 
     #[test]
@@ -2273,11 +2652,11 @@ mod tests {
         dab(&s);
         let colour = painted(&s);
         assert!(colour > 20, "{colour}");
-        // roughness: the same layers, nothing painted in them yet
+        // roughness: the same layers, the dab on the colour laid down there too
         assert_eq!(s.model_channel(), 0);
         s.set_model_channel(1);
         assert_eq!(s.model_channel(), 1);
-        assert_eq!(painted(&s), 0);
+        assert!(painted(&s).abs_diff(colour) * 10 < colour, "{} {colour}", painted(&s));
         s.stroke_begin(PointerKind::Stylus, vec![sample(70.0, 100.0, 0.0)]);
         s.stroke_end(vec![sample(130.0, 100.0, 50.0)]);
         frame(&s, 200);
@@ -2290,7 +2669,7 @@ mod tests {
         assert_eq!(painted(&s), colour);
         assert!(s.layers().iter().any(|l| l.id == added));
         // exports take every channel whichever is painted on: the colour and roughness as
-        // painted, the metalness (nothing painted) the plain one
+        // painted, the metalness painted with the brush's (none, as the plain one)
         s.set_model_channel(2);
         assert_eq!(painted(&s), 0);
         let dir = std::env::temp_dir().join(format!("procraft-channels-{}", std::process::id()));
@@ -2327,6 +2706,145 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The current channel's texels as painted: each one's grey (unpremultiplied) and alpha.
+    fn channel_texels(s: &CanvasSession) -> Vec<(u8, u8)> {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+        let px = canvas.read_composite(gpu).unwrap();
+        px.chunks(4)
+            .map(|p| (if p[3] == 0 { 0 } else { (u16::from(p[0]) * 255 / u16::from(p[3])) as u8 }, p[3]))
+            .collect()
+    }
+
+    /// The grey most of the current channel's painted texels have (the middle of a dab).
+    fn covered_grey(s: &CanvasSession) -> Option<u8> {
+        let fresh = fresh(s)[0];
+        let mut counts = [0usize; 256];
+        for (v, a) in channel_texels(s) {
+            if a == 255 && v != fresh {
+                counts[usize::from(v)] += 1;
+            }
+        }
+        let (grey, &n) = counts.iter().enumerate().max_by_key(|&(_, n)| *n)?;
+        (n > 0).then_some(grey as u8)
+    }
+
+    /// Sets the paint brush's material controls as the studio does.
+    fn materials(s: &CanvasSession, roughness: f32, metallic: f32) {
+        s.studio_begin();
+        s.set_studio_setting("roughness_amount".into(), roughness);
+        s.set_studio_setting("metallic_amount".into(), metallic);
+        s.studio_end(true);
+    }
+
+    #[test]
+    fn a_stroke_on_the_colour_lays_down_the_brushs_roughness_and_metalness() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        materials(&s, 0.2, 0.8);
+        frame(&s, 200);
+        dab(&s);
+        let colour = painted(&s);
+        assert!(colour > 20, "{colour}");
+        // each the brush's amount where the stroke covers, nothing elsewhere
+        s.set_model_channel(1);
+        assert_eq!(covered_grey(&s), Some(51));
+        assert!(painted(&s).abs_diff(colour) * 10 < colour, "{} {colour}", painted(&s));
+        s.set_model_channel(2);
+        assert_eq!(covered_grey(&s), Some(204));
+        // a stroke on a channel paints that channel alone, with the channel's own colour
+        s.set_color(1.0, 1.0, 1.0);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(60.0, 60.0, 0.0)]);
+        s.stroke_end(vec![sample(140.0, 60.0, 50.0)]);
+        frame(&s, 200);
+        let metal = painted(&s);
+        assert!(metal > colour);
+        s.set_model_channel(1);
+        assert!(painted(&s).abs_diff(colour) * 10 < colour);
+        s.set_model_channel(0);
+        assert_eq!(painted(&s), colour);
+    }
+
+    #[test]
+    fn the_brushs_material_source_shapes_what_it_lays_down() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        let size = crate::studio::source_size() as usize;
+        s.studio_begin();
+        // the metalness through a mid grey, the roughness through black
+        assert!(s.set_studio_source(crate::studio::SourceKind::Metallic, vec![128; size * size]));
+        assert!(s.set_studio_source(crate::studio::SourceKind::Roughness, vec![0; size * size]));
+        s.set_studio_setting("metallic_amount".into(), 1.0);
+        s.set_studio_setting("roughness_amount".into(), 1.0);
+        s.studio_end(true);
+        frame(&s, 200);
+        dab(&s);
+        s.set_model_channel(2);
+        let grey = covered_grey(&s).unwrap();
+        assert!(grey.abs_diff(128) <= 2, "{grey}");
+        s.set_model_channel(1);
+        assert_eq!(covered_grey(&s), Some(0));
+    }
+
+    #[test]
+    fn undo_and_redo_take_a_strokes_channels_together() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        materials(&s, 0.4, 0.6);
+        frame(&s, 200);
+        dab(&s);
+        let colour = painted(&s);
+        let all = |s: &CanvasSession| {
+            let counts: Vec<usize> = (0..3)
+                .map(|c| {
+                    s.set_model_channel(c);
+                    painted(s)
+                })
+                .collect();
+            s.set_model_channel(0);
+            counts
+        };
+        let painted_all = all(&s);
+        assert!(painted_all.iter().all(|&n| n > 20), "{painted_all:?}");
+        s.undo();
+        assert_eq!(all(&s), [0, 0, 0]);
+        s.redo();
+        assert_eq!(all(&s), painted_all);
+        // undone from the roughness, the colour and metalness go too
+        s.set_model_channel(1);
+        s.undo();
+        assert_eq!(painted(&s), 0);
+        assert_eq!(all(&s), [0, 0, 0]);
+        // an eraser on the colour takes all three away
+        s.redo();
+        assert_eq!(all(&s), painted_all);
+        let cover = |s: &CanvasSession| {
+            let sums: Vec<u32> = (0..3)
+                .map(|c| {
+                    s.set_model_channel(c);
+                    channel_texels(s).iter().map(|t| u32::from(t.1)).sum()
+                })
+                .collect();
+            s.set_model_channel(0);
+            sums
+        };
+        let before = cover(&s);
+        s.stroke_begin(PointerKind::StylusEraser, vec![sample(80.0, 100.0, 0.0)]);
+        s.stroke_end(vec![sample(120.0, 100.0, 50.0)]);
+        frame(&s, 200);
+        let after = cover(&s);
+        assert!(after.iter().zip(&before).all(|(a, b)| a * 10 < b * 9), "{after:?} {before:?}");
+        assert_eq!(colour, painted_all[0]);
+    }
+
     #[test]
     fn an_obj_takes_its_material_file_and_images_from_the_files_picked_with_it() {
         let obj = format!("mtllib Cube Parts.mtl\nusemtl body\n{CUBE}");
@@ -2349,6 +2867,75 @@ mod tests {
         let only = vec![file("whatever.mtl", mtl), file("rough.png", b"rough")];
         let s = CanvasSession::open_model(obj.into(), "cube.obj".into(), only, "Cube".into(), 64).unwrap();
         assert_eq!(s.model_texture_files().len(), 1);
+    }
+
+    /// A zip of `files` (name, contents), in order.
+    fn zipped(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut zip = procraft_engine::zip::ZipWriter::new();
+        for (name, bytes) in files {
+            zip.add(name, bytes);
+        }
+        zip.finish()
+    }
+
+    #[test]
+    fn a_zipped_obj_comes_in_with_its_material_file_and_images() {
+        let obj = format!("mtllib cube.mtl\nusemtl body\n{CUBE}");
+        let mtl =
+            b"newmtl body\nmap_Kd textures/Body.png\nmap_roughness ./rough.png\nmap_tangentSpaceNormal flat.png\n";
+        let zip = zipped(&[
+            ("Cube Folder/", b""),
+            ("__MACOSX/Cube Folder/._cube.obj", b"junk"),
+            ("Cube Folder/cube.obj", obj.as_bytes()),
+            ("Cube Folder/cube.mtl", mtl),
+            ("Cube Folder/other/body.png", b"not this one"),
+            ("Cube Folder/textures/body.png", b"colour"),
+            ("Cube Folder/rough.png", b"rough"),
+            ("Cube Folder/flat.png", b"normal"),
+        ]);
+        assert_eq!(super::zip_model_name(zip.clone()).as_deref(), Some("Cube Folder/cube.obj"));
+        let s = CanvasSession::open_model(zip, "Cube Folder.zip".into(), Vec::new(), "Cube".into(), 64).unwrap();
+        let info = s.model_info().unwrap();
+        assert_eq!((info.texture_sets.as_slice(), info.triangles), (["body".to_owned()].as_slice(), 12));
+        // each map found by its path from the model, ignoring case; the normal map as channel 3
+        let found: Vec<(u32, Vec<u8>)> = s.model_texture_files().into_iter().map(|f| (f.channel, f.bytes)).collect();
+        assert_eq!(found, [(0, b"colour".to_vec()), (1, b"rough".to_vec()), (3, b"normal".to_vec())]);
+        // kept as the model it holds
+        let source = s.shared.lock().scene.as_ref().map(|sc| (sc.source.extension.clone(), sc.source.mtl.is_some()));
+        assert_eq!(source, Some(("obj".to_owned(), true)));
+    }
+
+    #[test]
+    fn a_zips_model_is_the_one_nearest_its_top() {
+        let deep = zipped(&[("parts/inner.obj", CUBE.as_bytes()), ("outer.OBJ", CUBE.as_bytes())]);
+        assert_eq!(super::zip_model_name(deep).as_deref(), Some("outer.OBJ"));
+        let usd = zipped(&[("readme.txt", b"hi"), ("scene/model.usdz", b"x")]);
+        assert_eq!(super::zip_model_name(usd).as_deref(), Some("scene/model.usdz"));
+        // nothing to paint, or another kind of package: not a model
+        assert_eq!(super::zip_model_name(zipped(&[("picture.png", b"p")])), None);
+        assert_eq!(super::zip_model_name(zipped(&[("Document.archive", b"d"), ("mesh.obj", CUBE.as_bytes())])), None);
+        assert_eq!(super::zip_model_name(zipped(&[("artwork.json", b"{}"), ("model.obj", CUBE.as_bytes())])), None);
+        assert_eq!(super::zip_model_name(b"not a zip".to_vec()), None);
+        let none = CanvasSession::open_model(zipped(&[("a.png", b"p")]), "a.zip".into(), Vec::new(), "A".into(), 64);
+        assert!(none.is_err());
+    }
+
+    #[test]
+    fn a_models_own_obj_zip_opens_again_textured() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        dab(&s);
+        let path = std::env::temp_dir().join(format!("procraft-obj-zip-{}.zip", std::process::id()));
+        s.export_model_obj(path.to_string_lossy().into_owned()).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let again = CanvasSession::open_model(bytes, "Cube.zip".into(), Vec::new(), "Again".into(), 64).unwrap();
+        // its colour, roughness and metalness, as its material file maps them
+        let channels: Vec<u32> = again.model_texture_files().iter().map(|f| f.channel).collect();
+        assert_eq!(channels, [0, 1, 2]);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -2376,12 +2963,79 @@ mod tests {
         reader.next_frame(&mut px).unwrap();
         assert_eq!(px.len(), 64 * 64 * 4);
         assert!(!again.set_model_texture(0, 0, vec![0; 8]));
-        assert!(again.set_model_texture(0, 0, px));
+        assert!(again.set_model_texture(0, 0, px.clone()));
         assert!(shown(&again));
         frame(&again, 200);
-        // the exported picture is opaque (over white): every texel painted
-        assert_eq!(painted(&again), 64 * 64);
+        // the exported picture (opaque, over white) in place of the material's colour
+        let shown_px = {
+            let mut guard = again.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render(gpu, &mut st.doc, None);
+            canvas.read_composite(gpu).unwrap()
+        };
+        assert!(shown_px == px);
+        assert!(painted(&again) > 20);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_models_base_layers_start_as_its_materials_colour_roughness_and_metalness() {
+        let two = format!(
+            "mtllib m.mtl
+usemtl red
+{}",
+            CUBE.replacen(
+                "f 4/1",
+                "usemtl mapped
+f 4/1",
+                1
+            )
+        );
+        let mtl = b"newmtl red
+Kd 1 0 0
+Pr 0.25
+Pm 0.5
+newmtl mapped
+Kd 0 0 1
+map_Kd blue.png
+";
+        let files = vec![
+            ModelFile { name: "m.mtl".into(), bytes: mtl.to_vec() },
+            ModelFile { name: "blue.png".into(), bytes: b"an image".to_vec() },
+        ];
+        let s = CanvasSession::open_model(two.into_bytes(), "two.obj".into(), files, "Two".into(), 16).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let layer = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let id = st.doc.layers().first().unwrap().id;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render(gpu, &mut st.doc, None);
+            canvas.read_layer(gpu, id).unwrap()
+        };
+        // the Base Layer itself, opaque: the colour, and each channel's own value
+        assert!(layer(&s).chunks(4).all(|p| p == [255, 0, 0, 255]));
+        s.set_model_channel(1);
+        assert!(layer(&s).chunks(4).all(|p| p == [64, 64, 64, 255]));
+        s.set_model_channel(2);
+        assert!(layer(&s).chunks(4).all(|p| p == [128, 128, 128, 255]));
+        // a set whose material brings an image waits for it, its Base Layer clear
+        s.set_model_channel(0);
+        s.choose_texture_set(1);
+        assert!(layer(&s).chunks(4).all(|p| p[3] == 0));
+        // kept so when saved before it is drawn, and opened again so
+        let dir = std::env::temp_dir().join(format!("procraft-fill-{}", std::process::id()));
+        s.choose_texture_set(0);
+        s.save(dir.to_string_lossy().into_owned()).unwrap();
+        let again = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+        assert!(shown(&again));
+        frame(&again, 200);
+        assert!(layer(&again).chunks(4).all(|p| p == [255, 0, 0, 255]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

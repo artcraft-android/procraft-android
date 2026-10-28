@@ -418,6 +418,11 @@ impl State {
     /// Finishes an open stroke.
     fn finish_stroke(&mut self) {
         self.shape = None;
+        // a stroke on a model ends there, as the pen lifting would end it
+        if self.scene_shown() && self.scene.as_ref().is_some_and(|s| s.stroking) {
+            self.scene_stroke_add(&[], true);
+            return;
+        }
         if let (Some(open), Some(canvas)) = (self.stroke.take(), self.canvas.as_mut()) {
             close_stroke(canvas, open, &self.doc.stroke_guide());
             self.bake_painted_on();
@@ -1458,9 +1463,15 @@ impl CanvasSession {
             return;
         }
         st.settle();
+        st.flush();
+        let before = st.canvas.as_ref().map(|c| (c.undo_step(), c.redo_step()));
         if let Some(canvas) = st.canvas.as_mut() {
             f(canvas);
             st.flush();
+            // a stroke on a model's colour painted its roughness and metalness too
+            if let Some(before) = before {
+                st.follow_joint_step(before);
+            }
             st.sync_selection();
             st.revision += 1;
             self.shared.frame(st);
