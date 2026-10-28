@@ -58,7 +58,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
         let (size, reconfigure) = {
             let mut st = shared.lock();
             while !st.stop && !st.needs_frame {
-                st = shared.wake.wait(st).unwrap_or_else(|e| e.into_inner());
+                shared.wake.wait(&mut st);
             }
             if st.stop {
                 break;
@@ -185,6 +185,9 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
             if held.elapsed() > SLOW_FRAME {
                 log::warn!("a frame held the canvas {} ms", held.elapsed().as_millis());
             }
+            // whoever waited on the lock meanwhile (a touch) has it next, before this thread's
+            // next frame
+            parking_lot::MutexGuard::unlock_fair(guard);
         }
         queue.present(frame);
     }

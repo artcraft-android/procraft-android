@@ -4937,7 +4937,11 @@ impl Canvas {
     /// The picture as it shows (while the caches are remade, as it was), scaled to fit
     /// `max_side` pixels: quick enough to ask for while it is drawn on.
     pub fn composite_thumbnail(&mut self, gpu: &Gpu, doc: &mut Document, max_side: u32) -> Result<Thumbnail, GpuError> {
-        self.render(gpu, doc, None);
+        // while the caches are remade a render leaves the picture as it is: none, so this never
+        // does that work (on the main thread, as the artwork closes)
+        if !self.busy() {
+            self.render(gpu, doc, None);
+        }
         self.sample_view(gpu, &self.composite_views[0], self.full(), max_side)
     }
 
@@ -5901,7 +5905,7 @@ struct Caches {
 }
 
 /// How long each render goes on remaking caches before it lets the app go on.
-const REMAKE_SLICE: std::time::Duration = std::time::Duration::from_millis(40);
+const REMAKE_SLICE: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// Caches being remade a little each render: their textures, how far each has got (the next item
 /// and where its stack's result is; none when done or not remade), what they are made from,

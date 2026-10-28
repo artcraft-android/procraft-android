@@ -909,6 +909,7 @@ dependencies = [
  "jni-sys 0.3.1",
  "log",
  "ndk",
+ "parking_lot",
  "png",
  "procraft-engine",
  "procraft-gpu",

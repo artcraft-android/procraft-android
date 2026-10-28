@@ -38,7 +38,7 @@ mod transform;
 mod window;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use procraft_engine::brush::Brush;
@@ -639,8 +639,9 @@ fn close_stroke(canvas: &mut Canvas, mut builder: StrokeBuilder, guide: &procraf
 }
 
 pub(crate) struct Shared {
-    state: Mutex<State>,
-    pub(crate) wake: Condvar,
+    /// Fair when it matters: the render thread hands it on to whoever waits.
+    state: parking_lot::Mutex<State>,
+    pub(crate) wake: parking_lot::Condvar,
     thread: Mutex<Option<JoinHandle<()>>>,
     /// Project canvas's render thread.
     projection: Mutex<Option<JoinHandle<()>>>,
@@ -649,8 +650,8 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    pub(crate) fn lock(&self) -> parking_lot::MutexGuard<'_, State> {
+        self.state.lock()
     }
 
     /// Lets the canvas finish remaking its caches a render at a time, the lock let go between,
@@ -666,8 +667,9 @@ impl Shared {
                 if !canvas.busy() {
                     return;
                 }
+                // whoever waits on the lock (a touch, the render thread) has it next
+                parking_lot::MutexGuard::unlock_fair(guard);
             }
-            // a moment for whoever waits on the lock (a touch, the render thread)
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
@@ -675,7 +677,7 @@ impl Shared {
     /// The lock, taken once the canvas has finished remaking its caches (made a render at a
     /// time, the lock let go between): what is read under it is the picture as it is, and
     /// nothing waits on a whole remake.
-    pub(crate) fn lock_finished(&self) -> MutexGuard<'_, State> {
+    pub(crate) fn lock_finished(&self) -> parking_lot::MutexGuard<'_, State> {
         for _ in 0..1000 {
             self.finish_caches();
             let guard = self.lock();
@@ -931,8 +933,8 @@ impl CanvasSession {
         };
         Arc::new(CanvasSession {
             shared: Arc::new(Shared {
-                state: Mutex::new(state),
-                wake: Condvar::new(),
+                state: parking_lot::Mutex::new(state),
+                wake: parking_lot::Condvar::new(),
                 thread: Mutex::new(None),
                 projection: Mutex::new(None),
                 saving: Mutex::new(project::Saved::default()),

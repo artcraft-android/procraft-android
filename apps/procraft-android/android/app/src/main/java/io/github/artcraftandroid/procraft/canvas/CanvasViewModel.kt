@@ -5575,7 +5575,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun addLayer() = layerChange { if (it.addLayer() == 0uL) message = noRoom() }
 
-    fun selectLayer(id: ULong) = layerChange { it.selectLayer(id) }
+    // no layer's pixels change, so the thumbnails stay (an artwork's hundreds would load again)
+    fun selectLayer(id: ULong) = layerChange(thumbs = false) { it.selectLayer(id) }
 
     fun toggleVisible(l: LayerInfo) = layerChange { it.setLayerVisible(l.id, !l.visible) }
 
