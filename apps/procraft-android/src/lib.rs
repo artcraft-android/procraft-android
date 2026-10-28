@@ -321,6 +321,8 @@ pub(crate) struct State {
     pub(crate) info: project::ArtworkInfo,
     /// Saved layer pixels waiting for the canvas (an opened artwork before it is shown).
     pub(crate) pending_pixels: Vec<(procraft_engine::document::LayerId, project::Opened)>,
+    /// Let go of (see [`CanvasSession::release_canvas`]): no canvas is made again.
+    pub(crate) closed: bool,
     /// A model open to paint on, in place of the flat canvas (the document is its current
     /// texture set's).
     pub(crate) scene: Option<scene3d::Scene>,
@@ -549,7 +551,7 @@ impl State {
     /// Creates the canvas once there is a GPU.
     #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
     pub(crate) fn ensure_canvas(&mut self) {
-        if self.canvas.is_some() {
+        if self.canvas.is_some() || self.closed {
             return;
         }
         let Some(gpu) = self.gpu.as_ref() else { return };
@@ -565,6 +567,8 @@ impl State {
                         log::error!("opening a layer: {e}");
                     }
                 }
+                // as read: not changed
+                c.take_changed();
                 self.canvas = Some(c);
             }
             Err(e) => {
@@ -664,7 +668,7 @@ impl Shared {
     pub(crate) fn make_canvas(&self) {
         let (gpu, doc, ids) = {
             let st = self.lock();
-            let Some(gpu) = st.gpu.as_ref().filter(|_| st.canvas.is_none()) else { return };
+            let Some(gpu) = st.gpu.as_ref().filter(|_| st.canvas.is_none() && !st.closed) else { return };
             (gpu.clone(), st.doc.clone(), st.pending_pixels.iter().map(|(id, _)| *id).collect::<Vec<_>>())
         };
         let made = Canvas::new(&gpu, &doc).map(|mut c| {
@@ -676,6 +680,9 @@ impl Shared {
                 };
                 match layer.pixels(doc.width(), doc.height()) {
                     Ok(pixels) => {
+                        if let Ok(mut saved) = self.saving.lock() {
+                            saved.read(*id, &pixels);
+                        }
                         // past what fits, kept compressed until needed
                         let opened =
                             if c.has_room() { c.upload_layer(&gpu, *id, &pixels) } else { c.park_pixels(*id, &pixels) };
@@ -686,6 +693,8 @@ impl Shared {
                     Err(e) => log::error!("layer {id:?}: {e}"),
                 }
             }
+            // as read: not changed
+            c.take_changed();
             c
         });
         let mut st = self.lock();
@@ -827,6 +836,7 @@ impl CanvasSession {
             guide_before: None,
             name,
             pending_pixels: project::opened(pixels),
+            closed: false,
             fit_insets: [0.0; 4],
             backdrops: Vec::new(),
             saved_view: None,
@@ -1195,6 +1205,17 @@ impl CanvasSession {
     /// pixels): the interface, with Fit Canvas Inside Interface on.
     pub fn set_fit_insets(&self, left: f32, top: f32, right: f32, bottom: f32) {
         self.shared.lock().fit_insets = [left, top, right, bottom];
+    }
+
+    /// Lets go of the canvas and everything it holds, on the GPU and off it (its layers, parked
+    /// or not, and a model's), once the artwork is saved and left: a large artwork's memory is
+    /// free at once rather than whenever this object is collected. Nothing is drawn after.
+    pub fn release_canvas(&self) {
+        let mut st = self.shared.lock();
+        st.closed = true;
+        st.canvas = None;
+        st.pending_pixels.clear();
+        st.scene = None;
     }
 
     /// The artwork opens fitted, not as it was left (Canvas Orientation Memory off).

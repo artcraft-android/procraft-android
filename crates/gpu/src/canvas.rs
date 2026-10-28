@@ -1203,6 +1203,11 @@ pub struct Canvas {
     /// Layers' pixels kept compressed off the GPU: those parked (no texture), and copies of
     /// resident ones unchanged since, so that letting them go again costs nothing.
     parked: HashMap<LayerId, Vec<u8>>,
+    /// Small pictures of the parked layers, so their thumbnails need no texture.
+    pictures: HashMap<LayerId, Pictures>,
+    /// Layers whose pixels changed since [`Canvas::take_changed`] took them, so a save reads only
+    /// those.
+    changed: HashSet<LayerId>,
     /// What the layers' textures may take before those needed least lately are parked (0: none
     /// are), and when each was last needed, counted in renders.
     resident_budget: u64,
@@ -1404,6 +1409,8 @@ impl Canvas {
             cache_composites: false,
             caches: None,
             parked: HashMap::new(),
+            pictures: HashMap::new(),
+            changed: HashSet::new(),
             resident_budget: 0,
             needed_at: HashMap::new(),
             renders: 0,
@@ -1864,6 +1871,25 @@ impl Canvas {
         self.set_cache_composites(bytes > 0);
     }
 
+    /// A parked layer's small pictures, if they are big enough for a thumbnail `max_side` across.
+    fn parked_pictures(&self, id: LayerId, max_side: u32) -> Option<&Pictures> {
+        if self.layers.contains_key(&id) || max_side > PARKED_PICTURE_SIDE {
+            return None;
+        }
+        self.pictures.get(&id)
+    }
+
+    /// The layers whose pixels changed since this was last done (by painting, undo, uploads and
+    /// every other change), forgotten here: a save reads only these.
+    pub fn take_changed(&mut self) -> HashSet<LayerId> {
+        std::mem::take(&mut self.changed)
+    }
+
+    /// Layers to count as changed again (a save of them that failed).
+    pub fn mark_changed(&mut self, ids: impl IntoIterator<Item = LayerId>) {
+        self.changed.extend(ids);
+    }
+
     /// How many layers are parked (kept compressed, without a texture).
     pub fn parked_layers(&self) -> usize {
         self.parked.keys().filter(|id| !self.layers.contains_key(*id)).count()
@@ -1904,6 +1930,8 @@ impl Canvas {
             let restored = !self.layers.contains_key(&id) && self.restore(gpu, id);
             if written {
                 self.parked.remove(&id);
+                self.pictures.remove(&id);
+                self.changed.insert(id);
             }
             self.needed_at.insert(id, self.renders);
             // the staged pixels sent on now and then, so many in a row don't pile up
@@ -1983,6 +2011,7 @@ impl Canvas {
             }
             if !self.parked.contains_key(&id) {
                 let Ok(pixels) = self.read_layer(gpu, id) else { continue };
+                self.pictures.insert(id, Pictures::of(&pixels, self.width, self.height));
                 self.parked.insert(id, procraft_engine::applz4::encode(&pixels));
             }
             self.layers.remove(&id);
@@ -2313,6 +2342,7 @@ impl Canvas {
         }
         self.layers.retain(|id, _| keep.contains(id));
         self.parked.retain(|id, _| keep.contains(id));
+        self.pictures.retain(|id, _| keep.contains(id));
         self.needed_at.retain(|id, _| keep.contains(id));
     }
 
@@ -4014,6 +4044,7 @@ impl Canvas {
             return Err(GpuError::Readback(format!("layer {id:?}: {} bytes, expected {expected}", rgba.len())));
         }
         self.layers.remove(&id);
+        self.pictures.insert(id, Pictures::of(rgba, self.width, self.height));
         self.parked.insert(id, procraft_engine::applz4::encode(rgba));
         self.caches = None;
         self.invalidate();
@@ -4632,6 +4663,10 @@ impl Canvas {
         max_side: u32,
     ) -> Result<Thumbnail, GpuError> {
         self.render(gpu, doc, None);
+        let mask = doc.layer(id).is_some_and(|l| l.kind == LayerKind::Mask);
+        if let Some(p) = self.parked_pictures(id, max_side).filter(|_| !mask) {
+            return Ok(shrink(p.drawn.as_ref().unwrap_or(&p.whole), max_side));
+        }
         self.restore_all(gpu, [id], false);
         let full = self.full();
         // a mask is white where nothing is painted on it
@@ -4669,15 +4704,21 @@ impl Canvas {
             return Ok(Vec::new());
         }
         self.render(gpu, doc, None);
-        let ids: Vec<LayerId> = doc
-            .layers()
+        let paint: Vec<LayerId> = doc.layers().iter().filter(|l| l.kind == LayerKind::Paint).map(|l| l.id).collect();
+        let ids: Vec<LayerId> = paint.iter().copied().filter(|id| self.layers.contains_key(id)).collect();
+        // a parked layer's from its small picture
+        let parked: HashMap<LayerId, u8> = paint
             .iter()
-            .filter(|l| l.kind == LayerKind::Paint)
-            .map(|l| l.id)
-            .filter(|id| self.layers.contains_key(id))
+            .filter(|id| !self.layers.contains_key(*id))
+            .filter_map(|id| {
+                let w = &self.pictures.get(id)?.whole;
+                let px = (u64::from(x) * u64::from(w.width) / u64::from(self.width.max(1))) as usize;
+                let py = (u64::from(y) * u64::from(w.height) / u64::from(self.height.max(1))) as usize;
+                Some((*id, *w.rgba.get((py * w.width as usize + px) * 4 + 3)?))
+            })
             .collect();
         if ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(paint.iter().filter_map(|id| Some((*id, *parked.get(id)?))).collect());
         }
         // one pixel of each layer, each in its own 256-byte row of a buffer
         let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -4711,10 +4752,12 @@ impl Canvas {
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| GpuError::Readback(e.to_string()))?;
         rx.recv().map_err(|e| GpuError::Readback(e.to_string()))?.map_err(|e| GpuError::Readback(e.to_string()))?;
         let mapped = buffer.slice(..).get_mapped_range().map_err(|e| GpuError::Readback(e.to_string()))?;
-        let out = ids.iter().enumerate().map(|(i, id)| (*id, mapped.get(256 * i + 3).copied().unwrap_or(0))).collect();
+        let read: HashMap<LayerId, u8> =
+            ids.iter().enumerate().map(|(i, id)| (*id, mapped.get(256 * i + 3).copied().unwrap_or(0))).collect();
         drop(mapped);
         buffer.unmap();
-        Ok(out)
+        // in the document's order, parked or not
+        Ok(paint.iter().filter_map(|id| Some((*id, *read.get(id).or_else(|| parked.get(id))?))).collect())
     }
 
     /// Layer `id` over the whole canvas (not cropped to what is drawn) fitted to `max_side`, as
@@ -4727,6 +4770,9 @@ impl Canvas {
         max_side: u32,
     ) -> Result<Thumbnail, GpuError> {
         self.render(gpu, doc, None);
+        if let Some(p) = self.parked_pictures(id, max_side) {
+            return Ok(shrink(&p.whole, max_side));
+        }
         self.restore_all(gpu, [id], false);
         let full = self.full();
         self.sample_layer(gpu, id, full, max_side)
@@ -4790,6 +4836,7 @@ impl Canvas {
         }
         let Some(layer) = self.layers.get(&id) else { return Ok(()) };
         self.caches = None;
+        self.changed.insert(id);
         gpu.queue.write_texture(
             copy_at(&layer.texture, 0, 0),
             rgba,
@@ -5535,6 +5582,61 @@ fn painted_bounds(t: &Thumbnail, painted: impl Fn([u8; 4]) -> bool) -> Option<[u
         }
     }
     b
+}
+
+/// The longest side of a parked layer's small pictures, pixels: as big as any thumbnail asked for.
+const PARKED_PICTURE_SIDE: u32 = 192;
+
+/// A parked layer's small pictures: the whole layer, and what is drawn on it (none if nothing).
+struct Pictures {
+    whole: Thumbnail,
+    drawn: Option<Thumbnail>,
+}
+
+impl Pictures {
+    /// Of a layer's pixels (premultiplied RGBA, `width` x `height`).
+    fn of(rgba: &[u8], width: u32, height: u32) -> Pictures {
+        let full = Thumbnail { width, height, rgba: rgba.to_vec() };
+        let whole = shrink(&full, PARKED_PICTURE_SIDE);
+        let drawn = alpha_bounds(&full).map(|b| shrink(&crop(&full, b), PARKED_PICTURE_SIDE));
+        Pictures { whole, drawn }
+    }
+}
+
+/// A picture box-filtered to fit `side` pixels (never enlarged).
+fn shrink(t: &Thumbnail, side: u32) -> Thumbnail {
+    let (width, height) = (t.width.max(1), t.height.max(1));
+    let scale = (side.max(1) as f32 / width.max(height) as f32).min(1.0);
+    let w = ((width as f32 * scale).round() as u32).clamp(1, width);
+    let h = ((height as f32 * scale).round() as u32).clamp(1, height);
+    if (w, h) == (width, height) {
+        return Thumbnail { width, height, rgba: t.rgba.clone() };
+    }
+    let mut sums = vec![0u32; w as usize * h as usize * 4];
+    let mut counts = vec![0u32; w as usize * h as usize];
+    for (y, row) in t.rgba.chunks_exact(width as usize * 4).enumerate() {
+        let ty = (y as u64 * u64::from(h) / u64::from(height)) as usize;
+        for (x, px) in row.as_chunks::<4>().0.iter().enumerate() {
+            let tx = (x as u64 * u64::from(w) / u64::from(width)) as usize;
+            let i = ty * w as usize + tx;
+            if let Some(c) = counts.get_mut(i) {
+                *c += 1;
+            }
+            for (k, v) in px.iter().enumerate() {
+                if let Some(sum) = sums.get_mut(i * 4 + k) {
+                    *sum += u32::from(*v);
+                }
+            }
+        }
+    }
+    let rgba = sums
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(&counts)
+        .flat_map(|(sum, n)| sum.iter().map(move |v| ((v + n / 2) / (*n).max(1)) as u8).collect::<Vec<_>>())
+        .collect();
+    Thumbnail { width: w, height: h, rgba }
 }
 
 /// Part [x0, y0, x1, y1) of a thumbnail.

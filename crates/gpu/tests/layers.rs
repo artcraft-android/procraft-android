@@ -470,6 +470,19 @@ fn parked_layers_come_back_as_they_were() {
         pictures.push(canvas.layer_picture(&gpu, doc, low, 8).unwrap().rgba);
     }
     assert_eq!(pictures[0], pictures[1], "its picture");
+    let mut thumbs = Vec::new();
+    for (doc, canvas) in t.docs.iter_mut().zip(t.canvases.iter_mut()) {
+        thumbs.push(canvas.layer_thumbnail(&gpu, doc, low, 8).unwrap().rgba);
+    }
+    assert_eq!(thumbs[0], thumbs[1], "its thumbnail");
+    // every layer's coverage at a point, parked ones too
+    for (x, y) in [(2, 2), (8, 8), (13, 9)] {
+        let mut alphas = Vec::new();
+        for (doc, canvas) in t.docs.iter_mut().zip(t.canvases.iter_mut()) {
+            alphas.push(canvas.alphas_at(&gpu, doc, x, y).unwrap());
+        }
+        assert_eq!(alphas[0], alphas[1], "coverage at {x}, {y}");
+    }
     // merged down, duplicated, hidden: the layers they read and write come back first
     let (upper, lower) = (ids[5], ids[4]);
     t.each(|doc, canvas| {

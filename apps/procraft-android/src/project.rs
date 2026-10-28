@@ -107,6 +107,8 @@ pub(crate) fn file_error(context: &str, e: impl std::fmt::Display) -> MobileErro
 /// What a save writes, read under the lock: the artwork's file, the layers not already in the
 /// folder as they are (each with its hash) and the picture (if shown).
 pub(crate) struct SaveSnapshot {
+    /// The layers that had changed, counted as changed again if the save fails.
+    changed: Vec<LayerId>,
     file: ArtworkFile,
     layers: Vec<(LayerId, u64, Vec<u8>)>,
     /// Layers still the PNG files they were opened from (not shown yet), written as they are.
@@ -128,6 +130,18 @@ impl Saved {
     /// The hashes of the layers the last saves wrote to `dir`; none for another folder.
     pub(crate) fn known(&self, dir: &Path) -> std::collections::HashMap<LayerId, u64> {
         if self.dir == dir { self.layers.clone() } else { Default::default() }
+    }
+
+    /// An artwork opened from `dir`: its layer files are what the last save there wrote, their
+    /// hashes known as each is read ([`Saved::read`]).
+    pub(crate) fn opened(&mut self, dir: &Path) {
+        self.dir = dir.to_path_buf();
+        self.layers.clear();
+    }
+
+    /// Layer `id` read from its file with these pixels: a save that finds it unchanged leaves it.
+    pub(crate) fn read(&mut self, id: LayerId, rgba: &[u8]) {
+        self.layers.insert(id, pixels_hash(rgba));
     }
 }
 
@@ -193,9 +207,19 @@ impl crate::State {
         let mut layers = Vec::new();
         let mut files = Vec::new();
         let mut composite = None;
+        let mut changed_ids = Vec::new();
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.render(gpu, &mut self.doc, None);
+            let changed_now = canvas.take_changed();
+            changed_ids = changed_now.iter().copied().collect();
             for layer in self.doc.layers() {
+                // unchanged since it was read or saved, its file there: left as it is, unread
+                if !changed_now.contains(&layer.id)
+                    && known.contains_key(&layer.id)
+                    && layer_path(dir, layer.id).exists()
+                {
+                    continue;
+                }
                 let rgba = canvas.read_layer(gpu, layer.id).map_err(|e| file_error("reading a layer", e))?;
                 layers.extend(changed(layer.id, rgba));
             }
@@ -220,14 +244,31 @@ impl crate::State {
                 }
             }
         }
-        Ok(SaveSnapshot { file, layers, files, composite, model })
+        Ok(SaveSnapshot { changed: changed_ids, file, layers, files, composite, model })
     }
+}
+
+/// Writes a save; if it fails, the layers it had as changed count as changed again.
+fn write_or_keep_changed(
+    session: &CanvasSession,
+    saved: &mut Saved,
+    dir: &Path,
+    snapshot: SaveSnapshot,
+) -> Result<(), MobileError> {
+    let changed = snapshot.changed.clone();
+    let result = write_artwork(saved, dir, snapshot);
+    if result.is_err()
+        && let Some(canvas) = session.shared.lock().canvas.as_mut()
+    {
+        canvas.mark_changed(changed);
+    }
+    result
 }
 
 /// Writes a save into `dir` (made if missing): the layers that changed since the last save there,
 /// the thumbnail and the document.
 fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Result<(), MobileError> {
-    let SaveSnapshot { file, layers, files, composite, model } = snapshot;
+    let SaveSnapshot { file, layers, files, composite, model, .. } = snapshot;
     if saved.dir != dir {
         saved.dir = dir.to_path_buf();
         saved.layers.clear();
@@ -354,6 +395,8 @@ impl CanvasSession {
         }
         let scene = file.model.as_ref().map(|m| crate::scene3d::open_saved_model(&dir, m)).transpose()?;
         let session = CanvasSession::with_document(doc, file.name, Vec::new());
+        // its files are as the last save left them: one unchanged since isn't written again
+        session.shared.saving.lock().unwrap_or_else(|e| e.into_inner()).opened(&dir);
         {
             let mut st = session.shared.lock();
             st.pending_pixels = pngs;
@@ -377,7 +420,7 @@ impl CanvasSession {
             let known = saved.known(Path::new(&dir));
             st.with_colour(|st| st.save_snapshot(Path::new(&dir), &known))?
         };
-        write_artwork(&mut saved, Path::new(&dir), snapshot)
+        write_or_keep_changed(self, &mut saved, Path::new(&dir), snapshot)
     }
 
     /// Saves as [`CanvasSession::save`] does, but only when nothing is under way that saving
@@ -394,7 +437,7 @@ impl CanvasSession {
             let known = saved.known(Path::new(&dir));
             st.with_colour(|st| st.save_snapshot(Path::new(&dir), &known))?
         };
-        write_artwork(&mut saved, Path::new(&dir), snapshot).map(|()| true)
+        write_or_keep_changed(self, &mut saved, Path::new(&dir), snapshot).map(|()| true)
     }
 
     /// A number that changes whenever the artwork does (new steps, undo and redo, layer

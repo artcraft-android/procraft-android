@@ -1728,7 +1728,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         panel = Panel.NONE
         screen = Screen.GALLERY
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { dir?.let { runCatching { s.save(it.path) } } }
+            withContext(Dispatchers.IO) {
+                dir?.let { runCatching { s.save(it.path) } }
+                // its memory free at once, not when the object is collected
+                s.releaseCanvas()
+            }
             galleryVersion++
             refreshGallery()
         }

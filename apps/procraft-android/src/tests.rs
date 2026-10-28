@@ -370,6 +370,19 @@ fn artworks_save_and_open() {
     // as the render thread makes it: the layers go up with the state let go between them
     opened.shared.make_canvas();
     assert!(opened.shared.lock().pending_pixels.is_empty());
+    // shown, and nothing changed: its files are known as read, so a save rewrites none
+    let before = written(&dir);
+    opened.save(dir.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(written(&dir), before, "unchanged layers left as they were");
+    // a stroke on the bottom layer: only its file is written again
+    let bottom = opened.layers().first().map(|l| l.id).unwrap();
+    assert!(opened.select_layer(bottom));
+    opened.stroke_begin(PointerKind::Finger, vec![sample(50.0, 50.0, 0.0)]);
+    opened.stroke_end(vec![]);
+    opened.save(dir.to_string_lossy().into_owned()).unwrap();
+    let after = written(&dir);
+    assert_ne!(after.first(), before.first(), "the painted layer written");
+    assert_eq!(after.get(1), before.get(1), "the other left as it was");
     assert_eq!(opened.name(), "Test Piece");
     assert_eq!(opened.artwork_info().author, "A. Painter");
     assert_eq!(opened.artwork_info().created_ms, info.created_ms);
