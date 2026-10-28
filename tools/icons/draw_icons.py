@@ -142,10 +142,61 @@ def turning_arrow(mirror):
     return shape
 
 
+def ring(cx, cy, r, w):
+    """A circle's outline, w thick."""
+    return Point(cx, cy).buffer(r + w / 2, quad_segs=16).difference(Point(cx, cy).buffer(r - w / 2, quad_segs=16))
+
+
+def frame(x0, y0, x1, y1, w, r):
+    """A rounded rectangle's outline, w thick, its outer corners rounded by r."""
+    outer = soft(box(x0, y0, x1, y1), r)
+    return outer.difference(soft(box(x0 + w, y0 + w, x1 - w, y1 - w), max(0.2, r - w)))
+
+
+def plus():
+    """Add: a plus."""
+    return unary_union([capsule((12, 4), (12, 20), 1.3), capsule((4, 12), (20, 12), 1.3)])
+
+
+def canvas_tab():
+    """Canvas: a canvas's frame with a stroke across it."""
+    return unary_union([frame(3, 4, 21, 20, 2.2, 2.0), capsule((7.5, 15.5), (16.5, 8.5), 1.3)])
+
+
+def share_tab():
+    """Share: a tray with an arrow rising out of it."""
+    tray = LineString([(4, 12.5), (4, 20), (20, 20), (20, 12.5)]).buffer(1.2, join_style='round')
+    shaft = capsule((12, 4.5), (12, 15), 1.2)
+    head = soft(Polygon([(12, 2.4), (17, 7.6), (7, 7.6)]), 0.4)
+    return unary_union([tray, shaft, head])
+
+
+def video_tab():
+    """Video: a camera, its body and its lens."""
+    body = soft(box(2.5, 6.5, 15.5, 17.5), 2.0)
+    lens = soft(Polygon([(16.8, 12), (21.5, 8.2), (21.5, 15.8)]), 0.6)
+    return unary_union([body, lens])
+
+
+def prefs_tab():
+    """Preferences: a switch, turned on."""
+    track = capsule((7.5, 12), (16.5, 12), 5.2).difference(capsule((7.5, 12), (16.5, 12), 3.2))
+    return unary_union([track, Point(16.5, 12).buffer(2.4, quad_segs=16)])
+
+
+def help_tab():
+    """Help: a question mark in a ring."""
+    hook = LineString([(12 + 3.0 * math.cos(math.radians(a)), 9.4 + 3.0 * math.sin(math.radians(a)))
+                       for a in range(200, 361, 8)] + [(15.0, 9.4), (12.2, 12.4), (12.0, 14.0)])
+    return unary_union([ring(12, 12, 9.0, 2.0), hook.buffer(1.15, join_style='round'), Point(12, 17.4).buffer(1.35, quad_segs=10)])
+
+
 DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
     'undo': lambda: turning_arrow(False), 'redo': lambda: turning_arrow(True),
+    'tabadd': plus, 'tabcanvas': canvas_tab, 'tabshare': share_tab, 'tabvideo': video_tab,
+    'tabprefs': prefs_tab, 'tabhelp': help_tab,
 }
 
 
