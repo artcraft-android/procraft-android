@@ -4259,6 +4259,22 @@ impl Canvas {
         Ok(())
     }
 
+    /// As [`Canvas::upload_layer`], keeping `ready` (made from the same pixels by
+    /// [`ReadyToPark::of`]) as the layer's compressed copy: letting its texture go later, while
+    /// it is unchanged, costs nothing.
+    pub fn upload_layer_kept(
+        &mut self,
+        gpu: &Gpu,
+        id: LayerId,
+        rgba: &[u8],
+        ready: ReadyToPark,
+    ) -> Result<(), GpuError> {
+        self.upload_layer(gpu, id, rgba)?;
+        self.parked.insert(id, ready.parked);
+        self.pictures.insert(id, ready.pictures);
+        Ok(())
+    }
+
     /// Parks layer `id` with pixels already made ready (by [`ReadyToPark::of`], with this
     /// canvas's size).
     pub fn park_ready(&mut self, id: LayerId, ready: ReadyToPark) {
@@ -5851,6 +5867,11 @@ impl ReadyToPark {
     pub fn of(rgba: &[u8], width: u32, height: u32) -> ReadyToPark {
         let pictures = Pictures::of(rgba, width, height);
         ReadyToPark { parked: Parked::of(rgba, width, pictures.bounds), pictures }
+    }
+
+    /// How many bytes the compressed pixels take.
+    pub fn bytes(&self) -> usize {
+        self.parked.lz4.len()
     }
 }
 

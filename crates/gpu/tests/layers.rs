@@ -850,3 +850,42 @@ fn a_remake_part_composites_a_few_items_at_most() {
     let stats = t.canvases[0].last_remake().unwrap();
     assert!((1..=8).contains(&stats.largest_part), "{stats:?}");
 }
+
+#[test]
+fn layers_uploaded_with_their_copies_are_let_go_without_reading_them_back() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let mut doc = Document::new(W, W);
+    for _ in 0..11 {
+        doc.add_layer();
+    }
+    let ids: Vec<LayerId> = doc.layers().iter().map(|l| l.id).collect();
+    let pixels: Vec<Vec<u8>> = (0..ids.len())
+        .map(|i| {
+            let mut px = vec![0u8; (W * W * 4) as usize];
+            let (y, x0) = (i / 4 * 4 + 2, i % 4 * 4);
+            for x in x0..x0 + 3 {
+                let o = (y * W as usize + x) * 4;
+                px[o..o + 4].copy_from_slice(&[(i * 20) as u8, 200 - (i * 15) as u8, 90, 255]);
+            }
+            px
+        })
+        .collect();
+    let docs = [doc.clone(), doc];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    // room for 3 of 12, every one uploaded with its compressed copy (as an opening artwork's)
+    t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
+    for (id, px) in ids.iter().zip(&pixels) {
+        let ready = procraft_gpu::ReadyToPark::of(px, W, W);
+        t.canvases[0].upload_layer_kept(&gpu, *id, px, ready).unwrap();
+        t.canvases[1].upload_layer(&gpu, *id, px).unwrap();
+    }
+    // one render lets all but what fits go: nothing to read back first
+    let (doc, canvas) = (&mut t.docs[0], &mut t.canvases[0]);
+    canvas.render(&gpu, doc, None);
+    assert!(canvas.parked_layers() >= 9, "parked in one render: {}", canvas.parked_layers());
+    t.same(&gpu, 2, "opened");
+    for (id, px) in ids.iter().zip(&pixels) {
+        assert_eq!(&t.canvases[0].read_layer(&gpu, *id).unwrap(), px, "{id:?} as uploaded");
+    }
+}

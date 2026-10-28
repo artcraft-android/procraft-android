@@ -709,15 +709,22 @@ impl Shared {
         let started = std::time::Instant::now();
         /// A layer read, for the GPU or (past what fits) to keep compressed.
         enum Read {
-            Upload(Vec<u8>),
+            /// With its compressed copy, when layers are paged.
+            Upload(Vec<u8>, Option<procraft_gpu::ReadyToPark>),
             Park(procraft_gpu::ReadyToPark),
         }
         let made = Canvas::new(&gpu, &doc).map(|mut c| {
-            c.set_resident_budget(crate::layers::resident_budget());
+            let budget = crate::layers::resident_budget();
+            c.set_resident_budget(budget);
             let (w, h) = (doc.width(), doc.height());
-            // read on a few threads (each file decoded and, below the top layers that fit, its
-            // compressed copy made), put on the canvas here in order
+            // read on a few threads (each file decoded and its compressed copy made: those below
+            // the top layers that fit are parked, those that fit keep it, so letting them go
+            // later needs no reading back), put on the canvas here in order
             let first_resident = ids.len().saturating_sub(c.most_resident());
+            // the copies of layers that go up take an eighth of the textures' budget at most, and
+            // only those that pack to a quarter or less are kept
+            let copy_room = budget / 8;
+            let mut copies = 0u64;
             let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 6);
             let next = std::sync::atomic::AtomicUsize::new(0);
             let (send, receive) = std::sync::mpsc::sync_channel(workers);
@@ -735,7 +742,8 @@ impl Shared {
                                 l.pixels(w, h).map(|px| {
                                     let hash = project::pixels_hash(&px);
                                     if i >= first_resident {
-                                        (Read::Upload(px), hash)
+                                        let copy = (budget > 0).then(|| procraft_gpu::ReadyToPark::of(&px, w, h));
+                                        (Read::Upload(px, copy), hash)
                                     } else {
                                         (Read::Park(procraft_gpu::ReadyToPark::of(&px, w, h)), hash)
                                     }
@@ -762,7 +770,14 @@ impl Shared {
                                     saved.read(*id, hash);
                                 }
                                 let opened = match layer {
-                                    Read::Upload(px) => c.upload_layer(&gpu, *id, &px),
+                                    Read::Upload(px, Some(copy))
+                                        if copy.bytes() * 4 <= px.len()
+                                            && copies + copy.bytes() as u64 <= copy_room =>
+                                    {
+                                        copies += copy.bytes() as u64;
+                                        c.upload_layer_kept(&gpu, *id, &px, copy)
+                                    }
+                                    Read::Upload(px, _) => c.upload_layer(&gpu, *id, &px),
                                     Read::Park(ready) => {
                                         c.park_ready(*id, ready);
                                         Ok(())
@@ -780,10 +795,11 @@ impl Shared {
             // as read: not changed
             c.take_changed();
             log::info!(
-                "canvas made in {} ms: {} layers, {} kept compressed",
+                "canvas made in {} ms: {} layers, {} kept compressed, {} KB of copies of the rest",
                 started.elapsed().as_millis(),
                 ids.len(),
-                c.parked_layers()
+                c.parked_layers(),
+                copies / 1024
             );
             c
         });
