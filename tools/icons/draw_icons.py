@@ -378,6 +378,121 @@ def reset_transform():
     return unary_union([turning_arrow(False), Point(13.0, 13.0).buffer(1.6, quad_segs=12)])
 
 
+def colour_wheel():
+    """Hue, Saturation, Brightness: a colour wheel, six segments round a hole."""
+    disc = Point(12, 12).buffer(9.0, quad_segs=24).difference(Point(12, 12).buffer(3.2, quad_segs=16))
+    for a in (0, 60, 120):
+        disc = disc.difference(rotate(box(0, 11.4, 24, 12.6), a, origin=(12, 12)))
+    return disc
+
+
+def scales():
+    """Colour Balance: a balance, its beam on a post, a pan hanging from each end."""
+    parts = [capsule((12, 6.5), (12, 18.8), 1.2), soft(box(7.0, 18.4, 17.0, 20.8), 0.8),
+             capsule((5.5, 7.0), (18.5, 7.0), 1.1), Point(12, 5.0).buffer(1.8, quad_segs=12)]
+    for x in (5.5, 18.5):
+        parts.append(Point(x, 13.2).buffer(3.4, quad_segs=16).intersection(box(0, 13.2, 24, 24)))
+        parts += [capsule((x, 7.0), (x - 2.9, 13.4), 0.8), capsule((x, 7.0), (x + 2.9, 13.4), 0.8)]
+    return unary_union(parts)
+
+
+def curve_graph():
+    """Curves: a graph's two axes and an S-curve rising between them."""
+    pts = [(8.0 + 12.0 * t, 16.6 - 12.0 * (3 * t * t - 2 * t * t * t)) for t in [i / 32 for i in range(33)]]
+    return unary_union([capsule((4.0, 3.5), (4.0, 20.0), 1.1), capsule((4.0, 20.0), (20.5, 20.0), 1.1),
+                        LineString(pts).buffer(1.2)])
+
+
+def gradient_bars():
+    """Gradient Map: a bar that breaks into narrower and narrower strips."""
+    bar = soft(box(3.0, 5.0, 21.4, 19.0), 1.0)
+    for x0, x1 in ((9.4, 10.6), (14.4, 15.8), (18.2, 19.8)):
+        bar = bar.difference(box(x0, 0, x1, 24))
+    return bar
+
+
+def dot_halo():
+    """Gaussian Blur: a dot with two rings of smaller dots round it."""
+    parts = [Point(12, 12).buffer(3.4, quad_segs=16)]
+    for i in range(8):
+        a = math.radians(45 * i)
+        parts.append(Point(12 + 6.6 * math.cos(a), 12 + 6.6 * math.sin(a)).buffer(1.3, quad_segs=10))
+        b = a + math.radians(22.5)
+        parts.append(Point(12 + 9.6 * math.cos(b), 12 + 9.6 * math.sin(b)).buffer(0.9, quad_segs=8))
+    return unary_union(parts)
+
+
+def speeding_disc():
+    """Motion Blur: a disc with speed lines trailing behind it."""
+    return unary_union([Point(15.4, 12).buffer(5.4, quad_segs=20), capsule((2.6, 12), (7.4, 12), 1.1),
+                        capsule((4.6, 7.0), (9.4, 7.0), 1.1), capsule((4.6, 17.0), (9.4, 17.0), 1.1)])
+
+
+def converging():
+    """Perspective Blur: a tunnel of squares, smaller and smaller toward the middle."""
+    return unary_union([frame(3, 3, 21, 21, 1.6, 1.6), frame(7.2, 7.2, 16.8, 16.8, 1.6, 1.0),
+                        soft(box(10.6, 10.6, 13.4, 13.4), 0.4)])
+
+
+def scattered_dots():
+    """Noise: dots of a few sizes scattered over a square."""
+    dots = [(5, 5, 1.5), (11, 4.5, 1.0), (17.5, 5.5, 1.8), (7.5, 10, 1.0), (13, 10, 1.8), (19, 11.5, 1.0),
+            (4.5, 15.5, 1.8), (10, 15.5, 1.0), (15.5, 16, 1.2), (20, 18.5, 1.4), (6.5, 20, 1.0), (12.5, 20.5, 1.5)]
+    return unary_union([Point(x, y).buffer(r, quad_segs=10) for x, y, r in dots])
+
+
+def gem():
+    """Sharpen: a cut gem, its facets knocked out."""
+    crown = Polygon([(7.5, 4.5), (16.5, 4.5), (21.0, 9.6), (3.0, 9.6)])
+    pavilion = Polygon([(3.0, 10.8), (21.0, 10.8), (12.0, 21.0)])
+    stone = unary_union([soft(crown, 0.5), soft(pavilion, 0.5)])
+    for x in (8.6, 15.4):
+        stone = stone.difference(LineString([(12.0, 20.0), (x, 10.8)]).buffer(0.55))
+    return stone
+
+
+def sun():
+    """Bloom: a bright disc caught in a four-point glint."""
+    glint = star(12, 12, 10.5, 0.34).difference(Point(12, 12).buffer(5.6, quad_segs=20))
+    return unary_union([glint, Point(12, 12).buffer(4.2, quad_segs=20)])
+
+
+def glitch_bands():
+    """Glitch: a block cut into three bands, each slipped sideways."""
+    return unary_union([soft(box(3 + dx, y0, 21 + dx, y1), 0.8) for dx, y0, y1 in
+                        ((-1.5, 4.0, 8.8), (2.0, 10.0, 14.6), (-0.5, 15.8, 20.0))])
+
+
+def halftone():
+    """Halftone: a grid of dots growing toward one corner."""
+    dots = []
+    for i, x in enumerate((4.5, 9.5, 14.5, 19.5)):
+        for j, y in enumerate((4.5, 9.5, 14.5, 19.5)):
+            dots.append(Point(x, y).buffer(0.8 + 0.2 * ((3 - i) + j), quad_segs=10))
+    return unary_union(dots)
+
+
+def fringed_lens():
+    """Chromatic Aberration: a prism, one ray in and three spreading out."""
+    prism = soft(Polygon([(10.0, 4.0), (16.5, 17.5), (3.5, 17.5)]), 0.6)
+    rays = [capsule((1.8, 9.4), (5.0, 10.0), 1.0), capsule((14.6, 9.6), (21.6, 6.8), 1.0),
+            capsule((15.8, 11.8), (22.0, 11.8), 1.0), capsule((16.9, 14.0), (21.6, 16.8), 1.0)]
+    return unary_union([prism] + rays)
+
+
+def spiral():
+    """Liquify: a block melting, three drips running off it."""
+    block = unary_union([soft(box(3.0, 3.0, 21.0, 12.0), 1.0), capsule((7.0, 11.0), (7.0, 17.0), 1.8),
+                         capsule((13.6, 11.0), (13.6, 20.0), 1.8), capsule((18.6, 11.0), (18.6, 14.6), 1.5)])
+    return block.buffer(1.0).buffer(-1.0)
+
+
+def stamp():
+    """Clone: a rubber stamp over the mark it leaves."""
+    return unary_union([Point(12, 5.6).buffer(2.5, quad_segs=16), box(10.4, 7.0, 13.6, 10.4),
+                        soft(box(3.0, 10.0, 21.0, 14.8), 1.0), capsule((3.2, 17.4), (20.8, 17.4), 1.0)])
+
+
 DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
@@ -391,6 +506,10 @@ DRAWINGS = {
     'freeform': freeform, 'uniform': uniform, 'distort': distort, 'warp': warp, 'snapping': magnet,
     'fliphorizontal': lambda: flip(False), 'flipvertical': lambda: flip(True), 'rotate45': rotate_step,
     'fittocanvas': fit_to_canvas, 'interpolation': interpolation, 'transformreset': reset_transform,
+    'adjusthsb': colour_wheel, 'adjustbalance': scales, 'adjustcurves': curve_graph, 'adjustgradient': gradient_bars,
+    'adjustblur': dot_halo, 'adjustmotion': speeding_disc, 'adjustperspective': converging, 'adjustnoise': scattered_dots,
+    'adjustsharpen': gem, 'adjustbloom': sun, 'adjustglitch': glitch_bands, 'adjusthalftone': halftone,
+    'adjustchromatic': fringed_lens, 'adjustliquify': spiral, 'adjustclone': stamp,
 }
 
 

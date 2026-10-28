@@ -91,3 +91,23 @@ by one.
 | Fit to canvas | four arrows pointing out to the corners |
 | Interpolation | three square pixels and a round one |
 | Reset | a turning arrow back, round a dot |
+
+## The Adjustments menu
+
+| Adjustment | Idea |
+|---|---|
+| Hue, Saturation, Brightness | a colour wheel, six segments round a hole |
+| Colour Balance | a balance, a pan hanging from each end of its beam |
+| Curves | a graph's two axes and an S-curve rising between them |
+| Gradient Map | a bar breaking into narrower and narrower strips |
+| Gaussian Blur | a dot with two rings of smaller dots round it |
+| Motion Blur | a disc with speed lines trailing behind it |
+| Perspective Blur | a tunnel of squares, smaller toward the middle |
+| Noise | dots of a few sizes scattered over a square |
+| Sharpen | a cut gem, its facets knocked out |
+| Bloom | a bright disc caught in a four-point glint |
+| Glitch | a block cut into three bands, each slipped sideways |
+| Halftone | a grid of dots growing toward one corner |
+| Chromatic Aberration | a prism, one ray in and three spreading out |
+| Liquify | a block melting, three drips running off it |
+| Clone | a rubber stamp over the mark it leaves |
