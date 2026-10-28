@@ -158,6 +158,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     /** Where the stroke last moved from (window pixels), for QuickShape's hold; the handle being dragged. */
     private var holdAt = Offset.Zero
     private var shapeHandle = -1
+
+    // an edited shape's drag has gone past a tap's slop
+    private var shapeDragged = false
     private val quickShapeHold = Runnable {
         if ((mode == Mode.PEN || mode == Mode.FINGER) && drawAndHold) {
             removeCallbacks(holdToPick)
@@ -547,6 +550,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     tapStart = e.eventTime
                     lastX = e.x
                     lastY = e.y
+                    shapeDragged = false
                     mode = if (vm.quickShapeNearEdge(Offset(e.x, e.y))) Mode.SHAPE_PIN else Mode.SHAPE_MOVE
                     if (mode == Mode.SHAPE_PIN) vm.quickShapePin(Offset(e.x, e.y), begin = true)
                     return true
@@ -688,7 +692,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 Mode.SHAPE -> vm.moveQuickShapeHandle(shapeHandle, Offset(e.x, e.y))
                 Mode.SHAPE_PIN, Mode.SHAPE_MOVE -> {
                     val i = e.findPointerIndex(strokePointer)
-                    if (i >= 0) {
+                    // only a drag past a tap's slop moves it, then from where it began
+                    if (i >= 0 && !shapeDragged) shapeDragged = hypot(e.getX(i) - downX, e.getY(i) - downY) > tapSlop
+                    if (i >= 0 && shapeDragged) {
                         val p = Offset(e.getX(i), e.getY(i))
                         if (mode == Mode.SHAPE_PIN) vm.quickShapePin(p, begin = false) else vm.quickShapeMove(Offset(lastX, lastY), p)
                         lastX = p.x
@@ -780,9 +786,11 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     }
                     Mode.PICK -> vm.finishPick()
                     Mode.PUCK, Mode.SHAPE, Mode.IDLE, Mode.HOVER, Mode.TURN -> Unit
-                    Mode.SHAPE_PIN -> vm.quickShapeUnpin()
-                    // a tap ends the editing; a drag only moved it
-                    Mode.SHAPE_MOVE -> if (e.eventTime - tapStart <= TAP_MS && hypot(e.x - downX, e.y - downY) <= tapSlop) vm.endQuickShape()
+                    // a tap, on its outline or elsewhere, ends the editing; a drag only turned or moved it
+                    Mode.SHAPE_PIN, Mode.SHAPE_MOVE -> {
+                        if (mode == Mode.SHAPE_PIN) vm.quickShapeUnpin()
+                        if (!shapeDragged && e.eventTime - tapStart <= TAP_MS) vm.endQuickShape()
+                    }
                     Mode.SELECT -> select(e, done = true)
                     Mode.POUR -> pour(e, done = true)
                     Mode.RECOLOR -> if (!recolorDragging) vm.recolorTap(Offset(e.x, e.y))
