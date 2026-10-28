@@ -4037,7 +4037,7 @@ impl Canvas {
     }
 
     /// How many layers' textures fit the budget (any number without one).
-    fn most_resident(&self) -> usize {
+    pub fn most_resident(&self) -> usize {
         let per = u64::from(self.width) * u64::from(self.height) * 4;
         if self.resident_budget == 0 {
             usize::MAX
@@ -4193,13 +4193,18 @@ impl Canvas {
         if rgba.len() != expected {
             return Err(GpuError::Readback(format!("layer {id:?}: {} bytes, expected {expected}", rgba.len())));
         }
+        self.park_ready(id, ReadyToPark::of(rgba, self.width, self.height));
+        Ok(())
+    }
+
+    /// Parks layer `id` with pixels already made ready (by [`ReadyToPark::of`], with this
+    /// canvas's size).
+    pub fn park_ready(&mut self, id: LayerId, ready: ReadyToPark) {
         self.layers.remove(&id);
-        let pictures = Pictures::of(rgba, self.width, self.height);
-        self.parked.insert(id, Parked::of(rgba, self.width, pictures.bounds));
-        self.pictures.insert(id, pictures);
+        self.parked.insert(id, ready.parked);
+        self.pictures.insert(id, ready.pictures);
         self.caches = None;
         self.invalidate();
-        Ok(())
     }
 
     /// Whether work keeps the caches: painting, or undoing or redoing it, on a layer worked on.
@@ -5742,6 +5747,21 @@ fn painted_bounds(t: &Thumbnail, painted: impl Fn([u8; 4]) -> bool) -> Option<[u
 
 /// The longest side of a parked layer's small pictures, pixels: as big as any thumbnail asked for.
 const PARKED_PICTURE_SIDE: u32 = 192;
+
+/// A layer's pixels made ready to park: compressed, with its small pictures. Made on any thread
+/// (the slow part of [`Canvas::park_pixels`]), then given to [`Canvas::park_ready`].
+pub struct ReadyToPark {
+    parked: Parked,
+    pictures: Pictures,
+}
+
+impl ReadyToPark {
+    /// Of a layer's pixels (premultiplied RGBA, `width` x `height`).
+    pub fn of(rgba: &[u8], width: u32, height: u32) -> ReadyToPark {
+        let pictures = Pictures::of(rgba, width, height);
+        ReadyToPark { parked: Parked::of(rgba, width, pictures.bounds), pictures }
+    }
+}
 
 /// A parked layer's pixels: the rectangle painted (none if nothing), its rows compressed, so a
 /// layer drawn on in one place costs little to keep and to bring back.

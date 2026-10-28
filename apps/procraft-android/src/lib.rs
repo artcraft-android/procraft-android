@@ -705,28 +705,76 @@ impl Shared {
             (gpu.clone(), st.doc.clone(), st.pending_pixels.iter().map(|(id, _)| *id).collect::<Vec<_>>())
         };
         let started = std::time::Instant::now();
+        /// A layer read, for the GPU or (past what fits) to keep compressed.
+        enum Read {
+            Upload(Vec<u8>),
+            Park(procraft_gpu::ReadyToPark),
+        }
         let made = Canvas::new(&gpu, &doc).map(|mut c| {
             c.set_resident_budget(crate::layers::resident_budget());
-            for (i, id) in ids.iter().enumerate() {
-                let Some(layer) = self.lock().pending_pixels.get(i).filter(|(at, _)| at == id).map(|(_, p)| p.clone())
-                else {
-                    break;
-                };
-                match layer.pixels(doc.width(), doc.height()) {
-                    Ok(pixels) => {
-                        if let Ok(mut saved) = self.saving.lock() {
-                            saved.read(*id, &pixels);
+            let (w, h) = (doc.width(), doc.height());
+            // read on a few threads (each file decoded and, below the top layers that fit, its
+            // compressed copy made), put on the canvas here in order
+            let first_resident = ids.len().saturating_sub(c.most_resident());
+            let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 6);
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let (send, receive) = std::sync::mpsc::sync_channel(workers);
+            std::thread::scope(|scope| {
+                for _ in 0..workers {
+                    let (send, next, ids) = (send.clone(), &next, &ids);
+                    scope.spawn(move || {
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(id) = ids.get(i) else { break };
+                            // none if the artwork changed meanwhile: what is made is let go
+                            let layer =
+                                self.lock().pending_pixels.get(i).filter(|(at, _)| at == id).map(|(_, p)| p.clone());
+                            let read = layer.map(|l| {
+                                l.pixels(w, h).map(|px| {
+                                    let hash = project::pixels_hash(&px);
+                                    if i >= first_resident {
+                                        (Read::Upload(px), hash)
+                                    } else {
+                                        (Read::Park(procraft_gpu::ReadyToPark::of(&px, w, h)), hash)
+                                    }
+                                })
+                            });
+                            if send.send((i, read)).is_err() {
+                                break;
+                            }
                         }
-                        // past what fits, kept compressed until needed
-                        let opened =
-                            if c.has_room() { c.upload_layer(&gpu, *id, &pixels) } else { c.park_pixels(*id, &pixels) };
-                        if let Err(e) = opened {
-                            log::error!("opening a layer: {e}");
+                    });
+                }
+                drop(send);
+                let mut waiting = std::collections::BTreeMap::new();
+                let mut at = 0;
+                for (i, read) in receive {
+                    waiting.insert(i, read);
+                    while let Some(read) = waiting.remove(&at) {
+                        let Some(id) = ids.get(at) else { break };
+                        at += 1;
+                        match read {
+                            None => {}
+                            Some(Ok((layer, hash))) => {
+                                if let Ok(mut saved) = self.saving.lock() {
+                                    saved.read(*id, hash);
+                                }
+                                let opened = match layer {
+                                    Read::Upload(px) => c.upload_layer(&gpu, *id, &px),
+                                    Read::Park(ready) => {
+                                        c.park_ready(*id, ready);
+                                        Ok(())
+                                    }
+                                };
+                                if let Err(e) = opened {
+                                    log::error!("opening a layer: {e}");
+                                }
+                            }
+                            Some(Err(e)) => log::error!("layer {id:?}: {e}"),
                         }
                     }
-                    Err(e) => log::error!("layer {id:?}: {e}"),
                 }
-            }
+            });
             // as read: not changed
             c.take_changed();
             log::info!(

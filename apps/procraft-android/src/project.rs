@@ -139,9 +139,10 @@ impl Saved {
         self.layers.clear();
     }
 
-    /// Layer `id` read from its file with these pixels: a save that finds it unchanged leaves it.
-    pub(crate) fn read(&mut self, id: LayerId, rgba: &[u8]) {
-        self.layers.insert(id, pixels_hash(rgba));
+    /// Layer `id` read from its file, its pixels' [`pixels_hash`]: a save that finds it unchanged
+    /// leaves it.
+    pub(crate) fn read(&mut self, id: LayerId, hash: u64) {
+        self.layers.insert(id, hash);
     }
 }
 
