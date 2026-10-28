@@ -305,6 +305,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         try {
             s.attachWindow(id.toULong(), width.toUInt(), height.toUInt())
             s.setDisplayScale(resources.displayMetrics.density)
+            // the display turned while there was no window (the app away, the upright lock screen):
+            // the view follows now, as it would have then, so the canvas stays put on the glass
+            if (session === s && windowWidth > 0 && rotation != windowRotation) followTurn(s, windowRotation, rotation)
             session = s
             attached = true
             vm.refreshView()
