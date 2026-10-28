@@ -493,6 +493,84 @@ def stamp():
                         soft(box(3.0, 10.0, 21.0, 14.8), 1.0), capsule((3.2, 17.4), (20.8, 17.4), 1.0)])
 
 
+def colour_disc():
+    """Disc: a disc with a picker's ring on it."""
+    return Point(12, 12).buffer(9.5, quad_segs=24).difference(ring(16.0, 8.0, 2.4, 1.2))
+
+
+def classic_picker():
+    """Classic: a square field with its picker, a slider under it."""
+    field = soft(box(3.0, 3.0, 21.0, 15.4), 1.0).difference(ring(15.0, 8.2, 2.2, 1.1))
+    bar = capsule((3.6, 19.8), (20.4, 19.8), 1.4).difference(Point(9.0, 19.8).buffer(3.5, quad_segs=16))
+    return unary_union([field, bar, Point(9.0, 19.8).buffer(2.4, quad_segs=16)])
+
+
+def harmony():
+    """Harmony: a disc with two opposite points joined across it."""
+    a, b = (7.4, 16.6), (16.6, 7.4)
+    disc = Point(12, 12).buffer(9.5, quad_segs=24).difference(LineString([a, b]).buffer(0.6))
+    return disc.difference(ring(a[0], a[1], 2.2, 1.2)).difference(ring(b[0], b[1], 2.2, 1.2))
+
+
+def value_sliders():
+    """Value: three upright sliders, set at different heights."""
+    parts = []
+    for x, y in ((4.5, 14.5), (12.0, 8.5), (19.5, 12.0)):
+        parts.append(capsule((x, 6.0), (x, 18.0), 0.9).difference(Point(x, y).buffer(3.6, quad_segs=16)))
+        parts.append(Point(x, y).buffer(2.5, quad_segs=16))
+    return unary_union(parts)
+
+
+def palette():
+    """Palettes: a painter's palette, its thumb hole and paints cut out."""
+    from shapely.affinity import scale
+    board = rotate(scale(Point(12, 12).buffer(1.0, quad_segs=32), 10.0, 8.2), -12, origin=(12, 12))
+    for x, y, r in ((15.6, 15.4, 2.1), (7.0, 10.0, 1.6), (11.4, 7.0, 1.6), (16.4, 8.2, 1.6), (7.8, 15.0, 1.6)):
+        board = board.difference(Point(x, y).buffer(r, quad_segs=12))
+    return board
+
+
+def one_sheet():
+    """Layer: a single sheet."""
+    return soft(Polygon([(12, 4.5), (21.4, 10.3), (12, 16.1), (2.6, 10.3)]), 1.0)
+
+
+def pencil():
+    """Pencil: a pencil, its point down to the left."""
+    cone = soft(Polygon([(0, 0), (4.6, -2.3), (4.6, 2.3)]), 0.3)
+    body = soft(box(5.6, -2.3, 17.4, 2.3), 0.4)
+    end = soft(box(18.4, -2.3, 21.4, 2.3), 0.9)
+    return along_diagonal(unary_union([cone, body, end]), (3.6, 20.4))
+
+
+def check_in_disc():
+    """Apply: a tick cut out of a disc."""
+    tick = unary_union([capsule((7.2, 12.4), (10.6, 15.8), 1.2), capsule((10.6, 15.8), (17.0, 8.6), 1.2)])
+    return Point(12, 12).buffer(9.0, quad_segs=24).difference(tick)
+
+
+def eye():
+    """Preview: an eye, its outline and its pupil."""
+    lens = Point(12, 16.44).buffer(10.94, quad_segs=32).intersection(Point(12, 7.56).buffer(10.94, quad_segs=32))
+    return unary_union([lens.difference(lens.buffer(-1.8)), Point(12, 12).buffer(3.4, quad_segs=16)])
+
+
+def cross_in_disc():
+    """Cancel: a cross cut out of a disc."""
+    x = unary_union([capsule((8.2, 8.2), (15.8, 15.8), 1.2), capsule((15.8, 8.2), (8.2, 15.8), 1.2)])
+    return Point(12, 12).buffer(9.0, quad_segs=24).difference(x)
+
+
+def knob():
+    """Adjust: a knurled knob with its pointer."""
+    disc = Point(12, 12).buffer(8.6, quad_segs=32)
+    for k in range(18):
+        a = math.radians(20 * k)
+        disc = disc.difference(Point(12 + 8.9 * math.cos(a), 12 + 8.9 * math.sin(a)).buffer(0.9, quad_segs=8))
+    a = math.radians(-60)
+    return disc.difference(capsule((12, 12), (12 + 5.0 * math.cos(a), 12 + 5.0 * math.sin(a)), 0.7))
+
+
 DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
@@ -510,6 +588,10 @@ DRAWINGS = {
     'adjustblur': dot_halo, 'adjustmotion': speeding_disc, 'adjustperspective': converging, 'adjustnoise': scattered_dots,
     'adjustsharpen': gem, 'adjustbloom': sun, 'adjustglitch': glitch_bands, 'adjusthalftone': halftone,
     'adjustchromatic': fringed_lens, 'adjustliquify': spiral, 'adjustclone': stamp,
+    'modedisc': colour_disc, 'modeclassic': classic_picker, 'modeharmony': harmony, 'modevalue': value_sliders,
+    'modepalettes': palette, 'modelayer': one_sheet, 'modepencil': pencil, 'apply': check_in_disc, 'preview': eye,
+    'canceladjust': cross_in_disc, 'pieundo': lambda: turning_arrow(False), 'piereset': reset_transform,
+    'adjustknob': knob,
 }
 
 

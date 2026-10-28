@@ -111,3 +111,23 @@ by one.
 | Chromatic Aberration | a prism, one ray in and three spreading out |
 | Liquify | a block melting, three drips running off it |
 | Clone | a rubber stamp over the mark it leaves |
+
+## The colour panel's modes
+
+| Mode | Idea |
+|---|---|
+| Disc | a disc with a picker's ring on it |
+| Classic | a square field with its picker, a slider under it |
+| Harmony | a disc with two opposite points joined across it |
+| Value | three upright sliders set at different heights |
+| Palettes | a painter's palette, its thumb hole and paints cut out |
+
+## The adjustment menus
+
+| Control | Idea |
+|---|---|
+| Layer / Pencil | a single sheet / a pencil, point down to the left |
+| Apply / Cancel | a tick / a cross cut out of a disc |
+| Preview | an eye, its outline and its pupil |
+| Undo / Reset | the bar's Undo arrow / the Transform toolbar's Reset |
+| Adjust (Liquify) | a knurled knob with its pointer |
