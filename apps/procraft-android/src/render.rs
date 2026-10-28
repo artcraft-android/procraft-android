@@ -168,7 +168,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
                 );
                 // caches still being remade: another frame soon, and the artwork isn't shown yet
                 let busy = canvas.busy();
-                if animating || busy {
+                if animating || canvas.wants_render() {
                     st.needs_frame = true;
                 }
                 // counted only when the canvas was drawn, so a first frame means the artwork shows

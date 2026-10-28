@@ -1215,6 +1215,8 @@ pub struct Canvas {
     /// read again only when theirs has.
     versions: HashMap<LayerId, u64>,
     version: u64,
+    /// Layers past the budget are still to be parked (a render parks only a few).
+    parking_left: bool,
     /// What the layers' textures may take before those needed least lately are parked (0: none
     /// are), and when each was last needed, counted in renders.
     resident_budget: u64,
@@ -1421,6 +1423,7 @@ impl Canvas {
             changed: HashSet::new(),
             versions: HashMap::new(),
             version: 0,
+            parking_left: false,
             resident_budget: 0,
             needed_at: HashMap::new(),
             renders: 0,
@@ -1888,6 +1891,12 @@ impl Canvas {
         }
     }
 
+    /// Whether the canvas has work that more renders do (caches being remade, layers being
+    /// parked): it wants another render soon.
+    pub fn wants_render(&self) -> bool {
+        self.busy() || self.parking_left
+    }
+
     /// Whether the composite is being made around pictures of what isn't worked on.
     pub fn composites_cached(&self) -> bool {
         self.caches.is_some()
@@ -2041,6 +2050,7 @@ impl Canvas {
     /// worked on (and what they are clipped to); none while the composite isn't made around
     /// pictures of the others.
     fn park_extra(&mut self, gpu: &Gpu, doc: &Document) {
+        self.parking_left = false;
         let per = u64::from(self.width) * u64::from(self.height) * 4;
         let most = usize::try_from(self.resident_budget / per.max(1)).unwrap_or(usize::MAX);
         if self.resident_budget == 0 || self.layers.len() <= most {
@@ -2060,11 +2070,20 @@ impl Canvas {
         keep.extend(self.held.as_ref().map(|h| h.layer));
         let mut gone: Vec<LayerId> = self.layers.keys().filter(|id| !keep.contains(*id)).copied().collect();
         gone.sort_by_key(|id| self.needed_at.get(id).copied().unwrap_or(0));
+        // a layer with no compressed copy yet is read back first, the slow part: a few a render
+        // (at least one), the rest left for the renders after
+        let started = std::time::Instant::now();
+        let mut reads = 0;
         for id in gone {
             if self.layers.len() <= most {
                 break;
             }
             if !self.parked.contains_key(&id) {
+                if reads > 0 && (reads >= MOST_PARK_READS || started.elapsed() >= PARK_SLICE) {
+                    self.parking_left = true;
+                    break;
+                }
+                reads += 1;
                 let Ok(pixels) = self.read_layer(gpu, id) else { continue };
                 let pictures = Pictures::of(&pixels, self.width, self.height);
                 self.parked.insert(id, Parked::of(&pixels, self.width, pictures.bounds));
@@ -5948,6 +5967,11 @@ struct Caches {
     above_items: Vec<LayerId>,
     above_key: u64,
 }
+
+/// How many layers a render reads back to park, at most, and how long it goes on reading them
+/// (after the first).
+const MOST_PARK_READS: usize = 4;
+const PARK_SLICE: std::time::Duration = std::time::Duration::from_millis(6);
 
 /// How long each render goes on remaking caches before it lets the app go on.
 const REMAKE_SLICE: std::time::Duration = std::time::Duration::from_millis(16);

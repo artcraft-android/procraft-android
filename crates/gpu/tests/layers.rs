@@ -336,14 +336,15 @@ impl Twins {
         let mut pictures = Vec::new();
         for (doc, canvas) in self.docs.iter_mut().zip(self.canvases.iter_mut()) {
             canvas.render(gpu, doc, None);
-            // caches remade a little each render: until they are, the composite waits
+            // caches remade and layers parked a little each render: until the caches are, the
+            // composite waits
             for _ in 0..1000 {
-                if !canvas.busy() {
+                if !canvas.wants_render() {
                     break;
                 }
                 canvas.render(gpu, doc, None);
             }
-            assert!(!canvas.busy(), "{what}: caches still being remade");
+            assert!(!canvas.wants_render(), "{what}: caches still being remade or layers parked");
             assert_eq!(gpu.errors(), 0, "GPU validation errors");
             pictures.push(canvas.read_composite(gpu).unwrap());
         }
@@ -773,4 +774,44 @@ fn transforms_and_adjustments_on_the_layer_worked_on_keep_the_caches() {
     t.each(|_, canvas| canvas.end_transform(false));
     t.same(&gpu, 2, "cancelled");
     assert!(t.canvases[0].composites_cached());
+}
+
+#[test]
+fn a_render_reads_back_only_a_few_layers_to_park() {
+    let Some((gpu, _, _)) = setup() else { return };
+    let docs = [Document::new(W, W), Document::new(W, W)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    // drawn with room for every layer, so none has a compressed copy yet
+    t.each(|doc, canvas| {
+        let first = doc.current();
+        paint(canvas, doc, first, [0, 0, 0], Vec2::new(2.0, 8.0), 2.0, StrokeTool::Paint);
+        for i in 1..12u8 {
+            let id = doc.add_layer();
+            let at = Vec2::new(1.0 + f32::from(i), 8.0);
+            paint(canvas, doc, id, [i * 20, 100, 200 - i * 15], at, 2.0, StrokeTool::Paint);
+        }
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "made");
+    // then room for three, and Animation Assist on: the frames not shown are parked, a few a render
+    t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
+    t.each(|doc, canvas| {
+        doc.animation = Some(procraft_engine::animation::Animation { onion_frames: 1, ..Default::default() });
+        canvas.invalidate();
+    });
+    let (doc, canvas) = (&mut t.docs[0], &mut t.canvases[0]);
+    canvas.render(&gpu, doc, None);
+    let first = canvas.parked_layers();
+    assert!((1..=4).contains(&first), "parked in one render: {first}");
+    assert!(canvas.wants_render(), "more to park");
+    for _ in 0..100 {
+        if !canvas.wants_render() {
+            break;
+        }
+        canvas.render(&gpu, doc, None);
+    }
+    assert!(!canvas.wants_render());
+    assert!(canvas.parked_layers() >= 8, "parked in all: {}", canvas.parked_layers());
+    t.same(&gpu, 2, "the frames shown, the rest parked");
 }
