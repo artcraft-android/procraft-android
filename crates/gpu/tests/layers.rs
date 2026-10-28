@@ -405,13 +405,18 @@ fn composites_made_around_cached_pictures_match_full_ones() {
     // a layer below changed, one above hidden, then another layer worked on (inside the group)
     let ids: Vec<LayerId> = t.docs[0].layers().iter().map(|l| l.id).collect();
     let multiply = ids[1];
-    t.each(|doc, _| {
+    // as the app makes them: an undo step
+    t.each(|doc, canvas| {
+        let before = doc.clone();
         doc.set_opacity(multiply, 0.4);
+        canvas.record_document(before);
     });
     t.same(&gpu, 2, "a layer below changed");
     let top = *ids.last().unwrap();
-    t.each(|doc, _| {
+    t.each(|doc, canvas| {
+        let before = doc.clone();
         doc.set_visible(top, false);
+        canvas.record_document(before);
     });
     t.same(&gpu, 2, "a layer above hidden");
     let green = t.docs[0].layers().iter().find(|l| l.blend == BlendMode::Screen).map(|l| l.id).unwrap();
@@ -514,10 +519,14 @@ fn parked_layers_come_back_as_they_were() {
         canvas.duplicate_layer(ids[1], copy, before);
     });
     t.same(&gpu, 2, "duplicated");
-    t.each(|doc, _| {
+    t.each(|doc, canvas| {
+        let before = doc.clone();
         doc.set_visible(ids[3], false);
+        canvas.record_document(before);
     });
     t.same(&gpu, 2, "hidden");
+    t.each(|_, canvas| canvas.undo());
+    t.same(&gpu, 2, "shown again");
     t.each(|_, canvas| canvas.undo());
     t.same(&gpu, 2, "the duplicate undone");
     assert!(t.canvases[0].parked_layers() > 0);
@@ -655,4 +664,39 @@ fn empty_and_clipped_layers_cache_as_they_composite() {
         t.same(&gpu, 2, "another layer worked on");
     }
     assert!(t.canvases[0].parked_layers() > 0);
+}
+
+#[test]
+fn the_picture_read_back_waits_for_the_caches() {
+    let Some((gpu, _, _)) = setup() else { return };
+    // big enough that remaking the caches takes several renders
+    const SIDE: u32 = 768;
+    let docs = [Document::new(SIDE, SIDE), Document::new(SIDE, SIDE)];
+    let canvases = [Canvas::new(&gpu, &docs[0]).unwrap(), Canvas::new(&gpu, &docs[1]).unwrap()];
+    let mut t = Twins { docs, canvases };
+    t.canvases[0].set_resident_budget(3 * u64::from(SIDE * SIDE * 4));
+    t.each(|doc, canvas| {
+        for i in 0..40u8 {
+            let id = doc.add_layer();
+            let at = Vec2::new(f32::from(i % 8) * 90.0 + 40.0, f32::from(i / 8) * 140.0 + 60.0);
+            paint(canvas, doc, id, [i * 6, 220 - i * 5, 90], at, 70.0, StrokeTool::Paint);
+        }
+        canvas.invalidate();
+    });
+    t.same(&gpu, 2, "made");
+    // a layer low down hidden (an undo step, as the app makes it), then the picture read at once
+    // (as a save does)
+    let low = t.docs[0].layers()[3].id;
+    t.each(|doc, canvas| {
+        let before = doc.clone();
+        doc.set_visible(low, false);
+        canvas.record_document(before);
+    });
+    let mut read = Vec::new();
+    for (doc, canvas) in t.docs.iter_mut().zip(t.canvases.iter_mut()) {
+        read.push(canvas.read_composite_without(&gpu, doc, &[]).unwrap());
+    }
+    let worst = read[0].iter().zip(&read[1]).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(worst <= 2, "read while the caches are remade: differs by {worst}");
+    assert!(!t.canvases[0].busy());
 }

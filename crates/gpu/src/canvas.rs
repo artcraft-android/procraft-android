@@ -1869,6 +1869,19 @@ impl Canvas {
         self.remake.is_some()
     }
 
+    /// Renders until the caches are remade, so the composite is the picture as it is (to read it
+    /// back: a save's, an export's).
+    pub fn render_finished(&mut self, gpu: &Gpu, doc: &mut Document) {
+        self.render(gpu, doc, None);
+        // each render remakes at least one item, so this ends well before the bound
+        for _ in 0..100_000 {
+            if !self.busy() {
+                break;
+            }
+            self.render(gpu, doc, None);
+        }
+    }
+
     /// Whether the composite is being made around pictures of what isn't worked on.
     pub fn composites_cached(&self) -> bool {
         self.caches.is_some()
@@ -2966,9 +2979,10 @@ impl Canvas {
         if !smudge_uniforms.data.is_empty() {
             gpu.queue.write_buffer(&self.smudge_params, 0, &smudge_uniforms.data);
         }
-        let dirty = self.dirty.intersect(self.full());
         self.make_groups(device, doc.max_depth());
         self.ensure_caches(gpu, doc, &mut encoder, &mut uniforms);
+        // after the caches: caches just made want the whole picture composited again
+        let dirty = self.dirty.intersect(self.full());
         let device = &gpu.device;
         // while caches are remade the composite stays as it was, what changed kept for after
         if self.remake.is_none() {
@@ -4892,7 +4906,7 @@ impl Canvas {
     }
 
     pub fn composite_thumbnail(&mut self, gpu: &Gpu, doc: &mut Document, max_side: u32) -> Result<Thumbnail, GpuError> {
-        self.render(gpu, doc, None);
+        self.render_finished(gpu, doc);
         self.sample_view(gpu, &self.composite_views[0], self.full(), max_side)
     }
 
@@ -4983,7 +4997,8 @@ impl Canvas {
         DisplayLut { bind: lut_bind(gpu, &self.pipelines.lut_layout, lut.grid as u32, &rgba) }
     }
 
-    /// The composite's pixels (premultiplied RGBA8, rows top to bottom). Waits for the GPU.
+    /// The composite's pixels (premultiplied RGBA8, rows top to bottom) as last rendered: after
+    /// [`Canvas::render_finished`], the picture as it is. Waits for the GPU.
     pub fn read_composite(&self, gpu: &Gpu) -> Result<Vec<u8>, GpuError> {
         read_texture(gpu, &self.composite[0], self.width, self.height)
     }
@@ -4996,7 +5011,7 @@ impl Canvas {
         doc: &mut Document,
         left_out: &[LayerId],
     ) -> Result<Vec<u8>, GpuError> {
-        self.render(gpu, doc, None);
+        self.render_finished(gpu, doc);
         if left_out.is_empty() {
             return self.read_composite(gpu);
         }
@@ -5005,7 +5020,7 @@ impl Canvas {
             shown.set_visible(id, false);
         }
         self.invalidate();
-        self.render(gpu, &mut shown, None);
+        self.render_finished(gpu, &mut shown);
         let read = self.read_composite(gpu);
         self.invalidate();
         self.render(gpu, doc, None);

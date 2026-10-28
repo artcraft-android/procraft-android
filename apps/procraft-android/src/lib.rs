@@ -653,6 +653,21 @@ impl Shared {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Lets the canvas finish remaking its caches a render at a time, the lock let go between,
+    /// so a save or export after reads the picture as it is without holding everything up.
+    pub(crate) fn finish_caches(&self) {
+        // each render remakes at least one item, so this ends well before the bound
+        for _ in 0..100_000 {
+            let mut guard = self.lock();
+            let st = &mut *guard;
+            let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return };
+            canvas.render(gpu, &mut st.doc, None);
+            if !canvas.busy() {
+                return;
+            }
+        }
+    }
+
     fn frame(&self, st: &mut State) {
         st.needs_frame = true;
         self.wake.notify_all();

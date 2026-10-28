@@ -89,12 +89,14 @@ impl CanvasSession {
 
     /// The whole canvas as it shows, to paste later.
     pub fn copy_canvas(&self) -> Option<ThumbnailImage> {
+        self.shared.finish_caches();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
         st.flush();
-        let (Some(canvas), Some(gpu)) = (st.canvas.as_ref(), st.gpu.as_ref()) else { return None };
+        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
+        canvas.render_finished(gpu, &mut st.doc);
         let rgba = canvas.read_composite(gpu).ok()?;
         Some(ThumbnailImage { width: st.doc.width(), height: st.doc.height(), rgba })
     }
