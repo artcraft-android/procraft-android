@@ -2595,7 +2595,24 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val h = quickShape?.handles ?: return null
         if (!quickShapeEditing) return null
         return (0 until h.size / 2).minByOrNull { (Offset(h[it * 2], h[it * 2 + 1]) - p).getDistance() }
-            ?.takeIf { (Offset(h[it * 2], h[it * 2 + 1]) - p).getDistance() <= QUICKSHAPE_REACH_DP * density }
+            ?.takeIf { (Offset(h[it * 2], h[it * 2 + 1]) - p).getDistance() <= QUICKSHAPE_GRAB_DP * density }
+    }
+
+    /** Whether a drag from [p] on the edited shape turns and resizes it (on its outline) rather than moving it. */
+    fun quickShapeNearEdge(p: Offset): Boolean = session?.quickshapeNearEdge(p.x, p.y, QUICKSHAPE_GRAB_DP * density) == true
+
+    /** A drag on the edited shape's outline begins at [p] ([begin]) or goes on to it. */
+    fun quickShapePin(p: Offset, begin: Boolean) {
+        quickShape = session?.quickshapePin(p.x, p.y, begin) ?: quickShape
+    }
+
+    fun quickShapeUnpin() {
+        quickShape = session?.quickshapeUnpin() ?: quickShape
+    }
+
+    /** The edited shape dragged from [from] to [to]. */
+    fun quickShapeMove(from: Offset, to: Offset) {
+        quickShape = session?.quickshapeMove(from.x, from.y, to.x, to.y) ?: quickShape
     }
 
     /** Keeps the snapped shape as drawn. */
@@ -6071,6 +6088,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val QUICKSHAPE_MS = 650L
         const val QUICKSHAPE_STILL_DP = 6f
         const val QUICKSHAPE_REACH_DP = 30f
+
+        /** A snapped shape being edited: a handle within this takes a drag, and its outline within this. */
+        const val QUICKSHAPE_GRAB_DP = 22f
         /** The drawing pad's colours (0xRRGGBB), the white one, and its background's grey. */
         val PAD_COLORS = listOf(0xF83045, 0xFCBD03, 0x85D921, 0x2BB5E6, 0x4956A5, 0xDA3D92, 0xFFFFFF, 0x000000)
         const val PAD_WHITE = 6

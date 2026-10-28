@@ -1005,6 +1005,40 @@ fn a_held_stroke_snaps_to_a_shape_and_is_edited() {
 }
 
 #[test]
+fn an_edited_shape_is_turned_by_its_outline_and_moved_elsewhere() {
+    use crate::quickshape::QuickShapeKind;
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.2);
+    let pts: Vec<PenSample> = (0..=60)
+        .map(|i| {
+            let t = i as f32 / 60.0 * std::f32::consts::TAU;
+            sample(100.0 + 60.0 * t.cos(), 100.0 + 40.0 * t.sin(), f64::from(i) * 8.0)
+        })
+        .collect();
+    s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+    s.stroke_add(pts[1..].to_vec());
+    assert_eq!(s.quickshape_hold().unwrap().kind, QuickShapeKind::Ellipse);
+    s.stroke_end(vec![]);
+    let before = s.quickshape_info().unwrap();
+    // on its outline (the first axis end), not in its middle
+    let (ex, ey) = (before.handles[0], before.handles[1]);
+    assert!(s.quickshape_near_edge(ex, ey - 5.0, 22.0));
+    assert!(!s.quickshape_near_edge(100.0, 100.0, 22.0));
+    // the outline dragged half as far out again: half as big again about its centre
+    s.quickshape_pin(ex, ey, true);
+    let grown = s.quickshape_pin(100.0 + (ex - 100.0) * 1.5, 100.0 + (ey - 100.0) * 1.5, false).unwrap();
+    assert!((grown.handles[0] - (100.0 + (ex - 100.0) * 1.5)).abs() < 1.0, "{:?}", grown.handles);
+    s.quickshape_unpin();
+    // dragged elsewhere: it moves along
+    let moved = s.quickshape_move(100.0, 100.0, 110.0, 95.0).unwrap();
+    for (i, (a, b)) in grown.handles.iter().zip(&moved.handles).enumerate() {
+        let d = if i % 2 == 0 { 10.0 } else { -5.0 };
+        assert!((b - a - d).abs() < 0.5, "{i}: {a} -> {b}");
+    }
+    s.quickshape_done();
+}
+
+#[test]
 fn a_shape_still_held_follows_the_pen_and_a_finger_snaps_it() {
     use crate::quickshape::QuickShapeKind;
     let Some(s) = session(200, 200) else { return };

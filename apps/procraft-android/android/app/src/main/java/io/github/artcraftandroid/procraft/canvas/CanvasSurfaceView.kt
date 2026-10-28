@@ -45,7 +45,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     // IDLE: a finger that doesn't paint, waiting for a hold or more fingers; HOVER: fingers
     // setting the brush while the pen hovers
-    private enum class Mode { NONE, PEN, FINGER, IDLE, GESTURE, PICK, TRANSFORM, SELECT, ADJUST, PUCK, SHAPE, HOVER, TURN, POUR, OPACITY, RECOLOR }
+    private enum class Mode { NONE, PEN, FINGER, IDLE, GESTURE, PICK, TRANSFORM, SELECT, ADJUST, PUCK, SHAPE, SHAPE_PIN, SHAPE_MOVE, HOVER, TURN, POUR, OPACITY, RECOLOR }
 
     /** The pen is hovering over the canvas. */
     private var penHovering = false
@@ -540,6 +540,17 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     shapeHandle = handle
                     return true
                 }
+                // while it is edited, a drag on its outline turns and resizes it, one elsewhere moves
+                // it; a tap ends the editing
+                if (vm.quickShape != null && vm.quickShapeEditing) {
+                    strokePointer = e.getPointerId(0)
+                    tapStart = e.eventTime
+                    lastX = e.x
+                    lastY = e.y
+                    mode = if (vm.quickShapeNearEdge(Offset(e.x, e.y))) Mode.SHAPE_PIN else Mode.SHAPE_MOVE
+                    if (mode == Mode.SHAPE_PIN) vm.quickShapePin(Offset(e.x, e.y), begin = true)
+                    return true
+                }
                 vm.endQuickShape()
                 val kind = kindOf(e, 0)
                 val pen = kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER
@@ -616,7 +627,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 removeCallbacks(holdToPick)
                 removeCallbacks(quickShapeHold)
                 // a finger down while the stroke is held as a snapped shape snaps it, until lifted
-                if ((mode == Mode.PEN || mode == Mode.FINGER) && vm.quickShape != null) {
+                if ((mode == Mode.PEN || mode == Mode.FINGER || mode == Mode.SHAPE_PIN) && vm.quickShape != null) {
                     if (e.getToolType(e.actionIndex) == MotionEvent.TOOL_TYPE_FINGER) vm.quickShapeFinger(true)
                     return true
                 }
@@ -675,6 +686,15 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 }
                 Mode.PUCK -> vm.moveClonePuck(Offset(e.x, e.y) - puckGrab)
                 Mode.SHAPE -> vm.moveQuickShapeHandle(shapeHandle, Offset(e.x, e.y))
+                Mode.SHAPE_PIN, Mode.SHAPE_MOVE -> {
+                    val i = e.findPointerIndex(strokePointer)
+                    if (i >= 0) {
+                        val p = Offset(e.getX(i), e.getY(i))
+                        if (mode == Mode.SHAPE_PIN) vm.quickShapePin(p, begin = false) else vm.quickShapeMove(Offset(lastX, lastY), p)
+                        lastX = p.x
+                        lastY = p.y
+                    }
+                }
                 Mode.GESTURE -> if (fingers >= 3) scrub(e) else moveGesture(e, s)
                 Mode.SELECT -> select(e, done = false)
                 Mode.POUR -> pour(e, done = false)
@@ -726,7 +746,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 fingers = e.pointerCount - 1
                 if (mode == Mode.GESTURE) followFingers(e, exclude = e.actionIndex)
                 // the last finger other than the stroke's lifted from a held snapped shape
-                if ((mode == Mode.PEN || mode == Mode.FINGER) && vm.quickShape != null && e.getPointerId(e.actionIndex) != strokePointer) {
+                if ((mode == Mode.PEN || mode == Mode.FINGER || mode == Mode.SHAPE_PIN) && vm.quickShape != null && e.getPointerId(e.actionIndex) != strokePointer) {
                     val strokeDown = e.findPointerIndex(strokePointer).let { it >= 0 && it != e.actionIndex }
                     if (e.pointerCount - 1 - (if (strokeDown) 1 else 0) == 0) vm.quickShapeFinger(false)
                 }
@@ -760,6 +780,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     }
                     Mode.PICK -> vm.finishPick()
                     Mode.PUCK, Mode.SHAPE, Mode.IDLE, Mode.HOVER, Mode.TURN -> Unit
+                    Mode.SHAPE_PIN -> vm.quickShapeUnpin()
+                    // a tap ends the editing; a drag only moved it
+                    Mode.SHAPE_MOVE -> if (e.eventTime - tapStart <= TAP_MS && hypot(e.x - downX, e.y - downY) <= tapSlop) vm.endQuickShape()
                     Mode.SELECT -> select(e, done = true)
                     Mode.POUR -> pour(e, done = true)
                     Mode.RECOLOR -> if (!recolorDragging) vm.recolorTap(Offset(e.x, e.y))

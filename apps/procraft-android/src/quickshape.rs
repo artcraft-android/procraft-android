@@ -342,6 +342,51 @@ impl CanvasSession {
         st.shape_info()
     }
 
+    /// Whether window point (`x`, `y`) is within `reach` (window pixels) of the snapped shape's
+    /// outline, where a drag turns and resizes it while it is edited.
+    pub fn quickshape_near_edge(&self, x: f32, y: f32, reach: f32) -> bool {
+        let st = self.shared.lock();
+        let (Some(edit), Some(view)) = (st.shape.as_ref(), st.view) else { return false };
+        let Some(p) = view.screen_to_canvas(Vec2::new(x, y)) else { return false };
+        edit.shape.turns_from_edge() && edit.shape.edge_distance(p) * view.zoom() <= reach
+    }
+
+    /// A drag on the edited shape's outline, from window point (`x`, `y`) (`begin`) or on to it:
+    /// the shape turns and resizes about its pivot as a held pen turns it.
+    pub fn quickshape_pin(&self, x: f32, y: f32, begin: bool) -> Option<QuickShapeInfo> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let at = st.view?.screen_to_canvas(Vec2::new(x, y))?;
+        let edit = st.shape.as_mut()?;
+        if begin {
+            edit.held = Some(Held { snapped: edit.shape.clone(), from: at, at, finger: false });
+        } else if st.follow_shape(at) {
+            self.shared.frame(st);
+        }
+        st.shape_info()
+    }
+
+    /// The drag on the outline (or the pen) let go: the shape stays as it shows.
+    pub fn quickshape_unpin(&self) -> Option<QuickShapeInfo> {
+        let mut guard = self.shared.lock();
+        guard.let_go_shape();
+        guard.shape_info()
+    }
+
+    /// The edited shape dragged from window point (`fx`, `fy`) to (`tx`, `ty`): it moves along.
+    pub fn quickshape_move(&self, fx: f32, fy: f32, tx: f32, ty: f32) -> Option<QuickShapeInfo> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let view = st.view?;
+        let by = view.screen_to_canvas(Vec2::new(tx, ty))? - view.screen_to_canvas(Vec2::new(fx, fy))?;
+        let edit = st.shape.as_mut()?;
+        edit.held = None;
+        edit.shape = edit.shape.translated(by);
+        st.draw_shape();
+        self.shared.frame(st);
+        st.shape_info()
+    }
+
     /// Keeps the snapped shape as drawn.
     pub fn quickshape_done(&self) {
         let mut guard = self.shared.lock();

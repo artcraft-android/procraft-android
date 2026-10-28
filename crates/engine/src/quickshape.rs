@@ -153,6 +153,28 @@ impl Shape {
         }
     }
 
+    /// How far `p` is from the shape's outline.
+    pub fn edge_distance(&self, p: Vec2) -> f32 {
+        self.outline()
+            .windows(2)
+            .filter_map(|w| match w {
+                [a, b] => Some(distance_to_segment(p, *a, *b)),
+                _ => None,
+            })
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// Whether a drag on its outline turns and resizes it while it is edited; lines and
+    /// polylines are only moved.
+    pub fn turns_from_edge(&self) -> bool {
+        !matches!(self.kind, ShapeKind::Line | ShapeKind::Polyline)
+    }
+
+    /// The shape moved by `by`.
+    pub fn translated(&self, by: Vec2) -> Shape {
+        Shape { kind: self.kind, nodes: self.nodes.iter().map(|&p| p + by).collect() }
+    }
+
     /// What a shape still held turns and grows about: an open shape's start, a closed shape's
     /// centre.
     pub fn pivot(&self) -> Vec2 {
@@ -825,6 +847,21 @@ mod tests {
         assert_eq!(tri.pivot(), Vec2::new(30.0, 30.0));
         // a pen on the pivot itself leaves the shape alone
         assert_eq!(tri.moved_with(tri.pivot(), tri.pivot(), Vec2::new(5.0, 5.0)), tri);
+    }
+
+    #[test]
+    fn shapes_are_moved_and_found_by_their_outline() {
+        let rect = Shape {
+            kind: ShapeKind::Rectangle,
+            nodes: vec![Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0), Vec2::new(100.0, 50.0), Vec2::new(0.0, 50.0)],
+        };
+        assert!((rect.edge_distance(Vec2::new(50.0, 10.0)) - 10.0).abs() < 1e-3);
+        // the closing side counts too
+        assert!((rect.edge_distance(Vec2::new(-4.0, 25.0)) - 4.0).abs() < 1e-3);
+        let moved = rect.translated(Vec2::new(5.0, -5.0));
+        assert_eq!(moved.nodes[2], Vec2::new(105.0, 45.0));
+        assert!(rect.turns_from_edge());
+        assert!(!Shape { kind: ShapeKind::Line, nodes: vec![Vec2::ZERO, Vec2::new(1.0, 0.0)] }.turns_from_edge());
     }
 
     #[test]
