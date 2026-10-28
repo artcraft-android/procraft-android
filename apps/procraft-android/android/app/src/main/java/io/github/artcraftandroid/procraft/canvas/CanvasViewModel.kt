@@ -4301,6 +4301,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val name = session?.undo()
         if (could) showNotice("Undo" + name?.let { " $it" }.orEmpty())
         refresh()
+        // the thumbnails of the layers it put back (only those) read again
+        if (panel == Panel.LAYERS) refreshThumbnails()
     }
 
     /**
@@ -4347,6 +4349,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val name = session?.redo()
         if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
         refresh()
+        if (panel == Panel.LAYERS) refreshThumbnails()
         text?.let { resumeText(it) }
     }
 
