@@ -2764,7 +2764,10 @@ fn a_layered_psd_comes_in_as_an_artwork() {
     let s = CanvasSession::open(art.to_string_lossy().into_owned()).unwrap();
     assert_eq!(s.name(), "Imported");
     let names: Vec<String> = s.layers().iter().map(|l| l.name.clone()).collect();
-    assert!(names.contains(&"Ink".to_owned()) && names.contains(&"Background".to_owned()), "{names:?}");
+    assert_eq!(names, ["Ink"]);
+    // the bottom layer, all one colour, is the canvas's background colour
+    let back = s.background();
+    assert!(back.visible && back.r == 0.0 && (back.g - 200.0 / 255.0).abs() < 1e-6 && back.b == 0.0);
     // not a PSD
     std::fs::write(&file, b"nothing").unwrap();
     assert_eq!(
