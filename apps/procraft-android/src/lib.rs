@@ -704,6 +704,7 @@ impl Shared {
             let Some(gpu) = st.gpu.as_ref().filter(|_| st.canvas.is_none() && !st.closed) else { return };
             (gpu.clone(), st.doc.clone(), st.pending_pixels.iter().map(|(id, _)| *id).collect::<Vec<_>>())
         };
+        let started = std::time::Instant::now();
         let made = Canvas::new(&gpu, &doc).map(|mut c| {
             c.set_resident_budget(crate::layers::resident_budget());
             for (i, id) in ids.iter().enumerate() {
@@ -728,6 +729,12 @@ impl Shared {
             }
             // as read: not changed
             c.take_changed();
+            log::info!(
+                "canvas made in {} ms: {} layers, {} kept compressed",
+                started.elapsed().as_millis(),
+                ids.len(),
+                c.parked_layers()
+            );
             c
         });
         let mut st = self.lock();

@@ -1205,7 +1205,7 @@ pub struct Canvas {
     remake: Option<Remake>,
     /// Layers' pixels kept compressed off the GPU: those parked (no texture), and copies of
     /// resident ones unchanged since, so that letting them go again costs nothing.
-    parked: HashMap<LayerId, Vec<u8>>,
+    parked: HashMap<LayerId, Parked>,
     /// Small pictures of the parked layers, so their thumbnails need no texture.
     pictures: HashMap<LayerId, Pictures>,
     /// Layers whose pixels changed since [`Canvas::take_changed`] took them, so a save reads only
@@ -1925,26 +1925,19 @@ impl Canvas {
         if self.layers.contains_key(&id) {
             return true;
         }
-        let size = self.width as usize * self.height as usize * 4;
-        let Some(pixels) =
-            self.parked.get(&id).and_then(|p| procraft_engine::applz4::decode(p, size)).filter(|p| p.len() == size)
-        else {
+        let Some((painted, rows)) = self.parked.get(&id).and_then(|p| Some((p.rect, p.rows()?))) else {
             return false;
         };
         let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
         // only where it is painted (a new texture is clear): nothing at all for an empty layer
-        let painted = match self.pictures.get(&id) {
-            Some(p) => p.bounds,
-            None => Some(self.full()),
-        };
-        if let Some(b) = painted.filter(|b| !b.is_empty()) {
+        if let Some(b) = painted {
             gpu.queue.write_texture(
                 copy_at(&texture, b.x0, b.y0),
-                &pixels,
+                &rows,
                 wgpu::TexelCopyBufferLayout {
-                    offset: (b.y0 as u64 * u64::from(self.width) + b.x0 as u64) * 4,
-                    bytes_per_row: Some(self.width * 4),
-                    rows_per_image: Some(self.height),
+                    offset: 0,
+                    bytes_per_row: Some(b.width() * 4),
+                    rows_per_image: Some(b.height()),
                 },
                 extent(b.width(), b.height()),
             );
@@ -2053,8 +2046,9 @@ impl Canvas {
             }
             if !self.parked.contains_key(&id) {
                 let Ok(pixels) = self.read_layer(gpu, id) else { continue };
-                self.pictures.insert(id, Pictures::of(&pixels, self.width, self.height));
-                self.parked.insert(id, procraft_engine::applz4::encode(&pixels));
+                let pictures = Pictures::of(&pixels, self.width, self.height);
+                self.parked.insert(id, Parked::of(&pixels, self.width, pictures.bounds));
+                self.pictures.insert(id, pictures);
             }
             self.layers.remove(&id);
         }
@@ -3974,6 +3968,10 @@ impl Canvas {
                 above_items,
                 above_key,
                 keep,
+                started: std::time::Instant::now(),
+                slices: 0,
+                restored: 0,
+                restoring: std::time::Duration::ZERO,
             });
             self.go_on_remaking(gpu, doc);
             return;
@@ -4074,6 +4072,7 @@ impl Canvas {
         let device = &gpu.device;
         let full = self.full();
         let deadline = std::time::Instant::now() + REMAKE_SLICE;
+        let (mut restored, mut restoring) = (0, std::time::Duration::ZERO);
         loop {
             let (below, items, progress) = match (r.below, r.above) {
                 (Some(p), _) => (true, &r.below_items, p),
@@ -4110,7 +4109,10 @@ impl Canvas {
                 // brought back now (the slow part, so the time taken counts), the staged pixels sent
                 // on now and then so they don't pile up
                 staged += more.len();
+                let restore_started = std::time::Instant::now();
                 self.restore_all(gpu, more.iter().copied(), false);
+                restoring += restore_started.elapsed();
+                restored += more.len();
                 if staged >= 8 {
                     gpu.queue.submit(std::iter::empty());
                     staged = 0;
@@ -4154,10 +4156,21 @@ impl Canvas {
                 break;
             }
         }
+        r.slices += 1;
+        r.restored += restored;
+        r.restoring += restoring;
         if r.below.is_some() || r.above.is_some() {
             self.remake = Some(r);
             return;
         }
+        log::info!(
+            "caches remade in {} ms over {} renders: {} items, {} layers brought back in {} ms",
+            r.started.elapsed().as_millis(),
+            r.slices,
+            r.below_items.len() + r.above_items.len(),
+            r.restored,
+            r.restoring.as_millis()
+        );
         // made: they are the caches, and the whole picture is composited again around them
         let Remake { mut caches, below_items, below_key, above_items, above_key, .. } = r;
         caches.below_items = below_items;
@@ -4181,8 +4194,9 @@ impl Canvas {
             return Err(GpuError::Readback(format!("layer {id:?}: {} bytes, expected {expected}", rgba.len())));
         }
         self.layers.remove(&id);
-        self.pictures.insert(id, Pictures::of(rgba, self.width, self.height));
-        self.parked.insert(id, procraft_engine::applz4::encode(rgba));
+        let pictures = Pictures::of(rgba, self.width, self.height);
+        self.parked.insert(id, Parked::of(rgba, self.width, pictures.bounds));
+        self.pictures.insert(id, pictures);
         self.caches = None;
         self.invalidate();
         Ok(())
@@ -5041,10 +5055,9 @@ impl Canvas {
 
     /// A layer's pixels (premultiplied RGBA8). Waits for the GPU.
     pub fn read_layer(&self, gpu: &Gpu, id: LayerId) -> Result<Vec<u8>, GpuError> {
-        let size = self.width as usize * self.height as usize * 4;
-        if let Some(pixels) = self.parked.get(&id).filter(|_| !self.layers.contains_key(&id)) {
-            return procraft_engine::applz4::decode(pixels, size)
-                .filter(|p| p.len() == size)
+        if let Some(parked) = self.parked.get(&id).filter(|_| !self.layers.contains_key(&id)) {
+            return parked
+                .pixels(self.width, self.height)
                 .ok_or_else(|| GpuError::Readback(format!("layer {id:?} parked damaged")));
         }
         let layer = self.layers.get(&id).ok_or_else(|| GpuError::Readback(format!("no layer {id:?}")))?;
@@ -5730,6 +5743,50 @@ fn painted_bounds(t: &Thumbnail, painted: impl Fn([u8; 4]) -> bool) -> Option<[u
 /// The longest side of a parked layer's small pictures, pixels: as big as any thumbnail asked for.
 const PARKED_PICTURE_SIDE: u32 = 192;
 
+/// A parked layer's pixels: the rectangle painted (none if nothing), its rows compressed, so a
+/// layer drawn on in one place costs little to keep and to bring back.
+struct Parked {
+    rect: Option<IRect>,
+    lz4: Vec<u8>,
+}
+
+impl Parked {
+    /// Of a layer's pixels (premultiplied RGBA, `width` wide), painted only within `rect`.
+    fn of(rgba: &[u8], width: u32, rect: Option<IRect>) -> Parked {
+        let rect = rect.filter(|r| !r.is_empty());
+        let mut rows = Vec::new();
+        if let Some(r) = rect {
+            let row = r.width() as usize * 4;
+            rows.reserve(row * r.height() as usize);
+            for y in r.y0..r.y1 {
+                let start = (y as usize * width as usize + r.x0 as usize) * 4;
+                rows.extend_from_slice(rgba.get(start..start + row).unwrap_or_default());
+            }
+        }
+        Parked { rect, lz4: procraft_engine::applz4::encode(&rows) }
+    }
+
+    /// The painted rectangle's rows, one after another; none if damaged.
+    fn rows(&self) -> Option<Vec<u8>> {
+        let size = self.rect.map_or(0, |r| r.width() as usize * r.height() as usize * 4);
+        procraft_engine::applz4::decode(&self.lz4, size).filter(|p| p.len() == size)
+    }
+
+    /// The whole layer (`width` x `height`, clear outside the rectangle); none if damaged.
+    fn pixels(&self, width: u32, height: u32) -> Option<Vec<u8>> {
+        let rows = self.rows()?;
+        let mut full = vec![0u8; width as usize * height as usize * 4];
+        if let Some(r) = self.rect {
+            let row = r.width() as usize * 4;
+            for (y, src) in (r.y0..r.y1).zip(rows.chunks_exact(row.max(1))) {
+                let start = (y as usize * width as usize + r.x0 as usize) * 4;
+                full.get_mut(start..start + row)?.copy_from_slice(src);
+            }
+        }
+        Some(full)
+    }
+}
+
 /// A parked layer's small pictures: the whole layer, and what is drawn on it (none if nothing);
 /// and where it is drawn (none if nowhere).
 struct Pictures {
@@ -5838,6 +5895,12 @@ struct Remake {
     above_items: Vec<LayerId>,
     above_key: u64,
     keep: HashSet<LayerId>,
+    /// For the log: when it started, over how many renders, and the layers brought back for it
+    /// and the time that took.
+    started: std::time::Instant,
+    slices: u32,
+    restored: usize,
+    restoring: std::time::Duration,
 }
 
 /// What a top-level item composites from: itself and its mask, or a group and all it holds.
