@@ -2,7 +2,7 @@
 <resources>
     <!-- dark, so nothing flashes before the first frame -->
     <color name="window_background">#FF000000</color>
-    <color name="ic_launcher_background">#FF1C1C1E</color>
+    <color name="ic_launcher_background">#FF0B0B0C</color>
 
     <style name="Theme.ProCraft" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/window_background</item>

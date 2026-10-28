@@ -1493,7 +1493,7 @@ private fun AboutApp(onClose: () -> Unit) {
             // the launcher icon: its field, and its picture drawn at the adaptive icon's full size
             Box(Modifier.size(300.dp).clip(RoundedCornerShape(67.dp)).background(AboutIconField), contentAlignment = Alignment.Center) {
                 androidx.compose.foundation.Image(
-                    androidx.compose.ui.res.painterResource(io.github.artcraftandroid.procraft.R.drawable.ic_launcher_foreground),
+                    androidx.compose.ui.res.painterResource(io.github.artcraftandroid.procraft.R.drawable.procraft_mark),
                     contentDescription = null,
                     modifier = Modifier.requiredSize(450.dp),
                 )
@@ -1517,7 +1517,7 @@ private fun AboutApp(onClose: () -> Unit) {
 
 // as measured: the gallery under a near-black veil, the light round close button
 private val AboutVeil = Color(0xD90B0B0B)
-private val AboutIconField = Color(0xFF1C1C1E)
+private val AboutIconField = Color(0xFF0B0B0C)
 private val AboutInk = Color(0xFFBDBDBD)
 private val AboutClose = Color(0xFFE3E3E3)
 private val AboutCloseInk = Color(0xFF1C1C1C)

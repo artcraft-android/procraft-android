@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- A placeholder icon of our own (a brush stroke on a dark field) until ProCraft has its icon. -->
+<!-- ProCraft's icon: a paintbrush in a warm-to-cool blend on black (tools/app-icon/make_icon.py). -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@color/ic_launcher_background" />
     <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
 </adaptive-icon>
