@@ -252,7 +252,7 @@ fn brushes_keep_their_own_sliders() {
 }
 
 /// Writes every brush preview as raw RGBA (`<set>-<index>.rgba`, 480×120) into the directory in
-/// `PROCRAFT_DUMP`, for looking at the brushes: `cargo test -p procraft-android dump -- --ignored`.
+/// `PROCRAFT_DUMP`, for looking at the brushes: `cargo test -p procraft-core dump -- --ignored`.
 #[test]
 #[ignore]
 fn dump_brush_previews() {

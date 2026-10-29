@@ -35,7 +35,7 @@ jobs:
       - id: v
         name: Resolve version
         run: |
-          listed="$(sed -n 's/^procraft\.version=//p' apps/procraft-android/android/gradle.properties)"
+          listed="$(sed -n 's/^procraft\.version=//p' android/gradle.properties)"
           if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="$listed"; fi
           if ! printf '%s' "$v" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
             echo "::error::'$v' is not a version like 1.2.3 or 1.2.3-beta"
@@ -86,7 +86,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Build
-        working-directory: apps/procraft-android/android
+        working-directory: android
         env:
           VERSION: ${{ steps.v.outputs.version }}
           PROCRAFT_KEYSTORE_PASSWORD: ${{ secrets.PROCRAFT_KEYSTORE_PASSWORD }}

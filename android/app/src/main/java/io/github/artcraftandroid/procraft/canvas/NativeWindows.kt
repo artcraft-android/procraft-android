@@ -6,7 +6,7 @@ import android.view.Surface
 object NativeWindows {
     init {
         // JNA loads the library for the UniFFI bindings; the JVM needs it loaded too, for these
-        System.loadLibrary("procraft_android")
+        System.loadLibrary("procraft_core")
     }
 
     /** Registers [surface]'s window and returns its id for `CanvasSession.attachWindow`, or 0. */

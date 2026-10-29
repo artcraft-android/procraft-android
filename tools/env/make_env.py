@@ -12,7 +12,7 @@ import urllib.request
 
 import numpy as np
 
-OUT = os.path.join("apps", "procraft-android", "android", "app", "src", "main", "assets", "environments")
+OUT = os.path.join("android", "app", "src", "main", "assets", "environments")
 WIDTH = 512
 
 # preset -> (Poly Haven id, its title, its authors)

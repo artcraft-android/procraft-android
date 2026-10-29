@@ -17,7 +17,7 @@ from shapely.ops import unary_union
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MASTERS = os.path.join(ROOT, 'assets', 'icons', 'procraft')
 SLOTS = os.path.join(ROOT, 'assets', 'icons', 'slots.tsv')
-ICONS = os.path.join(ROOT, 'apps', 'procraft-android', 'android', 'app', 'src', 'main', 'java', 'io', 'github',
+ICONS = os.path.join(ROOT, 'android', 'app', 'src', 'main', 'java', 'io', 'github',
                      'artcraftandroid', 'procraft', 'ui', 'Icons.kt')
 
 GAP = 1.2  # a knockout's width

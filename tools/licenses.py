@@ -15,7 +15,7 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, 'apps', 'procraft-android', 'android', 'app', 'src', 'main', 'assets', 'licenses.txt')
+OUT = os.path.join(ROOT, 'android', 'app', 'src', 'main', 'assets', 'licenses.txt')
 TARGET = 'aarch64-linux-android'
 LICENCE_FILE = re.compile(r'^(licen[cs]e|copying|notice|unlicense)', re.IGNORECASE)
 
@@ -60,7 +60,7 @@ def main():
     packages = {p['id']: p for p in meta['packages']}
     nodes = {n['id']: n for n in meta['resolve']['nodes']}
     workspace = set(meta['workspace_members'])
-    root = next(i for i in workspace if packages[i]['name'] == 'procraft-android')
+    root = next(i for i in workspace if packages[i]['name'] == 'procraft-core')
 
     # the crates the library links: normal dependencies, not proc macros
     seen, stack = set(), [root]

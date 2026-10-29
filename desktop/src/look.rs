@@ -1,0 +1,301 @@
+//! The interface's look, as the Android app has it (ui/Theme.kt, ui/Type.kt, ui/Icons.kt): its
+//! colours and sizes (points, which are its dp), the Inter type it bundles, and its icons and
+//! shapes, drawn at the size they show.
+
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+use egui::text::{LayoutJob, TextFormat};
+use egui::{Align2, Color32, FontFamily, FontId, Painter, Pos2, Rect, TextureHandle, TextureOptions, Ui, pos2, vec2};
+use resvg::tiny_skia;
+
+use crate::icons::Icon;
+
+/// A colour written 0xAARRGGBB, as the Android app writes them.
+pub fn argb(v: u32) -> Color32 {
+    let [a, r, g, b] = v.to_be_bytes();
+    Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
+/// `a` turned `t` (0..1) of the way to `b`.
+pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let ch = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+    Color32::from_rgba_premultiplied(ch(a.r(), b.r()), ch(a.g(), b.g()), ch(a.b(), b.b()), ch(a.a(), b.a()))
+}
+
+/// The dark interface's colours (0xAARRGGBB) and sizes (points), named as the Android app's `Pc`.
+pub mod pc {
+    pub const ACCENT: u32 = 0xFF0076FD;
+    pub const BAR: u32 = 0xE61C1C1C;
+    pub const BAR_TEXT: u32 = 0xFFAAAAAA;
+    pub const BAR_GLYPH: u32 = 0xFFC7C7C7;
+    pub const BAR_GLYPH_SELECTED: u32 = 0xFF0076FD;
+    pub const ACTION_DISC: u32 = 0xFF141414;
+    pub const ACTION_GLYPH: u32 = 0xFF969696;
+    pub const COLOR_RING: u32 = 0xFF969696;
+    pub const BAR_HEIGHT: f32 = 44.0;
+    pub const BAR_MARGIN: f32 = 40.0;
+    pub const BAR_BUTTON_WIDTH: f32 = 44.0;
+    pub const BAR_BUTTON_HEIGHT: f32 = 38.0;
+    pub const GALLERY_WIDTH: f32 = 58.0;
+    pub const ACTION_DISC_SIZE: f32 = 32.0;
+    pub const COLOR_DOT: f32 = 31.0;
+
+    pub const SIDE_BAR: u32 = 0xE7171717;
+    pub const SLIDER_TRACK: u32 = 0xC93E3E3E;
+    pub const SLIDER_RIM: u32 = 0xB96E6E6E;
+    pub const SLIDER_RIM_WIDTH: f32 = 0.8;
+    pub const SLIDER_THUMB: u32 = 0xFFA6A6A6;
+    pub const SIDE_GLYPH: u32 = 0xFF969696;
+    pub const SIDE_GLYPH_DISABLED: u32 = 0x1AFFFFFF;
+    pub const SIDE_BAR_WIDTH: f32 = 51.0;
+    pub const SIDE_BAR_HEIGHT: f32 = 519.0;
+    pub const SIDE_BAR_CORNER: f32 = 20.0;
+    /// Where the side bar's centre sits, as a fraction of the window's height.
+    pub const SIDE_BAR_CENTRE: f32 = 0.5234;
+    pub const SLIDER_WIDTH: f32 = 40.0;
+    pub const SLIDER_HEIGHT: f32 = 170.0;
+    pub const SLIDER_CORNER: f32 = 13.0;
+    pub const THUMB_WIDTH: f32 = 32.0;
+    pub const THUMB_HEIGHT: f32 = 18.0;
+    pub const THUMB_INSET: f32 = 4.0;
+    pub const MODIFY_SIZE: f32 = 22.5;
+    pub const MODIFY_STROKE: f32 = 2.4;
+    pub const MODIFY_CORNER: f32 = 6.0;
+
+    pub const GLASS_MENU_EDGE: u32 = 0x24FFFFFF;
+
+    /// The gaps between the tool buttons and between the action buttons for a bar `width` wide:
+    /// the room left after both margins picks one of five steps.
+    pub fn bar_gaps(width: f32) -> (f32, f32) {
+        let room = width - BAR_MARGIN * 2.0;
+        if room < 435.0 {
+            (2.0, 4.0)
+        } else if room < 530.0 {
+            (8.0, 14.0)
+        } else if room < 625.0 {
+            (26.0, 14.0)
+        } else if room < 730.0 {
+            (8.0, 14.0)
+        } else {
+            (26.0, 14.0)
+        }
+    }
+}
+
+/// How long a button takes to light up, and to go back (seconds).
+pub const HIGHLIGHT_ON: f32 = 0.067;
+pub const HIGHLIGHT_OFF: f32 = 0.15;
+
+/// How lit `id` is (0..1): it lights up fast and goes back more slowly.
+pub fn highlight(ctx: &egui::Context, id: egui::Id, on: bool) -> f32 {
+    let time = if on { HIGHLIGHT_ON } else { HIGHLIGHT_OFF };
+    ctx.animate_value_with_time(id, if on { 1.0 } else { 0.0 }, time)
+}
+
+/// Letter spacing that brings Inter to the reference's text widths (em).
+const TRACKING: f32 = -0.045;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Weight {
+    Regular,
+    Medium,
+    SemiBold,
+    Bold,
+}
+
+impl Weight {
+    fn name(self) -> &'static str {
+        match self {
+            Weight::Regular => "Inter-Regular",
+            Weight::Medium => "Inter-Medium",
+            Weight::SemiBold => "Inter-SemiBold",
+            Weight::Bold => "Inter-Bold",
+        }
+    }
+
+    pub fn font(self, size: f32) -> FontId {
+        FontId::new(size, FontFamily::Name(self.name().into()))
+    }
+}
+
+/// Inter (bundled with the Android app, OFL) for all text, egui's own fonts behind it for what it
+/// lacks.
+pub fn install_fonts(ctx: &egui::Context) {
+    const FACES: [(Weight, &[u8]); 4] = [
+        (Weight::Regular, include_bytes!("../../android/app/src/main/assets/fonts/Inter-Regular.ttf")),
+        (Weight::Medium, include_bytes!("../../android/app/src/main/assets/fonts/Inter-Medium.ttf")),
+        (Weight::SemiBold, include_bytes!("../../android/app/src/main/assets/fonts/Inter-SemiBold.ttf")),
+        (Weight::Bold, include_bytes!("../../android/app/src/main/assets/fonts/Inter-Bold.ttf")),
+    ];
+    let mut fonts = egui::FontDefinitions::default();
+    let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    for (weight, bytes) in FACES {
+        let name = weight.name().to_owned();
+        fonts.font_data.insert(name.clone(), Arc::new(egui::FontData::from_static(bytes)));
+        let mut family = vec![name];
+        family.extend(fallback.iter().cloned());
+        fonts.families.insert(FontFamily::Name(weight.name().into()), family);
+    }
+    if let Some(p) = fonts.families.get_mut(&FontFamily::Proportional) {
+        p.insert(0, Weight::Regular.name().to_owned());
+    }
+    ctx.set_fonts(fonts);
+}
+
+/// Text in runs of weights, `size` points, placed by `align` at `at`; returns where it went.
+pub fn text_runs(
+    painter: &Painter,
+    at: Pos2,
+    align: Align2,
+    runs: &[(&str, Weight)],
+    size: f32,
+    colour: Color32,
+) -> Rect {
+    let mut job = LayoutJob::default();
+    for (text, weight) in runs {
+        let format = TextFormat {
+            font_id: weight.font(size),
+            color: colour,
+            extra_letter_spacing: TRACKING * size,
+            ..Default::default()
+        };
+        job.append(text, 0.0, format);
+    }
+    let galley = painter.layout_job(job);
+    let rect = align.anchor_size(at, galley.size());
+    painter.galley(rect.min, galley, colour);
+    rect
+}
+
+/// Text of one weight; see [`text_runs`].
+pub fn text(
+    painter: &Painter,
+    at: Pos2,
+    align: Align2,
+    text: &str,
+    size: f32,
+    weight: Weight,
+    colour: Color32,
+) -> Rect {
+    text_runs(painter, at, align, &[(text, weight)], size, colour)
+}
+
+/// The whole of a texture.
+const ALL: Rect = Rect { min: pos2(0.0, 0.0), max: pos2(1.0, 1.0) };
+
+/// Icons and shapes drawn for the screen's density, kept until it changes.
+#[derive(Default)]
+pub struct Look {
+    icons: HashMap<(&'static str, u32), TextureHandle>,
+    /// Each drawn shape's texture and what it was drawn from.
+    shapes: HashMap<&'static str, (u64, TextureHandle)>,
+}
+
+impl Look {
+    /// `icon` shown `width` points across (its frame scaled to it), centred at `centre`, in `colour`.
+    pub fn icon(&mut self, ui: &Ui, icon: &Icon, centre: Pos2, width: f32, colour: Color32) {
+        let ppp = ui.ctx().pixels_per_point();
+        let px = (width * ppp).round().max(1.0) as u32;
+        let texture = self
+            .icons
+            .entry((icon.name, px))
+            .or_insert_with(|| ui.ctx().load_texture(icon.name, raster_icon(icon, px), TextureOptions::LINEAR));
+        let height = width * icon.height / icon.width;
+        ui.painter().image(texture.id(), Rect::from_center_size(centre, vec2(width, height)), ALL, colour);
+    }
+
+    /// A shape drawn by `draw` (into a pixmap of `rect` at the screen's density, scaled so its
+    /// units are points from `rect`'s corner), kept as `slot` until `key` changes.
+    pub fn shape(
+        &mut self,
+        ui: &Ui,
+        slot: &'static str,
+        key: impl Hash,
+        rect: Rect,
+        draw: impl FnOnce(&mut tiny_skia::Pixmap, tiny_skia::Transform),
+    ) {
+        let ppp = ui.ctx().pixels_per_point();
+        let (w, h) = ((rect.width() * ppp).ceil().max(1.0) as u32, (rect.height() * ppp).ceil().max(1.0) as u32);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (key, w, h).hash(&mut hasher);
+        let hash = hasher.finish();
+        let fresh = self.shapes.get(slot).is_none_or(|(at, _)| *at != hash);
+        if fresh && let Some(mut pixmap) = tiny_skia::Pixmap::new(w, h) {
+            draw(&mut pixmap, tiny_skia::Transform::from_scale(ppp, ppp));
+            let image = egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], pixmap.data());
+            match self.shapes.get_mut(slot) {
+                Some((at, texture)) => {
+                    texture.set(image, TextureOptions::LINEAR);
+                    *at = hash;
+                }
+                None => {
+                    let texture = ui.ctx().load_texture(slot, image, TextureOptions::LINEAR);
+                    self.shapes.insert(slot, (hash, texture));
+                }
+            }
+        }
+        if let Some((_, texture)) = self.shapes.get(slot) {
+            let shown = Rect::from_min_size(rect.min, vec2(w as f32, h as f32) / ppp);
+            ui.painter().image(texture.id(), shown, ALL, Color32::WHITE);
+        }
+    }
+}
+
+/// `icon` drawn white `px` pixels across.
+fn raster_icon(icon: &Icon, px: u32) -> egui::ColorImage {
+    let mut svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}">"#, icon.width, icon.height);
+    for part in icon.parts {
+        if part.fill {
+            let rule = if part.even_odd { "evenodd" } else { "nonzero" };
+            svg.push_str(&format!(r##"<path d="{}" fill="#fff" fill-rule="{rule}"/>"##, part.d));
+        }
+        if part.stroke > 0.0 {
+            svg.push_str(&format!(
+                r##"<path d="{}" fill="none" stroke="#fff" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round"/>"##,
+                part.d, part.stroke
+            ));
+        }
+    }
+    svg.push_str("</svg>");
+    let ph = ((px as f32) * icon.height / icon.width).round().max(1.0) as u32;
+    let drawn = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).ok().and_then(|tree| {
+        let mut pixmap = tiny_skia::Pixmap::new(px, ph)?;
+        let scale = px as f32 / icon.width;
+        resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+        Some(pixmap)
+    });
+    match drawn {
+        Some(p) => egui::ColorImage::from_rgba_premultiplied([px as usize, ph as usize], p.data()),
+        None => egui::ColorImage::filled([1, 1], Color32::TRANSPARENT),
+    }
+}
+
+/// A rounded rectangle's outline: corners `[top left, top right, bottom right, bottom left]`.
+pub fn round_rect(pb: &mut tiny_skia::PathBuilder, r: Rect, [tl, tr, br, bl]: [f32; 4]) {
+    // the control points' share of a quarter circle's radius
+    const K: f32 = 0.552_284_8;
+    let (x0, y0, x1, y1) = (r.left(), r.top(), r.right(), r.bottom());
+    pb.move_to(x0 + tl, y0);
+    pb.line_to(x1 - tr, y0);
+    pb.cubic_to(x1 - tr + tr * K, y0, x1, y0 + tr - tr * K, x1, y0 + tr);
+    pb.line_to(x1, y1 - br);
+    pb.cubic_to(x1, y1 - br + br * K, x1 - br + br * K, y1, x1 - br, y1);
+    pb.line_to(x0 + bl, y1);
+    pb.cubic_to(x0 + bl - bl * K, y1, x0, y1 - bl + bl * K, x0, y1 - bl);
+    pb.line_to(x0, y0 + tl);
+    pb.cubic_to(x0, y0 + tl - tl * K, x0 + tl - tl * K, y0, x0 + tl, y0);
+    pb.close();
+}
+
+/// Fills `path` in `colour`, even-odd.
+pub fn fill(pixmap: &mut tiny_skia::Pixmap, path: Option<tiny_skia::Path>, colour: Color32, at: tiny_skia::Transform) {
+    let Some(path) = path else { return };
+    let mut paint = tiny_skia::Paint::default();
+    let [r, g, b, a] = colour.to_srgba_unmultiplied();
+    paint.set_color_rgba8(r, g, b, a);
+    paint.anti_alias = true;
+    pixmap.fill_path(&path, &paint, tiny_skia::FillRule::EvenOdd, at, None);
+}

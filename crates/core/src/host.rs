@@ -1,0 +1,46 @@
+//! The session in a window its caller owns and draws (the desktop app): the caller makes the
+//! device and the surface, draws each frame and presents it.
+
+use std::time::Instant;
+
+use procraft_engine::profile::Profile;
+use procraft_gpu::{Gpu, wgpu};
+
+use crate::CanvasSession;
+
+impl CanvasSession {
+    /// Paints with `gpu` (made for the caller's surface): the canvas is made on it now.
+    pub fn use_gpu(&self, gpu: Gpu) {
+        self.shared.lock().gpu.get_or_insert(gpu);
+        self.shared.make_canvas();
+    }
+
+    /// The window is `width` × `height` pixels: the canvas is placed in it the first time.
+    pub fn show_in(&self, width: u32, height: u32) {
+        let mut st = self.shared.lock();
+        st.window_size = (width.max(1), height.max(1));
+        st.place_view();
+        st.needs_frame = true;
+    }
+
+    /// Draws a frame into `view` (`format`, `size` window pixels, its colours shown in `screen`),
+    /// which the caller then presents. `started` is when drawing began. True while another frame
+    /// is wanted already (the view settling, the selection's bands drifting, caches remade).
+    pub fn draw(
+        &self,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        size: (u32, u32),
+        screen: Profile,
+        started: Instant,
+    ) -> bool {
+        let mut st = self.shared.lock();
+        st.draw_frame(view, format, size, screen, started);
+        st.needs_frame
+    }
+
+    /// Something changed since the last frame was drawn.
+    pub fn wants_frame(&self) -> bool {
+        self.shared.lock().needs_frame
+    }
+}

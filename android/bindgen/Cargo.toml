@@ -1,11 +1,11 @@
 [package]
-name = "procraft-android-bindgen"
+name = "procraft-bindgen"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "uniffi-bindgen for procraft-android: generates its Kotlin bindings from the built library (the Android build runs it)"
+description = "uniffi-bindgen for procraft-core: generates its Kotlin bindings from the built library (the Android build runs it)"
 
 [[bin]]
 name = "uniffi-bindgen"
@@ -15,5 +15,5 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-# The release procraft-android uses (same lock file): bindings only load against their own release.
+# The release procraft-core uses (same lock file): bindings only load against their own release.
 uniffi = { version = "=0.32.2", features = ["cli"] }

@@ -59,7 +59,6 @@ fn rgb_named(name: &str, doc: Option<&Document>) -> Option<Arc<IccProfile>> {
 /// The table taking a canvas's colours to the screen's (as a press would print them, for a CMYK
 /// canvas), for a canvas with a profile of its own; none for the built-in profiles, which the
 /// display moves by matrix.
-#[cfg(any(target_os = "android", test))]
 pub(crate) fn display_table(doc: &Document, screen: Profile) -> Option<procraft_engine::cms::Lut> {
     doc.icc.as_ref()?;
     use procraft_engine::cms;
@@ -67,7 +66,6 @@ pub(crate) fn display_table(doc: &Document, screen: Profile) -> Option<procraft_
 }
 
 /// What [`display_table`] depends on, to know when to make it again.
-#[cfg(any(target_os = "android", test))]
 pub(crate) fn table_key(doc: &Document, screen: Profile) -> Option<(usize, Profile)> {
     doc.icc.as_ref().map(|i| (Arc::as_ptr(&i.0) as usize, screen))
 }

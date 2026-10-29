@@ -1,0 +1,5 @@
+# UniFFI bindings of the `procraft_core` library, for the Android app.
+
+[bindings.kotlin]
+package_name = "io.github.artcraftandroid.procraft.core"
+cdylib_name = "procraft_core"

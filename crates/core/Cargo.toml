@@ -1,15 +1,15 @@
 [package]
-name = "procraft-android"
+name = "procraft-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "ProCraft on Android: the engine and renderer as a native library with Kotlin bindings (UniFFI); the app is in android/"
+description = "The session both ProCraft apps drive: a canvas painted with the engine and drawn by the renderer, with the Android app's Kotlin bindings (UniFFI)"
 
 [lib]
-name = "procraft_android"
-# cdylib: the library the app loads; lib: the tests
+name = "procraft_core"
+# cdylib: the library the Android app loads; lib: the desktop app and the tests
 crate-type = ["cdylib", "lib"]
 
 [lints]

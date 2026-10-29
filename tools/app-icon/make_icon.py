@@ -17,7 +17,7 @@ import os
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-RES = os.path.join(ROOT, 'apps', 'procraft-android', 'android', 'app', 'src', 'main', 'res')
+RES = os.path.join(ROOT, 'android', 'app', 'src', 'main', 'res')
 
 S = 2048  # the 512-unit tile, drawn at 4x
 INK = (11, 11, 12)

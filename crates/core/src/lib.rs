@@ -1,10 +1,12 @@
-//! ProCraft's native library for Android: a [`CanvasSession`] (UniFFI) that takes input from the
-//! Kotlin UI, builds strokes with the engine and draws them with the GPU renderer on its own
-//! render thread, straight into the app's `SurfaceView`.
+//! The session both ProCraft apps drive: a [`CanvasSession`] takes input from the interface, builds
+//! strokes with the engine and draws them with the GPU renderer. The Android app reaches it through
+//! UniFFI's Kotlin bindings, and it draws on its own render thread straight into the app's
+//! `SurfaceView`; the desktop app calls it directly and draws each frame into its window
+//! (`host.rs`).
 //!
-//! The window crosses over through two small JNI functions (`window.rs`, the crate's only unsafe
-//! code): Kotlin hands its `Surface` to `NativeWindows.acquire` and passes the id it returns to
-//! [`CanvasSession::attach_window`].
+//! On Android the window crosses over through two small JNI functions (`window.rs`, the crate's
+//! only unsafe code): Kotlin hands its `Surface` to `NativeWindows.acquire` and passes the id it
+//! returns to [`CanvasSession::attach_window`].
 
 uniffi::setup_scaffolding!();
 
@@ -17,7 +19,9 @@ mod clipboard;
 mod colour;
 mod crop;
 mod device;
+mod frame;
 mod guide;
+mod host;
 mod layer_ops;
 mod layers;
 mod pick;
@@ -49,6 +53,11 @@ use procraft_engine::library::{BrushSet, library};
 use procraft_engine::stroke::StrokeBuilder;
 use procraft_engine::view::View;
 use procraft_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
+
+pub use brushes::{BrushInfo, BrushSetInfo};
+pub use frame::{configure, screen_profile};
+pub use layers::{LayerInfo, LayerType, ThumbnailImage};
+pub use project::{PsdOutcome, import_psd};
 
 /// Colour around the canvas, sRGB; and with the light interface.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -345,7 +354,6 @@ pub(crate) struct State {
     saved_selections: Vec<procraft_engine::selection::Mask>,
     pub(crate) selection_display: selection::SelectionDisplay,
     /// The table showing a canvas with a profile of its own on the screen, and what it was made for.
-    #[cfg(target_os = "android")]
     pub(crate) display_lut: Option<((usize, procraft_engine::profile::Profile), procraft_gpu::DisplayLut)>,
     /// While a colour selection's threshold is dragged: the selection before it, and the layer read once.
     selection_before: Option<Option<procraft_engine::selection::Mask>>,
@@ -406,6 +414,20 @@ impl State {
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) fn surround(&self) -> [f32; 3] {
         if self.light { SURROUND_LIGHT } else { SURROUND }
+    }
+
+    /// Places the canvas in the window the first time: the view kept with the artwork, unless it
+    /// would leave the canvas off the page, else fitted.
+    pub(crate) fn place_view(&mut self) {
+        if self.view.is_none() {
+            let canvas = (self.doc.width(), self.doc.height());
+            let kept = self
+                .saved_view
+                .take()
+                .and_then(|v| v.view(self.window_size))
+                .filter(|v| project::shows_canvas(v, self.window_size, canvas));
+            self.view = Some(kept.unwrap_or_else(|| self.fitted_view()));
+        }
     }
 
     /// The whole canvas fitted in the window, clear of the insets, turned by the right angle the
@@ -921,7 +943,6 @@ impl CanvasSession {
             selection: None,
             saved_selections: Vec::new(),
             selection_display: selection::SelectionDisplay::Stripes,
-            #[cfg(target_os = "android")]
             display_lut: None,
             selection_before: None,
             colour_source: None,
@@ -977,16 +998,7 @@ impl CanvasSession {
             {
                 let mut st = self.shared.lock();
                 st.window_size = (width.max(1), height.max(1));
-                if st.view.is_none() {
-                    // the view kept with the artwork, unless it would leave the canvas off the page
-                    let canvas = (st.doc.width(), st.doc.height());
-                    let kept = st
-                        .saved_view
-                        .take()
-                        .and_then(|v| v.view(st.window_size))
-                        .filter(|v| project::shows_canvas(v, st.window_size, canvas));
-                    st.view = Some(kept.unwrap_or_else(|| st.fitted_view()));
-                }
+                st.place_view();
                 st.stop = false;
                 st.reconfigure = true;
                 self.shared.frame(&mut st);

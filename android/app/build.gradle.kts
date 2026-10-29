@@ -6,9 +6,9 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-// The Rust half of the app: this Gradle project is the android/ folder of the `procraft-android`
-// crate (apps/procraft-android), which sits in the ProCraft cargo workspace two folders up.
-val cargoWorkspaceDir: File = rootDir.parentFile.parentFile.parentFile
+// The Rust half of the app: the `procraft-core` crate (crates/core) in the ProCraft cargo
+// workspace, one folder up.
+val cargoWorkspaceDir: File = rootDir.parentFile
 val rustAbis: List<String> =
     providers.gradleProperty("procraft.abis").getOrElse("arm64-v8a,x86_64").split(',').map { it.trim() }.filter { it.isNotEmpty() }
 val minApi = 29
@@ -55,7 +55,7 @@ val cargoExecutable: String = run {
     providers.environmentVariable("CARGO").orNull ?: if (rustup.isFile) rustup.absolutePath else exe
 }
 
-/** Builds `libprocraft_android.so` (release profile) for each ABI with cargo-ndk. */
+/** Builds `libprocraft_core.so` (release profile) for each ABI with cargo-ndk. */
 abstract class CargoNdkBuild : DefaultTask() {
     @get:Inject abstract val execOperations: ExecOperations
     @get:Input abstract val cargo: Property<String>
@@ -81,11 +81,11 @@ abstract class CargoNdkBuild : DefaultTask() {
             environment("CARGO_ENCODED_RUSTFLAGS", remap.joinToString("\u001f"))
             commandLine(
                 listOf(cargo.get(), "ndk") + targets +
-                    listOf("--platform", apiLevel.get().toString(), "-o", out, "build", "--release", "-p", "procraft-android", "--lib"),
+                    listOf("--platform", apiLevel.get().toString(), "-o", out, "build", "--release", "-p", "procraft-core", "--lib"),
             )
         }
         // only the app's library ships (cargo-ndk copies any other shared library cargo left)
-        File(out).walk().filter { it.isFile && it.name != "libprocraft_android.so" }.forEach { it.delete() }
+        File(out).walk().filter { it.isFile && it.name != "libprocraft_core.so" }.forEach { it.delete() }
     }
 }
 
@@ -105,7 +105,7 @@ abstract class UniffiBindgen : DefaultTask() {
         execOperations.exec {
             workingDir(workspaceDir.get())
             commandLine(
-                cargo.get(), "run", "--quiet", "-p", "procraft-android-bindgen", "--",
+                cargo.get(), "run", "--quiet", "-p", "procraft-bindgen", "--",
                 "generate", library.get().asFile.absolutePath, "--language", "kotlin", "--out-dir", out.absolutePath, "--no-format",
             )
         }
@@ -167,7 +167,7 @@ androidComponents {
         val name = variant.name.replaceFirstChar { it.uppercase() }
         val cargoBuild = tasks.register<CargoNdkBuild>("cargoBuild$name") {
             group = "rust"
-            description = "Builds libprocraft_android.so for $rustAbis"
+            description = "Builds libprocraft_core.so for $rustAbis"
             cargo.set(cargoExecutable)
             workspaceDir.set(cargoWorkspaceDir.absolutePath)
             ndkDir.set(androidComponents.sdkComponents.ndkDirectory.map { it.asFile.absolutePath })
@@ -178,10 +178,10 @@ androidComponents {
         }
         val bindgen = tasks.register<UniffiBindgen>("uniffiBindgen$name") {
             group = "rust"
-            description = "Generates the Kotlin bindings of libprocraft_android.so"
+            description = "Generates the Kotlin bindings of libprocraft_core.so"
             cargo.set(cargoExecutable)
             workspaceDir.set(cargoWorkspaceDir.absolutePath)
-            library.set(cargoBuild.flatMap { it.outputDir.file("${rustAbis.first()}/libprocraft_android.so") })
+            library.set(cargoBuild.flatMap { it.outputDir.file("${rustAbis.first()}/libprocraft_core.so") })
         }
         variant.sources.jniLibs?.addGeneratedSourceDirectory(cargoBuild, CargoNdkBuild::outputDir)
         variant.sources.java?.addGeneratedSourceDirectory(bindgen, UniffiBindgen::outputDir)

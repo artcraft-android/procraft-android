@@ -56,17 +56,17 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
       # the code only Android builds (the surface and the render thread)
       - name: Clippy for Android
-        run: cargo ndk -t arm64-v8a --platform 29 clippy -p procraft-android --lib -- -D warnings
+        run: cargo ndk -t arm64-v8a --platform 29 clippy -p procraft-core --lib -- -D warnings
       - uses: gradle/actions/setup-gradle@v4
       - name: Release APK and lint
-        working-directory: apps/procraft-android/android
+        working-directory: android
         run: ./gradlew --no-daemon :app:assembleRelease :app:lintRelease
       - name: Unit tests
-        working-directory: apps/procraft-android/android
+        working-directory: android
         run: ./gradlew --no-daemon :app:testDebugUnitTest -Pprocraft.abis=x86_64
       - name: 16 KB pages
         run: |
-          apk=apps/procraft-android/android/app/build/outputs/apk/release/app-release.apk
+          apk=android/app/build/outputs/apk/release/app-release.apk
           tools="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
           "$tools/zipalign" -c -P 16 -v 4 "$apk" > /dev/null
           readelf="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"

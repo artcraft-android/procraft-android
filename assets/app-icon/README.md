@@ -35,7 +35,7 @@ below. MIT OR Apache-2.0, like the code.
 | `res/drawable-nodpi/procraft_mark.png` | the foreground at 1350 px, for the About screen |
 | `res/mipmap-anydpi/ic_launcher.xml` | the adaptive icon (background `@color/ic_launcher_background`) |
 
-The `res/` paths are under `apps/procraft-android/android/app/src/main/`.
+The `res/` paths are under `android/app/src/main/`.
 
 ## Regenerate
 

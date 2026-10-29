@@ -121,7 +121,8 @@ ProCraft for Android is in beta.
 
 * Clone this repository
 * Make sure you have at least 6 GB of free disk space
-* enter `apps/procraft-android/android` and run `./gradlew assembleRelease -Pprocraft.abis=arm64-v8a`, or open that folder in Android Studio and press Run.
+* enter `android` and run `./gradlew assembleRelease -Pprocraft.abis=arm64-v8a`, or open that folder in Android Studio and press Run.
+* the desktop app (in progress): `cargo run --release -p procraft-desktop` from the repository's root.
 
 Build time dependencies:
 
@@ -142,8 +143,9 @@ Build time dependencies:
 |---|---|
 | `crates/engine` | document, brushes, stroke geometry, canvas view (no GPU) |
 | `crates/gpu` | wgpu renderer: layers, strokes, compositing, display |
-| `apps/procraft-android` | the native library for Android (UniFFI bindings) |
-| `apps/procraft-android/android` | the Android app (Gradle) |
+| `crates/core` | the session both apps drive, with the Android app's UniFFI bindings |
+| `android` | the Android app (Gradle) |
+| `desktop` | the desktop app (egui), in progress |
 
 *Builds are only tested on Windows 11.*
 

@@ -1,0 +1,32 @@
+[package]
+name = "procraft-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "ProCraft on the desktop (Windows, macOS, Linux): the same engine and canvas, with an egui interface"
+
+[[bin]]
+name = "procraft"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+procraft-core = { path = "../crates/core" }
+procraft-engine = { workspace = true }
+procraft-gpu = { workspace = true }
+log = { workspace = true }
+env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
+egui = { version = "0.37", features = ["default_fonts"] }
+egui-winit = "0.37"
+egui-wgpu = { version = "0.37", default-features = false }
+winit = "0.30"
+rfd = "0.17"
+resvg = { version = "0.49", default-features = false }
+png = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { workspace = true, features = ["metal"] }
