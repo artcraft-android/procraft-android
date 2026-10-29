@@ -635,10 +635,15 @@ private fun LayerRow(
                 Text(tag, color = ink, fontSize = 13.sp, maxLines = 1, modifier = Modifier.offset(y = 17.5.dp).padding(start = 29.dp))
             }
         }
-        // a model's layer: the button that shows its channels, blue while one of them is painted
+        // a model's layer: the button that shows its channels, blue while one of them is painted;
+        // laid out narrower than it is touched (36 from the blend letter, as before), so the name
+        // keeps its room up to the icon
         if (onCube != null) {
-            Box(Modifier.offset(x = 16.dp).size(44.dp, 47.dp).clickable(onClick = onCube), contentAlignment = Alignment.Center) {
-                Icon(PcIcons.Tab3D, contentDescription = "Channels", tint = if (cubeLit) Pc.Accent else ink, modifier = Modifier.requiredSize(48.dp))
+            Spacer(Modifier.width(10.dp))
+            Box(Modifier.width(12.dp).height(47.dp), contentAlignment = Alignment.Center) {
+                Box(Modifier.requiredSize(44.dp, 47.dp).clickable(onClick = onCube), contentAlignment = Alignment.Center) {
+                    Icon(PcIcons.Tab3D, contentDescription = "Channels", tint = if (cubeLit) Pc.Accent else ink, modifier = Modifier.requiredSize(48.dp))
+                }
             }
         }
         // the blend and visibility buttons overlap by 8, as on the reference; a mask has no blend
