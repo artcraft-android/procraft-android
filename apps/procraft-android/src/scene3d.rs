@@ -2083,10 +2083,18 @@ impl State {
         );
         gpu.queue.submit([encoder.finish()]);
         canvas.stroke_drawn(reach);
+        // as the pen lifts, where the stroke really reached in the texture (the colour, roughness
+        // and metalness the same): each canvas's undo step keeps only that, not all the texels
+        // whose triangles lie under it on the screen (every one of them, where faces share a
+        // texture)
+        let within = if scene.ending { view.footprint(gpu, canvas.stroke_view(), reach) } else { None };
         // each canvas's step made as the pen lifts, to be undone and redone together
         let made = |c: &mut Canvas, doc: &mut Document| {
             let before = c.steps_made();
-            c.end_stroke();
+            match &within {
+                Some(rects) => c.end_stroke_within(rects.clone()),
+                None => c.end_stroke(),
+            }
             c.render(gpu, doc, None);
             (c.steps_made() > before).then(|| c.undo_step()).flatten()
         };
@@ -3347,20 +3355,23 @@ f 1/1 2/2",
     }
 
     /// What the current part's roughness and metalness canvases hold on the GPU, bytes (a texture
-    /// they share counted once); and which of the two are made.
-    fn channel_bytes(s: &CanvasSession) -> (u64, [bool; 2]) {
+    /// they share counted once), apart from their undo history; what their histories hold; and
+    /// which of the two are made.
+    fn channel_bytes(s: &CanvasSession) -> (u64, u64, [bool; 2]) {
         let st = s.shared.lock();
         let scene = st.scene.as_ref().unwrap();
         let pair = scene.channels.get(scene.current).unwrap();
         let mut all: Vec<wgpu::Texture> = Vec::new();
+        let mut history = 0;
         for c in pair.iter().flatten().filter_map(|set| set.canvas.as_ref()) {
+            history += c.history_bytes();
             for t in c.textures() {
                 if !all.contains(&t) {
                     all.push(t);
                 }
             }
         }
-        (procraft_gpu::textures_bytes(&all), [pair[0].is_some(), pair[1].is_some()])
+        (procraft_gpu::textures_bytes(&all) - history, history, [pair[0].is_some(), pair[1].is_some()])
     }
 
     #[test]
@@ -3374,27 +3385,89 @@ f 1/1 2/2",
         // the plain brush on a plain material: rough as the brush, as metal as the material
         // (none), so the metalness isn't made
         dab(&s);
-        assert_eq!(channel_bytes(&s).1, [true, false]);
+        assert_eq!(channel_bytes(&s).2, [true, false]);
         // a stroke under way on both: each its layer and composite (RGBA8) and a few small
         // textures, one stroke texture (half floats) between them, no brush images
         materials(&s, 0.2, 0.8);
         s.stroke_begin(PointerKind::Stylus, vec![sample(90.0, 100.0, 0.0)]);
         frame(&s, 200);
         let small = 1024 + 1 + 2;
-        let undo = side * side * 4;
-        let (bytes, made) = channel_bytes(&s);
+        let (bytes, _, made) = channel_bytes(&s);
         assert_eq!(made, [true, true]);
-        // the roughness keeps the first dab's undo step (the cube's faces each cover the texture)
-        assert_eq!(bytes, 2 * (side * side * 8 + small) + side * side * 8 + undo);
+        assert_eq!(bytes, 2 * (side * side * 8 + small) + side * side * 8);
         s.stroke_end(vec![sample(110.0, 100.0, 50.0)]);
         frame(&s, 200);
-        assert_eq!(channel_bytes(&s).0, bytes + 2 * undo);
+        assert_eq!(channel_bytes(&s).0, bytes);
         // painting the roughness itself gives it its brush images, and back on the colour it
         // lets them go
         s.set_model_channel(1);
         assert!(s.shared.lock().canvas.as_ref().unwrap().has_brush_images());
         s.set_model_channel(0);
-        assert_eq!(channel_bytes(&s).0, bytes + 2 * undo);
+        assert_eq!(channel_bytes(&s).0, bytes);
+    }
+
+    /// The undo history's bytes of the current part's colour, roughness and metalness.
+    fn history_bytes(s: &CanvasSession) -> [u64; 3] {
+        let st = s.shared.lock();
+        let scene = st.scene.as_ref().unwrap();
+        let pair = scene.channels.get(scene.current).unwrap();
+        let of = |k: usize| pair[k].as_ref().and_then(|set| set.canvas.as_ref()).map_or(0, |c| c.history_bytes());
+        [st.canvas.as_ref().unwrap().history_bytes(), of(0), of(1)]
+    }
+
+    #[test]
+    fn a_strokes_undo_step_keeps_only_the_texels_it_reached() {
+        // every face of the cube covers the whole texture: a dab on the front lies under all of
+        // it on the screen, and once took a step of the whole texture in each channel
+        let side = 512u32;
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), side).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        materials(&s, 0.2, 0.8);
+        frame(&s, 200);
+        let fresh = fresh(&s);
+        dab(&s);
+        // the texels it changed, and the tiles (16 texels, a 32nd of the side) they lie in
+        let changed: Vec<usize> = {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render(gpu, &mut st.doc, None);
+            let px = canvas.read_composite(gpu).unwrap();
+            px.chunks(4).enumerate().filter(|(_, p)| *p != fresh).map(|(i, _)| i).collect()
+        };
+        assert!(changed.len() > 100, "{}", changed.len());
+        let tile = 16usize;
+        let mut tiles: Vec<usize> = changed
+            .iter()
+            .map(|i| (i / side as usize / tile) * (side as usize / tile) + (i % side as usize) / tile)
+            .collect();
+        tiles.sort_unstable();
+        tiles.dedup();
+        let at_least = (tiles.len() * tile * tile * 4) as u64;
+        // each channel's step the same tiles, a few more than those it visibly changed at most
+        // (where the stroke is too faint to change a byte), far from the whole texture
+        let [colour, rough, metal] = history_bytes(&s);
+        assert_eq!((colour, metal), (rough, rough));
+        assert!(colour >= at_least && colour <= at_least * 2, "{colour} for {at_least}");
+        assert!(colour * 8 < u64::from(side * side * 4), "{colour}");
+        // undone and redone as exactly as before
+        let all = |s: &CanvasSession| {
+            let counts: Vec<usize> = (0..3)
+                .map(|c| {
+                    s.set_model_channel(c);
+                    painted(s)
+                })
+                .collect();
+            s.set_model_channel(0);
+            counts
+        };
+        let before = all(&s);
+        s.undo();
+        assert_eq!(all(&s), [0, 0, 0]);
+        s.redo();
+        assert_eq!(all(&s), before);
     }
 
     /// A dab in the middle of the window.
