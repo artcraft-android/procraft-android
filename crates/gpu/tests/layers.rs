@@ -977,3 +977,33 @@ fn a_canvas_makes_its_scratch_and_second_composite_only_once_wanted() {
     assert!(canvas.texture_bytes() >= per * (4 + 4 + 4 + 4 + 8) + images + small + undo);
     assert_eq!(gpu.errors(), 0);
 }
+
+/// What the GPU's allocator holds aside, used or not, bytes, once the work sent so far is done;
+/// none where the backend gives no report.
+fn reserved(gpu: &Gpu) -> Option<u64> {
+    gpu.flush();
+    gpu.device.generate_allocator_report().map(|r| r.total_reserved_bytes)
+}
+
+#[test]
+fn the_gpu_memory_set_aside_stays_near_what_is_used() {
+    let Some(gpu) = Gpu::headless().ok() else { return eprintln!("skipped: no GPU") };
+    let side = 2048u32;
+    let mut doc = Document::new(side, side);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    canvas.render(&gpu, &mut doc, None);
+    let (Some(used), Some(held)) = (allocated(&gpu), reserved(&gpu)) else { return };
+    // a canvas's textures (some 76 MB at this size) in blocks of 64 MB at most, not 128 to 256
+    assert!(held <= used + (96 << 20), "{} MB held for {} MB", held >> 20, used >> 20);
+    // the first read back of a few bytes sets aside a few MB the CPU can see, not 64
+    let before = reserved(&gpu).unwrap_or(0);
+    let mut small = Document::new(2, 2);
+    let mut tiny = Canvas::new(&gpu, &small).unwrap();
+    tiny.render(&gpu, &mut small, None);
+    let between = reserved(&gpu).unwrap_or(0);
+    assert_eq!(tiny.read_composite(&gpu).unwrap().len(), 16);
+    let after = reserved(&gpu).unwrap_or(0);
+    assert!(after.saturating_sub(between) <= 8 << 20, "{} MB for a read back", (after - between) >> 20);
+    assert!(between >= before);
+    assert_eq!(gpu.errors(), 0);
+}

@@ -91,7 +91,10 @@ impl Gpu {
             required_features: adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING,
             // the adapter's own limits, so large canvases fit where the GPU allows them
             required_limits: adapter.limits(),
-            memory_hints: wgpu::MemoryHints::Performance,
+            // memory taken in small blocks (a few MB up to 64): a block of each kind, once made,
+            // is kept for good, and the larger ones held what was never used (a first read back
+            // of a few bytes kept 64 MB the CPU can see)
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         }))
         .map_err(|e| GpuError::Device(e.to_string()))?;
