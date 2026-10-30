@@ -2739,6 +2739,59 @@ fn stock_images_a_file_names_are_kept_and_named_again() {
 }
 
 #[test]
+fn keys_a_brush_file_has_that_nothing_draws_yet_are_kept_and_written_again() {
+    use procraft_engine::brushfile;
+    use procraft_engine::document::BlendMode;
+    use procraft_engine::keyed::Builder;
+    use procraft_engine::plist::Value;
+    use procraft_engine::zip::ZipWriter;
+    let mut b = Builder::new();
+    let root = b.reserve();
+    let name = b.string("Carried");
+    b.fill(
+        &root,
+        &["SilicaBrush", "ValkyrieBrush", "NSObject"],
+        vec![
+            ("name", name),
+            ("eraseSize", Value::Real(0.25)),
+            ("smudgeOpacity", Value::Real(0.6)),
+            ("dynamicsPressureShapeRoundness", Value::Real(0.4)),
+            ("maxPressureSizeClamped", Value::Bool(true)),
+            ("attackRoll", Value::Bool(true)),
+            // Multiply, as brush files number it
+            ("dualBlendModeExtended", Value::Int(1)),
+        ],
+    );
+    let mut zip = ZipWriter::new();
+    zip.add("Brush.archive", &b.finish(root));
+    let s = CanvasSession::new(64, 64);
+    let set = s.import_brushes(zip.finish()).unwrap();
+    let expected = [
+        ("erase_size", 0.25),
+        ("smudge_opacity", 0.6),
+        ("pressure_roundness_max", 0.4),
+        ("pressure_size_clamped", 1.0),
+        ("attack_roll", 1.0),
+        ("dual_blend", BlendMode::Multiply.id() as f32),
+    ];
+    {
+        let st = s.shared.lock();
+        let brush = &st.library[set as usize].brushes[0];
+        for (key, v) in expected {
+            assert_eq!(brush.setting(key), v, "{key}");
+        }
+    }
+    // kept with the library, and written out again from it
+    let t = CanvasSession::new(64, 64);
+    assert!(t.load_brush_library(s.saved_brush_library()));
+    let set = t.brush_library().iter().position(|x| x.brushes.iter().any(|b| b.name == "Carried")).unwrap() as u32;
+    let out = brushfile::read(&t.brush_as_file(set, 0).unwrap()).unwrap();
+    for (key, v) in expected {
+        assert_eq!(out.settings.iter().rev().find(|(k, _)| k == key).map(|(_, v)| *v), Some(v), "{key}");
+    }
+}
+
+#[test]
 fn a_dropped_colour_fills_up_to_lines_and_is_one_undo_step() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.4);
