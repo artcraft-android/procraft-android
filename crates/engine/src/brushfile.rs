@@ -314,6 +314,18 @@ const PLAIN: &[(&str, &str, Kept)] = &[
     ("preview_tilt_offset", "previewTiltAngleOffset", Kept::Same),
 ];
 
+/// The keys the engine has no use for yet, carried so that a brush file's own values go out again
+/// as they came: read as the plain ones are, but written only for a brush that has them (one
+/// without them leaves the key out, so the app reading it takes its own start).
+const CARRIED: &[(&str, &str, Kept)] = &[
+    // the smudging and erasing sliders' own places, as `paintSize` and `paintOpacity` are the
+    // painting's
+    ("smudge_size", "smudgeSize", Kept::Same),
+    ("smudge_opacity", "smudgeOpacity", Kept::Same),
+    ("erase_size", "eraseSize", Kept::Same),
+    ("erase_opacity", "eraseOpacity", Kept::Same),
+];
+
 /// Rendering modes as the studio lists them, by the file's three switches (recursive mixing, the
 /// most transfer, modulated transfer).
 const RENDERING: [(bool, bool, bool); 6] = [
@@ -471,7 +483,7 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
             settings.push((key.to_owned(), v));
         }
     };
-    for &(control, key, kept) in PLAIN {
+    for &(control, key, kept) in PLAIN.iter().chain(CARRIED) {
         if let Some(v) = f.num(key) {
             set(control, to_control(kept, v));
         }
@@ -691,6 +703,11 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
     put("minSize", Value::Real(f64::from(brush.min_size / brush.size_unit())));
     for &(control, key, kept) in PLAIN {
         put(key, to_file(kept, brush.setting(control)));
+    }
+    for &(control, key, kept) in CARRIED {
+        if let Some(&v) = brush.extra.get(control) {
+            put(key, to_file(kept, v));
+        }
     }
     let count = 1.0 + (brush.setting("count") * (crate::studio::MAX_COUNT as f32 - 1.0)).round();
     put("shapeCount", Value::Real(f64::from(count / 16.0)));
@@ -1076,6 +1093,61 @@ mod tests {
         assert_eq!(get("touch_taper_start"), Some(0.4));
         // its own key wins
         assert_eq!(get("pen_taper_end"), Some(0.2));
+    }
+
+    /// A brush file of a brush named "Made" with `fields` and nothing else.
+    fn file_with(fields: Vec<(&str, Value)>) -> Vec<u8> {
+        let mut b = Builder::new();
+        let root = b.reserve();
+        let name = b.string("Made");
+        let mut all = vec![("name", name)];
+        all.extend(fields);
+        b.fill(&root, &["SilicaBrush", "ValkyrieBrush", "NSObject"], all);
+        let mut zip = ZipWriter::new();
+        zip.add("Brush.archive", &b.finish(root));
+        zip.finish()
+    }
+
+    /// `file` read into a brush, written out again and read back: its settings by key.
+    fn written_again(file: &[u8]) -> Vec<(String, f32)> {
+        let mut brush = Brush::round_pen();
+        for (k, v) in &read(file).unwrap().settings {
+            brush.set_setting(k, *v);
+        }
+        let pictures = Pictures {
+            shape_png: b"s",
+            grain_png: None,
+            metallic_png: None,
+            roughness_png: None,
+            thumbnail_png: b"t",
+            author_png: None,
+            signature_png: None,
+        };
+        read(&write(&brush, "", &pictures)).unwrap().settings
+    }
+
+    fn setting_of(settings: &[(String, f32)], key: &str) -> Option<f32> {
+        settings.iter().rev().find(|(k, _)| k == key).map(|(_, v)| *v)
+    }
+
+    #[test]
+    fn the_smudging_and_erasing_sliders_places_are_carried() {
+        let file = file_with(vec![
+            ("smudgeSize", Value::Real(0.3)),
+            ("smudgeOpacity", Value::Real(0.6)),
+            ("eraseSize", Value::Real(0.25)),
+            ("eraseOpacity", Value::Real(0.9)),
+        ]);
+        let settings = read(&file).unwrap().settings;
+        for (key, v) in [("smudge_size", 0.3), ("smudge_opacity", 0.6), ("erase_size", 0.25), ("erase_opacity", 0.9)] {
+            assert_eq!(setting_of(&settings, key), Some(v), "{key}");
+            assert_eq!(setting_of(&written_again(&file), key), Some(v), "{key} written again");
+        }
+        // a brush without them leaves them out
+        let none = written_again(&file_with(Vec::new()));
+        for key in ["smudge_size", "smudge_opacity", "erase_size", "erase_opacity"] {
+            assert_eq!(setting_of(&none, key), None, "{key}");
+        }
     }
 
     #[test]
