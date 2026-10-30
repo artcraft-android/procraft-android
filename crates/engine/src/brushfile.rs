@@ -324,6 +324,10 @@ const CARRIED: &[(&str, &str, Kept)] = &[
     ("smudge_opacity", "smudgeOpacity", Kept::Same),
     ("erase_size", "eraseSize", Kept::Same),
     ("erase_opacity", "eraseOpacity", Kept::Same),
+    // the pressure's counterpart of the tilt's `dynamicsTiltShapeRoundness` (which the stroke
+    // draws as `tilt_roundness_max`), and a switch on the pressure's size
+    ("pressure_roundness_max", "dynamicsPressureShapeRoundness", Kept::Same),
+    ("pressure_size_clamped", "maxPressureSizeClamped", Kept::Switch),
 ];
 
 /// Rendering modes as the studio lists them, by the file's three switches (recursive mixing, the
@@ -1148,6 +1152,29 @@ mod tests {
         for key in ["smudge_size", "smudge_opacity", "erase_size", "erase_opacity"] {
             assert_eq!(setting_of(&none, key), None, "{key}");
         }
+    }
+
+    #[test]
+    fn the_pressures_roundness_and_size_switch_are_carried() {
+        let file = file_with(vec![
+            ("dynamicsPressureShapeRoundness", Value::Real(0.4)),
+            ("dynamicsPressureShapeRoundnessMinimum", Value::Real(0.3)),
+            ("maxPressureSizeClamped", Value::Bool(true)),
+        ]);
+        let settings = read(&file).unwrap().settings;
+        assert_eq!(setting_of(&settings, "pressure_roundness_max"), Some(0.4));
+        assert_eq!(setting_of(&settings, "pressure_size_clamped"), Some(1.0));
+        // the least roundness is still read into the control it was
+        assert_eq!(setting_of(&settings, "pressure_roundness"), Some(0.7));
+        let again = written_again(&file);
+        assert_eq!(setting_of(&again, "pressure_roundness_max"), Some(0.4));
+        assert_eq!(setting_of(&again, "pressure_size_clamped"), Some(1.0));
+        // off is kept as off
+        let off = written_again(&file_with(vec![("maxPressureSizeClamped", Value::Bool(false))]));
+        assert_eq!(setting_of(&off, "pressure_size_clamped"), Some(0.0));
+        let none = written_again(&file_with(Vec::new()));
+        assert_eq!(setting_of(&none, "pressure_roundness_max"), None);
+        assert_eq!(setting_of(&none, "pressure_size_clamped"), None);
     }
 
     #[test]
