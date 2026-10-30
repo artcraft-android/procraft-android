@@ -102,7 +102,9 @@ impl Input {
     }
 
     /// Acts on `event` (`consumed` when the interface took it; `over` tells whether a point is on
-    /// the interface rather than the canvas). True if anything changed.
+    /// the interface rather than the canvas). True if anything changed. Presses go by `over` alone:
+    /// `consumed` is worked out from the last frame, so a press that comes straight after the
+    /// pointer (or a finger) arrives from the interface would count as the interface's.
     pub fn on_event(
         &mut self,
         session: &CanvasSession,
@@ -146,15 +148,12 @@ impl Input {
                 let Some(p) = self.cursor else { return false };
                 match (button, state) {
                     (MouseButton::Left | MouseButton::Middle, ElementState::Pressed)
-                        if self.down.is_empty()
-                            && !consumed
-                            && !over(p)
-                            && (self.space || *button == MouseButton::Middle) =>
+                        if self.down.is_empty() && !over(p) && (self.space || *button == MouseButton::Middle) =>
                     {
                         self.panning = true;
                         false
                     }
-                    (MouseButton::Left, ElementState::Pressed) if !self.panning && !consumed && !over(p) => {
+                    (MouseButton::Left, ElementState::Pressed) if !self.panning && !over(p) => {
                         self.pressed(session, MOUSE, PointerKind::Mouse, p, 1.0);
                         true
                     }
@@ -195,18 +194,12 @@ impl Input {
                 session.view_gesture(p.0, p.1, 0.0, 0.0, 1.0, -delta.to_radians());
                 true
             }
-            WindowEvent::Touch(touch) => self.on_touch(session, touch, consumed, &over),
+            WindowEvent::Touch(touch) => self.on_touch(session, touch, &over),
             _ => false,
         }
     }
 
-    fn on_touch(
-        &mut self,
-        session: &CanvasSession,
-        touch: &Touch,
-        consumed: bool,
-        over: &impl Fn((f32, f32)) -> bool,
-    ) -> bool {
+    fn on_touch(&mut self, session: &CanvasSession, touch: &Touch, over: &impl Fn((f32, f32)) -> bool) -> bool {
         let p = (touch.location.x as f32, touch.location.y as f32);
         // the platform gives a pen's pressure, and none for a finger
         let pen = touch.force.map(|f| f.normalized() as f32);
@@ -216,7 +209,7 @@ impl Input {
         match touch.phase {
             TouchPhase::Started => {
                 // the first touch must land on the canvas; more may land anywhere
-                if self.down.is_empty() && (consumed || over(p)) {
+                if self.down.is_empty() && over(p) {
                     return false;
                 }
                 self.pressed(session, touch.id, kind, p, pressure);

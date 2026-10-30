@@ -216,7 +216,7 @@ impl State {
         }
     }
 
-    fn transform_box(&self) -> Option<TransformBox> {
+    pub(crate) fn transform_box(&self) -> Option<TransformBox> {
         let t = self.transform.as_ref()?;
         let flat = |points: &mut dyn Iterator<Item = &Vec2>| points.flat_map(|p| [p.x, p.y]).collect::<Vec<f32>>();
         let mesh = t.warp();
@@ -252,7 +252,7 @@ impl State {
     }
 
     /// Window pixels to canvas pixels.
-    fn window_to_canvas(&self, x: f32, y: f32) -> Option<Vec2> {
+    pub(crate) fn window_to_canvas(&self, x: f32, y: f32) -> Option<Vec2> {
         self.view?.screen_to_canvas(Vec2::new(x, y)).filter(|p| p.is_finite())
     }
 }
@@ -500,5 +500,136 @@ impl CanvasSession {
         });
         let m = view.to_screen();
         vec![m.a, m.b, m.c, m.d, m.e, m.f]
+    }
+}
+
+/// How far the rotate node sits above the box's top edge, and the box-turning node below its
+/// bottom (points); how near a node a touch must land to take it, and a warp's control point.
+const ROTATE_LIFT: f32 = 34.5;
+const TURN_DROP: f32 = 35.5;
+const GRAB_RADIUS: f32 = 37.5;
+const MESH_GRAB_RADIUS: f32 = 15.0;
+
+/// The transform box on screen, in window pixels (x, y pairs): its corners (top left, top right,
+/// bottom right, bottom left), the middles of its edges (top, right, bottom, left), the rotate node
+/// above it, the node below it that turns the box alone, and the box's up direction.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct ScreenBox {
+    pub corners: Vec<f32>,
+    pub edges: Vec<f32>,
+    pub rotate: Vec<f32>,
+    pub turn: Vec<f32>,
+    pub up: Vec<f32>,
+}
+
+/// Canvas point (`x`, `y`) through the view `m` (`[a, b, c, d, e, f]`), in window pixels.
+fn to_screen(x: f32, y: f32, m: &[f32]) -> Option<(f32, f32)> {
+    let [a, b, c, d, e, f] = *m.get(..6)? else { return None };
+    Some((a * x + c * y + e, b * x + d * y + f))
+}
+
+/// The warp's control points a touch can take: the corners, or all 16 with the advanced mesh.
+#[uniffi::export]
+pub fn shown_mesh_points(advanced: bool) -> Vec<u8> {
+    if advanced { (0..16).collect() } else { vec![0, 3, 12, 15] }
+}
+
+/// Where a box with `corners` (canvas pixels) shows through the view `view`; `density` is pixels a
+/// point.
+#[uniffi::export]
+pub fn screen_box(corners: Vec<f32>, view: Vec<f32>, density: f32) -> Option<ScreenBox> {
+    let pts: Vec<(f32, f32)> =
+        corners.as_chunks::<2>().0.iter().take(4).map(|&[x, y]| to_screen(x, y, &view)).collect::<Option<_>>()?;
+    let [c0, c1, c2, c3] = pts[..] else { return None };
+    let corners = [c0, c1, c2, c3];
+    let mid = |a: (f32, f32), b: (f32, f32)| ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+    let edges = [mid(c0, c1), mid(c1, c2), mid(c2, c3), mid(c3, c0)];
+    let (top, bottom) = (edges[0], edges[2]);
+    let upward = (top.0 - bottom.0, top.1 - bottom.1);
+    let length = upward.0.hypot(upward.1);
+    let up = if length > 1e-3 { (upward.0 / length, upward.1 / length) } else { (0.0, -1.0) };
+    // the box's right, a quarter turn clockwise from up
+    let right = (-up.1, up.0);
+    let rotate = (top.0 + up.0 * ROTATE_LIFT * density, top.1 + up.1 * ROTATE_LIFT * density);
+    let turn = (
+        bottom.0 - up.0 * TURN_DROP * density + right.0 * density,
+        bottom.1 - up.1 * TURN_DROP * density + right.1 * density,
+    );
+    let flat = |ps: &[(f32, f32)]| ps.iter().flat_map(|&(x, y)| [x, y]).collect();
+    Some(ScreenBox {
+        corners: flat(&corners),
+        edges: flat(&edges),
+        rotate: vec![rotate.0, rotate.1],
+        turn: vec![turn.0, turn.1],
+        up: vec![up.0, up.1],
+    })
+}
+
+/// The handle a touch at window point (`x`, `y`) takes on the box `shown`: the nearest node within
+/// reach, otherwise a move.
+#[uniffi::export]
+pub fn handle_at(shown: ScreenBox, x: f32, y: f32, density: f32) -> TransformHandle {
+    let point = |v: &[f32], i: usize| Some((*v.get(2 * i)?, *v.get(2 * i + 1)?));
+    let mut nodes =
+        vec![(TransformHandle::Rotate, point(&shown.rotate, 0)), (TransformHandle::TurnBox, point(&shown.turn, 0))];
+    for i in 0..4u8 {
+        nodes.push((TransformHandle::Corner { index: i }, point(&shown.corners, usize::from(i))));
+    }
+    for i in 0..4u8 {
+        nodes.push((TransformHandle::Edge { index: i }, point(&shown.edges, usize::from(i))));
+    }
+    let nearest = nodes
+        .into_iter()
+        .filter_map(|(h, at)| at.map(|(px, py)| (h, (px - x).hypot(py - y))))
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    match nearest {
+        Some((h, d)) if d <= GRAB_RADIUS * density => h,
+        _ => TransformHandle::Move,
+    }
+}
+
+/// In a warp with control points `mesh` (canvas pixels) seen through `view`: the shown control
+/// point a touch at window point (`x`, `y`) takes, otherwise the surface under it (a move).
+#[uniffi::export]
+pub fn mesh_handle_at(mesh: Vec<f32>, view: Vec<f32>, x: f32, y: f32, density: f32, advanced: bool) -> TransformHandle {
+    if mesh.len() < 32 {
+        return TransformHandle::Move;
+    }
+    let nearest = shown_mesh_points(advanced)
+        .into_iter()
+        .filter_map(|i| {
+            let k = usize::from(i);
+            let (px, py) = to_screen(*mesh.get(2 * k)?, *mesh.get(2 * k + 1)?, &view)?;
+            Some((i, (px - x).hypot(py - y)))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    match nearest {
+        Some((index, d)) if d <= MESH_GRAB_RADIUS * density => TransformHandle::Mesh { index },
+        _ => TransformHandle::Move,
+    }
+}
+
+#[cfg(test)]
+mod handles {
+    use super::*;
+
+    #[test]
+    fn a_box_shows_its_nodes_and_a_touch_takes_the_nearest() {
+        let view = vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let shown = screen_box(vec![0.0, 0.0, 100.0, 0.0, 100.0, 100.0, 0.0, 100.0], view.clone(), 1.0).unwrap();
+        assert_eq!(shown.edges, vec![50.0, 0.0, 100.0, 50.0, 50.0, 100.0, 0.0, 50.0]);
+        assert_eq!(shown.rotate, vec![50.0, -34.5]);
+        assert_eq!(shown.turn, vec![51.0, 135.5]);
+        assert_eq!(handle_at(shown.clone(), 3.0, 4.0, 1.0), TransformHandle::Corner { index: 0 });
+        assert_eq!(handle_at(shown.clone(), 50.0, -30.0, 1.0), TransformHandle::Rotate);
+        assert_eq!(handle_at(shown, 50.0, 50.0, 1.0), TransformHandle::Move);
+        // a warp's corner points, and its inner ones only with the advanced mesh
+        let mesh: Vec<f32> = (0..16).flat_map(|i| [(i % 4) as f32 * 30.0, (i / 4) as f32 * 30.0]).collect();
+        assert_eq!(
+            mesh_handle_at(mesh.clone(), view.clone(), 1.0, 1.0, 1.0, false),
+            TransformHandle::Mesh { index: 0 }
+        );
+        assert_eq!(mesh_handle_at(mesh.clone(), view.clone(), 31.0, 31.0, 1.0, false), TransformHandle::Move);
+        assert_eq!(mesh_handle_at(mesh, view, 31.0, 31.0, 1.0, true), TransformHandle::Mesh { index: 5 });
     }
 }

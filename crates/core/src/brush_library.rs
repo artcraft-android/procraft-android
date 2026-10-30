@@ -891,4 +891,16 @@ mod keeping {
         assert!((next.info().size - 0.37).abs() < 1e-4, "{}", next.info().size);
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn a_file_chosen_to_import_is_told_apart_by_its_name_and_contents() {
+        let s = CanvasSession::new(32, 32);
+        let file = s.brush_as_file(0, 0).unwrap_or_default();
+        let sets = s.brush_library().len();
+        assert_eq!(s.import_any_brushes(file.clone(), Some("Mine.brush".into()), 0), Some(0));
+        assert_eq!(s.brush_library().len(), sets + 1, "into a set of imported brushes");
+        assert_eq!(s.import_any_brushes(file, None, 0), Some(0), "no name: told by its contents");
+        assert_eq!(s.import_any_brushes(vec![1, 2, 3], Some("junk.abr".into()), 0), None);
+        assert_eq!(s.import_any_brushes(vec![1, 2, 3], None, 0), None);
+    }
 }

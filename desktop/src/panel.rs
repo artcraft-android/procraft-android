@@ -62,15 +62,106 @@ pub fn frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, arrow_x: 
         pb.quad_to(arrow_x, 0.0, arrow_x + tip, tip);
         pb.line_to(arrow_x + half + tip, ARROW_HEIGHT + 0.5);
         pb.close();
-        // the arrow and the body are one shape: filled as one, without an even-odd seam
+        frost(pixmap, pb, t);
+    });
+}
+
+/// Draws a panel at `rect` (arrow included) with its arrow on its `left` side, else its right, the
+/// tip `arrow_y` from its top, and `corner` rounding: the shadow round it, then its frosted body,
+/// whose blur goes into `backdrops` (window pixels). Returns the body.
+#[allow(clippy::too_many_arguments)]
+pub fn side_frame(
+    ui: &Ui,
+    look: &mut Look,
+    slot: &'static str,
+    rect: Rect,
+    arrow_y: f32,
+    left: bool,
+    corner: f32,
+    backdrops: &mut Vec<f32>,
+) -> Rect {
+    let body = if left {
+        Rect::from_min_max(pos2(rect.left() + ARROW_HEIGHT, rect.top()), rect.max)
+    } else {
+        Rect::from_min_max(rect.min, pos2(rect.right() - ARROW_HEIGHT, rect.bottom()))
+    };
+    let ppp = ui.ctx().pixels_per_point();
+    backdrops.extend([body.left(), body.top(), body.right(), body.bottom(), corner].map(|v| v * ppp));
+    backdrops.push(1.0);
+    let shadow = egui::epaint::Shadow {
+        offset: [0, 0],
+        blur: POPOVER_SHADOW_RADIUS as u8,
+        spread: 0,
+        color: argb(POPOVER_SHADOW),
+    };
+    ui.painter().add(shadow.as_shape(body, corner));
+    let size = rect.size();
+    let key = ((arrow_y * 100.0).round() as i32, left, (corner * 10.0) as i32);
+    look.shape(ui, slot, key, rect, |pixmap, t| {
+        let mut pb = tiny_skia::PathBuilder::new();
+        let (half, tip, w) = (ARROW_HEIGHT, 2.0, size.x);
+        if left {
+            round_rect(&mut pb, Rect::from_min_max(pos2(ARROW_HEIGHT, 0.0), size.to_pos2()), [corner; 4]);
+            pb.move_to(ARROW_HEIGHT + 0.5, arrow_y - half - tip);
+            pb.line_to(tip, arrow_y - tip);
+            pb.quad_to(0.0, arrow_y, tip, arrow_y + tip);
+            pb.line_to(ARROW_HEIGHT + 0.5, arrow_y + half + tip);
+        } else {
+            round_rect(&mut pb, Rect::from_min_max(Pos2::ZERO, pos2(w - ARROW_HEIGHT, size.y)), [corner; 4]);
+            pb.move_to(w - ARROW_HEIGHT - 0.5, arrow_y - half - tip);
+            pb.line_to(w - tip, arrow_y - tip);
+            pb.quad_to(w, arrow_y, w - tip, arrow_y + tip);
+            pb.line_to(w - ARROW_HEIGHT - 0.5, arrow_y + half + tip);
+        }
+        pb.close();
+        frost(pixmap, pb, t);
+    });
+    body
+}
+
+/// Draws a panel at `rect` (arrow included) with its arrow under it, the tip `arrow_x` from its
+/// left edge, filled `colour` (nothing shows through): the shadow round it, then the panel.
+/// Returns its body.
+pub fn below_frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, arrow_x: f32, colour: u32) -> Rect {
+    let body = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - ARROW_HEIGHT));
+    let shadow = egui::epaint::Shadow {
+        offset: [0, 0],
+        blur: POPOVER_SHADOW_RADIUS as u8,
+        spread: 0,
+        color: argb(POPOVER_SHADOW),
+    };
+    ui.painter().add(shadow.as_shape(body, POPOVER_CORNER));
+    let size = rect.size();
+    look.shape(ui, slot, ((arrow_x * 100.0).round() as i32, colour), rect, |pixmap, t| {
+        let mut pb = tiny_skia::PathBuilder::new();
+        let (half, tip, h) = (ARROW_HEIGHT, 2.0, size.y);
+        round_rect(&mut pb, Rect::from_min_max(Pos2::ZERO, pos2(size.x, h - ARROW_HEIGHT)), [POPOVER_CORNER; 4]);
+        pb.move_to(arrow_x - half - tip, h - ARROW_HEIGHT - 0.5);
+        pb.line_to(arrow_x - tip, h - tip);
+        pb.quad_to(arrow_x, h, arrow_x + tip, h - tip);
+        pb.line_to(arrow_x + half + tip, h - ARROW_HEIGHT - 0.5);
+        pb.close();
         let mut paint = tiny_skia::Paint::default();
-        let [r, g, b, a] = argb(POPOVER_FROST).to_srgba_unmultiplied();
+        let [r, g, b, a] = argb(colour).to_srgba_unmultiplied();
         paint.set_color_rgba8(r, g, b, a);
         paint.anti_alias = true;
         if let Some(path) = pb.finish() {
             pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, t, None);
         }
     });
+    body
+}
+
+/// A panel's outline filled with its frosted material: the arrow and the body are one shape,
+/// filled as one, without an even-odd seam.
+fn frost(pixmap: &mut tiny_skia::Pixmap, pb: tiny_skia::PathBuilder, t: tiny_skia::Transform) {
+    let mut paint = tiny_skia::Paint::default();
+    let [r, g, b, a] = argb(POPOVER_FROST).to_srgba_unmultiplied();
+    paint.set_color_rgba8(r, g, b, a);
+    paint.anti_alias = true;
+    if let Some(path) = pb.finish() {
+        pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, t, None);
+    }
 }
 
 /// Fills a rounded rectangle (corners `[top left, top right, bottom right, bottom left]`) kept as

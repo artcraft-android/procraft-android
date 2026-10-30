@@ -35,8 +35,12 @@ import io.github.artcraftandroid.procraft.core.GuideType
 import io.github.artcraftandroid.procraft.core.SymmetryType
 import io.github.artcraftandroid.procraft.core.HalftoneKind
 import io.github.artcraftandroid.procraft.core.NoiseKind
+import io.github.artcraftandroid.procraft.core.Adjustment
+import io.github.artcraftandroid.procraft.core.GesturePurpose
+import io.github.artcraftandroid.procraft.core.QuickAction
 import io.github.artcraftandroid.procraft.core.QuickShapeInfo
 import io.github.artcraftandroid.procraft.core.QuickShapeKind
+import io.github.artcraftandroid.procraft.core.Trigger
 import io.github.artcraftandroid.procraft.core.GuideSettings
 import io.github.artcraftandroid.procraft.core.Interpolation
 import io.github.artcraftandroid.procraft.core.LayerInfo
@@ -101,46 +105,6 @@ enum class Screen { GALLERY, CANVAS }
 
 /** A popover over the transform toolbar. */
 enum class TransformPopup { NONE, SNAPPING, INTERPOLATION }
-
-/**
- * The adjustments, in the menu's order; [ready] once made, [swiped] for those whose one amount is
- * dragged across the canvas.
- */
-/**
- * An adjustment: [swiped] ones have one amount dragged across the canvas, which painting it on
- * ([paintable], Pencil) starts at [pencilAmount] (null: as it was).
- */
-enum class Adjustment(val label: String, val ready: Boolean = false, val swiped: Boolean = false, val pencilAmount: Float? = null) {
-    HSB("Hue, Saturation, Brightness", ready = true),
-    COLOR_BALANCE("Color Balance", ready = true),
-    CURVES("Curves", ready = true),
-    GRADIENT_MAP("Gradient Map", ready = true, swiped = true),
-    GAUSSIAN_BLUR("Gaussian Blur", ready = true, swiped = true, pencilAmount = 0.6f),
-    MOTION_BLUR("Motion Blur", ready = true, swiped = true, pencilAmount = 0.6f),
-    PERSPECTIVE_BLUR("Perspective Blur", ready = true, swiped = true, pencilAmount = 0.4f),
-    NOISE("Noise", ready = true, swiped = true, pencilAmount = 0.69f),
-    SHARPEN("Sharpen", ready = true, swiped = true, pencilAmount = 0.4f),
-    BLOOM("Bloom", ready = true, swiped = true, pencilAmount = 0.5f),
-    GLITCH("Glitch", ready = true, swiped = true, pencilAmount = 0.5f),
-    HALFTONE("Halftone", ready = true, swiped = true, pencilAmount = 0.12f),
-    CHROMATIC_ABERRATION("Chromatic Aberration", ready = true, swiped = true, pencilAmount = 1f),
-    LIQUIFY("Liquify", ready = true),
-    CLONE("Clone", ready = true),
-    ;
-
-    /** Can be painted on with the brush instead of changing the whole layer. */
-    val paintable get() = this != LIQUIFY && this != CLONE
-
-    companion object {
-        /** The menu's groups: colour, blurs, effects, painting. */
-        val groups = listOf(
-            listOf(HSB, COLOR_BALANCE, CURVES, GRADIENT_MAP),
-            listOf(GAUSSIAN_BLUR, MOTION_BLUR, PERSPECTIVE_BLUR),
-            listOf(NOISE, SHARPEN, BLOOM, GLITCH, HALFTONE, CHROMATIC_ABERRATION),
-            listOf(LIQUIFY, CLONE),
-        )
-    }
-}
 
 /** The selection tool's ways of making a selection. */
 enum class SelectionKind(val label: String) { AUTOMATIC("Automatic"), FREEHAND("Freehand"), RECTANGLE("Rectangle"), ELLIPSE("Ellipse") }
@@ -1845,39 +1809,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** The gesture settings as the canvas's touches (in the shared core) take them. */
-    fun touchSettings(): io.github.artcraftandroid.procraft.core.TouchSettings {
-        fun action(p: GesturePurpose?): io.github.artcraftandroid.procraft.core.GestureAction? = when (p) {
-            GesturePurpose.SMUDGE -> io.github.artcraftandroid.procraft.core.GestureAction.SMUDGE
-            GesturePurpose.ERASE -> io.github.artcraftandroid.procraft.core.GestureAction.ERASE
-            GesturePurpose.ASSISTED -> io.github.artcraftandroid.procraft.core.GestureAction.ASSISTED
-            GesturePurpose.EYEDROPPER -> io.github.artcraftandroid.procraft.core.GestureAction.EYEDROPPER
-            GesturePurpose.QUICKSHAPE -> io.github.artcraftandroid.procraft.core.GestureAction.QUICK_SHAPE
-            GesturePurpose.QUICKMENU -> io.github.artcraftandroid.procraft.core.GestureAction.QUICK_MENU
-            GesturePurpose.FULL_SCREEN -> io.github.artcraftandroid.procraft.core.GestureAction.FULL_SCREEN
-            GesturePurpose.CLEAR_LAYER -> io.github.artcraftandroid.procraft.core.GestureAction.CLEAR_LAYER
-            GesturePurpose.COPY_PASTE -> io.github.artcraftandroid.procraft.core.GestureAction.COPY_PASTE
-            GesturePurpose.LAYER_SELECT -> io.github.artcraftandroid.procraft.core.GestureAction.LAYER_SELECT
-            GesturePurpose.HOVER, GesturePurpose.GENERAL, null -> null
-        }
-        val hold = gestures.purposeOf(Trigger.HOLD)
-        return io.github.artcraftandroid.procraft.core.TouchSettings(
-            fingerPaint = gestures.isOn(GesturePurpose.GENERAL, "FINGER_PAINT"),
-            undoTaps = !gestures.isOn(GesturePurpose.GENERAL, "NO_UNDO"),
-            rotate = gestures.isOn(GesturePurpose.GENERAL, "ROTATE"),
-            drawAndHold = gestures.isOn(GesturePurpose.QUICKSHAPE, "DRAW_HOLD"),
-            touch = action(gestures.purposeOf(Trigger.TOUCH)),
-            pen = action(gestures.purposeOf(Trigger.PEN)),
-            hold = action(hold),
-            modifyTouch = action(gestures.purposeOf(Trigger.MODIFY_TOUCH)),
-            modifyPen = action(gestures.purposeOf(Trigger.MODIFY_PEN)),
-            fourTap = action(gestures.purposeOf(Trigger.FOUR_TAP)),
-            threeSwipe = action(gestures.purposeOf(Trigger.THREE_SWIPE)),
-            scrub = gestures.isOn(GesturePurpose.CLEAR_LAYER, Trigger.SCRUB),
-            holdMs = gestures.delay(hold ?: GesturePurpose.EYEDROPPER) * 1000.0,
-            quickshapeMs = gestures.delay(GesturePurpose.QUICKSHAPE) * 1000.0,
-            rapidUndoMs = rapidUndoDelay * 1000.0,
-        )
-    }
+    fun touchSettings(): io.github.artcraftandroid.procraft.core.TouchSettings = gestures.touchSettings(rapidUndoDelay * 1000.0)
 
     fun useModify() {
         modifyUsed = true
@@ -2212,16 +2144,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The QuickMenu's actions, in order round from the top. */
     /** The QuickMenu's buttons, clockwise from the top: each set to an action (a hold changes it). */
-    var quickMenuSlots by mutableStateOf(
-        interfacePrefs.getString(QUICK_MENU, null)?.split(',')?.map { n -> QuickAction.entries.firstOrNull { it.name == n } ?: QuickAction.NONE }
-            ?.takeIf { it.size == QuickAction.DEFAULTS.size } ?: QuickAction.DEFAULTS,
-    )
+    var quickMenuSlots by mutableStateOf(io.github.artcraftandroid.procraft.core.quickMenuSlots(interfacePrefs.getString(QUICK_MENU, null)))
         private set
 
     fun setQuickSlot(i: Int, a: QuickAction) {
         if (i !in quickMenuSlots.indices) return
         quickMenuSlots = quickMenuSlots.toMutableList().also { it[i] = a }
-        interfacePrefs.edit().putString(QUICK_MENU, quickMenuSlots.joinToString(",") { it.name }).apply()
+        interfacePrefs.edit().putString(QUICK_MENU, io.github.artcraftandroid.procraft.core.quickMenuSaved(quickMenuSlots)).apply()
     }
 
     /**
@@ -2333,7 +2262,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             QuickAction.QUICKSHAPE -> quickShapeLast()
             QuickAction.QUICKSHAPE_ON -> gestures.set(GesturePurpose.QUICKSHAPE, "DRAW_HOLD", !gestures.isOn(GesturePurpose.QUICKSHAPE, "DRAW_HOLD"))
             QuickAction.LAYER_SELECT -> layerSelectAt(at)
-            QuickAction.GUIDE_2D -> toggleGuideKind(GuideType.GRID)
+            QuickAction.GUIDE2D -> toggleGuideKind(GuideType.GRID)
             QuickAction.GUIDE_ISOMETRIC -> toggleGuideKind(GuideType.ISOMETRIC)
             QuickAction.GUIDE_PERSPECTIVE -> toggleGuideKind(GuideType.PERSPECTIVE)
             QuickAction.GUIDE_SYMMETRY -> toggleGuideKind(GuideType.SYMMETRY)
@@ -3353,7 +3282,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             val name = withContext(Dispatchers.IO) { fileName(uri) }
             // the name says which kind, when it has one we know; else our own kinds first, then
             // the other apps' (each told apart by its contents)
-            val added = if (name != null && isOtherBrushFile(name)) {
+            val added = session?.let { s ->
+                // the shared core tells the kinds apart
+                val set = withContext(Dispatchers.Default) { s.importAnyBrushes(bytes, name, shownSet.toUInt()) }
+                set?.let {
+                    shownSet = it.toInt()
+                    libraryChanged()
+                } != null
+            } ?: if (name != null && isOtherBrushFile(name)) {
                 addOtherBrushes(bytes, name)
             } else {
                 addBrushes(bytes) || addOtherBrushes(bytes, name ?: "Imported")

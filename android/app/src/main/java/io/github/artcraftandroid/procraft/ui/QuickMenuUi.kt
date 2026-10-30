@@ -23,7 +23,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import io.github.artcraftandroid.procraft.canvas.QuickAction
+import io.github.artcraftandroid.procraft.canvas.ADJUSTMENTS_LISTED
+import io.github.artcraftandroid.procraft.canvas.LISTED
+import io.github.artcraftandroid.procraft.canvas.adjustment
+import io.github.artcraftandroid.procraft.canvas.button
+import io.github.artcraftandroid.procraft.canvas.label
+import io.github.artcraftandroid.procraft.core.QuickAction
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope

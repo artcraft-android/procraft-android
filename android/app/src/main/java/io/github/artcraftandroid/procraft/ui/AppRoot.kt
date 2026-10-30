@@ -30,7 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.viewinterop.AndroidView
-import io.github.artcraftandroid.procraft.canvas.Adjustment
+import io.github.artcraftandroid.procraft.core.Adjustment
 import io.github.artcraftandroid.procraft.canvas.CanvasSurfaceView
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.Panel

@@ -23,6 +23,9 @@ import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.pow
+import io.github.artcraftandroid.procraft.core.Adjustment
+import io.github.artcraftandroid.procraft.core.GesturePurpose
+import io.github.artcraftandroid.procraft.core.Trigger
 
 /**
  * The canvas: a surface the Rust renderer draws into, and the touch input that drives it.
@@ -420,6 +423,14 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             // Continue filling's touches are still this view's own (see pour()), its fills on the
             // view model's fill thread
             is TouchCommand.FillThreshold, TouchCommand.Filled -> Unit
+            // so are a transform's (see Mode.TRANSFORM)
+            TouchCommand.TransformTouched, is TouchCommand.TransformMoved, is TouchCommand.TransformHeld,
+            is TouchCommand.TransformLetGo, is TouchCommand.TransformNumeric -> Unit
+            // and a selection's (see Mode.SELECT)
+            is TouchCommand.SelectionDrag, is TouchCommand.SelectionThreshold, TouchCommand.FreehandChanged,
+            TouchCommand.SelectionChanged -> Unit
+            // and an adjustment's (see Mode.ADJUST)
+            TouchCommand.AdjustChanged, is TouchCommand.AdjustMenu -> Unit
         }
     }
 

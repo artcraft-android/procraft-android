@@ -1,15 +1,23 @@
 //! The brush library, as the Android app's (ui/BrushLibrary.kt): sets on the left, the shown set's
-//! brushes with a sample stroke on the right. Tapping a set shows it; tapping a brush chooses it.
+//! brushes with a sample stroke on the right. Tapping a set shows it, the shown one for its menu
+//! (rename, duplicate, share, delete); tapping a brush chooses it; sliding one left shows Share,
+//! Duplicate and Delete; holding one drags it to another place or set. The plus makes a brush or a
+//! set, or brings brushes in from a file.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align2, Color32, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
+use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
+use egui::{
+    Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, pos2, vec2,
+};
 use procraft_core::{BrushInfo, BrushSetInfo, CanvasSession, ToolKind};
 
+use crate::alert::{Alert, Answer};
 use crate::icons;
-use crate::look::{Look, Weight, argb, pc};
+use crate::look::{Look, Weight, argb, pc, text};
+use crate::menu::{self, Entry, Menu};
 use crate::panel::{self, PANEL_GLYPH, PANEL_TITLE};
 
 const LIBRARY_WIDTH: f32 = 440.0;
@@ -27,6 +35,29 @@ const NAME_PILL: u32 = 0x80000000;
 /// The sample stroke's picture: half its own canvas, the cell showing it across its width.
 const PREVIEW: (u32, u32) = (530, 162);
 const PREVIEWS_A_FRAME: usize = 3;
+/// Menus stay below the top bar; the set's menu sits this far left of it.
+const MENU_TOP: f32 = 57.0;
+const SET_MENU_GAP: f32 = 6.0;
+/// The set's menu: frosted glass over the canvas, edged.
+const SET_MENU_GLASS: menu::Glass =
+    menu::Glass { fill: menu::GLASS, edge: Some(menu::EDGE), frost: true, corner: menu::LIBRARY_CORNER };
+/// A brush slid left shows three buttons filling its place, this far apart.
+const SWIPE_GAP: f32 = 5.5;
+const SWIPE_FILL: u32 = 0xFF3F3F3F;
+const SWIPE_INK: u32 = 0xFFC5C5C5;
+const SWIPE_DELETE: u32 = 0xFFFF3A46;
+/// The set icons to choose from: five across, each cell this big, in a panel this big (edged,
+/// nearly solid over the library), 11 left of the set, kept 25 above the window's bottom.
+const PICKER_COLUMNS: usize = 5;
+const PICKED_SET_ICONS: usize = 42;
+const PICKER: (f32, f32) = (250.0, 325.0);
+const PICKER_CELL: f32 = 48.0;
+const PICKER_INSET: f32 = 11.0;
+const PICKER_MARGIN: f32 = 25.0;
+const PICKER_GLASS: menu::Glass = menu::Glass { fill: 0xFA303335, edge: Some(menu::EDGE), frost: false, corner: 26.0 };
+/// A press moved this far (points) slides or scrolls; held still this long, it drags the brush.
+const SLOP: f32 = 8.0;
+const HOLD: Duration = Duration::from_millis(400);
 
 /// A brush's sample stroke, and whether it runs under the name (which then sits on a dark pill).
 struct Preview {
@@ -34,17 +65,88 @@ struct Preview {
     shaded: bool,
 }
 
+/// What a press on a brush turned out to be.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Way {
+    Undecided,
+    /// Sideways: the brush slides.
+    Swipe,
+    /// Held: the brush is dragged to another place or set.
+    Drag,
+    /// Up or down first: the list scrolls.
+    Scroll,
+}
+
+/// A press on a brush, followed until let go: which (set and place), where and when it went down,
+/// what it became, how far the brush was slid, where on it the press took hold, and how far the
+/// pointer has moved since the last frame.
+#[derive(Clone, Copy)]
+struct Press {
+    key: (u32, u32),
+    origin: Pos2,
+    since: Instant,
+    way: Way,
+    start: f32,
+    grab: Vec2,
+    last: Pos2,
+}
+
+/// What Delete asks about.
+#[derive(Clone, Copy)]
+enum Deleting {
+    Set(u32),
+    Brush(u32, u32),
+}
+
 #[derive(Default)]
 pub struct Library {
     /// The set shown, once one is tapped (else the current brush's).
     shown_set: Option<usize>,
     previews: HashMap<(u32, u32), Option<Preview>>,
+    plus_menu: Menu,
+    /// The shown set's menu, and which set it is for.
+    set_menu: Menu,
+    set_menu_for: Option<usize>,
+    /// The set's icons to choose from (Customize icon), and whether it has been scrolled to the
+    /// set's own.
+    icon_picker: Menu,
+    picker_scrolled: bool,
+    /// A set renamed in place: which, the name as typed, and whether it has been focused.
+    renaming_set: Option<(usize, String, bool)>,
+    deleting: Alert,
+    delete_what: Option<Deleting>,
+    press: Option<Press>,
+    /// How far each brush is slid (points, left negative), and the brush slid open.
+    slid: HashMap<(u32, u32), f32>,
+    swiped: Option<(u32, u32)>,
+    /// Where the sets and the shown set's brushes were last drawn, for a dragged brush to land.
+    set_rects: Vec<(usize, Rect)>,
+    brush_rects: Vec<((u32, u32), Rect)>,
+    /// The brushes list to scroll by (a press moved up or down on a brush).
+    scroll_by: f32,
+    /// The library changed: the app keeps it; its sample strokes are drawn again next frame (not
+    /// dropped in the middle of one that shows them).
+    pub changed: bool,
+    stale: bool,
 }
 
 impl Library {
     /// The tool changed: the library shows its brush's set again.
     pub fn tool_changed(&mut self) {
         self.shown_set = None;
+    }
+
+    /// A menu or question of the library's is up: a press elsewhere only closes it.
+    pub fn modal(&self) -> bool {
+        self.plus_menu.is_open() || self.set_menu.is_open() || self.icon_picker.is_open() || self.deleting.is_open()
+    }
+
+    /// The library changed: its sample strokes are drawn again (they go by place), and it is kept.
+    fn library_changed(&mut self) {
+        self.stale = true;
+        self.slid.clear();
+        self.swiped = None;
+        self.changed = true;
     }
 
     /// Shows the library hanging from `button`; returns where it is (points).
@@ -65,9 +167,23 @@ impl Library {
             pos2(left, top),
             vec2(LIBRARY_WIDTH, (screen.bottom() - BOTTOM_MARGIN - top).max(200.0)),
         );
+        if std::mem::take(&mut self.stale) {
+            self.previews.clear();
+        }
         let library = session.brush_library();
         let current = session.current_brush();
         let shown = self.shown_set.unwrap_or(current.set as usize).min(library.len().saturating_sub(1));
+        self.settle_slides(ctx);
+        // the set a dragged brush is over
+        let dragging = self.press.filter(|p| p.way == Way::Drag);
+        let over_set = dragging.and_then(|p| self.set_rects.iter().find(|(_, r)| r.contains(p.last)).map(|(i, _)| *i));
+        let mut set_rects = Vec::new();
+        let mut brush_rects = Vec::new();
+        let mut plus = Rect::NOTHING;
+        let mut lists = Rect::NOTHING;
+        let mut set_tapped = None;
+        let mut brush_tapped = None;
+        let mut swipe_chose = None;
         egui::Area::new(egui::Id::unique("brush library")).fixed_pos(rect.min).order(egui::Order::Foreground).show(
             ctx,
             |ui| {
@@ -81,11 +197,14 @@ impl Library {
                     ToolKind::Paint => "Brush library",
                 };
                 panel::header(ui, look, body, title, 20.0, true, false);
-                // the plus: new brushes and sets, and importing (its menu comes later)
-                let plus = Rect::from_min_size(pos2(body.right() - 12.0 - 41.0, body.top() + 12.0), vec2(41.0, 40.0));
+                // the plus: new brushes and sets, and importing
+                plus = Rect::from_min_size(pos2(body.right() - 12.0 - 41.0, body.top() + 12.0), vec2(41.0, 40.0));
                 look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(PANEL_GLYPH));
+                if ui.interact(plus, ui.scope_id().with("plus"), Sense::click()).clicked() {
+                    self.plus_menu.open();
+                }
 
-                let lists = Rect::from_min_max(pos2(body.left(), body.top() + HEADER_HEIGHT), body.max);
+                lists = Rect::from_min_max(pos2(body.left(), body.top() + HEADER_HEIGHT), body.max);
                 let sets = Rect::from_min_size(lists.min, vec2(SETS_WIDTH, lists.height()));
                 let brushes = Rect::from_min_max(pos2(lists.left() + SETS_WIDTH, lists.top()), lists.max);
                 if SET_COLUMN >> 24 != 0 {
@@ -101,8 +220,11 @@ impl Library {
                         .show(ui, |ui| {
                             ui.add_space(12.0);
                             for (i, set) in library.iter().enumerate() {
-                                if set_row(ui, look, set, i == shown).clicked() && i != shown {
-                                    self.shown_set = Some(i);
+                                let fill = if over_set == Some(i) { Some(argb(pc::ACCENT)) } else { None };
+                                let (response, at) = self.set_row(ui, look, session, i, set, i == shown, fill);
+                                set_rects.push((i, at));
+                                if response.clicked() {
+                                    set_tapped = Some(i);
                                 }
                                 ui.add_space(12.0);
                             }
@@ -113,6 +235,11 @@ impl Library {
                         .id_salt(("library brushes", shown))
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
+                            // a press moved up or down on a brush scrolls the list
+                            let by = std::mem::take(&mut self.scroll_by);
+                            if by != 0.0 {
+                                ui.scroll_with_delta(vec2(0.0, by));
+                            }
                             ui.add_space(9.75);
                             let Some(set) = library.get(shown) else { return };
                             let mut made = 0;
@@ -120,100 +247,574 @@ impl Library {
                                 // the current brush, or the brush last chosen in this set
                                 let selected =
                                     (b.set, b.index) == (current.set, current.index) || set.chosen == Some(b.index);
-                                if self.brush_row(ui, session, b, selected, &mut made).clicked() {
-                                    session.select_brush(b.set, b.index);
+                                let (response, cell) = self.brush_row(ui, look, session, b, selected, &mut made);
+                                brush_rects.push(((b.set, b.index), cell));
+                                if let Some(r) = response {
+                                    if r.0 {
+                                        brush_tapped = Some((b.set, b.index));
+                                    }
+                                    if let Some(chose) = r.1 {
+                                        swipe_chose = Some(((b.set, b.index), b.name.clone(), chose));
+                                    }
                                 }
                                 ui.add_space(BRUSH_GAP);
                             }
                             ui.add_space(12.0 - BRUSH_GAP);
                         });
                 });
+                // the dragged brush follows the pointer, over the lists
+                if let Some(p) = dragging
+                    && let Some(b) = library.iter().flat_map(|s| &s.brushes).find(|b| (b.set, b.index) == p.key)
+                {
+                    let size = self
+                        .brush_rects
+                        .iter()
+                        .find(|(k, _)| *k == p.key)
+                        .map_or(vec2(240.0, BRUSH_HEIGHT), |(_, r)| r.size());
+                    let at = Rect::from_min_size(p.last - p.grab, size);
+                    let painter = ui.painter_at(lists);
+                    painter.rect_filled(at, 12, argb(pc::ACCENT).gamma_multiply(0.9));
+                    self.preview_in(&painter, (b.set, b.index), at);
+                    let name = one_line(ui, &b.name, 14.0, Weight::SemiBold, Color32::WHITE, at.width() - 28.0);
+                    painter.galley(at.min + vec2(18.0, 11.0), name, Color32::WHITE);
+                    ctx.request_repaint();
+                }
             },
         );
+        self.set_rects = set_rects;
+        self.brush_rects = brush_rects;
+        self.follow_press(ctx, session);
+
+        if let Some(i) = set_tapped {
+            if i == shown {
+                self.set_menu_for = Some(i);
+                self.set_menu.open();
+            } else {
+                self.shown_set = Some(i);
+            }
+        }
+        if let Some(key) = brush_tapped {
+            // with a brush slid open, a tap only closes it
+            if self.swiped.is_some() {
+                self.swiped = None;
+            } else {
+                session.select_brush(key.0, key.1);
+                self.changed = true;
+            }
+        }
+        if let Some((key, name, chose)) = swipe_chose {
+            self.swiped = None;
+            match chose {
+                Swiped::Share => {
+                    if let Some(bytes) = session.brush_as_file(key.0, key.1) {
+                        crate::files::save_file(&bytes, &name, "brush", "Brush");
+                    }
+                }
+                Swiped::Duplicate => {
+                    if session.duplicate_brush(key.0, key.1).is_some() {
+                        self.library_changed();
+                    }
+                }
+                Swiped::Delete => self.ask_delete(Deleting::Brush(key.0, key.1)),
+            }
+        }
+        self.plus_menu(ctx, look, session, plus, shown, backdrops);
+        self.set_menu(ctx, look, session, &library, backdrops);
+        if self.deleting.show(ctx, look) == Some(Answer::Action) {
+            match self.delete_what.take() {
+                Some(Deleting::Set(i)) => {
+                    if session.delete_brush_set(i) {
+                        let at = i as usize;
+                        self.shown_set = Some(if shown >= at { shown.saturating_sub(1) } else { shown });
+                        self.library_changed();
+                    }
+                }
+                Some(Deleting::Brush(set, index)) if session.delete_brush(set, index) => self.library_changed(),
+                Some(Deleting::Brush(..)) | None => {}
+            }
+        }
         rect
     }
 
-    /// A brush: its sample stroke filling the cell's height (its ends past the cell's sides),
-    /// under its name.
+    fn ask_delete(&mut self, what: Deleting) {
+        let title = match what {
+            Deleting::Set(_) => "Delete this set and its brushes?",
+            Deleting::Brush(..) => "Delete this brush?",
+        };
+        self.delete_what = Some(what);
+        self.deleting.open(title, "It can't be brought back.", "Delete", Some(&icons::TRASH));
+    }
+
+    /// The plus's menu, hanging below it, their right edges in line: a new brush, a new set, or
+    /// brushes from a file.
+    #[allow(clippy::too_many_arguments)]
+    fn plus_menu(
+        &mut self,
+        ctx: &egui::Context,
+        look: &mut Look,
+        session: &CanvasSession,
+        plus: Rect,
+        shown: usize,
+        backdrops: &mut Vec<f32>,
+    ) {
+        let ink = menu::INK;
+        let entries = [
+            Entry::Item(&icons::MENU_NEW_BRUSH, "Create new brush", ink),
+            Entry::Item(&icons::MENU_NEW_SET, "Create new set", ink),
+            Entry::Rule(11.0),
+            Entry::Item(&icons::MENU_FOLDER, "Import from Files", ink),
+        ];
+        let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
+        let rect = Rect::from_min_size(pos2(plus.right() - size.x, plus.bottom()), size);
+        let mut tapped = None;
+        self.plus_menu.show(ctx, "library plus menu", rect, rect.right_top(), menu::OVER_A_PANEL, backdrops, |ui| {
+            tapped = menu::entries(ui, look, rect, &entries);
+        });
+        let Some(i) = tapped else { return };
+        self.plus_menu.close();
+        match i {
+            // the studio is still to come here: the new brush is chosen
+            0 => {
+                if let Some(index) = session.new_brush(shown as u32) {
+                    session.select_brush(shown as u32, index);
+                    self.library_changed();
+                }
+            }
+            1 => {
+                let set = session.new_brush_set() as usize;
+                self.shown_set = Some(set);
+                let name = session.brush_library().get(set).map(|s| s.name.clone()).unwrap_or_default();
+                self.renaming_set = Some((set, name, false));
+                self.library_changed();
+            }
+            _ => {
+                let Some((bytes, name)) = crate::files::pick_file("Import brushes") else { return };
+                match session.import_any_brushes(bytes, Some(name), shown as u32) {
+                    Some(set) => {
+                        self.shown_set = Some(set as usize);
+                        self.library_changed();
+                    }
+                    None => crate::files::say("This file has no brushes in it."),
+                }
+            }
+        }
+    }
+
+    /// The shown set's menu, left of it and centred on it: Rename, Duplicate, Customize icon (its
+    /// icons to choose from beside it), Share, Delete.
+    fn set_menu(
+        &mut self,
+        ctx: &egui::Context,
+        look: &mut Look,
+        session: &CanvasSession,
+        library: &[BrushSetInfo],
+        backdrops: &mut Vec<f32>,
+    ) {
+        let Some(i) = self.set_menu_for else { return };
+        let Some(set_rect) = self.set_rects.iter().find(|(s, _)| *s == i).map(|(_, r)| *r) else { return };
+        let ink = menu::INK;
+        let own = library.get(i).map_or(0, |s| s.icon as usize);
+        let set_icon = icons::SET_ICONS.get(own).unwrap_or(&icons::BRUSH_SET);
+        let mut entries = vec![
+            Entry::Item(&icons::MENU_RENAME, "Rename", ink),
+            Entry::Item(&icons::MENU_DUPLICATE, "Duplicate", ink),
+            Entry::More(set_icon, "Customize icon", ink),
+            menu::DIVIDER,
+            Entry::Item(&icons::MENU_SHARE, "Share", ink),
+        ];
+        if library.len() > 1 {
+            entries.push(menu::DIVIDER);
+            entries.push(Entry::Item(&icons::MENU_TRASH, "Delete", menu::DANGER));
+        }
+        let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
+        let screen = ctx.content_rect();
+        let top = (set_rect.center().y - size.y / 2.0)
+            .clamp(screen.top() + MENU_TOP, (screen.bottom() - size.y).max(screen.top() + MENU_TOP));
+        let rect = Rect::from_min_size(pos2(set_rect.left() - SET_MENU_GAP - size.x, top), size);
+        let mut tapped = None;
+        self.set_menu.show(ctx, "library set menu", rect, rect.right_center(), SET_MENU_GLASS, backdrops, |ui| {
+            tapped = menu::entries(ui, look, rect, &entries);
+        });
+        if !self.set_menu.is_open() {
+            self.icon_picker.close();
+        }
+        // the icons to choose from: under the Customize icon row, or over it with no room below
+        let row_top = rect.top() + menu::entry_top(&entries, 2);
+        let (row_top, row_bottom) = (row_top, row_top + menu::ITEM_HEIGHT);
+        let below = row_bottom + PICKER.1 <= screen.bottom() - PICKER_MARGIN;
+        let picker = Rect::from_min_size(
+            pos2(set_rect.left() - PICKER_INSET, if below { row_bottom } else { row_top - PICKER.1 }),
+            vec2(PICKER.0, PICKER.1),
+        );
+        let mut picked = None;
+        let scrolled = self.picker_scrolled;
+        self.icon_picker.show(ctx, "set icon picker", picker, picker.min, PICKER_GLASS, backdrops, |ui| {
+            picked = icon_grid(ui, look, picker, own, scrolled);
+        });
+        self.picker_scrolled = self.icon_picker.is_open();
+        if let Some(icon) = picked {
+            self.icon_picker.close();
+            self.set_menu.close();
+            if session.set_brush_set_icon(i as u32, icon as u32) {
+                self.library_changed();
+            }
+            return;
+        }
+        let Some(Entry::Item(_, label, _) | Entry::More(_, label, _)) = tapped.and_then(|t| entries.get(t)) else {
+            return;
+        };
+        if *label == "Customize icon" {
+            if self.icon_picker.is_open() {
+                self.icon_picker.close();
+            } else {
+                self.icon_picker.open();
+            }
+            return;
+        }
+        self.set_menu.close();
+        match *label {
+            "Rename" => {
+                let name = library.get(i).map(|s| s.name.clone()).unwrap_or_default();
+                self.renaming_set = Some((i, name, false));
+            }
+            "Duplicate" => {
+                if let Some(copy) = session.duplicate_brush_set(i as u32) {
+                    self.shown_set = Some(copy as usize);
+                    self.library_changed();
+                }
+            }
+            "Share" => {
+                let name = library.get(i).map_or("Brushes", |s| s.name.as_str());
+                if let Some(bytes) = session.brush_set_as_file(i as u32) {
+                    crate::files::save_file(&bytes, name, "brushset", "Brush set");
+                }
+            }
+            _ => self.ask_delete(Deleting::Set(i as u32)),
+        }
+    }
+
+    /// The brushes not being slid go back, or open to their buttons, as they were left.
+    fn settle_slides(&mut self, ctx: &egui::Context) {
+        let dt = ctx.input(|i| i.stable_dt).min(0.05);
+        let widths: HashMap<(u32, u32), f32> = self.brush_rects.iter().map(|(k, r)| (*k, r.width())).collect();
+        let held = self.press.filter(|p| p.way == Way::Swipe).map(|p| p.key);
+        let mut keys: Vec<(u32, u32)> = self.slid.keys().copied().collect();
+        if let Some(open) = self.swiped
+            && !keys.contains(&open)
+        {
+            keys.push(open);
+        }
+        for key in keys {
+            if held == Some(key) {
+                continue;
+            }
+            let to = if self.swiped == Some(key) { -widths.get(&key).copied().unwrap_or(0.0) } else { 0.0 };
+            let v = self.slid.entry(key).or_insert(0.0);
+            *v += (to - *v) * (dt * 14.0).min(1.0);
+            if (to - *v).abs() < 0.5 {
+                *v = to;
+            } else {
+                ctx.request_repaint();
+            }
+            if *v == 0.0 {
+                self.slid.remove(&key);
+            }
+        }
+    }
+
+    /// Follows the press on a brush: moved sideways it slides the brush (let go past a third of
+    /// the way, it stays open); moved up or down, the list scrolls; held still, the brush is dragged
+    /// and, let go, goes to the top of the set it is over, or to the place of the brush it is over.
+    fn follow_press(&mut self, ctx: &egui::Context, session: &CanvasSession) {
+        let Some(mut p) = self.press else { return };
+        let (at, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
+        let at = at.unwrap_or(p.last);
+        let d = at - p.origin;
+        let width = self.brush_rects.iter().find(|(k, _)| *k == p.key).map_or(0.0, |(_, r)| r.width());
+        if down {
+            match p.way {
+                Way::Undecided => {
+                    if d.length() > SLOP {
+                        p.way = if d.x.abs() > d.y.abs() { Way::Swipe } else { Way::Scroll };
+                    } else if p.since.elapsed() >= HOLD {
+                        p.way = Way::Drag;
+                        self.swiped = None;
+                    } else {
+                        ctx.request_repaint_after(HOLD.saturating_sub(p.since.elapsed()));
+                    }
+                }
+                Way::Swipe => {
+                    self.slid.insert(p.key, (p.start + d.x).clamp(-width, 0.0));
+                    ctx.request_repaint();
+                }
+                Way::Scroll => self.scroll_by += at.y - p.last.y,
+                Way::Drag => ctx.request_repaint(),
+            }
+            p.last = at;
+            self.press = Some(p);
+            return;
+        }
+        self.press = None;
+        match p.way {
+            Way::Swipe => {
+                let slide = self.slid.get(&p.key).copied().unwrap_or(0.0);
+                let open = self.swiped == Some(p.key);
+                let opened = slide < -width / 3.0;
+                if opened != open {
+                    self.swiped = opened.then_some(p.key);
+                }
+            }
+            Way::Drag => {
+                // onto a set: to its top; onto a brush of this set: to its place
+                let (set, index) = p.key;
+                let moved = if let Some(&(to, _)) = self.set_rects.iter().find(|(_, r)| r.contains(at)) {
+                    to as u32 != set && session.move_brush(set, index, to as u32, 0)
+                } else if let Some(&(target, _)) = self.brush_rects.iter().find(|(_, r)| r.contains(at)) {
+                    target != p.key && session.move_brush(set, index, target.0, target.1)
+                } else {
+                    false
+                };
+                if moved {
+                    self.library_changed();
+                }
+            }
+            Way::Undecided | Way::Scroll => {}
+        }
+    }
+
+    /// A set: its icon and its name (two lines at most), or a field renaming it. Returns its
+    /// response and where it is.
+    #[allow(clippy::too_many_arguments)]
+    fn set_row(
+        &mut self,
+        ui: &mut Ui,
+        look: &mut Look,
+        session: &CanvasSession,
+        i: usize,
+        set: &BrushSetInfo,
+        selected: bool,
+        fill: Option<Color32>,
+    ) -> (egui::Response, Rect) {
+        let width = ui.available_width();
+        let (outer, response) = ui.allocate_exact_size(vec2(width, SET_HEIGHT), Sense::click());
+        let rect = outer.shrink2(vec2(12.0, 0.0));
+        ui.painter().rect_filled(rect, 12, fill.unwrap_or_else(|| panel::row_fill(selected, SET_CELL)));
+        let ink = if selected { Color32::WHITE } else { argb(PANEL_TITLE) };
+        // a 40 frame centred 24 in
+        let icon = icons::SET_ICONS.get(set.icon as usize).unwrap_or(&icons::BRUSH_SET);
+        look.icon(ui, icon, pos2(rect.left() + 24.0, rect.center().y), 40.0, ink);
+        let left = rect.left() + 4.0 + 40.0 + 1.0;
+        if let Some((_, typed, focused)) = self.renaming_set.as_mut().filter(|(s, _, _)| *s == i) {
+            let field = Rect::from_min_max(
+                pos2(left, rect.center().y - 10.0),
+                pos2(rect.right() - 8.0, rect.center().y + 10.0),
+            );
+            let mut output = egui::TextEdit::singleline(typed)
+                .font(Weight::SemiBold.font(14.0))
+                .text_color(ink)
+                .frame(egui::Frame::NONE)
+                .margin(vec2(0.0, 0.0))
+                .desired_width(field.width())
+                .show(&mut ui.new_child(UiBuilder::new().max_rect(field)));
+            if !*focused {
+                // the whole name chosen, to type over
+                output.response.request_focus();
+                let all = CCursorRange::two(CCursor::new(0), CCursor::new(typed.chars().count()));
+                output.state.cursor.set_char_range(Some(all));
+                output.state.store(ui.ctx(), output.response.id);
+                *focused = true;
+            } else if output.response.lost_focus() {
+                let name = typed.clone();
+                self.renaming_set = None;
+                if session.rename_brush_set(i as u32, name) {
+                    self.library_changed();
+                }
+            }
+            return (response, rect);
+        }
+        let mut job = LayoutJob::default();
+        job.append(&set.name, 0.0, format(14.0, Weight::SemiBold, ink));
+        job.wrap = TextWrapping {
+            max_width: rect.right() - 8.0 - left,
+            max_rows: 2,
+            break_anywhere: false,
+            overflow_character: Some('…'),
+        };
+        let galley = ui.painter().layout_job(job);
+        let at = Align2::LEFT_CENTER.anchor_size(pos2(left, rect.center().y), galley.size());
+        ui.painter().galley(at.min, galley, ink);
+        (response, rect)
+    }
+
+    /// A brush: its sample stroke filling the cell's height (its ends past the cell's sides), under
+    /// its name; slid left, its buttons behind it. Returns whether it was tapped and which of its
+    /// buttons was, and where its cell is.
     fn brush_row(
         &mut self,
         ui: &mut Ui,
+        look: &mut Look,
         session: &CanvasSession,
         b: &BrushInfo,
         selected: bool,
         made: &mut usize,
-    ) -> egui::Response {
+    ) -> (Option<(bool, Option<Swiped>)>, Rect) {
         let row = ui.available_width();
-        let (outer, response) = ui.allocate_exact_size(vec2(row, BRUSH_HEIGHT), Sense::click());
-        let rect = outer.shrink2(vec2(12.0, 0.0));
-        let painter = ui.painter_at(rect);
-        if selected {
-            painter.rect_filled(rect, 12, argb(pc::ACCENT));
-        }
+        let (outer, _) = ui.allocate_exact_size(vec2(row, BRUSH_HEIGHT), Sense::hover());
+        let cell = outer.shrink2(vec2(12.0, 0.0));
         let key = (b.set, b.index);
-        if !self.previews.contains_key(&key) && ui.is_rect_visible(rect) {
-            if *made < PREVIEWS_A_FRAME {
-                *made += 1;
-                let preview = session.brush_preview(b.set, b.index, PREVIEW.0, PREVIEW.1).map(|t| {
-                    let shaded = under_name(&t.rgba, &b.name);
-                    let image =
-                        egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
-                    Preview {
-                        texture: ui.ctx().load_texture(format!("brush {key:?}"), image, TextureOptions::LINEAR),
-                        shaded,
-                    }
-                });
-                self.previews.insert(key, preview);
-            } else {
-                ui.ctx().request_repaint();
-            }
+        let slide = self.slid.get(&key).copied().unwrap_or(0.0);
+        let at = cell.translate(vec2(slide, 0.0));
+        let mut chose = None;
+        if slide < 0.0 {
+            chose = swipe_buttons(ui, look, cell, key);
         }
-        let shaded = match self.previews.get(&key) {
-            Some(Some(p)) => {
-                let (pw, ph) = (PREVIEW.0 as f32, PREVIEW.1 as f32);
-                let k = (rect.width() / pw).max(rect.height() / ph);
-                let shown = Rect::from_center_size(rect.center(), vec2(pw * k, ph * k));
-                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                painter.image(p.texture.id(), shown, uv, Color32::WHITE);
-                p.shaded
-            }
-            _ => false,
-        };
-        let ink = if selected { Color32::WHITE } else { argb(PANEL_TITLE) };
-        let galley = one_line(ui, &b.name, 14.0, Weight::SemiBold, ink, rect.width() - 18.0 - 10.0);
-        let at = rect.min + vec2(18.0, 11.75);
+        let response = ui.interact(at.intersect(cell), ui.scope_id().with(("brush", key)), Sense::click_and_drag());
+        if response.is_pointer_button_down_on()
+            && self.press.is_none()
+            && let Some(origin) = ui.input(|i| i.pointer.interact_pos())
+        {
+            let since = Instant::now();
+            self.press = Some(Press {
+                key,
+                origin,
+                since,
+                way: Way::Undecided,
+                start: slide,
+                grab: origin - cell.min,
+                last: origin,
+            });
+        }
+        self.make_preview(ui, session, b, cell, made);
+        let painter = ui.painter_at(cell);
+        // the dragged brush is faint where it was
+        let faint = self.press.is_some_and(|p| p.key == key && p.way == Way::Drag);
+        let alpha = if faint { 0.3 } else { 1.0 };
+        if selected {
+            painter.rect_filled(at, 12, argb(pc::ACCENT).gamma_multiply(alpha));
+        }
+        let mut faded = painter.clone();
+        faded.multiply_opacity(alpha);
+        let shaded = self.preview_in(&faded, key, at);
+        let ink = if selected { Color32::WHITE } else { argb(PANEL_TITLE) }.gamma_multiply(alpha);
+        let galley = one_line(ui, &b.name, 14.0, Weight::SemiBold, ink, at.width() - 18.0 - 10.0);
+        let name_at = at.min + vec2(18.0, 11.75);
         if shaded {
-            let pill = Rect::from_min_size(at, galley.size()).expand2(vec2(6.0, 2.0));
-            painter.rect_filled(pill, pill.height() / 2.0, argb(NAME_PILL));
+            let pill = Rect::from_min_size(name_at, galley.size()).expand2(vec2(6.0, 2.0));
+            painter.rect_filled(pill, pill.height() / 2.0, argb(NAME_PILL).gamma_multiply(alpha));
         }
-        painter.galley(at, galley, ink);
-        response
+        painter.galley(name_at, galley, ink);
+        let tapped = response.clicked() && self.press.is_none_or(|p| p.way == Way::Undecided);
+        (Some((tapped, chose)), cell)
+    }
+
+    /// Reads a brush's sample stroke when it is first in sight (a few a frame).
+    fn make_preview(&mut self, ui: &Ui, session: &CanvasSession, b: &BrushInfo, cell: Rect, made: &mut usize) {
+        let key = (b.set, b.index);
+        if self.previews.contains_key(&key) || !ui.is_rect_visible(cell) {
+            return;
+        }
+        if *made >= PREVIEWS_A_FRAME {
+            ui.ctx().request_repaint();
+            return;
+        }
+        *made += 1;
+        let preview = session.brush_preview(b.set, b.index, PREVIEW.0, PREVIEW.1).map(|t| {
+            let shaded = under_name(&t.rgba, &b.name);
+            let image = egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
+            Preview { texture: ui.ctx().load_texture(format!("brush {key:?}"), image, TextureOptions::LINEAR), shaded }
+        });
+        self.previews.insert(key, preview);
+    }
+
+    /// Draws brush `key`'s sample stroke filling `at`'s height; returns whether it runs under the
+    /// name.
+    fn preview_in(&self, painter: &egui::Painter, key: (u32, u32), at: Rect) -> bool {
+        let Some(Some(p)) = self.previews.get(&key) else { return false };
+        let (pw, ph) = (PREVIEW.0 as f32, PREVIEW.1 as f32);
+        let k = (at.width() / pw).max(at.height() / ph);
+        let shown = Rect::from_center_size(at.center(), vec2(pw * k, ph * k));
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        painter.image(p.texture.id(), shown, uv, Color32::WHITE);
+        p.shaded
     }
 }
 
-/// A set: its icon and its name (two lines at most).
-fn set_row(ui: &mut Ui, look: &mut Look, set: &BrushSetInfo, selected: bool) -> egui::Response {
-    let width = ui.available_width();
-    let (outer, response) = ui.allocate_exact_size(vec2(width, SET_HEIGHT), Sense::click());
-    let rect = outer.shrink2(vec2(12.0, 0.0));
-    ui.painter().rect_filled(rect, 12, panel::row_fill(selected, SET_CELL));
-    let ink = if selected { Color32::WHITE } else { argb(PANEL_TITLE) };
-    // a 40 frame centred 24 in
-    let icon = icons::SET_ICONS.get(set.icon as usize).unwrap_or(&icons::BRUSH_SET);
-    look.icon(ui, icon, pos2(rect.left() + 24.0, rect.center().y), 40.0, ink);
-    let left = rect.left() + 4.0 + 40.0 + 1.0;
-    let mut job = LayoutJob::default();
-    job.append(&set.name, 0.0, format(14.0, Weight::SemiBold, ink));
-    job.wrap = TextWrapping {
-        max_width: rect.right() - 8.0 - left,
-        max_rows: 2,
-        break_anywhere: false,
-        overflow_character: Some('…'),
-    };
-    let galley = ui.painter().layout_job(job);
-    let at = Align2::LEFT_CENTER.anchor_size(pos2(left, rect.center().y), galley.size());
-    ui.painter().galley(at.min, galley, ink);
-    response
+/// The set icons to choose from, five across in `rect` (scrolled at first to put `own` a few rows
+/// down, unless `scrolled` already): `own` blue. Returns the one tapped.
+fn icon_grid(ui: &mut Ui, look: &mut Look, rect: Rect, own: usize, scrolled: bool) -> Option<usize> {
+    let inner = rect.shrink(3.0);
+    let cell_w = inner.width() / PICKER_COLUMNS as f32;
+    let mut picked = None;
+    ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| {
+        let mut area = ScrollArea::vertical()
+            .id_salt("set icons")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+        if !scrolled {
+            // an icon that isn't one of these starts it at the top
+            let first = if own < PICKED_SET_ICONS { (own / PICKER_COLUMNS).saturating_sub(3) } else { 0 };
+            area = area.vertical_scroll_offset(first as f32 * cell_w);
+        }
+        area.show(ui, |ui| {
+            let rows = PICKED_SET_ICONS.div_ceil(PICKER_COLUMNS);
+            let (all, _) = ui.allocate_exact_size(vec2(inner.width(), rows as f32 * cell_w), Sense::hover());
+            for k in 0..PICKED_SET_ICONS {
+                let (col, row) = (k % PICKER_COLUMNS, k / PICKER_COLUMNS);
+                let slot =
+                    Rect::from_min_size(all.min + vec2(col as f32 * cell_w, row as f32 * cell_w), vec2(cell_w, cell_w));
+                let cell = Rect::from_center_size(slot.center(), vec2(PICKER_CELL, PICKER_CELL));
+                if k == own {
+                    ui.painter().rect_filled(cell, 21, argb(pc::ACCENT));
+                }
+                if let Some(icon) = icons::SET_ICONS.get(k) {
+                    look.icon(ui, icon, cell.center(), 40.0, Color32::WHITE);
+                }
+                if ui.interact(cell, ui.scope_id().with(("set icon", k)), Sense::click()).clicked() {
+                    picked = Some(k);
+                }
+            }
+        });
+    });
+    picked
+}
+
+/// What a slid brush's buttons do.
+#[derive(Clone, Copy)]
+enum Swiped {
+    Share,
+    Duplicate,
+    Delete,
+}
+
+/// A slid brush's buttons, filling its cell: Share, Duplicate and Delete. Returns the one tapped.
+fn swipe_buttons(ui: &Ui, look: &mut Look, cell: Rect, key: (u32, u32)) -> Option<Swiped> {
+    let w = (cell.width() - SWIPE_GAP * 2.0) / 3.0;
+    let buttons = [
+        (&icons::SWIPE_SHARE, "Share", SWIPE_FILL, SWIPE_INK, Swiped::Share),
+        (&icons::SWIPE_DUPLICATE, "Duplicate", SWIPE_FILL, SWIPE_INK, Swiped::Duplicate),
+        (&icons::SWIPE_TRASH, "Delete", SWIPE_DELETE, 0xFFFFFFFF, Swiped::Delete),
+    ];
+    let mut chose = None;
+    for (i, (icon, label, fill, ink, does)) in buttons.into_iter().enumerate() {
+        let rect =
+            Rect::from_min_size(pos2(cell.left() + (w + SWIPE_GAP) * i as f32, cell.top()), vec2(w, cell.height()));
+        ui.painter().rect_filled(rect, 16, argb(fill));
+        // 19 across, the label under it, the two in the middle (5 down)
+        let middle = rect.center().y + 2.5;
+        look.icon(ui, icon, pos2(rect.center().x, middle - 9.5 - 1.0), 19.0, argb(ink));
+        text(
+            ui.painter(),
+            pos2(rect.center().x, middle + 1.0),
+            Align2::CENTER_TOP,
+            label,
+            14.0,
+            Weight::Medium,
+            argb(ink),
+        );
+        if ui.interact(rect, ui.scope_id().with(("swipe", key, i)), Sense::click()).clicked() {
+            chose = Some(does);
+        }
+    }
+    chose
 }
 
 fn format(size: f32, weight: Weight, colour: Color32) -> TextFormat {

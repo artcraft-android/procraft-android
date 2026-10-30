@@ -31,8 +31,6 @@ pub const EDGE: u32 = 0xFF5A5D5F;
 pub const RULE: u32 = 0xFF3F4347;
 pub const DANGER: u32 = 0xFFE84F51;
 pub const ITEM_HEIGHT: f32 = 40.0;
-/// A rule between groups: 1 tall, 10 either side.
-pub const DIVIDER_HEIGHT: f32 = 21.0;
 
 /// How a menu looks: its fill, an edge round it, whether the canvas is frosted behind it, and how
 /// round it is.
@@ -113,8 +111,11 @@ impl Menu {
             // the rest of the window takes no presses while it is open
             let screen = ctx.content_rect();
             egui::Area::new(Id::unique((id, "scrim"))).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
-                let shield = ui.interact(screen, ui.scope_id().with("scrim"), Sense::click_and_drag());
-                if shield.is_pointer_button_down_on() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                let shield = ui.allocate_rect(screen, Sense::click_and_drag());
+                if shield.is_pointer_button_down_on()
+                    || shield.clicked()
+                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
                     self.close();
                 }
             });
@@ -175,11 +176,17 @@ pub fn option_rows(left: f32, top: f32, width: f32, n: usize) -> impl Iterator<I
     (0..n).map(move |i| Rect::from_min_size(pos2(left, top + OPTION_HEIGHT * i as f32), vec2(width, OPTION_HEIGHT)))
 }
 
-/// What a library-style menu lists: an item (its icon, label and ink), or a rule between groups.
+/// What a library-style menu lists: an item (its icon, label and ink), or a rule between groups
+/// (this far clear above and below it).
 pub enum Entry<'a> {
     Item(&'a icons::Icon, &'a str, u32),
-    Divider,
+    /// An item that opens more (a chevron at its end).
+    More(&'a icons::Icon, &'a str, u32),
+    Rule(f32),
 }
+
+/// The usual rule between groups.
+pub const DIVIDER: Entry<'static> = Entry::Rule(10.0);
 
 /// How tall a menu of `entries` is, 7 above and below them.
 pub fn entries_height(entries: &[Entry]) -> f32 {
@@ -187,8 +194,8 @@ pub fn entries_height(entries: &[Entry]) -> f32 {
         + entries
             .iter()
             .map(|e| match e {
-                Entry::Item(..) => ITEM_HEIGHT,
-                Entry::Divider => DIVIDER_HEIGHT,
+                Entry::Item(..) | Entry::More(..) => ITEM_HEIGHT,
+                Entry::Rule(gap) => 1.0 + gap * 2.0,
             })
             .sum::<f32>()
 }
@@ -199,7 +206,7 @@ pub fn entries(ui: &Ui, look: &mut Look, rect: Rect, entries: &[Entry]) -> Optio
     let mut tapped = None;
     for (i, e) in entries.iter().enumerate() {
         match e {
-            Entry::Item(icon, label, ink) => {
+            Entry::Item(icon, label, ink) | Entry::More(icon, label, ink) => {
                 let row = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), ITEM_HEIGHT));
                 // its icon (a 40 frame) centred 29.5 in, the label from 52
                 let ink = argb(*ink);
@@ -213,17 +220,32 @@ pub fn entries(ui: &Ui, look: &mut Look, rect: Rect, entries: &[Entry]) -> Optio
                     Weight::Regular,
                     ink,
                 );
+                if matches!(e, Entry::More(..)) {
+                    look.icon(ui, &icons::MENU_CHEVRON, pos2(row.right() - 7.5 - 20.0, row.center().y), 40.0, ink);
+                }
                 if ui.interact(row, ui.scope_id().with(("entry", i)), Sense::click()).clicked() {
                     tapped = Some(i);
                 }
                 y += ITEM_HEIGHT;
             }
-            Entry::Divider => {
-                let line = Rect::from_min_size(pos2(rect.left() + 15.5, y + 10.0), vec2(rect.width() - 31.0, 1.0));
+            Entry::Rule(gap) => {
+                let line = Rect::from_min_size(pos2(rect.left() + 15.5, y + gap), vec2(rect.width() - 31.0, 1.0));
                 ui.painter().rect_filled(line, 0, argb(RULE));
-                y += DIVIDER_HEIGHT;
+                y += 1.0 + gap * 2.0;
             }
         }
     }
     tapped
+}
+
+/// Where entry `index` of `entries` starts, down from the menu's top.
+pub fn entry_top(entries: &[Entry], index: usize) -> f32 {
+    7.0 + entries
+        .iter()
+        .take(index)
+        .map(|e| match e {
+            Entry::Item(..) | Entry::More(..) => ITEM_HEIGHT,
+            Entry::Rule(gap) => 1.0 + gap * 2.0,
+        })
+        .sum::<f32>()
 }

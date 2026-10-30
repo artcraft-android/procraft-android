@@ -46,9 +46,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
-import io.github.artcraftandroid.procraft.canvas.GestureOption
+import io.github.artcraftandroid.procraft.core.GestureOption
 import io.github.artcraftandroid.procraft.canvas.GestureOptions
-import io.github.artcraftandroid.procraft.canvas.GesturePurpose
+import io.github.artcraftandroid.procraft.canvas.heading
+import io.github.artcraftandroid.procraft.canvas.title
+import io.github.artcraftandroid.procraft.core.GesturePurpose
 import io.github.artcraftandroid.procraft.canvas.GestureSettings
 
 private val ScreenFill get() = if (Pc.light) Color(0xFFF3F3F3) else Color(0xFF1F1F1F)

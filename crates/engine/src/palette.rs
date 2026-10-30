@@ -59,7 +59,8 @@ pub fn read_store(text: &str) -> Option<(Vec<Palette>, usize)> {
         .filter_map(|p| {
             let name = p.get("name")?.as_str()?.to_owned();
             let colors = p.get("colors")?.as_array()?;
-            Some(Palette::new(name, colors.iter().map(|c| c.as_u64().map(|v| v as u32))))
+            // a colour kept with its alpha, as a signed 32-bit number, keeps its red, green and blue
+            Some(Palette::new(name, colors.iter().map(|c| c.as_i64().map(|v| (v as u32) & 0xFF_FFFF))))
         })
         .collect();
     if palettes.is_empty() {
@@ -544,6 +545,10 @@ mod tests {
         let (palettes, default) = read_store(&write_store(&starters(), 1)).unwrap();
         assert_eq!((palettes, default), (starters(), 1));
         assert!(read_store("not json").is_none());
+        // as the Android app kept them before: a colour with its alpha is a negative number
+        let kept = r#"{"default":0,"palettes":[{"name":"Old","colors":[-15584170,null,1193046]}]}"#;
+        let (palettes, _) = read_store(kept).unwrap();
+        assert_eq!(palettes.first().map(|p| p.colors[..3].to_vec()), Some(vec![Some(0x123456), None, Some(0x123456)]));
     }
 
     #[test]

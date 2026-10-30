@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use procraft_core::{CanvasSession, PsdOutcome, ThumbnailImage, import_psd};
+use procraft_core::{CanvasSession, KeptGestures, PsdOutcome, ThumbnailImage, import_psd};
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 
 use crate::ui::Interface;
@@ -66,14 +66,105 @@ pub fn app_dir() -> PathBuf {
     }
 }
 
+/// Shows a passing message with an OK button.
+pub fn say(text: &str) {
+    MessageDialog::new().set_level(MessageLevel::Info).set_title("ProCraft").set_description(text).show();
+}
+
 /// Shows a message with an OK button.
 pub fn tell(title: &str, text: &str) {
     MessageDialog::new().set_level(MessageLevel::Error).set_title(title).set_description(text).show();
 }
 
+/// Asks where to keep a file called `name` (ending `extension`, a `kind` of file) and writes
+/// `bytes` there.
+pub fn save_file(bytes: &[u8], name: &str, extension: &str, kind: &str) {
+    let safe: String = name.chars().map(|c| if c.is_alphanumeric() || " _-".contains(c) { c } else { '_' }).collect();
+    let safe = if safe.trim().is_empty() { "Brush".to_owned() } else { safe };
+    let Some(path) = FileDialog::new()
+        .set_title(format!("Share {kind}"))
+        .add_filter(kind, &[extension])
+        .set_file_name(format!("{safe}.{extension}"))
+        .save_file()
+    else {
+        return;
+    };
+    if let Err(e) = std::fs::write(&path, bytes) {
+        tell("Can't share", &e.to_string());
+    }
+}
+
+/// A file the user picks (titled `title`), read whole, with its name.
+pub fn pick_file(title: &str) -> Option<(Vec<u8>, String)> {
+    let path = FileDialog::new().set_title(title).pick_file()?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    match std::fs::read(&path) {
+        Ok(bytes) => Some((bytes, name)),
+        Err(_) => {
+            say("This file could not be read.");
+            None
+        }
+    }
+}
+
+/// Says the canvas holds no more layers, and how many it holds.
+pub fn no_room(session: &CanvasSession) {
+    let most = session.layer_stats().maximum;
+    tell("No room", &format!("This canvas holds at most {most} layers."));
+}
+
 /// Where the brush library, the brushes' choices and their sliders are kept.
 pub fn brushes_dir() -> String {
     app_dir().join("brushes").to_string_lossy().into_owned()
+}
+
+/// The gesture settings kept: a line for each switch (`EYEDROPPER.HOLD true`) and each page's
+/// delay (`EYEDROPPER.delay 0.4`).
+pub fn kept_gestures() -> KeptGestures {
+    let mut kept = KeptGestures::default();
+    let text = std::fs::read_to_string(app_dir().join("gestures")).unwrap_or_default();
+    for line in text.lines() {
+        let Some((name, value)) = line.split_once(' ') else { continue };
+        if name.ends_with(".delay") {
+            if let Ok(v) = value.parse() {
+                kept.delays.insert(name.to_owned(), v);
+            }
+        } else if let Ok(v) = value.parse() {
+            kept.switches.insert(name.to_owned(), v);
+        }
+    }
+    kept
+}
+
+pub fn keep_gestures(kept: &KeptGestures) {
+    let mut lines: Vec<String> = kept.switches.iter().map(|(name, on)| format!("{name} {on}")).collect();
+    lines.extend(kept.delays.iter().map(|(name, s)| format!("{name} {s}")));
+    lines.sort();
+    keep_text(
+        "gestures",
+        &(lines.join(
+            "
+",
+        ) + "
+"),
+    );
+}
+
+/// The QuickMenu's buttons kept, as the core writes them.
+pub fn kept_quick_menu() -> Option<String> {
+    std::fs::read_to_string(app_dir().join("quick_menu")).ok().map(|s| s.trim().to_owned())
+}
+
+pub fn keep_quick_menu(saved: &str) {
+    keep_text("quick_menu", saved);
+}
+
+/// A small file of the app's settings written (a failure only logged: the setting holds this run).
+fn keep_text(name: &str, text: &str) {
+    let dir = app_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(name), text)) {
+        log::warn!("keeping {name}: {e}");
+    }
 }
 
 /// Whether the artwork may be let go of: nothing unsaved, or the user saved it or chose not to.
@@ -152,6 +243,22 @@ fn open_psd(path: &Path, name: &str) -> Result<Arc<CanvasSession>, String> {
     // the opened artwork holds its layers' files by now
     let _ = std::fs::remove_dir_all(&dir);
     opened
+}
+
+/// A PNG's pixels (in `bytes`) as 0xAARRGGBB, for its colours; none if it isn't one.
+pub fn png_pixels(bytes: &[u8]) -> Option<Vec<u32>> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::normalize_to_color8() | png::Transformations::ALPHA);
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let frame = reader.next_frame(&mut buf).ok()?;
+    let data = buf.get(..frame.buffer_size())?;
+    let argb = |[r, g, b, a]: [u8; 4]| u32::from(a) << 24 | u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b);
+    Some(match frame.color_type {
+        png::ColorType::Rgba => data.as_chunks::<4>().0.iter().map(|&p| argb(p)).collect(),
+        png::ColorType::GrayscaleAlpha => data.as_chunks::<2>().0.iter().map(|&[g, a]| argb([g, g, g, a])).collect(),
+        _ => return None,
+    })
 }
 
 /// A PNG's pixels, straight RGBA.

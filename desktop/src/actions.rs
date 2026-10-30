@@ -30,6 +30,11 @@ pub enum Act {
     Flip { horizontal: bool },
     Share(Format),
     About,
+    GestureControls,
+    Cut,
+    Copy,
+    CopyCanvas,
+    Paste,
 }
 
 enum Row {
@@ -49,8 +54,8 @@ const TABS: [(&str, &icons::Icon); 6] = [
     ("Help", &icons::TAB_HELP),
 ];
 
-/// The groups of rows of tab `tab`.
-fn groups(tab: usize) -> Vec<Vec<Row>> {
+/// The groups of rows of tab `tab` (Paste only with something to paste).
+fn groups(tab: usize, can_paste: bool) -> Vec<Vec<Row>> {
     use Row::{Button, Heading, Switch};
     match tab {
         0 => vec![
@@ -61,10 +66,10 @@ fn groups(tab: usize) -> Vec<Vec<Row>> {
                 Button("Add text", None, None),
             ],
             vec![
-                Button("Cut", None, None),
-                Button("Copy", None, None),
-                Button("Copy canvas", None, None),
-                Button("Paste", None, None),
+                Button("Cut", None, Some(Act::Cut)),
+                Button("Copy", None, Some(Act::Copy)),
+                Button("Copy canvas", None, Some(Act::CopyCanvas)),
+                Button("Paste", None, can_paste.then_some(Act::Paste)),
             ],
         ],
         1 => vec![
@@ -116,7 +121,10 @@ fn groups(tab: usize) -> Vec<Vec<Row>> {
                 Switch("Brush cursor", true),
                 Button("Advanced cursor settings", None, None),
             ],
-            vec![Button("Pressure and Smoothing", None, None), Button("Gesture controls", None, None)],
+            vec![
+                Button("Pressure and Smoothing", None, None),
+                Button("Gesture controls", None, Some(Act::GestureControls)),
+            ],
             vec![Switch("Size & Opacity sidebar", true)],
         ],
         _ => vec![vec![Button("About ProCraft", None, Some(Act::About)), Button("Licences", None, None)]],
@@ -135,13 +143,14 @@ impl Actions {
         ctx: &egui::Context,
         look: &mut Look,
         button: Rect,
+        can_paste: bool,
         backdrops: &mut Vec<f32>,
     ) -> (Rect, Option<Act>) {
         let screen = ctx.content_rect();
         let (left, arrow_x) =
             panel::place(ACTIONS_WIDTH, button.center().x, screen, pc::SIDE_BAR_WIDTH + panel::POPOVER_GAP);
         let top = screen.top() + pc::BAR_HEIGHT;
-        let groups = groups(self.tab);
+        let groups = groups(self.tab, can_paste);
         let rows: f32 = groups
             .iter()
             .map(|g| {

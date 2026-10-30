@@ -164,7 +164,7 @@ const LIQUIFY_COAST_STAMPS: usize = 400;
 const CLONE_BRUSH: (usize, usize) = (3, 0);
 /// How far (points) a motion blur's drag goes for its whole amount, and the blur that is (canvas
 /// pixels).
-const MOTION_DRAG_PT: f32 = 500.0;
+pub(crate) const MOTION_DRAG_PT: f32 = 500.0;
 const MOTION_LENGTH_PX: f32 = 256.0;
 
 impl State {
@@ -647,13 +647,13 @@ impl CanvasSession {
         self.shared.frame(st);
     }
 
-    /// Starts cloning the current layer: painting copies from the source (see
-    /// [`Self::clone_source`]); false when the layer cannot take it.
     /// Whether leaving an adjustment makes the steps made in it one undo step (on at first).
     pub fn set_simplified_undos(&self, on: bool) {
         self.shared.lock().simplified_undos = on;
     }
 
+    /// Starts cloning the current layer: painting copies from the source (see
+    /// [`Self::clone_source`]); false when the layer cannot take it.
     pub fn clone_begin(&self) -> bool {
         if !self.adjust_begin() {
             return false;

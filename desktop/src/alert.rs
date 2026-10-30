@@ -119,7 +119,7 @@ impl Alert {
         ctx.set_transform_layer(LayerId::new(Order::Debug, area), transform);
         egui::Area::new(area).fixed_pos(screen.min).order(Order::Debug).interactable(self.open).show(ctx, |ui| {
             // nothing under it is touched while it is up, and a tap beside the panel cancels
-            let beside = ui.interact(screen, ui.scope_id().with("beside"), Sense::click_and_drag());
+            let beside = ui.allocate_rect(screen, Sense::click_and_drag());
             ui.interact(panel, ui.scope_id().with("panel"), Sense::click_and_drag());
             if beside.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 answer = Some(Answer::Cancel);

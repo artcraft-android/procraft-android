@@ -11,6 +11,8 @@
 uniffi::setup_scaffolding!();
 
 mod adjust;
+mod adjust_menu;
+mod adjusting;
 mod animation;
 mod brush_files;
 mod brush_library;
@@ -20,6 +22,8 @@ mod colour;
 mod crop;
 mod device;
 mod frame;
+mod gestures;
+mod gradients;
 mod guide;
 mod history;
 mod host;
@@ -30,6 +34,7 @@ mod pick;
 mod pour;
 mod project;
 mod projection;
+mod quick_menu;
 mod quickshape;
 #[cfg(target_os = "android")]
 mod render;
@@ -57,15 +62,35 @@ use procraft_engine::stroke::StrokeBuilder;
 use procraft_engine::view::View;
 use procraft_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
 
+pub use adjust::{ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, SwipeAdjustment};
+pub use adjust_menu::{
+    Adjustment, adjustment_groups, adjustment_label, adjustment_paintable, adjustment_pencil_amount, adjustment_swiped,
+    quick_action_adjustment,
+};
+pub use adjusting::{AdjustShown, CLONE_PUCK_RADIUS};
 pub use brushes::{BrushInfo, BrushSetInfo};
 pub use frame::{configure, screen_profile};
+pub use gestures::{
+    GestureOption, GesturePurpose, GestureSettings, KeptGestures, MAX_DELAY_S, MIN_DELAY_S, Trigger, gesture_options,
+    gesture_purpose_heading, gesture_purpose_title, gesture_purposes, gesture_trigger_label,
+};
+pub use gradients::{GradientInfo, GradientStop, Gradients};
 pub use history::ColourHistory;
 pub use layers::{BlendModeInfo, Blocked, LayerInfo, LayerType, ThumbnailImage, blend_modes};
-pub use palettes::{PaletteInfo, Palettes};
+pub use palettes::{PaletteInfo, Palettes, colour_name};
 pub use pick::Pick;
 pub use project::{PsdOutcome, import_psd};
+pub use quick_menu::{
+    QuickAction, quick_action_adjusts, quick_action_label, quick_actions_listed, quick_adjustments_listed,
+    quick_menu_saved, quick_menu_slots,
+};
 pub use quickshape::{QuickShapeInfo, QuickShapeKind};
-pub use touch::{Fill, GestureAction, TouchCommand, TouchSettings};
+pub use selection::{SelectionDisplay, SelectionJoin};
+pub use touch::{Fill, GestureAction, SelectKind, SelectTouch, TouchCommand, TouchSettings, TransformTouch};
+pub use transform::{
+    GuideSettings, Interpolation, ScreenBox, TransformAction, TransformBox, TransformHandle, TransformKind, handle_at,
+    mesh_handle_at, screen_box, shown_mesh_points,
+};
 
 /// Colour around the canvas, sRGB; and with the light interface.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -370,6 +395,8 @@ pub(crate) struct State {
     colour_source: Option<Vec<u8>>,
     /// An adjustment is open on the current layer, and what it last drew.
     adjusting: bool,
+    /// The open adjustment's values, as the apps show them (adjusting.rs).
+    adjust: adjusting::Adjusting,
     last_filter: Option<procraft_gpu::Filter>,
     /// The liquify brush's last stamp (canvas pixels).
     liquify_last: Option<Vec2>,
@@ -961,6 +988,7 @@ impl CanvasSession {
             colour_source: None,
             feather_base: None,
             adjusting: false,
+            adjust: adjusting::Adjusting::default(),
             last_filter: None,
             liquify_last: None,
             studio: None,
@@ -1426,6 +1454,8 @@ impl CanvasSession {
         if self.swap_crop(true) {
             return Some("Crop canvas".to_owned());
         }
+        // cloning, the source goes back to where it was before the stroke
+        self.shared.lock().adjust.puck_step(true);
         self.edit(Canvas::undo);
         self.shared.lock().canvas.as_ref().and_then(Canvas::redo_name)
     }
@@ -1435,6 +1465,7 @@ impl CanvasSession {
         if self.swap_crop(false) {
             return Some("Crop canvas".to_owned());
         }
+        self.shared.lock().adjust.puck_step(false);
         self.edit(Canvas::redo);
         self.shared.lock().canvas.as_ref().and_then(Canvas::undo_name)
     }

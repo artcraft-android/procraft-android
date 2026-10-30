@@ -850,44 +850,8 @@ private fun PaletteTiles(vm: CanvasViewModel, c: ColorPick, index: Int, p: Palet
     }
 }
 
-/**
- * A plain name for a colour (0xRRGGBB): a grey by its lightness, or a hue with "Dark", "Light" or
- * "Grayish" before it.
- */
-internal fun colourName(rgb: Int): String {
-    val r = ((rgb shr 16) and 0xFF) / 255f
-    val g = ((rgb shr 8) and 0xFF) / 255f
-    val b = (rgb and 0xFF) / 255f
-    val max = maxOf(r, g, b)
-    val min = minOf(r, g, b)
-    val lightness = (max + min) / 2f
-    val saturation = if (max > 0f) (max - min) / max else 0f
-    if (saturation < 0.05f) {
-        return when {
-            lightness > 0.98f -> "White"
-            lightness > 0.75f -> "Light Gray"
-            lightness > 0.35f -> "Gray"
-            lightness > 0.08f -> "Dark Gray"
-            else -> "Black"
-        }
-    }
-    val hsv = FloatArray(3).also { android.graphics.Color.colorToHSV(rgb, it) }
-    val hue = HueNames.firstOrNull { hsv[0] < it.first }?.second ?: "Red"
-    return when {
-        saturation < 0.2f -> "Grayish $hue"
-        lightness < 0.5f -> "Dark $hue"
-        lightness > 0.8f -> "Light $hue"
-        else -> hue
-    }
-}
-
-/** Hue names, each up to the hue (degrees) it ends at. */
-private val HueNames = listOf(
-    8f to "Red", 20f to "Red Orange", 40f to "Orange", 50f to "Yellow Orange", 65f to "Yellow",
-    80f to "Yellow Green", 150f to "Green", 170f to "Green Cyan", 195f to "Cyan", 220f to "Sky Blue",
-    250f to "Blue", 275f to "Violet", 290f to "Purple", 320f to "Magenta", 325f to "Magenta Pink",
-    342f to "Pink", 352f to "Pink Red", 361f to "Red",
-)
+/** A plain name for a colour (0xRRGGBB), as the shared core gives it. */
+internal fun colourName(rgb: Int): String = io.github.artcraftandroid.procraft.core.colourName(rgb.toUInt() and 0xFFFFFFu)
 
 /** A CMYK canvas's inks (cyan, magenta, yellow, black; 0..1) for a canvas colour, and back. */
 class Inks(val of: (Int) -> FloatArray, val rgb: (FloatArray) -> Int)

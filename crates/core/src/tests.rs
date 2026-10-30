@@ -3231,3 +3231,40 @@ fn a_kept_view_that_leaves_the_canvas_off_the_page_is_not_used() {
     let tiny = View::centred(procraft_engine::geom::Vec2::new(1024.0, 1024.0), 0.01, 0.0, window).unwrap();
     assert!(shows_canvas(&tiny, window, canvas));
 }
+
+#[test]
+fn the_clone_source_starts_in_the_middle_is_dragged_and_follows_the_brush() {
+    use crate::adjust_menu::Adjustment;
+    let Some(s) = session(100, 100) else { return };
+    let near = |x: f32, y: f32| {
+        let p = s.adjustment_shown().clone_puck.unwrap_or_default();
+        assert!(p.len() == 2 && (p[0] - x).abs() < 0.01 && (p[1] - y).abs() < 0.01, "{p:?} not ({x}, {y})");
+    };
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 50.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert!(s.adjustment_start(Adjustment::Clone));
+    near(50.0, 50.0);
+    // a touch on it drags it from where it was taken
+    s.touch_down(1, PointerKind::Finger, vec![sample(60.0, 50.0, 0.0)]);
+    s.touch_move(1, vec![sample(30.0, 40.0, 20.0)]);
+    s.touch_up(1, vec![sample(30.0, 40.0, 30.0)]);
+    near(20.0, 40.0);
+    // a touch off it paints, the source keeping its distance from the brush
+    s.touch_down(1, PointerKind::Finger, vec![sample(90.0, 90.0, 100.0)]);
+    s.touch_move(1, vec![sample(95.0, 92.0, 120.0)]);
+    s.touch_up(1, vec![sample(95.0, 92.0, 130.0)]);
+    near(25.0, 42.0);
+    // the next stroke keeps that distance, wherever it starts
+    s.touch_down(1, PointerKind::Finger, vec![sample(95.0, 95.0, 200.0)]);
+    s.touch_up(1, vec![sample(95.0, 95.0, 210.0)]);
+    near(25.0, 45.0);
+    // undo puts it back where it was before each stroke, redo where the stroke took it
+    s.undo();
+    near(25.0, 42.0);
+    s.undo();
+    near(20.0, 40.0);
+    s.redo();
+    near(25.0, 42.0);
+    assert!(s.adjustment_end(true));
+    assert_eq!(s.adjustment_shown().clone_puck, None);
+}

@@ -78,6 +78,10 @@ impl CanvasSession {
     }
 }
 
+/// Other apps' brush files, by the endings of their names: Photoshop's, GIMP's brushes, pipes and
+/// generated brushes, Krita's presets and bundles, Clip Studio's sub tools.
+pub const OTHER_BRUSH_EXTENSIONS: [&str; 7] = ["abr", "gbr", "gih", "vbr", "kpp", "bundle", "sut"];
+
 #[uniffi::export]
 impl CanvasSession {
     /// Adds the brushes in `bytes`: a brush file's (to the top of the "Imported" set, made at the
@@ -133,6 +137,26 @@ impl CanvasSession {
         st.library.insert(0, LibrarySet { name, brushes, origins, icon: crate::brush_library::IMPORTED_ICON });
         st.move_brush_refs(|(rs, ri)| Some((rs + 1, ri)));
         Some(0)
+    }
+
+    /// Adds the brushes in a file the user chose, called `file_name` (if known), into the library:
+    /// another app's brushes when its name says so (see [`OTHER_BRUSH_EXTENSIONS`]); else ours (a
+    /// brush or set file, or one of ours from before, put in set `shown`), then another app's told
+    /// apart by its contents. Returns the set they went into, or none if the file holds none.
+    pub fn import_any_brushes(&self, bytes: Vec<u8>, file_name: Option<String>, shown: u32) -> Option<u32> {
+        let name = file_name.unwrap_or_default();
+        let stem = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem).trim().to_owned();
+        let other = name
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| OTHER_BRUSH_EXTENSIONS.iter().any(|o| o.eq_ignore_ascii_case(ext)));
+        if other {
+            return self.import_other_brushes(bytes, stem);
+        }
+        let ours = self.import_brushes(bytes.clone()).or_else(|| {
+            let text = std::str::from_utf8(&bytes).ok()?;
+            self.import_brush_file(shown, text.to_owned())
+        });
+        ours.or_else(|| self.import_other_brushes(bytes, if stem.is_empty() { "Imported".into() } else { stem }))
     }
 
     /// Brush `index` of `set` as a brush file.

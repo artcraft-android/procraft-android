@@ -14,10 +14,14 @@
 
 use std::sync::Mutex;
 
+use crate::adjust_menu::Adjustment;
+use crate::adjusting::{CLONE_PUCK_RADIUS, CLONE_PUCK_SLOP};
 use crate::{CanvasSession, PenSample, PointerKind, ToolKind};
 
 /// A tap: down and up within this, moving no further than [`TAP_SLOP`] points.
 const TAP_MS: f64 = 300.0;
+/// A liquify brush lifted within this long of its last move carries on.
+const LIQUIFY_STILL_MS: f64 = 60.0;
 const TAP_SLOP: f32 = 24.0;
 /// Two (three) fingers held still go on undoing (redoing) every this often.
 const RAPID_REPEAT_MS: f64 = 120.0;
@@ -37,6 +41,38 @@ const QUICKSHAPE_GRAB: f32 = 22.0;
 /// selection's.
 const POUR_SLOP: f32 = 15.0;
 const POUR_SLIDE_GENTLER: f32 = 2.7;
+
+/// A transform's touch moved this far (points) drags what it took (a selection's too).
+const TRANSFORM_SLOP: f32 = 15.0;
+/// A tap this near a freehand selection's first point closes it; its points are added this far
+/// apart (points).
+const FREEHAND_CLOSE: f32 = 22.0;
+const FREEHAND_STEP: f32 = 2.0;
+
+/// How the selection tool selects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SelectKind {
+    Automatic,
+    Freehand,
+    Rectangle,
+    Ellipse,
+}
+
+/// The selection tool is open: how it selects, whether a new selection adds to the one there is
+/// or takes away from it, and where a colour selection's threshold starts (0..1).
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct SelectTouch {
+    pub kind: SelectKind,
+    pub join: crate::SelectionJoin,
+    pub threshold: f32,
+}
+
+/// A transform is open: touches work its box (a warp's control points shown as the advanced mesh
+/// has them, or only its corners).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TransformTouch {
+    pub advanced_mesh: bool,
+}
 
 /// What Continue filling fills with: a colour (sRGB, 0..1) and the threshold it starts at.
 #[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
@@ -161,6 +197,55 @@ pub enum TouchCommand {
         threshold: f32,
     },
     Filled,
+    /// A transform's touch came down (its popovers close); the box as it now is; the node held and
+    /// where (window pixels), and let go of there (a rotate or box-turning node springs back); a
+    /// node tapped, whose numbers are typed beside it (`angle` for the rotate node, else the size),
+    /// at (`x`, `y`), on the box's `right` side or its left.
+    TransformTouched,
+    TransformMoved {
+        transform: Option<crate::TransformBox>,
+    },
+    TransformHeld {
+        handle: crate::TransformHandle,
+        x: f32,
+        y: f32,
+    },
+    TransformLetGo {
+        handle: crate::TransformHandle,
+        x: f32,
+        y: f32,
+    },
+    TransformNumeric {
+        angle: bool,
+        x: f32,
+        y: f32,
+        right: bool,
+    },
+    /// The selection tool: a rectangle or ellipse being dragged out between two window points; a
+    /// colour selection's threshold slid (shown with [`CanvasSession::show_colour_selection`]
+    /// while not `done`, kept for the next when it is); the freehand path changed (see
+    /// [`CanvasSession::freehand_path`]); a selection made.
+    SelectionDrag {
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+    },
+    SelectionThreshold {
+        x: f32,
+        y: f32,
+        threshold: f32,
+        done: bool,
+    },
+    FreehandChanged,
+    SelectionChanged,
+    /// An adjustment open: its amount changed (see [`CanvasSession::adjustment_shown`]); a tap at
+    /// window point (`x`, `y`) asks for its menu.
+    AdjustChanged,
+    AdjustMenu {
+        x: f32,
+        y: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,6 +263,15 @@ enum Mode {
     ShapeMove,
     /// Continue filling: the touch filled where it landed, and slides the threshold.
     Pour,
+    /// A transform's touch: it took a node (or the content), and drags it once past the slop.
+    Transform,
+    /// The selection tool's touch.
+    Select,
+    /// An adjustment open: the touch drags its amount (or a motion blur, or chromatic aberration's
+    /// fringes) across the canvas; a tap opens its menu.
+    Adjust,
+    /// Cloning, the source dragged.
+    Puck,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -226,6 +320,29 @@ pub(crate) struct Touches {
     /// Continue filling is on: each touch fills; the fill's threshold as slid, and the touch's
     /// last place and time.
     filling: Option<Fill>,
+    /// The selection tool is open; its touch has moved past the slop; a freehand path held still
+    /// snapped to a shape; the colour selection's threshold as slid; the freehand path (canvas
+    /// pixels).
+    selecting: Option<SelectTouch>,
+    select_moved: bool,
+    lasso_snapped: bool,
+    /// An adjustment's touch went past the slop (it is not a tap), and has begun displacing;
+    /// liquify's brush, where it last was (window pixels), when, and how fast (pixels a
+    /// millisecond).
+    adjust_moved: bool,
+    adjust_displacing: bool,
+    liquify_at: (f32, f32),
+    liquify_ms: f64,
+    liquify_velocity: (f32, f32),
+    liquify_pen: bool,
+    /// Where on the clone source it was taken (window pixels from its centre).
+    puck_grab: (f32, f32),
+    select_threshold: f32,
+    freehand: Vec<(f32, f32)>,
+    /// A transform is open; what its touch took, and whether it has started dragging it.
+    transforming: Option<TransformTouch>,
+    transform_handle: crate::TransformHandle,
+    transform_grabbed: bool,
     pour_moved: bool,
     pour_last: (f32, f64),
     /// Window pixels a point.
@@ -267,6 +384,21 @@ impl Default for Touches {
             shape_dragged: false,
             shape_last: (0.0, 0.0),
             filling: None,
+            selecting: None,
+            select_moved: false,
+            lasso_snapped: false,
+            adjust_moved: false,
+            adjust_displacing: false,
+            liquify_at: (0.0, 0.0),
+            liquify_ms: 0.0,
+            liquify_velocity: (0.0, 0.0),
+            liquify_pen: false,
+            puck_grab: (0.0, 0.0),
+            select_threshold: 0.5,
+            freehand: Vec::new(),
+            transforming: None,
+            transform_handle: crate::TransformHandle::Move,
+            transform_grabbed: false,
             pour_moved: false,
             pour_last: (0.0, 0.0),
             scale: 1.0,
@@ -295,6 +427,11 @@ fn drag_step(dx: f32, ms: f64) -> f32 {
     let frames = (ms.max(1.0) / 1000.0 * 60.0).max(0.06) as f32;
     let speed = dx.abs() / frames;
     (speed / 30.0).powf(0.86) * dx / 200.0
+}
+
+/// A liquify stroke's points, (x, y, pressure) each: a finger's (or a mouse's) at full pressure.
+fn liquify_points(pen: bool, samples: &[PenSample]) -> Vec<f32> {
+    samples.iter().flat_map(|s| [s.x, s.y, if pen { s.pressure } else { 1.0 }]).collect()
 }
 
 fn is_pen(kind: PointerKind) -> bool {
@@ -333,6 +470,73 @@ impl CanvasSession {
             t.modify_used = false;
         }
         used
+    }
+
+    /// The selection tool open (each touch selects, as `how` says) or not.
+    pub fn set_touch_selecting(&self, how: Option<SelectTouch>) {
+        let mut t = self.touches();
+        t.selecting = how;
+        if how.is_none() {
+            t.freehand.clear();
+        }
+    }
+
+    /// The colour selection being slid, shown at `threshold` from window point (`x`, `y`) where it
+    /// went down: called once a frame with the last [`TouchCommand::SelectionThreshold`] not
+    /// `done`. Once the touch has lifted it does nothing, as the lift made the selection.
+    pub fn show_colour_selection(&self, x: f32, y: f32, threshold: f32) {
+        let join = {
+            let t = self.touches();
+            if t.mode != Mode::Select {
+                return;
+            }
+            match t.selecting {
+                Some(how) if how.kind == SelectKind::Automatic => how.join,
+                _ => return,
+            }
+        };
+        self.select_colour_at((x, y), threshold, join, true);
+    }
+
+    /// The freehand selection's path drawn so far, in window pixels (x, y pairs).
+    pub fn freehand_path(&self) -> Vec<f32> {
+        let points = self.touches().freehand.clone();
+        let st = self.shared.lock();
+        let Some(view) = st.view else { return Vec::new() };
+        points
+            .iter()
+            .flat_map(|&(x, y)| {
+                let p = view.to_screen().apply(procraft_engine::geom::Vec2::new(x, y));
+                [p.x, p.y]
+            })
+            .collect()
+    }
+
+    /// Closes the freehand path into a selection (fewer than three points are dropped).
+    pub fn close_freehand(&self) {
+        let (path, join) = {
+            let mut t = self.touches();
+            (std::mem::take(&mut t.freehand), t.selecting.map_or(crate::SelectionJoin::Add, |s| s.join))
+        };
+        if path.len() < 3 {
+            return;
+        }
+        let window: Vec<f32> = {
+            let st = self.shared.lock();
+            let Some(view) = st.view else { return };
+            path.iter()
+                .flat_map(|&(x, y)| {
+                    let p = view.to_screen().apply(procraft_engine::geom::Vec2::new(x, y));
+                    [p.x, p.y]
+                })
+                .collect()
+        };
+        self.select_polygon(window, join);
+    }
+
+    /// A transform open (each touch works its box) or not.
+    pub fn set_touch_transforming(&self, transforming: Option<TransformTouch>) {
+        self.touches().transforming = transforming;
     }
 
     /// Continue filling on (each touch on the canvas fills with `fill`) or off.
@@ -417,10 +621,76 @@ impl CanvasSession {
                         (!snapped && t.settings.draw_and_hold).then_some(last.time_ms + t.settings.quickshape_ms);
                 }
                 drop(t);
+                self.clone_stroke_at(at, false);
                 self.stroke_add(samples);
                 out.push(TouchCommand::Cursor { x: at.0, y: at.1 });
             }
+            Mode::Puck if id == t.stroke_pointer => {
+                let (gx, gy) = t.puck_grab;
+                drop(t);
+                self.adjustment_clone_move(at.0 - gx, at.1 - gy);
+                out.push(TouchCommand::AdjustChanged);
+            }
             Mode::Pick => out.push(TouchCommand::Pick { x: at.0, y: at.1 }),
+            Mode::Select if id == t.stroke_pointer => {
+                drop(t);
+                self.select_step(at, last.time_ms, false, &mut out);
+            }
+            Mode::Adjust if id == t.stroke_pointer => {
+                if dist(at, t.down_at) > TAP_SLOP * t.scale {
+                    t.adjust_moved = true;
+                }
+                let (from, (last_x, last_ms)) = (t.down_at, t.pour_last);
+                t.pour_last = (at.0, last.time_ms);
+                let start = !std::mem::replace(&mut t.adjust_displacing, true);
+                let step = drag_step((at.0 - last_x) / t.scale, last.time_ms - last_ms);
+                drop(t);
+                let (open, displacing) = {
+                    let st = self.shared.lock();
+                    (st.adjust.open().map(|o| o.0), st.adjust.displacing())
+                };
+                if open == Some(Adjustment::Liquify) {
+                    // the brush liquifies along the drag, its speed followed for when it lifts
+                    let mut t = self.touches();
+                    let dt = (last.time_ms - t.liquify_ms) as f32;
+                    if dt > 0.0 {
+                        let (vx, vy) = t.liquify_velocity;
+                        let (px, py) = t.liquify_at;
+                        t.liquify_velocity = (vx * 0.5 + (at.0 - px) / dt * 0.5, vy * 0.5 + (at.1 - py) / dt * 0.5);
+                        t.liquify_at = at;
+                        t.liquify_ms = last.time_ms;
+                    }
+                    let pen = t.liquify_pen;
+                    drop(t);
+                    self.adjustment_liquify_stroke(liquify_points(pen, &samples), false);
+                    out.push(TouchCommand::AdjustChanged);
+                    return out;
+                }
+                match open {
+                    // a motion blur follows the drag: along it, longer the further it goes
+                    Some(Adjustment::MotionBlur) => self.adjustment_motion(at.0 - from.0, at.1 - from.1),
+                    // displacing, the drag moves the fringes
+                    Some(_) if displacing => self.adjustment_chroma_drag(at.0 - from.0, at.1 - from.1, start),
+                    // across the canvas the amount follows the drag, faster the faster it goes
+                    Some(a) if crate::adjust_menu::adjustment_swiped(a) => self.adjustment_amount_by(step),
+                    _ => return out,
+                }
+                out.push(TouchCommand::AdjustChanged);
+            }
+            Mode::Transform if id == t.stroke_pointer => {
+                let handle = t.transform_handle;
+                if !t.transform_grabbed && dist(at, t.down_at) > TRANSFORM_SLOP * t.scale {
+                    // the drag counts from where it was recognised, as the slop is used up
+                    t.transform_grabbed = true;
+                    self.transform_grab(handle, at.0, at.1);
+                }
+                if t.transform_grabbed {
+                    drop(t);
+                    let transform = self.transform_drag(at.0, at.1);
+                    out.push(TouchCommand::TransformMoved { transform });
+                    out.push(TouchCommand::TransformHeld { handle, x: at.0, y: at.1 });
+                }
+            }
             Mode::Pour if id == t.stroke_pointer => {
                 if let Some(threshold) = Self::pour_slide(&mut t, at, last.time_ms) {
                     out.push(TouchCommand::FillThreshold { threshold });
@@ -484,6 +754,21 @@ impl CanvasSession {
     pub fn touch_tick(&self, now_ms: f64) -> Vec<TouchCommand> {
         let mut out = Vec::new();
         let mut t = self.touches();
+        // a freehand selection held still snaps to a shape, which the lift then selects
+        if t.mode == Mode::Select
+            && t.quickshape_due.is_some_and(|due| due <= now_ms)
+            && t.selecting.is_some_and(|s| s.kind == SelectKind::Freehand)
+        {
+            t.quickshape_due = None;
+            if t.select_moved && t.settings.draw_and_hold {
+                let flat: Vec<f32> = t.freehand.iter().flat_map(|&(x, y)| [x, y]).collect();
+                if let Some(outline) = crate::quickshape::quickshape_outline(flat).filter(|o| o.len() >= 6) {
+                    t.freehand = outline.as_chunks::<2>().0.iter().map(|&[x, y]| (x, y)).collect();
+                    t.lasso_snapped = true;
+                    out.push(TouchCommand::FreehandChanged);
+                }
+            }
+        }
         if t.quickshape_due.is_some_and(|due| due <= now_ms) {
             t.quickshape_due = None;
             if matches!(t.mode, Mode::Pen | Mode::Finger) && t.settings.draw_and_hold {
@@ -588,6 +873,65 @@ impl CanvasSession {
             return;
         }
         self.end_shape_with(t, out);
+        let adjusting = self.shared.lock().adjust.open();
+        let draws = is_pen(kind) || kind == PointerKind::Mouse;
+        if let Some((open, pencil)) = adjusting
+            && (open == Adjustment::Clone || (pencil && draws))
+        {
+            t.stroke_pointer = id;
+            if let Some(puck) = self.clone_puck_at()
+                && dist(puck, at) <= (CLONE_PUCK_RADIUS + CLONE_PUCK_SLOP) * t.scale
+            {
+                // the clone source is dragged
+                t.puck_grab = (at.0 - puck.0, at.1 - puck.1);
+                t.mode = Mode::Puck;
+                return;
+            }
+            // cloning, and the pen (or a mouse, a desktop's drawing tool) painting an adjustment
+            // on, paint (no eyedropper); the clone source follows the brush
+            t.mode = if is_pen(kind) { Mode::Pen } else { Mode::Finger };
+            t.hold_at = at;
+            self.clone_stroke_at(at, true);
+            self.stroke_begin(kind, samples.to_vec());
+            return;
+        }
+        // an adjustment open otherwise: the touch drags it (or liquifies) and nothing paints
+        if let Some((open, _)) = adjusting {
+            t.stroke_pointer = id;
+            t.adjust_moved = false;
+            t.adjust_displacing = false;
+            t.pour_last = (at.0, now);
+            t.mode = Mode::Adjust;
+            if open == Adjustment::Liquify {
+                t.liquify_at = at;
+                t.liquify_ms = now;
+                t.liquify_velocity = (0.0, 0.0);
+                t.liquify_pen = is_pen(kind);
+                self.adjustment_liquify_stroke(liquify_points(t.liquify_pen, samples), true);
+                out.push(TouchCommand::AdjustChanged);
+            }
+            return;
+        }
+        // the selection tool: the touch selects, nothing paints
+        if t.selecting.is_some() {
+            t.stroke_pointer = id;
+            t.select_moved = false;
+            t.lasso_snapped = false;
+            t.hold_at = at;
+            t.pour_last = (at.0, now);
+            t.select_threshold = t.selecting.map_or(0.5, |s| s.threshold);
+            t.mode = Mode::Select;
+            return;
+        }
+        // a transform: the touch takes the node it lands on (or the content), nothing paints
+        if let Some(how) = t.transforming {
+            t.stroke_pointer = id;
+            t.transform_grabbed = false;
+            t.transform_handle = self.transform_handle_at(at, how);
+            t.mode = Mode::Transform;
+            out.push(TouchCommand::TransformTouched);
+            return;
+        }
         // Continue filling: the touch fills where it lands; slid, it changes the threshold
         if let Some(fill) = t.filling {
             t.stroke_pointer = id;
@@ -676,16 +1020,37 @@ impl CanvasSession {
         if matches!(t.mode, Mode::Pen | Mode::Pick) {
             return;
         }
-        // a second finger takes back the fill the first one made
+        // a second finger takes back the fill the first one made, and a transform's drag
         if t.mode == Mode::Pour {
             self.pour_end(false, None);
+        }
+        // a colour selection under way is kept as it was slid; a shape being dragged out goes
+        if t.mode == Mode::Select {
+            let start = t.down_at;
+            let (moved, how, threshold) = (t.select_moved, t.selecting, t.select_threshold);
+            if let Some(how) = how {
+                match how.kind {
+                    SelectKind::Automatic if moved => {
+                        self.select_colour_at(start, threshold, how.join, false);
+                        out.push(TouchCommand::SelectionThreshold { x: start.0, y: start.1, threshold, done: true });
+                        out.push(TouchCommand::SelectionChanged);
+                    }
+                    SelectKind::Rectangle | SelectKind::Ellipse => out.push(TouchCommand::SelectionChanged),
+                    _ => {}
+                }
+            }
+        }
+        if t.mode == Mode::Transform && t.transform_grabbed {
+            t.transform_grabbed = false;
+            let transform = self.transform_cancel_drag();
+            out.push(TouchCommand::TransformMoved { transform });
         }
         out.push(TouchCommand::CursorGone);
         if t.mode == Mode::Finger {
             self.stroke_cancel();
         }
         self.end_stroke_tools(t);
-        if matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Pour) {
+        if matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Pour | Mode::Transform | Mode::Select) {
             t.gesture_start = now;
             t.gesture_scale = 1.0;
         }
@@ -800,6 +1165,53 @@ impl CanvasSession {
                 t.pick_next = false;
                 out.push(if cancelled { TouchCommand::PickCancel } else { TouchCommand::PickDone });
             }
+            Mode::Adjust => {
+                let at = last_of(&samples).map_or(t.down_at, |s| (s.x, s.y));
+                let liquifying = self.shared.lock().adjust.open().is_some_and(|o| o.0 == Adjustment::Liquify);
+                if liquifying {
+                    // still moving when it lifts, liquify carries on
+                    if !cancelled && now - t.liquify_ms <= LIQUIFY_STILL_MS {
+                        let (vx, vy) = t.liquify_velocity;
+                        drop(t);
+                        self.adjustment_liquify_coast(vx, vy);
+                    }
+                } else if !cancelled && !t.adjust_moved && now - t.tap_start <= TAP_MS {
+                    out.push(TouchCommand::AdjustMenu { x: at.0, y: at.1 });
+                }
+            }
+            Mode::Select => {
+                drop(t);
+                if !cancelled {
+                    let at = last_of(&samples).map(|s| ((s.x, s.y), s.time_ms));
+                    if let Some((at, ms)) = at {
+                        self.select_step(at, ms, true, &mut out);
+                    }
+                }
+            }
+            Mode::Transform => {
+                let (handle, grabbed, tapped) = (t.transform_handle, t.transform_grabbed, now - t.tap_start <= TAP_MS);
+                let at = last_of(&samples).map_or(t.down_at, |s| (s.x, s.y));
+                let how = t.transforming;
+                t.transform_grabbed = false;
+                drop(t);
+                if cancelled {
+                    if grabbed {
+                        out.push(TouchCommand::TransformMoved { transform: self.transform_cancel_drag() });
+                    }
+                } else if grabbed {
+                    out.push(TouchCommand::TransformMoved { transform: self.transform_release() });
+                    out.push(TouchCommand::TransformLetGo { handle, x: at.0, y: at.1 });
+                } else if tapped && handle == crate::TransformHandle::Move {
+                    // a tap off the nodes nudges the content a pixel towards it
+                    out.push(TouchCommand::TransformMoved { transform: self.transform_nudge(at.0, at.1) });
+                } else if tapped && how.is_some() {
+                    // a tap on a node types its numbers beside it: the rotate node its angle, the
+                    // others the size
+                    if let Some(command) = self.numeric_at(handle) {
+                        out.push(command);
+                    }
+                }
+            }
             Mode::Pour => {
                 let slid = last_of(&samples).and_then(|s| Self::pour_slide(&mut t, (s.x, s.y), s.time_ms));
                 drop(t);
@@ -883,6 +1295,161 @@ impl CanvasSession {
         let before = self.shared.lock().tool;
         self.set_tool(tool);
         before
+    }
+
+    /// A step of the selection tool's touch at `at` (`done` as it lifts): a rectangle or ellipse
+    /// dragged out; a freehand path drawn (or tapped point by point, closed by a tap on its first
+    /// point; held still, it snaps to a shape); a colour picked where it went down, its threshold
+    /// slid left and right, faster the faster it goes.
+    fn select_step(&self, at: (f32, f32), ms: f64, done: bool, out: &mut Vec<TouchCommand>) {
+        let mut t = self.touches();
+        let Some(how) = t.selecting else { return };
+        let start = t.down_at;
+        if dist(at, start) > TRANSFORM_SLOP * t.scale {
+            t.select_moved = true;
+        }
+        let moved = t.select_moved;
+        match how.kind {
+            SelectKind::Rectangle | SelectKind::Ellipse => {
+                drop(t);
+                if done {
+                    if dist(at, start) >= 1.0 {
+                        let ellipse = how.kind == SelectKind::Ellipse;
+                        self.select_shape(ellipse, start.0, start.1, at.0, at.1, how.join);
+                    }
+                    out.push(TouchCommand::SelectionChanged);
+                } else if moved {
+                    out.push(TouchCommand::SelectionDrag { x0: start.0, y0: start.1, x1: at.0, y1: at.1 });
+                }
+            }
+            SelectKind::Freehand => {
+                // snapped: the shape is kept as it is, and the lift selects it
+                if t.lasso_snapped {
+                    if done {
+                        t.lasso_snapped = false;
+                        drop(t);
+                        self.close_freehand();
+                        out.push(TouchCommand::FreehandChanged);
+                        out.push(TouchCommand::SelectionChanged);
+                    }
+                    return;
+                }
+                if done {
+                    t.quickshape_due = None;
+                } else if moved && dist(at, t.hold_at) > QUICKSHAPE_STILL * t.scale {
+                    // still for the QuickShape delay, it snaps
+                    t.hold_at = at;
+                    t.quickshape_due = t.settings.draw_and_hold.then_some(ms + t.settings.quickshape_ms);
+                }
+                let scale = t.scale;
+                let last = t.freehand.last().copied();
+                drop(t);
+                let (to_canvas, to_window) = {
+                    let st = self.shared.lock();
+                    let view = st.view;
+                    (
+                        st.window_to_canvas(at.0, at.1).map(|p| (p.x, p.y)),
+                        last.and_then(|(x, y)| {
+                            view.map(|v| v.to_screen().apply(procraft_engine::geom::Vec2::new(x, y)))
+                        }),
+                    )
+                };
+                let first_canvas = self.shared.lock().window_to_canvas(start.0, start.1).map(|p| (p.x, p.y));
+                if done && !moved {
+                    // a tap: a point of the path, or, by its first point, the path closed
+                    let mut t = self.touches();
+                    let first = t.freehand.first().copied();
+                    let near_first = first.zip(self.shared.lock().view).is_some_and(|((x, y), v)| {
+                        let p = v.to_screen().apply(procraft_engine::geom::Vec2::new(x, y));
+                        dist((p.x, p.y), at) <= FREEHAND_CLOSE * scale
+                    });
+                    if t.freehand.len() > 2 && near_first {
+                        drop(t);
+                        self.close_freehand();
+                        out.push(TouchCommand::SelectionChanged);
+                    } else if let Some(p) = to_canvas {
+                        t.freehand.push(p);
+                    }
+                    out.push(TouchCommand::FreehandChanged);
+                } else if moved && to_window.is_none_or(|w| dist((w.x, w.y), at) >= FREEHAND_STEP * scale) {
+                    let mut t = self.touches();
+                    if t.freehand.is_empty()
+                        && let Some(first) = first_canvas
+                    {
+                        t.freehand.push(first);
+                    }
+                    if let Some(p) = to_canvas {
+                        t.freehand.push(p);
+                    }
+                    out.push(TouchCommand::FreehandChanged);
+                }
+            }
+            SelectKind::Automatic => {
+                // across the screen the threshold follows the drag, faster the faster it goes
+                let (last_x, last_ms) = t.pour_last;
+                t.pour_last = (at.0, ms);
+                let dx = (at.0 - last_x) / t.scale;
+                t.select_threshold = (t.select_threshold + drag_step(dx, ms - last_ms)).clamp(0.0, 1.0);
+                let threshold = t.select_threshold;
+                drop(t);
+                if done {
+                    self.select_colour_at(start, threshold, how.join, false);
+                    out.push(TouchCommand::SelectionThreshold { x: start.0, y: start.1, threshold, done });
+                    out.push(TouchCommand::SelectionChanged);
+                } else if moved {
+                    // shown by the host once a frame: a selection by colour takes too long on a big
+                    // canvas to redo at every move
+                    out.push(TouchCommand::SelectionThreshold { x: start.0, y: start.1, threshold, done });
+                }
+            }
+        }
+    }
+
+    /// Selects by colour at `at` with `threshold`: `live` while it is being slid (shown filled),
+    /// else as it stays (tinted).
+    fn select_colour_at(&self, at: (f32, f32), threshold: f32, join: crate::SelectionJoin, live: bool) {
+        let display = if live { crate::SelectionDisplay::Fill } else { crate::SelectionDisplay::Tint };
+        self.set_selection_display(display);
+        self.select_by_colour(at.0, at.1, threshold, join, live);
+    }
+
+    /// What a transform's touch at `at` takes: a warp's shown control point, or the box's nearest
+    /// node, else the content.
+    fn transform_handle_at(&self, at: (f32, f32), how: TransformTouch) -> crate::TransformHandle {
+        let (shown, view, density) = {
+            let st = self.shared.lock();
+            (st.transform_box(), st.view.map(|v| v.to_screen()), st.display_scale)
+        };
+        let (Some(b), Some(m)) = (shown, view) else { return crate::TransformHandle::Move };
+        let view = vec![m.a, m.b, m.c, m.d, m.e, m.f];
+        if !b.mesh.is_empty() {
+            return crate::mesh_handle_at(b.mesh, view, at.0, at.1, density, how.advanced_mesh);
+        }
+        crate::screen_box(b.corners, view, density)
+            .map_or(crate::TransformHandle::Move, |s| crate::handle_at(s, at.0, at.1, density))
+    }
+
+    /// Typing a tapped node's numbers beside it: where the node is, and which side of the box.
+    fn numeric_at(&self, handle: crate::TransformHandle) -> Option<TouchCommand> {
+        let (b, m, density) = {
+            let st = self.shared.lock();
+            (st.transform_box()?, st.view?.to_screen(), st.display_scale)
+        };
+        let s = crate::screen_box(b.corners, vec![m.a, m.b, m.c, m.d, m.e, m.f], density)?;
+        let point = |v: &[f32], i: usize| Some((*v.get(2 * i)?, *v.get(2 * i + 1)?));
+        let node = match handle {
+            crate::TransformHandle::Rotate => point(&s.rotate, 0)?,
+            crate::TransformHandle::Corner { index } => point(&s.corners, usize::from(index))?,
+            crate::TransformHandle::Edge { index } => point(&s.edges, usize::from(index))?,
+            _ => return None,
+        };
+        let middle = s.corners.as_chunks::<2>().0.iter().map(|[x, _]| x).sum::<f32>() / 4.0;
+        Some(TouchCommand::TransformNumeric {
+            angle: handle == crate::TransformHandle::Rotate,
+            x: node.0,
+            y: node.1,
+            right: node.0 > middle + 1.0,
+        })
     }
 
     /// Whether the current layer is a text layer (it takes no paint until rasterized).
@@ -1122,6 +1689,69 @@ mod tests {
         // a touch used it: its tap does nothing
         assert!(s.set_modify_held(false));
         assert!(!s.set_modify_held(false));
+    }
+
+    #[test]
+    fn an_adjustments_amount_is_swiped_and_a_tap_asks_for_its_menu() {
+        let s = session();
+        s.shared.lock().adjust = crate::adjusting::Adjusting::opened(Adjustment::GaussianBlur);
+        let out = s.touch_down(1, PointerKind::Finger, at(10.0, 30.0, 0.0));
+        assert!(!out.iter().any(|c| matches!(c, TouchCommand::Cursor { .. })), "{out:?}");
+        let out = s.touch_move(1, at(60.0, 30.0, 30.0));
+        assert!(out.contains(&TouchCommand::AdjustChanged), "{out:?}");
+        let swiped = s.adjustment_shown().amount;
+        assert!(swiped > 0.0, "{swiped}");
+        let out = s.touch_up(1, at(60.0, 30.0, 40.0));
+        assert!(!out.iter().any(|c| matches!(c, TouchCommand::AdjustMenu { .. })), "{out:?}");
+        // back the other way, the amount goes down
+        s.touch_down(1, PointerKind::Finger, at(60.0, 30.0, 100.0));
+        s.touch_move(1, at(20.0, 30.0, 130.0));
+        s.touch_up(1, at(20.0, 30.0, 140.0));
+        assert!(s.adjustment_shown().amount < swiped);
+        // a tap asks for the menu where it was
+        s.touch_down(1, PointerKind::Finger, at(30.0, 30.0, 300.0));
+        let out = s.touch_up(1, at(31.0, 30.0, 350.0));
+        assert!(out.contains(&TouchCommand::AdjustMenu { x: 31.0, y: 30.0 }), "{out:?}");
+    }
+
+    #[test]
+    fn the_selection_tool_drags_out_shapes_and_slides_a_colour_selections_threshold() {
+        let s = session();
+        let tool = |kind| Some(SelectTouch { kind, join: crate::SelectionJoin::Add, threshold: 0.5 });
+        s.set_touch_selecting(tool(SelectKind::Rectangle));
+        s.touch_down(1, PointerKind::Stylus, at(10.0, 10.0, 0.0));
+        let out = s.touch_move(1, at(120.0, 90.0, 20.0));
+        assert!(out.contains(&TouchCommand::SelectionDrag { x0: 10.0, y0: 10.0, x1: 120.0, y1: 90.0 }), "{out:?}");
+        let out = s.touch_up(1, at(120.0, 90.0, 40.0));
+        assert!(out.contains(&TouchCommand::SelectionChanged), "{out:?}");
+        assert!(!out.contains(&TouchCommand::StrokeEnded));
+
+        s.set_touch_selecting(tool(SelectKind::Automatic));
+        s.touch_down(1, PointerKind::Finger, at(50.0, 50.0, 100.0));
+        let out = s.touch_move(1, at(120.0, 50.0, 120.0));
+        let slid = out.iter().find_map(|c| match c {
+            TouchCommand::SelectionThreshold { threshold, done: false, .. } => Some(*threshold),
+            _ => None,
+        });
+        assert!(slid.is_some_and(|t| t > 0.5), "{out:?}");
+        let out = s.touch_up(1, at(120.0, 50.0, 140.0));
+        assert!(out.iter().any(|c| matches!(c, TouchCommand::SelectionThreshold { done: true, .. })), "{out:?}");
+        s.set_touch_selecting(None);
+    }
+
+    #[test]
+    fn a_transform_takes_the_touches_and_paints_nothing() {
+        let s = session();
+        s.set_touch_transforming(Some(TransformTouch { advanced_mesh: false }));
+        let out = s.touch_down(1, PointerKind::Stylus, at(20.0, 20.0, 0.0));
+        assert!(out.contains(&TouchCommand::TransformTouched), "{out:?}");
+        // a tap off the nodes nudges (no box here: it says so)
+        let out = s.touch_up(1, at(20.0, 20.0, 50.0));
+        assert!(out.contains(&TouchCommand::TransformMoved { transform: None }), "{out:?}");
+        assert!(!out.contains(&TouchCommand::StrokeEnded));
+        s.set_touch_transforming(None);
+        let out = s.touch_down(1, PointerKind::Stylus, at(20.0, 20.0, 100.0));
+        assert!(!out.contains(&TouchCommand::TransformTouched));
     }
 
     #[test]

@@ -5,24 +5,36 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
+mod adjust_panels;
+mod adjustments;
 mod alert;
 mod chrome;
 mod colour_drop;
 mod colours;
+mod compact_colours;
+mod copy_paste;
 mod files;
+mod gesture_controls;
+mod gradient_map;
 mod icons;
 mod input;
+mod layer_choice;
 mod layers;
 mod library;
+mod liquify;
 mod look;
 mod menu;
 mod overlays;
 mod panel;
+mod quick_menu;
 mod screen;
+mod selection;
+mod transform;
+mod transform_numeric;
 mod ui;
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use procraft_core::CanvasSession;
 use winit::application::ApplicationHandler;
@@ -49,6 +61,8 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App {
         started: Instant::now(),
+        last_frame: Instant::now(),
+        again: None,
         screen: None,
         session: None,
         ui: Interface::default(),
@@ -62,6 +76,10 @@ fn main() {
 
 struct App {
     started: Instant,
+    /// When the last frame was drawn, and when another is wanted (the canvas or the interface still
+    /// moving, or a hold to be timed).
+    last_frame: Instant,
+    again: Option<Instant>,
     screen: Option<Screen>,
     /// The artwork open, made once the window is there.
     session: Option<Arc<CanvasSession>>,
@@ -114,7 +132,9 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let (Some(screen), Some(session)) = (self.screen.as_mut(), self.session.clone()) else { return };
         let response = screen.egui.on_window_event(&screen.window, &event);
-        if response.repaint {
+        // egui counts every redraw as wanting another; the frames it does want come from its
+        // repaint delay, paced in `about_to_wait`
+        if response.repaint && event != WindowEvent::RedrawRequested {
             screen.window.request_redraw();
         }
         match event {
@@ -147,12 +167,21 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let (Some(screen), Some(session)) = (self.screen.as_ref(), self.session.as_ref()) else { return };
+        let mut deadline = self.input.next_deadline(session);
         // the touches' waits (a hold, a repeat) run out
-        if self.input.tick(session) || session.wants_frame() || !self.input.commands.is_empty() {
+        if self.input.tick(session) || !self.input.commands.is_empty() {
             screen.window.request_redraw();
+        } else if let Some(due) = self.again.or_else(|| session.wants_frame().then(Instant::now)) {
+            // what moves by itself (the selection's bands, a fade) draws once a refresh, not as
+            // fast as frames can be made
+            let due = due.max(self.last_frame + frame_gap(&screen.window));
+            if Instant::now() >= due {
+                screen.window.request_redraw();
+            } else {
+                deadline = Some(deadline.map_or(due, |d| d.min(due)));
+            }
         }
-        event_loop
-            .set_control_flow(self.input.next_deadline(session).map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+        event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 }
 
@@ -179,12 +208,10 @@ impl App {
     /// Runs the interface, draws the canvas and the interface over it, and does what was asked.
     fn frame(&mut self) {
         let (Some(screen), Some(session)) = (self.screen.as_mut(), self.session.clone()) else { return };
+        self.last_frame = Instant::now();
         let raw = screen.egui.take_egui_input(&screen.window);
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| self.ui.show(ui, &session, &mut self.input));
-        let wants = screen.draw(&session, self.started, output);
-        if wants {
-            screen.window.request_redraw();
-        }
+        self.again = screen.draw(&session, self.started, output).map(|after| Instant::now() + after);
         let unsaved = if session.edits() == self.ui.saved_edits { "" } else { " •" };
         let title = format!("{}{unsaved} — ProCraft", session.name());
         if title != self.title {
@@ -224,4 +251,10 @@ impl App {
             self.show(session);
         }
     }
+}
+
+/// The time between the screen's refreshes (a 60 Hz screen's when it can't be told).
+fn frame_gap(window: &Window) -> Duration {
+    let millihertz = window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).filter(|&m| m > 0);
+    Duration::from_secs_f64(1000.0 / f64::from(millihertz.unwrap_or(60_000)))
 }

@@ -2,7 +2,7 @@
 //! canvas is drawn into the window's image, and the interface over it.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use procraft_core::{CanvasSession, configure, screen_profile};
 use procraft_gpu::{Gpu, wgpu};
@@ -63,13 +63,16 @@ impl Screen {
         !canvas.contains(at) || ctx.layer_id_at(at).is_some_and(|l| l.order != egui::Order::Background)
     }
 
-    /// Draws the canvas and the interface over it, and shows them. True while another frame is
-    /// wanted already.
-    pub fn draw(&mut self, session: &CanvasSession, started: Instant, output: egui::FullOutput) -> bool {
+    /// Draws the canvas and the interface over it, and shows them. Returns how soon another frame
+    /// is wanted, if one is (the interface can ask for one later, as a hold waits).
+    pub fn draw(&mut self, session: &CanvasSession, started: Instant, output: egui::FullOutput) -> Option<Duration> {
         let egui::FullOutput { platform_output, mut textures_delta, shapes, pixels_per_point, viewport_output } =
             output;
         self.egui.handle_platform_output(&self.window, platform_output);
-        let interface_soon = viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.repaint_delay.is_zero());
+        let interface_after = viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|v| v.repaint_delay)
+            .filter(|d| *d < Duration::from_secs(60 * 60));
         // textures change even when nothing is shown, so none is missed (the device keeps one
         // let go of until what drew with it is done)
         let (device, queue) = (&self.gpu.device, &self.gpu.queue);
@@ -81,18 +84,18 @@ impl Screen {
         for id in std::mem::take(&mut textures_delta.free) {
             self.renderer.free_texture(&id);
         }
-        let Some(config) = self.config.as_ref() else { return false };
+        let config = self.config.as_ref()?;
         let size = (config.width, config.height);
         let (format, screen) = (config.format, screen_profile(config));
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.resize(size.0, size.1);
-                return true;
+                return Some(Duration::ZERO);
             }
             wgpu::CurrentSurfaceTexture::Timeout
             | wgpu::CurrentSurfaceTexture::Occluded
-            | wgpu::CurrentSurfaceTexture::Validation => return false,
+            | wgpu::CurrentSurfaceTexture::Validation => return None,
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let canvas_soon = session.draw(&view, format, size, screen, started);
@@ -122,6 +125,6 @@ impl Screen {
         queue.submit(uploads.into_iter().chain([encoder.finish()]));
         self.window.pre_present_notify();
         queue.present(frame);
-        canvas_soon || interface_soon
+        if canvas_soon { Some(Duration::ZERO) } else { interface_after }
     }
 }

@@ -54,7 +54,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import io.github.artcraftandroid.procraft.canvas.Adjustment
+import io.github.artcraftandroid.procraft.canvas.groups
+import io.github.artcraftandroid.procraft.canvas.label
+import io.github.artcraftandroid.procraft.canvas.paintable
+import io.github.artcraftandroid.procraft.canvas.swiped
+import io.github.artcraftandroid.procraft.core.Adjustment
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.core.ChromaticKind
 import io.github.artcraftandroid.procraft.core.GlitchKind
@@ -90,11 +94,10 @@ fun AdjustmentsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modif
                     group.forEachIndexed { i, a ->
                         if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
                         Box(
-                            Modifier.fillMaxWidth().height(44.dp).then(if (a.ready) Modifier.tap { vm.startAdjustment(a) } else Modifier)
-                                .padding(start = 15.dp),
+                            Modifier.fillMaxWidth().height(44.dp).tap { vm.startAdjustment(a) }.padding(start = 15.dp),
                             contentAlignment = Alignment.CenterStart,
                         ) {
-                            Text(a.label, color = if (a.ready) MenuText else Pc.ActionsDisabled, fontSize = 17.sp, maxLines = 1)
+                            Text(a.label, color = MenuText, fontSize = 17.sp, maxLines = 1)
                         }
                     }
                 }

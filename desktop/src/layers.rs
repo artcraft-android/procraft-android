@@ -254,8 +254,10 @@ impl Layers {
                 }
                 let plus = Rect::from_min_size(pos2(body.right() - 18.0 - 40.0, body.top() + 12.0), vec2(40.0, 41.0));
                 look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(PANEL_GLYPH));
-                if ui.interact(plus, ui.scope_id().with("new layer"), Sense::click()).clicked() {
-                    session.add_layer();
+                if ui.interact(plus, ui.scope_id().with("new layer"), Sense::click()).clicked()
+                    && session.add_layer() == 0
+                {
+                    crate::files::no_room(session);
                 }
                 let list = Rect::from_min_max(
                     pos2(body.left() + 12.0, body.top() + HEADER_HEIGHT),
@@ -403,15 +405,15 @@ impl Layers {
         backdrops: &mut Vec<f32>,
     ) {
         let ink = menu::INK;
-        let mut entries = vec![Entry::Item(&icons::MENU_SELECT_ALL, "Select All", ink), Entry::Divider];
+        let mut entries = vec![Entry::Item(&icons::MENU_SELECT_ALL, "Select All", ink), menu::DIVIDER];
         if picked {
             entries.push(Entry::Item(&icons::MENU_GROUP, "Group", ink));
             entries.push(Entry::Item(&icons::MENU_MERGE, "Merge", ink));
-            entries.push(Entry::Divider);
+            entries.push(menu::DIVIDER);
         }
         entries.push(Entry::Item(&icons::MENU_SHARE, "Share", ink));
         entries.push(Entry::Item(&icons::MENU_DUPLICATE, "Duplicate", ink));
-        entries.push(Entry::Divider);
+        entries.push(menu::DIVIDER);
         entries.push(Entry::Item(&icons::MENU_TRASH, "Delete", menu::DANGER));
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
         let screen = ctx.content_rect();
@@ -438,8 +440,7 @@ impl Layers {
             "Share" => self.share = true,
             "Duplicate" => {
                 if !session.duplicate_picked() {
-                    let most = session.layer_stats().maximum;
-                    crate::files::tell("No room", &format!("This canvas holds at most {most} layers."));
+                    crate::files::no_room(session);
                 }
             }
             _ => self.deleting.open("Delete these layers?", "Undo brings them back.", "Delete", Some(&icons::TRASH)),

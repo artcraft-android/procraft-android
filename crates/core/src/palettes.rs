@@ -151,6 +151,70 @@ impl Palettes {
     }
 }
 
+/// A plain name for a colour (0xRRGGBB), as a palette's cards show it: a grey by its lightness, or
+/// a hue with "Dark", "Light" or "Grayish" before it.
+#[uniffi::export]
+pub fn colour_name(rgb: u32) -> String {
+    let [r, g, b] = [16, 8, 0].map(|shift| ((rgb >> shift) & 0xFF) as f32 / 255.0);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let lightness = (max + min) / 2.0;
+    let saturation = if max > 0.0 { (max - min) / max } else { 0.0 };
+    if saturation < 0.05 {
+        let grey = if lightness > 0.98 {
+            "White"
+        } else if lightness > 0.75 {
+            "Light Gray"
+        } else if lightness > 0.35 {
+            "Gray"
+        } else if lightness > 0.08 {
+            "Dark Gray"
+        } else {
+            "Black"
+        };
+        return grey.to_owned();
+    }
+    // the hue in degrees, as a colour picker reads it
+    let d = max - min;
+    let hue = if max == r {
+        60.0 * ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    // each name up to the hue it ends at
+    const NAMES: [(f32, &str); 18] = [
+        (8.0, "Red"),
+        (20.0, "Red Orange"),
+        (40.0, "Orange"),
+        (50.0, "Yellow Orange"),
+        (65.0, "Yellow"),
+        (80.0, "Yellow Green"),
+        (150.0, "Green"),
+        (170.0, "Green Cyan"),
+        (195.0, "Cyan"),
+        (220.0, "Sky Blue"),
+        (250.0, "Blue"),
+        (275.0, "Violet"),
+        (290.0, "Purple"),
+        (320.0, "Magenta"),
+        (325.0, "Magenta Pink"),
+        (342.0, "Pink"),
+        (352.0, "Pink Red"),
+        (361.0, "Red"),
+    ];
+    let name = NAMES.iter().find(|(end, _)| hue < *end).map_or("Red", |(_, n)| n);
+    if saturation < 0.2 {
+        format!("Grayish {name}")
+    } else if lightness < 0.5 {
+        format!("Dark {name}")
+    } else if lightness > 0.8 {
+        format!("Light {name}")
+    } else {
+        name.to_owned()
+    }
+}
+
 impl Palettes {
     /// Palettes kept nowhere (tests).
     #[cfg(test)]
@@ -212,5 +276,17 @@ mod tests {
         assert!(!p.import_file(vec![1, 2, 3], None));
         assert!(p.add_from_pixels(vec![0xFF102030, 0x00FFFFFF, 0xFFF0E0D0]));
         assert_eq!(p.list().last().map(|q| q.colors[..3].to_vec()), Some(vec![Some(0xF0E0D0), Some(0x102030), None]));
+    }
+
+    #[test]
+    fn colours_get_plain_names() {
+        assert_eq!(colour_name(0xFFFFFF), "White");
+        assert_eq!(colour_name(0x808080), "Gray");
+        assert_eq!(colour_name(0x000000), "Black");
+        assert_eq!(colour_name(0xFF0000), "Red");
+        assert_eq!(colour_name(0x800000), "Dark Red");
+        assert_eq!(colour_name(0x0000FF), "Blue");
+        assert_eq!(colour_name(0xA0C8FF), "Light Sky Blue");
+        assert_eq!(colour_name(0x8C7A7A), "Grayish Red");
     }
 }
