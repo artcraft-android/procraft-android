@@ -328,6 +328,9 @@ const CARRIED: &[(&str, &str, Kept)] = &[
     // draws as `tilt_roundness_max`), and a switch on the pressure's size
     ("pressure_roundness_max", "dynamicsPressureShapeRoundness", Kept::Same),
     ("pressure_size_clamped", "maxPressureSizeClamped", Kept::Switch),
+    // the barrel roll's switch for the wet mix's attack, as `attackTilt` is the tilt's (pens
+    // that report their roll are rare on Android)
+    ("attack_roll", "attackRoll", Kept::Switch),
 ];
 
 /// Rendering modes as the studio lists them, by the file's three switches (recursive mixing, the
@@ -1175,6 +1178,16 @@ mod tests {
         let none = written_again(&file_with(Vec::new()));
         assert_eq!(setting_of(&none, "pressure_roundness_max"), None);
         assert_eq!(setting_of(&none, "pressure_size_clamped"), None);
+    }
+
+    #[test]
+    fn the_barrel_rolls_attack_switch_is_carried() {
+        let file = file_with(vec![("attackRoll", Value::Bool(true)), ("attackTilt", Value::Bool(false))]);
+        assert_eq!(setting_of(&read(&file).unwrap().settings, "attack_roll"), Some(1.0));
+        let again = written_again(&file);
+        assert_eq!(setting_of(&again, "attack_roll"), Some(1.0));
+        assert_eq!(setting_of(&again, "attack_tilt"), Some(0.0));
+        assert_eq!(setting_of(&written_again(&file_with(Vec::new())), "attack_roll"), None);
     }
 
     #[test]
