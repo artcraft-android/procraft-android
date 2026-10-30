@@ -314,6 +314,25 @@ const PLAIN: &[(&str, &str, Kept)] = &[
     ("preview_tilt_offset", "previewTiltAngleOffset", Kept::Same),
 ];
 
+/// The keys the engine has no use for yet, carried so that a brush file's own values go out again
+/// as they came: read as the plain ones are, but written only for a brush that has them (one
+/// without them leaves the key out, so the app reading it takes its own start).
+const CARRIED: &[(&str, &str, Kept)] = &[
+    // the smudging and erasing sliders' own places, as `paintSize` and `paintOpacity` are the
+    // painting's
+    ("smudge_size", "smudgeSize", Kept::Same),
+    ("smudge_opacity", "smudgeOpacity", Kept::Same),
+    ("erase_size", "eraseSize", Kept::Same),
+    ("erase_opacity", "eraseOpacity", Kept::Same),
+    // the pressure's counterpart of the tilt's `dynamicsTiltShapeRoundness` (which the stroke
+    // draws as `tilt_roundness_max`), and a switch on the pressure's size
+    ("pressure_roundness_max", "dynamicsPressureShapeRoundness", Kept::Same),
+    ("pressure_size_clamped", "maxPressureSizeClamped", Kept::Switch),
+    // the barrel roll's switch for the wet mix's attack, as `attackTilt` is the tilt's (pens
+    // that report their roll are rare on Android)
+    ("attack_roll", "attackRoll", Kept::Switch),
+];
+
 /// Rendering modes as the studio lists them, by the file's three switches (recursive mixing, the
 /// most transfer, modulated transfer).
 const RENDERING: [(bool, bool, bool); 6] = [
@@ -471,7 +490,7 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
             settings.push((key.to_owned(), v));
         }
     };
-    for &(control, key, kept) in PLAIN {
+    for &(control, key, kept) in PLAIN.iter().chain(CARRIED) {
         if let Some(v) = f.num(key) {
             set(control, to_control(kept, v));
         }
@@ -568,6 +587,10 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     }
     if let Some(m) = blend(&["burntEdgesBlendModeExtended", "burntEdgesBlendMode"]) {
         set("burnt_blend", m as f32);
+    }
+    // the mode a dual brush combines its two by: no brush is paired yet, so it is only carried
+    if let Some(m) = blend(&["dualBlendModeExtended", "dualBlendMode"]) {
+        set("dual_blend", m as f32);
     }
     // an image of the brush's own is in the file by a name of its own (its path then null), or
     // by the name its path gives; else the path names a stock image
@@ -692,6 +715,11 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
     for &(control, key, kept) in PLAIN {
         put(key, to_file(kept, brush.setting(control)));
     }
+    for &(control, key, kept) in CARRIED {
+        if let Some(&v) = brush.extra.get(control) {
+            put(key, to_file(kept, v));
+        }
+    }
     let count = 1.0 + (brush.setting("count") * (crate::studio::MAX_COUNT as f32 - 1.0)).round();
     put("shapeCount", Value::Real(f64::from(count / 16.0)));
     let style = brush.setting("input_style").round();
@@ -734,6 +762,11 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
     let burnt = number("burnt_blend");
     put("burntEdgesBlendMode", Value::Int(crate::native::older_blends(burnt).1));
     put("burntEdgesBlendModeExtended", Value::Int(burnt));
+    if brush.extra.contains_key("dual_blend") {
+        let dual = number("dual_blend");
+        put("dualBlendMode", Value::Int(crate::native::older_blends(dual).1));
+        put("dualBlendModeExtended", Value::Int(dual));
+    }
     put("shapeAngle", Value::Real(f64::from(brush.shape.rotation)));
     // a stock image as the brush's file named it; otherwise the image is its own, the file by
     // its own name
@@ -1076,6 +1109,111 @@ mod tests {
         assert_eq!(get("touch_taper_start"), Some(0.4));
         // its own key wins
         assert_eq!(get("pen_taper_end"), Some(0.2));
+    }
+
+    /// A brush file of a brush named "Made" with `fields` and nothing else.
+    fn file_with(fields: Vec<(&str, Value)>) -> Vec<u8> {
+        let mut b = Builder::new();
+        let root = b.reserve();
+        let name = b.string("Made");
+        let mut all = vec![("name", name)];
+        all.extend(fields);
+        b.fill(&root, &["SilicaBrush", "ValkyrieBrush", "NSObject"], all);
+        let mut zip = ZipWriter::new();
+        zip.add("Brush.archive", &b.finish(root));
+        zip.finish()
+    }
+
+    /// `file` read into a brush, written out again and read back: its settings by key.
+    fn written_again(file: &[u8]) -> Vec<(String, f32)> {
+        let mut brush = Brush::round_pen();
+        for (k, v) in &read(file).unwrap().settings {
+            brush.set_setting(k, *v);
+        }
+        let pictures = Pictures {
+            shape_png: b"s",
+            grain_png: None,
+            metallic_png: None,
+            roughness_png: None,
+            thumbnail_png: b"t",
+            author_png: None,
+            signature_png: None,
+        };
+        read(&write(&brush, "", &pictures)).unwrap().settings
+    }
+
+    fn setting_of(settings: &[(String, f32)], key: &str) -> Option<f32> {
+        settings.iter().rev().find(|(k, _)| k == key).map(|(_, v)| *v)
+    }
+
+    #[test]
+    fn the_smudging_and_erasing_sliders_places_are_carried() {
+        let file = file_with(vec![
+            ("smudgeSize", Value::Real(0.3)),
+            ("smudgeOpacity", Value::Real(0.6)),
+            ("eraseSize", Value::Real(0.25)),
+            ("eraseOpacity", Value::Real(0.9)),
+        ]);
+        let settings = read(&file).unwrap().settings;
+        for (key, v) in [("smudge_size", 0.3), ("smudge_opacity", 0.6), ("erase_size", 0.25), ("erase_opacity", 0.9)] {
+            assert_eq!(setting_of(&settings, key), Some(v), "{key}");
+            assert_eq!(setting_of(&written_again(&file), key), Some(v), "{key} written again");
+        }
+        // a brush without them leaves them out
+        let none = written_again(&file_with(Vec::new()));
+        for key in ["smudge_size", "smudge_opacity", "erase_size", "erase_opacity"] {
+            assert_eq!(setting_of(&none, key), None, "{key}");
+        }
+    }
+
+    #[test]
+    fn the_pressures_roundness_and_size_switch_are_carried() {
+        let file = file_with(vec![
+            ("dynamicsPressureShapeRoundness", Value::Real(0.4)),
+            ("dynamicsPressureShapeRoundnessMinimum", Value::Real(0.3)),
+            ("maxPressureSizeClamped", Value::Bool(true)),
+        ]);
+        let settings = read(&file).unwrap().settings;
+        assert_eq!(setting_of(&settings, "pressure_roundness_max"), Some(0.4));
+        assert_eq!(setting_of(&settings, "pressure_size_clamped"), Some(1.0));
+        // the least roundness is still read into the control it was
+        assert_eq!(setting_of(&settings, "pressure_roundness"), Some(0.7));
+        let again = written_again(&file);
+        assert_eq!(setting_of(&again, "pressure_roundness_max"), Some(0.4));
+        assert_eq!(setting_of(&again, "pressure_size_clamped"), Some(1.0));
+        // off is kept as off
+        let off = written_again(&file_with(vec![("maxPressureSizeClamped", Value::Bool(false))]));
+        assert_eq!(setting_of(&off, "pressure_size_clamped"), Some(0.0));
+        let none = written_again(&file_with(Vec::new()));
+        assert_eq!(setting_of(&none, "pressure_roundness_max"), None);
+        assert_eq!(setting_of(&none, "pressure_size_clamped"), None);
+    }
+
+    #[test]
+    fn the_barrel_rolls_attack_switch_is_carried() {
+        let file = file_with(vec![("attackRoll", Value::Bool(true)), ("attackTilt", Value::Bool(false))]);
+        assert_eq!(setting_of(&read(&file).unwrap().settings, "attack_roll"), Some(1.0));
+        let again = written_again(&file);
+        assert_eq!(setting_of(&again, "attack_roll"), Some(1.0));
+        assert_eq!(setting_of(&again, "attack_tilt"), Some(0.0));
+        assert_eq!(setting_of(&written_again(&file_with(Vec::new())), "attack_roll"), None);
+    }
+
+    #[test]
+    fn a_dual_brushs_blend_mode_is_carried() {
+        use crate::document::BlendMode::{Multiply, Screen};
+        let (multiply, screen) = (crate::native::blend_to(Multiply), crate::native::blend_to(Screen));
+        // the newer key first; an older file's own; behind as files number it
+        for (fields, mode) in [
+            (vec![("dualBlendModeExtended", Value::Int(multiply)), ("dualBlendMode", Value::Int(0))], Multiply.id()),
+            (vec![("dualBlendMode", Value::Int(screen))], Screen.id()),
+            (vec![("dualBlendModeExtended", Value::Int(BEHIND_NUMBER))], BRUSH_BEHIND),
+        ] {
+            let file = file_with(fields);
+            assert_eq!(setting_of(&read(&file).unwrap().settings, "dual_blend"), Some(mode as f32));
+            assert_eq!(setting_of(&written_again(&file), "dual_blend"), Some(mode as f32));
+        }
+        assert_eq!(setting_of(&written_again(&file_with(Vec::new())), "dual_blend"), None);
     }
 
     #[test]
