@@ -33,6 +33,7 @@ pub mod library;
 pub mod mesh;
 pub mod motion;
 pub mod native;
+pub mod palette;
 pub mod plist;
 pub mod preview;
 pub mod profile;

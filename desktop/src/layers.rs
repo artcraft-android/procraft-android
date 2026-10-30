@@ -1,0 +1,1237 @@
+//! The layers panel, as the Android app's (ui/LayersPanel.kt): top layer first, each row its
+//! thumbnail, name, blend letter and visibility box; groups with their line and arrow; the
+//! background under them. Tap a layer to make it current, the current one for its options (where
+//! it is renamed in place), its blend letter for its blend mode and opacity, its box to show or
+//! hide it (hold it to show it alone), the plus for a new layer; hold a row and drag it to move it;
+//! slide it left for lock, duplicate and delete, or a little right to pick it.
+
+use std::collections::HashMap;
+use std::time::Instant;
+
+use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
+use egui::{Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
+use procraft_core::{BlendModeInfo, CanvasSession, LayerInfo, LayerType, ThumbnailImage};
+use resvg::tiny_skia;
+
+use crate::alert::{Alert, Answer};
+use crate::icons;
+use crate::look::{Look, Weight, argb, pc, round_rect, text};
+use crate::menu::{self, Entry, Menu};
+use crate::overlays::ease;
+use crate::panel::{self, PANEL_GLYPH, PANEL_TITLE};
+
+const LAYERS_WIDTH: f32 = 384.0;
+const HEADER_HEIGHT: f32 = 64.0;
+const ROW_HEIGHT: f32 = 69.0;
+/// A layer with a mask, and the mask, are a little shorter.
+const MASKED_ROW_HEIGHT: f32 = 65.0;
+const ROW_GAP: f32 = 1.0;
+const LIST_CORNER: f32 = 8.0;
+/// A group's row height, and how far in each level of group sits.
+const GROUP_HEIGHT: f32 = 44.0;
+const GROUP_INDENT: f32 = 21.0;
+const GROUP_LINE: u32 = 0xFF4E4E4E;
+const MASK_OWNER_ROW: u32 = 0xFF2C5281;
+const PICKED_ROW: u32 = 0xFF2C5281;
+const LOCKED_LETTER: u32 = 0xFF808080;
+const LAYER_ROW: u32 = 0x0DFFFFFF;
+const BACKGROUND_ROW: u32 = 0x0DFFFFFF;
+const CHECK_FILL: u32 = 0xFFC7C7C7;
+const THUMB_BACKGROUND: u32 = 0xFF4F4F4F;
+const THUMB: (f32, f32) = (93.0, 61.0);
+/// Thumbnails are read this many pixels on their longer side, a few a frame.
+const THUMB_SIDE: u32 = 192;
+const THUMBS_A_FRAME: usize = 4;
+/// The options sit this far left of the panel's left edge, as wide as this, never higher than this
+/// from the window's top.
+const OPTIONS_LEFT: f32 = -183.0;
+const OPTIONS_WIDTH: f32 = 194.0;
+const OPTIONS_TOP: f32 = 57.0;
+const OPTIONS_CORNER: f32 = 24.0;
+/// The blend editor under a row: the opacity and its slider, then the list of modes (nine rows
+/// showing, the layer's mode in the middle).
+const BLEND_EDITOR_HEIGHT: f32 = 22.0 + 23.0 + 20.0 + 11.0 + BLEND_LIST_HEIGHT + 15.0;
+const BLEND_LIST_HEIGHT: f32 = 349.0;
+const BLEND_ROW: f32 = 38.8;
+const BLEND_GLYPH_INK: u32 = 0xFF808080;
+const SLIDER_REST: u32 = 0xFF5A5A5A;
+/// Opening, the blend editor grows over this long; closing, it goes faster.
+const BLEND_OPEN: f32 = 0.25;
+const BLEND_CLOSE: f32 = 0.1;
+/// A scroll of the modes left alone this long settles on the nearest.
+const BLEND_SETTLE: f32 = 0.12;
+/// A row slid left shows its buttons, each this wide, this far apart; slid right this far, it is
+/// picked.
+const SWIPE_BUTTON: f32 = 82.0;
+const SWIPE_GAP: f32 = 2.0;
+const SWIPE_FILL: u32 = 0xFF3F3F3F;
+const SWIPE_INK: u32 = 0xFFC1C1C1;
+const SWIPE_DELETE: u32 = 0xFFFF473D;
+const PICK_REACH: f32 = 72.0;
+/// A press moved this far (points) slides its row; held still this long, it is a hold.
+const SLOP: f32 = 8.0;
+const HOLD: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// What a press on a row turned out to be.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Way {
+    Undecided,
+    /// Sideways: the row slides.
+    Swipe,
+    /// Held: the row is dragged up or down to move it.
+    Reorder,
+    /// Moved up or down first: nothing.
+    Ignored,
+}
+
+/// A press on a row, followed until let go: whose, where and when it went down, what it became,
+/// how far the row was slid as it went down, and how far it has been dragged down.
+#[derive(Clone, Copy)]
+struct RowPress {
+    id: u64,
+    origin: Pos2,
+    since: Instant,
+    way: Way,
+    start: f32,
+    dy: f32,
+}
+
+/// What a layer's options do.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Do {
+    Rename,
+    Ungroup,
+    Flatten,
+    Select,
+    Copy,
+    Fill,
+    Clear,
+    Invert,
+    AlphaLock,
+    Mask,
+    Clip,
+    Assist,
+    Reference,
+    Rasterize,
+    MergeDown,
+    CombineDown,
+}
+
+/// The blend editor open under a layer's row: how far its modes are scrolled (points, the first
+/// in the middle at 0), where a tap sent them, and when they were last moved.
+struct Blend {
+    id: u64,
+    scroll: f32,
+    to: Option<f32>,
+    moved: Option<Instant>,
+}
+
+#[derive(Default)]
+pub struct Layers {
+    /// Each layer's thumbnail and the pixels' version it shows.
+    thumbnails: HashMap<u64, (u64, TextureHandle)>,
+    /// The current layer's options: whose (kept while they fade), and their coming and going.
+    options: Option<u64>,
+    options_menu: Menu,
+    /// The title's menu, and Delete's question.
+    title_menu: Menu,
+    deleting: Alert,
+    /// A layer renamed in place: which, the name as typed, and whether it has been focused.
+    renaming: Option<(u64, String, bool)>,
+    blend: Option<Blend>,
+    /// A press on a row; how far each row is slid (points, left negative); the row slid open.
+    press: Option<RowPress>,
+    slid: HashMap<u64, f32>,
+    swiped: Option<u64>,
+    /// A press on a row's visibility box: whose, since when, and whether holding it has acted.
+    box_press: Option<(u64, Instant, bool)>,
+    /// What the panel asks of the app: a notice to show, a layer's contents copied, the chosen
+    /// layers shared.
+    pub notice: Option<(String, bool)>,
+    pub copied: Option<ThumbnailImage>,
+    pub share: bool,
+}
+
+impl Layers {
+    /// Another artwork is shown: its thumbnails are read anew.
+    pub fn forget(&mut self) {
+        self.thumbnails.clear();
+        self.options = None;
+        self.options_menu.close();
+        self.title_menu.close();
+        self.renaming = None;
+        self.blend = None;
+        self.press = None;
+        self.slid.clear();
+        self.swiped = None;
+    }
+
+    /// A menu of the panel's is open: a press elsewhere only closes it.
+    pub fn modal(&self) -> bool {
+        self.options_menu.is_open() || self.title_menu.is_open() || self.deleting.is_open()
+    }
+
+    /// Shows the panel hanging from `button`; returns where it is (points).
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        look: &mut Look,
+        session: &CanvasSession,
+        button: Rect,
+        backdrops: &mut Vec<f32>,
+    ) -> Rect {
+        let screen = ctx.content_rect();
+        let (left, arrow_x) =
+            panel::place(LAYERS_WIDTH, button.center().x, screen, pc::SIDE_BAR_WIDTH + panel::POPOVER_GAP);
+        let top = screen.top() + pc::BAR_HEIGHT;
+        let layers = session.layers();
+        let versions: HashMap<u64, u64> = session.layer_versions().into_iter().map(|v| (v.id, v.version)).collect();
+        let modes = procraft_core::blend_modes();
+        // a closed group's layers are left out
+        let collapsed: Vec<u64> =
+            layers.iter().filter(|l| l.kind == LayerType::Group && l.collapsed).map(|l| l.id).collect();
+        let parents: HashMap<u64, Option<u64>> = layers.iter().map(|l| (l.id, l.parent)).collect();
+        let hidden = |l: &LayerInfo| {
+            let mut at = l.parent;
+            for _ in 0..64 {
+                let Some(p) = at else { return false };
+                if collapsed.contains(&p) {
+                    return true;
+                }
+                at = parents.get(&p).copied().flatten();
+            }
+            false
+        };
+        let shown: Vec<&LayerInfo> = layers.iter().filter(|l| !hidden(l)).collect();
+        let masked = |l: &LayerInfo| layers.iter().any(|m| m.kind == LayerType::Mask && m.parent == Some(l.id));
+        let height_of = |l: &LayerInfo| match l.kind {
+            LayerType::Group => GROUP_HEIGHT,
+            LayerType::Mask => MASKED_ROW_HEIGHT,
+            LayerType::Paint if masked(l) => MASKED_ROW_HEIGHT,
+            LayerType::Paint => ROW_HEIGHT,
+        };
+        // each row's blend editor, open or opening or closing, and how far
+        let open_blend = self.blend.as_ref().map(|b| b.id);
+        let blend_shown: HashMap<u64, f32> = shown
+            .iter()
+            .filter(|l| l.kind != LayerType::Mask)
+            .map(|l| {
+                let open = open_blend == Some(l.id);
+                let id = egui::Id::unique(("blend editor", l.id));
+                let k = ctx.animate_bool_with_time(id, open, if open { BLEND_OPEN } else { BLEND_CLOSE });
+                (l.id, ease(k))
+            })
+            .filter(|(_, k)| *k > 0.0)
+            .collect();
+        let editors: f32 = blend_shown.values().map(|k| k * BLEND_EDITOR_HEIGHT).sum();
+        self.settle_slides(ctx, &shown);
+        let rows: f32 = shown.iter().map(|l| height_of(l) + ROW_GAP).sum::<f32>() + editors + 10.0 + 50.0 + 12.0;
+        // as tall as its rows, up to the window's bottom less a gap
+        let most = screen.bottom() - panel::POPOVER_GAP - top;
+        let height = (panel::ARROW_HEIGHT + HEADER_HEIGHT + rows).min(most);
+        let rect = Rect::from_min_size(pos2(left, top), vec2(LAYERS_WIDTH, height));
+        let any_picked = layers.iter().any(|l| l.picked);
+        let current_mask_parent = layers.iter().find(|l| l.current && l.kind == LayerType::Mask).and_then(|l| l.parent);
+        // where the rows are, for the options to sit by theirs
+        let mut row_rects: HashMap<u64, Rect> = HashMap::new();
+        let mut tapped: Option<&LayerInfo> = None;
+        let mut blend_tapped: Option<u64> = None;
+        let mut title = Rect::NOTHING;
+        // the only layer (masks aside) is cleared rather than deleted
+        let alone = layers.iter().filter(|l| l.kind != LayerType::Mask).count() == 1;
+
+        egui::Area::new(egui::Id::unique("layers panel")).fixed_pos(rect.min).order(egui::Order::Foreground).show(
+            ctx,
+            |ui| {
+                ui.allocate_rect(rect, Sense::click());
+                panel::frame(ui, look, "layers frame", rect, arrow_x, backdrops);
+                let body = panel::body(rect);
+                // the chevron turns blue while layers are picked
+                let (title_tapped, row) = panel::header_title(ui, look, body, "Layers", 24.0, true, any_picked);
+                title = row;
+                if title_tapped {
+                    self.title_menu.open();
+                }
+                let plus = Rect::from_min_size(pos2(body.right() - 18.0 - 40.0, body.top() + 12.0), vec2(40.0, 41.0));
+                look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(PANEL_GLYPH));
+                if ui.interact(plus, ui.scope_id().with("new layer"), Sense::click()).clicked() {
+                    session.add_layer();
+                }
+                let list = Rect::from_min_max(
+                    pos2(body.left() + 12.0, body.top() + HEADER_HEIGHT),
+                    pos2(body.right() - 12.0, body.bottom()),
+                );
+                let mut read = 0;
+                ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
+                    ScrollArea::vertical()
+                        .id_salt("layers list")
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                            let last = shown.len().saturating_sub(1);
+                            let mut dragged = None;
+                            for (i, l) in shown.iter().enumerate() {
+                                // the list's ends round; the rows between are square
+                                let (t, b) =
+                                    (if i == 0 { LIST_CORNER } else { 0.0 }, if i == last { LIST_CORNER } else { 0.0 });
+                                let height = height_of(l);
+                                let (row, _) =
+                                    ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+                                row_rects.insert(l.id, row);
+                                let owner = current_mask_parent == Some(l.id);
+                                let fill = if l.current {
+                                    argb(pc::ACCENT)
+                                } else if l.picked {
+                                    argb(PICKED_ROW)
+                                } else if owner {
+                                    argb(MASK_OWNER_ROW)
+                                } else {
+                                    argb(LAYER_ROW)
+                                };
+                                let looks = RowLook {
+                                    corners: (t, b),
+                                    fill,
+                                    version: versions.get(&l.id).copied(),
+                                    masked: masked(l),
+                                };
+                                if self.press.is_some_and(|p| p.id == l.id && p.way == Way::Reorder) {
+                                    // held and dragged: drawn where it is dragged to, over the rest
+                                    dragged = Some((*l, row, looks));
+                                } else {
+                                    let slide = self.slid.get(&l.id).copied().unwrap_or(0.0);
+                                    let at = row.translate(vec2(slide, 0.0));
+                                    if slide < 0.0 {
+                                        self.swipe_buttons(ui, session, l, row, alone);
+                                    }
+                                    let id = ui.scope_id().with(("row", l.id));
+                                    let response = ui.interact(at.intersect(row), id, Sense::click_and_drag());
+                                    if response.is_pointer_button_down_on()
+                                        && self.press.is_none()
+                                        && let Some(origin) = ui.input(|i| i.pointer.interact_pos())
+                                    {
+                                        let since = Instant::now();
+                                        let way = Way::Undecided;
+                                        self.press =
+                                            Some(RowPress { id: l.id, origin, since, way, start: slide, dy: 0.0 });
+                                    }
+                                    let mut row_ui = ui.new_child(UiBuilder::new().max_rect(row));
+                                    row_ui.set_clip_rect(row.intersect(ui.clip_rect()));
+                                    if self.draw_row(&mut row_ui, look, session, l, at, looks, &modes, &mut read) {
+                                        blend_tapped = Some(l.id);
+                                    }
+                                    // a tap, not a slide or a hold
+                                    if response.clicked() && self.press.is_none_or(|p| p.way == Way::Undecided) {
+                                        tapped = Some(l);
+                                        self.swiped = None;
+                                    }
+                                }
+                                ui.add_space(ROW_GAP);
+                                // its blend modes and opacity open under it, the panel growing as
+                                // they come
+                                if let Some(&k) = blend_shown.get(&l.id) {
+                                    let (space, _) = ui.allocate_exact_size(
+                                        vec2(ui.available_width(), k * BLEND_EDITOR_HEIGHT),
+                                        Sense::hover(),
+                                    );
+                                    let editor =
+                                        Rect::from_min_size(space.min, vec2(space.width(), BLEND_EDITOR_HEIGHT));
+                                    let mut ui = ui.new_child(UiBuilder::new().max_rect(editor));
+                                    ui.set_clip_rect(space.intersect(ui.clip_rect()));
+                                    ui.multiply_opacity(k);
+                                    self.blend_editor(&mut ui, look, session, l, editor, &modes);
+                                }
+                            }
+                            ui.add_space(10.0);
+                            background_row(ui, look, session);
+                            ui.add_space(12.0);
+                            if let Some((l, row, looks)) = dragged {
+                                let at = row.translate(vec2(0.0, self.press.map_or(0.0, |p| p.dy)));
+                                let mut row_ui = ui.new_child(UiBuilder::new().max_rect(at));
+                                self.draw_row(&mut row_ui, look, session, l, at, looks, &modes, &mut read);
+                            }
+                        });
+                });
+            },
+        );
+        self.follow_press(ctx, session, &layers, &row_rects);
+        // a layer tapped: picked layers give way to it; the current one shows its options (or
+        // hides them); any other becomes the current one
+        if let Some(l) = tapped {
+            if any_picked || !l.current {
+                session.select_layer(l.id);
+                self.options_menu.close();
+            } else if self.options_menu.is_open() {
+                self.options_menu.close();
+            } else {
+                self.options = Some(l.id);
+                self.options_menu.open();
+                self.blend = None;
+            }
+        }
+        if let Some(id) = blend_tapped {
+            self.options_menu.close();
+            let open = self.blend.as_ref().is_some_and(|b| b.id == id);
+            self.blend = (!open).then(|| {
+                let at = layers
+                    .iter()
+                    .find(|l| l.id == id)
+                    .map_or(0, |l| modes.iter().position(|m| m.id == l.blend).unwrap_or(0));
+                Blend { id, scroll: at as f32 * BLEND_ROW, to: None, moved: None }
+            });
+        }
+        if let Some(l) = self.options.and_then(|id| layers.iter().find(|l| l.id == id)) {
+            let row_y = row_rects.get(&l.id).map_or(rect.center().y, |r| r.center().y);
+            self.layer_options(ctx, look, session, l, rect, row_y, backdrops);
+        }
+        self.title_menu(ctx, look, session, title, any_picked, backdrops);
+        // the title menu's Delete asks first
+        if self.deleting.show(ctx, look) == Some(Answer::Action) {
+            session.delete_picked();
+        }
+        rect
+    }
+
+    /// The title's menu, under it: Select All; Group and Merge (with layers picked); Share and
+    /// Duplicate; Delete (asking first).
+    fn title_menu(
+        &mut self,
+        ctx: &egui::Context,
+        look: &mut Look,
+        session: &CanvasSession,
+        title: Rect,
+        picked: bool,
+        backdrops: &mut Vec<f32>,
+    ) {
+        let ink = menu::INK;
+        let mut entries = vec![Entry::Item(&icons::MENU_SELECT_ALL, "Select All", ink), Entry::Divider];
+        if picked {
+            entries.push(Entry::Item(&icons::MENU_GROUP, "Group", ink));
+            entries.push(Entry::Item(&icons::MENU_MERGE, "Merge", ink));
+            entries.push(Entry::Divider);
+        }
+        entries.push(Entry::Item(&icons::MENU_SHARE, "Share", ink));
+        entries.push(Entry::Item(&icons::MENU_DUPLICATE, "Duplicate", ink));
+        entries.push(Entry::Divider);
+        entries.push(Entry::Item(&icons::MENU_TRASH, "Delete", menu::DANGER));
+        let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
+        let screen = ctx.content_rect();
+        let left = (title.center().x - size.x / 2.0).clamp(screen.left(), (screen.right() - size.x).max(screen.left()));
+        let rect = Rect::from_min_size(pos2(left, title.bottom().max(screen.top() + OPTIONS_TOP)), size);
+        let mut tapped = None;
+        self.title_menu.show(
+            ctx,
+            "layers title menu",
+            rect,
+            pos2(rect.center().x, rect.top()),
+            menu::OVER_A_PANEL,
+            backdrops,
+            |ui| {
+                tapped = menu::entries(ui, look, rect, &entries);
+            },
+        );
+        let Some(Entry::Item(_, label, _)) = tapped.and_then(|i| entries.get(i)) else { return };
+        self.title_menu.close();
+        match *label {
+            "Select All" => _ = session.pick_all_layers(),
+            "Group" => _ = session.group_picked(),
+            "Merge" => _ = session.merge_picked(),
+            "Share" => self.share = true,
+            "Duplicate" => {
+                if !session.duplicate_picked() {
+                    let most = session.layer_stats().maximum;
+                    crate::files::tell("No room", &format!("This canvas holds at most {most} layers."));
+                }
+            }
+            _ => self.deleting.open("Delete these layers?", "Undo brings them back.", "Delete", Some(&icons::TRASH)),
+        }
+    }
+
+    /// A row's fill and what is on it, at `at` (where it is slid or dragged to); true if its blend
+    /// letter was tapped.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_row(
+        &mut self,
+        ui: &mut Ui,
+        look: &mut Look,
+        session: &CanvasSession,
+        l: &LayerInfo,
+        at: Rect,
+        looks: RowLook,
+        modes: &[BlendModeInfo],
+        read: &mut usize,
+    ) -> bool {
+        let (t, b) = looks.corners;
+        ui.painter().rect_filled(
+            at,
+            egui::CornerRadius { nw: t as u8, ne: t as u8, sw: b as u8, se: b as u8 },
+            looks.fill,
+        );
+        let ink = if l.current || l.picked { Color32::WHITE } else { argb(PANEL_TITLE) };
+        let box_fill = if l.current || l.picked { Color32::WHITE } else { argb(CHECK_FILL) };
+        if l.kind == LayerType::Group {
+            self.group_row(ui, look, session, l, at, ink, box_fill);
+            false
+        } else {
+            self.layer_row(ui, look, session, l, at, ink, box_fill, looks.version, looks.masked, modes, read)
+        }
+    }
+
+    /// The buttons a row slid left shows behind it: Lock (or Unlock), Duplicate (not for a mask)
+    /// and Delete (Clear for the only layer).
+    fn swipe_buttons(&mut self, ui: &Ui, session: &CanvasSession, l: &LayerInfo, row: Rect, alone: bool) {
+        let mut buttons = vec![(if l.locked { "Unlock" } else { "Lock" }, SWIPE_FILL, SWIPE_INK)];
+        if l.kind != LayerType::Mask {
+            buttons.push(("Duplicate", SWIPE_FILL, SWIPE_INK));
+        }
+        buttons.push((if alone { "Clear" } else { "Delete" }, SWIPE_DELETE, 0xFFFFFFFF));
+        let mut right = row.right();
+        for (label, fill, ink) in buttons.into_iter().rev() {
+            let rect = Rect::from_min_max(pos2(right - SWIPE_BUTTON, row.top()), pos2(right, row.bottom()));
+            right -= SWIPE_BUTTON + SWIPE_GAP;
+            ui.painter().rect_filled(rect, 8, argb(fill));
+            text(ui.painter(), rect.center(), Align2::CENTER_CENTER, label, 15.0, Weight::Medium, argb(ink));
+            if ui.interact(rect, ui.scope_id().with(("swipe", l.id, label)), Sense::click()).clicked() {
+                match label {
+                    "Lock" | "Unlock" => _ = session.set_layer_locked(l.id, !l.locked),
+                    "Duplicate" => _ = session.duplicate_layer(l.id),
+                    "Clear" => {
+                        session.select_layer(l.id);
+                        session.clear_layer();
+                    }
+                    _ => _ = session.delete_layer(l.id),
+                }
+                self.swiped = None;
+            }
+        }
+    }
+
+    /// The rows not being slid go back, or open to their buttons, as they were left.
+    fn settle_slides(&mut self, ctx: &egui::Context, shown: &[&LayerInfo]) {
+        let dt = ctx.input(|i| i.stable_dt).min(0.05);
+        for l in shown {
+            if self.press.is_some_and(|p| p.id == l.id && p.way == Way::Swipe) {
+                continue;
+            }
+            let to = if self.swiped == Some(l.id) { -swipe_reach(l) } else { 0.0 };
+            let Some(v) = self.slid.get_mut(&l.id) else {
+                if to != 0.0 {
+                    self.slid.insert(l.id, 0.0);
+                    ctx.request_repaint();
+                }
+                continue;
+            };
+            *v += (to - *v) * (dt * 14.0).min(1.0);
+            if (to - *v).abs() < 0.5 {
+                *v = to;
+            } else {
+                ctx.request_repaint();
+            }
+            if *v == 0.0 {
+                self.slid.remove(&l.id);
+            }
+        }
+    }
+
+    /// Follows the press on a row: moved sideways it slides the row (let go past half its buttons,
+    /// it stays open; slid right past half the way, it picks the layer); held still, the row is
+    /// dragged up and down and, let go, the layer moves next to the row it is over.
+    fn follow_press(
+        &mut self,
+        ctx: &egui::Context,
+        session: &CanvasSession,
+        layers: &[LayerInfo],
+        rows: &HashMap<u64, Rect>,
+    ) {
+        let Some(mut p) = self.press else { return };
+        let (at, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
+        let d = at.unwrap_or(p.origin) - p.origin;
+        let l = layers.iter().find(|l| l.id == p.id);
+        let reach = l.map_or(0.0, swipe_reach);
+        let open = self.swiped == Some(p.id);
+        if down {
+            match p.way {
+                Way::Undecided => {
+                    if d.length() > SLOP {
+                        p.way = if d.x.abs() > d.y.abs() { Way::Swipe } else { Way::Ignored };
+                    } else if p.since.elapsed() >= HOLD {
+                        // a mask stays with its layer
+                        if l.is_some_and(|l| l.kind != LayerType::Mask) {
+                            p.way = Way::Reorder;
+                            self.swiped = None;
+                        } else {
+                            p.way = Way::Ignored;
+                        }
+                    } else {
+                        ctx.request_repaint_after(HOLD.saturating_sub(p.since.elapsed()));
+                    }
+                }
+                Way::Swipe => {
+                    // closed, it goes right as far as picking takes
+                    let most = if open { 0.0 } else { PICK_REACH };
+                    self.slid.insert(p.id, (p.start + d.x).clamp(-reach, most));
+                    ctx.request_repaint();
+                }
+                Way::Reorder => {
+                    p.dy = d.y;
+                    ctx.request_repaint();
+                }
+                Way::Ignored => {}
+            }
+            self.press = Some(p);
+            return;
+        }
+        self.press = None;
+        match p.way {
+            Way::Swipe => {
+                let slide = self.slid.get(&p.id).copied().unwrap_or(0.0);
+                if slide > PICK_REACH / 2.0 {
+                    session.pick_layer(p.id);
+                } else {
+                    let opened = slide < -reach / 2.0;
+                    if opened != open {
+                        self.swiped = opened.then_some(p.id);
+                    }
+                }
+            }
+            Way::Reorder => {
+                // dropped where its middle came to rest: just above or below the row it is over
+                let Some(row) = rows.get(&p.id) else { return };
+                let y = row.center().y + p.dy;
+                let moving = session.moving_with(p.id);
+                let others: Vec<(u64, Rect)> = layers
+                    .iter()
+                    .filter(|o| !moving.contains(&o.id))
+                    .filter_map(|o| rows.get(&o.id).map(|r| (o.id, *r)))
+                    .collect();
+                let target = others.iter().find(|(_, r)| y >= r.top() && y < r.bottom()).or_else(|| {
+                    others.iter().min_by(|a, b| (a.1.center().y - y).abs().total_cmp(&(b.1.center().y - y).abs()))
+                });
+                if let Some((target, r)) = target {
+                    session.move_next_to(p.id, *target, y < r.center().y);
+                }
+            }
+            Way::Undecided | Way::Ignored => {}
+        }
+    }
+
+    /// A row's visibility box at `rect`: tapped, the layer shows or hides; held, it shows alone (or,
+    /// alone already, every layer shows again), a notice saying which.
+    fn visibility_touch(&mut self, ui: &Ui, session: &CanvasSession, l: &LayerInfo, rect: Rect) {
+        let response = ui.interact(rect, ui.scope_id().with(("visible", l.id)), Sense::click_and_drag());
+        if response.is_pointer_button_down_on() {
+            let (id, since, done) = self.box_press.get_or_insert((l.id, Instant::now(), false));
+            if *id == l.id && !*done {
+                let held = since.elapsed();
+                if held >= HOLD {
+                    *done = true;
+                    let on = session.solo() != Some(l.id);
+                    if session.set_solo(on.then_some(l.id)) {
+                        let said = if on { "Solo visibility on" } else { "Solo visibility off" };
+                        self.notice = Some((said.into(), false));
+                    }
+                } else {
+                    ui.ctx().request_repaint_after(HOLD - held);
+                }
+            }
+        }
+        let held = self.box_press.is_some_and(|(id, _, done)| id == l.id && done);
+        if response.clicked() && !held {
+            session.set_layer_visible(l.id, !l.visible);
+        }
+        if !response.is_pointer_button_down_on() && self.box_press.is_some_and(|(id, _, _)| id == l.id) {
+            self.box_press = None;
+        }
+    }
+
+    /// The current layer's options, left of the panel and centred on its row (kept below the top
+    /// bar): what doesn't apply to it is left out; lock, duplicate and delete are on the row's
+    /// swipe. Editing a text layer's text is still to come here.
+    #[allow(clippy::too_many_arguments)]
+    fn layer_options(
+        &mut self,
+        ctx: &egui::Context,
+        look: &mut Look,
+        session: &CanvasSession,
+        l: &LayerInfo,
+        panel: Rect,
+        row_y: f32,
+        backdrops: &mut Vec<f32>,
+    ) {
+        // (label, what it does, ticked, enabled, closes the menu)
+        let mut rows: Vec<(&str, Do, bool, bool, bool)> = vec![("Rename", Do::Rename, false, true, true)];
+        let unlocked = !l.locked;
+        match l.kind {
+            LayerType::Group => {
+                rows.push(("Ungroup", Do::Ungroup, false, true, true));
+                rows.push(("Flatten", Do::Flatten, false, true, true));
+            }
+            LayerType::Mask => {
+                rows.push(("Select", Do::Select, false, true, true));
+                rows.push(("Fill Layer", Do::Fill, false, unlocked, true));
+                rows.push(("Clear", Do::Clear, false, unlocked, true));
+                rows.push(("Invert", Do::Invert, false, unlocked, true));
+            }
+            LayerType::Paint => {
+                let has_mask = session.layers().iter().any(|m| m.kind == LayerType::Mask && m.parent == Some(l.id));
+                rows.push(("Select", Do::Select, false, true, true));
+                rows.push(("Copy", Do::Copy, false, true, true));
+                // a text layer's pixels come from its text
+                if !l.text {
+                    rows.push(("Fill Layer", Do::Fill, false, unlocked, true));
+                    rows.push(("Clear", Do::Clear, false, unlocked, true));
+                }
+                rows.push(("Alpha Lock", Do::AlphaLock, l.alpha_lock, true, false));
+                rows.push(("Mask", Do::Mask, false, !has_mask, true));
+                if l.can_clip {
+                    rows.push(("Clipping Mask", Do::Clip, l.clipped, true, false));
+                }
+                rows.push(("Drawing Assist", Do::Assist, l.assisted, true, false));
+                if !l.text {
+                    rows.push(("Invert", Do::Invert, false, unlocked, true));
+                }
+                rows.push(("Reference", Do::Reference, l.reference, true, false));
+            }
+        }
+        if l.text {
+            rows.push(("Rasterize", Do::Rasterize, false, unlocked, true));
+        }
+        if l.kind != LayerType::Mask {
+            if l.can_merge {
+                rows.push(("Merge Down", Do::MergeDown, false, unlocked, true));
+            }
+            if l.can_combine {
+                rows.push(("Combine Down", Do::CombineDown, false, true, true));
+            }
+        }
+        let height = 7.0 * 2.0 + menu::OPTION_HEIGHT * rows.len() as f32;
+        let screen = ctx.content_rect();
+        let lowest = (screen.bottom() - height).max(screen.top() + OPTIONS_TOP);
+        let top = (row_y - height / 2.0).clamp(screen.top() + OPTIONS_TOP, lowest);
+        let rect = Rect::from_min_size(pos2(panel.left() + OPTIONS_LEFT, top), vec2(OPTIONS_WIDTH, height));
+        let mut chosen = None;
+        self.options_menu.show(
+            ctx,
+            "layer options",
+            rect,
+            pos2(rect.right(), rect.center().y),
+            menu::Glass { corner: OPTIONS_CORNER, ..menu::FROSTED },
+            backdrops,
+            |ui| {
+                let places = menu::option_rows(rect.left(), rect.top() + 7.0, rect.width(), rows.len());
+                for (row, (label, does, ticked, enabled, closes)) in places.zip(&rows) {
+                    if menu::option(ui, look, row, label, *ticked, *enabled, false) {
+                        chosen = Some((*does, *closes));
+                    }
+                }
+            },
+        );
+        let Some((does, closes)) = chosen else { return };
+        if closes {
+            self.options_menu.close();
+        }
+        match does {
+            Do::Rename => self.renaming = Some((l.id, l.name.clone(), false)),
+            Do::Ungroup => _ = session.ungroup(l.id),
+            Do::Flatten => _ = session.flatten_group(l.id),
+            Do::Select => _ = session.select_layer_contents(l.id),
+            Do::Copy => self.copied = session.copy_layer_contents(l.id).or(self.copied.take()),
+            Do::Fill => _ = session.fill_layer(l.id),
+            Do::Clear => {
+                session.select_layer(l.id);
+                session.clear_layer();
+            }
+            Do::Invert => _ = session.invert_layer(l.id),
+            Do::AlphaLock => _ = session.set_layer_alpha_lock(l.id, !l.alpha_lock),
+            Do::Mask => _ = session.add_mask(l.id),
+            Do::Clip => _ = session.set_layer_clipped(l.id, !l.clipped),
+            Do::Assist => _ = session.set_guide_assisted(!l.assisted),
+            Do::Reference => _ = session.set_layer_reference(l.id, !l.reference),
+            Do::Rasterize => {
+                session.rasterize_layer(l.id);
+                self.notice = Some(("Text rasterized".into(), true));
+            }
+            Do::MergeDown => _ = session.merge_down(l.id),
+            Do::CombineDown => _ = session.combine_down(l.id),
+        }
+    }
+
+    /// The blend editor under a layer's row: its opacity, read and slid, then its blend modes, the
+    /// layer's in the middle; scrolled, the mode settling in the middle becomes the layer's, and a
+    /// tap on one scrolls it there.
+    fn blend_editor(
+        &mut self,
+        ui: &mut Ui,
+        look: &mut Look,
+        session: &CanvasSession,
+        l: &LayerInfo,
+        rect: Rect,
+        modes: &[BlendModeInfo],
+    ) {
+        let ink = argb(PANEL_TITLE);
+        let left = rect.left() + 13.0;
+        let right = rect.right() - 13.0;
+        let y = rect.top() + 22.0 + 23.0 / 2.0;
+        text(ui.painter(), pos2(left, y), Align2::LEFT_CENTER, "Opacity", 17.0, Weight::Regular, ink);
+        let reading =
+            if l.opacity >= 0.995 { "Max".to_owned() } else { format!("{}%", (l.opacity * 100.0).round() as i32) };
+        text(ui.painter(), pos2(right, y), Align2::RIGHT_CENTER, &reading, 17.0, Weight::Regular, ink);
+        // a thin blue slider with a white knob, set by dragging anywhere along it
+        let slider = Rect::from_min_max(
+            pos2(left, rect.top() + 22.0 + 23.0 + 2.0),
+            pos2(right, rect.top() + 22.0 + 23.0 + 18.0),
+        );
+        let response = ui.interact(slider, ui.scope_id().with(("opacity", l.id)), Sense::click_and_drag());
+        let held = response.is_pointer_button_down_on();
+        if let Some(p) = response.interact_pointer_pos().filter(|_| held || response.clicked()) {
+            let v = ((p.x - slider.left()) / slider.width()).clamp(0.0, 1.0);
+            session.set_layer_opacity(l.id, v, !held);
+        } else if response.drag_stopped() {
+            session.set_layer_opacity(l.id, l.opacity, true);
+        }
+        let (cy, h) = (slider.center().y, 3.0);
+        let track = Rect::from_min_max(pos2(slider.left(), cy - h / 2.0), pos2(slider.right(), cy + h / 2.0));
+        ui.painter().rect_filled(track, h / 2.0, argb(SLIDER_REST));
+        ui.painter().rect_filled(
+            Rect::from_min_size(track.min, vec2(track.width() * l.opacity, h)),
+            h / 2.0,
+            argb(pc::ACCENT),
+        );
+        let knob = vec2(26.0, 15.0);
+        let x = (slider.left() + slider.width() * l.opacity)
+            .clamp(slider.left() + knob.x / 2.0, slider.right() - knob.x / 2.0);
+        ui.painter().rect_filled(Rect::from_center_size(pos2(x, cy), knob), knob.y / 2.0, Color32::WHITE);
+
+        // the modes: a picker scrolled to put one in the middle
+        let list =
+            Rect::from_min_size(pos2(rect.left(), slider.bottom() + 2.0 + 11.0), vec2(rect.width(), BLEND_LIST_HEIGHT));
+        ui.painter().rect_filled(list, 12, argb(LAYER_ROW));
+        let Some(b) = self.blend.as_mut().filter(|b| b.id == l.id) else {
+            // closing: as it was
+            let at = modes.iter().position(|m| m.id == l.blend).unwrap_or(0) as f32 * BLEND_ROW;
+            blend_rows(ui, look, list, modes, l.blend, at);
+            return;
+        };
+        let most = modes.len().saturating_sub(1) as f32 * BLEND_ROW;
+        let pad = (BLEND_LIST_HEIGHT - BLEND_ROW) / 2.0;
+        let response = ui.interact(list, ui.scope_id().with(("modes", l.id)), Sense::click_and_drag());
+        let now = Instant::now();
+        if response.dragged() {
+            b.scroll = (b.scroll - response.drag_delta().y).clamp(0.0, most);
+            b.to = None;
+            b.moved = Some(now);
+        }
+        if response.hovered() {
+            let wheel = ui.input(|i| i.smooth_scroll_delta.y);
+            if wheel != 0.0 {
+                // the list scrolls, not the panel round it
+                ui.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+                b.scroll = (b.scroll - wheel).clamp(0.0, most);
+                b.to = None;
+                b.moved = Some(now);
+            }
+        }
+        if response.clicked()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let i = ((p.y - list.top() - pad + b.scroll) / BLEND_ROW).floor();
+            if i >= 0.0 && (i as usize) < modes.len() {
+                b.to = Some(i * BLEND_ROW);
+            }
+        }
+        // left alone, it settles on the nearest mode
+        let settled = b.moved.is_some_and(|t| t.elapsed().as_secs_f32() >= BLEND_SETTLE);
+        if b.to.is_none() && settled && !response.dragged() {
+            b.to = Some((b.scroll / BLEND_ROW).round() * BLEND_ROW);
+        }
+        if let Some(to) = b.to {
+            let dt = ui.input(|i| i.stable_dt).min(0.05);
+            b.scroll += (to - b.scroll) * (dt * 14.0).min(1.0);
+            if (to - b.scroll).abs() < 0.5 {
+                b.scroll = to;
+                b.to = None;
+                b.moved = None;
+                let i = (to / BLEND_ROW).round() as usize;
+                if let Some(m) = modes.get(i).filter(|m| m.id != l.blend) {
+                    session.set_layer_blend(l.id, m.id);
+                }
+            }
+            ui.ctx().request_repaint();
+        } else if b.moved.is_some() {
+            ui.ctx().request_repaint();
+        }
+        let scroll = b.scroll;
+        blend_rows(ui, look, list, modes, l.blend, scroll);
+    }
+
+    /// A layer's row: its thumbnail, its name (a padlock before it when locked, what it is under it),
+    /// its blend letter and its visibility box.
+    #[allow(clippy::too_many_arguments)]
+    fn layer_row(
+        &mut self,
+        ui: &mut Ui,
+        look: &mut Look,
+        session: &CanvasSession,
+        l: &LayerInfo,
+        row: Rect,
+        ink: Color32,
+        box_fill: Color32,
+        version: Option<u64>,
+        masked: bool,
+        modes: &[BlendModeInfo],
+        read: &mut usize,
+    ) -> bool {
+        let mask = l.kind == LayerType::Mask;
+        let mut blend_tapped = false;
+        let mut x = row.left() + GROUP_INDENT * l.depth as f32;
+        if l.clipped {
+            look.icon(ui, &icons::CLIP, pos2(x + 8.0, row.center().y), 16.0, ink);
+            x += 18.0;
+        }
+        // a mask's thumbnail and its layer's join into one
+        let shift = if mask {
+            2.0
+        } else if masked {
+            -2.0
+        } else {
+            0.0
+        };
+        let thumb =
+            Rect::from_center_size(pos2(x + 4.0 + THUMB.0 / 2.0, row.center().y + shift), vec2(THUMB.0, THUMB.1));
+        self.thumbnail(ui, session, l, thumb, version, read);
+        let name_left = thumb.right();
+        let blend =
+            Rect::from_min_size(pos2(row.right() - 8.0 - 44.0 - 44.0 + 8.0, row.center().y - 23.5), vec2(44.0, 47.0));
+        let visibility = Rect::from_min_size(pos2(row.right() - 8.0 - 44.0, row.center().y - 23.5), vec2(44.0, 47.0));
+        let name_right = if mask { visibility.left() - 36.0 } else { blend.left() - 8.0 };
+        // what the layer is, under its name (which stays in the middle)
+        let tag = if l.reference && l.assisted {
+            Some("Assisted Reference")
+        } else if l.reference {
+            Some("Reference")
+        } else if l.assisted {
+            Some("Assisted")
+        } else if l.private {
+            Some("Private")
+        } else {
+            None
+        };
+        self.name(ui, look, session, l, pos2(name_left, row.center().y), name_right, ink);
+        if let Some(tag) = tag {
+            let g = galley(ui, tag, 13.0, Weight::Regular, ink, name_right - name_left - 29.0);
+            ui.painter().galley(pos2(name_left + 29.0, row.center().y + 17.5 - g.size().y / 2.0), g, ink);
+        }
+        if !mask {
+            // a locked layer's mode is greyed
+            let letter = if l.locked && !l.current && !l.picked { argb(LOCKED_LETTER) } else { ink };
+            let code = blend_code(modes, l.blend);
+            crate::look::text(
+                ui.painter(),
+                blend.center(),
+                Align2::CENTER_CENTER,
+                &code,
+                14.0,
+                Weight::SemiBold,
+                letter,
+            );
+            // it takes drags too, so a press on it is never the row's
+            blend_tapped = ui.interact(blend, ui.scope_id().with(("blend", l.id)), Sense::click_and_drag()).clicked();
+        }
+        check_box(ui, look, visibility.center(), l.visible, box_fill);
+        self.visibility_touch(ui, session, l, visibility);
+        blend_tapped
+    }
+
+    /// A row's name (see [`locked_name`]), or, being renamed, a field for it with the name chosen;
+    /// let go of, the name is kept.
+    #[allow(clippy::too_many_arguments)]
+    fn name(
+        &mut self,
+        ui: &mut Ui,
+        look: &mut Look,
+        session: &CanvasSession,
+        l: &LayerInfo,
+        at: Pos2,
+        right: f32,
+        ink: Color32,
+    ) {
+        let Some((id, typed, focused)) = self.renaming.as_mut().filter(|(id, _, _)| *id == l.id) else {
+            locked_name(ui, look, l, at, right, ink);
+            return;
+        };
+        if l.locked {
+            look.icon(ui, &icons::LOCK_ROW, pos2(at.x + 3.0 + 8.5, at.y), 17.0, ink);
+        }
+        let field = Rect::from_min_max(pos2(at.x + 29.0, at.y - 12.0), pos2(right - 6.0, at.y + 12.0));
+        let mut output = egui::TextEdit::singleline(typed)
+            .font(Weight::Regular.font(17.0))
+            .text_color(ink)
+            .frame(egui::Frame::NONE)
+            .margin(vec2(0.0, 0.0))
+            .desired_width(field.width())
+            .show(&mut ui.new_child(UiBuilder::new().max_rect(field)));
+        if !*focused {
+            // the whole name chosen, to type over
+            output.response.request_focus();
+            let all = CCursorRange::two(CCursor::new(0), CCursor::new(typed.chars().count()));
+            output.state.cursor.set_char_range(Some(all));
+            output.state.store(ui.ctx(), output.response.id);
+            *focused = true;
+        } else if output.response.lost_focus() {
+            let (id, name) = (*id, typed.clone());
+            self.renaming = None;
+            session.rename_layer(id, name);
+        }
+    }
+
+    /// A group's row: a line where a thumbnail would be, its name, its open or closed arrow and its box.
+    #[allow(clippy::too_many_arguments)]
+    fn group_row(
+        &mut self,
+        ui: &mut Ui,
+        look: &mut Look,
+        session: &CanvasSession,
+        l: &LayerInfo,
+        row: Rect,
+        ink: Color32,
+        box_fill: Color32,
+    ) {
+        let x = row.left() + GROUP_INDENT * l.depth as f32;
+        let line = Rect::from_min_size(pos2(x + 4.0, row.center().y - 2.0), vec2(93.0, 4.0));
+        ui.painter().rect_filled(line, 2, argb(GROUP_LINE));
+        let visibility = Rect::from_min_size(pos2(row.right() - 8.0 - 44.0, row.top()), vec2(44.0, GROUP_HEIGHT));
+        let arrow = Rect::from_min_size(pos2(visibility.left() - 44.0 + 8.0, row.top()), vec2(44.0, GROUP_HEIGHT));
+        self.name(ui, look, session, l, pos2(line.right(), row.center().y), arrow.left() - 8.0, ink);
+        let icon = if l.collapsed { &icons::CHEVRON_RIGHT } else { &icons::CHEVRON_DOWN };
+        look.icon(ui, icon, arrow.center(), 16.0, ink);
+        if ui.interact(arrow, ui.scope_id().with(("fold", l.id)), Sense::click()).clicked() {
+            session.set_group_collapsed(l.id, !l.collapsed);
+        }
+        check_box(ui, look, visibility.center(), l.visible, box_fill);
+        self.visibility_touch(ui, session, l, visibility);
+    }
+
+    /// A layer's thumbnail, read again when its pixels' version is new: what is drawn, fitted on
+    /// its grey (a mask's on white, an alpha-locked layer's on a checkerboard).
+    fn thumbnail(
+        &mut self,
+        ui: &Ui,
+        session: &CanvasSession,
+        l: &LayerInfo,
+        rect: Rect,
+        version: Option<u64>,
+        read: &mut usize,
+    ) {
+        let painter = ui.painter_at(rect);
+        let corner = 4u8;
+        if l.alpha_lock {
+            painter.rect_filled(rect, corner, Color32::WHITE);
+            let cell = 6.0;
+            let (cols, rows) = ((rect.width() / cell).ceil() as i32, (rect.height() / cell).ceil() as i32);
+            for y in 0..rows {
+                for x in 0..cols {
+                    if (x + y) % 2 == 1 {
+                        let r =
+                            Rect::from_min_size(rect.min + vec2(x as f32 * cell, y as f32 * cell), vec2(cell, cell));
+                        painter.rect_filled(r.intersect(rect), 0, Color32::from_gray(0xD6));
+                    }
+                }
+            }
+        } else if l.kind == LayerType::Mask {
+            painter.rect_filled(rect, corner, Color32::WHITE);
+        } else {
+            painter.rect_filled(rect, corner, argb(THUMB_BACKGROUND));
+        }
+        let stale = version.is_some_and(|v| self.thumbnails.get(&l.id).is_none_or(|(at, _)| *at != v));
+        if stale && ui.is_rect_visible(rect) {
+            if *read < THUMBS_A_FRAME {
+                *read += 1;
+                if let (Some(t), Some(v)) = (session.layer_thumbnail(l.id, THUMB_SIDE), version) {
+                    let image =
+                        egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
+                    // small drawings show their pixels
+                    let texture = ui.ctx().load_texture(format!("layer {}", l.id), image, TextureOptions::NEAREST);
+                    self.thumbnails.insert(l.id, (v, texture));
+                }
+            } else {
+                ui.ctx().request_repaint();
+            }
+        }
+        if let Some((_, t)) = self.thumbnails.get(&l.id) {
+            let size = t.size_vec2();
+            let fit = (rect.width() / size.x.max(1.0)).min(rect.height() / size.y.max(1.0));
+            let shown = Rect::from_center_size(rect.center(), size * fit);
+            painter.image(t.id(), shown, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+    }
+}
+
+/// A row's name, where it always is: 29 in from `at`, ending by `right`; a small padlock in the gap
+/// before it when locked.
+fn locked_name(ui: &Ui, look: &mut Look, l: &LayerInfo, at: Pos2, right: f32, ink: Color32) {
+    if l.locked {
+        look.icon(ui, &icons::LOCK_ROW, pos2(at.x + 3.0 + 8.5, at.y), 17.0, ink);
+    }
+    let g = galley(ui, &l.name, 17.0, Weight::Regular, ink, (right - at.x - 29.0 - 6.0).max(10.0));
+    ui.painter().galley(pos2(at.x + 29.0, at.y - g.size().y / 2.0), g, ink);
+}
+
+/// How a row looks: its corners (top, bottom), its fill, its thumbnail's version and whether its
+/// layer has a mask.
+#[derive(Clone, Copy)]
+struct RowLook {
+    corners: (f32, f32),
+    fill: Color32,
+    version: Option<u64>,
+    masked: bool,
+}
+
+/// How far a row slides left to show its buttons: 6 past them.
+fn swipe_reach(l: &LayerInfo) -> f32 {
+    let buttons = if l.kind == LayerType::Mask { 2.0 } else { 3.0 };
+    SWIPE_BUTTON * buttons + SWIPE_GAP * (buttons - 1.0) + 6.0
+}
+
+/// The blend modes in `list`, scrolled `scroll` from the first in the middle: each its name and
+/// glyph, the layer's (`chosen`) blue.
+fn blend_rows(ui: &Ui, look: &mut Look, list: Rect, modes: &[BlendModeInfo], chosen: u32, scroll: f32) {
+    let pad = (BLEND_LIST_HEIGHT - BLEND_ROW) / 2.0;
+    let painter = ui.painter_at(list);
+    for (i, m) in modes.iter().enumerate() {
+        let top = list.top() + pad + i as f32 * BLEND_ROW - scroll;
+        let row = Rect::from_min_size(pos2(list.left(), top), vec2(list.width(), BLEND_ROW));
+        if !row.intersects(list) {
+            continue;
+        }
+        let on = m.id == chosen;
+        if on {
+            painter.rect_filled(row, 0, argb(pc::ACCENT));
+        }
+        let ink = if on { Color32::WHITE } else { argb(PANEL_TITLE) };
+        text(
+            &painter,
+            pos2(row.left() + 12.0, row.center().y),
+            Align2::LEFT_CENTER,
+            &m.name,
+            17.0,
+            Weight::Regular,
+            ink,
+        );
+        if let Some((_, glyph)) = icons::BLEND_GLYPHS.iter().find(|(name, _)| *name == m.name) {
+            let tint = if on { Color32::WHITE } else { argb(BLEND_GLYPH_INK) };
+            let centre = pos2(row.right() - 31.5, row.center().y);
+            if list.contains(centre) {
+                look.icon(ui, glyph, centre, 26.0, tint);
+            }
+        }
+    }
+}
+
+/// The background: its colour and whether it shows.
+fn background_row(ui: &mut Ui, look: &mut Look, session: &CanvasSession) {
+    let background = session.background();
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), Sense::hover());
+    ui.painter().rect_filled(row, 17, argb(BACKGROUND_ROW));
+    let swatch = Rect::from_min_size(pos2(row.left() + 4.0, row.center().y - 21.0), vec2(92.0, 42.0));
+    let colour = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    ui.painter().rect_filled(
+        swatch,
+        14,
+        Color32::from_rgb(colour(background.r), colour(background.g), colour(background.b)),
+    );
+    let ink = argb(PANEL_TITLE);
+    let visibility = Rect::from_min_size(pos2(row.right() - 8.0 - 44.0, row.center().y - 20.5), vec2(44.0, 41.0));
+    let g = galley(ui, "Background color", 17.0, Weight::Regular, ink, visibility.left() - swatch.right() - 14.0);
+    ui.painter().galley(pos2(swatch.right() + 14.0, row.center().y - g.size().y / 2.0), g, ink);
+    check_box(ui, look, visibility.center(), background.visible, argb(CHECK_FILL));
+    if ui.interact(visibility, ui.scope_id().with("background visible"), Sense::click()).clicked() {
+        session.set_background_visible(!background.visible);
+    }
+}
+
+/// A visibility box: filled with a check cut out of it when shown, an outline when hidden.
+fn check_box(ui: &Ui, look: &mut Look, centre: Pos2, checked: bool, fill: Color32) {
+    let rect = Rect::from_center_size(centre, vec2(18.0, 18.0));
+    let slot = match (checked, fill == Color32::WHITE) {
+        (true, true) => "check on white",
+        (true, false) => "check on grey",
+        (false, true) => "check off white",
+        (false, false) => "check off grey",
+    };
+    look.shape(ui, slot, fill.to_array(), rect, |pixmap, t| {
+        let mut paint = tiny_skia::Paint::default();
+        let [r, g, b, a] = fill.to_srgba_unmultiplied();
+        paint.set_color_rgba8(r, g, b, a);
+        paint.anti_alias = true;
+        let mut pb = tiny_skia::PathBuilder::new();
+        if checked {
+            round_rect(&mut pb, Rect::from_min_size(Pos2::ZERO, vec2(18.0, 18.0)), [5.0; 4]);
+            if let Some(p) = pb.finish() {
+                pixmap.fill_path(&p, &paint, tiny_skia::FillRule::Winding, t, None);
+            }
+            // the tick is cut out of the box: the row shows through it (a 24 frame shown 14 across)
+            let k = 14.0 / 24.0;
+            let mut tick = tiny_skia::PathBuilder::new();
+            tick.move_to(5.5, 12.5);
+            tick.line_to(9.5, 16.5);
+            tick.line_to(18.5, 7.5);
+            if let Some(p) = tick.finish() {
+                let cut = tiny_skia::Paint {
+                    blend_mode: tiny_skia::BlendMode::Clear,
+                    anti_alias: true,
+                    ..Default::default()
+                };
+                let stroke = tiny_skia::Stroke {
+                    width: 3.2,
+                    line_cap: tiny_skia::LineCap::Round,
+                    line_join: tiny_skia::LineJoin::Round,
+                    ..Default::default()
+                };
+                let at = t.pre_translate(2.0, 2.0).pre_scale(k, k);
+                pixmap.stroke_path(&p, &cut, &stroke, at, None);
+            }
+        } else {
+            round_rect(&mut pb, Rect::from_min_size(pos2(0.75, 0.75), vec2(16.5, 16.5)), [4.25; 4]);
+            if let Some(p) = pb.finish() {
+                let stroke = tiny_skia::Stroke { width: 1.5, ..Default::default() };
+                pixmap.stroke_path(&p, &paint, &stroke, t, None);
+            }
+        }
+    });
+}
+
+/// The letters on a layer's row for its mode: a two-word name's initials (the second small), a
+/// one-word name's first letter, or its first two where one letter is already taken.
+fn blend_code(modes: &[BlendModeInfo], blend: u32) -> String {
+    const TWO_LETTERS: [&str; 6] = ["Darken", "Shade", "Lighten", "Subtract", "Divide", "Saturation"];
+    let Some(name) = modes.iter().find(|m| m.id == blend).map(|m| m.name.as_str()) else { return "N".into() };
+    if TWO_LETTERS.contains(&name) {
+        return name.chars().take(2).collect();
+    }
+    let mut words = name.split(' ');
+    match (words.next(), words.next()) {
+        (Some(a), Some(b)) => a.chars().take(1).chain(b.chars().take(1).flat_map(char::to_lowercase)).collect(),
+        (Some(a), None) => a.chars().take(1).collect(),
+        _ => "N".into(),
+    }
+}
+
+/// Text on one line, cut short with an ellipsis past `max_width`.
+fn galley(
+    ui: &Ui,
+    text: &str,
+    size: f32,
+    weight: Weight,
+    colour: Color32,
+    max_width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = LayoutJob::default();
+    let format = TextFormat {
+        font_id: weight.font(size),
+        color: colour,
+        extra_letter_spacing: -0.045 * size,
+        ..Default::default()
+    };
+    job.append(text, 0.0, format);
+    job.wrap = TextWrapping { max_width, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    ui.painter().layout_job(job)
+}

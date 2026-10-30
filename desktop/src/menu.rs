@@ -1,0 +1,229 @@
+//! The menus that pop up from the panels, as the Android app's (ui/Motion.kt's MenuPresence and the
+//! menus on it): frosted glass, rounded, opening from a point with a slight overshoot and closing
+//! smaller as they fade. While one is open, a press anywhere else only closes it.
+
+use std::time::Instant;
+
+use egui::emath::TSTransform;
+use egui::{Align2, Id, LayerId, Order, Pos2, Rect, Sense, Ui, pos2, vec2};
+
+use crate::icons;
+use crate::look::{Look, Weight, argb, cubic_bezier, text};
+
+/// How long a menu takes to open or close, seconds.
+const MENU_TIME: f32 = 0.3;
+/// Opening, it grows from almost nothing; closing, it shrinks to this as it fades.
+const START_SCALE: f32 = 0.001;
+const END_SCALE: f32 = 0.8;
+/// The glass over the canvas.
+pub const GLASS: u32 = 0xCF313135;
+pub const INK: u32 = 0xFFFFFFFF;
+pub const DISABLED: u32 = 0x66FFFFFF;
+pub const DESTRUCTIVE: u32 = 0xFFFF453A;
+/// An option's row.
+pub const OPTION_HEIGHT: f32 = 38.0;
+/// The brush library's menus (and the layers title's): this wide, rounded so, nearly solid over a
+/// panel, edged, their items with icons, the groups ruled apart.
+pub const LIBRARY_WIDTH: f32 = 253.0;
+pub const LIBRARY_CORNER: f32 = 16.0;
+pub const OVER_PANEL: u32 = 0xFA222222;
+pub const EDGE: u32 = 0xFF5A5D5F;
+pub const RULE: u32 = 0xFF3F4347;
+pub const DANGER: u32 = 0xFFE84F51;
+pub const ITEM_HEIGHT: f32 = 40.0;
+/// A rule between groups: 1 tall, 10 either side.
+pub const DIVIDER_HEIGHT: f32 = 21.0;
+
+/// How a menu looks: its fill, an edge round it, whether the canvas is frosted behind it, and how
+/// round it is.
+#[derive(Clone, Copy)]
+pub struct Glass {
+    pub fill: u32,
+    pub edge: Option<u32>,
+    pub frost: bool,
+    pub corner: f32,
+}
+
+/// The glass over the canvas, as the layer options have it.
+pub const FROSTED: Glass = Glass { fill: GLASS, edge: None, frost: true, corner: 24.0 };
+/// Over a panel: nearly solid, edged.
+pub const OVER_A_PANEL: Glass = Glass { fill: OVER_PANEL, edge: Some(EDGE), frost: false, corner: LIBRARY_CORNER };
+
+/// A menu's coming and going.
+#[derive(Default)]
+pub struct Menu {
+    /// Open or not, since when (none: never opened, so shut).
+    open: bool,
+    since: Option<Instant>,
+}
+
+impl Menu {
+    pub fn open(&mut self) {
+        if !self.open {
+            self.open = true;
+            self.since = Some(Instant::now());
+        }
+    }
+
+    pub fn close(&mut self) {
+        if self.open {
+            self.open = false;
+            self.since = Some(Instant::now());
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// How it shows now, opacity and scale; none once it has closed.
+    fn presence(&self) -> Option<(f32, f32)> {
+        let t = (self.since?.elapsed().as_secs_f32() / MENU_TIME).clamp(0.0, 1.0);
+        if self.open {
+            let k = cubic_bezier(0.26, 1.22, 0.39, 1.01, t);
+            Some((k.clamp(0.0, 1.0), START_SCALE + (1.0 - START_SCALE) * k))
+        } else if t < 1.0 {
+            let k = cubic_bezier(0.2, 0.8, 0.5, 1.0, t);
+            Some((1.0 - k, 1.0 + (END_SCALE - 1.0) * k))
+        } else {
+            None
+        }
+    }
+
+    /// Draws the menu at `rect` (its size when open), growing from and shrinking to `pivot`: its
+    /// `glass` (any frost's blur going into `backdrops`), then `content`. A press elsewhere closes
+    /// it (and goes no further), as does Escape.
+    #[allow(clippy::too_many_arguments)]
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        id: &str,
+        rect: Rect,
+        pivot: Pos2,
+        glass: Glass,
+        backdrops: &mut Vec<f32>,
+        content: impl FnOnce(&mut Ui),
+    ) {
+        let corner = glass.corner;
+        let Some((alpha, scale)) = self.presence() else { return };
+        if alpha < 1.0 || scale != 1.0 {
+            ctx.request_repaint();
+        }
+        if self.open {
+            // the rest of the window takes no presses while it is open
+            let screen = ctx.content_rect();
+            egui::Area::new(Id::unique((id, "scrim"))).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
+                let shield = ui.interact(screen, ui.scope_id().with("scrim"), Sense::click_and_drag());
+                if shield.is_pointer_button_down_on() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.close();
+                }
+            });
+        }
+        let area = Id::unique((id, "menu"));
+        let shown = Rect::from_min_max(pivot + (rect.min - pivot) * scale, pivot + (rect.max - pivot) * scale);
+        if glass.frost {
+            let ppp = ctx.pixels_per_point();
+            let blur = [shown.left(), shown.top(), shown.right(), shown.bottom(), corner * scale];
+            backdrops.extend(blur.map(|v| v * ppp));
+            backdrops.push(alpha);
+        }
+        let transform = TSTransform::from_translation(pivot.to_vec2())
+            * TSTransform::from_scaling(scale)
+            * TSTransform::from_translation(-pivot.to_vec2());
+        ctx.set_transform_layer(LayerId::new(Order::Tooltip, area), transform);
+        egui::Area::new(area).fixed_pos(rect.min).order(Order::Tooltip).interactable(self.open).show(ctx, |ui| {
+            ui.multiply_opacity(alpha);
+            ui.allocate_rect(rect, Sense::click());
+            ui.painter().rect_filled(rect, corner, argb(glass.fill));
+            if let Some(edge) = glass.edge {
+                ui.painter().rect_stroke(rect, corner, egui::Stroke::new(1.0, argb(edge)), egui::StrokeKind::Inside);
+            }
+            content(ui);
+        });
+    }
+}
+
+/// An option's row at `row`: its label (greyed when not `enabled`, red when `destructive`) and a
+/// tick when `checked`. True when tapped.
+#[allow(clippy::too_many_arguments)]
+pub fn option(
+    ui: &Ui,
+    look: &mut Look,
+    row: Rect,
+    label: &str,
+    checked: bool,
+    enabled: bool,
+    destructive: bool,
+) -> bool {
+    let ink = argb(if !enabled {
+        DISABLED
+    } else if destructive {
+        DESTRUCTIVE
+    } else {
+        INK
+    });
+    text(ui.painter(), pos2(row.left() + 19.0, row.center().y), Align2::LEFT_CENTER, label, 17.0, Weight::Regular, ink);
+    if checked {
+        look.icon(ui, &icons::TICK, pos2(row.right() - 16.0 - 9.0, row.center().y), 18.0, ink);
+    }
+    let response = ui.interact(row, ui.scope_id().with(("option", label)), Sense::click());
+    enabled && response.clicked()
+}
+
+/// Options' rows down from `top`, `width` across from `left`, each [`OPTION_HEIGHT`].
+pub fn option_rows(left: f32, top: f32, width: f32, n: usize) -> impl Iterator<Item = Rect> {
+    (0..n).map(move |i| Rect::from_min_size(pos2(left, top + OPTION_HEIGHT * i as f32), vec2(width, OPTION_HEIGHT)))
+}
+
+/// What a library-style menu lists: an item (its icon, label and ink), or a rule between groups.
+pub enum Entry<'a> {
+    Item(&'a icons::Icon, &'a str, u32),
+    Divider,
+}
+
+/// How tall a menu of `entries` is, 7 above and below them.
+pub fn entries_height(entries: &[Entry]) -> f32 {
+    7.0 * 2.0
+        + entries
+            .iter()
+            .map(|e| match e {
+                Entry::Item(..) => ITEM_HEIGHT,
+                Entry::Divider => DIVIDER_HEIGHT,
+            })
+            .sum::<f32>()
+}
+
+/// Lays out and draws `entries` down from `rect`'s top (7 in); returns the index of the one tapped.
+pub fn entries(ui: &Ui, look: &mut Look, rect: Rect, entries: &[Entry]) -> Option<usize> {
+    let mut y = rect.top() + 7.0;
+    let mut tapped = None;
+    for (i, e) in entries.iter().enumerate() {
+        match e {
+            Entry::Item(icon, label, ink) => {
+                let row = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), ITEM_HEIGHT));
+                // its icon (a 40 frame) centred 29.5 in, the label from 52
+                let ink = argb(*ink);
+                look.icon(ui, icon, pos2(row.left() + 29.5, row.center().y), 40.0, ink);
+                text(
+                    ui.painter(),
+                    pos2(row.left() + 52.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    label,
+                    18.0,
+                    Weight::Regular,
+                    ink,
+                );
+                if ui.interact(row, ui.scope_id().with(("entry", i)), Sense::click()).clicked() {
+                    tapped = Some(i);
+                }
+                y += ITEM_HEIGHT;
+            }
+            Entry::Divider => {
+                let line = Rect::from_min_size(pos2(rect.left() + 15.5, y + 10.0), vec2(rect.width() - 31.0, 1.0));
+                ui.painter().rect_filled(line, 0, argb(RULE));
+                y += DIVIDER_HEIGHT;
+            }
+        }
+    }
+    tapped
+}

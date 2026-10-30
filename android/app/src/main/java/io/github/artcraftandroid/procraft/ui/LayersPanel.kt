@@ -419,7 +419,7 @@ private fun LayersTitleMenu(open: Boolean, vm: CanvasViewModel, onDismiss: () ->
 
 /** Drops [l] where its row's middle came to rest: just above or below the row it is over. */
 private fun drop(vm: CanvasViewModel, l: LayerInfo, y: Float, rows: Map<ULong, Rect>) {
-    val unit = vm.unitOf(l)
+    val unit = vm.movingWith(l)
     val others = vm.layers.filter { it.id !in unit && !vm.hidden(it) }.mapNotNull { o -> rows[o.id]?.let { o to it } }
     val (target, row) = others.firstOrNull { (_, r) -> y >= r.top && y < r.bottom }
         ?: others.minByOrNull { (_, r) -> abs(r.center.y - y) }

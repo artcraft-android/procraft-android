@@ -9,37 +9,71 @@ use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, Messag
 
 use crate::ui::Interface;
 
-/// What an artwork exports as.
+/// What an artwork is shared as (the Actions panel's Share tab): written to a file the user picks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
-    Png,
+    /// The layered package, as .procraft or with the other app's extension.
+    Procraft,
+    Package,
     Psd,
+    Pdf,
+    Png,
     Tiff,
+    /// Each layer a page, or a PNG file in a folder.
+    LayersPdf,
+    LayerPngs,
+    /// The current and picked layers, each a PNG file in a folder.
+    ChosenLayerPngs,
 }
 
 impl Format {
-    pub const ALL: [Format; 3] = [Format::Png, Format::Psd, Format::Tiff];
-
     pub fn name(self) -> &'static str {
         match self {
-            Format::Png => "PNG",
+            Format::Procraft => "ProCraft",
+            Format::Package => "Procreate",
             Format::Psd => "PSD",
+            Format::Pdf | Format::LayersPdf => "PDF",
+            Format::Png | Format::LayerPngs | Format::ChosenLayerPngs => "PNG",
             Format::Tiff => "TIFF",
         }
     }
 
     fn extension(self) -> &'static str {
         match self {
-            Format::Png => "png",
+            Format::Procraft => "procraft",
+            Format::Package => "procreate",
             Format::Psd => "psd",
+            Format::Pdf | Format::LayersPdf => "pdf",
+            Format::Png | Format::LayerPngs | Format::ChosenLayerPngs => "png",
             Format::Tiff => "tiff",
         }
+    }
+}
+
+/// Where the app keeps what it keeps between runs (palettes and the like): the platform's place
+/// for an app's data.
+pub fn app_dir() -> PathBuf {
+    let home = || std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(home).join("ProCraft")
+    } else if cfg!(target_os = "macos") {
+        home().join("Library/Application Support/ProCraft")
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join(".local/share"))
+            .join("procraft")
     }
 }
 
 /// Shows a message with an OK button.
 pub fn tell(title: &str, text: &str) {
     MessageDialog::new().set_level(MessageLevel::Error).set_title(title).set_description(text).show();
+}
+
+/// Where the brush library, the brushes' choices and their sliders are kept.
+pub fn brushes_dir() -> String {
+    app_dir().join("brushes").to_string_lossy().into_owned()
 }
 
 /// Whether the artwork may be let go of: nothing unsaved, or the user saved it or chose not to.
@@ -137,6 +171,28 @@ fn read_png(path: &Path) -> Result<ThumbnailImage, String> {
     Ok(ThumbnailImage { width: frame.width, height: frame.height, rgba })
 }
 
+/// A picture the user picks (a PNG) put on a new layer of its own.
+pub fn insert_file(session: &CanvasSession) {
+    let Some(path) = FileDialog::new().set_title("Insert a file").add_filter("Pictures", &["png"]).pick_file() else {
+        return;
+    };
+    match read_png(&path) {
+        Ok(image) => {
+            session.insert_image(image, false);
+        }
+        Err(e) => tell("Can't insert the file", &e),
+    }
+}
+
+/// Shows the app's name and version.
+pub fn about() {
+    MessageDialog::new()
+        .set_level(MessageLevel::Info)
+        .set_title("ProCraft")
+        .set_description(format!("Version {}", env!("CARGO_PKG_VERSION")))
+        .show();
+}
+
 /// Saves the artwork as a .procraft package, where it was last saved unless `ask` (or it never
 /// was). True if it was saved.
 pub fn save(session: &CanvasSession, ui: &mut Interface, ask: bool) -> bool {
@@ -170,6 +226,20 @@ pub fn save(session: &CanvasSession, ui: &mut Interface, ask: bool) -> bool {
 
 /// Writes the artwork as `format` where the user picks.
 pub fn export(session: &CanvasSession, format: Format) {
+    // each layer a PNG file, in a folder the user picks
+    if matches!(format, Format::LayerPngs | Format::ChosenLayerPngs) {
+        let Some(dir) = FileDialog::new().set_title("Share layers as PNG files").pick_folder() else { return };
+        let dir = dir.to_string_lossy().into_owned();
+        let written = if format == Format::LayerPngs {
+            session.export_layer_pngs(dir).map(drop)
+        } else {
+            session.export_chosen_pngs(dir).map(drop)
+        };
+        if let Err(e) = written {
+            tell("Can't share", &e.to_string());
+        }
+        return;
+    }
     let Some(path) = FileDialog::new()
         .set_title(format!("Export {}", format.name()))
         .add_filter(format.name(), &[format.extension()])
@@ -180,9 +250,13 @@ pub fn export(session: &CanvasSession, format: Format) {
     };
     let path = with_extension(path, format.extension()).to_string_lossy().into_owned();
     let written = match format {
-        Format::Png => session.export_png(path),
+        Format::Procraft | Format::Package => session.export_package(path, seed(), None),
         Format::Psd => session.export_psd(path),
+        Format::Pdf => session.export_pdf(path, false, 100),
+        Format::LayersPdf => session.export_pdf(path, true, 100),
+        Format::Png => session.export_png(path),
         Format::Tiff => session.export_tiff(path),
+        Format::LayerPngs | Format::ChosenLayerPngs => return,
     };
     if let Err(e) = written {
         tell("Can't export", &e.to_string());

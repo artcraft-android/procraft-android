@@ -14,6 +14,7 @@ import io.github.artcraftandroid.procraft.core.MobileException
 import io.github.artcraftandroid.procraft.core.PenSample
 import io.github.artcraftandroid.procraft.core.ChromaticKind
 import io.github.artcraftandroid.procraft.core.PointerKind
+import io.github.artcraftandroid.procraft.core.TouchCommand
 import io.github.artcraftandroid.procraft.core.ToolKind
 import io.github.artcraftandroid.procraft.core.TransformHandle
 import io.github.artcraftandroid.procraft.core.TransformKind
@@ -58,76 +59,6 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     private var toolOverride: ToolKind? = null
 
     /** The chosen tool back after a stroke that used another. */
-    // □ + Touch / □ + Pen: the touch that came while □ was held (its pointer id), and what it does
-    private var modifyPointer = -1
-    private var modifyPurpose: GesturePurpose? = null
-
-    /**
-     * A touch on the canvas while □ is held does what □ + Touch (or □ + Pen) is set to; the touch
-     * is followed by its pointer id alone, whether it comes as the first or as a further pointer
-     * (the finger on □ may be in the same event). False if the event is not one of these.
-     */
-    private fun modifyTouch(e: MotionEvent, s: CanvasSession): Boolean {
-        if (modifyPointer == -1) {
-            val starts = e.actionMasked == MotionEvent.ACTION_DOWN || (e.actionMasked == MotionEvent.ACTION_POINTER_DOWN && mode == Mode.NONE)
-            if (!starts || !vm.modifyHeld) return false
-            val i = e.actionIndex
-            val kind = kindOf(e, i)
-            val pen = kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER
-            val purpose = vm.gestures.purposeOf(if (pen) Trigger.MODIFY_PEN else Trigger.MODIFY_TOUCH) ?: return false
-            vm.useModify()
-            vm.endQuickShape()
-            modifyPointer = e.getPointerId(i)
-            modifyPurpose = purpose
-            val at = Offset(e.getX(i), e.getY(i))
-            when (purpose) {
-                GesturePurpose.EYEDROPPER -> vm.pickAt(at.x, at.y, pickSide)
-                GesturePurpose.QUICKMENU -> vm.toggleQuickMenu(at)
-                GesturePurpose.COPY_PASTE -> vm.copyPasteOpen = true
-                GesturePurpose.LAYER_SELECT -> vm.layerSelectAt(at)
-                GesturePurpose.SMUDGE, GesturePurpose.ERASE, GesturePurpose.ASSISTED -> {
-                    requestUnbufferedDispatch(e)
-                    toolOverride = when (purpose) {
-                        GesturePurpose.ERASE -> ToolKind.ERASE
-                        GesturePurpose.SMUDGE -> ToolKind.SMUDGE
-                        else -> null
-                    }
-                    toolOverride?.let { s.setTool(it) }
-                    if (purpose == GesturePurpose.ASSISTED) s.setStrokeAssist(true)
-                    if (vm.currentIsText()) vm.askRasterize = true
-                    s.strokeBegin(kind, samples(e, i))
-                }
-                else -> Unit
-            }
-            return true
-        }
-        val i = e.findPointerIndex(modifyPointer)
-        val stroke = modifyPurpose == GesturePurpose.SMUDGE || modifyPurpose == GesturePurpose.ERASE || modifyPurpose == GesturePurpose.ASSISTED
-        when (e.actionMasked) {
-            MotionEvent.ACTION_MOVE -> if (i >= 0) {
-                if (modifyPurpose == GesturePurpose.EYEDROPPER) vm.pickAt(e.getX(i), e.getY(i), pickSide)
-                if (stroke) s.strokeAdd(samples(e, i))
-            }
-            MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                val ended = e.actionMasked == MotionEvent.ACTION_CANCEL || e.getPointerId(e.actionIndex) == modifyPointer
-                if (ended) {
-                    if (modifyPurpose == GesturePurpose.EYEDROPPER) vm.finishPick()
-                    if (stroke) {
-                        if (e.actionMasked == MotionEvent.ACTION_CANCEL) s.strokeCancel() else s.strokeEnd(emptyList())
-                        s.setStrokeAssist(false)
-                        restoreTool(s)
-                        vm.strokeEnded()
-                    }
-                    modifyPointer = -1
-                    modifyPurpose = null
-                }
-                // the last finger up: the canvas waits for a new touch
-                if (e.actionMasked != MotionEvent.ACTION_POINTER_UP) mode = Mode.NONE
-            }
-        }
-        return true
-    }
-
     private fun restoreTool(s: CanvasSession) {
         if (toolOverride != null) s.setTool(vm.tool)
         toolOverride = null
@@ -419,13 +350,111 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         return true
     }
 
+    // this touch (down to the last pointer up) is the shared touches' (crates/core touch.rs): painting,
+    // picking, the snapped shape, and the gestures, the same in every app
+    private var routed = false
+
+    /**
+     * Whether a touch going down now is an ordinary one, for the shared touches: none of the canvas's
+     * own modes takes it (the modify button and its eyedropper go to them first).
+     */
+    private fun routes(e: MotionEvent): Boolean {
+        if (vm.modifyHeld || vm.pickNext) return true
+        val kind = kindOf(e, 0)
+        val pen = kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER
+        return vm.opacityLayer == null &&
+            vm.dropBand != CanvasViewModel.DropBand.FILLING &&
+            !vm.recoloring &&
+            vm.adjustment == null &&
+            !vm.selecting &&
+            !vm.transforming &&
+            !(vm.modelOpen && !vm.modelFlat && kind == PointerKind.FINGER) &&
+            // Hover: with the pen held over the canvas, a finger drags the opacity and a pinch the size
+            !(!pen && penHovering && vm.gestures.isOn(GesturePurpose.HOVER, "HOVER_TOUCH") && vm.quickShape == null)
+    }
+
+    /** Hands [e] to the shared touches and does what they ask. */
+    private fun route(e: MotionEvent, s: CanvasSession) {
+        val out = when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                val i = e.actionIndex
+                if (e.actionMasked == MotionEvent.ACTION_DOWN) strokePointer = e.getPointerId(i)
+                s.touchDown(e.getPointerId(i).toULong(), kindOf(e, i), samples(e, i))
+            }
+            MotionEvent.ACTION_MOVE -> (0 until e.pointerCount).flatMap { i -> s.touchMove(e.getPointerId(i).toULong(), samples(e, i)) }
+            MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP -> {
+                val i = e.actionIndex
+                s.touchUp(e.getPointerId(i).toULong(), samples(e, i))
+            }
+            MotionEvent.ACTION_CANCEL -> s.touchCancel()
+            else -> emptyList()
+        }
+        if (e.actionMasked == MotionEvent.ACTION_MOVE) predict(s)
+        obey(out)
+        scheduleTouchTick(s)
+    }
+
+    /** Does what the shared touches asked. */
+    private fun obey(out: List<TouchCommand>) {
+        for (c in out) when (c) {
+            TouchCommand.Undo -> vm.undo()
+            TouchCommand.Redo -> vm.redo()
+            TouchCommand.ClearLayer -> vm.clearCurrentLayer()
+            TouchCommand.ToggleBars -> vm.toggleBars()
+            TouchCommand.Fit -> vm.settleToFit()
+            TouchCommand.CopyPaste -> vm.copyPasteOpen = true
+            is TouchCommand.QuickMenu -> vm.toggleQuickMenu(Offset(c.x, c.y))
+            is TouchCommand.LayerSelect -> vm.layerSelectAt(Offset(c.x, c.y))
+            TouchCommand.QuickShapeLast -> vm.quickShapeLast()
+            is TouchCommand.Pick -> vm.pickAt(c.x, c.y, pickSide)
+            TouchCommand.PickDone -> vm.finishPick()
+            TouchCommand.PickCancel -> vm.cancelPick()
+            TouchCommand.ShapeSnapped -> vm.quickShapeSnapped()
+            TouchCommand.ShapeChanged -> vm.quickShapeChanged()
+            TouchCommand.ShapeEnded -> vm.quickShapeEnded()
+            TouchCommand.StrokeEnded -> vm.strokeEnded()
+            TouchCommand.ViewMoved -> vm.refreshView()
+            is TouchCommand.Cursor -> vm.showCursor(Offset(c.x, c.y))
+            TouchCommand.CursorGone -> vm.showCursor(null)
+            TouchCommand.TextLayer -> vm.askRasterize = true
+            // Continue filling's touches are still this view's own (see pour()), its fills on the
+            // view model's fill thread
+            is TouchCommand.FillThreshold, TouchCommand.Filled -> Unit
+        }
+    }
+
+    // the shared touches' waits (a hold, a repeat), run when they run out
+    private val touchTick = Runnable {
+        val s = session ?: return@Runnable
+        obey(s.touchTick(android.os.SystemClock.uptimeMillis().toDouble()))
+        scheduleTouchTick(s)
+    }
+
+    private fun scheduleTouchTick(s: CanvasSession) {
+        removeCallbacks(touchTick)
+        val due = s.touchDeadline() ?: return
+        postDelayed(touchTick, (due - android.os.SystemClock.uptimeMillis()).toLong().coerceAtLeast(0L))
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
         val s = session ?: return true
         if (penButton(e)) return true
-        if (modifyTouch(e, s)) return true
         if (companionTouch(e, s)) return true
         predictor.record(e)
+        if (e.actionMasked == MotionEvent.ACTION_DOWN) {
+            routed = routes(e)
+            if (routed) {
+                // every sample as it arrives, not batched to the frame
+                requestUnbufferedDispatch(e)
+                s.setTouchSettings(vm.touchSettings())
+            }
+        }
+        if (routed) {
+            route(e, s)
+            if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) routed = false
+            return true
+        }
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 // every sample as it arrives, not batched to the frame
@@ -433,12 +462,6 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 fingers = 1
                 downX = e.x
                 downY = e.y
-                if (vm.pickNext) {
-                    // the modify button was pressed: this touch picks a colour
-                    mode = Mode.PICK
-                    vm.pickAt(e.x, e.y, pickSide)
-                    return true
-                }
                 if (vm.opacityLayer != null) {
                     // Layer opacity: one pen or finger drags the layer's opacity across the canvas
                     mode = Mode.OPACITY
@@ -536,91 +559,6 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     lastY = e.y
                     return true
                 }
-                // a snapped shape's handle is dragged; anything else keeps the shape and draws on
-                val handle = vm.quickShapeHandleAt(Offset(e.x, e.y))
-                if (handle != null) {
-                    mode = Mode.SHAPE
-                    shapeHandle = handle
-                    return true
-                }
-                // while it is edited, a drag on its outline turns and resizes it, one elsewhere moves
-                // it; a tap ends the editing
-                if (vm.quickShape != null && vm.quickShapeEditing) {
-                    strokePointer = e.getPointerId(0)
-                    tapStart = e.eventTime
-                    lastX = e.x
-                    lastY = e.y
-                    shapeDragged = false
-                    mode = if (vm.quickShapeNearEdge(Offset(e.x, e.y))) Mode.SHAPE_PIN else Mode.SHAPE_MOVE
-                    if (mode == Mode.SHAPE_PIN) vm.quickShapePin(Offset(e.x, e.y), begin = true)
-                    return true
-                }
-                vm.endQuickShape()
-                val kind = kindOf(e, 0)
-                val pen = kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER
-                // Hover: with the pen held over the canvas, a finger drags the opacity and a pinch the size
-                if (!pen && penHovering && vm.gestures.isOn(GesturePurpose.HOVER, "HOVER_TOUCH")) {
-                    mode = Mode.HOVER
-                    hoverX = e.x
-                    return true
-                }
-                val gestures = vm.gestures
-                // what this kind of touch is set to do in Gesture controls
-                val touchDoes = gestures.purposeOf(if (pen) Trigger.PEN else Trigger.TOUCH)
-                if (!pen && touchDoes == GesturePurpose.EYEDROPPER) {
-                    mode = Mode.PICK
-                    vm.pickAt(e.x, e.y, pickSide)
-                    return true
-                }
-                // a finger set to open a menu or show the interface does that instead of painting
-                when (touchDoes.takeIf { !pen }) {
-                    GesturePurpose.QUICKMENU -> {
-                        mode = Mode.IDLE
-                        vm.toggleQuickMenu(Offset(e.x, e.y))
-                        return true
-                    }
-                    GesturePurpose.COPY_PASTE -> {
-                        mode = Mode.IDLE
-                        vm.copyPasteOpen = true
-                        return true
-                    }
-                    GesturePurpose.FULL_SCREEN -> {
-                        mode = Mode.IDLE
-                        vm.toggleBars()
-                        return true
-                    }
-                    GesturePurpose.LAYER_SELECT -> {
-                        mode = Mode.IDLE
-                        vm.layerSelectAt(Offset(e.x, e.y))
-                        return true
-                    }
-                    GesturePurpose.QUICKSHAPE -> {
-                        mode = Mode.IDLE
-                        vm.quickShapeLast()
-                        return true
-                    }
-                    else -> Unit
-                }
-                if (!pen && touchDoes == null && !gestures.isOn(GesturePurpose.GENERAL, "FINGER_PAINT")) {
-                    mode = Mode.IDLE
-                    if (gestures.purposeOf(Trigger.HOLD) != null) postDelayed(holdToPick, holdMs)
-                    return true
-                }
-                strokePointer = e.getPointerId(0)
-                mode = if (pen) Mode.PEN else Mode.FINGER
-                toolOverride = when (touchDoes) {
-                    GesturePurpose.ERASE -> ToolKind.ERASE
-                    GesturePurpose.SMUDGE -> ToolKind.SMUDGE
-                    else -> null
-                }
-                toolOverride?.let { s.setTool(it) }
-                // a text layer takes no paint until it is rasterized
-                if (vm.currentIsText()) vm.askRasterize = true
-                s.strokeBegin(kind, samples(e, 0))
-                vm.showCursor(Offset(e.x, e.y))
-                if (mode == Mode.FINGER && gestures.purposeOf(Trigger.HOLD) != null) postDelayed(holdToPick, holdMs)
-                holdAt = Offset(e.x, e.y)
-                if (drawAndHold) postDelayed(quickShapeHold, quickShapeMs)
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 fingers = e.pointerCount

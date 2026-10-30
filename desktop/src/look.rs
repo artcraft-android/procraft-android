@@ -299,3 +299,33 @@ pub fn fill(pixmap: &mut tiny_skia::Pixmap, path: Option<tiny_skia::Path>, colou
     paint.anti_alias = true;
     pixmap.fill_path(&path, &paint, tiny_skia::FillRule::EvenOdd, at, None);
 }
+
+/// A cubic Bézier easing from (0, 0) to (1, 1) through (`x1`, `y1`) and (`x2`, `y2`), as CSS and
+/// Compose give them, at `t`.
+pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let curve = |a: f32, b: f32, s: f32| 3.0 * a * s * (1.0 - s).powi(2) + 3.0 * b * s * s * (1.0 - s) + s.powi(3);
+    let slope =
+        |a: f32, b: f32, s: f32| 3.0 * a * (1.0 - s).powi(2) + 6.0 * (b - a) * s * (1.0 - s) + 3.0 * (1.0 - b) * s * s;
+    // where along the curve x is t: Newton's method, then halving if that didn't settle
+    let mut s = t;
+    for _ in 0..8 {
+        let (dx, d) = (curve(x1, x2, s) - t, slope(x1, x2, s));
+        if dx.abs() < 1e-5 || d.abs() < 1e-6 {
+            break;
+        }
+        s = (s - dx / d).clamp(0.0, 1.0);
+    }
+    if (curve(x1, x2, s) - t).abs() >= 1e-4 {
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        for _ in 0..24 {
+            s = (lo + hi) / 2.0;
+            if curve(x1, x2, s) < t {
+                lo = s;
+            } else {
+                hi = s;
+            }
+        }
+    }
+    curve(y1, y2, s)
+}

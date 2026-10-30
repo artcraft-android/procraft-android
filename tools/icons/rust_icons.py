@@ -43,6 +43,10 @@ def parse_call(body):
     if m:
         name, width = m.group(1), floats(m.group(2))
         return name, 24.0, 24.0, [(d, width, False, False) for d in re.findall(STR, m.group(3))]
+    # filled and outlined 1.2 wide, in the 24 frame
+    m = re.fullmatch(r"solid\(\s*" + STR + r"\s*,\s*((?:" + STR + r"\s*,?\s*)+)\)", body, re.S)
+    if m:
+        return m.group(1), 24.0, 24.0, [(d, 1.2, True, False) for d in re.findall(STR, m.group(2))]
     m = re.fullmatch(r"filled\(\s*" + STR + r"\s*,\s*" + STR + r"\s*\)", body, re.S)
     if m:
         return m.group(1), 24.0, 24.0, [(m.group(2), 0.0, True, False)]
@@ -92,6 +96,15 @@ def main():
             i += 1
         vals.append((m.group(1), body.strip()[:-1].strip()))
     for val, body in vals:
+        if body.startswith("listOf("):
+            calls = re.findall(r'(ours\("[^"]+".*?"\))\s*,?\s*(?=ours\(|\)\s*$)', body[len("listOf("):].strip(), re.S)
+            icons = [parse_call(c) for c in calls]
+            if icons and all(icons):
+                rows = "\n".join(f"    {rust_icon(i)}," for i in icons)
+                out.append(f"pub const {snake(val)}: &[Icon] = &[\n{rows}\n];")
+            else:
+                skipped.append(val)
+            continue
         if body.startswith("mapOf("):
             entries = re.findall(r'"([^"]+)" to (ours\(.*?"\))', body, re.S)
             icons = [(k, parse_call(v)) for k, v in entries]

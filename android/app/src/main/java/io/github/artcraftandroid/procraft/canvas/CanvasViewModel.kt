@@ -56,7 +56,6 @@ import io.github.artcraftandroid.procraft.core.TransformHandle
 import io.github.artcraftandroid.procraft.core.TransformKind
 import io.github.artcraftandroid.procraft.gallery.PALETTE_SLOTS
 import io.github.artcraftandroid.procraft.gallery.Palette
-import io.github.artcraftandroid.procraft.gallery.PaletteStore
 import io.github.artcraftandroid.procraft.gallery.StandardPresets
 import io.github.artcraftandroid.procraft.core.blendModes
 import io.github.artcraftandroid.procraft.core.brushBlendModes
@@ -212,9 +211,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         session?.setSecondaryColor(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f)
     }
 
-    /** Colours painted with recently (0xRRGGBB), newest first. */
+    /** Colours painted with recently (0xRRGGBB), newest first, as the shared core keeps them. */
     var history by mutableStateOf<List<Int>>(emptyList())
         private set
+
+    /** The colour history, kept by the shared core across artworks: each canvas's paint strokes add to it. */
+    private val colourHistory = io.github.artcraftandroid.procraft.core.ColourHistory()
 
     /** Whether the size and opacity side bar shows. */
     var showSideBar by mutableStateOf(true)
@@ -436,8 +438,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var picking by mutableStateOf<PickState?>(null)
         private set
 
-    /** The modify button was pressed: the next touch on the canvas picks a colour. */
-    var pickNext by mutableStateOf(false)
+    /** The modify button was pressed: the next touch on the canvas picks a colour (the touches know too). */
+    private var pickNextShown by mutableStateOf(false)
+    var pickNext: Boolean
+        get() = pickNextShown
+        set(value) {
+            pickNextShown = value
+            session?.setPickNext(value)
+        }
 
     /** Transform is open (with a box when the layer holds anything). */
     var transforming by mutableStateOf(false)
@@ -625,7 +633,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private var pickJob: Job? = null
     private var pendingPick: Pair<Float, Float>? = null
 
-    private val paletteStore = PaletteStore(File(app.filesDir, "palettes.json"))
+    // the palettes, kept by the shared core
+    private val paletteStore = io.github.artcraftandroid.procraft.core.Palettes.open(File(app.filesDir, "palettes.json").path)
     var palettes by mutableStateOf<List<Palette>>(emptyList())
         private set
 
@@ -634,9 +643,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     init {
-        val (p, d) = paletteStore.load()
-        palettes = p
-        defaultPalette = d
+        refreshPalettes()
         // colour profiles the user imported
         io.github.artcraftandroid.procraft.core.setProfileFolder(File(app.filesDir, "icc").path)
     }
@@ -722,7 +729,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The shape the last stroke snapped to (drawn and held), and whether its handles are shown. */
     var quickShape by mutableStateOf<QuickShapeInfo?>(null)
         private set
-    var quickShapeEditing by mutableStateOf(false)
+    private var quickShapeEditingShown by mutableStateOf(false)
+    var quickShapeEditing: Boolean
+        get() = quickShapeEditingShown
+        set(value) {
+            quickShapeEditingShown = value
+            session?.setShapeEditing(value)
+        }
 
     /** The brush studio: open, the tab shown, the brush's name, its controls' values, curve and sample stroke. */
     var studioOpen by mutableStateOf(false)
@@ -1399,7 +1412,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val head = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { s -> ByteArray(4).also { s.read(it) } } }.getOrNull() }
         val name = withContext(Dispatchers.IO) { fileName(uri) }
         // another program's palette
-        val foreign = head != null && io.github.artcraftandroid.procraft.gallery.ColourSwatches.isExchange(head) || name?.endsWith(".aco", ignoreCase = true) == true
+        val foreign = head != null && String(head, Charsets.US_ASCII) == "ASEF" || name?.endsWith(".aco", ignoreCase = true) == true
         val zip = head != null && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()
         val zipBytes = if (zip) withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() } else null
         // a zip of brushes
@@ -1820,12 +1833,50 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         modifyHeld = true
         modifyUsed = false
         modifyDownAt = android.os.SystemClock.uptimeMillis()
+        session?.setModifyHeld(true)
     }
 
     /** □ let go: a short press nothing used is a tap ([cancelled] when the finger slid off). */
     fun modifyReleased(cancelled: Boolean) {
         modifyHeld = false
+        // a touch the canvas's touches took meanwhile used it too
+        if (session?.setModifyHeld(false) == true) modifyUsed = true
         if (!cancelled && !modifyUsed && android.os.SystemClock.uptimeMillis() - modifyDownAt < MODIFY_TAP_MS) tapModify()
+    }
+
+    /** The gesture settings as the canvas's touches (in the shared core) take them. */
+    fun touchSettings(): io.github.artcraftandroid.procraft.core.TouchSettings {
+        fun action(p: GesturePurpose?): io.github.artcraftandroid.procraft.core.GestureAction? = when (p) {
+            GesturePurpose.SMUDGE -> io.github.artcraftandroid.procraft.core.GestureAction.SMUDGE
+            GesturePurpose.ERASE -> io.github.artcraftandroid.procraft.core.GestureAction.ERASE
+            GesturePurpose.ASSISTED -> io.github.artcraftandroid.procraft.core.GestureAction.ASSISTED
+            GesturePurpose.EYEDROPPER -> io.github.artcraftandroid.procraft.core.GestureAction.EYEDROPPER
+            GesturePurpose.QUICKSHAPE -> io.github.artcraftandroid.procraft.core.GestureAction.QUICK_SHAPE
+            GesturePurpose.QUICKMENU -> io.github.artcraftandroid.procraft.core.GestureAction.QUICK_MENU
+            GesturePurpose.FULL_SCREEN -> io.github.artcraftandroid.procraft.core.GestureAction.FULL_SCREEN
+            GesturePurpose.CLEAR_LAYER -> io.github.artcraftandroid.procraft.core.GestureAction.CLEAR_LAYER
+            GesturePurpose.COPY_PASTE -> io.github.artcraftandroid.procraft.core.GestureAction.COPY_PASTE
+            GesturePurpose.LAYER_SELECT -> io.github.artcraftandroid.procraft.core.GestureAction.LAYER_SELECT
+            GesturePurpose.HOVER, GesturePurpose.GENERAL, null -> null
+        }
+        val hold = gestures.purposeOf(Trigger.HOLD)
+        return io.github.artcraftandroid.procraft.core.TouchSettings(
+            fingerPaint = gestures.isOn(GesturePurpose.GENERAL, "FINGER_PAINT"),
+            undoTaps = !gestures.isOn(GesturePurpose.GENERAL, "NO_UNDO"),
+            rotate = gestures.isOn(GesturePurpose.GENERAL, "ROTATE"),
+            drawAndHold = gestures.isOn(GesturePurpose.QUICKSHAPE, "DRAW_HOLD"),
+            touch = action(gestures.purposeOf(Trigger.TOUCH)),
+            pen = action(gestures.purposeOf(Trigger.PEN)),
+            hold = action(hold),
+            modifyTouch = action(gestures.purposeOf(Trigger.MODIFY_TOUCH)),
+            modifyPen = action(gestures.purposeOf(Trigger.MODIFY_PEN)),
+            fourTap = action(gestures.purposeOf(Trigger.FOUR_TAP)),
+            threeSwipe = action(gestures.purposeOf(Trigger.THREE_SWIPE)),
+            scrub = gestures.isOn(GesturePurpose.CLEAR_LAYER, Trigger.SCRUB),
+            holdMs = gestures.delay(hold ?: GesturePurpose.EYEDROPPER) * 1000.0,
+            quickshapeMs = gestures.delay(GesturePurpose.QUICKSHAPE) * 1000.0,
+            rapidUndoMs = rapidUndoDelay * 1000.0,
+        )
     }
 
     fun useModify() {
@@ -1939,6 +1990,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         applyAppSettings(s)
         timeLapse = TimeLapse(dir).also { timeLapseRecording = it.recording }
         if (!brushesLoaded) loadBrushes(s)
+        s.useColourHistory(colourHistory)
         session = s
         val model = s.modelInfo()
         modelOpen = model != null
@@ -2568,6 +2620,26 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         QuickShapeKind.SQUARE -> "a square"
     }
 
+    /** The stroke held still snapped to a shape (the canvas's touches did it). */
+    fun quickShapeSnapped() {
+        val info = session?.quickshapeInfo() ?: return
+        quickShape = info
+        quickShapeEditing = false
+        showNotice(snappedTo(info.kind))
+    }
+
+    /** The snapped shape changed (dragged, or a finger down while it is held). */
+    fun quickShapeChanged() {
+        quickShape = session?.quickshapeInfo() ?: quickShape
+    }
+
+    /** The snapped shape was let go of as it is (the canvas's touches did it). */
+    fun quickShapeEnded() {
+        quickShape = null
+        quickShapeEditing = false
+        refreshFlags()
+    }
+
     /** The last stroke snaps to the shape it looks like, if nothing has been done since (a QuickShape trigger). */
     fun quickShapeLast() {
         val info = session?.quickshapeLast() ?: return
@@ -3149,11 +3221,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun currentTakesChanges(): Boolean {
         val l = layers.firstOrNull { it.current } ?: return true
-        val why = when {
-            l.locked -> Blocked.LOCKED
-            !l.visible -> Blocked.HIDDEN
-            l.kind == LayerType.GROUP && layers.none { it.parent == l.id } -> Blocked.EMPTY_GROUP
-            else -> return true
+        // the shared core decides
+        val why = when (session?.whyBlocked()) {
+            io.github.artcraftandroid.procraft.core.Blocked.LOCKED -> Blocked.LOCKED
+            io.github.artcraftandroid.procraft.core.Blocked.HIDDEN -> Blocked.HIDDEN
+            io.github.artcraftandroid.procraft.core.Blocked.EMPTY_GROUP -> Blocked.EMPTY_GROUP
+            null -> return true
         }
         blocked = why to l
         return false
@@ -3790,20 +3863,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     /** The notch [value] is on, of the size or opacity slider's ([size]), if any. */
-    fun notchAt(size: Boolean, value: Float): Float? =
-        (if (size) sizeNotches else opacityNotches)
-            .filter { kotlin.math.abs(it - value) < NOTCH_NEAR }
-            .minByOrNull { kotlin.math.abs(it - value) }
+    fun notchAt(size: Boolean, value: Float): Float? = session?.sliderNotchAt(size, value)
 
     /** Whether the slider's panel offers to save its value: not when it is on a notch or the slider is full. */
-    fun canSaveNotch(size: Boolean): Boolean =
-        notchAt(size, if (size) this.size else opacity) == null && (if (size) sizeNotches else opacityNotches).size < NOTCH_MOST
+    fun canSaveNotch(size: Boolean): Boolean = session?.canSaveSliderNotch(size) == true
 
     /** The slider panel's button: saves the value as a notch, or takes away the notch it is on. */
     fun toggleNotch(size: Boolean) {
         val s = session ?: return
-        val value = if (size) this.size else opacity
-        if (notchAt(size, value) != null) s.removeSliderNotch(size, value) else s.addSliderNotch(size, value)
+        s.toggleSliderNotch(size)
         readNotches()
         keepBrushLibrary(s)
     }
@@ -3913,8 +3981,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The colour button held: back to the colour painted with before this one, if there was one. */
     fun previousColor() {
-        val now = colorRgb()
-        val before = history.firstOrNull { it != now } ?: return
+        val before = colourHistory.previous(colorRgb().toUInt())?.toInt() ?: return
         setRgb(before)
         showNotice("Previous colour")
     }
@@ -3927,6 +3994,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearHistory() {
+        colourHistory.clear()
         history = emptyList()
     }
 
@@ -4162,19 +4230,28 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- palettes ----
 
-    fun addPalette() = changePalettes(palettes + Palette("Untitled Palette", List(PALETTE_SLOTS) { null }))
+    /** The palettes as the core keeps them now. */
+    private fun refreshPalettes() {
+        palettes = paletteStore.list().map { p -> Palette(p.name, p.colors.map { it?.toInt() }) }
+        defaultPalette = paletteStore.defaultPalette().toInt()
+    }
+
+    fun addPalette() {
+        paletteStore.add()
+        refreshPalettes()
+    }
 
     /** Our example palettes back, those missing added at the end. */
     fun restoreExamplePalettes() {
-        val missing = io.github.artcraftandroid.procraft.gallery.PaletteStore.starters().filter { s -> palettes.none { it.name == s.name } }
-        if (missing.isNotEmpty()) changePalettes(palettes + missing)
+        paletteStore.restoreExamples()
+        refreshPalettes()
     }
 
     /** A palette of the main colours in the picture at [uri], light to dark, added at the end. */
     fun paletteFromImage(uri: android.net.Uri) {
         val resolver = getApplication<Application>().contentResolver
         viewModelScope.launch {
-            val colours = withContext(Dispatchers.IO) {
+            val added = withContext(Dispatchers.IO) {
                 runCatching {
                     val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     resolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
@@ -4183,16 +4260,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 256) sample *= 2
                     val bitmap = resolver.openInputStream(uri)?.use {
                         android.graphics.BitmapFactory.decodeStream(it, null, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
-                    } ?: return@runCatching null
+                    } ?: return@runCatching false
                     val pixels = IntArray(bitmap.width * bitmap.height).also { bitmap.getPixels(it, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height) }
-                    mainColours(pixels.filter { (it ushr 24) > 128 }.map { it and 0xFFFFFF }, PALETTE_SLOTS)
-                }.getOrNull()
+                    paletteStore.addFromPixels(pixels.map { it.toUInt() })
+                }.getOrNull() == true
             }
-            if (colours.isNullOrEmpty()) {
+            if (!added) {
                 message = "This picture can't be read."
                 return@launch
             }
-            changePalettes(palettes + Palette("Palette from image", List(PALETTE_SLOTS) { colours.getOrNull(it) }))
+            refreshPalettes()
         }
     }
 
@@ -4202,21 +4279,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      */
     suspend fun importSwatches(uri: android.net.Uri): Boolean {
         val resolver = getApplication<Application>().contentResolver
-        val p = withContext(Dispatchers.IO) {
+        val added = withContext(Dispatchers.IO) {
             runCatching {
-                val head = resolver.openInputStream(uri)?.use { s -> ByteArray(4).also { s.read(it) } } ?: return@runCatching null
-                val name = fileName(uri)
-                when {
-                    head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte() ->
-                        resolver.openInputStream(uri)?.use { io.github.artcraftandroid.procraft.gallery.Swatches.read(it) }
-                    io.github.artcraftandroid.procraft.gallery.ColourSwatches.isExchange(head) || name?.endsWith(".aco", ignoreCase = true) == true ->
-                        resolver.openInputStream(uri)?.use { io.github.artcraftandroid.procraft.gallery.ColourSwatches.read(it.readBytes(), name) }
-                    else -> null
-                }
-            }.getOrNull()
-        } ?: return false
-        changePalettes(palettes + p)
-        return true
+                val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching false
+                paletteStore.importFile(bytes, fileName(uri))
+            }.getOrNull() == true
+        }
+        if (added) refreshPalettes()
+        return added
     }
 
     /** The name of the file at [uri], if its provider says. */
@@ -4231,49 +4301,37 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val p = palettes.getOrNull(i) ?: return null
         return withContext(Dispatchers.IO) {
             runCatching {
+                val bytes = paletteStore.swatchesFile(i.toUInt()) ?: return@runCatching null
                 val base = p.name.filter { it.isLetterOrDigit() || it in " _-" }.trim().ifEmpty { "Palette" }
-                File(File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }, "$base.${io.github.artcraftandroid.procraft.gallery.Swatches.EXTENSION}")
-                    .also { io.github.artcraftandroid.procraft.gallery.Swatches.write(p, it) }
+                File(File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }, "$base.swatches").also { it.writeBytes(bytes) }
             }.onFailure { Log.e(TAG, "sharing a palette", it) }.getOrNull()
         }
     }
 
-    fun renamePalette(i: Int, name: String) = editPalette(i) { it.copy(name = name.trim().ifEmpty { it.name }) }
+    fun renamePalette(i: Int, name: String) {
+        paletteStore.rename(i.toUInt(), name)
+        refreshPalettes()
+    }
 
     fun duplicatePalette(i: Int) {
-        val p = palettes.getOrNull(i) ?: return
-        changePalettes(palettes.take(i + 1) + p.copy(name = p.name + " copy") + palettes.drop(i + 1))
+        paletteStore.duplicate(i.toUInt())
+        refreshPalettes()
     }
 
     fun deletePalette(i: Int) {
-        if (palettes.size <= 1 || i !in palettes.indices) return
-        val d = when {
-            defaultPalette == i -> 0
-            defaultPalette > i -> defaultPalette - 1
-            else -> defaultPalette
-        }
-        changePalettes(palettes.filterIndexed { j, _ -> j != i }, d)
+        paletteStore.delete(i.toUInt())
+        refreshPalettes()
     }
 
     fun chooseDefaultPalette(i: Int) {
-        if (i in palettes.indices) changePalettes(palettes, i)
+        paletteStore.chooseDefault(i.toUInt())
+        refreshPalettes()
     }
 
     /** Puts [rgb] in a palette's [slot], or empties it when null. */
-    fun setSwatch(i: Int, slot: Int, rgb: Int?) = editPalette(i) { p ->
-        if (slot !in 0 until PALETTE_SLOTS) p else p.copy(colors = p.colors.toMutableList().also { it[slot] = rgb })
-    }
-
-    private fun editPalette(i: Int, f: (Palette) -> Palette) {
-        val p = palettes.getOrNull(i) ?: return
-        changePalettes(palettes.toMutableList().also { it[i] = f(p) })
-    }
-
-    private fun changePalettes(next: List<Palette>, default: Int = defaultPalette) {
-        palettes = next
-        defaultPalette = default.coerceIn(0, (next.size - 1).coerceAtLeast(0))
-        val snapshot = palettes to defaultPalette
-        viewModelScope.launch(Dispatchers.IO) { paletteStore.save(snapshot.first, snapshot.second) }
+    fun setSwatch(i: Int, slot: Int, rgb: Int?) {
+        paletteStore.setSwatch(i.toUInt(), slot.toUInt(), rgb?.toUInt())
+        refreshPalettes()
     }
 
     private fun applyColor() {
@@ -5478,11 +5536,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (animation != null) refreshFrameThumbnails()
         refreshReference()
         recordFrame()
-        // painting an adjustment on uses no colour
-        if (tool == ToolKind.PAINT && adjustment == null) {
-            val c = colorRgb()
-            history = (listOf(c) + history.filter { it != c }).take(HISTORY_SIZE)
-        }
+        // the stroke's colour went into the history (painting with the brush, not an adjustment on)
+        history = colourHistory.colours().map { it.toInt() }
         if (panel == Panel.LAYERS) layers.firstOrNull { it.current }?.let { loadThumbnail(it.id) }
     }
 
@@ -5707,33 +5762,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun hasMask(l: LayerInfo) = layers.any { it.kind == LayerType.MASK && it.parent == l.id }
 
-    /** The rows that go with [l]: it with its mask, or a group with everything in it. */
-    fun unitOf(l: LayerInfo): Set<ULong> = layers
-        .filter { it.id == l.id || (it.kind == LayerType.MASK && it.parent == l.id) || (l.kind == LayerType.GROUP && isInside(it, l.id)) }
-        .map { it.id }
-        .toSet()
+    /** The rows a drag of [l] takes along, it among them (the shared core decides). */
+    fun movingWith(l: LayerInfo): Set<ULong> = session?.movingWith(l.id)?.toSet() ?: setOf(l.id)
 
     /**
      * Moves [l] (with what goes with it) just above or below [target]'s row; a chosen layer with
-     * others picked takes them along, in their order.
+     * others picked takes them along, in their order (the shared core decides).
      */
-    fun moveNextTo(l: LayerInfo, target: LayerInfo, above: Boolean) = layerChange(thumbs = false) {
-        val together = anyPicked && (l.current || l.picked)
-        val unit = if (together) {
-            // a picked mask moves with its layer
-            layers.filter { it.current || it.picked }
-                .mapNotNull { c -> if (c.kind == LayerType.MASK) layers.firstOrNull { it.id == c.parent } else c }
-                .flatMap { unitOf(it) }.toSet()
-        } else {
-            unitOf(l)
-        }
-        if (target.id in unit) return@layerChange null
-        val rest = layers.filter { it.id !in unit }.asReversed()
-        val at = rest.indexOfFirst { it.id == target.id }
-        if (at < 0) return@layerChange null
-        val to = (if (above) at + 1 else at).toUInt()
-        if (together) it.moveChosen(to) else it.moveLayer(l.id, to)
-    }
+    fun moveNextTo(l: LayerInfo, target: LayerInfo, above: Boolean) = layerChange(thumbs = false) { it.moveNextTo(l.id, target.id, above) }
 
     fun addMask(l: LayerInfo) = layerChange { if (it.addMask(l.id) == null && !hasMask(l)) message = noRoom() }
 
@@ -6044,7 +6080,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
         /** How near a slider value is on a notch (and is pulled onto it), and the most a slider takes. */
         const val NOTCH_NEAR = 0.04f
-        const val NOTCH_MOST = 4
 
         /** The least time between two colour names while the colour keeps changing, milliseconds. */
         const val COLOR_NAME_GAP_MS = 150L
@@ -6147,24 +6182,3 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 }
 
-/**
- * Up to [count] colours standing for [pixels] (0xRRGGBB): the colours split again and again at the
- * middle of their widest channel, each part's mean kept; lightest first.
- */
-internal fun mainColours(pixels: List<Int>, count: Int): List<Int> {
-    if (pixels.isEmpty()) return emptyList()
-    fun ch(c: Int, k: Int) = (c shr (16 - 8 * k)) and 0xFF
-    fun spread(box: List<Int>) = (0 until 3).maxOf { k -> box.maxOf { ch(it, k) } - box.minOf { ch(it, k) } }
-    val boxes = mutableListOf(pixels)
-    while (boxes.size < count) {
-        val widest = boxes.filter { it.size > 1 }.maxByOrNull { spread(it) } ?: break
-        if (spread(widest) == 0) break
-        val k = (0 until 3).maxBy { k -> widest.maxOf { ch(it, k) } - widest.minOf { ch(it, k) } }
-        val sorted = widest.sortedBy { ch(it, k) }
-        boxes.remove(widest)
-        boxes.add(sorted.subList(0, sorted.size / 2))
-        boxes.add(sorted.subList(sorted.size / 2, sorted.size))
-    }
-    val means = boxes.map { box -> (0 until 3).map { k -> box.sumOf { ch(it, k) } / box.size }.let { (r, g, b) -> (r shl 16) or (g shl 8) or b } }
-    return means.distinct().sortedByDescending { 0.299 * ch(it, 0) + 0.587 * ch(it, 1) + 0.114 * ch(it, 2) }
-}

@@ -28,6 +28,10 @@ pub struct BrushSetInfo {
     pub chosen: Option<u32>,
 }
 
+/// How near a slider value pulls onto a notch, and how many notches a slider holds.
+pub const NOTCH_NEAR: f32 = 0.04;
+pub const NOTCH_MOST: usize = 4;
+
 #[uniffi::export]
 impl CanvasSession {
     pub fn brush_library(&self) -> Vec<BrushSetInfo> {
@@ -81,6 +85,34 @@ impl CanvasSession {
         let mut st = self.shared.lock();
         let tool = st.tool;
         st.brush_mut(tool).is_some_and(|b| b.notches.remove(notch_tool(tool), size, value))
+    }
+
+    /// The notch `value` is on (within [`NOTCH_NEAR`]), of the size or opacity slider, if any: a
+    /// slider dragged there is pulled onto it.
+    pub fn slider_notch_at(&self, size: bool, value: f32) -> Option<f32> {
+        self.slider_notches(size)
+            .into_iter()
+            .filter(|n| (n - value).abs() < NOTCH_NEAR)
+            .min_by(|a, b| (a - value).abs().total_cmp(&(b - value).abs()))
+    }
+
+    /// Whether the slider's panel offers to save its value: not when it is on a notch or the
+    /// slider holds [`NOTCH_MOST`] already.
+    pub fn can_save_slider_notch(&self, size: bool) -> bool {
+        let info = self.info();
+        let value = if size { info.size } else { info.opacity };
+        self.slider_notch_at(size, value).is_none() && self.slider_notches(size).len() < NOTCH_MOST
+    }
+
+    /// The slider panel's button: saves the slider's value as a notch, or takes away the notch it
+    /// is on.
+    pub fn toggle_slider_notch(&self, size: bool) {
+        let info = self.info();
+        let value = if size { info.size } else { info.opacity };
+        match self.slider_notch_at(size, value) {
+            Some(n) => self.remove_slider_notch(size, n),
+            None => self.add_slider_notch(size, value),
+        };
     }
 
     /// Chooses the brush the current tool uses.

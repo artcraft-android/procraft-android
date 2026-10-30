@@ -245,6 +245,15 @@ struct SavedChoices {
 /// The tools in the order [`SavedChoices`] keeps them.
 const TOOLS: [crate::ToolKind; 3] = [crate::ToolKind::Paint, crate::ToolKind::Erase, crate::ToolKind::Smudge];
 
+/// How many brushes each shipped set had when the library was first kept: a kept library has had
+/// the chance to hold those, and what shipped after them joins it once.
+const FIRST_SHIPPED: [u32; 6] = [3, 3, 3, 2, 2, 2];
+/// The files a library is kept in, in the app's folder for it: the library, the brushes' choices
+/// and sliders, and how many brushes of each shipped set it has seen.
+const LIBRARY_FILE: &str = "library.json";
+const CHOICES_FILE: &str = "choices.json";
+const SEEN_FILE: &str = "seen.txt";
+
 /// One brush as a file to share.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct BrushFile {
@@ -652,6 +661,51 @@ impl CanvasSession {
         true
     }
 
+    /// The library as the app kept it in folder `dir` (see [`Self::keep_brushes`]), what shipped
+    /// since joining it once, with the tools' brushes, the sets' choices and the brushes' sliders
+    /// as they were left; with none kept, the library as it ships. True if a kept one was put back.
+    pub fn open_brushes(&self, dir: String) -> bool {
+        let dir = std::path::PathBuf::from(dir);
+        let library = dir.join(LIBRARY_FILE).to_string_lossy().into_owned();
+        let loaded = self.load_brush_library_file(library.clone());
+        let seen_file = dir.join(SEEN_FILE);
+        let kept_seen = std::fs::read_to_string(&seen_file).ok();
+        let seen: Vec<u32> = kept_seen
+            .as_deref()
+            .map_or_else(|| FIRST_SHIPPED.to_vec(), |t| t.split(',').filter_map(|v| v.trim().parse().ok()).collect());
+        let shipped = if loaded { self.add_shipped_brushes(seen.clone()) } else { self.shipped_brush_counts() };
+        if shipped != seen || kept_seen.is_none() {
+            // kept with them, or the next start would put the library back without them
+            if loaded {
+                self.save_brush_library_file(library);
+            }
+            let text = shipped.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+            let _ = std::fs::create_dir_all(&dir);
+            if let Err(e) = std::fs::write(&seen_file, text) {
+                log::error!("keeping the brushes seen: {e}");
+            }
+        }
+        if loaded && let Ok(choices) = std::fs::read_to_string(dir.join(CHOICES_FILE)) {
+            self.load_brush_choices(choices);
+        }
+        loaded
+    }
+
+    /// Keeps the library, the tools' brushes, the sets' choices and the brushes' sliders in folder
+    /// `dir`, for [`Self::open_brushes`]. False if they couldn't all be written.
+    pub fn keep_brushes(&self, dir: String) -> bool {
+        let dir = std::path::PathBuf::from(dir);
+        let library = self.save_brush_library_file(dir.join(LIBRARY_FILE).to_string_lossy().into_owned());
+        let choices = self.saved_brush_choices();
+        let written = crate::project::write_atomically(&dir.join(CHOICES_FILE), |p| {
+            std::fs::write(p, choices.as_bytes()).map_err(|e| crate::project::file_error("keeping the brushes", e))
+        });
+        if let Err(e) = &written {
+            log::error!("{e}");
+        }
+        library && written.is_ok()
+    }
+
     /// The tools' brushes, the sets' last choices and each brush's sliders, as kept between
     /// sessions (JSON); kept with the library as it is now.
     pub fn saved_brush_choices(&self) -> String {
@@ -808,5 +862,33 @@ impl CanvasSession {
         entry.origins.insert(0, from);
         st.move_brush_refs(|(rs, ri)| Some(if rs == s { (rs, ri + 1) } else { (rs, ri) }));
         Some(set)
+    }
+}
+
+#[cfg(test)]
+mod keeping {
+    use crate::CanvasSession;
+
+    #[test]
+    fn a_library_kept_in_a_folder_comes_back_with_its_choices() {
+        let dir = std::env::temp_dir().join(format!(
+            "procraft-brushes-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+        ));
+        let path = dir.to_string_lossy().into_owned();
+        let first = CanvasSession::new(32, 32);
+        assert!(!first.open_brushes(path.clone()), "nothing kept yet");
+        assert!(dir.join("seen.txt").exists(), "what shipped is noted from the start");
+        let set = first.new_brush_set();
+        assert!(first.rename_brush_set(set, "Mine".into()));
+        first.set_brush_size(0.37);
+        assert!(first.keep_brushes(path.clone()));
+
+        let next = CanvasSession::new(32, 32);
+        assert!(next.open_brushes(path));
+        assert!(next.brush_library().iter().any(|s| s.name == "Mine"));
+        assert!((next.info().size - 0.37).abs() < 1e-4, "{}", next.info().size);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

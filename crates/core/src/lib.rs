@@ -21,9 +21,11 @@ mod crop;
 mod device;
 mod frame;
 mod guide;
+mod history;
 mod host;
 mod layer_ops;
 mod layers;
+mod palettes;
 mod pick;
 mod pour;
 mod project;
@@ -37,6 +39,7 @@ mod studio;
 #[cfg(test)]
 mod tests;
 mod text;
+mod touch;
 mod transform;
 #[cfg(target_os = "android")]
 mod window;
@@ -56,8 +59,13 @@ use procraft_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
 
 pub use brushes::{BrushInfo, BrushSetInfo};
 pub use frame::{configure, screen_profile};
-pub use layers::{LayerInfo, LayerType, ThumbnailImage};
+pub use history::ColourHistory;
+pub use layers::{BlendModeInfo, Blocked, LayerInfo, LayerType, ThumbnailImage, blend_modes};
+pub use palettes::{PaletteInfo, Palettes};
+pub use pick::Pick;
 pub use project::{PsdOutcome, import_psd};
+pub use quickshape::{QuickShapeInfo, QuickShapeKind};
+pub use touch::{Fill, GestureAction, TouchCommand, TouchSettings};
 
 /// Colour around the canvas, sRGB; and with the light interface.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -293,6 +301,8 @@ pub(crate) struct State {
     color: [f32; 3],
     /// The secondary colour, for secondary colour dynamics.
     secondary: [f32; 3],
+    /// The app's colour history, which paint strokes add to.
+    colour_history: Option<std::sync::Arc<ColourHistory>>,
     stroke: Option<StrokeBuilder>,
     #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
     pub(crate) gpu: Option<Gpu>,
@@ -674,6 +684,8 @@ pub(crate) struct Shared {
     projection: Mutex<Option<JoinHandle<()>>>,
     /// Held while the artwork is saved: one save at a time, so two never write the same files.
     pub(crate) saving: Mutex<project::Saved>,
+    /// The canvas's touches (they call into the session, so they keep their own lock).
+    pub(crate) touches: touch::TouchState,
 }
 
 impl Shared {
@@ -910,6 +922,7 @@ impl CanvasSession {
             preview: None,
             color: [0.0, 0.0, 0.0],
             secondary: [1.0, 1.0, 1.0],
+            colour_history: None,
             stroke: None,
             gpu: None,
             canvas: None,
@@ -980,6 +993,7 @@ impl CanvasSession {
                 thread: Mutex::new(None),
                 projection: Mutex::new(None),
                 saving: Mutex::new(project::Saved::default()),
+                touches: Mutex::new(touch::Touches::default()),
             }),
         })
     }
@@ -1177,6 +1191,13 @@ impl CanvasSession {
     pub fn stroke_end(&self, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // a paint stroke's colour goes into the history (painting an adjustment on uses none)
+        if st.tool == ToolKind::Paint
+            && !st.adjusting
+            && let Some(history) = &st.colour_history
+        {
+            history.painted(history::hex(st.color));
+        }
         if st.scene_shown() {
             st.scene_stroke_add(&samples, true);
             self.shared.frame(st);
@@ -1387,6 +1408,11 @@ impl CanvasSession {
     pub fn set_color(&self, r: f32, g: f32, b: f32) {
         let c = [r, g, b].map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 });
         self.shared.lock().color = c;
+    }
+
+    /// The app's colour history: each paint stroke's colour is added to it as the stroke ends.
+    pub fn use_colour_history(&self, history: std::sync::Arc<ColourHistory>) {
+        self.shared.lock().colour_history = Some(history);
     }
 
     /// The secondary colour, which brushes with secondary colour dynamics mix in.

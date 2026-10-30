@@ -423,6 +423,47 @@ impl CanvasSession {
         .is_some()
     }
 
+    /// Moves layer `id` just above or below `target`'s row, as a row dragged in the panel drops:
+    /// with what goes with it (its mask, or a group with what is in it); the current layer with
+    /// others picked (or a picked one) takes them all along, in their order. False if nothing moved.
+    pub fn move_next_to(&self, id: u64, target: u64, above: bool) -> bool {
+        let layers = self.layers();
+        let Some((unit, together)) = moving(&layers, id) else { return false };
+        if unit.contains(&target) {
+            return false;
+        }
+        // the others, bottom first: it goes in among them
+        let Some(at) = layers.iter().filter(|o| !unit.contains(&o.id)).rev().position(|o| o.id == target) else {
+            return false;
+        };
+        let to = u32::try_from(if above { at + 1 } else { at }).unwrap_or(u32::MAX);
+        if together { self.move_chosen(to) } else { self.move_layer(id, to) }
+    }
+
+    /// Why the current layer takes no change (a stroke, a transform, an adjustment, clearing,
+    /// cutting): it is locked, hidden, or a group with nothing in it. None if it takes them.
+    pub fn why_blocked(&self) -> Option<Blocked> {
+        let layers = self.layers();
+        let l = layers.iter().find(|l| l.current)?;
+        if l.locked {
+            Some(Blocked::Locked)
+        } else if !l.visible {
+            Some(Blocked::Hidden)
+        } else if l.kind == LayerType::Group && !layers.iter().any(|o| o.parent == Some(l.id)) {
+            Some(Blocked::EmptyGroup)
+        } else {
+            None
+        }
+    }
+
+    /// The rows a drag of layer `id` in the panel takes along (see
+    /// [`CanvasSession::move_next_to`]), it among them.
+    pub fn moving_with(&self, id: u64) -> Vec<u64> {
+        let layers = self.layers();
+        let Some((unit, _)) = moving(&layers, id) else { return Vec::new() };
+        layers.iter().map(|l| l.id).filter(|id| unit.contains(id)).collect()
+    }
+
     /// Moves the current and picked layers together to `position` of the stack without them
     /// (0 = bottom), as [`CanvasSession::move_layer`] moves one.
     pub fn move_chosen(&self, position: u32) -> bool {
@@ -646,5 +687,99 @@ impl CanvasSession {
         st.revision += 1;
         self.shared.frame(st);
         true
+    }
+}
+
+/// Why the current layer takes no change (see [`CanvasSession::why_blocked`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum Blocked {
+    Locked,
+    Hidden,
+    EmptyGroup,
+}
+
+/// What a drag of layer `id` takes along, and whether that is the chosen layers together: it with
+/// its mask (or a group with what is in it), or, the current layer with others picked (or a picked
+/// one), them all, a picked mask going with its layer.
+fn moving(layers: &[LayerInfo], id: u64) -> Option<(std::collections::HashSet<u64>, bool)> {
+    let l = layers.iter().find(|l| l.id == id)?;
+    let together = layers.iter().any(|l| l.picked) && (l.current || l.picked);
+    let unit = if together {
+        layers.iter().filter(|c| c.current || c.picked).flat_map(|c| unit_of(layers, owner_of(layers, c))).collect()
+    } else {
+        unit_of(layers, l)
+    };
+    Some((unit, together))
+}
+
+/// A mask's layer; anything else itself.
+fn owner_of<'a>(layers: &'a [LayerInfo], l: &'a LayerInfo) -> &'a LayerInfo {
+    if l.kind == LayerType::Mask { layers.iter().find(|o| Some(o.id) == l.parent).unwrap_or(l) } else { l }
+}
+
+/// Whether `l` is somewhere inside group `group`.
+fn is_inside(layers: &[LayerInfo], l: &LayerInfo, group: u64) -> bool {
+    let mut at = owner_of(layers, l).parent;
+    for _ in 0..layers.len() {
+        let Some(id) = at else { return false };
+        if id == group {
+            return true;
+        }
+        at = layers.iter().find(|o| o.id == id).and_then(|o| o.parent);
+    }
+    false
+}
+
+/// The rows that go with `l`: it with its mask, or a group with everything in it.
+fn unit_of(layers: &[LayerInfo], l: &LayerInfo) -> std::collections::HashSet<u64> {
+    layers
+        .iter()
+        .filter(|o| {
+            o.id == l.id
+                || (o.kind == LayerType::Mask && o.parent == Some(l.id))
+                || (l.kind == LayerType::Group && is_inside(layers, o, l.id))
+        })
+        .map(|o| o.id)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::CanvasSession;
+
+    #[test]
+    fn a_row_dropped_by_another_goes_above_or_below_it_with_its_mask() {
+        let s = CanvasSession::new(64, 64);
+        let bottom = s.layers().first().map(|l| l.id).unwrap_or_default();
+        let middle = s.add_layer();
+        let top = s.add_layer();
+        let order = |s: &CanvasSession| {
+            s.layers().iter().filter(|l| l.kind != super::LayerType::Mask).map(|l| l.id).collect::<Vec<_>>()
+        };
+        assert_eq!(order(&s), vec![top, middle, bottom]);
+        assert!(s.move_next_to(bottom, top, true));
+        assert_eq!(order(&s), vec![bottom, top, middle]);
+        assert!(s.move_next_to(bottom, middle, false));
+        assert_eq!(order(&s), vec![top, middle, bottom]);
+        assert!(!s.move_next_to(top, top, true), "onto itself it stays");
+        assert_eq!(s.why_blocked(), None);
+        s.set_layer_locked(top, true);
+        assert_eq!(s.why_blocked(), Some(super::Blocked::Locked));
+        s.set_layer_locked(top, false);
+        s.set_layer_visible(top, false);
+        assert_eq!(s.why_blocked(), Some(super::Blocked::Hidden));
+        s.set_layer_visible(top, true);
+        // a layer's mask goes with it
+        let mask = s.add_mask(middle).unwrap_or_default();
+        assert!(s.move_next_to(middle, top, true));
+        let ids: Vec<u64> = s.layers().iter().map(|l| l.id).collect();
+        let at = |id| ids.iter().position(|&i| i == id).unwrap_or(usize::MAX);
+        assert!(at(mask) < at(middle) && at(middle) < at(top), "{ids:?}");
+        assert!(!s.move_next_to(middle, mask, true), "onto its own mask it stays");
+        let mut with = s.moving_with(middle);
+        with.sort_unstable();
+        let mut expected = vec![middle, mask];
+        expected.sort_unstable();
+        assert_eq!(with, expected);
     }
 }

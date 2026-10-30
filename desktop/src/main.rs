@@ -4,11 +4,20 @@
 // no console window behind the app on Windows (a debug build keeps it, for the log)
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod actions;
+mod alert;
 mod chrome;
+mod colour_drop;
+mod colours;
 mod files;
 mod icons;
 mod input;
+mod layers;
+mod library;
 mod look;
+mod menu;
+mod overlays;
+mod panel;
 mod screen;
 mod ui;
 
@@ -111,6 +120,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 if files::may_close(&session, &mut self.ui) {
+                    session.keep_brushes(files::brushes_dir());
                     event_loop.exit();
                 }
             }
@@ -135,12 +145,14 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let (Some(screen), Some(session)) = (self.screen.as_ref(), self.session.as_ref())
-            && session.wants_frame()
-        {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let (Some(screen), Some(session)) = (self.screen.as_ref(), self.session.as_ref()) else { return };
+        // the touches' waits (a hold, a repeat) run out
+        if self.input.tick(session) || session.wants_frame() || !self.input.commands.is_empty() {
             screen.window.request_redraw();
         }
+        event_loop
+            .set_control_flow(self.input.next_deadline(session).map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 }
 
@@ -152,6 +164,11 @@ impl App {
         let scale = screen.window.scale_factor() as f32;
         session.set_display_scale(scale);
         session.use_gpu(screen.gpu.clone());
+        // the brushes as the last artwork left them
+        if let Some(last) = &self.session {
+            last.keep_brushes(files::brushes_dir());
+        }
+        session.open_brushes(files::brushes_dir());
         self.ui.opened(&session, scale);
         session.show_in(size.width, size.height);
         self.input = input::Input::default();
@@ -163,7 +180,7 @@ impl App {
     fn frame(&mut self) {
         let (Some(screen), Some(session)) = (self.screen.as_mut(), self.session.clone()) else { return };
         let raw = screen.egui.take_egui_input(&screen.window);
-        let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| self.ui.show(ui, &session, &self.input));
+        let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| self.ui.show(ui, &session, &mut self.input));
         let wants = screen.draw(&session, self.started, output);
         if wants {
             screen.window.request_redraw();
@@ -173,6 +190,9 @@ impl App {
         if title != self.title {
             screen.window.set_title(&title);
             self.title = title;
+        }
+        if std::mem::take(&mut self.ui.keep_brushes) {
+            session.keep_brushes(files::brushes_dir());
         }
         for action in std::mem::take(&mut self.ui.actions) {
             self.act(action, &session);
@@ -193,6 +213,10 @@ impl App {
             }
             Action::Export(format) => {
                 files::export(session, format);
+                None
+            }
+            Action::InsertFile => {
+                files::insert_file(session);
                 None
             }
         };

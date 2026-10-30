@@ -36,7 +36,8 @@ pub struct Lit {
     pub panel_open: bool,
 }
 
-/// The button tapped on the top bar, if any, and where each one is (points).
+/// The button tapped on the top bar, if any, and where each one is (points). The colour button's
+/// touches are ColorDrop's (see [`crate::colour_drop`]): it is never the one tapped here.
 #[derive(Default)]
 pub struct Bar {
     pub pressed: Option<BarButton>,
@@ -105,7 +106,7 @@ pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, br
         // from the colour leftwards
         let mut x = r.right() - pc::BAR_MARGIN - pc::BAR_BUTTON_WIDTH;
         let rect = button(x, pc::BAR_BUTTON_WIDTH);
-        tap(ui, BarButton::Colour, rect);
+        let colour_rect = rect;
         ui.painter().circle_filled(rect.center(), pc::COLOR_DOT / 2.0, colour);
         // ringed only where the colour would fade into the bar
         if brightness < DARK_RING_BELOW {
@@ -129,6 +130,7 @@ pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, br
             // a 44 frame shown as it is, over the 38 tall button
             look.icon(ui, icon, rect.center(), 44.0, mix(argb(pc::BAR_GLYPH), argb(pc::BAR_GLYPH_SELECTED), l));
         }
+        bar.rects.push((BarButton::Colour, colour_rect));
     });
     bar
 }
@@ -140,11 +142,40 @@ pub enum Slider {
     Opacity,
 }
 
-/// The side bar's own state: the slider being dragged and its value before any rounding.
+/// What the side bar's buttons were asked: undo, redo, and the modify button tapped or held.
+#[derive(Default)]
+pub struct SideTaps {
+    pub undo: bool,
+    pub redo: bool,
+    pub modify_tapped: bool,
+    pub modify_down: bool,
+    /// A slider was let go or a notch saved or taken away: the brush's settings changed.
+    pub brush_changed: bool,
+}
+
+/// The side bar's own state: the slider pressed (its value before a notch pulls it in, when, and
+/// whether it moved), the slider whose panel shows (kept up when it was held still), and whether
+/// the brush's settings changed this frame.
 #[derive(Default)]
 pub struct SideBar {
-    dragging: Option<(Slider, f32)>,
+    pressed: Option<Press>,
+    panel: Option<(Slider, bool)>,
+    changed: bool,
 }
+
+#[derive(Clone, Copy)]
+struct Press {
+    which: Slider,
+    raw: f32,
+    since: std::time::Instant,
+    moved: bool,
+}
+
+/// A slider held still this long keeps its panel up.
+const HOLD: std::time::Duration = std::time::Duration::from_millis(400);
+const NOTCH_WIDTH: f32 = 20.0;
+const NOTCH_HEIGHT: f32 = 4.0;
+const NOTCH_MARK: u32 = 0x1AFFFFFF;
 
 const SLIDER_LEFT: f32 = 5.0;
 const SIZE_TRACK_TOP: f32 = 6.0;
@@ -164,8 +195,10 @@ impl SideBar {
         look: &mut Look,
         session: &CanvasSession,
         info: &CanvasInfo,
+        modify_lit: bool,
         backdrops: &mut Vec<f32>,
-    ) {
+    ) -> SideTaps {
+        let mut taps = SideTaps::default();
         let ctx = ui.ctx().clone();
         let window = ctx.content_rect();
         let top = window.top() + window.height() * pc::SIDE_BAR_CENTRE - pc::SIDE_BAR_HEIGHT / 2.0;
@@ -189,14 +222,26 @@ impl SideBar {
                 let rect = at(SLIDER_LEFT, y, pc::SLIDER_WIDTH, pc::SLIDER_HEIGHT);
                 self.slider(ui, look, session, which, rect, value);
             }
-            // the modify button
+            // a slider held still keeps its panel up, until the next press elsewhere
+            if let Some(press) = self.pressed.filter(|p| !p.moved) {
+                if press.since.elapsed() >= HOLD {
+                    self.panel = Some((press.which, true));
+                } else {
+                    ui.ctx().request_repaint_after(HOLD - press.since.elapsed());
+                }
+            }
+            // the modify button: held, it changes what a canvas touch does; tapped, it does what
+            // Tap □ is set to (opens the eyedropper)
             let modify = at(5.0, 191.0, 40.0, 41.0);
+            let response = ui.interact(modify, ui.scope_id().with("modify"), Sense::click_and_drag());
+            taps.modify_down = response.is_pointer_button_down_on();
+            taps.modify_tapped = response.clicked();
             let square = egui::Rect::from_center_size(modify.center(), vec2(pc::MODIFY_SIZE, pc::MODIFY_SIZE));
             let w = pc::MODIFY_STROKE;
             ui.painter().rect_stroke(
                 square.shrink(w / 2.0),
                 pc::MODIFY_CORNER - w / 2.0,
-                Stroke::new(w, argb(pc::SIDE_GLYPH)),
+                Stroke::new(w, argb(if modify_lit { pc::ACCENT } else { pc::SIDE_GLYPH })),
                 egui::StrokeKind::Middle,
             );
             for (icon, enabled, y, undo) in
@@ -206,9 +251,9 @@ impl SideBar {
                 let tapped = ui.interact(rect, ui.scope_id().with(("side", undo)), Sense::click()).clicked();
                 if tapped && enabled {
                     if undo {
-                        session.undo();
+                        taps.undo = true;
                     } else {
-                        session.redo();
+                        taps.redo = true;
                     }
                 }
                 // a 50 frame shown 36 across
@@ -216,45 +261,82 @@ impl SideBar {
                 look.icon(ui, icon, rect.center(), 36.0, tint);
             }
         });
-        if let Some((which, _)) = self.dragging {
+        if let Some((which, kept)) = self.panel {
             let y = if which == Slider::Size { SIZE_TRACK_TOP } else { OPACITY_TRACK_TOP };
             let min = bar.min + vec2(SLIDER_LEFT + pc::SLIDER_WIDTH + SLIDER_PANEL_GAP, y - SLIDER_PANEL_RISE);
-            slider_panel(
-                &ctx,
-                which,
-                Rect::from_min_size(min, vec2(SLIDER_PANEL_SIDE, SLIDER_PANEL_SIDE)),
-                info,
-                backdrops,
-            );
+            let rect = Rect::from_min_size(min, vec2(SLIDER_PANEL_SIDE, SLIDER_PANEL_SIDE));
+            self.changed |= slider_panel(&ctx, look, session, which, rect, info, backdrops);
+            // kept up, it goes at the next press anywhere but on it and its slider
+            let pressed_elsewhere = ctx.input(|i| {
+                i.pointer.any_pressed()
+                    && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p) && !bar.contains(p))
+            });
+            if kept && pressed_elsewhere {
+                self.panel = None;
+            }
         }
+        taps.brush_changed = std::mem::take(&mut self.changed);
+        taps
     }
 
     /// An upright slider moved by dragging anywhere on it: the thumb follows the pointer (not
-    /// jumping to it), 1 at the top.
+    /// jumping to it), 1 at the top. Moved, its panel shows while it moves; held still, it stays
+    /// up. Its notches (saved values) show as marks on the track; a value dragged near one is
+    /// pulled onto it, and a tap on one goes there. On a notch, the thumb shows a blue bar.
     fn slider(&mut self, ui: &Ui, look: &mut Look, session: &CanvasSession, which: Slider, rect: Rect, value: f32) {
+        let size = which == Slider::Size;
         let travel = pc::SLIDER_HEIGHT - pc::THUMB_HEIGHT - pc::THUMB_INSET * 2.0;
-        let response = ui.interact(rect, ui.scope_id().with(("slider", which)), Sense::drag());
-        if response.drag_started() {
-            self.dragging = Some((which, value));
+        let response = ui.interact(rect, ui.scope_id().with(("slider", which)), Sense::click_and_drag());
+        let set = |v: f32| match which {
+            Slider::Size => session.set_brush_size(v),
+            Slider::Opacity => session.set_brush_opacity(v),
+        };
+        if response.is_pointer_button_down_on() && self.pressed.is_none_or(|p| p.which != which) {
+            self.pressed = Some(Press { which, raw: value, since: std::time::Instant::now(), moved: false });
         }
-        if let Some((w, raw)) = self.dragging.as_mut().filter(|(w, _)| *w == which) {
+        if let Some(press) = self.pressed.as_mut().filter(|p| p.which == which) {
             let dy = response.drag_delta().y;
             if dy != 0.0 {
-                *raw = (*raw - dy / travel).clamp(0.0, 1.0);
-                match w {
-                    Slider::Size => session.set_brush_size(*raw),
-                    Slider::Opacity => session.set_brush_opacity(*raw),
+                if !press.moved {
+                    self.panel = Some((which, false));
                 }
+                press.moved = true;
+                press.raw = (press.raw - dy / travel).clamp(0.0, 1.0);
+                set(session.slider_notch_at(size, press.raw).unwrap_or(press.raw));
             }
         }
-        if response.drag_stopped() {
-            self.dragging = None;
+        // a tap on a notch's mark goes to it
+        if response.clicked()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let at = 1.0 - (p.y - rect.top() - pc::THUMB_INSET - pc::THUMB_HEIGHT / 2.0) / travel;
+            let reach = pc::THUMB_HEIGHT / 2.0 / travel;
+            let notch = session
+                .slider_notches(size)
+                .into_iter()
+                .filter(|n| (n - at).abs() < reach)
+                .min_by(|a, b| (a - at).abs().total_cmp(&(b - at).abs()));
+            if let Some(n) = notch {
+                set(n);
+            }
         }
+        if !response.is_pointer_button_down_on() && self.pressed.is_some_and(|p| p.which == which) {
+            // let go after moving, the panel goes (one held up stays)
+            if self.pressed.is_some_and(|p| p.moved) && self.panel == Some((which, false)) {
+                self.panel = None;
+            }
+            self.pressed = None;
+            self.changed = true;
+        }
+        let notches = session.slider_notches(size);
+        let on_notch = notches.iter().any(|n| (n - value).abs() < 1e-4);
         let slot = match which {
             Slider::Size => "size slider",
             Slider::Opacity => "opacity slider",
         };
-        look.shape(ui, slot, (value * 10_000.0).round() as i32, rect, |pixmap, t| {
+        let key =
+            ((value * 10_000.0).round() as i32, notches.iter().map(|n| (n * 10_000.0) as i32).collect::<Vec<_>>());
+        look.shape(ui, slot, key, rect, |pixmap, t| {
             let size = rect.size();
             let thumb = vec2(pc::THUMB_WIDTH, pc::THUMB_HEIGHT);
             let inset = pc::THUMB_INSET;
@@ -274,25 +356,49 @@ impl SideBar {
             round_rect(&mut ring, outer, [corner; 4]);
             round_rect(&mut ring, inside, [corner - rim; 4]);
             fill(pixmap, ring.finish(), argb(pc::SLIDER_RIM), t);
+            // the notches: short bars across the track
+            let bar = vec2(NOTCH_WIDTH, NOTCH_HEIGHT);
+            let travel = size.y - thumb.y - inset * 2.0;
+            for n in &notches {
+                let y = inset + thumb.y / 2.0 + travel * (1.0 - n);
+                let mut mark = tiny_skia::PathBuilder::new();
+                round_rect(&mut mark, Rect::from_center_size(pos2(size.x / 2.0, y), bar), [bar.y / 2.0; 4]);
+                fill(pixmap, mark.finish(), argb(NOTCH_MARK), t);
+            }
             let mut thumb_path = tiny_skia::PathBuilder::new();
             round_rect(&mut thumb_path, knob, [thumb.y / 2.0; 4]);
             fill(pixmap, thumb_path.finish(), argb(pc::SLIDER_THUMB), t);
+            // on a notch, the thumb shows a blue bar
+            if on_notch {
+                let mut mark = tiny_skia::PathBuilder::new();
+                round_rect(&mut mark, Rect::from_center_size(knob.center(), bar), [bar.y / 2.0; 4]);
+                fill(pixmap, mark.finish(), argb(pc::ACCENT), t);
+            }
         });
     }
 }
 
-/// A slider's panel: its name and value ("Size 8%"), and in the middle a dot of the brush as it
+/// A slider's panel: its name and value ("Size 8%"), a button saving the value as a notch on the
+/// slider ("+"; "-" takes away the notch it is on), and in the middle a dot of the brush as it
 /// would paint now, its size on the screen (and at its opacity).
-fn slider_panel(ctx: &egui::Context, which: Slider, rect: Rect, info: &CanvasInfo, backdrops: &mut Vec<f32>) {
+fn slider_panel(
+    ctx: &egui::Context,
+    look: &mut Look,
+    session: &CanvasSession,
+    which: Slider,
+    rect: Rect,
+    info: &CanvasInfo,
+    backdrops: &mut Vec<f32>,
+) -> bool {
+    let mut toggled = false;
     let ppp = ctx.pixels_per_point();
     let corner = 22.0;
     backdrops.extend([rect.left(), rect.top(), rect.right(), rect.bottom(), corner].map(|v| v * ppp));
     backdrops.push(1.0);
-    egui::Area::new(egui::Id::unique("slider panel"))
-        .fixed_pos(rect.min)
-        .order(egui::Order::Foreground)
-        .interactable(false)
-        .show(ctx, |ui| {
+    egui::Area::new(egui::Id::unique("slider panel")).fixed_pos(rect.min).order(egui::Order::Foreground).show(
+        ctx,
+        |ui| {
+            ui.allocate_rect(rect, Sense::hover());
             let painter = ui.painter();
             painter.rect_filled(rect, corner, argb(SLIDER_PANEL_FILL));
             // a hairline rim
@@ -315,5 +421,19 @@ fn slider_panel(ctx: &egui::Context, which: Slider, rect: Rect, info: &CanvasInf
             let r = (diameter / 2.0).clamp(1.5, (SLIDER_PANEL_SIDE / 2.0 - 8.0).max(1.5));
             let alpha = if which == Slider::Size { 1.0 } else { info.opacity.clamp(0.02, 1.0) };
             painter.circle_filled(rect.center(), r, Color32::WHITE.gamma_multiply(alpha));
-        });
+            let size = which == Slider::Size;
+            let value = if size { info.size } else { info.opacity };
+            let on_notch = session.slider_notch_at(size, value).is_some();
+            if on_notch || session.can_save_slider_notch(size) {
+                let button = Rect::from_min_size(rect.min + vec2(150.0, 6.0), vec2(32.0, 32.0));
+                let icon = if on_notch { &icons::NOTCH_REMOVE } else { &icons::NOTCH_ADD };
+                look.icon(ui, icon, button.center(), 24.0, argb(SLIDER_PANEL_INK));
+                if ui.interact(button, ui.scope_id().with("notch"), Sense::click()).clicked() {
+                    session.toggle_slider_notch(size);
+                    toggled = true;
+                }
+            }
+        },
+    );
+    toggled
 }
