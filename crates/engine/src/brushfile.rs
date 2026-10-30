@@ -588,6 +588,10 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     if let Some(m) = blend(&["burntEdgesBlendModeExtended", "burntEdgesBlendMode"]) {
         set("burnt_blend", m as f32);
     }
+    // the mode a dual brush combines its two by: no brush is paired yet, so it is only carried
+    if let Some(m) = blend(&["dualBlendModeExtended", "dualBlendMode"]) {
+        set("dual_blend", m as f32);
+    }
     // an image of the brush's own is in the file by a name of its own (its path then null), or
     // by the name its path gives; else the path names a stock image
     let texture = |path: &str, own: &str, inverted: &str| {
@@ -758,6 +762,11 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
     let burnt = number("burnt_blend");
     put("burntEdgesBlendMode", Value::Int(crate::native::older_blends(burnt).1));
     put("burntEdgesBlendModeExtended", Value::Int(burnt));
+    if brush.extra.contains_key("dual_blend") {
+        let dual = number("dual_blend");
+        put("dualBlendMode", Value::Int(crate::native::older_blends(dual).1));
+        put("dualBlendModeExtended", Value::Int(dual));
+    }
     put("shapeAngle", Value::Real(f64::from(brush.shape.rotation)));
     // a stock image as the brush's file named it; otherwise the image is its own, the file by
     // its own name
@@ -1188,6 +1197,23 @@ mod tests {
         assert_eq!(setting_of(&again, "attack_roll"), Some(1.0));
         assert_eq!(setting_of(&again, "attack_tilt"), Some(0.0));
         assert_eq!(setting_of(&written_again(&file_with(Vec::new())), "attack_roll"), None);
+    }
+
+    #[test]
+    fn a_dual_brushs_blend_mode_is_carried() {
+        use crate::document::BlendMode::{Multiply, Screen};
+        let (multiply, screen) = (crate::native::blend_to(Multiply), crate::native::blend_to(Screen));
+        // the newer key first; an older file's own; behind as files number it
+        for (fields, mode) in [
+            (vec![("dualBlendModeExtended", Value::Int(multiply)), ("dualBlendMode", Value::Int(0))], Multiply.id()),
+            (vec![("dualBlendMode", Value::Int(screen))], Screen.id()),
+            (vec![("dualBlendModeExtended", Value::Int(BEHIND_NUMBER))], BRUSH_BEHIND),
+        ] {
+            let file = file_with(fields);
+            assert_eq!(setting_of(&read(&file).unwrap().settings, "dual_blend"), Some(mode as f32));
+            assert_eq!(setting_of(&written_again(&file), "dual_blend"), Some(mode as f32));
+        }
+        assert_eq!(setting_of(&written_again(&file_with(Vec::new())), "dual_blend"), None);
     }
 
     #[test]
