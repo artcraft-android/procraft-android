@@ -197,7 +197,7 @@ private fun Adjustment.icon() = when (this) {
 
 /**
  * Whether the adjustment toolbars lay their sliders side by side: on a screen wider than tall, as
- * the reference does in landscape (upright they stack).
+ * measured in landscape (upright they stack).
  */
 @Composable
 private fun widePanels(): Boolean {

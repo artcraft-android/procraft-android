@@ -10,7 +10,7 @@ use egui::{Align2, Color32, Id, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use procraft_core::{CanvasSession, Fill};
 
 use crate::colours::{of_hex, srgb};
-use crate::look::{Weight, argb, pc, text};
+use crate::look::{Themed, Weight, argb, pc, text};
 use crate::overlays::ease;
 
 /// A press moved this far (points) drags the colour out.
@@ -26,9 +26,9 @@ const BAND_HEIGHT: f32 = 32.0;
 const ROW_HEIGHT: f32 = 24.0;
 const LINE_HEIGHT: f32 = 4.0;
 /// The band, translucent over the canvas, and the threshold's row under it.
-const BAND_FILL: u32 = 0xD63B3B3B;
-const ROW_FILL: u32 = 0xCC4A4A4A;
-const INK: u32 = 0xFFC5C5C5;
+const BAND_FILL: Themed = Themed(0xD63B3B3B, 0xD6EEEEEE);
+const ROW_FILL: Themed = Themed(0xCC4A4A4A, 0xCCDCDCDC);
+const INK: Themed = Themed(0xFFC5C5C5, 0xFF222222);
 
 /// What the band under the top bar shows.
 #[derive(Clone, Copy, Debug, PartialEq)]

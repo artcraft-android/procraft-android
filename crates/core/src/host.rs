@@ -43,4 +43,22 @@ impl CanvasSession {
     pub fn wants_frame(&self) -> bool {
         self.shared.lock().needs_frame
     }
+
+    /// Draws the whole canvas fitted and centred on black into `view` (a second display's
+    /// window, `format`, `size` pixels, its colours shown in `screen`): Project canvas.
+    pub fn draw_projection(
+        &self,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        size: (u32, u32),
+        screen: Profile,
+    ) {
+        self.shared.lock().draw_fitted(view, format, size, screen);
+    }
+
+    /// How many frames of the canvas have been drawn: a second display showing it is drawn again
+    /// when this changes.
+    pub fn frames_drawn(&self) -> u64 {
+        self.shared.lock().frames
+    }
 }

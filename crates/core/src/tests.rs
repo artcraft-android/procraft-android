@@ -1844,6 +1844,24 @@ fn a_brush_paints_with_a_shape_of_the_users_own_and_keeps_it() {
 }
 
 #[test]
+fn a_picture_becomes_a_source_fitted_on_black() {
+    let n = crate::studio::source_size() as usize;
+    // twice as wide as tall: white on the left, see-through white on the right
+    let rgba: Vec<u8> =
+        (0..8 * 4).flat_map(|i| if i % 8 < 4 { [255, 255, 255, 255] } else { [255, 255, 255, 0] }).collect();
+    let source = crate::studio::source_from_picture(rgba, 8, 4);
+    assert_eq!(source.len(), n * n);
+    let at = |x: usize, y: usize| source.get(y * n + x).copied().unwrap();
+    // black above and below it, white where it is opaque, black where it shows through
+    assert_eq!(at(n / 4, 2), 0);
+    assert_eq!(at(n / 4, n - 3), 0);
+    assert_eq!(at(n / 4, n / 2), 255);
+    assert_eq!(at(n * 3 / 4, n / 2), 0);
+    // pixels of the wrong size: nothing
+    assert!(crate::studio::source_from_picture(vec![0; 7], 2, 1).is_empty());
+}
+
+#[test]
 fn an_artwork_opens_as_it_was_shown() {
     let Some(s) = session(100, 100) else { return };
     s.view_gesture(50.0, 50.0, 5.0, -3.0, 2.0, 0.4);
@@ -2461,7 +2479,7 @@ fn set_sheet() {
     encoder.write_header().unwrap().write_image_data(&sheet).unwrap();
 }
 
-/// The rendering modes build up within a stroke as measured on the reference's drawing pad: a hard
+/// The rendering modes build up within a stroke as measured on a drawing pad: a hard
 /// round brush 22 px across, spaced as its file keeps 0.042, at 49% flow, one pass along a line.
 #[test]
 fn rendering_modes_build_up_as_measured() {

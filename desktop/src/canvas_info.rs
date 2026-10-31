@@ -14,20 +14,25 @@ use procraft_core::{
 };
 
 use crate::icons::{self, Icon};
-use crate::look::{Look, Weight, argb, pc, text};
+use crate::look::{Look, Themed, Weight, argb, pc, text};
 
-const SCREEN: u32 = 0xFF1F1F1F;
-const RAIL: u32 = 0xFF272727;
-const CARD: u32 = 0xFF252525;
-const INK: u32 = 0xFFC1C1C1;
-const RAIL_IDLE: u32 = 0xFFAAAAAA;
-const PHOTO: u32 = 0xFF303030;
-const PHOTO_GLYPH: u32 = 0xFF4E4E4E;
-const PLACEHOLDER: u32 = 0xFF605F63;
-const SIGN_LINE: u32 = 0xFF494949;
+const SCREEN: Themed = Themed(0xFF1F1F1F, 0xFFF3F3F3);
+const RAIL: Themed = Themed(0xFF272727, 0xFFEBEBEB);
+const CARD: Themed = Themed(0xFF252525, 0xFFEBEBEB);
+const INK: Themed = Themed(0xFFC1C1C1, 0xFF3B3B3B);
+const RAIL_IDLE: Themed = Themed(0xFFAAAAAA, 0xFF3D3D3D);
+const PHOTO: Themed = Themed(0xFF303030, 0xFFB3B3B3);
+const PHOTO_GLYPH: Themed = Themed(0xFF4E4E4E, 0xFFF5F5F5);
+const PLACEHOLDER: Themed = Themed(0xFF605F63, 0xFFB8B8BC);
+const SIGN_LINE: Themed = Themed(0xFF494949, 0xFF9A9A9A);
 const DONE: u32 = 0xFF0190FF;
-const CARD_EDGE: u32 = 0xFF373737;
-const PAGE_INK: u32 = 0xFF797979;
+const CARD_EDGE: Themed = Themed(0xFF373737, 0xFFDADADA);
+/// "Sign here" and its clear button: the photo's glyph while dark, darker greys while light; the
+/// header's words.
+const SIGN_INK: Themed = Themed(0xFF4E4E4E, 0xFF666666);
+const SIGN_CLEAR: Themed = Themed(0xFF4E4E4E, 0xFF393939);
+const CAPSULE_INK: Themed = Themed(0xFFA5A5A5, 0xFF585858);
+const PAGE_INK: Themed = Themed(0xFF797979, 0xFF3E3E3E);
 const CARD_CORNER: f32 = 25.0;
 /// Where a wide window's page starts and ends, beside the pages' card.
 const WIDE_START: f32 = 358.0;
@@ -195,10 +200,10 @@ impl CanvasInfo {
                 .desired_width(field.width())
                 .char_limit(256)
                 .show(&mut ui.new_child(UiBuilder::new().max_rect(field)));
-            // Cancel, Import before it on the colour profile page (still to come here), and Done
+            // Cancel, Import before it on the colour profile page, and Done
             let done = Rect::from_min_size(pos2(screen.right() - 20.0 - 44.0, screen.top() + 20.0), vec2(44.0, 45.0));
             let words: &[&str] = if self.page == 3 { &["Import", "Cancel"] } else { &["Cancel"] };
-            match crate::custom_canvas::capsule_words(ui, done.left() - 13.0, screen.top() + 21.0, words) {
+            match crate::custom_canvas::capsule_words(ui, done.left() - 13.0, screen.top() + 21.0, words, CAPSULE_INK) {
                 Some("Cancel") => ended = Some(Ended::Cancel),
                 // a profile of the canvas's kind is picked to change to
                 Some(_) => {
@@ -459,11 +464,11 @@ impl CanvasInfo {
             "Sign here",
             11.0,
             Weight::Regular,
-            argb(PHOTO_GLYPH),
+            argb(SIGN_INK),
         );
         // always there, at the line's end
         let clear = Rect::from_min_size(sign.min + vec2(330.0, 58.0), vec2(22.0, 22.0));
-        painter.circle_filled(clear.center(), 11.0, argb(PHOTO_GLYPH));
+        painter.circle_filled(clear.center(), 11.0, argb(SIGN_CLEAR));
         look.icon(ui, &icons::CROSS, clear.center(), 14.0, argb(CARD));
         if ui.interact(clear, ui.scope_id().with("clear signature"), Sense::click()).clicked() {
             self.signature.clear();

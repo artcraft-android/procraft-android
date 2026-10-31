@@ -1,6 +1,7 @@
 //! The window's pointers handed to the session's touches (crates/core's `touch`, shared with the
 //! Android app), which paint, move the canvas and say what the app should do. The mouse adds what
-//! it can't do by touch: the wheel zooms, and the middle button (or space) moves the canvas.
+//! it can't do by touch: the wheel zooms, and the middle button (or space) moves the canvas; on a
+//! model it turns it, as a finger does, and with Shift moves it.
 
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,9 @@ pub const PICK_WINDOW: f32 = 54.0;
 const WHEEL_ZOOM: f32 = 1.15;
 /// How much a pixel of scrolling zooms by, with Ctrl (or ⌘) held.
 const SCROLL_ZOOM: f32 = 0.005;
+/// A place in the window (pixels).
+type Point = (f32, f32);
+
 /// The mouse's pointer id: touches have the platform's.
 const MOUSE: u64 = u64::MAX;
 
@@ -32,6 +36,23 @@ pub struct Input {
     pub hover_shown: bool,
     space: bool,
     command_key: bool,
+    shift: bool,
+    /// A model is shown (not its 2D texture): dragging the view turns it, as one finger does
+    /// (which finger, and where it last was).
+    pub turns_model: bool,
+    turning: Option<(u64, (f32, f32))>,
+    /// The touch companion's Zoom or Move on: a press dragged on the canvas zooms or moves it
+    /// (which pointer, where it went down and where it last was); and the screen's density.
+    pub companion: crate::companion::Mode,
+    companion_drag: Option<(u64, Point, Point)>,
+    pub pixels_per_point: f32,
+    /// Recolor is on: a press on the canvas drags its reticle, or (a tap) fills from where it
+    /// lands. The press (which pointer, where it went down and last was, whether it is a drag),
+    /// how far the reticle has been dragged since the interface last looked, and a tap's place.
+    pub recolor: bool,
+    recolor_press: Option<(u64, Point, Point, bool)>,
+    pub recolor_moved: Point,
+    pub recolor_tap: Option<Point>,
 }
 
 impl Default for Input {
@@ -46,6 +67,16 @@ impl Default for Input {
             hover_shown: false,
             space: false,
             command_key: false,
+            shift: false,
+            turns_model: false,
+            turning: None,
+            companion: crate::companion::Mode::None,
+            companion_drag: None,
+            pixels_per_point: 1.0,
+            recolor: false,
+            recolor_press: None,
+            recolor_moved: (0.0, 0.0),
+            recolor_tap: None,
         }
     }
 }
@@ -65,6 +96,63 @@ impl Input {
     /// Space is held or the mouse moves the view.
     pub fn moving_view(&self) -> bool {
         self.space || self.panning
+    }
+
+    /// A press going down at `at` with the companion's Zoom or Move on: the companion's, not the
+    /// touches'. True if it took it.
+    fn companion_down(&mut self, id: u64, at: (f32, f32)) -> bool {
+        if self.companion == crate::companion::Mode::None || !self.down.is_empty() || self.companion_drag.is_some() {
+            return false;
+        }
+        self.companion_drag = Some((id, at, at));
+        true
+    }
+
+    /// The companion's press `id` moved to `at`: the canvas zooms (up zooming in, about where it
+    /// went down) or moves. True if it was the companion's.
+    fn companion_moved(&mut self, session: &CanvasSession, id: u64, at: (f32, f32)) -> bool {
+        let Some((held, start, last)) = self.companion_drag.filter(|d| d.0 == id) else { return false };
+        let (dx, dy) = (at.0 - last.0, at.1 - last.1);
+        if self.companion == crate::companion::Mode::Zoom {
+            let scale = (-dy / (crate::companion::ZOOM_DISTANCE * self.pixels_per_point)).exp();
+            session.view_gesture(start.0, start.1, 0.0, 0.0, scale, 0.0);
+        } else {
+            session.view_gesture(at.0, at.1, dx, dy, 1.0, 0.0);
+        }
+        self.companion_drag = Some((held, start, at));
+        true
+    }
+
+    /// A press going down at `at` with Recolor on: Recolor's. True if it took it.
+    fn recolor_down(&mut self, id: u64, at: Point) -> bool {
+        if !self.recolor || !self.down.is_empty() || self.recolor_press.is_some() {
+            return false;
+        }
+        self.recolor_press = Some((id, at, at, false));
+        true
+    }
+
+    /// Recolor's press `id` moved to `at`: past a tap's reach, the reticle follows it. True if it
+    /// was Recolor's.
+    fn recolor_moved_to(&mut self, id: u64, at: Point) -> bool {
+        let Some((held, start, last, dragging)) = self.recolor_press.filter(|p| p.0 == id) else { return false };
+        let slop = 8.0 * self.pixels_per_point;
+        let dragging = dragging || (at.0 - start.0).hypot(at.1 - start.1) > slop;
+        if dragging {
+            self.recolor_moved = (self.recolor_moved.0 + at.0 - last.0, self.recolor_moved.1 + at.1 - last.1);
+        }
+        self.recolor_press = Some((held, start, if dragging { at } else { last }, dragging));
+        true
+    }
+
+    /// Recolor's press `id` let go at `at`: a tap fills from there. True if it was Recolor's.
+    fn recolor_up(&mut self, id: u64, at: Point) -> bool {
+        let Some((_, _, _, dragging)) = self.recolor_press.filter(|p| p.0 == id) else { return false };
+        self.recolor_press = None;
+        if !dragging {
+            self.recolor_tap = Some(at);
+        }
+        true
     }
 
     fn now_ms(&self) -> f64 {
@@ -133,6 +221,7 @@ impl Input {
             WindowEvent::ModifiersChanged(m) => {
                 let state = m.state();
                 self.command_key = if cfg!(target_os = "macos") { state.super_key() } else { state.control_key() };
+                self.shift = state.shift_key();
                 false
             }
             WindowEvent::KeyboardInput { event, .. } if event.logical_key == Key::Named(NamedKey::Space) => {
@@ -157,7 +246,14 @@ impl Input {
                 self.inside = true;
                 let last = self.cursor.replace(p);
                 if let (true, Some(l)) = (self.panning, last) {
-                    session.view_gesture(p.0, p.1, p.0 - l.0, p.1 - l.1, 1.0, 0.0);
+                    if self.turns_model && !self.shift {
+                        session.turn_model(p.0 - l.0, p.1 - l.1);
+                    } else {
+                        session.view_gesture(p.0, p.1, p.0 - l.0, p.1 - l.1, 1.0, 0.0);
+                    }
+                    return true;
+                }
+                if self.companion_moved(session, MOUSE, p) || self.recolor_moved_to(MOUSE, p) {
                     return true;
                 }
                 if self.down.contains(&MOUSE) {
@@ -176,7 +272,16 @@ impl Input {
                         false
                     }
                     (MouseButton::Left, ElementState::Pressed) if !self.panning && !over(p) => {
-                        self.pressed(session, MOUSE, PointerKind::Mouse, p, 1.0);
+                        if !self.companion_down(MOUSE, p) && !self.recolor_down(MOUSE, p) {
+                            self.pressed(session, MOUSE, PointerKind::Mouse, p, 1.0);
+                        }
+                        true
+                    }
+                    (MouseButton::Left, ElementState::Released) if self.recolor_up(MOUSE, p) => true,
+                    (MouseButton::Left, ElementState::Released)
+                        if self.companion_drag.is_some_and(|d| d.0 == MOUSE) =>
+                    {
+                        self.companion_drag = None;
                         true
                     }
                     (MouseButton::Left, ElementState::Released) if self.down.contains(&MOUSE) => {
@@ -228,7 +333,50 @@ impl Input {
         let kind = if pen.is_some() { PointerKind::Stylus } else { PointerKind::Finger };
         let pressure = pen.unwrap_or(1.0);
         let known = self.down.contains(&touch.id);
+        // the companion's Zoom or Move takes a press on the canvas
         match touch.phase {
+            TouchPhase::Started if !over(p) && self.turning.is_none() && self.companion_down(touch.id, p) => {
+                return true;
+            }
+            TouchPhase::Started if !over(p) && self.turning.is_none() && self.recolor_down(touch.id, p) => return true,
+            TouchPhase::Moved if self.companion_moved(session, touch.id, p) || self.recolor_moved_to(touch.id, p) => {
+                return true;
+            }
+            TouchPhase::Ended if self.recolor_up(touch.id, p) => return true,
+            TouchPhase::Cancelled if self.recolor_press.is_some_and(|r| r.0 == touch.id) => {
+                self.recolor_press = None;
+                return true;
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled if self.companion_drag.is_some_and(|d| d.0 == touch.id) => {
+                self.companion_drag = None;
+                return true;
+            }
+            _ => {}
+        }
+        // on a shown model one finger turns it; a second one hands both to the touches
+        if let Some((id, last)) = self.turning {
+            match touch.phase {
+                TouchPhase::Moved if touch.id == id => {
+                    session.turn_model(p.0 - last.0, p.1 - last.1);
+                    self.turning = Some((id, p));
+                    return true;
+                }
+                TouchPhase::Ended | TouchPhase::Cancelled if touch.id == id => {
+                    self.turning = None;
+                    return true;
+                }
+                TouchPhase::Started => {
+                    self.turning = None;
+                    self.pressed(session, id, PointerKind::Finger, last, 1.0);
+                }
+                _ => {}
+            }
+        }
+        match touch.phase {
+            TouchPhase::Started if self.turns_model && pen.is_none() && self.down.is_empty() && !over(p) => {
+                self.turning = Some((touch.id, p));
+                true
+            }
             TouchPhase::Started => {
                 // the first touch must land on the canvas; more may land anywhere
                 if self.down.is_empty() && over(p) {

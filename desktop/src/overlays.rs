@@ -8,7 +8,7 @@ use egui::{Align2, Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui
 use procraft_core::{CanvasSession, Pick, QuickShapeInfo, QuickShapeKind};
 
 use crate::icons;
-use crate::look::{Look, Weight, argb, pc, text};
+use crate::look::{Look, Themed, Weight, argb, pc, text};
 use crate::prefs::CursorStyle;
 
 const NOTICE_FILL: u32 = 0xC2424242;
@@ -16,15 +16,15 @@ const NOTICE_INK: u32 = 0xFFD7D7D7;
 const NOTICE_IN: f32 = 0.3;
 const NOTICE_SHOWN: Duration = Duration::from_millis(750);
 const NOTICE_WARNING_SHOWN: Duration = Duration::from_millis(1500);
-const MESSAGE_BAR: u32 = 0xFF606060;
-const MESSAGE_TEXT: u32 = 0xFFB5B5B5;
+const MESSAGE_BAR: Themed = Themed(0xFF606060, 0xFFD0D0D0);
+const MESSAGE_TEXT: Themed = Themed(0xFFB5B5B5, 0xFF3B3B3B);
 const LOUPE_OUTER: f32 = 69.0;
 const LOUPE_INNER: f32 = 53.5;
 const LOUPE_LIFT: f32 = 41.0;
 const LOUPE_EDGE: u32 = 0xFF808080;
-const MODE_BAR: u32 = 0xD63B3B3B;
+const MODE_BAR: Themed = Themed(0xD63B3B3B, 0xD6EEEEEE);
 const MODE_TEXT: u32 = 0xFFC5C5C5;
-const MODES_FILL: u32 = 0xFF7B7B7B;
+const MODES_FILL: Themed = Themed(0xFF7B7B7B, 0xFFFFFFFF);
 
 /// A passing message under the top bar; a warning stays longer.
 struct Notice {

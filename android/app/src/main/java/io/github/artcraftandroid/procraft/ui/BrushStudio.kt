@@ -330,7 +330,7 @@ private enum class Edge { TOP, TITLE }
 
 /**
  * The space between [above] (a control, a section's title or the column's top) and [below] (a
- * control or a title), as the reference spaces them. Titles here are 23 tall (24 there), slider rows
+ * control or a title), as measured. Titles here are 23 tall (24 there), slider rows
  * 55, switch and picker rows 47, list rows 44 with a line between.
  */
 private fun gap(above: Any, below: Any): Dp {
@@ -612,7 +612,7 @@ private fun StudioPad(vm: CanvasViewModel, modifier: Modifier) {
     }
 }
 
-/** The open page's settings, in sections, spaced as the reference spaces them. */
+/** The open page's settings, in sections, spaced as measured. */
 @Composable
 private fun StudioSettings(vm: CanvasViewModel, modifier: Modifier) {
     val tab = STUDIO_TABS.getOrNull(vm.studioTab) ?: return
@@ -790,7 +790,7 @@ private fun AboutBrush(vm: CanvasViewModel) {
                         Icon(PcIcons.MenuTick, contentDescription = null, tint = Color.White, modifier = Modifier.requiredSize(20.dp))
                     }
                     Spacer(Modifier.width(6.dp))
-                    // the short date and time with a comma between, as the reference writes them
+                    // the short date and time with a comma between
                     val day = java.util.Date(made * 1000)
                     val at = java.text.DateFormat.getDateInstance(java.text.DateFormat.SHORT).format(day) + ", " +
                         java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(day)
@@ -1084,7 +1084,7 @@ private val KeypadWidth = 275.dp
 private val KeypadHeight = 360.dp
 /**
  * With pages to choose between, the tabs under the title push the keys down, 64 tall: the popover
- * is 410 tall with two tabs, 386 with three (as the reference's measure).
+ * is 410 tall with two tabs, 386 with three (as measured).
  */
 private fun keypadHeight(tabs: Int) = when (tabs) {
     1 -> KeypadHeight
@@ -1365,7 +1365,7 @@ private val TaperBarFill get() = if (Pc.light) Color(0xFFDCDCDC) else Color(0xFF
 internal class TiltLook(val box: Color, val quarter: Color, val arc: Color, val line: Color, val label: Color, val off: Color, val fill: Boolean = true)
 
 private val DarkTilt = TiltLook(Color(0xFF1B1B1B), Color(0xFF262626), Color(0xFF4A4A4A), Color(0xFF6E6E6E), Color(0xFF8E8E8E), Color(0xFF6E6E6E))
-/** In the keypads: the disc darker than the box round it, as the reference's. */
+/** In the keypads: the disc darker than the box round it, as measured. */
 private val LightTilt = TiltLook(Color(0xFFE6E6E6), Color(0xFFDADADA), Color(0xFFABABAB), Color(0xFF797979), Color(0xFFAAAAAA), Color(0xFFAAAAAA), fill = false)
 
 /**

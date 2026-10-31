@@ -7,33 +7,33 @@ use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2
 use procraft_core::{AdjustShown, CanvasSession, ChromaticKind, GlitchKind, HalftoneKind, NoiseKind};
 
 use crate::icons::{self, Icon};
-use crate::look::{Look, Weight, argb, pc, text};
+use crate::look::{Look, Shade, Themed, Weight, argb, pc, text};
 use crate::transform::switch;
 
-const PANEL_FILL: u32 = 0xF71E1E1E;
+const PANEL_FILL: Themed = Themed(0xF71E1E1E, 0xF7F1F1F1);
 const PANEL_RISE: f32 = 25.0;
-const KINDS_FILL: u32 = 0xFF535353;
-const KINDS_EDGE: u32 = 0xFF747474;
-const MODES_TEXT: u32 = 0xFFD0D0D0;
-const LABEL: u32 = 0xFF808080;
-const VALUE: u32 = 0xFFEDEDED;
-const TRACK: u32 = 0xFF2E2E2E;
-const TICK: u32 = 0xFF4A4A4A;
-const NOISE_BUTTON: u32 = 0xFF1E1E1E;
-const MORE_FILL: u32 = 0xFF1C1C1C;
-const MORE_EDGE: u32 = 0xFF3A3A3A;
-const MORE_DOTS: u32 = 0xFF9A9A9A;
-const OPTIONS_MENU_FILL: u32 = 0xF2262626;
-const OPTIONS_GROUP_FILL: u32 = 0xFF1B1B1B;
-const OPTIONS_LINE: u32 = 0xFF2E2E2E;
-const MENU_TEXT: u32 = 0xFFC5C5C5;
-const PANEL_BUTTON: u32 = 0xFF303030;
-const PANEL_BUTTON_TEXT: u32 = 0xFFA6A6A6;
+const KINDS_FILL: Themed = Themed(0xFF535353, 0xFFFFFFFF);
+const KINDS_EDGE: Themed = Themed(0xFF747474, 0xFFFAFAFA);
+const MODES_TEXT: Themed = Themed(0xFFD0D0D0, 0xFF3B3B3B);
+const LABEL: Themed = Themed(0xFF808080, 0xFF595959);
+const VALUE: Themed = Themed(0xFFEDEDED, 0xFF363636);
+const TRACK: Themed = Themed(0xFF2E2E2E, 0xFFDDDDDD);
+const TICK: Themed = Themed(0xFF4A4A4A, 0xFFC8C8C8);
+const NOISE_BUTTON: Themed = Themed(0xFF1E1E1E, 0xFFFFFFFF);
+const MORE_FILL: Themed = Themed(0xFF1C1C1C, 0xFFFAFAFA);
+const MORE_EDGE: Themed = Themed(0xFF3A3A3A, 0xFFE1E1E1);
+const MORE_DOTS: Themed = Themed(0xFF9A9A9A, 0xFF595959);
+const OPTIONS_MENU_FILL: Themed = Themed(0xF2262626, 0xF2F0F0F0);
+const OPTIONS_GROUP_FILL: Themed = Themed(0xFF1B1B1B, 0xFFFFFFFF);
+const OPTIONS_LINE: Themed = Themed(0xFF2E2E2E, 0xFFE2E2E2);
+const MENU_TEXT: Themed = Themed(0xFFC5C5C5, 0xFF393939);
+const PANEL_BUTTON: Themed = Themed(0xFF303030, 0xFFF8F8F8);
+const PANEL_BUTTON_TEXT: Themed = Themed(0xFFA6A6A6, 0xFF515151);
 const BALANCE_KNOB: u32 = 0xFF7A7A7A;
 const GRID_LINE: u32 = 0xFF8A8A8A;
 const CURVE_NODE: u32 = 0xFF0171EA;
 /// The Delete pill over a tapped curve point.
-const CURVE_MENU_FILL: u32 = 0xFF262626;
+const CURVE_MENU_FILL: Themed = Themed(0xFF262626, 0xFFF0F0F0);
 const BALANCE_PAIRS: [(&str, &str, [u32; 3]); 3] = [
     ("Cyan", "Red", [0xFF00FFFF, 0xFF808080, 0xFFFF0000]),
     ("Magenta", "Green", [0xFFFF00FF, 0xFF808080, 0xFF00FF00]),
@@ -135,7 +135,7 @@ pub(crate) fn option_slider(
     value: f32,
     shown: &str,
     both: bool,
-    label_ink: u32,
+    label_ink: impl Shade,
 ) -> Option<f32> {
     let top = at.y + 6.0;
     text(ui.painter(), pos2(at.x + 10.0, top), Align2::LEFT_TOP, label, 16.0, Weight::Regular, argb(label_ink));
@@ -163,6 +163,27 @@ pub(crate) fn option_slider(
     let p = response.interact_pointer_pos()?;
     let t = ((p.x - bar.left()) / bar.width().max(1.0)).clamp(0.0, 1.0);
     Some(if both { t * 2.0 - 1.0 } else { t })
+}
+
+/// Recolor's toolbar: the Flood slider, how far from the colour under the reticle the fill
+/// reaches. Returns the value dragged to.
+pub(crate) fn recolor_toolbar(ctx: &egui::Context, threshold: f32) -> Option<f32> {
+    let rect = panel_rect(ctx.content_rect(), 332.0, 70.0);
+    let mut moved = None;
+    panel(ctx, "recolor toolbar", rect, |ui| {
+        let shown = format!("{}%", (threshold * 100.0).round());
+        moved = option_slider(
+            ui,
+            pos2(rect.center().x - 150.0, rect.top() + 8.0),
+            300.0,
+            "Flood",
+            threshold,
+            &shown,
+            false,
+            LABEL,
+        );
+    });
+    moved
 }
 
 #[derive(Default)]
@@ -259,7 +280,7 @@ impl Toolbars {
                 for (k, (multi, label)) in [(false, "Single"), (true, "Multi")].into_iter().enumerate() {
                     let b = Rect::from_min_size(pos2(row.left() + k as f32 * 167.0, row.top()), vec2(160.0, 40.0));
                     let on = shown.noise_multi == multi;
-                    ui.painter().rect_filled(b, 20, argb(if on { pc::ACCENT } else { NOISE_BUTTON }));
+                    ui.painter().rect_filled(b, 20, if on { argb(pc::ACCENT) } else { argb(NOISE_BUTTON) });
                     let ink = if on { Color32::WHITE } else { argb(MODES_TEXT) };
                     text(ui.painter(), b.center(), Align2::CENTER_CENTER, label, 15.0, Weight::Regular, ink);
                     if ui.interact(b, ui.scope_id().with(("noise channels", k)), Sense::click()).clicked() {
@@ -269,7 +290,7 @@ impl Toolbars {
                 let switch_at = pos2(row.right() - 63.0, row.center().y - 14.0);
                 let words = pos2((row.left() + 334.0 + switch_at.x) / 2.0, row.center().y);
                 text(ui.painter(), words, Align2::CENTER_CENTER, "Additive", 16.0, Weight::Regular, argb(MODES_TEXT));
-                switch(ui, switch_at, shown.noise_added);
+                switch(ui, switch_at, shown.noise_added, "additive");
                 let hit = Rect::from_min_size(switch_at, vec2(63.0, 28.0));
                 if ui.interact(hit, ui.scope_id().with("additive"), Sense::click()).clicked() {
                     session.adjustment_noise_ways(shown.noise_multi, !shown.noise_added);
@@ -325,7 +346,7 @@ impl Toolbars {
                 for (i, name) in BALANCE_TONES.iter().enumerate() {
                     let b = Rect::from_min_size(pos2(row.left() + i as f32 * (w + 7.0), row.top()), vec2(w, 40.0));
                     let chosen = tone == i;
-                    ui.painter().rect_filled(b, 20, argb(if chosen { pc::ACCENT } else { PANEL_BUTTON }));
+                    ui.painter().rect_filled(b, 20, if chosen { argb(pc::ACCENT) } else { argb(PANEL_BUTTON) });
                     let ink = if chosen { Color32::WHITE } else { argb(PANEL_BUTTON_TEXT) };
                     text(ui.painter(), b.center(), Align2::CENTER_CENTER, name, 15.0, Weight::Regular, ink);
                     if ui.interact(b, ui.scope_id().with(("tone", i)), Sense::click()).clicked() {
@@ -439,7 +460,7 @@ impl Toolbars {
                 let (upper, lower) = (if i == 0 { 13 } else { 0 }, if i == 3 { 13 } else { 0 });
                 let corners = egui::CornerRadius { nw: upper, ne: upper, sw: lower, se: lower };
                 let chosen = channel as usize == i;
-                ui.painter().rect_filled(cell, corners, argb(if chosen { pc::ACCENT } else { PANEL_BUTTON }));
+                ui.painter().rect_filled(cell, corners, if chosen { argb(pc::ACCENT) } else { argb(PANEL_BUTTON) });
                 let ink = if chosen { Color32::WHITE } else { argb(PANEL_BUTTON_TEXT) };
                 text(ui.painter(), cell.center(), Align2::CENTER_CENTER, name, 16.0, Weight::Regular, ink);
                 if ui.interact(cell, ui.scope_id().with(("channel", i)), Sense::click()).clicked() {
@@ -493,7 +514,7 @@ impl Toolbars {
                 ink,
             );
             let switch_at = pos2(additive.right() - 8.0 - 63.0, additive.center().y - 14.0);
-            switch(ui, switch_at, shown.noise_added);
+            switch(ui, switch_at, shown.noise_added, "additive in the menu");
             if ui.interact(additive, ui.scope_id().with("menu additive"), Sense::click()).clicked() {
                 session.adjustment_noise_ways(shown.noise_multi, !shown.noise_added);
             }

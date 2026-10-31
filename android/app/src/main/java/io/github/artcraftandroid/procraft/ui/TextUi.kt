@@ -235,7 +235,7 @@ private const val SELECTED_RING = 0.08f
 private fun TextBar(vm: CanvasViewModel) {
     Row(Modifier.fillMaxWidth().height(44.dp).background(KeyboardBar).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         Spacer(Modifier.weight(1f))
-        Text("Edit style", color = Color.White, fontSize = 15.sp, modifier = Modifier.clickable { vm.openTextStyle() }.padding(8.dp))
+        Text("Edit style", color = SheetInk, fontSize = 15.sp, modifier = Modifier.clickable { vm.openTextStyle() }.padding(8.dp))
     }
 }
 

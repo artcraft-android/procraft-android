@@ -8,17 +8,17 @@ use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, TextureHandle,
 use procraft_core::CanvasSession;
 
 use crate::icons;
-use crate::look::{Look, Weight, argb, pc, text};
+use crate::look::{Look, Themed, Weight, argb, pc, text};
 
-const BAR: u32 = 0xFF393939;
-const PICTURE: u32 = 0xFF262626;
-const GRAB_LINE: u32 = 0xFF7C7C7C;
-const TITLE: u32 = 0xFFC5C5C5;
-const CLOSE: u32 = 0xFF262626;
-const CLOSE_EDGE: u32 = 0xFF454545;
-const CLOSE_INK: u32 = 0xFFA5A5A5;
-const SEGMENT_TRACK: u32 = 0xFF4D4D4D;
-const MUTED: u32 = 0xFFAAAAAA;
+const BAR: Themed = Themed(0xFF393939, 0xFFEDEDED);
+const PICTURE: Themed = Themed(0xFF262626, 0xFFFFFFFF);
+const GRAB_LINE: Themed = Themed(0xFF7C7C7C, 0xFF909090);
+const TITLE: Themed = Themed(0xFFC5C5C5, 0xFF3A3A3A);
+const CLOSE: Themed = Themed(0xFF262626, 0xFFFAFAFA);
+const CLOSE_EDGE: Themed = Themed(0xFF454545, 0xFFE0E0E0);
+const CLOSE_INK: Themed = Themed(0xFFA5A5A5, 0xFF595959);
+const SEGMENT_TRACK: Themed = Themed(0xFF4D4D4D, 0xFFD7D7D7);
+const MUTED: Themed = Themed(0xFFAAAAAA, 0xFF3B3B3B);
 const TOP_BAR: f32 = 64.0;
 const BOTTOM_BAR: f32 = 45.0;
 const CORNER: f32 = 24.0;

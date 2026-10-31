@@ -157,7 +157,15 @@ impl QuickMenu {
                 let edge = Stroke::new(1.0, fade(BUTTON_EDGE));
                 ui.painter().rect_stroke(button, BUTTON.1 / 2.0, edge, egui::StrokeKind::Inside);
                 let label = quick_action_label(action);
-                text(ui.painter(), centre, Align2::CENTER_CENTER, &label, 16.0, Weight::SemiBold, fade(BUTTON_INK));
+                // on one line, cut by the pill where it is too long (from its left)
+                let painter = ui.painter().with_clip_rect(button.intersect(ui.clip_rect()));
+                let (at, align) = if crate::look::text_width(&painter, &label, 16.0, Weight::SemiBold) > button.width()
+                {
+                    (button.left_center(), Align2::LEFT_CENTER)
+                } else {
+                    (centre, Align2::CENTER_CENTER)
+                };
+                text(&painter, at, align, &label, 16.0, Weight::SemiBold, fade(BUTTON_INK));
                 if !self.open {
                     continue;
                 }

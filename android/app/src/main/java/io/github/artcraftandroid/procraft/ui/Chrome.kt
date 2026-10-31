@@ -271,7 +271,7 @@ private fun SliderPanel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel,
         modifier.wrapContentSize(Alignment.TopStart, unbounded = true).size(SliderPanelSide)
             .then(if (Pc.light) Modifier else rememberFrost(22.dp))
             .clip(RoundedCornerShape(22.dp)).background(SliderPanelFill)
-            // a hairline rim, as the reference's (about 25 over the glass)
+            // a hairline rim, as measured (about 25 over the glass)
             .border(1.dp, Pc.GlassMenuEdge, RoundedCornerShape(22.dp)),
     ) {
         Text(

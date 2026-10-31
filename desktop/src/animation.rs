@@ -13,7 +13,7 @@ use procraft_core::{AnimationPlayback, AnimationSettings, CanvasSession, Palette
 use crate::colours::HarmonyKind;
 use crate::compact_colours::{self, CompactColours};
 use crate::icons;
-use crate::look::{Look, Weight, argb, cubic_bezier, pc, text};
+use crate::look::{Look, Themed, Weight, argb, cubic_bezier, pc, text};
 use crate::panel::{self, PANEL_TITLE};
 
 /// The bar is 657 wide on a wide window, 446 upright; 96 tall, 25 over the bottom edge.
@@ -24,17 +24,17 @@ const BAR_GAP: f32 = 25.0;
 /// Play's and Add Frame's inset from the bar's ends.
 const BAR_INSET: f32 = 26.0;
 const FRAME_HEIGHT: f32 = 40.0;
-const BAR_FILL: u32 = 0xFF2A2A2A;
-const TRACK_FILL: u32 = 0xFF474747;
-const TRACK_EDGE: u32 = 0xFF5C5C5C;
-const BAR_INK: u32 = 0xFFC5C5C5;
+const BAR_FILL: Themed = Themed(0xFF2A2A2A, 0xFFE4E4E4);
+const TRACK_FILL: Themed = Themed(0xFF474747, 0xFFD0D0D0);
+const TRACK_EDGE: Themed = Themed(0xFF5C5C5C, 0xFFBDBDBD);
+const BAR_INK: Themed = Themed(0xFFC5C5C5, 0xFF393939);
 const FRAME_EDGE: u32 = 0xFF9A9A9A;
-const POPOVER_FILL: u32 = 0xFF383838;
-const GROUP: u32 = 0x420C0C0C;
+const POPOVER_FILL: Themed = Themed(0xFF383838, 0xFFE6E6E6);
+const GROUP: Themed = Themed(0x420C0C0C, 0xFFE8E8E8);
 const ROW_LINE: u32 = 0x09FFFFFF;
-const SLIDE_LABEL: u32 = 0xFFC1C1C1;
-const SLIDE_VALUE: u32 = 0xFFEDEDED;
-const SLIDE_TRACK: u32 = 0xFF414141;
+const SLIDE_LABEL: Themed = Themed(0xFFC1C1C1, 0xFF3D3D3D);
+const SLIDE_VALUE: Themed = Themed(0xFFEDEDED, 0xFF3D3D3D);
+const SLIDE_TRACK: Themed = Themed(0xFF414141, 0xFFBEBEBE);
 const SWATCH_RIM: u32 = 0xFF969696;
 const MAX_ONION: u32 = 12;
 const MAX_HOLD: u32 = 60;
@@ -788,7 +788,7 @@ fn value_slider(ui: &Ui, row: Rect, label: &str, value: &str, fraction: f32, id:
 fn toggle_row(ui: &Ui, row: Rect, label: &str, on: bool) -> bool {
     let at = pos2(row.left() + 16.0, row.center().y);
     text(ui.painter(), at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(PANEL_TITLE));
-    crate::transform::switch(ui, pos2(row.right() - 6.0 - 63.0, row.center().y - 14.0), on);
+    crate::transform::switch(ui, pos2(row.right() - 6.0 - 63.0, row.center().y - 14.0), on, label);
     ui.interact(row, ui.scope_id().with(("toggle", label)), Sense::click()).clicked()
 }
 

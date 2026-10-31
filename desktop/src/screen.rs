@@ -17,6 +17,16 @@ pub struct Screen {
     /// Made for the surface's format.
     renderer: egui_wgpu::Renderer,
     format: wgpu::TextureFormat,
+    /// The brush studio's drawing pad: its own picture, shown by the interface.
+    pad: Option<Pad>,
+}
+
+/// A canvas drawn into a picture of its own (the surface's format), its size, and the
+/// interface's name for it.
+struct Pad {
+    view: wgpu::TextureView,
+    size: (u32, u32),
+    id: egui::TextureId,
 }
 
 impl Screen {
@@ -38,7 +48,7 @@ impl Screen {
             window.theme(),
             usize::try_from(gpu.max_texture_size()).ok(),
         );
-        Ok(Screen { window, surface, config, gpu, egui, renderer, format })
+        Ok(Screen { window, surface, config, gpu, egui, renderer, format, pad: None })
     }
 
     /// The window is `width` × `height` pixels now.
@@ -61,6 +71,49 @@ impl Screen {
         let ctx = self.egui.egui_ctx();
         let at = egui::pos2(p.0, p.1) / ctx.pixels_per_point();
         !canvas.contains(at) || ctx.layer_id_at(at).is_some_and(|l| l.order != egui::Order::Background)
+    }
+
+    /// Draws `pad` (the brush studio's drawing pad) into its own picture, `size` pixels (made again
+    /// at another size); returns the interface's name for the picture, to show it with.
+    pub fn draw_pad(&mut self, pad: &CanvasSession, size: (u32, u32), started: Instant) -> egui::TextureId {
+        let size = (size.0.max(1), size.1.max(1));
+        let config = self.config.as_ref();
+        let screen = config.map_or(procraft_engine::profile::Profile::Srgb, screen_profile);
+        if self.pad.as_ref().is_none_or(|p| p.size != size) {
+            let device = &self.gpu.device;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("drawing pad"),
+                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            // the interface shows the picture's values as they are, as the canvas wrote them
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let shown = &view;
+            let id = match &self.pad {
+                Some(p) => {
+                    self.renderer.update_egui_texture_from_wgpu_texture(device, shown, wgpu::FilterMode::Linear, p.id);
+                    p.id
+                }
+                None => self.renderer.register_native_texture(device, shown, wgpu::FilterMode::Linear),
+            };
+            pad.show_in(size.0, size.1);
+            self.pad = Some(Pad { view, size, id });
+        }
+        let Some(p) = &self.pad else { return egui::TextureId::default() };
+        pad.draw(&p.view, self.format, size, screen, started);
+        p.id
+    }
+
+    /// The pad's picture goes (the studio closed).
+    pub fn drop_pad(&mut self) {
+        if let Some(p) = self.pad.take() {
+            self.renderer.free_texture(&p.id);
+        }
     }
 
     /// Draws the canvas (if an artwork is open) and the interface over it, and shows them. Returns

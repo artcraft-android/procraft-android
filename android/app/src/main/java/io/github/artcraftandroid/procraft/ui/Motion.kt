@@ -36,7 +36,7 @@ import kotlin.math.exp
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-/** How the interface moves: every animation's timing in one place, as measured on the reference. */
+/** How the interface moves: every animation's timing in one place, as measured. */
 object Motion {
     /**
      * A menu opening: it grows out of the point it hangs from, from almost nothing, overshooting a
@@ -348,7 +348,7 @@ val LocalPanelLook = compositionLocalOf { PanelLook(1f, 1f, Offset.Zero) }
 
 /**
  * Shows [content] for [target] unless it is [hidden]. The panels hanging from the top bar come and
- * go at once (as measured on the reference, within a frame); [content] still gets how opaque and
+ * go at once (as measured, within a frame); [content] still gets how opaque and
  * how big the panel is and where this host's top left is on screen (pixels), for its frosted
  * backdrop.
  */

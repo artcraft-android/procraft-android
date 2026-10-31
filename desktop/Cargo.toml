@@ -25,6 +25,8 @@ egui-winit = "0.37"
 egui-wgpu = { version = "0.37", default-features = false }
 winit = "0.30"
 rfd = "0.17"
+# Pictures pasted into the source editor (egui already brings it in, with images)
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 resvg = { version = "0.49", default-features = false }
 png = { workspace = true }
 # Photo's pictures (the clipboard already brings it in, with PNG and TIFF)
@@ -35,6 +37,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }
 
-# Animated MP4 and HEVC through the system's own encoders (Media Foundation)
+# Animated MP4 and HEVC through the system's own encoders (Media Foundation); Feedback Sounds'
+# click played by the system (PlaySound)
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
+windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_Media_MediaFoundation", "Win32_System_Com"] }

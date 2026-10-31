@@ -8,7 +8,7 @@ use egui::emath::TSTransform;
 use egui::{Align2, Id, LayerId, Order, Pos2, Rect, Sense, Ui, pos2, vec2};
 
 use crate::icons;
-use crate::look::{Look, Weight, argb, cubic_bezier, text};
+use crate::look::{Look, Themed, Weight, argb, cubic_bezier, text};
 
 /// How long a menu takes to open or close, seconds.
 const MENU_TIME: f32 = 0.3;
@@ -16,9 +16,9 @@ const MENU_TIME: f32 = 0.3;
 const START_SCALE: f32 = 0.001;
 const END_SCALE: f32 = 0.8;
 /// The glass over the canvas.
-pub const GLASS: u32 = 0xCF313135;
-pub const INK: u32 = 0xFFFFFFFF;
-pub const DISABLED: u32 = 0x66FFFFFF;
+pub const GLASS: Themed = Themed(0xCF313135, 0xFAF0F0F0);
+pub const INK: Themed = Themed(0xFFFFFFFF, 0xFF000000);
+pub const DISABLED: Themed = Themed(0x66FFFFFF, 0x66000000);
 pub const DESTRUCTIVE: u32 = 0xFFFF453A;
 /// An option's row.
 pub const OPTION_HEIGHT: f32 = 38.0;
@@ -26,17 +26,17 @@ pub const OPTION_HEIGHT: f32 = 38.0;
 /// panel, edged, their items with icons, the groups ruled apart.
 pub const LIBRARY_WIDTH: f32 = 253.0;
 pub const LIBRARY_CORNER: f32 = 16.0;
-pub const OVER_PANEL: u32 = 0xFA222222;
+pub const OVER_PANEL: Themed = Themed(0xFA222222, 0xFAF0F0F0);
 pub const EDGE: u32 = 0xFF5A5D5F;
 pub const RULE: u32 = 0xFF3F4347;
-pub const DANGER: u32 = 0xFFE84F51;
+pub const DANGER: Themed = Themed(0xFFE84F51, 0xFFD93A3D);
 pub const ITEM_HEIGHT: f32 = 40.0;
 
 /// How a menu looks: its fill, an edge round it, whether the canvas is frosted behind it, and how
 /// round it is.
 #[derive(Clone, Copy)]
 pub struct Glass {
-    pub fill: u32,
+    pub fill: Themed,
     pub edge: Option<u32>,
     pub frost: bool,
     pub corner: f32,
@@ -156,13 +156,13 @@ pub fn option(
     enabled: bool,
     destructive: bool,
 ) -> bool {
-    let ink = argb(if !enabled {
-        DISABLED
+    let ink = if !enabled {
+        argb(DISABLED)
     } else if destructive {
-        DESTRUCTIVE
+        argb(DESTRUCTIVE)
     } else {
-        INK
-    });
+        argb(INK)
+    };
     text(ui.painter(), pos2(row.left() + 19.0, row.center().y), Align2::LEFT_CENTER, label, 17.0, Weight::Regular, ink);
     if checked {
         look.icon(ui, &icons::TICK, pos2(row.right() - 16.0 - 9.0, row.center().y), 18.0, ink);
@@ -179,9 +179,9 @@ pub fn option_rows(left: f32, top: f32, width: f32, n: usize) -> impl Iterator<I
 /// What a library-style menu lists: an item (its icon, label and ink), or a rule between groups
 /// (this far clear above and below it).
 pub enum Entry<'a> {
-    Item(&'a icons::Icon, &'a str, u32),
+    Item(&'a icons::Icon, &'a str, Themed),
     /// An item that opens more (a chevron at its end).
-    More(&'a icons::Icon, &'a str, u32),
+    More(&'a icons::Icon, &'a str, Themed),
     Rule(f32),
 }
 

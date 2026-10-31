@@ -8,18 +8,18 @@ use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, Ui, UiBuilder,
 use procraft_core::{CanvasSession, CropShown};
 
 use crate::icons;
-use crate::look::{Look, Weight, argb, pc, text};
+use crate::look::{Look, Themed, Weight, argb, pc, text};
 use crate::panel;
 use crate::tool_header::{self, Tapped};
 
-const FRAME_LINE: u32 = 0xCCFFFFFF;
-const GRID_LINE: u32 = 0x66C8C8C8;
-const MARK: u32 = 0xFFD0D0D0;
-const POPOVER: u32 = 0xF21F1F1F;
-const FIELD: u32 = 0xFF242424;
-const GROUP: u32 = 0xFF2A2A2A;
-const ROW_LINE: u32 = 0xFF3A3A3A;
-const INK: u32 = 0xFFD2D2D2;
+const FRAME_LINE: Themed = Themed(0xCCFFFFFF, 0xCC303030);
+const GRID_LINE: Themed = Themed(0x66C8C8C8, 0x99606060);
+const MARK: Themed = Themed(0xFFD0D0D0, 0xFF3A3A3A);
+const POPOVER: Themed = Themed(0xF21F1F1F, 0xF2DBDEDF);
+const FIELD: Themed = Themed(0xFF242424, 0xFFD3D3D5);
+const GROUP: Themed = Themed(0xFF2A2A2A, 0xFFE4E4E6);
+const ROW_LINE: Themed = Themed(0xFF3A3A3A, 0xFFD6D6D8);
+const INK: Themed = Themed(0xFFD2D2D2, 0xFF3B3B3B);
 const MUTED: u32 = 0xFF8E8E93;
 const TRACK: u32 = 0xFF555555;
 /// The settings: 348 wide, 9 from the window's right edge, its arrow 174.5 in.
@@ -183,7 +183,12 @@ impl Crop {
                     Weight::Regular,
                     ink,
                 );
-                crate::transform::switch(ui, pos2(switch_row.right() - 6.0 - 63.0, switch_row.center().y - 14.0), on);
+                crate::transform::switch(
+                    ui,
+                    pos2(switch_row.right() - 6.0 - 63.0, switch_row.center().y - 14.0),
+                    on,
+                    label,
+                );
                 if ui.interact(switch_row, ui.scope_id().with(("crop switch", k)), Sense::click()).clicked() {
                     if k == 0 {
                         session.crop_set_resample(!on);

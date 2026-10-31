@@ -11,21 +11,21 @@ use procraft_core::{AdjustShown, CanvasSession, GradientInfo, Gradients};
 
 use crate::compact_colours::{CompactColours, Picked};
 use crate::icons;
-use crate::look::{Look, Weight, argb, text};
+use crate::look::{Look, Themed, Weight, argb, text};
 use crate::menu::{self, Entry};
 
-const PANEL_FILL: u32 = 0xF71E1E1E;
+const PANEL_FILL: Themed = Themed(0xF71E1E1E, 0xF7F1F1F1);
 const PANEL_RISE: f32 = 25.0;
-const MENU_TEXT: u32 = 0xFFC5C5C5;
-const BAND: u32 = 0xFF535353;
+const MENU_TEXT: Themed = Themed(0xFFC5C5C5, 0xFF393939);
+const BAND: Themed = Themed(0xFF535353, 0xFFFFFFFF);
 const DONE: u32 = 0xFF0190FF;
-const PLUS_DISC: u32 = 0xFF1B1B1B;
-const PLUS_RIM: u32 = 0xFF373737;
-const PLUS_GLYPH: u32 = 0xFFAAAAAA;
-const EDITOR_CARD: u32 = 0xFF383838;
-const EDITOR_NAME: u32 = 0xFFC5C5C5;
-const CARD: u32 = 0xFF282828;
-const CARD_NAME: u32 = 0xFFC1C1C1;
+const PLUS_DISC: Themed = Themed(0xFF1B1B1B, 0xFFFBFBFB);
+const PLUS_RIM: Themed = Themed(0xFF373737, 0xFFE1E1E1);
+const PLUS_GLYPH: Themed = Themed(0xFFAAAAAA, 0xFF595959);
+const EDITOR_CARD: Themed = Themed(0xFF383838, 0xFFEEEEEE);
+const EDITOR_NAME: Themed = Themed(0xFFC5C5C5, 0xFF3A3A3A);
+const CARD: Themed = Themed(0xFF282828, 0xFFEEEEEE);
+const CARD_NAME: Themed = Themed(0xFFC1C1C1, 0xFF5D5D5D);
 const STOP: f32 = 42.0;
 const HOLD: Duration = Duration::from_millis(400);
 

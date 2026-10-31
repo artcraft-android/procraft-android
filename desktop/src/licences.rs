@@ -1,8 +1,12 @@
 //! Help's Licences, as the Android app's dialog: what the app is made with (the interface font and
 //! the icons) and their licences, on a dark panel over the dimmed window, the text scrolling;
-//! Done or a tap beside it closes it.
+//! Done or a tap beside it closes it. The desktop has no settings screen of its own to list the
+//! third-party crates (Android's does), so they follow here (desktop/licenses.txt, written by
+//! tools/licenses.py).
 
-use egui::{Align2, Color32, Id, Order, Rect, ScrollArea, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
+use std::sync::{Arc, OnceLock};
+
+use egui::{Align2, Color32, Id, Order, Rect, ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
 
 use crate::look::{Weight, argb, pc, text};
 
@@ -18,7 +22,55 @@ const LICENCES: &str = concat!(
     include_str!("../../android/app/src/main/assets/fonts/Inter-OFL.txt"),
     "\n\nThe app keeps Lucide icons (lucide.dev), by Lucide Icons and Contributors.\n\n",
     include_str!("../../android/app/src/main/assets/icons/LICENSE-lucide.txt"),
+    "
+
+",
+    include_str!("../licenses.txt"),
 );
+/// The licences a paragraph each.
+fn paragraphs() -> &'static [&'static str] {
+    static PARAGRAPHS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    PARAGRAPHS.get_or_init(|| {
+        LICENCES
+            .split(
+                "
+
+",
+            )
+            .map(str::trim_end)
+            .filter(|p| !p.trim().is_empty())
+            .collect()
+    })
+}
+
+/// Where each paragraph starts laid out `width` wide, and how tall they all are: worked out once
+/// for a width (the text is long), so only those in sight are laid out and drawn.
+fn offsets(ui: &Ui, width: f32) -> Arc<(Vec<f32>, f32)> {
+    let id = Id::unique("licences offsets");
+    let ppp = ui.ctx().pixels_per_point();
+    let kept = ui.ctx().data(|d| d.get_temp::<(f32, f32, Arc<(Vec<f32>, f32)>)>(id));
+    if let Some((w, p, offsets)) = kept
+        && w == width
+        && p == ppp
+    {
+        return offsets;
+    }
+    // a blank line between paragraphs
+    let gap = galley(ui, " ", width).size().y;
+    let mut y = 0.0;
+    let mut starts = Vec::with_capacity(paragraphs().len());
+    for paragraph in paragraphs() {
+        starts.push(y);
+        y += galley(ui, paragraph, width).size().y + gap;
+    }
+    let offsets = Arc::new((starts, y));
+    ui.ctx().data_mut(|d| d.insert_temp(id, (width, ppp, Arc::clone(&offsets))));
+    offsets
+}
+
+fn galley(ui: &Ui, paragraph: &str, width: f32) -> Arc<egui::Galley> {
+    ui.painter().layout(paragraph.to_owned(), Weight::Regular.font(14.0), argb(INK), width)
+}
 
 /// Shows the licences; true once closed.
 pub fn show(ctx: &egui::Context) -> bool {
@@ -42,9 +94,16 @@ pub fn show(ctx: &egui::Context) -> bool {
             pos2(panel.right() - 24.0, panel.bottom() - 16.0 - 40.0 - 16.0),
         );
         ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
-            ScrollArea::vertical().id_salt("licences text").show(ui, |ui| {
-                ui.set_width(body.width());
-                ui.label(egui::RichText::new(LICENCES).font(Weight::Regular.font(14.0)).color(argb(INK)));
+            ScrollArea::vertical().id_salt("licences text").show_viewport(ui, |ui, viewport| {
+                let offsets = offsets(ui, body.width());
+                let (rect, _) = ui.allocate_exact_size(vec2(body.width(), offsets.1), Sense::hover());
+                let first = offsets.0.partition_point(|&y| y <= viewport.top()).saturating_sub(1);
+                for (paragraph, y) in paragraphs().iter().zip(&offsets.0).skip(first) {
+                    if *y > viewport.bottom() {
+                        break;
+                    }
+                    ui.painter().galley(rect.min + vec2(0.0, *y), galley(ui, paragraph, body.width()), argb(INK));
+                }
             });
         });
         let done =

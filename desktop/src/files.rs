@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use procraft_core::{
-    CanvasPreset, CanvasSession, KeptGestures, PsdOutcome, ThumbnailImage, import_psd, preset_height, preset_width,
+    CanvasPreset, CanvasSession, KeptGestures, ModelFile, PsdOutcome, ThumbnailImage, import_psd, preset_height,
+    preset_width,
 };
 use rfd::{FileDialog, MessageDialog, MessageLevel};
 
@@ -27,6 +28,14 @@ pub enum Format {
     LayerPngs,
     /// The current and picked layers, each a PNG file in a folder.
     ChosenLayerPngs,
+    /// A model: as an OBJ zipped with its material file and textures, or as a USDZ; as shown, as
+    /// a PNG, a JPEG or a TIFF; its texture sets, a PNG each in a folder.
+    ModelObj,
+    ModelUsdz,
+    ModelRender,
+    ModelJpeg,
+    ModelTiff,
+    ModelTextures,
 }
 
 impl Format {
@@ -36,9 +45,13 @@ impl Format {
             Format::Package => "Procreate",
             Format::Psd => "PSD",
             Format::Pdf | Format::LayersPdf => "PDF",
-            Format::Png | Format::LayerPngs | Format::ChosenLayerPngs => "PNG",
-            Format::Tiff => "TIFF",
-            Format::Jpeg => "JPEG",
+            Format::Png | Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelRender | Format::ModelTextures => {
+                "PNG"
+            }
+            Format::Tiff | Format::ModelTiff => "TIFF",
+            Format::Jpeg | Format::ModelJpeg => "JPEG",
+            Format::ModelObj => "OBJ",
+            Format::ModelUsdz => "USDZ",
         }
     }
 
@@ -48,9 +61,13 @@ impl Format {
             Format::Package => "procreate",
             Format::Psd => "psd",
             Format::Pdf | Format::LayersPdf => "pdf",
-            Format::Png | Format::LayerPngs | Format::ChosenLayerPngs => "png",
-            Format::Tiff => "tiff",
-            Format::Jpeg => "jpg",
+            Format::Png | Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelRender | Format::ModelTextures => {
+                "png"
+            }
+            Format::Tiff | Format::ModelTiff => "tiff",
+            Format::Jpeg | Format::ModelJpeg => "jpg",
+            Format::ModelObj => "zip",
+            Format::ModelUsdz => "usdz",
         }
     }
 }
@@ -74,6 +91,58 @@ pub fn app_dir() -> PathBuf {
 /// Shows a passing message with an OK button.
 pub fn say(text: &str) {
     MessageDialog::new().set_level(MessageLevel::Info).set_title("ProCraft").set_description(text).show();
+}
+
+/// Whether the file at `path` holds brushes, by its name: ours (a brush or a set) or another
+/// app's.
+pub fn is_brush_file(path: &Path) -> bool {
+    let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    ["brush", "brushset"].contains(&extension.as_str())
+        || procraft_core::OTHER_BRUSH_EXTENSIONS.contains(&extension.as_str())
+}
+
+/// Where brush files given while no canvas is open wait for one.
+pub fn pending_brushes_dir() -> PathBuf {
+    app_dir().join("pending-brushes")
+}
+
+/// Brush files given while no canvas is open, kept (under their own names, after a number that
+/// keeps their order) until one opens; says so. False if none could be kept.
+pub fn keep_pending_brushes(paths: &[PathBuf]) -> bool {
+    let dir = pending_brushes_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let mut kept = false;
+    for (i, path) in paths.iter().enumerate() {
+        let Some(name) = path.file_name() else { continue };
+        let to = dir.join(format!("{stamp}-{i}-{}", name.to_string_lossy()));
+        kept |= std::fs::copy(path, to).is_ok();
+    }
+    if kept {
+        say("Brushes will be added to the library when a canvas opens.");
+    }
+    kept
+}
+
+/// The brush files kept while no canvas was open, oldest first, each with its own name; taken
+/// out of the folder.
+pub fn take_pending_brushes() -> Vec<(Vec<u8>, String)> {
+    let Ok(read) = std::fs::read_dir(pending_brushes_dir()) else { return Vec::new() };
+    let mut paths: Vec<PathBuf> = read.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let bytes = std::fs::read(&path).ok();
+            let _ = std::fs::remove_file(&path);
+            let kept = path.file_name()?.to_string_lossy().into_owned();
+            // the name it came with, after the stamp and the number
+            let name = kept.splitn(3, '-').nth(2).unwrap_or(&kept).to_owned();
+            Some((bytes?, name))
+        })
+        .collect()
 }
 
 /// Shows a message with an OK button.
@@ -206,22 +275,84 @@ pub fn pick_picture() -> Option<Arc<CanvasSession>> {
     }
 }
 
-/// An artwork the user picks: a layered package, a PSD, or a PNG as a one-layer artwork.
+/// What a model to paint on can be: an OBJ, a USD (packaged or not), or a zip holding one with
+/// its files.
+const MODEL_EXTENSIONS: [&str; 6] = ["obj", "usdz", "usdc", "usda", "usd", "zip"];
+
+fn extension_of(path: &Path) -> String {
+    path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
+}
+
+/// An artwork the user picks: a layered package, a PSD, a PNG as a one-layer artwork, or a model
+/// to paint on (picked with its files: an OBJ's material file and the images it maps).
 pub fn pick_artwork() -> Option<(Arc<CanvasSession>, Option<PathBuf>)> {
-    let path = FileDialog::new()
+    let paths = FileDialog::new()
         .set_title("Import")
-        .add_filter("Artworks", &["procraft", "procreate", "psd", "psb", "png"])
-        .pick_file()?;
+        .add_filter(
+            "Artworks and models",
+            &[
+                "procraft",
+                "procreate",
+                "psd",
+                "psb",
+                "png",
+                "obj",
+                "usdz",
+                "usdc",
+                "usda",
+                "usd",
+                "zip",
+                "mtl",
+                "jpg",
+                "jpeg",
+            ],
+        )
+        .pick_files()?;
+    open_artwork_files(paths)
+}
+
+/// The artwork in the files `paths` (picked, or dropped on the gallery): a layered package, a
+/// PSD, a picture as a one-layer artwork, or a model to paint on with the other files beside it.
+pub fn open_artwork_files(paths: Vec<PathBuf>) -> Option<(Arc<CanvasSession>, Option<PathBuf>)> {
+    // a model among them takes the rest as the files picked with it
+    if let Some(model) = paths.iter().find(|p| MODEL_EXTENSIONS.contains(&extension_of(p).as_str())) {
+        return open_model(model, &paths).map(|s| (s, None)).map_err(|e| tell("Can't open the model", &e)).ok();
+    }
+    let path = paths.into_iter().next()?;
     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     let opened = match extension.as_str() {
         "psd" | "psb" => open_psd(&path, &name),
         "png" => read_png(&path).map(|image| CanvasSession::from_image(image, name)),
+        "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" => image::open(&path)
+            .map(|picture| {
+                let rgba = picture.to_rgba8();
+                let image = ThumbnailImage { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() };
+                CanvasSession::from_image(image, name)
+            })
+            .map_err(|e| e.to_string()),
         _ => CanvasSession::open_package(path.to_string_lossy().into_owned()).map_err(|e| e.to_string()),
     };
     // a package brings its time-lapse too
     let package = matches!(extension.as_str(), "procraft" | "procreate").then_some(path);
     opened.map(|s| (s, package)).map_err(|e| tell("Can't open the file", &e)).ok()
+}
+
+/// The model in file `path` to paint on, with the other files `picked` along with it; its own
+/// textures in its texture sets.
+fn open_model(path: &Path, picked: &[PathBuf]) -> Result<Arc<CanvasSession>, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let file_name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let files = picked
+        .iter()
+        .filter(|p| p.as_path() != path)
+        .filter_map(|p| std::fs::read(p).ok().map(|bytes| ModelFile { name: file_name(p), bytes }))
+        .collect();
+    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).filter(|n| !n.trim().is_empty());
+    let name = name.unwrap_or_else(|| "Untitled Artwork".to_owned());
+    let session = CanvasSession::open_model(bytes, file_name(path), files, name, 0).map_err(|e| e.to_string())?;
+    session.load_model_textures();
+    Ok(session)
 }
 
 /// A PSD made an artwork in a folder of its own, then opened from there.
@@ -333,15 +464,17 @@ pub fn save(session: &CanvasSession, ui: &mut Interface, ask: bool) -> bool {
 }
 
 /// Writes the artwork as `format` where the user picks.
-pub fn export(session: &CanvasSession, format: Format, dir: Option<&str>) {
-    // each layer a PNG file, in a folder the user picks
-    if matches!(format, Format::LayerPngs | Format::ChosenLayerPngs) {
-        let Some(dir) = FileDialog::new().set_title("Share layers as PNG files").pick_folder() else { return };
+pub fn export(session: &CanvasSession, format: Format, dir: Option<&str>, pdf_quality: u8) {
+    // each layer (or a model's texture set) a PNG file, in a folder the user picks
+    if matches!(format, Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures) {
+        let title =
+            if format == Format::ModelTextures { "Share textures as PNG files" } else { "Share layers as PNG files" };
+        let Some(dir) = FileDialog::new().set_title(title).pick_folder() else { return };
         let dir = dir.to_string_lossy().into_owned();
-        let written = if format == Format::LayerPngs {
-            session.export_layer_pngs(dir).map(drop)
-        } else {
-            session.export_chosen_pngs(dir).map(drop)
+        let written = match format {
+            Format::LayerPngs => session.export_layer_pngs(dir).map(drop),
+            Format::ModelTextures => session.export_model_textures(dir).map(drop),
+            _ => session.export_chosen_pngs(dir).map(drop),
         };
         if let Err(e) = written {
             tell("Can't share", &e.to_string());
@@ -362,17 +495,21 @@ pub fn export(session: &CanvasSession, format: Format, dir: Option<&str>) {
             session.export_package(path, seed(), dir.map(crate::timelapse::for_package))
         }
         Format::Psd => session.export_psd(path),
-        Format::Pdf => session.export_pdf(path, false, 100),
-        Format::LayersPdf => session.export_pdf(path, true, 100),
+        Format::Pdf => session.export_pdf(path, false, pdf_quality),
+        Format::LayersPdf => session.export_pdf(path, true, pdf_quality),
         Format::Png => session.export_png(path),
         Format::Tiff => session.export_tiff(path),
-        Format::Jpeg => {
-            if let Err(e) = export_jpeg(session, &path) {
+        Format::Jpeg | Format::ModelJpeg => {
+            if let Err(e) = export_jpeg(session, &path, format == Format::ModelJpeg) {
                 tell("Can't export", &e);
             }
             return;
         }
-        Format::LayerPngs | Format::ChosenLayerPngs => return,
+        Format::ModelObj => session.export_model_obj(path),
+        Format::ModelUsdz => session.export_model_usdz(path),
+        Format::ModelRender => session.export_model_render(path, false),
+        Format::ModelTiff => session.export_model_tiff(path),
+        Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures => return,
     };
     if let Err(e) = written {
         tell("Can't export", &e.to_string());
@@ -382,7 +519,7 @@ pub fn export(session: &CanvasSession, format: Format, dir: Option<&str>) {
 /// Artworks from the gallery written as `format`: one where the user picks, several into a folder
 /// the user picks, each named by its name (a number after it when two share one). Each is opened
 /// on a GPU device of its own, never shown.
-pub fn share_artworks(list: &[procraft_core::GalleryArtwork], format: Format) {
+pub fn share_artworks(list: &[procraft_core::GalleryArtwork], format: Format, pdf_quality: u8) {
     let extension = format.extension();
     let file_name = |name: &str| {
         let kept: String = name.chars().filter(|c| c.is_alphanumeric() || " _-".contains(*c)).collect();
@@ -426,9 +563,9 @@ pub fn share_artworks(list: &[procraft_core::GalleryArtwork], format: Format) {
                     s.export_package(path, seed(), Some(crate::timelapse::for_package(&a.dir)))
                 }
                 Format::Psd => s.export_psd(path),
-                Format::Pdf | Format::LayersPdf => s.export_pdf(path, false, 100),
+                Format::Pdf | Format::LayersPdf => s.export_pdf(path, false, pdf_quality),
                 Format::Tiff => s.export_tiff(path),
-                Format::Jpeg => return export_jpeg(&s, &path),
+                Format::Jpeg => return export_jpeg(&s, &path, false),
                 _ => s.export_png(path),
             }
             .map_err(|e| e.to_string())
@@ -440,11 +577,12 @@ pub fn share_artworks(list: &[procraft_core::GalleryArtwork], format: Format) {
     }
 }
 
-/// The artwork as a JPEG at `path`: its picture written as a PNG beside it, then flattened onto
-/// white.
-fn export_jpeg(session: &CanvasSession, path: &str) -> Result<(), String> {
+/// The artwork (or with `model`, the model as shown) as a JPEG at `path`: its picture written as
+/// a PNG beside it, then flattened onto white.
+fn export_jpeg(session: &CanvasSession, path: &str, model: bool) -> Result<(), String> {
     let png = format!("{path}.png");
-    session.export_png(png.clone()).map_err(|e| e.to_string())?;
+    let written = if model { session.export_model_render(png.clone(), false) } else { session.export_png(png.clone()) };
+    written.map_err(|e| e.to_string())?;
     let picture = image::open(&png).map_err(|e| e.to_string());
     let _ = std::fs::remove_file(&png);
     let rgba = picture?.to_rgba8();

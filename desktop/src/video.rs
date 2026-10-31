@@ -26,7 +26,7 @@ pub fn fit(width: u32, height: u32, max_side: u32, mut fits: impl FnMut(u32, u32
     None
 }
 
-/// Media Foundation's calls: the desktop's only unsafe code, as the system's COM interfaces are.
+/// Media Foundation's calls, unsafe as the system's COM interfaces are.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod system {

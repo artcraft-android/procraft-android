@@ -615,7 +615,7 @@ private fun SwipeButton(icon: ImageVector, label: String, fill: Color, ink: Colo
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        // 19 across, as the reference's are, the label where it was
+        // 19 across, as measured, the label where it was
         Icon(icon, contentDescription = null, tint = ink, modifier = Modifier.size(19.dp))
         Spacer(Modifier.height(2.dp))
         Text(label, color = ink, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)

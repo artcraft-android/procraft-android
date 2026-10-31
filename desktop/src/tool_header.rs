@@ -4,27 +4,37 @@
 use egui::{Align2, Color32, Id, Order, Rect, Sense, Stroke, pos2, vec2};
 
 use crate::icons;
-use crate::look::{Look, Weight, argb, text};
+use crate::look::{Look, Themed, Weight, argb, text};
 
 pub const HEIGHT: f32 = 85.0;
-const LABEL: u32 = 0xFFC5C5C5;
-const BUTTON: u32 = 0xFFA5A5A5;
-const CHOSEN: u32 = 0xFFC0C0C0;
-const CHOSEN_FILL: u32 = 0xFF464646;
+const LABEL: Themed = Themed(0xFFC5C5C5, 0xFF3A3A3A);
+const BUTTON: Themed = Themed(0xFFA5A5A5, 0xFF565656);
+const CHOSEN: Themed = Themed(0xFFC0C0C0, 0xFF3A3A3A);
+const CHOSEN_FILL: Themed = Themed(0xFF464646, 0xFFA5A5A5);
 const DONE: u32 = 0xFF0190FF;
 
 /// The header's band, its capsule and the capsule's edge.
 #[derive(Clone, Copy)]
 pub struct Colours {
-    pub band: u32,
-    pub capsule: u32,
-    pub edge: u32,
+    pub band: Themed,
+    pub capsule: Themed,
+    pub edge: Themed,
 }
 
+/// The light interface's header, every tool's.
+const LIGHT: (u32, u32, u32) = (0xFFDFE2E3, 0xFFF5F8F9, 0xFFDCDEDF);
 /// Over the surround of a tool that edits the canvas.
-pub const DARK: Colours = Colours { band: 0xFF1D1D1D, capsule: 0xFF1A1A1A, edge: 0xFF373737 };
+pub const DARK: Colours = Colours {
+    band: Themed(0xFF1D1D1D, LIGHT.0),
+    capsule: Themed(0xFF1A1A1A, LIGHT.1),
+    edge: Themed(0xFF373737, LIGHT.2),
+};
 /// Over a picture shown edge to edge.
-pub const OVER_PICTURE: Colours = Colours { band: 0xFF333333, capsule: 0xFF232323, edge: 0xFF424242 };
+pub const OVER_PICTURE: Colours = Colours {
+    band: Themed(0xFF333333, LIGHT.0),
+    capsule: Themed(0xFF232323, LIGHT.1),
+    edge: Themed(0xFF424242, LIGHT.2),
+};
 
 /// What a tap on the header was on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

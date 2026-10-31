@@ -2329,6 +2329,7 @@ dependencies = [
 name = "procraft-desktop"
 version = "0.0.1"
 dependencies = [
+ "arboard",
  "chrono",
  "egui",
  "egui-wgpu",

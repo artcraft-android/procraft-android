@@ -722,7 +722,7 @@ fn make_shapes() -> Vec<GrayImage> {
 const DAB_GAIN: f32 = 1.4;
 
 /// How much smaller the stock stand-ins draw our grainy disc, chunk and pastel shapes: as measured,
-/// stock brushes on them paint as much of the reference's drawing pad as ours then do (the disc's
+/// stock brushes on them paint as much of a measured drawing pad as ours then do (the disc's
 /// and the chunk's median areas within 3%; the pastel by the stock shapes' spread alone).
 const SHRINK_DISC: f32 = 1.7;
 const SHRINK_CHUNK: f32 = 1.47;
@@ -1115,7 +1115,7 @@ const MOTTLED_SPREAD: [(f32, f32); 8] =
     [(0.0, 0.0), (0.25, 0.05), (0.4, 0.2), (0.55, 0.4), (0.65, 0.6), (0.75, 0.8), (0.88, 0.95), (1.0, 1.0)];
 
 /// The paper sheet's values: narrow, nearly all from 0.11 to 0.5, half under 0.29 (a stock paper
-/// grain's own values, half as light again, as the stand-ins measured against the reference's pad
+/// grain's own values, half as light again, as the stand-ins measured against a drawing pad
 /// all come out; narrow, a thin line drawn on it stays smooth).
 const SHEET_SPREAD: [(f32, f32); 11] = [
     (0.0, 0.0),

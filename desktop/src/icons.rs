@@ -779,6 +779,17 @@ pub const EYE_STRUCK: Icon = Icon { name: "eye-struck", width: 24.0, height: 24.
     Part { d: "M5 20.5L19 3.5", stroke: 1.8, fill: false, even_odd: false },
 ] };
 
+pub const KEYPAD: Icon = Icon { name: "keypad", width: 30.0, height: 30.0, parts: &[
+    Part { d: "M8.3 8h2.6a0.8 0.8 0 0 1 0.8 0.8v2.6a0.8 0.8 0 0 1-0.8 0.8h-2.6a0.8 0.8 0 0 1-0.8-0.8v-2.6a0.8 0.8 0 0 1 0.8-0.8z", stroke: 0.0, fill: true, even_odd: false },
+    Part { d: "M13.7 8h2.6a0.8 0.8 0 0 1 0.8 0.8v2.6a0.8 0.8 0 0 1-0.8 0.8h-2.6a0.8 0.8 0 0 1-0.8-0.8v-2.6a0.8 0.8 0 0 1 0.8-0.8z", stroke: 0.0, fill: true, even_odd: false },
+    Part { d: "M19.1 8h2.6a0.8 0.8 0 0 1 0.8 0.8v2.6a0.8 0.8 0 0 1-0.8 0.8h-2.6a0.8 0.8 0 0 1-0.8-0.8v-2.6a0.8 0.8 0 0 1 0.8-0.8z", stroke: 0.0, fill: true, even_odd: false },
+    Part { d: "M8.3 13.4h2.6a0.8 0.8 0 0 1 0.8 0.8v2.6a0.8 0.8 0 0 1-0.8 0.8h-2.6a0.8 0.8 0 0 1-0.8-0.8v-2.6a0.8 0.8 0 0 1 0.8-0.8z", stroke: 0.0, fill: true, even_odd: false },
+    Part { d: "M13.7 13.4h2.6a0.8 0.8 0 0 1 0.8 0.8v2.6a0.8 0.8 0 0 1-0.8 0.8h-2.6a0.8 0.8 0 0 1-0.8-0.8v-2.6a0.8 0.8 0 0 1 0.8-0.8z", stroke: 0.0, fill: true, even_odd: false },
+    Part { d: "M19.1 13.4h2.6a0.8 0.8 0 0 1 0.8 0.8v2.6a0.8 0.8 0 0 1-0.8 0.8h-2.6a0.8 0.8 0 0 1-0.8-0.8v-2.6a0.8 0.8 0 0 1 0.8-0.8z", stroke: 0.0, fill: true, even_odd: false },
+    Part { d: "M8.3 18.8h8a0.8 0.8 0 0 1 0.8 0.8v2.6a0.8 0.8 0 0 1-0.8 0.8h-8a0.8 0.8 0 0 1-0.8-0.8v-2.6a0.8 0.8 0 0 1 0.8-0.8z", stroke: 0.0, fill: true, even_odd: false },
+    Part { d: "M19.1 18.8h2.6a0.8 0.8 0 0 1 0.8 0.8v2.6a0.8 0.8 0 0 1-0.8 0.8h-2.6a0.8 0.8 0 0 1-0.8-0.8v-2.6a0.8 0.8 0 0 1 0.8-0.8z", stroke: 0.0, fill: true, even_odd: false },
+] };
+
 pub const BACKSPACE: Icon = Icon { name: "backspace", width: 24.0, height: 24.0, parts: &[
     Part { d: "M9 6h11v12H9l-6-6z", stroke: 1.7, fill: false, even_odd: false },
     Part { d: "M12 9.5l5 5", stroke: 1.7, fill: false, even_odd: false },

@@ -7,7 +7,7 @@ use procraft_core::{CanvasInfo, CanvasSession, ToolKind};
 use resvg::tiny_skia;
 
 use crate::icons;
-use crate::look::{Look, Weight, argb, fill, highlight, mix, pc, round_rect, text, text_runs};
+use crate::look::{Look, Themed, Weight, argb, fill, highlight, mix, pc, round_rect, text, text_runs};
 
 /// The top bar's buttons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -183,8 +183,8 @@ const OPACITY_TRACK_TOP: f32 = 248.0;
 const SLIDER_PANEL_SIDE: f32 = 190.0;
 const SLIDER_PANEL_GAP: f32 = 8.0;
 const SLIDER_PANEL_RISE: f32 = 10.0;
-const SLIDER_PANEL_FILL: u32 = 0xC93E3E3E;
-const SLIDER_PANEL_INK: u32 = 0xFFF0F0F0;
+const SLIDER_PANEL_FILL: Themed = Themed(0xC93E3E3E, 0xFFE7E7E7);
+const SLIDER_PANEL_INK: Themed = Themed(0xFFF0F0F0, 0xFF393939);
 
 impl SideBar {
     /// The side bar against the window's left edge (the right one, `right`-handed: everything
@@ -251,7 +251,7 @@ impl SideBar {
             ui.painter().rect_stroke(
                 square.shrink(w / 2.0),
                 pc::MODIFY_CORNER - w / 2.0,
-                Stroke::new(w, argb(if modify_lit { pc::ACCENT } else { pc::SIDE_GLYPH })),
+                Stroke::new(w, if modify_lit { argb(pc::ACCENT) } else { argb(pc::SIDE_GLYPH) }),
                 egui::StrokeKind::Middle,
             );
             for (icon, enabled, y, undo) in
@@ -267,7 +267,7 @@ impl SideBar {
                     }
                 }
                 // a 50 frame shown 36 across
-                let tint = argb(if enabled { pc::SIDE_GLYPH } else { pc::SIDE_GLYPH_DISABLED });
+                let tint = if enabled { argb(pc::SIDE_GLYPH) } else { argb(pc::SIDE_GLYPH_DISABLED) };
                 look.icon(ui, icon, rect.center(), 36.0, tint);
             }
         });

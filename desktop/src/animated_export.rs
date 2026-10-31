@@ -1,7 +1,9 @@
 //! Sharing the layers as an animation, as the Android app's (ui/AnimatedExportUi.kt): the frames
 //! playing, the settings (the size, and per format dithering and a transparent background),
 //! Cancel, and the round Done that saves the file. The file is made as the settings change, to
-//! show its size; it and the preview's frames are made off the window's thread.
+//! show its size; it and the preview's frames are made off the window's thread. On a model, its
+//! turntable in place of the layers: its size, rotate or swing, its duration, zoom and ease, and
+//! the environment behind it; its file made once Done is pressed.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,20 +11,26 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Id, Order, Rect, Sense, Stroke, TextureHandle, pos2, vec2};
-use procraft_core::CanvasSession;
+use procraft_core::{CanvasSession, Turntable};
 
 use crate::icons;
-use crate::look::{Look, Weight, argb, pc, text};
+use crate::look::{Look, Themed, Weight, argb, pc, text};
 
-const SCREEN_FILL: u32 = 0xFF1F1F1F;
-const TITLE_INK: u32 = 0xFFAAAAAA;
-const ROW_INK: u32 = 0xFFC1C1C1;
-const SIZE_INK: u32 = 0xFF8E8E8E;
-const PANEL_FILL: u32 = 0xFF262626;
-const PANEL_EDGE: u32 = 0xFF363636;
-const SEGMENT_TRACK: u32 = 0xFF3C3C3C;
-const CAPSULE_FILL: u32 = 0xFF1A1A1A;
-const CAPSULE_EDGE: u32 = 0xFF373737;
+const SCREEN_FILL: Themed = Themed(0xFF1F1F1F, 0xFFF2F2F2);
+const TITLE_INK: Themed = Themed(0xFFAAAAAA, 0xFF3D3D3D);
+const ROW_INK: Themed = Themed(0xFFC1C1C1, 0xFF595959);
+const SIZE_INK: Themed = Themed(0xFF8E8E8E, 0xFF3F3F3F);
+const PANEL_FILL: Themed = Themed(0xFF262626, 0xFFEBEBEB);
+const PANEL_EDGE: Themed = Themed(0xFF363636, 0xFFDADADA);
+const SEGMENT_TRACK: Themed = Themed(0xFF3C3C3C, 0xFFD5D5D5);
+const CAPSULE_FILL: Themed = Themed(0xFF1A1A1A, 0xFFFBFBFB);
+const CAPSULE_EDGE: Themed = Themed(0xFF373737, 0xFFE0E0E0);
+const CHOICE_FILL: Themed = Themed(0xFF2E2E2E, 0xFFE3E3E3);
+const SLIDER_TRACK: Themed = Themed(0xFF3E3E3E, 0xFFDDDDDD);
+/// A model's turntable sizes (video's 16:9 across, or a square) and its frames a second.
+const TURNTABLE_SIZES: [(u32, u32, &str); 4] =
+    [(1280, 720, "720p"), (1920, 1080, "1080p"), (3840, 2160, "4K"), (1080, 1080, "Square")];
+const TURNTABLE_FPS: f32 = 30.0;
 const CANCEL_INK: u32 = 0xFFA5A5A5;
 const DONE_BLUE: u32 = 0xFF0190FF;
 const PANEL_WIDTH: f32 = 400.0;
@@ -43,7 +51,7 @@ pub enum Animated {
 }
 
 impl Animated {
-    fn title(self) -> &'static str {
+    pub fn title(self) -> &'static str {
         match self {
             Animated::Gif => "Animated GIF",
             Animated::Png => "Animated PNG",
@@ -61,13 +69,16 @@ impl Animated {
     }
 }
 
-/// The settings a file is made with: Web Ready, dithering, a transparent background.
-type Settings = (bool, bool, bool);
+/// The settings a file is made with: Web Ready, dithering, a transparent background; on a model,
+/// how its turntable goes and its size.
+type Settings = (bool, bool, bool, Option<(Turntable, usize)>);
 /// A file being made: its settings, and where it went and how big it is, once made.
 type Making = (Settings, Receiver<Option<(PathBuf, u64)>>);
-/// The preview's frames being read: for a transparent background or not and what side, and the
-/// frames, once read.
-type Reading = ((bool, u32), Receiver<Vec<procraft_core::ThumbnailImage>>);
+/// What the preview's frames are read for: a transparent background or not, what side, and on a
+/// model how its turntable goes.
+type Framing = (bool, u32, Option<Turntable>);
+/// The preview's frames being read, and the frames, once read.
+type Reading = (Framing, Receiver<Vec<procraft_core::ThumbnailImage>>);
 
 pub struct AnimatedExport {
     format: Animated,
@@ -81,7 +92,7 @@ pub struct AnimatedExport {
     failed: Option<Settings>,
     /// The preview's frames, what they were read for (transparent, side), and the read running.
     frames: Vec<TextureHandle>,
-    frames_for: Option<(bool, u32)>,
+    frames_for: Option<Framing>,
     reading: Option<Reading>,
     shown: usize,
     stepped: Instant,
@@ -89,6 +100,10 @@ pub struct AnimatedExport {
     saving: bool,
     /// Upright, the settings panel is open.
     settings_open: bool,
+    /// On a model: its turntable and size (which of [`TURNTABLE_SIZES`]), in place of the
+    /// layers; a slider held.
+    turntable: Option<(Turntable, usize)>,
+    held: Option<(Id, f32)>,
 }
 
 /// What the screen asked.
@@ -116,15 +131,24 @@ impl AnimatedExport {
             stepped: Instant::now(),
             saving: false,
             settings_open: false,
+            turntable: None,
+            held: None,
         }
     }
 
+    /// A model's turntable as `format`: once round in two seconds, half way out, eased, the
+    /// environment behind it, 720p.
+    pub fn model(format: Animated) -> AnimatedExport {
+        let turntable = Turntable { swing: false, seconds: 2.0, zoom: 0.5, ease: 1.0, environment: true };
+        AnimatedExport { turntable: Some((turntable, 0)), ..AnimatedExport::new(format) }
+    }
+
     fn can_transparent(&self) -> bool {
-        matches!(self.format, Animated::Gif | Animated::Png)
+        self.turntable.is_none() && matches!(self.format, Animated::Gif | Animated::Png)
     }
 
     fn settings(&self) -> Settings {
-        (self.web_ready, self.dither, self.transparent)
+        (self.web_ready, self.dither, self.transparent, self.turntable)
     }
 
     /// The file made for the settings now, made again (off the window's thread) when they
@@ -145,10 +169,14 @@ impl AnimatedExport {
         if self.made.as_ref().is_some_and(|(s, _, _)| *s == wanted) || self.failed == Some(wanted) {
             return;
         }
+        // a model's turntable is made once Done is pressed
+        if wanted.3.is_some() && !self.saving {
+            return;
+        }
         let (tx, rx) = channel();
         let session = Arc::clone(session);
         let format = self.format;
-        let (web_ready, dither, transparent) = wanted;
+        let (web_ready, dither, transparent, turntable) = wanted;
         std::thread::spawn(move || {
             let dir = std::env::temp_dir().join("procraft-exports");
             let base: String = session.name().chars().filter(|c| c.is_alphanumeric() || " _-".contains(*c)).collect();
@@ -158,7 +186,13 @@ impl AnimatedExport {
             // Animation Assist's own frame rate, when it is on
             let fps = session.animation_settings().map_or(ANIMATION_FPS, |a| a.fps) as f32;
             let file = path.to_string_lossy().into_owned();
-            let made = std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|()| match format {
+            let made = std::fs::create_dir_all(&dir).map_err(|e| e.to_string());
+            let made = made.and_then(|()| match turntable {
+                Some((t, size)) => turntable_file(&session, format, &path, t, size),
+                None => Ok(()),
+            });
+            let made = made.and_then(|()| match format {
+                _ if turntable.is_some() => Ok(()),
                 Animated::Gif => session.export_gif(file, side, fps, dither, transparent).map_err(|e| e.to_string()),
                 Animated::Png => session.export_apng(file, side, fps, transparent).map_err(|e| e.to_string()),
                 Animated::Mp4 | Animated::Hevc => {
@@ -206,7 +240,8 @@ impl AnimatedExport {
     /// The preview's frames, fitted to `side`, read again (off the window's thread) when the
     /// background or the box changed; then played over and over.
     fn preview(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, side: u32) {
-        let wanted = (self.transparent && self.can_transparent(), side);
+        let turn = self.turntable.map(|(t, _)| t);
+        let wanted = (self.transparent && self.can_transparent(), side, turn);
         if let Some((key, rx)) = &self.reading {
             match rx.try_recv() {
                 Ok(frames) => {
@@ -230,9 +265,19 @@ impl AnimatedExport {
             let (tx, rx) = channel();
             let session = Arc::clone(session);
             std::thread::spawn(move || {
-                let frames = (0..session.animation_frame_count())
-                    .filter_map(|i| session.animation_frame(i, wanted.0, wanted.1))
-                    .collect();
+                let frames = match wanted.2 {
+                    // the turntable's frames, half the box across
+                    Some(t) => {
+                        let count = ((t.seconds * PREVIEW_FPS as f32).round() as u32).max(1);
+                        let half = (wanted.1 / 2).max(1);
+                        (0..count)
+                            .filter_map(|i| session.model_turntable_picture(i, count, t, half, half, false))
+                            .collect()
+                    }
+                    None => (0..session.animation_frame_count())
+                        .filter_map(|i| session.animation_frame(i, wanted.0, wanted.1))
+                        .collect(),
+                };
                 let _ = tx.send(frames);
             });
             self.reading = Some((wanted, rx));
@@ -266,7 +311,7 @@ impl AnimatedExport {
         self.preview(ctx, session, side);
         let mut cancel = false;
         let mut done = false;
-        let size = self.made.as_ref().map(|(_, _, bytes)| file_size(*bytes));
+        let size = self.made.as_ref().filter(|_| self.turntable.is_none()).map(|(_, _, bytes)| file_size(*bytes));
         egui::Area::new(Id::unique("animated export")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
             // the whole window: nothing under it takes a press
             let beside = ui.allocate_rect(screen, Sense::click_and_drag());
@@ -348,6 +393,10 @@ impl AnimatedExport {
                 let at = pos2(panel.left() + 24.0, panel.top() + 19.0 + 18.0);
                 text(ui.painter(), at, Align2::LEFT_CENTER, self.format.title(), 24.0, Weight::Bold, argb(TITLE_INK));
                 let mut y = panel.top() + 19.0 + 36.0 + 11.5;
+                if let Some((t, size)) = self.turntable {
+                    self.turntable_settings(ui, panel, y, t, size);
+                    return;
+                }
                 // Max Resolution or Web Ready, in a grey track 384 wide
                 let track = Rect::from_min_size(pos2(panel.left() + 7.5, y), vec2(384.0, 34.0));
                 ui.painter().rect_filled(track, 17, argb(SEGMENT_TRACK));
@@ -377,7 +426,7 @@ impl AnimatedExport {
                     let row = Rect::from_min_size(pos2(panel.left(), y), vec2(PANEL_WIDTH, 52.0));
                     let at = pos2(row.left() + 16.0, row.center().y);
                     text(ui.painter(), at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(ROW_INK));
-                    crate::transform::switch(ui, pos2(row.left() + 16.0 + 307.0, row.center().y - 14.0), on);
+                    crate::transform::switch(ui, pos2(row.left() + 16.0 + 307.0, row.center().y - 14.0), on, label);
                     if ui.interact(row, ui.scope_id().with(label), Sense::click()).clicked() {
                         if label == "Dithering" {
                             self.dither = !self.dither;
@@ -410,6 +459,155 @@ impl AnimatedExport {
             }
         }
         None
+    }
+}
+
+impl AnimatedExport {
+    /// A model's turntable settings in `panel` from `y` down: its size, rotate or swing, its
+    /// duration, zoom and ease, and the environment behind it.
+    fn turntable_settings(&mut self, ui: &egui::Ui, panel: Rect, mut y: f32, t: Turntable, size: usize) {
+        let mut t = t;
+        let mut size = size;
+        // the sizes, in a grey track 384 wide
+        let track = Rect::from_min_size(pos2(panel.left() + 7.5, y), vec2(384.0, 34.0));
+        ui.painter().rect_filled(track, 17, argb(SEGMENT_TRACK));
+        let item = (track.width() - 4.0 - 12.0 * 3.0) / 4.0;
+        for (i, (_, _, label)) in TURNTABLE_SIZES.iter().enumerate() {
+            let cell = Rect::from_min_size(track.min + vec2(2.0 + (item + 12.0) * i as f32, 2.0), vec2(item, 30.0));
+            let chosen = size == i;
+            if chosen {
+                ui.painter().rect_filled(cell, 15, argb(pc::ACCENT));
+            }
+            let ink = if chosen { Color32::WHITE } else { argb(ROW_INK) };
+            text(ui.painter(), cell.center(), Align2::CENTER_CENTER, label, 15.0, Weight::Regular, ink);
+            if ui.interact(cell, ui.scope_id().with(("turntable size", i)), Sense::click()).clicked() {
+                size = i;
+            }
+        }
+        y = track.bottom() + 14.5;
+        // rotate or swing, the chosen one blue with a tick
+        let group = Rect::from_min_size(pos2(panel.left() + 16.0, y), vec2(PANEL_WIDTH - 32.0, 80.0));
+        ui.painter().rect_filled(group, 14, argb(CHOICE_FILL));
+        for (i, (label, swing)) in [("Animated rotate", false), ("Animated swing", true)].into_iter().enumerate() {
+            let row = Rect::from_min_size(pos2(group.left(), group.top() + 40.0 * i as f32), vec2(group.width(), 40.0));
+            let chosen = t.swing == swing;
+            if chosen {
+                let corners = if i == 0 {
+                    egui::CornerRadius { nw: 14, ne: 14, sw: 0, se: 0 }
+                } else {
+                    egui::CornerRadius { nw: 0, ne: 0, sw: 14, se: 14 }
+                };
+                ui.painter().rect_filled(row, corners, argb(pc::ACCENT));
+                let disc = pos2(row.right() - 12.0 - 10.0, row.center().y);
+                ui.painter().circle_filled(disc, 10.0, Color32::WHITE);
+                // the tick is drawn in a 24 frame, shown 14 across
+                ui.painter().add(egui::Shape::line(
+                    vec![disc + vec2(-4.0, 0.0), disc + vec2(-1.0, 3.0), disc + vec2(4.5, -3.0)],
+                    Stroke::new(2.0, argb(pc::ACCENT)),
+                ));
+            }
+            let ink = if chosen { Color32::WHITE } else { argb(ROW_INK) };
+            text(
+                ui.painter(),
+                pos2(row.left() + 16.0, row.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                17.0,
+                Weight::Regular,
+                ink,
+            );
+            if ui.interact(row, ui.scope_id().with(("turntable way", i)), Sense::click()).clicked() {
+                t.swing = swing;
+            }
+        }
+        y = group.bottom() + 26.0;
+        let seconds = if t.seconds < 1.0 { format!("{:.1}", t.seconds) } else { format!("{}", t.seconds.round()) };
+        let rows: [(&str, String, f32); 3] = [
+            ("Animation duration", seconds, (t.seconds - 0.5) / 4.5),
+            ("Zoom distance", format!("{}%", (t.zoom * 100.0).round()), t.zoom),
+            ("Ease", format!("{}%", (t.ease * 100.0).round()), t.ease),
+        ];
+        for (k, (label, value, fraction)) in rows.into_iter().enumerate() {
+            let row = Rect::from_min_size(pos2(panel.left() + 8.0, y), vec2(PANEL_WIDTH - 16.0, 66.0));
+            text(
+                ui.painter(),
+                row.min + vec2(16.0, 6.0),
+                Align2::LEFT_TOP,
+                label,
+                17.0,
+                Weight::Regular,
+                argb(ROW_INK),
+            );
+            text(
+                ui.painter(),
+                pos2(row.right() - 16.0, row.top() + 6.0),
+                Align2::RIGHT_TOP,
+                &value,
+                17.0,
+                Weight::Regular,
+                argb(ROW_INK),
+            );
+            let slider =
+                Rect::from_min_max(pos2(row.left(), row.bottom() - 8.0 - 28.0), pos2(row.right(), row.bottom() - 8.0));
+            let (x0, x1, cy) = (slider.left() + 16.0, slider.right() - 16.0, slider.center().y);
+            let x = x0 + (x1 - x0) * fraction.clamp(0.0, 1.0);
+            ui.painter().rect_filled(
+                Rect::from_min_max(pos2(x0, cy - 1.5), pos2(x1, cy + 1.5)),
+                1.5,
+                argb(SLIDER_TRACK),
+            );
+            ui.painter().rect_filled(Rect::from_min_max(pos2(x0, cy - 1.5), pos2(x, cy + 1.5)), 1.5, argb(pc::ACCENT));
+            ui.painter().rect_filled(Rect::from_center_size(pos2(x, cy), vec2(26.0, 16.0)), 8.0, Color32::WHITE);
+            let response = ui.interact(slider, ui.scope_id().with(("turntable slider", k)), Sense::click_and_drag());
+            let by = crate::look::dragged_by(&mut self.held, &response);
+            if by != 0.0 {
+                let v = (fraction + by / (x1 - x0)).clamp(0.0, 1.0);
+                match k {
+                    0 => t.seconds = 0.5 + v * 4.5,
+                    1 => t.zoom = v,
+                    _ => t.ease = v,
+                }
+            }
+            y += 66.0;
+        }
+        y += 10.0;
+        let row = Rect::from_min_size(pos2(panel.left(), y), vec2(PANEL_WIDTH, 52.0));
+        let at = pos2(row.left() + 16.0, row.center().y);
+        text(ui.painter(), at, Align2::LEFT_CENTER, "Show environment", 17.0, Weight::Regular, argb(ROW_INK));
+        crate::transform::switch(
+            ui,
+            pos2(row.left() + 16.0 + 307.0, row.center().y - 14.0),
+            t.environment,
+            "turntable environment",
+        );
+        if ui.interact(row, ui.scope_id().with("turntable environment"), Sense::click()).clicked() {
+            t.environment = !t.environment;
+        }
+        self.turntable = Some((t, size));
+    }
+}
+
+/// A model's turntable `t` at size `size` (of [`TURNTABLE_SIZES`]) written as `format` to `path`.
+fn turntable_file(
+    session: &CanvasSession,
+    format: Animated,
+    path: &std::path::Path,
+    t: Turntable,
+    size: usize,
+) -> Result<(), String> {
+    let (w, h, _) = TURNTABLE_SIZES.get(size).copied().unwrap_or((1280, 720, "720p"));
+    let file = path.to_string_lossy().into_owned();
+    match format {
+        Animated::Gif => session.export_model_gif(file, t, w, h, TURNTABLE_FPS).map_err(|e| e.to_string()),
+        Animated::Png => session.export_model_apng(file, t, w, h, TURNTABLE_FPS).map_err(|e| e.to_string()),
+        Animated::Mp4 | Animated::Hevc => {
+            let count = ((t.seconds * TURNTABLE_FPS).round() as u32).max(1);
+            let hevc = format == Animated::Hevc;
+            crate::video::write_mp4(path, w, h, w.max(h), TURNTABLE_FPS as u32, hevc, 4, count as usize, |i, vw, vh| {
+                session.model_turntable_picture(i as u32, count, t, vw, vh, false).map(|p| p.rgba)
+            })
+            .map(|_| ())
+        }
     }
 }
 

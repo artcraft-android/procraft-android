@@ -1305,38 +1305,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * The images a model's file brings (a USDZ's), decoded and scaled to its texture sets' side
-     * into their Base Layers: colour as it is, roughness and metalness from the component they
-     * name, as grey.
+     * into their Base Layers by the core: colour as it is, roughness and metalness from the
+     * component they name, as grey. An image that can't be read is left out.
      */
     private fun loadModelTextures(s: CanvasSession) {
-        val side = s.modelInfo()?.textureSize?.toInt() ?: return
-        val options = BitmapFactory.Options().apply {
-            inPreferredConfig = Bitmap.Config.ARGB_8888
-            inPreferredColorSpace = android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB)
-        }
-        // an image that can't be read is left out, the rest still come in
-        for (f in s.modelTextureFiles()) runCatching {
-            val decoded = BitmapFactory.decodeByteArray(f.bytes, 0, f.bytes.size, options) ?: return@runCatching
-            var scaled = Bitmap.createScaledBitmap(decoded, side, side, true)
-            if (scaled !== decoded) decoded.recycle()
-            // a 16-bit image decodes to half floats whatever is asked: made 8-bit
-            if (scaled.config != Bitmap.Config.ARGB_8888) scaled = scaled.copy(Bitmap.Config.ARGB_8888, true).also { scaled.recycle() }
-            if (f.component >= 0) {
-                val px = IntArray(side * side)
-                scaled.getPixels(px, 0, side, 0, 0, side, side)
-                val shift = when (f.component) { 0 -> 16; 1 -> 8; 2 -> 0; else -> 24 }
-                for (i in px.indices) {
-                    val v = (px[i] ushr shift) and 0xFF
-                    px[i] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
-                }
-                scaled.setPixels(px, 0, side, 0, 0, side, side)
-            }
-            // RGBA, premultiplied
-            val buffer = ByteBuffer.allocate(side * side * 4)
-            scaled.copyPixelsToBuffer(buffer)
-            scaled.recycle()
-            s.setModelTexture(f.textureSet, f.channel, buffer.array())
-        }.onFailure { android.util.Log.e("ProCraft", "a model's texture", it) }
+        s.loadModelTextures()
     }
 
     /** A file from elsewhere into the gallery: an artwork file, or a picture as a new artwork. */

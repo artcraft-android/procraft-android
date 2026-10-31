@@ -169,7 +169,7 @@ impl Numeric {
                         self.typed.clear();
                     }
                 }
-                ui.painter().rect_filled(link, 9, argb(if self.linked { LINK_ON } else { FIELD_IDLE }));
+                ui.painter().rect_filled(link, 9, if self.linked { argb(LINK_ON) } else { argb(FIELD_IDLE) });
                 let tint = if self.linked { argb(pc::ACCENT) } else { ink };
                 look.icon(ui, &icons::LINK, link.center(), 22.0, tint);
                 if ui.interact(link, ui.scope_id().with("link"), Sense::click()).clicked() {
@@ -211,7 +211,7 @@ impl Numeric {
 
 /// A number's field: blue while it is the one typed into. Returns whether it was tapped.
 fn number_field(ui: &Ui, rect: Rect, shown: &str, chosen: bool, index: usize) -> bool {
-    ui.painter().rect_filled(rect, 10, argb(if chosen { pc::ACCENT } else { FIELD_IDLE }));
+    ui.painter().rect_filled(rect, 10, if chosen { argb(pc::ACCENT) } else { argb(FIELD_IDLE) });
     text(ui.painter(), rect.center(), Align2::CENTER_CENTER, shown, 15.0, Weight::Regular, Color32::WHITE);
     ui.interact(rect, ui.scope_id().with(("number field", index)), Sense::click()).clicked()
 }

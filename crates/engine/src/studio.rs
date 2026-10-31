@@ -372,7 +372,7 @@ pub struct SliderTilt {
 }
 
 /// What a studio slider's keypad offers besides typing its value: its own pressure curve and its
-/// own tilt, those it has (as the reference's keypads show them).
+/// own tilt, those it has (as the keypads show them).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SliderExtras {
     pub curve: Option<SliderCurve>,

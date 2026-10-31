@@ -377,7 +377,7 @@ internal fun ToolbarButton(
             letterSpacing = 0.em,
             maxLines = 1,
             softWrap = false,
-            // a long name may run past the button, as the reference's do
+            // a long name may run past the button
             modifier = Modifier.align(Alignment.TopCenter).offset(y = 50.dp - labelSize.value.dp * CAP_MIDDLE).wrapContentWidth(unbounded = true),
         )
     }

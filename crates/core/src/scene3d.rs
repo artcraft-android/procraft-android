@@ -699,6 +699,41 @@ impl CanvasSession {
         out
     }
 
+    /// The images the model brings ([`CanvasSession::model_texture_files`]) decoded (PNG or
+    /// JPEG) and scaled to the texture sets' side into them: colour as it is, roughness,
+    /// metalness and occlusion from the component they name, as grey. An image that can't be read
+    /// is left out, the rest still come in. How many came in.
+    pub fn load_model_textures(&self) -> u32 {
+        let Some(side) = self.model_info().map(|m| m.texture_size) else { return 0 };
+        let mut loaded = 0;
+        for f in self.model_texture_files() {
+            let Ok(decoded) = image::load_from_memory(&f.bytes) else { continue };
+            let picture = decoded.to_rgba8();
+            let mut picture = if picture.dimensions() == (side, side) {
+                picture
+            } else {
+                image::imageops::resize(&picture, side, side, image::imageops::FilterType::Triangle)
+            };
+            for px in picture.pixels_mut() {
+                let [r, g, b, a] = px.0;
+                px.0 = match usize::try_from(f.component).ok().and_then(|c| px.0.get(c).copied()) {
+                    // one component, as grey
+                    Some(v) => [v, v, v, 255],
+                    // premultiplied
+                    None => {
+                        let k = u16::from(a);
+                        let mul = |c: u8| ((u16::from(c) * k + 127) / 255) as u8;
+                        [mul(r), mul(g), mul(b), a]
+                    }
+                };
+            }
+            if self.set_model_texture(f.texture_set, f.channel, picture.into_raw()) {
+                loaded += 1;
+            }
+        }
+        loaded
+    }
+
     /// Puts `rgba` (premultiplied, the texture size square) into texture set `texture_set`'s
     /// Base Layer in `channel` (0 colour, 1 roughness, 2 metalness), with no undo step; or, as
     /// channel 3 or 4, makes it the set's normal or occlusion map. False if it doesn't fit.
@@ -3119,13 +3154,13 @@ mod tests {
         let files = again.model_texture_files();
         let kinds: Vec<(u32, u32, i32)> = files.iter().map(|f| (f.texture_set, f.channel, f.component)).collect();
         assert_eq!(kinds, [(0, 0, -1), (0, 1, 0), (0, 2, 0)]);
-        // decoded (as the interface does) into the Base Layer
+        // decoded into the Base Layer, each channel's
         let mut reader = png::Decoder::new(std::io::Cursor::new(files[0].bytes.clone())).read_info().unwrap();
         let mut px = vec![0; reader.output_buffer_size().unwrap()];
         reader.next_frame(&mut px).unwrap();
         assert_eq!(px.len(), 64 * 64 * 4);
         assert!(!again.set_model_texture(0, 0, vec![0; 8]));
-        assert!(again.set_model_texture(0, 0, px.clone()));
+        assert_eq!(again.load_model_textures(), 3);
         assert!(shown(&again));
         frame(&again, 200);
         // the exported picture (opaque, over white) in place of the material's colour

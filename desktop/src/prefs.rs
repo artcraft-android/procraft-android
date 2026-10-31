@@ -1,5 +1,6 @@
-//! The Prefs tab's settings and Pressure and Smoothing's, kept between runs in the app's folder
-//! (`interface`, a setting a line), as the Android app keeps them in its interface preferences.
+//! The Prefs tab's settings, Pressure and Smoothing's and Advanced settings', kept between runs in
+//! the app's folder (`interface`, a setting a line), as the Android app keeps them in its interface
+//! preferences.
 
 use procraft_core::CanvasSession;
 
@@ -25,6 +26,8 @@ pub const RAPID_UNDO_MAX_S: f32 = 1.5;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prefs {
+    /// Panels and bars light grey with dark text.
+    pub light_interface: bool,
     /// The side bar on the right edge instead of the left.
     pub right_handed: bool,
     /// Brush sizes relative to the screen (else to the canvas).
@@ -44,11 +47,36 @@ pub struct Prefs {
     pub curve: Vec<[f32; 2]>,
     /// The Actions panel's tab open.
     pub actions_tab: usize,
+    /// The brush studio's pad a sphere on every page.
+    pub pad_3d: bool,
+    /// The canvas shown on a second display too.
+    pub project_canvas: bool,
+    /// Advanced settings: an artwork opens as it was left; fitting the canvas keeps it clear of
+    /// the top bar and the side bar; new artworks don't record their time-lapse; strokes made in
+    /// an adjustment undo together; how far the pen moves before it counts as fast (0.25..1); the
+    /// colour named in a message as it changes.
+    pub orientation_memory: bool,
+    pub fit_inside: bool,
+    pub no_time_lapse: bool,
+    pub simplified_undos: bool,
+    pub speed_distance: f32,
+    pub colour_names: bool,
+    /// A floating bar of undo, redo, zoom, move and fit for one finger; a tap landing where the
+    /// finger first touched, even if it drifts before lifting.
+    pub touch_companion: bool,
+    pub tap_assistance: bool,
+    /// Undo, redo, tools and panels click as they are used.
+    pub feedback_sounds: bool,
+    /// The short colour panel shows the history, not the active palette.
+    pub colour_history_shown: bool,
+    /// Recolor's Flood, kept from one time to the next.
+    pub recolor_threshold: f32,
 }
 
 impl Default for Prefs {
     fn default() -> Prefs {
         Prefs {
+            light_interface: false,
             right_handed: false,
             brush_on_screen: false,
             brush_cursor: true,
@@ -62,6 +90,19 @@ impl Default for Prefs {
             pressure_smoothing: 0.0,
             curve: straight(),
             actions_tab: 0,
+            pad_3d: false,
+            project_canvas: false,
+            orientation_memory: true,
+            fit_inside: false,
+            no_time_lapse: false,
+            simplified_undos: true,
+            speed_distance: 1.0,
+            colour_names: false,
+            touch_companion: false,
+            tap_assistance: false,
+            feedback_sounds: false,
+            colour_history_shown: false,
+            recolor_threshold: 0.0,
         }
     }
 }
@@ -85,6 +126,7 @@ impl Prefs {
             let number = value.parse::<f32>().ok().filter(|v| v.is_finite());
             let unit = number.map(|v| v.clamp(0.0, 1.0));
             match name {
+                "light_interface" => p.light_interface = on,
                 "right_handed" => p.right_handed = on,
                 "brush_on_screen" => p.brush_on_screen = on,
                 "brush_cursor" => p.brush_cursor = on,
@@ -100,6 +142,19 @@ impl Prefs {
                 "motion_filtering" => p.motion_filtering = unit.unwrap_or(0.0),
                 "motion_expression" => p.motion_expression = unit.unwrap_or(0.0),
                 "pressure_smoothing" => p.pressure_smoothing = unit.unwrap_or(0.0),
+                "pad_3d" => p.pad_3d = on,
+                "project_canvas" => p.project_canvas = on,
+                "orientation_memory" => p.orientation_memory = on,
+                "fit_inside" => p.fit_inside = on,
+                "no_time_lapse" => p.no_time_lapse = on,
+                "simplified_undos" => p.simplified_undos = on,
+                "speed_distance" => p.speed_distance = number.map_or(1.0, |v| v.clamp(0.25, 1.0)),
+                "color_names" => p.colour_names = on,
+                "single_touch_companion" => p.touch_companion = on,
+                "tap_assistance" => p.tap_assistance = on,
+                "feedback_sounds" => p.feedback_sounds = on,
+                "color_history_shown" => p.colour_history_shown = on,
+                "recolor_threshold" => p.recolor_threshold = unit.unwrap_or(0.0),
                 "actions_tab" => p.actions_tab = value.parse::<usize>().map_or(0, |t| t.min(5)),
                 "curve" => {
                     let numbers: Vec<f32> = value.split(',').filter_map(|v| v.parse().ok()).collect();
@@ -111,12 +166,15 @@ impl Prefs {
                 _ => {}
             }
         }
+        // the interface shows as it was left
+        crate::look::set_light(p.light_interface);
         p
     }
 
     pub fn keep(&self) {
         let curve: Vec<String> = self.curve.iter().map(|[x, y]| format!("{x},{y}")).collect();
         let lines = [
+            format!("light_interface {}", self.light_interface),
             format!("right_handed {}", self.right_handed),
             format!("brush_on_screen {}", self.brush_on_screen),
             format!("brush_cursor {}", self.brush_cursor),
@@ -130,14 +188,31 @@ impl Prefs {
             format!("pressure_smoothing {}", self.pressure_smoothing),
             format!("curve {}", curve.join(",")),
             format!("actions_tab {}", self.actions_tab),
+            format!("pad_3d {}", self.pad_3d),
+            format!("project_canvas {}", self.project_canvas),
+            format!("orientation_memory {}", self.orientation_memory),
+            format!("fit_inside {}", self.fit_inside),
+            format!("no_time_lapse {}", self.no_time_lapse),
+            format!("simplified_undos {}", self.simplified_undos),
+            format!("speed_distance {}", self.speed_distance),
+            format!("color_names {}", self.colour_names),
+            format!("single_touch_companion {}", self.touch_companion),
+            format!("tap_assistance {}", self.tap_assistance),
+            format!("feedback_sounds {}", self.feedback_sounds),
+            format!("color_history_shown {}", self.colour_history_shown),
+            format!("recolor_threshold {}", self.recolor_threshold),
         ];
         crate::files::keep_text("interface", &(lines.join("\n") + "\n"));
     }
 
     /// The artwork follows them.
     pub fn apply(&self, session: &CanvasSession) {
+        crate::look::set_light(self.light_interface);
+        session.set_light_interface(self.light_interface);
         session.set_brush_scaling(self.brush_on_screen);
         session.set_selection_visibility(self.selection_visibility);
+        session.set_simplified_undos(self.simplified_undos);
+        session.set_speed_distance(self.speed_distance);
         session.set_input_settings(
             self.stabilization,
             self.motion_filtering,

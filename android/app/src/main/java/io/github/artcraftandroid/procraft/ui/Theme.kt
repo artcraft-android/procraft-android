@@ -7,7 +7,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
-/** Interface colours and sizes. Sizes in dp equal the reference's points. */
+/** Interface colours and sizes. Sizes in dp equal the measured points. */
 object Pc {
     /** The light interface (Prefs) is on: panels and bars go light grey with dark text. */
     var light by mutableStateOf(false)
@@ -26,7 +26,7 @@ object Pc {
     val Surround = Color(0xFF1C1C1C)
 
     // the bar across the top of the canvas
-    /** Translucent: #333333 over white, as the reference's bar. */
+    /** Translucent: #333333 over white, as the bar measures. */
     // light, see-through enough to read 226 over the light surround and 235 over white
     val Bar: Color get() = pick(0xE61C1C1C, 0xCFE6E6E6)
     val BarText: Color get() = pick(0xFFAAAAAA, 0xFF3B3B3B)

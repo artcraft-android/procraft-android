@@ -5,12 +5,12 @@
 use egui::{Align2, Id, Order, Rect, Sense, pos2, vec2};
 
 use crate::icons::{self, Icon};
-use crate::look::{Look, Weight, argb, text};
+use crate::look::{Look, Themed, Weight, argb, text};
 
-const PANEL_FILL: u32 = 0xFF484848;
-const TITLE_INK: u32 = 0xFFC5C5C5;
-const BUTTON_INK: u32 = 0xFFA8A8A8;
-const CLOSE_FILL: u32 = 0xFF2A2A2A;
+const PANEL_FILL: Themed = Themed(0xFF484848, 0xFFE2E2E2);
+const TITLE_INK: Themed = Themed(0xFFC5C5C5, 0xFF393939);
+const BUTTON_INK: Themed = Themed(0xFFA8A8A8, 0xFF4A4A4A);
+const CLOSE_FILL: Themed = Themed(0xFF2A2A2A, 0xFFCFCFCF);
 const GRABBER: u32 = 0xFF7C7C7C;
 const PANEL: (f32, f32) = (496.0, 106.0);
 /// The panel's top, as a share of the window's height.

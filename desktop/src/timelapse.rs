@@ -14,11 +14,11 @@ use procraft_core::{
 
 use crate::alert::{Alert, Answer, Asking};
 use crate::icons;
-use crate::look::{Look, Weight, argb, text};
+use crate::look::{Look, Themed, Weight, argb, text};
 use crate::tool_header;
 
-const REPLAY_FILL: u32 = 0xFF252525;
-const GRID_LINE: u32 = 0xFF2E2E2E;
+const REPLAY_FILL: Themed = Themed(0xFF252525, 0xFFCED1D2);
+const GRID_LINE: Themed = Themed(0xFF2E2E2E, 0xFFCACDCE);
 const EMPTY_INK: u32 = 0xFF8E8E93;
 const PROGRESS: u32 = 0xFF0076FD;
 

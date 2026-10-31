@@ -17,7 +17,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.em
 
-/** Touches leave no ripple: the reference's controls show presses in their own ways, or not at all. */
+/** Touches leave no ripple: the controls show presses in their own ways, or not at all. */
 private object NoIndication : androidx.compose.foundation.IndicationNodeFactory {
     override fun create(interactionSource: androidx.compose.foundation.interaction.InteractionSource): androidx.compose.ui.node.DelegatableNode =
         object : androidx.compose.ui.Modifier.Node() {}
@@ -27,13 +27,13 @@ private object NoIndication : androidx.compose.foundation.IndicationNodeFactory 
     override fun equals(other: Any?): Boolean = other === this
 }
 
-/** Letter spacing that brings the bundled face to the reference's text widths (measured over 18–24 pt labels). */
+/** Letter spacing that brings the bundled face to the measured text widths (over 18–24 pt labels). */
 private const val TRACKING = -0.045f
 
 /**
  * The app's theme: Inter (bundled in `assets/fonts`, OFL) for all text, with natural line heights
- * and no font padding, so text sits where the reference's labels do. Interface text keeps its size
- * whatever the system font scale, as the reference's does: sp equal dp inside the theme.
+ * and no font padding, so text sits where the measured labels do. Interface text keeps its size
+ * whatever the system font scale: sp equal dp inside the theme.
  */
 @Composable
 fun ProCraftTheme(content: @Composable () -> Unit) {
@@ -79,7 +79,7 @@ fun ProCraftTheme(content: @Composable () -> Unit) {
 }
 
 /**
- * The text scale the popups made before [PcPopup] were matched to the reference at: they ran at
+ * The text scale the popups made before [PcPopup] were matched at: they ran at
  * the Legion's system font scale (0.85) then, so their sizes are set for it. Kept for them, now
  * on any device.
  */

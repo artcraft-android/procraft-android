@@ -5,20 +5,20 @@ use egui::{Align2, Color32, Pos2, Rect, Sense, Ui, pos2};
 use resvg::tiny_skia;
 
 use crate::icons;
-use crate::look::{Look, Weight, argb, fill, pc, round_rect, text};
+use crate::look::{Look, Shade, Themed, Weight, argb, fill, pc, round_rect, text};
 
 /// A panel's own material over the canvas: what is behind it shows through, blurred.
-pub const POPOVER_FROST: u32 = 0xDE1E1E1E;
-pub const POPOVER_SHADOW: u32 = 0x38000000;
+pub const POPOVER_FROST: Themed = Themed(0xDE1E1E1E, 0xFFE6E6E6);
+pub const POPOVER_SHADOW: Themed = Themed(0x38000000, 0x24000000);
 pub const POPOVER_SHADOW_RADIUS: f32 = 51.0;
 pub const POPOVER_CORNER: f32 = 35.0;
 pub const POPOVER_GAP: f32 = 12.0;
 pub const ARROW_HEIGHT: f32 = 12.0;
 pub const ARROW_SHIFT: f32 = 2.0;
-pub const PANEL_TITLE: u32 = 0xFFC7C7C7;
-pub const PANEL_GLYPH: u32 = 0xFFC8C8C8;
-pub const CHEVRON_DISC: u32 = 0xFF4C4C4C;
-pub const CHEVRON_GLYPH: u32 = 0xFF2E2E2E;
+pub const PANEL_TITLE: Themed = Themed(0xFFC7C7C7, 0xFF393939);
+pub const PANEL_GLYPH: Themed = Themed(0xFFC8C8C8, 0xFF393939);
+pub const CHEVRON_DISC: Themed = Themed(0xFF4C4C4C, 0xFFCFCFCF);
+pub const CHEVRON_GLYPH: Themed = Themed(0xFF2E2E2E, 0xFFE6E6E6);
 
 /// Where the side bar is, for the panels to keep clear of: whether it shows, and on the right.
 #[derive(Clone, Copy, Default)]
@@ -98,11 +98,7 @@ pub fn side_frame(
     corner: f32,
     backdrops: &mut Vec<f32>,
 ) -> Rect {
-    let body = if left {
-        Rect::from_min_max(pos2(rect.left() + ARROW_HEIGHT, rect.top()), rect.max)
-    } else {
-        Rect::from_min_max(rect.min, pos2(rect.right() - ARROW_HEIGHT, rect.bottom()))
-    };
+    let body = side_body(rect, left);
     let ppp = ui.ctx().pixels_per_point();
     backdrops.extend([body.left(), body.top(), body.right(), body.bottom(), corner].map(|v| v * ppp));
     backdrops.push(1.0);
@@ -115,26 +111,68 @@ pub fn side_frame(
     ui.painter().add(shadow.as_shape(body, corner));
     let size = rect.size();
     let key = ((arrow_y * 100.0).round() as i32, left, (corner * 10.0) as i32);
+    look.shape(ui, slot, key, rect, |pixmap, t| frost(pixmap, side_outline(size, arrow_y, left, corner), t));
+    body
+}
+
+/// As [`side_frame`], filled `colour` (nothing shows through). Returns the body.
+#[allow(clippy::too_many_arguments)]
+pub fn solid_side_frame(
+    ui: &Ui,
+    look: &mut Look,
+    slot: &'static str,
+    rect: Rect,
+    arrow_y: f32,
+    left: bool,
+    corner: f32,
+    colour: impl Shade,
+) -> Rect {
+    let colour = colour.value();
+    let body = side_body(rect, left);
+    let shadow = egui::epaint::Shadow {
+        offset: [0, 0],
+        blur: POPOVER_SHADOW_RADIUS as u8,
+        spread: 0,
+        color: argb(POPOVER_SHADOW),
+    };
+    ui.painter().add(shadow.as_shape(body, corner));
+    let size = rect.size();
+    let key = ((arrow_y * 100.0).round() as i32, left, (corner * 10.0) as i32, colour);
     look.shape(ui, slot, key, rect, |pixmap, t| {
-        let mut pb = tiny_skia::PathBuilder::new();
-        let (half, tip, w) = (ARROW_HEIGHT, 2.0, size.x);
-        if left {
-            round_rect(&mut pb, Rect::from_min_max(pos2(ARROW_HEIGHT, 0.0), size.to_pos2()), [corner; 4]);
-            pb.move_to(ARROW_HEIGHT + 0.5, arrow_y - half - tip);
-            pb.line_to(tip, arrow_y - tip);
-            pb.quad_to(0.0, arrow_y, tip, arrow_y + tip);
-            pb.line_to(ARROW_HEIGHT + 0.5, arrow_y + half + tip);
-        } else {
-            round_rect(&mut pb, Rect::from_min_max(Pos2::ZERO, pos2(w - ARROW_HEIGHT, size.y)), [corner; 4]);
-            pb.move_to(w - ARROW_HEIGHT - 0.5, arrow_y - half - tip);
-            pb.line_to(w - tip, arrow_y - tip);
-            pb.quad_to(w, arrow_y, w - tip, arrow_y + tip);
-            pb.line_to(w - ARROW_HEIGHT - 0.5, arrow_y + half + tip);
-        }
-        pb.close();
-        frost(pixmap, pb, t);
+        fill(pixmap, side_outline(size, arrow_y, left, corner).finish(), argb(colour), t);
     });
     body
+}
+
+/// A side-arrowed panel's body: `rect` less its arrow, on its `left` side or its right.
+fn side_body(rect: Rect, left: bool) -> Rect {
+    if left {
+        Rect::from_min_max(pos2(rect.left() + ARROW_HEIGHT, rect.top()), rect.max)
+    } else {
+        Rect::from_min_max(rect.min, pos2(rect.right() - ARROW_HEIGHT, rect.bottom()))
+    }
+}
+
+/// The outline of a panel `size` big (arrow included) with its arrow on its `left` side, else its
+/// right, the tip `arrow_y` from its top, rounded `corner`: one shape, filled as one.
+fn side_outline(size: egui::Vec2, arrow_y: f32, left: bool, corner: f32) -> tiny_skia::PathBuilder {
+    let mut pb = tiny_skia::PathBuilder::new();
+    let (half, tip, w) = (ARROW_HEIGHT, 2.0, size.x);
+    if left {
+        round_rect(&mut pb, Rect::from_min_max(pos2(ARROW_HEIGHT, 0.0), size.to_pos2()), [corner; 4]);
+        pb.move_to(ARROW_HEIGHT + 0.5, arrow_y - half - tip);
+        pb.line_to(tip, arrow_y - tip);
+        pb.quad_to(0.0, arrow_y, tip, arrow_y + tip);
+        pb.line_to(ARROW_HEIGHT + 0.5, arrow_y + half + tip);
+    } else {
+        round_rect(&mut pb, Rect::from_min_max(Pos2::ZERO, pos2(w - ARROW_HEIGHT, size.y)), [corner; 4]);
+        pb.move_to(w - ARROW_HEIGHT - 0.5, arrow_y - half - tip);
+        pb.line_to(w - tip, arrow_y - tip);
+        pb.quad_to(w, arrow_y, w - tip, arrow_y + tip);
+        pb.line_to(w - ARROW_HEIGHT - 0.5, arrow_y + half + tip);
+    }
+    pb.close();
+    pb
 }
 
 /// Draws a panel at `rect` (arrow included) with its arrow `below` it (else above), the tip
@@ -149,8 +187,9 @@ pub fn solid_frame(
     arrow_x: f32,
     below: bool,
     corner: f32,
-    colour: u32,
+    colour: impl Shade,
 ) -> Rect {
+    let colour = colour.value();
     let body = if below {
         Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - ARROW_HEIGHT))
     } else {
@@ -238,7 +277,7 @@ pub fn header_title(
     let words = text(painter, at, Align2::LEFT_TOP, title, 24.0, Weight::Bold, argb(PANEL_TITLE));
     if chevron {
         let centre = pos2(words.right() + 10.0 + 8.5, words.center().y - 1.5);
-        painter.circle_filled(centre, 8.5, argb(if chevron_on { pc::ACCENT } else { CHEVRON_DISC }));
+        painter.circle_filled(centre, 8.5, if chevron_on { argb(pc::ACCENT) } else { argb(CHEVRON_DISC) });
         look.icon(ui, &icons::CHEVRON_DOWN, centre, 13.0, argb(CHEVRON_GLYPH));
     }
     let row = if chevron { Rect::from_min_max(words.min, pos2(words.right() + 27.0, words.bottom())) } else { words };
@@ -246,6 +285,6 @@ pub fn header_title(
 }
 
 /// A light-on-dark tint for a selected row, or none.
-pub fn row_fill(selected: bool, idle: u32) -> Color32 {
+pub fn row_fill(selected: bool, idle: impl Shade) -> Color32 {
     if selected { argb(pc::ACCENT) } else { argb(idle) }
 }

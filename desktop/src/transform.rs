@@ -15,7 +15,7 @@ use procraft_core::{
 };
 
 use crate::icons::{self, Icon, Part};
-use crate::look::{Look, Weight, argb, pc, text};
+use crate::look::{Look, Themed, Weight, argb, mix, pc, text};
 use crate::transform_numeric::Numeric;
 
 const NODE_BLUE: u32 = 0xFF0171EA;
@@ -36,12 +36,12 @@ const TOOLBAR_WIDTH: f32 = 728.0;
 const TOOLBAR_HEIGHT: f32 = 126.0;
 const TOOLBAR_BOTTOM: f32 = 25.0;
 const TOOLBAR_CORNER: f32 = 33.0;
-const TOOLBAR_FILL: u32 = 0xF71E1E1E;
-const SEGMENT_TRACK: u32 = 0xFF535353;
-const SEGMENT_EDGE: u32 = 0xFF7E7E7E;
-const SEGMENT_TEXT: u32 = 0xFFC1C1C1;
-const BUTTON_TEXT: u32 = 0xFFA3A3A3;
-const BUTTON_DIMMED: u32 = 0xFF575757;
+const TOOLBAR_FILL: Themed = Themed(0xF71E1E1E, 0xF7F2F2F2);
+const SEGMENT_TRACK: Themed = Themed(0xFF535353, 0xFFFFFFFF);
+const SEGMENT_EDGE: Themed = Themed(0xFF7E7E7E, 0xFFEBEBEB);
+const SEGMENT_TEXT: Themed = Themed(0xFFC1C1C1, 0xFF3B3B3B);
+const BUTTON_TEXT: Themed = Themed(0xFFA3A3A3, 0xFF414141);
+const BUTTON_DIMMED: Themed = Themed(0xFF575757, 0xFF989898);
 const SEGMENT_GAP: f32 = 11.33;
 /// The toolbar's buttons with room, and where the window is narrow; the gap between roomy ones.
 const BUTTON_ROOMY: f32 = 89.0;
@@ -52,12 +52,12 @@ const BUTTON_GAP: f32 = 19.0;
 pub(crate) const MENU_WIDTH: f32 = 260.0;
 pub(crate) const MENU_ARROW: f32 = 15.0;
 const MENU_CORNER: f32 = 26.0;
-const MENU_FILL: u32 = 0xEB2A2A2A;
-pub(crate) const MENU_GROUP: u32 = 0xFF313131;
-pub(crate) const MENU_LINE: u32 = 0xFF373737;
-pub(crate) const MENU_TEXT: u32 = 0xFFC5C5C5;
-const SLIDER_REST: u32 = 0xFF5A5A5A;
-const SWITCH_OFF: u32 = 0xFF747377;
+const MENU_FILL: Themed = Themed(0xEB2A2A2A, 0xEBF0F0F0);
+pub(crate) const MENU_GROUP: Themed = Themed(0xFF313131, 0xFFFFFFFF);
+pub(crate) const MENU_LINE: Themed = Themed(0xFF373737, 0xFFE2E2E2);
+pub(crate) const MENU_TEXT: Themed = Themed(0xFFC5C5C5, 0xFF393939);
+const SLIDER_REST: Themed = Themed(0xFF5A5A5A, 0xFFDDDDDD);
+const SWITCH_OFF: Themed = Themed(0xFF747377, 0xFFA9A8AC);
 /// Snapping's distance (points) and velocity, as their sliders run.
 const SNAP_DISTANCE: (f32, f32, f32) = (1.0, 50.0, 3.0);
 const SNAP_VELOCITY_MAX: f32 = 10.0;
@@ -478,7 +478,7 @@ impl Transform {
                             Weight::Regular,
                             argb(MENU_TEXT),
                         );
-                        switch(ui, pos2(row.right() - 6.0 - 63.0, row.center().y - 14.0), on);
+                        switch(ui, pos2(row.right() - 6.0 - 63.0, row.center().y - 14.0), on, label);
                         if ui.interact(row, ui.scope_id().with(("switch", i)), Sense::click()).clicked() {
                             if i == 0 {
                                 g.magnetics = !g.magnetics;
@@ -725,12 +725,60 @@ fn node(painter: &egui::Painter, at: Pos2, colour: Color32, scale: f32) {
     painter.circle_filled(at, 3.5 * scale, colour);
 }
 
-/// A switch at `at` (63 × 28): blue with its knob right when on.
-pub(crate) fn switch(ui: &Ui, at: Pos2, on: bool) {
+/// A switch at `at` (63 × 28): blue with its knob right when on, as the Android app's
+/// (ui/ActionsPanel.kt, Switch). Flipped, the knob slides across as the track's colour follows,
+/// swelling into a clear lens that settles white again. `id` tells it from the others shown.
+pub(crate) fn switch(ui: &Ui, at: Pos2, on: bool, id: impl std::hash::Hash + std::fmt::Debug) {
+    let ctx = ui.ctx();
+    let id = ui.scope_id().with(("switch", id));
+    let k = ctx.animate_bool_with_time_and_easing(id, on, KNOB_SLIDE_S, knob_ease);
+    // the lens: since it was last flipped (not as it first shows)
+    let now = ui.input(|i| i.time);
+    let flipped = ctx.data_mut(|d| {
+        let seen = d.get_temp_mut_or_insert_with(id.with("flipped"), || (on, f64::NEG_INFINITY));
+        if seen.0 != on {
+            *seen = (on, now);
+        }
+        seen.1
+    });
+    let e = (now - flipped) as f32;
+    let lens = if e < SWELL_S {
+        ease_in_out(e / SWELL_S)
+    } else if e < SWELL_S + SWELL_HOLD_S {
+        1.0
+    } else if e < SWELL_S + SWELL_HOLD_S + SETTLE_S {
+        1.0 - ease_in_out((e - SWELL_S - SWELL_HOLD_S) / SETTLE_S)
+    } else {
+        0.0
+    };
+    if e < SWELL_S + SWELL_HOLD_S + SETTLE_S {
+        ctx.request_repaint();
+    }
     let track = Rect::from_min_size(at, vec2(63.0, 28.0));
-    ui.painter().rect_filled(track, 14, if on { argb(pc::ACCENT) } else { argb(SWITCH_OFF) });
-    let knob = Rect::from_min_size(at + vec2(2.0 + if on { 22.0 } else { 0.0 }, 2.0), vec2(37.0, 24.0));
-    ui.painter().rect_filled(knob, 12, Color32::WHITE);
+    ui.painter().rect_filled(track, 14, mix(argb(SWITCH_OFF), argb(pc::ACCENT), k));
+    // not clipped to the track: the swollen knob spills over it
+    let centre = at + vec2(2.0 + 22.0 * k + 37.0 / 2.0, 2.0 + 12.0);
+    let knob = Rect::from_center_size(centre, vec2(37.0 * (1.0 + 0.35 * lens), 24.0 * (1.0 + 0.4 * lens)));
+    let round = knob.height() / 2.0;
+    ui.painter().rect_filled(knob, round, Color32::WHITE.gamma_multiply(1.0 - 0.7 * lens));
+    if lens > 0.0 {
+        let rim = Stroke::new(1.0, Color32::WHITE.gamma_multiply(0.55 * lens));
+        ui.painter().rect_stroke(knob, round, rim, egui::StrokeKind::Inside);
+    }
+}
+
+/// A switch's knob sliding across, and its lens swelling, held and settling (seconds).
+const KNOB_SLIDE_S: f32 = 0.33;
+const SWELL_S: f32 = 0.07;
+const SWELL_HOLD_S: f32 = 0.14;
+const SETTLE_S: f32 = 0.12;
+
+fn knob_ease(t: f32) -> f32 {
+    crate::look::cubic_bezier(0.3, 0.0, 0.2, 1.0, t)
+}
+
+fn ease_in_out(t: f32) -> f32 {
+    crate::look::cubic_bezier(0.42, 0.0, 0.58, 1.0, t)
 }
 
 /// A popover's slider row (59 tall): its name and value, then a thin slider, blue up to a small

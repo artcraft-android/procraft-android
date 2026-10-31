@@ -73,6 +73,7 @@ pub use adjust_menu::{
 };
 pub use adjusting::{AdjustShown, CLONE_PUCK_RADIUS};
 pub use animation::{AnimationPlayback, AnimationSettings, PlayStep, animation_next_step};
+pub use brush_files::OTHER_BRUSH_EXTENSIONS;
 pub use brushes::{BrushInfo, BrushSetInfo};
 pub use colour::{cmyk_profiles, color_profiles, convert_color, import_profile, is_cmyk_profile, set_profile_folder};
 pub use crop_edit::CropShown;
@@ -85,7 +86,10 @@ pub use gestures::{
 pub use gradients::{GradientInfo, GradientStop, Gradients};
 pub use guide::{GuideInfo, GuideType, SymmetryType};
 pub use history::ColourHistory;
-pub use layers::{BlendModeInfo, Blocked, LayerInfo, LayerType, ThumbnailImage, blend_modes, layers_for};
+pub use layers::{
+    BlendModeInfo, Blocked, LayerInfo, LayerType, ThumbnailImage, blend_modes, brush_blend_modes, grain_blend_modes,
+    layers_for,
+};
 pub use palettes::{PaletteInfo, Palettes, colour_name};
 pub use pick::Pick;
 pub use presets::{
@@ -100,8 +104,12 @@ pub use quick_menu::{
     quick_menu_saved, quick_menu_slots,
 };
 pub use quickshape::{QuickShapeInfo, QuickShapeKind};
+pub use scene3d::{ModelFile, ModelInfo, ModelLight, ModelTextureFile, SubmeshInfo, Turntable, zip_model_name};
 pub use selection::{SelectionDisplay, SelectionJoin};
-pub use studio::curve_samples;
+pub use studio::{
+    SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
+    source_from_picture, source_library, source_size,
+};
 pub use timelapse::{
     SegmentPlan, TIME_LAPSE_FPS, TimeLapse, TimeLapseSettings, time_lapse_bits_per_pixel, time_lapse_picks,
     time_lapse_side,

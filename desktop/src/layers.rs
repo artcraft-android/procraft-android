@@ -3,19 +3,22 @@
 //! background under them. Tap a layer to make it current, the current one for its options (where
 //! it is renamed in place), its blend letter for its blend mode and opacity, its box to show or
 //! hide it (hold it to show it alone), the plus for a new layer; hold a row and drag it to move it;
-//! slide it left for lock, duplicate and delete, or a little right to pick it.
+//! slide it left for lock, duplicate and delete, or a little right to pick it. On a model: each
+//! texture set's name over its meshes (each its picture and box), the open mesh's layers under it,
+//! and under a layer its channels (colour, roughness, metalness), one of which a click paints on.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
-use procraft_core::{BlendModeInfo, CanvasSession, LayerInfo, LayerType, ThumbnailImage};
+use procraft_core::{BlendModeInfo, CanvasSession, LayerInfo, LayerType, ModelInfo, ThumbnailImage};
 use resvg::tiny_skia;
 
 use crate::alert::{Alert, Answer};
+use crate::colours::Colours;
 use crate::icons;
-use crate::look::{Look, Weight, argb, pc, round_rect, text};
+use crate::look::{Look, Themed, Weight, argb, pc, round_rect, text};
 use crate::menu::{self, Entry, Menu};
 use crate::overlays::ease;
 use crate::panel::{self, PANEL_GLYPH, PANEL_TITLE};
@@ -34,11 +37,21 @@ const GROUP_LINE: u32 = 0xFF4E4E4E;
 const MASK_OWNER_ROW: u32 = 0xFF2C5281;
 const PICKED_ROW: u32 = 0xFF2C5281;
 const LOCKED_LETTER: u32 = 0xFF808080;
-const LAYER_ROW: u32 = 0x0DFFFFFF;
-const BACKGROUND_ROW: u32 = 0x0DFFFFFF;
-const CHECK_FILL: u32 = 0xFFC7C7C7;
-const THUMB_BACKGROUND: u32 = 0xFF4F4F4F;
+const LAYER_ROW: Themed = Themed(0x0DFFFFFF, 0xFFD8D8D8);
+const BACKGROUND_ROW: Themed = Themed(0x0DFFFFFF, 0xFFD8D8D8);
+const CHECK_FILL: Themed = Themed(0xFFC7C7C7, 0xFF575757);
+const THUMB_BACKGROUND: Themed = Themed(0xFF4F4F4F, 0xFFC8C8C8);
 const THUMB: (f32, f32) = (93.0, 61.0);
+/// On a model: a texture set's name heading its meshes (16 under the set before it), an open
+/// mesh's row, a mesh's picture's tile; a layer's channels under it, each a tile.
+const SET_HEADER: f32 = 41.0;
+const SET_GAP: f32 = 16.0;
+const SUBMESH_OPEN: u32 = 0xFF25344A;
+const SUBMESH_TILE: u32 = 0xFF434246;
+const TRAY_HEIGHT: f32 = 159.0;
+const TRAY_FILL: u32 = 0xFF303032;
+const TILE_FILL: u32 = 0xFF3B3B3D;
+const CHANNELS: [&str; 3] = ["Color", "Roughness", "Metallic"];
 /// Thumbnails are read this many pixels on their longer side, a few a frame.
 const THUMB_SIDE: u32 = 192;
 const THUMBS_A_FRAME: usize = 4;
@@ -54,7 +67,7 @@ const BLEND_EDITOR_HEIGHT: f32 = 22.0 + 23.0 + 20.0 + 11.0 + BLEND_LIST_HEIGHT +
 const BLEND_LIST_HEIGHT: f32 = 349.0;
 const BLEND_ROW: f32 = 38.8;
 const BLEND_GLYPH_INK: u32 = 0xFF808080;
-const SLIDER_REST: u32 = 0xFF5A5A5A;
+const SLIDER_REST: Themed = Themed(0xFF5A5A5A, 0xFFBEBEBE);
 /// Opening, the blend editor grows over this long; closing, it goes faster.
 const BLEND_OPEN: f32 = 0.25;
 const BLEND_CLOSE: f32 = 0.1;
@@ -150,6 +163,75 @@ pub struct Layers {
     pub notice: Option<(String, bool)>,
     pub copied: Option<ThumbnailImage>,
     pub share: bool,
+    /// On a model: the mesh open (its texture set's layers under it), the layer whose channels
+    /// show, whether a channel's tile was chosen (painting goes to that channel of the current
+    /// layer), each channel's own colour (hue, saturation, brightness) kept while another is
+    /// painted, the meshes' and channels' pictures, and the frame the panel last showed in (the
+    /// meshes are pictured anew as it opens).
+    open_mesh: Option<usize>,
+    tray_for: Option<u64>,
+    tile_chosen: bool,
+    channel_colours: [Option<[f32; 3]>; 3],
+    mesh_pictures: HashMap<usize, TextureHandle>,
+    channel_pictures: HashMap<(u32, u64), TextureHandle>,
+    last_frame: u64,
+}
+
+/// What the list shows: a layer's row (its corners, how far in it sits, whether its texture set's
+/// meshes share it), or on a model a texture set's name or a mesh's row.
+enum Item<'a> {
+    Set { name: String, first: bool },
+    Mesh { index: usize, name: String, open: bool, corners: (f32, f32) },
+    Layer { l: &'a LayerInfo, corners: (f32, f32), indent: f32, shared: bool },
+}
+
+/// The list's items in order: the layers (top first), or on a model each texture set's name and
+/// meshes, the open mesh's layers under it when its set is the one `painted` on.
+fn items<'a>(
+    shown: &[&'a LayerInfo],
+    model: Option<&ModelInfo>,
+    open_mesh: Option<usize>,
+    painted: u32,
+) -> Vec<Item<'a>> {
+    let Some(model) = model else {
+        let last = shown.len().saturating_sub(1);
+        return shown
+            .iter()
+            .enumerate()
+            .map(|(i, l)| Item::Layer {
+                l,
+                // the list's ends round; the rows between are square
+                corners: (if i == 0 { LIST_CORNER } else { 0.0 }, if i == last { LIST_CORNER } else { 0.0 }),
+                indent: 0.0,
+                shared: false,
+            })
+            .collect();
+    };
+    let mut out = Vec::new();
+    for (set, name) in model.texture_sets.iter().enumerate() {
+        let meshes: Vec<(usize, &procraft_core::SubmeshInfo)> =
+            model.submeshes.iter().enumerate().filter(|(_, m)| m.texture_set as usize == set).collect();
+        if meshes.is_empty() {
+            continue;
+        }
+        out.push(Item::Set { name: name.clone(), first: set == 0 });
+        let count = meshes.len();
+        for (k, (index, m)) in meshes.into_iter().enumerate() {
+            let last_mesh = k + 1 == count;
+            let under = open_mesh == Some(index) && set as u32 == painted && !shown.is_empty();
+            let corners = (if k == 0 { LIST_CORNER } else { 0.0 }, if last_mesh && !under { LIST_CORNER } else { 0.0 });
+            out.push(Item::Mesh { index, name: m.name.clone(), open: under, corners });
+            if under {
+                let n = shown.len();
+                for (i, l) in shown.iter().enumerate() {
+                    let end = last_mesh && i + 1 == n;
+                    let corners = (0.0, if end { LIST_CORNER } else { 0.0 });
+                    out.push(Item::Layer { l, corners, indent: GROUP_INDENT, shared: count > 1 });
+                }
+            }
+        }
+    }
+    out
 }
 
 impl Layers {
@@ -164,6 +246,12 @@ impl Layers {
         self.press = None;
         self.slid.clear();
         self.swiped = None;
+        self.open_mesh = None;
+        self.tray_for = None;
+        self.tile_chosen = false;
+        self.channel_colours = [None; 3];
+        self.mesh_pictures.clear();
+        self.channel_pictures.clear();
     }
 
     /// A menu of the panel's is open: a press elsewhere only closes it.
@@ -177,11 +265,20 @@ impl Layers {
         ctx: &egui::Context,
         look: &mut Look,
         session: &CanvasSession,
+        colours: &mut Colours,
         button: Rect,
         backdrops: &mut Vec<f32>,
     ) -> Rect {
         let screen = ctx.content_rect();
         let (left, arrow_x) = panel::place(ctx, LAYERS_WIDTH, button.center().x);
+        // on a model: its meshes pictured as it is seen when the panel opens
+        let model = session.model_info();
+        let chosen_tile = model.is_some() && self.tile_chosen;
+        let frame = ctx.cumulative_frame_nr();
+        if frame > self.last_frame + 1 {
+            self.mesh_pictures.clear();
+        }
+        self.last_frame = frame;
         let top = screen.top() + pc::BAR_HEIGHT;
         let layers = session.layers();
         let versions: HashMap<u64, u64> = session.layer_versions().into_iter().map(|v| (v.id, v.version)).collect();
@@ -224,7 +321,16 @@ impl Layers {
             .collect();
         let editors: f32 = blend_shown.values().map(|k| k * BLEND_EDITOR_HEIGHT).sum();
         self.settle_slides(ctx, &shown);
-        let rows: f32 = shown.iter().map(|l| height_of(l) + ROW_GAP).sum::<f32>() + editors + 10.0 + 50.0 + 12.0;
+        let items = items(&shown, model.as_ref(), self.open_mesh, session.texture_set());
+        let tray_for = self.tray_for.filter(|_| model.is_some());
+        let item_height = |item: &Item| match item {
+            Item::Set { first, .. } => SET_HEADER + if *first { 0.0 } else { SET_GAP },
+            Item::Mesh { .. } => ROW_HEIGHT + ROW_GAP,
+            Item::Layer { l, .. } => height_of(l) + ROW_GAP + if tray_for == Some(l.id) { TRAY_HEIGHT } else { 0.0 },
+        };
+        // a model has no background row
+        let below = if model.is_some() { 12.0 } else { 10.0 + 50.0 + 12.0 };
+        let rows: f32 = items.iter().map(item_height).sum::<f32>() + editors + below;
         // as tall as its rows, up to the window's bottom less a gap
         let most = screen.bottom() - panel::POPOVER_GAP - top;
         let height = (panel::ARROW_HEIGHT + HEADER_HEIGHT + rows).min(most);
@@ -269,18 +375,28 @@ impl Layers {
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                            let last = shown.len().saturating_sub(1);
                             let mut dragged = None;
-                            for (i, l) in shown.iter().enumerate() {
-                                // the list's ends round; the rows between are square
-                                let (t, b) =
-                                    (if i == 0 { LIST_CORNER } else { 0.0 }, if i == last { LIST_CORNER } else { 0.0 });
+                            for item in &items {
+                                let (l, (t, b), indent, shared) = match item {
+                                    Item::Set { name, first } => {
+                                        set_header(ui, name, *first);
+                                        continue;
+                                    }
+                                    Item::Mesh { index, name, open, corners } => {
+                                        self.submesh_row(ui, look, session, colours, *index, name, *open, *corners);
+                                        ui.add_space(ROW_GAP);
+                                        continue;
+                                    }
+                                    Item::Layer { l, corners, indent, shared } => (*l, *corners, *indent, *shared),
+                                };
                                 let height = height_of(l);
                                 let (row, _) =
                                     ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
                                 row_rects.insert(l.id, row);
                                 let owner = current_mask_parent == Some(l.id);
-                                let fill = if l.current {
+                                // on a model with a channel's tile chosen, the tile is blue, not the row
+                                let chosen = l.current && !chosen_tile;
+                                let fill = if chosen {
                                     argb(pc::ACCENT)
                                 } else if l.picked {
                                     argb(PICKED_ROW)
@@ -294,10 +410,15 @@ impl Layers {
                                     fill,
                                     version: versions.get(&l.id).copied(),
                                     masked: masked(l),
+                                    indent,
+                                    shared,
+                                    cube: (model.is_some() && l.kind != LayerType::Mask)
+                                        .then_some(l.current && chosen_tile),
+                                    chosen,
                                 };
                                 if self.press.is_some_and(|p| p.id == l.id && p.way == Way::Reorder) {
                                     // held and dragged: drawn where it is dragged to, over the rest
-                                    dragged = Some((*l, row, looks));
+                                    dragged = Some((l, row, looks));
                                 } else {
                                     let slide = self.slid.get(&l.id).copied().unwrap_or(0.0);
                                     let at = row.translate(vec2(slide, 0.0));
@@ -326,6 +447,11 @@ impl Layers {
                                         self.swiped = None;
                                     }
                                 }
+                                if tray_for == Some(l.id) {
+                                    let (tray, _) =
+                                        ui.allocate_exact_size(vec2(ui.available_width(), TRAY_HEIGHT), Sense::hover());
+                                    self.channel_tray(ui, session, colours, l, tray);
+                                }
                                 ui.add_space(ROW_GAP);
                                 // its blend modes and opacity open under it, the panel growing as
                                 // they come
@@ -342,8 +468,10 @@ impl Layers {
                                     self.blend_editor(&mut ui, look, session, l, editor, &modes);
                                 }
                             }
-                            ui.add_space(10.0);
-                            background_row(ui, look, session);
+                            if model.is_none() {
+                                ui.add_space(10.0);
+                                background_row(ui, look, session);
+                            }
                             ui.add_space(12.0);
                             if let Some((l, row, looks)) = dragged {
                                 let at = row.translate(vec2(0.0, self.press.map_or(0.0, |p| p.dy)));
@@ -358,7 +486,14 @@ impl Layers {
         // a layer tapped: picked layers give way to it; the current one shows its options (or
         // hides them); any other becomes the current one
         if let Some(l) = tapped {
-            if any_picked || !l.current {
+            if chosen_tile && l.kind != LayerType::Group {
+                // on a model the row means the layer itself: its colour, no channel's tile
+                self.tile_chosen = false;
+                self.choose_channel(session, colours, 0);
+                if !l.current {
+                    session.select_layer(l.id);
+                }
+            } else if any_picked || !l.current {
                 session.select_layer(l.id);
                 self.options_menu.close();
             } else if self.options_menu.is_open() {
@@ -466,13 +601,150 @@ impl Layers {
             egui::CornerRadius { nw: t as u8, ne: t as u8, sw: b as u8, se: b as u8 },
             looks.fill,
         );
-        let ink = if l.current || l.picked { Color32::WHITE } else { argb(PANEL_TITLE) };
-        let box_fill = if l.current || l.picked { Color32::WHITE } else { argb(CHECK_FILL) };
+        let ink = if looks.chosen || l.picked { Color32::WHITE } else { argb(PANEL_TITLE) };
+        let box_fill = if looks.chosen || l.picked { Color32::WHITE } else { argb(CHECK_FILL) };
         if l.kind == LayerType::Group {
-            self.group_row(ui, look, session, l, at, ink, box_fill);
+            self.group_row(ui, look, session, l, at.translate(vec2(looks.indent, 0.0)), ink, box_fill);
             false
         } else {
-            self.layer_row(ui, look, session, l, at, ink, box_fill, looks.version, looks.masked, modes, read)
+            self.layer_row(ui, look, session, l, at, ink, box_fill, looks, modes, read)
+        }
+    }
+
+    /// One of a model's meshes: its picture, its name, the arrow that opens it (its texture set's
+    /// layers under it) and its box (shown or hidden). A click anywhere but the box opens or
+    /// closes it.
+    #[allow(clippy::too_many_arguments)]
+    fn submesh_row(
+        &mut self,
+        ui: &mut Ui,
+        look: &mut Look,
+        session: &CanvasSession,
+        colours: &mut Colours,
+        index: usize,
+        name: &str,
+        open: bool,
+        (t, b): (f32, f32),
+    ) {
+        let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+        let corners = egui::CornerRadius { nw: t as u8, ne: t as u8, sw: b as u8, se: b as u8 };
+        ui.painter().rect_filled(row, corners, if open { argb(SUBMESH_OPEN) } else { argb(LAYER_ROW) });
+        let tile =
+            Rect::from_center_size(pos2(row.left() + 4.0 + THUMB.0 / 2.0, row.center().y), vec2(THUMB.0, THUMB.1));
+        ui.painter().rect_filled(tile, 4, argb(SUBMESH_TILE));
+        if !self.mesh_pictures.contains_key(&index)
+            && ui.is_rect_visible(tile)
+            && let Some(t) = session.submesh_thumbnail(index as u32, THUMB_SIDE)
+        {
+            let image = egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
+            let texture = ui.ctx().load_texture(format!("mesh {index}"), image, TextureOptions::LINEAR);
+            self.mesh_pictures.insert(index, texture);
+        }
+        if let Some(texture) = self.mesh_pictures.get(&index) {
+            fit_picture(ui, texture, tile.shrink(4.0));
+        }
+        let ink = argb(PANEL_TITLE);
+        let visibility = Rect::from_min_size(pos2(row.right() - 8.0 - 44.0, row.center().y - 23.5), vec2(44.0, 47.0));
+        let arrow = Rect::from_min_size(pos2(visibility.left() - 44.0 + 8.0, row.center().y - 25.5), vec2(44.0, 51.0));
+        let left = tile.right() + 29.0;
+        let g = galley(ui, name, 17.0, Weight::Regular, ink, arrow.left() - 6.0 - left);
+        ui.painter().galley(pos2(left, row.center().y - g.size().y / 2.0), g, ink);
+        look.icon(ui, if open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, arrow.center(), 16.0, ink);
+        let hidden = session.submeshes_hidden().get(index).copied().unwrap_or(false);
+        check_box(ui, look, visibility.center(), !hidden, argb(CHECK_FILL));
+        if ui.interact(visibility, ui.scope_id().with(("mesh box", index)), Sense::click()).clicked() {
+            session.set_submesh_hidden(index as u32, !hidden);
+            self.notice = Some((if hidden { "Show Submesh" } else { "Hide Submesh" }.to_owned(), false));
+        } else if response.clicked() {
+            self.open_mesh(session, colours, index);
+        }
+    }
+
+    /// Opens mesh `index` (its texture set's layers under it, that set painted on), or closes it.
+    fn open_mesh(&mut self, session: &CanvasSession, colours: &mut Colours, index: usize) {
+        if self.open_mesh == Some(index) {
+            self.open_mesh = None;
+            return;
+        }
+        let set = session.model_info().and_then(|m| m.submeshes.get(index).map(|s| s.texture_set));
+        let Some(set) = set else { return };
+        self.open_mesh = Some(index);
+        if set != session.texture_set() {
+            // a texture set is opened on its colour
+            self.tile_chosen = false;
+            self.choose_channel(session, colours, 0);
+            self.tray_for = None;
+            session.choose_texture_set(set);
+        }
+    }
+
+    /// Paints on `channel` of the texture set from now on (its layers stay the layers), with that
+    /// channel's own colour: roughness and metalness start black.
+    fn choose_channel(&mut self, session: &CanvasSession, colours: &mut Colours, channel: u32) {
+        let now = session.model_channel();
+        if channel == now || channel > 2 {
+            return;
+        }
+        if let Some(slot) = self.channel_colours.get_mut(now as usize) {
+            *slot = Some(colours.hsv);
+        }
+        session.set_model_channel(channel);
+        let now = session.model_channel();
+        let kept = self.channel_colours.get(now as usize).copied().flatten();
+        if let Some(hsv) = kept.or((now != 0).then_some([0.0, 0.0, 0.0])) {
+            colours.hsv = hsv;
+            colours.send(session);
+        }
+    }
+
+    /// Shows layer `id`'s channels under it (or hides them), pictured afresh.
+    fn toggle_tray(&mut self, id: u64) {
+        self.tray_for = if self.tray_for == Some(id) { None } else { Some(id) };
+        self.channel_pictures.retain(|(_, l), _| *l != id);
+    }
+
+    /// A model's layer's channels in `tray`: Color, Roughness and Metallic, each its picture of
+    /// the layer; the one painted on (of the current layer) blue. A click paints on it.
+    fn channel_tray(&mut self, ui: &Ui, session: &CanvasSession, colours: &mut Colours, l: &LayerInfo, tray: Rect) {
+        ui.painter().rect_filled(tray, 0, argb(TRAY_FILL));
+        let inner = tray.shrink(4.0);
+        let w = (inner.width() - 12.0) / 3.0;
+        let painted = session.model_channel();
+        for (c, label) in CHANNELS.iter().enumerate() {
+            let c = c as u32;
+            let tile =
+                Rect::from_min_size(pos2(inner.left() + (w + 6.0) * c as f32, inner.top()), vec2(w, inner.height()));
+            let chosen = l.current && self.tile_chosen && painted == c;
+            ui.painter().rect_filled(tile, 6, if chosen { argb(pc::ACCENT) } else { argb(TILE_FILL) });
+            let picture = Rect::from_min_size(tile.min + vec2(6.0, 6.0), vec2(w - 12.0, 102.0));
+            ui.painter().rect_filled(picture, 3, argb(THUMB_BACKGROUND));
+            if !self.channel_pictures.contains_key(&(c, l.id))
+                && let Some(t) = session.channel_layer_thumbnail(c, l.id, THUMB_SIDE)
+            {
+                let image = egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
+                let texture = ui.ctx().load_texture(format!("channel {c} {}", l.id), image, TextureOptions::LINEAR);
+                self.channel_pictures.insert((c, l.id), texture);
+            }
+            if let Some(texture) = self.channel_pictures.get(&(c, l.id)) {
+                fit_picture(ui, texture, picture);
+            }
+            let ink = if chosen { Color32::WHITE } else { argb(PANEL_TITLE) };
+            text(
+                ui.painter(),
+                pos2(picture.left() + 2.0, picture.bottom() + 9.0),
+                Align2::LEFT_TOP,
+                label,
+                15.0,
+                Weight::Regular,
+                ink,
+            );
+            if ui.interact(tile, ui.scope_id().with(("channel tile", c, l.id)), Sense::click()).clicked() {
+                if !l.current {
+                    session.select_layer(l.id);
+                }
+                self.choose_channel(session, colours, c);
+                self.tile_chosen = true;
+            }
         }
     }
 
@@ -875,14 +1147,14 @@ impl Layers {
         row: Rect,
         ink: Color32,
         box_fill: Color32,
-        version: Option<u64>,
-        masked: bool,
+        looks: RowLook,
         modes: &[BlendModeInfo],
         read: &mut usize,
     ) -> bool {
+        let (version, masked) = (looks.version, looks.masked);
         let mask = l.kind == LayerType::Mask;
         let mut blend_tapped = false;
-        let mut x = row.left() + GROUP_INDENT * l.depth as f32;
+        let mut x = row.left() + looks.indent + GROUP_INDENT * l.depth as f32;
         if l.clipped {
             look.icon(ui, &icons::CLIP, pos2(x + 8.0, row.center().y), 16.0, ink);
             x += 18.0;
@@ -902,12 +1174,26 @@ impl Layers {
         let blend =
             Rect::from_min_size(pos2(row.right() - 8.0 - 44.0 - 44.0 + 8.0, row.center().y - 23.5), vec2(44.0, 47.0));
         let visibility = Rect::from_min_size(pos2(row.right() - 8.0 - 44.0, row.center().y - 23.5), vec2(44.0, 47.0));
-        let name_right = if mask { visibility.left() - 36.0 } else { blend.left() - 8.0 };
-        // what the layer is, under its name (which stays in the middle)
+        // a model's layer: the button that shows its channels, blue while one of them is painted;
+        // laid out narrower than it is touched, so the name keeps its room up to the icon
+        let cube = looks
+            .cube
+            .map(|lit| (Rect::from_center_size(pos2(blend.left() - 8.0 - 6.0, row.center().y), vec2(44.0, 47.0)), lit));
+        let name_right = match cube {
+            Some((c, _)) => c.center().x - 6.0 - 10.0,
+            None if mask => visibility.left() - 36.0,
+            None => blend.left() - 8.0,
+        };
+        // what the layer is, under its name (which stays in the middle): a reference layer, one
+        // drawing assist is on for, a private one, a model's layer its texture set's meshes share
         let tag = if l.reference && l.assisted {
             Some("Assisted Reference")
+        } else if l.reference && looks.shared {
+            Some("Shared Reference")
         } else if l.reference {
             Some("Reference")
+        } else if looks.shared {
+            Some("Shared")
         } else if l.assisted {
             Some("Assisted")
         } else if l.private {
@@ -919,6 +1205,12 @@ impl Layers {
         if let Some(tag) = tag {
             let g = galley(ui, tag, 13.0, Weight::Regular, ink, name_right - name_left - 29.0);
             ui.painter().galley(pos2(name_left + 29.0, row.center().y + 17.5 - g.size().y / 2.0), g, ink);
+        }
+        if let Some((c, lit)) = cube {
+            look.icon(ui, &icons::TAB3_D, c.center(), 48.0, if lit { argb(pc::ACCENT) } else { ink });
+            if ui.interact(c, ui.scope_id().with(("channels", l.id)), Sense::click()).clicked() {
+                self.toggle_tray(l.id);
+            }
         }
         if !mask {
             // a locked layer's mode is greyed
@@ -1065,6 +1357,25 @@ impl Layers {
     }
 }
 
+/// A model's texture set's name, heading its meshes: 41 tall, 16 under the set before it.
+fn set_header(ui: &mut Ui, name: &str, first: bool) {
+    if !first {
+        ui.add_space(SET_GAP);
+    }
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), SET_HEADER), Sense::hover());
+    let ink = argb(PANEL_TITLE);
+    let g = galley(ui, name, 14.0, Weight::SemiBold, ink, row.width() - 32.0);
+    ui.painter().galley(row.min + vec2(16.0, 12.0), g, ink);
+}
+
+/// `texture` fitted in `rect`, centred.
+fn fit_picture(ui: &Ui, texture: &TextureHandle, rect: Rect) {
+    let size = texture.size_vec2();
+    let fit = (rect.width() / size.x.max(1.0)).min(rect.height() / size.y.max(1.0));
+    let shown = Rect::from_center_size(rect.center(), size * fit);
+    ui.painter().image(texture.id(), shown, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+}
+
 /// A row's name, where it always is: 29 in from `at`, ending by `right`; a small padlock in the gap
 /// before it when locked.
 fn locked_name(ui: &Ui, look: &mut Look, l: &LayerInfo, at: Pos2, right: f32, ink: Color32) {
@@ -1083,6 +1394,12 @@ struct RowLook {
     fill: Color32,
     version: Option<u64>,
     masked: bool,
+    /// On a model: how far in it sits under its mesh, whether its texture set's meshes share it,
+    /// and its channels' button (lit while one of them is painted). Whether it shows as chosen.
+    indent: f32,
+    shared: bool,
+    cube: Option<bool>,
+    chosen: bool,
 }
 
 /// How far a row slides left to show its buttons: 6 past them.

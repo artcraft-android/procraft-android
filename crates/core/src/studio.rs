@@ -65,6 +65,39 @@ pub fn repeatable_source(
     textures::repeatable(&pixels, repeat)
 }
 
+/// A picture (`width` by `height`, RGBA) as a source image: its lightness over black (what
+/// shows through it counting as black), fitted into the `source_size` square, centred.
+/// Empty if the pixels aren't that size.
+#[uniffi::export]
+pub fn source_from_picture(rgba: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
+    let n = textures::TEXTURE_SIZE as u32;
+    if width == 0 || height == 0 || rgba.len() as u64 != u64::from(width) * u64::from(height) * 4 {
+        return Vec::new();
+    }
+    let lightness: Vec<u8> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&[r, g, b, a]| {
+            let v = (u32::from(r) * 54 + u32::from(g) * 183 + u32::from(b) * 19) >> 8;
+            (v * u32::from(a) / 255) as u8
+        })
+        .collect();
+    let Some(picture) = image::GrayImage::from_raw(width, height, lightness) else { return Vec::new() };
+    let scale = (n as f32 / width as f32).min(n as f32 / height as f32);
+    let fit = |side: u32| ((side as f32 * scale).round() as u32).clamp(1, n);
+    let (w, h) = (fit(width), fit(height));
+    let fitted = image::imageops::resize(&picture, w, h, image::imageops::FilterType::Triangle);
+    let (left, top) = ((n - w) / 2, (n - h) / 2);
+    let mut out = vec![0; (n * n) as usize];
+    for (x, y, p) in fitted.enumerate_pixels() {
+        if let Some(o) = out.get_mut(((top + y) * n + left + x) as usize) {
+            *o = p.0[0];
+        }
+    }
+    out
+}
+
 /// Which of a brush's images the studio's editors change: its shape, its grain, or what it paints a
 /// model's metalness or roughness through (tiled as the grain is, from the same library).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -607,7 +640,7 @@ fn now() -> i64 {
 /// The drawing pad's sample scribble, in points from the pad's middle: a light lead-in up to the
 /// top, then a steep zigzag down the pad whose swings shrink as it goes, ending in a small hook to
 /// the right. The path runs smoothly through these points. It is the same size whatever the pad's
-/// (as the reference's, which runs off a portrait pad's top and fits a landscape one).
+/// (so it runs off a portrait pad's top and fits a landscape one).
 const SCRIBBLE: [(f32, f32); 41] = [
     (-147.0, -7.5),
     (-104.0, -66.5),
@@ -771,13 +804,13 @@ fn pad_scribble(w: f32, h: f32, scale: f32) -> Vec<crate::PenSample> {
         .collect()
 }
 
-/// The sphere's radius on the pad, points, whatever the pad's size (as the reference's, which runs
-/// a little past a landscape pad's sides).
+/// The sphere's radius on the pad, points, whatever the pad's size (so it runs a little past a
+/// landscape pad's sides).
 const SPHERE_RADIUS_PT: f32 = 240.25;
 
 /// How the sample scribble wraps round the sphere: each of its points (see [`SCRIBBLE`]) this many
 /// radians of longitude and latitude, the scribble's middle turned this far right and up from the
-/// sphere's front (as the reference's lies, drawn on the sphere's surface).
+/// sphere's front (as measured, drawn on the sphere's surface).
 const SPHERE_LONGITUDE: f32 = 0.003_538_5;
 const SPHERE_LATITUDE: f32 = 0.001_788_6;
 const SPHERE_TURN: f32 = 0.089_121;

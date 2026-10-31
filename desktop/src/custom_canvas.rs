@@ -13,22 +13,22 @@ use procraft_core::{
 use crate::colours::HarmonyKind;
 use crate::compact_colours::{CompactColours, Picked};
 use crate::icons::{self, Icon};
-use crate::look::{Look, Weight, argb, pc, text};
+use crate::look::{Look, Themed, Weight, argb, pc, text};
 
-const SCREEN: u32 = 0xFF1F1F1F;
-const PANEL: u32 = 0xFF282828;
-const INK: u32 = 0xFFAAAAAA;
-const IDLE_INK: u32 = 0xFF797979;
+const SCREEN: Themed = Themed(0xFF1F1F1F, 0xFFF2F2F2);
+const PANEL: Themed = Themed(0xFF282828, 0xFFDFDFDF);
+const INK: Themed = Themed(0xFFAAAAAA, 0xFF3E3E3E);
+const IDLE_INK: Themed = Themed(0xFF797979, 0xFF3E3E3E);
 const EDITING: u32 = 0xFF436BF0;
-const KEYPAD: u32 = 0xFF1A1A1A;
-const DIGIT: u32 = 0xFF525252;
-const KEY: u32 = 0xFF2B2B2B;
-const UNIT_CHOSEN: u32 = 0xFFA1A1A1;
-const UNIT_CHOSEN_INK: u32 = 0xFF1F1F1F;
-const SWITCH_TRACK: u32 = 0xFF353535;
-const SWITCH_IDLE: u32 = 0xFFC1C1C1;
-const CAPSULE: u32 = 0xFF1A1A1A;
-const CAPSULE_EDGE: u32 = 0xFF373737;
+const KEYPAD: Themed = Themed(0xFF1A1A1A, 0xFFD1D3D8);
+const DIGIT: Themed = Themed(0xFF525252, 0xFFFFFFFF);
+const KEY: Themed = Themed(0xFF2B2B2B, 0xFFABB2BB);
+const UNIT_CHOSEN: Themed = Themed(0xFFA1A1A1, 0xFF818C96);
+const UNIT_CHOSEN_INK: Themed = Themed(0xFF1F1F1F, 0xFFFFFFFF);
+const SWITCH_TRACK: Themed = Themed(0xFF353535, 0xFFD5D5D5);
+const SWITCH_IDLE: Themed = Themed(0xFFC1C1C1, 0xFF3B3B3B);
+const CAPSULE: Themed = Themed(0xFF1A1A1A, 0xFFFBFBFB);
+const CAPSULE_EDGE: Themed = Themed(0xFF373737, 0xFFE0E0E0);
 const CAPSULE_INK: u32 = 0xFFA5A5A5;
 const DONE: u32 = 0xFF0190FF;
 const SWATCH_EDGE: u32 = 0xFF555555;
@@ -274,7 +274,7 @@ impl CustomCanvas {
             // Cancel, and Import beside it on the colour profile page, then Done
             let tick = Rect::from_min_size(pos2(screen.right() - 20.0 - 44.0, screen.top() + 20.0), vec2(44.0, 45.0));
             let words: &[&str] = if self.section == 1 { &["Cancel", "Import"] } else { &["Cancel"] };
-            match capsule_words(ui, tick.left() - 13.0, screen.top() + 21.0, words) {
+            match capsule_words(ui, tick.left() - 13.0, screen.top() + 21.0, words, CAPSULE_INK.into()) {
                 Some("Cancel") => done = Some(Done::Cancel),
                 Some(_) => {
                     if let Some(name) = crate::files::import_profile() {
@@ -533,7 +533,7 @@ impl CustomCanvas {
         let content = vec2(w + 30.0 + w * 3.0 + across * 2.0 + 30.0 + w, h * 4.0 + down * 3.0);
         let left = panel.center().x - content.x / 2.0;
         let top = if wide { panel.top() + 47.0 } else { panel.center().y - content.y / 2.0 };
-        let key = |label: &str, rect: Rect, fill: u32, ink: Color32, size: f32, id: (&str, usize)| {
+        let key = |label: &str, rect: Rect, fill: Themed, ink: Color32, size: f32, id: (&str, usize)| {
             ui.painter().rect_filled(rect, 8.0, argb(fill));
             text(ui.painter(), rect.center(), Align2::CENTER_CENTER, label, size, Weight::Regular, ink);
             ui.interact(rect, ui.scope_id().with(id), Sense::click()).clicked()
@@ -597,10 +597,16 @@ impl CustomCanvas {
 }
 
 /// A header's capsule of words, ending at `right`: each a button. Returns the one tapped.
-pub(crate) fn capsule_words<'a>(ui: &egui::Ui, right: f32, top: f32, words: &[&'a str]) -> Option<&'a str> {
+pub(crate) fn capsule_words<'a>(
+    ui: &egui::Ui,
+    right: f32,
+    top: f32,
+    words: &[&'a str],
+    ink: Themed,
+) -> Option<&'a str> {
     let galleys: Vec<_> = words
         .iter()
-        .map(|w| ui.painter().layout_no_wrap((*w).to_owned(), Weight::Regular.font(17.0), argb(CAPSULE_INK)))
+        .map(|w| ui.painter().layout_no_wrap((*w).to_owned(), Weight::Regular.font(17.0), argb(ink)))
         .collect();
     let width: f32 = galleys.iter().map(|g| g.size().x + 26.0).sum();
     let capsule = Rect::from_min_size(pos2(right - width, top), vec2(width, 43.0));
@@ -611,7 +617,7 @@ pub(crate) fn capsule_words<'a>(ui: &egui::Ui, right: f32, top: f32, words: &[&'
     for (word, galley) in words.iter().zip(galleys) {
         let button = Rect::from_min_size(pos2(x, top), vec2(galley.size().x + 26.0, 43.0));
         let at = button.center() - galley.size() / 2.0;
-        ui.painter().galley(at, galley.clone(), argb(CAPSULE_INK));
+        ui.painter().galley(at, galley.clone(), argb(ink));
         if ui.interact(button, ui.scope_id().with(("capsule", *word)), Sense::click()).clicked() {
             tapped = Some(*word);
         }
@@ -685,6 +691,6 @@ fn switch_line(ui: &egui::Ui, row: Rect, label: &str, on: bool, id: &str) -> boo
         Weight::Regular,
         argb(INK),
     );
-    crate::transform::switch(ui, pos2(row.right() - 8.0 - 63.0, row.center().y - 14.0), on);
+    crate::transform::switch(ui, pos2(row.right() - 8.0 - 63.0, row.center().y - 14.0), on, id);
     ui.interact(row, ui.scope_id().with(id), Sense::click()).clicked()
 }

@@ -1,39 +1,37 @@
 //! The Actions panel, as the Android app's (ui/ActionsPanel.kt): six tabs (Add, Canvas, Share,
-//! Video, Prefs, Help) of grouped rows, and the pages Prefs opens (Advanced cursor, Pressure and
+//! Video, Prefs, Help; on a model, 3D in Video's place) of grouped rows, and the pages Prefs opens (Advanced cursor, Pressure and
 //! Smoothing). Rows the desktop can't do yet show dimmed, as the Android app's own rows still to
 //! come do. Share writes the artwork to a file.
+
+use std::collections::HashMap;
+use std::time::Instant;
 
 use egui::{Align2, Color32, Id, Order, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 
 use crate::animated_export::Animated;
 use crate::files::Format;
 use crate::icons;
-use crate::look::{Look, Weight, argb, highlight, mix, pc, text};
+use crate::look::{Look, Themed, Weight, argb, cubic_bezier, highlight, mix, pc, text};
 use crate::menu::{Glass, Menu};
 use crate::panel::{self, PANEL_TITLE};
 use crate::prefs::{CursorShows, CursorStyle, Prefs, RAPID_UNDO_MAX_S, RAPID_UNDO_MIN_S};
 
 const ACTIONS_WIDTH: f32 = 390.0;
-const TAB_IDLE: u32 = 0xFFA3A3A3;
-const ACTIONS_GROUP: u32 = 0x420C0C0C;
-const ACTIONS_SEPARATOR: u32 = 0x06FFFFFF;
-const ACTIONS_ROW: u32 = 0xFFA8A8A8;
-const ACTIONS_DISABLED: u32 = 0xFF5E5E5E;
-const SWITCH_FIXED: u32 = 0xFF404040;
-const SWITCH_FIXED_KNOB: u32 = 0xFF525252;
-const SLIDE_LABEL: u32 = 0xFFC1C1C1;
-const SLIDE_VALUE: u32 = 0xFFEDEDED;
-const SLIDE_TRACK: u32 = 0xFF414141;
-const CURSOR_HEADING: u32 = 0xFFB5B5B5;
-const CURVE_FILL: u32 = 0xFF262626;
-const CURVE_GRID: u32 = 0xFF353535;
-const CURVE_EDGE: u32 = 0xFF666666;
-const NODE_MENU_FILL: u32 = 0xFF101010;
-const NODE_MENU_WIDTH: f32 = 70.0;
-const NODE_MENU_ROW: f32 = 36.0;
+const TAB_IDLE: Themed = Themed(0xFFA3A3A3, 0xFF404040);
+const ACTIONS_GROUP: Themed = Themed(0x420C0C0C, 0xFFE8E8E8);
+const ACTIONS_SEPARATOR: Themed = Themed(0x06FFFFFF, 0xFFE2E2E2);
+const ACTIONS_ROW: Themed = Themed(0xFFA8A8A8, 0xFF393939);
+const ACTIONS_DISABLED: Themed = Themed(0xFF5E5E5E, 0xFFABABAB);
+const SWITCH_FIXED: Themed = Themed(0xFF404040, 0xFFD2D2D2);
+const SWITCH_FIXED_KNOB: Themed = Themed(0xFF525252, 0xFFE9E9E9);
+const SLIDE_LABEL: Themed = Themed(0xFFC1C1C1, 0xFF3D3D3D);
+const SLIDE_VALUE: Themed = Themed(0xFFEDEDED, 0xFF3D3D3D);
+const SLIDE_TRACK: Themed = Themed(0xFF414141, 0xFFBEBEBE);
+const CURSOR_HEADING: Themed = Themed(0xFFB5B5B5, 0xFF404040);
 /// Brush scaling's menu: its fill and rim, a radio's ring.
-const CHOICE_MENU: Glass = Glass { fill: 0xFF5A5C5B, edge: Some(0x33FFFFFF), frost: false, corner: 26.0 };
-const RADIO_RING: u32 = 0xFF606060;
+const CHOICE_MENU: Glass =
+    Glass { fill: Themed(0xFF5A5C5B, 0xFFF0F0F0), edge: Some(0x33FFFFFF), frost: false, corner: 26.0 };
+const RADIO_RING: Themed = Themed(0xFF606060, 0xFFB0B0B0);
 const ROW_HEIGHT: f32 = 44.0;
 const CHOICE_HEIGHT: f32 = 42.0;
 const SLIDE_HEIGHT: f32 = 63.0;
@@ -42,6 +40,17 @@ const HEADING_HEIGHT: f32 = 45.0;
 /// The panel ends this far above the window's bottom edge, and its rows scroll past this tall.
 const BOTTOM_MARGIN: f32 = 25.0;
 const MOST_ROWS: f32 = 760.0;
+/// A row with a private action: how far a swipe to the left slides it open, that action's button
+/// and its look, and how long it takes to settle open or closed (seconds).
+const PRIVATE_SLIDE: f32 = 248.0;
+const PRIVATE_WIDTH: f32 = 245.0;
+const PRIVATE_FILL: u32 = 0xFF454545;
+const PRIVATE_INK: u32 = 0xFFA8A8A8;
+const PRIVATE_SETTLE_S: f32 = 0.3;
+/// A page pushed in or going back, and the rows fading out and in as the tab changes (seconds).
+const PAGE_SLIDE_S: f32 = 0.45;
+const TAB_OUT_S: f32 = 0.1;
+const TAB_IN_S: f32 = 0.2;
 
 /// What a row does. Those the panel does itself (a page, a menu, a setting) never reach the app;
 /// [`Act::Prefs`] tells it a setting changed.
@@ -49,11 +58,24 @@ const MOST_ROWS: f32 = 760.0;
 pub enum Act {
     InsertFile,
     InsertPhoto,
-    Flip { horizontal: bool },
+    /// Insert a file or a photo, or Paste, swiped open: what they bring goes on a private layer.
+    InsertPrivateFile,
+    InsertPrivatePhoto,
+    PastePrivate,
+    /// On a model: its 2D texture shown flat, strokes reaching through it, the lighting studio.
+    ModelFlat,
+    PaintThrough,
+    LightingStudio,
+    Flip {
+        horizontal: bool,
+    },
     Share(Format),
     AnimatedExport(Animated),
+    /// A model's turntable as an animation.
+    ModelAnimated(Animated),
     About,
     Licences,
+    AdvancedSettings,
     GestureControls,
     CanvasInfo,
     AnimationAssist,
@@ -73,8 +95,10 @@ pub enum Act {
     Prefs,
     Page(Page),
     ScalingMenu,
+    LightInterface,
     RightHanded,
     BrushCursor,
+    ProjectCanvas,
     ResetInput,
 }
 
@@ -100,6 +124,9 @@ enum Slid {
 enum Row {
     /// A button row, dimmed without anything to do; its value on the right.
     Button(&'static str, Option<&'static str>, Option<Act>),
+    /// A button row a swipe to the left slides open, a second button coming in from the right
+    /// that does it privately: the two labels and what each does (none: dimmed).
+    Private(&'static str, &'static str, Option<Act>, Option<Act>),
     /// A switch row, on or off; what a tap does, or none where the desktop can't change it yet
     /// (shown dimmed, as it is).
     Switch(&'static str, bool, Option<Act>),
@@ -120,6 +147,61 @@ impl Row {
     }
 }
 
+/// The groups of a model's tab `tab` (Add, Canvas, Share or 3D).
+fn model_groups(tab: usize, showing: &Showing) -> Vec<Vec<Row>> {
+    use Row::{Button, Heading, Switch};
+    // showing the 2D texture, the rest is for the model
+    let shown = !showing.model_flat;
+    match tab {
+        0 => vec![
+            vec![
+                Button("Insert a file", None, Some(Act::InsertFile)),
+                Button("Insert a photo", None, Some(Act::InsertPhoto)),
+                Button("Take a photo", None, None),
+            ],
+            vec![
+                Button("Cut", None, Some(Act::Cut)),
+                Button("Copy", None, Some(Act::Copy)),
+                Button("Copy canvas", None, Some(Act::CopyCanvas)),
+                Button("Paste", None, showing.can_paste.then_some(Act::Paste)),
+            ],
+        ],
+        1 => vec![
+            vec![Switch("Reference", showing.reference, Some(Act::Reference))],
+            vec![Button("Canvas information", None, Some(Act::CanvasInfo))],
+        ],
+        2 => vec![
+            vec![
+                Heading("Share Model"),
+                // the layered package doesn't hold a model yet
+                Button("ProCraft", None, None),
+                Button("Procreate", None, None),
+                Button("USDZ", None, Some(Act::Share(Format::ModelUsdz))),
+                Button("OBJ", None, Some(Act::Share(Format::ModelObj))),
+            ],
+            vec![
+                Heading("Share Image"),
+                Button("JPEG", None, Some(Act::Share(Format::ModelJpeg))),
+                Button("PNG", None, Some(Act::Share(Format::ModelRender))),
+                Button("TIFF", None, Some(Act::Share(Format::ModelTiff))),
+                Button("Animated GIF", None, Some(Act::ModelAnimated(Animated::Gif))),
+                Button("Animated PNG", None, Some(Act::ModelAnimated(Animated::Png))),
+                Button("Animated MP4", None, Some(Act::ModelAnimated(Animated::Mp4))),
+                Button("Animated HEVC", None, Some(Act::ModelAnimated(Animated::Hevc))),
+            ],
+            vec![Heading("Share Textures"), Button("PNG", None, Some(Act::Share(Format::ModelTextures)))],
+        ],
+        _ => vec![
+            vec![
+                Switch("Show 2D texture", showing.model_flat, Some(Act::ModelFlat)),
+                Switch("Paint through mesh", showing.paint_through, shown.then_some(Act::PaintThrough)),
+                Button("Edit lighting & environment", None, shown.then_some(Act::LightingStudio)),
+            ],
+            vec![Button("View in AR", None, None)],
+        ],
+    }
+}
+
 /// What a tap in a group did.
 #[derive(Clone, Copy)]
 enum Tapped {
@@ -136,6 +218,16 @@ const TABS: [(&str, &icons::Icon); 6] = [
     ("Help", &icons::TAB_HELP),
 ];
 
+/// On a model, its own tab takes Video's place.
+const MODEL_TABS: [(&str, &icons::Icon); 6] = [
+    ("Add", &icons::TAB_ADD),
+    ("Canvas", &icons::TAB_CANVAS),
+    ("Share", &icons::TAB_SHARE),
+    ("3D", &icons::TAB3_D),
+    ("Prefs", &icons::TAB_PREFS),
+    ("Help", &icons::TAB_HELP),
+];
+
 /// What the rows show besides the settings: something to paste, and Animation or Page Assist,
 /// Reference, the drawing guide and the side bar on.
 pub struct Showing {
@@ -146,24 +238,44 @@ pub struct Showing {
     pub reference: bool,
     pub guide: bool,
     pub side_bar: bool,
+    /// The artwork paints on a model: whether its 2D texture shows flat, and strokes reach
+    /// through it.
+    pub model: bool,
+    pub model_flat: bool,
+    pub paint_through: bool,
 }
 
 /// The groups of rows of tab `tab`.
 fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
-    use Row::{Button, Heading, Slide, Switch};
+    use Row::{Button, Heading, Private, Slide, Switch};
+    if showing.model && tab <= 3 {
+        return model_groups(tab, showing);
+    }
     match tab {
         0 => vec![
             vec![
-                Button("Insert a file", None, Some(Act::InsertFile)),
-                Button("Insert a photo", None, Some(Act::InsertPhoto)),
-                Button("Take a photo", None, None),
+                // swiped to the left, the first three and Paste put what they bring on a private
+                // layer
+                Private("Insert a file", "Insert a private file", Some(Act::InsertFile), Some(Act::InsertPrivateFile)),
+                Private(
+                    "Insert a photo",
+                    "Insert a private photo",
+                    Some(Act::InsertPhoto),
+                    Some(Act::InsertPrivatePhoto),
+                ),
+                Private("Take a photo", "Take a private photo", None, None),
                 Button("Add text", None, None),
             ],
             vec![
                 Button("Cut", None, Some(Act::Cut)),
                 Button("Copy", None, Some(Act::Copy)),
                 Button("Copy canvas", None, Some(Act::CopyCanvas)),
-                Button("Paste", None, showing.can_paste.then_some(Act::Paste)),
+                Private(
+                    "Paste",
+                    "Paste Private",
+                    showing.can_paste.then_some(Act::Paste),
+                    showing.can_paste.then_some(Act::PastePrivate),
+                ),
             ],
         ],
         1 => vec![
@@ -214,14 +326,14 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
             let visibility = prefs.selection_visibility;
             vec![
                 vec![
-                    Switch("Light interface", false, None),
+                    Switch("Light interface", prefs.light_interface, Some(Act::LightInterface)),
                     Switch("Right-hand interface", prefs.right_handed, Some(Act::RightHanded)),
                     Button(
                         "Brush scaling",
                         Some(if prefs.brush_on_screen { "Screen" } else { "Canvas" }),
                         Some(Act::ScalingMenu),
                     ),
-                    Switch("Project canvas", false, None),
+                    Switch("Project canvas", prefs.project_canvas, Some(Act::ProjectCanvas)),
                     Switch("Brush cursor", prefs.brush_cursor, Some(Act::BrushCursor)),
                     Button("Advanced cursor settings", None, Some(Act::Page(Page::Cursor))),
                 ],
@@ -250,7 +362,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
         }
         _ => vec![
             vec![Button("About ProCraft", None, Some(Act::About)), Button("Licences", None, Some(Act::Licences))],
-            vec![Button("Advanced settings", None, None)],
+            vec![Button("Advanced settings", None, Some(Act::AdvancedSettings))],
         ],
     }
 }
@@ -305,16 +417,57 @@ fn choices_height(n: usize, chosen: usize) -> f32 {
 pub struct Actions {
     /// The tab open (kept between runs in the settings).
     tab: Option<usize>,
+    /// The tab whose rows show, and since when they change: the old rows fade out, then the new
+    /// ones fade in.
+    shown_tab: Option<usize>,
+    tab_fade: Option<(Instant, usize)>,
     page: Page,
+    /// The page last shown, and a page pushed in or going back: the page it leaves, since when,
+    /// and whether it went forward.
+    last_page: Page,
+    page_move: Option<(Page, Instant, bool)>,
     /// Brush scaling's menu, and the row it hangs from.
     scaling: Menu,
     scaling_row: Option<Rect>,
-    /// The pressure curve: the node pressed (its index, whether it was just added and whether it
-    /// moved), and the node whose menu shows.
-    curve_press: Option<(usize, bool, bool)>,
-    node_menu: Option<usize>,
-    /// The frame the node menu opened in (the press that opened it closes nothing).
-    node_menu_frame: u64,
+    /// Pressure and Smoothing's curve.
+    curve: crate::curve::CurveEditor,
+    /// The artwork paints on a model: its tabs have 3D in Video's place.
+    model_tabs: bool,
+    /// The rows with a private action swiped (by group and row), until the tab changes or the
+    /// panel closes.
+    swipes: Swipes,
+}
+
+type Swipes = HashMap<(usize, usize), Swipe>;
+
+/// A private row's slide: under a drag, where it is; otherwise settling from `from` towards open
+/// or closed since `since` (seconds).
+#[derive(Clone, Copy, Debug, Default)]
+struct Swipe {
+    dragging: Option<f32>,
+    from: f32,
+    open: bool,
+    since: f64,
+}
+
+impl Swipe {
+    /// How far it is slid open at `now` (0 closed, [`PRIVATE_SLIDE`] open).
+    fn at(&self, now: f64) -> f32 {
+        if let Some(d) = self.dragging {
+            return d;
+        }
+        let to = if self.open { PRIVATE_SLIDE } else { 0.0 };
+        let k = ((now - self.since) as f32 / PRIVATE_SETTLE_S).clamp(0.0, 1.0);
+        self.from + (to - self.from) * crate::look::spring(PRIVATE_SETTLE_S, 0.8, 0.2, k)
+    }
+
+    /// Settling open or closed from where it is.
+    fn settle(&mut self, open: bool, now: f64) {
+        self.from = self.at(now);
+        self.dragging = None;
+        self.open = open;
+        self.since = now;
+    }
 }
 
 impl Actions {
@@ -333,54 +486,87 @@ impl Actions {
         let (left, arrow_x) = panel::place(ctx, ACTIONS_WIDTH, button.center().x);
         let top = screen.top() + pc::BAR_HEIGHT;
         let tab = *self.tab.get_or_insert(prefs.actions_tab);
-        let groups = groups(tab, showing, prefs);
+        let rows_alpha = self.tab_fade(ctx, tab);
+        let groups = groups(self.shown_tab.unwrap_or(tab), showing, prefs);
+        self.model_tabs = showing.model;
         let header = 12.0 + 44.0;
-        let content = panel::ARROW_HEIGHT
-            + match self.page {
-                Page::Tabs => {
-                    let rows: f32 = groups.iter().map(|g| group_height(g)).sum::<f32>()
-                        + GROUP_GAP * (groups.len().saturating_sub(1)) as f32;
-                    22.0 + 34.0 + 60.0 + 20.0 + rows.min(MOST_ROWS) + 11.0
+        let content_of = |page: Page| {
+            panel::ARROW_HEIGHT
+                + match page {
+                    Page::Tabs => {
+                        let rows: f32 = groups.iter().map(|g| group_height(g)).sum::<f32>()
+                            + GROUP_GAP * (groups.len().saturating_sub(1)) as f32;
+                        22.0 + 34.0 + 60.0 + 20.0 + rows.min(MOST_ROWS) + 11.0
+                    }
+                    Page::Cursor => {
+                        let heading = 21.0 + 8.0;
+                        header
+                            + 8.0
+                            + 6.0
+                            + heading
+                            + choices_height(3, prefs.cursor_shows as usize)
+                            + 28.0
+                            + heading
+                            + choices_height(3, prefs.cursor_style as usize)
+                            + 13.0
+                    }
+                    Page::Pressure => {
+                        let curve = ACTIONS_WIDTH - 24.0 - 14.0;
+                        let rows = 20.0
+                            + group_height(&smoothing_rows(prefs))
+                            + 16.0
+                            + ROW_HEIGHT
+                            + 24.0
+                            + 19.0
+                            + curve
+                            + 27.0
+                            + ROW_HEIGHT
+                            + 13.0;
+                        header + rows.min(MOST_ROWS)
+                    }
                 }
-                Page::Cursor => {
-                    let heading = 21.0 + 8.0;
-                    header
-                        + 8.0
-                        + 6.0
-                        + heading
-                        + choices_height(3, prefs.cursor_shows as usize)
-                        + 28.0
-                        + heading
-                        + choices_height(3, prefs.cursor_style as usize)
-                        + 13.0
-                }
-                Page::Pressure => {
-                    let curve = ACTIONS_WIDTH - 24.0 - 14.0;
-                    let rows = 20.0
-                        + group_height(&smoothing_rows(prefs))
-                        + 16.0
-                        + ROW_HEIGHT
-                        + 24.0
-                        + 19.0
-                        + curve
-                        + 27.0
-                        + ROW_HEIGHT
-                        + 13.0;
-                    header + rows.min(MOST_ROWS)
-                }
-            };
+        };
+        // a page pushed in slides in from the right as the one it covers slides off to the left;
+        // going back, the page goes at once as the one under it slides back in; the panel's
+        // height follows
+        let moving = self.page_move.map(|(from, since, forward)| {
+            let t = since.elapsed().as_secs_f32() / PAGE_SLIDE_S;
+            (from, cubic_bezier(0.25, 0.1, 0.25, 1.0, t), forward, t >= 1.0)
+        });
+        let content = match moving {
+            Some((from, e, _, _)) => content_of(from) + (content_of(self.page) - content_of(from)) * e,
+            None => content_of(self.page),
+        };
+        if moving.is_some_and(|m| m.3) {
+            self.page_move = None;
+        } else if moving.is_some() {
+            ctx.request_repaint();
+        }
         let height = content.min(screen.bottom() - BOTTOM_MARGIN - top);
         let rect = Rect::from_min_size(pos2(left, top), vec2(ACTIONS_WIDTH, height));
         let mut tapped = None;
+        let page = self.page;
         egui::Area::new(Id::unique("actions panel")).fixed_pos(rect.min).order(Order::Foreground).show(ctx, |ui| {
             ui.allocate_rect(rect, Sense::click());
             panel::frame(ui, look, "actions frame", rect, arrow_x, backdrops);
             let body = panel::body(rect);
-            tapped = match self.page {
-                Page::Tabs => self.tabs(ui, look, body, &groups),
-                Page::Cursor => self.cursor_page(ui, look, body, prefs),
-                Page::Pressure => self.pressure_page(ui, look, body, prefs),
-            };
+            ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
+                ui.set_clip_rect(body.intersect(ui.clip_rect()));
+                let width = body.width();
+                let (shift, leaving) = match moving {
+                    Some((from, e, true, false)) => (width * (1.0 - e), Some((from, -width * e))),
+                    Some((_, e, false, false)) => (-width * (1.0 - e), None),
+                    _ => (0.0, None),
+                };
+                // the page it leaves, only seen
+                if let Some((from, dx)) = leaving {
+                    let _ = self.page_view(ui, look, from, body.translate(vec2(dx, 0.0)), &groups, prefs, rows_alpha);
+                }
+                tapped = self.page_view(ui, look, page, body.translate(vec2(shift, 0.0)), &groups, prefs, rows_alpha);
+                if leaving.is_some() || shift != 0.0 {
+                    tapped = None;
+                }
+            });
         });
         // what the panel does itself
         let mut act = match tapped {
@@ -392,12 +578,20 @@ impl Actions {
                 self.scaling.open();
                 None
             }
+            Some(Tapped::Act(Act::LightInterface)) => {
+                prefs.light_interface = !prefs.light_interface;
+                Some(Act::Prefs)
+            }
             Some(Tapped::Act(Act::RightHanded)) => {
                 prefs.right_handed = !prefs.right_handed;
                 Some(Act::Prefs)
             }
             Some(Tapped::Act(Act::BrushCursor)) => {
                 prefs.brush_cursor = !prefs.brush_cursor;
+                Some(Act::Prefs)
+            }
+            Some(Tapped::Act(Act::ProjectCanvas)) => {
+                prefs.project_canvas = !prefs.project_canvas;
                 Some(Act::Prefs)
             }
             Some(Tapped::Act(Act::ResetInput)) => {
@@ -428,27 +622,86 @@ impl Actions {
         if self.scaling_menu(ctx, look, prefs, backdrops) {
             act = Some(Act::Prefs);
         }
-        if self.node_menu(ctx, prefs) {
+        if self.page != Page::Pressure {
+            self.curve.close();
+        }
+        if self.curve.menu(ctx, &mut prefs.curve) {
             act = Some(Act::Prefs);
+        }
+        // another page: it slides in
+        if self.page != self.last_page {
+            self.page_move = Some((self.last_page, Instant::now(), self.page != Page::Tabs));
+            self.last_page = self.page;
+            ctx.request_repaint();
         }
         (rect, act)
     }
 
+    /// Page `page` of the panel in `body`, the tabs' rows shown `rows_alpha`.
+    #[allow(clippy::too_many_arguments)]
+    fn page_view(
+        &mut self,
+        ui: &mut Ui,
+        look: &mut Look,
+        page: Page,
+        body: Rect,
+        groups: &[Vec<Row>],
+        prefs: &mut Prefs,
+        rows_alpha: f32,
+    ) -> Option<Tapped> {
+        match page {
+            Page::Tabs => self.tabs(ui, look, body, groups, rows_alpha),
+            Page::Cursor => self.cursor_page(ui, look, body, prefs),
+            Page::Pressure => self.pressure_page(ui, look, body, prefs),
+        }
+    }
+
+    /// How much the rows show as the tab changes to `tab`: the old ones fade out (0.1 s), then
+    /// the new ones fade in (0.2 s).
+    fn tab_fade(&mut self, ctx: &egui::Context, tab: usize) -> f32 {
+        let shown = *self.shown_tab.get_or_insert(tab);
+        // another tab (also while the rows fade): they fade out from here
+        if self.tab_fade.map_or(shown != tab, |(_, to)| to != tab) {
+            self.tab_fade = Some((Instant::now(), tab));
+        }
+        let Some((since, _)) = self.tab_fade else { return 1.0 };
+        ctx.request_repaint();
+        let t = since.elapsed().as_secs_f32();
+        let ease = |k: f32| cubic_bezier(0.42, 0.0, 0.58, 1.0, k);
+        if t < TAB_OUT_S {
+            return 1.0 - ease(t / TAB_OUT_S);
+        }
+        if self.shown_tab != Some(tab) {
+            self.swipes.clear();
+        }
+        self.shown_tab = Some(tab);
+        let k = (t - TAB_OUT_S) / TAB_IN_S;
+        if k >= 1.0 {
+            self.tab_fade = None;
+            return 1.0;
+        }
+        ease(k)
+    }
+
     /// One of its menus is open: a press elsewhere only closes it.
     pub fn modal(&self) -> bool {
-        self.scaling.is_open() || self.node_menu.is_some()
+        self.scaling.is_open() || self.curve.menu_open()
     }
 
     /// The panel's pages go back to the tabs (as it closes).
     pub fn closed(&mut self) {
         self.page = Page::Tabs;
+        self.last_page = Page::Tabs;
+        self.page_move = None;
+        self.tab_fade = None;
+        self.shown_tab = self.tab;
         self.scaling.close();
-        self.node_menu = None;
-        self.curve_press = None;
+        self.curve.close();
+        self.swipes.clear();
     }
 
     /// The tabs page: the title, the tabs, and the open tab's groups.
-    fn tabs(&mut self, ui: &mut Ui, look: &mut Look, body: Rect, groups: &[Vec<Row>]) -> Option<Tapped> {
+    fn tabs(&mut self, ui: &mut Ui, look: &mut Look, body: Rect, groups: &[Vec<Row>], alpha: f32) -> Option<Tapped> {
         text(
             ui.painter(),
             pos2(body.left() + 24.0, body.top() + 22.0),
@@ -460,7 +713,8 @@ impl Actions {
         );
         // the tabs: 54 wide, 10 apart; a tab lights up as soon as it is touched
         let tabs_top = body.top() + 22.0 + 34.0;
-        for (i, (label, icon)) in TABS.iter().enumerate() {
+        let tabs = if self.model_tabs { &MODEL_TABS } else { &TABS };
+        for (i, (label, icon)) in tabs.iter().enumerate() {
             let cell = Rect::from_min_size(pos2(body.left() + 10.0 + 64.0 * i as f32, tabs_top), vec2(54.0, 60.0));
             let response = ui.interact(cell, ui.scope_id().with(("tab", i)), Sense::click());
             if response.clicked() {
@@ -468,9 +722,9 @@ impl Actions {
             }
             let lit = Some(i) == self.tab || response.is_pointer_button_down_on();
             // a 50 frame centred 24 down
-            let tint = argb(if lit { pc::ACCENT } else { TAB_IDLE });
+            let tint = if lit { argb(pc::ACCENT) } else { argb(TAB_IDLE) };
             look.icon(ui, icon, pos2(cell.center().x, cell.top() + 24.0), 50.0, tint);
-            let ink = if lit { Color32::WHITE } else { argb(TAB_IDLE) };
+            let ink = if lit { argb(pc::TEXT) } else { argb(TAB_IDLE) };
             let at = pos2(cell.center().x, cell.top() + 41.0);
             text(ui.painter(), at, Align2::CENTER_TOP, label, 12.0, Weight::Medium, ink);
         }
@@ -480,9 +734,11 @@ impl Actions {
         );
         let mut tapped = None;
         self.scaling_row = None;
+        let shown_tab = self.shown_tab;
         ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
+            ui.multiply_opacity(alpha);
             ScrollArea::vertical()
-                .id_salt(("actions rows", self.tab))
+                .id_salt(("actions rows", shown_tab))
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -490,7 +746,7 @@ impl Actions {
                         if g > 0 {
                             ui.add_space(GROUP_GAP);
                         }
-                        let (t, cells) = group_view(ui, group, g);
+                        let (t, cells) = group_view(ui, group, g, &mut self.swipes);
                         tapped = tapped.or(t);
                         // Brush scaling's menu hangs beside its row
                         if let Some(at) = group
@@ -529,7 +785,7 @@ impl Actions {
                     vec2(rect.width(), 40.0),
                 );
                 let at = pos2(line.left() + 20.0, line.center().y);
-                text(ui.painter(), at, Align2::LEFT_CENTER, label, 14.5, Weight::Regular, Color32::WHITE);
+                text(ui.painter(), at, Align2::LEFT_CENTER, label, 14.5, Weight::Regular, argb(pc::TEXT));
                 radio(ui, look, pos2(line.right() - 19.0 - 9.0, line.center().y), i == chosen);
                 if ui.interact(line, ui.scope_id().with(("scaling", i)), Sense::click()).clicked() {
                     picked = Some(i == 1);
@@ -551,7 +807,7 @@ impl Actions {
         let tapped = ui.interact(back, ui.scope_id().with("back"), Sense::click()).clicked();
         if tapped {
             self.page = Page::Tabs;
-            self.node_menu = None;
+            self.curve.close();
         }
         tapped
     }
@@ -615,10 +871,10 @@ impl Actions {
                     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                     let width = ui.available_width();
                     ui.add_space(20.0);
-                    tapped = group_view(ui, &smoothing_rows(prefs), 0).0;
+                    tapped = group_view(ui, &smoothing_rows(prefs), 0, &mut self.swipes).0;
                     ui.add_space(16.0);
                     // the stroke always starts at the pointer's tip here
-                    group_view(ui, &[Row::Fixed("Tip Attachment", true)], 1);
+                    group_view(ui, &[Row::Fixed("Tip Attachment", true)], 1, &mut self.swipes);
                     ui.add_space(24.0);
                     let (label, _) = ui.allocate_exact_size(vec2(width, 19.0), Sense::hover());
                     text(
@@ -632,177 +888,22 @@ impl Actions {
                     );
                     let (band, _) = ui.allocate_exact_size(vec2(width, width - 14.0), Sense::hover());
                     let square = band.shrink2(vec2(7.0, 0.0));
-                    if self.pressure_curve(ui, square, &mut prefs.curve) {
+                    if self.curve.show(ui, square, &mut prefs.curve, &crate::curve::ACTIONS, "pressure") {
                         tapped = Some(Tapped::Act(Act::Prefs));
                     }
                     ui.add_space(27.0);
-                    let (t, _) = group_view(ui, &[Row::Button("Reset all", None, Some(Act::ResetInput))], 2);
+                    let reset = [Row::Button("Reset all", None, Some(Act::ResetInput))];
+                    let (t, _) = group_view(ui, &reset, 2, &mut self.swipes);
                     tapped = tapped.or(t);
                     ui.add_space(13.0);
                 });
         });
         tapped
     }
-
-    /// The pressure curve in `rect`: a press off the nodes adds one there, a node is dragged
-    /// between its neighbours, and a tap on a node shows its menu. True when it changed.
-    fn pressure_curve(&mut self, ui: &Ui, rect: Rect, curve: &mut Vec<[f32; 2]>) -> bool {
-        let response = ui.interact(rect, ui.scope_id().with("pressure curve"), Sense::click_and_drag());
-        let to_curve = |p: Pos2| {
-            [
-                ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
-                (1.0 - (p.y - rect.top()) / rect.height()).clamp(0.0, 1.0),
-            ]
-        };
-        let mut changed = false;
-        let down = response.is_pointer_button_down_on();
-        if down
-            && self.curve_press.is_none()
-            && let Some(origin) = ui.input(|i| i.pointer.press_origin())
-        {
-            self.node_menu = None;
-            let at = to_curve(origin);
-            let near = curve.iter().position(|p| (p[0] - at[0]).hypot(p[1] - at[1]) < 0.05);
-            let index = near.unwrap_or_else(|| {
-                curve.push(at);
-                curve.sort_by(|a, b| a[0].total_cmp(&b[0]));
-                changed = true;
-                curve.iter().position(|p| *p == at).unwrap_or(0)
-            });
-            self.curve_press = Some((index, near.is_none(), false));
-        } else if response.clicked()
-            && self.curve_press.is_none()
-            && let Some(p) = response.interact_pointer_pos()
-        {
-            // pressed and let go within a frame: on a node its menu, elsewhere a node added
-            let at = to_curve(p);
-            match curve.iter().position(|p| (p[0] - at[0]).hypot(p[1] - at[1]) < 0.05) {
-                Some(index) => {
-                    self.node_menu = Some(index);
-                    self.node_menu_frame = ui.ctx().cumulative_frame_nr();
-                }
-                None => {
-                    curve.push(at);
-                    curve.sort_by(|a, b| a[0].total_cmp(&b[0]));
-                    changed = true;
-                }
-            }
-        }
-        if let Some((index, _, moved)) = self.curve_press.as_mut() {
-            if down
-                && response.dragged()
-                && let Some(p) = response.interact_pointer_pos()
-            {
-                *moved = true;
-                let [x, y] = to_curve(p);
-                let lo = index.checked_sub(1).and_then(|i| curve.get(i)).map_or(0.0, |p| p[0]);
-                let hi = curve.get(*index + 1).map_or(1.0, |p| p[0]);
-                if let Some(node) = curve.get_mut(*index) {
-                    *node = [x.clamp(lo, hi.max(lo)), y];
-                    changed = true;
-                }
-            }
-            if !down {
-                // a tap on a node shows what can be done with it
-                if let Some((index, false, false)) = self.curve_press {
-                    self.node_menu = Some(index);
-                    self.node_menu_frame = ui.ctx().cumulative_frame_nr();
-                }
-                self.curve_press = None;
-            }
-        }
-        let painter = ui.painter();
-        painter.rect_filled(rect, 0, argb(CURVE_FILL));
-        for k in 1..4 {
-            let f = k as f32 / 4.0;
-            let x = rect.left() + rect.width() * f;
-            let y = rect.top() + rect.height() * f;
-            painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0, argb(CURVE_GRID)));
-            painter.line_segment([pos2(rect.left(), y), pos2(rect.right(), y)], Stroke::new(1.0, argb(CURVE_GRID)));
-        }
-        painter.rect_stroke(rect, 0, Stroke::new(1.0, argb(CURVE_EDGE)), egui::StrokeKind::Inside);
-        let samples = procraft_core::curve_samples(curve.iter().flatten().copied().collect(), 129);
-        let last = samples.len().saturating_sub(1).max(1) as f32;
-        let line: Vec<Pos2> = samples
-            .iter()
-            .enumerate()
-            .map(|(i, v)| pos2(rect.left() + rect.width() * i as f32 / last, rect.top() + (1.0 - v) * rect.height()))
-            .collect();
-        painter.add(egui::Shape::line(line, Stroke::new(1.5, Color32::WHITE)));
-        let place = |[x, y]: [f32; 2]| pos2(rect.left() + x * rect.width(), rect.top() + (1.0 - y) * rect.height());
-        for p in curve.iter() {
-            painter.circle_filled(place(*p), 7.0, Color32::WHITE);
-            painter.circle_filled(place(*p), 5.0, argb(pc::ACCENT));
-        }
-        // where the node menu goes: centred over its node, its bottom 11 above it
-        if let Some(i) = self.node_menu
-            && let Some(p) = curve.get(i)
-        {
-            let rows = if i == 0 || i + 1 == curve.len() { 1.0 } else { 2.0 };
-            let at = place(*p);
-            let menu = Rect::from_min_size(
-                pos2(at.x - NODE_MENU_WIDTH / 2.0, at.y - 11.0 - NODE_MENU_ROW * rows),
-                vec2(NODE_MENU_WIDTH, NODE_MENU_ROW * rows),
-            );
-            ui.ctx().data_mut(|d| d.insert_temp(Id::unique("node menu at"), menu));
-        }
-        changed
-    }
-
-    /// The menu over a curve node, while it shows: Delete (a node between the ends) and Reset (the
-    /// curve straight again). A press elsewhere closes it. True when the curve changed.
-    fn node_menu(&mut self, ctx: &egui::Context, prefs: &mut Prefs) -> bool {
-        let Some(index) = self.node_menu else { return false };
-        let Some(menu) = ctx.data(|d| d.get_temp::<Rect>(Id::unique("node menu at"))) else { return false };
-        if self.page != Page::Pressure || index >= prefs.curve.len() {
-            self.node_menu = None;
-            return false;
-        }
-        let end = index == 0 || index + 1 == prefs.curve.len();
-        let rows: &[&str] = if end { &["Reset"] } else { &["Delete", "Reset"] };
-        let mut picked = None;
-        egui::Area::new(Id::unique("curve node menu")).fixed_pos(menu.min).order(Order::Tooltip).show(ctx, |ui| {
-            ui.allocate_rect(menu, Sense::click());
-            let shadow =
-                egui::epaint::Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(0x80) };
-            ui.painter().add(shadow.as_shape(menu, 12.0));
-            ui.painter().rect_filled(menu, 12, argb(NODE_MENU_FILL));
-            for (k, label) in rows.iter().enumerate() {
-                let row = Rect::from_min_size(
-                    pos2(menu.left(), menu.top() + NODE_MENU_ROW * k as f32),
-                    vec2(menu.width(), NODE_MENU_ROW),
-                );
-                text(ui.painter(), row.center(), Align2::CENTER_CENTER, label, 17.0, Weight::Regular, Color32::WHITE);
-                if ui.interact(row, ui.scope_id().with(("node", k)), Sense::click()).clicked() {
-                    picked = Some(*label);
-                }
-            }
-        });
-        let pressed_elsewhere =
-            ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !menu.contains(p)));
-        match picked {
-            Some("Delete") => {
-                prefs.curve.remove(index);
-                self.node_menu = None;
-                true
-            }
-            Some(_) => {
-                prefs.curve = crate::prefs::straight();
-                self.node_menu = None;
-                true
-            }
-            None => {
-                if pressed_elsewhere && ctx.cumulative_frame_nr() != self.node_menu_frame {
-                    self.node_menu = None;
-                }
-                false
-            }
-        }
-    }
 }
 
 /// A radio mark centred at `at`: blue with a tick when chosen, else a grey ring.
-fn radio(ui: &Ui, look: &mut Look, at: Pos2, chosen: bool) {
+pub(crate) fn radio(ui: &Ui, look: &mut Look, at: Pos2, chosen: bool) {
     if chosen {
         ui.painter().circle_filled(at, 9.0, argb(pc::ACCENT));
         look.icon(ui, &icons::TICK, at, 12.0, Color32::WHITE);
@@ -848,7 +949,7 @@ fn choice_group(ui: &Ui, rect: Rect, labels: &[&str], chosen: usize, g: usize) -
 /// A group: led by its heading (above it, not a row of it), its rows on a dark rounded wash with
 /// faint lines between them (none between sliders). Returns what was tapped, and where each row
 /// is.
-fn group_view(ui: &mut Ui, rows: &[Row], g: usize) -> (Option<Tapped>, Vec<Rect>) {
+fn group_view(ui: &mut Ui, rows: &[Row], g: usize, swipes: &mut Swipes) -> (Option<Tapped>, Vec<Rect>) {
     let width = ui.available_width();
     let mut rows = rows.iter().peekable();
     if let Some(Row::Heading(label)) = rows.peek() {
@@ -884,27 +985,20 @@ fn group_view(ui: &mut Ui, rows: &[Row], g: usize) -> (Option<Tapped>, Vec<Rect>
         match row {
             Row::Button(label, value, act) => {
                 let response = ui.interact(cell, ui.scope_id().with(("row", g, i)), Sense::click());
-                // a button row turns blue while it is held, its text white
-                let held = response.is_pointer_button_down_on();
-                let lit = if act.is_some() { highlight(ui.ctx(), response.id, held) } else { 0.0 };
-                if lit > 0.0 {
-                    ui.painter().rect_filled(cell, corners, argb(pc::ACCENT).gamma_multiply(lit));
-                }
-                let idle = argb(if act.is_some() { ACTIONS_ROW } else { ACTIONS_DISABLED });
-                let ink = mix(idle, Color32::WHITE, lit);
-                text(ui.painter(), label_at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, ink);
-                if let Some(v) = value {
-                    let shown = mix(argb(TAB_IDLE), Color32::WHITE, lit);
-                    let at = pos2(cell.right() - 16.0, cell.center().y);
-                    text(ui.painter(), at, Align2::RIGHT_CENTER, v, 15.0, Weight::Regular, shown);
-                }
+                button_row(ui, &response, cell, corners, label, *value, act.is_some());
                 if response.clicked() {
                     tapped = act.map(Tapped::Act);
                 }
             }
+            Row::Private(label, private, act, private_act) => {
+                if let Some(t) = private_row(ui, cell, corners, (label, private), (*act, *private_act), swipes, (g, i))
+                {
+                    tapped = Some(t);
+                }
+            }
             Row::Switch(label, on, Some(act)) => {
                 text(ui.painter(), label_at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
-                crate::transform::switch(ui, switch_at, *on);
+                crate::transform::switch(ui, switch_at, *on, label);
                 if ui.interact(cell, ui.scope_id().with(("switch", g, i)), Sense::click()).clicked() {
                     tapped = Some(Tapped::Act(*act));
                 }
@@ -929,6 +1023,97 @@ fn group_view(ui: &mut Ui, rows: &[Row], g: usize) -> (Option<Tapped>, Vec<Rect>
         y += row.height();
     }
     (tapped, cells)
+}
+
+/// A button row at `cell`: it turns blue while it is held (`response`), its text white; dimmed
+/// unless it does something (`acts`). Its value, if any, on the right.
+fn button_row(
+    ui: &Ui,
+    response: &egui::Response,
+    cell: Rect,
+    corners: egui::CornerRadius,
+    label: &str,
+    value: Option<&str>,
+    acts: bool,
+) {
+    let held = response.is_pointer_button_down_on() && !response.dragged();
+    let lit = if acts { highlight(ui.ctx(), response.id, held) } else { 0.0 };
+    if lit > 0.0 {
+        ui.painter().rect_filled(cell, corners, argb(pc::ACCENT).gamma_multiply(lit));
+    }
+    let idle = if acts { argb(ACTIONS_ROW) } else { argb(ACTIONS_DISABLED) };
+    let ink = mix(idle, Color32::WHITE, lit);
+    text(
+        ui.painter(),
+        pos2(cell.left() + 16.0, cell.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        17.0,
+        Weight::Regular,
+        ink,
+    );
+    if let Some(v) = value {
+        let shown = mix(argb(TAB_IDLE), Color32::WHITE, lit);
+        let at = pos2(cell.right() - 16.0, cell.center().y);
+        text(ui.painter(), at, Align2::RIGHT_CENTER, v, 15.0, Weight::Regular, shown);
+    }
+}
+
+/// A row with a private action at `cell`: a swipe to the left slides it open (let go past halfway
+/// it stays open), its private button coming in from the right; a tap on the row closes it again,
+/// one on the button does it privately. Returns what was tapped.
+fn private_row(
+    ui: &Ui,
+    cell: Rect,
+    corners: egui::CornerRadius,
+    (label, private): (&str, &str),
+    (act, private_act): (Option<Act>, Option<Act>),
+    swipes: &mut Swipes,
+    at: (usize, usize),
+) -> Option<Tapped> {
+    let now = ui.input(|i| i.time);
+    let id = ui.scope_id().with(("private row", at));
+    let response = ui.interact(cell, id, Sense::click_and_drag());
+    let swipe = swipes.entry(at).or_default();
+    if response.drag_started() {
+        swipe.dragging = Some(swipe.at(now));
+    }
+    if let Some(d) = swipe.dragging.as_mut() {
+        *d = (*d - response.drag_delta().x).clamp(0.0, PRIVATE_SLIDE);
+    }
+    if response.drag_stopped() {
+        let open = swipe.at(now) > PRIVATE_SLIDE / 2.0;
+        swipe.settle(open, now);
+    }
+    let slide = swipe.at(now);
+    if swipe.dragging.is_none() && (now - swipe.since) < f64::from(PRIVATE_SETTLE_S) {
+        ui.ctx().request_repaint();
+    }
+    let painter = ui.painter_at(cell);
+    if slide <= 0.0 {
+        button_row(ui, &response, cell, corners, label, None, act.is_some());
+        return response.clicked().then_some(act).flatten().map(Tapped::Act);
+    }
+    // slid aside, the row only closes again when tapped
+    let ink = if act.is_some() { argb(ACTIONS_ROW) } else { argb(ACTIONS_DISABLED) };
+    let label_at = pos2(cell.left() + 16.0 - slide, cell.center().y);
+    text(&painter, label_at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, ink);
+    let left = cell.right() - PRIVATE_WIDTH + (PRIVATE_SLIDE - slide);
+    let button = Rect::from_min_size(pos2(left, cell.top()), vec2(PRIVATE_WIDTH, cell.height()));
+    // rounded 13, its outer corners as round as the group's where it meets them
+    let round = egui::CornerRadius { nw: 13, sw: 13, ne: corners.ne.max(13), se: corners.se.max(13) };
+    painter.rect_filled(button, round, argb(PRIVATE_FILL));
+    let ink = if private_act.is_some() { argb(PRIVATE_INK) } else { argb(ACTIONS_DISABLED) };
+    text(&painter, button.center(), Align2::CENTER_CENTER, private, 17.0, Weight::Regular, ink);
+    let pressed = ui.interact(button.intersect(cell), id.with("private"), Sense::click()).clicked();
+    if pressed && private_act.is_some() {
+        *swipe = Swipe::default();
+        return private_act.map(Tapped::Act);
+    }
+    if response.clicked() {
+        swipe.settle(false, now);
+    }
+    None
 }
 
 /// The rows' height in a group, with the lines between them (none between sliders).

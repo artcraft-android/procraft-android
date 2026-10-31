@@ -8,15 +8,15 @@ use procraft_core::{CanvasSession, GuideInfo, GuideType, SymmetryType};
 
 use crate::adjust_panels::{kinds_switch, option_slider, options_choices, options_menu, panel, panel_rect, shown};
 use crate::icons;
-use crate::look::{Look, Weight, argb, text};
+use crate::look::{Look, Themed, Weight, argb, text};
 
-const TOP: u32 = 0xFF1F1F1F;
-const BUTTON: u32 = 0xFF1C1C1C;
-const BUTTON_EDGE: u32 = 0xFF383838;
-const TITLE: u32 = 0xFFD8D8D8;
+const TOP: Themed = Themed(0xFF1F1F1F, 0xFFE1E1E3);
+const BUTTON: Themed = Themed(0xFF1C1C1C, 0xFFF5F8F9);
+const BUTTON_EDGE: Themed = Themed(0xFF383838, 0xFFDCDEDF);
+const TITLE: Themed = Themed(0xFFD8D8D8, 0xFF3A3A3A);
 const DONE: u32 = 0xFF0190FF;
-const NOTE: u32 = 0xFF4A4A4A;
-const LABEL: u32 = 0xFFD0D0D0;
+const NOTE: Themed = Themed(0xFF4A4A4A, 0xFFB5B5B5);
+const LABEL: Themed = Themed(0xFFD0D0D0, 0xFF414141);
 const OPTIONS: u32 = 0xFF303030;
 const NODE_CENTRE: u32 = 0xFF0A84FF;
 const NODE_TURN: u32 = 0xFF30D158;
@@ -295,7 +295,7 @@ impl GuideEditor {
             let switch_y = third_top + 27.0;
             let right = if wide { rect.right() - 22.0 } else { third + slider_w + gap + slider_w };
             let switch_at = pos2(right - 63.0, switch_y - 14.0);
-            crate::transform::switch(ui, switch_at, g.assisted);
+            crate::transform::switch(ui, switch_at, g.assisted, "assisted");
             let label_at = pos2(if wide { switch_at.x - 12.0 } else { third + slider_w + gap + 8.0 }, switch_y);
             let align = if wide { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER };
             text(ui.painter(), label_at, align, "Assisted Drawing", 15.0, Weight::Regular, argb(LABEL));
@@ -347,7 +347,7 @@ impl GuideEditor {
                     Weight::Regular,
                     argb(LABEL),
                 );
-                crate::transform::switch(ui, pos2(row.right() - 63.0, row.center().y - 14.0), on);
+                crate::transform::switch(ui, pos2(row.right() - 63.0, row.center().y - 14.0), on, label);
                 if ui.interact(row, ui.scope_id().with(("symmetry switch", i)), Sense::click()).clicked() {
                     if i == 0 {
                         session.set_guide_symmetry(g.symmetry, !g.rotational);

@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Align2, Color32, FontFamily, FontId, Painter, Pos2, Rect, TextureHandle, TextureOptions, Ui, pos2, vec2};
@@ -12,9 +13,50 @@ use resvg::tiny_skia;
 
 use crate::icons::Icon;
 
-/// A colour written 0xAARRGGBB, as the Android app writes them.
-pub fn argb(v: u32) -> Color32 {
-    let [a, r, g, b] = v.to_be_bytes();
+/// The light interface (Prefs) is on: panels and bars go light grey with dark text.
+static LIGHT: AtomicBool = AtomicBool::new(false);
+
+pub fn light() -> bool {
+    LIGHT.load(Ordering::Relaxed)
+}
+
+pub fn set_light(on: bool) {
+    LIGHT.store(on, Ordering::Relaxed);
+}
+
+/// A colour the interface shows as the first (0xAARRGGBB) while dark, the second while light.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Themed(pub u32, pub u32);
+
+/// A colour as written: the same either way (0xAARRGGBB), or one for each look.
+pub trait Shade: Copy {
+    /// The colour now, 0xAARRGGBB.
+    fn value(self) -> u32;
+}
+
+impl Shade for u32 {
+    fn value(self) -> u32 {
+        self
+    }
+}
+
+impl Shade for Themed {
+    fn value(self) -> u32 {
+        if light() { self.1 } else { self.0 }
+    }
+}
+
+/// The same colour either way.
+impl From<u32> for Themed {
+    fn from(v: u32) -> Themed {
+        Themed(v, v)
+    }
+}
+
+/// A colour written 0xAARRGGBB, as the Android app writes them (as it is now, for one with a
+/// light look).
+pub fn argb(v: impl Shade) -> Color32 {
+    let [a, r, g, b] = v.value().to_be_bytes();
     Color32::from_rgba_unmultiplied(r, g, b, a)
 }
 
@@ -25,16 +67,22 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgba_premultiplied(ch(a.r(), b.r()), ch(a.g(), b.g()), ch(a.b(), b.b()), ch(a.a(), b.a()))
 }
 
-/// The dark interface's colours (0xAARRGGBB) and sizes (points), named as the Android app's `Pc`.
+/// The interface's colours (0xAARRGGBB, dark and light) and sizes (points), named as the Android
+/// app's `Pc`.
 pub mod pc {
+    use super::Themed;
+
     pub const ACCENT: u32 = 0xFF0076FD;
-    pub const BAR: u32 = 0xE61C1C1C;
-    pub const BAR_TEXT: u32 = 0xFFAAAAAA;
-    pub const BAR_GLYPH: u32 = 0xFFC7C7C7;
+    /// Text and a menu's words: white, nearly black (black for a menu's) on the light interface.
+    pub const TEXT: Themed = Themed(0xFFFFFFFF, 0xFF222222);
+    pub const MENU_INK: Themed = Themed(0xFFFFFFFF, 0xFF000000);
+    pub const BAR: Themed = Themed(0xE61C1C1C, 0xCFE6E6E6);
+    pub const BAR_TEXT: Themed = Themed(0xFFAAAAAA, 0xFF3B3B3B);
+    pub const BAR_GLYPH: Themed = Themed(0xFFC7C7C7, 0xFF373737);
     pub const BAR_GLYPH_SELECTED: u32 = 0xFF0076FD;
-    pub const ACTION_DISC: u32 = 0xFF141414;
-    pub const ACTION_GLYPH: u32 = 0xFF969696;
-    pub const COLOR_RING: u32 = 0xFF969696;
+    pub const ACTION_DISC: Themed = Themed(0xFF141414, 0xFFEDEDED);
+    pub const ACTION_GLYPH: Themed = Themed(0xFF969696, 0xFF646464);
+    pub const COLOR_RING: Themed = Themed(0xFF969696, 0xFF696969);
     pub const BAR_HEIGHT: f32 = 44.0;
     pub const BAR_MARGIN: f32 = 40.0;
     pub const BAR_BUTTON_WIDTH: f32 = 44.0;
@@ -43,13 +91,13 @@ pub mod pc {
     pub const ACTION_DISC_SIZE: f32 = 32.0;
     pub const COLOR_DOT: f32 = 31.0;
 
-    pub const SIDE_BAR: u32 = 0xE7171717;
-    pub const SLIDER_TRACK: u32 = 0xC93E3E3E;
-    pub const SLIDER_RIM: u32 = 0xB96E6E6E;
+    pub const SIDE_BAR: Themed = Themed(0xE7171717, 0xCFE5E5E5);
+    pub const SLIDER_TRACK: Themed = Themed(0xC93E3E3E, 0xFFE9E9E9);
+    pub const SLIDER_RIM: Themed = Themed(0xB96E6E6E, 0xFFE9E9E9);
     pub const SLIDER_RIM_WIDTH: f32 = 0.8;
-    pub const SLIDER_THUMB: u32 = 0xFFA6A6A6;
-    pub const SIDE_GLYPH: u32 = 0xFF969696;
-    pub const SIDE_GLYPH_DISABLED: u32 = 0x1AFFFFFF;
+    pub const SLIDER_THUMB: Themed = Themed(0xFFA6A6A6, 0xFFF8F8F8);
+    pub const SIDE_GLYPH: Themed = Themed(0xFF969696, 0xFF646464);
+    pub const SIDE_GLYPH_DISABLED: Themed = Themed(0x1AFFFFFF, 0x33000000);
     pub const SIDE_BAR_WIDTH: f32 = 51.0;
     pub const SIDE_BAR_HEIGHT: f32 = 519.0;
     pub const SIDE_BAR_CORNER: f32 = 20.0;
@@ -65,7 +113,7 @@ pub mod pc {
     pub const MODIFY_STROKE: f32 = 2.4;
     pub const MODIFY_CORNER: f32 = 6.0;
 
-    pub const GLASS_MENU_EDGE: u32 = 0x24FFFFFF;
+    pub const GLASS_MENU_EDGE: Themed = Themed(0x24FFFFFF, 0x14000000);
 
     /// The gaps between the tool buttons and between the action buttons for a bar `width` wide:
     /// the room left after both margins picks one of five steps.
@@ -95,7 +143,7 @@ pub fn highlight(ctx: &egui::Context, id: egui::Id, on: bool) -> f32 {
     ctx.animate_value_with_time(id, if on { 1.0 } else { 0.0 }, time)
 }
 
-/// Letter spacing that brings Inter to the reference's text widths (em).
+/// Letter spacing that brings Inter to the measured text widths (em).
 const TRACKING: f32 = -0.045;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +218,56 @@ pub fn text_runs(
     rect
 }
 
+/// Text of one weight, `size` points, wrapped `width` wide, laid out to be drawn.
+pub fn wrapped(
+    painter: &Painter,
+    text: &str,
+    size: f32,
+    weight: Weight,
+    colour: Color32,
+    width: f32,
+) -> Arc<egui::Galley> {
+    let mut job = LayoutJob::default();
+    let format = TextFormat {
+        font_id: weight.font(size),
+        color: colour,
+        extra_letter_spacing: TRACKING * size,
+        ..Default::default()
+    };
+    job.append(text, 0.0, format);
+    job.wrap.max_width = width;
+    painter.layout_job(job)
+}
+
+/// How far across (points) the pointer has gone since the last frame while held on `response`, a
+/// slider; `held` keeps which slider is held and where the pointer was.
+pub fn dragged_by(held: &mut Option<(egui::Id, f32)>, response: &egui::Response) -> f32 {
+    match response.interact_pointer_pos().filter(|_| response.is_pointer_button_down_on()) {
+        Some(p) => {
+            let moved = match *held {
+                Some((id, x)) if id == response.id => p.x - x,
+                _ => 0.0,
+            };
+            *held = Some((response.id, p.x));
+            moved
+        }
+        None => {
+            if held.is_some_and(|(id, _)| id == response.id) {
+                *held = None;
+            }
+            0.0
+        }
+    }
+}
+
+/// How wide `text` of one weight is at `size` points, as [`text`] draws it.
+pub fn text_width(painter: &Painter, text: &str, size: f32, weight: Weight) -> f32 {
+    let mut job = LayoutJob::default();
+    let format = TextFormat { font_id: weight.font(size), extra_letter_spacing: TRACKING * size, ..Default::default() };
+    job.append(text, 0.0, format);
+    painter.layout_job(job).size().x
+}
+
 /// Text of one weight; see [`text_runs`].
 pub fn text(
     painter: &Painter,
@@ -207,6 +305,18 @@ impl Look {
         ui.painter().image(texture.id(), Rect::from_center_size(centre, vec2(width, height)), ALL, colour);
     }
 
+    /// `icon` stretched to fill `rect` (drawn as wide as it, then squeezed or stretched to its
+    /// height), in `colour`.
+    pub fn icon_in(&mut self, ui: &Ui, icon: &Icon, rect: Rect, colour: Color32) {
+        let ppp = ui.ctx().pixels_per_point();
+        let px = (rect.width() * ppp).round().max(1.0) as u32;
+        let texture = self
+            .icons
+            .entry((icon.name, px))
+            .or_insert_with(|| ui.ctx().load_texture(icon.name, raster_icon(icon, px), TextureOptions::LINEAR));
+        ui.painter().image(texture.id(), rect, ALL, colour);
+    }
+
     /// A shape drawn by `draw` (into a pixmap of `rect` at the screen's density, scaled so its
     /// units are points from `rect`'s corner), kept as `slot` until `key` changes.
     pub fn shape(
@@ -220,7 +330,8 @@ impl Look {
         let ppp = ui.ctx().pixels_per_point();
         let (w, h) = ((rect.width() * ppp).ceil().max(1.0) as u32, (rect.height() * ppp).ceil().max(1.0) as u32);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        (key, w, h).hash(&mut hasher);
+        // drawn again when the interface turns light or dark
+        (key, w, h, light()).hash(&mut hasher);
         let hash = hasher.finish();
         let fresh = self.shapes.get(slot).is_none_or(|(at, _)| *at != hash);
         if fresh && let Some(mut pixmap) = tiny_skia::Pixmap::new(w, h) {
@@ -302,6 +413,56 @@ pub fn fill(pixmap: &mut tiny_skia::Pixmap, path: Option<tiny_skia::Path>, colou
 
 /// A cubic Bézier easing from (0, 0) to (1, 1) through (`x1`, `y1`) and (`x2`, `y2`), as CSS and
 /// Compose give them, at `t`.
+/// A spring settling over its own time (`seconds`, as damped as `damping`, starting at
+/// `velocity`), as the Android app's (ui/Motion.kt, Spring): how far along it is at `fraction`
+/// (0..1) of that time, overshooting while it is under-damped.
+pub fn spring(seconds: f32, damping: f32, velocity: f32, fraction: f32) -> f32 {
+    if fraction >= 1.0 {
+        return 1.0;
+    }
+    let z = f64::from(damping).max(0.01);
+    let v = f64::from(velocity);
+    // how far from its end it can still be at time `t` at frequency `w`
+    let envelope = |w: f64, t: f64| {
+        if z < 1.0 {
+            let wd = w * (1.0 - z * z).sqrt();
+            let c2 = (v - z * w) / wd;
+            (1.0 + c2 * c2).sqrt() * (-z * w * t).exp()
+        } else if z == 1.0 {
+            (1.0 + (v - w).abs() * t) * (-w * t).exp()
+        } else {
+            let s = (z * z - 1.0).sqrt();
+            let (r1, r2) = (-w * (z - s), -w * (z + s));
+            let c1 = (v + r2) / (r1 - r2);
+            c1.abs() * (r1 * t).exp() + (-1.0 - c1).abs() * (r2 * t).exp()
+        }
+    };
+    // the slowest frequency that is within a thousandth of its end by the time given
+    let seconds = f64::from(seconds);
+    let (mut lo, mut hi) = (0.01, 2000.0);
+    for _ in 0..60 {
+        let mid = (lo + hi) / 2.0;
+        if envelope(mid, seconds) > 1e-3 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let (w, t) = (hi, f64::from(fraction.max(0.0)) * seconds);
+    let off = if z < 1.0 {
+        let wd = w * (1.0 - z * z).sqrt();
+        (-z * w * t).exp() * (-(wd * t).cos() + (v - z * w) / wd * (wd * t).sin())
+    } else if z == 1.0 {
+        (-1.0 + (v - w) * t) * (-w * t).exp()
+    } else {
+        let s = (z * z - 1.0).sqrt();
+        let (r1, r2) = (-w * (z - s), -w * (z + s));
+        let c1 = (v + r2) / (r1 - r2);
+        c1 * (r1 * t).exp() + (-1.0 - c1) * (r2 * t).exp()
+    };
+    (1.0 + off) as f32
+}
+
 pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     let curve = |a: f32, b: f32, s: f32| 3.0 * a * s * (1.0 - s).powi(2) + 3.0 * b * s * s * (1.0 - s) + s.powi(3);
@@ -328,4 +489,20 @@ pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
         }
     }
     curve(y1, y2, s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spring;
+
+    #[test]
+    fn a_spring_starts_still_overshoots_and_settles() {
+        assert!(spring(0.3, 0.75, 0.0, 0.0).abs() < 1e-3);
+        assert!((spring(0.3, 0.75, 0.0, 0.999) - 1.0).abs() < 0.01);
+        assert_eq!(spring(0.3, 0.75, 0.0, 1.0), 1.0);
+        // under-damped, it goes past its end on the way
+        assert!((0..100).any(|i| spring(0.3, 0.75, 0.0, i as f32 / 100.0) > 1.0));
+        // damped enough, it doesn't
+        assert!((0..100).all(|i| spring(0.3, 1.2, 0.0, i as f32 / 100.0) <= 1.0));
+    }
 }

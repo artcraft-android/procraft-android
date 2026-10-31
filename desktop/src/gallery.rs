@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
@@ -16,16 +17,17 @@ use procraft_core::{
     ArtworkStore, CanvasPreset, GalleryArtwork, GalleryEntry, P3, preset_label, presets_from_json, profile_chip,
 };
 
+use crate::animated_export::Animated;
 use crate::icons;
-use crate::look::{Look, Weight, argb, text};
+use crate::look::{Look, Themed, Weight, argb, text};
 use crate::panel;
 
-pub const BACKGROUND: u32 = 0xFF212121;
-const TITLE: u32 = 0xFFF0F0F0;
-const TEXT: u32 = 0xFFAAAAAA;
-const SIZE: u32 = 0xFF666666;
-const CAPSULE: u32 = 0xFF1C1C1C;
-const CAPSULE_EDGE: u32 = 0xFF393939;
+pub const BACKGROUND: Themed = Themed(0xFF212121, 0xFFF0F0F0);
+const TITLE: Themed = Themed(0xFFF0F0F0, 0xFF3C3C3C);
+const TEXT: Themed = Themed(0xFFAAAAAA, 0xFF595959);
+const SIZE: Themed = Themed(0xFF666666, 0xFF6A6A6A);
+const CAPSULE: Themed = Themed(0xFF1C1C1C, 0xF0F7F7F7);
+const CAPSULE_EDGE: Themed = Themed(0xFF393939, 0x0F000000);
 const HEADER: f32 = 55.0;
 /// The New canvas list: light, hanging from +.
 const NEW_WIDTH: f32 = 347.0;
@@ -48,11 +50,11 @@ const PRESET_DELETE: u32 = 0xFFFE604D;
 const DONE_FILL: u32 = 0xFF0190FF;
 const PICKED: u32 = 0xFF0F7EFD;
 const UNPICKED_RING: u32 = 0xFFCCCCCC;
-const POPOVER: u32 = 0xFF212121;
-const ACTIONS_GROUP: u32 = 0x420C0C0C;
-const ACTIONS_SEPARATOR: u32 = 0x06FFFFFF;
-const ACTIONS_DISABLED: u32 = 0xFF5E5E5E;
-const PANEL_TITLE: u32 = 0xFFC7C7C7;
+const POPOVER: Themed = Themed(0xFF212121, 0xFFE6E6E6);
+const ACTIONS_GROUP: Themed = Themed(0x420C0C0C, 0xFFE8E8E8);
+const ACTIONS_SEPARATOR: Themed = Themed(0x06FFFFFF, 0xFFE2E2E2);
+const ACTIONS_DISABLED: Themed = Themed(0xFF5E5E5E, 0xFFABABAB);
+const PANEL_TITLE: Themed = Themed(0xFFC7C7C7, 0xFF393939);
 const PREVIEW_CLOSE: u32 = 0xFFD7D7D7;
 /// Renaming: the gallery faded back, the artwork fitted in a 281 x 280 frame 20 from the top (12
 /// in), the name's field 20 under it.
@@ -69,12 +71,21 @@ const RENAME_MARGIN: f32 = 12.0;
 const RENAME_GAP: f32 = 20.0;
 const RENAME_FIELD: (f32, f32) = (262.0, 38.0);
 const RENAME_FIELD_FILL: u32 = 0x14FFFFFF;
+/// Renaming's picture rising from its cell, and its fading away when done (seconds).
+const RENAME_RISE_S: f32 = 0.3;
+const RENAME_FADE_S: f32 = 0.15;
 /// A swiped artwork's actions: three pills over its thumbnail, which fades back.
 const SWIPE_PILL: (f32, f32) = (94.0, 56.0);
-const SWIPE_PILL_FILL: u32 = 0xDB1C1C1C;
-const SWIPE_PILL_INK: u32 = 0xFFA9A9A9;
+const SWIPE_PILL_FILL: Themed = Themed(0xDB1C1C1C, 0xFFF5F5F5);
+const SWIPE_PILL_INK: Themed = Themed(0xFFA9A9A9, 0xFF575757);
 const SWIPE_DELETE_FILL: u32 = 0xFFFE604D;
 const SWIPED_FADE: f32 = 0.64;
+/// A swiped artwork's actions growing in or going (seconds), on a spring.
+const SWIPE_S: f32 = 0.3;
+
+fn swipe_ease(t: f32) -> f32 {
+    crate::look::spring(SWIPE_S, 0.75, 0.0, t)
+}
 /// Held this long, an artwork (or a stack) lifts to be dragged; while it is, its cell stays behind
 /// faint, and what it would be stacked onto is washed blue.
 const HOLD_S: f64 = 0.4;
@@ -105,18 +116,64 @@ pub enum Asked {
     Photo(Option<String>),
     /// These artworks written as this format, where the user picks.
     Share(Vec<GalleryArtwork>, crate::files::Format),
+    /// These artworks written as PDFs keeping their pictures at this JPEG quality.
+    SharePdf(Vec<GalleryArtwork>, u8),
+    /// The artwork opened to be shared as this animation, the gallery back after.
+    ShareAnimated(GalleryArtwork, Animated),
 }
 
-/// Share's formats, as their list shows them.
-const SHARE_FORMATS: [crate::files::Format; 7] = [
-    crate::files::Format::Procraft,
-    crate::files::Format::Package,
-    crate::files::Format::Psd,
-    crate::files::Format::Pdf,
-    crate::files::Format::Jpeg,
-    crate::files::Format::Png,
-    crate::files::Format::Tiff,
+/// Share's formats (`size`, arrow left out) beside a swiped artwork's Share `pill`, pointing at it:
+/// on the side with more room (the other if that one is too narrow), kept 2 inside `screen`.
+/// Where it goes (arrow in), its arrow's tip from its top, and whether it is right of the pill.
+fn formats_beside(pill: Rect, screen: Rect, size: egui::Vec2) -> (Rect, f32, bool) {
+    let (width, height) = (size.x, size.y);
+    let top = (pill.center().y - height / 2.0)
+        .clamp(screen.top() + 2.0, (screen.bottom() - 2.0 - height).max(screen.top() + 2.0));
+    let ends = panel::POPOVER_CORNER + panel::ARROW_HEIGHT;
+    let arrow_y = (pill.center().y - top).clamp(ends, height - ends);
+    let total = width + panel::ARROW_HEIGHT;
+    let room_right = screen.right() - 2.0 - pill.right() - 2.0;
+    let room_left = pill.left() - 2.0 - (screen.left() + 2.0);
+    let right = if room_right >= room_left {
+        room_right >= total || room_left < total
+    } else {
+        room_left < total && room_right >= total
+    };
+    let left = if right { pill.right() + 2.0 } else { (pill.left() - 2.0 - total).max(screen.left() + 2.0) };
+    (Rect::from_min_size(pos2(left, top), vec2(total, height)), arrow_y, right)
+}
+
+/// A row of Share's formats: a still format, or an animated one (the artwork opened to make it).
+#[derive(Clone, Copy)]
+enum ShareRow {
+    Still(crate::files::Format),
+    Animated(Animated),
+}
+
+impl ShareRow {
+    fn name(self) -> &'static str {
+        match self {
+            ShareRow::Still(format) => format.name(),
+            ShareRow::Animated(format) => format.title(),
+        }
+    }
+}
+
+/// Share's formats, as their list shows them, the animated ones last.
+const SHARE_ROWS: [ShareRow; 11] = [
+    ShareRow::Still(crate::files::Format::Procraft),
+    ShareRow::Still(crate::files::Format::Package),
+    ShareRow::Still(crate::files::Format::Psd),
+    ShareRow::Still(crate::files::Format::Pdf),
+    ShareRow::Still(crate::files::Format::Jpeg),
+    ShareRow::Still(crate::files::Format::Png),
+    ShareRow::Still(crate::files::Format::Tiff),
+    ShareRow::Animated(Animated::Gif),
+    ShareRow::Animated(Animated::Png),
+    ShareRow::Animated(Animated::Mp4),
+    ShareRow::Animated(Animated::Hevc),
 ];
+const FORMATS_WIDTH: f32 = 260.0;
 
 pub struct Gallery {
     pub store: Arc<ArtworkStore>,
@@ -136,8 +193,15 @@ pub struct Gallery {
     more_open: bool,
     preview: Option<(Vec<GalleryArtwork>, usize, bool, f32)>,
     alert: crate::alert::Alert,
+    /// Share's PDF asks how well it keeps its pictures first (for these artworks).
+    pdf_alert: crate::alert::Alert,
+    pdf_for: Option<Vec<GalleryArtwork>>,
     /// The artwork being renamed, its name as typed, and whether its field has had the focus.
     renaming: Option<(GalleryArtwork, String, bool)>,
+    /// When the renaming began (its picture rising from its cell), and one just done, fading
+    /// away (its name as kept, since when).
+    rename_since: Option<Instant>,
+    rename_fading: Option<(GalleryArtwork, String, Instant)>,
     /// The artwork (by folder) whose actions a swipe left shows, and the one asked about deleting.
     swiped: Option<String>,
     deleting: Option<String>,
@@ -159,7 +223,65 @@ pub struct Gallery {
     /// What the app is, over the gallery, and its mark's picture once read.
     about: bool,
     mark: Option<TextureHandle>,
+    /// Where each artwork's picture (by folder) was last drawn: what the gallery zooms into and
+    /// out of as an artwork opens and closes.
+    pictures: HashMap<String, Rect>,
+    /// Pictures shrinking under a press, growing as they lift, or going back (by folder).
+    lifts: HashMap<String, Lift>,
+    /// A stack opening, its artworks flying out of its cell (where it was, since when); or left,
+    /// its artworks flying back into it over the gallery coming back.
+    opening_stack: Option<(Rect, Instant)>,
+    leaving_stack: Option<LeavingStack>,
+    /// Where each stack's cell was last drawn (by folder), and the cells drawn last frame: what
+    /// flies back into a stack as it is left.
+    stack_cells: HashMap<String, Rect>,
+    drawn_cells: Vec<(GalleryEntry, Rect)>,
 }
+
+/// A stack just left: its folder and name, its artworks and where each was, and since when.
+struct LeavingStack {
+    dir: String,
+    name: String,
+    cells: Vec<(GalleryEntry, Rect)>,
+    since: Instant,
+}
+
+/// A stack's artworks flying out of its cell as it opens, and back into it (as the gallery grows
+/// back from 0.8 of its size, fading in) as it is left (seconds, on springs); leaving, its name
+/// fading out and the gallery's in.
+const STACK_OPEN_S: f32 = 0.45;
+/// Select's marks fading in and out (seconds).
+const SELECT_FADE_S: f32 = 0.15;
+const STACK_LEAVE_S: f32 = 0.3;
+const STACK_GROW_FROM: f32 = 0.8;
+const NAME_OUT_S: f32 = 0.07;
+const TITLE_IN_S: f32 = 0.11;
+
+/// A picture's size changing: from and to (times its size), since when, and how long (seconds).
+struct Lift {
+    from: f32,
+    to: f32,
+    since: Instant,
+    secs: f32,
+}
+
+impl Lift {
+    fn now(&self) -> f32 {
+        let t = if self.secs > 0.0 { self.since.elapsed().as_secs_f32() / self.secs } else { 1.0 };
+        self.from + (self.to - self.from) * crate::look::cubic_bezier(0.42, 0.0, 0.58, 1.0, t)
+    }
+
+    fn moving(&self) -> bool {
+        self.since.elapsed().as_secs_f32() < self.secs
+    }
+}
+
+/// Pressed, a picture waits a moment (so a scroll starting on it leaves it be), then shrinks;
+/// held, it grows as it lifts; let go, it goes back (times its size, seconds).
+const PRESS_DELAY_S: f64 = 0.1;
+const PRESSED: (f32, f32) = (0.87, 0.15);
+const LIFTED: (f32, f32) = (1.07, 0.25);
+const DROPPED: (f32, f32) = (1.0, 0.25);
 
 impl Gallery {
     pub fn new() -> Gallery {
@@ -178,7 +300,11 @@ impl Gallery {
             more_open: false,
             preview: None,
             alert: crate::alert::Alert::default(),
+            pdf_alert: crate::alert::Alert::default(),
+            pdf_for: None,
             renaming: None,
+            rename_since: None,
+            rename_fading: None,
             swiped: None,
             deleting: None,
             dragged: egui::Vec2::ZERO,
@@ -191,6 +317,12 @@ impl Gallery {
             preset_drag: None,
             about: false,
             mark: None,
+            pictures: HashMap::new(),
+            lifts: HashMap::new(),
+            opening_stack: None,
+            leaving_stack: None,
+            stack_cells: HashMap::new(),
+            drawn_cells: Vec::new(),
         };
         gallery.refresh();
         gallery
@@ -213,20 +345,60 @@ impl Gallery {
     }
 
     /// The folder new artworks go in: the stack open's, or the gallery's.
-    fn folder(&self) -> Option<String> {
+    pub fn folder(&self) -> Option<String> {
         self.stack.as_ref().map(|s| s.0.clone())
     }
 
-    /// Shows the gallery over the whole window; returns what a tap asked for.
-    pub fn show(&mut self, ctx: &egui::Context, look: &mut Look, colours: &crate::colours::Colours) -> Option<Asked> {
+    /// How big the picture of `dir` is now (times its size), going to `to` in `secs` when that
+    /// is new.
+    fn lift(&mut self, ctx: &egui::Context, dir: &str, (to, secs): (f32, f32)) -> f32 {
+        let lift =
+            self.lifts.entry(dir.to_owned()).or_insert(Lift { from: 1.0, to: 1.0, since: Instant::now(), secs: 0.0 });
+        if lift.to != to {
+            *lift = Lift { from: lift.now(), to, since: Instant::now(), secs };
+        }
+        let now = lift.now();
+        if lift.moving() {
+            ctx.request_repaint();
+        } else if to == 1.0 {
+            self.lifts.remove(dir);
+        }
+        now
+    }
+
+    /// Where the artwork in folder `dir` was last drawn, if it was.
+    pub fn picture_of(&self, dir: &str) -> Option<Rect> {
+        self.pictures.get(dir).copied()
+    }
+
+    /// The gallery's own page (its header and grid), as the window's background.
+    pub fn layer() -> egui::LayerId {
+        egui::LayerId::new(Order::Background, Id::unique("gallery"))
+    }
+
+    /// The gallery's page over the canvas opening, moved by `transform` and shown `alpha`; nothing
+    /// in it is touched.
+    pub fn zooming(&mut self, ctx: &egui::Context, look: &mut Look, transform: egui::emath::TSTransform, alpha: f32) {
+        ctx.set_transform_layer(egui::LayerId::new(Order::Foreground, Id::unique("gallery")), transform);
+        self.page(ctx, look, Order::Foreground, alpha, true);
+    }
+
+    /// The gallery's page (its header and grid) over the whole window, `order` deep, shown
+    /// `alpha`; `covered`, nothing in it is touched. What a tap in it asked for.
+    fn page(&mut self, ctx: &egui::Context, look: &mut Look, order: Order, alpha: f32, covered: bool) -> Option<Asked> {
         let screen = ctx.content_rect();
-        let shown =
-            egui::Area::new(Id::unique("gallery")).fixed_pos(screen.min).order(Order::Background).show(ctx, |ui| {
+        // shown at once, not faded in as a new area would be
+        egui::Area::new(Id::unique("gallery"))
+            .fixed_pos(screen.min)
+            .order(order)
+            .fade_in(false)
+            .show(ctx, |ui| {
+                ui.multiply_opacity(alpha);
                 ui.allocate_rect(screen, Sense::hover());
                 ui.painter().rect_filled(screen, 0, argb(BACKGROUND));
                 let tapped = self.header(ui, look, screen);
                 let grid = Rect::from_min_max(pos2(screen.left(), screen.top() + HEADER), screen.max);
-                if self.entries.is_empty() {
+                let asked = if self.entries.is_empty() {
                     let at = grid.center();
                     text(
                         ui.painter(),
@@ -239,10 +411,38 @@ impl Gallery {
                     );
                     tapped
                 } else {
-                    self.grid(ui, grid).or(tapped)
+                    // a stack just left: the gallery grows back into place under its artworks
+                    match self.leaving_stack.as_ref().map(|l| l.since.elapsed().as_secs_f32() / STACK_LEAVE_S) {
+                        Some(t) if t < 1.0 => {
+                            let e = crate::look::spring(STACK_LEAVE_S, 0.8, 0.0, t);
+                            let s = STACK_GROW_FROM + (1.0 - STACK_GROW_FROM) * e;
+                            let c = grid.center().to_vec2();
+                            let grow = egui::emath::TSTransform::new(c * (1.0 - s), s);
+                            ui.with_visual_transform(grow, |ui| {
+                                ui.multiply_opacity(e.clamp(0.0, 1.0));
+                                self.grid(ui, grid)
+                            })
+                            .inner
+                            .or(tapped)
+                        }
+                        _ => self.grid(ui, grid).or(tapped),
+                    }
+                };
+                if covered {
+                    // over everything in it: taken before any of it sees a press
+                    ui.allocate_rect(screen, Sense::click_and_drag());
+                    return None;
                 }
-            });
-        let mut asked = shown.inner;
+                asked
+            })
+            .inner
+    }
+
+    /// Shows the gallery over the whole window; returns what a tap asked for.
+    pub fn show(&mut self, ctx: &egui::Context, look: &mut Look, colours: &crate::colours::Colours) -> Option<Asked> {
+        let screen = ctx.content_rect();
+        let mut asked = self.page(ctx, look, Order::Background, 1.0, false);
+        self.stack_flights(ctx, look);
         if self.new_open && self.custom.is_none() {
             asked = self.new_canvas(ctx, look, screen).or(asked);
         }
@@ -280,8 +480,9 @@ impl Gallery {
         if self.renaming.is_some() {
             self.rename(ctx, screen);
         }
+        self.rename_fade(ctx, screen);
         if self.sharing.is_some() {
-            asked = self.formats(ctx, screen).or(asked);
+            asked = self.formats(ctx, look, screen).or(asked);
         }
         match self.alert.show(ctx, look) {
             Some(crate::alert::Answer::Action) => {
@@ -297,6 +498,12 @@ impl Gallery {
             }
             Some(_) => self.deleting = None,
             None => {}
+        }
+        if let Some(answer) = self.pdf_alert.show(ctx, look)
+            && let Some(list) = self.pdf_for.take()
+            && let Some(quality) = crate::alert::pdf_jpeg(answer)
+        {
+            asked = Some(Asked::SharePdf(list, quality));
         }
         asked
     }
@@ -354,7 +561,6 @@ impl Gallery {
                 self.alert.open(&title, "This can't be undone.", "Delete", Some(&icons::TRASH));
             }
             SelectAction::More => self.more_open = !self.more_open,
-            // sharing artworks that aren't open is still to come here
             SelectAction::Share => self.sharing = Some((self.picked_artworks(), None)),
         }
     }
@@ -499,24 +705,60 @@ impl Gallery {
     /// Renaming an artwork: it shows at the top middle, larger, over the gallery faded back, with
     /// its name in a field under it, all of it chosen. Enter, Escape or a tap away keeps the name
     /// (an empty one keeps the old).
+    /// The artwork done renaming fading away (0.15 s), as it was left.
+    fn rename_fade(&mut self, ctx: &egui::Context, screen: Rect) {
+        let Some((a, name, since)) = self.rename_fading.clone() else { return };
+        let t = since.elapsed().as_secs_f32() / RENAME_FADE_S;
+        if t >= 1.0 {
+            self.rename_fading = None;
+            return;
+        }
+        ctx.request_repaint();
+        let alpha = 1.0 - crate::look::cubic_bezier(0.42, 0.0, 0.58, 1.0, t);
+        egui::Area::new(Id::unique("renamed artwork")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
+            ui.multiply_opacity(alpha);
+            let (picture, field) = Self::rename_places(&a, screen);
+            ui.painter().rect_filled(screen, 0, argb(RENAME_VEIL));
+            self.thumbnail(ui, picture, &a, 0.0);
+            ui.painter().rect_filled(field, 10.0, argb(RENAME_FIELD_FILL));
+            text(ui.painter(), field.center(), Align2::CENTER_CENTER, &name, 17.0, Weight::Regular, Color32::WHITE);
+        });
+    }
+
+    /// Where renaming shows an artwork's picture (fitted in its frame, centred across the top) and
+    /// the field under it.
+    fn rename_places(a: &GalleryArtwork, screen: Rect) -> (Rect, Rect) {
+        let (fw, fh) = (RENAME_FRAME.0 - RENAME_MARGIN * 2.0, RENAME_FRAME.1 - RENAME_MARGIN * 2.0);
+        let ratio = if a.width > 0 && a.height > 0 { a.width as f32 / a.height as f32 } else { 0.75 };
+        let (aw, ah) = if ratio > fw / fh { (fw, fw / ratio) } else { (fh * ratio, fh) };
+        let top = screen.top() + RENAME_TOP + (RENAME_FRAME.1 - ah) / 2.0;
+        let picture = Rect::from_min_size(pos2(screen.center().x - aw / 2.0, top), vec2(aw, ah));
+        let field_top = screen.top() + RENAME_TOP + RENAME_FRAME.1 + RENAME_GAP;
+        let field = Rect::from_min_size(
+            pos2(screen.center().x - RENAME_FIELD.0 / 2.0, field_top),
+            vec2(RENAME_FIELD.0, RENAME_FIELD.1),
+        );
+        (picture, field)
+    }
+
     fn rename(&mut self, ctx: &egui::Context, screen: Rect) {
         let Some((a, mut name, mut focused)) = self.renaming.take() else { return };
         let mut done = false;
+        // the picture rises from its cell to the top (0.3 s), the field showing as it comes
+        let since = *self.rename_since.get_or_insert_with(Instant::now);
+        let t = since.elapsed().as_secs_f32() / RENAME_RISE_S;
+        let rise = crate::look::cubic_bezier(0.42, 0.0, 0.58, 1.0, t);
+        if t < 1.0 {
+            ctx.request_repaint();
+        }
         egui::Area::new(Id::unique("rename artwork")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
             done = ui.allocate_rect(screen, Sense::click()).clicked();
             ui.painter().rect_filled(screen, 0, argb(RENAME_VEIL));
-            let (fw, fh) = (RENAME_FRAME.0 - RENAME_MARGIN * 2.0, RENAME_FRAME.1 - RENAME_MARGIN * 2.0);
-            let ratio = if a.width > 0 && a.height > 0 { a.width as f32 / a.height as f32 } else { 0.75 };
-            let (aw, ah) = if ratio > fw / fh { (fw, fw / ratio) } else { (fh * ratio, fh) };
-            let top = screen.top() + RENAME_TOP + (RENAME_FRAME.1 - ah) / 2.0;
-            let picture = Rect::from_min_size(pos2(screen.center().x - aw / 2.0, top), vec2(aw, ah));
-            self.thumbnail(ui, picture, &a, 0.0);
-            let field_top = screen.top() + RENAME_TOP + RENAME_FRAME.1 + RENAME_GAP;
-            let field = Rect::from_min_size(
-                pos2(screen.center().x - RENAME_FIELD.0 / 2.0, field_top),
-                vec2(RENAME_FIELD.0, RENAME_FIELD.1),
-            );
-            ui.painter().rect_filled(field, 10.0, argb(RENAME_FIELD_FILL));
+            let (picture, field) = Self::rename_places(&a, screen);
+            let from = self.picture_of(&a.dir).unwrap_or(picture);
+            let at = Rect::from_min_max(from.min.lerp(picture.min, rise), from.max.lerp(picture.max, rise));
+            self.thumbnail(ui, at, &a, 0.0);
+            ui.painter().rect_filled(field, 10.0, argb(RENAME_FIELD_FILL).gamma_multiply(rise));
             let inner = field.shrink2(vec2(12.0, 0.0));
             let mut output = egui::TextEdit::singleline(&mut name)
                 .font(Weight::Regular.font(17.0))
@@ -526,9 +768,13 @@ impl Gallery {
                 .align(Align2::CENTER_CENTER)
                 .desired_width(inner.width())
                 .char_limit(256)
-                .show(&mut ui.new_child(
-                    UiBuilder::new().max_rect(Rect::from_center_size(inner.center(), vec2(inner.width(), 22.0))),
-                ));
+                .show(&mut {
+                    let mut child = ui.new_child(
+                        UiBuilder::new().max_rect(Rect::from_center_size(inner.center(), vec2(inner.width(), 22.0))),
+                    );
+                    child.multiply_opacity(rise);
+                    child
+                });
             if !focused {
                 output.response.request_focus();
                 let all = egui::text::CCursorRange::two(
@@ -544,6 +790,8 @@ impl Gallery {
         });
         if done {
             let kept = if name.trim().is_empty() { a.name.clone() } else { name.trim().to_owned() };
+            self.rename_since = None;
+            self.rename_fading = Some((a.clone(), kept.clone(), Instant::now()));
             self.store.rename(a.dir, kept);
             self.refresh();
         } else {
@@ -681,10 +929,25 @@ impl Gallery {
             look.icon(ui, &icons::CHEVRON_LEFT, row.center(), 28.0, ink);
             text(painter, pos2(row.right(), row.center().y), Align2::LEFT_CENTER, &name, 36.0, Weight::Bold, ink);
             if response.clicked() {
-                self.stack = None;
+                if let Some((dir, name)) = self.stack.take() {
+                    let cells = std::mem::take(&mut self.drawn_cells);
+                    self.leaving_stack = Some(LeavingStack { dir, name, cells, since: Instant::now() });
+                }
                 self.refresh();
             }
         } else {
+            // a stack just left: its name fades out as the gallery's fades in
+            let ease = |t: f32| crate::look::cubic_bezier(0.42, 0.0, 0.58, 1.0, t);
+            let left = self.leaving_stack.as_ref().map(|l| (l.name.clone(), l.since.elapsed().as_secs_f32()));
+            let title_in = left.as_ref().map_or(1.0, |(_, t)| ease(t / TITLE_IN_S));
+            if let Some((name, t)) = &left
+                && *t < NAME_OUT_S
+            {
+                let ink = argb(TITLE).gamma_multiply(1.0 - ease(t / NAME_OUT_S));
+                let row = Rect::from_min_size(pos2(screen.left() + 20.0, top + 12.0), vec2(40.0, 41.0));
+                look.icon(ui, &icons::CHEVRON_LEFT, row.center(), 28.0, ink);
+                text(painter, pos2(row.right(), row.center().y), Align2::LEFT_CENTER, name, 36.0, Weight::Bold, ink);
+            }
             let name = text(
                 painter,
                 pos2(screen.left() + 32.0, top + 11.0),
@@ -692,7 +955,7 @@ impl Gallery {
                 "ProCraft",
                 36.0,
                 Weight::Bold,
-                argb(TITLE),
+                argb(TITLE).gamma_multiply(title_in),
             );
             // the app's name tapped: what it is and its version
             if ui.interact(name, ui.scope_id().with("about"), Sense::click()).clicked() {
@@ -743,6 +1006,17 @@ impl Gallery {
         let entries = self.entries.clone();
         // the cells laid out this frame, for where a drag would land
         let mut cells: Vec<(usize, Rect)> = Vec::new();
+        let mut drawn = Vec::new();
+        // a stack opening: its artworks fly out of its cell to their places
+        let opening = self.opening_stack.and_then(|(from, since)| {
+            let t = since.elapsed().as_secs_f32() / STACK_OPEN_S;
+            (t < 1.0).then(|| (from, crate::look::spring(STACK_OPEN_S, 0.8, 0.0, t)))
+        });
+        if opening.is_some() {
+            ui.ctx().request_repaint();
+        } else {
+            self.opening_stack = None;
+        }
         ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
             ScrollArea::vertical().id_salt("gallery grid").show(ui, |ui| {
                 let (all, _) = ui.allocate_exact_size(vec2(rect.width(), rows as f32 * pitch + 24.0), Sense::hover());
@@ -754,6 +1028,14 @@ impl Gallery {
                     );
                     if !ui.is_rect_visible(cell) {
                         continue;
+                    }
+                    let cell = match opening {
+                        Some((from, e)) => cell.translate((from.min - cell.min) * (1.0 - e)),
+                        None => cell,
+                    };
+                    drawn.push((entry.clone(), cell));
+                    if let GalleryEntry::Stack { dir, .. } = entry {
+                        self.stack_cells.insert(dir.clone(), cell);
                     }
                     let response = ui.interact(cell, ui.scope_id().with(("gallery cell", i)), Sense::click_and_drag());
                     cells.push((i, cell));
@@ -773,9 +1055,24 @@ impl Gallery {
                         }
                     }
                     let tapped = response.clicked() && self.lifted.is_none();
+                    // its picture shrinks under a press and grows as it lifts
+                    let dir = entry_dir(entry);
+                    let pressed = ui.input(|inp| inp.pointer.press_start_time().map_or(0.0, |t| inp.time - t));
+                    let down = response.is_pointer_button_down_on() && !response.dragged();
+                    let size = if self.lifted.as_ref().is_some_and(|(d, _)| d == dir) {
+                        LIFTED
+                    } else if down && pressed >= PRESS_DELAY_S {
+                        PRESSED
+                    } else {
+                        if down {
+                            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(PRESS_DELAY_S - pressed));
+                        }
+                        DROPPED
+                    };
+                    let scale = self.lift(ui.ctx(), dir, size);
                     match entry {
                         GalleryEntry::Artwork { artwork } => {
-                            self.artwork_cell(ui, cell, artwork);
+                            self.artwork_cell(ui, cell, artwork, scale);
                             // under its thumbnail (on its name and size), a tap renames it
                             let below = cell.top() + 39.0 + Self::thumb_box(cell).height() + 8.0;
                             let on_name = response.interact_pointer_pos().is_some_and(|p| p.y > below);
@@ -791,9 +1088,12 @@ impl Gallery {
                             {
                                 self.swiped = (self.dragged.x < 0.0).then(|| artwork.dir.clone());
                             }
+                            // swiped open, it fades back and its actions grow in over it
                             let swiped = self.swiped.as_ref() == Some(&artwork.dir);
-                            if swiped {
-                                self.swipe_actions(ui, cell, artwork);
+                            let id = ui.scope_id().with(("swipe open", &artwork.dir));
+                            let open = ui.ctx().animate_bool_with_time_and_easing(id, swiped, SWIPE_S, swipe_ease);
+                            if open > 0.0 {
+                                self.swipe_actions(ui, cell, artwork, open, swiped);
                             }
                             // selecting, a tap picks it (or lets it go); a tap puts away actions
                             // showing
@@ -815,6 +1115,7 @@ impl Gallery {
                             self.stack_cell(ui, cell, name, artworks);
                             if tapped && !self.selecting {
                                 self.stack = Some((dir.clone(), name.clone()));
+                                self.opening_stack = Some((cell, Instant::now()));
                                 into_stack = true;
                             }
                         }
@@ -823,10 +1124,47 @@ impl Gallery {
             });
         });
         self.drag(ui, &entries, &cells);
+        self.drawn_cells = drawn;
         if into_stack {
             self.refresh();
         }
         asked
+    }
+
+    /// A stack just left: its artworks flying back into its cell, over the gallery coming back.
+    fn stack_flights(&mut self, ctx: &egui::Context, _look: &mut Look) {
+        let Some(leaving) = self.leaving_stack.take() else { return };
+        let t = leaving.since.elapsed().as_secs_f32() / STACK_LEAVE_S;
+        if t >= 1.0 {
+            return;
+        }
+        ctx.request_repaint();
+        let e = crate::look::spring(STACK_LEAVE_S, 0.8, 0.0, t);
+        let to = self.stack_cells.get(&leaving.dir).copied();
+        let screen = ctx.content_rect();
+        egui::Area::new(Id::unique("stack left"))
+            .fixed_pos(screen.min)
+            .order(Order::Foreground)
+            .interactable(false)
+            .fade_in(false)
+            .show(ctx, |ui| {
+                for (entry, cell) in &leaving.cells {
+                    // to the stack's cell, its top left there (where it isn't known, they just go)
+                    let at = match to {
+                        Some(to) => cell.translate((to.min - cell.min) * e),
+                        None => *cell,
+                    };
+                    let mut faded = ui.new_child(UiBuilder::new().max_rect(screen));
+                    if to.is_none() {
+                        faded.multiply_opacity(1.0 - e.clamp(0.0, 1.0));
+                    }
+                    match entry {
+                        GalleryEntry::Artwork { artwork } => _ = self.artwork_cell(&faded, at, artwork, 1.0),
+                        GalleryEntry::Stack { name, artworks, .. } => self.stack_cell(&faded, at, name, artworks),
+                    }
+                }
+            });
+        self.leaving_stack = Some(leaving);
     }
 
     /// Where a point over the grid would put what is dragged: onto another's picture (an
@@ -895,7 +1233,10 @@ impl Gallery {
         if let (Some(a), Some(p), Some(&(_, cell))) =
             (shown, pointer, cells.iter().find(|(i, _)| entries.get(*i).is_some_and(|e| entry_dir(e) == dir)))
         {
+            // grown as it lifts, about where it is held
+            let k = self.lifts.get(&dir).map_or(LIFTED.0, Lift::now);
             let picture = Self::fitted(Self::thumb_box(cell), &a).translate(p - from);
+            let picture = Rect::from_min_max(p + (picture.min - p) * k, p + (picture.max - p) * k);
             let texture = self.texture(ui.ctx(), &a);
             let painter = ui.ctx().layer_painter(egui::LayerId::new(Order::Tooltip, Id::unique("lifted artwork")));
             let shadow =
@@ -932,17 +1273,37 @@ impl Gallery {
 
     /// A swiped artwork's actions: Share, Duplicate and Delete as pills across the middle of its
     /// thumbnail's box, the cell faded back under them.
-    fn swipe_actions(&mut self, ui: &Ui, cell: Rect, a: &GalleryArtwork) {
-        ui.painter().rect_filled(cell, 0, argb(BACKGROUND).gamma_multiply(SWIPED_FADE));
+    /// A swiped artwork's actions, `open` of the way in (they grow from a fifth of their size
+    /// about their right end, fading in, as the artwork fades back); tappable once `shown`.
+    fn swipe_actions(&mut self, ui: &Ui, cell: Rect, a: &GalleryArtwork, open: f32, shown: bool) {
+        let alpha = open.clamp(0.0, 1.0);
+        ui.painter().rect_filled(cell, 0, argb(BACKGROUND).gamma_multiply(SWIPED_FADE * alpha));
         let frame = Self::thumb_box(cell);
         let width = SWIPE_PILL.0 * 3.0 + 6.0;
+        let (k, origin) = (0.2 + 0.8 * open, pos2(cell.center().x + width / 2.0, frame.center().y));
+        let grown = |r: Rect| Rect::from_min_max(origin + (r.min - origin) * k, origin + (r.max - origin) * k);
         let mut x = cell.center().x - width / 2.0;
         for (label, delete) in [("Share", false), ("Duplicate", false), ("Delete", true)] {
             let pill =
                 Rect::from_min_size(pos2(x, frame.center().y - SWIPE_PILL.1 / 2.0), vec2(SWIPE_PILL.0, SWIPE_PILL.1));
-            ui.painter().rect_filled(pill, 12.0, argb(if delete { SWIPE_DELETE_FILL } else { SWIPE_PILL_FILL }));
+            x += SWIPE_PILL.0 + 3.0;
+            let drawn = grown(pill);
+            let fill = if delete { argb(SWIPE_DELETE_FILL) } else { argb(SWIPE_PILL_FILL) };
+            ui.painter().rect_filled(drawn, 12.0 * k, fill.gamma_multiply(alpha));
             let ink = if delete { Color32::WHITE } else { argb(SWIPE_PILL_INK) };
-            text(ui.painter(), pill.center(), Align2::CENTER_CENTER, label, 15.0, Weight::SemiBold, ink);
+            let words = (15.0 * k).max(1.0);
+            text(
+                ui.painter(),
+                drawn.center(),
+                Align2::CENTER_CENTER,
+                label,
+                words,
+                Weight::SemiBold,
+                ink.gamma_multiply(alpha),
+            );
+            if !shown {
+                continue;
+            }
             if ui.interact(pill, ui.scope_id().with(("swiped", label)), Sense::click()).clicked() {
                 match label {
                     "Duplicate" => {
@@ -962,40 +1323,55 @@ impl Gallery {
                     }
                 }
             }
-            x += SWIPE_PILL.0 + 3.0;
         }
     }
 
-    /// Share's formats: beside a swiped artwork's Share where they fit (right, else left), or
-    /// under Select's Share, kept inside the window; a tap on one shares in it, a tap off closes.
-    fn formats(&mut self, ctx: &egui::Context, screen: Rect) -> Option<Asked> {
+    /// Share's formats: beside a swiped artwork's Share, pointing at it, on the side with more
+    /// room (the other if that one is too narrow), kept 2 inside the window; or under Select's
+    /// Share, centred on it, kept 4 inside. A tap on one shares in it, a tap off closes.
+    fn formats(&mut self, ctx: &egui::Context, look: &mut Look, screen: Rect) -> Option<Asked> {
         let (list, from) = self.sharing.clone()?;
-        let (width, n) = (260.0, SHARE_FORMATS.len() as f32);
+        let (width, n) = (FORMATS_WIDTH, SHARE_ROWS.len() as f32);
         let height = 55.0 + 40.0 * n + (n - 1.0) + 10.0;
-        let at = match from {
+        let (rect, arrow) = match from {
             Some(pill) => {
-                let top = (pill.center().y - height / 2.0)
-                    .clamp(screen.top() + 2.0, (screen.bottom() - 2.0 - height).max(2.0));
-                let right = screen.right() - 2.0 - pill.right() - 2.0 >= width;
-                pos2(if right { pill.right() + 2.0 } else { (pill.left() - 2.0 - width).max(screen.left() + 2.0) }, top)
+                let (rect, arrow_y, right) = formats_beside(pill, screen, vec2(width, height));
+                (rect, Some((arrow_y, right)))
             }
             None => {
                 let centre = self.share_button.center().x;
-                pos2(
-                    (centre - width / 2.0).clamp(screen.left() + 4.0, screen.right() - 4.0 - width),
-                    screen.top() + 69.0,
-                )
+                let left = (centre - width / 2.0).clamp(screen.left() + 4.0, screen.right() - 4.0 - width);
+                (Rect::from_min_size(pos2(left, screen.top() + 69.0), vec2(width, height)), None)
             }
         };
-        let rect = Rect::from_min_size(at, vec2(width, height));
         let (mut chosen, mut close) = (None, false);
         egui::Area::new(Id::unique("share formats")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
             close = ui.allocate_rect(screen, Sense::click()).clicked();
             ui.interact(rect, ui.scope_id().with("panel"), Sense::click_and_drag());
-            let shadow =
-                egui::epaint::Shadow { offset: [0, 0], blur: 51, spread: 0, color: argb(panel::POPOVER_SHADOW) };
-            ui.painter().add(shadow.as_shape(rect, panel::POPOVER_CORNER));
-            ui.painter().rect_filled(rect, panel::POPOVER_CORNER, argb(POPOVER));
+            let rect = match arrow {
+                // its arrow on its left when it is right of the pill
+                Some((arrow_y, right)) => panel::solid_side_frame(
+                    ui,
+                    look,
+                    "share formats",
+                    rect,
+                    arrow_y,
+                    right,
+                    panel::POPOVER_CORNER,
+                    POPOVER,
+                ),
+                None => {
+                    let shadow = egui::epaint::Shadow {
+                        offset: [0, 0],
+                        blur: 51,
+                        spread: 0,
+                        color: argb(panel::POPOVER_SHADOW),
+                    };
+                    ui.painter().add(shadow.as_shape(rect, panel::POPOVER_CORNER));
+                    ui.painter().rect_filled(rect, panel::POPOVER_CORNER, argb(POPOVER));
+                    rect
+                }
+            };
             let ink = argb(PANEL_TITLE);
             text(
                 ui.painter(),
@@ -1011,7 +1387,7 @@ impl Gallery {
                 vec2(width - 20.0, 40.0 * n + n - 1.0),
             );
             ui.painter().rect_filled(group, 18.0, argb(ACTIONS_GROUP));
-            for (i, format) in SHARE_FORMATS.into_iter().enumerate() {
+            for (i, format) in SHARE_ROWS.into_iter().enumerate() {
                 let row =
                     Rect::from_min_size(pos2(group.left(), group.top() + 41.0 * i as f32), vec2(group.width(), 40.0));
                 if i > 0 {
@@ -1035,7 +1411,21 @@ impl Gallery {
         if close || chosen.is_some() {
             self.sharing = None;
         }
-        chosen.map(|format| Asked::Share(list, format))
+        match chosen? {
+            // how well a PDF keeps its pictures, asked first
+            ShareRow::Still(crate::files::Format::Pdf) => {
+                self.pdf_for = Some(list);
+                self.pdf_alert.ask(crate::alert::pdf_quality());
+                None
+            }
+            ShareRow::Still(format) => Some(Asked::Share(list, format)),
+            // an animation is made from the first of them
+            ShareRow::Animated(format) => {
+                let first = list.into_iter().next()?;
+                self.end_selecting();
+                Some(Asked::ShareAnimated(first, format))
+            }
+        }
     }
 
     /// The box a cell's thumbnail fits in: the cell's width less 40, its height less 82, 39 down.
@@ -1113,18 +1503,29 @@ impl Gallery {
     }
 
     /// Draws an artwork's cell; returns where its name is.
-    fn artwork_cell(&mut self, ui: &Ui, cell: Rect, a: &GalleryArtwork) -> Rect {
+    fn artwork_cell(&mut self, ui: &Ui, cell: Rect, a: &GalleryArtwork, scale: f32) -> Rect {
         let frame = Self::thumb_box(cell);
         let picture = Self::fitted(frame, a);
+        self.pictures.insert(a.dir.clone(), picture);
+        // shrunk or grown about its middle as it is pressed or lifted
+        let picture = Rect::from_center_size(picture.center(), picture.size() * scale);
         self.thumbnail(ui, picture, a, 0.0);
         let chosen = self.picked.contains(&a.dir);
-        if self.selecting {
+        // the marks fade in as Select starts, and out as it ends
+        let marks = ui.ctx().animate_bool_with_time_and_easing(
+            Id::unique("select marks"),
+            self.selecting,
+            SELECT_FADE_S,
+            |t| crate::look::cubic_bezier(0.42, 0.0, 0.58, 1.0, t),
+        );
+        if marks > 0.0 {
             // a circle at its top right: filled blue with a tick when picked, else a thin light ring
             let mark = pos2(picture.right() - 12.0 - 7.0, picture.top() + 12.0 + 7.0);
             if chosen {
-                ui.painter().circle_filled(mark, 7.0, argb(PICKED));
+                ui.painter().circle_filled(mark, 7.0, argb(PICKED).gamma_multiply(marks));
             } else {
-                ui.painter().circle_stroke(mark, 6.5, Stroke::new(1.0, argb(UNPICKED_RING)));
+                let ring = Stroke::new(1.0, argb(UNPICKED_RING).gamma_multiply(marks));
+                ui.painter().circle_stroke(mark, 6.5, ring);
             }
         }
         if chosen {
@@ -1356,4 +1757,33 @@ fn one_line(ui: &Ui, text: &str, size: f32, weight: Weight, colour: Color32, max
 
 fn presets_path() -> std::path::PathBuf {
     crate::files::app_dir().join("presets.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Rect, pos2, vec2};
+
+    use super::formats_beside;
+
+    #[test]
+    fn share_formats_go_where_there_is_room_and_point_at_the_pill() {
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(1440.0, 900.0));
+        let size = vec2(260.0, 515.0);
+        // a pill on the left: the list on its right, its arrow at the pill's middle
+        let pill = Rect::from_min_size(pos2(40.0, 300.0), vec2(94.0, 56.0));
+        let (rect, arrow_y, right) = formats_beside(pill, screen, size);
+        assert!(right);
+        assert_eq!(rect.left(), pill.right() + 2.0);
+        assert!((rect.top() + arrow_y - pill.center().y).abs() < 0.01);
+        // a pill near the right edge: on its left, its right end 2 off the pill
+        let pill = Rect::from_min_size(pos2(1300.0, 300.0), vec2(94.0, 56.0));
+        let (rect, _, right) = formats_beside(pill, screen, size);
+        assert!(!right);
+        assert!((rect.right() - (pill.left() - 2.0)).abs() < 0.01);
+        // a pill at the very top: kept 2 inside, the arrow no nearer its end than the corner allows
+        let pill = Rect::from_min_size(pos2(40.0, 0.0), vec2(94.0, 20.0));
+        let (rect, arrow_y, _) = formats_beside(pill, screen, size);
+        assert_eq!(rect.top(), 2.0);
+        assert!(arrow_y >= crate::panel::POPOVER_CORNER + crate::panel::ARROW_HEIGHT);
+    }
 }

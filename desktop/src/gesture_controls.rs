@@ -8,22 +8,22 @@ use procraft_core::{GestureOption, GesturePurpose, GestureSettings, gesture_opti
 
 use crate::alert::{Alert, Answer};
 use crate::icons::{self, Icon};
-use crate::look::{Look, Weight, argb, pc, text};
+use crate::look::{Look, Themed, Weight, argb, pc, text};
 use crate::transform::switch;
 
-const SCREEN_FILL: u32 = 0xFF1F1F1F;
-const RAIL_FILL: u32 = 0xFF272727;
-const CARD_FILL: u32 = 0xFF252525;
-const INK: u32 = 0xFFC1C1C1;
-const DETAIL: u32 = 0xFF9A9A9A;
-const RAIL_IDLE: u32 = 0xFFAAAAAA;
-const TRACK: u32 = 0xFF414141;
+const SCREEN_FILL: Themed = Themed(0xFF1F1F1F, 0xFFF3F3F3);
+const RAIL_FILL: Themed = Themed(0xFF272727, 0xFFEBEBEB);
+const CARD_FILL: Themed = Themed(0xFF252525, 0xFFFFFFFF);
+const INK: Themed = Themed(0xFFC1C1C1, 0xFF414141);
+const DETAIL: Themed = Themed(0xFF9A9A9A, 0xFF6A6A6A);
+const RAIL_IDLE: Themed = Themed(0xFFAAAAAA, 0xFF3F3F3F);
+const TRACK: Themed = Themed(0xFF414141, 0xFFE5E5E5);
 /// A delay whose way of touching is off: a dark line and a dim knob, no blue.
-const TRACK_OFF: u32 = 0xFF1D1D1D;
-const KNOB_OFF: u32 = 0xFF333333;
+const TRACK_OFF: Themed = Themed(0xFF1D1D1D, 0xFFE9E9EB);
+const KNOB_OFF: Themed = Themed(0xFF333333, 0xFFD0D0D0);
 const DONE_BLUE: u32 = 0xFF0190FF;
-const CARD_EDGE: u32 = 0xFF373737;
-const PAGE_INK: u32 = 0xFF797979;
+const CARD_EDGE: Themed = Themed(0xFF373737, 0xFFDADADA);
+const PAGE_INK: Themed = Themed(0xFF797979, 0xFF3E3E3E);
 /// Where a wide window's page starts and ends, beside the card of what gestures can do.
 const WIDE_START: f32 = 358.0;
 const WIDE_END: f32 = 28.0;
@@ -253,7 +253,7 @@ fn option_row(ui: &Ui, o: &GestureOption, on: bool, row: Rect) -> bool {
     let x = row.left() + 28.0;
     text(ui.painter(), pos2(x, row.top() + 28.0), Align2::LEFT_CENTER, &o.label, 18.0, Weight::Medium, ink);
     text(ui.painter(), pos2(x, row.top() + 47.0), Align2::LEFT_CENTER, &o.detail, 13.0, Weight::Regular, argb(DETAIL));
-    switch(ui, pos2(row.right() - 16.0 - 63.0, row.center().y - 14.0), on);
+    switch(ui, pos2(row.right() - 16.0 - 63.0, row.center().y - 14.0), on, &o.label);
     ui.interact(row, ui.scope_id().with(("gesture switch", &o.key)), Sense::click()).clicked()
 }
 

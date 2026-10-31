@@ -8,22 +8,22 @@ use egui::{Align2, Color32, Id, LayerId, Order, Pos2, Rect, ScrollArea, Sense, S
 use procraft_core::{AdjustShown, Adjustment, CLONE_PUCK_RADIUS, CanvasSession, adjustment_groups, adjustment_label};
 
 use crate::icons::{self, Icon};
-use crate::look::{Look, Weight, argb, pc, text};
+use crate::look::{Look, Themed, Weight, argb, pc, text};
 use crate::panel;
 
 const MENU_WIDTH: f32 = 330.0;
 const MENU_BOTTOM_MARGIN: f32 = 25.0;
-const GROUP_FILL: u32 = 0x420C0C0C;
-const GROUP_LINE: u32 = 0x06FFFFFF;
-const MENU_TEXT: u32 = 0xFFC5C5C5;
-const MODE_BAR: u32 = 0xD63B3B3B;
-const MODE_TEXT: u32 = 0xFFC5C5C5;
-const MODES_FILL: u32 = 0xFF7B7B7B;
-const PANEL_FILL: u32 = 0xF71E1E1E;
-const HSB_LABEL: u32 = 0xFF808080;
-const HSB_VALUE: u32 = 0xFFEDEDED;
-const PIE_BUTTON: u32 = 0xFF3B3B3B;
-const PIE_TEXT: u32 = 0xFFD8D8D8;
+const GROUP_FILL: Themed = Themed(0x420C0C0C, 0xFFE8E8E8);
+const GROUP_LINE: Themed = Themed(0x06FFFFFF, 0xFFE2E2E2);
+const MENU_TEXT: Themed = Themed(0xFFC5C5C5, 0xFF393939);
+const MODE_BAR: Themed = Themed(0xD63B3B3B, 0xD6EEEEEE);
+const MODE_TEXT: Themed = Themed(0xFFC5C5C5, 0xFF6A6A6A);
+const MODES_FILL: Themed = Themed(0xFF7B7B7B, 0xFFFFFFFF);
+const PANEL_FILL: Themed = Themed(0xF71E1E1E, 0xF7F1F1F1);
+const HSB_LABEL: Themed = Themed(0xFF808080, 0xFF595959);
+const HSB_VALUE: Themed = Themed(0xFFEDEDED, 0xFF363636);
+const PIE_BUTTON: Themed = Themed(0xFF3B3B3B, 0xFFFFFFFF);
+const PIE_TEXT: Themed = Themed(0xFFD8D8D8, 0xFF414141);
 /// The tap menu's buttons apart, and how far the bottom panels stand up from the window's foot.
 const PIE_STEP: f32 = 88.0;
 const PANEL_RISE: f32 = 25.0;
@@ -278,6 +278,68 @@ fn bar_in(ui: &Ui, look: &mut Look, shown: &AdjustShown, a: Adjustment, band: Re
         painter.rect_filled(line, 0, argb(pc::ACCENT));
     }
     disclose
+}
+
+/// Layer Opacity's band under the top bar (at `top`): its glyph, "Opacity" and the layer's
+/// `opacity`, under it the opacity as a thin blue line across the window.
+pub(crate) fn layer_opacity_bar(ctx: &egui::Context, opacity: f32, top: f32) {
+    let screen = ctx.content_rect();
+    let band = Rect::from_min_size(pos2(screen.left(), top), vec2(screen.width(), 32.0));
+    // drawn over the canvas without taking its touches: a drag across it still changes the opacity
+    egui::Area::new(Id::unique("layer opacity bar")).fixed_pos(band.min).order(Order::Middle).interactable(false).show(
+        ctx,
+        |ui| {
+            let painter = ui.painter();
+            painter.rect_filled(band, 0, argb(MODE_BAR));
+            let ink = argb(MODE_TEXT);
+            let amount = format!("{}%", (opacity * 100.0).round() as i32);
+            let measure = |s: &str, size: f32, w: Weight| painter.layout_no_wrap(s.into(), w.font(size), ink).size().x;
+            let width = 33.0 + measure("Opacity", 17.0, Weight::Bold) + 3.0 + measure(&amount, 14.0, Weight::Regular);
+            let x = band.center().x - width / 2.0;
+            opacity_glyph(painter, pos2(x + 16.5, band.center().y), ink, argb(MODE_BAR));
+            let x =
+                text(painter, pos2(x + 33.0, band.center().y), Align2::LEFT_CENTER, "Opacity", 17.0, Weight::Bold, ink);
+            text(
+                painter,
+                pos2(x.right() + 3.0, band.center().y),
+                Align2::LEFT_CENTER,
+                &amount,
+                14.0,
+                Weight::Regular,
+                ink,
+            );
+            let line = Rect::from_min_size(band.left_bottom(), vec2(screen.width() * opacity.clamp(0.0, 1.0), 4.0));
+            painter.rect_filled(line, 0, argb(pc::ACCENT));
+        },
+    );
+}
+
+/// Opacity's glyph, 14 across about `at`: a ring behind and up to the right, a disc in front,
+/// striped (in the band's colour, `gap`) where it covers the ring's inside.
+fn opacity_glyph(painter: &egui::Painter, at: Pos2, ink: Color32, gap: Color32) {
+    let back = at + vec2(1.7, -1.7);
+    let front = at + vec2(-1.6, 1.6);
+    let r = 4.9;
+    painter.circle_stroke(back, r, Stroke::new(1.1, ink));
+    painter.circle_filled(front, r, ink);
+    // each stripe's run inside both circles
+    let within = |from: Pos2, d: egui::Vec2, c: Pos2| {
+        let f = from - c;
+        let (a, b, k) = (d.dot(d), 2.0 * f.dot(d), f.dot(f) - r * r);
+        let disc = b * b - 4.0 * a * k;
+        (disc > 0.0).then(|| ((-b - disc.sqrt()) / (2.0 * a), (-b + disc.sqrt()) / (2.0 * a)))
+    };
+    for k in -1..=1 {
+        let o = k as f32 * 2.2;
+        let from = front + vec2(o - 5.0, -o - 5.0);
+        let d = vec2(10.0, 10.0);
+        if let (Some((a0, a1)), Some((b0, b1))) = (within(from, d, back), within(from, d, front)) {
+            let (t0, t1) = (a0.max(b0).max(0.0), a1.min(b1).min(1.0));
+            if t1 > t0 {
+                painter.line_segment([from + d * t0, from + d * t1], Stroke::new(1.0, gap));
+            }
+        }
+    }
 }
 
 /// The Layer / Pencil choice under the bar: the adjustment changes the layer, or is painted on.

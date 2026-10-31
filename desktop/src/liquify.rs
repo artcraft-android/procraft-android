@@ -8,17 +8,17 @@ use egui::{Align2, Color32, Id, Order, Rect, Sense, Ui, pos2, vec2};
 use procraft_core::{AdjustShown, CanvasSession, LiquifyKind};
 
 use crate::icons::{self, Icon};
-use crate::look::{Look, Weight, argb, pc, text};
+use crate::look::{Look, Shade, Themed, Weight, argb, pc, text};
 use crate::transform::{
     MENU_ARROW, MENU_GROUP, MENU_LINE, MENU_TEXT, MENU_WIDTH, menu_slider, menu_title, popover_frame,
 };
 
-const PANEL_FILL: u32 = 0xF71E1E1E;
+const PANEL_FILL: Themed = Themed(0xF71E1E1E, 0xF7F1F1F1);
 const PANEL_RISE: f32 = 25.0;
-const PANEL_BUTTON: u32 = 0xFF303030;
-const IDLE: u32 = 0xFFAAAAAA;
-const LABEL: u32 = 0xFFA3A3A3;
-const DIM: u32 = 0xFF575757;
+const PANEL_BUTTON: Themed = Themed(0xFF303030, 0xFFF8F8F8);
+const IDLE: Themed = Themed(0xFFAAAAAA, 0xFF414141);
+const LABEL: Themed = Themed(0xFFA3A3A3, 0xFF414141);
+const DIM: Themed = Themed(0xFF575757, 0xFF989898);
 const WIDE: (f32, f32) = (1093.0, 162.0);
 const UPRIGHT: (f32, f32) = (654.0, 200.0);
 
@@ -97,7 +97,7 @@ impl Liquify {
         let left = rect.left() + 86.0;
         let top = rect.top() + 28.0;
         for (k, &(kind, label, glyph)) in KINDS.iter().enumerate() {
-            let ink = if shown.liquify_kind == kind { pc::ACCENT } else { IDLE };
+            let ink = if shown.liquify_kind == kind { pc::ACCENT.into() } else { IDLE };
             if button(ui, look, pos2(left + 94.0 * k as f32, top), glyph, label, ink, LABEL, 24.0, true) {
                 session.adjustment_liquify_kind(kind);
                 self.popup = Popup::None;
@@ -283,8 +283,8 @@ fn button(
     at: egui::Pos2,
     glyph: &Icon,
     label: &str,
-    ink: u32,
-    words: u32,
+    ink: impl Shade,
+    words: impl Shade,
     size: f32,
     enabled: bool,
 ) -> bool {

@@ -11,7 +11,7 @@ use procraft_core::{CanvasSession, ColourHistory, Palettes};
 
 use crate::colour_drop::{ColourDrop, Touch};
 use crate::icons;
-use crate::look::{Look, Weight, argb, pc, text};
+use crate::look::{Look, Shade, Themed, Weight, argb, pc, text};
 use crate::panel::{self, PANEL_TITLE};
 
 const PANEL_WIDTH: f32 = 376.0;
@@ -20,12 +20,12 @@ const RING_OUTER: f32 = 182.0;
 const RING_INNER: f32 = 124.0;
 const DISC_RADIUS: f32 = 105.0;
 const PICKER: f32 = 364.0;
-const SWATCH_EDGE: u32 = 0xFF5A5A5A;
-const GRABBER: u32 = 0x7AC6C6C6;
-const SET_CELL: u32 = 0x2E5B5B5B;
-const CLEAR_TEXT: u32 = 0xFFB5B5B5;
-const EMPTY_SWATCH: u32 = 0xFF2A2A2A;
-pub(crate) const EMPTY_SLOT: u32 = 0xFF555555;
+const SWATCH_EDGE: Themed = Themed(0xFF5A5A5A, 0xFFC0C0C0);
+const GRABBER: Themed = Themed(0x7AC6C6C6, 0xFFB0B0B0);
+const SET_CELL: Themed = Themed(0x2E5B5B5B, 0xFFD7D7D7);
+const CLEAR_TEXT: Themed = Themed(0xFFB5B5B5, 0xFF4A4A4A);
+const EMPTY_SWATCH: Themed = Themed(0xFF2A2A2A, 0xFFD9D9D9);
+pub(crate) const EMPTY_SLOT: Themed = Themed(0xFF555555, 0xFFC8C8C8);
 /// The history's strip: its last colours, as many as it keeps.
 const HISTORY_SHOWN: usize = 10;
 /// Classic's square, Harmony's wheel (its radius), and their rows.
@@ -34,10 +34,10 @@ const HARMONY_RADIUS: f32 = 149.0;
 const SLIDER_ROW: f32 = 36.0;
 pub(crate) const SATURATION_GREY: u32 = 0xFF7F7F7F;
 /// Value's groups of sliders and its hex row.
-const VALUE_GROUP: u32 = 0xFF434343;
+const VALUE_GROUP: Themed = Themed(0xFF434343, 0xFFD5D5D5);
 const VALUE_GROUP_HEIGHT: f32 = 167.0;
-const HEX_ROW: u32 = 0xFF414141;
-const HEX_FIELD: u32 = 0xFF4B4B4B;
+const HEX_ROW: Themed = Themed(0xFF414141, 0xFFD8D8D8);
+const HEX_FIELD: Themed = Themed(0xFF4B4B4B, 0xFFCFCFCF);
 /// The hex keypad beside the panel.
 const HEX_PAD: (f32, f32) = (259.0, 340.0);
 const HEX_PAD_FILL: u32 = 0xFF616161;
@@ -47,9 +47,63 @@ const HEX_KEY_HELD: u32 = 0xFF8A8A8A;
 const HEX_KEY_INK: u32 = 0xFFEEEEEE;
 const HEX_BACK_INK: u32 = 0xFFBABABA;
 /// Harmony's kinds menu.
-const HARMONY_MENU_FILL: u32 = 0xFF5A5C5B;
+const HARMONY_MENU_FILL: Themed = Themed(0xFF5A5C5B, 0xFFF0F0F0);
 /// Palettes: the Compact/Cards switch, then the list of palettes, each a card.
 const PALETTE_LIST: f32 = 577.0;
+/// Windows shorter than this get the short panel: the history or the palette (as its "•••" menu
+/// says), not both, and the pickers tighter (see [`Shape`]).
+const SHORT_SCREEN: f32 = 900.0;
+/// Short, the classic square takes the height left over: the window less the bar and arrow (56),
+/// the header (64), the sliders (108), the palette (142), the tabs (70) and a 25 margin.
+const SHORT_CLASSIC_REST: f32 = 465.0;
+/// The short panel's menu: its width, edge and corners.
+const SHORT_MENU_WIDTH: f32 = 252.0;
+const SHORT_MENU_EDGE: u32 = 0x24FFFFFF;
+const SHORT_MENU_CORNER: f32 = 17.0;
+
+/// The pickers' sizes, full or short: Classic's square's height, Harmony's wheel (its radius, the
+/// space above it and under it), Value's groups (their height, the gap between rows and above the
+/// first), and the palettes' list.
+#[derive(Clone, Copy, Debug)]
+struct Shape {
+    square: f32,
+    harmony_radius: f32,
+    harmony_top: f32,
+    harmony_gap: f32,
+    value_group: f32,
+    value_gap: f32,
+    value_top: f32,
+    palette_list: f32,
+}
+
+impl Shape {
+    fn of(short: bool, screen_height: f32) -> Shape {
+        if short {
+            Shape {
+                square: (screen_height - SHORT_CLASSIC_REST).clamp(150.0, SQUARE),
+                harmony_radius: HARMONY_RADIUS - 1.0,
+                harmony_top: 4.0,
+                harmony_gap: 10.0,
+                // the rows 51 apart instead of 53
+                value_group: 151.0,
+                value_gap: 7.0,
+                value_top: 3.0,
+                palette_list: 458.0,
+            }
+        } else {
+            Shape {
+                square: SQUARE,
+                harmony_radius: HARMONY_RADIUS,
+                harmony_top: 10.0,
+                harmony_gap: 31.0,
+                value_group: VALUE_GROUP_HEIGHT,
+                value_gap: 9.0,
+                value_top: 9.0,
+                palette_list: PALETTE_LIST,
+            }
+        }
+    }
+}
 const PALETTE_TILE: f32 = 120.0;
 /// A swatch held this long is taken out of its palette.
 const SWATCH_HOLD: std::time::Duration = std::time::Duration::from_millis(400);
@@ -210,6 +264,9 @@ pub struct Colours {
     new_palette_menu: crate::menu::Menu,
     new_palette_button: Rect,
     swatch_press: Option<(u32, usize, std::time::Instant, bool)>,
+    /// The short panel's "•••" (where it is) and its menu.
+    short_dots: Rect,
+    short_menu: crate::menu::Menu,
 }
 
 impl Default for Colours {
@@ -231,6 +288,8 @@ impl Default for Colours {
             new_palette_menu: crate::menu::Menu::default(),
             new_palette_button: Rect::NOTHING,
             swatch_press: None,
+            short_dots: Rect::NOTHING,
+            short_menu: crate::menu::Menu::default(),
         }
     }
 }
@@ -269,7 +328,9 @@ impl Colours {
         session.set_secondary_color(r, g, b);
     }
 
-    /// Shows the panel hanging from `button`; returns where it is (points).
+    /// Shows the panel hanging from `button`; returns where it is (points). In a short window it
+    /// shows the history or the palette, as `history_shown` says (its menu sets it).
+    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -277,24 +338,41 @@ impl Colours {
         session: &CanvasSession,
         drop: &mut ColourDrop,
         button: Rect,
+        history_shown: &mut bool,
         backdrops: &mut Vec<f32>,
     ) -> Rect {
         let screen = ctx.content_rect();
         let (left, arrow_x) = panel::place(ctx, PANEL_WIDTH, button.center().x);
         let top = screen.top() + pc::BAR_HEIGHT;
         // the header (with Harmony's kind under its title), the picker, the history (44 and 36),
-        // the palette (44 and three rows of 36) and the tabs (70)
-        let header = if self.mode == Mode::Harmony { HEADER_HEIGHT + 14.0 } else { HEADER_HEIGHT };
+        // the palette (44 and three rows of 36) and the tabs (70); short, the history or the
+        // palette (34 and its rows) and the pickers tighter
+        let short = screen.height() < SHORT_SCREEN;
+        let shape = Shape::of(short, screen.height());
+        let has_palette = (self.palettes.default_palette() as usize) < self.palettes.list().len();
+        let history = *history_shown || !has_palette;
+        let header = match self.mode {
+            Mode::Harmony => HEADER_HEIGHT + 14.0,
+            // short, the disc reaches up into the header's last 7
+            Mode::Disc if short => HEADER_HEIGHT - 7.0,
+            _ => HEADER_HEIGHT,
+        };
         let picker_height = match self.mode {
+            Mode::Disc if short => PICKER + 3.0,
             Mode::Disc | Mode::Palettes => 8.0 + PICKER + 17.0,
-            Mode::Classic => SQUARE + SLIDER_ROW * 3.0,
-            Mode::Harmony => 10.0 + HARMONY_RADIUS * 2.0 + 31.0 + SLIDER_ROW,
-            Mode::Value => VALUE_GROUP_HEIGHT * 2.0 + 6.0 + 6.0 + 44.0,
+            Mode::Classic => shape.square + SLIDER_ROW * 3.0,
+            Mode::Harmony => shape.harmony_top + shape.harmony_radius * 2.0 + shape.harmony_gap + SLIDER_ROW,
+            Mode::Value => shape.value_group * 2.0 + 6.0 + 6.0 + 44.0 + if short { 2.0 } else { 0.0 },
+        };
+        let bottom = match (short, history) {
+            (false, _) => 80.0 + 44.0 + 108.0,
+            (true, true) => 44.0 + 36.0,
+            (true, false) => 34.0 + 108.0,
         };
         let height = if self.mode == Mode::Palettes {
-            panel::ARROW_HEIGHT + HEADER_HEIGHT + 36.0 + 8.0 + PALETTE_LIST + 70.0
+            panel::ARROW_HEIGHT + HEADER_HEIGHT + 36.0 + 8.0 + shape.palette_list + 70.0
         } else {
-            panel::ARROW_HEIGHT + header + picker_height + 80.0 + 44.0 + 108.0 + 8.0 + 70.0
+            panel::ARROW_HEIGHT + header + picker_height + bottom + 8.0 + 70.0
         };
         let mut hex_row = Rect::NOTHING;
         let rect = Rect::from_min_size(pos2(left, top), vec2(PANEL_WIDTH, height));
@@ -339,22 +417,47 @@ impl Colours {
 
                 let top = body.top() + header;
                 match self.mode {
-                    Mode::Palettes => self.palettes_view(ui, look, session, body, top),
+                    Mode::Palettes => self.palettes_view(ui, look, session, body, top, shape.palette_list),
                     Mode::Disc => {
-                        let picker = Rect::from_min_size(pos2(body.left() + 6.0, top + 8.0), vec2(PICKER, PICKER));
+                        let at = pos2(body.left() + 6.0, top + if short { 0.0 } else { 8.0 });
+                        let picker = Rect::from_min_size(at, vec2(PICKER, PICKER));
                         if self.pickers.disc(ui, &mut self.hsv, picker) {
                             self.send(session);
                         }
                     }
-                    Mode::Classic => self.classic(ui, session, body, top),
+                    Mode::Classic => self.classic(ui, session, body, top, shape.square),
                     Mode::Harmony => {
                         self.harmony_kind_button(ui, body);
-                        self.harmony(ui, session, body, top);
+                        self.harmony(ui, session, body, top, shape);
                     }
-                    Mode::Value => hex_row = self.value(ui, session, body, top),
+                    Mode::Value => hex_row = self.value(ui, session, body, top, shape),
                 }
 
-                if self.mode != Mode::Palettes {
+                if self.mode != Mode::Palettes && short {
+                    // the history or the palette, as the "•••" beside its title says
+                    let y = top + picker_height;
+                    let band = if history { 44.0 } else { 34.0 };
+                    if history {
+                        let at = pos2(body.left() + 21.0, y + 13.0);
+                        text(ui.painter(), at, Align2::LEFT_TOP, "History", 14.0, Weight::SemiBold, argb(PANEL_TITLE));
+                        self.history_strip(ui, session, body, y + band);
+                    } else {
+                        let at = pos2(body.left() + 21.0, y + 8.0);
+                        let name = self.palette_name();
+                        text(ui.painter(), at, Align2::LEFT_TOP, &name, 14.0, Weight::SemiBold, argb(PANEL_TITLE));
+                        self.palette_rows(ui, session, drop, rect, body, y + band);
+                    }
+                    // three dots in a 44 x 34 box 9 in from the right, level with the title
+                    let dots =
+                        Rect::from_min_size(pos2(body.right() - 9.0 - 44.0, y + (band - 34.0) / 2.0), vec2(44.0, 34.0));
+                    for i in -1..=1 {
+                        ui.painter().circle_filled(dots.center() + vec2(i as f32 * 6.5, 0.0), 1.8, argb(PANEL_TITLE));
+                    }
+                    self.short_dots = dots;
+                    if ui.interact(dots, ui.scope_id().with("short menu"), Sense::click()).clicked() {
+                        self.short_menu.open();
+                    }
+                } else if self.mode != Mode::Palettes {
                     let mut y = top + picker_height;
                     // the history: its title, Clear, and the last ten colours
                     let ink = argb(PANEL_TITLE);
@@ -382,63 +485,20 @@ impl Colours {
                         self.history.clear();
                     }
                     y += 44.0;
-                    let strip = Rect::from_min_size(pos2(body.left() + 8.0, y), vec2(body.width() - 16.0, 36.0));
-                    let kept = self.history.colours();
-                    let history: Vec<Option<u32>> = (0..HISTORY_SHOWN).map(|i| kept.get(i).copied()).collect();
-                    if let Some((Some(c), _)) =
-                        swatch_row(ui, strip, &history, EMPTY_SWATCH, [8.0, 8.0, 8.0, 8.0], "history")
-                    {
-                        self.set_rgb(session, c);
-                    }
+                    self.history_strip(ui, session, body, y);
                     y += 36.0;
-                    let index = self.palettes.default_palette();
-                    let palette = self.palettes.list().into_iter().nth(index as usize);
-                    let name = palette.as_ref().map_or("", |p| p.name.as_str());
+                    let name = self.palette_name();
                     text(
                         ui.painter(),
                         pos2(body.left() + 21.0, y + 13.0),
                         Align2::LEFT_TOP,
-                        name,
+                        &name,
                         14.0,
                         Weight::SemiBold,
                         ink,
                     );
-                    let colors = palette.map(|p| p.colors).unwrap_or_default();
                     y += 44.0;
-                    for row in 0..3 {
-                        let cells: Vec<Option<u32>> =
-                            (0..10).map(|c| colors.get(row * 10 + c).copied().flatten()).collect();
-                        let line = Rect::from_min_size(pos2(body.left() + 8.0, y), vec2(body.width() - 16.0, 36.0));
-                        let corners = match row {
-                            0 => [8.0, 8.0, 0.0, 0.0],
-                            2 => [0.0, 0.0, 8.0, 8.0],
-                            _ => [0.0; 4],
-                        };
-                        // a filled swatch tapped gives its colour, held is taken out, and dragged out
-                        // fills where it is let go (off this panel); an empty one tapped keeps the
-                        // current colour there
-                        for (i, (cell, rgb)) in paint_row(ui, line, &cells, EMPTY_SLOT, corners).into_iter().enumerate()
-                        {
-                            let slot = (row * 10 + i) as u32;
-                            let id = ui.scope_id().with(("palette swatch", slot));
-                            match rgb {
-                                Some(c) => match drop.source(ui, session, id, cell, c, true, true, Some(rect)) {
-                                    Some(Touch::Tap) => self.set_rgb(session, c),
-                                    Some(Touch::Hold) => self.palettes.set_swatch(index, slot, None),
-                                    Some(Touch::Dragged) | None => {}
-                                },
-                                // not the swatch's id: a hold that took a colour out doesn't tap
-                                // the slot it leaves when let go
-                                None => {
-                                    let id = ui.scope_id().with(("palette slot", slot));
-                                    if ui.interact(cell, id, Sense::click()).clicked() {
-                                        self.palettes.set_swatch(index, slot, Some(to_hex(self.rgb())));
-                                    }
-                                }
-                            }
-                        }
-                        y += 36.0;
-                    }
+                    self.palette_rows(ui, session, drop, rect, body, y);
                 }
                 let tabs = Rect::from_min_max(pos2(body.left(), body.bottom() - 70.0), body.max);
                 if let Some(mode) = mode_tabs(ui, look, tabs, self.mode) {
@@ -458,8 +518,130 @@ impl Colours {
         if self.mode == Mode::Palettes {
             self.palette_menu(ctx, look, backdrops);
             self.new_palette_menu(ctx, look, backdrops);
+        } else if short {
+            self.short_menu(ctx, look, history, history_shown, backdrops);
         }
         rect
+    }
+
+    /// The last ten colours painted with, in a strip 36 tall from `y`; one tapped is taken.
+    fn history_strip(&mut self, ui: &Ui, session: &CanvasSession, body: Rect, y: f32) {
+        let strip = Rect::from_min_size(pos2(body.left() + 8.0, y), vec2(body.width() - 16.0, 36.0));
+        let kept = self.history.colours();
+        let history: Vec<Option<u32>> = (0..HISTORY_SHOWN).map(|i| kept.get(i).copied()).collect();
+        if let Some((Some(c), _)) = swatch_row(ui, strip, &history, EMPTY_SWATCH, [8.0, 8.0, 8.0, 8.0], "history") {
+            self.set_rgb(session, c);
+        }
+    }
+
+    /// The active palette's name.
+    fn palette_name(&self) -> String {
+        let index = self.palettes.default_palette() as usize;
+        self.palettes.list().into_iter().nth(index).map(|p| p.name).unwrap_or_default()
+    }
+
+    /// The active palette's three rows of ten from `y`, in the panel at `panel`: a filled swatch
+    /// tapped gives its colour, held is taken out, and dragged out fills where it is let go (off
+    /// this panel); an empty one tapped keeps the current colour there.
+    fn palette_rows(
+        &mut self,
+        ui: &Ui,
+        session: &CanvasSession,
+        drop: &mut ColourDrop,
+        panel: Rect,
+        body: Rect,
+        mut y: f32,
+    ) {
+        let index = self.palettes.default_palette();
+        let colors = self.palettes.list().into_iter().nth(index as usize).map(|p| p.colors).unwrap_or_default();
+        for row in 0..3 {
+            let cells: Vec<Option<u32>> = (0..10).map(|c| colors.get(row * 10 + c).copied().flatten()).collect();
+            let line = Rect::from_min_size(pos2(body.left() + 8.0, y), vec2(body.width() - 16.0, 36.0));
+            let corners = match row {
+                0 => [8.0, 8.0, 0.0, 0.0],
+                2 => [0.0, 0.0, 8.0, 8.0],
+                _ => [0.0; 4],
+            };
+            for (i, (cell, rgb)) in paint_row(ui, line, &cells, EMPTY_SLOT, corners).into_iter().enumerate() {
+                let slot = (row * 10 + i) as u32;
+                let id = ui.scope_id().with(("palette swatch", slot));
+                match rgb {
+                    Some(c) => match drop.source(ui, session, id, cell, c, true, true, Some(panel)) {
+                        Some(Touch::Tap) => self.set_rgb(session, c),
+                        Some(Touch::Hold) => self.palettes.set_swatch(index, slot, None),
+                        Some(Touch::Dragged) | None => {}
+                    },
+                    // not the swatch's id: a hold that took a colour out doesn't tap the slot it
+                    // leaves when let go
+                    None => {
+                        let id = ui.scope_id().with(("palette slot", slot));
+                        if ui.interact(cell, id, Sense::click()).clicked() {
+                            self.palettes.set_swatch(index, slot, Some(to_hex(self.rgb())));
+                        }
+                    }
+                }
+            }
+            y += 36.0;
+        }
+    }
+
+    /// The short panel's menu under its "•••": Color history or Active palette (a radio each,
+    /// setting `history_shown`), and with the history shown, Clear history. Its right edge is 16
+    /// left of the dots, its top 32 under their box's.
+    fn short_menu(
+        &mut self,
+        ctx: &egui::Context,
+        look: &mut Look,
+        history: bool,
+        history_shown: &mut bool,
+        backdrops: &mut Vec<f32>,
+    ) {
+        let height = 6.0 + 40.0 * 2.0 + if history { 11.0 + 1.0 + 10.0 + 40.0 + 9.5 } else { 7.0 };
+        let dots = self.short_dots;
+        let rect = Rect::from_min_size(pos2(dots.left() - 246.0, dots.top() + 32.0), vec2(SHORT_MENU_WIDTH, height));
+        let glass = crate::menu::Glass {
+            fill: crate::menu::OVER_PANEL,
+            edge: Some(SHORT_MENU_EDGE),
+            frost: false,
+            corner: SHORT_MENU_CORNER,
+        };
+        let mut chosen = None;
+        self.short_menu.show(ctx, "short colour menu", rect, rect.right_top(), glass, backdrops, |ui| {
+            for (i, (label, on)) in [("Color history", true), ("Active palette", false)].into_iter().enumerate() {
+                let row = Rect::from_min_size(
+                    pos2(rect.left(), rect.top() + 6.0 + 40.0 * i as f32),
+                    vec2(rect.width(), 40.0),
+                );
+                let at = pos2(row.left() + 20.0, row.center().y);
+                text(ui.painter(), at, Align2::LEFT_CENTER, label, 18.0, Weight::Regular, argb(crate::menu::INK));
+                crate::actions::radio(ui, look, pos2(row.right() - 19.0 - 9.0, row.center().y), on == history);
+                if ui.interact(row, ui.scope_id().with(("short menu", i)), Sense::click()).clicked() {
+                    chosen = Some(Some(on));
+                }
+            }
+            if history {
+                let rule = Rect::from_min_max(
+                    pos2(rect.left() + 16.0, rect.top() + 6.0 + 80.0 + 11.0),
+                    pos2(rect.right() - 15.0, rect.top() + 6.0 + 80.0 + 12.0),
+                );
+                ui.painter().rect_filled(rule, 0, argb(pc::GLASS_MENU_EDGE));
+                let row = Rect::from_min_size(pos2(rect.left(), rule.bottom() + 10.0), vec2(rect.width(), 40.0));
+                let danger = argb(crate::menu::DANGER);
+                // a 41 frame centred 29.5 in
+                look.icon(ui, &icons::SWEEP, pos2(row.left() + 29.5, row.center().y), 41.0, danger);
+                let at = pos2(row.left() + 9.0 + 41.0 + 2.0, row.center().y);
+                text(ui.painter(), at, Align2::LEFT_CENTER, "Clear history", 18.0, Weight::Regular, danger);
+                if ui.interact(row, ui.scope_id().with("short clear"), Sense::click()).clicked() {
+                    chosen = Some(None);
+                }
+            }
+        });
+        match chosen {
+            Some(Some(on)) => *history_shown = on,
+            Some(None) => self.history.clear(),
+            None => return,
+        }
+        self.short_menu.close();
     }
 }
 
@@ -611,8 +793,9 @@ impl Pickers {
 impl Colours {
     /// Classic: the saturation/brightness square (344, rounded 10), then sliders for the hue,
     /// saturation and brightness.
-    fn classic(&mut self, ui: &Ui, session: &CanvasSession, body: Rect, top: f32) {
-        let square = Rect::from_min_size(pos2(body.left() + 16.0, top), vec2(SQUARE, SQUARE));
+    /// Short, the square is `side` tall (still 344 wide).
+    fn classic(&mut self, ui: &Ui, session: &CanvasSession, body: Rect, top: f32, side: f32) {
+        let square = Rect::from_min_size(pos2(body.left() + 16.0, top), vec2(SQUARE, side));
         let mut changed = self.pickers.square(ui, &mut self.hsv, square);
         let row = |i: f32| {
             Rect::from_min_size(
@@ -688,14 +871,17 @@ impl Colours {
 
     /// Harmony: a 298 wheel (hue round it, saturation out, in Display P3) with a knob for the
     /// colour and one for each of its companions, then a brightness slider.
-    fn harmony(&mut self, ui: &Ui, session: &CanvasSession, body: Rect, top: f32) {
+    fn harmony(&mut self, ui: &Ui, session: &CanvasSession, body: Rect, top: f32, shape: Shape) {
+        let r = shape.harmony_radius;
         let wheel = Rect::from_min_size(
-            pos2(body.left() + PANEL_WIDTH / 2.0 - HARMONY_RADIUS, top + 10.0),
-            vec2(HARMONY_RADIUS * 2.0, HARMONY_RADIUS * 2.0),
+            pos2(body.left() + PANEL_WIDTH / 2.0 - r, top + shape.harmony_top),
+            vec2(r * 2.0, r * 2.0),
         );
         let mut changed = self.pickers.harmony(ui, &mut self.hsv, wheel, self.harmony);
-        let row =
-            Rect::from_min_size(pos2(body.left() + 20.0, wheel.bottom() + 31.0), vec2(body.width() - 40.0, SLIDER_ROW));
+        let row = Rect::from_min_size(
+            pos2(body.left() + 20.0, wheel.bottom() + shape.harmony_gap),
+            vec2(body.width() - 40.0, SLIDER_ROW),
+        );
         changed |= harmony_brightness(ui, row, &mut self.hsv);
         if changed {
             self.send(session);
@@ -704,16 +890,18 @@ impl Colours {
 
     /// Value: the hue, saturation and brightness, then the red, green and blue, each a number
     /// slider; then the hex code, a tap on which opens the keypad. Returns the hex row.
-    fn value(&mut self, ui: &Ui, session: &CanvasSession, body: Rect, top: f32) -> Rect {
+    fn value(&mut self, ui: &Ui, session: &CanvasSession, body: Rect, top: f32, shape: Shape) -> Rect {
         let left = body.left() + 8.0;
         let width = body.width() - 16.0;
         let rgb = to_hex(self.rgb());
         let [r, g, b] = [rgb >> 16 & 0xFF, rgb >> 8 & 0xFF, rgb & 0xFF];
-        for (k, group_top) in [top, top + VALUE_GROUP_HEIGHT + 6.0].into_iter().enumerate() {
-            let group = Rect::from_min_size(pos2(left, group_top), vec2(width, VALUE_GROUP_HEIGHT));
+        let (group_height, gap) = (shape.value_group, shape.value_gap);
+        for (k, group_top) in [top, top + group_height + 6.0].into_iter().enumerate() {
+            let group = Rect::from_min_size(pos2(left, group_top), vec2(width, group_height));
             ui.painter().rect_filled(group, 10, argb(VALUE_GROUP));
             for i in 0..3 {
-                let row = Rect::from_min_size(pos2(left, group_top + 9.0 + (44.0 + 9.0) * i as f32), vec2(width, 44.0));
+                let y = group_top + shape.value_top + (44.0 + gap) * i as f32;
+                let row = Rect::from_min_size(pos2(left, y), vec2(width, 44.0));
                 let (letter, value, colours, shown): (&str, f32, Vec<Color32>, String) = match (k, i) {
                     (0, 0) => (
                         "H",
@@ -774,7 +962,7 @@ impl Colours {
             }
         }
         // the hex code
-        let row = Rect::from_min_size(pos2(left, top + VALUE_GROUP_HEIGHT * 2.0 + 6.0 + 6.0), vec2(width, 44.0));
+        let row = Rect::from_min_size(pos2(left, top + group_height * 2.0 + 6.0 + 6.0), vec2(width, 44.0));
         hex_row(ui, row, rgb, &mut self.hex, HEX_ROW, HEX_FIELD);
         row
     }
@@ -782,7 +970,14 @@ impl Colours {
 
 /// The hex code's row, filled `fill`: "Hexadecimal", and the code in a field filled `field_fill`, a
 /// tap on which opens the keypad (`typed`: the digits typed on it since; none while it is shut).
-pub(crate) fn hex_row(ui: &Ui, row: Rect, rgb: u32, typed: &mut Option<String>, fill: u32, field_fill: u32) {
+pub(crate) fn hex_row(
+    ui: &Ui,
+    row: Rect,
+    rgb: u32,
+    typed: &mut Option<String>,
+    fill: impl Shade,
+    field_fill: impl Shade,
+) {
     ui.painter().rect_filled(row, 10, argb(fill));
     let ink = argb(PANEL_TITLE);
     text(
@@ -887,13 +1082,22 @@ impl Colours {
     pub fn modal(&self) -> bool {
         self.palette_menu.is_open()
             || self.new_palette_menu.is_open()
+            || self.short_menu.is_open()
             || self.harmony_menu.is_open()
             || self.takes_keys()
     }
 
     /// Palettes: the Compact/Cards switch, then every palette as a card, the default ticked: its
     /// name (tapped, renamed in place), its menu, and its swatches as a grid or as named tiles.
-    fn palettes_view(&mut self, ui: &mut Ui, look: &mut Look, session: &CanvasSession, body: Rect, top: f32) {
+    fn palettes_view(
+        &mut self,
+        ui: &mut Ui,
+        look: &mut Look,
+        session: &CanvasSession,
+        body: Rect,
+        top: f32,
+        list_height: f32,
+    ) {
         let switch = Rect::from_min_size(pos2(body.left() + 8.5, top), vec2(body.width() - 17.0, 36.0));
         ui.painter().rect_filled(switch, 9, argb(SET_CELL));
         let inner = switch.shrink(2.0);
@@ -918,7 +1122,7 @@ impl Colours {
                 self.palette_cards = cards;
             }
         }
-        let list = Rect::from_min_size(pos2(body.left(), switch.bottom() + 8.0), vec2(body.width(), PALETTE_LIST));
+        let list = Rect::from_min_size(pos2(body.left(), switch.bottom() + 8.0), vec2(body.width(), list_height));
         let palettes = self.palettes.list();
         let default = self.palettes.default_palette();
         let pad = if self.palette_cards { 8.0 } else { 8.5 };
@@ -1333,7 +1537,7 @@ fn swatch_row(
     ui: &Ui,
     rect: Rect,
     cells: &[Option<u32>],
-    empty: u32,
+    empty: impl Shade,
     [tl, tr, br, bl]: [f32; 4],
     id: impl std::hash::Hash + std::fmt::Debug,
 ) -> Option<(Option<u32>, usize)> {
@@ -1352,7 +1556,7 @@ pub(crate) fn paint_row(
     ui: &Ui,
     rect: Rect,
     cells: &[Option<u32>],
-    empty: u32,
+    empty: impl Shade,
     [tl, tr, br, bl]: [f32; 4],
 ) -> Vec<(Rect, Option<u32>)> {
     let n = cells.len().max(1);
@@ -1404,7 +1608,7 @@ fn mode_tabs(ui: &Ui, look: &mut Look, rect: Rect, mode: Mode) -> Option<Mode> {
             36.0,
             if selected { argb(pc::ACCENT) } else { argb(PANEL_TITLE) },
         );
-        let ink = if selected { Color32::WHITE } else { argb(PANEL_TITLE) };
+        let ink = if selected { argb(pc::MENU_INK) } else { argb(PANEL_TITLE) };
         text(ui.painter(), pos2(x, rect.top() + 41.0), Align2::CENTER_TOP, label, 13.0, Weight::Medium, ink);
     }
     chosen

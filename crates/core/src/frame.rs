@@ -13,6 +13,43 @@ use crate::{
 };
 
 impl State {
+    /// Draws the whole canvas fitted and centred on black into `view` (`format`, `size` pixels,
+    /// its colours shown in `screen`): Project canvas, on a second display.
+    pub(crate) fn draw_fitted(
+        &mut self,
+        view: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        size: (u32, u32),
+        screen: Profile,
+    ) {
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return };
+        let to_screen = procraft_engine::view::View::fit((self.doc.width(), self.doc.height()), size).to_screen();
+        let convert = colours_to(self.doc.profile, screen);
+        let key = crate::colour::table_key(&self.doc, screen);
+        if self.display_lut.as_ref().map(|(k, _)| *k) != key {
+            self.display_lut = key
+                .zip(crate::colour::display_table(&self.doc, screen))
+                .map(|(k, table)| (k, canvas.display_lut(gpu, &table)));
+        }
+        let lut = self.display_lut.as_ref().map(|(_, l)| l);
+        canvas.render(
+            gpu,
+            &mut self.doc,
+            Some(Target {
+                view,
+                format,
+                size,
+                to_screen,
+                surround: [0.0; 3],
+                grid: None,
+                selection: None,
+                backdrop: None,
+                convert,
+                lut,
+            }),
+        );
+    }
+
     /// Draws a frame into `view` (`format`, `size` window pixels, its colours shown in `screen`):
     /// the model open to paint on, the drawing pad as a sphere, or the canvas with its surround,
     /// grid, selection and frosted panels. `started` is when drawing began, for the bands' drift.

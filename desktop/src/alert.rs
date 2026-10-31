@@ -8,20 +8,56 @@ use std::time::Instant;
 use egui::emath::TSTransform;
 use egui::{Align2, Color32, Id, LayerId, Order, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 
-use crate::icons::Icon;
-use crate::look::{Look, Weight, argb, cubic_bezier, pc, text};
+use crate::icons::{Icon, Part};
+use crate::look::{Look, Themed, Weight, argb, cubic_bezier, pc, text};
 
 const BUTTON_WIDTH: f32 = 192.0;
 const BUTTON_GAP: f32 = 12.0;
 const BUTTON_HEIGHT: f32 = 48.0;
 const SIDE: f32 = 15.0;
-const FILL: u32 = 0xF21E1E1E;
+const FILL: Themed = Themed(0xF21E1E1E, 0xF2E3E3E3);
 const EDGE: u32 = 0x24FFFFFF;
-const INK: u32 = 0xFFC5C5C5;
-const CANCEL_FILL: u32 = 0xFF2D2D2D;
-const DESTROY_FILL: u32 = 0xFFFE2D2E;
+const INK: Themed = Themed(0xFFC5C5C5, 0xFF222222);
+const CANCEL_FILL: Themed = Themed(0xFF2D2D2D, 0xFFD9D9D9);
+const DESTROY_FILL: Themed = Themed(0xFFFE2D2E, 0xFFFD0100);
 const DIM: f32 = 0.7;
 const START_SCALE: f32 = 1.1;
+/// A page with its corner folded (14 x 18, the corner solid), as the Android app draws it.
+const PAGE: Icon = Icon {
+    name: "page",
+    width: 24.0,
+    height: 24.0,
+    parts: &[Part {
+        d: "M7 3H13.25L19 8.75V19a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM7.5 4.75H12.5V10.75H17.25V18.5a0.75 0.75 0 0 1-0.75 0.75H7.5a0.75 0.75 0 0 1-0.75-0.75V5.5a0.75 0.75 0 0 1 0.75-0.75z",
+        stroke: 0.0,
+        fill: true,
+        even_odd: true,
+    }],
+};
+
+/// How well a PDF keeps its pictures, asked before one is made: Good, Better or Best (JPEG at 60,
+/// 85 or exactly); a tap beside the panel makes none.
+pub fn pdf_quality() -> Asking {
+    Asking {
+        title: "PDF quality".into(),
+        message: String::new(),
+        action: "Best".into(),
+        icon: Some(&PAGE),
+        destructive: false,
+        extra: Some("Better".into()),
+        first: Some("Good".into()),
+    }
+}
+
+/// The JPEG quality the PDF quality alert's `answer` picked, if it picked one.
+pub fn pdf_jpeg(answer: Answer) -> Option<u8> {
+    match answer {
+        Answer::First => Some(60),
+        Answer::Extra => Some(85),
+        Answer::Action => Some(100),
+        Answer::Cancel => None,
+    }
+}
 /// Coming, it takes this long; going, this long.
 const IN: f32 = 0.3;
 const OUT: f32 = 0.35;
@@ -166,13 +202,13 @@ impl Alert {
                 y += 20.0;
             }
             let top = panel.bottom() - 16.0 - BUTTON_HEIGHT;
-            let action_fill = if asking.destructive { DESTROY_FILL } else { pc::ACCENT };
+            let action_fill = if asking.destructive { DESTROY_FILL } else { pc::ACCENT.into() };
             let mut choices = match &asking.first {
                 Some(first) => vec![(first.as_str(), CANCEL_FILL, Answer::First)],
                 None => vec![("Cancel", CANCEL_FILL, Answer::Cancel)],
             };
             if let Some(extra) = &asking.extra {
-                choices.push((extra.as_str(), pc::ACCENT, Answer::Extra));
+                choices.push((extra.as_str(), pc::ACCENT.into(), Answer::Extra));
             }
             choices.push((asking.action.as_str(), action_fill, Answer::Action));
             for (i, (label, fill, which)) in choices.into_iter().enumerate() {

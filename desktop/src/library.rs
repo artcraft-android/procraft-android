@@ -16,7 +16,7 @@ use procraft_core::{BrushInfo, BrushSetInfo, CanvasSession, ToolKind};
 
 use crate::alert::{Alert, Answer};
 use crate::icons;
-use crate::look::{Look, Weight, argb, pc, text};
+use crate::look::{Look, Shade, Themed, Weight, argb, pc, text};
 use crate::menu::{self, Entry, Menu};
 use crate::panel::{self, PANEL_GLYPH, PANEL_TITLE};
 
@@ -28,9 +28,9 @@ const BRUSH_HEIGHT: f32 = 80.0;
 const BRUSH_GAP: f32 = 8.0;
 /// The library ends this far above the window's bottom edge.
 const BOTTOM_MARGIN: f32 = 25.0;
-const SET_COLUMN: u32 = 0x00000000;
-const SET_CELL: u32 = 0x2E5B5B5B;
-const BRUSH_COLUMN: u32 = 0x26000000;
+const SET_COLUMN: Themed = Themed(0x00000000, 0xFFE6E6E6);
+const SET_CELL: Themed = Themed(0x2E5B5B5B, 0xFFD7D7D7);
+const BRUSH_COLUMN: Themed = Themed(0x26000000, 0xFFE0E0E0);
 const NAME_PILL: u32 = 0x80000000;
 /// The sample stroke's picture: half its own canvas, the cell showing it across its width.
 const PREVIEW: (u32, u32) = (530, 162);
@@ -54,7 +54,8 @@ const PICKER: (f32, f32) = (250.0, 325.0);
 const PICKER_CELL: f32 = 48.0;
 const PICKER_INSET: f32 = 11.0;
 const PICKER_MARGIN: f32 = 25.0;
-const PICKER_GLASS: menu::Glass = menu::Glass { fill: 0xFA303335, edge: Some(menu::EDGE), frost: false, corner: 26.0 };
+const PICKER_GLASS: menu::Glass =
+    menu::Glass { fill: Themed(0xFA303335, 0xFA303335), edge: Some(menu::EDGE), frost: false, corner: 26.0 };
 /// A press moved this far (points) slides or scrolls; held still this long, it drags the brush.
 const SLOP: f32 = 8.0;
 const HOLD: Duration = Duration::from_millis(400);
@@ -128,6 +129,8 @@ pub struct Library {
     /// dropped in the middle of one that shows them).
     pub changed: bool,
     stale: bool,
+    /// The studio asked for: on the brush now chosen, or on one just made (Cancel throws it away).
+    pub studio: Option<Option<(u32, u32)>>,
 }
 
 impl Library {
@@ -141,8 +144,18 @@ impl Library {
         self.plus_menu.is_open() || self.set_menu.is_open() || self.icon_picker.is_open() || self.deleting.is_open()
     }
 
+    /// Brushes came in from a file (not through the library): they are added to the set it shows
+    /// (or the current brush's), and that set shows once they are in. True if the file held any.
+    pub fn add_brushes(&mut self, session: &CanvasSession, bytes: Vec<u8>, name: String) -> bool {
+        let shown = self.shown_set.unwrap_or(session.current_brush().set as usize) as u32;
+        let Some(set) = session.import_any_brushes(bytes, Some(name), shown) else { return false };
+        self.shown_set = Some(set as usize);
+        self.library_changed();
+        true
+    }
+
     /// The library changed: its sample strokes are drawn again (they go by place), and it is kept.
-    fn library_changed(&mut self) {
+    pub fn library_changed(&mut self) {
         self.stale = true;
         self.slid.clear();
         self.swiped = None;
@@ -206,7 +219,7 @@ impl Library {
                 lists = Rect::from_min_max(pos2(body.left(), body.top() + HEADER_HEIGHT), body.max);
                 let sets = Rect::from_min_size(lists.min, vec2(SETS_WIDTH, lists.height()));
                 let brushes = Rect::from_min_max(pos2(lists.left() + SETS_WIDTH, lists.top()), lists.max);
-                if SET_COLUMN >> 24 != 0 {
+                if SET_COLUMN.value() >> 24 != 0 {
                     ui.painter().rect_filled(sets, 0, argb(SET_COLUMN));
                 }
                 let corner = panel::POPOVER_CORNER;
@@ -250,7 +263,7 @@ impl Library {
                                 brush_rects.push(((b.set, b.index), cell));
                                 if let Some(r) = response {
                                     if r.0 {
-                                        brush_tapped = Some((b.set, b.index));
+                                        brush_tapped = Some(((b.set, b.index), selected));
                                     }
                                     if let Some(chose) = r.1 {
                                         swipe_chose = Some(((b.set, b.index), b.name.clone(), chose));
@@ -273,7 +286,7 @@ impl Library {
                     let at = Rect::from_min_size(p.last - p.grab, size);
                     let painter = ui.painter_at(lists);
                     painter.rect_filled(at, 12, argb(pc::ACCENT).gamma_multiply(0.9));
-                    self.preview_in(&painter, (b.set, b.index), at);
+                    self.preview_in(&painter, (b.set, b.index), at, true);
                     let name = one_line(ui, &b.name, 14.0, Weight::SemiBold, Color32::WHITE, at.width() - 28.0);
                     painter.galley(at.min + vec2(18.0, 11.0), name, Color32::WHITE);
                     ctx.request_repaint();
@@ -292,13 +305,17 @@ impl Library {
                 self.shown_set = Some(i);
             }
         }
-        if let Some(key) = brush_tapped {
+        if let Some((key, selected)) = brush_tapped {
             // with a brush slid open, a tap only closes it
             if self.swiped.is_some() {
                 self.swiped = None;
             } else {
                 session.select_brush(key.0, key.1);
                 self.changed = true;
+                // a highlighted brush opens in the studio
+                if selected {
+                    self.studio = Some(None);
+                }
             }
         }
         if let Some((key, name, chose)) = swipe_chose {
@@ -372,11 +389,12 @@ impl Library {
         let Some(i) = tapped else { return };
         self.plus_menu.close();
         match i {
-            // the studio is still to come here: the new brush is chosen
+            // a new brush, opened in the studio
             0 => {
                 if let Some(index) = session.new_brush(shown as u32) {
                     session.select_brush(shown as u32, index);
                     self.library_changed();
+                    self.studio = Some(Some((shown as u32, index)));
                 }
             }
             1 => {
@@ -693,7 +711,7 @@ impl Library {
         }
         let mut faded = painter.clone();
         faded.multiply_opacity(alpha);
-        let shaded = self.preview_in(&faded, key, at);
+        let shaded = self.preview_in(&faded, key, at, selected);
         let ink = if selected { Color32::WHITE } else { argb(PANEL_TITLE) }.gamma_multiply(alpha);
         let galley = one_line(ui, &b.name, 14.0, Weight::SemiBold, ink, at.width() - 18.0 - 10.0);
         let name_at = at.min + vec2(18.0, 11.75);
@@ -725,15 +743,16 @@ impl Library {
         self.previews.insert(key, preview);
     }
 
-    /// Draws brush `key`'s sample stroke filling `at`'s height; returns whether it runs under the
-    /// name.
-    fn preview_in(&self, painter: &egui::Painter, key: (u32, u32), at: Rect) -> bool {
+    /// Draws brush `key`'s sample stroke filling `at`'s height (white on blue when `selected`,
+    /// black on the light interface's rows); returns whether it runs under the name.
+    fn preview_in(&self, painter: &egui::Painter, key: (u32, u32), at: Rect, selected: bool) -> bool {
         let Some(Some(p)) = self.previews.get(&key) else { return false };
         let (pw, ph) = (PREVIEW.0 as f32, PREVIEW.1 as f32);
         let k = (at.width() / pw).max(at.height() / ph);
         let shown = Rect::from_center_size(at.center(), vec2(pw * k, ph * k));
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-        painter.image(p.texture.id(), shown, uv, Color32::WHITE);
+        let tint = if crate::look::light() && !selected { Color32::BLACK } else { Color32::WHITE };
+        painter.image(p.texture.id(), shown, uv, tint);
         p.shaded
     }
 }

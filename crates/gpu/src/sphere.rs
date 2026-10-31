@@ -17,7 +17,7 @@ const BASE_ROUGHNESS: f32 = 0.4836;
 /// The light the sphere is lit by: a sky bluest above, palest at the horizon and dark and warm
 /// below, each blended to the horizon's colour by the height to a power, and a small bright key
 /// light high to the right (directions in the camera's space, y up, z toward the eye). Matched to
-/// how the reference's sphere is lit.
+/// how the measured sphere is lit.
 const SKY_TOP: [f32; 3] = [0.0, 0.0967, 0.2962];
 const SKY_HORIZON: [f32; 3] = [0.2846, 0.3455, 0.4076];
 const SKY_BOTTOM: [f32; 3] = [0.0749, 0.0261, 0.0167];

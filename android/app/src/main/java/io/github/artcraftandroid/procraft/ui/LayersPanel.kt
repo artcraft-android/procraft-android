@@ -646,7 +646,7 @@ private fun LayerRow(
                 }
             }
         }
-        // the blend and visibility buttons overlap by 8, as on the reference; a mask has no blend
+        // the blend and visibility buttons overlap by 8, as measured; a mask has no blend
         if (mask) {
             Spacer(Modifier.width(36.dp))
         } else {

@@ -12,7 +12,7 @@ use egui::{
 use procraft_core::{CanvasSession, SelectKind, SelectTouch, SelectionDisplay, SelectionJoin};
 
 use crate::icons;
-use crate::look::{Look, Weight, argb, text};
+use crate::look::{Look, Themed, Weight, argb, text};
 use crate::transform::{
     Button, DASH, DASH_GAP, MENU_ARROW, MENU_GROUP, MENU_TEXT, MENU_WIDTH, Tapped, button_tip, floating_toolbar,
     menu_slider, menu_title, popover_frame,
@@ -23,8 +23,8 @@ const BUTTON_ROOMY: f32 = 83.0;
 const BUTTON_NARROW: f32 = 70.0;
 const FEATHER_WIDTH: f32 = 250.0;
 const START_DOT: u32 = 0xFFC7C7C7;
-const MESSAGE_BAR: u32 = 0xFF606060;
-const MESSAGE_TEXT: u32 = 0xFFB5B5B5;
+const MESSAGE_BAR: Themed = Themed(0xFF606060, 0xFFD0D0D0);
+const MESSAGE_TEXT: Themed = Themed(0xFFB5B5B5, 0xFF3B3B3B);
 const KINDS: [SelectKind; 4] =
     [SelectKind::Automatic, SelectKind::Freehand, SelectKind::Rectangle, SelectKind::Ellipse];
 

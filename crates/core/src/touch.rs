@@ -272,6 +272,8 @@ enum Mode {
     Adjust,
     /// Cloning, the source dragged.
     Puck,
+    /// Layer Opacity: the touch drags the layer's opacity across the canvas.
+    Opacity,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -345,6 +347,10 @@ pub(crate) struct Touches {
     transform_grabbed: bool,
     pour_moved: bool,
     pour_last: (f32, f64),
+    /// Layer Opacity is on: the layer a drag changes and its opacity as dragged; whether the
+    /// touch has changed it yet.
+    layer_opacity: Option<(u64, f32)>,
+    opacity_moved: bool,
     /// Window pixels a point.
     scale: f32,
 }
@@ -401,6 +407,8 @@ impl Default for Touches {
             transform_grabbed: false,
             pour_moved: false,
             pour_last: (0.0, 0.0),
+            layer_opacity: None,
+            opacity_moved: false,
             scale: 1.0,
         }
     }
@@ -544,6 +552,18 @@ impl CanvasSession {
         self.touches().filling = fill;
     }
 
+    /// Layer Opacity on for layer `id` (a drag across the canvas changes its opacity, each drag
+    /// one undo step) or off.
+    pub fn set_touch_layer_opacity(&self, id: Option<u64>) {
+        let start = id.and_then(|id| self.layers().into_iter().find(|l| l.id == id)).map(|l| (l.id, l.opacity));
+        self.touches().layer_opacity = start;
+    }
+
+    /// Layer Opacity's layer's opacity as dragged, while it is on.
+    pub fn touch_layer_opacity(&self) -> Option<f32> {
+        self.touches().layer_opacity.map(|(_, opacity)| opacity)
+    }
+
     /// The snapped shape's handles show (its bar tapped), or not.
     pub fn set_shape_editing(&self, editing: bool) {
         self.touches().shape_editing = editing;
@@ -632,6 +652,19 @@ impl CanvasSession {
                 out.push(TouchCommand::AdjustChanged);
             }
             Mode::Pick => out.push(TouchCommand::Pick { x: at.0, y: at.1 }),
+            Mode::Opacity if id == t.stroke_pointer => {
+                // the opacity follows the drag across, faster the faster it goes
+                let (last_x, last_ms) = t.pour_last;
+                t.pour_last = (at.0, last.time_ms);
+                let step = drag_step((at.0 - last_x) / t.scale, last.time_ms - last_ms);
+                if let Some((layer, opacity)) = t.layer_opacity.filter(|_| step != 0.0) {
+                    let opacity = (opacity + step).clamp(0.0, 1.0);
+                    t.layer_opacity = Some((layer, opacity));
+                    t.opacity_moved = true;
+                    drop(t);
+                    self.set_layer_opacity(layer, opacity, false);
+                }
+            }
             Mode::Select if id == t.stroke_pointer => {
                 drop(t);
                 self.select_step(at, last.time_ms, false, &mut out);
@@ -819,6 +852,13 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
+    /// Layer Opacity's touch lifted (or another came down): what it dragged is one undo step.
+    fn opacity_lifted(&self, t: &mut Touches) {
+        if let Some((layer, opacity)) = t.layer_opacity.filter(|_| std::mem::take(&mut t.opacity_moved)) {
+            self.set_layer_opacity(layer, opacity, true);
+        }
+    }
+
     fn first_down(
         &self,
         t: &mut Touches,
@@ -838,6 +878,14 @@ impl CanvasSession {
             // the modify button was tapped: this touch picks a colour
             t.mode = Mode::Pick;
             out.push(TouchCommand::Pick { x: at.0, y: at.1 });
+            return;
+        }
+        if t.layer_opacity.is_some() {
+            // Layer Opacity: the touch drags the layer's opacity
+            t.stroke_pointer = id;
+            t.pour_last = (at.0, now);
+            t.opacity_moved = false;
+            t.mode = Mode::Opacity;
             return;
         }
         // a snapped shape's handle is dragged; while it is edited, a drag on its outline turns and
@@ -1020,9 +1068,13 @@ impl CanvasSession {
         if matches!(t.mode, Mode::Pen | Mode::Pick) {
             return;
         }
-        // a second finger takes back the fill the first one made, and a transform's drag
+        // a second finger takes back the fill the first one made, and a transform's drag; it keeps
+        // the opacity dragged so far
         if t.mode == Mode::Pour {
             self.pour_end(false, None);
+        }
+        if t.mode == Mode::Opacity {
+            self.opacity_lifted(t);
         }
         // a colour selection under way is kept as it was slid; a shape being dragged out goes
         if t.mode == Mode::Select {
@@ -1212,6 +1264,7 @@ impl CanvasSession {
                     }
                 }
             }
+            Mode::Opacity => self.opacity_lifted(&mut t),
             Mode::Pour => {
                 let slid = last_of(&samples).and_then(|s| Self::pour_slide(&mut t, (s.x, s.y), s.time_ms));
                 drop(t);
@@ -1752,6 +1805,32 @@ mod tests {
         s.set_touch_transforming(None);
         let out = s.touch_down(1, PointerKind::Stylus, at(20.0, 20.0, 100.0));
         assert!(!out.contains(&TouchCommand::TransformTouched));
+    }
+
+    #[test]
+    fn layer_opacity_follows_a_drag_across_and_paints_nothing() {
+        let s = session();
+        let layer = s.layers().into_iter().find(|l| l.current).unwrap();
+        s.set_touch_layer_opacity(Some(layer.id));
+        assert_eq!(s.touch_layer_opacity(), Some(layer.opacity));
+        let opacity = |s: &CanvasSession| s.layers().into_iter().find(|l| l.id == layer.id).unwrap().opacity;
+        // a tap changes nothing
+        s.touch_down(1, PointerKind::Finger, at(400.0, 100.0, 0.0));
+        let out = s.touch_up(1, at(400.0, 100.0, 50.0));
+        assert!(!out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+        assert_eq!(opacity(&s), layer.opacity);
+        // a drag to the left lowers it, as it goes
+        s.touch_down(1, PointerKind::Finger, at(400.0, 100.0, 100.0));
+        for k in 1..=10 {
+            s.touch_move(1, at(400.0 - 20.0 * k as f32, 100.0, 100.0 + 16.0 * f64::from(k)));
+        }
+        let out = s.touch_up(1, at(200.0, 100.0, 300.0));
+        assert!(!out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+        let dragged = s.touch_layer_opacity().unwrap();
+        assert!(dragged < layer.opacity, "{dragged}");
+        assert_eq!(opacity(&s), dragged);
+        s.set_touch_layer_opacity(None);
+        assert_eq!(s.touch_layer_opacity(), None);
     }
 
     #[test]

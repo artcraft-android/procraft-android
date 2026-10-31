@@ -5,11 +5,10 @@ use std::time::{Duration, Instant};
 
 use ndk::native_window::NativeWindow;
 use procraft_engine::profile::Profile;
-use procraft_engine::view::View;
-use procraft_gpu::{Gpu, Target, wgpu};
+use procraft_gpu::{Gpu, wgpu};
 
 use crate::Shared;
-use crate::frame::{colours_to, configure, screen_profile};
+use crate::frame::{configure, screen_profile};
 
 pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
     let own = shared.lock().gpu.as_ref().map(|g| g.instance.clone());
@@ -190,39 +189,12 @@ pub(crate) fn project(shared: Arc<Shared>, window: NativeWindow) {
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         {
-            let mut guard = shared.lock();
-            let st = &mut *guard;
+            let mut st = shared.lock();
             if st.projection_size != size {
                 continue;
             }
-            if let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
-                let to_screen = View::fit((st.doc.width(), st.doc.height()), size).to_screen();
-                let screen = config.as_ref().map_or(Profile::Srgb, screen_profile);
-                let convert = colours_to(st.doc.profile, screen);
-                let key = crate::colour::table_key(&st.doc, screen);
-                if st.display_lut.as_ref().map(|(k, _)| *k) != key {
-                    st.display_lut = key
-                        .zip(crate::colour::display_table(&st.doc, screen))
-                        .map(|(k, table)| (k, canvas.display_lut(gpu, &table)));
-                }
-                let lut = st.display_lut.as_ref().map(|(_, l)| l);
-                canvas.render(
-                    gpu,
-                    &mut st.doc,
-                    Some(Target {
-                        view: &view,
-                        format,
-                        size,
-                        to_screen,
-                        surround: [0.0; 3],
-                        grid: None,
-                        selection: None,
-                        backdrop: None,
-                        convert,
-                        lut,
-                    }),
-                );
-            }
+            let screen = config.as_ref().map_or(Profile::Srgb, screen_profile);
+            st.draw_fitted(&view, format, size, screen);
         }
         drawn = Some(frames);
         queue.present(frame);
