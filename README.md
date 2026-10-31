@@ -143,7 +143,7 @@ Build time dependencies:
 |---|---|
 | `crates/engine` | document, brushes, stroke geometry, canvas view (no GPU) |
 | `crates/gpu` | wgpu renderer: layers, strokes, compositing, display |
-| `crates/core` | the session both apps drive, with the Android app's UniFFI bindings |
+| `crates/core` | what both apps share above the renderer: the canvas session, every touch and gesture, the tools' state (adjustments, transform, selection, crop, Recolor), the gallery, presets, gradients, time-lapse and keyboard shortcuts; with the Android app's UniFFI bindings |
 | `android` | the Android app (Gradle) |
 | `desktop` | the desktop app (egui), in progress |
 

@@ -638,11 +638,6 @@ impl CanvasSession {
         self.touches().shape_editing = editing;
     }
 
-    /// Whether any pointer is down on the canvas.
-    pub fn touch_active(&self) -> bool {
-        !self.touches().down.is_empty()
-    }
-
     /// When the touches next need [`CanvasSession::touch_tick`] (a hold, a repeat), if ever.
     pub fn touch_deadline(&self) -> Option<f64> {
         let t = self.touches();

@@ -98,7 +98,6 @@ private val LibraryMenuWidth = 253.dp
 private val MenuFill = Color(0xFA303335)
 private val MenuEdge = Color(0xFF5A5D5F)
 private val MenuRule = Color(0xFF3F4347)
-private val MenuRed = Color(0xFFFF453A)
 /** Menus stay below the top bar. */
 private val MenuTop = 57.dp
 /** A brush swiped left shows three buttons filling its place, this far apart. */

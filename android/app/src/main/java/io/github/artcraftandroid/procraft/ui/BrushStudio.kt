@@ -109,7 +109,6 @@ private val StudioButton get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF
 private val StudioButtonEdge get() = if (Pc.light) Color(0xFFE0E0E0) else Color(0xFF383838)
 // the pad's buttons' text and icon: grey, not the labels' white
 private val StudioButtonInk get() = if (Pc.light) Color(0xFF585858) else Color(0xFFAAAAAA)
-private val StudioGroup get() = if (Pc.light) Color(0xFFEBEBEB) else Color(0xFF262626)
 private val StudioCard get() = if (Pc.light) Color(0xFFE5E5E5) else Color(0xFF313131)
 private val PreviewCardFill get() = if (Pc.light) Color(0xFFE8E8E8) else Color(0xFF2A2A2A)
 private val PreviewCardEdge get() = if (Pc.light) Color(0xFFD0D0D0) else Color(0xFF4A4A4A)
