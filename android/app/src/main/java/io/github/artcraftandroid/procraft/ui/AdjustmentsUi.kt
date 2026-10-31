@@ -659,32 +659,6 @@ private val GradientName get() = if (Pc.light) Color(0xFF5D5D5D) else Color(0xFF
 /** A gradient to map by: its name and colour stops (position, 0xAARRGGBB), in any order. */
 data class GradientPreset(val name: String, val stops: List<Pair<Float, Long>>)
 
-/** The colour gradient [g] has at [p] (0..1): its stops' colours mixed between them. */
-fun gradientColorAt(g: GradientPreset, p: Float): Long {
-    val stops = g.stops.sortedBy { it.first }
-    val first = stops.firstOrNull() ?: return 0xFF000000
-    if (p <= first.first) return first.second
-    for ((a, b) in stops.zipWithNext()) {
-        if (p <= b.first) {
-            val t = if (b.first > a.first) (p - a.first) / (b.first - a.first) else 1f
-            fun ch(c: Long, shift: Int) = ((c shr shift) and 0xFF).toFloat()
-            fun mix(shift: Int) = (ch(a.second, shift) + (ch(b.second, shift) - ch(a.second, shift)) * t).toInt().coerceIn(0, 255).toLong() shl shift
-            return 0xFF000000 or mix(16) or mix(8) or mix(0)
-        }
-    }
-    return stops.last().second
-}
-
-/** ProCraft's own gradients. */
-val GRADIENTS = listOf(
-    GradientPreset("Ember", listOf(0f to 0xFF140A1E, 0.45f to 0xFF9C2A1F, 0.8f to 0xFFF29B38, 1f to 0xFFFFF4D6)),
-    GradientPreset("Glacier", listOf(0f to 0xFF0B1A33, 0.5f to 0xFF3F7FB5, 1f to 0xFFE8F6FF)),
-    GradientPreset("Moss", listOf(0f to 0xFF101A0C, 0.5f to 0xFF5C7A34, 1f to 0xFFE9F0C8)),
-    GradientPreset("Citrus", listOf(0f to 0xFF2B1640, 0.5f to 0xFFE0466A, 1f to 0xFFFFE15C)),
-    GradientPreset("Graphite", listOf(0f to 0xFF000000, 1f to 0xFFFFFFFF)),
-    GradientPreset("Lagoon", listOf(0f to 0xFF06202A, 0.55f to 0xFF1B9A8E, 1f to 0xFFF4F1D0)),
-)
-
 private val MenuButton get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF3B3B3B)
 private val MenuButtonText get() = if (Pc.light) Color(0xFF414141) else Color(0xFFD8D8D8)
 
@@ -815,10 +789,10 @@ private fun LiquifyWide(vm: CanvasViewModel, modifier: Modifier) {
         }
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(11.dp)) {
-            Box(Modifier.weight(1f)) { SliderRow("Size", vm.liquifySize, percent(vm.liquifySize, null)) { vm.liquifySize = it } }
-            Box(Modifier.weight(1f)) { SliderRow("Pressure", vm.liquifyPressure, percent(vm.liquifyPressure, null)) { vm.liquifyPressure = it } }
-            Box(Modifier.weight(1f)) { SliderRow("Distortion", vm.liquifyDistortion, percent(vm.liquifyDistortion, "None")) { vm.liquifyDistortion = it } }
-            Box(Modifier.weight(1f)) { SliderRow("Momentum", vm.liquifyMomentum, percent(vm.liquifyMomentum, "None")) { vm.liquifyMomentum = it } }
+            Box(Modifier.weight(1f)) { SliderRow("Size", vm.liquifySize, percent(vm.liquifySize, null)) { vm.setLiquifyValue(0, it) } }
+            Box(Modifier.weight(1f)) { SliderRow("Pressure", vm.liquifyPressure, percent(vm.liquifyPressure, null)) { vm.setLiquifyValue(1, it) } }
+            Box(Modifier.weight(1f)) { SliderRow("Distortion", vm.liquifyDistortion, percent(vm.liquifyDistortion, "None")) { vm.setLiquifyValue(2, it) } }
+            Box(Modifier.weight(1f)) { SliderRow("Momentum", vm.liquifyMomentum, percent(vm.liquifyMomentum, "None")) { vm.setLiquifyValue(3, it) } }
         }
     }
 }
@@ -843,12 +817,12 @@ private fun LiquifyUpright(vm: CanvasViewModel, modifier: Modifier) {
     ) {
         val percent = { v: Float, none: String? -> if (v >= 1f) "Max" else if (v <= 0f && none != null) none else "${(v * 100).roundToInt()}%" }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            Box(Modifier.weight(1f)) { SliderRow("Size", vm.liquifySize, percent(vm.liquifySize, null)) { vm.liquifySize = it } }
-            Box(Modifier.weight(1f)) { SliderRow("Pressure", vm.liquifyPressure, percent(vm.liquifyPressure, null)) { vm.liquifyPressure = it } }
+            Box(Modifier.weight(1f)) { SliderRow("Size", vm.liquifySize, percent(vm.liquifySize, null)) { vm.setLiquifyValue(0, it) } }
+            Box(Modifier.weight(1f)) { SliderRow("Pressure", vm.liquifyPressure, percent(vm.liquifyPressure, null)) { vm.setLiquifyValue(1, it) } }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            Box(Modifier.weight(1f)) { SliderRow("Distortion", vm.liquifyDistortion, percent(vm.liquifyDistortion, "None")) { vm.liquifyDistortion = it } }
-            Box(Modifier.weight(1f)) { SliderRow("Momentum", vm.liquifyMomentum, percent(vm.liquifyMomentum, "None")) { vm.liquifyMomentum = it } }
+            Box(Modifier.weight(1f)) { SliderRow("Distortion", vm.liquifyDistortion, percent(vm.liquifyDistortion, "None")) { vm.setLiquifyValue(2, it) } }
+            Box(Modifier.weight(1f)) { SliderRow("Momentum", vm.liquifyMomentum, percent(vm.liquifyMomentum, "None")) { vm.setLiquifyValue(3, it) } }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             val name = LIQUIFY_NAMES.firstOrNull { it.first == vm.liquifyKind }?.second ?: ""

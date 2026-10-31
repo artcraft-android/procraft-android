@@ -557,7 +557,6 @@ fn a_selection_limits_painting_and_its_tools_work() {
     s.select_by_colour(10.0, 10.0, 0.3, SelectionJoin::Add, false);
     s.set_selection_display(crate::selection::SelectionDisplay::Tint);
     assert!(s.has_selection());
-    let _ = id;
     // clearing with a selection clears only what is selected
     s.select_none();
     let paint = s.layers().iter().map(|l| l.id).rfind(|&l| l != id).unwrap();
@@ -2790,6 +2789,65 @@ fn a_dropped_colour_fills_up_to_lines_and_is_one_undo_step() {
     // a locked layer takes none
     assert!(s.set_layer_locked(layer, true));
     assert!(!s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+}
+
+#[test]
+fn crop_and_resize_takes_typed_sizes_and_crops_on_done() {
+    let Some(s) = session(100, 100) else { return };
+    s.crop_begin();
+    let c = s.crop_shown().unwrap();
+    assert_eq!((c.x, c.y, c.width, c.height, c.size_width, c.size_height), (0.0, 0.0, 100.0, 100.0, 100, 100));
+    assert_eq!(c.corners.len(), 8);
+    // a typed width sizes the rectangle; with the aspect locked the height follows
+    s.crop_set_aspect_locked(true);
+    s.crop_set_size(Some(50), None);
+    let c = s.crop_shown().unwrap();
+    assert_eq!((c.width, c.height, c.size_width, c.size_height), (50.0, 50.0, 50, 50));
+    // resampling: a typed size is what the rectangle becomes, the rectangle stays
+    s.crop_set_resample(true);
+    s.crop_set_size(None, Some(200));
+    let c = s.crop_shown().unwrap();
+    assert_eq!((c.width, c.height, c.size_width, c.size_height), (50.0, 50.0, 200, 200));
+    s.crop_set_dpi(300.0);
+    assert!(s.crop_end(true));
+    assert!(s.crop_shown().is_none());
+    let info = s.info();
+    assert_eq!((info.width, info.height), (200, 200));
+    assert!((info.dpi - 300.0).abs() < 0.01);
+    // left as it was, or cancelled: nothing changes (the aspect lock is kept from before)
+    s.crop_begin();
+    assert!(s.crop_shown().unwrap().aspect_locked);
+    assert!(!s.crop_end(true));
+    s.crop_begin();
+    s.crop_set_size(Some(10), None);
+    assert!(!s.crop_end(false));
+    assert_eq!(s.info().width, 200);
+}
+
+#[test]
+fn undo_takes_back_recolor_s_open_fill_first_and_redo_makes_it_again() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, -10.0, 0.0)]);
+    s.stroke_add((1..30).map(|i| sample(50.0, -10.0 + i as f32 * 4.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![sample(50.0, 110.0, 250.0)]);
+    // the left half filled and kept by a tap on the right, which fills there
+    s.recolor_start(20.0, 50.0, 1.0, 0.0, 0.0, 0.0);
+    s.recolor_tap(80.0, 50.0);
+    assert_eq!((pixel(&s, 20, 50), pixel(&s, 80, 50)), ([255, 0, 0, 255], [255, 0, 0, 255]));
+    // the open fill goes first, then the kept one
+    assert_eq!(s.undo().as_deref(), Some("Recolor"));
+    assert_eq!((pixel(&s, 20, 50), pixel(&s, 80, 50)), ([255, 0, 0, 255], [255, 255, 255, 255]));
+    assert_eq!(s.undo().as_deref(), Some("Recolor"));
+    assert_eq!(pixel(&s, 20, 50), [255, 255, 255, 255]);
+    assert!(s.recolor_on());
+    // with a fill open again, a redo brings the kept one back and fills again over it
+    s.recolor_again();
+    assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
+    assert_eq!(s.redo().as_deref(), Some("Recolor"));
+    assert_eq!((pixel(&s, 20, 50), pixel(&s, 80, 50)), ([255, 0, 0, 255], [255, 0, 0, 255]));
+    s.recolor_end();
+    assert!(s.info().can_undo);
 }
 
 #[test]

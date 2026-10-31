@@ -17,8 +17,6 @@ const BUTTON_WIDTH: f32 = 80.0;
 const BUTTON_GAP: f32 = 4.0;
 /// Where the bar sits at first: its middle across the window and this far down it.
 const START_Y: f32 = 0.54;
-/// How far (points) a press dragged up zooms the canvas in by e (times about 2.7).
-pub const ZOOM_DISTANCE: f32 = 180.0;
 
 /// What a press on the canvas does while one of the bar's modes is on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -330,6 +330,22 @@ impl CanvasSession {
         st.transform_box()
     }
 
+    /// Why a transform didn't begin ([`CanvasSession::transform_begin`] gave none), as the message
+    /// says it: a text layer must be rasterized first, a selection holds nothing of the layer, or
+    /// the layer is empty.
+    pub fn transform_refusal(&self) -> String {
+        let st = self.shared.lock();
+        let text = st.doc.layer(st.doc.current()).is_some_and(|l| l.text.is_some());
+        if text {
+            "Rasterize the text to transform it"
+        } else if st.selection.is_some() {
+            "Nothing is selected on this layer"
+        } else {
+            "This layer is empty"
+        }
+        .to_owned()
+    }
+
     /// A drag of `handle` starts at window point (`x`, `y`).
     pub fn transform_grab(&self, handle: TransformHandle, x: f32, y: f32) {
         let mut st = self.shared.lock();
@@ -612,6 +628,14 @@ pub fn mesh_handle_at(mesh: Vec<f32>, view: Vec<f32>, x: f32, y: f32, density: f
 #[cfg(test)]
 mod handles {
     use super::*;
+
+    #[test]
+    fn a_transform_that_cannot_begin_says_why() {
+        let s = CanvasSession::new(32, 32);
+        assert_eq!(s.transform_refusal(), "This layer is empty");
+        s.select_invert();
+        assert_eq!(s.transform_refusal(), "Nothing is selected on this layer");
+    }
 
     #[test]
     fn a_box_shows_its_nodes_and_a_touch_takes_the_nearest() {

@@ -413,6 +413,7 @@ impl App {
             }
             Some(gallery::Asked::Share(list, format)) => files::share_artworks(&list, format, 100),
             Some(gallery::Asked::SharePdf(list, quality)) => files::share_artworks(&list, files::Format::Pdf, quality),
+            Some(gallery::Asked::DragOut(artwork)) => self.drag_out(&artwork),
             Some(gallery::Asked::ShareAnimated(artwork, format)) => match CanvasSession::open(artwork.dir.clone()) {
                 Ok(session) => {
                     self.open_artwork(session, artwork.dir);
@@ -572,6 +573,38 @@ impl App {
             self.ui.started_new();
         }
     }
+
+    /// An artwork dragged out of the window: written as Drag and Drop export's file format says,
+    /// then dragged on as that file, for wherever it is let go (the system's drag carries it).
+    #[cfg(windows)]
+    fn drag_out(&mut self, artwork: &procraft_core::GalleryArtwork) {
+        let format = self.ui.drag_format();
+        let Some(screen) = self.screen.as_mut() else { return };
+        let path = match files::drag_file(artwork, format) {
+            Ok(path) => path,
+            Err(e) => {
+                files::tell("Can't drag it out", &e);
+                return;
+            }
+        };
+        let image = drag::Image::Raw(files::drag_picture(&artwork.dir, 256).unwrap_or_default());
+        let item = drag::DragItem::Files(vec![path]);
+        if let Err(e) = drag::start_drag(&*screen.window, item, image, |_, _| {}, drag::Options::default()) {
+            log::warn!("dragging an artwork out: {e}");
+        }
+        // the button was let go inside the system's drag, which egui never heard
+        let pos = screen.egui.egui_ctx().input(|i| i.pointer.latest_pos()).unwrap_or(egui::Pos2::ZERO);
+        screen.egui.egui_input_mut().events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        screen.window.request_redraw();
+    }
+
+    #[cfg(not(windows))]
+    fn drag_out(&mut self, _artwork: &procraft_core::GalleryArtwork) {}
 
     /// The artwork open is put away and kept; false if it couldn't be.
     fn leave_artwork(&mut self) -> bool {

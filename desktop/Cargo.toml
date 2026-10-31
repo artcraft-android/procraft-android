@@ -41,3 +41,5 @@ wgpu = { workspace = true, features = ["metal"] }
 # click played by the system (PlaySound)
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_Media_MediaFoundation", "Win32_System_Com"] }
+# An artwork dragged out of the gallery, handed to the system as a file
+drag = "2.1"

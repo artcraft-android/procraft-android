@@ -145,8 +145,12 @@ impl Alert {
         let screen = ctx.content_rect();
         let buttons = if asking.extra.is_some() { 3.0 } else { 2.0 };
         let width = BUTTON_WIDTH * buttons + BUTTON_GAP * (buttons - 1.0) + SIDE * 2.0;
-        let lines = asking.message.lines().count().max(usize::from(!asking.message.is_empty())) as f32;
-        let message = if asking.message.is_empty() { 0.0 } else { 20.0 * lines };
+        // the message wrapped inside the panel, its lines centred and 20 apart
+        let measure = ctx.layer_painter(LayerId::background());
+        let inner = width - SIDE * 2.0;
+        let wrapped =
+            crate::look::wrapped_centred(&measure, &asking.message, 16.0, Weight::Regular, argb(INK), inner, 20.0);
+        let message = if asking.message.is_empty() { 0.0 } else { wrapped.size().y };
         let height = 21.0 + 31.0 + 13.0 + message + 27.0 + BUTTON_HEIGHT + 16.0;
         let panel = Rect::from_center_size(screen.center(), vec2(width, height));
         let mut answer = None;
@@ -188,18 +192,8 @@ impl Alert {
                 Weight::Bold,
                 ink,
             );
-            let mut y = panel.top() + 21.0 + 31.0 + 13.0;
-            for line in asking.message.lines() {
-                text(
-                    ui.painter(),
-                    pos2(panel.center().x, y + 10.0),
-                    Align2::CENTER_CENTER,
-                    line,
-                    16.0,
-                    Weight::Regular,
-                    ink,
-                );
-                y += 20.0;
+            if !asking.message.is_empty() {
+                ui.painter().galley(pos2(panel.center().x, panel.top() + 21.0 + 31.0 + 13.0), wrapped.clone(), ink);
             }
             let top = panel.bottom() - 16.0 - BUTTON_HEIGHT;
             let action_fill = if asking.destructive { DESTROY_FILL } else { pc::ACCENT.into() };

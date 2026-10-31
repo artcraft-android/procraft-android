@@ -23,6 +23,15 @@ use crate::panel::{self, PANEL_GLYPH, PANEL_TITLE};
 const LIBRARY_WIDTH: f32 = 440.0;
 const SETS_WIDTH: f32 = 168.0;
 const HEADER_HEIGHT: f32 = 52.0;
+/// The search field with the space above and below it (out of sight until the lists are scrolled
+/// up past their top), its fill and hint, and a found brush's tile.
+const SEARCH_BLOCK: f32 = 60.0;
+const SEARCH_FILL: u32 = 0x1F767680;
+const SEARCH_HINT: u32 = 0x4DEBEBF5;
+const RESULT_FILL: u32 = 0x14FFFFFF;
+const RESULT_HEIGHT: f32 = 81.0;
+/// The clear button's cross, cut through to the panel.
+const CLEAR_CROSS: Themed = Themed(0xFF1E1E1E, 0xFFF2F2F2);
 const SET_HEIGHT: f32 = 50.0;
 const BRUSH_HEIGHT: f32 = 80.0;
 const BRUSH_GAP: f32 = 8.0;
@@ -131,6 +140,12 @@ pub struct Library {
     stale: bool,
     /// The studio asked for: on the brush now chosen, or on one just made (Cancel throws it away).
     pub studio: Option<Option<(u32, u32)>>,
+    /// The search: what is typed, whether its field has the keys, whether it has come down into
+    /// sight, and whether the sets and the brushes were at their tops last frame.
+    query: String,
+    searching: bool,
+    search_down: bool,
+    lists_top: (bool, bool),
 }
 
 impl Library {
@@ -217,63 +232,96 @@ impl Library {
                 }
 
                 lists = Rect::from_min_max(pos2(body.left(), body.top() + HEADER_HEIGHT), body.max);
-                let sets = Rect::from_min_size(lists.min, vec2(SETS_WIDTH, lists.height()));
-                let brushes = Rect::from_min_max(pos2(lists.left() + SETS_WIDTH, lists.top()), lists.max);
-                if SET_COLUMN.value() >> 24 != 0 {
-                    ui.painter().rect_filled(sets, 0, argb(SET_COLUMN));
+                // the search: out of sight at first, it comes down as a list is scrolled up past
+                // its top, and goes as they scroll down again (unless it is in use)
+                let in_use = self.searching || !self.query.is_empty();
+                let wheel = ui.input(|i| i.smooth_scroll_delta.y);
+                if !in_use && let Some(p) = ui.input(|i| i.pointer.hover_pos()).filter(|p| lists.contains(*p)) {
+                    let at_top = if p.x < lists.left() + SETS_WIDTH { self.lists_top.0 } else { self.lists_top.1 };
+                    if wheel > 0.0 && at_top {
+                        self.search_down = true;
+                    } else if wheel < 0.0 {
+                        self.search_down = false;
+                    }
                 }
-                let corner = panel::POPOVER_CORNER;
-                panel::rounded(ui, look, "library brushes", brushes, [0.0, 0.0, corner, 0.0], argb(BRUSH_COLUMN));
+                let shown_down = in_use || self.search_down;
+                let down =
+                    ui.ctx().animate_bool_with_time(egui::Id::unique("library search"), shown_down, 0.2) * SEARCH_BLOCK;
+                if down > 0.0 {
+                    let block = Rect::from_min_size(
+                        pos2(lists.left(), lists.top() + down - SEARCH_BLOCK),
+                        vec2(lists.width(), SEARCH_BLOCK),
+                    );
+                    self.search_field(ui, block, lists);
+                }
+                lists.min.y += down;
+                if in_use {
+                    if let Some(key) = self.search_results(ui, session, &library, (current.set, current.index), lists) {
+                        brush_tapped = Some((key, false));
+                    }
+                } else {
+                    let sets = Rect::from_min_size(lists.min, vec2(SETS_WIDTH, lists.height()));
+                    let brushes = Rect::from_min_max(pos2(lists.left() + SETS_WIDTH, lists.top()), lists.max);
+                    if SET_COLUMN.value() >> 24 != 0 {
+                        ui.painter().rect_filled(sets, 0, argb(SET_COLUMN));
+                    }
+                    let corner = panel::POPOVER_CORNER;
+                    panel::rounded(ui, look, "library brushes", brushes, [0.0, 0.0, corner, 0.0], argb(BRUSH_COLUMN));
 
-                ui.scope_builder(UiBuilder::new().max_rect(sets), |ui| {
-                    ScrollArea::vertical()
-                        .id_salt("library sets")
-                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                        .show(ui, |ui| {
-                            ui.add_space(12.0);
-                            for (i, set) in library.iter().enumerate() {
-                                let fill = if over_set == Some(i) { Some(argb(pc::ACCENT)) } else { None };
-                                let (response, at) = self.set_row(ui, look, session, i, set, i == shown, fill);
-                                set_rects.push((i, at));
-                                if response.clicked() {
-                                    set_tapped = Some(i);
-                                }
+                    let sets_out = ui.scope_builder(UiBuilder::new().max_rect(sets), |ui| {
+                        ScrollArea::vertical()
+                            .id_salt("library sets")
+                            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                            .show(ui, |ui| {
                                 ui.add_space(12.0);
-                            }
-                        });
-                });
-                ui.scope_builder(UiBuilder::new().max_rect(brushes), |ui| {
-                    ScrollArea::vertical()
-                        .id_salt(("library brushes", shown))
-                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                        .show(ui, |ui| {
-                            // a press moved up or down on a brush scrolls the list
-                            let by = std::mem::take(&mut self.scroll_by);
-                            if by != 0.0 {
-                                ui.scroll_with_delta(vec2(0.0, by));
-                            }
-                            ui.add_space(9.75);
-                            let Some(set) = library.get(shown) else { return };
-                            let mut made = 0;
-                            for b in &set.brushes {
-                                // the current brush, or the brush last chosen in this set
-                                let selected =
-                                    (b.set, b.index) == (current.set, current.index) || set.chosen == Some(b.index);
-                                let (response, cell) = self.brush_row(ui, look, session, b, selected, &mut made);
-                                brush_rects.push(((b.set, b.index), cell));
-                                if let Some(r) = response {
-                                    if r.0 {
-                                        brush_tapped = Some(((b.set, b.index), selected));
+                                for (i, set) in library.iter().enumerate() {
+                                    let fill = if over_set == Some(i) { Some(argb(pc::ACCENT)) } else { None };
+                                    let (response, at) = self.set_row(ui, look, session, i, set, i == shown, fill);
+                                    set_rects.push((i, at));
+                                    if response.clicked() {
+                                        set_tapped = Some(i);
                                     }
-                                    if let Some(chose) = r.1 {
-                                        swipe_chose = Some(((b.set, b.index), b.name.clone(), chose));
-                                    }
+                                    ui.add_space(12.0);
                                 }
-                                ui.add_space(BRUSH_GAP);
-                            }
-                            ui.add_space(12.0 - BRUSH_GAP);
-                        });
-                });
+                            })
+                    });
+                    let brushes_out = ui.scope_builder(UiBuilder::new().max_rect(brushes), |ui| {
+                        ScrollArea::vertical()
+                            .id_salt(("library brushes", shown))
+                            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                            .show(ui, |ui| {
+                                // a press moved up or down on a brush scrolls the list
+                                let by = std::mem::take(&mut self.scroll_by);
+                                if by != 0.0 {
+                                    ui.scroll_with_delta(vec2(0.0, by));
+                                }
+                                ui.add_space(9.75);
+                                let Some(set) = library.get(shown) else { return };
+                                let mut made = 0;
+                                for b in &set.brushes {
+                                    // the current brush, or the brush last chosen in this set
+                                    let selected =
+                                        (b.set, b.index) == (current.set, current.index) || set.chosen == Some(b.index);
+                                    let (response, cell) = self.brush_row(ui, look, session, b, selected, &mut made);
+                                    brush_rects.push(((b.set, b.index), cell));
+                                    if let Some(r) = response {
+                                        if r.0 {
+                                            brush_tapped = Some(((b.set, b.index), selected));
+                                        }
+                                        if let Some(chose) = r.1 {
+                                            swipe_chose = Some(((b.set, b.index), b.name.clone(), chose));
+                                        }
+                                    }
+                                    ui.add_space(BRUSH_GAP);
+                                }
+                                ui.add_space(12.0 - BRUSH_GAP);
+                            })
+                    });
+                    self.lists_top = (
+                        sets_out.inner.state.clamped_offset().y <= 0.5,
+                        brushes_out.inner.state.clamped_offset().y <= 0.5,
+                    );
+                }
                 // the dragged brush follows the pointer, over the lists
                 if let Some(p) = dragging
                     && let Some(b) = library.iter().flat_map(|s| &s.brushes).find(|b| (b.set, b.index) == p.key)
@@ -741,6 +789,120 @@ impl Library {
             Preview { texture: ui.ctx().load_texture(format!("brush {key:?}"), image, TextureOptions::LINEAR), shaded }
         });
         self.previews.insert(key, preview);
+    }
+
+    /// The search field in `block` (shown where it overlaps `clip`): a magnifier, what is typed
+    /// (or "Search"), and once typed, a button that clears it. Enter, Escape or a press elsewhere
+    /// leaves it.
+    fn search_field(&mut self, ui: &mut Ui, block: Rect, clip: Rect) {
+        let field = Rect::from_min_max(block.min + vec2(12.0, 10.0), pos2(block.right() - 12.0, block.top() + 50.0));
+        let hint = argb(SEARCH_HINT);
+        let mut inside = ui.new_child(UiBuilder::new().max_rect(field));
+        inside.set_clip_rect(clip.intersect(field));
+        let painter = inside.painter().clone();
+        painter.rect_filled(field, 10, argb(SEARCH_FILL));
+        // a magnifier: a ring and its handle
+        let c = pos2(field.left() + 41.0 * 0.47, field.top() + 40.0 * 0.46);
+        painter.circle_stroke(c, 7.0, egui::Stroke::new(2.0, hint));
+        let d = 7.0 * std::f32::consts::FRAC_1_SQRT_2;
+        painter.line_segment([c + vec2(d, d), c + vec2(d + 5.0, d + 5.0)], egui::Stroke::new(2.4, hint));
+        let clear = (!self.query.is_empty())
+            .then(|| Rect::from_center_size(pos2(field.right() - 5.0 - 9.5, field.center().y), vec2(19.0, 18.0)));
+        let words = Rect::from_min_max(
+            pos2(field.left() + 41.0, field.top()),
+            pos2(clear.map_or(field.right() - 8.0, |r| r.left() - 6.0), field.bottom()),
+        );
+        if self.query.is_empty() {
+            text(&painter, words.left_center(), Align2::LEFT_CENTER, "Search", 17.0, Weight::Regular, hint);
+        }
+        let edit = egui::TextEdit::singleline(&mut self.query)
+            .frame(egui::Frame::NONE)
+            .font(Weight::Regular.font(17.0))
+            .text_color(Color32::WHITE)
+            .align(Align2::LEFT_CENTER)
+            .min_size(words.size())
+            .desired_width(words.width())
+            .show(&mut inside.new_child(UiBuilder::new().max_rect(words)));
+        // taking or leaving the keys changes what shows: drawn again now
+        if self.searching != edit.response.has_focus() {
+            self.searching = edit.response.has_focus();
+            ui.ctx().request_repaint();
+        }
+        if let Some(clear) = clear {
+            // a filled circle with a cross through it
+            painter.circle_filled(clear.center(), 9.0, hint);
+            let k = 3.5;
+            for s in [1.0, -1.0] {
+                let (a, b) = (clear.center() + vec2(-k, -k * s), clear.center() + vec2(k, k * s));
+                painter.line_segment([a, b], egui::Stroke::new(1.8, argb(CLEAR_CROSS)));
+            }
+            if inside.interact(clear, inside.scope_id().with("clear search"), Sense::click()).clicked() {
+                self.query.clear();
+            }
+        }
+    }
+
+    /// The brushes of every set whose name holds the search, two to a row in `area`; returns the
+    /// one tapped. None found (or nothing typed yet): "No results".
+    fn search_results(
+        &mut self,
+        ui: &mut Ui,
+        session: &CanvasSession,
+        library: &[BrushSetInfo],
+        current: (u32, u32),
+        area: Rect,
+    ) -> Option<(u32, u32)> {
+        let query = self.query.trim().to_lowercase();
+        let found: Vec<&BrushInfo> = if query.is_empty() {
+            Vec::new()
+        } else {
+            library.iter().flat_map(|s| &s.brushes).filter(|b| b.name.to_lowercase().contains(&query)).collect()
+        };
+        if found.is_empty() {
+            let at = pos2(area.center().x, area.top() + 24.0);
+            text(ui.painter(), at, Align2::CENTER_TOP, "No results", 15.0, Weight::Medium, argb(PANEL_TITLE));
+            return None;
+        }
+        let mut tapped = None;
+        let mut made = 0;
+        ui.scope_builder(UiBuilder::new().max_rect(area), |ui| {
+            ScrollArea::vertical()
+                .id_salt("library results")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.add_space(11.0);
+                    let width = (area.width() - 12.0 * 2.0 - 6.0) / 2.0;
+                    for pair in found.chunks(2) {
+                        let (row, _) = ui.allocate_exact_size(vec2(area.width(), RESULT_HEIGHT), Sense::hover());
+                        for (k, b) in pair.iter().enumerate() {
+                            let tile = Rect::from_min_size(
+                                pos2(row.left() + 12.0 + (width + 6.0) * k as f32, row.top()),
+                                vec2(width, RESULT_HEIGHT),
+                            );
+                            let key = (b.set, b.index);
+                            let selected = key == current;
+                            self.make_preview(ui, session, b, tile, &mut made);
+                            let painter = ui.painter_at(tile);
+                            painter.rect_filled(tile, 12, if selected { argb(pc::ACCENT) } else { argb(RESULT_FILL) });
+                            let shaded = self.preview_in(&painter, key, tile, selected);
+                            let ink = if selected { Color32::WHITE } else { argb(PANEL_TITLE) };
+                            let galley = one_line(ui, &b.name, 14.0, Weight::SemiBold, ink, tile.width() - 14.0 - 10.0);
+                            let name_at = tile.min + vec2(14.0, 11.0);
+                            if shaded {
+                                let pill = Rect::from_min_size(name_at, galley.size()).expand2(vec2(6.0, 2.0));
+                                painter.rect_filled(pill, pill.height() / 2.0, argb(NAME_PILL));
+                            }
+                            painter.galley(name_at, galley, ink);
+                            if ui.interact(tile, ui.scope_id().with(("result", key)), Sense::click()).clicked() {
+                                tapped = Some(key);
+                            }
+                        }
+                        ui.add_space(6.0);
+                    }
+                    ui.add_space(12.0 - 6.0);
+                });
+        });
+        tapped
     }
 
     /// Draws brush `key`'s sample stroke filling `at`'s height (white on blue when `selected`,

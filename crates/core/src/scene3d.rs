@@ -2699,6 +2699,48 @@ mod tests {
     }
 
     #[test]
+    fn a_finger_on_the_model_turns_it_and_the_pen_paints() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 128).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let orbit = |s: &CanvasSession| s.shared.lock().scene.as_ref().and_then(|c| c.view.as_ref()).map(|v| v.orbit);
+        let before = orbit(&s);
+        assert!(before.is_some());
+        s.touch_down(1, PointerKind::Finger, vec![sample(70.0, 100.0, 0.0)]);
+        s.touch_move(1, vec![sample(130.0, 100.0, 16.0)]);
+        let out = s.touch_up(1, vec![sample(130.0, 100.0, 32.0)]);
+        assert!(!out.contains(&crate::TouchCommand::StrokeEnded), "{out:?}");
+        assert_ne!(orbit(&s), before);
+        frame(&s, 200);
+        assert_eq!(painted(&s), 0);
+        // the pen paints on it
+        s.touch_down(2, PointerKind::Stylus, vec![sample(70.0, 100.0, 100.0)]);
+        frame(&s, 200);
+        s.touch_move(2, (1..16).map(|i| sample(70.0 + i as f32 * 4.0, 100.0, 100.0 + f64::from(i) * 8.0)).collect());
+        frame(&s, 200);
+        s.touch_up(2, vec![sample(134.0, 100.0, 240.0)]);
+        frame(&s, 200);
+        let kept = painted(&s);
+        assert!(kept > 100);
+        // a second finger hands both to the gestures: spread apart, they bring the model nearer
+        let distance = |s: &CanvasSession| orbit(s).map_or(0.0, |o| o.distance);
+        let far = distance(&s);
+        s.touch_down(3, PointerKind::Finger, vec![sample(80.0, 100.0, 300.0)]);
+        s.touch_move(3, vec![sample(90.0, 100.0, 308.0)]);
+        s.touch_down(4, PointerKind::Finger, vec![sample(120.0, 100.0, 316.0)]);
+        s.touch_move(3, vec![sample(60.0, 100.0, 332.0)]);
+        s.touch_move(4, vec![sample(150.0, 100.0, 332.0)]);
+        s.touch_up(4, vec![sample(150.0, 100.0, 348.0)]);
+        let out = s.touch_up(3, vec![sample(60.0, 100.0, 348.0)]);
+        assert!(!out.contains(&crate::TouchCommand::Undo), "{out:?}");
+        assert!(distance(&s) < far, "{} from {far}", distance(&s));
+        frame(&s, 200);
+        assert_eq!(painted(&s), kept);
+    }
+
+    #[test]
     fn the_2d_texture_shows_and_paints_flat() {
         let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 128).unwrap();
         if !shown(&s) {

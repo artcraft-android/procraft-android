@@ -138,8 +138,9 @@ mod system {
         }
     }
 
-    /// The frames of the video at `path`, each as straight RGBA rows to `each`; how many.
-    pub fn read(path: &Path, each: &mut dyn FnMut(Vec<u8>, u32, u32)) -> windows::core::Result<u32> {
+    /// The frames of the video at `path`, each as straight RGBA rows to `each` with when it
+    /// shows (seconds); how many.
+    pub fn read(path: &Path, each: &mut dyn FnMut(Vec<u8>, u32, u32, f64)) -> windows::core::Result<u32> {
         let _started = Started::new()?;
         let mut attributes = None;
         unsafe { MFCreateAttributes(&mut attributes, 1)? };
@@ -202,16 +203,18 @@ mod system {
                 }
                 buffer.Unlock()?;
             }
-            each(rgba, w, h);
+            // its time in 100 ns units
+            let at = unsafe { sample.GetSampleTime() }.unwrap_or(0);
+            each(rgba, w, h, at as f64 / 10_000_000.0);
             frames += 1;
         }
         Ok(frames)
     }
 }
 
-/// The frames of the video at `path`, each as straight RGBA rows (`width`, `height`) to `each`;
-/// how many there were.
-pub fn read_frames(path: &Path, mut each: impl FnMut(Vec<u8>, u32, u32)) -> Result<u32, String> {
+/// The frames of the video at `path`, each as straight RGBA rows (`width`, `height`) to `each`
+/// with when it shows (seconds); how many there were.
+pub fn read_frames(path: &Path, mut each: impl FnMut(Vec<u8>, u32, u32, f64)) -> Result<u32, String> {
     #[cfg(windows)]
     {
         system::read(path, &mut each).map_err(|e| e.to_string())

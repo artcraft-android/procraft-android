@@ -120,6 +120,8 @@ pub enum Asked {
     SharePdf(Vec<GalleryArtwork>, u8),
     /// The artwork opened to be shared as this animation, the gallery back after.
     ShareAnimated(GalleryArtwork, Animated),
+    /// The artwork lifted and dragged out of the window: handed to the system as a file.
+    DragOut(GalleryArtwork),
 }
 
 /// Share's formats (`size`, arrow left out) beside a swiped artwork's Share `pill`, pointing at it:
@@ -196,6 +198,8 @@ pub struct Gallery {
     /// Share's PDF asks how well it keeps its pictures first (for these artworks).
     pdf_alert: crate::alert::Alert,
     pdf_for: Option<Vec<GalleryArtwork>>,
+    /// An artwork lifted and dragged out past the window's edge.
+    dragged_out: Option<GalleryArtwork>,
     /// The artwork being renamed, its name as typed, and whether its field has had the focus.
     renaming: Option<(GalleryArtwork, String, bool)>,
     /// When the renaming began (its picture rising from its cell), and one just done, fading
@@ -302,6 +306,7 @@ impl Gallery {
             alert: crate::alert::Alert::default(),
             pdf_alert: crate::alert::Alert::default(),
             pdf_for: None,
+            dragged_out: None,
             renaming: None,
             rename_since: None,
             rename_fading: None,
@@ -504,6 +509,9 @@ impl Gallery {
             && let Some(quality) = crate::alert::pdf_jpeg(answer)
         {
             asked = Some(Asked::SharePdf(list, quality));
+        }
+        if let Some(artwork) = self.dragged_out.take() {
+            asked = Some(Asked::DragOut(artwork));
         }
         asked
     }
@@ -1208,6 +1216,17 @@ impl Gallery {
             return;
         };
         let (pointer, down) = ui.input(|i| (i.pointer.latest_pos(), i.pointer.any_down()));
+        // an artwork taken past the window's edge leaves it, as a file for wherever it is let go
+        // (the pointer outside, or gone as the window lost it)
+        if let GalleryEntry::Artwork { artwork } = &entry
+            && down
+            && cfg!(windows)
+            && pointer.is_none_or(|p| !ui.ctx().content_rect().contains(p))
+        {
+            self.dragged_out = Some(artwork.clone());
+            self.lifted = None;
+            return;
+        }
         let stacking = self.stack.is_none() && matches!(entry, GalleryEntry::Artwork { .. });
         let target = pointer.and_then(|p| Self::drop_at(entries, cells, &dir, p, stacking));
         for &(i, cell) in cells {

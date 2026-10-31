@@ -304,6 +304,13 @@ impl TimeLapse {
         let picture = image::open(self.frame_path(i)).ok()?.to_rgba8();
         Some(ThumbnailImage { width: picture.width(), height: picture.height(), rgba: picture.into_raw() })
     }
+
+    /// Frame `i`'s file (a JPEG), for an app that reads it with its own decoder; none if there is
+    /// no such frame.
+    pub fn frame_file(&self, i: u32) -> Option<String> {
+        let path = self.frame_path(i);
+        path.exists().then(|| path.to_string_lossy().into_owned())
+    }
 }
 
 /// A video a package needs made of the frames: into `path`, of frames `frames`, fitted on white
@@ -511,6 +518,8 @@ mod tests {
         let second = t.frame(1).unwrap();
         assert!(second.rgba[0] > 200 && second.rgba[1] < 60);
         assert!(t.frame(2).is_none());
+        assert!(t.frame_file(1).is_some_and(|f| f.ends_with("frame-000001.jpg")));
+        assert!(t.frame_file(2).is_none());
         // not recording: nothing kept; counted again from the files
         t.set_recording(false);
         assert!(!t.record([0u8, 0, 255, 255].repeat(16), 4, 4));

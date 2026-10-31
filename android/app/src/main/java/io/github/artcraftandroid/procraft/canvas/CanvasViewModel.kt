@@ -22,7 +22,6 @@ import io.github.artcraftandroid.procraft.gallery.CanvasPreset
 import io.github.artcraftandroid.procraft.core.BackgroundInfo
 import io.github.artcraftandroid.procraft.core.BlendModeInfo
 import io.github.artcraftandroid.procraft.ui.GradientPreset
-import io.github.artcraftandroid.procraft.ui.gradientColorAt
 import io.github.artcraftandroid.procraft.core.BrushInfo
 import io.github.artcraftandroid.procraft.core.BrushSetInfo
 import io.github.artcraftandroid.procraft.core.CanvasSession
@@ -31,6 +30,7 @@ import io.github.artcraftandroid.procraft.core.SourceKind
 import io.github.artcraftandroid.procraft.core.ChromaticKind
 import io.github.artcraftandroid.procraft.core.GlitchKind
 import io.github.artcraftandroid.procraft.core.GuideInfo
+import io.github.artcraftandroid.procraft.core.KeyShortcut
 import io.github.artcraftandroid.procraft.core.GuideType
 import io.github.artcraftandroid.procraft.core.SymmetryType
 import io.github.artcraftandroid.procraft.core.HalftoneKind
@@ -60,8 +60,8 @@ import io.github.artcraftandroid.procraft.core.TransformHandle
 import io.github.artcraftandroid.procraft.core.TransformKind
 import io.github.artcraftandroid.procraft.gallery.PALETTE_SLOTS
 import io.github.artcraftandroid.procraft.gallery.Palette
-import io.github.artcraftandroid.procraft.gallery.StandardPresets
 import io.github.artcraftandroid.procraft.core.blendModes
+import io.github.artcraftandroid.procraft.core.keyShortcut as sharedKeyShortcut
 import io.github.artcraftandroid.procraft.core.brushBlendModes
 import io.github.artcraftandroid.procraft.core.grainBlendModes
 import kotlinx.coroutines.Dispatchers
@@ -500,9 +500,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var liquifyKind by mutableStateOf(LiquifyKind.PUSH)
         private set
     var liquifySize by mutableFloatStateOf(0.5f)
+        private set
     var liquifyPressure by mutableFloatStateOf(1f)
+        private set
     var liquifyDistortion by mutableFloatStateOf(0f)
+        private set
     var liquifyMomentum by mutableFloatStateOf(0.8f)
+        private set
     var liquifyAmount by mutableFloatStateOf(1f)
         private set
     /** Liquify's mode list or adjust slider is open. */
@@ -514,13 +518,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var adjustPencil by mutableStateOf(false)
         private set
     var adjustModesOpen by mutableStateOf(false)
-    /** Cloning: where the source is (canvas pixels), and how far from the brush once a stroke fixed it. */
+    /** Cloning: where the source is (canvas pixels). */
     var clonePuck by mutableStateOf<Offset?>(null)
         private set
-    private var cloneOffset: Offset? = null
-    /** Where the source was before each clone stroke kept, and before each undone, for undo and redo. */
-    private val puckBefore = ArrayDeque<Offset>()
-    private val puckAfter = ArrayDeque<Offset>()
     /** The canvas window's size (pixels) and density, for what starts in its middle. */
     var windowSize = Offset.Zero
     var density = 2f
@@ -543,10 +543,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The gradient mapped by. */
     var gradientIndex by mutableStateOf(0)
         private set
-    private val gradientStore = io.github.artcraftandroid.procraft.gallery.GradientStore(File(app.filesDir, "gradients.json"))
+    /** The gradient library, kept by the shared core (crates/core gradients.rs), each change written at once. */
+    private val gradientLibrary = io.github.artcraftandroid.procraft.core.Gradients.open(File(app.filesDir, "gradients.json").path)
     /** The gradient library: ours, and those made or changed here. */
-    var gradients by mutableStateOf(gradientStore.load())
+    var gradients by mutableStateOf(readGradients())
         private set
+
+    private fun readGradients(): List<GradientPreset> = gradientLibrary.list().map { g ->
+        GradientPreset(g.name, g.stops.map { it.position to (0xFF000000 or it.rgb.toLong()) })
+    }
     /** The gradient being edited, by its place in [gradients]. */
     var gradientEditing by mutableStateOf<Int?>(null)
         private set
@@ -582,8 +587,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var chromaValues by mutableStateOf(mapOf(ChromaticKind.PERSPECTIVE to listOf(0f, 0f), ChromaticKind.DISPLACE to listOf(0f, 0f)))
         private set
-    private var chromaOffset = Offset.Zero
-    private var chromaDragFrom = Offset.Zero
 
     /** The node held on the transform box and where the touch is (window pixels), while a drag lasts. */
     var transformHeld by mutableStateOf<Pair<TransformHandle, Offset>?>(null)
@@ -804,19 +807,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var editingPreset by mutableStateOf<Int?>(null)
         private set
 
-    private fun readPresets(): List<CanvasPreset> {
-        val saved = presetPrefs.getString(PRESETS, null) ?: return StandardPresets
-        return runCatching {
-            val list = org.json.JSONArray(saved)
-            List(list.length()) { CanvasPreset.fromJson(list.getJSONObject(it)) }
-        }.getOrDefault(StandardPresets)
-    }
+    private fun readPresets(): List<CanvasPreset> = CanvasPreset.fromJson(presetPrefs.getString(PRESETS, null))
 
     private fun savePresets(list: List<CanvasPreset>) {
         canvasPresets = list
-        val json = org.json.JSONArray()
-        list.forEach { json.put(it.toJson()) }
-        presetPrefs.edit().putString(PRESETS, json.toString()).apply()
+        presetPrefs.edit().putString(PRESETS, CanvasPreset.toJson(list)).apply()
     }
 
     /** Opens Custom Canvas on the preset at [index], or on a new one. */
@@ -1784,10 +1779,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The gesture settings as the canvas's touches (in the shared core) take them. */
     fun touchSettings(): io.github.artcraftandroid.procraft.core.TouchSettings = gestures.touchSettings(rapidUndoDelay * 1000.0)
 
-    fun useModify() {
-        modifyUsed = true
-    }
-
     /** The middle of the screen (window pixels), for menus a button opens. */
     var screenCentre = Offset(800f, 1280f)
 
@@ -1876,6 +1867,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun start(s: CanvasSession, dir: File, brushesLoaded: Boolean = false) {
+        // Gradient Map maps by the library
+        s.useGradients(gradientLibrary)
         // the canvas's colours are P3 or sRGB numbers: the colour panel and swatches follow
         refreshCanvasSpace(s)
         // layers may take half the device's memory, their textures a quarter: past that, those not
@@ -2132,53 +2125,42 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun keyShortcut(keyCode: Int, ctrl: Boolean, shift: Boolean, alt: Boolean): Boolean {
         if (screen != Screen.CANVAS || session == null) return false
-        when {
-            ctrl && keyCode == android.view.KeyEvent.KEYCODE_Z -> if (shift) redo() else undo()
-            ctrl && keyCode == android.view.KeyEvent.KEYCODE_C -> copyLayer()
-            ctrl && keyCode == android.view.KeyEvent.KEYCODE_X -> cutLayer()
-            ctrl && keyCode == android.view.KeyEvent.KEYCODE_V -> paste()
-            ctrl -> return false
-            keyCode == android.view.KeyEvent.KEYCODE_B -> select(ToolKind.PAINT)
-            keyCode == android.view.KeyEvent.KEYCODE_E -> select(ToolKind.ERASE)
-            keyCode == android.view.KeyEvent.KEYCODE_M -> pickNext = !pickNext
-            keyCode == android.view.KeyEvent.KEYCODE_S -> toggleSelecting()
-            keyCode == android.view.KeyEvent.KEYCODE_V -> toggleTransform()
-            keyCode == android.view.KeyEvent.KEYCODE_U -> startAdjustment(Adjustment.HSB)
-            keyCode == android.view.KeyEvent.KEYCODE_C -> toggle(Panel.COLOR)
-            keyCode == android.view.KeyEvent.KEYCODE_X -> swapColors()
-            keyCode == android.view.KeyEvent.KEYCODE_D -> clearSelection()
-            keyCode == android.view.KeyEvent.KEYCODE_J -> duplicateCurrent()
-            keyCode == android.view.KeyEvent.KEYCODE_K -> toggle(Panel.ACTIONS)
-            keyCode == android.view.KeyEvent.KEYCODE_L -> toggle(Panel.LAYERS)
-            keyCode == android.view.KeyEvent.KEYCODE_0 -> toggleBars()
-            keyCode == android.view.KeyEvent.KEYCODE_DEL || keyCode == android.view.KeyEvent.KEYCODE_FORWARD_DEL -> clearCurrentLayer()
-            // the brush a step smaller or bigger: 1%, with shift 5%, with alt 10%
-            keyCode == android.view.KeyEvent.KEYCODE_LEFT_BRACKET || keyCode == android.view.KeyEvent.KEYCODE_RIGHT_BRACKET -> {
-                val step = if (alt) 0.10f else if (shift) 0.05f else 0.01f
-                val sign = if (keyCode == android.view.KeyEvent.KEYCODE_LEFT_BRACKET) -1f else 1f
-                changeSize((size + sign * step).coerceIn(0f, 1f))
-            }
-            // arrows nudge what is being transformed a pixel at a time
-            transforming && keyCode in listOf(
-                android.view.KeyEvent.KEYCODE_DPAD_LEFT,
-                android.view.KeyEvent.KEYCODE_DPAD_RIGHT,
-                android.view.KeyEvent.KEYCODE_DPAD_UP,
-                android.view.KeyEvent.KEYCODE_DPAD_DOWN,
-            ) -> {
-                val box = transformBox?.corners ?: return true
-                if (box.size < 8) return true
-                val cx = (0 until 4).map { box[it * 2] }.average().toFloat()
-                val cy = (0 until 4).map { box[it * 2 + 1] }.average().toFloat()
-                val far = 100_000f
-                val (dx, dy) = when (keyCode) {
-                    android.view.KeyEvent.KEYCODE_DPAD_LEFT -> -far to 0f
-                    android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> far to 0f
-                    android.view.KeyEvent.KEYCODE_DPAD_UP -> 0f to -far
-                    else -> 0f to far
-                }
-                session?.transformNudge(cx + dx, cy + dy)?.let { transformMoved(it) }
-            }
+        // the key as the shared shortcuts name it (crates/core keys.rs), which say what it does
+        val name = when (keyCode) {
+            in android.view.KeyEvent.KEYCODE_A..android.view.KeyEvent.KEYCODE_Z -> ('a' + (keyCode - android.view.KeyEvent.KEYCODE_A)).toString()
+            in android.view.KeyEvent.KEYCODE_0..android.view.KeyEvent.KEYCODE_9 -> ('0' + (keyCode - android.view.KeyEvent.KEYCODE_0)).toString()
+            android.view.KeyEvent.KEYCODE_LEFT_BRACKET -> "["
+            android.view.KeyEvent.KEYCODE_RIGHT_BRACKET -> "]"
+            android.view.KeyEvent.KEYCODE_DEL -> "backspace"
+            android.view.KeyEvent.KEYCODE_FORWARD_DEL -> "delete"
+            android.view.KeyEvent.KEYCODE_DPAD_LEFT -> "left"
+            android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> "right"
+            android.view.KeyEvent.KEYCODE_DPAD_UP -> "up"
+            android.view.KeyEvent.KEYCODE_DPAD_DOWN -> "down"
             else -> return false
+        }
+        when (val shortcut = sharedKeyShortcut(name, ctrl, shift, alt, transforming) ?: return false) {
+            KeyShortcut.Undo -> undo()
+            KeyShortcut.Redo -> redo()
+            KeyShortcut.CopyLayer -> copyLayer()
+            KeyShortcut.CutLayer -> cutLayer()
+            KeyShortcut.Paste -> paste()
+            KeyShortcut.Paint -> select(ToolKind.PAINT)
+            KeyShortcut.Erase -> select(ToolKind.ERASE)
+            KeyShortcut.Eyedropper -> pickNext = !pickNext
+            KeyShortcut.Selection -> toggleSelecting()
+            KeyShortcut.Transform -> toggleTransform()
+            KeyShortcut.HueSaturationBrightness -> startAdjustment(Adjustment.HSB)
+            KeyShortcut.Colours -> toggle(Panel.COLOR)
+            KeyShortcut.Actions -> toggle(Panel.ACTIONS)
+            KeyShortcut.Layers -> toggle(Panel.LAYERS)
+            KeyShortcut.SwapColours -> swapColors()
+            KeyShortcut.Deselect -> clearSelection()
+            KeyShortcut.DuplicateLayer -> duplicateCurrent()
+            KeyShortcut.Interface -> toggleBars()
+            KeyShortcut.ClearLayer -> clearCurrentLayer()
+            is KeyShortcut.BrushSize -> changeSize((size + shortcut.by).coerceIn(0f, 1f))
+            is KeyShortcut.Nudge -> session?.transformArrow(shortcut.dx, shortcut.dy)?.let { transformMoved(it) }
         }
         return true
     }
@@ -2319,22 +2301,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         closePanels()
         opacityLayer = l
         opacityValue = l.opacity
+        // the shared touches drag it, each drag one undo step
+        session?.setTouchLayerOpacity(l.id)
     }
 
-    /** A step of the drag: the opacity changed by [by]. */
-    fun dragLayerOpacity(by: Float) {
-        val l = opacityLayer ?: return
-        opacityValue = (opacityValue + by).coerceIn(0f, 1f)
-        setLayerOpacity(l, opacityValue, done = false)
-    }
-
-    /** The drag let go: its change is one undo step. */
-    fun liftLayerOpacity() {
-        val l = opacityLayer ?: return
-        setLayerOpacity(l, opacityValue, done = true)
+    /** The shared touches dragged the opacity: shown as it is; let go ([ended]), the layers read again. */
+    fun layerOpacityTouched(ended: Boolean) {
+        val s = session ?: return
+        s.touchLayerOpacity()?.let { opacityValue = it }
+        if (ended) refresh()
     }
 
     fun endLayerOpacity() {
+        if (opacityLayer != null) session?.setTouchLayerOpacity(null)
         opacityLayer = null
     }
 
@@ -2560,35 +2539,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         quickShape = session?.quickshapeChoose(kind) ?: quickShape
     }
 
-    fun moveQuickShapeHandle(index: Int, at: Offset) {
-        quickShape = session?.quickshapeMoveHandle(index.toUInt(), at.x, at.y) ?: quickShape
-    }
-
-    /** The handle of the snapped shape under window point [p], while its handles show. */
-    fun quickShapeHandleAt(p: Offset): Int? {
-        val h = quickShape?.handles ?: return null
-        if (!quickShapeEditing) return null
-        return (0 until h.size / 2).minByOrNull { (Offset(h[it * 2], h[it * 2 + 1]) - p).getDistance() }
-            ?.takeIf { (Offset(h[it * 2], h[it * 2 + 1]) - p).getDistance() <= QUICKSHAPE_GRAB_DP * density }
-    }
-
-    /** Whether a drag from [p] on the edited shape turns and resizes it (on its outline) rather than moving it. */
-    fun quickShapeNearEdge(p: Offset): Boolean = session?.quickshapeNearEdge(p.x, p.y, QUICKSHAPE_GRAB_DP * density) == true
-
-    /** A drag on the edited shape's outline begins at [p] ([begin]) or goes on to it. */
-    fun quickShapePin(p: Offset, begin: Boolean) {
-        quickShape = session?.quickshapePin(p.x, p.y, begin) ?: quickShape
-    }
-
-    fun quickShapeUnpin() {
-        quickShape = session?.quickshapeUnpin() ?: quickShape
-    }
-
-    /** The edited shape dragged from [from] to [to]. */
-    fun quickShapeMove(from: Offset, to: Offset) {
-        quickShape = session?.quickshapeMove(from.x, from.y, to.x, to.y) ?: quickShape
-    }
-
     /** Keeps the snapped shape as drawn. */
     fun endQuickShape() {
         if (quickShape == null) return
@@ -2687,7 +2637,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 frameStale = false
                 withContext(Dispatchers.Default) {
                     // frames as large as the video they make
-                    val shot = s.canvasThumbnail((timeLapse?.settings?.side ?: TimeLapse.FRAME_SIDE).toUInt()) ?: return@withContext
+                    val shot = s.canvasThumbnail(t.settings.side.toUInt()) ?: return@withContext
                     t.record(shot.rgba, shot.width.toInt(), shot.height.toInt())
                 }
             } while (frameStale)
@@ -2707,7 +2657,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ---- crop and resize ----
+    // ---- crop and resize: the shared core edits it (crates/core crop_edit.rs); these show it ----
 
     /** The rectangle being kept (canvas pixels: left, top, width, height), or null outside crop. */
     var cropRect by mutableStateOf<androidx.compose.ui.geometry.Rect?>(null)
@@ -2720,14 +2670,30 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var cropSize by mutableStateOf(0 to 0)
         private set
     var cropAspectLocked by mutableStateOf(false)
+        private set
     var cropSettingsOpen by mutableStateOf(false)
     var cropSnapping by mutableStateOf(false)
+        private set
     /** The canvas's dots per inch, as the crop's settings have it. */
     var cropDpi by mutableStateOf(132f)
         private set
 
+    /** The crop as the core has it now. */
+    private fun readCrop() {
+        val c = session?.cropShown()
+        cropRect = c?.let { androidx.compose.ui.geometry.Rect(it.x, it.y, it.x + it.width, it.y + it.height) }
+        if (c == null) return
+        cropAngle = c.angle
+        cropResample = c.resample
+        cropSize = c.sizeWidth.toInt() to c.sizeHeight.toInt()
+        cropAspectLocked = c.aspectLocked
+        cropSnapping = c.snapping
+        cropDpi = c.dpi
+    }
+
     fun changeCropDpi(dpi: Float) {
-        if (dpi.isFinite() && dpi >= 1f) cropDpi = dpi.coerceAtMost(9999f)
+        session?.cropSetDpi(dpi)
+        readCrop()
     }
 
     /** The canvas's size, pixels. */
@@ -2735,89 +2701,78 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun beginCrop() {
         closePanels()
-        val (w, h) = canvasSize()
+        val (w, _) = canvasSize()
         if (w == 0) return
         // the canvas fitted to the screen and shrunk, in the middle, so the frame's handles are clear
-        session?.fitCanvasScaled(CROP_SCALE)
-        cropDpi = session?.info()?.dpi ?: 132f
+        session?.cropBegin()
         refreshView()
         followView()
-        cropRect = androidx.compose.ui.geometry.Rect(0f, 0f, w.toFloat(), h.toFloat())
-        cropAngle = 0f
-        cropResample = false
-        cropSize = w to h
+        readCrop()
         cropSettingsOpen = false
     }
 
     fun resetCrop() = beginCrop()
 
-    fun changeCropRect(r: androidx.compose.ui.geometry.Rect) {
-        val w = r.width.coerceAtLeast(1f)
-        val h = r.height.coerceAtLeast(1f)
-        cropRect = androidx.compose.ui.geometry.Rect(r.left, r.top, r.left + w, r.top + h)
-        if (!cropResample) cropSize = w.roundToInt() to h.roundToInt()
+    /** A press on the frame at window point [at]: near a corner or a side's middle it takes that, else the whole frame. */
+    fun cropPress(at: Offset) {
+        session?.cropPress(at.x, at.y)
+    }
+
+    /** The drag on the frame reached window point [at]. */
+    fun cropDrag(at: Offset) {
+        session?.cropDrag(at.x, at.y)
+        readCrop()
+    }
+
+    fun cropRelease() {
+        session?.cropRelease()
     }
 
     fun changeCropAngle(radians: Float) {
-        cropAngle = radians
+        session?.cropSetAngle(radians)
+        readCrop()
     }
 
     fun changeCropResample(on: Boolean) {
-        cropResample = on
-        cropRect?.let { cropSize = it.width.roundToInt() to it.height.roundToInt() }
+        session?.cropSetResample(on)
+        readCrop()
+    }
+
+    fun changeCropAspectLocked(on: Boolean) {
+        session?.cropSetAspectLocked(on)
+        readCrop()
+    }
+
+    fun changeCropSnapping(on: Boolean) {
+        session?.cropSetSnapping(on)
+        readCrop()
     }
 
     /** A width or height typed in: resampling, it is the new size; otherwise the kept rectangle's. */
     fun changeCropSize(width: Int?, height: Int?) {
-        val r = cropRect ?: return
-        val (w0, h0) = cropSize
-        var w = (width ?: w0).coerceIn(1, MAX_CANVAS_EDGE)
-        var h = (height ?: h0).coerceIn(1, MAX_CANVAS_EDGE)
-        if (cropAspectLocked && w0 > 0 && h0 > 0) {
-            if (width != null) h = (w * h0.toFloat() / w0).roundToInt().coerceIn(1, MAX_CANVAS_EDGE)
-            else if (height != null) w = (h * w0.toFloat() / h0).roundToInt().coerceIn(1, MAX_CANVAS_EDGE)
-        }
-        cropSize = w to h
-        if (!cropResample) cropRect = androidx.compose.ui.geometry.Rect(r.left, r.top, r.left + w, r.top + h)
-    }
-
-    /** How many layers a canvas of the size kept can hold. */
-    fun cropLayerCount(): Int {
-        val (w, h) = cropSize
-        val bytes = w.toLong() * h.toLong() * 4
-        return if (bytes <= 0) 0 else (LAYER_BUDGET / bytes).toInt().coerceAtMost(999)
+        session?.cropSetSize(width?.coerceAtLeast(1)?.toUInt(), height?.coerceAtLeast(1)?.toUInt())
+        readCrop()
     }
 
     fun endCrop(keep: Boolean) {
-        val r = cropRect ?: return
-        val s = session
+        if (cropRect == null) return
         cropRect = null
         cropSettingsOpen = false
+        val s = session ?: return
         // either way the canvas is fitted to the screen again: cancelled, growing back into place
-        if (!keep || s == null) {
-            s?.easeToFit()
+        val changed = s.cropEnd(keep)
+        if (!keep) {
             refreshView()
             followView()
             return
         }
-        s.fitView()
-        val (w, h) = cropSize
-        if (abs(cropDpi - (s.info().dpi)) > 0.01f) s.setDpi(cropDpi)
-        // nothing to crop: the whole canvas, unturned, at its size
-        val (cw, ch) = canvasSize()
-        val same = r.left == 0f && r.top == 0f && r.width.roundToInt() == cw && r.height.roundToInt() == ch && cropAngle == 0f && w == cw && h == ch
-        if (same) {
-            refresh()
-            refreshView()
-            return
-        }
-        if (s.cropCanvas(r.left, r.top, r.width, r.height, cropAngle, cropResample, w.toUInt(), h.toUInt())) {
+        if (changed) {
             thumbnails.clear()
             thumbnailVersions.clear()
-            refresh()
-            refreshView()
-            if (panel == Panel.LAYERS) refreshThumbnails()
         }
+        refresh()
+        refreshView()
+        if (changed && panel == Panel.LAYERS) refreshThumbnails()
     }
 
     // ---- the reference window ----
@@ -3557,21 +3512,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun librarySource(grain: Boolean, index: Int): ByteArray =
         io.github.artcraftandroid.procraft.core.sourceLibrary(grain).getOrNull(index)?.pixels ?: ByteArray(0)
 
-    /** [bitmap] fitted into the square on black, by its lightness. */
+    /** [bitmap] fitted into the square on black, by its lightness (the shared core's). */
     private fun sourceFrom(bitmap: Bitmap): ByteArray {
-        val n = io.github.artcraftandroid.procraft.core.sourceSize().toInt()
-        val square = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(square)
-        canvas.drawColor(android.graphics.Color.BLACK)
-        val scale = minOf(n / bitmap.width.toFloat(), n / bitmap.height.toFloat())
-        val (w, h) = bitmap.width * scale to bitmap.height * scale
-        canvas.drawBitmap(bitmap, null, android.graphics.RectF((n - w) / 2f, (n - h) / 2f, (n + w) / 2f, (n + h) / 2f), android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
-        val argb = IntArray(n * n)
-        square.getPixels(argb, 0, n, 0, 0, n, n)
-        return ByteArray(n * n) { i ->
-            val c = argb[i]
-            ((((c shr 16) and 255) * 54 + ((c shr 8) and 255) * 183 + (c and 255) * 19) shr 8).toByte()
+        val (w, h) = bitmap.width to bitmap.height
+        // straight RGBA, as the core takes it
+        val argb = IntArray(w * h).also { bitmap.getPixels(it, 0, w, 0, 0, w, h) }
+        val rgba = ByteArray(w * h * 4)
+        for ((i, c) in argb.withIndex()) {
+            rgba[i * 4] = (c shr 16).toByte()
+            rgba[i * 4 + 1] = (c shr 8).toByte()
+            rgba[i * 4 + 2] = c.toByte()
+            rgba[i * 4 + 3] = (c ushr 24).toByte()
         }
+        return io.github.artcraftandroid.procraft.core.sourceFromPicture(rgba, w.toUInt(), h.toUInt())
     }
 
     /** A picture from elsewhere as a source image; none if it can't be read. */
@@ -4325,10 +4278,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             transformBox = session?.transformApply(TransformAction.UNDO) ?: transformBox
             return
         }
-        // cloning, the source goes back to where it was before the stroke
-        if (adjustment == Adjustment.CLONE) {
-            puckBefore.removeLastOrNull()?.let { before -> clonePuck?.let { puckAfter.addLast(it) }; clonePuck = before }
-        }
         // recoloring, the fill under the reticle is taken back first
         if (recolorOpen) {
             session?.let { s -> pourNow { s.pourEnd(false, null) } }
@@ -4340,6 +4289,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val could = canUndo
         val name = session?.undo()
         if (could) showNotice("Undo" + name?.let { " $it" }.orEmpty())
+        // cloning, the core put the source back where it was before the stroke
+        if (adjustment != null) readAdjust()
         refresh()
         // the thumbnails of the layers it put back (only those) read again
         if (panel == Panel.LAYERS) refreshThumbnails()
@@ -4369,9 +4320,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun redo() {
         feedback()
         if (transforming) return
-        if (adjustment == Adjustment.CLONE) {
-            puckAfter.removeLastOrNull()?.let { after -> clonePuck?.let { puckBefore.addLast(it) }; clonePuck = after }
-        }
         // recoloring, the open fill steps aside for the redo and is made again over what it brings back
         if (recolorOpen) {
             session?.let { s -> pourNow { s.pourEnd(false, null) } }
@@ -4390,10 +4338,50 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
         refresh()
         if (panel == Panel.LAYERS) refreshThumbnails()
+        if (adjustment != null) readAdjust()
         text?.let { resumeText(it) }
     }
 
-    // ---- adjustments ----
+    // ---- adjustments: the shared core keeps the one open and its values (crates/core adjusting.rs); these show them ----
+
+    /** The adjustment's values as the core has them now. */
+    private fun readAdjust() {
+        val a = session?.adjustmentShown() ?: return
+        adjustment = a.adjustment
+        adjustAmount = a.amount
+        adjustPencil = a.pencil
+        adjustPreview = a.preview
+        hue50 = a.hsb.getOrElse(0) { 0.5f }
+        saturation50 = a.hsb.getOrElse(1) { 0.5f }
+        brightness50 = a.hsb.getOrElse(2) { 0.5f }
+        balanceTone = a.balanceTone.toInt()
+        balance = a.balance
+        curveChannel = a.curveChannel.toInt()
+        curves = a.curves.map { c -> List(c.size / 2) { Offset(c[it * 2], c[it * 2 + 1]) } }
+        gradientIndex = a.gradient.toInt()
+        noiseKind = a.noiseKind
+        noiseScale = a.noise.getOrElse(0) { 0f }
+        noiseOctaves = a.noise.getOrElse(1) { 0f }
+        noiseTurbulence = a.noise.getOrElse(2) { 0.7f }
+        noiseMulti = a.noiseMulti
+        noiseAdded = a.noiseAdded
+        bloomTransition = a.bloom.getOrElse(0) { 1f }
+        bloomSize = a.bloom.getOrElse(1) { 0.3f }
+        bloomBurn = a.bloom.getOrElse(2) { 0.35f }
+        halftoneKind = a.halftoneKind
+        chromaKind = a.chromaKind
+        chromaValues = chromaValues + (a.chromaKind to a.chroma)
+        glitchKind = a.glitchKind
+        glitchValues = glitchValues + (a.glitchKind to a.glitch)
+        liquifyKind = a.liquifyKind
+        liquifySize = a.liquify.getOrElse(0) { 0.5f }
+        liquifyPressure = a.liquify.getOrElse(1) { 1f }
+        liquifyDistortion = a.liquify.getOrElse(2) { 0f }
+        liquifyMomentum = a.liquify.getOrElse(3) { 0.8f }
+        liquifyAmount = a.liquifyAmount
+        liquified = a.liquified
+        clonePuck = a.clonePuck?.let { windowToCanvas(Offset(it[0], it[1])) }
+    }
 
     /** Opens adjustment [a] on the current layer (keeping one already open). */
     fun startAdjustment(a: Adjustment) {
@@ -4406,36 +4394,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // the list fades away rather than going at once
         if (panel == Panel.ADJUSTMENTS) panelFading = true
         panel = Panel.NONE
-        val begun = when (a) {
-            Adjustment.LIQUIFY -> s.liquifyBegin()
-            Adjustment.CLONE -> s.cloneBegin()
-            else -> s.adjustBegin()
-        }
-        if (!begun) return
-        adjustment = a
-        chromaOffset = Offset.Zero
-        adjustPencil = a == Adjustment.CLONE
+        if (!s.adjustmentStart(a)) return
         adjustModesOpen = false
-        cloneOffset = null
-        puckBefore.clear()
-        puckAfter.clear()
-        clonePuck = null
-        if (a == Adjustment.CLONE) {
-            // the source starts in the middle of the window
-            moveClonePuck(windowSize / 2f)
-            readSliders()
-        }
-        liquified = false
-        liquifyAmount = 1f
         liquifyPopup = 0
-        adjustAmount = if (a == Adjustment.GRADIENT_MAP) 1f else 0f
-        hue50 = 0.5f
-        saturation50 = 0.5f
-        brightness50 = 0.5f
-        balance = List(9) { 0.5f }
-        curves = List(4) { listOf(Offset(0f, 0f), Offset(1f, 1f)) }
-        if (a == Adjustment.GRADIENT_MAP) applyGradient()
-        if (a == Adjustment.GLITCH) applyGlitch()
+        readAdjust()
+        // cloning paints with the brush: its sliders show
+        if (a == Adjustment.CLONE) readSliders()
     }
 
     /** Ends the adjustment: [commit] keeps it as one undo step, otherwise the layer goes back. */
@@ -4444,13 +4408,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // a gradient being edited is kept as it is
         if (gradientEditing != null) endGradientEdit()
         adjustMenuAt = null
-        adjustPreview = false
-        session?.adjustEnd(commit)
-        if (commit) showNotice("Adjustment applied")
-        adjustment = null
         val painted = adjustPencil
-        adjustPencil = false
+        session?.adjustmentEnd(commit)
+        if (commit) showNotice("Adjustment applied")
         adjustModesOpen = false
+        readAdjust()
+        adjustment = null
         clonePuck = null
         if (painted) readSliders()
         refresh()
@@ -4469,41 +4432,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             resetAdjustment()
             return
         }
-        session?.adjustPencil()
-        adjustPencil = true
+        session?.adjustmentPencil(true)
+        readAdjust()
         readSliders()
-        val amount = a.pencilAmount ?: return
-        if (a == Adjustment.BLOOM) {
-            // painted on, bloom starts smaller and burns more
-            bloomSize = PENCIL_BLOOM_SIZE
-            bloomBurn = PENCIL_BLOOM_BURN
-        }
-        if (a == Adjustment.MOTION_BLUR) {
-            // along the canvas, as long as a drag of that much
-            dragMotionBlur(amount * MOTION_DRAG_PT * density, 0f)
-        } else {
-            changeAdjustAmount(amount - adjustAmount)
-        }
     }
 
     /** The clone source moved to window point [p]: the next stroke fixes how far from it the brush is. */
     fun moveClonePuck(p: Offset) {
-        val at = windowToCanvas(p) ?: return
-        clonePuck = at
-        cloneOffset = null
-        session?.cloneSource(p.x, p.y)
+        session?.adjustmentCloneMove(p.x, p.y)
+        readAdjust()
     }
 
     /** A clone stroke reached window point [p] ([start]: it begins there); the source follows the brush. */
     fun cloneStrokeAt(p: Offset, start: Boolean) {
-        val puck = clonePuck ?: return
-        val at = windowToCanvas(p) ?: return
-        if (start) {
-            puckBefore.addLast(puck)
-            puckAfter.clear()
-        }
-        val offset = cloneOffset ?: (puck - at).also { cloneOffset = it }
-        clonePuck = at + offset
+        val s = session ?: return
+        s.adjustmentCloneStroke(p.x, p.y, start)
+        clonePuck = s.adjustmentShown().clonePuck?.let { windowToCanvas(Offset(it[0], it[1])) }
     }
 
     /** Whether window point [p] is on the clone source. */
@@ -4514,95 +4458,56 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The amount dragged across the canvas changed by [step] (0..1 of the whole). */
     fun changeAdjustAmount(step: Float) {
-        val a = adjustment ?: return
-        adjustAmount = (adjustAmount + step).coerceIn(0f, 1f)
-        val kind = when (a) {
-            Adjustment.GAUSSIAN_BLUR -> SwipeAdjustment.GAUSSIAN_BLUR
-            Adjustment.SHARPEN -> SwipeAdjustment.SHARPEN
-            Adjustment.PERSPECTIVE_BLUR -> SwipeAdjustment.PERSPECTIVE_BLUR
-            Adjustment.GRADIENT_MAP -> {
-                applyGradient()
-                return
-            }
-            Adjustment.GLITCH -> {
-                applyGlitch()
-                return
-            }
-            Adjustment.NOISE -> {
-                applyNoise()
-                return
-            }
-            Adjustment.BLOOM -> {
-                applyBloom()
-                return
-            }
-            Adjustment.HALFTONE -> {
-                applyHalftone()
-                return
-            }
-            Adjustment.CHROMATIC_ABERRATION -> {
-                applyChroma()
-                return
-            }
-            else -> return
-        }
-        session?.adjustSwipe(kind, adjustAmount)
+        if (adjustment == null) return
+        session?.adjustmentAmountBy(step)
+        readAdjust()
     }
 
     /** A motion blur's drag reached ([dx], [dy]) window pixels from where it started. */
     fun dragMotionBlur(dx: Float, dy: Float) {
-        adjustAmount = session?.adjustMotion(dx, dy) ?: adjustAmount
+        session?.adjustmentMotion(dx, dy)
+        readAdjust()
     }
 
     fun chooseBalanceTone(tone: Int) {
-        balanceTone = tone.coerceIn(0, 2)
+        session?.adjustmentBalanceTone(tone.coerceIn(0, 2).toUInt())
+        readAdjust()
     }
 
     /** Slider [k] (red, green, blue) of the tone shown moved to [value] (0..1). */
     fun setBalance(k: Int, value: Float) {
-        balance = balance.toMutableList().also { it[balanceTone * 3 + k] = value }
-        val v = balance.map { (it - 0.5f) * 2f }
-        session?.adjustColorBalance(v.subList(0, 3), v.subList(3, 6), v.subList(6, 9))
+        session?.adjustmentBalance(k.coerceIn(0, 2).toUInt(), value)
+        readAdjust()
     }
 
     fun chooseCurveChannel(channel: Int) {
-        curveChannel = channel.coerceIn(0, 3)
+        session?.adjustmentCurveChannel(channel.coerceIn(0, 3).toUInt())
+        readAdjust()
     }
 
     /** Adds a point to the channel shown; returns its index. */
     fun addCurvePoint(p: Offset): Int {
-        val pts = (curves[curveChannel] + p).sortedBy { it.x }
-        setCurve(pts)
-        return pts.indexOf(p)
+        val i = session?.adjustmentCurveAdd(p.x, p.y)?.toInt() ?: -1
+        readAdjust()
+        return i
     }
 
     /** Moves point [index] of the channel shown to [p], kept between its neighbours; returns its index. */
     fun moveCurvePoint(index: Int, p: Offset): Int {
-        val pts = curves[curveChannel].toMutableList()
-        if (index !in pts.indices) return index
-        val lo = pts.getOrNull(index - 1)?.x?.plus(0.01f) ?: 0f
-        val hi = pts.getOrNull(index + 1)?.x?.minus(0.01f) ?: 1f
-        pts[index] = Offset(p.x.coerceIn(lo, maxOf(lo, hi)), p.y)
-        setCurve(pts)
+        if (index >= 0) session?.adjustmentCurveMove(index.toUInt(), p.x, p.y)
+        readAdjust()
         return index
     }
 
     /** Takes point [index] off the channel shown (the curve keeps two at least). */
     fun deleteCurvePoint(index: Int) {
-        val pts = curves[curveChannel]
-        if (index !in pts.indices || pts.size <= 2) return
-        setCurve(pts.filterIndexed { k, _ -> k != index })
-    }
-
-    private fun setCurve(points: List<Offset>) {
-        curves = curves.toMutableList().also { it[curveChannel] = points }
-        val flat = curves.map { c -> c.flatMap { listOf(it.x, it.y) } }
-        session?.adjustCurves(flat[0], flat[1], flat[2], flat[3])
+        if (index >= 0) session?.adjustmentCurveDelete(index.toUInt())
+        readAdjust()
     }
 
     /** The curve of [channel] as points to draw (x, height). */
     fun curveShape(channel: Int): List<Offset> {
-        val heights = session?.curveShape(curves[channel].flatMap { listOf(it.x, it.y) }) ?: return emptyList()
+        val heights = session?.adjustmentCurveShape(channel.coerceIn(0, 3).toUInt()) ?: return emptyList()
         return heights.mapIndexed { i, h -> Offset(i / 255f, h) }
     }
 
@@ -4613,11 +4518,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A new gradient, black to white, just after the chosen one: chosen and opened to edit. */
     fun newGradient() {
-        val at = (gradientIndex + 1).coerceIn(0, gradients.size)
-        gradients = gradients.toMutableList().apply { add(at, GradientPreset("Gradient", listOf(0f to 0xFF000000, 1f to 0xFFFFFFFF))) }
+        val at = gradientLibrary.addAfter(gradientIndex.toUInt()).toInt()
+        gradients = readGradients()
         gradientIndex = at
         gradientEditing = at
-        gradientStore.save(gradients)
         applyGradient()
     }
 
@@ -4627,190 +4531,146 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         gradientEditing = gradientIndex
     }
 
-    /** Done editing: the library is saved. */
+    /** Done editing (each change was kept as it was made). */
     fun endGradientEdit() {
         gradientEditing = null
-        gradientStore.save(gradients)
     }
 
     fun deleteGradient(i: Int) {
         if (gradients.size <= 1 || i !in gradients.indices) return
-        gradients = gradients.toMutableList().apply { removeAt(i) }
+        gradientLibrary.delete(i.toUInt())
+        gradients = readGradients()
         if (gradientIndex > i || gradientIndex >= gradients.size) gradientIndex = (gradientIndex - 1).coerceAtLeast(0)
-        gradientStore.save(gradients)
         applyGradient()
     }
 
     /** A copy of gradient [i] just after it, chosen. */
     fun duplicateGradient(i: Int) {
-        val g = gradients.getOrNull(i) ?: return
-        gradients = gradients.toMutableList().apply { add(i + 1, g) }
-        gradientIndex = i + 1
-        gradientStore.save(gradients)
+        if (i !in gradients.indices) return
+        gradientIndex = gradientLibrary.duplicate(i.toUInt()).toInt()
+        gradients = readGradients()
         applyGradient()
     }
 
-    private fun changeEdited(f: (GradientPreset) -> GradientPreset) {
+    /** The gradient being edited changed by [f] (in the shared library), and mapped by again. */
+    private fun changeEdited(f: (UInt) -> Unit) {
         val i = gradientEditing ?: return
-        val g = gradients.getOrNull(i) ?: return
-        gradients = gradients.toMutableList().apply { set(i, f(g)) }
+        if (i !in gradients.indices) return
+        f(i.toUInt())
+        gradients = readGradients()
         applyGradient()
     }
 
-    fun renameGradient(name: String) = changeEdited { if (name.isBlank()) it else it.copy(name = name.trim()) }
+    fun renameGradient(name: String) = changeEdited { gradientLibrary.rename(it, name) }
 
     /** A stop at [position] (0..1), coloured as the gradient was there; returns its index. */
     fun addGradientStop(position: Float): Int {
-        val g = gradientEditing?.let { gradients.getOrNull(it) } ?: return -1
-        val p = position.coerceIn(0f, 1f)
-        changeEdited { it.copy(stops = it.stops + (p to gradientColorAt(it, p))) }
-        return g.stops.size
+        var stop = -1
+        changeEdited { stop = gradientLibrary.addStop(it, position).toInt() }
+        return stop
     }
 
-    fun moveGradientStop(i: Int, position: Float) = changeEdited { g ->
-        g.copy(stops = g.stops.mapIndexed { k, s -> if (k == i) position.coerceIn(0f, 1f) to s.second else s })
-    }
+    fun moveGradientStop(i: Int, position: Float) = changeEdited { gradientLibrary.moveStop(it, i.toUInt(), position) }
 
-    fun setGradientStopColor(i: Int, rgb: Int) = changeEdited { g ->
-        g.copy(stops = g.stops.mapIndexed { k, s -> if (k == i) s.first to (0xFF000000 or (rgb.toLong() and 0xFFFFFF)) else s })
-    }
+    fun setGradientStopColor(i: Int, rgb: Int) = changeEdited { gradientLibrary.setStopColour(it, i.toUInt(), (rgb and 0xFFFFFF).toUInt()) }
 
     /** Takes a stop out; a gradient keeps two. */
-    fun deleteGradientStop(i: Int) = changeEdited { g -> if (g.stops.size <= 2) g else g.copy(stops = g.stops.filterIndexed { k, _ -> k != i }) }
+    fun deleteGradientStop(i: Int) = changeEdited { gradientLibrary.deleteStop(it, i.toUInt()) }
 
     // noise, bloom, halftone and chromatic aberration's toolbars
 
     fun chooseNoiseKind(kind: NoiseKind) {
-        noiseKind = kind
-        applyNoise()
+        session?.adjustmentNoiseKind(kind)
+        readAdjust()
     }
 
     /** Noise's slider [index] (scale, octaves, turbulence) moved to [value]. */
     fun setNoiseValue(index: Int, value: Float) {
-        when (index) {
-            0 -> noiseScale = value
-            1 -> noiseOctaves = value
-            else -> noiseTurbulence = value
-        }
-        applyNoise()
+        session?.adjustmentNoiseValue(index.coerceIn(0, 2).toUInt(), value)
+        readAdjust()
     }
 
     fun chooseNoiseMulti(multi: Boolean) {
-        noiseMulti = multi
-        applyNoise()
+        session?.adjustmentNoiseWays(multi, noiseAdded)
+        readAdjust()
     }
 
     fun toggleNoiseAdded() {
-        noiseAdded = !noiseAdded
-        applyNoise()
-    }
-
-    private fun applyNoise() {
-        session?.adjustNoise(noiseKind, adjustAmount, noiseScale, noiseOctaves, noiseTurbulence, noiseMulti, noiseAdded)
+        session?.adjustmentNoiseWays(noiseMulti, !noiseAdded)
+        readAdjust()
     }
 
     /** Bloom's slider [index] (transition, size, burn) moved to [value]. */
     fun setBloomValue(index: Int, value: Float) {
-        when (index) {
-            0 -> bloomTransition = value
-            1 -> bloomSize = value
-            else -> bloomBurn = value
-        }
-        applyBloom()
-    }
-
-    private fun applyBloom() {
-        session?.adjustBloom(adjustAmount, bloomTransition, bloomSize, bloomBurn)
+        session?.adjustmentBloomValue(index.coerceIn(0, 2).toUInt(), value)
+        readAdjust()
     }
 
     fun chooseHalftoneKind(kind: HalftoneKind) {
-        halftoneKind = kind
-        applyHalftone()
-    }
-
-    private fun applyHalftone() {
-        session?.adjustHalftone(halftoneKind, adjustAmount)
+        session?.adjustmentHalftoneKind(kind)
+        readAdjust()
     }
 
     fun chooseChromaKind(kind: ChromaticKind) {
-        chromaKind = kind
-        applyChroma()
+        session?.adjustmentChromaKind(kind)
+        readAdjust()
     }
 
     /** Chromatic aberration's slider [index] of the kind shown moved to [value]. */
     fun setChromaValue(index: Int, value: Float) {
-        val values = chromaValues[chromaKind] ?: return
-        if (index !in values.indices) return
-        chromaValues = chromaValues + (chromaKind to values.toMutableList().also { it[index] = value })
-        applyChroma()
+        if (index < 0) return
+        session?.adjustmentChromaValue(index.toUInt(), value)
+        readAdjust()
     }
 
     /** Displacing: a drag [d] window pixels from where it began ([start] at its beginning) moves the fringes on. */
     fun dragChromatic(d: Offset, start: Boolean) {
-        if (start) chromaDragFrom = chromaOffset
-        chromaOffset = chromaDragFrom + d
-        // how far, shown as the amount: a quarter of the window's short side is all of it
-        val whole = minOf(windowSize.x, windowSize.y) / 4f
-        adjustAmount = if (whole > 0f) (chromaOffset.getDistance() / whole).coerceIn(0f, 1f) else 0f
-        applyChroma()
-    }
-
-    private fun applyChroma() {
-        val v = chromaValues[chromaKind] ?: return
-        val offset = if (chromaKind == ChromaticKind.DISPLACE) chromaOffset else Offset.Zero
-        session?.adjustChromatic(chromaKind, adjustAmount, offset.x, offset.y, v[0], v[1])
+        session?.adjustmentChromaDrag(d.x, d.y, start)
+        readAdjust()
     }
 
     fun chooseGlitchKind(kind: GlitchKind) {
-        glitchKind = kind
-        applyGlitch()
+        session?.adjustmentGlitchKind(kind)
+        readAdjust()
     }
 
     /** Slider [index] of the glitch kind shown moved to [value] (0..1, or −1..1 for diverge's shifts). */
     fun setGlitchValue(index: Int, value: Float) {
-        val values = glitchValues[glitchKind] ?: return
-        if (index !in values.indices) return
-        glitchValues = glitchValues + (glitchKind to values.toMutableList().also { it[index] = value })
-        applyGlitch()
+        if (index < 0) return
+        session?.adjustmentGlitchValue(index.toUInt(), value)
+        readAdjust()
     }
 
-    private fun applyGlitch() {
-        val v = glitchValues[glitchKind] ?: return
-        session?.adjustGlitch(glitchKind, adjustAmount, v.dropLast(1), v.last())
-    }
-
+    /** Gradient Map maps by the gradient chosen (also after the library changed). */
     private fun applyGradient() {
-        val g = gradients.getOrNull(gradientIndex) ?: return
-        val stops = g.stops.sortedBy { it.first }.flatMap { (p, c) ->
-            listOf(p, ((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f)
-        }
-        session?.adjustGradientMap(stops, adjustAmount)
+        session?.adjustmentGradient(gradientIndex.toUInt())
     }
 
     // the menu a tap on the canvas opens during an adjustment
 
     /** Keeps what the adjustment did as one undo step and starts it again from there. */
     fun applyAdjustment() {
-        val a = adjustment ?: return
-        endAdjustment(true)
-        startAdjustment(a)
+        if (adjustment == null) return
+        adjustMenuAt = null
+        session?.adjustmentApply()
+        showNotice("Adjustment applied")
+        readAdjust()
+        refresh()
+        if (panel == Panel.LAYERS) refreshThumbnails()
     }
 
     /** Takes back the adjustment's changes, or with none, the last one kept. */
     fun undoAdjustment() {
-        val a = adjustment ?: return
-        if (adjustChanged()) {
-            resetAdjustment()
-            return
-        }
-        endAdjustment(false)
-        session?.undo()
-        startAdjustment(a)
+        if (adjustment == null) return
+        session?.adjustmentUndo()
+        readAdjust()
+        refresh()
+        if (panel == Panel.LAYERS) refreshThumbnails()
     }
 
     fun togglePreview() {
-        adjustPreview = !adjustPreview
-        session?.adjustPreview(adjustPreview)
+        session?.adjustmentPreview(!adjustPreview)
+        readAdjust()
         adjustMenuAt = null
     }
 
@@ -4818,53 +4678,52 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Every value back to where the adjustment started. */
     fun resetAdjustment() {
-        val a = adjustment ?: return
-        endAdjustment(false)
-        startAdjustment(a)
+        if (adjustment == null) return
+        val painted = adjustPencil
+        session?.adjustmentReset()
+        readAdjust()
+        if (painted && !adjustPencil) readSliders()
+        refresh()
     }
 
-    private fun adjustChanged(): Boolean = when (adjustment) {
-        Adjustment.HSB -> listOf(hue50, saturation50, brightness50).any { it != 0.5f }
-        Adjustment.COLOR_BALANCE -> balance.any { it != 0.5f }
-        Adjustment.CURVES -> curves.any { it.size != 2 || it[0] != Offset(0f, 0f) || it[1] != Offset(1f, 1f) }
-        Adjustment.GRADIENT_MAP -> true
-        else -> adjustAmount > 0f
+    /** The liquify brush lifted moving at ([vx], [vy]) window pixels a millisecond: it carries on with its momentum. */
+    fun liquifyLifted(vx: Float, vy: Float) {
+        session?.adjustmentLiquifyCoast(vx, vy)
     }
 
     /** A liquify stroke's window points (x, y, pressure each); [start] begins it. */
-    /** The liquify brush lifted moving at ([vx], [vy]) window pixels a millisecond: it carries on with its momentum. */
-    fun liquifyLifted(vx: Float, vy: Float) {
-        session?.liquifyCoast(vx, vy, liquifyMomentum, LiquifyBrush(liquifyKind, liquifySize, liquifyPressure, liquifyDistortion))
-    }
-
     fun liquifyStroke(points: List<Float>, start: Boolean) {
         val s = session ?: return
-        s.liquifyStroke(points, start, LiquifyBrush(liquifyKind, liquifySize, liquifyPressure, liquifyDistortion))
+        s.adjustmentLiquifyStroke(points, start)
         liquified = true
     }
 
     fun chooseLiquifyKind(kind: LiquifyKind) {
-        liquifyKind = kind
+        session?.adjustmentLiquifyKind(kind)
         liquifyPopup = 0
+        readAdjust()
+    }
+
+    /** Liquify's slider [index] (size, pressure, distortion, momentum) moved to [value]. */
+    fun setLiquifyValue(index: Int, value: Float) {
+        session?.adjustmentLiquifyValue(index.coerceIn(0, 3).toUInt(), value)
+        readAdjust()
     }
 
     fun changeLiquifyAmount(amount: Float) {
-        liquifyAmount = amount
-        session?.liquifyAmount(amount)
+        session?.adjustmentLiquifyAmount(amount)
+        readAdjust()
     }
 
     fun resetLiquify() {
-        session?.liquifyReset()
-        liquified = false
-        liquifyAmount = 1f
+        session?.adjustmentLiquifyReset()
         liquifyPopup = 0
+        readAdjust()
     }
 
     fun setHsb(h: Float, s: Float, b: Float) {
-        hue50 = h
-        saturation50 = s
-        brightness50 = b
-        session?.adjustHsb(h, s, b)
+        session?.adjustmentHsb(h, s, b)
+        readAdjust()
     }
 
     /** The adjustments button: closes an open adjustment (keeping it), or opens the menu. */
@@ -5312,13 +5171,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         transformBox = s.transformBegin()
         // nothing there to move: it says so and stays out of transform
         if (transformBox == null) {
-            showNotice(
-                when {
-                    currentIsText() -> "Rasterize the text to transform it"
-                    hasSelection -> "Nothing is selected on this layer"
-                    else -> "This layer is empty"
-                },
-            )
+            showNotice(s.transformRefusal())
             return
         }
         // a warp lays its mesh over what began
@@ -5589,18 +5442,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         holdVersion++
     }
 
-    /** The frames in playing order, each as often as it is held. */
-    private fun playOrder(): List<Int> {
-        val s = session ?: return emptyList()
-        return animationFrames.flatMapIndexed { i, id -> List(1 + s.frameHold(id).toInt()) { i } }
-    }
-
     fun togglePlaying() = if (playingFrame != null) stopPlaying() else play()
 
     private fun play() {
         val s = session ?: return
         val a = animation ?: return
-        val order = playOrder()
+        // the frames in playing order, each as often as it is held (the shared core's)
+        val order = s.animationSequence().map { it.toInt() }
         if (order.isEmpty()) return
         animationSettingsOpen = false
         frameOptionsOpen = false
@@ -5613,16 +5461,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 playingFrame = frame
                 s.setPlayFrame(frame.toUInt())
                 kotlinx.coroutines.delay(1000L / (animation?.fps ?: a.fps).toInt().coerceAtLeast(1))
-                val next = at + step
-                when {
-                    next in order.indices -> at = next
-                    a.playback == io.github.artcraftandroid.procraft.core.AnimationPlayback.LOOP -> at = 0
-                    a.playback == io.github.artcraftandroid.procraft.core.AnimationPlayback.PING_PONG && order.size > 1 -> {
-                        step = -step
-                        at += step
-                    }
-                    else -> break
-                }
+                // round again, turned back, or (a single pass) done
+                val next = io.github.artcraftandroid.procraft.core.animationNextStep(a.playback, order.size.toUInt(), at.toUInt(), step) ?: break
+                at = next.at.toInt()
+                step = next.step
             }
             // a single pass ends on its last frame, still shown
         }
@@ -5918,12 +5760,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
         /** What shipped before brushes and sets were added to kept libraries. */
         val FIRST_SHIPPED = listOf(3u, 3u, 3u, 2u, 2u, 2u)
-        /** Said when a layer can't be added: the canvas holds no more at its size. */
-        /** The memory layers may take, which sets how many a canvas can hold. */
-        const val LAYER_BUDGET = 2L * 1024 * 1024 * 1024
         const val MAX_CANVAS_EDGE = 16384
         /** How much smaller than fitted to the screen the canvas is while cropping. */
-        const val CROP_SCALE = 0.597f
         /** The reference window: its first place and picture size, its limits, and how sharp and how often its canvas is read. */
         /** The reference window's picture at first, and its gap to the screen's bottom. */
         const val REFERENCE_WIDTH_DP = 350f
@@ -6033,8 +5871,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val QUICKSHAPE_STILL_DP = 6f
         const val QUICKSHAPE_REACH_DP = 30f
 
-        /** A snapped shape being edited: a handle within this takes a drag, and its outline within this. */
-        const val QUICKSHAPE_GRAB_DP = 22f
         /** The drawing pad's colours (0xRRGGBB), the white one, and its background's grey. */
         val PAD_COLORS = listOf(0xF83045, 0xFCBD03, 0x85D921, 0x2BB5E6, 0x4956A5, 0xDA3D92, 0xFFFFFF, 0x000000)
         const val PAD_WHITE = 6
@@ -6044,11 +5880,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val PAD_BACK_LIGHT = 243f / 255f
         /** How long after a studio control stops moving its sample stroke is drawn again (milliseconds). */
         const val STUDIO_PREVIEW_DELAY_MS = 60L
-        /** Bloom's size and burn sliders when painted on. */
-        const val PENCIL_BLOOM_SIZE = 0.335f
-        const val PENCIL_BLOOM_BURN = 0.57f
-        /** How far a motion blur's drag goes for its whole amount (points). */
-        const val MOTION_DRAG_PT = 500f
         /** The first colour: a saturated blue. */
         const val DEFAULT_HUE = 0.59f
         /** Layer thumbnails are read at about the size they show (93 dp at 2 px a dp). */

@@ -553,28 +553,66 @@ pub fn share_artworks(list: &[procraft_core::GalleryArtwork], format: Format, pd
             .collect()
     };
     for (a, path) in targets {
-        let path = path.to_string_lossy().into_owned();
-        let written = CanvasSession::open(a.dir.clone()).map_err(|e| e.to_string()).and_then(|s| {
-            if !s.prepare_offscreen() {
-                return Err("There's no GPU device to draw it with.".to_owned());
-            }
-            match format {
-                Format::Procraft | Format::Package => {
-                    s.export_package(path, seed(), Some(crate::timelapse::for_package(&a.dir)))
-                }
-                Format::Psd => s.export_psd(path),
-                Format::Pdf | Format::LayersPdf => s.export_pdf(path, false, pdf_quality),
-                Format::Tiff => s.export_tiff(path),
-                Format::Jpeg => return export_jpeg(&s, &path, false),
-                _ => s.export_png(path),
-            }
-            .map_err(|e| e.to_string())
-        });
-        if let Err(e) = written {
+        if let Err(e) = write_artwork(a, format, &path.to_string_lossy(), pdf_quality) {
             tell("Can't share", &format!("{}: {e}", a.name));
             return;
         }
     }
+}
+
+/// The artwork `a` from the gallery written as `format` at `path` (a PDF's pictures at
+/// `pdf_quality`), opened on a GPU device of its own, never shown.
+pub fn write_artwork(
+    a: &procraft_core::GalleryArtwork,
+    format: Format,
+    path: &str,
+    pdf_quality: u8,
+) -> Result<(), String> {
+    let path = path.to_owned();
+    let s = CanvasSession::open(a.dir.clone()).map_err(|e| e.to_string())?;
+    if !s.prepare_offscreen() {
+        return Err("There's no GPU device to draw it with.".to_owned());
+    }
+    match format {
+        Format::Procraft | Format::Package => {
+            s.export_package(path, seed(), Some(crate::timelapse::for_package(&a.dir)))
+        }
+        Format::Psd => s.export_psd(path),
+        Format::Pdf | Format::LayersPdf => s.export_pdf(path, false, pdf_quality),
+        Format::Tiff => s.export_tiff(path),
+        Format::Jpeg => return export_jpeg(&s, &path, false),
+        _ => s.export_png(path),
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// What an artwork dragged out of the gallery becomes, by Drag and Drop export's preferred file
+/// format ([`crate::prefs::DRAG_FORMATS`]).
+pub const DRAG_FORMATS: [Format; 5] = [Format::Procraft, Format::Psd, Format::Jpeg, Format::Png, Format::Tiff];
+
+/// An artwork lifted out of the gallery (the folder `dir`, named `name`) written as `format` into
+/// the system's temporary folder for dragging; its path.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn drag_file(a: &procraft_core::GalleryArtwork, format: Format) -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("ProCraft drags");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let kept: String = a.name.chars().filter(|c| c.is_alphanumeric() || " _-".contains(*c)).collect();
+    let name = if kept.trim().is_empty() { "Untitled Artwork" } else { kept.trim() };
+    let path = dir.join(format!("{name}.{}", format.extension()));
+    write_artwork(a, format, &path.to_string_lossy(), 100)?;
+    Ok(path)
+}
+
+/// A dragged artwork's picture: its thumbnail fitted in `side` pixels, on white, as a PNG.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn drag_picture(dir: &str, side: u32) -> Option<Vec<u8>> {
+    let thumbnail = image::open(Path::new(dir).join("thumbnail.png")).ok()?.thumbnail(side, side).to_rgba8();
+    let mut on_white =
+        image::RgbaImage::from_pixel(thumbnail.width(), thumbnail.height(), image::Rgba([255, 255, 255, 255]));
+    image::imageops::overlay(&mut on_white, &thumbnail, 0, 0);
+    let mut png = Vec::new();
+    on_white.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).ok()?;
+    Some(png)
 }
 
 /// The artwork (or with `model`, the model as shown) as a JPEG at `path`: its picture written as

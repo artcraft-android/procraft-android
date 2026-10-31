@@ -36,12 +36,14 @@ pub struct Lit {
     pub panel_open: bool,
 }
 
-/// The button tapped on the top bar, if any, and where each one is (points). The colour button's
-/// touches are ColorDrop's (see [`crate::colour_drop`]): it is never the one tapped here.
+/// The button tapped on the top bar, if any, and where each one is (points); the one held down
+/// (not dragged off), and since when (seconds, egui's clock). The colour button's touches are
+/// ColorDrop's (see [`crate::colour_drop`]): it is never the one tapped here.
 #[derive(Default)]
 pub struct Bar {
     pub pressed: Option<BarButton>,
     pub rects: Vec<(BarButton, Rect)>,
+    pub down: Option<(BarButton, f64)>,
 }
 
 impl Bar {
@@ -67,8 +69,16 @@ pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, br
         };
         let mut tap = |ui: &Ui, which: BarButton, rect: Rect| {
             bar.rects.push((which, rect));
-            if ui.interact(rect, ui.scope_id().with(which), Sense::click()).clicked() {
+            let response = ui.interact(rect, ui.scope_id().with(which), Sense::click());
+            if response.clicked() {
                 bar.pressed = Some(which);
+            }
+            let (since, dragging) = ui.input(|i| (i.pointer.press_start_time(), i.pointer.is_decidedly_dragging()));
+            if response.is_pointer_button_down_on()
+                && !dragging
+                && let Some(since) = since
+            {
+                bar.down = Some((which, since));
             }
         };
 

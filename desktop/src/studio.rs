@@ -595,7 +595,6 @@ fn gap(above: Edge, below: Option<&Control>) -> f32 {
 /// A slider's value as it reads.
 fn shown_value(v: f32, shown: Shown, most: f32) -> String {
     let pc = (v * 100.0).round() as i32;
-    let percent = format!("{pc}%");
     // between ends that read by name, a value never rounds onto an end (0.996 reads 99%)
     let between = format!("{}%", pc.clamp(1, 99));
     let below_top = format!("{}%", pc.min(99));
@@ -656,7 +655,6 @@ fn shown_value(v: f32, shown: Shown, most: f32) -> String {
             } else if size <= 0.0 {
                 "None".into()
             } else {
-                let _ = percent;
                 format!("{}%", (size * 100.0).round() as i32)
             }
         }
@@ -875,13 +873,13 @@ impl Studio {
                 self.rail(ui, look, pages);
             }
             self.settings(ui, look, session, settings);
-            if let Some(done) = self.pad_view(ui, look, session, pad) {
+            if let Some(done) = self.pad_view(ui, look, pad) {
                 self.close(session, done);
                 asked = Some(Asked::Closed);
             }
         });
         if self.pad_menu {
-            self.pad_menu(ctx, look, session, prefs);
+            self.pad_menu(ctx, session, prefs);
         }
         if let Some(mut keypad) = self.keypad.take()
             && keypad.show(ctx, look, session, self)
@@ -1307,7 +1305,7 @@ impl Studio {
 
     /// The drawing pad with its buttons: Drawing Pad (its menu), Cancel and Done. Returns whether
     /// Done (true) or Cancel (false) was tapped.
-    fn pad_view(&mut self, ui: &mut Ui, look: &mut Look, session: &Arc<CanvasSession>, area: Rect) -> Option<bool> {
+    fn pad_view(&mut self, ui: &mut Ui, look: &mut Look, area: Rect) -> Option<bool> {
         self.pad_rect = Some(area);
         ui.painter().rect_filled(area, 0, argb(BACK));
         if let Some(id) = self.pad_texture {
@@ -1358,7 +1356,6 @@ impl Studio {
         if ui.interact(done, ui.scope_id().with("done"), Sense::click()).clicked() {
             return Some(true);
         }
-        let _ = session;
         None
     }
 
@@ -1391,13 +1388,7 @@ impl Studio {
     }
 
     /// The pad's menu: the pad's colour, clearing it, and resetting the brush.
-    fn pad_menu(
-        &mut self,
-        ctx: &egui::Context,
-        look: &mut Look,
-        session: &Arc<CanvasSession>,
-        prefs: &mut crate::prefs::Prefs,
-    ) {
+    fn pad_menu(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>, prefs: &mut crate::prefs::Prefs) {
         let screen = ctx.content_rect();
         // under the Drawing Pad button, centred on it but kept 14 in from the screen's sides
         let centre = self.pad_rect.map_or(screen.left(), |r| r.left() + 21.0 + 70.0);
@@ -1517,7 +1508,6 @@ impl Studio {
                 }
             }
         });
-        let _ = look;
         let pressed_elsewhere =
             ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !menu.contains(p)));
         if pressed_elsewhere && ctx.cumulative_frame_nr() != self.pad_menu_frame {
@@ -2107,8 +2097,7 @@ impl Keypad {
             }
             match self.page {
                 KeypadPage::Numeric => {
-                    let (most, signed) = typed(self.how, self.most);
-                    let _ = most;
+                    let (_, signed) = typed(self.how, self.most);
                     let left = body.left() + 12.0;
                     let rows: [&[(&str, f32)]; 4] = [
                         &[("7", 81.0), ("8", 81.0), ("9", 81.0)],

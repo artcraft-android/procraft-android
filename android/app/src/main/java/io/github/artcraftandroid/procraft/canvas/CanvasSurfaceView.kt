@@ -13,6 +13,7 @@ import io.github.artcraftandroid.procraft.core.CanvasSession
 import io.github.artcraftandroid.procraft.core.MobileException
 import io.github.artcraftandroid.procraft.core.PenSample
 import io.github.artcraftandroid.procraft.core.ChromaticKind
+import io.github.artcraftandroid.procraft.core.CompanionMode
 import io.github.artcraftandroid.procraft.core.PointerKind
 import io.github.artcraftandroid.procraft.core.TouchCommand
 import io.github.artcraftandroid.procraft.core.ToolKind
@@ -49,7 +50,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     // IDLE: a finger that doesn't paint, waiting for a hold or more fingers; HOVER: fingers
     // setting the brush while the pen hovers
-    private enum class Mode { NONE, PEN, FINGER, IDLE, GESTURE, PICK, TRANSFORM, SELECT, ADJUST, PUCK, SHAPE, SHAPE_PIN, SHAPE_MOVE, HOVER, TURN, POUR, OPACITY, RECOLOR }
+    private enum class Mode { NONE, PEN, FINGER, IDLE, GESTURE, PICK, TRANSFORM, SELECT, ADJUST, PUCK, HOVER, POUR, RECOLOR }
 
     /** The pen is hovering over the canvas. */
     private var penHovering = false
@@ -89,12 +90,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         liquifyTime = e.eventTime
     }
 
-    /** Where the stroke last moved from (window pixels), for QuickShape's hold; the handle being dragged. */
+    /** Where the stroke last moved from (window pixels), for QuickShape's hold. */
     private var holdAt = Offset.Zero
-    private var shapeHandle = -1
-
-    // an edited shape's drag has gone past a tap's slop
-    private var shapeDragged = false
     private val quickShapeHold = Runnable {
         if ((mode == Mode.PEN || mode == Mode.FINGER) && drawAndHold) {
             removeCallbacks(holdToPick)
@@ -314,64 +311,24 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         attached = false
     }
 
-    /** Where the last companion drag sample was, while a one-finger zoom or move goes on. */
-    private var companionAt: Offset? = null
-
-    /**
-     * With the companion's Zoom or Move on, a single finger dragged on the canvas zooms it (up
-     * zooms in, about where it started) or moves it, instead of painting.
-     */
-    private fun companionTouch(e: MotionEvent, s: CanvasSession): Boolean {
-        val mode = vm.companionMode
-        if (mode == CanvasViewModel.CompanionMode.NONE && companionAt == null) return false
-        when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                if (mode == CanvasViewModel.CompanionMode.NONE) return false
-                companionAt = Offset(e.x, e.y)
-                downX = e.x
-                downY = e.y
-            }
-            MotionEvent.ACTION_MOVE -> {
-                val last = companionAt ?: return false
-                val (dx, dy) = (e.x - last.x) to (e.y - last.y)
-                if (mode == CanvasViewModel.CompanionMode.ZOOM) {
-                    val scale = kotlin.math.exp(-dy / (COMPANION_ZOOM_DP * resources.displayMetrics.density))
-                    s.viewGesture(downX, downY, 0f, 0f, scale, 0f)
-                } else {
-                    s.viewGesture(e.x, e.y, dx, dy, 1f, 0f)
-                }
-                companionAt = Offset(e.x, e.y)
-                vm.refreshView()
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                companionAt ?: return false
-                companionAt = null
-                vm.refreshView()
-            }
-            else -> return companionAt != null
-        }
-        return true
-    }
-
     // this touch (down to the last pointer up) is the shared touches' (crates/core touch.rs): painting,
     // picking, the snapped shape, and the gestures, the same in every app
     private var routed = false
 
     /**
      * Whether a touch going down now is an ordinary one, for the shared touches: none of the canvas's
-     * own modes takes it (the modify button and its eyedropper go to them first).
+     * own modes takes it (the modify button and its eyedropper go to them first, and the companion's
+     * Zoom or Move before anything).
      */
     private fun routes(e: MotionEvent): Boolean {
-        if (vm.modifyHeld || vm.pickNext) return true
+        if (vm.modifyHeld || vm.pickNext || vm.companionMode != CanvasViewModel.CompanionMode.NONE) return true
         val kind = kindOf(e, 0)
         val pen = kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER
-        return vm.opacityLayer == null &&
-            vm.dropBand != CanvasViewModel.DropBand.FILLING &&
+        return vm.dropBand != CanvasViewModel.DropBand.FILLING &&
             !vm.recoloring &&
             vm.adjustment == null &&
             !vm.selecting &&
             !vm.transforming &&
-            !(vm.modelOpen && !vm.modelFlat && kind == PointerKind.FINGER) &&
             // Hover: with the pen held over the canvas, a finger drags the opacity and a pinch the size
             !(!pen && penHovering && vm.gestures.isOn(GesturePurpose.HOVER, "HOVER_TOUCH") && vm.quickShape == null)
     }
@@ -451,7 +408,6 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     override fun onTouchEvent(e: MotionEvent): Boolean {
         val s = session ?: return true
         if (penButton(e)) return true
-        if (companionTouch(e, s)) return true
         predictor.record(e)
         if (e.actionMasked == MotionEvent.ACTION_DOWN) {
             routed = routes(e)
@@ -459,11 +415,22 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 // every sample as it arrives, not batched to the frame
                 requestUnbufferedDispatch(e)
                 s.setTouchSettings(vm.touchSettings())
+                // the companion's Zoom or Move: a lone press zooms or moves the canvas
+                s.setTouchCompanion(
+                    when (vm.companionMode) {
+                        CanvasViewModel.CompanionMode.ZOOM -> CompanionMode.ZOOM
+                        CanvasViewModel.CompanionMode.MOVE -> CompanionMode.MOVE
+                        CanvasViewModel.CompanionMode.NONE -> null
+                    },
+                )
             }
         }
         if (routed) {
             route(e, s)
-            if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) routed = false
+            val ended = e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL
+            // Layer opacity: the shared touches drag it; the band shows it as they go
+            if (vm.opacityLayer != null) vm.layerOpacityTouched(ended)
+            if (ended) routed = false
             return true
         }
         when (e.actionMasked) {
@@ -473,13 +440,6 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 fingers = 1
                 downX = e.x
                 downY = e.y
-                if (vm.opacityLayer != null) {
-                    // Layer opacity: one pen or finger drags the layer's opacity across the canvas
-                    mode = Mode.OPACITY
-                    lastSelectX = e.x
-                    lastSelectTime = e.eventTime
-                    return true
-                }
                 if (vm.dropBand == CanvasViewModel.DropBand.FILLING) {
                     // Continue filling: the touch fills where it lands; slid, it changes the threshold
                     pourStart = Offset(e.x, e.y)
@@ -563,11 +523,13 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                     transformGrabbed = false
                     return true
                 }
-                // on a model, a finger turns it; the pen paints
-                if (vm.modelOpen && !vm.modelFlat && kindOf(e, 0) == PointerKind.FINGER) {
-                    mode = Mode.TURN
-                    lastX = e.x
-                    lastY = e.y
+                // Hover: with the pen held over the canvas, a finger drags the opacity and a pinch the
+                // size (routes() keeps these touches here)
+                val kind = kindOf(e, 0)
+                val pen = kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER
+                if (!pen && penHovering && vm.gestures.isOn(GesturePurpose.HOVER, "HOVER_TOUCH")) {
+                    mode = Mode.HOVER
+                    hoverX = e.x
                     return true
                 }
             }
@@ -580,7 +542,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 removeCallbacks(holdToPick)
                 removeCallbacks(quickShapeHold)
                 // a finger down while the stroke is held as a snapped shape snaps it, until lifted
-                if ((mode == Mode.PEN || mode == Mode.FINGER || mode == Mode.SHAPE_PIN) && vm.quickShape != null) {
+                if ((mode == Mode.PEN || mode == Mode.FINGER) && vm.quickShape != null) {
                     if (e.getToolType(e.actionIndex) == MotionEvent.TOOL_TYPE_FINGER) vm.quickShapeFinger(true)
                     return true
                 }
@@ -596,8 +558,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 }
                 // a second finger takes back the fill the first one made
                 if (mode == Mode.POUR) vm.pourEnd(keep = false)
-                if (mode == Mode.OPACITY) vm.liftLayerOpacity()
-                if (mode == Mode.FINGER || mode == Mode.IDLE || mode == Mode.TRANSFORM || mode == Mode.SELECT || mode == Mode.TURN || mode == Mode.POUR || mode == Mode.RECOLOR) {
+                if (mode == Mode.FINGER || mode == Mode.IDLE || mode == Mode.TRANSFORM || mode == Mode.SELECT || mode == Mode.POUR || mode == Mode.RECOLOR) {
                     gestureStart = e.eventTime
                     gestureScale = 1f
                 }
@@ -631,25 +592,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 Mode.PICK -> vm.pickAt(e.x, e.y, pickSide)
                 Mode.IDLE -> if (hypot(e.x - downX, e.y - downY) > tapSlop) removeCallbacks(holdToPick)
                 Mode.HOVER -> hoverAdjust(e)
-                Mode.TURN -> {
-                    s.turnModel(e.x - lastX, e.y - lastY)
-                    tapMoved += hypot(e.x - lastX, e.y - lastY)
-                    lastX = e.x
-                    lastY = e.y
-                }
                 Mode.PUCK -> vm.moveClonePuck(Offset(e.x, e.y) - puckGrab)
-                Mode.SHAPE -> vm.moveQuickShapeHandle(shapeHandle, Offset(e.x, e.y))
-                Mode.SHAPE_PIN, Mode.SHAPE_MOVE -> {
-                    val i = e.findPointerIndex(strokePointer)
-                    // only a drag past a tap's slop moves it, then from where it began
-                    if (i >= 0 && !shapeDragged) shapeDragged = hypot(e.getX(i) - downX, e.getY(i) - downY) > tapSlop
-                    if (i >= 0 && shapeDragged) {
-                        val p = Offset(e.getX(i), e.getY(i))
-                        if (mode == Mode.SHAPE_PIN) vm.quickShapePin(p, begin = false) else vm.quickShapeMove(Offset(lastX, lastY), p)
-                        lastX = p.x
-                        lastY = p.y
-                    }
-                }
                 Mode.GESTURE -> if (fingers >= 3) scrub(e) else moveGesture(e, s)
                 Mode.SELECT -> select(e, done = false)
                 Mode.POUR -> pour(e, done = false)
@@ -660,12 +603,6 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                         vm.recolorDrag(p - recolorLast)
                         recolorLast = p
                     }
-                }
-                Mode.OPACITY -> {
-                    val dx = (e.x - lastSelectX) / resources.displayMetrics.density
-                    vm.dragLayerOpacity(dragStep(dx, e.eventTime - lastSelectTime))
-                    lastSelectX = e.x
-                    lastSelectTime = e.eventTime
                 }
                 Mode.ADJUST -> if (vm.adjustment == Adjustment.LIQUIFY) {
                     vm.liquifyStroke(liquifyPoints(e), start = false)
@@ -701,7 +638,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 fingers = e.pointerCount - 1
                 if (mode == Mode.GESTURE) followFingers(e, exclude = e.actionIndex)
                 // the last finger other than the stroke's lifted from a held snapped shape
-                if ((mode == Mode.PEN || mode == Mode.FINGER || mode == Mode.SHAPE_PIN) && vm.quickShape != null && e.getPointerId(e.actionIndex) != strokePointer) {
+                if ((mode == Mode.PEN || mode == Mode.FINGER) && vm.quickShape != null && e.getPointerId(e.actionIndex) != strokePointer) {
                     val strokeDown = e.findPointerIndex(strokePointer).let { it >= 0 && it != e.actionIndex }
                     if (e.pointerCount - 1 - (if (strokeDown) 1 else 0) == 0) vm.quickShapeFinger(false)
                 }
@@ -734,16 +671,10 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                         vm.settleToFit()
                     }
                     Mode.PICK -> vm.finishPick()
-                    Mode.PUCK, Mode.SHAPE, Mode.IDLE, Mode.HOVER, Mode.TURN -> Unit
-                    // a tap, on its outline or elsewhere, ends the editing; a drag only turned or moved it
-                    Mode.SHAPE_PIN, Mode.SHAPE_MOVE -> {
-                        if (mode == Mode.SHAPE_PIN) vm.quickShapeUnpin()
-                        if (!shapeDragged && e.eventTime - tapStart <= TAP_MS) vm.endQuickShape()
-                    }
+                    Mode.PUCK, Mode.IDLE, Mode.HOVER -> Unit
                     Mode.SELECT -> select(e, done = true)
                     Mode.POUR -> pour(e, done = true)
                     Mode.RECOLOR -> if (!recolorDragging) vm.recolorTap(Offset(e.x, e.y))
-                    Mode.OPACITY -> vm.liftLayerOpacity()
                     Mode.ADJUST -> if (vm.adjustment == Adjustment.LIQUIFY) {
                         // still moving when it lifts, liquify carries on
                         if (e.eventTime - liquifyTime <= LIQUIFY_STILL_MS) vm.liquifyLifted(liquifyVelocity.x, liquifyVelocity.y)
@@ -1081,8 +1012,6 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         const val RAPID_UNDO_DELAY_MS = 650L
         const val RAPID_REPEAT_MS = 120L
         const val QUICK_PINCH_MS = 400L
-        /** How far (dp) a companion zoom drag goes for the canvas to grow e times. */
-        const val COMPANION_ZOOM_DP = 180f
         const val QUICK_PINCH_SCALE = 0.75f
         const val SCRUB_TURNS = 3
         /** How far three fingers go down to count as a swipe, dp. */

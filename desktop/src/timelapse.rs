@@ -43,6 +43,11 @@ impl TimeLapseUi {
         self.replay = None;
     }
 
+    /// The frames recorded so far, and what they take on disk (bytes).
+    pub fn info(&self) -> (u32, u64) {
+        self.lapse.as_ref().map_or((0, 0), |(_, t)| (t.count(), t.bytes()))
+    }
+
     /// Whether it records changes (the Video tab's switch).
     pub fn recording(&self) -> bool {
         self.lapse.as_ref().is_none_or(|(_, t)| t.recording())
@@ -241,7 +246,7 @@ pub fn take_package(package: &std::path::Path, dir: &str) {
     let videos = t.segments.clone();
     lapse.take_begin(t);
     for path in videos {
-        let read = crate::video::read_frames(std::path::Path::new(&path), |rgba, w, h| {
+        let read = crate::video::read_frames(std::path::Path::new(&path), |rgba, w, h, _| {
             lapse.keep_frame(rgba, w, h);
         });
         let frames = read.unwrap_or_else(|e| {

@@ -69,10 +69,14 @@ pub struct CanvasInfo {
     profile: String,
     /// The signature's strokes, x, y of each point across its box (0..1).
     signature: Vec<Vec<f32>>,
+    /// The time-lapse recorded so far: its frames and what they take on disk (bytes).
+    lapse: (u32, u64),
+    /// Done with another profile picked while a time-lapse was recorded asks first.
+    asking: crate::alert::Alert,
 }
 
 impl CanvasInfo {
-    pub fn new(session: &CanvasSession, dir: Option<String>) -> CanvasInfo {
+    pub fn new(session: &CanvasSession, dir: Option<String>, lapse: (u32, u64)) -> CanvasInfo {
         let info = session.artwork_info();
         CanvasInfo {
             page: 0,
@@ -85,6 +89,8 @@ impl CanvasInfo {
             photo_read: false,
             new_photo: None,
             profile: session.profile(),
+            lapse,
+            asking: crate::alert::Alert::default(),
         }
     }
 
@@ -220,7 +226,20 @@ impl CanvasInfo {
             if ui.interact(done, ui.scope_id().with("done"), Sense::click()).clicked() {
                 self.keep(session);
                 let changed = (self.profile != session.profile()).then(|| self.profile.clone());
-                ended = Some(Ended::Done(changed));
+                // a time-lapse recorded so far is in the old profile: asked first
+                if changed.is_some() && self.lapse.0 > 0 {
+                    self.asking.ask(crate::alert::Asking {
+                        title: "Change color profile?".into(),
+                        message: "The time-lapse recorded so far was made in the old profile's colours.".into(),
+                        action: "Change".into(),
+                        icon: None,
+                        destructive: false,
+                        extra: None,
+                        first: Some("Don't change".into()),
+                    });
+                } else {
+                    ended = Some(Ended::Done(changed));
+                }
             }
             let (start, end) = if wide { (WIDE_START, WIDE_END) } else { (105.0, 24.0) };
             let page = Rect::from_min_max(
@@ -235,7 +254,13 @@ impl CanvasInfo {
                 });
             });
         });
-        if escape {
+        match self.asking.show(ctx, look) {
+            Some(crate::alert::Answer::Action) => ended = Some(Ended::Done(Some(self.profile.clone()))),
+            // kept in the profile it has (the rest kept)
+            Some(_) => ended = Some(Ended::Done(None)),
+            None => {}
+        }
+        if escape && !self.asking.is_open() {
             ended = Some(Ended::Cancel);
         }
         ended
@@ -346,12 +371,14 @@ impl CanvasInfo {
                 }
             }
             4 => {
-                // the desktop records no time-lapse yet
+                // the time-lapse recorded so far, as its video would be
+                let (frames, bytes) = self.lapse;
+                let seconds = frames / procraft_core::TIME_LAPSE_FPS;
                 let video = [
-                    ("Video length", "00:00:00".to_owned()),
+                    ("Video length", format!("{:02}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)),
                     ("Video quality", "Good".to_owned()),
                     ("Video resolution", "720p".to_owned()),
-                    ("Video file size", megabytes(0)),
+                    ("Video file size", megabytes(bytes)),
                     ("Video codec", "H.264".to_owned()),
                 ];
                 rows(ui, width, &video, 50.0);
@@ -367,7 +394,6 @@ impl CanvasInfo {
                 rows(ui, width, &stats, 50.0);
             }
         }
-        let _ = look;
     }
 
     /// The author: a photo (a tap picks another), "Made by" and the name, and a signature drawn

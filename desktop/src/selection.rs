@@ -111,6 +111,14 @@ impl Selection {
         session.set_selection_display(if tint { SelectionDisplay::Tint } else { SelectionDisplay::Stripes });
     }
 
+    /// Nothing selected any more (a freehand path being drawn closed first), as Deselect does.
+    pub fn clear(&mut self, session: &CanvasSession) {
+        session.close_freehand();
+        session.select_none();
+        self.has = false;
+        self.look(session);
+    }
+
     /// A rectangle or ellipse is being dragged out.
     pub fn dragged(&mut self, session: &CanvasSession, a: Pos2, b: Pos2) {
         self.drag = Some((a, b));

@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, Rect, Stroke, Ui, vec2};
-use procraft_core::{Blocked, CanvasInfo, CanvasSession, GesturePurpose, QuickAction, ToolKind, TouchCommand};
+use procraft_core::{
+    Blocked, CanvasInfo, CanvasSession, GesturePurpose, KeyShortcut, QuickAction, ToolKind, TouchCommand,
+};
 
 use crate::actions::{Act, Actions};
 use crate::alert::{Alert, Answer, Asking};
@@ -21,6 +23,14 @@ use crate::look::{Look, argb, pc};
 use crate::overlays::{Overlays, snapped_to};
 
 const POPOVER_FILL: Color32 = Color32::from_rgb(0x28, 0x2a, 0x2d);
+/// A tool button held this long (seconds), as a long press, takes the current brush.
+const TOOL_HOLD_S: f64 = 0.4;
+/// The pictures and the videos Insert a file and Insert a photo take (and a drop on the canvas).
+const PICTURES: [&str; 8] = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
+const VIDEOS: [&str; 6] = ["mp4", "m4v", "mov", "wmv", "avi", "mkv"];
+/// A video's frames come in at the animation's frame rate, or this one; this many at most.
+const VIDEO_FPS: u32 = 15;
+const MOST_VIDEO_FRAMES: u32 = 999;
 
 /// What the interface asks the app to do once the frame is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +112,8 @@ pub struct Interface {
     pdf_for: Option<Format>,
     /// The brushes changed (the library closed, a slider let go, a notch saved): keep them.
     pub keep_brushes: bool,
+    /// A tool button held long enough has acted (its tap, when let go, does nothing).
+    tool_hold_acted: bool,
     brushes_were_open: bool,
     /// The Prefs tab's settings (kept between runs), whether the side bar shows, and the licences
     /// while they show.
@@ -125,7 +137,6 @@ pub struct Interface {
     /// How many onion skin frames there were before the QuickMenu last turned them off.
     onion_kept: u32,
     /// Recolor, while on, and the colour it last filled with.
-    recolor: crate::recolor::Recolor,
     recolor_rgb: [f32; 3],
     /// The brush in use (its tool, set and place in it) and the one chosen before it with the
     /// same tool, for Previous brush.
@@ -179,6 +190,7 @@ impl Default for Interface {
             pdf_alert: Alert::default(),
             pdf_for: None,
             keep_brushes: false,
+            tool_hold_acted: false,
             brushes_were_open: false,
             prefs: crate::prefs::Prefs::kept(),
             side_bar_shown: true,
@@ -194,7 +206,6 @@ impl Default for Interface {
             lighting: crate::lighting::LightingStudio::default(),
             companion: crate::companion::Companion::default(),
             onion_kept: 1,
-            recolor: crate::recolor::Recolor::default(),
             recolor_rgb: [0.0; 3],
             brush_now: None,
             brush_last: None,
@@ -207,7 +218,6 @@ impl Interface {
     pub fn opened(&mut self, session: &CanvasSession, scale: f32) {
         self.model = session.model_info().is_some();
         self.lighting.forget();
-        self.recolor.forget();
         // brush files given while no canvas was open
         self.add_brushes(session, crate::files::take_pending_brushes());
         session.set_touch_layer_opacity(None);
@@ -254,6 +264,12 @@ impl Interface {
     }
 
     /// Whether the canvas is shown on a second display too.
+    /// What an artwork dragged out of the gallery becomes (Advanced settings' Drag and Drop export).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn drag_format(&self) -> crate::files::Format {
+        crate::files::DRAG_FORMATS.get(self.prefs.drag_format).copied().unwrap_or(crate::files::Format::Procraft)
+    }
+
     /// Tap Assistance is on (Advanced settings).
     pub fn tap_assistance(&self) -> bool {
         self.prefs.tap_assistance
@@ -303,19 +319,22 @@ impl Interface {
         self.overlays.cursor_style = self.prefs.cursor_style;
         input.hover_shown = false;
         input.turns_model = self.model && !session.model_flat();
-        input.companion = self.companion.mode;
-        self.recolor_frame(&ctx, session, input);
+        session.set_touch_companion(match self.companion.mode {
+            crate::companion::Mode::None => None,
+            crate::companion::Mode::Zoom => Some(procraft_core::CompanionMode::Zoom),
+            crate::companion::Mode::Move => Some(procraft_core::CompanionMode::Move),
+        });
+        self.recolor_frame(&ctx, session);
         if let Some(opacity) = session.touch_layer_opacity().filter(|_| !self.bars_hidden) {
             crate::adjustments::layer_opacity_bar(&ctx, opacity, pc::BAR_HEIGHT);
         }
-        input.pixels_per_point = ctx.pixels_per_point();
         let lit = Lit {
             actions: self.open == Some(Popover::Actions),
             transform: self.transform.on,
             selection: self.selection.on,
             adjustments: self.open == Some(Popover::Adjustments)
                 || session.adjustment_shown().adjustment.is_some()
-                || self.recolor.on
+                || session.recolor_on()
                 || session.touch_layer_opacity().is_some(),
             layers: self.open == Some(Popover::Layers),
             panel_open: matches!(self.open, Some(Popover::Layers | Popover::Colour)),
@@ -415,7 +434,8 @@ impl Interface {
             return;
         }
         let bar = crate::chrome::top_bar(ui, &mut self.look, info.tool, colour, self.colours.hsv[2], &lit);
-        match bar.pressed {
+        let held = self.tool_hold(&ctx, session, &bar);
+        match bar.pressed.filter(|_| !held) {
             Some(BarButton::Gallery) => self.actions.push(Action::Gallery),
             Some(BarButton::Actions) => self.toggle(Popover::Actions),
             Some(BarButton::Layers) => self.toggle(Popover::Layers),
@@ -606,7 +626,7 @@ impl Interface {
 
     /// Recolor on, the reticle in the middle of the window, or off (keeping what it filled).
     fn toggle_recolor(&mut self, ctx: &egui::Context, session: &CanvasSession) {
-        if self.recolor.on {
+        if session.recolor_on() {
             self.end_recolor(session);
             return;
         }
@@ -626,7 +646,8 @@ impl Interface {
         self.open = None;
         let centre = ctx.content_rect().center() * ctx.pixels_per_point();
         self.recolor_rgb = self.colours.rgb();
-        self.recolor.toggle(session, (centre.x, centre.y), self.recolor_rgb, self.prefs.recolor_threshold);
+        let [r, g, b] = self.recolor_rgb;
+        session.recolor_start(centre.x, centre.y, r, g, b, self.prefs.recolor_threshold);
     }
 
     /// Layer Opacity on for the current layer (a paint layer or a group): a drag across the canvas
@@ -652,20 +673,16 @@ impl Interface {
 
     /// Recolor ends, keeping what it filled; its Flood kept.
     fn end_recolor(&mut self, session: &CanvasSession) {
-        if self.recolor.on {
-            self.recolor.end(session);
+        if session.recolor_on() {
+            session.recolor_end();
             self.prefs.keep();
         }
     }
 
     /// Recolor, while on: its reticle and toolbar, the drags and taps on the canvas, the colour
     /// changing; a panel opening (but Colors) ends it.
-    fn recolor_frame(&mut self, ctx: &egui::Context, session: &CanvasSession, input: &mut Input) {
-        input.recolor = self.recolor.on;
-        input.pixels_per_point = ctx.pixels_per_point();
-        if !self.recolor.on {
-            input.recolor_moved = (0.0, 0.0);
-            input.recolor_tap = None;
+    fn recolor_frame(&mut self, ctx: &egui::Context, session: &CanvasSession) {
+        if !session.recolor_on() {
             return;
         }
         if self.open.is_some_and(|p| p != Popover::Colour) {
@@ -676,21 +693,15 @@ impl Interface {
         let threshold = self.prefs.recolor_threshold;
         if rgb != self.recolor_rgb {
             self.recolor_rgb = rgb;
-            self.recolor.colour_to(session, rgb);
+            let [r, g, b] = rgb;
+            session.recolor_colour(r, g, b);
         }
-        let moved = std::mem::take(&mut input.recolor_moved);
-        if moved != (0.0, 0.0) {
-            self.recolor.drag(session, moved, rgb, threshold);
-        }
-        if let Some(at) = input.recolor_tap.take() {
-            self.recolor.tap(session, at, rgb, threshold);
-        }
-        self.recolor.reticle(ctx, session, rgb);
+        crate::recolor::reticle(ctx, session, rgb);
         if !self.bars_hidden
             && let Some(t) = crate::adjust_panels::recolor_toolbar(ctx, threshold)
         {
             self.prefs.recolor_threshold = t;
-            self.recolor.threshold_to(session, t);
+            session.recolor_threshold(t);
         }
     }
 
@@ -842,8 +853,7 @@ impl Interface {
                 TouchCommand::TransformNumeric { angle, x, y, right } => {
                     self.transform.numbers(angle, egui::pos2(x, y) / ctx.pixels_per_point(), right);
                 }
-                // still to come on the desktop: copy and paste, the QuickMenu, layer select,
-                // rasterizing a text layer
+                // (a text layer's question about rasterizing comes with text, still to come here)
                 TouchCommand::CopyPaste => self.copy_paste = true,
                 TouchCommand::LayerSelect { x, y } => self.layer_select(ctx, session, x, y),
                 TouchCommand::QuickMenu { x, y } => self.quick_menu.toggle(egui::pos2(x, y) / ctx.pixels_per_point()),
@@ -873,33 +883,18 @@ impl Interface {
         self.overlays.shape_editing = false;
     }
 
+    /// Undo (recoloring, the core takes back the open fill first).
     fn undo(&mut self, session: &CanvasSession) {
         self.feedback();
-        // recoloring, the fill under the reticle is taken back first
-        if self.recolor.on && self.recolor.step_aside(session) {
-            self.overlays.notice("Undo Recolor", false);
-            return;
-        }
         let could = session.info().can_undo;
         let name = session.undo();
-        if could {
+        if could || name.is_some() {
             self.overlays.notice(name.map_or("Undo".into(), |n| format!("Undo {n}")), false);
         }
     }
 
     fn redo(&mut self, session: &CanvasSession) {
         self.feedback();
-        // recoloring, the open fill steps aside for the redo and is made again over what it
-        // brings back
-        if self.recolor.on && self.recolor.step_aside(session) {
-            let could = session.info().can_redo;
-            let name = session.redo();
-            if could {
-                self.overlays.notice(name.map_or("Redo".into(), |n| format!("Redo {n}")), false);
-            }
-            self.recolor.again(session, self.colours.rgb(), self.prefs.recolor_threshold);
-            return;
-        }
         let could = session.info().can_redo;
         let name = session.redo();
         if could {
@@ -1109,7 +1104,7 @@ impl Interface {
         let title = if photo { "Insert a photo" } else { "Insert a file" };
         let Some(path) = rfd::FileDialog::new()
             .set_title(title)
-            .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"])
+            .add_filter("Pictures and videos", &[&PICTURES[..], &VIDEOS[..]].concat())
             .pick_file()
         else {
             return;
@@ -1120,11 +1115,10 @@ impl Interface {
     /// Files dropped on the canvas: each picture inserted as Insert a file does; brushes (ours
     /// or another app's) added to the library.
     pub fn dropped(&mut self, session: &CanvasSession, paths: &[std::path::PathBuf]) {
-        const PICTURES: [&str; 8] = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
         let mut brushes = Vec::new();
         for path in paths {
             let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-            if PICTURES.contains(&extension.as_str()) {
+            if PICTURES.contains(&extension.as_str()) || VIDEOS.contains(&extension.as_str()) {
                 self.open = None;
                 self.insert_file(session, path, false);
             } else if crate::files::is_brush_file(path)
@@ -1153,6 +1147,11 @@ impl Interface {
     /// The picture in file `path` as a new layer (a private one, if `private`), ready to
     /// transform; a GIF's frames each a layer.
     fn insert_file(&mut self, session: &CanvasSession, path: &std::path::Path, private: bool) {
+        let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if VIDEOS.contains(&extension.as_str()) {
+            self.insert_video(session, path, private);
+            return;
+        }
         let Ok(bytes) = std::fs::read(path) else {
             crate::files::tell("Can't insert it", "This picture can't be opened.");
             return;
@@ -1182,6 +1181,44 @@ impl Interface {
                 }
             }
             Err(_) => crate::files::tell("Can't insert it", "This picture can't be opened."),
+        }
+    }
+
+    /// A video's frames as layers above the current one (private ones, if `private`), each
+    /// fitted to the canvas, at the animation's frame rate (or 15 a second): for each time a
+    /// frame falls due, the video's frame nearest it. As many as there is room for, 999 at most;
+    /// Animation Assist comes on with them in its timeline.
+    fn insert_video(&mut self, session: &CanvasSession, path: &std::path::Path, private: bool) {
+        let settings = session.animation_settings();
+        let fps = f64::from(settings.as_ref().map_or(VIDEO_FPS, |a| a.fps).clamp(1, 60));
+        let (mut added, mut full, mut start) = (0u32, false, None);
+        let read = crate::video::read_frames(path, |rgba, width, height, at| {
+            // its time from the first frame's (a video may start late); the frames falling due
+            // nearer it than the next one's take it
+            let at = at - *start.get_or_insert(at);
+            while !full && added < MOST_VIDEO_FRAMES && at + 0.5 / fps + 1e-3 >= f64::from(added) / fps {
+                let image = procraft_core::ThumbnailImage { width, height, rgba: rgba.clone() };
+                if session.insert_image(image, private).is_some() {
+                    added += 1;
+                } else {
+                    full = true;
+                }
+            }
+        });
+        if added == 0 {
+            match read {
+                Ok(_) if full => crate::files::no_room(session),
+                _ => crate::files::tell("Can't insert it", "This video can't be opened."),
+            }
+            return;
+        }
+        if settings.is_none_or(|a| a.pages) {
+            self.animation.reset(session);
+            session.set_animation_assist(true);
+        }
+        self.overlays.notice("Frames saved to timeline", false);
+        if full {
+            crate::files::no_room(session);
         }
     }
 
@@ -1237,7 +1274,7 @@ impl Interface {
             session.set_touch_layer_opacity(None);
             return;
         }
-        if self.recolor.on {
+        if session.recolor_on() {
             self.end_recolor(session);
             return;
         }
@@ -1424,6 +1461,56 @@ impl Interface {
     }
 
     /// The interface hides (full screen) or comes back; hiding, it closes its panels.
+    /// A tool button held (as long as a long press): that tool takes the brush the current one has
+    /// (erasing with the painting brush, say) and becomes the tool. True while the press holding
+    /// it has acted, so that its letting go doesn't tap it too.
+    fn tool_hold(&mut self, ctx: &egui::Context, session: &CanvasSession, bar: &crate::chrome::Bar) -> bool {
+        let tool = |b: BarButton| match b {
+            BarButton::Paint => Some(ToolKind::Paint),
+            BarButton::Smudge => Some(ToolKind::Smudge),
+            BarButton::Erase => Some(ToolKind::Erase),
+            _ => None,
+        };
+        if let Some((target, since)) = bar.down.and_then(|(b, since)| tool(b).map(|t| (t, since)))
+            && !self.tool_hold_acted
+        {
+            let left = TOOL_HOLD_S - (ctx.input(|i| i.time) - since);
+            if left <= 0.0 {
+                self.tool_hold_acted = true;
+                self.tool_held(session, target);
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
+            }
+        }
+        let acted = self.tool_hold_acted;
+        if bar.down.is_none() {
+            self.tool_hold_acted = false;
+        }
+        acted
+    }
+
+    /// The tool `target` takes the current brush, as its button held does.
+    fn tool_held(&mut self, session: &CanvasSession, target: ToolKind) {
+        let brush = session.current_brush();
+        let adjusting = session.adjustment_shown().adjustment.is_some();
+        if self.transform.on || self.selection.on || adjusting || session.info().tool == target {
+            return;
+        }
+        self.choose_tool(session, target);
+        if session.select_brush(brush.set, brush.index) {
+            self.keep_brushes = true;
+        }
+        if self.open == Some(Popover::Brushes) {
+            self.open = None;
+        }
+        let doing = match target {
+            ToolKind::Paint => "Painting",
+            ToolKind::Smudge => "Smudging",
+            ToolKind::Erase => "Erasing",
+        };
+        self.overlays.notice(format!("{doing} with the current brush"), false);
+    }
+
     /// With the interface hidden, a button in the top left (44 square, 20 in) that brings it
     /// back: the full screen glyph, drawn wider than it is tall (36.7 by 32). True when tapped.
     fn show_interface_button(&mut self, ctx: &egui::Context) -> bool {
@@ -1605,7 +1692,11 @@ impl Interface {
                     }
                     Some(Act::CanvasInfo) => {
                         self.open = None;
-                        self.canvas_info = Some(crate::canvas_info::CanvasInfo::new(session, self.artwork_dir.clone()));
+                        self.canvas_info = Some(crate::canvas_info::CanvasInfo::new(
+                            session,
+                            self.artwork_dir.clone(),
+                            self.time_lapse.info(),
+                        ));
                     }
                     Some(Act::Cut) => self.cut_layer(session),
                     Some(Act::Copy) => self.copy_layer(session),
@@ -1643,11 +1734,8 @@ impl Interface {
         }
     }
 
-    /// A hardware keyboard's shortcuts, as the Android app's: Ctrl (⌘) with Z undoes (with Shift
-    /// redoes), with C, X and V copies, cuts and pastes the layer; B paints, E erases, M opens the
-    /// eyedropper, C the colours, X swaps the colours, J duplicates the layer, K opens Actions, L
-    /// Layers, 0 hides the interface, Delete clears the layer, and [ and ] change the brush's size
-    /// by 1% (Shift 5%, Alt 10%). The desktop adds its files: Ctrl (⌘) with N, O, S (and Shift).
+    /// A hardware keyboard's shortcuts: the core's (keys.rs), and the desktop's files: Ctrl (⌘)
+    /// with N, O, S (and Shift).
     fn shortcuts(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo) {
         // a text field, or the hex keypad, takes the keys
         if ctx.egui_wants_keyboard_input() || (self.open == Some(Popover::Colour) && self.colours.takes_keys()) {
@@ -1658,20 +1746,6 @@ impl Interface {
         };
         let command_shift = Modifiers::COMMAND | Modifiers::SHIFT;
         // with Shift first: the shortcut without it would take it too
-        if pressed(command_shift, Key::Z) {
-            self.redo(session);
-        } else if pressed(Modifiers::COMMAND, Key::Z) {
-            self.undo(session);
-        }
-        if pressed(Modifiers::COMMAND, Key::C) {
-            self.copy_layer(session);
-        }
-        if pressed(Modifiers::COMMAND, Key::X) {
-            self.cut_layer(session);
-        }
-        if pressed(Modifiers::COMMAND, Key::V) {
-            self.paste(session);
-        }
         if pressed(command_shift, Key::S) {
             self.actions.push(Action::SaveAs);
         } else if pressed(Modifiers::COMMAND, Key::S) {
@@ -1683,62 +1757,56 @@ impl Interface {
         if pressed(Modifiers::COMMAND, Key::O) {
             self.actions.push(Action::Open);
         }
-        let plain = |key: Key| pressed(Modifiers::NONE, key);
-        if plain(Key::B) {
-            self.choose_tool(session, ToolKind::Paint);
-        }
-        if plain(Key::E) {
-            self.choose_tool(session, ToolKind::Erase);
-        }
-        if plain(Key::M) {
-            session.set_pick_next(!session.pick_next());
-        }
-        if plain(Key::C) {
-            self.toggle(Popover::Colour);
-        }
-        if plain(Key::X) {
-            self.colours.swap(session);
-        }
-        if plain(Key::J) {
-            self.duplicate_current(session);
-        }
-        if plain(Key::K) {
-            self.toggle(Popover::Actions);
-        }
-        if plain(Key::L) {
-            self.toggle(Popover::Layers);
-        }
-        if plain(Key::Num0) {
-            self.toggle_bars();
-        }
-        if plain(Key::Backspace) || plain(Key::Delete) {
-            self.clear_layer(session);
-        }
-        // the brush a step smaller or bigger: 1%, with Shift 5%, with Alt 10%
-        let step = ctx.input(|i| {
-            if i.modifiers.alt {
-                0.10
-            } else if i.modifiers.shift {
-                0.05
-            } else {
-                0.01
-            }
+        let keys: Vec<(Key, Modifiers)> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                    _ => None,
+                })
+                .collect()
         });
-        let bracket = |open: bool| {
-            ctx.input_mut(|i| {
-                let keys = if open {
-                    [Key::OpenBracket, Key::OpenCurlyBracket]
-                } else {
-                    [Key::CloseBracket, Key::CloseCurlyBracket]
-                };
-                keys.iter().any(|k| i.consume_key(i.modifiers, *k))
-            })
-        };
-        if bracket(true) {
-            session.set_brush_size((info.size - step).max(0.0));
+        for (key, modifiers) in keys {
+            let Some(name) = key_name(key) else { continue };
+            let transforming = self.transform.on;
+            let Some(shortcut) = procraft_core::key_shortcut(
+                name.into(),
+                modifiers.command,
+                modifiers.shift,
+                modifiers.alt,
+                transforming,
+            ) else {
+                continue;
+            };
+            ctx.input_mut(|i| i.consume_key(modifiers, key));
+            self.key_shortcut(session, info, shortcut);
         }
-        if bracket(false) {
-            session.set_brush_size((info.size + step).min(1.0));
+    }
+
+    /// Does what a keyboard shortcut says.
+    fn key_shortcut(&mut self, session: &CanvasSession, info: &CanvasInfo, shortcut: KeyShortcut) {
+        match shortcut {
+            KeyShortcut::Undo => self.undo(session),
+            KeyShortcut::Redo => self.redo(session),
+            KeyShortcut::CopyLayer => self.copy_layer(session),
+            KeyShortcut::CutLayer => self.cut_layer(session),
+            KeyShortcut::Paste => self.paste(session),
+            KeyShortcut::Paint => self.choose_tool(session, ToolKind::Paint),
+            KeyShortcut::Erase => self.choose_tool(session, ToolKind::Erase),
+            KeyShortcut::Eyedropper => session.set_pick_next(!session.pick_next()),
+            KeyShortcut::Selection => self.toggle_selection(session),
+            KeyShortcut::Transform => self.toggle_transform(session),
+            KeyShortcut::HueSaturationBrightness => self.start_adjustment(session, procraft_core::Adjustment::Hsb),
+            KeyShortcut::Colours => self.toggle(Popover::Colour),
+            KeyShortcut::Actions => self.toggle(Popover::Actions),
+            KeyShortcut::Layers => self.toggle(Popover::Layers),
+            KeyShortcut::SwapColours => self.colours.swap(session),
+            KeyShortcut::Deselect => self.selection.clear(session),
+            KeyShortcut::DuplicateLayer => self.duplicate_current(session),
+            KeyShortcut::Interface => self.toggle_bars(),
+            KeyShortcut::ClearLayer => self.clear_layer(session),
+            KeyShortcut::BrushSize { by } => session.set_brush_size((info.size + by).clamp(0.0, 1.0)),
+            KeyShortcut::Nudge { dx, dy } => self.transform.moved(session.transform_arrow(dx, dy)),
         }
     }
 
@@ -1751,7 +1819,22 @@ impl Interface {
     }
 }
 
-/// The drawing guide's lines over the canvas while it is on.
+/// The name the core's shortcuts know `key` by (keys.rs), if it has one.
+fn key_name(key: Key) -> Option<&'static str> {
+    Some(match key {
+        Key::OpenBracket | Key::OpenCurlyBracket => "[",
+        Key::CloseBracket | Key::CloseCurlyBracket => "]",
+        Key::Delete => "delete",
+        Key::Backspace => "backspace",
+        Key::ArrowLeft => "left",
+        Key::ArrowRight => "right",
+        Key::ArrowUp => "up",
+        Key::ArrowDown => "down",
+        // the letters and digits by their names ("A", "0")
+        _ => Some(key.name()).filter(|n| n.len() == 1)?,
+    })
+}
+
 /// The drawing guide on as `kind`, or off if it already is that.
 fn toggle_guide_kind(session: &CanvasSession, kind: procraft_core::GuideType) {
     let g = session.guide();

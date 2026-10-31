@@ -29,6 +29,7 @@ mod gradients;
 mod guide;
 mod history;
 mod host;
+mod keys;
 mod layer_ops;
 mod layers;
 mod palettes;
@@ -39,6 +40,7 @@ mod project;
 mod projection;
 mod quick_menu;
 mod quickshape;
+mod recolor;
 #[cfg(target_os = "android")]
 mod render;
 mod scene3d;
@@ -86,6 +88,7 @@ pub use gestures::{
 pub use gradients::{GradientInfo, GradientStop, Gradients};
 pub use guide::{GuideInfo, GuideType, SymmetryType};
 pub use history::ColourHistory;
+pub use keys::{KeyShortcut, key_shortcut};
 pub use layers::{
     BlendModeInfo, Blocked, LayerInfo, LayerType, ThumbnailImage, blend_modes, brush_blend_modes, grain_blend_modes,
     layers_for,
@@ -114,7 +117,10 @@ pub use timelapse::{
     SegmentPlan, TIME_LAPSE_FPS, TimeLapse, TimeLapseSettings, time_lapse_bits_per_pixel, time_lapse_picks,
     time_lapse_side,
 };
-pub use touch::{Fill, GestureAction, SelectKind, SelectTouch, TouchCommand, TouchSettings, TransformTouch};
+pub use touch::{
+    COMPANION_ZOOM_DISTANCE, CompanionMode, Fill, GestureAction, SelectKind, SelectTouch, TouchCommand, TouchSettings,
+    TransformTouch,
+};
 pub use transform::{
     GuideSettings, Interpolation, ScreenBox, TransformAction, TransformBox, TransformHandle, TransformKind, handle_at,
     mesh_handle_at, screen_box, shown_mesh_points,
@@ -334,6 +340,8 @@ pub(crate) struct State {
     pub(crate) text_steps: Vec<(u64, procraft_engine::document::LayerId)>,
     /// A colour dropped on the canvas whose threshold can still change.
     pub(crate) pour: Option<pour::Pour>,
+    /// Recolor, while it is on.
+    pub(crate) recolor: Option<recolor::Recolor>,
     /// The library as the user has it, and as it ships.
     library: Vec<brush_library::LibrarySet>,
     shipped: Vec<BrushSet>,
@@ -962,6 +970,7 @@ impl CanvasSession {
             text_edit: None,
             text_steps: Vec::new(),
             pour: None,
+            recolor: None,
             crop_undo: None,
             selection_visibility: 0.25,
             brush_on_screen: false,
@@ -1485,6 +1494,10 @@ impl CanvasSession {
         if self.swap_crop(true) {
             return Some("Crop canvas".to_owned());
         }
+        // recoloring, the fill open under the reticle is taken back first
+        if self.recolor_step_aside() {
+            return Some(recolor::STEP.to_owned());
+        }
         // cloning, the source goes back to where it was before the stroke
         self.shared.lock().adjust.puck_step(true);
         self.edit(Canvas::undo);
@@ -1496,9 +1509,15 @@ impl CanvasSession {
         if self.swap_crop(false) {
             return Some("Crop canvas".to_owned());
         }
+        // recoloring, the open fill steps aside and is made again over what comes back
+        let recoloring = self.recolor_step_aside();
         self.shared.lock().adjust.puck_step(false);
         self.edit(Canvas::redo);
-        self.shared.lock().canvas.as_ref().and_then(Canvas::undo_name)
+        let name = self.shared.lock().canvas.as_ref().and_then(Canvas::undo_name);
+        if recoloring {
+            self.recolor_again();
+        }
+        name
     }
 
     pub fn clear_layer(&self) {

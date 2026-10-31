@@ -24,11 +24,11 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -54,7 +54,6 @@ import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import kotlin.math.abs
 import kotlin.math.cos
-import kotlin.math.roundToInt
 import kotlin.math.sin
 
 // light over the dark surround; dark with the light interface
@@ -70,7 +69,6 @@ private val SettingsInk get() = if (Pc.light) Color(0xFF3B3B3B) else Color(0xFFD
 private val Muted = Color(0xFF8E8E93)
 
 /** Which part of the crop's frame a drag takes. */
-private enum class Grab { MOVE, LEFT, TOP, RIGHT, BOTTOM, TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT }
 
 /**
  * Crop and Resize: the canvas, fitted inside a margin, with a frame over it in quarters whose
@@ -80,10 +78,6 @@ private enum class Grab { MOVE, LEFT, TOP, RIGHT, BOTTOM, TOP_LEFT, TOP_RIGHT, B
 @Composable
 fun BoxScope.CropOverlay(vm: CanvasViewModel) {
     val rect = vm.cropRect ?: return
-    val density = LocalDensity.current
-    val reach = with(density) { 28.dp.toPx() }
-    val snapPx = with(density) { 10.dp.toPx() }
-    val current by rememberUpdatedState(rect)
     // the frame's corners in the window, turned with the crop
     fun corners(r: Rect): List<Offset> {
         val c = r.center
@@ -95,74 +89,18 @@ fun BoxScope.CropOverlay(vm: CanvasViewModel) {
     }
     Canvas(
         Modifier.fillMaxSize().pointerInput(Unit) {
+            // the core takes the part pressed and follows the drag (snapping, a locked aspect)
             awaitEachGesture {
                 val down = awaitFirstDown()
-                val cs = corners(current)
-                val mid = { a: Offset, b: Offset -> (a + b) / 2f }
-                val near = { p: Offset -> (p - down.position).getDistance() < reach }
-                val grab = when {
-                    near(cs[0]) -> Grab.TOP_LEFT
-                    near(cs[1]) -> Grab.TOP_RIGHT
-                    near(cs[2]) -> Grab.BOTTOM_RIGHT
-                    near(cs[3]) -> Grab.BOTTOM_LEFT
-                    near(mid(cs[0], cs[3])) -> Grab.LEFT
-                    near(mid(cs[0], cs[1])) -> Grab.TOP
-                    near(mid(cs[1], cs[2])) -> Grab.RIGHT
-                    near(mid(cs[2], cs[3])) -> Grab.BOTTOM
-                    else -> Grab.MOVE
-                }
-                val start = current
-                val from = vm.windowToCanvas(down.position) ?: return@awaitEachGesture
-                // canvas pixels a few window points cover, for snapping
-                val snap = vm.windowToCanvas(down.position + Offset(snapPx, 0f))?.let { (it - from).getDistance() } ?: 0f
+                vm.cropPress(down.position)
                 down.consume()
                 while (true) {
                     val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
                     if (!c.pressed) break
                     c.consume()
-                    val at = vm.windowToCanvas(c.position) ?: continue
-                    val d = at - from
-                    var l = start.left
-                    var t = start.top
-                    var r = start.right
-                    var b = start.bottom
-                    when (grab) {
-                        Grab.MOVE -> { l += d.x; r += d.x; t += d.y; b += d.y }
-                        Grab.LEFT -> l += d.x
-                        Grab.RIGHT -> r += d.x
-                        Grab.TOP -> t += d.y
-                        Grab.BOTTOM -> b += d.y
-                        Grab.TOP_LEFT -> { l += d.x; t += d.y }
-                        Grab.TOP_RIGHT -> { r += d.x; t += d.y }
-                        Grab.BOTTOM_LEFT -> { l += d.x; b += d.y }
-                        Grab.BOTTOM_RIGHT -> { r += d.x; b += d.y }
-                    }
-                    // snapping: the frame's sides to the canvas's sides and middle
-                    if (vm.cropSnapping) {
-                        val (cw, ch) = vm.canvasSize()
-                        fun snapTo(v: Float, targets: List<Float>) = targets.firstOrNull { abs(it - v) < snap } ?: v
-                        val xs = listOf(0f, cw / 2f, cw.toFloat())
-                        val ys = listOf(0f, ch / 2f, ch.toFloat())
-                        if (grab == Grab.MOVE) {
-                            val dl = snapTo(l, xs) - l
-                            val dr = snapTo(r, xs) - r
-                            val dx = if (dl != 0f) dl else dr
-                            l += dx; r += dx
-                            val dt = snapTo(t, ys) - t
-                            val db = snapTo(b, ys) - b
-                            val dy = if (dt != 0f) dt else db
-                            t += dy; b += dy
-                        } else {
-                            l = snapTo(l, xs); r = snapTo(r, xs); t = snapTo(t, ys); b = snapTo(b, ys)
-                        }
-                    }
-                    // a locked aspect follows the width
-                    if (vm.cropAspectLocked && grab != Grab.MOVE && start.width > 0f) {
-                        val h = (r - l) * start.height / start.width
-                        if (grab == Grab.TOP || grab == Grab.TOP_LEFT || grab == Grab.TOP_RIGHT) t = b - h else b = t + h
-                    }
-                    if (r - l >= 1f && b - t >= 1f) vm.changeCropRect(Rect(l, t, r, b))
+                    vm.cropDrag(c.position)
                 }
+                vm.cropRelease()
             }
         },
     ) {
@@ -218,7 +156,7 @@ private fun CropSettings(vm: CanvasViewModel, modifier: Modifier) {
             val (w, h) = vm.cropSize
             Row(Modifier.padding(top = 10.dp).fillMaxWidth().height(44.dp).padding(horizontal = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                 NumberField(w.toString(), "px", Modifier.width(137.dp)) { it.toIntOrNull()?.let { v -> vm.changeCropSize(v, null) } }
-                Box(Modifier.padding(horizontal = 8.dp).size(34.dp, 40.dp).clickable { vm.cropAspectLocked = !vm.cropAspectLocked }, contentAlignment = Alignment.Center) {
+                Box(Modifier.padding(horizontal = 8.dp).size(34.dp, 40.dp).clickable { vm.changeCropAspectLocked(!vm.cropAspectLocked) }, contentAlignment = Alignment.Center) {
                     Icon(PcIcons.Link, contentDescription = "Aspect lock", tint = if (vm.cropAspectLocked) Pc.Accent else SettingsInk, modifier = Modifier.size(20.dp))
                 }
                 NumberField(h.toString(), "px", Modifier.width(137.dp)) { it.toIntOrNull()?.let { v -> vm.changeCropSize(null, v) } }
@@ -231,7 +169,7 @@ private fun CropSettings(vm: CanvasViewModel, modifier: Modifier) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(RowLine))
                 SwitchRow("Resample canvas", vm.cropResample, vm::changeCropResample)
                 Box(Modifier.fillMaxWidth().height(1.dp).background(RowLine))
-                SwitchRow("Snapping", vm.cropSnapping) { vm.cropSnapping = it }
+                SwitchRow("Snapping", vm.cropSnapping, vm::changeCropSnapping)
             }
             Box(Modifier.padding(top = 10.dp).fillMaxWidth().height(64.dp).clip(RoundedCornerShape(14.dp)).background(GroupFill)) {
                 RotationSlider(vm.cropAngle) { vm.changeCropAngle(it) }

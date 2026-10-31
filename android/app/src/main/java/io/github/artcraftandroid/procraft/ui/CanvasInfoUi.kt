@@ -65,7 +65,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.TimeLapse
-import org.json.JSONArray
 import java.io.File
 import java.text.DateFormat
 import java.util.Date
@@ -149,7 +148,7 @@ fun CanvasInfo(vm: CanvasViewModel) {
     // the profile picked on its page, set on Done
     var profile by remember { mutableStateOf(session.profile()) }
     var askProfile by remember { mutableStateOf(false) }
-    val signature = remember { mutableStateListOf<List<Offset>>().apply { addAll(readSignature(about)) } }
+    val signature = remember { mutableStateListOf<List<Offset>>().apply { addAll(readSignature(dir)) } }
     val context = LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -179,7 +178,7 @@ fun CanvasInfo(vm: CanvasViewModel) {
         about?.let { folder ->
             folder.mkdirs()
             newPhoto?.let { uri -> runCatching { context.contentResolver.openInputStream(uri)?.use { input -> File(folder, "photo.jpg").outputStream().use { input.copyTo(it) } } } }
-            writeSignature(folder, signature)
+            dir?.let { writeSignature(it, signature) }
         }
         if (profile != session.profile()) vm.changeProfile(profile)
         close()
@@ -417,17 +416,11 @@ private fun dateText(ms: Long): String =
 
 private fun megabytes(bytes: Long) = "%.2f MB".format(bytes / 1_000_000.0)
 
-/** The signature kept in an artwork's about folder: strokes of points across its box, 0..1. */
-private fun readSignature(about: File?): List<List<Offset>> = runCatching {
-    val strokes = JSONArray(File(about, "signature.json").readText())
-    List(strokes.length()) { i ->
-        val pts = strokes.getJSONArray(i)
-        List(pts.length() / 2) { j -> Offset(pts.getDouble(j * 2).toFloat(), pts.getDouble(j * 2 + 1).toFloat()) }
-    }
-}.getOrDefault(emptyList())
+/** The signature kept with the artwork in folder [dir] (the shared core's): strokes of points across its box, 0..1. */
+private fun readSignature(dir: File?): List<List<Offset>> =
+    dir?.let { io.github.artcraftandroid.procraft.core.readSignature(it.path) }.orEmpty()
+        .map { pts -> List(pts.size / 2) { j -> Offset(pts[j * 2], pts[j * 2 + 1]) } }
 
-private fun writeSignature(about: File, strokes: List<List<Offset>>) {
-    val out = JSONArray()
-    for (s in strokes) out.put(JSONArray().apply { s.forEach { put(it.x.toDouble()); put(it.y.toDouble()) } })
-    runCatching { File(about, "signature.json").writeText(out.toString()) }
+private fun writeSignature(dir: File, strokes: List<List<Offset>>) {
+    runCatching { io.github.artcraftandroid.procraft.core.writeSignature(dir.path, strokes.map { s -> s.flatMap { listOf(it.x, it.y) } }) }
 }

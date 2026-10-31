@@ -126,7 +126,7 @@ private val TabsWidth = 81.dp
  * [FOLLOW] and [GRADE] to a name of their own), [DOUBLE] reads 100% at its middle; [METAL] and
  * [GLOSS] name their ends as a material's metalness and roughness.
  */
-enum class Shown { PERCENT, BOTH, COUNT, TIP, MOVEMENT, ZOOM, CHARGE, ZERO, SIZE, FOLLOW, GRADE, DOUBLE, TWICE, METAL, GLOSS }
+enum class Shown { PERCENT, BOTH, COUNT, TIP, MOVEMENT, ZOOM, CHARGE, SIZE, FOLLOW, GRADE, DOUBLE, TWICE, METAL, GLOSS }
 
 /** One control in the brush studio. */
 sealed class StudioControl {
@@ -452,7 +452,6 @@ private val ModeListGlyph = Color(0xFF7F7F7F)
 
 /** A slider's value as it reads. */
 private fun shownValue(v: Float, shown: Shown, most: Float = 16f): String {
-    val percent = "${(v * 100).roundToInt()}%"
     // between ends that read by name, a value never rounds onto an end (0.996 reads 99%)
     val between = "${(v * 100).roundToInt().coerceIn(1, 99)}%"
     val belowTop = "${(v * 100).roundToInt().coerceAtMost(99)}%"
@@ -462,7 +461,6 @@ private fun shownValue(v: Float, shown: Shown, most: Float = 16f): String {
             v >= 1f -> "Max"
             else -> between
         }
-        Shown.ZERO -> percent
         Shown.BOTH -> if (v >= 1f) "Max" else belowTop
         // smoothing all the way
         Shown.GRADE -> if (v >= 1f) "Smooth" else belowTop
@@ -1070,7 +1068,7 @@ private class Typed(val most: Int, val signed: Boolean, val toValue: (Int) -> Fl
  * going both ways, the count itself, or for a size the percent the slider reads (of [most]).
  */
 private fun typedNumber(shown: Shown, most: Float): Typed = when (shown) {
-    Shown.PERCENT, Shown.ZERO, Shown.TIP, Shown.MOVEMENT, Shown.ZOOM, Shown.CHARGE, Shown.METAL, Shown.GLOSS -> Typed(100, false) { n -> n / 100f }
+    Shown.PERCENT, Shown.TIP, Shown.MOVEMENT, Shown.ZOOM, Shown.CHARGE, Shown.METAL, Shown.GLOSS -> Typed(100, false) { n -> n / 100f }
     Shown.DOUBLE, Shown.TWICE -> Typed(200, false) { n -> n / 200f }
     Shown.BOTH, Shown.FOLLOW, Shown.GRADE -> Typed(100, true) { n -> n / 100f }
     Shown.COUNT -> Typed(16, false) { n -> (n.coerceAtLeast(1) - 1) / 15f }

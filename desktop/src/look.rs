@@ -239,6 +239,31 @@ pub fn wrapped(
     painter.layout_job(job)
 }
 
+/// Text wrapped `width` wide with its lines centred (about x = 0 where it is drawn) and
+/// `line_height` apart.
+pub fn wrapped_centred(
+    painter: &Painter,
+    text: &str,
+    size: f32,
+    weight: Weight,
+    colour: Color32,
+    width: f32,
+    line_height: f32,
+) -> Arc<egui::Galley> {
+    let mut job = LayoutJob::default();
+    let format = TextFormat {
+        font_id: weight.font(size),
+        color: colour,
+        extra_letter_spacing: TRACKING * size,
+        line_height: Some(line_height),
+        ..Default::default()
+    };
+    job.append(text, 0.0, format);
+    job.wrap.max_width = width;
+    job.halign = egui::Align::Center;
+    painter.layout_job(job)
+}
+
 /// How far across (points) the pointer has gone since the last frame while held on `response`, a
 /// slider; `held` keeps which slider is held and where the pointer was.
 pub fn dragged_by(held: &mut Option<(egui::Id, f32)>, response: &egui::Response) -> f32 {

@@ -1,13 +1,13 @@
 //! Help's Advanced settings: the app's own settings, apart from the canvas, on a page of their own
 //! over everything, as the Android app's (SettingsActivity.kt): an artwork opening as it was left,
 //! fitting the canvas inside the interface, no time-lapse for new artworks, simplified undos, the
-//! maximum speed distance, the touch companion, colour names, feedback sounds and tap assistance.
-//! Kept with the Prefs tab's.
+//! maximum speed distance, what an artwork dragged out becomes, the touch companion, colour names,
+//! feedback sounds and tap assistance. Kept with the Prefs tab's.
 
 use egui::{Align2, Color32, Id, Key, Order, Rect, ScrollArea, Sense, Stroke, UiBuilder, Vec2, pos2, vec2};
 
 use crate::look::{Weight, argb, text};
-use crate::prefs::Prefs;
+use crate::prefs::{DRAG_FORMATS, DRAG_IMAGE_FORMATS, Prefs};
 
 const BACK: u32 = 0xFF000000;
 const GROUP: u32 = 0xFF1C1C1E;
@@ -47,15 +47,39 @@ impl Setting {
     }
 }
 
-/// A row of the page: a switch with its name and what it does, or the speed distance's slider
-/// with what it does.
+/// A choice the page sets, one of its options.
+#[derive(Clone, Copy)]
+enum Pick {
+    DragFormat,
+    DragImageFormat,
+}
+
+impl Pick {
+    fn of(self, p: &mut Prefs) -> &mut usize {
+        match self {
+            Pick::DragFormat => &mut p.drag_format,
+            Pick::DragImageFormat => &mut p.drag_image_format,
+        }
+    }
+
+    fn options(self) -> &'static [&'static str] {
+        match self {
+            Pick::DragFormat => &DRAG_FORMATS,
+            Pick::DragImageFormat => &DRAG_IMAGE_FORMATS,
+        }
+    }
+}
+
+/// A row of the page: a switch with its name and what it does, the speed distance's slider with
+/// what it does, or a choice with its name (its value beside it opening a menu of the options).
 enum Row {
     Toggle(Setting, &'static str, &'static str),
     SpeedDistance(&'static str),
+    Choice(Pick, &'static str),
 }
 
 /// The groups of rows, each under its heading (none for "").
-const GROUPS: [(&str, &[Row]); 4] = [
+const GROUPS: [(&str, &[Row]); 5] = [
     (
         "",
         &[
@@ -85,6 +109,13 @@ const GROUPS: [(&str, &[Row]); 4] = [
     (
         "Maximum Speed Distance",
         &[Row::SpeedDistance("How far the pen moves before a brush's speed dynamics count it as fast.")],
+    ),
+    (
+        "Drag and Drop export",
+        &[
+            Row::Choice(Pick::DragFormat, "Preferred file format"),
+            Row::Choice(Pick::DragImageFormat, "Preferred image format"),
+        ],
     ),
     (
         "Accessibility",
@@ -240,7 +271,53 @@ fn row_height(ui: &egui::Ui, row: &Row, width: f32) -> f32 {
         Row::Toggle(_, _, what) => 10.0 + 21.0 + detail(ui, what, width - 32.0 - 63.0 - 12.0).size().y + 10.0,
         // the slider 44 tall over what it does, 6 above and below and 4 under the words
         Row::SpeedDistance(what) => 6.0 + 44.0 + detail(ui, what, width - 32.0).size().y + 4.0 + 6.0,
+        // a line of the name, 14 above and below
+        Row::Choice(..) => 14.0 + 21.0 + 14.0,
     }
+}
+
+/// A choice's menu, under its value: the options 48 tall, 12 in, 8 above and below them, the
+/// chosen one blue. Returns the one tapped; a tap elsewhere closes it (`close`).
+fn choice_menu(ui: &egui::Ui, value: Rect, options: &[&str], chosen: usize, close: &mut bool) -> Option<usize> {
+    let widest = options
+        .iter()
+        .map(|o| ui.painter().layout_no_wrap((*o).into(), Weight::Regular.font(17.0), argb(INK)).size().x)
+        .fold(0.0, f32::max);
+    let size = vec2((widest + 24.0).max(112.0), 8.0 + 48.0 * options.len() as f32 + 8.0);
+    let menu = Rect::from_min_size(value.left_bottom(), size);
+    let mut tapped = None;
+    egui::Area::new(Id::unique("settings choice menu")).fixed_pos(menu.min).order(Order::Tooltip).show(
+        ui.ctx(),
+        |ui| {
+            let shadow =
+                egui::epaint::Shadow { offset: [0, 3], blur: 12, spread: 0, color: Color32::from_black_alpha(0x60) };
+            ui.painter().add(shadow.as_shape(menu, 4));
+            ui.painter().rect_filled(menu, 4, argb(GROUP));
+            for (i, option) in options.iter().enumerate() {
+                let item = Rect::from_min_size(
+                    pos2(menu.left(), menu.top() + 8.0 + 48.0 * i as f32),
+                    vec2(menu.width(), 48.0),
+                );
+                let ink = if i == chosen { argb(BLUE) } else { argb(INK) };
+                text(
+                    ui.painter(),
+                    pos2(item.left() + 12.0, item.center().y),
+                    Align2::LEFT_CENTER,
+                    option,
+                    17.0,
+                    Weight::Regular,
+                    ink,
+                );
+                if ui.interact(item, ui.scope_id().with(("choice", i)), Sense::click()).clicked() {
+                    tapped = Some(i);
+                }
+            }
+        },
+    );
+    let elsewhere =
+        ui.ctx().input(|i| i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|p| !menu.contains(p)));
+    *close = tapped.is_some() || elsewhere;
+    tapped
 }
 
 /// Row `row` at `at`; whether its setting changed (and was kept).
@@ -289,6 +366,40 @@ fn draw_row(ui: &egui::Ui, row: &Row, at: Rect, prefs: &mut Prefs, id: (usize, u
             let galley = detail(ui, what, slider.width());
             painter.galley(pos2(slider.left(), slider.bottom()), galley, argb(DIM));
             changed
+        }
+        Row::Choice(pick, name) => {
+            let cy = at.center().y;
+            text(ui.painter(), pos2(at.left() + 16.0, cy), Align2::LEFT_CENTER, name, 17.0, Weight::Regular, argb(INK));
+            let options = pick.options();
+            let chosen = (*pick.of(prefs)).min(options.len().saturating_sub(1));
+            let shown = options.get(chosen).copied().unwrap_or_default();
+            let value = text(
+                ui.painter(),
+                pos2(at.right() - 16.0, cy),
+                Align2::RIGHT_CENTER,
+                shown,
+                17.0,
+                Weight::Regular,
+                argb(DIM),
+            );
+            // which choice's menu is open (one at a time)
+            let key = Id::unique("settings choice open");
+            let open = ui.ctx().data(|d| d.get_temp::<Option<(usize, usize)>>(key)).flatten();
+            if open == Some(id) {
+                let mut close = false;
+                let tapped = choice_menu(ui, value, options, chosen, &mut close);
+                if close {
+                    ui.ctx().data_mut(|d| d.insert_temp(key, None::<(usize, usize)>));
+                }
+                if let Some(i) = tapped {
+                    *pick.of(prefs) = i;
+                    prefs.keep();
+                    return true;
+                }
+            } else if ui.interact(at, ui.scope_id().with(("settings row", id)), Sense::click()).clicked() {
+                ui.ctx().data_mut(|d| d.insert_temp(key, Some(id)));
+            }
+            false
         }
     }
 }

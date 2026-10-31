@@ -23,6 +23,16 @@ const TAP_MS: f64 = 300.0;
 /// A liquify brush lifted within this long of its last move carries on.
 const LIQUIFY_STILL_MS: f64 = 60.0;
 const TAP_SLOP: f32 = 24.0;
+/// The single touch companion's Zoom: a drag this far (points) up zooms the canvas in e times.
+pub const COMPANION_ZOOM_DISTANCE: f32 = 180.0;
+
+/// The single touch companion's mode: a lone press dragged on the canvas zooms it (up in, about
+/// where it went down) or moves it, instead of painting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CompanionMode {
+    Zoom,
+    Move,
+}
 /// Two (three) fingers held still go on undoing (redoing) every this often.
 const RAPID_REPEAT_MS: f64 = 120.0;
 /// A pinch in this quick, to under this scale, fits the canvas.
@@ -274,6 +284,13 @@ enum Mode {
     Puck,
     /// Layer Opacity: the touch drags the layer's opacity across the canvas.
     Opacity,
+    /// Recolor is on: the touch drags its reticle about, or (a tap) starts it again where it lands.
+    Recolor,
+    /// The companion's Zoom or Move: the press zooms or moves the canvas; others meanwhile do
+    /// nothing.
+    Companion,
+    /// A finger on a shown model: it turns the model.
+    Turn,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -351,6 +368,14 @@ pub(crate) struct Touches {
     /// touch has changed it yet.
     layer_opacity: Option<(u64, f32)>,
     opacity_moved: bool,
+    /// Recolor's touch: past a tap's slop, and where it last moved the reticle from.
+    recolor_dragged: bool,
+    recolor_last: (f32, f32),
+    /// The companion's Zoom or Move, while on, and where its press last was.
+    companion: Option<CompanionMode>,
+    companion_last: (f32, f32),
+    /// Where the finger turning a model last was.
+    turn_last: (f32, f32),
     /// Window pixels a point.
     scale: f32,
 }
@@ -409,6 +434,11 @@ impl Default for Touches {
             pour_last: (0.0, 0.0),
             layer_opacity: None,
             opacity_moved: false,
+            recolor_dragged: false,
+            recolor_last: (0.0, 0.0),
+            companion: None,
+            companion_last: (0.0, 0.0),
+            turn_last: (0.0, 0.0),
             scale: 1.0,
         }
     }
@@ -559,6 +589,12 @@ impl CanvasSession {
         self.touches().layer_opacity = start;
     }
 
+    /// The single touch companion's Zoom or Move on (a lone press dragged on the canvas zooms or
+    /// moves it), or off.
+    pub fn set_touch_companion(&self, mode: Option<CompanionMode>) {
+        self.touches().companion = mode;
+    }
+
     /// Layer Opacity's layer's opacity as dragged, while it is on.
     pub fn touch_layer_opacity(&self) -> Option<f32> {
         self.touches().layer_opacity.map(|(_, opacity)| opacity)
@@ -589,6 +625,17 @@ impl CanvasSession {
         let at = (first.x, first.y);
         t.down.retain(|d| d.id != id);
         t.down.push(Down { id, at });
+        // the companion's Zoom or Move takes a lone press, and others while it is held do nothing
+        if t.mode == Mode::Companion {
+            return out;
+        }
+        if t.companion.is_some() && t.down.len() == 1 {
+            t.stroke_pointer = id;
+            t.down_at = at;
+            t.companion_last = at;
+            t.mode = Mode::Companion;
+            return out;
+        }
         // a touch made while the modify button is held does what □ + Touch (□ + Pen) is set to
         if t.modify_held && t.modify_pointer.is_none() && (t.down.len() == 1 || t.mode == Mode::None) {
             let purpose = if is_pen(kind) { t.settings.modify_pen } else { t.settings.modify_touch };
@@ -652,6 +699,36 @@ impl CanvasSession {
                 out.push(TouchCommand::AdjustChanged);
             }
             Mode::Pick => out.push(TouchCommand::Pick { x: at.0, y: at.1 }),
+            Mode::Companion if id == t.stroke_pointer => {
+                let last = std::mem::replace(&mut t.companion_last, at);
+                let (dx, dy) = (at.0 - last.0, at.1 - last.1);
+                let (from, zoom, scale) = (t.down_at, t.companion == Some(CompanionMode::Zoom), t.scale);
+                drop(t);
+                if zoom {
+                    let k = (-dy / (COMPANION_ZOOM_DISTANCE * scale)).exp();
+                    self.view_gesture(from.0, from.1, 0.0, 0.0, k, 0.0);
+                } else {
+                    self.view_gesture(at.0, at.1, dx, dy, 1.0, 0.0);
+                }
+                out.push(TouchCommand::ViewMoved);
+            }
+            Mode::Turn if id == t.stroke_pointer => {
+                let last = std::mem::replace(&mut t.turn_last, at);
+                t.tap_moved += dist(at, last);
+                drop(t);
+                self.turn_model(at.0 - last.0, at.1 - last.1);
+            }
+            Mode::Recolor if id == t.stroke_pointer => {
+                // past a tap's slop, the reticle follows the touch
+                if !t.recolor_dragged && dist(at, t.down_at) > TAP_SLOP * t.scale {
+                    t.recolor_dragged = true;
+                }
+                if t.recolor_dragged {
+                    let last = std::mem::replace(&mut t.recolor_last, at);
+                    drop(t);
+                    self.recolor_drag(at.0 - last.0, at.1 - last.1);
+                }
+            }
             Mode::Opacity if id == t.stroke_pointer => {
                 // the opacity follows the drag across, faster the faster it goes
                 let (last_x, last_ms) = t.pour_last;
@@ -888,6 +965,14 @@ impl CanvasSession {
             t.mode = Mode::Opacity;
             return;
         }
+        if self.shared.lock().recolor.is_some() {
+            // Recolor: the touch moves its reticle, or a tap starts it again
+            t.stroke_pointer = id;
+            t.recolor_dragged = false;
+            t.recolor_last = at;
+            t.mode = Mode::Recolor;
+            return;
+        }
         // a snapped shape's handle is dragged; while it is edited, a drag on its outline turns and
         // resizes it, one elsewhere moves it (a tap ends the editing); anything else keeps the
         // shape and draws on
@@ -992,6 +1077,13 @@ impl CanvasSession {
                 let poured = self.pour_begin(at.0, at.1, fill.r, fill.g, fill.b, fill.threshold);
                 t.mode = if poured { Mode::Pour } else { Mode::Idle };
             }
+            return;
+        }
+        // on a shown model a finger turns it; the pen paints
+        if kind == PointerKind::Finger && self.shared.lock().scene_shown() {
+            t.stroke_pointer = id;
+            t.turn_last = at;
+            t.mode = Mode::Turn;
             return;
         }
         let pen = is_pen(kind);
@@ -1102,7 +1194,10 @@ impl CanvasSession {
             self.stroke_cancel();
         }
         self.end_stroke_tools(t);
-        if matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Pour | Mode::Transform | Mode::Select) {
+        if matches!(
+            t.mode,
+            Mode::Finger | Mode::Idle | Mode::Pour | Mode::Transform | Mode::Select | Mode::Recolor | Mode::Turn
+        ) {
             t.gesture_start = now;
             t.gesture_scale = 1.0;
         }
@@ -1265,6 +1360,12 @@ impl CanvasSession {
                 }
             }
             Mode::Opacity => self.opacity_lifted(&mut t),
+            // a tap starts the reticle again where it lands
+            Mode::Recolor if !t.recolor_dragged && !cancelled => {
+                let at = last_of(&samples).map_or(t.recolor_last, |s| (s.x, s.y));
+                drop(t);
+                self.recolor_tap(at.0, at.1);
+            }
             Mode::Pour => {
                 let slid = last_of(&samples).and_then(|s| Self::pour_slide(&mut t, (s.x, s.y), s.time_ms));
                 drop(t);
@@ -1831,6 +1932,48 @@ mod tests {
         assert_eq!(opacity(&s), dragged);
         s.set_touch_layer_opacity(None);
         assert_eq!(s.touch_layer_opacity(), None);
+    }
+
+    #[test]
+    fn recolor_s_touch_drags_its_reticle_or_taps_it_elsewhere_and_paints_nothing() {
+        let s = session();
+        s.shared.lock().view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+        s.recolor_start(32.0, 32.0, 0.0, 0.0, 1.0, 0.0);
+        // a drag past the slop moves it by as much as the touch moved after that
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
+        s.touch_move(1, at(200.0, 100.0, 16.0));
+        s.touch_move(1, at(210.0, 110.0, 32.0));
+        let out = s.touch_up(1, at(210.0, 110.0, 48.0));
+        assert!(!out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+        assert_eq!(s.recolor_point(), Some(vec![142.0, 42.0]));
+        // a tap puts it where it lands
+        s.touch_down(1, PointerKind::Finger, at(10.0, 12.0, 100.0));
+        s.touch_up(1, at(11.0, 12.0, 150.0));
+        assert_eq!(s.recolor_point(), Some(vec![11.0, 12.0]));
+        s.recolor_end();
+    }
+
+    #[test]
+    fn the_companion_s_move_takes_a_lone_press_and_moves_the_view_without_painting() {
+        let s = session();
+        s.shared.lock().view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+        s.set_touch_companion(Some(CompanionMode::Move));
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
+        let out = s.touch_move(1, at(130.0, 120.0, 16.0));
+        assert!(out.contains(&TouchCommand::ViewMoved), "{out:?}");
+        // a second finger meanwhile does nothing
+        assert!(s.touch_down(2, PointerKind::Finger, at(300.0, 300.0, 20.0)).is_empty());
+        s.touch_up(2, at(300.0, 300.0, 30.0));
+        let out = s.touch_up(1, at(130.0, 120.0, 40.0));
+        assert!(!out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+        let m = s.view_matrix();
+        assert_eq!((m.get(4).copied(), m.get(5).copied()), (Some(30.0), Some(20.0)));
+        // off, a press paints again
+        s.set_touch_companion(None);
+        s.touch_down(1, PointerKind::Finger, at(10.0, 10.0, 100.0));
+        s.touch_move(1, at(60.0, 10.0, 120.0));
+        let out = s.touch_up(1, at(60.0, 10.0, 140.0));
+        assert!(out.contains(&TouchCommand::StrokeEnded), "{out:?}");
     }
 
     #[test]

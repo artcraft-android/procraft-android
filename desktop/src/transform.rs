@@ -128,19 +128,10 @@ impl Default for Transform {
 impl Transform {
     /// Starts transforming the current layer (the caller has checked it takes changes). Returns
     /// what to say when there is nothing there to move.
-    pub fn begin(&mut self, session: &CanvasSession) -> Result<(), &'static str> {
+    pub fn begin(&mut self, session: &CanvasSession) -> Result<(), String> {
         session.transform_set_interpolation(self.interpolation);
         session.transform_set_guides(self.guides);
-        let Some(shown) = session.transform_begin() else {
-            let text = session.layers().iter().any(|l| l.current && l.text);
-            return Err(if text {
-                "Rasterize the text to transform it"
-            } else if session.has_selection() {
-                "Nothing is selected on this layer"
-            } else {
-                "This layer is empty"
-            });
-        };
+        let Some(shown) = session.transform_begin() else { return Err(session.transform_refusal()) };
         // a warp lays its mesh over what began
         self.shown = session.transform_set_kind(self.kind).or(Some(shown));
         self.popup = Popup::None;

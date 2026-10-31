@@ -21,6 +21,10 @@ pub enum CursorStyle {
     Brush,
 }
 
+/// What an artwork dragged out of the gallery becomes, and a picture's format when one is wanted.
+pub const DRAG_FORMATS: [&str; 5] = ["ProCraft", "PSD", "JPEG", "PNG", "TIFF"];
+pub const DRAG_IMAGE_FORMATS: [&str; 3] = ["JPEG", "PNG", "TIFF"];
+
 pub const RAPID_UNDO_MIN_S: f32 = 0.1;
 pub const RAPID_UNDO_MAX_S: f32 = 1.5;
 
@@ -69,6 +73,10 @@ pub struct Prefs {
     pub feedback_sounds: bool,
     /// The short colour panel shows the history, not the active palette.
     pub colour_history_shown: bool,
+    /// Drag and Drop export: what an artwork dragged out of the gallery becomes (an index into
+    /// [`DRAG_FORMATS`]), and a picture's format when one is wanted (into [`DRAG_IMAGE_FORMATS`]).
+    pub drag_format: usize,
+    pub drag_image_format: usize,
     /// Recolor's Flood, kept from one time to the next.
     pub recolor_threshold: f32,
 }
@@ -102,6 +110,8 @@ impl Default for Prefs {
             tap_assistance: false,
             feedback_sounds: false,
             colour_history_shown: false,
+            drag_format: 0,
+            drag_image_format: 0,
             recolor_threshold: 0.0,
         }
     }
@@ -154,6 +164,10 @@ impl Prefs {
                 "tap_assistance" => p.tap_assistance = on,
                 "feedback_sounds" => p.feedback_sounds = on,
                 "color_history_shown" => p.colour_history_shown = on,
+                "drag_format" => p.drag_format = value.parse::<usize>().map_or(0, |t| t.min(DRAG_FORMATS.len() - 1)),
+                "drag_image_format" => {
+                    p.drag_image_format = value.parse::<usize>().map_or(0, |t| t.min(DRAG_IMAGE_FORMATS.len() - 1))
+                }
                 "recolor_threshold" => p.recolor_threshold = unit.unwrap_or(0.0),
                 "actions_tab" => p.actions_tab = value.parse::<usize>().map_or(0, |t| t.min(5)),
                 "curve" => {
@@ -200,6 +214,8 @@ impl Prefs {
             format!("tap_assistance {}", self.tap_assistance),
             format!("feedback_sounds {}", self.feedback_sounds),
             format!("color_history_shown {}", self.colour_history_shown),
+            format!("drag_format {}", self.drag_format),
+            format!("drag_image_format {}", self.drag_image_format),
             format!("recolor_threshold {}", self.recolor_threshold),
         ];
         crate::files::keep_text("interface", &(lines.join("\n") + "\n"));
