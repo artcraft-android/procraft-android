@@ -665,6 +665,24 @@ impl CanvasSession {
     }
 }
 
+/// The signature kept in the artwork's folder `dir` (about/signature.json): its strokes, each the
+/// x, y of its points across the signature's box (0..1); none if there is none.
+#[uniffi::export]
+pub fn read_signature(dir: String) -> Vec<Vec<f32>> {
+    let file = Path::new(&dir).join("about").join("signature.json");
+    let read: Option<Vec<Vec<f32>>> = fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    read.unwrap_or_default()
+}
+
+/// Keeps `strokes` as the signature in the artwork's folder `dir` (see [`read_signature`]).
+#[uniffi::export]
+pub fn write_signature(dir: String, strokes: Vec<Vec<f32>>) -> Result<(), MobileError> {
+    let about = Path::new(&dir).join("about");
+    fs::create_dir_all(&about).map_err(|e| file_error("keeping the signature", e))?;
+    let json = serde_json::to_string(&strokes).map_err(|e| file_error("keeping the signature", e))?;
+    fs::write(about.join("signature.json"), json).map_err(|e| file_error("keeping the signature", e))
+}
+
 /// The table showing a CMYK canvas's colours as its press prints them (in Display P3, as its
 /// pictures carry), if it is one.
 fn proof_table(doc: &Document) -> Option<procraft_engine::cms::Lut> {
@@ -1160,4 +1178,23 @@ pub(crate) fn thumbnail(rgba: &[u8], width: u32, height: u32, side: u32) -> (u32
         }
     }
     (tw, th, out)
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+
+    #[test]
+    fn a_signature_is_kept_as_the_android_app_keeps_it() {
+        let dir = std::env::temp_dir().join(format!("procraft-signature-{}", std::process::id()));
+        let path = dir.to_string_lossy().into_owned();
+        assert!(read_signature(path.clone()).is_empty());
+        let strokes = vec![vec![0.1, 0.2, 0.3, 0.4], vec![0.5, 0.5]];
+        write_signature(path.clone(), strokes.clone()).unwrap();
+        assert_eq!(read_signature(path.clone()), strokes);
+        // as the Android app wrote it: an array of arrays of numbers
+        fs::write(dir.join("about").join("signature.json"), "[[0.25,0.75,1.0,0.0]]").unwrap();
+        assert_eq!(read_signature(path), vec![vec![0.25, 0.75, 1.0, 0.0]]);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

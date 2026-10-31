@@ -27,6 +27,14 @@ winit = "0.30"
 rfd = "0.17"
 resvg = { version = "0.49", default-features = false }
 png = { workspace = true }
+# Photo's pictures (the clipboard already brings it in, with PNG and TIFF)
+# Canvas information's dates, in local time
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }
+
+# Animated MP4 and HEVC through the system's own encoders (Media Foundation)
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }

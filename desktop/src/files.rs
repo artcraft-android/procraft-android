@@ -4,8 +4,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use procraft_core::{CanvasSession, KeptGestures, PsdOutcome, ThumbnailImage, import_psd};
-use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+use procraft_core::{
+    CanvasPreset, CanvasSession, KeptGestures, PsdOutcome, ThumbnailImage, import_psd, preset_height, preset_width,
+};
+use rfd::{FileDialog, MessageDialog, MessageLevel};
 
 use crate::ui::Interface;
 
@@ -18,6 +20,7 @@ pub enum Format {
     Psd,
     Pdf,
     Png,
+    Jpeg,
     Tiff,
     /// Each layer a page, or a PNG file in a folder.
     LayersPdf,
@@ -35,6 +38,7 @@ impl Format {
             Format::Pdf | Format::LayersPdf => "PDF",
             Format::Png | Format::LayerPngs | Format::ChosenLayerPngs => "PNG",
             Format::Tiff => "TIFF",
+            Format::Jpeg => "JPEG",
         }
     }
 
@@ -46,6 +50,7 @@ impl Format {
             Format::Pdf | Format::LayersPdf => "pdf",
             Format::Png | Format::LayerPngs | Format::ChosenLayerPngs => "png",
             Format::Tiff => "tiff",
+            Format::Jpeg => "jpg",
         }
     }
 }
@@ -140,14 +145,7 @@ pub fn keep_gestures(kept: &KeptGestures) {
     let mut lines: Vec<String> = kept.switches.iter().map(|(name, on)| format!("{name} {on}")).collect();
     lines.extend(kept.delays.iter().map(|(name, s)| format!("{name} {s}")));
     lines.sort();
-    keep_text(
-        "gestures",
-        &(lines.join(
-            "
-",
-        ) + "
-"),
-    );
+    keep_text("gestures", &(lines.join("\n") + "\n"));
 }
 
 /// The QuickMenu's buttons kept, as the core writes them.
@@ -160,50 +158,58 @@ pub fn keep_quick_menu(saved: &str) {
 }
 
 /// A small file of the app's settings written (a failure only logged: the setting holds this run).
-fn keep_text(name: &str, text: &str) {
+pub fn keep_text(name: &str, text: &str) {
     let dir = app_dir();
     if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(name), text)) {
         log::warn!("keeping {name}: {e}");
     }
 }
 
-/// Whether the artwork may be let go of: nothing unsaved, or the user saved it or chose not to.
-pub fn may_close(session: &CanvasSession, ui: &mut Interface) -> bool {
-    if session.edits() == ui.saved_edits {
-        return true;
-    }
-    let answer = MessageDialog::new()
-        .set_level(MessageLevel::Warning)
-        .set_title("ProCraft")
-        .set_description(format!("Save the changes to “{}”?", session.name()))
-        .set_buttons(MessageButtons::YesNoCancel)
-        .show();
-    match answer {
-        MessageDialogResult::Yes => save(session, ui, false),
-        MessageDialogResult::No => true,
-        _ => false,
-    }
+/// A new artwork as `preset` says: its size, DPI, background and colour profile.
+pub fn new_from_preset(preset: &CanvasPreset) -> Arc<CanvasSession> {
+    let rgb = [16, 8, 0].map(|shift| ((preset.background >> shift) & 0xFF) as f32 / 255.0).to_vec();
+    let (w, h) = (preset_width(preset.clone()), preset_height(preset.clone()));
+    let session = CanvasSession::new_custom(w, h, preset.dpi, rgb, !preset.background_hidden, String::new());
+    session.set_new_profile(preset.profile.clone());
+    session
 }
 
-/// A new artwork the size of the one open.
-pub fn new_artwork(session: &CanvasSession, ui: &mut Interface) -> Option<Arc<CanvasSession>> {
-    if !may_close(session, ui) {
-        return None;
+/// A colour profile the user picks (an .icc file), added to those a canvas can be in; its name, or
+/// none (said so) if it isn't one.
+pub fn import_profile() -> Option<String> {
+    let path = FileDialog::new().set_title("Import").add_filter("Color profiles", &["icc", "icm"]).pick_file()?;
+    let name = std::fs::read(path).ok().and_then(procraft_core::import_profile);
+    if name.is_none() {
+        tell("Can't import", "This file isn't a color profile.");
     }
-    let info = session.info();
-    let next = CanvasSession::new(info.width, info.height);
-    ui.path = None;
-    ui.saved_edits = next.edits();
-    Some(next)
+    name
+}
+
+/// A picture the user picks (PNG, JPEG, WebP, GIF, BMP or TIFF) as a new one-layer artwork its
+/// size.
+pub fn pick_picture() -> Option<Arc<CanvasSession>> {
+    let path = FileDialog::new()
+        .set_title("Photo")
+        .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"])
+        .pick_file()?;
+    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    match image::open(&path) {
+        Ok(picture) => {
+            let rgba = picture.to_rgba8();
+            let image = ThumbnailImage { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() };
+            Some(CanvasSession::from_image(image, name))
+        }
+        Err(e) => {
+            tell("Can't open the picture", &e.to_string());
+            None
+        }
+    }
 }
 
 /// An artwork the user picks: a layered package, a PSD, or a PNG as a one-layer artwork.
-pub fn open(session: &CanvasSession, ui: &mut Interface) -> Option<Arc<CanvasSession>> {
-    if !may_close(session, ui) {
-        return None;
-    }
+pub fn pick_artwork() -> Option<(Arc<CanvasSession>, Option<PathBuf>)> {
     let path = FileDialog::new()
-        .set_title("Open")
+        .set_title("Import")
         .add_filter("Artworks", &["procraft", "procreate", "psd", "psb", "png"])
         .pick_file()?;
     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -213,18 +219,9 @@ pub fn open(session: &CanvasSession, ui: &mut Interface) -> Option<Arc<CanvasSes
         "png" => read_png(&path).map(|image| CanvasSession::from_image(image, name)),
         _ => CanvasSession::open_package(path.to_string_lossy().into_owned()).map_err(|e| e.to_string()),
     };
-    match opened {
-        Ok(next) => {
-            // only a package is saved back where it came from
-            ui.path = matches!(extension.as_str(), "procraft").then_some(path);
-            ui.saved_edits = next.edits();
-            Some(next)
-        }
-        Err(e) => {
-            tell("Can't open the file", &e);
-            None
-        }
-    }
+    // a package brings its time-lapse too
+    let package = matches!(extension.as_str(), "procraft" | "procreate").then_some(path);
+    opened.map(|s| (s, package)).map_err(|e| tell("Can't open the file", &e)).ok()
 }
 
 /// A PSD made an artwork in a folder of its own, then opened from there.
@@ -261,8 +258,24 @@ pub fn png_pixels(bytes: &[u8]) -> Option<Vec<u32>> {
     })
 }
 
+/// A PNG's size and pixels (in `bytes`), straight RGBA; none if it isn't one.
+pub fn png_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::normalize_to_color8() | png::Transformations::ALPHA);
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let frame = reader.next_frame(&mut buf).ok()?;
+    let data = buf.get(..frame.buffer_size())?;
+    let rgba = match frame.color_type {
+        png::ColorType::Rgba => data.to_vec(),
+        png::ColorType::GrayscaleAlpha => data.as_chunks::<2>().0.iter().flat_map(|&[g, a]| [g, g, g, a]).collect(),
+        _ => return None,
+    };
+    Some((frame.width, frame.height, rgba))
+}
+
 /// A PNG's pixels, straight RGBA.
-fn read_png(path: &Path) -> Result<ThumbnailImage, String> {
+pub fn read_png(path: &Path) -> Result<ThumbnailImage, String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
     decoder.set_transformations(png::Transformations::normalize_to_color8() | png::Transformations::ALPHA);
@@ -276,19 +289,6 @@ fn read_png(path: &Path) -> Result<ThumbnailImage, String> {
         other => return Err(format!("PNG colours not read: {other:?}")),
     };
     Ok(ThumbnailImage { width: frame.width, height: frame.height, rgba })
-}
-
-/// A picture the user picks (a PNG) put on a new layer of its own.
-pub fn insert_file(session: &CanvasSession) {
-    let Some(path) = FileDialog::new().set_title("Insert a file").add_filter("Pictures", &["png"]).pick_file() else {
-        return;
-    };
-    match read_png(&path) {
-        Ok(image) => {
-            session.insert_image(image, false);
-        }
-        Err(e) => tell("Can't insert the file", &e),
-    }
 }
 
 /// Shows the app's name and version.
@@ -318,7 +318,8 @@ pub fn save(session: &CanvasSession, ui: &mut Interface, ask: bool) -> bool {
         }
     };
     let edits = session.edits();
-    match session.export_package(path.to_string_lossy().into_owned(), seed(), None) {
+    let time_lapse = ui.artwork_dir.as_deref().map(crate::timelapse::for_package);
+    match session.export_package(path.to_string_lossy().into_owned(), seed(), time_lapse) {
         Ok(()) => {
             ui.path = Some(path);
             ui.saved_edits = edits;
@@ -332,7 +333,7 @@ pub fn save(session: &CanvasSession, ui: &mut Interface, ask: bool) -> bool {
 }
 
 /// Writes the artwork as `format` where the user picks.
-pub fn export(session: &CanvasSession, format: Format) {
+pub fn export(session: &CanvasSession, format: Format, dir: Option<&str>) {
     // each layer a PNG file, in a folder the user picks
     if matches!(format, Format::LayerPngs | Format::ChosenLayerPngs) {
         let Some(dir) = FileDialog::new().set_title("Share layers as PNG files").pick_folder() else { return };
@@ -357,17 +358,103 @@ pub fn export(session: &CanvasSession, format: Format) {
     };
     let path = with_extension(path, format.extension()).to_string_lossy().into_owned();
     let written = match format {
-        Format::Procraft | Format::Package => session.export_package(path, seed(), None),
+        Format::Procraft | Format::Package => {
+            session.export_package(path, seed(), dir.map(crate::timelapse::for_package))
+        }
         Format::Psd => session.export_psd(path),
         Format::Pdf => session.export_pdf(path, false, 100),
         Format::LayersPdf => session.export_pdf(path, true, 100),
         Format::Png => session.export_png(path),
         Format::Tiff => session.export_tiff(path),
+        Format::Jpeg => {
+            if let Err(e) = export_jpeg(session, &path) {
+                tell("Can't export", &e);
+            }
+            return;
+        }
         Format::LayerPngs | Format::ChosenLayerPngs => return,
     };
     if let Err(e) = written {
         tell("Can't export", &e.to_string());
     }
+}
+
+/// Artworks from the gallery written as `format`: one where the user picks, several into a folder
+/// the user picks, each named by its name (a number after it when two share one). Each is opened
+/// on a GPU device of its own, never shown.
+pub fn share_artworks(list: &[procraft_core::GalleryArtwork], format: Format) {
+    let extension = format.extension();
+    let file_name = |name: &str| {
+        let kept: String = name.chars().filter(|c| c.is_alphanumeric() || " _-".contains(*c)).collect();
+        if kept.trim().is_empty() { "Untitled Artwork".to_owned() } else { kept.trim().to_owned() }
+    };
+    let targets: Vec<(&procraft_core::GalleryArtwork, PathBuf)> = if let [one] = list {
+        let Some(path) = FileDialog::new()
+            .set_title(format!("Share {}", format.name()))
+            .add_filter(format.name(), &[extension])
+            .set_file_name(format!("{}.{extension}", file_name(&one.name)))
+            .save_file()
+        else {
+            return;
+        };
+        vec![(one, with_extension(path, extension))]
+    } else {
+        let Some(dir) = FileDialog::new().set_title(format!("Share as {}", format.name())).pick_folder() else {
+            return;
+        };
+        let mut used = std::collections::HashSet::new();
+        list.iter()
+            .map(|a| {
+                let base = file_name(&a.name);
+                let (mut name, mut n) = (base.clone(), 2);
+                while !used.insert(name.clone()) {
+                    name = format!("{base} {n}");
+                    n += 1;
+                }
+                (a, dir.join(format!("{name}.{extension}")))
+            })
+            .collect()
+    };
+    for (a, path) in targets {
+        let path = path.to_string_lossy().into_owned();
+        let written = CanvasSession::open(a.dir.clone()).map_err(|e| e.to_string()).and_then(|s| {
+            if !s.prepare_offscreen() {
+                return Err("There's no GPU device to draw it with.".to_owned());
+            }
+            match format {
+                Format::Procraft | Format::Package => {
+                    s.export_package(path, seed(), Some(crate::timelapse::for_package(&a.dir)))
+                }
+                Format::Psd => s.export_psd(path),
+                Format::Pdf | Format::LayersPdf => s.export_pdf(path, false, 100),
+                Format::Tiff => s.export_tiff(path),
+                Format::Jpeg => return export_jpeg(&s, &path),
+                _ => s.export_png(path),
+            }
+            .map_err(|e| e.to_string())
+        });
+        if let Err(e) = written {
+            tell("Can't share", &format!("{}: {e}", a.name));
+            return;
+        }
+    }
+}
+
+/// The artwork as a JPEG at `path`: its picture written as a PNG beside it, then flattened onto
+/// white.
+fn export_jpeg(session: &CanvasSession, path: &str) -> Result<(), String> {
+    let png = format!("{path}.png");
+    session.export_png(png.clone()).map_err(|e| e.to_string())?;
+    let picture = image::open(&png).map_err(|e| e.to_string());
+    let _ = std::fs::remove_file(&png);
+    let rgba = picture?.to_rgba8();
+    let mut rgb = image::RgbImage::new(rgba.width(), rgba.height());
+    for (out, px) in rgb.pixels_mut().zip(rgba.pixels()) {
+        let a = u16::from(px.0[3]);
+        let over = |c: u8| ((u16::from(c) * a + 255 * (255 - a) + 127) / 255) as u8;
+        *out = image::Rgb([over(px.0[0]), over(px.0[1]), over(px.0[2])]);
+    }
+    rgb.save_with_format(path, image::ImageFormat::Jpeg).map_err(|e| e.to_string())
 }
 
 /// `path`, ending in `.extension`.

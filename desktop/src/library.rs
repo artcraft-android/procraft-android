@@ -160,8 +160,7 @@ impl Library {
         backdrops: &mut Vec<f32>,
     ) -> Rect {
         let screen = ctx.content_rect();
-        let (left, arrow_x) =
-            panel::place(LIBRARY_WIDTH, button.center().x, screen, pc::SIDE_BAR_WIDTH + panel::POPOVER_GAP);
+        let (left, arrow_x) = panel::place(ctx, LIBRARY_WIDTH, button.center().x);
         let top = screen.top() + pc::BAR_HEIGHT;
         let rect = Rect::from_min_size(
             pos2(left, top),

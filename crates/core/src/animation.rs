@@ -321,3 +321,58 @@ impl CanvasSession {
         }
     }
 }
+
+/// A step of playing: the place in the sequence shown next, and the way it is going (1 forward,
+/// -1 back).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PlayStep {
+    pub at: u32,
+    pub step: i32,
+}
+
+/// Where playing goes after place `at` of a sequence `len` long, moving `step`: on, round again
+/// (Loop), turned back (Ping-Pong), or none once a single pass ends (One Shot, or one frame to
+/// ping-pong).
+#[uniffi::export]
+pub fn animation_next_step(playback: AnimationPlayback, len: u32, at: u32, step: i32) -> Option<PlayStep> {
+    let step = if step < 0 { -1 } else { 1 };
+    let next = i64::from(at) + i64::from(step);
+    if (0..i64::from(len)).contains(&next) {
+        return Some(PlayStep { at: u32::try_from(next).ok()?, step });
+    }
+    match playback {
+        AnimationPlayback::Loop if len > 0 => Some(PlayStep { at: 0, step }),
+        AnimationPlayback::PingPong if len > 1 => {
+            let back = i64::from(at) - i64::from(step);
+            Some(PlayStep { at: u32::try_from(back).ok()?, step: -step })
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(playback: AnimationPlayback, len: u32, steps: usize) -> Vec<u32> {
+        let mut shown = vec![0];
+        let (mut at, mut step) = (0, 1);
+        for _ in 0..steps {
+            let Some(next) = animation_next_step(playback, len, at, step) else { break };
+            (at, step) = (next.at, next.step);
+            shown.push(at);
+        }
+        shown
+    }
+
+    #[test]
+    fn playing_loops_turns_back_or_stops() {
+        assert_eq!(run(AnimationPlayback::Loop, 3, 6), [0, 1, 2, 0, 1, 2, 0]);
+        assert_eq!(run(AnimationPlayback::PingPong, 3, 6), [0, 1, 2, 1, 0, 1, 2]);
+        assert_eq!(run(AnimationPlayback::OneShot, 3, 6), [0, 1, 2]);
+        // one frame: looping shows it again and again; ping-pong and one shot stop
+        assert_eq!(run(AnimationPlayback::Loop, 1, 2), [0, 0, 0]);
+        assert_eq!(run(AnimationPlayback::PingPong, 1, 2), [0]);
+        assert_eq!(animation_next_step(AnimationPlayback::Loop, 0, 0, 1), None);
+    }
+}

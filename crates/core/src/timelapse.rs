@@ -1,0 +1,602 @@
+//! An artwork's time-lapse: a picture of the whole canvas after each change, kept as numbered
+//! JPEG frames in the artwork's folder (`timelapse/frame-000000.jpg` on), replayed or made into a
+//! video at [`TIME_LAPSE_FPS`] frames a second. The video itself is made by the app, with the
+//! system's encoder; this keeps the frames, the settings and whether it records.
+
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::io::BufWriter;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+
+use crate::layers::ThumbnailImage;
+use crate::project::PackageTimeLapse;
+
+/// The replay's and the video's frames a second.
+pub const TIME_LAPSE_FPS: u32 = 30;
+/// A frame's longest side kept, pixels.
+const FRAME_SIDE: u32 = 1280;
+const JPEG_QUALITY: u8 = 85;
+/// A package's videos are made again as one rather than be more than this.
+const MOST_SEGMENTS: usize = 32;
+
+/// A time-lapse's video: 1080p, 2K or 4K (`resolution` 0 to 2), Low, Good, Studio quality or
+/// Lossless (`quality` 0 to 3), and HEVC or H.264.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TimeLapseSettings {
+    pub resolution: u32,
+    pub quality: u32,
+    pub hevc: bool,
+}
+
+impl Default for TimeLapseSettings {
+    fn default() -> TimeLapseSettings {
+        TimeLapseSettings { resolution: 0, quality: 1, hevc: false }
+    }
+}
+
+/// The replay's and the video's frames a second.
+#[uniffi::export]
+pub fn time_lapse_fps() -> u32 {
+    TIME_LAPSE_FPS
+}
+
+/// The longest side of a video made with `s`, pixels: 1920, 2732 or 3840.
+#[uniffi::export]
+pub fn time_lapse_side(s: TimeLapseSettings) -> u32 {
+    match s.resolution {
+        1 => 2732,
+        2 => 3840,
+        _ => 1920,
+    }
+}
+
+/// The bits a pixel a second a video made with `s` takes: 2, 4, 8 or 16.
+#[uniffi::export]
+pub fn time_lapse_bits_per_pixel(s: TimeLapseSettings) -> u32 {
+    match s.quality {
+        0 => 2,
+        2 => 8,
+        3 => 16,
+        _ => 4,
+    }
+}
+
+/// The frames a video `seconds` long takes out of `frames`, spread evenly; all of them when it
+/// is none, or they wouldn't fill it.
+#[uniffi::export]
+pub fn time_lapse_picks(frames: u32, seconds: Option<u32>) -> Vec<u32> {
+    let wanted = seconds.map(|s| s.saturating_mul(TIME_LAPSE_FPS));
+    match wanted {
+        Some(n) if frames > n && n > 0 => {
+            let last = u64::from(frames - 1);
+            let gaps = u64::from(n - 1).max(1);
+            (0..u64::from(n)).filter_map(|i| u32::try_from(i * last / gaps).ok()).collect()
+        }
+        _ => (0..frames).collect(),
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct TimeLapse {
+    dir: PathBuf,
+    state: Mutex<State>,
+}
+
+struct State {
+    /// Frames kept so far, and the last picture's hash (a picture the same as it isn't kept).
+    count: u32,
+    last: Option<u64>,
+    /// A package's time-lapse being taken in.
+    taking: Option<Taking>,
+}
+
+/// Taking a package's time-lapse in: its videos are kept (to go back into a package as they are)
+/// while every frame of them has come in and there were no frames before; the frames each ends
+/// before, the frames before the video being read, and the videos' size and bit rate.
+struct Taking {
+    whole: bool,
+    ends: Vec<u32>,
+    before: u32,
+    width: u32,
+    height: u32,
+    bitrate: u64,
+}
+
+#[uniffi::export]
+impl TimeLapse {
+    /// The time-lapse of the artwork in folder `artwork`, its frames counted.
+    #[uniffi::constructor]
+    pub fn new(artwork: String) -> Arc<TimeLapse> {
+        let dir = Path::new(&artwork).join("timelapse");
+        let count = frame_files(&dir).len();
+        Arc::new(TimeLapse {
+            dir,
+            state: Mutex::new(State { count: u32::try_from(count).unwrap_or(u32::MAX), last: None, taking: None }),
+        })
+    }
+
+    /// The video's size, quality and codec, kept with the artwork.
+    pub fn settings(&self) -> TimeLapseSettings {
+        let text = fs::read_to_string(self.dir.join("settings.json")).unwrap_or_default();
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return TimeLapseSettings::default() };
+        let whole = |key: &str, or: u32| {
+            json.get(key).and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok()).unwrap_or(or)
+        };
+        TimeLapseSettings {
+            resolution: whole("resolution", 0),
+            quality: whole("quality", 1),
+            hevc: json.get("hevc").and_then(|v| v.as_bool()).unwrap_or(false),
+        }
+    }
+
+    pub fn set_settings(&self, s: TimeLapseSettings) {
+        let json = serde_json::json!({ "resolution": s.resolution, "quality": s.quality, "hevc": s.hevc });
+        let written =
+            fs::create_dir_all(&self.dir).and_then(|()| fs::write(self.dir.join("settings.json"), json.to_string()));
+        if let Err(e) = written {
+            log::warn!("keeping the time-lapse's settings: {e}");
+        }
+    }
+
+    /// Whether changes are recorded (on unless turned off for this artwork).
+    pub fn recording(&self) -> bool {
+        !self.dir.join("off").exists()
+    }
+
+    pub fn set_recording(&self, on: bool) {
+        let off = self.dir.join("off");
+        let done = if on {
+            match fs::remove_file(&off) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            }
+        } else {
+            fs::create_dir_all(&self.dir).and_then(|()| fs::write(&off, b""))
+        };
+        if let Err(e) = done {
+            log::warn!("switching the time-lapse: {e}");
+        }
+    }
+
+    /// Frames recorded so far.
+    pub fn count(&self) -> u32 {
+        self.state.lock().count
+    }
+
+    /// What the recorded frames take on disk, bytes.
+    pub fn bytes(&self) -> u64 {
+        frame_files(&self.dir).iter().filter_map(|f| fs::metadata(f).ok()).map(|m| m.len()).sum()
+    }
+
+    /// Keeps a picture of the canvas (premultiplied RGBA, `width` × `height`) as the next frame,
+    /// on white (as the canvas shows a hidden background) and at most 1280 on its long side;
+    /// unless it isn't recording, or the picture is the same as the last. True when kept.
+    pub fn record(&self, rgba: Vec<u8>, width: u32, height: u32) -> bool {
+        let len = (width as usize).saturating_mul(height as usize).saturating_mul(4);
+        if !self.recording() || width == 0 || height == 0 || rgba.len() < len {
+            return false;
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        rgba.hash(&mut hasher);
+        let hash = hasher.finish();
+        let mut st = self.state.lock();
+        if st.last == Some(hash) {
+            return false;
+        }
+        st.last = Some(hash);
+        // premultiplied over white
+        let rgb: Vec<u8> = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b, a]| {
+                let under = 255 - u16::from(a);
+                [r, g, b].map(|c| (u16::from(c) + under).min(255) as u8)
+            })
+            .collect();
+        let Some(picture) = image::RgbImage::from_raw(width, height, rgb) else { return false };
+        self.keep(&mut st, picture)
+    }
+
+    /// Takes a package's time-lapse `t` in: its settings and whether it records; then the app
+    /// gives its videos' frames ([`Self::keep_frame`], [`Self::take_video`]) and ends with
+    /// [`Self::take_end`].
+    pub fn take_begin(&self, t: PackageTimeLapse) {
+        self.set_settings(TimeLapseSettings {
+            resolution: u32::from(t.resolution),
+            quality: u32::from(t.quality),
+            hevc: t.hevc,
+        });
+        self.set_recording(t.recording);
+        self.drop_segments();
+        let mut st = self.state.lock();
+        st.taking = Some(Taking {
+            whole: st.count == 0 && t.width > 0 && t.height > 0,
+            ends: Vec::new(),
+            before: st.count,
+            width: t.width,
+            height: t.height,
+            bitrate: t.bitrate,
+        });
+    }
+
+    /// A frame of a package's video (straight RGBA, opaque) kept as the next frame. True when
+    /// kept.
+    pub fn keep_frame(&self, rgba: Vec<u8>, width: u32, height: u32) -> bool {
+        let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|&[r, g, b, _]| [r, g, b]).collect();
+        let Some(picture) = image::RgbImage::from_raw(width, height, rgb) else { return false };
+        let mut st = self.state.lock();
+        self.keep(&mut st, picture)
+    }
+
+    /// The package's video at `path` was read, `frames` frames in it: it is kept as it is while
+    /// every frame of every video so far came in.
+    pub fn take_video(&self, path: String, frames: u32) {
+        let mut st = self.state.lock();
+        let count = st.count;
+        let Some(t) = st.taking.as_mut() else { return };
+        t.whole = t.whole && frames > 0 && count - t.before == frames;
+        if t.whole {
+            let to = self.segment_path(t.ends.len());
+            t.whole = fs::create_dir_all(&self.dir).and_then(|()| fs::copy(&path, &to)).is_ok();
+        }
+        t.ends.push(count);
+        t.before = count;
+    }
+
+    /// The package's time-lapse is in: its videos noted, if they were all kept.
+    pub fn take_end(&self) {
+        let Some(t) = self.state.lock().taking.take() else { return };
+        if t.whole && !t.ends.is_empty() && t.ends.len() < MOST_SEGMENTS {
+            let s = self.settings();
+            self.write_segments(&Segments {
+                resolution: s.resolution,
+                quality: s.quality,
+                hevc: s.hevc,
+                width: t.width,
+                height: t.height,
+                bitrate: t.bitrate,
+                ends: t.ends,
+            });
+        } else {
+            self.drop_segments();
+        }
+    }
+}
+
+impl TimeLapse {
+    /// Keeps `picture` as the next frame, at most 1280 on its long side, as JPEG.
+    fn keep(&self, st: &mut State, picture: image::RgbImage) -> bool {
+        let (width, height) = picture.dimensions();
+        let k = (FRAME_SIDE as f32 / width.max(height) as f32).min(1.0);
+        let picture = if k < 1.0 {
+            let (w, h) = (((width as f32 * k).round() as u32).max(1), ((height as f32 * k).round() as u32).max(1));
+            image::imageops::resize(&picture, w, h, image::imageops::FilterType::Triangle)
+        } else {
+            picture
+        };
+        let path = self.frame_path(st.count);
+        let written = fs::create_dir_all(&self.dir).map_err(|e| e.to_string()).and_then(|()| {
+            let file = fs::File::create(&path).map_err(|e| e.to_string())?;
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(BufWriter::new(file), JPEG_QUALITY);
+            picture.write_with_encoder(encoder).map_err(|e| e.to_string())
+        });
+        match written {
+            Ok(()) => {
+                st.count += 1;
+                true
+            }
+            Err(e) => {
+                log::warn!("keeping a time-lapse frame: {e}");
+                false
+            }
+        }
+    }
+}
+
+#[uniffi::export]
+impl TimeLapse {
+    /// Frame `i`, straight RGBA (opaque); none if there is no such frame.
+    pub fn frame(&self, i: u32) -> Option<ThumbnailImage> {
+        let picture = image::open(self.frame_path(i)).ok()?.to_rgba8();
+        Some(ThumbnailImage { width: picture.width(), height: picture.height(), rgba: picture.into_raw() })
+    }
+}
+
+/// A video a package needs made of the frames: into `path`, of frames `frames`, fitted on white
+/// into `width` x `height` (0 x 0: into the first frame's size, within the settings' side);
+/// `append` when it adds to the videos made before (it must then come out that size).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SegmentPlan {
+    pub path: String,
+    pub frames: Vec<u32>,
+    pub width: u32,
+    pub height: u32,
+    pub append: bool,
+}
+
+/// The videos made of the frames for packages: the settings they were made with, their size and
+/// bit rate, and the frame each ends before (`ends`, rising), their files numbered from 1.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Segments {
+    resolution: u32,
+    quality: u32,
+    hevc: bool,
+    width: u32,
+    height: u32,
+    bitrate: u64,
+    ends: Vec<u32>,
+}
+
+#[uniffi::export]
+impl TimeLapse {
+    /// The video a package still needs made so every frame is in one (the ones made before kept,
+    /// so a share makes only what is new); none when they all are. The ones made before go when
+    /// the settings changed, they are broken, or there would be too many.
+    pub fn segment_plan(&self) -> Option<SegmentPlan> {
+        let frames = self.count();
+        let kept = self.kept_segments();
+        if kept.is_none() {
+            self.drop_segments();
+        }
+        let done = kept.as_ref().and_then(|k| k.ends.last().copied()).unwrap_or(0);
+        if done >= frames {
+            return None;
+        }
+        Some(match kept {
+            Some(k) => SegmentPlan {
+                path: self.segment_path(k.ends.len()),
+                frames: (done..frames).collect(),
+                width: k.width,
+                height: k.height,
+                append: true,
+            },
+            None => SegmentPlan {
+                path: self.segment_path(0),
+                frames: (0..frames).collect(),
+                width: 0,
+                height: 0,
+                append: false,
+            },
+        })
+    }
+
+    /// `plan`'s video was made `width` x `height` (or `made` false: it couldn't be). A video added
+    /// to the ones before that failed means all are made again as one: that plan.
+    pub fn segment_made(&self, plan: SegmentPlan, width: u32, height: u32, made: bool) -> Option<SegmentPlan> {
+        let end = plan.frames.last().map_or(0, |f| f + 1);
+        if made {
+            let segments = match (plan.append, self.kept_segments()) {
+                (true, Some(mut k)) if (k.width, k.height) == (width, height) => {
+                    k.ends.push(end);
+                    k
+                }
+                _ => {
+                    let s = self.settings();
+                    let bits = time_lapse_bits_per_pixel(s);
+                    Segments {
+                        resolution: s.resolution,
+                        quality: s.quality,
+                        hevc: s.hevc,
+                        width,
+                        height,
+                        bitrate: (u64::from(width) * u64::from(height) * u64::from(bits)).max(1_000_000),
+                        ends: vec![end],
+                    }
+                }
+            };
+            self.write_segments(&segments);
+            return None;
+        }
+        self.drop_segments();
+        plan.append.then(|| SegmentPlan {
+            path: self.segment_path(0),
+            frames: (0..self.count()).collect(),
+            width: 0,
+            height: 0,
+            append: false,
+        })
+    }
+
+    /// The time-lapse as a package keeps it: its settings, and its videos once made.
+    pub fn for_package(&self) -> PackageTimeLapse {
+        let s = self.settings();
+        let kept = self.kept_segments();
+        PackageTimeLapse {
+            recording: self.recording(),
+            quality: u8::try_from(s.quality).unwrap_or(1),
+            resolution: u8::try_from(s.resolution).unwrap_or(0),
+            hevc: s.hevc,
+            segments: kept.as_ref().map_or(Vec::new(), |k| (0..k.ends.len()).map(|i| self.segment_path(i)).collect()),
+            width: kept.as_ref().map_or(0, |k| k.width),
+            height: kept.as_ref().map_or(0, |k| k.height),
+            fps: TIME_LAPSE_FPS,
+            bitrate: kept.as_ref().map_or(0, |k| k.bitrate),
+        }
+    }
+}
+
+impl TimeLapse {
+    fn frame_path(&self, i: u32) -> PathBuf {
+        self.dir.join(format!("frame-{i:06}.jpg"))
+    }
+
+    fn segment_path(&self, i: usize) -> String {
+        self.dir.join(format!("segment-{}.mp4", i + 1)).to_string_lossy().into_owned()
+    }
+
+    /// The videos made before, when they still hold: made with the settings now, a size, not too
+    /// many, their ends rising and within the frames, and every file there.
+    fn kept_segments(&self) -> Option<Segments> {
+        let text = fs::read_to_string(self.dir.join("segments.json")).ok()?;
+        let k: Segments = serde_json::from_str(&text).ok()?;
+        let s = self.settings();
+        let holds = (k.resolution, k.quality, k.hevc) == (s.resolution, s.quality, s.hevc)
+            && k.width > 0
+            && k.height > 0
+            && k.ends.len() < MOST_SEGMENTS
+            && k.ends.first().is_none_or(|e| *e > 0)
+            && k.ends.windows(2).all(|w| w.first() < w.get(1))
+            && k.ends.last().is_none_or(|e| *e <= self.count())
+            && (0..k.ends.len()).all(|i| Path::new(&self.segment_path(i)).exists());
+        holds.then_some(k)
+    }
+
+    fn write_segments(&self, k: &Segments) {
+        let written = serde_json::to_string(k)
+            .map_err(|e| e.to_string())
+            .and_then(|text| fs::write(self.dir.join("segments.json"), text).map_err(|e| e.to_string()));
+        if let Err(e) = written {
+            log::warn!("keeping the time-lapse's videos: {e}");
+        }
+    }
+
+    /// Every package video, and the note of them, gone.
+    fn drop_segments(&self) {
+        let _ = fs::remove_file(self.dir.join("segments.json"));
+        let Ok(entries) = fs::read_dir(&self.dir) else { return };
+        for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with("segment-") && name.ends_with(".mp4") {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+/// The frame files in `dir`.
+fn frame_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("frame-")))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picks_spread_a_long_time_lapse_over_the_seconds() {
+        assert_eq!(time_lapse_picks(5, None), [0, 1, 2, 3, 4]);
+        // fewer frames than the seconds take: all of them
+        assert_eq!(time_lapse_picks(5, Some(1)), [0, 1, 2, 3, 4]);
+        let picks = time_lapse_picks(301, Some(1));
+        assert_eq!(picks.len(), 30);
+        assert_eq!((picks[0], picks[29]), (0, 300));
+        assert!(picks.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn frames_are_kept_once_on_white_and_counted_again() {
+        let dir = std::env::temp_dir().join(format!("procraft-timelapse-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let t = TimeLapse::new(dir.to_string_lossy().into_owned());
+        assert_eq!(t.count(), 0);
+        // a clear canvas comes out white; the same picture again isn't kept
+        let clear = vec![0u8; 4 * 4 * 4];
+        assert!(t.record(clear.clone(), 4, 4));
+        assert!(!t.record(clear, 4, 4));
+        let red = [255u8, 0, 0, 255].repeat(16);
+        assert!(t.record(red, 4, 4));
+        assert_eq!(t.count(), 2);
+        let first = t.frame(0).unwrap();
+        assert_eq!((first.width, first.height), (4, 4));
+        assert!(first.rgba[..3].iter().all(|&c| c > 240), "{:?}", &first.rgba[..4]);
+        let second = t.frame(1).unwrap();
+        assert!(second.rgba[0] > 200 && second.rgba[1] < 60);
+        assert!(t.frame(2).is_none());
+        // not recording: nothing kept; counted again from the files
+        t.set_recording(false);
+        assert!(!t.record([0u8, 0, 255, 255].repeat(16), 4, 4));
+        assert_eq!(TimeLapse::new(dir.to_string_lossy().into_owned()).count(), 2);
+        t.set_recording(true);
+        assert!(t.recording());
+        let s = TimeLapseSettings { resolution: 2, quality: 3, hevc: true };
+        t.set_settings(s);
+        assert_eq!(t.settings(), s);
+        assert_eq!((time_lapse_side(s), time_lapse_bits_per_pixel(s)), (3840, 16));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn package_videos_are_made_once_and_added_to() {
+        let dir = std::env::temp_dir().join(format!("procraft-segments-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let t = TimeLapse::new(dir.to_string_lossy().into_owned());
+        assert_eq!(t.segment_plan(), None, "no frames: nothing to make");
+        for i in 0..3u8 {
+            assert!(t.record([i, 0, 0, 255].repeat(4), 2, 2));
+        }
+        // the first share makes every frame into one video
+        let plan = t.segment_plan().unwrap();
+        assert_eq!((plan.frames.clone(), plan.width, plan.append), (vec![0, 1, 2], 0, false));
+        fs::write(&plan.path, b"video").unwrap();
+        assert_eq!(t.segment_made(plan, 640, 480, true), None);
+        assert_eq!(t.segment_plan(), None, "all made");
+        let p = t.for_package();
+        assert_eq!((p.segments.len(), p.width, p.height, p.fps, p.bitrate), (1, 640, 480, 30, 1_228_800));
+        // frames since: one more video the same size
+        assert!(t.record([9, 9, 9, 255].repeat(4), 2, 2));
+        let plan = t.segment_plan().unwrap();
+        assert_eq!((plan.frames.clone(), plan.width, plan.height, plan.append), (vec![3], 640, 480, true));
+        assert!(plan.path.ends_with("segment-2.mp4"));
+        // it couldn't be made that size: all again as one
+        let again = t.segment_made(plan, 0, 0, false).unwrap();
+        assert_eq!((again.frames.len(), again.append), (4, false));
+        assert!(t.for_package().segments.is_empty());
+        // other settings: the videos made before go
+        fs::write(&again.path, b"video").unwrap();
+        t.segment_made(again, 640, 480, true);
+        t.set_settings(TimeLapseSettings { hevc: true, ..t.settings() });
+        assert!(!t.segment_plan().unwrap().append);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_package_time_lapse_comes_in_with_its_videos() {
+        let dir = std::env::temp_dir().join(format!("procraft-take-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let video = dir.join("brought.mp4");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&video, b"video").unwrap();
+        let t = TimeLapse::new(dir.join("artwork").to_string_lossy().into_owned());
+        let package = PackageTimeLapse {
+            recording: false,
+            quality: 2,
+            resolution: 1,
+            hevc: true,
+            segments: vec![video.to_string_lossy().into_owned()],
+            width: 640,
+            height: 480,
+            fps: 30,
+            bitrate: 5_000_000,
+        };
+        t.take_begin(package);
+        assert!(!t.recording());
+        assert_eq!(t.settings(), TimeLapseSettings { resolution: 1, quality: 2, hevc: true });
+        // its video's two frames come in, so the video is kept to go back into a package
+        assert!(t.keep_frame([10, 20, 30, 255].repeat(4), 2, 2));
+        assert!(t.keep_frame([40, 50, 60, 255].repeat(4), 2, 2));
+        t.take_video(video.to_string_lossy().into_owned(), 2);
+        t.take_end();
+        assert_eq!(t.count(), 2);
+        assert_eq!(t.segment_plan(), None, "nothing to make again");
+        let p = t.for_package();
+        assert_eq!((p.segments.len(), p.width, p.height, p.bitrate), (1, 640, 480, 5_000_000));
+        assert!(Path::new(&p.segments[0]).exists());
+        // a video whose frames didn't all come in isn't kept
+        let t2 = TimeLapse::new(dir.join("other").to_string_lossy().into_owned());
+        t2.take_begin(PackageTimeLapse { segments: vec![], ..t.for_package() });
+        assert!(t2.keep_frame([0, 0, 0, 255].repeat(4), 2, 2));
+        t2.take_video(video.to_string_lossy().into_owned(), 3);
+        t2.take_end();
+        assert!(t2.for_package().segments.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

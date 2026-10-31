@@ -23,9 +23,13 @@ pub struct Input {
     pub commands: Vec<TouchCommand>,
     /// The pointers down on the canvas.
     down: Vec<u64>,
-    /// The mouse: where it is, and whether it (or space) moves the view.
+    /// The mouse: where it is, whether it is over the window, and whether it (or space) moves the
+    /// view.
     cursor: Option<(f32, f32)>,
+    inside: bool,
     panning: bool,
+    /// The brush cursor follows the mouse hovering, so its moves draw a frame.
+    pub hover_shown: bool,
     space: bool,
     command_key: bool,
 }
@@ -37,7 +41,9 @@ impl Default for Input {
             commands: Vec::new(),
             down: Vec::new(),
             cursor: None,
+            inside: false,
             panning: false,
+            hover_shown: false,
             space: false,
             command_key: false,
         }
@@ -45,6 +51,17 @@ impl Default for Input {
 }
 
 impl Input {
+    /// Where the mouse hovers (window pixels): over the window, nothing pressed, the view not
+    /// moving.
+    pub fn hovering(&self) -> Option<(f32, f32)> {
+        self.cursor.filter(|_| self.inside && self.down.is_empty() && !self.panning && !self.space)
+    }
+
+    /// Nothing is pressed on the canvas and the view isn't moving.
+    pub fn idle(&self) -> bool {
+        self.down.is_empty() && !self.panning
+    }
+
     /// Space is held or the mouse moves the view.
     pub fn moving_view(&self) -> bool {
         self.space || self.panning
@@ -131,8 +148,13 @@ impl Input {
                 self.command_key = false;
                 false
             }
+            WindowEvent::CursorEntered { .. } | WindowEvent::CursorLeft { .. } => {
+                self.inside = matches!(event, WindowEvent::CursorEntered { .. });
+                self.hover_shown
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let p = (position.x as f32, position.y as f32);
+                self.inside = true;
                 let last = self.cursor.replace(p);
                 if let (true, Some(l)) = (self.panning, last) {
                     session.view_gesture(p.0, p.1, p.0 - l.0, p.1 - l.1, 1.0, 0.0);
@@ -142,7 +164,7 @@ impl Input {
                     self.moved(session, MOUSE, p, 1.0);
                     return true;
                 }
-                false
+                self.hover_shown
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let Some(p) = self.cursor else { return false };

@@ -181,8 +181,7 @@ impl Layers {
         backdrops: &mut Vec<f32>,
     ) -> Rect {
         let screen = ctx.content_rect();
-        let (left, arrow_x) =
-            panel::place(LAYERS_WIDTH, button.center().x, screen, pc::SIDE_BAR_WIDTH + panel::POPOVER_GAP);
+        let (left, arrow_x) = panel::place(ctx, LAYERS_WIDTH, button.center().x);
         let top = screen.top() + pc::BAR_HEIGHT;
         let layers = session.layers();
         let versions: HashMap<u64, u64> = session.layer_versions().into_iter().map(|v| (v.id, v.version)).collect();

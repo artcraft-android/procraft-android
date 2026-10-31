@@ -20,8 +20,10 @@ mod brushes;
 mod clipboard;
 mod colour;
 mod crop;
+mod crop_edit;
 mod device;
 mod frame;
+mod gallery;
 mod gestures;
 mod gradients;
 mod guide;
@@ -32,6 +34,7 @@ mod layers;
 mod palettes;
 mod pick;
 mod pour;
+mod presets;
 mod project;
 mod projection;
 mod quick_menu;
@@ -44,6 +47,7 @@ mod studio;
 #[cfg(test)]
 mod tests;
 mod text;
+mod timelapse;
 mod touch;
 mod transform;
 #[cfg(target_os = "android")]
@@ -68,17 +72,28 @@ pub use adjust_menu::{
     quick_action_adjustment,
 };
 pub use adjusting::{AdjustShown, CLONE_PUCK_RADIUS};
+pub use animation::{AnimationPlayback, AnimationSettings, PlayStep, animation_next_step};
 pub use brushes::{BrushInfo, BrushSetInfo};
+pub use colour::{cmyk_profiles, color_profiles, convert_color, import_profile, is_cmyk_profile, set_profile_folder};
+pub use crop_edit::CropShown;
 pub use frame::{configure, screen_profile};
+pub use gallery::{ArtworkStore, GalleryArtwork, GalleryEntry};
 pub use gestures::{
     GestureOption, GesturePurpose, GestureSettings, KeptGestures, MAX_DELAY_S, MIN_DELAY_S, Trigger, gesture_options,
     gesture_purpose_heading, gesture_purpose_title, gesture_purposes, gesture_trigger_label,
 };
 pub use gradients::{GradientInfo, GradientStop, Gradients};
+pub use guide::{GuideInfo, GuideType, SymmetryType};
 pub use history::ColourHistory;
-pub use layers::{BlendModeInfo, Blocked, LayerInfo, LayerType, ThumbnailImage, blend_modes};
+pub use layers::{BlendModeInfo, Blocked, LayerInfo, LayerType, ThumbnailImage, blend_modes, layers_for};
 pub use palettes::{PaletteInfo, Palettes, colour_name};
 pub use pick::Pick;
+pub use presets::{
+    CanvasPreset, P3, SRGB, per_inch, preset_height, preset_label, preset_number, preset_width, presets_from_json,
+    presets_json, profile_chip, standard_presets,
+};
+pub use project::{ArtworkInfo, read_signature, write_signature};
+pub use project::{PackageTimeLapse, package_time_lapse};
 pub use project::{PsdOutcome, import_psd};
 pub use quick_menu::{
     QuickAction, quick_action_adjusts, quick_action_label, quick_actions_listed, quick_adjustments_listed,
@@ -86,6 +101,11 @@ pub use quick_menu::{
 };
 pub use quickshape::{QuickShapeInfo, QuickShapeKind};
 pub use selection::{SelectionDisplay, SelectionJoin};
+pub use studio::curve_samples;
+pub use timelapse::{
+    SegmentPlan, TIME_LAPSE_FPS, TimeLapse, TimeLapseSettings, time_lapse_bits_per_pixel, time_lapse_picks,
+    time_lapse_side,
+};
 pub use touch::{Fill, GestureAction, SelectKind, SelectTouch, TouchCommand, TouchSettings, TransformTouch};
 pub use transform::{
     GuideSettings, Interpolation, ScreenBox, TransformAction, TransformBox, TransformHandle, TransformKind, handle_at,
@@ -397,6 +417,8 @@ pub(crate) struct State {
     adjusting: bool,
     /// The open adjustment's values, as the apps show them (adjusting.rs).
     adjust: adjusting::Adjusting,
+    /// Crop and Resize as it is edited.
+    crop_edit: crop_edit::CropEdit,
     last_filter: Option<procraft_gpu::Filter>,
     /// The liquify brush's last stamp (canvas pixels).
     liquify_last: Option<Vec2>,
@@ -989,6 +1011,7 @@ impl CanvasSession {
             feather_base: None,
             adjusting: false,
             adjust: adjusting::Adjusting::default(),
+            crop_edit: crop_edit::CropEdit::default(),
             last_filter: None,
             liquify_last: None,
             studio: None,

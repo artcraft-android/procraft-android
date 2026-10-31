@@ -295,6 +295,13 @@ pub const LAYER_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
 /// holds.
 static BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(LAYER_BUDGET);
 
+/// How many layers with pixels a canvas `width` × `height` holds on this device.
+pub fn layer_cap_for(width: u32, height: u32) -> usize {
+    let bytes = u64::from(width) * u64::from(height) * 4;
+    let budget = BUDGET.load(std::sync::atomic::Ordering::Relaxed);
+    usize::try_from(budget / bytes.max(1)).unwrap_or(usize::MAX).max(1)
+}
+
 /// Sets the memory layers may take on this device (256 MiB to 64 GiB).
 pub fn set_layer_budget(bytes: u64) {
     BUDGET.store(bytes.clamp(256 << 20, 64 << 30), std::sync::atomic::Ordering::Relaxed);
@@ -406,9 +413,7 @@ impl Document {
 
     /// How many layers with pixels (paint layers and masks) a canvas this size holds.
     pub fn layer_cap(&self) -> usize {
-        let bytes = u64::from(self.width) * u64::from(self.height) * 4;
-        let budget = BUDGET.load(std::sync::atomic::Ordering::Relaxed);
-        usize::try_from(budget / bytes.max(1)).unwrap_or(usize::MAX).max(1)
+        layer_cap_for(self.width, self.height)
     }
 
     /// Whether `more` more layers with pixels fit under [`Document::layer_cap`].

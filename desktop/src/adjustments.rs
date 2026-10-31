@@ -68,7 +68,7 @@ pub fn menu(
     backdrops: &mut Vec<f32>,
 ) -> (Rect, Option<Adjustment>) {
     let screen = ctx.content_rect();
-    let (left, arrow_x) = panel::place(MENU_WIDTH, button.center().x, screen, pc::SIDE_BAR_WIDTH + panel::POPOVER_GAP);
+    let (left, arrow_x) = panel::place(ctx, MENU_WIDTH, button.center().x);
     let top = screen.top() + pc::BAR_HEIGHT;
     let groups = adjustment_groups();
     let rows: f32 = groups.iter().map(|g| g.len() as f32 * 44.0 + g.len().saturating_sub(1) as f32).sum::<f32>()

@@ -19,7 +19,7 @@ const GROUP: u32 = 0xFF292929;
 const HEX_FIELD: u32 = 0xFF343434;
 /// "Colors" (9 above it, 5 below), and the tabs under the picker.
 const TITLE: f32 = 42.0;
-const TABS: f32 = 52.0;
+pub const TABS: f32 = 52.0;
 
 /// What the picker did this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +39,8 @@ pub struct CompactColours {
     /// digits typed, while it is open.
     rgb_shown: bool,
     hex: Option<String>,
+    /// Its arrow under it (pointing down at what it colours), else above it.
+    pub arrow_below: bool,
 }
 
 impl CompactColours {
@@ -46,7 +48,14 @@ impl CompactColours {
     pub fn new(rgb: u32, grey_hue: f32) -> CompactColours {
         let mut hsv = [grey_hue, 0.0, 0.0];
         take_rgb(&mut hsv, rgb);
-        CompactColours { hsv, mode: Mode::Disc, pickers: Pickers::default(), rgb_shown: false, hex: None }
+        CompactColours {
+            hsv,
+            mode: Mode::Disc,
+            pickers: Pickers::default(),
+            rgb_shown: false,
+            hex: None,
+            arrow_below: true,
+        }
     }
 
     pub fn rgb(&self) -> u32 {
@@ -90,7 +99,16 @@ impl CompactColours {
                 // allocated, so the canvas under it takes no touch
                 closed = ui.allocate_rect(screen, Sense::click_and_drag()).clicked();
                 ui.interact(rect, ui.scope_id().with("on"), Sense::click_and_drag());
-                let body = panel::below_frame(ui, look, "compact colours", rect, tip - rect.left(), FILL);
+                let body = panel::solid_frame(
+                    ui,
+                    look,
+                    "compact colours",
+                    rect,
+                    tip - rect.left(),
+                    self.arrow_below,
+                    panel::POPOVER_CORNER,
+                    FILL,
+                );
                 text(
                     ui.painter(),
                     pos2(body.left() + 18.0, body.top() + 9.0),
@@ -101,47 +119,63 @@ impl CompactColours {
                     argb(PANEL_TITLE),
                 );
                 let top = body.top() + TITLE;
-                match self.mode {
-                    Mode::Disc => {
-                        let disc = Rect::from_min_size(pos2(body.left() + 10.0, top + 4.0), vec2(240.0, 240.0));
-                        self.pickers.disc(ui, &mut self.hsv, disc);
-                    }
-                    Mode::Classic => {
-                        let square = Rect::from_min_size(pos2(body.left() + 6.0, top), vec2(248.0, 248.0));
-                        self.pickers.square(ui, &mut self.hsv, square);
-                        // the hue only, 240 wide under the square
-                        let row = Rect::from_min_size(pos2(body.left() + 10.0, square.bottom()), vec2(240.0, 36.0));
-                        hue_slider(ui, row, "compact hue", &mut self.hsv);
-                    }
-                    Mode::Harmony => {
-                        let wheel = Rect::from_min_size(pos2(body.left() + 30.0, top + 10.0), vec2(200.0, 200.0));
-                        self.pickers.harmony(ui, &mut self.hsv, wheel, harmony);
-                        let row =
-                            Rect::from_min_size(pos2(body.left() + 10.0, wheel.bottom() + 8.0), vec2(240.0, 36.0));
-                        harmony_brightness(ui, row, &mut self.hsv);
-                    }
-                    Mode::Value => value_hex = self.value(ui, body.left() + 10.0, top),
-                    Mode::Palettes => {
-                        let list = Rect::from_min_size(pos2(body.left(), top), vec2(WIDTH, 240.0));
-                        self.palettes(ui, list, palettes);
-                    }
-                }
+                value_hex = self.picker(ui, body.left(), top, palettes, harmony);
                 let tabs = Rect::from_min_size(pos2(body.left(), top + self.body_height()), vec2(WIDTH, TABS));
-                if let Some(mode) = tabs_row(ui, look, tabs, self.mode) {
-                    self.mode = mode;
-                    self.hex = None;
-                }
+                self.tabs(ui, look, tabs);
             },
         );
-        if let Some(rgb) = hex_pad(ctx, look, &mut self.hex, value_hex) {
-            take_rgb(&mut self.hsv, rgb);
-        }
+        self.keypad(ctx, look, value_hex);
         if closed {
             Some(Picked::Closed)
         } else if self.hsv != before {
             Some(Picked::Colour(self.rgb()))
         } else {
             None
+        }
+    }
+
+    /// The mode shown's picker, 260 wide from (`left`, `top`); Harmony with the colour panel's
+    /// `harmony` kind, Palettes with its `palettes`. Returns Value's hex row (else nothing).
+    pub fn picker(&mut self, ui: &mut Ui, left: f32, top: f32, palettes: &Palettes, harmony: HarmonyKind) -> Rect {
+        match self.mode {
+            Mode::Disc => {
+                let disc = Rect::from_min_size(pos2(left + 10.0, top + 4.0), vec2(240.0, 240.0));
+                self.pickers.disc(ui, &mut self.hsv, disc);
+            }
+            Mode::Classic => {
+                let square = Rect::from_min_size(pos2(left + 6.0, top), vec2(248.0, 248.0));
+                self.pickers.square(ui, &mut self.hsv, square);
+                // the hue only, 240 wide under the square
+                let row = Rect::from_min_size(pos2(left + 10.0, square.bottom()), vec2(240.0, 36.0));
+                hue_slider(ui, row, "compact hue", &mut self.hsv);
+            }
+            Mode::Harmony => {
+                let wheel = Rect::from_min_size(pos2(left + 30.0, top + 10.0), vec2(200.0, 200.0));
+                self.pickers.harmony(ui, &mut self.hsv, wheel, harmony);
+                let row = Rect::from_min_size(pos2(left + 10.0, wheel.bottom() + 8.0), vec2(240.0, 36.0));
+                harmony_brightness(ui, row, &mut self.hsv);
+            }
+            Mode::Value => return self.value(ui, left + 10.0, top),
+            Mode::Palettes => {
+                let list = Rect::from_min_size(pos2(left, top), vec2(WIDTH, 240.0));
+                self.palettes(ui, list, palettes);
+            }
+        }
+        Rect::NOTHING
+    }
+
+    /// The modes as icons at `rect` (260 by [`TABS`]); a tap shows that mode.
+    pub fn tabs(&mut self, ui: &Ui, look: &mut Look, rect: Rect) {
+        if let Some(mode) = tabs_row(ui, look, rect, self.mode) {
+            self.mode = mode;
+            self.hex = None;
+        }
+    }
+
+    /// The hex keypad over Value's hex row `hex_row`, while it is open.
+    pub fn keypad(&mut self, ctx: &egui::Context, look: &mut Look, hex_row: Rect) {
+        if let Some(rgb) = hex_pad(ctx, look, &mut self.hex, hex_row) {
+            take_rgb(&mut self.hsv, rgb);
         }
     }
 

@@ -63,7 +63,7 @@ const CHROMA_KINDS: [(ChromaticKind, &str, f32, &Icon); 2] = [
 ];
 
 /// A slider's value as shown: None at nothing, Max at all (`max`), else a percentage.
-fn shown(v: f32, max: bool) -> String {
+pub(crate) fn shown(v: f32, max: bool) -> String {
     if v <= 0.0 {
         "None".into()
     } else if max && v >= 1.0 {
@@ -74,12 +74,12 @@ fn shown(v: f32, max: bool) -> String {
 }
 
 /// Where a toolbar `size` big floats: centred, 25 above the window's foot.
-fn panel_rect(screen: Rect, w: f32, h: f32) -> Rect {
+pub(crate) fn panel_rect(screen: Rect, w: f32, h: f32) -> Rect {
     Rect::from_min_size(pos2(screen.center().x - w / 2.0, screen.bottom() - PANEL_RISE - h), vec2(w, h))
 }
 
 /// Draws a toolbar's panel and runs `inside` in it.
-fn panel(ctx: &egui::Context, id: &str, rect: Rect, inside: impl FnOnce(&mut Ui)) {
+pub(crate) fn panel(ctx: &egui::Context, id: &str, rect: Rect, inside: impl FnOnce(&mut Ui)) {
     egui::Area::new(Id::unique(id)).fixed_pos(rect.min).order(Order::Foreground).show(ctx, |ui| {
         ui.allocate_rect(rect, Sense::click());
         ui.painter().rect_filled(rect, 33, argb(PANEL_FILL));
@@ -89,7 +89,7 @@ fn panel(ctx: &egui::Context, id: &str, rect: Rect, inside: impl FnOnce(&mut Ui)
 
 /// A toolbar's row of kinds `width` wide, its top centred at `top`, the `chosen` one blue.
 /// Returns the one tapped.
-fn kinds_switch(
+pub(crate) fn kinds_switch(
     ui: &Ui,
     look: &mut Look,
     top: Pos2,
@@ -127,7 +127,7 @@ fn kinds_switch(
 #[allow(clippy::too_many_arguments)]
 /// A labelled toolbar slider at `at` (its top left), `width` wide: `both` ways runs −1..1 with its
 /// fill from the middle, else 0..1. Returns the value dragged to.
-fn option_slider(
+pub(crate) fn option_slider(
     ui: &Ui,
     at: Pos2,
     width: f32,
@@ -508,7 +508,7 @@ impl Toolbars {
 
 /// A toolbar's "•••" menu, 16 above its `button`: `title` over what `inside` draws in the
 /// `height` under it. A tap outside closes it (`open` goes false).
-fn options_menu(
+pub(crate) fn options_menu(
     ctx: &egui::Context,
     open: &mut bool,
     button: Rect,
@@ -536,7 +536,7 @@ fn options_menu(
 
 /// Choices in a rounded group of an options menu, `height` each: the `chosen` one blue with a
 /// tick, a line between them. Returns the one tapped.
-fn options_choices(
+pub(crate) fn options_choices(
     ui: &Ui,
     look: &mut Look,
     group: Rect,

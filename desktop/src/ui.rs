@@ -24,12 +24,13 @@ const POPOVER_FILL: Color32 = Color32::from_rgb(0x28, 0x2a, 0x2d);
 /// What the interface asks the app to do once the frame is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
+    /// Back to the gallery, the artwork kept.
+    Gallery,
     New,
     Open,
     Save,
     SaveAs,
     Export(Format),
-    InsertFile,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -52,7 +53,7 @@ pub struct Interface {
     /// The artwork's edits when it was last saved: anything else is unsaved.
     pub saved_edits: u64,
     open: Option<Popover>,
-    colours: Colours,
+    pub(crate) colours: Colours,
     drop: ColourDrop,
     library: Library,
     overlays: Overlays,
@@ -66,7 +67,7 @@ pub struct Interface {
     layer_choice: Option<(egui::Pos2, Vec<u64>)>,
     actions_panel: Actions,
     layers: Layers,
-    look: Look,
+    pub look: Look,
     side_bar: SideBar,
     /// Transform: its box over the canvas and its toolbar, while open.
     transform: crate::transform::Transform,
@@ -75,6 +76,16 @@ pub struct Interface {
     /// The gesture settings (kept between runs), and their page while it is open.
     gestures: std::sync::Arc<procraft_core::GestureSettings>,
     gesture_controls: crate::gesture_controls::GestureControls,
+    /// Canvas information, while it is open.
+    canvas_info: Option<crate::canvas_info::CanvasInfo>,
+    /// The reference window.
+    reference: crate::reference::Reference,
+    /// Crop and Resize.
+    crop: crate::crop::Crop,
+    /// The drawing guide's editor.
+    guide_editor: crate::guide_editor::GuideEditor,
+    /// The artwork's folder in the gallery.
+    pub artwork_dir: Option<String>,
     quick_menu: crate::quick_menu::QuickMenu,
     /// An open adjustment's bar, panel and tap menu; Gradient Map's library (kept between runs).
     adjustments: crate::adjustments::Adjustments,
@@ -87,10 +98,17 @@ pub struct Interface {
     /// The brushes changed (the library closed, a slider let go, a notch saved): keep them.
     pub keep_brushes: bool,
     brushes_were_open: bool,
+    /// The Prefs tab's settings (kept between runs), whether the side bar shows, and the licences
+    /// while they show.
+    prefs: crate::prefs::Prefs,
+    side_bar_shown: bool,
+    licences: bool,
+    /// Animation Assist's bar, while it is on, and sharing the layers as an animation.
+    animation: crate::animation::AnimationBar,
+    animated_export: Option<crate::animated_export::AnimatedExport>,
+    /// The artwork's time-lapse: recorded, replayed, made into a video.
+    time_lapse: crate::timelapse::TimeLapseUi,
 }
-
-/// How long two fingers are held before undo repeats, milliseconds.
-const RAPID_UNDO_MS: f64 = 650.0;
 
 impl Default for Interface {
     fn default() -> Interface {
@@ -117,6 +135,11 @@ impl Default for Interface {
             selection: crate::selection::Selection::default(),
             gestures: procraft_core::GestureSettings::new(crate::files::kept_gestures()),
             gesture_controls: crate::gesture_controls::GestureControls::default(),
+            canvas_info: None,
+            reference: crate::reference::Reference::default(),
+            crop: crate::crop::Crop::default(),
+            guide_editor: crate::guide_editor::GuideEditor::default(),
+            artwork_dir: None,
             quick_menu: crate::quick_menu::QuickMenu::default(),
             adjustments: crate::adjustments::Adjustments::default(),
             gradients: procraft_core::Gradients::open(
@@ -127,6 +150,12 @@ impl Default for Interface {
             blocked_alert: Alert::default(),
             keep_brushes: false,
             brushes_were_open: false,
+            prefs: crate::prefs::Prefs::kept(),
+            side_bar_shown: true,
+            licences: false,
+            animation: crate::animation::AnimationBar::default(),
+            animated_export: None,
+            time_lapse: crate::timelapse::TimeLapseUi::default(),
         }
     }
 }
@@ -139,8 +168,10 @@ impl Interface {
         self.selection.on = false;
         self.drop.end_filling();
         session.use_colour_history(self.colours.history.clone());
-        session.set_touch_settings(self.gestures.touch_settings(RAPID_UNDO_MS));
+        session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
         session.use_gradients(self.gradients.clone());
+        self.prefs.apply(session);
+        self.time_lapse.open(self.artwork_dir.as_deref(), session.edits());
         self.adjustments.menu_at = None;
         self.colours.send(session);
         self.place_canvas(session, scale);
@@ -151,12 +182,17 @@ impl Interface {
         session.set_fit_insets(0.0, pc::BAR_HEIGHT * scale, 0.0, 0.0);
     }
 
-    pub fn show(&mut self, ui: &mut Ui, session: &CanvasSession, input: &mut Input) {
-        let ctx = ui.ctx().clone();
+    /// The app's fonts and look, set the first time anything shows.
+    pub fn style_once(&mut self, ctx: &egui::Context) {
         if !self.styled {
-            style(&ctx);
+            style(ctx);
             self.styled = true;
         }
+    }
+
+    pub fn show(&mut self, ui: &mut Ui, session: &std::sync::Arc<CanvasSession>, input: &mut Input) {
+        let ctx = ui.ctx().clone();
+        self.style_once(&ctx);
         self.commands(&ctx, session, input);
         // the brush library closed: what was done in it is kept
         let brushes_open = self.open == Some(Popover::Brushes);
@@ -164,6 +200,8 @@ impl Interface {
         self.brushes_were_open = brushes_open;
         let info = session.info();
         self.shortcuts(&ctx, session, &info);
+        self.overlays.cursor_style = self.prefs.cursor_style;
+        input.hover_shown = false;
         let lit = Lit {
             actions: self.open == Some(Popover::Actions),
             transform: self.transform.on,
@@ -173,9 +211,55 @@ impl Interface {
             panel_open: matches!(self.open, Some(Popover::Layers | Popover::Colour)),
         };
         let colour = srgb(self.colours.rgb());
+        self.time_lapse.record(&ctx, session, input.idle());
+        // the time-lapse replayed over everything
+        if self.time_lapse.replaying() {
+            self.canvas_rect = Rect::NOTHING;
+            self.animation.reset(session);
+            if let Some(said) = self.time_lapse.show(&ctx, &mut self.look, &session.name()) {
+                crate::files::tell("Time-lapse", said);
+            }
+            session.set_backdrops(Vec::new());
+            self.popover_open = false;
+            return;
+        }
+        // sharing as an animation: its screen over everything
+        if let Some(export) = self.animated_export.as_mut() {
+            self.canvas_rect = Rect::NOTHING;
+            self.animation.reset(session);
+            match export.show(&ctx, &mut self.look, session) {
+                Some(crate::animated_export::Ended::Closed) => self.animated_export = None,
+                Some(crate::animated_export::Ended::Failed) => {
+                    self.animated_export = None;
+                    crate::files::tell("Share", "The animation could not be exported.");
+                }
+                None => {}
+            }
+            session.set_backdrops(Vec::new());
+            self.popover_open = false;
+            return;
+        }
+        // Crop and Resize: the canvas, its frame and header alone
+        if self.crop.open {
+            self.canvas_rect = Rect::EVERYTHING;
+            self.crop.show(&ctx, &mut self.look, session);
+            session.set_backdrops(Vec::new());
+            self.popover_open = false;
+            return;
+        }
+        // the drawing guide's editor: the canvas, the guide and the editor alone
+        if self.guide_editor.open {
+            self.canvas_rect = Rect::EVERYTHING;
+            guide_lines(&ctx, session);
+            self.guide_editor.show(&ctx, &mut self.look, session);
+            session.set_backdrops(Vec::new());
+            self.popover_open = false;
+            return;
+        }
         if self.bars_hidden {
             // full screen: the canvas alone (the overlays still show)
             self.canvas_rect = Rect::EVERYTHING;
+            self.hover_cursor(&ctx, session, &info, input);
             self.overlays.show(ui, &mut self.look, colour, false);
             self.drop.show(&ctx, session, to_hex(self.colours.rgb()), 0.0);
             self.copy_paste_panel(&ctx, session);
@@ -188,7 +272,7 @@ impl Interface {
         }
         let bar = crate::chrome::top_bar(ui, &mut self.look, info.tool, colour, self.colours.hsv[2], &lit);
         match bar.pressed {
-            Some(BarButton::Gallery) => self.actions.push(Action::Open),
+            Some(BarButton::Gallery) => self.actions.push(Action::Gallery),
             Some(BarButton::Actions) => self.toggle(Popover::Actions),
             Some(BarButton::Layers) => self.toggle(Popover::Layers),
             Some(b @ (BarButton::Paint | BarButton::Smudge | BarButton::Erase)) => {
@@ -229,7 +313,20 @@ impl Interface {
         }
         self.canvas_rect = ui.available_rect_before_wrap();
         let mut backdrops = Vec::new();
-        let taps = self.side_bar.show(ui, &mut self.look, session, &info, session.pick_next(), &mut backdrops);
+        // a mode taking the screen puts the side bar away
+        let adjusting = session.adjustment_shown();
+        let side_bar = self.side_bar_shown
+            && !self.transform.on
+            && !self.selection.on
+            && (adjusting.adjustment.is_none() || adjusting.pencil);
+        crate::panel::side_bar_at(&ctx, self.side_bar_shown, self.prefs.right_handed);
+        let taps = if side_bar {
+            let modify_lit = session.pick_next();
+            let right = self.prefs.right_handed;
+            self.side_bar.show(ui, &mut self.look, session, &info, modify_lit, right, &mut backdrops)
+        } else {
+            crate::chrome::SideTaps::default()
+        };
         self.keep_brushes |= taps.brush_changed;
         if taps.undo {
             self.undo(session);
@@ -243,6 +340,7 @@ impl Interface {
         if taps.modify_tapped && !used {
             session.set_pick_next(!session.pick_next());
         }
+        self.hover_cursor(&ctx, session, &info, input);
         if let Some(kind) = self.overlays.show(ui, &mut self.look, colour, true) {
             self.overlays.shape = session.quickshape_choose(kind).or(self.overlays.shape.take());
         }
@@ -263,6 +361,9 @@ impl Interface {
         if let Some(open) = self.open {
             self.popover(&ctx, session, open, anchor(open), info.tool, &mut backdrops);
         }
+        if self.open != Some(Popover::Actions) {
+            self.actions_panel.closed();
+        }
         self.transform.show(&ctx, &mut self.look, session, &mut backdrops);
         self.selection.show(&ctx, &mut self.look, session, pc::BAR_HEIGHT);
         if let Some(asked) = self.adjustments.show(
@@ -276,6 +377,17 @@ impl Interface {
         ) {
             self.adjustment_asked(session, asked);
         }
+        guide_lines(&ctx, session);
+        self.reference.show(&ctx, &mut self.look, session);
+        // a full-screen page covers the timeline, as it covers the canvas
+        if self.canvas_info.is_none() && !self.gesture_controls.open {
+            let said = self.animation.show(&ctx, &mut self.look, session, &self.colours.palettes, self.colours.harmony);
+            if let Some(crate::animation::Said::NoRoom) = said {
+                crate::files::no_room(session);
+            }
+        } else {
+            self.animation.reset(session);
+        }
         self.drop.show(&ctx, session, to_hex(self.colours.rgb()), pc::BAR_HEIGHT);
         self.copy_paste_panel(&ctx, session);
         self.layer_choice(&ctx, session);
@@ -283,14 +395,50 @@ impl Interface {
         self.blocked_alert(&ctx, session);
         // a gesture setting changed: the touches follow it, and it is kept
         if self.gesture_controls.show(&ctx, &mut self.look, &self.gestures) {
-            session.set_touch_settings(self.gestures.touch_settings(RAPID_UNDO_MS));
+            session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
             crate::files::keep_gestures(&self.gestures.kept());
+        }
+        if let Some(info) = self.canvas_info.as_mut() {
+            use crate::canvas_info::Ended;
+            match info.show(&ctx, &mut self.look, session) {
+                // another profile: the canvas and the current colour turned into it
+                Some(Ended::Done(Some(profile))) => {
+                    let (from, rgb) = (session.profile(), to_hex(self.colours.rgb()));
+                    if session.change_profile(profile.clone()) {
+                        self.colours.set_rgb(session, crate::canvas_info::colour_in(rgb, &from, &profile));
+                    }
+                    self.canvas_info = None;
+                }
+                Some(_) => self.canvas_info = None,
+                None => {}
+            }
+        }
+        if let Some(said) = self.time_lapse.show(&ctx, &mut self.look, &session.name()) {
+            crate::files::tell("Time-lapse", said);
+        }
+        if self.licences && crate::licences::show(&ctx) {
+            self.licences = false;
         }
         session.set_backdrops(backdrops);
         if input.moving_view() && !ctx.is_pointer_over_egui() {
             ctx.set_cursor_icon(egui::CursorIcon::Grab);
         }
         self.popover_open = self.open.is_some();
+    }
+
+    /// The brush's outline where the mouse hovers over the canvas, as the pen's hover shows it,
+    /// while nothing is pressed (and while it would paint there).
+    fn hover_cursor(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo, input: &mut Input) {
+        if !input.idle() {
+            return;
+        }
+        let painting = session.adjustment_shown().adjustment.is_none() && !self.selection.on && !self.transform.on;
+        input.hover_shown = painting && self.prefs.cursor_shown(true);
+        let ppp = ctx.pixels_per_point();
+        let at = input.hovering().filter(|_| input.hover_shown).map(|(x, y)| egui::pos2(x, y) / ppp).filter(|at| {
+            self.canvas_rect.contains(*at) && ctx.layer_id_at(*at).is_none_or(|l| l.order == egui::Order::Background)
+        });
+        self.overlays.hover(session, info, ppp, at);
     }
 
     /// Does what the touches asked.
@@ -333,7 +481,10 @@ impl Interface {
                     self.overlays.shape = None;
                     self.overlays.shape_editing = false;
                 }
-                TouchCommand::Cursor { x, y } => self.overlays.cursor(ctx, session, Some((x, y))),
+                TouchCommand::Cursor { x, y } if self.prefs.cursor_shown(false) => {
+                    self.overlays.cursor(ctx, session, Some((x, y)));
+                }
+                TouchCommand::Cursor { .. } => {}
                 TouchCommand::CursorGone => self.overlays.cursor(ctx, session, None),
                 TouchCommand::FillThreshold { threshold } => {
                     self.drop.slid(threshold);
@@ -502,7 +653,7 @@ impl Interface {
             QuickAction::QuickshapeOn => {
                 let on = self.gestures.is_on(GesturePurpose::Quickshape, "DRAW_HOLD".into());
                 self.gestures.set(GesturePurpose::Quickshape, "DRAW_HOLD".into(), !on);
-                session.set_touch_settings(self.gestures.touch_settings(RAPID_UNDO_MS));
+                session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
                 crate::files::keep_gestures(&self.gestures.kept());
             }
             QuickAction::LayerSelect => {
@@ -524,6 +675,50 @@ impl Interface {
     }
 
     /// Transform on (the current layer, or what is selected of it, in a box) or off (kept).
+    /// A picture the user picks put on a new layer of its own, then transformed (a moving GIF's
+    /// frames each on a layer of its own, for the timeline), as Insert a file and Insert a photo
+    /// do.
+    fn insert_picture(&mut self, session: &CanvasSession, photo: bool) {
+        let title = if photo { "Insert a photo" } else { "Insert a file" };
+        let Some(path) = rfd::FileDialog::new()
+            .set_title(title)
+            .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            crate::files::tell("Can't insert it", "This picture can't be opened.");
+            return;
+        };
+        if let Some(done) = session.insert_gif_frames(bytes.clone(), false) {
+            if done.added == 0 && !done.full {
+                crate::files::tell("Can't insert it", "This picture can't be opened.");
+                return;
+            }
+            if done.added > 0 {
+                self.overlays.notice("Frames saved to timeline", false);
+            }
+            if done.full {
+                crate::files::no_room(session);
+            }
+            return;
+        }
+        match image::load_from_memory(&bytes) {
+            Ok(picture) => {
+                let rgba = picture.to_rgba8();
+                let image =
+                    procraft_core::ThumbnailImage { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() };
+                if session.insert_image(image, false).is_some() {
+                    self.toggle_transform(session);
+                } else {
+                    crate::files::no_room(session);
+                }
+            }
+            Err(_) => crate::files::tell("Can't insert it", "This picture can't be opened."),
+        }
+    }
+
     fn toggle_transform(&mut self, session: &CanvasSession) {
         self.drop.end_filling();
         if self.transform.on {
@@ -710,6 +905,7 @@ impl Interface {
             icon: Some(icon),
             destructive: false,
             extra: extra.map(Into::into),
+            first: None,
         });
         false
     }
@@ -757,7 +953,8 @@ impl Interface {
             Popover::Layers => self.layers.modal(),
             Popover::Brushes => self.library.modal(),
             Popover::Colour => self.colours.modal(),
-            Popover::Actions | Popover::Adjustments => false,
+            Popover::Actions => self.licences || self.actions_panel.modal(),
+            Popover::Adjustments => false,
         };
         let shown = match which {
             Popover::Brushes => {
@@ -786,13 +983,53 @@ impl Interface {
                 shown
             }
             Popover::Actions => {
-                let can_paste = self.clipboard.is_some();
-                let (shown, act) = self.actions_panel.show(ctx, &mut self.look, button, can_paste, backdrops);
+                let assist = session.animation_settings();
+                let showing = crate::actions::Showing {
+                    can_paste: self.clipboard.is_some(),
+                    animation: assist.as_ref().is_some_and(|a| !a.pages),
+                    pages: assist.as_ref().is_some_and(|a| a.pages),
+                    time_lapse: self.time_lapse.recording(),
+                    reference: self.reference.on,
+                    guide: session.guide().on,
+                    side_bar: self.side_bar_shown,
+                };
+                let (shown, act) =
+                    self.actions_panel.show(ctx, &mut self.look, button, &showing, &mut self.prefs, backdrops);
                 match act {
-                    Some(Act::Flip { horizontal }) => session.flip_canvas(horizontal),
-                    Some(Act::InsertFile) => {
-                        self.actions.push(Action::InsertFile);
+                    Some(Act::Prefs) => {
+                        self.prefs.apply(session);
+                        session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
+                        self.prefs.keep();
+                    }
+                    Some(Act::SideBar) => self.side_bar_shown = !self.side_bar_shown,
+                    Some(Act::TimeLapseReplay) => {
                         self.open = None;
+                        self.time_lapse.replay();
+                    }
+                    Some(Act::TimeLapseRecording) => self.time_lapse.set_recording(!self.time_lapse.recording()),
+                    Some(Act::ExportTimeLapse) => {
+                        self.open = None;
+                        self.time_lapse.ask_length();
+                    }
+                    Some(Act::AnimatedExport(format)) => {
+                        self.open = None;
+                        self.animated_export = Some(crate::animated_export::AnimatedExport::new(format));
+                    }
+                    Some(act @ (Act::AnimationAssist | Act::PageAssist)) => {
+                        self.animation.reset(session);
+                        let pages = act == Act::PageAssist;
+                        let on = session.animation_settings().is_some_and(|a| a.pages == pages);
+                        if pages {
+                            session.set_page_assist(!on);
+                        } else {
+                            session.set_animation_assist(!on);
+                        }
+                    }
+                    Some(Act::Licences) => self.licences = true,
+                    Some(Act::Flip { horizontal }) => session.flip_canvas(horizontal),
+                    Some(act @ (Act::InsertFile | Act::InsertPhoto)) => {
+                        self.open = None;
+                        self.insert_picture(session, act == Act::InsertPhoto);
                     }
                     Some(Act::Share(format)) => {
                         self.actions.push(Action::Export(format));
@@ -803,11 +1040,27 @@ impl Interface {
                         self.open = None;
                         self.gesture_controls.open = true;
                     }
+                    Some(Act::Reference) => self.reference.on = !self.reference.on,
+                    Some(Act::DrawingGuide) => _ = session.set_guide_on(!session.guide().on),
+                    Some(Act::EditGuide) => {
+                        self.open = None;
+                        self.guide_editor.begin(ctx, session);
+                    }
+                    Some(Act::Crop) => {
+                        self.open = None;
+                        self.crop.begin(session);
+                    }
+                    Some(Act::CanvasInfo) => {
+                        self.open = None;
+                        self.canvas_info = Some(crate::canvas_info::CanvasInfo::new(session, self.artwork_dir.clone()));
+                    }
                     Some(Act::Cut) => self.cut_layer(session),
                     Some(Act::Copy) => self.copy_layer(session),
                     Some(Act::CopyCanvas) => self.copy_canvas(session),
                     Some(Act::Paste) => self.paste(session),
-                    None => {}
+                    // the panel does these itself
+                    Some(Act::Page(_) | Act::ScalingMenu | Act::RightHanded | Act::BrushCursor | Act::ResetInput)
+                    | None => {}
                 }
                 shown
             }
@@ -931,6 +1184,22 @@ impl Interface {
     fn choose_tool(&mut self, session: &CanvasSession, tool: ToolKind) {
         session.set_tool(tool);
         self.library.tool_changed();
+    }
+}
+
+/// The drawing guide's lines over the canvas while it is on.
+fn guide_lines(ctx: &egui::Context, session: &CanvasSession) {
+    let g = session.guide();
+    if !g.on {
+        return;
+    }
+    let ppp = ctx.pixels_per_point();
+    let [r, gr, b] = [0, 1, 2].map(|k| (g.color.get(k).copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8);
+    let colour = Color32::from_rgba_unmultiplied(r, gr, b, (g.opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let stroke = Stroke::new(0.25 + 1.5 * g.thickness, colour);
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::unique("drawing guide")));
+    for &[x0, y0, x1, y1] in g.lines.as_chunks::<4>().0 {
+        painter.line_segment([egui::pos2(x0, y0) / ppp, egui::pos2(x1, y1) / ppp], stroke);
     }
 }
 

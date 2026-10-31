@@ -9,6 +9,7 @@ use procraft_core::{CanvasSession, Pick, QuickShapeInfo, QuickShapeKind};
 
 use crate::icons;
 use crate::look::{Look, Weight, argb, pc, text};
+use crate::prefs::CursorStyle;
 
 const NOTICE_FILL: u32 = 0xC2424242;
 const NOTICE_INK: u32 = 0xFFD7D7D7;
@@ -39,7 +40,6 @@ pub struct Picking {
     pub rgb: Option<u32>,
 }
 
-#[derive(Default)]
 pub struct Overlays {
     notice: Option<Notice>,
     pub picking: Option<Picking>,
@@ -49,6 +49,21 @@ pub struct Overlays {
     /// The brush's outline where the pen paints (points): its radius, and the brush's outline
     /// setting (none, contrasting rings, or the colour).
     cursor: Option<(Pos2, f32, i32)>,
+    /// How the cursor is drawn (Advanced cursor settings).
+    pub cursor_style: CursorStyle,
+}
+
+impl Default for Overlays {
+    fn default() -> Overlays {
+        Overlays {
+            notice: None,
+            picking: None,
+            shape: None,
+            shape_editing: false,
+            cursor: None,
+            cursor_style: CursorStyle::Brush,
+        }
+    }
 }
 
 impl Overlays {
@@ -70,6 +85,15 @@ impl Overlays {
                 )
             });
             (pos2(x, y) / ppp, r, outline)
+        });
+    }
+
+    /// The brush's outline goes to `at` (points), where the pointer hovers, sized for the brush
+    /// as it is now (`info`); or away.
+    pub fn hover(&mut self, session: &CanvasSession, info: &procraft_core::CanvasInfo, ppp: f32, at: Option<Pos2>) {
+        self.cursor = at.map(|at| {
+            let outline = session.current_brush_setting("cursor_outline".into()).round() as i32;
+            (at, info.brush_diameter * info.zoom / 2.0 / ppp, outline)
         });
     }
 
@@ -133,6 +157,12 @@ impl Overlays {
                 // the brush's outline where the pen paints: a thin dark ring with a light edge, or
                 // the colour, as the brush says
                 if let Some((at, r, outline)) = self.cursor.filter(|(_, r, _)| *r >= 2.0) {
+                    // the style chosen, or as the brush says: none, contrasting rings, or the colour
+                    let outline = match self.cursor_style {
+                        CursorStyle::Contrast => 1,
+                        CursorStyle::Colour => 2,
+                        CursorStyle::Brush => outline,
+                    };
                     match outline {
                         0 => {}
                         2 => {

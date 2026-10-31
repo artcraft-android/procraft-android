@@ -187,8 +187,10 @@ const SLIDER_PANEL_FILL: u32 = 0xC93E3E3E;
 const SLIDER_PANEL_INK: u32 = 0xFFF0F0F0;
 
 impl SideBar {
-    /// The side bar against the window's left edge; a slider's panel adds its frost to `backdrops`
-    /// (window pixels: left, top, right, bottom, corner, how much shows).
+    /// The side bar against the window's left edge (the right one, `right`-handed: everything
+    /// mirrored but the glyphs); a slider's panel adds its frost to `backdrops` (window pixels:
+    /// left, top, right, bottom, corner, how much shows).
+    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ui: &mut Ui,
@@ -196,24 +198,32 @@ impl SideBar {
         session: &CanvasSession,
         info: &CanvasInfo,
         modify_lit: bool,
+        right: bool,
         backdrops: &mut Vec<f32>,
     ) -> SideTaps {
         let mut taps = SideTaps::default();
         let ctx = ui.ctx().clone();
         let window = ctx.content_rect();
         let top = window.top() + window.height() * pc::SIDE_BAR_CENTRE - pc::SIDE_BAR_HEIGHT / 2.0;
-        let bar = Rect::from_min_size(pos2(window.left(), top), vec2(pc::SIDE_BAR_WIDTH, pc::SIDE_BAR_HEIGHT));
-        let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(bar.min + vec2(x, y), vec2(w, h));
+        let left = if right { window.right() - pc::SIDE_BAR_WIDTH } else { window.left() };
+        let bar = Rect::from_min_size(pos2(left, top), vec2(pc::SIDE_BAR_WIDTH, pc::SIDE_BAR_HEIGHT));
+        // a control's left edge in the bar, mirrored on the right
+        let x = |left: f32, width: f32| if right { pc::SIDE_BAR_WIDTH - left - width } else { left };
+        let at = |l: f32, y: f32, w: f32, h: f32| Rect::from_min_size(bar.min + vec2(x(l, w), y), vec2(w, h));
         let tracks = [(Slider::Size, SIZE_TRACK_TOP, info.size), (Slider::Opacity, OPACITY_TRACK_TOP, info.opacity)];
         egui::Area::new(egui::Id::unique("side bar")).fixed_pos(bar.min).order(egui::Order::Middle).show(&ctx, |ui| {
             ui.set_min_size(bar.size());
             // translucent, with windows where the slider tracks are: they show what is behind
-            look.shape(ui, "side bar", (), bar, |pixmap, t| {
+            look.shape(ui, "side bar", right, bar, |pixmap, t| {
                 let mut pb = tiny_skia::PathBuilder::new();
                 let c = pc::SIDE_BAR_CORNER;
-                round_rect(&mut pb, Rect::from_min_size(pos2(0.0, 0.0), bar.size()), [0.0, c, c, 0.0]);
+                let corners = if right { [c, 0.0, 0.0, c] } else { [0.0, c, c, 0.0] };
+                round_rect(&mut pb, Rect::from_min_size(pos2(0.0, 0.0), bar.size()), corners);
                 for (_, y, _) in tracks {
-                    let track = Rect::from_min_size(pos2(SLIDER_LEFT, y), vec2(pc::SLIDER_WIDTH, pc::SLIDER_HEIGHT));
+                    let track = Rect::from_min_size(
+                        pos2(x(SLIDER_LEFT, pc::SLIDER_WIDTH), y),
+                        vec2(pc::SLIDER_WIDTH, pc::SLIDER_HEIGHT),
+                    );
                     round_rect(&mut pb, track, [pc::SLIDER_CORNER; 4]);
                 }
                 fill(pixmap, pb.finish(), argb(pc::SIDE_BAR), t);
@@ -263,7 +273,8 @@ impl SideBar {
         });
         if let Some((which, kept)) = self.panel {
             let y = if which == Slider::Size { SIZE_TRACK_TOP } else { OPACITY_TRACK_TOP };
-            let min = bar.min + vec2(SLIDER_LEFT + pc::SLIDER_WIDTH + SLIDER_PANEL_GAP, y - SLIDER_PANEL_RISE);
+            let left = x(SLIDER_LEFT + pc::SLIDER_WIDTH + SLIDER_PANEL_GAP, SLIDER_PANEL_SIDE);
+            let min = bar.min + vec2(left, y - SLIDER_PANEL_RISE);
             let rect = Rect::from_min_size(min, vec2(SLIDER_PANEL_SIDE, SLIDER_PANEL_SIDE));
             self.changed |= slider_panel(&ctx, look, session, which, rect, info, backdrops);
             // kept up, it goes at the next press anywhere but on it and its slider

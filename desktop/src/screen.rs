@@ -63,9 +63,15 @@ impl Screen {
         !canvas.contains(at) || ctx.layer_id_at(at).is_some_and(|l| l.order != egui::Order::Background)
     }
 
-    /// Draws the canvas and the interface over it, and shows them. Returns how soon another frame
-    /// is wanted, if one is (the interface can ask for one later, as a hold waits).
-    pub fn draw(&mut self, session: &CanvasSession, started: Instant, output: egui::FullOutput) -> Option<Duration> {
+    /// Draws the canvas (if an artwork is open) and the interface over it, and shows them. Returns
+    /// how soon another frame is wanted, if one is (the interface can ask for one later, as a hold
+    /// waits).
+    pub fn draw(
+        &mut self,
+        session: Option<&CanvasSession>,
+        started: Instant,
+        output: egui::FullOutput,
+    ) -> Option<Duration> {
         let egui::FullOutput { platform_output, mut textures_delta, shapes, pixels_per_point, viewport_output } =
             output;
         self.egui.handle_platform_output(&self.window, platform_output);
@@ -98,7 +104,7 @@ impl Screen {
             | wgpu::CurrentSurfaceTexture::Validation => return None,
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let canvas_soon = session.draw(&view, format, size, screen, started);
+        let canvas_soon = session.is_some_and(|s| s.draw(&view, format, size, screen, started));
 
         let (device, queue) = (&self.gpu.device, &self.gpu.queue);
         let jobs = self.egui.egui_ctx().tessellate(shapes, pixels_per_point);
@@ -112,8 +118,15 @@ impl Screen {
                     view: &view,
                     depth_slice: None,
                     resolve_target: None,
-                    // over the canvas just drawn
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    // over the canvas just drawn (the gallery covers the whole window)
+                    ops: wgpu::Operations {
+                        load: if session.is_some() {
+                            wgpu::LoadOp::Load
+                        } else {
+                            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                        },
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,

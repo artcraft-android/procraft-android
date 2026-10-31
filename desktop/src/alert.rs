@@ -35,12 +35,16 @@ pub struct Asking {
     pub icon: Option<&'static Icon>,
     pub destructive: bool,
     pub extra: Option<String>,
+    /// The first button's label in place of Cancel: it answers [`Answer::First`], and only a tap
+    /// beside the panel cancels.
+    pub first: Option<String>,
 }
 
 /// How an alert was answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Answer {
     Cancel,
+    First,
     Action,
     Extra,
 }
@@ -62,6 +66,7 @@ impl Alert {
             icon,
             destructive: true,
             extra: None,
+            first: None,
         });
     }
 
@@ -162,7 +167,10 @@ impl Alert {
             }
             let top = panel.bottom() - 16.0 - BUTTON_HEIGHT;
             let action_fill = if asking.destructive { DESTROY_FILL } else { pc::ACCENT };
-            let mut choices = vec![("Cancel", CANCEL_FILL, Answer::Cancel)];
+            let mut choices = match &asking.first {
+                Some(first) => vec![(first.as_str(), CANCEL_FILL, Answer::First)],
+                None => vec![("Cancel", CANCEL_FILL, Answer::Cancel)],
+            };
             if let Some(extra) = &asking.extra {
                 choices.push((extra.as_str(), pc::ACCENT, Answer::Extra));
             }

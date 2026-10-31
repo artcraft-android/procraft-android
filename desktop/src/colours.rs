@@ -280,8 +280,7 @@ impl Colours {
         backdrops: &mut Vec<f32>,
     ) -> Rect {
         let screen = ctx.content_rect();
-        let (left, arrow_x) =
-            panel::place(PANEL_WIDTH, button.center().x, screen, pc::SIDE_BAR_WIDTH + panel::POPOVER_GAP);
+        let (left, arrow_x) = panel::place(ctx, PANEL_WIDTH, button.center().x);
         let top = screen.top() + pc::BAR_HEIGHT;
         // the header (with Harmony's kind under its title), the picker, the history (44 and 36),
         // the palette (44 and three rows of 36) and the tabs (70)

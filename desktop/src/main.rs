@@ -8,30 +8,43 @@ mod actions;
 mod adjust_panels;
 mod adjustments;
 mod alert;
+mod animated_export;
+mod animation;
+mod canvas_info;
 mod chrome;
 mod colour_drop;
 mod colours;
 mod compact_colours;
 mod copy_paste;
+mod crop;
+mod custom_canvas;
 mod files;
+mod gallery;
 mod gesture_controls;
 mod gradient_map;
+mod guide_editor;
 mod icons;
 mod input;
 mod layer_choice;
 mod layers;
 mod library;
+mod licences;
 mod liquify;
 mod look;
 mod menu;
 mod overlays;
 mod panel;
+mod prefs;
 mod quick_menu;
+mod reference;
 mod screen;
 mod selection;
+mod timelapse;
+mod tool_header;
 mod transform;
 mod transform_numeric;
 mod ui;
+mod video;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -59,12 +72,16 @@ fn main() {
         }
     };
     event_loop.set_control_flow(ControlFlow::Wait);
+    // the colour profiles imported before
+    procraft_core::set_profile_folder(files::app_dir().join("profiles").to_string_lossy().into_owned());
     let mut app = App {
         started: Instant::now(),
         last_frame: Instant::now(),
         again: None,
         screen: None,
         session: None,
+        artwork: None,
+        gallery: gallery::Gallery::new(),
         ui: Interface::default(),
         input: input::Input::default(),
         title: String::new(),
@@ -81,8 +98,10 @@ struct App {
     last_frame: Instant,
     again: Option<Instant>,
     screen: Option<Screen>,
-    /// The artwork open, made once the window is there.
+    /// The artwork open and its folder in the gallery; none while the gallery shows.
     session: Option<Arc<CanvasSession>>,
+    artwork: Option<String>,
+    gallery: gallery::Gallery,
     ui: Interface,
     input: input::Input,
     /// The window's title as last set.
@@ -117,20 +136,21 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        // a new artwork is the screen's size
-        let canvas = screen
+        // Screen Size's artwork is the screen's size
+        self.gallery.screen_px = screen
             .window
             .current_monitor()
             .map(|m| m.size())
             .filter(|s| s.width > 0 && s.height > 0)
             .map_or(FALLBACK_CANVAS, |s| (s.width, s.height));
-        let session = CanvasSession::new(canvas.0, canvas.1);
+        // the app opens on the gallery
+        screen.window.request_redraw();
         self.screen = Some(screen);
-        self.show(session);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let (Some(screen), Some(session)) = (self.screen.as_mut(), self.session.clone()) else { return };
+        let Some(screen) = self.screen.as_mut() else { return };
+        let session = self.session.clone();
         let response = screen.egui.on_window_event(&screen.window, &event);
         // egui counts every redraw as wanting another; the frames it does want come from its
         // repaint delay, paced in `about_to_wait`
@@ -139,22 +159,27 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                if files::may_close(&session, &mut self.ui) {
-                    session.keep_brushes(files::brushes_dir());
+                // the artwork open is kept in the gallery
+                if self.keep_artwork() {
                     event_loop.exit();
                 }
             }
             WindowEvent::Resized(size) => {
                 screen.resize(size.width, size.height);
-                session.resize_window(size.width, size.height);
+                if let Some(session) = &session {
+                    session.resize_window(size.width, size.height);
+                }
                 screen.window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                session.set_display_scale(scale_factor as f32);
-                self.ui.place_canvas(&session, scale_factor as f32);
+                if let Some(session) = &session {
+                    session.set_display_scale(scale_factor as f32);
+                    self.ui.place_canvas(session, scale_factor as f32);
+                }
             }
             WindowEvent::RedrawRequested => self.frame(),
             event => {
+                let Some(session) = session else { return };
                 // with a popover open, a press on the canvas only closes it
                 let (blocked, canvas) = (self.ui.popover_open, self.ui.canvas_rect);
                 let over = |p: (f32, f32)| blocked || screen.over_interface(p, canvas);
@@ -166,7 +191,20 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let (Some(screen), Some(session)) = (self.screen.as_ref(), self.session.as_ref()) else { return };
+        let Some(screen) = self.screen.as_ref() else { return };
+        let Some(session) = self.session.as_ref() else {
+            // the gallery: only the interface's own wants
+            match self.again {
+                Some(due) if Instant::now() >= due => screen.window.request_redraw(),
+                Some(due) => {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(due));
+                    return;
+                }
+                None => {}
+            }
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        };
         let mut deadline = self.input.next_deadline(session);
         // the touches' waits (a hold, a repeat) run out
         if self.input.tick(session) || !self.input.commands.is_empty() {
@@ -207,11 +245,15 @@ impl App {
 
     /// Runs the interface, draws the canvas and the interface over it, and does what was asked.
     fn frame(&mut self) {
-        let (Some(screen), Some(session)) = (self.screen.as_mut(), self.session.clone()) else { return };
+        let Some(screen) = self.screen.as_mut() else { return };
+        let Some(session) = self.session.clone() else {
+            self.gallery_frame();
+            return;
+        };
         self.last_frame = Instant::now();
         let raw = screen.egui.take_egui_input(&screen.window);
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| self.ui.show(ui, &session, &mut self.input));
-        self.again = screen.draw(&session, self.started, output).map(|after| Instant::now() + after);
+        self.again = screen.draw(Some(&session), self.started, output).map(|after| Instant::now() + after);
         let unsaved = if session.edits() == self.ui.saved_edits { "" } else { " •" };
         let title = format!("{}{unsaved} — ProCraft", session.name());
         if title != self.title {
@@ -226,12 +268,124 @@ impl App {
         }
     }
 
+    /// The gallery over the whole window, and what a tap in it asked for.
+    fn gallery_frame(&mut self) {
+        let Some(screen) = self.screen.as_mut() else { return };
+        self.last_frame = Instant::now();
+        let raw = screen.egui.take_egui_input(&screen.window);
+        let mut asked = None;
+        let (gallery, interface) = (&mut self.gallery, &mut self.ui);
+        let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
+            interface.style_once(ui.ctx());
+            asked = gallery.show(ui.ctx(), &mut interface.look, &interface.colours);
+        });
+        self.again = screen.draw(None, self.started, output).map(|after| Instant::now() + after);
+        if self.title != "ProCraft" {
+            screen.window.set_title("ProCraft");
+            self.title = "ProCraft".into();
+        }
+        match asked {
+            Some(gallery::Asked::Open(dir)) => match CanvasSession::open(dir.clone()) {
+                Ok(session) => self.open_artwork(session, dir),
+                Err(e) => files::tell("Can't open the artwork", &e.to_string()),
+            },
+            Some(gallery::Asked::New(preset, folder)) => {
+                let session = files::new_from_preset(&preset);
+                let dir = self.gallery.store.new_folder(folder);
+                self.open_artwork(session, dir);
+            }
+            Some(gallery::Asked::ScreenSize(folder)) => {
+                let (w, h) = self.gallery.screen_px;
+                let session = CanvasSession::new(w, h);
+                session.set_new_profile(procraft_core::P3.into());
+                let dir = self.gallery.store.new_folder(folder);
+                self.open_artwork(session, dir);
+            }
+            Some(gallery::Asked::Share(list, format)) => files::share_artworks(&list, format),
+            Some(gallery::Asked::Photo(folder)) => {
+                if let Some(session) = files::pick_picture() {
+                    let dir = self.gallery.store.new_folder(folder);
+                    self.open_artwork(session, dir);
+                }
+            }
+            Some(gallery::Asked::Import(folder)) => {
+                if let Some((session, package)) = files::pick_artwork() {
+                    let dir = self.gallery.store.new_folder(folder);
+                    if let Some(package) = package {
+                        timelapse::take_package(&package, &dir);
+                    }
+                    self.open_artwork(session, dir);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Shows `session`, kept in the gallery's folder `dir`.
+    fn open_artwork(&mut self, session: Arc<CanvasSession>, dir: String) {
+        self.ui.artwork_dir = Some(dir.clone());
+        self.artwork = Some(dir);
+        self.ui.path = None;
+        self.ui.saved_edits = session.edits();
+        self.show(session);
+    }
+
+    /// Saves the artwork open into its folder in the gallery (and the brushes as it left them);
+    /// false if it couldn't be.
+    fn keep_artwork(&mut self) -> bool {
+        let (Some(session), Some(dir)) = (self.session.clone(), self.artwork.clone()) else { return true };
+        session.keep_brushes(files::brushes_dir());
+        let edits = session.edits();
+        match session.save(dir) {
+            Ok(()) => {
+                self.ui.saved_edits = edits;
+                true
+            }
+            Err(e) => {
+                files::tell("Can't keep the artwork", &e.to_string());
+                false
+            }
+        }
+    }
+
     fn act(&mut self, action: Action, session: &Arc<CanvasSession>) {
         let opened = match action {
-            Action::New => files::new_artwork(session, &mut self.ui),
-            Action::Open => files::open(session, &mut self.ui),
+            Action::Gallery => {
+                if self.keep_artwork() {
+                    self.session = None;
+                    self.artwork = None;
+                    self.gallery.refresh();
+                    if let Some(screen) = &self.screen {
+                        screen.window.request_redraw();
+                    }
+                }
+                None
+            }
+            // a new artwork the size of this one, or one picked, beside it in the gallery
+            Action::New | Action::Open => {
+                if !self.keep_artwork() {
+                    return;
+                }
+                let next = if matches!(action, Action::New) {
+                    let info = session.info();
+                    Some((CanvasSession::new(info.width, info.height), None))
+                } else {
+                    files::pick_artwork()
+                };
+                if let Some((next, package)) = next {
+                    let folder = self.artwork.as_deref().and_then(|d| std::path::Path::new(d).parent());
+                    let folder =
+                        folder.map(|f| f.to_string_lossy().into_owned()).filter(|f| *f != self.gallery.store.root());
+                    let dir = self.gallery.store.new_folder(folder);
+                    if let Some(package) = package {
+                        timelapse::take_package(&package, &dir);
+                    }
+                    self.open_artwork(next, dir);
+                }
+                None
+            }
             Action::Save => {
-                files::save(session, &mut self.ui, false);
+                self.keep_artwork();
                 None
             }
             Action::SaveAs => {
@@ -239,11 +393,7 @@ impl App {
                 None
             }
             Action::Export(format) => {
-                files::export(session, format);
-                None
-            }
-            Action::InsertFile => {
-                files::insert_file(session);
+                files::export(session, format, self.ui.artwork_dir.as_deref());
                 None
             }
         };

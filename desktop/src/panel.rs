@@ -20,14 +20,32 @@ pub const PANEL_GLYPH: u32 = 0xFFC8C8C8;
 pub const CHEVRON_DISC: u32 = 0xFF4C4C4C;
 pub const CHEVRON_GLYPH: u32 = 0xFF2E2E2E;
 
-/// Where a panel `width` wide goes on a window `screen` wide, hanging from a button centred at
-/// `button_x`: its left edge and its arrow's tip from that edge. It is centred on the button (the
-/// tip `ARROW_SHIFT` right of the button's centre) and kept inside the window, at least
-/// `min_left` from its left edge (clear of the side bar).
-pub fn place(width: f32, button_x: f32, screen: Rect, min_left: f32) -> (f32, f32) {
+/// Where the side bar is, for the panels to keep clear of: whether it shows, and on the right.
+#[derive(Clone, Copy, Default)]
+struct SideBarPlace {
+    shown: bool,
+    right: bool,
+}
+
+/// The side bar shows (or not) on the right (or the left), for the panels placed this frame.
+pub fn side_bar_at(ctx: &egui::Context, shown: bool, right: bool) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("side bar place"), SideBarPlace { shown, right }));
+}
+
+/// Where a panel `width` wide goes in the window, hanging from a button centred at `button_x`:
+/// its left edge and its arrow's tip from that edge. It is centred on the button (the tip
+/// `ARROW_SHIFT` right of the button's centre) and kept inside the window, clear of the side bar
+/// on whichever side it is.
+pub fn place(ctx: &egui::Context, width: f32, button_x: f32) -> (f32, f32) {
+    let screen = ctx.content_rect();
+    let side = ctx
+        .data(|d| d.get_temp::<SideBarPlace>(egui::Id::unique("side bar place")))
+        .unwrap_or(SideBarPlace { shown: true, right: false });
+    let clear = if side.shown { pc::SIDE_BAR_WIDTH + POPOVER_GAP } else { POPOVER_GAP };
+    let (min_left, min_right) = if side.right { (POPOVER_GAP, clear) } else { (clear, POPOVER_GAP) };
     let tip = button_x + ARROW_SHIFT;
     let lo = screen.left() + min_left;
-    let hi = (screen.right() - POPOVER_GAP - width).max(lo);
+    let hi = (screen.right() - min_right - width).max(lo);
     let left = (tip - width / 2.0).clamp(lo, hi);
     (left, tip - left)
 }
@@ -119,27 +137,50 @@ pub fn side_frame(
     body
 }
 
-/// Draws a panel at `rect` (arrow included) with its arrow under it, the tip `arrow_x` from its
-/// left edge, filled `colour` (nothing shows through): the shadow round it, then the panel.
-/// Returns its body.
-pub fn below_frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, arrow_x: f32, colour: u32) -> Rect {
-    let body = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - ARROW_HEIGHT));
+/// Draws a panel at `rect` (arrow included) with its arrow `below` it (else above), the tip
+/// `arrow_x` from its left edge, rounded `corner` and filled `colour` (nothing shows through): the
+/// shadow round it, then the panel. Returns its body.
+#[allow(clippy::too_many_arguments)]
+pub fn solid_frame(
+    ui: &Ui,
+    look: &mut Look,
+    slot: &'static str,
+    rect: Rect,
+    arrow_x: f32,
+    below: bool,
+    corner: f32,
+    colour: u32,
+) -> Rect {
+    let body = if below {
+        Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - ARROW_HEIGHT))
+    } else {
+        Rect::from_min_max(pos2(rect.left(), rect.top() + ARROW_HEIGHT), rect.max)
+    };
     let shadow = egui::epaint::Shadow {
         offset: [0, 0],
         blur: POPOVER_SHADOW_RADIUS as u8,
         spread: 0,
         color: argb(POPOVER_SHADOW),
     };
-    ui.painter().add(shadow.as_shape(body, POPOVER_CORNER));
+    ui.painter().add(shadow.as_shape(body, corner));
     let size = rect.size();
-    look.shape(ui, slot, ((arrow_x * 100.0).round() as i32, colour), rect, |pixmap, t| {
+    let key = ((arrow_x * 100.0).round() as i32, colour, below, (corner * 10.0) as i32);
+    look.shape(ui, slot, key, rect, |pixmap, t| {
         let mut pb = tiny_skia::PathBuilder::new();
         let (half, tip, h) = (ARROW_HEIGHT, 2.0, size.y);
-        round_rect(&mut pb, Rect::from_min_max(Pos2::ZERO, pos2(size.x, h - ARROW_HEIGHT)), [POPOVER_CORNER; 4]);
-        pb.move_to(arrow_x - half - tip, h - ARROW_HEIGHT - 0.5);
-        pb.line_to(arrow_x - tip, h - tip);
-        pb.quad_to(arrow_x, h, arrow_x + tip, h - tip);
-        pb.line_to(arrow_x + half + tip, h - ARROW_HEIGHT - 0.5);
+        if below {
+            round_rect(&mut pb, Rect::from_min_max(Pos2::ZERO, pos2(size.x, h - ARROW_HEIGHT)), [corner; 4]);
+            pb.move_to(arrow_x - half - tip, h - ARROW_HEIGHT - 0.5);
+            pb.line_to(arrow_x - tip, h - tip);
+            pb.quad_to(arrow_x, h, arrow_x + tip, h - tip);
+            pb.line_to(arrow_x + half + tip, h - ARROW_HEIGHT - 0.5);
+        } else {
+            round_rect(&mut pb, Rect::from_min_max(pos2(0.0, ARROW_HEIGHT), size.to_pos2()), [corner; 4]);
+            pb.move_to(arrow_x - half - tip, ARROW_HEIGHT + 0.5);
+            pb.line_to(arrow_x - tip, tip);
+            pb.quad_to(arrow_x, 0.0, arrow_x + tip, tip);
+            pb.line_to(arrow_x + half + tip, ARROW_HEIGHT + 0.5);
+        }
         pb.close();
         let mut paint = tiny_skia::Paint::default();
         let [r, g, b, a] = argb(colour).to_srgba_unmultiplied();

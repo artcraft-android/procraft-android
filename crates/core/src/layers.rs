@@ -82,6 +82,13 @@ pub fn set_layer_budget(bytes: u64) {
     procraft_engine::document::set_layer_budget(bytes);
 }
 
+/// How many layers a canvas `width` × `height` holds on this device (Custom Canvas's Maximum
+/// Layers).
+#[uniffi::export]
+pub fn layers_for(width: u32, height: u32) -> u32 {
+    u32::try_from(procraft_engine::document::layer_cap_for(width, height)).unwrap_or(u32::MAX)
+}
+
 /// What the layers' textures may take on this device, bytes: past it, layers not worked on are
 /// kept compressed off the GPU until needed. 0 keeps them all on it.
 static RESIDENT_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
