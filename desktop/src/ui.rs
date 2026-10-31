@@ -854,10 +854,14 @@ impl Interface {
                     self.transform.numbers(angle, egui::pos2(x, y) / ctx.pixels_per_point(), right);
                 }
                 // (a text layer's question about rasterizing comes with text, still to come here)
+                // Recolor's reticle moved or tapped elsewhere: the fill follows at once
+                TouchCommand::RecolorMoved { x, y } => session.recolor_move_to(x, y),
+                TouchCommand::RecolorTapped { x, y } => session.recolor_tap(x, y),
                 TouchCommand::CopyPaste => self.copy_paste = true,
                 TouchCommand::LayerSelect { x, y } => self.layer_select(ctx, session, x, y),
                 TouchCommand::QuickMenu { x, y } => self.quick_menu.toggle(egui::pos2(x, y) / ctx.pixels_per_point()),
-                TouchCommand::ViewMoved | TouchCommand::TextLayer => {}
+                // (the pen's hover, which sets the brush with a finger, isn't the desktop's)
+                TouchCommand::ViewMoved | TouchCommand::TextLayer | TouchCommand::BrushChanged => {}
             }
         }
         // a slid threshold redoes the whole fill: once a frame, at the last

@@ -402,6 +402,7 @@ impl GestureSettings {
             four_tap: action(self.purpose_of(Trigger::FourTap)),
             three_swipe: action(self.purpose_of(Trigger::ThreeSwipe)),
             scrub: self.is_on(GesturePurpose::ClearLayer, "SCRUB".to_owned()),
+            hover_touch: self.is_on(GesturePurpose::Hover, "HOVER_TOUCH".to_owned()),
             hold_ms: f64::from(self.delay(hold.unwrap_or(GesturePurpose::Eyedropper))) * 1000.0,
             quickshape_ms: f64::from(self.delay(GesturePurpose::Quickshape)) * 1000.0,
             rapid_undo_ms,

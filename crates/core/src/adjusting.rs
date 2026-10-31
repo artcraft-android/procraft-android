@@ -699,12 +699,6 @@ impl CanvasSession {
         self.clone_source(x, y);
     }
 
-    /// Cloning, a stroke reached window point (`x`, `y`) (`start`: it begins there): the source
-    /// follows the brush (for an app whose own touches paint the clone).
-    pub fn adjustment_clone_stroke(&self, x: f32, y: f32, start: bool) {
-        self.clone_stroke_at((x, y), start);
-    }
-
     /// The curve of `channel` as heights to draw, 256 across.
     pub fn adjustment_curve_shape(&self, channel: u32) -> Vec<f32> {
         let points = self.adjusting(|a, _| a.curves.get(channel as usize).cloned().unwrap_or_else(straight));

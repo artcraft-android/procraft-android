@@ -128,6 +128,9 @@ pub struct TouchSettings {
     pub three_swipe: Option<GestureAction>,
     /// Three fingers rubbed back and forth clear the layer.
     pub scrub: bool,
+    /// While the pen hovers over the canvas, a finger dragged across moves the brush's opacity and
+    /// two pinched its size.
+    pub hover_touch: bool,
     pub hold_ms: f64,
     pub quickshape_ms: f64,
     pub rapid_undo_ms: f64,
@@ -149,6 +152,7 @@ impl Default for TouchSettings {
             four_tap: Some(GestureAction::FullScreen),
             three_swipe: Some(GestureAction::CopyPaste),
             scrub: true,
+            hover_touch: false,
             hold_ms: 400.0,
             quickshape_ms: 650.0,
             rapid_undo_ms: 650.0,
@@ -200,6 +204,19 @@ pub enum TouchCommand {
     CursorGone,
     /// A stroke began on a text layer, which takes no paint until it is rasterized.
     TextLayer,
+    /// The brush's size or opacity changed (Hover's touch): its sliders show it again.
+    BrushChanged,
+    /// Recolor's reticle dragged to window pixel (`x`, `y`)
+    /// ([`CanvasSession::recolor_move_to`]), or a tap there starting it again
+    /// ([`CanvasSession::recolor_tap`]): the app moves it, at once or on its fill thread.
+    RecolorMoved {
+        x: f32,
+        y: f32,
+    },
+    RecolorTapped {
+        x: f32,
+        y: f32,
+    },
     /// Continue filling: a touch slid the fill's threshold to this (keep it for the next, and redo
     /// the fill with it, `pour_threshold`, when next drawing: it redoes the whole fill, so once a
     /// frame at most), and the fill was let go of (kept, at the threshold it was let go at).
@@ -291,6 +308,8 @@ enum Mode {
     Companion,
     /// A finger on a shown model: it turns the model.
     Turn,
+    /// Hover's touch: a finger dragging the opacity, two pinching the size.
+    Hover,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -368,14 +387,19 @@ pub(crate) struct Touches {
     /// touch has changed it yet.
     layer_opacity: Option<(u64, f32)>,
     opacity_moved: bool,
-    /// Recolor's touch: past a tap's slop, and where it last moved the reticle from.
+    /// Recolor's touch: past a tap's slop, and where the reticle was (window pixels) as it went down.
     recolor_dragged: bool,
-    recolor_last: (f32, f32),
+    recolor_from: (f32, f32),
     /// The companion's Zoom or Move, while on, and where its press last was.
     companion: Option<CompanionMode>,
     companion_last: (f32, f32),
     /// Where the finger turning a model last was.
     turn_last: (f32, f32),
+    /// The pen held over the canvas, and Hover's touch: where its finger last was (window x) and
+    /// how far apart two fingers last were.
+    pen_hovering: bool,
+    hover_x: f32,
+    hover_spread: f32,
     /// Window pixels a point.
     scale: f32,
 }
@@ -435,10 +459,13 @@ impl Default for Touches {
             layer_opacity: None,
             opacity_moved: false,
             recolor_dragged: false,
-            recolor_last: (0.0, 0.0),
+            recolor_from: (0.0, 0.0),
             companion: None,
             companion_last: (0.0, 0.0),
             turn_last: (0.0, 0.0),
+            pen_hovering: false,
+            hover_x: 0.0,
+            hover_spread: 0.0,
             scale: 1.0,
         }
     }
@@ -589,6 +616,12 @@ impl CanvasSession {
         self.touches().layer_opacity = start;
     }
 
+    /// The pen is held over the canvas (or not): with Hover's touch on, a finger then sets the
+    /// brush rather than painting.
+    pub fn set_touch_pen_hovering(&self, hovering: bool) {
+        self.touches().pen_hovering = hovering;
+    }
+
     /// The single touch companion's Zoom or Move on (a lone press dragged on the canvas zooms or
     /// moves it), or off.
     pub fn set_touch_companion(&self, mode: Option<CompanionMode>) {
@@ -712,6 +745,29 @@ impl CanvasSession {
                 }
                 out.push(TouchCommand::ViewMoved);
             }
+            Mode::Hover => {
+                if let (Some(a), Some(b)) = (t.down.first(), t.down.get(1)) {
+                    // pinched: the size grows and shrinks with how far apart they are
+                    let spread = dist(a.at, b.at);
+                    let last = std::mem::replace(&mut t.hover_spread, spread);
+                    if last > 1.0 && spread > 1.0 {
+                        drop(t);
+                        let mut st = self.shared.lock();
+                        let sliders = st.sliders_mut();
+                        sliders.size = (sliders.size * spread / last).clamp(0.0, 1.0);
+                        out.push(TouchCommand::BrushChanged);
+                    }
+                } else if id == t.stroke_pointer {
+                    // across the window, from none to full opacity
+                    let dx = at.0 - std::mem::replace(&mut t.hover_x, at.0);
+                    drop(t);
+                    let mut st = self.shared.lock();
+                    let width = st.window_size.0.max(1) as f32;
+                    let sliders = st.sliders_mut();
+                    sliders.opacity = (sliders.opacity + dx / width).clamp(0.0, 1.0);
+                    out.push(TouchCommand::BrushChanged);
+                }
+            }
             Mode::Turn if id == t.stroke_pointer => {
                 let last = std::mem::replace(&mut t.turn_last, at);
                 t.tap_moved += dist(at, last);
@@ -724,9 +780,9 @@ impl CanvasSession {
                     t.recolor_dragged = true;
                 }
                 if t.recolor_dragged {
-                    let last = std::mem::replace(&mut t.recolor_last, at);
-                    drop(t);
-                    self.recolor_drag(at.0 - last.0, at.1 - last.1);
+                    // as far from where it was as the touch went from where it came down
+                    let (from, down) = (t.recolor_from, t.down_at);
+                    out.push(TouchCommand::RecolorMoved { x: from.0 + at.0 - down.0, y: from.1 + at.1 - down.1 });
                 }
             }
             Mode::Opacity if id == t.stroke_pointer => {
@@ -957,6 +1013,15 @@ impl CanvasSession {
             out.push(TouchCommand::Pick { x: at.0, y: at.1 });
             return;
         }
+        // Hover: with the pen held over the canvas, a finger drags the opacity and a pinch the size
+        if kind == PointerKind::Finger && t.pen_hovering && t.settings.hover_touch && self.shared.lock().shape.is_none()
+        {
+            t.stroke_pointer = id;
+            t.hover_x = at.0;
+            t.hover_spread = 0.0;
+            t.mode = Mode::Hover;
+            return;
+        }
         if t.layer_opacity.is_some() {
             // Layer Opacity: the touch drags the layer's opacity
             t.stroke_pointer = id;
@@ -969,7 +1034,7 @@ impl CanvasSession {
             // Recolor: the touch moves its reticle, or a tap starts it again
             t.stroke_pointer = id;
             t.recolor_dragged = false;
-            t.recolor_last = at;
+            t.recolor_from = self.recolor_point().and_then(|p| Some((*p.first()?, *p.get(1)?))).unwrap_or(at);
             t.mode = Mode::Recolor;
             return;
         }
@@ -1146,6 +1211,13 @@ impl CanvasSession {
     }
 
     fn another_down(&self, t: &mut Touches, kind: PointerKind, now: f64, out: &mut Vec<TouchCommand>) {
+        // Hover's second finger: the two pinch the brush's size from how far apart they now are
+        if t.mode == Mode::Hover {
+            if let (Some(a), Some(b)) = (t.down.first(), t.down.get(1)) {
+                t.hover_spread = dist(a.at, b.at);
+            }
+            return;
+        }
         t.hold_due = None;
         t.quickshape_due = None;
         // a finger down while the stroke is held as a snapped shape snaps it, until lifted
@@ -1362,9 +1434,8 @@ impl CanvasSession {
             Mode::Opacity => self.opacity_lifted(&mut t),
             // a tap starts the reticle again where it lands
             Mode::Recolor if !t.recolor_dragged && !cancelled => {
-                let at = last_of(&samples).map_or(t.recolor_last, |s| (s.x, s.y));
-                drop(t);
-                self.recolor_tap(at.0, at.1);
+                let at = last_of(&samples).map_or(t.down_at, |s| (s.x, s.y));
+                out.push(TouchCommand::RecolorTapped { x: at.0, y: at.1 });
             }
             Mode::Pour => {
                 let slid = last_of(&samples).and_then(|s| Self::pour_slide(&mut t, (s.x, s.y), s.time_ms));
@@ -1935,20 +2006,59 @@ mod tests {
     }
 
     #[test]
+    fn hover_s_finger_drags_the_opacity_and_two_pinch_the_size() {
+        let s = session();
+        s.shared.lock().window_size = (1000, 800);
+        s.set_brush_size(0.5);
+        s.set_brush_opacity(0.5);
+        s.set_touch_settings(TouchSettings { hover_touch: true, ..TouchSettings::default() });
+        // the pen held over the canvas: a finger dragged a fifth of the window across adds a fifth
+        s.set_touch_pen_hovering(true);
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
+        let out = s.touch_move(1, at(300.0, 100.0, 16.0));
+        assert_eq!(out, vec![TouchCommand::BrushChanged]);
+        assert!((s.info().opacity - 0.7).abs() < 1e-4, "{}", s.info().opacity);
+        // a second finger: twice as far apart, twice the size
+        s.touch_down(2, PointerKind::Finger, at(400.0, 100.0, 20.0));
+        s.touch_move(2, at(500.0, 100.0, 30.0));
+        assert!((s.info().size - 1.0).abs() < 1e-4, "{}", s.info().size);
+        s.touch_up(2, at(500.0, 100.0, 40.0));
+        let out = s.touch_up(1, at(300.0, 100.0, 50.0));
+        assert!(!out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+        // the pen gone, a finger paints again
+        s.set_touch_pen_hovering(false);
+        s.touch_down(1, PointerKind::Finger, at(10.0, 10.0, 100.0));
+        s.touch_move(1, at(60.0, 10.0, 120.0));
+        assert!(s.touch_up(1, at(60.0, 10.0, 140.0)).contains(&TouchCommand::StrokeEnded));
+    }
+
+    #[test]
     fn recolor_s_touch_drags_its_reticle_or_taps_it_elsewhere_and_paints_nothing() {
         let s = session();
         s.shared.lock().view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
         s.recolor_start(32.0, 32.0, 0.0, 0.0, 1.0, 0.0);
-        // a drag past the slop moves it by as much as the touch moved after that
-        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
-        s.touch_move(1, at(200.0, 100.0, 16.0));
-        s.touch_move(1, at(210.0, 110.0, 32.0));
-        let out = s.touch_up(1, at(210.0, 110.0, 48.0));
+        // the app moves the reticle where the touches say
+        let obey = |out: Vec<TouchCommand>| {
+            for c in &out {
+                match *c {
+                    TouchCommand::RecolorMoved { x, y } => s.recolor_move_to(x, y),
+                    TouchCommand::RecolorTapped { x, y } => s.recolor_tap(x, y),
+                    _ => {}
+                }
+            }
+            out
+        };
+        // a drag past the slop moves it as far as the touch went from where it came down
+        obey(s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0)));
+        obey(s.touch_move(1, at(200.0, 100.0, 16.0)));
+        let out = obey(s.touch_move(1, at(210.0, 110.0, 32.0)));
+        assert_eq!(out, vec![TouchCommand::RecolorMoved { x: 142.0, y: 42.0 }]);
+        let out = obey(s.touch_up(1, at(210.0, 110.0, 48.0)));
         assert!(!out.contains(&TouchCommand::StrokeEnded), "{out:?}");
         assert_eq!(s.recolor_point(), Some(vec![142.0, 42.0]));
         // a tap puts it where it lands
-        s.touch_down(1, PointerKind::Finger, at(10.0, 12.0, 100.0));
-        s.touch_up(1, at(11.0, 12.0, 150.0));
+        obey(s.touch_down(1, PointerKind::Finger, at(10.0, 12.0, 100.0)));
+        obey(s.touch_up(1, at(11.0, 12.0, 150.0)));
         assert_eq!(s.recolor_point(), Some(vec![11.0, 12.0]));
         s.recolor_end();
     }

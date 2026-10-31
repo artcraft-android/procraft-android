@@ -12,21 +12,12 @@ import androidx.input.motionprediction.MotionEventPredictor
 import io.github.artcraftandroid.procraft.core.CanvasSession
 import io.github.artcraftandroid.procraft.core.MobileException
 import io.github.artcraftandroid.procraft.core.PenSample
-import io.github.artcraftandroid.procraft.core.ChromaticKind
 import io.github.artcraftandroid.procraft.core.CompanionMode
 import io.github.artcraftandroid.procraft.core.PointerKind
 import io.github.artcraftandroid.procraft.core.TouchCommand
-import io.github.artcraftandroid.procraft.core.ToolKind
 import io.github.artcraftandroid.procraft.core.TransformHandle
-import io.github.artcraftandroid.procraft.core.TransformKind
-import kotlin.math.PI
 import kotlin.math.atan2
-import kotlin.math.hypot
-import kotlin.math.max
-import kotlin.math.pow
 import io.github.artcraftandroid.procraft.core.Adjustment
-import io.github.artcraftandroid.procraft.core.GesturePurpose
-import io.github.artcraftandroid.procraft.core.Trigger
 
 /**
  * The canvas: a surface the Rust renderer draws into, and the touch input that drives it.
@@ -48,172 +39,12 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     /** Predicts where the pen is going, so the stroke can be drawn ahead of the latest input. */
     private val predictor = MotionEventPredictor.newInstance(this)
 
-    // IDLE: a finger that doesn't paint, waiting for a hold or more fingers; HOVER: fingers
-    // setting the brush while the pen hovers
-    private enum class Mode { NONE, PEN, FINGER, IDLE, GESTURE, PICK, TRANSFORM, SELECT, ADJUST, PUCK, HOVER, POUR, RECOLOR }
-
     /** The pen is hovering over the canvas. */
     private var penHovering = false
 
-    // Hover: where the finger last was, and the two fingers' last spread
-    private var hoverX = 0f
-    private var hoverSpread = 0f
-
-    /** The tool this stroke uses instead of the chosen one (Gesture controls' Erase or Smudge), if any. */
-    private var toolOverride: ToolKind? = null
-
-    /** The chosen tool back after a stroke that used another. */
-    private fun restoreTool(s: CanvasSession) {
-        if (toolOverride != null) s.setTool(vm.tool)
-        toolOverride = null
-    }
-
-    private val holdMs get() = (vm.gestures.delay(vm.gestures.purposeOf(Trigger.HOLD) ?: GesturePurpose.EYEDROPPER) * 1000).toLong()
-    private val quickShapeMs get() = (vm.gestures.delay(GesturePurpose.QUICKSHAPE) * 1000).toLong()
-    private val drawAndHold get() = vm.gestures.isOn(GesturePurpose.QUICKSHAPE, "DRAW_HOLD")
-    private val undoTaps get() = !vm.gestures.isOn(GesturePurpose.GENERAL, "NO_UNDO")
-
-    private var mode = Mode.NONE
     private var strokePointer = -1
-    /** The liquify brush's last place (window pixels), when, and its velocity (pixels a millisecond). */
-    private var liquifyAt = Offset.Zero
-    private var liquifyTime = 0L
-    private var liquifyVelocity = Offset.Zero
 
-    /** Follows the liquify brush's velocity, smoothed over its moves. */
-    private fun followLiquify(e: MotionEvent) {
-        val dt = (e.eventTime - liquifyTime).toFloat()
-        if (dt <= 0f) return
-        val now = Offset(e.x, e.y)
-        liquifyVelocity = liquifyVelocity * 0.5f + (now - liquifyAt) / dt * 0.5f
-        liquifyAt = now
-        liquifyTime = e.eventTime
-    }
-
-    /** Where the stroke last moved from (window pixels), for QuickShape's hold. */
-    private var holdAt = Offset.Zero
-    private val quickShapeHold = Runnable {
-        if ((mode == Mode.PEN || mode == Mode.FINGER) && drawAndHold) {
-            removeCallbacks(holdToPick)
-            vm.quickShapeHold()
-        }
-    }
-
-    // a freehand selection drawn and held still snaps to a shape, which the lift then selects
-    private var lassoHoldAt = Offset.Zero
-    private var lassoSnapped = false
-    private val lassoHold = Runnable {
-        if (mode == Mode.SELECT && vm.selectionKind == SelectionKind.FREEHAND && selectMoved && drawAndHold) {
-            lassoSnapped = vm.snapFreehand()
-        }
-    }
-
-    /** A displacing drag has begun. */
-    private var chromaDragging = false
-    /** Where on the clone source it was taken (window pixels from its centre). */
-    private var puckGrab = Offset.Zero
-    /** Recolor's touch has moved too far for a tap: it drags the reticle, from here (window pixels). */
-    private var recolorDragging = false
-    private var recolorLast = Offset.Zero
-
-    // the two fingers a gesture follows (pointer ids) and where they were
-    private var gestureA = -1
-    private var gestureB = -1
-    private var lastX = 0f
-    private var lastY = 0f
-    private var lastDistance = 0f
-    private var lastAngle = 0f
-
-    // whether the touches so far still make a tap
-    private var tapStart = 0L
-    private var tapPointers = 0
-    private var tapMoved = 0f
-    private val tapSlop = 24f * resources.displayMetrics.density
-
-    // the gesture as a whole: when it began, how far it has zoomed, fingers down now
-    private var gestureStart = 0L
-    private var gestureScale = 1f
-    private var fingers = 0
-
-    // the three-finger scrub that clears the layer: direction changes of the fingers' centre
-    private var scrubX = 0f
-    private var scrubDirection = 0
-    private var scrubTravel = 0f
-    private var scrubTurns = 0
-    private val scrubStep = 24f * resources.displayMetrics.density
-
-    // while transforming: the handle the touch took, and whether its drag has begun (past the slop)
-    private var transformHandle: TransformHandle? = null
-    private var transformGrabbed = false
-    private val transformSlop = TRANSFORM_SLOP_DP * resources.displayMetrics.density
-
-    // the selection tool's touch: where it went down, and whether it has moved past the slop
-    private var selectStart = Offset.Zero
-    private var selectMoved = false
-    private var lastSelectX = 0f
-    private var lastSelectTime = 0L
-    private var threshold = 0f
-
-    // Continue filling's touch: where it filled from, and whether it has slid past the slop
-    private var pourStart = Offset.Zero
-    private var pourMoved = false
-
-    // where the finger went down, for the hold that opens the eyedropper
-    private var downX = 0f
-    private var downY = 0f
     private val pickSide get() = (PICK_WINDOW_DP * resources.displayMetrics.density).toInt() or 1
-
-    /** A finger held still on the canvas does what Touch and hold is set to: picks a colour, or clears the layer. */
-    private val holdToPick = Runnable {
-        val s = session ?: return@Runnable
-        if (mode != Mode.FINGER && mode != Mode.IDLE) return@Runnable
-        when (vm.gestures.purposeOf(Trigger.HOLD)) {
-            GesturePurpose.EYEDROPPER -> {
-                if (mode == Mode.FINGER) s.strokeCancel()
-                restoreTool(s)
-                mode = Mode.PICK
-                vm.pickAt(downX, downY, pickSide)
-            }
-            GesturePurpose.CLEAR_LAYER -> {
-                if (mode == Mode.FINGER) s.strokeCancel()
-                restoreTool(s)
-                mode = Mode.IDLE
-                vm.clearCurrentLayer()
-            }
-            GesturePurpose.QUICKMENU -> {
-                if (mode == Mode.FINGER) s.strokeCancel()
-                restoreTool(s)
-                mode = Mode.IDLE
-                vm.toggleQuickMenu(Offset(downX, downY))
-            }
-            GesturePurpose.LAYER_SELECT -> {
-                if (mode == Mode.FINGER) s.strokeCancel()
-                restoreTool(s)
-                mode = Mode.IDLE
-                vm.layerSelectAt(Offset(downX, downY))
-            }
-            GesturePurpose.COPY_PASTE -> {
-                if (mode == Mode.FINGER) s.strokeCancel()
-                restoreTool(s)
-                mode = Mode.IDLE
-                vm.copyPasteOpen = true
-            }
-            else -> Unit
-        }
-    }
-
-    /** Holding two fingers still undoes, then keeps undoing; three fingers redo. */
-    private val rapidUndo = object : Runnable {
-        override fun run() {
-            if (mode != Mode.GESTURE || tapMoved > tapSlop || fingers != tapPointers || !undoTaps) return
-            when (fingers) {
-                2 -> vm.undo()
-                3 -> vm.redo()
-                else -> return
-            }
-            postDelayed(this, RAPID_REPEAT_MS)
-        }
-    }
 
     init {
         holder.addCallback(this)
@@ -311,27 +142,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         attached = false
     }
 
-    // this touch (down to the last pointer up) is the shared touches' (crates/core touch.rs): painting,
-    // picking, the snapped shape, and the gestures, the same in every app
-    private var routed = false
-
-    /**
-     * Whether a touch going down now is an ordinary one, for the shared touches: none of the canvas's
-     * own modes takes it (the modify button and its eyedropper go to them first, and the companion's
-     * Zoom or Move before anything).
-     */
-    private fun routes(e: MotionEvent): Boolean {
-        if (vm.modifyHeld || vm.pickNext || vm.companionMode != CanvasViewModel.CompanionMode.NONE) return true
-        val kind = kindOf(e, 0)
-        val pen = kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER
-        return vm.dropBand != CanvasViewModel.DropBand.FILLING &&
-            !vm.recoloring &&
-            vm.adjustment == null &&
-            !vm.selecting &&
-            !vm.transforming &&
-            // Hover: with the pen held over the canvas, a finger drags the opacity and a pinch the size
-            !(!pen && penHovering && vm.gestures.isOn(GesturePurpose.HOVER, "HOVER_TOUCH") && vm.quickShape == null)
-    }
+    // every touch is the shared touches' (crates/core touch.rs): painting, picking, the snapped shape,
+    // the gestures and every tool's touch, the same in every app
 
     /** Hands [e] to the shared touches and does what they ask. */
     private fun route(e: MotionEvent, s: CanvasSession) {
@@ -374,20 +186,42 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             TouchCommand.ShapeEnded -> vm.quickShapeEnded()
             TouchCommand.StrokeEnded -> vm.strokeEnded()
             TouchCommand.ViewMoved -> vm.refreshView()
-            is TouchCommand.Cursor -> vm.showCursor(Offset(c.x, c.y))
-            TouchCommand.CursorGone -> vm.showCursor(null)
+            is TouchCommand.Cursor -> {
+                vm.showCursor(Offset(c.x, c.y))
+                // cloning, the source follows the brush
+                if (vm.adjustment == Adjustment.CLONE) vm.followClonePuck()
+            }
+            TouchCommand.CursorGone -> {
+                vm.showCursor(null)
+                vm.transformHeld = null
+            }
             TouchCommand.TextLayer -> vm.askRasterize = true
-            // Continue filling's touches are still this view's own (see pour()), its fills on the
-            // view model's fill thread
-            is TouchCommand.FillThreshold, TouchCommand.Filled -> Unit
-            // so are a transform's (see Mode.TRANSFORM)
-            TouchCommand.TransformTouched, is TouchCommand.TransformMoved, is TouchCommand.TransformHeld,
-            is TouchCommand.TransformLetGo, is TouchCommand.TransformNumeric -> Unit
-            // and a selection's (see Mode.SELECT)
-            is TouchCommand.SelectionDrag, is TouchCommand.SelectionThreshold, TouchCommand.FreehandChanged,
-            TouchCommand.SelectionChanged -> Unit
-            // and an adjustment's (see Mode.ADJUST)
-            TouchCommand.AdjustChanged, is TouchCommand.AdjustMenu -> Unit
+            TouchCommand.BrushChanged -> vm.brushTouched()
+            // Recolor's reticle dragged or tapped elsewhere (its fills on the view model's fill thread)
+            is TouchCommand.RecolorMoved -> vm.recolorMoveTo(Offset(c.x, c.y))
+            is TouchCommand.RecolorTapped -> vm.recolorTap(Offset(c.x, c.y))
+            // Continue filling's threshold slid (redone on the view model's fill thread), and the fill let go
+            is TouchCommand.FillThreshold -> vm.pourThreshold(c.threshold)
+            TouchCommand.Filled -> vm.filled()
+            // a transform's touch: its popovers close; the box as it now is; the node held, and let go
+            // (a rotate or box-turning node springs back); a node tapped types its numbers beside it
+            TouchCommand.TransformTouched -> vm.transformPopup = TransformPopup.NONE
+            is TouchCommand.TransformMoved -> vm.transformMoved(c.transform)
+            is TouchCommand.TransformHeld -> vm.transformHeld = c.handle to Offset(c.x, c.y)
+            is TouchCommand.TransformLetGo -> {
+                vm.transformHeld = null
+                if (c.handle == TransformHandle.Rotate || c.handle == TransformHandle.TurnBox) vm.transformLetGo = c.handle to Offset(c.x, c.y)
+            }
+            is TouchCommand.TransformNumeric -> vm.transformNumeric = CanvasViewModel.TransformNumeric(c.angle, Offset(c.x, c.y), c.right)
+            // the selection tool's touch: a shape dragged out, a colour selection's threshold slid, the
+            // freehand path drawn, a selection made
+            is TouchCommand.SelectionDrag -> vm.shapeDrag = Offset(c.x0, c.y0) to Offset(c.x1, c.y1)
+            is TouchCommand.SelectionThreshold -> vm.colourSlid(Offset(c.x, c.y), c.threshold, c.done)
+            TouchCommand.FreehandChanged -> vm.freehandChanged()
+            TouchCommand.SelectionChanged -> vm.selectionTouched()
+            // an adjustment's amount, liquify, the clone source and the like changed; a tap opens its menu
+            TouchCommand.AdjustChanged -> vm.adjustTouched()
+            is TouchCommand.AdjustMenu -> vm.adjustMenuAt = Offset(c.x, c.y)
         }
     }
 
@@ -410,326 +244,46 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         if (penButton(e)) return true
         predictor.record(e)
         if (e.actionMasked == MotionEvent.ACTION_DOWN) {
-            routed = routes(e)
-            if (routed) {
-                // every sample as it arrives, not batched to the frame
-                requestUnbufferedDispatch(e)
-                s.setTouchSettings(vm.touchSettings())
-                // the companion's Zoom or Move: a lone press zooms or moves the canvas
-                s.setTouchCompanion(
-                    when (vm.companionMode) {
-                        CanvasViewModel.CompanionMode.ZOOM -> CompanionMode.ZOOM
-                        CanvasViewModel.CompanionMode.MOVE -> CompanionMode.MOVE
-                        CanvasViewModel.CompanionMode.NONE -> null
-                    },
-                )
+            // Continue filling on a layer that takes no fill: the dialog says why, and the touch does nothing
+            if (vm.dropBand == CanvasViewModel.DropBand.FILLING && !vm.currentTakesChanges()) {
+                skipping = true
+                return true
             }
+            skipping = false
+            // a touch on the canvas closes an adjustment's menu, its Layer / Pencil choice and liquify's popups
+            if (vm.adjustment != null) {
+                vm.adjustMenuAt = null
+                vm.adjustModesOpen = false
+                vm.liquifyPopup = 0
+            }
+            // every sample as it arrives, not batched to the frame
+            requestUnbufferedDispatch(e)
+            s.setTouchSettings(vm.touchSettings())
+            // Continue filling: each touch fills where it lands; slid, it changes the threshold
+            s.setTouchFilling(vm.touchFill())
+            // the selection tool's touch selects as the tool is set
+            s.setTouchSelecting(vm.selectTouch())
+            if (vm.selecting) vm.selectionPopup = SelectionPopup.NONE
+            // a transform's touch takes the node it lands on (the warp's inner points with the advanced mesh)
+            s.setTouchTransforming(if (vm.transforming) io.github.artcraftandroid.procraft.core.TransformTouch(vm.advancedMesh) else null)
+            // the companion's Zoom or Move: a lone press zooms or moves the canvas
+            s.setTouchCompanion(
+                when (vm.companionMode) {
+                    CanvasViewModel.CompanionMode.ZOOM -> CompanionMode.ZOOM
+                    CanvasViewModel.CompanionMode.MOVE -> CompanionMode.MOVE
+                    CanvasViewModel.CompanionMode.NONE -> null
+                },
+            )
         }
-        if (routed) {
-            route(e, s)
-            val ended = e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL
-            // Layer opacity: the shared touches drag it; the band shows it as they go
-            if (vm.opacityLayer != null) vm.layerOpacityTouched(ended)
-            if (ended) routed = false
-            return true
-        }
-        when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                // every sample as it arrives, not batched to the frame
-                requestUnbufferedDispatch(e)
-                fingers = 1
-                downX = e.x
-                downY = e.y
-                if (vm.dropBand == CanvasViewModel.DropBand.FILLING) {
-                    // Continue filling: the touch fills where it lands; slid, it changes the threshold
-                    pourStart = Offset(e.x, e.y)
-                    pourMoved = false
-                    lastSelectX = e.x
-                    lastSelectTime = e.eventTime
-                    threshold = vm.dropThreshold
-                    mode = if (vm.pourBegin(pourStart)) Mode.POUR else Mode.IDLE
-                    return true
-                }
-                tapStart = e.eventTime
-                tapPointers = 1
-                tapMoved = 0f
-                if (vm.recoloring) {
-                    // Recolor: a drag anywhere moves the reticle (the fill following); a tap fills from where it lands
-                    mode = Mode.RECOLOR
-                    recolorDragging = false
-                    recolorLast = Offset(e.x, e.y)
-                    return true
-                }
-                val a = vm.adjustment
-                if (a != null) {
-                    vm.adjustMenuAt = null
-                    vm.adjustModesOpen = false
-                    val kind = kindOf(e, 0)
-                    val pen = kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER
-                    if (a == Adjustment.CLONE && vm.onClonePuck(Offset(e.x, e.y))) {
-                        // the clone source is dragged
-                        mode = Mode.PUCK
-                        val puck = vm.clonePuck?.let(vm::canvasToWindow) ?: Offset(e.x, e.y)
-                        puckGrab = Offset(e.x, e.y) - puck
-                        return true
-                    }
-                    if (a == Adjustment.CLONE || (vm.adjustPencil && pen)) {
-                        // cloning, and the pen painting an adjustment on, paint (no eyedropper)
-                        strokePointer = e.getPointerId(0)
-                        mode = if (pen) Mode.PEN else Mode.FINGER
-                        if (a == Adjustment.CLONE) vm.cloneStrokeAt(Offset(e.x, e.y), start = true)
-                        s.strokeBegin(kind, samples(e, 0))
-                        return true
-                    }
-                    // otherwise one pen or finger drags the amount across the canvas (a tap opens the menu); nothing paints
-                    mode = Mode.ADJUST
-                    chromaDragging = false
-                    if (vm.adjustment == Adjustment.LIQUIFY) {
-                        vm.liquifyPopup = 0
-                        vm.liquifyStroke(liquifyPoints(e), start = true)
-                        liquifyVelocity = Offset.Zero
-                        liquifyAt = Offset(e.x, e.y)
-                        liquifyTime = e.eventTime
-                    }
-                    lastSelectX = e.x
-                    lastSelectTime = e.eventTime
-                    return true
-                }
-                if (vm.selecting) {
-                    // one pen or finger makes the selection; nothing paints
-                    mode = Mode.SELECT
-                    vm.selectionPopup = SelectionPopup.NONE
-                    selectStart = Offset(e.x, e.y)
-                    selectMoved = false
-                    lassoSnapped = false
-                    lassoHoldAt = selectStart
-                    lastSelectX = e.x
-                    lastSelectTime = e.eventTime
-                    threshold = vm.selectionThreshold
-                    return true
-                }
-                if (vm.transforming) {
-                    // one pen or finger works the box; nothing paints
-                    mode = Mode.TRANSFORM
-                    vm.transformPopup = TransformPopup.NONE
-                    val density = resources.displayMetrics.density
-                    val box = vm.transformBox
-                    transformHandle = when {
-                        box == null -> null
-                        vm.transformKind == TransformKind.WARP && box.mesh.isNotEmpty() ->
-                            meshHandleAt(box, vm.viewMatrix, Offset(e.x, e.y), density, vm.advancedMesh)
-                        else -> boxOnScreen(box, vm.viewMatrix, density)?.let { handleAt(it, Offset(e.x, e.y), density) }
-                    }
-                    transformGrabbed = false
-                    return true
-                }
-                // Hover: with the pen held over the canvas, a finger drags the opacity and a pinch the
-                // size (routes() keeps these touches here)
-                val kind = kindOf(e, 0)
-                val pen = kind == PointerKind.STYLUS || kind == PointerKind.STYLUS_ERASER
-                if (!pen && penHovering && vm.gestures.isOn(GesturePurpose.HOVER, "HOVER_TOUCH")) {
-                    mode = Mode.HOVER
-                    hoverX = e.x
-                    return true
-                }
-            }
-            MotionEvent.ACTION_POINTER_DOWN -> {
-                fingers = e.pointerCount
-                if (mode == Mode.HOVER) {
-                    if (e.pointerCount >= 2) hoverSpread = hypot(e.getX(1) - e.getX(0), e.getY(1) - e.getY(0))
-                    return true
-                }
-                removeCallbacks(holdToPick)
-                removeCallbacks(quickShapeHold)
-                // a finger down while the stroke is held as a snapped shape snaps it, until lifted
-                if ((mode == Mode.PEN || mode == Mode.FINGER) && vm.quickShape != null) {
-                    if (e.getToolType(e.actionIndex) == MotionEvent.TOOL_TYPE_FINGER) vm.quickShapeFinger(true)
-                    return true
-                }
-                if (mode == Mode.PEN || mode == Mode.PICK) return true
-                vm.showCursor(null)
-                if (mode == Mode.FINGER) s.strokeCancel()
-                restoreTool(s)
-                if (mode == Mode.TRANSFORM && transformGrabbed) vm.transformMoved(s.transformCancelDrag())
-                vm.transformHeld = null
-                if (mode == Mode.SELECT) {
-                    vm.shapeDrag = null
-                    vm.thresholdDrag?.let { (p, t) -> vm.selectByColour(p, t, live = false) }
-                }
-                // a second finger takes back the fill the first one made
-                if (mode == Mode.POUR) vm.pourEnd(keep = false)
-                if (mode == Mode.FINGER || mode == Mode.IDLE || mode == Mode.TRANSFORM || mode == Mode.SELECT || mode == Mode.POUR || mode == Mode.RECOLOR) {
-                    gestureStart = e.eventTime
-                    gestureScale = 1f
-                }
-                mode = Mode.GESTURE
-                tapPointers = max(tapPointers, e.pointerCount)
-                followFingers(e, exclude = -1)
-                if (fingers == 3) {
-                    startScrub(e)
-                    if (!vm.gestures.isOn(GesturePurpose.CLEAR_LAYER, Trigger.SCRUB)) scrubTurns = -1
-                }
-                removeCallbacks(rapidUndo)
-                postDelayed(rapidUndo, (vm.rapidUndoDelay * 1000).toLong())
-            }
-            MotionEvent.ACTION_MOVE -> when (mode) {
-                Mode.PEN, Mode.FINGER -> {
-                    val i = e.findPointerIndex(strokePointer)
-                    if (i >= 0) {
-                        if (mode == Mode.FINGER && hypot(e.getX(i) - downX, e.getY(i) - downY) > tapSlop) removeCallbacks(holdToPick)
-                        if (vm.adjustment == Adjustment.CLONE) vm.cloneStrokeAt(Offset(e.getX(i), e.getY(i)), start = false)
-                        // moving on restarts the wait for a hold
-                        if (hypot(e.getX(i) - holdAt.x, e.getY(i) - holdAt.y) > CanvasViewModel.QUICKSHAPE_STILL_DP * resources.displayMetrics.density) {
-                            holdAt = Offset(e.getX(i), e.getY(i))
-                            removeCallbacks(quickShapeHold)
-                            if (vm.quickShape == null && drawAndHold) postDelayed(quickShapeHold, quickShapeMs)
-                        }
-                        s.strokeAdd(samples(e, i))
-                        vm.showCursor(Offset(e.getX(i), e.getY(i)))
-                        predict(s)
-                    }
-                }
-                Mode.PICK -> vm.pickAt(e.x, e.y, pickSide)
-                Mode.IDLE -> if (hypot(e.x - downX, e.y - downY) > tapSlop) removeCallbacks(holdToPick)
-                Mode.HOVER -> hoverAdjust(e)
-                Mode.PUCK -> vm.moveClonePuck(Offset(e.x, e.y) - puckGrab)
-                Mode.GESTURE -> if (fingers >= 3) scrub(e) else moveGesture(e, s)
-                Mode.SELECT -> select(e, done = false)
-                Mode.POUR -> pour(e, done = false)
-                Mode.RECOLOR -> {
-                    if (!recolorDragging && hypot(e.x - downX, e.y - downY) > tapSlop) recolorDragging = true
-                    if (recolorDragging) {
-                        val p = Offset(e.x, e.y)
-                        vm.recolorDrag(p - recolorLast)
-                        recolorLast = p
-                    }
-                }
-                Mode.ADJUST -> if (vm.adjustment == Adjustment.LIQUIFY) {
-                    vm.liquifyStroke(liquifyPoints(e), start = false)
-                    followLiquify(e)
-                } else if (vm.adjustment == Adjustment.MOTION_BLUR) {
-                    // a motion blur follows the drag: along it, longer the further it goes
-                    vm.dragMotionBlur(e.x - downX, e.y - downY)
-                } else if (vm.adjustment == Adjustment.CHROMATIC_ABERRATION && vm.chromaKind == ChromaticKind.DISPLACE) {
-                    // displacing, the drag moves the fringes
-                    vm.dragChromatic(Offset(e.x - downX, e.y - downY), start = !chromaDragging)
-                    chromaDragging = true
-                } else if (vm.adjustment?.swiped == true) {
-                    // across the canvas the amount follows the drag, faster the faster it goes
-                    val dx = (e.x - lastSelectX) / resources.displayMetrics.density
-                    vm.changeAdjustAmount(dragStep(dx, e.eventTime - lastSelectTime))
-                    lastSelectX = e.x
-                    lastSelectTime = e.eventTime
-                }
-                Mode.TRANSFORM -> transformHandle?.let { handle ->
-                    if (!transformGrabbed && hypot(e.x - downX, e.y - downY) > transformSlop) {
-                        // the drag counts from where it was recognised, as the slop is used up
-                        s.transformGrab(handle, e.x, e.y)
-                        transformGrabbed = true
-                    }
-                    if (transformGrabbed) {
-                        vm.transformMoved(s.transformDrag(e.x, e.y))
-                        vm.transformHeld = handle to Offset(e.x, e.y)
-                    }
-                }
-                Mode.NONE -> Unit
-            }
-            MotionEvent.ACTION_POINTER_UP -> {
-                fingers = e.pointerCount - 1
-                if (mode == Mode.GESTURE) followFingers(e, exclude = e.actionIndex)
-                // the last finger other than the stroke's lifted from a held snapped shape
-                if ((mode == Mode.PEN || mode == Mode.FINGER) && vm.quickShape != null && e.getPointerId(e.actionIndex) != strokePointer) {
-                    val strokeDown = e.findPointerIndex(strokePointer).let { it >= 0 && it != e.actionIndex }
-                    if (e.pointerCount - 1 - (if (strokeDown) 1 else 0) == 0) vm.quickShapeFinger(false)
-                }
-            }
-            MotionEvent.ACTION_UP -> {
-                vm.showCursor(null)
-                when (mode) {
-                    Mode.PEN, Mode.FINGER -> {
-                        val i = e.findPointerIndex(strokePointer)
-                        s.strokeEnd(if (i >= 0) samples(e, i) else emptyList())
-                        restoreTool(s)
-                        vm.strokeEnded()
-                    }
-                    Mode.GESTURE -> if (e.eventTime - tapStart <= TAP_MS && tapMoved <= tapSlop) {
-                        when (tapPointers) {
-                            2 -> if (undoTaps) vm.undo()
-                            3 -> if (undoTaps) vm.redo()
-                            4 -> when (vm.gestures.purposeOf(Trigger.FOUR_TAP)) {
-                                GesturePurpose.FULL_SCREEN -> vm.toggleBars()
-                                GesturePurpose.CLEAR_LAYER -> vm.clearCurrentLayer()
-                                // in the middle of the screen, not under the fingers
-                                GesturePurpose.QUICKMENU -> vm.toggleQuickMenu(vm.screenCentre)
-                                GesturePurpose.COPY_PASTE -> vm.copyPasteOpen = true
-                                GesturePurpose.QUICKSHAPE -> vm.quickShapeLast()
-                                else -> Unit
-                            }
-                        }
-                    } else if (tapPointers == 2 && e.eventTime - gestureStart <= QUICK_PINCH_MS && gestureScale < QUICK_PINCH_SCALE) {
-                        // a quick pinch in fits the canvas to the screen, settling into place
-                        vm.settleToFit()
-                    }
-                    Mode.PICK -> vm.finishPick()
-                    Mode.PUCK, Mode.IDLE, Mode.HOVER -> Unit
-                    Mode.SELECT -> select(e, done = true)
-                    Mode.POUR -> pour(e, done = true)
-                    Mode.RECOLOR -> if (!recolorDragging) vm.recolorTap(Offset(e.x, e.y))
-                    Mode.ADJUST -> if (vm.adjustment == Adjustment.LIQUIFY) {
-                        // still moving when it lifts, liquify carries on
-                        if (e.eventTime - liquifyTime <= LIQUIFY_STILL_MS) vm.liquifyLifted(liquifyVelocity.x, liquifyVelocity.y)
-                    } else if (e.eventTime - tapStart <= TAP_MS && hypot(e.x - downX, e.y - downY) <= tapSlop) {
-                        vm.adjustMenuAt = Offset(e.x, e.y)
-                    }
-                    Mode.TRANSFORM -> if (transformGrabbed) {
-                        vm.transformMoved(s.transformRelease())
-                        val handle = transformHandle
-                        if (handle == TransformHandle.Rotate || handle == TransformHandle.TurnBox) vm.transformLetGo = handle to Offset(e.x, e.y)
-                        vm.transformHeld = null
-                    } else if (transformHandle == TransformHandle.Move && e.eventTime - tapStart <= TAP_MS) {
-                        // a tap off the nodes nudges the content a pixel towards it
-                        vm.transformMoved(s.transformNudge(e.x, e.y))
-                    } else if (e.eventTime - tapStart <= TAP_MS) {
-                        // a tap on a node types its numbers beside it: the rotation handle its angle, the others the size
-                        val shown = vm.transformBox?.let { boxOnScreen(it, vm.viewMatrix, resources.displayMetrics.density) }
-                        val node = when (val h = transformHandle) {
-                            TransformHandle.Rotate -> shown?.rotate
-                            is TransformHandle.Corner -> shown?.corners?.getOrNull(h.index.toInt())
-                            is TransformHandle.Edge -> shown?.edges?.getOrNull(h.index.toInt())
-                            else -> null
-                        }
-                        if (shown != null && node != null) {
-                            val middle = shown.corners.fold(Offset.Zero) { sum, c -> sum + c } / 4f
-                            val right = node.x > middle.x + 1f
-                            vm.transformNumeric = CanvasViewModel.TransformNumeric(transformHandle == TransformHandle.Rotate, node, right)
-                        }
-                    }
-                    Mode.NONE -> Unit
-                }
-                mode = Mode.NONE
-                transformGrabbed = false
-                fingers = 0
-                removeCallbacks(rapidUndo)
-                removeCallbacks(holdToPick)
-                removeCallbacks(quickShapeHold)
-            }
-            MotionEvent.ACTION_CANCEL -> {
-                vm.showCursor(null)
-                if (mode == Mode.PEN || mode == Mode.FINGER) s.strokeCancel()
-                restoreTool(s)
-                if (mode == Mode.PICK) vm.cancelPick()
-                if (mode == Mode.POUR) vm.pourEnd(keep = false)
-                if (mode == Mode.TRANSFORM && transformGrabbed) vm.transformMoved(s.transformCancelDrag())
-                vm.transformHeld = null
-                transformGrabbed = false
-                mode = Mode.NONE
-                fingers = 0
-                removeCallbacks(rapidUndo)
-                removeCallbacks(holdToPick)
-            }
-        }
+        if (skipping) return true
+        route(e, s)
+        // Layer opacity: the shared touches drag it; the band shows it as they go
+        if (vm.opacityLayer != null) vm.layerOpacityTouched(e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL)
         return true
     }
+
+    /** The touch went down where Continue filling takes no fill: the rest of it does nothing. */
+    private var skipping = false
 
     /** The pen's side buttons, hovering or touching: what Pen double-tap or squeeze is set to do. */
     private fun penButton(e: MotionEvent): Boolean {
@@ -747,13 +301,16 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     /** The pen hovering over the canvas shows the brush cursor where it would paint. */
     override fun onHoverEvent(e: MotionEvent): Boolean {
         if (penButton(e)) return true
-        if (e.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS || mode != Mode.NONE) return super.onHoverEvent(e)
+        if (e.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) return super.onHoverEvent(e)
         when (e.actionMasked) {
             MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
+                // (told each time: a session opened meanwhile knows it too)
+                session?.setTouchPenHovering(true)
                 penHovering = true
                 if (painting()) vm.showCursor(Offset(e.x, e.y), hovering = true)
             }
             MotionEvent.ACTION_HOVER_EXIT -> {
+                session?.setTouchPenHovering(false)
                 penHovering = false
                 vm.showCursor(null)
             }
@@ -761,112 +318,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         return true
     }
 
-    /** Hover: one finger across the screen moves the opacity; two pinching change the size. */
-    private fun hoverAdjust(e: MotionEvent) {
-        if (e.pointerCount >= 2) {
-            val spread = hypot(e.getX(1) - e.getX(0), e.getY(1) - e.getY(0))
-            if (hoverSpread > 1f && spread > 1f) vm.changeSize((vm.size * spread / hoverSpread).coerceIn(0f, 1f))
-            hoverSpread = spread
-        } else {
-            val dx = (e.x - hoverX) / width.coerceAtLeast(1)
-            vm.changeOpacity((vm.opacity + dx).coerceIn(0f, 1f))
-            hoverX = e.x
-        }
-    }
-
     /** Whether a pen on the canvas now would paint (no tool of another kind open). */
     private fun painting() = vm.adjustment == null && !vm.selecting && !vm.transforming
-
-    /**
-     * A step of the selection tool's touch: a rectangle or ellipse dragged out; a freehand path drawn
-     * (or tapped point by point, closed by a tap on its first point); a colour picked by a tap, its
-     * threshold dragged left and right.
-     */
-    private fun select(e: MotionEvent, done: Boolean) {
-        val start = selectStart
-        val p = Offset(e.x, e.y)
-        val density = resources.displayMetrics.density
-        if ((p - start).getDistance() > transformSlop) selectMoved = true
-        when (vm.selectionKind) {
-            SelectionKind.RECTANGLE, SelectionKind.ELLIPSE -> {
-                if (done) vm.selectShape(start, p) else if (selectMoved) vm.shapeDrag = start to p
-            }
-            SelectionKind.FREEHAND -> {
-                // snapped: the shape is kept as it is, and the lift selects it
-                if (lassoSnapped) {
-                    if (done) {
-                        lassoSnapped = false
-                        vm.closeFreehand()
-                    }
-                    return
-                }
-                if (done) {
-                    removeCallbacks(lassoHold)
-                } else if (selectMoved && (p - lassoHoldAt).getDistance() > CanvasViewModel.QUICKSHAPE_STILL_DP * density) {
-                    // still for the QuickShape delay, it snaps
-                    lassoHoldAt = p
-                    removeCallbacks(lassoHold)
-                    postDelayed(lassoHold, quickShapeMs)
-                }
-                val last = vm.freehand.lastOrNull()?.let { vm.canvasToWindow(it) }
-                if (done && !selectMoved) {
-                    vm.freehandPoint(p, FREEHAND_CLOSE_DP * density)
-                } else if (selectMoved && (last == null || (p - last).getDistance() >= FREEHAND_STEP_DP * density)) {
-                    if (last == null) vm.freehandPoint(start, 0f)
-                    vm.freehandPoint(p, 0f)
-                }
-            }
-            SelectionKind.AUTOMATIC -> {
-                // across the screen the threshold follows the drag, faster the faster it goes
-                val dx = (p.x - lastSelectX) / density
-                threshold = (threshold + dragStep(dx, e.eventTime - lastSelectTime)).coerceIn(0f, 1f)
-                lastSelectX = p.x
-                lastSelectTime = e.eventTime
-                if (done) vm.selectByColour(start, threshold, live = false)
-                else if (selectMoved) vm.selectByColour(start, threshold, live = true)
-            }
-        }
-    }
-
-    /** Continue filling's touch slid across the screen changes the fill's threshold; lifted, the fill is kept. */
-    private fun pour(e: MotionEvent, done: Boolean) {
-        val p = Offset(e.x, e.y)
-        if ((p - pourStart).getDistance() > transformSlop) pourMoved = true
-        if (pourMoved) {
-            // as a selection's threshold follows a drag, only more gently
-            val dx = (p.x - lastSelectX) / resources.displayMetrics.density
-            threshold = (threshold + dragStep(dx, e.eventTime - lastSelectTime) / POUR_SLIDE_GENTLER).coerceIn(0f, 1f)
-            vm.pourThreshold(threshold)
-        }
-        lastSelectX = p.x
-        lastSelectTime = e.eventTime
-        if (done) vm.pourEnd(keep = true)
-    }
-
-    /**
-     * How much an amount dragged across the screen changes for a step of [dx] points over [ms]: more
-     * for faster drags (the speed taken per 60 Hz frame), 200 points at a steady pace moving it most
-     * of the way.
-     */
-    private fun dragStep(dx: Float, ms: Long): Float {
-        val frames = (ms.coerceAtLeast(1L) / 1000f * 60f).coerceAtLeast(0.06f)
-        val speed = kotlin.math.abs(dx) / frames
-        return (speed / 30f).toDouble().pow(0.86).toFloat() * dx / 200f
-    }
-
-    /** The first pointer's samples in this event as (x, y, pressure), for liquify. */
-    private fun liquifyPoints(e: MotionEvent): List<Float> {
-        val out = ArrayList<Float>((e.historySize + 1) * 3)
-        for (h in 0 until e.historySize) {
-            out += e.getHistoricalX(0, h)
-            out += e.getHistoricalY(0, h)
-            out += if (e.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS) e.getHistoricalPressure(0, h) else 1f
-        }
-        out += e.getX(0)
-        out += e.getY(0)
-        out += if (e.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS) e.getPressure(0) else 1f
-        return out
-    }
 
     /** Draws the predicted next samples of the stroke ahead of it (replaced at the next input). */
     private fun predict(s: CanvasSession) {
@@ -877,107 +330,6 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         } finally {
             p.recycle()
         }
-    }
-
-    /** Starts following the first two fingers other than the one at [exclude]. */
-    private fun startScrub(e: MotionEvent) {
-        swipeStartY = centreY(e)
-        swipeStartX = centreX(e)
-        swiped = false
-        scrubX = centreX(e)
-        scrubDirection = 0
-        scrubTravel = 0f
-        scrubTurns = 0
-    }
-
-    /** Three fingers rubbed back and forth (three turns) clear the current layer, once per gesture. */
-    private fun scrub(e: MotionEvent) {
-        threeFingerSwipe(e)
-        val x = centreX(e)
-        val dx = x - scrubX
-        scrubX = x
-        tapMoved += kotlin.math.abs(dx)
-        if (dx == 0f || scrubTurns < 0) return
-        val direction = if (dx > 0f) 1 else -1
-        if (direction != scrubDirection) {
-            if (scrubDirection != 0 && scrubTravel >= scrubStep) scrubTurns++
-            scrubDirection = direction
-            scrubTravel = 0f
-        }
-        scrubTravel += kotlin.math.abs(dx)
-        if (scrubTurns >= SCRUB_TURNS) {
-            scrubTurns = -1
-            vm.clearCurrentLayer()
-        }
-    }
-
-    // three fingers swiped down: where they started, and whether it has done its thing
-    private var swipeStartX = 0f
-    private var swipeStartY = 0f
-    private var swiped = false
-
-    /** Three fingers swiped down (mostly straight) do what Three-finger swipe is set to, once. */
-    private fun threeFingerSwipe(e: MotionEvent) {
-        if (swiped || e.pointerCount != 3) return
-        val dy = centreY(e) - swipeStartY
-        val dx = centreX(e) - swipeStartX
-        if (dy < SWIPE_DOWN_DP * resources.displayMetrics.density || kotlin.math.abs(dx) > dy / 2f) return
-        swiped = true
-        scrubTurns = -1
-        when (vm.gestures.purposeOf(Trigger.THREE_SWIPE)) {
-            GesturePurpose.COPY_PASTE -> vm.copyPasteOpen = true
-            GesturePurpose.FULL_SCREEN -> vm.toggleBars()
-            GesturePurpose.CLEAR_LAYER -> vm.clearCurrentLayer()
-            GesturePurpose.QUICKMENU -> vm.toggleQuickMenu(Offset(centreX(e), centreY(e)))
-            GesturePurpose.QUICKSHAPE -> vm.quickShapeLast()
-            else -> Unit
-        }
-    }
-
-    private fun centreY(e: MotionEvent): Float = (0 until e.pointerCount).sumOf { e.getY(it).toDouble() }.toFloat() / e.pointerCount
-
-    private fun centreX(e: MotionEvent): Float = (0 until e.pointerCount).sumOf { e.getX(it).toDouble() }.toFloat() / e.pointerCount
-
-    private fun followFingers(e: MotionEvent, exclude: Int) {
-        val picked = (0 until e.pointerCount).filter { it != exclude }.take(2)
-        if (picked.size < 2) {
-            gestureA = -1
-            gestureB = -1
-            return
-        }
-        gestureA = e.getPointerId(picked[0])
-        gestureB = e.getPointerId(picked[1])
-        val (x, y, d, a) = pair(e, picked[0], picked[1])
-        lastX = x
-        lastY = y
-        lastDistance = d
-        lastAngle = a
-    }
-
-    private fun moveGesture(e: MotionEvent, s: CanvasSession) {
-        val ia = e.findPointerIndex(gestureA)
-        val ib = e.findPointerIndex(gestureB)
-        if (ia < 0 || ib < 0) return
-        val (x, y, d, a) = pair(e, ia, ib)
-        val scale = if (lastDistance > 1f && d > 1f) d / lastDistance else 1f
-        var turn = a - lastAngle
-        if (turn > PI) turn -= (2 * PI).toFloat()
-        if (turn < -PI) turn += (2 * PI).toFloat()
-        if (!vm.gestures.isOn(GesturePurpose.GENERAL, "ROTATE")) turn = 0f
-        tapMoved += hypot(x - lastX, y - lastY) + kotlin.math.abs(d - lastDistance)
-        gestureScale *= scale
-        s.viewGesture(lastX, lastY, x - lastX, y - lastY, scale, turn)
-        vm.refreshView()
-        lastX = x
-        lastY = y
-        lastDistance = d
-        lastAngle = a
-    }
-
-    /** Centre, distance and angle of two fingers. */
-    private fun pair(e: MotionEvent, a: Int, b: Int): FloatArray {
-        val (ax, ay, bx, by) = floatArrayOf(e.getX(a), e.getY(a), e.getX(b), e.getY(b))
-        return floatArrayOf((ax + bx) / 2f, (ay + by) / 2f, hypot(bx - ax, by - ay), atan2(by - ay, bx - ax))
     }
 
     private fun kindOf(e: MotionEvent, index: Int): PointerKind = when (e.getToolType(index)) {
@@ -1005,29 +357,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     }
 
     private companion object {
-        /** Lifted after holding still this long (milliseconds), liquify does not carry on. */
-        private const val LIQUIFY_STILL_MS = 60L
         const val TAG = "ProCraft"
-        const val TAP_MS = 300L
-        const val RAPID_UNDO_DELAY_MS = 650L
-        const val RAPID_REPEAT_MS = 120L
-        const val QUICK_PINCH_MS = 400L
-        const val QUICK_PINCH_SCALE = 0.75f
-        const val SCRUB_TURNS = 3
-        /** How far three fingers go down to count as a swipe, dp. */
-        const val SWIPE_DOWN_DP = 70f
-
-        /** A tap this near a freehand path's first point closes it; points are added this far apart (dp). */
-        const val FREEHAND_CLOSE_DP = 22f
-        const val FREEHAND_STEP_DP = 2f
-
-        /** How far a touch on the transform box moves before its drag begins (dp); the drag counts from there. */
-        const val TRANSFORM_SLOP_DP = 15f
 
         /** The window the eyedropper shows (magnified twice), dp across. */
         const val PICK_WINDOW_DP = 54f
-
-        /** How many times more gently a fill's threshold follows a slide than a selection's. */
-        const val POUR_SLIDE_GENTLER = 2.7f
     }
 }

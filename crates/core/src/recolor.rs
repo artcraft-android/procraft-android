@@ -2,8 +2,10 @@
 //! moves and the fill follows it; a tap keeps the fill and starts again where it lands; its Flood
 //! says how far from the colour under the reticle the fill reaches. It ends keeping what it
 //! filled, each fill kept one "Recolor" undo step. The platforms draw the reticle (at
-//! [`CanvasSession::recolor_point`]) and the Flood toolbar; the touches drag and tap it (touch.rs's
-//! Recolor mode). Its fills are the pour's (pour.rs). Undo takes back the open fill first, and a
+//! [`CanvasSession::recolor_point`]) and the Flood toolbar; the touches say where it is dragged or
+//! tapped (touch.rs's Recolor mode) and the app moves it there ([`CanvasSession::recolor_move_to`],
+//! [`CanvasSession::recolor_tap`]), at once or on a thread of its own. Its fills are the pour's
+//! (pour.rs). Undo takes back the open fill first, and a
 //! redo makes it again over what it brings back (lib.rs's `undo`, `redo`).
 
 use procraft_engine::geom::Vec2;
@@ -82,15 +84,20 @@ impl CanvasSession {
 
     /// The reticle dragged by (`dx`, `dy`) window pixels: the fill follows it.
     pub fn recolor_drag(&self, dx: f32, dy: f32) {
+        let Some(from) = self.recolor_state().and_then(|r| r.point).and_then(|p| self.to_window(p)) else { return };
+        self.recolor_move_to(from.0 + dx, from.1 + dy);
+    }
+
+    /// The reticle moved to window pixel (`x`, `y`): the fill follows it (only the last of several
+    /// moves need be made).
+    pub fn recolor_move_to(&self, x: f32, y: f32) {
         let Some(mut recolor) = self.recolor_state() else { return };
-        let Some(from) = recolor.point.and_then(|p| self.to_window(p)) else { return };
-        let at = (from.0 + dx, from.1 + dy);
-        let Some(moved) = self.to_canvas(at) else { return };
+        let Some(moved) = self.to_canvas((x, y)) else { return };
         recolor.point = Some(moved);
         if recolor.open {
-            self.pour_move(at.0, at.1);
+            self.pour_move(x, y);
         } else {
-            recolor.open = self.recolor_fill(at, &recolor);
+            recolor.open = self.recolor_fill((x, y), &recolor);
         }
         self.keep_recolor(recolor);
     }

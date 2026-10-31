@@ -2479,14 +2479,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     // QuickShape
 
-    /** The stroke being drawn was held still: it snaps to a shape if it looks like one. */
-    fun quickShapeHold() {
-        val info = session?.quickshapeHold() ?: return
-        quickShape = info
-        quickShapeEditing = false
-        showNotice(snappedTo(info.kind))
-    }
-
     /** What a stroke snapped to, for the band under the top bar. */
     private fun snappedTo(kind: QuickShapeKind): String = "Snapped to " + when (kind) {
         QuickShapeKind.LINE -> "a line"
@@ -2528,11 +2520,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         quickShapeEditing = false
         showNotice(snappedTo(info.kind))
         refreshFlags()
-    }
-
-    /** A finger down ([down]) or lifted while the pen still holds the snapped shape. */
-    fun quickShapeFinger(down: Boolean) {
-        quickShape = session?.quickshapeFinger(down) ?: quickShape
     }
 
     fun chooseQuickShape(kind: QuickShapeKind) {
@@ -4203,7 +4190,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (colorNames) nameColorSoon()
         // recoloring, the area under the reticle takes the new colour
         val s = session
-        if (recolorOpen && s != null) pourLater("colour") { s.pourColour(r, g, b) }
+        if (recoloring && s != null) pourLater("colour") { s.recolorColour(r, g, b) }
     }
 
     private var naming: kotlinx.coroutines.Job? = null
@@ -4278,17 +4265,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             transformBox = session?.transformApply(TransformAction.UNDO) ?: transformBox
             return
         }
-        // recoloring, the fill under the reticle is taken back first
-        if (recolorOpen) {
-            session?.let { s -> pourNow { s.pourEnd(false, null) } }
-            recolorOpen = false
-            showNotice("Undo $RECOLOR_STEP")
-            refresh()
-            return
-        }
+        // recoloring, the core takes the fill under the reticle back first (after the fills queued)
         val could = canUndo
-        val name = session?.undo()
-        if (could) showNotice("Undo" + name?.let { " $it" }.orEmpty())
+        val name = session?.let { s -> if (recoloring) pourNow { s.undo() } else s.undo() }
+        if (could || name != null) showNotice("Undo" + name?.let { " $it" }.orEmpty())
         // cloning, the core put the source back where it was before the stroke
         if (adjustment != null) readAdjust()
         refresh()
@@ -4320,21 +4300,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun redo() {
         feedback()
         if (transforming) return
-        // recoloring, the open fill steps aside for the redo and is made again over what it brings back
-        if (recolorOpen) {
-            session?.let { s -> pourNow { s.pourEnd(false, null) } }
-            recolorOpen = false
-            val could = canRedo
-            val name = session?.redo()
-            if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
-            recolorPoint?.let { recolorOpen = recolorBegin(canvasToWindow(it)) }
-            refresh()
-            return
-        }
         val could = canRedo
         // a text edit redone is edited again
         val text = if (textInfo == null) session?.textRedoLayer() else null
-        val name = session?.redo()
+        // recoloring, the core steps the open fill aside and makes it again over what comes back
+        val name = session?.let { s -> if (recoloring) pourNow { s.redo() } else s.redo() }
         if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
         refresh()
         if (panel == Panel.LAYERS) refreshThumbnails()
@@ -4437,36 +4407,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readSliders()
     }
 
-    /** The clone source moved to window point [p]: the next stroke fixes how far from it the brush is. */
-    fun moveClonePuck(p: Offset) {
-        session?.adjustmentCloneMove(p.x, p.y)
+    /** The canvas's (shared) touches changed the adjustment: its values shown as they are now. */
+    fun adjustTouched() {
+        adjustModesOpen = false
         readAdjust()
     }
 
-    /** A clone stroke reached window point [p] ([start]: it begins there); the source follows the brush. */
-    fun cloneStrokeAt(p: Offset, start: Boolean) {
-        val s = session ?: return
-        s.adjustmentCloneStroke(p.x, p.y, start)
-        clonePuck = s.adjustmentShown().clonePuck?.let { windowToCanvas(Offset(it[0], it[1])) }
-    }
-
-    /** Whether window point [p] is on the clone source. */
-    fun onClonePuck(p: Offset): Boolean {
-        val puck = clonePuck ?: return false
-        return (canvasToWindow(puck) - p).getDistance() <= (CLONE_PUCK_RADIUS_DP + CLONE_PUCK_SLOP_DP) * density
-    }
-
-    /** The amount dragged across the canvas changed by [step] (0..1 of the whole). */
-    fun changeAdjustAmount(step: Float) {
-        if (adjustment == null) return
-        session?.adjustmentAmountBy(step)
-        readAdjust()
-    }
-
-    /** A motion blur's drag reached ([dx], [dy]) window pixels from where it started. */
-    fun dragMotionBlur(dx: Float, dy: Float) {
-        session?.adjustmentMotion(dx, dy)
-        readAdjust()
+    /** Cloning, the source as the core has it while the brush paints. */
+    fun followClonePuck() {
+        clonePuck = session?.adjustmentShown()?.clonePuck?.let { windowToCanvas(Offset(it[0], it[1])) }
     }
 
     fun chooseBalanceTone(tone: Int) {
@@ -4623,12 +4572,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readAdjust()
     }
 
-    /** Displacing: a drag [d] window pixels from where it began ([start] at its beginning) moves the fringes on. */
-    fun dragChromatic(d: Offset, start: Boolean) {
-        session?.adjustmentChromaDrag(d.x, d.y, start)
-        readAdjust()
-    }
-
     fun chooseGlitchKind(kind: GlitchKind) {
         session?.adjustmentGlitchKind(kind)
         readAdjust()
@@ -4684,18 +4627,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readAdjust()
         if (painted && !adjustPencil) readSliders()
         refresh()
-    }
-
-    /** The liquify brush lifted moving at ([vx], [vy]) window pixels a millisecond: it carries on with its momentum. */
-    fun liquifyLifted(vx: Float, vy: Float) {
-        session?.adjustmentLiquifyCoast(vx, vy)
-    }
-
-    /** A liquify stroke's window points (x, y, pressure each); [start] begins it. */
-    fun liquifyStroke(points: List<Float>, start: Boolean) {
-        val s = session ?: return
-        s.adjustmentLiquifyStroke(points, start)
-        liquified = true
     }
 
     fun chooseLiquifyKind(kind: LiquifyKind) {
@@ -4785,54 +4716,56 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     private val join get() = if (selectionRemoves) SelectionJoin.REMOVE else SelectionJoin.ADD
 
-    /** A rectangle or ellipse dragged out between window points [a] and [b]. */
-    fun selectShape(a: Offset, b: Offset) {
-        val s = session ?: return
+    /** How the canvas's (shared) touches select while the selection tool is open; none otherwise. */
+    fun selectTouch(): io.github.artcraftandroid.procraft.core.SelectTouch? {
+        if (!selecting) return null
+        val kind = when (selectionKind) {
+            SelectionKind.AUTOMATIC -> io.github.artcraftandroid.procraft.core.SelectKind.AUTOMATIC
+            SelectionKind.FREEHAND -> io.github.artcraftandroid.procraft.core.SelectKind.FREEHAND
+            SelectionKind.RECTANGLE -> io.github.artcraftandroid.procraft.core.SelectKind.RECTANGLE
+            SelectionKind.ELLIPSE -> io.github.artcraftandroid.procraft.core.SelectKind.ELLIPSE
+        }
+        return io.github.artcraftandroid.procraft.core.SelectTouch(kind, join, selectionThreshold)
+    }
+
+    /** The freehand path as the touches have drawn it (canvas pixels). */
+    fun freehandChanged() {
+        freehand = session?.freehandPath().orEmpty().chunked(2).mapNotNull { (x, y) -> windowToCanvas(Offset(x, y)) }
+    }
+
+    /** The touches made a selection (or a shape dragged out ended): Color Fill fills it. */
+    fun selectionTouched() {
         shapeDrag = null
-        if ((b - a).getDistance() < 1f) return
-        s.selectShape(selectionKind == SelectionKind.ELLIPSE, a.x, a.y, b.x, b.y, join)
         selectionChanged()
     }
 
-    /** Adds window point [p] to the freehand path; a point near its first one closes it. */
-    fun freehandPoint(p: Offset, closeReach: Float) {
-        val canvas = windowToCanvas(p) ?: return
-        val first = freehand.firstOrNull()
-        if (first != null && freehand.size > 2 && closeReach > 0f && (canvasToWindow(first) - p).getDistance() <= closeReach) {
-            closeFreehand()
+    /** A colour selection's threshold slid from window point [p]: shown as it goes; [done], kept for the next one. */
+    fun colourSlid(p: Offset, threshold: Float, done: Boolean) {
+        if (!done) {
+            selectByColour(p, threshold, live = true)
             return
         }
-        freehand = freehand + canvas
-    }
-
-    /** The freehand path, held still, snaps to the shape it looks like; true if it did. */
-    fun snapFreehand(): Boolean {
-        val outline = io.github.artcraftandroid.procraft.core.quickshapeOutline(freehand.flatMap { listOf(it.x, it.y) }) ?: return false
-        if (outline.size < 6) return false
-        freehand = outline.chunked(2).map { (x, y) -> Offset(x, y) }
-        return true
+        // the touches made the selection as it was let go
+        thresholdDrag = null
+        selectionThreshold = threshold
+        transformPrefs.edit().putFloat(SELECTION_THRESHOLD, threshold).apply()
     }
 
     /** Closes the freehand path into a selection (a path of fewer than three points is dropped). */
     fun closeFreehand() {
         val s = session ?: return
-        val path = freehand
+        val drawn = freehand.isNotEmpty()
         freehand = emptyList()
-        if (path.size < 3) return
-        s.selectPolygon(path.flatMap { canvasToWindow(it).let { w -> listOf(w.x, w.y) } }, join)
-        selectionChanged()
+        s.closeFreehand()
+        if (drawn) selectionChanged()
     }
 
-    /** Selects by colour at window point [p] with [threshold]; [live] while the threshold is dragged. */
-    fun selectByColour(p: Offset, threshold: Float, live: Boolean) {
+    /** Selects by colour at window point [p] with [threshold], shown filled while the threshold is dragged. */
+    private fun selectByColour(p: Offset, threshold: Float, live: Boolean) {
         val s = session ?: return
         thresholdDrag = if (live) p to threshold else null
         s.setSelectionDisplay(if (live) SelectionDisplay.FILL else SelectionDisplay.TINT)
         s.selectByColour(p.x, p.y, threshold, join, live)
-        if (!live) {
-            selectionThreshold = threshold
-            transformPrefs.edit().putFloat(SELECTION_THRESHOLD, threshold).apply()
-        }
         selectionChanged(fill = !live)
     }
 
@@ -4921,6 +4854,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return pourNow { s.pourBegin(p.x, p.y, ((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, t) }
     }
 
+    /** Continue filling: the colour and threshold the canvas's (shared) touches fill with; none when not filling. */
+    fun touchFill(): io.github.artcraftandroid.procraft.core.Fill? {
+        if (dropBand != DropBand.FILLING) return null
+        val c = dropSwatch ?: colorRgb()
+        return io.github.artcraftandroid.procraft.core.Fill(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, dropThreshold)
+    }
+
+    /** The touches' fill was let go of (kept, or taken back by a second finger): a slid threshold is kept for the next. */
+    fun filled() {
+        if (dropSliding) transformPrefs.edit().putFloat(DROP_THRESHOLD, dropThreshold).apply()
+        dropSliding = false
+        refresh()
+    }
+
     /** The fill under way redone with [threshold], which is kept for the next. */
     fun pourThreshold(threshold: Float) {
         val s = session ?: return
@@ -4968,8 +4915,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var recolorThreshold by mutableFloatStateOf(transformPrefs.getFloat(RECOLOR_THRESHOLD, 0f))
         private set
 
-    /** A fill is open under the reticle (none while the reticle is off the canvas, or once undone). */
-    private var recolorOpen = false
+    /** The reticle where the core has it (canvas pixels). */
+    private fun readRecolorPoint() {
+        recolorPoint = session?.recolorPoint()?.let { windowToCanvas(Offset(it[0], it[1])) }
+    }
 
     /** Recolor on, the reticle in the middle of the screen, or off (keeping what it filled). */
     fun toggleRecolor() {
@@ -4977,7 +4926,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             endRecolor()
             return
         }
-        if (session == null || !currentTakesChanges()) return
+        val s = session ?: return
+        if (!currentTakesChanges()) return
         // text takes no colour until it is rasterized
         if (currentIsText()) {
             askRasterize = true
@@ -4991,39 +4941,27 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         closeSelecting()
         closePanels()
         recoloring = true
-        recolorPoint = windowToCanvas(screenCentre)
-        recolorOpen = recolorBegin(screenCentre)
+        val c = colorRgb()
+        val (r, g, b) = Triple(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f)
+        val t = recolorThreshold
+        // the shared core keeps it (crates/core recolor.rs); its fills run on the fill thread
+        pourNow { s.recolorStart(screenCentre.x, screenCentre.y, r, g, b, t) }
+        readRecolorPoint()
         refresh()
     }
 
-    /** A fill under the reticle at window point [at]; false where there is nothing to fill. */
-    private fun recolorBegin(at: Offset): Boolean {
-        val s = session ?: return false
-        val c = colorRgb()
-        val t = recolorThreshold
-        return pourNow { s.pourBegin(at.x, at.y, ((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, t) }
-    }
-
-    /** The reticle dragged by [by] window pixels: the fill follows it. */
-    fun recolorDrag(by: Offset) {
+    /** The touches dragged the reticle to window point [at]: shown there at once, the fill following on the fill thread. */
+    fun recolorMoveTo(at: Offset) {
         val s = session ?: return
-        val from = recolorPoint?.let(::canvasToWindow) ?: screenCentre
-        val at = from + by
         recolorPoint = windowToCanvas(at) ?: return
-        if (!recolorOpen) {
-            recolorOpen = recolorBegin(at)
-            return
-        }
-        pourLater("point") { s.pourMove(at.x, at.y) }
+        pourLater("point") { s.recolorMoveTo(at.x, at.y) }
     }
 
     /** A tap while recoloring: the fill so far is kept, and the reticle starts again at [p]. */
     fun recolorTap(p: Offset) {
         val s = session ?: return
-        if (recolorOpen) pourNow { s.pourEnd(true, RECOLOR_STEP) }
-        recolorOpen = false
-        recolorPoint = windowToCanvas(p) ?: return
-        recolorOpen = recolorBegin(p)
+        pourNow { s.recolorTap(p.x, p.y) }
+        readRecolorPoint()
         refresh()
     }
 
@@ -5032,15 +4970,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return
         val v = t.coerceIn(0f, 1f)
         recolorThreshold = v
-        if (recolorOpen) pourLater("threshold") { s.pourThreshold(v) }
+        if (recoloring) pourLater("threshold") { s.recolorThreshold(v) }
     }
 
     /** Recolor ends, keeping what it filled. */
     fun endRecolor() {
         if (!recoloring) return
         val s = session
-        if (recolorOpen && s != null) pourNow { s.pourEnd(true, RECOLOR_STEP) }
-        recolorOpen = false
+        if (s != null) pourNow { s.recolorEnd() }
         recoloring = false
         recolorPoint = null
         transformPrefs.edit().putFloat(RECOLOR_THRESHOLD, recolorThreshold).apply()
@@ -5704,6 +5641,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** The canvas's (shared) touches changed the brush's size or opacity (Hover's): the sliders show it. */
+    fun brushTouched() = readSliders()
+
     private fun readSliders() {
         val info = session?.info() ?: return
         size = info.size
@@ -5735,9 +5675,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val FRAME_MS = 16L
         const val SETTLE_MARGIN_NS = 50_000_000L
 
-        /** The clone source's ring (points from its centre), and how far off it a touch still takes it. */
+        /** The clone source's ring (points from its centre). */
         const val CLONE_PUCK_RADIUS_DP = 30f
-        const val CLONE_PUCK_SLOP_DP = 8f
         /** Each glitch kind's sliders as they start: its own two (diverge three), then the zoom. */
         val GLITCH_DEFAULTS = mapOf(
             GlitchKind.ARTIFACT to listOf(1f, 0.09f, 1f),
@@ -5901,7 +5840,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private const val RECOLOR_THRESHOLD = "recolorThreshold"
 
         /** What undo and redo call a Recolor fill. */
-        private const val RECOLOR_STEP = "Recolor"
 
         /** A video's frames come in at Animation Assist's starting frame rate unless it is on. */
         private const val DEFAULT_FPS = 15
