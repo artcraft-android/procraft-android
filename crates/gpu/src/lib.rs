@@ -9,13 +9,13 @@ mod lighting;
 mod scene;
 mod sphere;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 pub use canvas::{
-    Backdrop, Canvas, DisplayLut, Filter, LiquifyMode, LiquifyStamp, ReadyToPark, RemakeStats, Resample, SelectionLook,
-    SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, read_texture,
-    textures_bytes,
+    Backdrop, Canvas, DisplayLut, Filter, LiquifyMode, LiquifyStamp, Readback, ReadyToPark, RemakeStats, Resample,
+    SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail,
+    read_texture, start_reading, textures_bytes,
 };
 pub use lighting::Lighting;
 pub use scene::{GrainLook, Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, SurfaceMap, material_source};
@@ -44,6 +44,8 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     errors: Arc<AtomicU64>,
+    /// Whether the device has been lost (its driver reset or stopped).
+    lost: Arc<AtomicBool>,
     /// The canvases' pipelines, once the first canvas has made them.
     canvas_pipelines: Arc<OnceLock<Arc<canvas::Pipelines>>>,
 }
@@ -109,7 +111,19 @@ impl Gpu {
             counter.fetch_add(1, Ordering::Relaxed);
             log::error!("GPU error: {e}");
         }));
-        Ok(Gpu { instance, adapter, device, queue, errors, canvas_pipelines: Arc::default() })
+        // a device lost keeps nothing it held: what its textures had is gone
+        let lost = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&lost);
+        device.set_device_lost_callback(move |reason, message| {
+            flag.store(true, Ordering::Relaxed);
+            log::error!("GPU lost ({reason:?}): {message}");
+        });
+        Ok(Gpu { instance, adapter, device, queue, errors, lost, canvas_pipelines: Arc::default() })
+    }
+
+    /// Whether the device has been lost: nothing it held can be read back.
+    pub fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::Relaxed)
     }
 
     /// Makes the pipelines canvases draw with, and the brush images they hold, now, so the first

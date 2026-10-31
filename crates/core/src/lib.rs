@@ -760,6 +760,9 @@ pub(crate) struct Shared {
     projection: Mutex<Option<JoinHandle<()>>>,
     /// Held while the artwork is saved: one save at a time, so two never write the same files.
     pub(crate) saving: Mutex<project::Saved>,
+    /// The artwork's edits as the last save that worked found them, [`project::NOT_SAVED`]
+    /// before one (read without waiting on a save).
+    pub(crate) edits_saved: std::sync::atomic::AtomicU64,
     /// The canvas's touches (they call into the session, so they keep their own lock).
     pub(crate) touches: touch::TouchState,
 }
@@ -1072,6 +1075,7 @@ impl CanvasSession {
                 thread: Mutex::new(None),
                 projection: Mutex::new(None),
                 saving: Mutex::new(project::Saved::default()),
+                edits_saved: std::sync::atomic::AtomicU64::new(project::NOT_SAVED),
                 touches: Mutex::new(touch::Touches::default()),
             }),
         })
@@ -1255,7 +1259,7 @@ impl CanvasSession {
             return;
         }
         let canvas_samples = st.to_canvas(&samples);
-        let (Some(builder), Some(canvas)) = (st.stroke.as_ref(), st.canvas.as_mut()) else { return };
+        let (Some(builder), Some(canvas)) = (st.stroke.as_mut(), st.canvas.as_mut()) else { return };
         let guide = st.doc.stroke_guide();
         // a stroke shown with its tip ends it where the input is predicted to go
         if canvas.shows_tip() && builder.shows_tip() {
@@ -1542,24 +1546,30 @@ impl CanvasSession {
         }
         // with a selection, only what is selected is cleared
         if let Some(mask) = st.selection.clone() {
-            st.flush();
-            let pixels = match (st.canvas.as_mut(), st.gpu.as_ref()) {
-                (Some(canvas), Some(gpu)) => canvas.read_layer(gpu, current).ok(),
-                _ => None,
-            };
+            let Some(rect) = layer_ops::mask_rect(&mask) else { return };
+            let pixels = st.layer_part(current, rect);
             if let (Some(mut pixels), Some(canvas)) = (pixels, st.canvas.as_mut()) {
-                for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&mask.data) {
+                for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&layer_ops::mask_part(&mask, rect)) {
                     let keep = 255 - u16::from(m);
                     px.iter_mut().for_each(|c| *c = ((u16::from(*c) * keep + 127) / 255) as u8);
                 }
-                canvas.write_layer(current, pixels);
+                canvas.write_layer_part(current, rect, pixels);
                 self.shared.frame(st);
             }
             return;
         }
+        // the undo step keeps only what was painted, where the GPU can tell
+        st.flush();
+        let painted = match (st.canvas.as_ref(), st.gpu.as_ref()) {
+            (Some(canvas), Some(gpu)) => canvas.painted_boxes(gpu, &[current]).pop().flatten(),
+            _ => None,
+        };
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.name_next_step("clear layer");
-            canvas.clear_layer(current);
+            match painted {
+                Some(painted) => canvas.clear_layer_within(current, painted),
+                None => canvas.clear_layer(current),
+            }
             self.shared.frame(st);
         }
     }

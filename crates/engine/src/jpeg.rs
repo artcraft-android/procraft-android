@@ -213,7 +213,7 @@ fn encode_with(
     height: u32,
     quality: u8,
     icc: &[u8],
-    pixel: impl Fn(usize) -> [f32; 4],
+    pixel: impl Fn(usize) -> [f32; 4] + Sync,
 ) -> Vec<u8> {
     let (w, h) = (width.clamp(1, 65535) as usize, height.clamp(1, 65535) as usize);
     let n = if kind == Kind::Cmyk { 4 } else { 3 };
@@ -262,6 +262,17 @@ fn encode_with(
         out.extend_from_slice(bits);
         out.extend_from_slice(symbols);
     }
+    // the rows of blocks in stretches coded side by side, each starting its DC prediction afresh
+    // after a restart marker (DRI says how many blocks a stretch has); one stretch for a small
+    // picture
+    let (block_rows, per_row) = (h.div_ceil(8), w.div_ceil(8));
+    let stretch =
+        block_rows.div_ceil(crate::par::cores() * 2).clamp(1, (usize::from(u16::MAX) / per_row.max(1)).max(1));
+    let stretches = block_rows.div_ceil(stretch);
+    if stretches > 1 {
+        out.extend_from_slice(&[0xFF, 0xDD, 0, 4]);
+        out.extend_from_slice(&((stretch * per_row) as u16).to_be_bytes());
+    }
     out.extend_from_slice(&[0xFF, 0xDA]);
     out.extend_from_slice(&(6 + 2 * n as u16).to_be_bytes());
     out.push(n as u8);
@@ -273,64 +284,74 @@ fn encode_with(
 
     let dc = [Codes::new(&DC_LUMA_BITS, &DC_SYMBOLS), Codes::new(&DC_CHROMA_BITS, &DC_SYMBOLS)];
     let ac = [Codes::new(&AC_LUMA_BITS, &AC_LUMA_SYMBOLS), Codes::new(&AC_CHROMA_BITS, &AC_CHROMA_SYMBOLS)];
-    let mut bits = Bits { out, acc: 0, n: 0 };
-    let mut previous = [0i32; 4];
-    for by in (0..h).step_by(8) {
-        for bx in (0..w).step_by(8) {
-            // the block's components, edges repeated past the picture
-            let mut blocks = [[0f32; 64]; 4];
-            for k in 0..64 {
-                let (sx, sy) = ((bx + k % 8).min(w - 1), (by + k / 8).min(h - 1));
-                for (block, value) in blocks.iter_mut().zip(pixel(sy * w + sx)) {
-                    if let Some(slot) = block.get_mut(k) {
-                        *slot = value;
+    let code = |&stretch_at: &usize| -> Vec<u8> {
+        let mut bits = Bits { out: Vec::new(), acc: 0, n: 0 };
+        let mut previous = [0i32; 4];
+        for by in (stretch_at * stretch * 8..((stretch_at + 1) * stretch * 8).min(h)).step_by(8) {
+            for bx in (0..w).step_by(8) {
+                // the block's components, edges repeated past the picture
+                let mut blocks = [[0f32; 64]; 4];
+                for k in 0..64 {
+                    let (sx, sy) = ((bx + k % 8).min(w - 1), (by + k / 8).min(h - 1));
+                    for (block, value) in blocks.iter_mut().zip(pixel(sy * w + sx)) {
+                        if let Some(slot) = block.get_mut(k) {
+                            *slot = value;
+                        }
                     }
                 }
-            }
-            for ((c, block), last) in blocks.iter_mut().enumerate().take(n).zip(previous.iter_mut()) {
-                let t = table_of(c);
-                let (Some(dc), Some(ac)) = (dc.get(t), ac.get(t)) else { continue };
-                dct(block);
-                let q = tables.get(t).copied().unwrap_or([1; 64]);
-                let coeff: Vec<i32> = ZIGZAG
-                    .iter()
-                    .map(|&i| {
-                        (block.get(i).copied().unwrap_or(0.0) / f32::from(q.get(i).copied().unwrap_or(1))).round()
-                            as i32
-                    })
-                    .collect();
-                let first = coeff.first().copied().unwrap_or(0);
-                let (size, value) = magnitude(first - *last);
-                *last = first;
-                let (code, len) = dc.get(size);
-                bits.put(code, len);
-                bits.put(value, size);
-                let mut zeros = 0u8;
-                for &v in coeff.get(1..).unwrap_or(&[]) {
-                    if v == 0 {
-                        zeros += 1;
-                        continue;
-                    }
-                    while zeros >= 16 {
-                        let (code, len) = ac.get(0xF0);
-                        bits.put(code, len);
-                        zeros -= 16;
-                    }
-                    let (size, value) = magnitude(v);
-                    let (code, len) = ac.get((zeros << 4) | size);
+                for ((c, block), last) in blocks.iter_mut().enumerate().take(n).zip(previous.iter_mut()) {
+                    let t = table_of(c);
+                    let (Some(dc), Some(ac)) = (dc.get(t), ac.get(t)) else { continue };
+                    dct(block);
+                    let q = tables.get(t).copied().unwrap_or([1; 64]);
+                    let coeff: Vec<i32> = ZIGZAG
+                        .iter()
+                        .map(|&i| {
+                            (block.get(i).copied().unwrap_or(0.0) / f32::from(q.get(i).copied().unwrap_or(1))).round()
+                                as i32
+                        })
+                        .collect();
+                    let first = coeff.first().copied().unwrap_or(0);
+                    let (size, value) = magnitude(first - *last);
+                    *last = first;
+                    let (code, len) = dc.get(size);
                     bits.put(code, len);
                     bits.put(value, size);
-                    zeros = 0;
-                }
-                if zeros > 0 {
-                    let (code, len) = ac.get(0x00);
-                    bits.put(code, len);
+                    let mut zeros = 0u8;
+                    for &v in coeff.get(1..).unwrap_or(&[]) {
+                        if v == 0 {
+                            zeros += 1;
+                            continue;
+                        }
+                        while zeros >= 16 {
+                            let (code, len) = ac.get(0xF0);
+                            bits.put(code, len);
+                            zeros -= 16;
+                        }
+                        let (size, value) = magnitude(v);
+                        let (code, len) = ac.get((zeros << 4) | size);
+                        bits.put(code, len);
+                        bits.put(value, size);
+                        zeros = 0;
+                    }
+                    if zeros > 0 {
+                        let (code, len) = ac.get(0x00);
+                        bits.put(code, len);
+                    }
                 }
             }
         }
+        bits.flush();
+        bits.out
+    };
+    let numbers: Vec<usize> = (0..stretches).collect();
+    let coded = crate::par::side_by_side(&numbers, code);
+    for (i, data) in numbers.iter().zip(coded) {
+        if *i > 0 {
+            out.extend_from_slice(&[0xFF, 0xD0 + ((*i - 1) % 8) as u8]);
+        }
+        out.extend(data.unwrap_or_else(|| code(i)));
     }
-    bits.flush();
-    let mut out = bits.out;
     out.extend_from_slice(&[0xFF, 0xD9]);
     out
 }

@@ -74,6 +74,28 @@ use crate::ui::{Action, Interface};
 /// A new artwork's size when the screen's isn't known.
 const FALLBACK_CANVAS: (u32, u32) = (1920, 1080);
 
+/// Artworks being brought in into a gallery folder: one read on a thread of its own (an artwork of
+/// many layers takes seconds), since when, and those still to come.
+struct Importing {
+    since: Instant,
+    reading: std::thread::JoinHandle<Option<(Arc<CanvasSession>, Option<std::path::PathBuf>)>>,
+    folder: Option<String>,
+    rest: std::collections::VecDeque<Vec<std::path::PathBuf>>,
+}
+
+impl Importing {
+    /// The first of `artworks` (each its files) read on its own thread, into `folder`; none left,
+    /// none.
+    fn next(
+        mut artworks: std::collections::VecDeque<Vec<std::path::PathBuf>>,
+        folder: Option<String>,
+    ) -> Option<Importing> {
+        let paths = artworks.pop_front()?;
+        let reading = std::thread::spawn(move || files::open_artwork_files(paths));
+        Some(Importing { since: Instant::now(), reading, folder, rest: artworks })
+    }
+}
+
 /// How long an artwork opens before it says so, as the tablet's.
 const SLOW_OPENING: Duration = Duration::from_millis(500);
 /// The veil over the window while it does.
@@ -115,6 +137,7 @@ fn main() {
         last_frame: Instant::now(),
         again: None,
         opening: None,
+        importing: None,
         screen: None,
         session: None,
         artwork: None,
@@ -143,6 +166,8 @@ struct App {
     again: Option<Instant>,
     /// An artwork's canvas being made on a thread of its own as it opens, and since when.
     opening: Option<(Instant, std::thread::JoinHandle<()>)>,
+    /// Artworks being brought in, read on a thread of their own one after another.
+    importing: Option<Importing>,
     screen: Option<Screen>,
     /// The artwork open and its folder in the gallery; none while the gallery shows.
     session: Option<Arc<CanvasSession>>,
@@ -261,6 +286,10 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.screen.as_ref().is_some_and(|s| s.gpu.is_lost()) {
+            self.gpu_lost(event_loop);
+            return;
+        }
         self.sync_projection(event_loop);
         let Some(screen) = self.screen.as_ref() else { return };
         let Some(session) = self.session.as_ref() else {
@@ -352,6 +381,7 @@ impl App {
             return;
         }
         self.take_dropped();
+        self.imported();
         let Some(screen) = self.screen.as_mut() else { return };
         let Some(session) = self.session.clone() else {
             self.gallery_frame();
@@ -364,7 +394,8 @@ impl App {
         {
             let _ = made.join();
         }
-        let slow = self.opening.as_ref().is_some_and(|(since, _)| since.elapsed() >= SLOW_OPENING);
+        let slow = self.opening.as_ref().is_some_and(|(since, _)| since.elapsed() >= SLOW_OPENING)
+            || self.importing.as_ref().is_some_and(|i| i.since.elapsed() >= SLOW_OPENING);
         // the gallery stays as it is until there is a canvas to zoom into
         if self.opening.is_some()
             && let Some(zoom) = self.zoom.as_mut().filter(|z| z.opening)
@@ -388,16 +419,23 @@ impl App {
         if pad_soon {
             self.again = Some(Instant::now());
         }
-        // looked at again soon while the canvas is being made
-        if self.opening.is_some() {
+        // looked at again soon while the canvas is being made, or an artwork read
+        if self.opening.is_some() || self.importing.is_some() {
             let soon = Instant::now() + Duration::from_millis(50);
             self.again = Some(self.again.map_or(soon, |due| due.min(soon)));
         }
-        let unsaved = if session.edits() == self.ui.saved_edits { "" } else { " •" };
+        let edits = session.edits();
+        let saved = edits == self.ui.saved_edits || session.edits_saved() == Some(edits);
+        let unsaved = if saved { "" } else { " •" };
         let title = format!("{}{unsaved} — ProCraft", session.name());
         if title != self.title {
             screen.window.set_title(&title);
             self.title = title;
+        }
+        // looked at again until a save has it (autosaves come in on their own)
+        if !saved {
+            let soon = Instant::now() + Duration::from_secs(1);
+            self.again = Some(self.again.map_or(soon, |due| due.min(soon)));
         }
         self.zoom_on();
         // Project canvas shows the canvas as just drawn
@@ -420,6 +458,7 @@ impl App {
         let mut asked = None;
         let (gallery, interface) = (&mut self.gallery, &mut self.ui);
         let closing = self.zoom.as_ref().filter(|z| !z.opening);
+        let reading = self.importing.as_ref().map(|i| i.since.elapsed() >= SLOW_OPENING);
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             interface.style_once(ui.ctx());
             // closing: the gallery settling back into place, the canvas fading over it
@@ -429,8 +468,16 @@ impl App {
                 None => zoom::Zoom::end(ui.ctx()),
             }
             asked = gallery.show(ui.ctx(), &mut interface.look, &interface.colours);
+            if reading == Some(true) {
+                opening_veil(ui.ctx());
+            }
         });
         self.again = screen.draw(None, self.started, output).map(|after| Instant::now() + after);
+        // looked at again soon while an artwork is read
+        if reading.is_some() {
+            let soon = Instant::now() + Duration::from_millis(50);
+            self.again = Some(self.again.map_or(soon, |due| due.min(soon)));
+        }
         if self.title != "ProCraft" {
             screen.window.set_title("ProCraft");
             self.title = "ProCraft".into();
@@ -556,6 +603,8 @@ impl App {
 
     fn open_artwork(&mut self, session: Arc<CanvasSession>, dir: String) {
         self.ui.artwork_dir = Some(dir.clone());
+        // kept saved as it changes, as the tablet's
+        Arc::clone(&session).start_autosave(dir.clone());
         self.artwork = Some(dir);
         self.ui.path = None;
         self.ui.saved_edits = session.edits();
@@ -624,16 +673,27 @@ impl App {
         }
         // a model takes the files picked with it; else each is an artwork of its own, the one
         // before kept (closed) as the next comes in
-        let artworks: Vec<Vec<std::path::PathBuf>> = if paths.iter().any(|p| files::is_model_file(p)) {
-            vec![paths]
-        } else {
-            paths.into_iter().map(|p| vec![p]).collect()
-        };
-        for paths in artworks {
+        let artworks: std::collections::VecDeque<Vec<std::path::PathBuf>> =
+            if paths.iter().any(|p| files::is_model_file(p)) {
+                [paths].into()
+            } else {
+                paths.into_iter().map(|p| vec![p]).collect()
+            };
+        // after any already coming in
+        match &mut self.importing {
+            Some(importing) => importing.rest.extend(artworks),
+            None => self.importing = Importing::next(artworks, folder),
+        }
+    }
+
+    /// An artwork read meanwhile, opened (the one open before kept), and the next one read.
+    fn imported(&mut self) {
+        let Some(importing) = self.importing.take_if(|i| i.reading.is_finished()) else { return };
+        let Importing { reading, folder, rest, .. } = importing;
+        if let Ok(Some((session, package))) = reading.join() {
             if self.session.is_some() && !self.leave_artwork() {
                 return;
             }
-            let Some((session, package)) = files::open_artwork_files(paths) else { continue };
             let dir = self.gallery.store.new_folder(folder.clone());
             // a model is a new artwork painting on it
             let model = session.model_info().is_some();
@@ -645,6 +705,7 @@ impl App {
                 self.ui.started_new();
             }
         }
+        self.importing = Importing::next(rest, folder);
     }
 
     /// An artwork dragged out of the window: written as Drag and Drop export's file format says,
@@ -679,18 +740,51 @@ impl App {
     #[cfg(not(windows))]
     fn drag_out(&mut self, _artwork: &procraft_core::GalleryArtwork) {}
 
+    /// The graphics device was lost (its driver reset or stopped), and all it held: nothing is
+    /// saved from it (the gallery keeps the artwork as it was last saved, seconds before); the
+    /// windows go, and the app says so and starts again.
+    fn gpu_lost(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(session) = self.session.take() {
+            session.stop_autosave();
+        }
+        // nothing they show can be drawn (and with the screen gone this happens once)
+        self.projection = None;
+        self.screen = None;
+        files::tell("The graphics device stopped", "ProCraft starts again, with the artwork as it was last saved.");
+        match std::env::current_exe() {
+            Ok(me) => {
+                if let Err(e) = std::process::Command::new(me).spawn() {
+                    log::error!("starting again: {e}");
+                }
+            }
+            Err(e) => log::error!("starting again: {e}"),
+        }
+        event_loop.exit();
+    }
+
     /// The artwork open is put away and kept; false if it couldn't be.
     fn leave_artwork(&mut self) -> bool {
         if let Some(session) = self.session.clone() {
             self.ui.closing(&session);
+            // no save of its own after this one
+            session.stop_autosave();
         }
-        self.keep_artwork()
+        let kept = self.keep_artwork();
+        // still open: kept saved again
+        if !kept && let (Some(session), Some(dir)) = (&self.session, &self.artwork) {
+            Arc::clone(session).start_autosave(dir.clone());
+        }
+        kept
     }
 
     /// Saves the artwork open into its folder in the gallery (and the brushes as it left them);
     /// false if it couldn't be.
     fn keep_artwork(&mut self) -> bool {
         let (Some(session), Some(dir)) = (self.session.clone(), self.artwork.clone()) else { return true };
+        // its canvas made first (it is being made on a thread of its own), so the save has its picture
+        if let Some((_, made)) = self.opening.take() {
+            let _ = made.join();
+        }
         session.keep_brushes(files::brushes_dir());
         let edits = session.edits();
         match session.save(dir) {

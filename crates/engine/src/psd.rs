@@ -653,7 +653,8 @@ fn build(records: &[Record], f: &Format) -> Built {
             },
         }
     };
-    let mut made: Vec<Option<Made>> = crate::par::side_by_side(&numbers, made_of);
+    // each holds its picture apart while it is placed on the canvas
+    let mut made: Vec<Option<Made>> = crate::par::side_by_side_within(&numbers, w * h * 4, made_of);
     for (i, r) in records.iter().enumerate() {
         // a layer without a name is numbered by where it is, counting from 2 at the bottom
         let name = if r.name.is_empty() { format!("Layer {}", i + 2) } else { r.name.clone() };

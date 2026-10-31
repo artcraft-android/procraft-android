@@ -492,6 +492,9 @@ mod tests {
             &p.colors[..6],
             &[Some(0xFF0000), Some(0x00FF00), Some(0x00FFFF), Some(0x808080), Some(0xFFFFFF), None]
         );
+        crate::damaged::survives("colour swatch file", &aco, |b| {
+            let _ = read_other(b, Some("x.aco"));
+        });
     }
 
     #[test]
@@ -529,6 +532,9 @@ mod tests {
         let p = read_other(&ase, Some("whatever.ase")).unwrap();
         assert_eq!(p.name, "Sunset");
         assert_eq!(&p.colors[..3], &[Some(0xFF8000), Some(0x000000), None]);
+        crate::damaged::survives("swatch exchange file", &ase, |b| {
+            let _ = read_other(b, None);
+        });
     }
 
     #[test]
@@ -540,8 +546,11 @@ mod tests {
     #[test]
     fn swatches_files_and_the_store_keep_a_palette_as_it_is() {
         let p = Palette::new("Mine", [Some(0x3366CC), None, Some(0xFFCC00)]);
-        let back = read_swatches(&write_swatches(&p, b"icc")).unwrap();
-        assert_eq!(back, p);
+        let file = write_swatches(&p, b"icc");
+        assert_eq!(read_swatches(&file), Some(p));
+        crate::damaged::survives("swatches file", &file, |b| {
+            let _ = read_swatches(b);
+        });
         let (palettes, default) = read_store(&write_store(&starters(), 1)).unwrap();
         assert_eq!((palettes, default), (starters(), 1));
         assert!(read_store("not json").is_none());

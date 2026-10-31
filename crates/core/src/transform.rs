@@ -2,7 +2,7 @@
 //! the box around it, shown live and kept as one undo step.
 
 use procraft_engine::document::{Document, Layer, LayerId, LayerKind};
-use procraft_engine::geom::{Affine, Homography, Vec2};
+use procraft_engine::geom::{Affine, Homography, IRect, Vec2};
 use procraft_engine::transform::{Guides, Handle, Transform, TransformMode, convex_hull};
 use procraft_engine::warp;
 use procraft_gpu::Resample;
@@ -160,25 +160,6 @@ pub(crate) fn content_shape(pixels: &[u8], width: u32) -> Option<([f32; 4], Vec<
     (x0 < x1).then(|| ([x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32], convex_hull(&ends)))
 }
 
-/// The box around the pixels that aren't clear (`x`, `y`, `width`, `height`), if any.
-fn content_bounds(pixels: &[u8], width: u32) -> Option<[f32; 4]> {
-    let row_len = width as usize * 4;
-    if row_len == 0 {
-        return None;
-    }
-    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
-    for (y, row) in pixels.chunks_exact(row_len).enumerate() {
-        let (px, _) = row.as_chunks::<4>();
-        let Some(first) = px.iter().position(|&[.., a]| a != 0) else { continue };
-        let last = px.iter().rposition(|&[.., a]| a != 0).unwrap_or(first) + 1;
-        x0 = x0.min(first);
-        x1 = x1.max(last);
-        y0 = y0.min(y);
-        y1 = y + 1;
-    }
-    (x0 < x1).then(|| [x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32])
-}
-
 /// Whether `l` shows: it and every group it is in visible.
 fn shown(doc: &Document, l: &Layer) -> bool {
     l.visible && l.parent.and_then(|p| doc.layer(p)).is_none_or(|p| shown(doc, p))
@@ -190,6 +171,7 @@ const MAX_SNAP_LAYERS: usize = 16;
 impl State {
     /// Ends an open transform: `commit` keeps it as one undo step, otherwise the layer is put back.
     pub(crate) fn end_transform(&mut self, commit: bool) {
+        let within = if commit { self.changed_since_begin() } else { None };
         if self.transform.take().is_some()
             && let Some(canvas) = self.canvas.as_mut()
         {
@@ -201,8 +183,20 @@ impl State {
                     procraft_engine::transform::TransformMode::Warp => "warp transform",
                 });
             }
-            canvas.end_transform(commit);
+            match within {
+                Some(within) => canvas.end_transform_within(commit, within),
+                None => canvas.end_transform(commit),
+            }
         }
+    }
+
+    /// Where the open transform or adjustment changed its layers, all it drew done first: the box
+    /// around the pixels changed (a pixel if none were, still a step to undo); none if that can't
+    /// be told.
+    pub(crate) fn changed_since_begin(&mut self) -> Option<IRect> {
+        self.flush();
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_ref(), self.gpu.as_ref()) else { return None };
+        canvas.changed_box(gpu).map(|b| b.unwrap_or(IRect::new(0, 0, 1, 1)))
     }
 
     /// Redraws the layer with the content where the transform has it now.
@@ -289,12 +283,27 @@ impl CanvasSession {
             return None;
         }
         st.flush();
-        let width = st.doc.width();
+        let (width, height) = (st.doc.width(), st.doc.height());
         let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
-        // what all of them hold together
+        // only where they are painted (and the selection takes) is read back; all of them where
+        // the GPU can't tell
+        let boxes = canvas.painted_boxes(gpu, &targets);
+        let full = IRect::from_size(width, height);
+        let mut area = boxes
+            .iter()
+            .copied()
+            .collect::<Option<Vec<_>>>()
+            .map_or(full, |b| b.into_iter().reduce(IRect::union).unwrap_or(IRect::EMPTY));
+        if let Some(taken) = st.selection.as_ref().and_then(crate::layer_ops::mask_rect) {
+            area = area.intersect(taken);
+        }
+        if area.is_empty() {
+            return None;
+        }
+        // what all of them hold together there
         let mut pixels: Vec<u8> = Vec::new();
         for id in &targets {
-            let layer = canvas.read_layer(gpu, *id).ok()?;
+            let layer = canvas.read_layer_part(gpu, *id, area).ok()?;
             if pixels.is_empty() {
                 pixels = layer;
             } else {
@@ -304,12 +313,17 @@ impl CanvasSession {
             }
         }
         // with a selection, only what it takes moves
+        let (left, top, across) = (area.x0.max(0) as usize, area.y0.max(0) as usize, area.width().max(1) as usize);
         if let Some(mask) = st.selection.as_ref() {
-            for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&mask.data) {
+            for (i, px) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let at = (top + i / across) * mask.width as usize + left + i % across;
+                let m = mask.data.get(at).copied().unwrap_or(0);
                 px[3] = ((u16::from(px[3]) * u16::from(m) + 127) / 255) as u8;
             }
         }
-        let ([x, y, w, h], hull) = content_shape(&pixels, width)?;
+        let ([x, y, w, h], hull) = content_shape(&pixels, area.width())?;
+        let corner = Vec2::new(area.x0 as f32, area.y0 as f32);
+        let (x, y, hull) = (x + corner.x, y + corner.y, hull.into_iter().map(|p| p + corner).collect());
         // the other layers shown, nearest the top first, are snapped onto by their bounds
         let others: Vec<_> = st
             .doc
@@ -320,8 +334,12 @@ impl CanvasSession {
             .take(MAX_SNAP_LAYERS)
             .map(|l| l.id)
             .collect();
-        let bounds: Vec<[f32; 4]> =
-            others.into_iter().filter_map(|id| content_bounds(&canvas.read_layer(gpu, id).ok()?, width)).collect();
+        let bounds: Vec<[f32; 4]> = canvas
+            .painted_boxes(gpu, &others)
+            .into_iter()
+            .flatten()
+            .map(|r| [r.x0 as f32, r.y0 as f32, r.width() as f32, r.height() as f32])
+            .collect();
         canvas.begin_transform_layers(&targets);
         let mut t = Transform::new(x, y, w, h, hull);
         t.set_snap_targets(&bounds);

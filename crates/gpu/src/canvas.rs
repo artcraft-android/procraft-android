@@ -20,6 +20,9 @@ use wgpu::util::DeviceExt;
 use crate::{Gpu, GpuError};
 
 const LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// How many pixels of a row or column each pixel of a layer's bounds lines stands for (as
+/// `bounds.wgsl` has it).
+const BOUNDS_STRETCH: u32 = 512;
 /// Half floats, so a stroke's build-up from many faint stamps doesn't band.
 const STROKE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Every draw gets its own slot in the uniform buffer (dynamic offsets are 256-byte aligned).
@@ -806,7 +809,9 @@ enum Op {
     Untip(IRect),
     Undo,
     Redo,
-    Clear(LayerId),
+    /// A layer cleared, as one undo step keeping what was painted (all of it, or the box given
+    /// when nothing is painted outside it).
+    Clear(LayerId, Option<IRect>),
     /// Clears a layer without an undo step (scratch canvases).
     Wipe(LayerId),
     /// The document changed structurally; `before` is how it was.
@@ -858,10 +863,11 @@ enum Op {
     Mark,
     /// The steps made since the mark become one.
     Collapse,
-    /// Layers' pixels are replaced (premultiplied RGBA8, the canvas's size), together as one undo
-    /// step, with the document as it was (`before`) when that changed too.
+    /// Layers' pixels are replaced inside a rectangle each (premultiplied RGBA8, the rectangle's
+    /// rows), together as one undo step keeping those rectangles, with the document as it was
+    /// (`before`) when that changed too.
     Write {
-        layers: Vec<(LayerId, Vec<u8>)>,
+        layers: Vec<(LayerId, IRect, Vec<u8>)>,
         before: Option<Box<Document>>,
     },
     /// A layer's pixels are replaced with no undo step (during an edit held with `Hold`).
@@ -893,9 +899,11 @@ enum Op {
     LiquifyStamps(Vec<LiquifyStamp>),
     /// The liquify field back to no offsets.
     LiquifyClear,
-    /// The transform ends: kept as one undo step, or put back.
+    /// The transform ends: kept as one undo step (keeping only the part `within`, when its layers
+    /// changed only there), or put back.
     TransformEnd {
         commit: bool,
+        within: Option<IRect>,
     },
 }
 
@@ -1106,6 +1114,14 @@ pub(crate) struct Pipelines {
     /// What a transform leaves where it was (with a selection).
     transform_static: wgpu::RenderPipeline,
     transform_layout: wgpu::BindGroupLayout,
+    /// Where a layer is painted, across its rows and down its columns; and where it differs from
+    /// another.
+    bounds_layout: wgpu::BindGroupLayout,
+    bounds_rows: wgpu::RenderPipeline,
+    bounds_columns: wgpu::RenderPipeline,
+    changed_layout: wgpu::BindGroupLayout,
+    changed_rows: wgpu::RenderPipeline,
+    changed_columns: wgpu::RenderPipeline,
     /// Adjustments: the copy alone, and the passes.
     before_layout: wgpu::BindGroupLayout,
     /// Adjustment passes by their fragment entry.
@@ -1663,13 +1679,13 @@ impl Canvas {
                 matches!(
                     op,
                     Op::Commit(_)
-                        | Op::Clear(_)
+                        | Op::Clear(..)
                         | Op::Record(_)
                         | Op::Duplicate { .. }
                         | Op::MergeDown { .. }
                         | Op::MergeMany { .. }
                         | Op::Flatten { .. }
-                        | Op::TransformEnd { commit: true }
+                        | Op::TransformEnd { commit: true, .. }
                         | Op::Write { .. }
                         | Op::Release { keep: true, .. }
                 )
@@ -1951,7 +1967,14 @@ impl Canvas {
 
     pub fn clear_layer(&mut self, layer: LayerId) {
         self.end_stroke();
-        self.ops.push(Op::Clear(layer));
+        self.ops.push(Op::Clear(layer, None));
+    }
+
+    /// Clears a layer painted only within `painted` (as [`Canvas::painted_boxes`] finds), the undo
+    /// step keeping only that.
+    pub fn clear_layer_within(&mut self, layer: LayerId, painted: IRect) {
+        self.end_stroke();
+        self.ops.push(Op::Clear(layer, Some(painted)));
     }
 
     /// Replaces a layer's pixels (premultiplied RGBA8, the canvas's size) as one undo step; pixels
@@ -1996,11 +2019,24 @@ impl Canvas {
         self.invalidate();
     }
 
+    /// Replaces a layer's pixels inside `rect` with `part` (premultiplied RGBA8, the rectangle's
+    /// rows) as one undo step keeping only that part. Left out if `rect` isn't wholly on the
+    /// canvas or `part` isn't its size.
+    pub fn write_layer_part(&mut self, layer: LayerId, rect: IRect, part: Vec<u8>) {
+        let fits = !rect.is_empty() && rect.intersect(self.full()) == rect;
+        if !fits || part.len() != rect.width() as usize * rect.height() as usize * 4 {
+            return;
+        }
+        self.end_stroke();
+        self.ops.push(Op::Write { layers: vec![(layer, rect, part)], before: None });
+    }
+
     /// Replaces several layers' pixels at once, as one undo step; pictures of the wrong size are
     /// left out.
     pub fn write_layers(&mut self, layers: Vec<(LayerId, Vec<u8>)>) {
-        let size = self.width as usize * self.height as usize * 4;
-        let layers: Vec<(LayerId, Vec<u8>)> = layers.into_iter().filter(|(_, p)| p.len() == size).collect();
+        let (size, full) = (self.width as usize * self.height as usize * 4, self.full());
+        let layers: Vec<(LayerId, IRect, Vec<u8>)> =
+            layers.into_iter().filter(|(_, p)| p.len() == size).map(|(id, p)| (id, full, p)).collect();
         if !layers.is_empty() {
             self.end_stroke();
             self.ops.push(Op::Write { layers, before: None });
@@ -2011,8 +2047,9 @@ impl Canvas {
     /// to the pixels and to `before` (the document as it was); pictures of the wrong size are left
     /// out.
     pub fn write_layers_and_document(&mut self, layers: Vec<(LayerId, Vec<u8>)>, before: Document) {
-        let size = self.width as usize * self.height as usize * 4;
-        let layers: Vec<(LayerId, Vec<u8>)> = layers.into_iter().filter(|(_, p)| p.len() == size).collect();
+        let (size, full) = (self.width as usize * self.height as usize * 4, self.full());
+        let layers: Vec<(LayerId, IRect, Vec<u8>)> =
+            layers.into_iter().filter(|(_, p)| p.len() == size).map(|(id, p)| (id, full, p)).collect();
         self.end_stroke();
         self.ops.push(Op::Write { layers, before: Some(Box::new(before)) });
         self.invalidate();
@@ -2237,14 +2274,14 @@ impl Canvas {
         for op in &self.ops {
             match op {
                 Op::Commit(s) => written.push(s.layer),
-                Op::Clear(id)
+                Op::Clear(id, _)
                 | Op::Wipe(id)
                 | Op::TransformBegin(id)
                 | Op::TransformAlso(id)
                 | Op::Put(id, _)
                 | Op::PutRegion { layer: id, .. }
                 | Op::Hold(id) => written.push(*id),
-                Op::Write { layers, .. } => written.extend(layers.iter().map(|(id, _)| *id)),
+                Op::Write { layers, .. } => written.extend(layers.iter().map(|(id, ..)| *id)),
                 Op::Duplicate { pairs, .. } => {
                     read.extend(pairs.iter().map(|(from, _)| *from));
                     written.extend(pairs.iter().map(|(_, to)| *to));
@@ -2549,7 +2586,13 @@ impl Canvas {
 
     /// Ends the transform: `commit` keeps it as one undo step, otherwise the layer is put back.
     pub fn end_transform(&mut self, commit: bool) {
-        self.ops.push(Op::TransformEnd { commit });
+        self.ops.push(Op::TransformEnd { commit, within: None });
+    }
+
+    /// Ends the transform as [`Canvas::end_transform`] does, the layers changed only inside
+    /// `within`: an undo step keeps only that part of them.
+    pub fn end_transform_within(&mut self, commit: bool, within: IRect) {
+        self.ops.push(Op::TransformEnd { commit, within: Some(within) });
     }
 
     /// Whether a transform is open, counting queued work.
@@ -2577,8 +2620,8 @@ impl Canvas {
                 | Op::MergeMany { before: d, .. }
                 | Op::Flatten { before: d, .. } => ids.extend(d.pixel_layer_ids()),
                 Op::Commit(s) => ids.push(s.layer),
-                Op::Clear(id) | Op::Wipe(id) | Op::TransformBegin(id) | Op::TransformAlso(id) => ids.push(*id),
-                Op::Write { layers, .. } => ids.extend(layers.iter().map(|(id, _)| *id)),
+                Op::Clear(id, _) | Op::Wipe(id) | Op::TransformBegin(id) | Op::TransformAlso(id) => ids.push(*id),
+                Op::Write { layers, .. } => ids.extend(layers.iter().map(|(id, ..)| *id)),
                 Op::Put(id, _) | Op::PutRegion { layer: id, .. } | Op::Hold(id) => ids.push(*id),
                 Op::Release { before: Some(d), .. } => ids.extend(d.pixel_layer_ids()),
                 _ => {}
@@ -2847,9 +2890,10 @@ impl Canvas {
                         history_changed = true;
                     }
                 }
-                Op::Clear(id) => {
+                Op::Clear(id, painted) => {
                     let full = self.full();
-                    if let Some(snapshot) = self.snapshot(device, &mut encoder, id, full) {
+                    let kept = painted.map_or(full, |r| r.intersect(full));
+                    if let Some(snapshot) = self.snapshot(device, &mut encoder, id, kept) {
                         self.push_step(Step {
                             made: 0,
                             name: None,
@@ -2940,33 +2984,39 @@ impl Canvas {
                     self.dirty = self.full();
                 }
                 Op::Write { layers, before } => {
-                    let full = self.full();
-                    let snapshots: Vec<Snapshot> =
-                        layers.iter().filter_map(|(id, _)| self.snapshot(device, &mut encoder, *id, full)).collect();
-                    if !snapshots.is_empty() || before.is_some() {
+                    let snapshots: Vec<Snapshot> = layers
+                        .iter()
+                        .filter_map(|(id, rect, _)| self.snapshot(device, &mut encoder, *id, *rect))
+                        .collect();
+                    let document_changed = before.is_some();
+                    if !snapshots.is_empty() || document_changed {
                         self.push_step(Step { made: 0, name: None, doc: before, pixels: snapshots, selection: None });
                     }
-                    for (id, pixels) in layers {
+                    for (id, rect, pixels) in layers {
                         let Some(layer) = self.layers.get(&id) else { continue };
+                        let (width, height) = (rect.width(), rect.height());
                         // through a staging texture, so the snapshot above is taken first
-                        let staging = texture(device, "layer write", self.width, self.height, LAYER_FORMAT);
+                        let staging = texture(device, "layer write", width, height, LAYER_FORMAT);
                         gpu.queue.write_texture(
                             copy_at(&staging, 0, 0),
                             &pixels,
                             wgpu::TexelCopyBufferLayout {
                                 offset: 0,
-                                bytes_per_row: Some(self.width * 4),
-                                rows_per_image: Some(self.height),
+                                bytes_per_row: Some(width * 4),
+                                rows_per_image: Some(height),
                             },
-                            extent(self.width, self.height),
+                            extent(width, height),
                         );
                         encoder.copy_texture_to_texture(
                             copy_at(&staging, 0, 0),
-                            copy_at(&layer.texture, 0, 0),
-                            extent(self.width, self.height),
+                            copy_at(&layer.texture, rect.x0, rect.y0),
+                            extent(width, height),
                         );
+                        self.dirty = self.dirty.union(rect);
                     }
-                    self.dirty = full;
+                    if document_changed {
+                        self.dirty = self.full();
+                    }
                     history_changed = true;
                 }
                 Op::TransformBegin(id) => {
@@ -3140,7 +3190,7 @@ impl Canvas {
                         ));
                     }
                 }
-                Op::TransformEnd { commit } => {
+                Op::TransformEnd { commit, within } => {
                     self.liquify = None;
                     let painted = self.pencil.take().map(|p| p.bounds.intersect(self.full()));
                     let more = std::mem::take(&mut self.transform_more);
@@ -3160,9 +3210,18 @@ impl Canvas {
                             }
                         } else if commit {
                             let full = self.full();
+                            // only the part changed, when that is known
+                            let part = within.map(|r| r.intersect(full)).filter(|r| !r.is_empty() && *r != full);
                             let pixels = std::iter::once(t)
                                 .chain(more)
-                                .map(|t| Snapshot { layer: t.layer, rect: full, texture: t.before })
+                                .map(|t| match part {
+                                    Some(rect) => Snapshot {
+                                        layer: t.layer,
+                                        rect,
+                                        texture: region_copy(device, &mut encoder, &t.before, rect),
+                                    },
+                                    None => Snapshot { layer: t.layer, rect: full, texture: t.before },
+                                })
                                 .collect();
                             self.push_step(Step { made: 0, name: None, doc: None, pixels, selection: None });
                             history_changed = true;
@@ -4579,7 +4638,7 @@ impl Canvas {
             | Op::Hold(id)
             | Op::Put(id, _)
             | Op::PutRegion { layer: id, .. }
-            | Op::Clear(id)
+            | Op::Clear(id, _)
             | Op::Wipe(id) => live.contains(id),
             Op::TransformSet { .. }
             | Op::TransformMesh { .. }
@@ -4590,7 +4649,7 @@ impl Canvas {
             | Op::LiquifyClear
             | Op::TransformEnd { .. } => transformed_live(),
             Op::Release { before: None, .. } => self.held.as_ref().is_none_or(|h| live.contains(&h.layer)),
-            Op::Write { layers, before: None } => layers.iter().all(|(id, _)| live.contains(id)),
+            Op::Write { layers, before: None } => layers.iter().all(|(id, ..)| live.contains(id)),
             _ => false,
         }
     }
@@ -5361,9 +5420,15 @@ impl Canvas {
     /// Replaces a layer's pixels (premultiplied RGBA8, the canvas's size, rows top to bottom), for
     /// opening a saved artwork. Not an undo step.
     pub fn upload_layer(&mut self, gpu: &Gpu, id: LayerId, rgba: &[u8]) -> Result<(), GpuError> {
-        let expected = self.width as usize * self.height as usize * 4;
-        if rgba.len() != expected {
-            return Err(GpuError::Readback(format!("layer {id:?}: {} bytes, expected {expected}", rgba.len())));
+        self.upload_layer_part(gpu, id, self.full(), rgba)
+    }
+
+    /// [`Canvas::upload_layer`] for the pixels inside `rect` only (`part`, its rows): for a layer
+    /// with nothing on it elsewhere (a new one). Not an undo step.
+    pub fn upload_layer_part(&mut self, gpu: &Gpu, id: LayerId, rect: IRect, part: &[u8]) -> Result<(), GpuError> {
+        let expected = rect.width() as usize * rect.height() as usize * 4;
+        if rect.is_empty() || rect.intersect(self.full()) != rect || part.len() != expected {
+            return Err(GpuError::Readback(format!("layer {id:?}: {} bytes, expected {expected}", part.len())));
         }
         if !self.layers.contains_key(&id) {
             let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
@@ -5377,14 +5442,14 @@ impl Canvas {
         self.parked.remove(&id);
         self.pictures.remove(&id);
         gpu.queue.write_texture(
-            copy_at(&layer.texture, 0, 0),
-            rgba,
+            copy_at(&layer.texture, rect.x0, rect.y0),
+            part,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(self.width * 4),
-                rows_per_image: Some(self.height),
+                bytes_per_row: Some(rect.width() * 4),
+                rows_per_image: Some(rect.height()),
             },
-            extent(self.width, self.height),
+            extent(rect.width(), rect.height()),
         );
         // sent now, so many layers in a row (an artwork opening, a moving picture pasted) don't
         // each keep a staged copy until the next frame
@@ -5434,6 +5499,158 @@ impl Canvas {
         self.invalidate();
         self.render(gpu, doc, None);
         read
+    }
+
+    /// Starts reading a layer's pixels back (premultiplied RGBA8): see [`Readback`].
+    pub fn start_reading_layer(&self, gpu: &Gpu, id: LayerId) -> Result<Readback, GpuError> {
+        if self.parked.contains_key(&id) && !self.layers.contains_key(&id) {
+            return self.read_layer(gpu, id).map(Readback::Ready);
+        }
+        let layer = self.layers.get(&id).ok_or_else(|| GpuError::Readback(format!("no layer {id:?}")))?;
+        Ok(start_reading(gpu, &layer.texture, self.width, self.height))
+    }
+
+    /// Starts reading the composite back as it would be without the layers `left_out`, as
+    /// [`Canvas::read_composite_without`] does: see [`Readback`].
+    pub fn start_reading_composite_without(&mut self, gpu: &Gpu, doc: &mut Document, left_out: &[LayerId]) -> Readback {
+        self.render_finished(gpu, doc);
+        if left_out.is_empty() {
+            return start_reading(gpu, &self.composite, self.width, self.height);
+        }
+        let mut shown = doc.clone();
+        for &id in left_out {
+            shown.set_visible(id, false);
+        }
+        self.invalidate();
+        self.render_finished(gpu, &mut shown);
+        // copied before the composite is made again below
+        let read = start_reading(gpu, &self.composite, self.width, self.height);
+        self.invalidate();
+        self.render(gpu, doc, None);
+        read
+    }
+
+    /// Where each of `layers` is painted: the box around its pixels that aren't clear, none for one
+    /// with nothing on it (or not on the canvas). Found on the GPU, which sends back only a few
+    /// bytes a row and column; a parked layer's is known already. Waits for the GPU.
+    pub fn painted_boxes(&self, gpu: &Gpu, layers: &[LayerId]) -> Vec<Option<IRect>> {
+        let sources = layers
+            .iter()
+            .map(|id| match self.layers.get(id) {
+                Some(layer) => Ok(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("bounds"),
+                    layout: &self.pipelines.bounds_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&layer.view),
+                    }],
+                })),
+                None => Err(self.parked.get(id).and_then(|p| p.rect)),
+            })
+            .collect();
+        self.boxes(gpu, sources, [&self.pipelines.bounds_rows, &self.pipelines.bounds_columns])
+            .into_iter()
+            .map(|b| b.ok().flatten())
+            .collect()
+    }
+
+    /// Where the layers being transformed or adjusted differ from their copies from when it
+    /// began, all drawn so far: the box around the pixels changed, inner none if none did; none
+    /// if it can't be told (nothing open, or the GPU didn't say). Waits for the GPU.
+    pub fn changed_box(&self, gpu: &Gpu) -> Option<Option<IRect>> {
+        let open: Vec<&Transforming> = self.transforming.iter().chain(&self.transform_more).collect();
+        if open.is_empty() {
+            return None;
+        }
+        let mut sources = Vec::new();
+        for t in open {
+            let layer = self.layers.get(&t.layer)?;
+            let before = t.before.create_view(&wgpu::TextureViewDescriptor::default());
+            sources.push(Ok(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("changed"),
+                layout: &self.pipelines.changed_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&layer.view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&before) },
+                ],
+            })));
+        }
+        let boxes = self.boxes(gpu, sources, [&self.pipelines.changed_rows, &self.pipelines.changed_columns]);
+        let boxes: Vec<Option<IRect>> = boxes.into_iter().collect::<Result<_, _>>().ok()?;
+        Some(boxes.into_iter().flatten().reduce(IRect::union))
+    }
+
+    /// The boxes the GPU's passes (`pipelines`: across rows, down columns) find for each of
+    /// `sources` (a bind group for them, or a box already known), all drawn and read back
+    /// together: none where nothing is marked, an error where the GPU didn't say.
+    fn boxes(
+        &self,
+        gpu: &Gpu,
+        sources: Vec<Result<wgpu::BindGroup, Option<IRect>>>,
+        [rows_pass, columns_pass]: [&wgpu::RenderPipeline; 2],
+    ) -> Vec<Result<Option<IRect>, GpuError>> {
+        let (w, h) = (self.width, self.height);
+        let (across, down) = (w.div_ceil(BOUNDS_STRETCH).max(1), h.div_ceil(BOUNDS_STRETCH).max(1));
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("bounds") });
+        // each source's rows (h x across) and columns (w x down)
+        let lines: Vec<_> = sources
+            .into_iter()
+            .map(|source| {
+                source.map(|bind| {
+                    [(rows_pass, (h, across)), (columns_pass, (w, down))].map(|(pipeline, size)| {
+                        let target = texture(&gpu.device, "bounds", size.0, size.1, LAYER_FORMAT);
+                        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+                        let mut pass =
+                            render_pass(&mut encoder, "bounds", &view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &bind, &[]);
+                        pass.draw(0..3, 0..1);
+                        drop(pass);
+                        (target, size)
+                    })
+                })
+            })
+            .collect();
+        gpu.queue.submit([encoder.finish()]);
+        // all copied back together, then each read
+        let reads: Vec<_> =
+            lines.into_iter().map(|l| l.map(|t| t.map(|(t, (a, b))| start_reading(gpu, &t, a, b)))).collect();
+        // a line marked if any of its stretches is
+        let span = |pixels: &[u8], n: u32| -> Option<(i32, i32)> {
+            let n = n as usize;
+            let marked =
+                |i: usize| pixels.chunks_exact(4 * n).any(|stretch| stretch.get(4 * i).is_some_and(|&v| v > 0));
+            let first = (0..n).find(|&i| marked(i))?;
+            let last = (0..n).rev().find(|&i| marked(i))?;
+            Some((i32::try_from(first).ok()?, i32::try_from(last + 1).ok()?))
+        };
+        reads
+            .into_iter()
+            .map(|read| match read {
+                Err(known) => Ok(known),
+                Ok([rows, columns]) => {
+                    let (rows, columns) = (rows.pixels()?, columns.pixels()?);
+                    let spans = span(&rows, h).zip(span(&columns, w));
+                    Ok(spans.map(|((y0, y1), (x0, x1))| IRect::new(x0, y0, x1, y1)))
+                }
+            })
+            .collect()
+    }
+
+    /// A layer's pixels inside `rect` (on the canvas), rows top to bottom; none if it is off the
+    /// canvas. Waits for the GPU.
+    pub fn read_layer_part(&self, gpu: &Gpu, id: LayerId, rect: IRect) -> Result<Vec<u8>, GpuError> {
+        let rect = rect.intersect(self.full());
+        if rect.is_empty() {
+            return Ok(Vec::new());
+        }
+        if rect == self.full() || (self.parked.contains_key(&id) && !self.layers.contains_key(&id)) {
+            return self
+                .read_layer(gpu, id)
+                .map(|p| if rect == self.full() { p } else { cropped(&p, self.width, rect) });
+        }
+        let layer = self.layers.get(&id).ok_or_else(|| GpuError::Readback(format!("no layer {id:?}")))?;
+        start_reading_part(gpu, &layer.texture, rect).pixels()
     }
 
     /// A layer's pixels (premultiplied RGBA8). Waits for the GPU.
@@ -5692,6 +5909,25 @@ impl Pipelines {
         });
         let filter_pipeline_layout =
             layout("adjustment", &[Some(&transform_layout), Some(&uniform_layout), Some(&before_layout)]);
+        let bounds_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bounds"),
+            entries: &[tex_entry(0)],
+        });
+        let bounds_module = module("bounds", include_str!("shaders/bounds.wgsl"));
+        let changed_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("changed"),
+            entries: &[tex_entry(0), tex_entry(1)],
+        });
+        let bounds_pipeline = |group: &wgpu::BindGroupLayout, fs| {
+            let pipeline_layout = layout("bounds", &[Some(group)]);
+            blended_pipeline(device, &pipeline_layout, &bounds_module, fs, ("vs_full", fs), LAYER_FORMAT, None)
+        };
+        let (bounds_rows, bounds_columns) =
+            (bounds_pipeline(&bounds_layout, "fs_rows"), bounds_pipeline(&bounds_layout, "fs_columns"));
+        let (changed_rows, changed_columns) = (
+            bounds_pipeline(&changed_layout, "fs_changed_rows"),
+            bounds_pipeline(&changed_layout, "fs_changed_columns"),
+        );
         let filter_module = module("filter", include_str!("shaders/filter.wgsl"));
         let filters = FILTER_PASSES
             .iter()
@@ -5907,6 +6143,12 @@ impl Pipelines {
                 LAYER_FORMAT,
             ),
             transform_layout,
+            bounds_layout,
+            bounds_rows,
+            bounds_columns,
+            changed_layout,
+            changed_rows,
+            changed_columns,
             before_layout,
             filters,
             liquify_add,
@@ -6133,6 +6375,16 @@ impl UniformData {
         self.data.resize(offset + SLOT as usize, 0);
         u32::try_from(offset).unwrap_or(0)
     }
+}
+
+/// The rows of `rect` (on the picture) out of a picture `width` pixels wide (RGBA8).
+fn cropped(pixels: &[u8], width: u32, rect: IRect) -> Vec<u8> {
+    let (row, x0, x1) = (width as usize * 4, rect.x0.max(0) as usize * 4, rect.x1.max(0) as usize * 4);
+    let mut out = Vec::with_capacity(rect.width() as usize * rect.height() as usize * 4);
+    for line in pixels.chunks_exact(row.max(1)).skip(rect.y0.max(0) as usize).take(rect.height() as usize) {
+        out.extend_from_slice(line.get(x0..x1).unwrap_or_default());
+    }
+    out
 }
 
 fn texture(device: &wgpu::Device, label: &str, width: u32, height: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
@@ -6817,6 +7069,61 @@ fn srgb_to_linear(c: f32) -> f32 {
 
 /// Reads a texture of 4-byte pixels back from the GPU, rows top to bottom without padding.
 pub fn read_texture(gpu: &Gpu, texture: &wgpu::Texture, width: u32, height: u32) -> Result<Vec<u8>, GpuError> {
+    start_reading(gpu, texture, width, height).pixels()
+}
+
+/// Pixels on their way back from the GPU: their copy is queued (under whatever lock guards what
+/// they are copied from), and waited for later, the lock let go ([`Readback::pixels`]).
+pub enum Readback {
+    /// Already here.
+    Ready(Vec<u8>),
+    Copying {
+        device: wgpu::Device,
+        buffer: wgpu::Buffer,
+        /// A row's bytes, and as the copy pads it.
+        row: usize,
+        padded: usize,
+        mapped: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    },
+}
+
+impl Readback {
+    /// How many bytes the pixels take.
+    pub fn bytes(&self) -> usize {
+        match self {
+            Readback::Ready(p) => p.len(),
+            Readback::Copying { buffer, .. } => usize::try_from(buffer.size()).unwrap_or(usize::MAX),
+        }
+    }
+
+    /// The pixels (4 bytes each, rows top to bottom without padding), once the GPU has copied
+    /// them.
+    pub fn pixels(self) -> Result<Vec<u8>, GpuError> {
+        let (device, buffer, row, padded, mapped) = match self {
+            Readback::Ready(p) => return Ok(p),
+            Readback::Copying { device, buffer, row, padded, mapped } => (device, buffer, row, padded, mapped),
+        };
+        device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| GpuError::Readback(e.to_string()))?;
+        mapped.recv().map_err(|e| GpuError::Readback(e.to_string()))?.map_err(|e| GpuError::Readback(e.to_string()))?;
+        let view = buffer.slice(..).get_mapped_range().map_err(|e| GpuError::Readback(e.to_string()))?;
+        let mut out = Vec::with_capacity(row * (view.len() / padded.max(1)));
+        for chunk in view.chunks(padded.max(1)) {
+            out.extend_from_slice(chunk.get(..row).unwrap_or(chunk));
+        }
+        drop(view);
+        buffer.unmap();
+        Ok(out)
+    }
+}
+
+/// Starts reading a texture of 4-byte pixels back from the GPU: its copy is queued now.
+pub fn start_reading(gpu: &Gpu, texture: &wgpu::Texture, width: u32, height: u32) -> Readback {
+    start_reading_part(gpu, texture, IRect::from_size(width, height))
+}
+
+/// [`start_reading`] for the pixels inside `rect` (on the texture, not empty) only.
+fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readback {
+    let (width, height) = (rect.width(), rect.height());
     let row = width as usize * 4;
     let padded = row.div_ceil(256) * 256;
     let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -6827,7 +7134,7 @@ pub fn read_texture(gpu: &Gpu, texture: &wgpu::Texture, width: u32, height: u32)
     });
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
     encoder.copy_texture_to_buffer(
-        copy_at(texture, 0, 0),
+        copy_at(texture, rect.x0, rect.y0),
         wgpu::TexelCopyBufferInfo {
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {
@@ -6843,16 +7150,7 @@ pub fn read_texture(gpu: &Gpu, texture: &wgpu::Texture, width: u32, height: u32)
     buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| GpuError::Readback(e.to_string()))?;
-    rx.recv().map_err(|e| GpuError::Readback(e.to_string()))?.map_err(|e| GpuError::Readback(e.to_string()))?;
-    let mapped = buffer.slice(..).get_mapped_range().map_err(|e| GpuError::Readback(e.to_string()))?;
-    let mut out = Vec::with_capacity(row * height as usize);
-    for chunk in mapped.chunks(padded) {
-        out.extend_from_slice(chunk.get(..row).unwrap_or(chunk));
-    }
-    drop(mapped);
-    buffer.unmap();
-    Ok(out)
+    Readback::Copying { device: gpu.device.clone(), buffer, row, padded, mapped: rx }
 }
 
 #[cfg(test)]

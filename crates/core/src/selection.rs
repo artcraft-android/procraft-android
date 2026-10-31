@@ -316,10 +316,12 @@ impl CanvasSession {
             return;
         }
         let Some(mask) = st.selection.clone() else { return };
-        let Some(mut pixels) = st.current_pixels() else { return };
+        // only what is selected changes
+        let Some(rect) = crate::layer_ops::mask_rect(&mask) else { return };
+        let Some(mut pixels) = st.layer_part(current, rect) else { return };
         let [r, g, b] = st.color.map(|c| c.clamp(0.0, 1.0));
         let alpha_lock = st.doc.layer(current).is_some_and(|l| l.alpha_lock);
-        for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&mask.data) {
+        for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&crate::layer_ops::mask_part(&mask, rect)) {
             let [pr, pg, pb, pa] = px;
             if m == 0 {
                 continue;
@@ -335,7 +337,7 @@ impl CanvasSession {
             *pa = to_byte(out_a);
         }
         if let Some(canvas) = st.canvas.as_mut() {
-            canvas.write_layer(current, pixels);
+            canvas.write_layer_part(current, rect, pixels);
             st.flush();
             st.revision += 1;
             self.shared.frame(st);
@@ -345,24 +347,32 @@ impl CanvasSession {
     /// Copies what is selected on the current layer to a new layer above it, made current;
     /// returns its id.
     pub fn copy_selection_to_layer(&self) -> Option<u64> {
-        let pixels = {
+        // only what the selection's box holds is read back and copied
+        let part = {
             let mut guard = self.shared.lock();
             let st = &mut *guard;
             let mask = st.selection.clone()?;
-            let mut pixels = st.current_pixels()?;
-            for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&mask.data) {
-                let k = u16::from(m);
-                for c in px.iter_mut() {
-                    *c = ((u16::from(*c) * k + 127) / 255) as u8;
+            match crate::layer_ops::mask_rect(&mask) {
+                Some(rect) => {
+                    let mut pixels = st.layer_part(st.doc.current(), rect)?;
+                    for (px, &m) in
+                        pixels.as_chunks_mut::<4>().0.iter_mut().zip(&crate::layer_ops::mask_part(&mask, rect))
+                    {
+                        let k = u16::from(m);
+                        for c in px.iter_mut() {
+                            *c = ((u16::from(*c) * k + 127) / 255) as u8;
+                        }
+                    }
+                    Some((rect, pixels))
                 }
+                None => None,
             }
-            pixels
         };
         let id = self.add_layer();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
-            let _ = canvas.upload_layer(gpu, procraft_engine::document::LayerId(id), &pixels);
+        if let (Some(canvas), Some(gpu), Some((rect, pixels))) = (st.canvas.as_mut(), st.gpu.as_ref(), part) {
+            let _ = canvas.upload_layer_part(gpu, procraft_engine::document::LayerId(id), rect, &pixels);
         }
         st.revision += 1;
         self.shared.frame(st);

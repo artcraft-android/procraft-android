@@ -73,3 +73,29 @@ pub fn draw_pages(path: &Path, pages: &Path) -> Result<(u32, u32, u32), Box<dyn 
 pub fn draw_pages(_path: &Path, _pages: &Path) -> Result<(u32, u32, u32), Box<dyn std::error::Error>> {
     Err("no PDF renderer on this system".into())
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn a_pdf_s_pages_are_drawn_on_white_at_its_size() {
+        // two pages 144 points square (2 inches at 72 dpi): red, then blue
+        let page = |rgb: [u8; 3]| -> Vec<u8> { [rgb[0], rgb[1], rgb[2], 255].repeat(144 * 144) };
+        let (red, blue) = (page([255, 0, 0]), page([0, 0, 255]));
+        let bytes = procraft_engine::formats::pdf(144, 144, 72.0, &[], &[&red, &blue], 100, None);
+        let dir = std::env::temp_dir().join(format!("procraft-pdf-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pages = dir.join("pages");
+        std::fs::create_dir_all(&pages).unwrap();
+        let file = dir.join("two.pdf");
+        std::fs::write(&file, bytes).unwrap();
+        let (count, w, h) = super::draw_pages(&file, &pages).unwrap();
+        // 2 inches at 300 dpi
+        assert_eq!((count, w, h), (2, 600, 600));
+        let middle =
+            |n: u32| image::open(pages.join(format!("page-{n}.png"))).unwrap().to_rgba8().get_pixel(300, 300).0;
+        let (first, second) = (middle(1), middle(2));
+        assert!(first[0] > 240 && first[2] < 20, "{first:?}");
+        assert!(second[2] > 240 && second[0] < 20, "{second:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

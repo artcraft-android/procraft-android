@@ -1,9 +1,12 @@
 name: CI
 
+# A public repo runs it on every push for free. A private one pays for each minute, so there it
+# runs only when started by hand (Actions > CI > Run workflow): its pushes skip every job.
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,6 +23,7 @@ env:
 jobs:
   rust:
     name: Rust (format, clippy, tests)
+    if: ${{ !github.event.repository.private || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +39,7 @@ jobs:
 
   android:
     name: Android (clippy, lint, unit tests, release APK)
+    if: ${{ !github.event.repository.private || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

@@ -308,6 +308,53 @@ fn prediction_is_drawn_but_never_kept() {
 }
 
 #[test]
+fn an_open_artwork_is_kept_saved_until_that_stops() {
+    let Some(s) = session(64, 64) else { return };
+    let dir = std::env::temp_dir().join(format!("procraft-autosave-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::sync::Arc::clone(&s).start_autosave(dir.to_string_lossy().into_owned());
+    assert_eq!(s.edits_saved(), None);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let _ = pixel(&s, 0, 0);
+    let edits = s.edits();
+    let saved = (0..300).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        s.edits_saved() == Some(edits)
+    });
+    assert!(saved && dir.join("artwork.json").exists(), "not saved");
+    // stopped: what changes next isn't saved
+    s.stop_autosave();
+    s.stroke_begin(PointerKind::Finger, vec![sample(40.0, 40.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let _ = pixel(&s, 0, 0);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_ne!(s.edits(), edits);
+    assert_eq!(s.edits_saved(), Some(edits));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn nothing_is_saved_from_a_lost_graphics_device() {
+    let Some(s) = session(64, 64) else { return };
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let dir = std::env::temp_dir().join(format!("procraft-lost-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let kept = std::fs::read(dir.join("thumbnail.png")).unwrap();
+    s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 50.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    gpu.device.destroy();
+    let _ = gpu.device.poll(procraft_gpu::wgpu::PollType::wait_indefinitely());
+    assert!(gpu.is_lost());
+    assert!(s.save(dir.to_string_lossy().into_owned()).is_err());
+    assert_eq!(std::fs::read(dir.join("thumbnail.png")).unwrap(), kept);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn artworks_save_and_open() {
     let Some(s) = session(100, 100) else { return };
     s.set_color(0.0, 1.0, 0.0);
@@ -508,6 +555,187 @@ fn a_transform_moves_the_layer_as_one_undo_step() {
     assert_eq!(pixel(&s, 70, 70), [0, 0, 0, 255]);
     assert_eq!(s.transform_drag(10.0, 10.0), None);
     assert_eq!(s.view_matrix(), vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+}
+
+#[test]
+fn where_layers_are_painted_is_found_on_the_gpu_as_on_the_cpu() {
+    // wider than tall, past a stretch of the GPU's lines each way
+    let Some(s) = session(1100, 1100) else { return };
+    s.set_brush_size(0.2);
+    let mut ids = vec![s.layers()[0].id];
+    for (k, (x, y)) in [(600.0, 700.0), (1.0, 520.0), (1099.0, 1099.0)].into_iter().enumerate() {
+        if k > 0 {
+            ids.push(s.add_layer());
+        }
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_end(vec![]);
+    }
+    ids.push(s.add_layer());
+    let _ = pixel(&s, 0, 0);
+    let mut guard = s.shared.lock();
+    let st = &mut *guard;
+    let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+    let ids: Vec<_> = ids.into_iter().map(procraft_engine::document::LayerId).collect();
+    let found = canvas.painted_boxes(gpu, &ids);
+    for (id, gpu_box) in ids.iter().zip(&found) {
+        let cpu_box = crate::layer_ops::painted_rect(&canvas.read_layer(gpu, *id).unwrap(), 1100);
+        assert_eq!(*gpu_box, cpu_box, "{id:?}");
+    }
+    // the last is clear, the others aren't
+    assert_eq!(found.iter().map(Option::is_some).collect::<Vec<_>>(), [true, true, true, false]);
+}
+
+#[test]
+fn a_selection_copied_to_a_layer_is_what_it_takes_of_the_layer() {
+    use crate::selection::SelectionJoin;
+    let Some(s) = session(300, 300) else { return };
+    s.set_brush_size(0.3);
+    s.stroke_begin(PointerKind::Finger, vec![sample(60.0, 150.0, 0.0)]);
+    s.stroke_add(vec![sample(240.0, 150.0, 60.0)]);
+    s.stroke_end(vec![]);
+    let source = s.layers()[0].id;
+    let _ = pixel(&s, 0, 0);
+    let before = s.copy_layer_contents(source).unwrap().rgba;
+    // an ellipse over part of the stroke, feathered
+    s.select_shape(true, 100.0, 100.0, 200.0, 190.0, SelectionJoin::Add);
+    s.select_feather(0.05);
+    s.select_feather_done();
+    let mask = s.shared.lock().selection.clone().unwrap();
+    let id = s.copy_selection_to_layer().unwrap();
+    let _ = pixel(&s, 0, 0);
+    let copied = s.copy_layer_contents(id).unwrap().rgba;
+    let expected: Vec<u8> = before
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(&mask.data)
+        .flat_map(|(px, &m)| px.map(|c| ((u16::from(c) * u16::from(m) + 127) / 255) as u8))
+        .collect();
+    assert!(copied == expected);
+    assert!(copied.iter().any(|&v| v > 0));
+    // the source layer's contents selected: its coverage everywhere
+    assert!(s.select_layer_contents(source));
+    let taken = s.shared.lock().selection.clone().unwrap();
+    assert!(taken.data.iter().zip(before.as_chunks::<4>().0).all(|(&m, px)| m == px[3]));
+    assert!(taken.data.iter().any(|&m| m > 0));
+}
+
+#[test]
+fn a_cleared_layer_keeps_only_what_was_painted_to_undo() {
+    let Some(s) = session(300, 300) else { return };
+    s.set_brush_size(0.2);
+    s.stroke_begin(PointerKind::Finger, vec![sample(100.0, 100.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let id = s.layers()[0].id;
+    let layer = |s: &CanvasSession| {
+        let _ = pixel(s, 0, 0);
+        s.copy_layer_contents(id).unwrap().rgba
+    };
+    let history = |s: &CanvasSession| {
+        let _ = pixel(s, 0, 0);
+        s.shared.lock().canvas.as_ref().map_or(0, |c| c.history_bytes())
+    };
+    let (before, kept) = (layer(&s), history(&s));
+    s.clear_layer();
+    assert!(layer(&s).iter().all(|&v| v == 0));
+    let kept = history(&s) - kept;
+    assert!(kept > 0 && kept < 300 * 300, "kept {kept}");
+    s.undo();
+    assert!(layer(&s) == before, "undone");
+}
+
+#[test]
+fn a_transform_keeps_only_where_it_changed_to_undo() {
+    use crate::transform::{TransformHandle, TransformKind};
+    let Some(s) = session(300, 300) else { return };
+    s.set_brush_size(0.2);
+    s.stroke_begin(PointerKind::Finger, vec![sample(50.0, 60.0, 0.0)]);
+    s.stroke_add(vec![sample(70.0, 50.0, 30.0)]);
+    s.stroke_end(vec![]);
+    let id = s.layers()[0].id;
+    let layer = |s: &CanvasSession| {
+        let _ = pixel(s, 0, 0);
+        s.copy_layer_contents(id).unwrap().rgba
+    };
+    let history = |s: &CanvasSession| {
+        let _ = pixel(s, 0, 0);
+        s.shared.lock().canvas.as_ref().map_or(0, |c| c.history_bytes())
+    };
+    // moved; then a corner pulled out (scaled up, resampled); then warped
+    for kind in 0..3 {
+        let (before, kept) = (layer(&s), history(&s));
+        let b = s.transform_begin().unwrap();
+        match kind {
+            0 => s.transform_grab(TransformHandle::Move, b.corners[0] + 2.0, b.corners[1] + 2.0),
+            1 => {
+                s.transform_set_kind(TransformKind::Distort);
+                s.transform_grab(TransformHandle::Corner { index: 2 }, b.corners[4], b.corners[5]);
+            }
+            _ => {
+                let mesh = s.transform_set_kind(TransformKind::Warp).unwrap().mesh;
+                s.transform_grab(TransformHandle::Mesh { index: 5 }, mesh[10], mesh[11]);
+            }
+        }
+        let start = if kind == 1 { (b.corners[4], b.corners[5]) } else { (b.corners[0] + 2.0, b.corners[1] + 2.0) };
+        s.transform_drag(start.0 + 40.0, start.1 + 25.0);
+        s.transform_release();
+        s.transform_end(true);
+        let after = layer(&s);
+        assert_ne!(after, before, "{kind}");
+        let kept = history(&s) - kept;
+        assert!(kept > 0 && kept < 300 * 300 * 2, "{kind}: kept {kept}");
+        // undone and redone to the pixel
+        s.undo();
+        assert!(layer(&s) == before, "{kind}: undone");
+        s.redo();
+        assert!(layer(&s) == after, "{kind}: redone");
+    }
+}
+
+#[test]
+fn an_adjustment_within_a_selection_keeps_only_that_to_undo() {
+    use crate::adjust_menu::Adjustment;
+    use crate::selection::SelectionJoin;
+    let Some(s) = session(300, 300) else { return };
+    s.set_brush_size(0.3);
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 150.0, 0.0)]);
+    s.stroke_add(vec![sample(280.0, 150.0, 60.0)]);
+    s.stroke_end(vec![]);
+    let id = s.layers()[0].id;
+    let layer = |s: &CanvasSession| {
+        let _ = pixel(s, 0, 0);
+        s.copy_layer_contents(id).unwrap().rgba
+    };
+    let history = |s: &CanvasSession| {
+        let _ = pixel(s, 0, 0);
+        s.shared.lock().canvas.as_ref().map_or(0, |c| c.history_bytes())
+    };
+    s.select_shape(false, 100.0, 120.0, 160.0, 180.0, SelectionJoin::Add);
+    let (before, kept) = (layer(&s), history(&s));
+    s.adjustment_start(Adjustment::GaussianBlur);
+    s.adjustment_amount_by(0.3);
+    s.adjustment_end(true);
+    let after = layer(&s);
+    assert_ne!(after, before);
+    let kept = history(&s) - kept;
+    assert!(kept > 0 && kept <= 62 * 62 * 4, "kept {kept}");
+    s.undo();
+    assert!(layer(&s) == before, "undone");
+    s.redo();
+    assert!(layer(&s) == after, "redone");
+    // without one: only around what is painted, as far as the blur reached
+    s.select_none();
+    let (before, kept) = (layer(&s), history(&s));
+    s.adjustment_start(Adjustment::GaussianBlur);
+    s.adjustment_amount_by(0.05);
+    s.adjustment_end(true);
+    let after = layer(&s);
+    let kept = history(&s) - kept;
+    assert!(kept > 0 && kept < 300 * 300 * 4, "kept {kept}");
+    s.undo();
+    assert!(layer(&s) == before, "undone");
+    s.redo();
+    assert!(layer(&s) == after, "redone");
 }
 
 #[test]
@@ -1236,6 +1464,46 @@ fn a_layer_s_options_follow_what_it_is() {
     assert!(!row(bottom, O::Mask).enabled);
     assert_eq!(options(mask), [O::Rename, O::Select, O::Fill, O::Clear, O::Invert]);
     assert!(s.layer_options(9999).is_empty());
+}
+
+#[test]
+fn an_edit_to_part_of_a_layer_keeps_only_that_part_to_undo() {
+    use crate::selection::SelectionJoin;
+    let Some(s) = session(400, 400) else { return };
+    let history = |s: &CanvasSession| {
+        let _ = pixel(s, 0, 0);
+        s.shared.lock().canvas.as_ref().map_or(0, |c| c.history_bytes())
+    };
+    let part = 42 * 22 * 4;
+    // a 40 x 20 selection filled with red: the step keeps that much, not the whole layer
+    s.select_shape(false, 100.0, 100.0, 140.0, 120.0, SelectionJoin::Add);
+    s.set_color(1.0, 0.0, 0.0);
+    let before = history(&s);
+    s.fill_selection();
+    let kept = history(&s) - before;
+    assert!(kept > 0 && kept <= part, "{kept}");
+    assert_eq!(pixel(&s, 120, 110), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 150, 110), [255, 255, 255, 255]);
+    // inverted: only what is painted changes
+    let id = s.layers()[0].id;
+    s.select_none();
+    let before = history(&s);
+    assert!(s.invert_layer(id));
+    let kept = history(&s) - before;
+    assert!(kept > 0 && kept <= part, "{kept}");
+    assert_eq!(pixel(&s, 120, 110), [0, 255, 255, 255]);
+    // undone and redone as before
+    s.undo();
+    assert_eq!(pixel(&s, 120, 110), [255, 0, 0, 255]);
+    s.undo();
+    s.undo();
+    assert_eq!(pixel(&s, 120, 110), [255, 255, 255, 255]);
+    s.redo();
+    assert_eq!(pixel(&s, 120, 110), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 150, 110), [255, 255, 255, 255]);
+    // a clear layer has nothing to invert
+    let empty = s.add_layer();
+    assert!(!s.invert_layer(empty));
 }
 
 #[test]
@@ -2004,6 +2272,38 @@ fn an_export_is_named_after_its_artwork() {
     assert_eq!(export_file_name("?!".to_owned(), false), "Untitled Artwork");
     assert_eq!(export_file_name(String::new(), true), "Untitled_Artwork");
     assert_eq!(export_file_name("Night walk".to_owned(), true), "Night_walk");
+}
+
+#[test]
+fn an_artwork_saved_while_its_canvas_is_being_made_keeps_its_picture() {
+    let Ok(gpu) = Gpu::headless() else { return };
+    // a picture brought in, its GPU given but its canvas not made yet (as on another thread)
+    let red: Vec<u8> = [255u8, 0, 0, 255].repeat(64 * 64);
+    let s = CanvasSession::from_image(crate::layers::ThumbnailImage { width: 64, height: 64, rgba: red }, "Red".into());
+    s.shared.lock().gpu = Some(gpu);
+    let dir = std::env::temp_dir().join(format!("procraft-unmade-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(dir.join("thumbnail.png")).unwrap()));
+    let mut reader = reader.read_info().unwrap();
+    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut buf).unwrap();
+    assert_eq!(&buf[..4], &[255, 0, 0, 255]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_jpeg_coded_in_stretches_reads_back_as_its_picture() {
+    // tall enough to be coded in several stretches between restart markers
+    let (w, h) = (96u32, 640u32);
+    let rgb: Vec<u8> = (0..w * h).flat_map(|i| [(i % w * 2) as u8, (i / w % 256) as u8, 128]).collect();
+    let jpg = procraft_engine::jpeg::encode(&rgb, w, h, 95);
+    assert!(jpg.windows(2).any(|m| m == [0xFF, 0xDD]), "no restart interval");
+    let back = image::load_from_memory_with_format(&jpg, image::ImageFormat::Jpeg).unwrap().to_rgb8();
+    assert_eq!(back.dimensions(), (w, h));
+    // within what JPEG at 95 keeps, everywhere (a stretch decoded wrongly would be far off)
+    let worst = back.as_raw().iter().zip(&rgb).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    assert!(worst < 24, "{worst}");
 }
 
 #[test]

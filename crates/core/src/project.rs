@@ -22,6 +22,10 @@ use crate::{CanvasSession, MobileError};
 
 /// The gallery thumbnail's longest side, pixels.
 pub const THUMBNAIL_SIDE: u32 = 512;
+/// [`CanvasSession::edits_saved`] before any save.
+pub(crate) const NOT_SAVED: u64 = u64::MAX;
+/// How often an open artwork kept saved looks for changes to save.
+const AUTOSAVE_EVERY: std::time::Duration = std::time::Duration::from_millis(if cfg!(test) { 50 } else { 3000 });
 /// A package's preview's longest side, pixels.
 const PACKAGE_PREVIEW_SIDE: u32 = 1024;
 const FORMAT: &str = "procraft-artwork";
@@ -120,18 +124,28 @@ pub(crate) fn file_error(context: &str, e: impl std::fmt::Display) -> MobileErro
     MobileError::File { reason: format!("{context}: {e}") }
 }
 
-/// What a save writes, read under the lock: the artwork's file, the layers not already in the
-/// folder as they are (each with its hash) and the picture (if shown).
+/// What a save writes, taken under the lock: the artwork's file, the layers not already in the
+/// folder as they are (each with its hash) and the picture (if shown). What the GPU still copies
+/// back is waited for after the lock is let go.
 pub(crate) struct SaveSnapshot {
     /// The layers that had changed, counted as changed again if the save fails.
     changed: Vec<LayerId>,
     file: ArtworkFile,
     layers: Vec<(LayerId, u64, Vec<u8>)>,
+    /// Layers on their way back from the GPU, to be checked against the folder once here.
+    reading: Vec<(LayerId, procraft_gpu::Readback)>,
     /// Layers still the PNG files they were opened from (not shown yet), written as they are.
     files: Vec<(LayerId, Vec<u8>)>,
-    composite: Option<Vec<u8>>,
+    composite: Option<procraft_gpu::Readback>,
     model: Option<crate::scene3d::ModelSnapshot>,
+    /// The device read from, to tell whether it was lost meanwhile.
+    gpu: Option<procraft_gpu::Gpu>,
 }
+
+/// How much of a save's layers may still be on their way back from the GPU when the lock is let
+/// go; past it they are read (and those unchanged let go) under it. Small in tests, so their
+/// saves go both ways.
+const READ_AFTER_LOCK: usize = if cfg!(test) { 64 << 10 } else { 256 << 20 };
 
 /// What the last saves wrote: the folder, and a hash of each layer's pixels, so layers that
 /// haven't changed aren't written again.
@@ -140,6 +154,8 @@ pub(crate) struct Saved {
     dir: PathBuf,
     layers: std::collections::HashMap<LayerId, u64>,
     sets: crate::scene3d::SavedSets,
+    /// Which autosave may save: one started under another number has been stopped.
+    autosave: u64,
 }
 
 impl Saved {
@@ -177,6 +193,11 @@ pub(crate) fn pixels_hash(rgba: &[u8]) -> u64 {
 }
 
 impl crate::State {
+    /// See [`CanvasSession::edits`].
+    pub(crate) fn edits(&self) -> u64 {
+        self.revision.wrapping_add(self.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made))
+    }
+
     /// Nothing under way that saving would end or cut short.
     pub(crate) fn idle(&self) -> bool {
         self.stroke.is_none()
@@ -192,7 +213,8 @@ impl crate::State {
 
     /// The artwork as it is now, for saving into `dir`: a layer already there as it is (its hash
     /// among the `known` and its file there) is let go as soon as it is read, so a save holds only
-    /// the layers that changed.
+    /// the layers that changed. Up to [`READ_AFTER_LOCK`] of the layers, and the picture, are
+    /// only started back from the GPU here, to be waited for once the lock is let go.
     pub(crate) fn save_snapshot(
         &mut self,
         dir: &Path,
@@ -222,9 +244,15 @@ impl crate::State {
             model: model.as_ref().map(|m| m.saved.clone()),
         };
         let mut layers = Vec::new();
+        let mut reading = Vec::new();
         let mut files = Vec::new();
         let mut composite = None;
         let mut changed_ids = Vec::new();
+        // shown but its canvas still being made (on another thread): made now, so the save has its
+        // picture for the gallery
+        if self.gpu.is_some() && self.canvas.is_none() {
+            self.ensure_canvas();
+        }
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.render(gpu, &mut self.doc, None);
             let changed_now = canvas.take_changed();
@@ -237,16 +265,18 @@ impl crate::State {
                 {
                     continue;
                 }
-                let rgba = canvas.read_layer(gpu, layer.id).map_err(|e| file_error("reading a layer", e))?;
-                layers.extend(changed(layer.id, rgba));
+                let read = canvas.start_reading_layer(gpu, layer.id).map_err(|e| file_error("reading a layer", e))?;
+                let after: usize = reading.iter().map(|(_, r): &(LayerId, procraft_gpu::Readback)| r.bytes()).sum();
+                if after + read.bytes() <= READ_AFTER_LOCK {
+                    reading.push((layer.id, read));
+                } else {
+                    let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
+                    layers.extend(changed(layer.id, rgba));
+                }
             }
             // for the gallery's thumbnail: private layers left out
             let private = self.doc.private_layers();
-            composite = Some(
-                canvas
-                    .read_composite_without(gpu, &mut self.doc, &private)
-                    .map_err(|e| file_error("reading the picture", e))?,
-            );
+            composite = Some(canvas.start_reading_composite_without(gpu, &mut self.doc, &private));
         } else {
             // not shown yet: what was opened is still what there is. A layer still its file's
             // bytes isn't decoded: it is written as they are, or not at all if that file is there
@@ -261,7 +291,8 @@ impl crate::State {
                 }
             }
         }
-        Ok(SaveSnapshot { changed: changed_ids, file, layers, files, composite, model })
+        let gpu = self.gpu.clone();
+        Ok(SaveSnapshot { changed: changed_ids, file, layers, reading, files, composite, model, gpu })
     }
 }
 
@@ -282,10 +313,44 @@ fn write_or_keep_changed(
     result
 }
 
+impl CanvasSession {
+    /// [`CanvasSession::save_if_idle`] with what the last saves wrote (its lock held).
+    fn save_if_idle_with(&self, saved: &mut Saved, dir: &str) -> Result<bool, MobileError> {
+        let (snapshot, edits) = {
+            let mut guard = self.shared.lock_finished();
+            let st = &mut *guard;
+            if !st.idle() {
+                return Ok(false);
+            }
+            // a model saves its colour as the artwork's document
+            let known = saved.known(Path::new(dir));
+            (st.with_colour(|st| st.save_snapshot(Path::new(dir), &known))?, st.edits())
+        };
+        write_or_keep_changed(self, saved, Path::new(dir), snapshot)?;
+        self.shared.edits_saved.store(edits, std::sync::atomic::Ordering::Relaxed);
+        Ok(true)
+    }
+}
+
 /// Writes a save into `dir` (made if missing): the layers that changed since the last save there,
 /// the thumbnail and the document.
 fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Result<(), MobileError> {
-    let SaveSnapshot { file, layers, files, composite, model, .. } = snapshot;
+    let SaveSnapshot { file, mut layers, reading, files, composite, model, gpu, .. } = snapshot;
+    // what was still on its way back: those unchanged since the last save there are let go
+    for (id, read) in reading {
+        let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
+        let hash = pixels_hash(&rgba);
+        let there = saved.dir == dir && saved.layers.get(&id) == Some(&hash) && layer_path(dir, id).exists();
+        if !there {
+            layers.push((id, hash, rgba));
+        }
+    }
+    let composite =
+        composite.map(procraft_gpu::Readback::pixels).transpose().map_err(|e| file_error("reading the picture", e))?;
+    // a device lost meanwhile read back nothing true: the last save is kept as it is
+    if gpu.as_ref().is_some_and(procraft_gpu::Gpu::is_lost) {
+        return Err(file_error("reading the layers", "the graphics device was lost"));
+    }
     if saved.dir != dir {
         saved.dir = dir.to_path_buf();
         saved.layers.clear();
@@ -433,40 +498,78 @@ impl CanvasSession {
     /// Saves started together run one after the other.
     pub fn save(&self, dir: String) -> Result<(), MobileError> {
         let mut saved = self.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
-        let snapshot = {
+        let (snapshot, edits) = {
             let mut guard = self.shared.lock_finished();
             let st = &mut *guard;
             st.finish_stroke();
             st.settle();
             // a model saves its colour as the artwork's document
             let known = saved.known(Path::new(&dir));
-            st.with_colour(|st| st.save_snapshot(Path::new(&dir), &known))?
+            (st.with_colour(|st| st.save_snapshot(Path::new(&dir), &known))?, st.edits())
         };
-        write_or_keep_changed(self, &mut saved, Path::new(&dir), snapshot)
+        write_or_keep_changed(self, &mut saved, Path::new(&dir), snapshot)?;
+        self.shared.edits_saved.store(edits, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     /// Saves as [`CanvasSession::save`] does, but only when nothing is under way that saving
     /// would end (a stroke, a transform, an adjustment, text being edited...); false if it didn't.
     pub fn save_if_idle(&self, dir: String) -> Result<bool, MobileError> {
         let mut saved = self.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
-        let snapshot = {
-            let mut guard = self.shared.lock_finished();
-            let st = &mut *guard;
-            if !st.idle() {
-                return Ok(false);
-            }
-            // a model saves its colour as the artwork's document
-            let known = saved.known(Path::new(&dir));
-            st.with_colour(|st| st.save_snapshot(Path::new(&dir), &known))?
-        };
-        write_or_keep_changed(self, &mut saved, Path::new(&dir), snapshot).map(|()| true)
+        self.save_if_idle_with(&mut saved, &dir)
     }
 
     /// A number that changes whenever the artwork does (new steps, undo and redo, layer
     /// settings): unchanged, there is nothing new to save.
     pub fn edits(&self) -> u64 {
-        let st = self.shared.lock();
-        st.revision.wrapping_add(st.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made))
+        self.shared.lock().edits()
+    }
+
+    /// [`CanvasSession::edits`] as the last save that worked found them; none before one.
+    pub fn edits_saved(&self) -> Option<u64> {
+        Some(self.shared.edits_saved.load(std::sync::atomic::Ordering::Relaxed)).filter(|&e| e != NOT_SAVED)
+    }
+
+    /// Keeps the artwork saved into `dir` while it is open, from a thread of its own: every few
+    /// seconds, when it has changed and nothing is under way that saving would cut short (only
+    /// the layers that changed are written). Ends with [`CanvasSession::stop_autosave`], with
+    /// another start, or when the session is let go.
+    pub fn start_autosave(self: Arc<Self>, dir: String) {
+        let mine = {
+            let mut saved = self.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
+            saved.autosave = saved.autosave.wrapping_add(1);
+            saved.autosave
+        };
+        let mut kept = self.edits();
+        let session = Arc::downgrade(&self);
+        let started = std::thread::Builder::new().name("autosave".into()).spawn(move || {
+            loop {
+                std::thread::sleep(AUTOSAVE_EVERY);
+                let Some(session) = session.upgrade() else { return };
+                let mut saved = session.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
+                if saved.autosave != mine {
+                    return;
+                }
+                let now = session.edits();
+                if now == kept {
+                    continue;
+                }
+                match session.save_if_idle_with(&mut saved, &dir) {
+                    Ok(true) => kept = now,
+                    Ok(false) => {}
+                    Err(e) => log::error!("keeping the artwork saved: {e}"),
+                }
+            }
+        });
+        if let Err(e) = started {
+            log::error!("keeping the artwork saved: {e}");
+        }
+    }
+
+    /// Ends the autosave started last: a save it is making is finished first, and none follows.
+    pub fn stop_autosave(&self) {
+        let mut saved = self.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
+        saved.autosave = saved.autosave.wrapping_add(1);
     }
 
     /// Gives an artwork opened only to be exported (never shown) a GPU device of its own, so its
@@ -1013,6 +1116,18 @@ pub(crate) fn onto_white(rgba: &[u8]) -> Vec<u8> {
 }
 
 pub(crate) fn straight_alpha(rgba: &[u8]) -> Vec<u8> {
+    // in pieces made side by side
+    let pieces: Vec<&[u8]> = rgba.chunks(1 << 20).collect();
+    let made = procraft_engine::par::side_by_side(&pieces, |piece| straight_piece(piece));
+    let mut out = Vec::with_capacity(rgba.len());
+    for (piece, made) in pieces.iter().zip(made) {
+        out.extend_from_slice(&made.unwrap_or_else(|| straight_piece(piece)));
+    }
+    out
+}
+
+/// [`straight_alpha`] of one piece (whole pixels).
+fn straight_piece(rgba: &[u8]) -> Vec<u8> {
     let (pixels, _) = rgba.as_chunks::<4>();
     let mut out = Vec::with_capacity(rgba.len());
     for &[r, g, b, a] in pixels {
@@ -1202,8 +1317,28 @@ pub fn import_psd(path: String, dir: String, name: String) -> PsdOutcome {
 pub(crate) fn thumbnail(rgba: &[u8], width: u32, height: u32, side: u32) -> (u32, u32, Vec<u8>) {
     let scale = (side as f32 / width.max(height).max(1) as f32).min(1.0);
     let (tw, th) = (((width as f32 * scale).round() as u32).max(1), ((height as f32 * scale).round() as u32).max(1));
-    let mut out = Vec::with_capacity((tw * th * 4) as usize);
-    for ty in 0..th {
+    // at full size each pixel is only made straight
+    let whole = width as usize * height as usize * 4;
+    if (tw, th) == (width, height)
+        && let Some(all) = rgba.get(..whole)
+    {
+        return (tw, th, straight_alpha(all));
+    }
+    // each row averaged on its own, side by side
+    let rows: Vec<u32> = (0..th).collect();
+    let made = procraft_engine::par::side_by_side(&rows, |&ty| thumbnail_row(rgba, width, height, tw, th, ty));
+    let mut out = Vec::with_capacity(tw as usize * th as usize * 4);
+    for (&ty, row) in rows.iter().zip(made) {
+        out.extend_from_slice(&row.unwrap_or_else(|| thumbnail_row(rgba, width, height, tw, th, ty)));
+    }
+    (tw, th, out)
+}
+
+/// Row `ty` of [`thumbnail`]'s `tw` x `th` picture: each pixel the average of the premultiplied
+/// pixels it covers, made straight.
+fn thumbnail_row(rgba: &[u8], width: u32, height: u32, tw: u32, th: u32, ty: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity((tw * 4) as usize);
+    {
         let (y0, y1) = (ty * height / th, ((ty + 1) * height / th).max(ty * height / th + 1));
         for tx in 0..tw {
             let (x0, x1) = (tx * width / tw, ((tx + 1) * width / tw).max(tx * width / tw + 1));
@@ -1227,7 +1362,7 @@ pub(crate) fn thumbnail(rgba: &[u8], width: u32, height: u32, side: u32) -> (u32
             out.extend_from_slice(&[un(r), un(g), un(b), a as u8]);
         }
     }
-    (tw, th, out)
+    out
 }
 
 #[cfg(test)]

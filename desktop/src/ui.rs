@@ -1044,7 +1044,11 @@ impl Interface {
                 self.library.tool_changed();
             }
             QuickAction::Eyedropper => session.set_pick_next(true),
-            QuickAction::SwapColors => _ = self.colours.previous(session),
+            QuickAction::SwapColors => {
+                if self.colours.previous(session) {
+                    self.overlays.notice("Previous colour", false);
+                }
+            }
             QuickAction::Selection => self.toggle_selection(session),
             QuickAction::Transform => self.toggle_transform(session),
             QuickAction::Colors => self.toggle(session, Popover::Colour),

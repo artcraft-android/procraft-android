@@ -2,6 +2,7 @@
 //! colour, inverting it, and making it the reference layer.
 
 use procraft_engine::document::LayerId;
+use procraft_engine::geom::IRect;
 use procraft_engine::selection::Mask;
 
 use crate::layers::ThumbnailImage;
@@ -17,13 +18,71 @@ impl State {
         canvas.read_layer(gpu, id).ok()
     }
 
-    /// Replaces an unlocked layer's pixels as one undo step.
-    fn rewrite_layer(&mut self, id: LayerId, pixels: Vec<u8>) {
+    /// A layer's pixels inside `rect` (rows top to bottom), everything queued drawn first.
+    pub(crate) fn layer_part(&mut self, id: LayerId, rect: IRect) -> Option<Vec<u8>> {
+        self.finish_stroke();
+        self.settle();
+        self.flush();
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return None };
+        canvas.read_layer_part(gpu, id, rect).ok()
+    }
+
+    /// Where layer `id` is painted (as the GPU finds it, everything queued drawn first); none if
+    /// nowhere, or if that can't be told.
+    fn painted_box(&mut self, id: LayerId) -> Option<IRect> {
+        self.finish_stroke();
+        self.settle();
+        self.flush();
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_ref(), self.gpu.as_ref()) else { return None };
+        canvas.painted_boxes(gpu, &[id]).pop().flatten()
+    }
+
+    /// Replaces an unlocked layer's pixels inside `rect` with `part` (its rows), as one undo step.
+    fn rewrite_layer(&mut self, id: LayerId, rect: IRect, part: Vec<u8>) {
         if let Some(canvas) = self.canvas.as_mut() {
-            canvas.write_layer(id, pixels);
+            canvas.write_layer_part(id, rect, part);
         }
         self.revision += 1;
     }
+}
+
+/// What `mask` takes inside `rect` (on it), row by row.
+pub(crate) fn mask_part(mask: &Mask, rect: IRect) -> Vec<u8> {
+    let w = mask.width as usize;
+    let (x0, x1) = (rect.x0.max(0) as usize, rect.x1.max(0) as usize);
+    let mut out = Vec::with_capacity(rect.width() as usize * rect.height() as usize);
+    for y in rect.y0.max(0) as usize..rect.y1.max(0) as usize {
+        out.extend_from_slice(mask.data.get(y * w + x0..y * w + x1).unwrap_or_default());
+    }
+    out
+}
+
+/// The rectangle around what `mask` takes; none when it takes nothing.
+pub(crate) fn mask_rect(mask: &Mask) -> Option<IRect> {
+    let [x, y, w, h] = mask.bounds()?.map(|v| i32::try_from(v).unwrap_or(i32::MAX));
+    Some(IRect::new(x, y, x.saturating_add(w), y.saturating_add(h)))
+}
+
+/// The rectangle around the pixels of a picture `width` wide (RGBA) that aren't clear; none when
+/// all are (as the GPU's [`procraft_gpu::Canvas::painted_boxes`] should find it).
+#[cfg(test)]
+pub(crate) fn painted_rect(pixels: &[u8], width: u32) -> Option<IRect> {
+    let row_len = width as usize * 4;
+    if row_len == 0 {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+    for (y, row) in pixels.chunks_exact(row_len).enumerate() {
+        let (px, _) = row.as_chunks::<4>();
+        let Some(first) = px.iter().position(|&[.., a]| a != 0) else { continue };
+        let last = px.iter().rposition(|&[.., a]| a != 0).unwrap_or(first) + 1;
+        x0 = x0.min(first);
+        x1 = x1.max(last);
+        y0 = y0.min(y);
+        y1 = y + 1;
+    }
+    let n = |v: usize| i32::try_from(v).unwrap_or(i32::MAX);
+    (x0 < x1).then(|| IRect::new(n(x0), n(y0), n(x1), n(y1)))
 }
 
 #[uniffi::export]
@@ -32,11 +91,20 @@ impl CanvasSession {
     pub fn select_layer_contents(&self, id: u64) -> bool {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let Some(pixels) = st.layer_pixels(LayerId(id)) else { return false };
         let (w, h) = (st.doc.width(), st.doc.height());
         let mut mask = Mask::empty(w, h);
-        for (m, px) in mask.data.iter_mut().zip(pixels.as_chunks::<4>().0) {
-            *m = px[3];
+        // only where it is painted is read back (nothing selected if nowhere)
+        if let Some(rect) = st.painted_box(LayerId(id)) {
+            let Some(pixels) = st.layer_part(LayerId(id), rect) else { return false };
+            let (x0, across) = (rect.x0.max(0) as usize, rect.width() as usize);
+            for (row, y) in pixels.chunks_exact(across * 4).zip(rect.y0.max(0) as usize..) {
+                let start = y * w as usize + x0;
+                if let Some(line) = mask.data.get_mut(start..start + across) {
+                    for (m, px) in line.iter_mut().zip(row.as_chunks::<4>().0) {
+                        *m = px[3];
+                    }
+                }
+            }
         }
         let before = st.selection.take();
         st.selection = Some(mask);
@@ -63,11 +131,20 @@ impl CanvasSession {
         if layer.locked || layer.text.is_some() {
             return false;
         }
-        let Some(mut pixels) = st.layer_pixels(id) else { return false };
         let [r, g, b] = st.color.map(|c| (c.clamp(0.0, 1.0) * 255.0).round());
         let mask = st.selection.clone();
+        // only what is selected changes, and with the alpha locked only what is painted: only
+        // that is read back and filled
+        let (w, h) = (st.doc.width(), st.doc.height());
+        let selected = mask.as_ref().map_or(Some(IRect::from_size(w, h)), mask_rect);
+        let painted = if layer.alpha_lock { st.painted_box(id) } else { Some(IRect::from_size(w, h)) };
+        let Some(rect) = selected.zip(painted).map(|(a, b)| a.intersect(b)).filter(|r| !r.is_empty()) else {
+            return false;
+        };
+        let Some(mut pixels) = st.layer_part(id, rect) else { return false };
+        let taken = mask.as_ref().map(|m| mask_part(m, rect));
         for (i, px) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let k = mask.as_ref().map_or(1.0, |m| f32::from(m.data.get(i).copied().unwrap_or(0)) / 255.0);
+            let k = taken.as_ref().map_or(1.0, |m| f32::from(m.get(i).copied().unwrap_or(0)) / 255.0);
             // the colour over what is there, as much as the selection takes; alpha-locked, only
             // as much as is there
             let a = if layer.alpha_lock { f32::from(px[3]) / 255.0 } else { 1.0 };
@@ -76,7 +153,7 @@ impl CanvasSession {
                 *c = (f32::from(*c) + (f - f32::from(*c)) * k).round().clamp(0.0, 255.0) as u8;
             }
         }
-        st.rewrite_layer(id, pixels);
+        st.rewrite_layer(id, rect, pixels);
         self.shared.frame(st);
         true
     }
@@ -89,14 +166,16 @@ impl CanvasSession {
         if st.doc.layer(id).is_none_or(|l| l.locked || l.text.is_some()) {
             return false;
         }
-        let Some(mut pixels) = st.layer_pixels(id) else { return false };
+        // only what is painted changes: only that is read back
+        let Some(rect) = st.painted_box(id) else { return false };
+        let Some(mut pixels) = st.layer_part(id, rect) else { return false };
         for px in pixels.as_chunks_mut::<4>().0 {
             let a = px[3];
             for c in px.iter_mut().take(3) {
                 *c = a.saturating_sub(*c);
             }
         }
-        st.rewrite_layer(id, pixels);
+        st.rewrite_layer(id, rect, pixels);
         self.shared.frame(st);
         true
     }

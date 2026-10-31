@@ -324,7 +324,8 @@ mod tests {
         let named = r#"<Brush type="gbr_brush" filename="charcoal.gbr" spacing="0.3"/>"#;
         z.add("paintoppresets/charcoal.kpp", &kpp(&preset("Charcoal", named, true)));
         z.add("paintoppresets/broken.kpp", b"not a preset");
-        let (title, presets) = read_bundle(&z.finish()).unwrap();
+        let bundle = z.finish();
+        let (title, presets) = read_bundle(&bundle).unwrap();
         assert_eq!(title, "Charcoals");
         assert_eq!(presets.len(), 1);
         let KritaTip::Image(t) = &presets[0].tip else { panic!("{:?}", presets[0].tip) };
@@ -334,6 +335,9 @@ mod tests {
         let missing = r#"<Brush type="gbr_brush" filename="gone.gbr"/>"#;
         let b = read_preset(&kpp(&preset("Gone", missing, true)), &|_| None).unwrap();
         assert!(matches!(b.tip, KritaTip::Round { .. }));
+        crate::damaged::survives("Krita bundle", &bundle, |b| {
+            let _ = read_bundle(b);
+        });
     }
 
     #[test]

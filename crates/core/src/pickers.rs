@@ -87,20 +87,68 @@ pub fn rgb_to_p3_hsv(rgb: u32, p3: bool) -> Vec<f32> {
 #[uniffi::export]
 pub fn harmony_wheel(v: f32, side: u32, p3: bool) -> Vec<u8> {
     let side = side.min(4096) as usize;
-    let half = side as f32 / 2.0;
-    let mut out = vec![0u8; side * side * 4];
-    for (k, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-        let u = ((k % side) as f32 + 0.5) / half - 1.0;
-        let w = ((k / side) as f32 + 0.5) / half - 1.0;
+    // each pixel's hue, saturation and edge, kept for the size
+    let places = geometry(&WHEEL_PLACES, side, |u, w, half| {
         let d = u.hypot(w);
         let edge = ((1.0 - d) * half + 0.5).clamp(0.0, 1.0);
-        if edge <= 0.0 {
-            continue;
+        [((-w).atan2(u) / std::f32::consts::TAU + 1.0) % 1.0, d.min(1.0), edge]
+    });
+    picture_rows(side, |y, row| {
+        for (px, &[h, s, edge]) in row.iter_mut().zip(places.get(y * side..(y + 1) * side).unwrap_or_default()) {
+            if edge <= 0.0 {
+                continue;
+            }
+            let rgb = p3_hsv_to_rgb(h, s, v, p3);
+            let premultiplied = |shift: u32| (((rgb >> shift) & 0xFF) as f32 * edge).round() as u8;
+            *px = [premultiplied(16), premultiplied(8), premultiplied(0), (edge * 255.0).round() as u8];
         }
-        let h = ((-w).atan2(u) / std::f32::consts::TAU + 1.0) % 1.0;
-        let rgb = p3_hsv_to_rgb(h, d.min(1.0), v, p3);
-        let premultiplied = |shift: u32| (((rgb >> shift) & 0xFF) as f32 * edge).round() as u8;
-        *px = [premultiplied(16), premultiplied(8), premultiplied(0), (edge * 255.0).round() as u8];
+    })
+}
+
+/// A picker picture's pixels' places (three numbers each, from `place` of the pixel's centre on
+/// -1..1 across and down, and half the side), the last size asked kept: a drag remakes the
+/// picture at one size, only its colour changing.
+type Places = std::sync::Mutex<Option<(usize, std::sync::Arc<Vec<[f32; 3]>>)>>;
+
+static WHEEL_PLACES: Places = std::sync::Mutex::new(None);
+static DISC_PLACES: Places = std::sync::Mutex::new(None);
+
+fn geometry(
+    kept: &Places,
+    side: usize,
+    place: impl Fn(f32, f32, f32) -> [f32; 3] + Sync,
+) -> std::sync::Arc<Vec<[f32; 3]>> {
+    let mut last = kept.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, places)) = last.as_ref().filter(|(at, _)| *at == side) {
+        return std::sync::Arc::clone(places);
+    }
+    let half = side as f32 / 2.0;
+    let rows: Vec<usize> = (0..side).collect();
+    let made = procraft_engine::par::side_by_side(&rows, |&y| {
+        let w = (y as f32 + 0.5) / half - 1.0;
+        (0..side).map(|x| place((x as f32 + 0.5) / half - 1.0, w, half)).collect::<Vec<_>>()
+    });
+    let places: Vec<[f32; 3]> = made.into_iter().flat_map(|row| row.unwrap_or_else(|| vec![[0.0; 3]; side])).collect();
+    let places = std::sync::Arc::new(places);
+    *last = Some((side, std::sync::Arc::clone(&places)));
+    places
+}
+
+/// A `side` pixels square picture (RGBA) made a row at a time (`row` given its number and its
+/// pixels, clear), the rows side by side: the pickers remake theirs as a slider is dragged.
+fn picture_rows(side: usize, row: impl Fn(usize, &mut [[u8; 4]]) + Sync) -> Vec<u8> {
+    let rows: Vec<usize> = (0..side).collect();
+    let made = procraft_engine::par::side_by_side(&rows, |&y| {
+        let mut line = vec![[0u8; 4]; side];
+        row(y, &mut line);
+        line
+    });
+    let mut out = Vec::with_capacity(side * side * 4);
+    for line in made {
+        match line {
+            Some(line) => out.extend_from_slice(line.as_flattened()),
+            None => out.resize(out.len() + side * 4, 0),
+        }
     }
     out
 }
@@ -137,21 +185,25 @@ pub fn disc_to_square_point(u: f32, v: f32) -> Vec<f32> {
 #[uniffi::export]
 pub fn disc_picture(hue: f32, side: u32) -> Vec<u8> {
     let side = side.min(4096) as usize;
-    let half = side as f32 / 2.0;
-    let mut out = vec![0u8; side * side * 4];
-    for (k, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-        let u = ((k % side) as f32 + 0.5) / half - 1.0;
-        let v = ((k / side) as f32 + 0.5) / half - 1.0;
+    // each pixel's saturation, brightness and edge, kept for the size
+    let places = geometry(&DISC_PLACES, side, |u, v, half| {
         let edge = ((1.0 - u.hypot(v)) * half + 0.5).clamp(0.0, 1.0);
         if edge <= 0.0 {
-            continue;
+            return [0.0; 3];
         }
         let [x, y] = disc_to_square(u, v);
-        let rgb = hsv_to_rgb([hue, (x + 1.0) / 2.0, (1.0 - y) / 2.0]);
-        let premultiplied = |c: f32| (byte(c) as f32 * edge).round() as u8;
-        *px = [premultiplied(rgb[0]), premultiplied(rgb[1]), premultiplied(rgb[2]), (edge * 255.0).round() as u8];
-    }
-    out
+        [(x + 1.0) / 2.0, (1.0 - y) / 2.0, edge]
+    });
+    picture_rows(side, |y, row| {
+        for (px, &[s, v, edge]) in row.iter_mut().zip(places.get(y * side..(y + 1) * side).unwrap_or_default()) {
+            if edge <= 0.0 {
+                continue;
+            }
+            let rgb = hsv_to_rgb([hue, s, v]);
+            let premultiplied = |c: f32| (byte(c) as f32 * edge).round() as u8;
+            *px = [premultiplied(rgb[0]), premultiplied(rgb[1]), premultiplied(rgb[2]), (edge * 255.0).round() as u8];
+        }
+    })
 }
 
 #[cfg(test)]

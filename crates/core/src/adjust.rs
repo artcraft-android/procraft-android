@@ -250,6 +250,7 @@ impl State {
 
     /// Ends an open adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
     pub(crate) fn end_adjustment(&mut self, commit: bool) {
+        let within = if commit && self.adjusting { self.changed_since_begin() } else { None };
         self.pencil = false;
         self.cloning = false;
         self.clone_source = None;
@@ -266,7 +267,11 @@ impl State {
                     _ => "adjustment",
                 });
             }
-            canvas.end_transform(commit);
+            // only where it changed is kept
+            match within {
+                Some(within) => canvas.end_transform_within(commit, within),
+                None => canvas.end_transform(commit),
+            }
             if self.simplified_undos {
                 canvas.collapse_steps();
             }

@@ -516,6 +516,9 @@ pub struct StrokeBuilder {
     ran_on: Option<f32>,
     /// How many stamps have been drawn for good, for a stroke shown with its tip.
     kept: usize,
+    /// How many of the stroke's stamps before `placed` a copy leaves out (see
+    /// [`StrokeBuilder::open_copy`]).
+    left_out: usize,
 }
 
 /// Smoothing and pressure set for every stroke, whatever the brush, on top of the brush's own.
@@ -660,6 +663,7 @@ impl StrokeBuilder {
             before_last: [None; 2],
             ran_on: None,
             kept: 0,
+            left_out: 0,
         }
         .reading_extras()
     }
@@ -731,8 +735,9 @@ impl StrokeBuilder {
 
     /// The stamps `samples` would add, without adding them (for drawing predicted input): the
     /// path walked on to the last of them.
-    pub fn preview(&self, samples: &[Sample]) -> Vec<Stamp> {
-        let mut ahead = self.clone();
+    pub fn preview(&mut self, samples: &[Sample]) -> Vec<Stamp> {
+        // none of the stamps so far are needed
+        let mut ahead = self.open_copy(self.placed.len());
         let mut out = ahead.add(samples);
         ahead.flush(&mut out);
         out
@@ -759,23 +764,40 @@ impl StrokeBuilder {
         self.add(samples);
         let start = self.start_span();
         let reach = self.length - self.end_span(0.0);
-        let to = self.placed.iter().position(|p| p.distance >= reach).unwrap_or(self.placed.len()).max(self.kept);
+        // the stamps lie in order along the path: the first the taper reaches is after those kept
+        let open = self.placed.get(self.kept..).unwrap_or_default();
+        let to = open.iter().position(|p| p.distance >= reach).map_or(self.placed.len(), |i| self.kept + i);
         let kept = self.placed.get(self.kept..to).unwrap_or_default();
         let kept = kept.iter().map(|p| self.finish_stamp(p, start, None)).collect();
         self.kept = to;
         // the tip as if the stroke ended here: walked on to its newest point
-        let mut ended = self.clone();
+        let mut ended = self.open_copy(to);
         ended.flush(&mut Vec::new());
-        (kept, ended.tip_from(to))
+        (kept, ended.tip_from(0))
     }
 
     /// The tip as it would be with `samples` added (for drawing predicted input), the stroke
     /// left as it is.
-    pub fn preview_tip(&self, samples: &[Sample]) -> Vec<Stamp> {
-        let mut ahead = self.clone();
+    pub fn preview_tip(&mut self, samples: &[Sample]) -> Vec<Stamp> {
+        let mut ahead = self.open_copy(self.kept);
         ahead.add(samples);
         ahead.flush(&mut Vec::new());
-        ahead.tip_from(self.kept)
+        ahead.tip_from(0)
+    }
+
+    /// A copy of the stroke holding only its stamps from `from` on, to see how it would go on:
+    /// copying every stamp each time cost more the longer the stroke. Those before are set aside
+    /// while it is made, not copied.
+    fn open_copy(&mut self, from: usize) -> StrokeBuilder {
+        let from = from.min(self.placed.len());
+        let open = self.placed.split_off(from);
+        let before = std::mem::replace(&mut self.placed, open);
+        let mut copy = self.clone();
+        copy.left_out += from;
+        copy.kept = 0;
+        let open = std::mem::replace(&mut self.placed, before);
+        self.placed.extend(open);
+        copy
     }
 
     /// The stamps from `from` on as they would be drawn were the stroke to end here.
@@ -1034,7 +1056,7 @@ impl StrokeBuilder {
         let mut done = 0.0f32;
         // each input segment goes on from the plain gap where it starts
         let mut last = self.step(from);
-        while self.placed.len() < MAX_STAMPS {
+        while self.left_out + self.placed.len() < MAX_STAMPS {
             let gap = match self.pending_gap.take() {
                 Some(gap) => gap,
                 None => {
@@ -1710,6 +1732,44 @@ mod tests {
         let (tip, inside) = (stamp(&brush, Pointer::Stylus, 5), stamp(&brush, Pointer::Stylus, 40));
         assert!(tip.grain_press < 0.6 && tip.roundness < 0.6, "{} {}", tip.grain_press, tip.roundness);
         assert!(inside.grain_press > 0.99 && inside.roundness > 0.99, "{} {}", inside.grain_press, inside.roundness);
+    }
+
+    #[test]
+    fn a_tip_worked_out_on_what_is_open_is_the_whole_strokes() {
+        let taper = Taper { start: 0.2, end: 0.5, size: 1.0, opacity: 0.3 };
+        let brush = Brush { pen_taper: taper.clone(), touch_taper: taper, streamline: 0.4, ..plain() };
+        let samples: Vec<Sample> = (0..=600)
+            .map(|i| {
+                let t = i as f32 * 0.05;
+                let pos = Vec2::new(i as f32 * 1.5, 50.0 + 30.0 * t.sin());
+                Sample::at(pos, 0.4 + 0.5 * (t * 0.7).cos().abs(), i as f64 * 4.0)
+            })
+            .collect();
+        let mut b = StrokeBuilder::new(brush, 10.0, Pointer::Stylus);
+        assert!(b.shows_tip());
+        // as the whole stroke copied works them out
+        let whole_tip = |b: &StrokeBuilder, ahead: &[Sample]| {
+            let mut copy = b.clone();
+            copy.add(ahead);
+            copy.flush(&mut Vec::new());
+            copy.tip_from(b.kept)
+        };
+        let mut checked = 0;
+        for (k, chunk) in samples.chunks(3).enumerate() {
+            let ahead = [Sample::at(chunk[0].pos + Vec2::new(6.0, 2.0), 0.5, chunk[0].time_ms + 8.0)];
+            let (count, kept_before) = (b.stamp_count(), b.kept);
+            assert_eq!(b.preview_tip(&ahead), whole_tip(&b, &ahead), "predicted at {k}");
+            let mut whole = b.clone();
+            let mut ahead_stamps = whole.add(&ahead);
+            whole.flush(&mut ahead_stamps);
+            assert_eq!(b.preview(&ahead), ahead_stamps, "previewed at {k}");
+            // the stroke left as it was
+            assert_eq!((b.stamp_count(), b.kept), (count, kept_before));
+            let (_, tip) = b.add_tipped(chunk);
+            assert_eq!(tip, whole_tip(&b, &[]), "tip at {k}");
+            checked += tip.len();
+        }
+        assert!(checked > 1000 && b.kept > 100, "{checked} {}", b.kept);
     }
 
     #[test]
