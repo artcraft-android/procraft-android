@@ -2,6 +2,7 @@
 //! colour, and combined, inverted and feathered.
 
 use crate::geom::Vec2;
+use crate::par::cores;
 
 /// A selection over a `width` × `height` canvas, one byte per pixel, rows top to bottom.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,6 +26,27 @@ impl Mask {
     /// Nothing selected.
     pub fn empty(width: u32, height: u32) -> Mask {
         Mask { width, height, data: vec![0; width as usize * height as usize] }
+    }
+
+    /// The smallest rectangle holding everything it takes (x, y, width, height); none when it
+    /// takes nothing.
+    pub fn bounds(&self) -> Option<[u32; 4]> {
+        let w = self.width as usize;
+        if w == 0 {
+            return None;
+        }
+        let (mut top, mut bottom, mut left, mut right) = (None, 0, usize::MAX, 0);
+        for (y, row) in self.data.chunks(w).enumerate() {
+            let Some(first) = row.iter().position(|&v| v > 0) else { continue };
+            let last = row.iter().rposition(|&v| v > 0).unwrap_or(first);
+            top.get_or_insert(y);
+            bottom = y;
+            left = left.min(first);
+            right = right.max(last);
+        }
+        let top = top?;
+        let n = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+        Some([n(left), n(top), n(right - left + 1), n(bottom - top + 1)])
     }
 
     pub fn is_empty(&self) -> bool {
@@ -144,19 +166,30 @@ impl Mask {
             return;
         }
         let (w, h) = (self.width as usize, self.height as usize);
-        let mut values: Vec<f32> = self.data.iter().map(|&v| f32::from(v)).collect();
-        let mut line = Vec::new();
+        let mut values = vec![0.0f32; self.data.len()];
+        by_bands(&mut values, w, |first, rows| {
+            let from = self.data.get(first * w..).unwrap_or(&[]);
+            for (f, &v) in rows.iter_mut().zip(from) {
+                *f = f32::from(v);
+            }
+        });
+        let mut src = Vec::new();
         for _ in 0..3 {
-            for y in 0..h {
-                blur_line(&mut values, y * w, 1, w, r, &mut line);
-            }
-            for x in 0..w {
-                blur_line(&mut values, x, w, h, r, &mut line);
-            }
+            by_bands(&mut values, w, |_, rows| {
+                let mut line = Vec::new();
+                for row in rows.chunks_mut(w) {
+                    blur_row(row, r, &mut line);
+                }
+            });
+            blur_columns(&mut values, &mut src, w, h, r);
         }
-        for (v, f) in self.data.iter_mut().zip(&values) {
-            *v = f.round().clamp(0.0, 255.0) as u8;
-        }
+        let values = &values;
+        by_bands(&mut self.data, w, |first, rows| {
+            let from = values.get(first * w..).unwrap_or(&[]);
+            for (v, f) in rows.iter_mut().zip(from) {
+                *v = f.round().clamp(0.0, 255.0) as u8;
+            }
+        });
     }
 
     /// The pixels joined to `seed` whose colour is within `threshold` (0..1) of the seed's, in
@@ -164,40 +197,60 @@ impl Mask {
     pub fn by_colour(width: u32, height: u32, pixels: &[u8], seed: (u32, u32), threshold: f32) -> Mask {
         let mut m = Mask::empty(width, height);
         let (w, h) = (width as usize, height as usize);
-        let at = |x: usize, y: usize| -> [f32; 4] {
-            let i = (y * w + x) * 4;
-            match pixels.get(i..i + 4) {
-                Some(&[r, g, b, a]) => [r, g, b, a].map(|v| f32::from(v) / 255.0),
-                _ => [0.0; 4],
-            }
-        };
         let (sx, sy) = (seed.0 as usize, seed.1 as usize);
         if sx >= w || sy >= h {
             return m;
         }
-        let target = at(sx, sy);
+        let unit = |p: &[u8; 4]| p.map(|v| f32::from(v) / 255.0);
+        let i = (sy * w + sx) * 4;
+        let target = match pixels.get(i..i + 4) {
+            Some(&[r, g, b, a]) => unit(&[r, g, b, a]),
+            _ => [0.0; 4],
+        };
         let limit = threshold.clamp(0.0, 1.0) * 2.0;
-        let near = |c: [f32; 4]| c.iter().zip(&target).map(|(a, b)| (a - b).abs()).sum::<f32>() <= limit;
+        // which pixels are near the seed's colour, each worked out once
+        let mut near: Vec<bool> = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .take(w * h)
+            .map(|p| unit(p).iter().zip(&target).map(|(a, b)| (a - b).abs()).sum::<f32>() <= limit)
+            .collect();
+        near.resize(w * h, false);
+        let open = |m: &Mask, i: usize| m.data.get(i) == Some(&0) && near.get(i) == Some(&true);
+        // scanlines: each span selected whole, then the runs above and below it seeded
         let mut stack = vec![(sx, sy)];
         while let Some((x, y)) = stack.pop() {
-            let i = y * w + x;
-            if m.data.get(i).copied() != Some(0) || !near(at(x, y)) {
+            let row = y * w;
+            if !open(&m, row + x) {
                 continue;
             }
-            if let Some(v) = m.data.get_mut(i) {
-                *v = 255;
+            let (mut l, mut r) = (x, x);
+            while l > 0 && open(&m, row + l - 1) {
+                l -= 1;
             }
-            if x > 0 {
-                stack.push((x - 1, y));
+            while r + 1 < w && open(&m, row + r + 1) {
+                r += 1;
             }
-            if x + 1 < w {
-                stack.push((x + 1, y));
+            if let Some(span) = m.data.get_mut(row + l..=row + r) {
+                span.fill(255);
             }
-            if y > 0 {
-                stack.push((x, y - 1));
-            }
-            if y + 1 < h {
-                stack.push((x, y + 1));
+            for ny in [y.wrapping_sub(1), y + 1] {
+                if ny >= h {
+                    continue;
+                }
+                let next = ny * w;
+                let mut xi = l;
+                while xi <= r {
+                    if open(&m, next + xi) {
+                        stack.push((xi, ny));
+                        while xi <= r && open(&m, next + xi) {
+                            xi += 1;
+                        }
+                    } else {
+                        xi += 1;
+                    }
+                }
             }
         }
         m
@@ -224,16 +277,25 @@ impl Mask {
 
     /// The selection moved as content is: each pixel takes what `to_source` (a pixel centre to
     /// where it came from) finds there.
-    pub fn moved(&self, to_source: impl Fn(Vec2) -> Option<Vec2>) -> Mask {
+    pub fn moved(&self, to_source: impl Fn(Vec2) -> Option<Vec2> + Sync) -> Mask {
         let mut out = Mask::empty(self.width, self.height);
+        let Some([bx, by, bw, bh]) = self.bounds() else { return out };
+        // a point finds nothing where both pixels it reads across (or down) are outside the
+        // rectangle the mask takes
+        let (left, right) = (bx as f32 - 1.0, (bx + bw) as f32);
+        let (top, bottom) = (by as f32 - 1.0, (by + bh) as f32);
         let w = self.width as usize;
-        for (y, row) in out.data.chunks_exact_mut(w.max(1)).enumerate() {
-            for (x, v) in row.iter_mut().enumerate() {
-                if let Some(s) = to_source(Vec2::new(x as f32 + 0.5, y as f32 + 0.5)) {
-                    *v = to_byte(self.sample(s));
+        by_bands(&mut out.data, w, |first, rows| {
+            for (y, row) in (first..).zip(rows.chunks_exact_mut(w)) {
+                for (x, v) in row.iter_mut().enumerate() {
+                    let Some(s) = to_source(Vec2::new(x as f32 + 0.5, y as f32 + 0.5)) else { continue };
+                    let (sx, sy) = (s.x - 0.5, s.y - 0.5);
+                    if sx >= left && sx < right && sy >= top && sy < bottom {
+                        *v = to_byte(self.sample(s));
+                    }
                 }
             }
-        }
+        });
         out
     }
 
@@ -241,38 +303,42 @@ impl Mask {
     /// where it came from) in pixels, as a warp moves content.
     pub fn warped(&self, triangles: &[[f32; 4]]) -> Mask {
         let mut out = Mask::empty(self.width, self.height);
-        let (w, h) = (self.width as usize, self.height as usize);
-        for &[a, b, c] in triangles.as_chunks::<3>().0 {
-            let (pa, pb, pc) = (Vec2::new(a[0], a[1]), Vec2::new(b[0], b[1]), Vec2::new(c[0], c[1]));
-            let area = (pb.x - pa.x) * (pc.y - pa.y) - (pc.x - pa.x) * (pb.y - pa.y);
-            if area.abs() < 1e-9 {
-                continue;
-            }
-            let (lo_x, hi_x) = (
-                pa.x.min(pb.x).min(pc.x).floor().max(0.0) as usize,
-                (pa.x.max(pb.x).max(pc.x).ceil().max(0.0) as usize).min(w),
-            );
-            let (lo_y, hi_y) = (
-                pa.y.min(pb.y).min(pc.y).floor().max(0.0) as usize,
-                (pa.y.max(pb.y).max(pc.y).ceil().max(0.0) as usize).min(h),
-            );
-            for y in lo_y..hi_y {
-                for x in lo_x..hi_x {
-                    let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
-                    // where p falls in the triangle, as weights of its corners
-                    let wb = ((p.x - pa.x) * (pc.y - pa.y) - (pc.x - pa.x) * (p.y - pa.y)) / area;
-                    let wc = ((pb.x - pa.x) * (p.y - pa.y) - (p.x - pa.x) * (pb.y - pa.y)) / area;
-                    let wa = 1.0 - wb - wc;
-                    if wa < -1e-4 || wb < -1e-4 || wc < -1e-4 {
-                        continue;
-                    }
-                    let s = Vec2::new(a[2] * wa + b[2] * wb + c[2] * wc, a[3] * wa + b[3] * wb + c[3] * wc);
-                    if let Some(v) = out.data.get_mut(y * w + x) {
-                        *v = (*v).max(to_byte(self.sample(s)));
+        let w = self.width as usize;
+        // each band of rows takes the parts of the triangles that fall on it
+        by_bands(&mut out.data, w, |first, rows| {
+            let last = first + rows.len() / w.max(1);
+            for &[a, b, c] in triangles.as_chunks::<3>().0 {
+                let (pa, pb, pc) = (Vec2::new(a[0], a[1]), Vec2::new(b[0], b[1]), Vec2::new(c[0], c[1]));
+                let area = (pb.x - pa.x) * (pc.y - pa.y) - (pc.x - pa.x) * (pb.y - pa.y);
+                if area.abs() < 1e-9 {
+                    continue;
+                }
+                let (lo_x, hi_x) = (
+                    pa.x.min(pb.x).min(pc.x).floor().max(0.0) as usize,
+                    (pa.x.max(pb.x).max(pc.x).ceil().max(0.0) as usize).min(w),
+                );
+                let (lo_y, hi_y) = (
+                    (pa.y.min(pb.y).min(pc.y).floor().max(0.0) as usize).max(first),
+                    (pa.y.max(pb.y).max(pc.y).ceil().max(0.0) as usize).min(last),
+                );
+                for y in lo_y..hi_y {
+                    for x in lo_x..hi_x {
+                        let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                        // where p falls in the triangle, as weights of its corners
+                        let wb = ((p.x - pa.x) * (pc.y - pa.y) - (pc.x - pa.x) * (p.y - pa.y)) / area;
+                        let wc = ((pb.x - pa.x) * (p.y - pa.y) - (p.x - pa.x) * (pb.y - pa.y)) / area;
+                        let wa = 1.0 - wb - wc;
+                        if wa < -1e-4 || wb < -1e-4 || wc < -1e-4 {
+                            continue;
+                        }
+                        let s = Vec2::new(a[2] * wa + b[2] * wb + c[2] * wc, a[3] * wa + b[3] * wb + c[3] * wc);
+                        if let Some(v) = rows.get_mut((y - first) * w + x) {
+                            *v = (*v).max(to_byte(self.sample(s)));
+                        }
                     }
                 }
             }
-        }
+        });
         out
     }
 }
@@ -318,25 +384,116 @@ fn add_span(row: &mut [f32], x0: f32, x1: f32, amount: f32) {
     }
 }
 
-/// One box blur `r` either side along a line of `len` values `step` apart from `start`, edges
-/// held at their last value.
-fn blur_line(values: &mut [f32], start: usize, step: usize, len: usize, r: usize, line: &mut Vec<f32>) {
-    line.clear();
-    line.extend((0..len).map(|i| values.get(start + i * step).copied().unwrap_or(0.0)));
-    let get = |i: isize| line.get(i.clamp(0, len as isize - 1) as usize).copied().unwrap_or(0.0);
+/// [`blur_row`] down every column at once, a row at a time (the columns' running sums side by
+/// side, each added up in the same order), so memory is read along its rows; the columns in
+/// bands, one to a core. `src` is room to keep the values as they were.
+fn blur_columns(values: &mut [f32], src: &mut Vec<f32>, w: usize, h: usize, r: usize) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    src.clear();
+    src.extend_from_slice(values);
+    let src = &*src;
+    let row = |i: isize| src.get(i.clamp(0, h as isize - 1) as usize * w..).and_then(|s| s.get(..w)).unwrap_or(&[]);
     let span = (2 * r + 1) as f32;
-    let mut sum: f32 = (-(r as isize)..=r as isize).map(get).sum();
-    for i in 0..len {
-        if let Some(v) = values.get_mut(start + i * step) {
-            *v = sum / span;
+    let part = w.div_ceil(cores());
+    // each band's columns: its piece of every row
+    let mut bands: Vec<Vec<&mut [f32]>> = (0..w.div_ceil(part)).map(|_| Vec::with_capacity(h)).collect();
+    for line in values.chunks_mut(w).take(h) {
+        for (band, piece) in bands.iter_mut().zip(line.chunks_mut(part)) {
+            band.push(piece);
         }
-        sum += get(i as isize + r as isize + 1) - get(i as isize - r as isize);
+    }
+    std::thread::scope(|scope| {
+        for (k, pieces) in bands.into_iter().enumerate() {
+            let row = &row;
+            scope.spawn(move || {
+                let (from, to) = (k * part, (k * part + part).min(w));
+                let cols = |i: isize| row(i).get(from..to).unwrap_or(&[]);
+                let mut sums = vec![0.0f32; to - from];
+                for d in -(r as isize)..=r as isize {
+                    for (s, v) in sums.iter_mut().zip(cols(d)) {
+                        *s += v;
+                    }
+                }
+                for (i, out) in (0isize..).zip(pieces) {
+                    for (o, s) in out.iter_mut().zip(&sums) {
+                        *o = s / span;
+                    }
+                    let (add, drop) = (cols(i + r as isize + 1), cols(i - r as isize));
+                    for ((s, a), d) in sums.iter_mut().zip(add).zip(drop) {
+                        *s += a - d;
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// `f(first row, its rows)` over bands of `data`'s rows (`width` values each), side by side.
+fn by_bands<T: Send>(data: &mut [T], width: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    let width = width.max(1);
+    let band = (data.len() / width).div_ceil(cores()).max(1);
+    std::thread::scope(|scope| {
+        for (k, rows) in data.chunks_mut(band * width).enumerate() {
+            let f = &f;
+            scope.spawn(move || f(k * band, rows));
+        }
+    });
+}
+
+/// A box blur `2r + 1` wide along `row` (its ends repeated past them), with `line` to work in.
+fn blur_row(row: &mut [f32], r: usize, line: &mut Vec<f32>) {
+    // the row with its ends repeated `r` (and `r` + 1) further out, so the window never needs
+    // bringing back inside it
+    let (Some(&first), Some(&last)) = (row.first(), row.last()) else { return };
+    line.clear();
+    line.extend(std::iter::repeat_n(first, r));
+    line.extend_from_slice(row);
+    line.extend(std::iter::repeat_n(last, r + 1));
+    let span = (2 * r + 1) as f32;
+    let mut sum: f32 = line.get(..=2 * r).unwrap_or(&[]).iter().sum();
+    let ahead = line.get(2 * r + 1..).unwrap_or(&[]);
+    for ((v, a), d) in row.iter_mut().zip(ahead).zip(line.iter()) {
+        *v = sum / span;
+        sum += a - d;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_colour_selection_joins_sides_not_corners() {
+        // W white, B black: the top left white touches the rest only at a corner
+        let rows = ["WBWWW", "BWWBW", "WWBBW", "WWWWW"];
+        let px: Vec<u8> = rows
+            .iter()
+            .flat_map(|r| r.bytes())
+            .flat_map(|c| if c == b'W' { [255, 255, 255, 255] } else { [0, 0, 0, 255] })
+            .collect();
+        let count = |m: &Mask| m.data.iter().filter(|&&v| v == 255).count();
+        assert_eq!(count(&Mask::by_colour(5, 4, &px, (0, 0), 0.0)), 1);
+        // the rest of the white, round the black on both sides and below it
+        let m = Mask::by_colour(5, 4, &px, (2, 0), 0.0);
+        assert_eq!(count(&m), 14);
+        assert_eq!(m.data.first(), Some(&0));
+        assert_eq!(m.data.get(2 * 5), Some(&255));
+    }
+
+    #[test]
+    fn bounds_hold_what_a_mask_takes() {
+        let mut m = Mask::empty(10, 8);
+        assert_eq!(m.bounds(), None);
+        if let Some(v) = m.data.get_mut(3 * 10 + 2) {
+            *v = 9;
+        }
+        if let Some(v) = m.data.get_mut(5 * 10 + 7) {
+            *v = 255;
+        }
+        assert_eq!(m.bounds(), Some([2, 3, 6, 3]));
+    }
 
     fn at(m: &Mask, x: u32, y: u32) -> u8 {
         m.data[(y * m.width + x) as usize]

@@ -12,7 +12,9 @@ use std::time::Instant;
 
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
-use procraft_core::{BlendModeInfo, CanvasSession, LayerInfo, LayerType, ModelInfo, ThumbnailImage};
+use procraft_core::{
+    BlendModeInfo, CanvasSession, LayerInfo, LayerOption, LayerOptionRow, LayerType, ModelInfo, ThumbnailImage,
+};
 use resvg::tiny_skia;
 
 use crate::alert::{Alert, Answer};
@@ -107,27 +109,6 @@ struct RowPress {
     way: Way,
     start: f32,
     dy: f32,
-}
-
-/// What a layer's options do.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Do {
-    Rename,
-    Ungroup,
-    Flatten,
-    Select,
-    Copy,
-    Fill,
-    Clear,
-    Invert,
-    AlphaLock,
-    Mask,
-    Clip,
-    Assist,
-    Reference,
-    Rasterize,
-    MergeDown,
-    CombineDown,
 }
 
 /// The blend editor open under a layer's row: how far its modes are scrolled (points, the first
@@ -929,52 +910,9 @@ impl Layers {
         row_y: f32,
         backdrops: &mut Vec<f32>,
     ) {
-        // (label, what it does, ticked, enabled, closes the menu)
-        let mut rows: Vec<(&str, Do, bool, bool, bool)> = vec![("Rename", Do::Rename, false, true, true)];
-        let unlocked = !l.locked;
-        match l.kind {
-            LayerType::Group => {
-                rows.push(("Ungroup", Do::Ungroup, false, true, true));
-                rows.push(("Flatten", Do::Flatten, false, true, true));
-            }
-            LayerType::Mask => {
-                rows.push(("Select", Do::Select, false, true, true));
-                rows.push(("Fill Layer", Do::Fill, false, unlocked, true));
-                rows.push(("Clear", Do::Clear, false, unlocked, true));
-                rows.push(("Invert", Do::Invert, false, unlocked, true));
-            }
-            LayerType::Paint => {
-                let has_mask = session.layers().iter().any(|m| m.kind == LayerType::Mask && m.parent == Some(l.id));
-                rows.push(("Select", Do::Select, false, true, true));
-                rows.push(("Copy", Do::Copy, false, true, true));
-                // a text layer's pixels come from its text
-                if !l.text {
-                    rows.push(("Fill Layer", Do::Fill, false, unlocked, true));
-                    rows.push(("Clear", Do::Clear, false, unlocked, true));
-                }
-                rows.push(("Alpha Lock", Do::AlphaLock, l.alpha_lock, true, false));
-                rows.push(("Mask", Do::Mask, false, !has_mask, true));
-                if l.can_clip {
-                    rows.push(("Clipping Mask", Do::Clip, l.clipped, true, false));
-                }
-                rows.push(("Drawing Assist", Do::Assist, l.assisted, true, false));
-                if !l.text {
-                    rows.push(("Invert", Do::Invert, false, unlocked, true));
-                }
-                rows.push(("Reference", Do::Reference, l.reference, true, false));
-            }
-        }
-        if l.text {
-            rows.push(("Rasterize", Do::Rasterize, false, unlocked, true));
-        }
-        if l.kind != LayerType::Mask {
-            if l.can_merge {
-                rows.push(("Merge Down", Do::MergeDown, false, unlocked, true));
-            }
-            if l.can_combine {
-                rows.push(("Combine Down", Do::CombineDown, false, true, true));
-            }
-        }
+        // the core's rows, but for editing text (not on the desktop yet)
+        let rows: Vec<LayerOptionRow> =
+            session.layer_options(l.id).into_iter().filter(|r| r.option != LayerOption::EditText).collect();
         let height = 7.0 * 2.0 + menu::OPTION_HEIGHT * rows.len() as f32;
         let screen = ctx.content_rect();
         let lowest = (screen.bottom() - height).max(screen.top() + OPTIONS_TOP);
@@ -990,9 +928,10 @@ impl Layers {
             backdrops,
             |ui| {
                 let places = menu::option_rows(rect.left(), rect.top() + 7.0, rect.width(), rows.len());
-                for (row, (label, does, ticked, enabled, closes)) in places.zip(&rows) {
-                    if menu::option(ui, look, row, label, *ticked, *enabled, false) {
-                        chosen = Some((*does, *closes));
+                for (row, r) in places.zip(&rows) {
+                    if menu::option(ui, look, row, &r.label, r.switch_on.unwrap_or(false), r.enabled, false) {
+                        // a switch leaves the menu open
+                        chosen = Some((r.option, r.switch_on.is_none()));
                     }
                 }
             },
@@ -1002,28 +941,29 @@ impl Layers {
             self.options_menu.close();
         }
         match does {
-            Do::Rename => self.renaming = Some((l.id, l.name.clone(), false)),
-            Do::Ungroup => _ = session.ungroup(l.id),
-            Do::Flatten => _ = session.flatten_group(l.id),
-            Do::Select => _ = session.select_layer_contents(l.id),
-            Do::Copy => self.copied = session.copy_layer_contents(l.id).or(self.copied.take()),
-            Do::Fill => _ = session.fill_layer(l.id),
-            Do::Clear => {
+            LayerOption::Rename => self.renaming = Some((l.id, l.name.clone(), false)),
+            LayerOption::Ungroup => _ = session.ungroup(l.id),
+            LayerOption::Flatten => _ = session.flatten_group(l.id),
+            LayerOption::Select => _ = session.select_layer_contents(l.id),
+            LayerOption::Copy => self.copied = session.copy_layer_contents(l.id).or(self.copied.take()),
+            LayerOption::Fill => _ = session.fill_layer(l.id),
+            LayerOption::Clear => {
                 session.select_layer(l.id);
                 session.clear_layer();
             }
-            Do::Invert => _ = session.invert_layer(l.id),
-            Do::AlphaLock => _ = session.set_layer_alpha_lock(l.id, !l.alpha_lock),
-            Do::Mask => _ = session.add_mask(l.id),
-            Do::Clip => _ = session.set_layer_clipped(l.id, !l.clipped),
-            Do::Assist => _ = session.set_guide_assisted(!l.assisted),
-            Do::Reference => _ = session.set_layer_reference(l.id, !l.reference),
-            Do::Rasterize => {
+            LayerOption::Invert => _ = session.invert_layer(l.id),
+            LayerOption::AlphaLock => _ = session.set_layer_alpha_lock(l.id, !l.alpha_lock),
+            LayerOption::Mask => _ = session.add_mask(l.id),
+            LayerOption::ClippingMask => _ = session.set_layer_clipped(l.id, !l.clipped),
+            LayerOption::DrawingAssist => _ = session.set_guide_assisted(!l.assisted),
+            LayerOption::Reference => _ = session.set_layer_reference(l.id, !l.reference),
+            LayerOption::EditText => {}
+            LayerOption::Rasterize => {
                 session.rasterize_layer(l.id);
                 self.notice = Some(("Text rasterized".into(), true));
             }
-            Do::MergeDown => _ = session.merge_down(l.id),
-            Do::CombineDown => _ = session.combine_down(l.id),
+            LayerOption::MergeDown => _ = session.merge_down(l.id),
+            LayerOption::CombineDown => _ = session.combine_down(l.id),
         }
     }
 

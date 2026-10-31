@@ -7,7 +7,10 @@
 use egui::{Align2, Color32, Pos2, Rect, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
 use std::sync::Arc;
 
-use procraft_core::{CanvasSession, ColourHistory, Palettes};
+use procraft_core::{
+    CanvasSession, ColourHistory, HueControl, Palettes, SLIDER_HUES, colours_in_p3, disc_picture, disc_to_square,
+    harmony_wheel, hue_at, hue_position, p3_hsv_of, p3_hsv_to_rgb, square_to_disc,
+};
 
 use crate::colour_drop::{ColourDrop, Touch};
 use crate::icons;
@@ -171,12 +174,6 @@ const MENU_GRID: icons::Icon = icons::Icon {
     ],
 };
 
-/// The classic slider's hues (degrees) at 25 evenly spaced points, as the Android app has them.
-pub(crate) const SLIDER_HUES: [f32; 25] = [
-    0.0, 0.2, 8.0, 17.7, 27.3, 36.4, 44.2, 52.7, 80.4, 112.8, 120.5, 120.5, 133.3, 154.3, 178.2, 196.1, 211.1, 226.1,
-    241.1, 259.7, 275.1, 291.7, 310.0, 340.2, 360.0,
-];
-
 /// The panel's modes, as its tabs list them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
@@ -228,14 +225,6 @@ impl HarmonyKind {
         }
     }
 }
-
-/// The disc's ring is not linear in hue: the hues (degrees) at 49 evenly spaced points round it,
-/// anticlockwise from the right, as the Android app has them; between them they interpolate.
-const RING_HUES: [f32; 49] = [
-    0.0, 0.2, 0.2, 0.2, 4.5, 13.2, 18.9, 23.7, 27.9, 32.4, 36.4, 40.9, 44.6, 49.1, 53.1, 57.2, 61.4, 74.2, 88.6, 114.8,
-    120.5, 120.5, 120.5, 120.5, 134.8, 149.9, 162.2, 173.4, 180.0, 186.9, 195.4, 203.4, 211.4, 219.4, 227.5, 235.3,
-    242.1, 251.1, 258.5, 268.0, 276.5, 285.3, 293.6, 300.2, 303.3, 318.2, 333.7, 351.2, 360.0,
-];
 
 /// The colours the panel shows and changes.
 pub struct Colours {
@@ -676,13 +665,13 @@ impl Pickers {
             let ring = *self.on_ring.get_or_insert(d.length() > (disc_radius + ring_inner) / 2.0);
             if ring {
                 let turn = ((-d.y).atan2(d.x) / std::f32::consts::TAU + 1.0) % 1.0;
-                hsv[0] = hue_at(&RING_HUES, turn);
+                hsv[0] = hue_at(HueControl::Ring, turn);
             } else {
                 let mut uv = d / disc_radius;
                 if uv.length() > 1.0 {
                     uv /= uv.length();
                 }
-                let (x, y) = disc_to_square(uv.x, uv.y);
+                let [x, y] = disc_to_square(uv.x, uv.y);
                 hsv[1] = (x + 1.0) / 2.0;
                 hsv[2] = (1.0 - y) / 2.0;
             }
@@ -699,7 +688,10 @@ impl Pickers {
         let hue_key = (hsv[0] * 10_000.0).round() as u32;
         let disc_side = (disc_radius * 2.0 * ppp).round() as usize;
         if self.disc.as_ref().is_none_or(|(h, at, _)| *h != hue_key || *at != disc_side) {
-            let image = disc_image(hsv[0], disc_side);
+            let image = egui::ColorImage::from_rgba_premultiplied(
+                [disc_side, disc_side],
+                &disc_picture(hsv[0], disc_side as u32),
+            );
             self.disc = Some((hue_key, disc_side, ctx.load_texture("colour disc", image, TextureOptions::LINEAR)));
         }
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -716,10 +708,10 @@ impl Pickers {
             );
         }
         // the ring's knob sits on the middle of the ring, where the hue is
-        let turn = hue_position(&RING_HUES, hsv[0]) * std::f32::consts::TAU;
+        let turn = hue_position(HueControl::Ring, hsv[0]) * std::f32::consts::TAU;
         let mid = (ring_inner + ring_outer) / 2.0;
         knob(ui, centre + vec2(turn.cos() * mid, -turn.sin() * mid), 26.2 * k, srgb(hsv_to_rgb([hsv[0], 1.0, 1.0])));
-        let (x, y) = square_to_disc(hsv[1] * 2.0 - 1.0, 1.0 - hsv[2] * 2.0);
+        let [x, y] = square_to_disc(hsv[1] * 2.0 - 1.0, 1.0 - hsv[2] * 2.0);
         knob(ui, centre + vec2(x, y) * disc_radius, 10.75, srgb(hsv_to_rgb(*hsv)));
         *hsv != before
     }
@@ -753,25 +745,27 @@ impl Pickers {
     }
 
     /// Harmony's wheel in `wheel` (hue round it, saturation out, in Display P3) with a knob for
-    /// the colour and one for each of `kind`'s companions; returns whether it changed `hsv`.
-    pub fn harmony(&mut self, ui: &Ui, hsv: &mut [f32; 3], wheel: Rect, kind: HarmonyKind) -> bool {
+    /// the colour and one for each of `kind`'s companions, for a canvas whose colours are in P3
+    /// (`p3`) or sRGB; returns whether it changed `hsv`.
+    pub fn harmony(&mut self, ui: &Ui, hsv: &mut [f32; 3], wheel: Rect, kind: HarmonyKind, p3: bool) -> bool {
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
         let rgb = to_hex(hsv_to_rgb(*hsv));
-        let [h, sat, v] = rgb_to_p3_hsv(rgb);
+        let [h, sat, v] = p3_hsv_of(rgb, p3);
         let before = *hsv;
         let response = ui.interact(wheel, ui.scope_id().with("harmony wheel"), Sense::click_and_drag());
         if let Some(p) = response.interact_pointer_pos() {
             let u = ((p.x - wheel.left()) / wheel.width()).clamp(0.0, 1.0) * 2.0 - 1.0;
             let w = ((p.y - wheel.top()) / wheel.height()).clamp(0.0, 1.0) * 2.0 - 1.0;
             let turn = ((-w).atan2(u) / std::f32::consts::TAU + 1.0) % 1.0;
-            take_rgb(hsv, p3_hsv_to_rgb(turn, u.hypot(w).min(1.0), v));
+            take_rgb(hsv, p3_hsv_to_rgb(turn, u.hypot(w).min(1.0), v, p3));
         }
-        let v_key = (v * 10_000.0).round() as u32;
+        // the brightness and the space in one key
+        let v_key = (v * 10_000.0).round() as u32 * 2 + u32::from(p3);
         let side = (wheel.width() * ppp).round() as usize;
         if self.wheel.as_ref().is_none_or(|(k, at, _)| *k != v_key || *at != side) {
-            self.wheel =
-                Some((v_key, side, ctx.load_texture("harmony wheel", harmony_image(v, side), TextureOptions::LINEAR)));
+            let image = egui::ColorImage::from_rgba_premultiplied([side, side], &harmony_wheel(v, side as u32, p3));
+            self.wheel = Some((v_key, side, ctx.load_texture("harmony wheel", image, TextureOptions::LINEAR)));
         }
         if let Some((_, _, t)) = &self.wheel {
             ui.painter().image(t.id(), wheel, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
@@ -783,7 +777,7 @@ impl Pickers {
         };
         for t in kind.turns() {
             let hue = ((h + t / 360.0) % 1.0 + 1.0) % 1.0;
-            knob(ui, at(hue), 10.75, srgb(of_hex(p3_hsv_to_rgb(hue, sat, v))));
+            knob(ui, at(hue), 10.75, srgb(of_hex(p3_hsv_to_rgb(hue, sat, v, p3))));
         }
         knob(ui, at(h), 14.5, srgb(of_hex(rgb)));
         *hsv != before
@@ -877,12 +871,13 @@ impl Colours {
             pos2(body.left() + PANEL_WIDTH / 2.0 - r, top + shape.harmony_top),
             vec2(r * 2.0, r * 2.0),
         );
-        let mut changed = self.pickers.harmony(ui, &mut self.hsv, wheel, self.harmony);
+        let p3 = colours_in_p3(session.profile());
+        let mut changed = self.pickers.harmony(ui, &mut self.hsv, wheel, self.harmony, p3);
         let row = Rect::from_min_size(
             pos2(body.left() + 20.0, wheel.bottom() + shape.harmony_gap),
             vec2(body.width() - 40.0, SLIDER_ROW),
         );
-        changed |= harmony_brightness(ui, row, &mut self.hsv);
+        changed |= harmony_brightness(ui, row, &mut self.hsv, p3);
         if changed {
             self.send(session);
         }
@@ -905,7 +900,7 @@ impl Colours {
                 let (letter, value, colours, shown): (&str, f32, Vec<Color32>, String) = match (k, i) {
                     (0, 0) => (
                         "H",
-                        hue_position(&SLIDER_HUES, self.hsv[0]),
+                        hue_position(HueControl::Slider, self.hsv[0]),
                         SLIDER_HUES.iter().map(|h| srgb(hsv_to_rgb([h / 360.0, 1.0, 1.0]))).collect(),
                         format!("{}\u{b0}", (self.hsv[0] * 360.0).round() as i32),
                     ),
@@ -949,7 +944,7 @@ impl Colours {
                 let Some(to) = slider_row(ui, track, ("value", k, i), value, &colours) else { continue };
                 let byte = (to * 255.0).round() as u32;
                 match (k, i) {
-                    (0, 0) => self.hsv[0] = hue_at(&SLIDER_HUES, to),
+                    (0, 0) => self.hsv[0] = hue_at(HueControl::Slider, to),
                     (0, 1) => self.hsv[1] = to,
                     (0, _) => self.hsv[2] = to,
                     (_, 0) => self.set_rgb(session, byte << 16 | g << 8 | b),
@@ -1391,7 +1386,7 @@ impl Colours {
 
     /// A palette of a picture's main colours (a PNG's), light to dark, added at the end.
     fn palette_from_picture(&mut self, bytes: &[u8]) {
-        let Some(pixels) = crate::files::png_pixels(bytes) else {
+        let Some(pixels) = crate::files::picture_pixels(bytes) else {
             crate::files::say("This picture can't be read.");
             return;
         };
@@ -1484,49 +1479,6 @@ fn square_image(hue: f32, side: usize) -> egui::ColorImage {
         let dark = 1.0 - y;
         let shade = |c: u8| (f32::from(c) * dark).round() as u8;
         *px = Color32::from_rgb(shade(across.r()), shade(across.g()), shade(across.b()));
-    }
-    egui::ColorImage::new([side, side], pixels)
-}
-
-// Harmony's wheel is a hue/saturation wheel in Display P3, turned into sRGB (clipped) for the
-// canvas; both use the sRGB transfer curve.
-fn to_linear(c: f32) -> f32 {
-    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-}
-
-fn to_encoded(c: f32) -> f32 {
-    if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
-}
-
-/// P3 hue (0..1), saturation and value as an sRGB colour (0xRRGGBB), clipped.
-fn p3_hsv_to_rgb(h: f32, s: f32, v: f32) -> u32 {
-    let [r, g, b] = hsv_to_rgb([h, s, v]).map(to_linear);
-    let out = |x: f32| (to_encoded(x.clamp(0.0, 1.0)) * 255.0).round() as u32;
-    out(1.2249 * r - 0.2247 * g) << 16 | out(-0.0420 * r + 1.0419 * g) << 8 | out(-0.0197 * r - 0.0786 * g + 1.0979 * b)
-}
-
-/// An sRGB colour (0xRRGGBB) as P3 hue (0..1), saturation and value.
-fn rgb_to_p3_hsv(rgb: u32) -> [f32; 3] {
-    let [r, g, b] = of_hex(rgb).map(to_linear);
-    let enc = |x: f32| to_encoded(x.clamp(0.0, 1.0));
-    rgb_to_hsv([enc(0.8225 * r + 0.1774 * g), enc(0.0332 * r + 0.9669 * g), enc(0.0171 * r + 0.0724 * g + 0.9108 * b)])
-}
-
-/// Harmony's wheel at value `v`, `side` pixels square: hue anticlockwise from the right,
-/// saturation outwards, with a soft edge.
-fn harmony_image(v: f32, side: usize) -> egui::ColorImage {
-    let half = side as f32 / 2.0;
-    let mut pixels = vec![Color32::TRANSPARENT; side * side];
-    for (k, px) in pixels.iter_mut().enumerate() {
-        let u = ((k % side) as f32 + 0.5) / half - 1.0;
-        let w = ((k / side) as f32 + 0.5) / half - 1.0;
-        let d = u.hypot(w);
-        let edge = ((1.0 - d) * half + 0.5).clamp(0.0, 1.0);
-        if edge <= 0.0 {
-            continue;
-        }
-        let h = ((-w).atan2(u) / std::f32::consts::TAU + 1.0) % 1.0;
-        *px = srgb(of_hex(p3_hsv_to_rgb(h, d.min(1.0), v))).gamma_multiply(edge);
     }
     egui::ColorImage::new([side, side], pixels)
 }
@@ -1630,19 +1582,19 @@ pub(crate) fn set(slot: &mut f32, v: f32) -> bool {
 /// The hue slider (its hues as the classic slider's); returns whether it changed `hsv`.
 pub(crate) fn hue_slider(ui: &Ui, rect: Rect, id: &str, hsv: &mut [f32; 3]) -> bool {
     let hues: Vec<Color32> = SLIDER_HUES.iter().map(|h| srgb(hsv_to_rgb([h / 360.0, 1.0, 1.0]))).collect();
-    slider_row(ui, rect, id, hue_position(&SLIDER_HUES, hsv[0]), &hues)
-        .is_some_and(|v| set(&mut hsv[0], hue_at(&SLIDER_HUES, v)))
+    slider_row(ui, rect, id, hue_position(HueControl::Slider, hsv[0]), &hues)
+        .is_some_and(|v| set(&mut hsv[0], hue_at(HueControl::Slider, v)))
 }
 
-/// Harmony's brightness slider (the colour's value in Display P3); returns whether it changed
-/// `hsv`.
-pub(crate) fn harmony_brightness(ui: &Ui, rect: Rect, hsv: &mut [f32; 3]) -> bool {
-    let [h, sat, v] = rgb_to_p3_hsv(to_hex(hsv_to_rgb(*hsv)));
+/// Harmony's brightness slider (the colour's value in Display P3, the canvas's colours in P3 or
+/// not as `p3` says); returns whether it changed `hsv`.
+pub(crate) fn harmony_brightness(ui: &Ui, rect: Rect, hsv: &mut [f32; 3], p3: bool) -> bool {
+    let [h, sat, v] = p3_hsv_of(to_hex(hsv_to_rgb(*hsv)), p3);
     let Some(b) = slider_row(ui, rect, "harmony brightness", v, &[Color32::BLACK, Color32::WHITE]) else {
         return false;
     };
     let before = *hsv;
-    take_rgb(hsv, p3_hsv_to_rgb(h, sat, b));
+    take_rgb(hsv, p3_hsv_to_rgb(h, sat, b, p3));
     *hsv != before
 }
 
@@ -1652,43 +1604,6 @@ fn knob(ui: &Ui, at: Pos2, r: f32, fill: Color32) {
     ui.painter().add(shadow.as_shape(Rect::from_center_size(at, vec2(r * 2.0, r * 2.0)), r));
     ui.painter().circle_filled(at, r, fill);
     ui.painter().circle_stroke(at, r - 0.6, egui::Stroke::new(1.2, Color32::WHITE));
-}
-
-/// The hue (0..1) at `position` (0..1) along a control whose hues (degrees) are `stops`.
-pub(crate) fn hue_at(stops: &[f32], position: f32) -> f32 {
-    let p = position.clamp(0.0, 1.0) * (stops.len() - 1) as f32;
-    let i = (p as usize).min(stops.len() - 2);
-    match (stops.get(i), stops.get(i + 1)) {
-        (Some(a), Some(b)) => (a + (b - a) * (p - i as f32)) / 360.0,
-        _ => 0.0,
-    }
-}
-
-/// Where `hue` (0..1) sits (0..1) along a control whose hues are `stops`.
-pub(crate) fn hue_position(stops: &[f32], hue: f32) -> f32 {
-    let h = hue.clamp(0.0, 1.0) * 360.0;
-    for (i, w) in stops.windows(2).enumerate() {
-        if let [a, b] = w
-            && h <= *b
-            && b > a
-        {
-            return (i as f32 + ((h - a) / (b - a)).clamp(0.0, 1.0)) / (stops.len() - 1) as f32;
-        }
-    }
-    1.0
-}
-
-/// A point of the square (-1..1) on the disc, and back.
-fn square_to_disc(x: f32, y: f32) -> (f32, f32) {
-    (x * (1.0 - y * y / 2.0).sqrt(), y * (1.0 - x * x / 2.0).sqrt())
-}
-
-fn disc_to_square(u: f32, v: f32) -> (f32, f32) {
-    let r2 = 2.0 * 2f32.sqrt();
-    let half = |a: f32, b: f32, s: f32| {
-        0.5 * (2.0 + a * a - b * b + r2 * s).max(0.0).sqrt() - 0.5 * (2.0 + a * a - b * b - r2 * s).max(0.0).sqrt()
-    };
-    (half(u, v, u).clamp(-1.0, 1.0), half(v, u, v).clamp(-1.0, 1.0))
 }
 
 /// The hue ring, `side` pixels square (at `ppp` pixels a point), with soft edges.
@@ -1704,24 +1619,7 @@ fn ring_image(side: usize, ppp: f32) -> egui::ColorImage {
             continue;
         }
         let turn = ((-j).atan2(i) / std::f32::consts::TAU + 1.0) % 1.0;
-        *px = srgb(hsv_to_rgb([hue_at(&RING_HUES, turn), 1.0, 1.0])).gamma_multiply(cover);
-    }
-    egui::ColorImage::new([side, side], pixels)
-}
-
-/// The saturation/brightness disc for `hue`, `side` pixels square, with a soft edge.
-fn disc_image(hue: f32, side: usize) -> egui::ColorImage {
-    let half = side as f32 / 2.0;
-    let mut pixels = vec![Color32::TRANSPARENT; side * side];
-    for (k, px) in pixels.iter_mut().enumerate() {
-        let u = ((k % side) as f32 + 0.5) / half - 1.0;
-        let v = ((k / side) as f32 + 0.5) / half - 1.0;
-        let edge = ((1.0 - u.hypot(v)) * half + 0.5).clamp(0.0, 1.0);
-        if edge <= 0.0 {
-            continue;
-        }
-        let (x, y) = disc_to_square(u, v);
-        *px = srgb(hsv_to_rgb([hue, (x + 1.0) / 2.0, (1.0 - y) / 2.0])).gamma_multiply(edge);
+        *px = srgb(hsv_to_rgb([hue_at(HueControl::Ring, turn), 1.0, 1.0])).gamma_multiply(cover);
     }
     egui::ColorImage::new([side, side], pixels)
 }
@@ -1780,23 +1678,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn harmony_colours_go_to_p3_and_back() {
-        for rgb in [0x808080, 0xC04020, 0x2060A0, 0x40A040] {
-            let [h, s, v] = rgb_to_p3_hsv(rgb);
-            let back = p3_hsv_to_rgb(h, s, v);
-            for shift in [16, 8, 0] {
-                let (a, b) = ((rgb >> shift & 0xFF) as i32, (back >> shift & 0xFF) as i32);
-                assert!((a - b).abs() <= 2, "{rgb:06X} came back {back:06X}");
-            }
-        }
-    }
-
-    #[test]
     fn a_gradient_is_mixed_as_written_and_hues_go_round_their_stops() {
         assert_eq!(colour_along(&[Color32::BLACK, Color32::WHITE], 0.5), Color32::from_gray(128));
         assert_eq!(colour_along(&[Color32::BLACK, Color32::WHITE], 1.0), Color32::WHITE);
         for hue in [0.1, 0.35, 0.8] {
-            let back = hue_at(&SLIDER_HUES, hue_position(&SLIDER_HUES, hue));
+            let back = hue_at(HueControl::Slider, hue_position(HueControl::Slider, hue));
             assert!((back - hue).abs() < 1e-3, "{hue} came back {back}");
         }
     }

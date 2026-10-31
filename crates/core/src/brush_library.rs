@@ -254,6 +254,23 @@ const LIBRARY_FILE: &str = "library.json";
 const CHOICES_FILE: &str = "choices.json";
 const SEEN_FILE: &str = "seen.txt";
 
+/// Puts what an earlier version kept elsewhere into folder `dir` for [`CanvasSession::open_brushes`]:
+/// the shipped brushes it had seen (`seen`, numbers joined by commas) and the brushes in use
+/// (`choices`, as [`CanvasSession::saved_brush_choices`] gives), each only where the folder has none.
+/// False if one couldn't be written.
+#[uniffi::export]
+pub fn adopt_kept_brushes(dir: String, seen: Option<String>, choices: Option<String>) -> bool {
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    [(SEEN_FILE, seen), (CHOICES_FILE, choices)].into_iter().all(|(name, text)| {
+        let path = dir.join(name);
+        match text {
+            Some(text) if !path.exists() => std::fs::write(&path, text).is_ok(),
+            _ => true,
+        }
+    })
+}
+
 /// One brush as a file to share.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct BrushFile {
@@ -694,16 +711,25 @@ impl CanvasSession {
     /// Keeps the library, the tools' brushes, the sets' choices and the brushes' sliders in folder
     /// `dir`, for [`Self::open_brushes`]. False if they couldn't all be written.
     pub fn keep_brushes(&self, dir: String) -> bool {
+        let library =
+            self.save_brush_library_file(std::path::Path::new(&dir).join(LIBRARY_FILE).to_string_lossy().into_owned());
+        self.keep_brush_choices(dir) && library
+    }
+
+    /// Keeps only the tools' brushes, the sets' choices and the brushes' sliders in folder `dir`
+    /// (as [`Self::keep_brushes`] does with the library): for a brush chosen, the library as it
+    /// was. False if they couldn't be written.
+    pub fn keep_brush_choices(&self, dir: String) -> bool {
         let dir = std::path::PathBuf::from(dir);
-        let library = self.save_brush_library_file(dir.join(LIBRARY_FILE).to_string_lossy().into_owned());
         let choices = self.saved_brush_choices();
+        let _ = std::fs::create_dir_all(&dir);
         let written = crate::project::write_atomically(&dir.join(CHOICES_FILE), |p| {
             std::fs::write(p, choices.as_bytes()).map_err(|e| crate::project::file_error("keeping the brushes", e))
         });
         if let Err(e) = &written {
             log::error!("{e}");
         }
-        library && written.is_ok()
+        written.is_ok()
     }
 
     /// The tools' brushes, the sets' last choices and each brush's sliders, as kept between

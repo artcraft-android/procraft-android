@@ -742,8 +742,12 @@ impl CanvasSession {
             }
             Mode::Hover => {
                 if let (Some(a), Some(b)) = (t.down.first(), t.down.get(1)) {
-                    // pinched: the size grows and shrinks with how far apart they are
+                    // pinched: the size grows and shrinks with how far apart they are (the first
+                    // finger followed, so it drags the opacity on from where it is once alone)
                     let spread = dist(a.at, b.at);
+                    if id == t.stroke_pointer {
+                        t.hover_x = at.0;
+                    }
                     let last = std::mem::replace(&mut t.hover_spread, spread);
                     if last > 1.0 && spread > 1.0 {
                         drop(t);
@@ -2017,8 +2021,12 @@ mod tests {
         s.touch_down(2, PointerKind::Finger, at(400.0, 100.0, 20.0));
         s.touch_move(2, at(500.0, 100.0, 30.0));
         assert!((s.info().size - 1.0).abs() < 1e-4, "{}", s.info().size);
+        // the first finger moved in the pinch drags on from where it went
+        s.touch_move(1, at(200.0, 100.0, 32.0));
         s.touch_up(2, at(500.0, 100.0, 40.0));
-        let out = s.touch_up(1, at(300.0, 100.0, 50.0));
+        s.touch_move(1, at(250.0, 100.0, 45.0));
+        assert!((s.info().opacity - 0.75).abs() < 1e-4, "{}", s.info().opacity);
+        let out = s.touch_up(1, at(250.0, 100.0, 50.0));
         assert!(!out.contains(&TouchCommand::StrokeEnded), "{out:?}");
         // the pen gone, a finger paints again
         s.set_touch_pen_hovering(false);

@@ -284,7 +284,8 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                 Switch("Animation Assist", showing.animation, Some(Act::AnimationAssist)),
                 Switch("Page Assist", showing.pages, Some(Act::PageAssist)),
                 Switch("Drawing Guide", showing.guide, Some(Act::DrawingGuide)),
-                Button("Edit Drawing Guide", None, Some(Act::EditGuide)),
+                // greyed until the guide is on
+                Button("Edit Drawing Guide", None, showing.guide.then_some(Act::EditGuide)),
             ],
             vec![Switch("Reference", showing.reference, Some(Act::Reference))],
             vec![

@@ -32,6 +32,16 @@ impl Flood {
         Some(Flood { width, height, seed, distance, colour })
     }
 
+    /// The pixel the fill is measured from, now `seed`, for a seed of the same colour (the
+    /// distances stay as they are). False, and left as it was, if `seed` is off the picture.
+    pub fn reseed(&mut self, seed: (u32, u32)) -> bool {
+        let on = seed.0 < self.width && seed.1 < self.height;
+        if on {
+            self.seed = seed;
+        }
+        on
+    }
+
     /// How much each pixel takes the fill at `threshold` (0..1): the pixels joined to the seed
     /// through pixels within reach, fully where the distance is within the threshold, fading out
     /// over [`FADE`] past it.
@@ -129,10 +139,20 @@ pub fn pour_over(pixels: &mut [u8], mask: &Mask, colour: [f32; 3], alpha_lock: b
 /// Each pixel `mask` takes moved toward what `full` (from the pixel, premultiplied 0..1) makes of
 /// it, as far as the mask goes.
 fn pour_with(pixels: &mut [u8], mask: &Mask, alpha_lock: bool, full: impl Fn([f32; 4]) -> [f32; 4]) {
+    // a filled area is mostly runs of the same pixel taking the same amount: made once each run
+    let mut last: Option<([u8; 4], u8, [u8; 4])> = None;
     for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&mask.data) {
         if m == 0 {
             continue;
         }
+        if let Some((was, k, made)) = last
+            && was == *px
+            && k == m
+        {
+            *px = made;
+            continue;
+        }
+        let input = *px;
         let k = f32::from(m) / 255.0;
         let p = px.map(|v| f32::from(v) / 255.0);
         let mut out = p;
@@ -147,6 +167,7 @@ fn pour_with(pixels: &mut [u8], mask: &Mask, alpha_lock: bool, full: impl Fn([f3
         }
         let a = a.clamp(0.0, 1.0);
         *px = [r.clamp(0.0, a), g.clamp(0.0, a), b.clamp(0.0, a), a].map(|v| (v * 255.0).round() as u8);
+        last = Some((input, m, *px));
     }
 }
 

@@ -80,6 +80,7 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.core.LayerInfo
+import io.github.artcraftandroid.procraft.core.LayerOption
 import io.github.artcraftandroid.procraft.core.LayerType
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -872,43 +873,28 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
         PcPopup(textScale = MATCHED_POPUP_TEXT, popupPositionProvider = place, onDismissRequest = onDone, properties = PopupProperties(focusable = true)) {
             // frosted over the canvas, as the library's menus are
             Column(look.width(194.dp).clip(RoundedCornerShape(24.dp)).then(rememberFrost(24.dp)).background(Pc.GlassMenu).padding(vertical = 7.dp)) {
-                val then = { f: () -> Unit -> { f(); onDone() } }
-                Option("Rename", onClick = then(onRename))
-                when (l.kind) {
-                    LayerType.GROUP -> {
-                        Option("Ungroup", onClick = then { vm.ungroup(l) })
-                        Option("Flatten", onClick = then { vm.flattenGroup(l) })
+                // the core's rows: a switch leaves the menu open, the others close it
+                for (r in vm.layerOptions(l)) {
+                    val act: () -> Unit = when (r.option) {
+                        LayerOption.RENAME -> onRename
+                        LayerOption.UNGROUP -> { { vm.ungroup(l) } }
+                        LayerOption.FLATTEN -> { { vm.flattenGroup(l) } }
+                        LayerOption.SELECT -> { { vm.selectLayerContents(l) } }
+                        LayerOption.COPY -> { { vm.copyLayerContents(l) } }
+                        LayerOption.FILL -> { { vm.fillLayer(l) } }
+                        LayerOption.CLEAR -> { { vm.clear(l) } }
+                        LayerOption.ALPHA_LOCK -> { { vm.toggleAlphaLock(l) } }
+                        LayerOption.MASK -> { { vm.addMask(l) } }
+                        LayerOption.CLIPPING_MASK -> { { vm.toggleClipped(l) } }
+                        LayerOption.DRAWING_ASSIST -> { { vm.setGuideAssisted(!l.assisted) } }
+                        LayerOption.INVERT -> { { vm.invertLayer(l) } }
+                        LayerOption.REFERENCE -> { { vm.toggleReference(l) } }
+                        LayerOption.EDIT_TEXT -> { { vm.editText(l) } }
+                        LayerOption.RASTERIZE -> { { vm.rasterize(l) } }
+                        LayerOption.MERGE_DOWN -> { { vm.mergeDown(l) } }
+                        LayerOption.COMBINE_DOWN -> { { vm.combineDown(l) } }
                     }
-                    LayerType.MASK -> {
-                        Option("Select", onClick = then { vm.selectLayerContents(l) })
-                        Option("Fill Layer", enabled = !l.locked, onClick = then { vm.fillLayer(l) })
-                        Option("Clear", enabled = !l.locked, onClick = then { vm.clear(l) })
-                        Option("Invert", enabled = !l.locked, onClick = then { vm.invertLayer(l) })
-                    }
-                    else -> {
-                        Option("Select", onClick = then { vm.selectLayerContents(l) })
-                        Option("Copy", onClick = then { vm.copyLayerContents(l) })
-                        // a text layer's pixels come from its text
-                        if (!l.text) {
-                            Option("Fill Layer", enabled = !l.locked, onClick = then { vm.fillLayer(l) })
-                            Option("Clear", enabled = !l.locked, onClick = then { vm.clear(l) })
-                        }
-                        Option("Alpha Lock", checked = l.alphaLock) { vm.toggleAlphaLock(l) }
-                        Option("Mask", enabled = !vm.hasMask(l), onClick = then { vm.addMask(l) })
-                        if (l.canClip) Option("Clipping Mask", checked = l.clipped) { vm.toggleClipped(l) }
-                        // offered with the drawing guide on or off
-                        Option("Drawing Assist", checked = l.assisted) { vm.setGuideAssisted(!l.assisted) }
-                        if (!l.text) Option("Invert", enabled = !l.locked, onClick = then { vm.invertLayer(l) })
-                        Option("Reference", checked = l.reference) { vm.toggleReference(l) }
-                    }
-                }
-                if (l.text) {
-                    Option("Edit Text", enabled = !l.locked, onClick = then { vm.editText(l) })
-                    Option("Rasterize", enabled = !l.locked, onClick = then { vm.rasterize(l) })
-                }
-                if (l.kind != LayerType.MASK) {
-                    if (l.canMerge) Option("Merge Down", enabled = !l.locked, onClick = then { vm.mergeDown(l) })
-                    if (l.canCombine) Option("Combine Down", onClick = then { vm.combineDown(l) })
+                    Option(r.label, checked = r.switchOn, enabled = r.enabled, onClick = if (r.switchOn != null) act else { { act(); onDone() } })
                 }
             }
         }

@@ -56,6 +56,11 @@ impl Zoom {
         Zoom { cell, canvas, opening: false, started: Instant::now(), picture }
     }
 
+    /// Not under way yet (the canvas is still being made): it starts from the gallery again.
+    pub fn hold(&mut self) {
+        self.started = Instant::now();
+    }
+
     fn length(&self) -> Duration {
         if self.opening { OPEN } else { CLOSE }
     }

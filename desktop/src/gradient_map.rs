@@ -156,7 +156,8 @@ impl GradientMap {
             let size = pick.size();
             let left = (tip.x - size.x / 2.0).clamp(screen.left(), (screen.right() - size.x).max(screen.left()));
             let rect = Rect::from_min_size(pos2(left, tip.y - size.y), size);
-            match pick.show(ctx, look, rect, tip.x, &colours.palettes, colours.harmony) {
+            let p3 = procraft_core::colours_in_p3(session.profile());
+            match pick.show(ctx, look, rect, tip.x, &colours.palettes, colours.harmony, p3) {
                 Some(Picked::Colour(rgb)) => {
                     gradients.set_stop_colour(*index, *stop, rgb);
                     session.adjustment_gradient(*index);

@@ -82,6 +82,15 @@ impl CanvasSession {
 /// generated brushes, Krita's presets and bundles, Clip Studio's sub tools.
 pub const OTHER_BRUSH_EXTENSIONS: [&str; 7] = ["abr", "gbr", "gih", "vbr", "kpp", "bundle", "sut"];
 
+/// Whether `bytes` are a zip holding brushes (a brush's archive, or a set's list), whatever the
+/// file is called: a brush or set file sent on as a plain zip.
+#[uniffi::export]
+pub fn is_brush_zip(bytes: Vec<u8>) -> bool {
+    procraft_engine::zip::ZipReader::new(&bytes).is_some_and(|zip| {
+        zip.names().any(|n| n == "Brush.archive" || n == "brushset.plist" || n.ends_with("/Brush.archive"))
+    })
+}
+
 #[uniffi::export]
 impl CanvasSession {
     /// Adds the brushes in `bytes`: a brush file's (to the top of the "Imported" set, made at the

@@ -5,6 +5,8 @@
 pub struct ZipReader<'a> {
     bytes: &'a [u8],
     entries: Vec<Entry>,
+    /// Where each name's (first) entry is.
+    by_name: std::collections::HashMap<String, usize>,
 }
 
 #[derive(Clone)]
@@ -48,7 +50,15 @@ impl<'a> ZipReader<'a> {
             entries.push(Entry { name, method, compressed, size, crc, local });
             at += 46 + name_len + extra + comment;
         }
-        Some(ZipReader { bytes, entries })
+        let mut by_name = std::collections::HashMap::with_capacity(entries.len());
+        for (i, e) in entries.iter().enumerate() {
+            by_name.entry(e.name.clone()).or_insert(i);
+        }
+        Some(ZipReader { bytes, entries, by_name })
+    }
+
+    fn entry(&self, name: &str) -> Option<&Entry> {
+        self.by_name.get(name).and_then(|&i| self.entries.get(i))
     }
 
     /// Every entry's name, folders included.
@@ -58,12 +68,12 @@ impl<'a> ZipReader<'a> {
 
     /// The size entry `name` says it has once read (`read` gives no more).
     pub fn size(&self, name: &str) -> Option<usize> {
-        self.entries.iter().find(|e| e.name == name).map(|e| e.size)
+        self.entry(name).map(|e| e.size)
     }
 
     /// The contents of entry `name`; `None` if it is missing, damaged or of a kind not read.
     pub fn read(&self, name: &str) -> Option<Vec<u8>> {
-        let e = self.entries.iter().find(|e| e.name == name)?;
+        let e = self.entry(name)?;
         if e.size > MAX_ENTRY || e.compressed > MAX_ENTRY || u32le(self.bytes, e.local)? != 0x0403_4B50 {
             return None;
         }
@@ -96,6 +106,30 @@ pub struct ZipWriter {
     count: u16,
 }
 
+/// An entry made ready to add with [`ZipWriter::add_ready`] (on any thread, for adding in order):
+/// its data's checksum and size, and how it is written.
+pub struct Ready {
+    crc: u32,
+    size: usize,
+    method: u16,
+    body: Vec<u8>,
+}
+
+impl Ready {
+    /// `data` deflated if that makes it smaller, and `deflate` is asked (it isn't, for data
+    /// already compressed that won't shrink); else stored.
+    pub fn of(data: &[u8], deflate: bool) -> Ready {
+        let (crc, size) = (crc32(data), data.len());
+        if deflate {
+            let deflated = miniz_oxide::deflate::compress_to_vec(data, 6);
+            if deflated.len() < size {
+                return Ready { crc, size, method: 8, body: deflated };
+            }
+        }
+        Ready { crc, size, method: 0, body: data.to_vec() }
+    }
+}
+
 impl ZipWriter {
     pub fn new() -> ZipWriter {
         ZipWriter::default()
@@ -103,12 +137,12 @@ impl ZipWriter {
 
     /// Adds `data` as entry `name`, deflated (or stored, if deflating doesn't make it smaller).
     pub fn add(&mut self, name: &str, data: &[u8]) {
-        let deflated = miniz_oxide::deflate::compress_to_vec(data, 6);
-        if deflated.len() < data.len() {
-            self.entry(name, data, 8, &deflated, 0);
-        } else {
-            self.entry(name, data, 0, data, 0);
-        }
+        self.add_ready(name, Ready::of(data, true));
+    }
+
+    /// Adds an entry made ready (perhaps on another thread) as entry `name`.
+    pub fn add_ready(&mut self, name: &str, ready: Ready) {
+        self.entry(name, ready.crc, ready.size, ready.method, &ready.body, 0);
     }
 
     /// Adds `data` as entry `name` stored as it is, starting at a multiple of `align` bytes into
@@ -121,11 +155,11 @@ impl ZipWriter {
         if pad > 0 && pad < 4 {
             pad += align;
         }
-        self.entry(name, data, 0, data, pad);
+        self.entry(name, crc32(data), data.len(), 0, data, pad);
     }
 
-    fn entry(&mut self, name: &str, data: &[u8], method: u16, body: &[u8], pad: usize) {
-        let crc = crc32(data);
+    /// An entry whose data (`size` bytes, checksum `crc`) is written as `body` by `method`.
+    fn entry(&mut self, name: &str, crc: u32, size: usize, method: u16, body: &[u8], pad: usize) {
         let local = self.out.len() as u32;
         let name = name.as_bytes();
         let header = |sig: u32, central: bool| {
@@ -141,7 +175,7 @@ impl ZipWriter {
             h.extend_from_slice(&0x0021u16.to_le_bytes()); // date: 1980-01-01
             h.extend_from_slice(&crc.to_le_bytes());
             h.extend_from_slice(&(body.len() as u32).to_le_bytes());
-            h.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            h.extend_from_slice(&(size as u32).to_le_bytes());
             h.extend_from_slice(&(name.len() as u16).to_le_bytes());
             let extra = if central { 0 } else { pad as u16 };
             h.extend_from_slice(&extra.to_le_bytes());

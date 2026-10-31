@@ -31,6 +31,9 @@ import io.github.artcraftandroid.procraft.core.ChromaticKind
 import io.github.artcraftandroid.procraft.core.GlitchKind
 import io.github.artcraftandroid.procraft.core.GuideInfo
 import io.github.artcraftandroid.procraft.core.KeyShortcut
+import io.github.artcraftandroid.procraft.core.ModeButton
+import io.github.artcraftandroid.procraft.core.Modes
+import io.github.artcraftandroid.procraft.core.modeSwitch
 import io.github.artcraftandroid.procraft.core.GuideType
 import io.github.artcraftandroid.procraft.core.SymmetryType
 import io.github.artcraftandroid.procraft.core.HalftoneKind
@@ -420,7 +423,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The brushes in use and what has shipped, kept between artworks and launches. */
     private val brushPrefs = app.getSharedPreferences("brushes", android.content.Context.MODE_PRIVATE)
     /** The brush library as edited, in a file: brought-in brushes' images make it too big for preferences. */
-    private val brushLibraryFile = File(app.filesDir, "brushes/library.json")
+    private val brushesDir = File(app.filesDir, "brushes")
+    private val brushLibraryFile = File(brushesDir, "library.json")
     /** Writes of the library, one at a time. */
     private val brushLibraryWrites = Mutex()
     var transformKind by mutableStateOf(enumPref(TRANSFORM_KIND, TransformKind.FREEFORM))
@@ -613,6 +617,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refreshPalettes()
         // colour profiles the user imported
         io.github.artcraftandroid.procraft.core.setProfileFolder(File(app.filesDir, "icc").path)
+        // layers may take half the device's memory, their textures a quarter: past that, those not
+        // worked on are kept compressed off the GPU until needed (set before Custom Canvas asks)
+        val memory = android.app.ActivityManager.MemoryInfo()
+        app.getSystemService(android.app.ActivityManager::class.java)?.getMemoryInfo(memory)
+        if (memory.totalMem > 0) {
+            io.github.artcraftandroid.procraft.core.setLayerBudget((memory.totalMem / 2).toULong())
+            io.github.artcraftandroid.procraft.core.setResidentBudget((memory.totalMem / 4).toULong())
+        }
     }
 
     /** A CMYK canvas's inks for a colour and back, for the colour panel; null on an RGB canvas. */
@@ -864,19 +876,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** The layers a canvas [width] × [height] holds on this device. */
     /** Says the canvas holds no more layers, and how many it holds. */
     private fun noRoom(): String {
         val (w, h) = canvasSize()
         return "This canvas holds at most ${layersFor(w, h)} layers."
     }
 
-    fun layersFor(width: Int, height: Int): Int {
-        val memory = android.app.ActivityManager.MemoryInfo()
-        getApplication<Application>().getSystemService(android.app.ActivityManager::class.java)?.getMemoryInfo(memory)
-        val budget = if (memory.totalMem > 0) memory.totalMem / 4 else 2L shl 30
-        return (budget / (width.toLong().coerceAtLeast(1) * height.toLong().coerceAtLeast(1) * 4)).toInt().coerceAtLeast(1)
-    }
+    /** The layers a canvas [width] × [height] holds on this device (the core's cap). */
+    fun layersFor(width: Int, height: Int): Int =
+        io.github.artcraftandroid.procraft.core.layersFor(width.coerceAtLeast(1).toUInt(), height.coerceAtLeast(1).toUInt())
+            .coerceAtMost(Int.MAX_VALUE.toUInt()).toInt()
 
     /** A new artwork of `width` × `height` pixels (the screen's size), in Display P3, opened on the canvas. */
     fun newArtwork(width: Int, height: Int) {
@@ -1401,6 +1410,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                             val scale = minOf(PDF_DPI / 72f, PDF_MOST_SIDE / maxOf(p.width, p.height).toFloat())
                             (p.width * scale).roundToInt().coerceAtLeast(1) to (p.height * scale).roundToInt().coerceAtLeast(1)
                         }
+                        // more pages than a canvas this size holds as layers: none drawn, as none will be taken
+                        val most = io.github.artcraftandroid.procraft.core.layersFor(w.toUInt(), h.toUInt())
+                        if (pdf.pageCount.toUInt() > most) return@use io.github.artcraftandroid.procraft.core.PagesOutcome.TooManyPages(most)
                         val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                         for (i in 0 until pdf.pageCount) {
                             pdf.openPage(i).use { p ->
@@ -1500,7 +1512,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return null
         return withContext(Dispatchers.IO) {
             runCatching {
-                val base = s.name().filter { it.isLetterOrDigit() || it in " _-" }.trim().replace(' ', '_').ifEmpty { "Untitled_Artwork" }
+                val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), true)
                 val out = File(File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }, "$base.$extension")
                 s.exportPackage(out.path, System.nanoTime().toULong(), timeLapse?.forPackage())
                 out
@@ -1606,7 +1618,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
         val used = mutableSetOf<String>()
         list.mapNotNull { a ->
-            val base = a.name.filter { it.isLetterOrDigit() || it in " _-" }.trim().ifEmpty { "Untitled Artwork" }
+            val base = io.github.artcraftandroid.procraft.core.exportFileName(a.name, false)
             var name = base
             var n = 2
             while (!used.add(name)) name = "$base ${n++}"
@@ -1845,25 +1857,24 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * takes half a second, so callers off the main thread do this before [start].
      */
     private fun loadBrushes(s: CanvasSession) {
-        // the library as kept (in its file; earlier versions kept it in preferences: moved once), else
-        // edits kept by earlier versions
-        var loaded = brushLibraryFile.exists() && s.loadBrushLibraryFile(brushLibraryFile.path)
-        if (!loaded) {
+        // earlier versions kept the library, what had shipped and the brushes in use in preferences:
+        // moved into the brushes' folder once
+        if (!brushLibraryFile.exists()) {
             val kept = brushPrefs.getString(BRUSH_LIBRARY, null)
-            loaded = kept != null && s.loadBrushLibrary(kept)
-            if (loaded && s.saveBrushLibraryFile(brushLibraryFile.path)) brushPrefs.edit().remove(BRUSH_LIBRARY).apply()
+            if (kept != null && s.loadBrushLibrary(kept) && s.saveBrushLibraryFile(brushLibraryFile.path)) {
+                brushPrefs.edit().remove(BRUSH_LIBRARY).apply()
+            }
         }
-        if (!loaded) brushPrefs.getString(BRUSH_CHANGES, null)?.let { s.applyBrushChanges(it) }
-        // brushes and sets shipped since the library was kept join it, once
-        val seen = brushPrefs.getString(BRUSHES_SEEN, null)?.split(',')?.mapNotNull { it.toUIntOrNull() } ?: FIRST_SHIPPED
-        val shipped = if (loaded) s.addShippedBrushes(seen) else s.shippedBrushCounts()
-        if (shipped != seen || !brushPrefs.contains(BRUSHES_SEEN)) {
-            // kept with them, or the next start would load the library without them
-            if (loaded) s.saveBrushLibraryFile(brushLibraryFile.path)
-            brushPrefs.edit().putString(BRUSHES_SEEN, shipped.joinToString(",")).apply()
+        if (brushPrefs.contains(BRUSHES_SEEN) || brushPrefs.contains(BRUSH_CHOICES)) {
+            val seen = brushPrefs.getString(BRUSHES_SEEN, null)
+            val choices = brushPrefs.getString(BRUSH_CHOICES, null)
+            if (io.github.artcraftandroid.procraft.core.adoptKeptBrushes(brushesDir.path, seen, choices)) {
+                brushPrefs.edit().remove(BRUSHES_SEEN).remove(BRUSH_CHOICES).apply()
+            }
         }
-        // the brushes in use as they were left (they go by place in the kept library)
-        if (loaded) brushPrefs.getString(BRUSH_CHOICES, null)?.let { s.loadBrushChoices(it) }
+        // the library as kept, with what shipped since joining it, and the brushes in use as left;
+        // else edits kept by versions before the library was
+        if (!s.openBrushes(brushesDir.path)) brushPrefs.getString(BRUSH_CHANGES, null)?.let { s.applyBrushChanges(it) }
     }
 
     private fun start(s: CanvasSession, dir: File, brushesLoaded: Boolean = false) {
@@ -1871,14 +1882,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.useGradients(gradientLibrary)
         // the canvas's colours are P3 or sRGB numbers: the colour panel and swatches follow
         refreshCanvasSpace(s)
-        // layers may take half the device's memory, their textures a quarter: past that, those not
-        // worked on are kept compressed off the GPU until needed
-        val memory = android.app.ActivityManager.MemoryInfo()
-        getApplication<Application>().getSystemService(android.app.ActivityManager::class.java)?.getMemoryInfo(memory)
-        if (memory.totalMem > 0) {
-            io.github.artcraftandroid.procraft.core.setLayerBudget((memory.totalMem / 2).toULong())
-            io.github.artcraftandroid.procraft.core.setResidentBudget((memory.totalMem / 4).toULong())
-        }
         s.setSelectionVisibility(selectionVisibility)
         s.setBrushScaling(brushOnScreen)
         s.setLightInterface(lightInterface)
@@ -2197,7 +2200,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             QuickAction.SMUDGE -> select(ToolKind.SMUDGE)
             QuickAction.ERASE -> select(ToolKind.ERASE)
             QuickAction.EYEDROPPER -> pickNext = true
-            QuickAction.SWAP_COLORS -> swapColors()
+            QuickAction.SWAP_COLORS -> previousColor()
             QuickAction.PREVIOUS_BRUSH -> previousBrush()
             QuickAction.SELECTION -> toggleSelecting()
             QuickAction.TRANSFORM -> toggleTransform()
@@ -2293,11 +2296,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun startLayerOpacity() {
         val l = layers.firstOrNull { it.current } ?: return
         if (l.kind != LayerType.PAINT && l.kind != LayerType.GROUP) return
-        endQuickShape()
-        endFilling()
-        if (transforming) endTransform(true)
-        endAdjustment(true)
-        closeSelecting()
+        switchModes(ModeButton.LayerOpacity)
         closePanels()
         opacityLayer = l
         opacityValue = l.opacity
@@ -2536,12 +2535,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun toolPressed(tool: ToolKind) {
-        endQuickShape()
-        if (transforming || selecting || adjustment != null || recoloring) {
-            // leaving transform, selection, an adjustment or Recolor for a tool keeps what they made, and only picks the tool
-            endTransform(true)
-            closeSelecting()
-            endAdjustment(true)
+        // leaving a mode for a tool keeps what it made, and only picks the tool
+        if (!switchModes(ModeButton.Tool)) {
             select(tool)
             return
         }
@@ -2561,8 +2556,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun toolHeld(target: ToolKind) {
         val s = session ?: return
         val brush = currentBrush ?: return
-        if (transforming || selecting || adjustment != null || target == tool) return
-        endQuickShape()
+        if (target == tool || !switchModes(ModeButton.ToolHeld)) return
         select(target)
         if (s.selectBrush(brush.set, brush.index)) {
             currentBrush = s.currentBrush()
@@ -2637,7 +2631,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return null
         return withContext(Dispatchers.IO) {
             val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
-            val base = s.name().filter { it.isLetterOrDigit() || it in " _-" }.trim().ifEmpty { "Untitled Artwork" }
+            val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
             val out = File(dir, "$base.mp4")
             out.delete()
             if (t.export(out, seconds)) out else null
@@ -3114,7 +3108,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         previews.clear()
         shadedNames.clear()
         keepBrushLibrary(s)
-        brushPrefs.edit().putString(BRUSH_CHOICES, s.savedBrushChoices()).apply()
     }
 
     fun duplicateBrush(b: BrushInfo) {
@@ -3310,11 +3303,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private val pendingBrushDir get() = File(getApplication<Application>().filesDir, "pending-brushes")
 
     /** Whether [bytes] is a zip holding a brush or a set of them. */
-    private fun isBrushFile(bytes: ByteArray): Boolean = runCatching {
-        java.util.zip.ZipInputStream(bytes.inputStream()).use { zip ->
-            generateSequence { zip.nextEntry }.any { it.name == "Brush.archive" || it.name == "brushset.plist" || it.name.endsWith("/Brush.archive") }
-        }
-    }.getOrDefault(false)
+    private fun isBrushFile(bytes: ByteArray): Boolean = io.github.artcraftandroid.procraft.core.isBrushZip(bytes)
 
     fun chooseBrush(b: BrushInfo) {
         val s = session ?: return
@@ -3358,7 +3347,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Keeps the tools' brushes, the sets' choices and each brush's sliders for the next session. */
     private fun keepChoices(s: CanvasSession) {
-        brushPrefs.edit().putString(BRUSH_CHOICES, s.savedBrushChoices()).apply()
+        viewModelScope.launch(Dispatchers.IO) {
+            brushLibraryWrites.withLock { runCatching { s.keepBrushChoices(brushesDir.path) } }
+        }
     }
 
     /** Whether [b] shows highlighted: the current brush, or its set's last choice. */
@@ -3726,10 +3717,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Keeps the library as it is now in its file, off the main thread. */
+    /** Keeps the library with the brushes in use. */
     private fun keepBrushLibrary(s: CanvasSession) {
         viewModelScope.launch(Dispatchers.IO) {
             // each write takes the library as it is when it runs, so the last one is the latest
-            brushLibraryWrites.withLock { runCatching { s.saveBrushLibraryFile(brushLibraryFile.path) } }
+            brushLibraryWrites.withLock { runCatching { s.keepBrushes(brushesDir.path) } }
         }
     }
 
@@ -3875,7 +3867,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return emptyList()
         return withContext(Dispatchers.IO) {
             val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
-            val base = s.name().filter { it.isLetterOrDigit() || it in " _-" }.trim().ifEmpty { "Untitled Artwork" }
+            val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
             val file = File(dir, "$base.${kind.extension}")
             try {
                 when (kind) {
@@ -3885,13 +3877,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     Export.MODEL_OBJ -> s.exportModelObj(file.path)
                     Export.MODEL_USDZ -> s.exportModelUsdz(file.path)
                     Export.MODEL_RENDER -> s.exportModelRender(file.path, false)
-                    Export.MODEL_JPEG -> {
-                        val png = File(dir, "$base.png")
-                        s.exportModelRender(png.path, false)
-                        val ok = io.github.artcraftandroid.procraft.gallery.pngToJpeg(png, file)
-                        png.delete()
-                        if (!ok) return@withContext emptyList()
-                    }
+                    Export.MODEL_JPEG -> s.exportModelJpeg(file.path)
                     Export.MODEL_TIFF -> s.exportModelTiff(file.path)
                     Export.MODEL_TEXTURES -> {
                         val folder = File(dir, base).apply { deleteRecursively(); mkdirs() }
@@ -3941,7 +3927,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val (w, h) = turntablePixels()
         return withContext(Dispatchers.IO) {
             val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
-            val base = s.name().filter { it.isLetterOrDigit() || it in " _-" }.trim().ifEmpty { "Untitled Artwork" }
+            val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
             val file = File(dir, "$base.${format.extension}")
             try {
                 when (format) {
@@ -4019,7 +4005,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return null
         return animationExports.withLock { withContext(Dispatchers.IO) {
             val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
-            val base = s.name().filter { it.isLetterOrDigit() || it in " _-" }.trim().ifEmpty { "Untitled Artwork" }
+            val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
             val file = File(dir, "$base.${format.extension}")
             val side = if (webReady) WEB_READY_SIDE else 0
             // Animation Assist's own frame rate, when it is on
@@ -4061,19 +4047,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return null
         return withContext(Dispatchers.IO) {
             val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
-            val base = s.name().filter { it.isLetterOrDigit() || it in " _-" }.trim().ifEmpty { "Untitled Artwork" }
-            val png = File(dir, "$base.png")
+            val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
+            val file = File(dir, if (jpeg) "$base.jpg" else "$base.png")
             try {
-                s.exportPng(png.path)
+                if (jpeg) s.exportJpeg(file.path) else s.exportPng(file.path)
             } catch (e: MobileException) {
                 Log.e(TAG, "exporting", e)
                 return@withContext null
             }
-            if (!jpeg) return@withContext png
-            val jpg = File(dir, "$base.jpg")
-            val ok = io.github.artcraftandroid.procraft.gallery.pngToJpeg(png, jpg)
-            png.delete()
-            jpg.takeIf { ok }
+            file
         }
     }
 
@@ -4227,13 +4209,34 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         feedback()
-        endQuickShape()
-        if (p != Panel.COLOR) endRecolor()
-        if (transforming) endTransform(true)
-        endAdjustment(true)
-        closeSelecting()
+        switchModes(ModeButton.Panel(p == Panel.COLOR))
         panel = if (panel == p) Panel.NONE else p
         if (panel == Panel.LAYERS) refreshThumbnails()
+    }
+
+    /** The modes open now, as the core's [modeSwitch] takes them. */
+    private fun openModes() = Modes(
+        quickshape = quickShape != null,
+        filling = dropBand == DropBand.FILLING,
+        recolor = recoloring,
+        layerOpacity = opacityLayer != null,
+        transform = transforming,
+        selection = selecting,
+        adjustment = adjustment != null,
+    )
+
+    /** [button] pressed: the modes it leaves behind end first (keeping what they made), as the core says; true if it goes on to do what it does. */
+    private fun switchModes(button: ModeButton): Boolean {
+        val change = modeSwitch(button, openModes())
+        val end = change.end
+        if (end.quickshape) endQuickShape()
+        if (end.filling) endDropBand()
+        if (end.recolor) endRecolor()
+        if (end.layerOpacity) endLayerOpacity()
+        if (end.transform) endTransform(true)
+        if (end.selection) closeSelecting()
+        if (end.adjustment) endAdjustment(true)
+        return change.goesOn
     }
 
     fun closePanels() {
@@ -4357,10 +4360,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun startAdjustment(a: Adjustment) {
         val s = session ?: return
         if (!currentTakesChanges()) return
-        endRecolor()
-        endAdjustment(true)
-        endTransform(true)
-        closeSelecting()
+        switchModes(ModeButton.Adjustment)
         // the list fades away rather than going at once
         if (panel == Panel.ADJUSTMENTS) panelFading = true
         panel = Panel.NONE
@@ -4657,35 +4657,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readAdjust()
     }
 
-    /** The adjustments button: closes an open adjustment (keeping it), or opens the menu. */
+    /** The Adjustments button: ends Layer Opacity, Recolor or the open adjustment, else opens its menu. */
     fun adjustmentsPressed() {
-        endQuickShape()
-        endFilling()
-        // in Layer opacity or Recolor, the button ends it
-        if (opacityLayer != null) {
-            endLayerOpacity()
-            return
-        }
-        if (recoloring) {
-            endRecolor()
-            return
-        }
-        if (adjustment != null) endAdjustment(true) else toggle(Panel.ADJUSTMENTS)
+        if (switchModes(ModeButton.Adjustments)) toggle(Panel.ADJUSTMENTS)
     }
 
     // ---- selection ----
 
     /** The selection button: opens or closes the selection tool (a selection made stays). */
     fun toggleSelecting() {
-        endQuickShape()
-        endFilling()
-        endLayerOpacity()
-        if (selecting) {
-            closeSelecting()
-            return
-        }
-        endTransform(true)
-        endAdjustment(true)
+        // open, it closes; else the other modes end
+        if (!switchModes(ModeButton.Selection)) return
         panel = Panel.NONE
         pickNext = false
         // each time the tool opens, shapes add to the selection
@@ -4714,7 +4696,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         selectionRemoves = removes
     }
 
-    private val join get() = if (selectionRemoves) SelectionJoin.REMOVE else SelectionJoin.ADD
+    /** How a selection joins the one there is: selecting by colour always adds (Remove greyed). */
+    private val join
+        get() = if (selectionRemoves && selectionKind != SelectionKind.AUTOMATIC) SelectionJoin.REMOVE else SelectionJoin.ADD
 
     /** How the canvas's (shared) touches select while the selection tool is open; none otherwise. */
     fun selectTouch(): io.github.artcraftandroid.procraft.core.SelectTouch? {
@@ -4834,10 +4818,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** ColorDrop's filling ends, and Recolor with it. */
     fun endFilling() {
+        endDropBand()
+        endRecolor()
+    }
+
+    /** ColorDrop's band goes, and Continue filling with it. */
+    private fun endDropBand() {
         dropBandTimer?.cancel()
         if (dropBand != DropBand.NONE) dropBand = DropBand.NONE
         dropSliding = false
-        endRecolor()
     }
 
     /** Fills from window point [p] with the dropped colour; false if nothing was filled. */
@@ -4923,7 +4912,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Recolor on, the reticle in the middle of the screen, or off (keeping what it filled). */
     fun toggleRecolor() {
         if (recoloring) {
-            endRecolor()
+            switchModes(ModeButton.Recolor)
             return
         }
         val s = session ?: return
@@ -4933,12 +4922,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             askRasterize = true
             return
         }
-        endQuickShape()
-        endFilling()
-        endLayerOpacity()
-        if (transforming) endTransform(true)
-        endAdjustment(true)
-        closeSelecting()
+        switchModes(ModeButton.Recolor)
         closePanels()
         recoloring = true
         val c = colorRgb()
@@ -5090,17 +5074,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The transform button: opens transform on the current layer, or keeps it and closes. */
     fun toggleTransform() {
-        endQuickShape()
-        endFilling()
-        endLayerOpacity()
         if (transforming) {
-            endTransform(true)
+            switchModes(ModeButton.Transform)
             return
         }
         val s = session ?: return
         if (!currentTakesChanges()) return
-        closeSelecting()
-        endAdjustment(true)
+        switchModes(ModeButton.Transform)
         panel = Panel.NONE
         pickNext = false
         s.transformSetInterpolation(interpolation)
@@ -5219,8 +5199,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (quickShape != null) quickShape = session?.quickshapeInfo()
     }
 
+    /** The interface hidden or shown again (not while transforming). */
     fun toggleBars() {
-        if (transforming) return
+        if (!switchModes(ModeButton.Bars)) return
         barsHidden = !barsHidden
         if (barsHidden) panel = Panel.NONE
     }
@@ -5447,6 +5428,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Whether a closed group hides [l]'s row. */
     fun hidden(l: LayerInfo) = layers.any { it.kind == LayerType.GROUP && it.collapsed && isInside(l, it.id) }
+
+    /** Layer [l]'s options menu, as the core lists it. */
+    fun layerOptions(l: LayerInfo): List<io.github.artcraftandroid.procraft.core.LayerOptionRow> = session?.layerOptions(l.id).orEmpty()
 
     fun hasMask(l: LayerInfo) = layers.any { it.kind == LayerType.MASK && it.parent == l.id }
 
@@ -5691,14 +5675,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val SOURCE_ROW_PX = 88
         /** And the landscape studio's square of it. */
         const val SOURCE_BOX_PX = 566
-        /** The brushes in use, each set's last choice and each brush's sliders. */
+        /** Where earlier versions kept the brushes in use, each set's last choice and each brush's sliders. */
         const val BRUSH_CHOICES = "choices"
 
-        /** How many brushes of each shipped set the kept library has had the chance to hold. */
+        /** And how many brushes of each shipped set the kept library had had the chance to hold. */
         const val BRUSHES_SEEN = "brushes_seen"
-
-        /** What shipped before brushes and sets were added to kept libraries. */
-        val FIRST_SHIPPED = listOf(3u, 3u, 3u, 2u, 2u, 2u)
         const val MAX_CANVAS_EDGE = 16384
         /** How much smaller than fitted to the screen the canvas is while cropping. */
         /** The reference window: its first place and picture size, its limits, and how sharp and how often its canvas is read. */

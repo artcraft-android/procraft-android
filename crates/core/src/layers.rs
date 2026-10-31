@@ -76,6 +76,95 @@ pub struct ThumbnailImage {
     pub rgba: Vec<u8>,
 }
 
+/// What a row of a layer's options menu does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum LayerOption {
+    Rename,
+    Ungroup,
+    Flatten,
+    Select,
+    Copy,
+    Fill,
+    Clear,
+    AlphaLock,
+    Mask,
+    ClippingMask,
+    DrawingAssist,
+    Invert,
+    Reference,
+    EditText,
+    Rasterize,
+    MergeDown,
+    CombineDown,
+}
+
+/// A row of a layer's options menu: what it does, its label, whether it can be chosen, and for a
+/// switch whether it is on (a switch leaves the menu open; the other rows close it).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct LayerOptionRow {
+    pub option: LayerOption,
+    pub label: String,
+    pub enabled: bool,
+    pub switch_on: Option<bool>,
+}
+
+/// The rows of layer `l`'s options menu (`masked`: it has a mask), in order: what doesn't apply to
+/// it left out, what its lock forbids greyed. Lock, duplicate and delete are on its row's swipe.
+fn layer_options(l: &LayerInfo, masked: bool) -> Vec<LayerOptionRow> {
+    use LayerOption as O;
+    let unlocked = !l.locked;
+    let mut rows = Vec::new();
+    let mut row = |option, label: &str, enabled: bool, switch_on: Option<bool>| {
+        rows.push(LayerOptionRow { option, label: label.to_owned(), enabled, switch_on });
+    };
+    row(O::Rename, "Rename", true, None);
+    match l.kind {
+        LayerType::Group => {
+            row(O::Ungroup, "Ungroup", true, None);
+            row(O::Flatten, "Flatten", true, None);
+        }
+        LayerType::Mask => {
+            row(O::Select, "Select", true, None);
+            row(O::Fill, "Fill Layer", unlocked, None);
+            row(O::Clear, "Clear", unlocked, None);
+            row(O::Invert, "Invert", unlocked, None);
+        }
+        LayerType::Paint => {
+            row(O::Select, "Select", true, None);
+            row(O::Copy, "Copy", true, None);
+            // a text layer's pixels come from its text
+            if !l.text {
+                row(O::Fill, "Fill Layer", unlocked, None);
+                row(O::Clear, "Clear", unlocked, None);
+            }
+            row(O::AlphaLock, "Alpha Lock", true, Some(l.alpha_lock));
+            row(O::Mask, "Mask", !masked, None);
+            if l.can_clip {
+                row(O::ClippingMask, "Clipping Mask", true, Some(l.clipped));
+            }
+            // offered with the drawing guide on or off
+            row(O::DrawingAssist, "Drawing Assist", true, Some(l.assisted));
+            if !l.text {
+                row(O::Invert, "Invert", unlocked, None);
+            }
+            row(O::Reference, "Reference", true, Some(l.reference));
+        }
+    }
+    if l.text {
+        row(O::EditText, "Edit Text", unlocked, None);
+        row(O::Rasterize, "Rasterize", unlocked, None);
+    }
+    if l.kind != LayerType::Mask {
+        if l.can_merge {
+            row(O::MergeDown, "Merge Down", unlocked, None);
+        }
+        if l.can_combine {
+            row(O::CombineDown, "Combine Down", true, None);
+        }
+    }
+    rows
+}
+
 /// The memory layers may take on this device, bytes: it sets how many layers a canvas holds.
 #[uniffi::export]
 pub fn set_layer_budget(bytes: u64) {
@@ -180,6 +269,14 @@ impl CanvasSession {
             masks: kind(LayerKind::Mask),
             groups: kind(LayerKind::Group),
         }
+    }
+
+    /// The rows of layer `id`'s options menu; none if there is no such layer.
+    pub fn layer_options(&self, id: u64) -> Vec<LayerOptionRow> {
+        let layers = self.layers();
+        let Some(l) = layers.iter().find(|l| l.id == id) else { return Vec::new() };
+        let masked = layers.iter().any(|m| m.kind == LayerType::Mask && m.parent == Some(id));
+        layer_options(l, masked)
     }
 
     /// Top layer first, as the panel lists them.
@@ -619,7 +716,6 @@ impl CanvasSession {
         Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
     }
 
-    /// The layer scaled to fit `max_side` pixels, or none before the canvas exists.
     /// Each paint layer's and mask's pixels' version, the queued work done first: a thumbnail
     /// need only be read again when its layer's is new.
     pub fn layer_versions(&self) -> Vec<LayerVersion> {
@@ -635,6 +731,7 @@ impl CanvasSession {
             .collect()
     }
 
+    /// The layer scaled to fit `max_side` pixels, or none before the canvas exists.
     pub fn layer_thumbnail(&self, id: u64, max_side: u32) -> Option<ThumbnailImage> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;

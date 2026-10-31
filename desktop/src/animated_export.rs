@@ -179,8 +179,7 @@ impl AnimatedExport {
         let (web_ready, dither, transparent, turntable) = wanted;
         std::thread::spawn(move || {
             let dir = std::env::temp_dir().join("procraft-exports");
-            let base: String = session.name().chars().filter(|c| c.is_alphanumeric() || " _-".contains(*c)).collect();
-            let base = if base.trim().is_empty() { "Untitled Artwork".to_owned() } else { base.trim().to_owned() };
+            let base = procraft_core::export_file_name(session.name(), false);
             let path = dir.join(format!("{base}.{}", format.extension()));
             let side = if web_ready { WEB_READY_SIDE } else { 0 };
             // Animation Assist's own frame rate, when it is on

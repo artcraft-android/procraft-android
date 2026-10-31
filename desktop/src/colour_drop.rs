@@ -192,6 +192,11 @@ impl ColourDrop {
     }
 
     /// Filling ends (the artwork closed, another mode chosen).
+    /// Continue filling is on: the touches fill.
+    pub fn filling(&self) -> bool {
+        self.band == Band::Filling
+    }
+
     pub fn end_filling(&mut self) {
         self.band = Band::None;
         self.sliding = false;

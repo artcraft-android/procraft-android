@@ -6,7 +6,8 @@ use std::time::Instant;
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, Rect, Stroke, Ui, vec2};
 use procraft_core::{
-    Blocked, CanvasInfo, CanvasSession, GesturePurpose, KeyShortcut, QuickAction, ToolKind, TouchCommand,
+    Blocked, CanvasInfo, CanvasSession, GesturePurpose, KeyShortcut, ModeButton, ModeSwitch, Modes, QuickAction,
+    ToolKind, TouchCommand, mode_switch,
 };
 
 use crate::actions::{Act, Actions};
@@ -427,7 +428,7 @@ impl Interface {
             self.pdf_quality_alert(&ctx);
             self.touch_companion(&ctx, session);
             if self.show_interface_button(&ctx) {
-                self.toggle_bars();
+                self.toggle_bars(session);
             }
             session.set_backdrops(Vec::new());
             self.popover_open = false;
@@ -437,22 +438,21 @@ impl Interface {
         let held = self.tool_hold(&ctx, session, &bar);
         match bar.pressed.filter(|_| !held) {
             Some(BarButton::Gallery) => self.actions.push(Action::Gallery),
-            Some(BarButton::Actions) => self.toggle(Popover::Actions),
-            Some(BarButton::Layers) => self.toggle(Popover::Layers),
+            Some(BarButton::Actions) => self.toggle(session, Popover::Actions),
+            Some(BarButton::Layers) => self.toggle(session, Popover::Layers),
             Some(b @ (BarButton::Paint | BarButton::Smudge | BarButton::Erase)) => {
                 let tool = match b {
                     BarButton::Smudge => ToolKind::Smudge,
                     BarButton::Erase => ToolKind::Erase,
                     _ => ToolKind::Paint,
                 };
-                // the chosen tool again opens its brushes
-                if info.tool == tool && self.open.is_none_or(|o| o == Popover::Brushes) {
-                    self.toggle(Popover::Brushes);
+                // leaving a mode for a tool keeps what it made, and only picks the tool; the chosen
+                // tool again opens its brushes
+                let goes_on = self.switch_modes(session, ModeButton::Tool);
+                if goes_on && info.tool == tool && self.open.is_none_or(|o| o == Popover::Brushes) {
+                    self.toggle(session, Popover::Brushes);
                 } else {
-                    self.feedback();
-                    self.end_recolor(session);
-                    session.set_tool(tool);
-                    self.library.tool_changed();
+                    self.choose_tool(session, tool);
                     self.open = None;
                 }
             }
@@ -467,7 +467,7 @@ impl Interface {
             let id = ui.scope_id().with("colour button");
             let rgb = to_hex(self.colours.rgb());
             match self.drop.source(ui, session, id, rect, rgb, false, true, None) {
-                Some(Touch::Tap) => self.toggle(Popover::Colour),
+                Some(Touch::Tap) => self.toggle(session, Popover::Colour),
                 Some(Touch::Hold) => {
                     if self.colours.previous(session) {
                         self.overlays.notice("Previous colour", false);
@@ -626,22 +626,12 @@ impl Interface {
 
     /// Recolor on, the reticle in the middle of the window, or off (keeping what it filled).
     fn toggle_recolor(&mut self, ctx: &egui::Context, session: &CanvasSession) {
-        if session.recolor_on() {
-            self.end_recolor(session);
+        if !session.recolor_on() && !self.takes_changes(session) {
             return;
         }
-        if !self.takes_changes(session) {
+        // on, it ends; else the other modes end
+        if !self.switch_modes(session, ModeButton::Recolor) {
             return;
-        }
-        // the other modes end
-        self.drop.end_filling();
-        session.set_touch_layer_opacity(None);
-        self.end_adjustment(session, true);
-        if self.transform.on {
-            self.toggle_transform(session);
-        }
-        if self.selection.on {
-            self.toggle_selection(session);
         }
         self.open = None;
         let centre = ctx.content_rect().center() * ctx.pixels_per_point();
@@ -658,15 +648,7 @@ impl Interface {
         if !matches!(layer.kind, LayerType::Paint | LayerType::Group) {
             return;
         }
-        self.end_recolor(session);
-        self.drop.end_filling();
-        if self.transform.on {
-            self.toggle_transform(session);
-        }
-        self.end_adjustment(session, true);
-        if self.selection.on {
-            self.toggle_selection(session);
-        }
+        self.switch_modes(session, ModeButton::LayerOpacity);
         self.open = None;
         session.set_touch_layer_opacity(Some(layer.id));
     }
@@ -787,7 +769,7 @@ impl Interface {
                 TouchCommand::Undo => self.undo(session),
                 TouchCommand::Redo => self.redo(session),
                 TouchCommand::ClearLayer => self.clear_layer(session),
-                TouchCommand::ToggleBars => self.toggle_bars(),
+                TouchCommand::ToggleBars => self.toggle_bars(session),
                 TouchCommand::Fit => session.settle_to_fit(),
                 TouchCommand::QuickShapeLast => {
                     if let Some(info) = session.quickshape_last() {
@@ -932,8 +914,8 @@ impl Interface {
         }
     }
 
-    /// A QuickMenu button's action, the menu opened at `at` (points). What the desktop doesn't
-    /// have yet (adjustments, guides, animation, reference, text) does nothing.
+    /// A QuickMenu button's action, the menu opened at `at` (points). Adding text does nothing
+    /// yet (the desktop doesn't edit text).
     fn run_quick(&mut self, ctx: &egui::Context, session: &CanvasSession, action: QuickAction, at: egui::Pos2) {
         let current = session.layers().into_iter().find(|l| l.current);
         let id = current.as_ref().map(|l| l.id);
@@ -1065,10 +1047,10 @@ impl Interface {
             QuickAction::SwapColors => _ = self.colours.previous(session),
             QuickAction::Selection => self.toggle_selection(session),
             QuickAction::Transform => self.toggle_transform(session),
-            QuickAction::Colors => self.toggle(Popover::Colour),
-            QuickAction::Layers => self.toggle(Popover::Layers),
-            QuickAction::Brushes => self.toggle(Popover::Brushes),
-            QuickAction::Interface => self.toggle_bars(),
+            QuickAction::Colors => self.toggle(session, Popover::Colour),
+            QuickAction::Layers => self.toggle(session, Popover::Layers),
+            QuickAction::Brushes => self.toggle(session, Popover::Brushes),
+            QuickAction::Interface => self.toggle_bars(session),
             QuickAction::FitCanvas => session.settle_to_fit(),
             QuickAction::ActualSize => session.settle_to_actual_size(),
             QuickAction::Quickshape => {
@@ -1227,18 +1209,13 @@ impl Interface {
     }
 
     fn toggle_transform(&mut self, session: &CanvasSession) {
-        self.end_recolor(session);
-        session.set_touch_layer_opacity(None);
-        self.drop.end_filling();
-        if self.transform.on {
-            self.transform.end(session, true);
+        if !self.transform.on && !self.takes_changes(session) {
             return;
         }
-        if !self.takes_changes(session) {
+        // on, it ends; else the other modes end
+        if !self.switch_modes(session, ModeButton::Transform) {
             return;
         }
-        self.selection.close(session);
-        self.end_adjustment(session, true);
         self.open = None;
         session.set_pick_next(false);
         // nothing there to move: it says so and stays out of transform
@@ -1249,14 +1226,10 @@ impl Interface {
 
     /// Opens adjustment `a` on the current layer (anything else open ends first).
     fn start_adjustment(&mut self, session: &CanvasSession, a: procraft_core::Adjustment) {
-        self.end_recolor(session);
-        session.set_touch_layer_opacity(None);
-        self.drop.end_filling();
         if !self.takes_changes(session) {
             return;
         }
-        self.transform.end(session, true);
-        self.selection.close(session);
+        self.switch_modes(session, ModeButton::Adjustment);
         self.open = None;
         session.set_pick_next(false);
         session.adjustment_start(a);
@@ -1272,20 +1245,8 @@ impl Interface {
 
     /// The adjustments button: closes an open adjustment (keeping it), or opens the menu.
     fn adjustments_pressed(&mut self, session: &CanvasSession) {
-        self.drop.end_filling();
-        // in Layer Opacity or Recolor, the button ends it
-        if session.touch_layer_opacity().is_some() {
-            session.set_touch_layer_opacity(None);
-            return;
-        }
-        if session.recolor_on() {
-            self.end_recolor(session);
-            return;
-        }
-        if session.adjustment_shown().adjustment.is_some() {
-            self.end_adjustment(session, true);
-        } else {
-            self.toggle(Popover::Adjustments);
+        if self.switch_modes(session, ModeButton::Adjustments) {
+            self.toggle(session, Popover::Adjustments);
         }
     }
 
@@ -1306,17 +1267,10 @@ impl Interface {
 
     /// Selection on (touches select, as its toolbar says) or off (a freehand path drawn is closed).
     fn toggle_selection(&mut self, session: &CanvasSession) {
-        self.end_recolor(session);
-        session.set_touch_layer_opacity(None);
-        self.drop.end_filling();
-        if self.selection.on {
-            self.selection.close(session);
+        // on, it ends; else the other modes end
+        if !self.switch_modes(session, ModeButton::Selection) {
             return;
         }
-        if self.transform.on {
-            self.transform.end(session, true);
-        }
-        self.end_adjustment(session, true);
         self.open = None;
         session.set_pick_next(false);
         self.selection.open(session);
@@ -1496,8 +1450,7 @@ impl Interface {
     /// The tool `target` takes the current brush, as its button held does.
     fn tool_held(&mut self, session: &CanvasSession, target: ToolKind) {
         let brush = session.current_brush();
-        let adjusting = session.adjustment_shown().adjustment.is_some();
-        if self.transform.on || self.selection.on || adjusting || session.info().tool == target {
+        if session.info().tool == target || !self.switch_modes(session, ModeButton::ToolHeld) {
             return;
         }
         self.choose_tool(session, target);
@@ -1532,16 +1485,65 @@ impl Interface {
         tapped
     }
 
-    fn toggle_bars(&mut self) {
+    /// The interface hidden or shown again (not while transforming).
+    fn toggle_bars(&mut self, session: &CanvasSession) {
+        if !self.switch_modes(session, ModeButton::Bars) {
+            return;
+        }
         self.bars_hidden = !self.bars_hidden;
         if self.bars_hidden {
             self.open = None;
         }
     }
 
-    fn toggle(&mut self, popover: Popover) {
+    /// A panel's button: the panel opens (or closes), what works on the canvas ending first.
+    fn toggle(&mut self, session: &CanvasSession, popover: Popover) {
         self.feedback();
+        self.switch_modes(session, ModeButton::Panel { colour: popover == Popover::Colour });
         self.open = if self.open == Some(popover) { None } else { Some(popover) };
+    }
+
+    /// The modes open now, as the core's [`mode_switch`] takes them.
+    fn open_modes(&self, session: &CanvasSession) -> Modes {
+        Modes {
+            quickshape: self.overlays.shape.is_some(),
+            filling: self.drop.filling(),
+            recolor: session.recolor_on(),
+            layer_opacity: session.touch_layer_opacity().is_some(),
+            transform: self.transform.on,
+            selection: self.selection.on,
+            adjustment: session.adjustment_shown().adjustment.is_some(),
+        }
+    }
+
+    /// `button` pressed: the modes it leaves behind end first (keeping what they made), as the
+    /// core says; true if it goes on to do what it does.
+    fn switch_modes(&mut self, session: &CanvasSession, button: ModeButton) -> bool {
+        let ModeSwitch { end, goes_on } = mode_switch(button, self.open_modes(session));
+        if end.quickshape {
+            session.quickshape_done();
+            self.overlays.shape = None;
+            self.overlays.shape_editing = false;
+        }
+        if end.filling {
+            self.drop.end_filling();
+        }
+        if end.recolor {
+            self.end_recolor(session);
+        }
+        if end.layer_opacity {
+            session.set_touch_layer_opacity(None);
+        }
+        if end.transform {
+            self.transform.end(session, true);
+        }
+        if end.selection {
+            self.selection.close(session);
+        }
+        if end.adjustment {
+            self.end_adjustment(session, true);
+        }
+        goes_on
     }
 
     /// The open panel, hanging from its button; a press anywhere else, or Escape, closes it.
@@ -1801,13 +1803,13 @@ impl Interface {
             KeyShortcut::Selection => self.toggle_selection(session),
             KeyShortcut::Transform => self.toggle_transform(session),
             KeyShortcut::HueSaturationBrightness => self.start_adjustment(session, procraft_core::Adjustment::Hsb),
-            KeyShortcut::Colours => self.toggle(Popover::Colour),
-            KeyShortcut::Actions => self.toggle(Popover::Actions),
-            KeyShortcut::Layers => self.toggle(Popover::Layers),
+            KeyShortcut::Colours => self.toggle(session, Popover::Colour),
+            KeyShortcut::Actions => self.toggle(session, Popover::Actions),
+            KeyShortcut::Layers => self.toggle(session, Popover::Layers),
             KeyShortcut::SwapColours => self.colours.swap(session),
             KeyShortcut::Deselect => self.selection.clear(session),
             KeyShortcut::DuplicateLayer => self.duplicate_current(session),
-            KeyShortcut::Interface => self.toggle_bars(),
+            KeyShortcut::Interface => self.toggle_bars(session),
             KeyShortcut::ClearLayer => self.clear_layer(session),
             KeyShortcut::BrushSize { by } => session.set_brush_size((info.size + by).clamp(0.0, 1.0)),
             KeyShortcut::Nudge { dx, dy } => self.transform.moved(session.transform_arrow(dx, dy)),

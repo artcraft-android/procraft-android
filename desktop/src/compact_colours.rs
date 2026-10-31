@@ -4,11 +4,11 @@
 //! own, which the screen that opened it takes as it changes.
 
 use egui::{Align2, Color32, Rect, ScrollArea, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
-use procraft_core::Palettes;
+use procraft_core::{HueControl, Palettes, SLIDER_HUES, hue_at, hue_position};
 
 use crate::colours::{
-    self, EMPTY_SLOT, HarmonyKind, Mode, Pickers, SATURATION_GREY, SLIDER_HUES, harmony_brightness, hex_pad, hex_row,
-    hsv_to_rgb, hue_at, hue_position, hue_slider, paint_row, rgb_of, set, slider_row, srgb, take_rgb, to_hex,
+    self, EMPTY_SLOT, HarmonyKind, Mode, Pickers, SATURATION_GREY, harmony_brightness, hex_pad, hex_row, hsv_to_rgb,
+    hue_slider, paint_row, rgb_of, set, slider_row, srgb, take_rgb, to_hex,
 };
 use crate::look::{Look, Weight, argb, pc, text};
 use crate::panel::{self, PANEL_TITLE};
@@ -88,6 +88,7 @@ impl CompactColours {
         tip: f32,
         palettes: &Palettes,
         harmony: HarmonyKind,
+        p3: bool,
     ) -> Option<Picked> {
         let screen = ctx.content_rect();
         let before = self.hsv;
@@ -119,7 +120,7 @@ impl CompactColours {
                     argb(PANEL_TITLE),
                 );
                 let top = body.top() + TITLE;
-                value_hex = self.picker(ui, body.left(), top, palettes, harmony);
+                value_hex = self.picker(ui, body.left(), top, palettes, harmony, p3);
                 let tabs = Rect::from_min_size(pos2(body.left(), top + self.body_height()), vec2(WIDTH, TABS));
                 self.tabs(ui, look, tabs);
             },
@@ -135,8 +136,17 @@ impl CompactColours {
     }
 
     /// The mode shown's picker, 260 wide from (`left`, `top`); Harmony with the colour panel's
-    /// `harmony` kind, Palettes with its `palettes`. Returns Value's hex row (else nothing).
-    pub fn picker(&mut self, ui: &mut Ui, left: f32, top: f32, palettes: &Palettes, harmony: HarmonyKind) -> Rect {
+    /// `harmony` kind (for a canvas in P3, `p3`, or sRGB), Palettes with its `palettes`. Returns
+    /// Value's hex row (else nothing).
+    pub fn picker(
+        &mut self,
+        ui: &mut Ui,
+        left: f32,
+        top: f32,
+        palettes: &Palettes,
+        harmony: HarmonyKind,
+        p3: bool,
+    ) -> Rect {
         match self.mode {
             Mode::Disc => {
                 let disc = Rect::from_min_size(pos2(left + 10.0, top + 4.0), vec2(240.0, 240.0));
@@ -151,9 +161,9 @@ impl CompactColours {
             }
             Mode::Harmony => {
                 let wheel = Rect::from_min_size(pos2(left + 30.0, top + 10.0), vec2(200.0, 200.0));
-                self.pickers.harmony(ui, &mut self.hsv, wheel, harmony);
+                self.pickers.harmony(ui, &mut self.hsv, wheel, harmony, p3);
                 let row = Rect::from_min_size(pos2(left + 10.0, wheel.bottom() + 8.0), vec2(240.0, 36.0));
-                harmony_brightness(ui, row, &mut self.hsv);
+                harmony_brightness(ui, row, &mut self.hsv, p3);
             }
             Mode::Value => return self.value(ui, left + 10.0, top),
             Mode::Palettes => {
@@ -208,7 +218,7 @@ impl CompactColours {
             let (letter, value, colours, shown): (&str, f32, Vec<Color32>, String) = match (self.rgb_shown, i) {
                 (false, 0) => (
                     "H",
-                    hue_position(&SLIDER_HUES, hsv[0]),
+                    hue_position(HueControl::Slider, hsv[0]),
                     SLIDER_HUES.iter().map(|h| srgb(hsv_to_rgb([h / 360.0, 1.0, 1.0]))).collect(),
                     format!("{}\u{b0}", (hsv[0] * 360.0).round() as i32),
                 ),
@@ -235,7 +245,7 @@ impl CompactColours {
             };
             let byte = (to * 255.0).round() as u32;
             match (self.rgb_shown, i) {
-                (false, 0) => _ = set(&mut self.hsv[0], hue_at(&SLIDER_HUES, to)),
+                (false, 0) => _ = set(&mut self.hsv[0], hue_at(HueControl::Slider, to)),
                 (false, 1) => _ = set(&mut self.hsv[1], to),
                 (false, _) => _ = set(&mut self.hsv[2], to),
                 (true, 0) => take_rgb(&mut self.hsv, byte << 16 | g << 8 | b),

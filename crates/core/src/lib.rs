@@ -29,11 +29,14 @@ mod gradients;
 mod guide;
 mod history;
 mod host;
+mod hues;
 mod keys;
 mod layer_ops;
 mod layers;
+mod modes;
 mod palettes;
 mod pick;
+mod pickers;
 mod pour;
 mod presets;
 mod project;
@@ -75,9 +78,11 @@ pub use adjust_menu::{
 };
 pub use adjusting::{AdjustShown, CLONE_PUCK_RADIUS};
 pub use animation::{AnimationPlayback, AnimationSettings, PlayStep, animation_next_step};
-pub use brush_files::OTHER_BRUSH_EXTENSIONS;
+pub use brush_files::{OTHER_BRUSH_EXTENSIONS, is_brush_zip};
 pub use brushes::{BrushInfo, BrushSetInfo};
-pub use colour::{cmyk_profiles, color_profiles, convert_color, import_profile, is_cmyk_profile, set_profile_folder};
+pub use colour::{
+    cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,
+};
 pub use crop_edit::CropShown;
 pub use frame::{configure, screen_profile};
 pub use gallery::{ArtworkStore, GalleryArtwork, GalleryEntry};
@@ -88,20 +93,26 @@ pub use gestures::{
 pub use gradients::{GradientInfo, GradientStop, Gradients};
 pub use guide::{GuideInfo, GuideType, SymmetryType};
 pub use history::ColourHistory;
+pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_stops};
 pub use keys::{KeyShortcut, key_shortcut};
 pub use layers::{
-    BlendModeInfo, Blocked, LayerInfo, LayerType, ThumbnailImage, blend_modes, brush_blend_modes, grain_blend_modes,
-    layers_for,
+    BlendModeInfo, Blocked, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
+    brush_blend_modes, grain_blend_modes, layers_for,
 };
+pub use modes::{ModeButton, ModeSwitch, Modes, mode_switch};
 pub use palettes::{PaletteInfo, Palettes, colour_name};
 pub use pick::Pick;
+pub use pickers::{
+    disc_picture, disc_to_square, disc_to_square_point, harmony_wheel, p3_hsv_of, p3_hsv_to_rgb, rgb_to_p3_hsv,
+    square_to_disc, square_to_disc_point,
+};
 pub use presets::{
     CanvasPreset, P3, SRGB, per_inch, preset_height, preset_label, preset_number, preset_width, presets_from_json,
     presets_json, profile_chip, standard_presets,
 };
-pub use project::{ArtworkInfo, read_signature, write_signature};
+pub use project::{ArtworkInfo, export_file_name, read_signature, write_signature};
 pub use project::{PackageTimeLapse, package_time_lapse};
-pub use project::{PsdOutcome, import_psd};
+pub use project::{PagesOutcome, PsdOutcome, import_pages, import_psd};
 pub use quick_menu::{
     QuickAction, quick_action_adjusts, quick_action_label, quick_actions_listed, quick_adjustments_listed,
     quick_menu_saved, quick_menu_slots,

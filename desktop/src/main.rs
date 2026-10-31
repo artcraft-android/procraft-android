@@ -37,6 +37,8 @@ mod look;
 mod menu;
 mod overlays;
 mod panel;
+mod pdf;
+mod pen;
 mod prefs;
 mod projection;
 mod quick_menu;
@@ -72,6 +74,30 @@ use crate::ui::{Action, Interface};
 /// A new artwork's size when the screen's isn't known.
 const FALLBACK_CANVAS: (u32, u32) = (1920, 1080);
 
+/// How long an artwork opens before it says so, as the tablet's.
+const SLOW_OPENING: Duration = Duration::from_millis(500);
+/// The veil over the window while it does.
+const OPENING_VEIL: u32 = 0x66000000;
+
+/// Over the window while a slow artwork opens: veiled, saying so (and taking the presses).
+fn opening_veil(ctx: &egui::Context) {
+    let screen = ctx.content_rect();
+    egui::Area::new(egui::Id::unique("opening")).fixed_pos(screen.min).order(egui::Order::Foreground).show(ctx, |ui| {
+        ui.allocate_rect(screen, egui::Sense::click_and_drag());
+        ui.painter().rect_filled(screen, 0, look::argb(OPENING_VEIL));
+        let ink = look::argb(look::pc::TEXT);
+        look::text(
+            ui.painter(),
+            screen.center(),
+            egui::Align2::CENTER_CENTER,
+            "Opening…",
+            17.0,
+            look::Weight::Regular,
+            ink,
+        );
+    });
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let event_loop = match EventLoop::new() {
@@ -88,6 +114,7 @@ fn main() {
         started: Instant::now(),
         last_frame: Instant::now(),
         again: None,
+        opening: None,
         screen: None,
         session: None,
         artwork: None,
@@ -98,7 +125,9 @@ fn main() {
         zoom: None,
         projection: None,
         displays_seen: None,
-        dropped: Vec::new(),
+        // files the app was opened with ("Open with", or dropped on its icon) come in as a drop on
+        // the gallery does
+        dropped: std::env::args_os().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_file()).collect(),
         tap_held: None,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
@@ -112,6 +141,8 @@ struct App {
     /// moving, or a hold to be timed).
     last_frame: Instant,
     again: Option<Instant>,
+    /// An artwork's canvas being made on a thread of its own as it opens, and since when.
+    opening: Option<(Instant, std::thread::JoinHandle<()>)>,
     screen: Option<Screen>,
     /// The artwork open and its folder in the gallery; none while the gallery shows.
     session: Option<Arc<CanvasSession>>,
@@ -126,8 +157,8 @@ struct App {
     /// Project canvas's window on a second display, and when the displays were last looked at.
     projection: Option<projection::Projection>,
     displays_seen: Option<Instant>,
-    /// Files dropped on the window, taken in together at the next frame (a model with its
-    /// material file and images comes in one drop).
+    /// Files dropped on the window (or the app opened with), taken in together at the next frame
+    /// (a model with its material file and images comes in one drop).
     dropped: Vec<std::path::PathBuf>,
     /// Tap Assistance: a lone finger's touch, where it landed and when, while it is held there.
     tap_held: Option<(u64, winit::dpi::PhysicalPosition<f64>, Instant)>,
@@ -155,6 +186,8 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+        // a pen's lean, which winit's touches leave out
+        pen::watch(&window);
         let screen = match Screen::new(window) {
             Ok(s) => s,
             Err(e) => {
@@ -268,7 +301,10 @@ impl App {
         let size = screen.window.inner_size();
         let scale = screen.window.scale_factor() as f32;
         session.set_display_scale(scale);
-        session.use_gpu(screen.gpu.clone());
+        // its layers go up on a thread of their own (an artwork of many takes seconds), the window
+        // drawing meanwhile
+        let (gpu, opened) = (screen.gpu.clone(), session.clone());
+        self.opening = Some((Instant::now(), std::thread::spawn(move || opened.use_gpu(gpu))));
         // the brushes as the last artwork left them
         if let Some(last) = &self.session {
             last.keep_brushes(files::brushes_dir());
@@ -322,6 +358,19 @@ impl App {
             return;
         };
         self.last_frame = Instant::now();
+        // the canvas made: drawn from now on; a slow one says it is opening
+        if self.opening.as_ref().is_some_and(|(_, made)| made.is_finished())
+            && let Some((_, made)) = self.opening.take()
+        {
+            let _ = made.join();
+        }
+        let slow = self.opening.as_ref().is_some_and(|(since, _)| since.elapsed() >= SLOW_OPENING);
+        // the gallery stays as it is until there is a canvas to zoom into
+        if self.opening.is_some()
+            && let Some(zoom) = self.zoom.as_mut().filter(|z| z.opening)
+        {
+            zoom.hold();
+        }
         let raw = screen.egui.take_egui_input(&screen.window);
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             self.ui.show(ui, &session, &mut self.input);
@@ -329,12 +378,20 @@ impl App {
             if let Some(zoom) = self.zoom.as_ref().filter(|z| z.opening) {
                 zoom.over_canvas(ui.ctx(), &mut self.gallery, &mut self.ui.look);
             }
+            if slow {
+                opening_veil(ui.ctx());
+            }
         });
         let pad_soon = self.studio_pad(&session);
         let Some(screen) = self.screen.as_mut() else { return };
         self.again = screen.draw(Some(&session), self.started, output).map(|after| Instant::now() + after);
         if pad_soon {
             self.again = Some(Instant::now());
+        }
+        // looked at again soon while the canvas is being made
+        if self.opening.is_some() {
+            let soon = Instant::now() + Duration::from_millis(50);
+            self.again = Some(self.again.map_or(soon, |due| due.min(soon)));
         }
         let unsaved = if session.edits() == self.ui.saved_edits { "" } else { " •" };
         let title = format!("{}{unsaved} — ProCraft", session.name());
@@ -429,17 +486,8 @@ impl App {
                 }
             }
             Some(gallery::Asked::Import(folder)) => {
-                if let Some((session, package)) = files::pick_artwork() {
-                    let dir = self.gallery.store.new_folder(folder);
-                    // a model is a new artwork painting on it
-                    let model = session.model_info().is_some();
-                    if let Some(package) = package {
-                        timelapse::take_package(&package, &dir);
-                    }
-                    self.open_artwork(session, dir);
-                    if model {
-                        self.ui.started_new();
-                    }
+                if let Some(paths) = files::pick_import() {
+                    self.import(paths, folder);
                 }
             }
             None => {}
@@ -554,23 +602,48 @@ impl App {
             self.ui.dropped(&session, &paths);
             return;
         }
-        // brushes wait for a canvas to open
+        self.import(paths, self.gallery.folder());
+    }
+
+    /// Files brought into the gallery (picked with Import, or dropped on it) into `folder`:
+    /// palettes join the colour panel's, brushes wait for a canvas to open, and the rest come in as
+    /// an artwork (a package, a PSD, a PDF, a picture, or a model with its files).
+    fn import(&mut self, paths: Vec<std::path::PathBuf>, folder: Option<String>) {
+        let (palettes, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| files::is_palette_file(p));
+        if !palettes.is_empty() {
+            let store = &self.ui.colours.palettes;
+            let added = palettes.iter().filter(|p| {
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
+                std::fs::read(p).is_ok_and(|bytes| store.import_file(bytes, name))
+            });
+            files::say(if added.count() > 0 { "Palette added." } else { "This palette can't be read." });
+        }
         let (brushes, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| files::is_brush_file(p));
         if !brushes.is_empty() {
             files::keep_pending_brushes(&brushes);
         }
-        if paths.is_empty() {
-            return;
-        }
-        let Some((session, package)) = files::open_artwork_files(paths) else { return };
-        let dir = self.gallery.store.new_folder(self.gallery.folder());
-        let model = session.model_info().is_some();
-        if let Some(package) = package {
-            timelapse::take_package(&package, &dir);
-        }
-        self.open_artwork(session, dir);
-        if model {
-            self.ui.started_new();
+        // a model takes the files picked with it; else each is an artwork of its own, the one
+        // before kept (closed) as the next comes in
+        let artworks: Vec<Vec<std::path::PathBuf>> = if paths.iter().any(|p| files::is_model_file(p)) {
+            vec![paths]
+        } else {
+            paths.into_iter().map(|p| vec![p]).collect()
+        };
+        for paths in artworks {
+            if self.session.is_some() && !self.leave_artwork() {
+                return;
+            }
+            let Some((session, package)) = files::open_artwork_files(paths) else { continue };
+            let dir = self.gallery.store.new_folder(folder.clone());
+            // a model is a new artwork painting on it
+            let model = session.model_info().is_some();
+            if let Some(package) = package {
+                timelapse::take_package(&package, &dir);
+            }
+            self.open_artwork(session, dir);
+            if model {
+                self.ui.started_new();
+            }
         }
     }
 

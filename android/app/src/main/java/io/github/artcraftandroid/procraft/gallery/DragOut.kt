@@ -77,7 +77,7 @@ class DragProvider : ContentProvider() {
 
         /** The address of artwork [a] (in the gallery at [root]) as [format]. */
         fun uri(ctx: Context, format: String, a: Artwork, root: File): Uri {
-            val base = a.name.filter { it.isLetterOrDigit() || it in " _-" }.trim().ifEmpty { "Untitled Artwork" }
+            val base = io.github.artcraftandroid.procraft.core.exportFileName(a.name, false)
             return Uri.Builder().scheme("content").authority(ctx.packageName + ".drag")
                 .appendPath(format).appendPath(a.dir.relativeTo(root).path).appendPath("$base.${Extensions[format] ?: "bin"}").build()
         }
@@ -99,31 +99,12 @@ fun exportArtwork(dir: File, format: String, out: File, pdfQuality: Int = 100): 
             "PSD" -> s.exportPsd(out.path)
             "TIFF" -> s.exportTiff(out.path)
             "PNG" -> s.exportPng(out.path)
-            "JPEG" -> {
-                val png = File(out.path + ".png")
-                s.exportPng(png.path)
-                val ok = pngToJpeg(png, out)
-                png.delete()
-                return@runCatching ok
-            }
+            "JPEG" -> s.exportJpeg(out.path)
             else -> return@runCatching false
         }
     }
     true
 }.getOrDefault(false)
-
-/** The picture in [png] flattened onto white as a JPEG in [jpg], keeping its colour space. */
-fun pngToJpeg(png: File, jpg: File): Boolean {
-    val picture = BitmapFactory.decodeFile(png.path) ?: return false
-    val space = picture.colorSpace ?: android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB)
-    val flat = Bitmap.createBitmap(picture.width, picture.height, Bitmap.Config.ARGB_8888, true, space)
-    android.graphics.Canvas(flat).apply {
-        drawColor(android.graphics.Color.WHITE)
-        drawBitmap(picture, 0f, 0f, null)
-    }
-    jpg.outputStream().use { flat.compress(Bitmap.CompressFormat.JPEG, 92, it) }
-    return true
-}
 
 /** What the gallery's own drags carry, so it can tell them from another app's. */
 class GalleryDrag(val entry: GalleryEntry)

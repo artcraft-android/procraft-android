@@ -148,6 +148,14 @@ pub fn profile_is_built_in(name: String) -> bool {
     Profile::from_name(&name).is_some()
 }
 
+/// Whether a canvas in the profile named `profile` takes the colour panel's Display P3 colours
+/// (Harmony's wheel) as they are: a P3 canvas, a CMYK one (shown in P3) and one in an imported
+/// profile. A built-in sRGB one has them turned into sRGB.
+#[uniffi::export]
+pub fn colours_in_p3(profile: String) -> bool {
+    Profile::from_name(&profile).is_none_or(|p| p == Profile::DisplayP3)
+}
+
 /// Whether the profile named `name` is a CMYK one.
 #[uniffi::export]
 pub fn is_cmyk_profile(name: String) -> bool {
@@ -244,5 +252,12 @@ mod tests {
         let same = convert_color(0x12AB34, "Display P3".to_owned(), procraft_engine::cmyk::NAME.to_owned());
         assert!((same >> 16).abs_diff(0x12) <= 1 && ((same >> 8) & 0xFF).abs_diff(0xAB) <= 1, "{same:06x}");
         assert_eq!(convert_color(0x123456, "nothing".to_owned(), "Display P3".to_owned()), 0x123456);
+    }
+
+    #[test]
+    fn the_panel_s_p3_colours_go_into_srgb_canvases_only() {
+        assert!(colours_in_p3("Display P3".to_owned()));
+        assert!(colours_in_p3(procraft_engine::cmyk::NAME.to_owned()));
+        assert!(!colours_in_p3("sRGB IEC61966-2.1".to_owned()));
     }
 }

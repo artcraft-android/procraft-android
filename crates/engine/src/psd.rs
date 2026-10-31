@@ -386,8 +386,10 @@ fn layer_info(bytes: &[u8], f: &Format) -> Result<Vec<Record>, PsdError> {
         records.push(record);
         lengths.push(ids);
     }
-    // each layer's channels, in the order its record listed them
-    for (record, ids) in records.iter_mut().zip(lengths) {
+    // each layer's channels, in the order its record listed them: found in turn, then unpacked
+    // side by side
+    let mut found = Vec::new();
+    for (i, (record, ids)) in records.iter().zip(lengths).enumerate() {
         for (id, len) in ids {
             let data = r.take(len).ok_or(damaged("channel"))?;
             let (w, h) = match (id, record.mask) {
@@ -398,9 +400,18 @@ fn layer_info(bytes: &[u8], f: &Format) -> Result<Vec<Record>, PsdError> {
             if id == -3 || w == 0 || h == 0 {
                 continue;
             }
-            let mut d = Reader::new(data);
-            let compression = d.u16().ok_or(damaged("channel"))?;
-            let plane = plane(&mut d, compression, w, h, f).ok_or(damaged("channel"))?;
+            found.push((i, id, data, w, h));
+        }
+    }
+    let unpack = |&(_, _, data, w, h): &(usize, i16, &[u8], usize, usize)| {
+        let mut d = Reader::new(data);
+        let compression = d.u16()?;
+        plane(&mut d, compression, w, h, f)
+    };
+    let planes = crate::par::side_by_side(&found, unpack);
+    for (&(i, id, ..), plane) in found.iter().zip(planes) {
+        let plane = plane.flatten().ok_or(damaged("channel"))?;
+        if let Some(record) = records.get_mut(i) {
             record.channels.push((id, plane));
         }
     }
@@ -608,6 +619,14 @@ struct Built {
 }
 
 /// The document's layers and pixels from the records.
+/// What a record's pixels came to: nothing on the canvas, the one colour the bottom layer is
+/// all of, or its pixels on the canvas.
+enum Made {
+    Nothing,
+    Uniform([u8; 3]),
+    Pixels(Vec<u8>),
+}
+
 fn build(records: &[Record], f: &Format) -> Built {
     let (w, h) = (f.width as usize, f.height as usize);
     let mut layers = Vec::new();
@@ -621,6 +640,20 @@ fn build(records: &[Record], f: &Format) -> Built {
     let mut open: Vec<LayerId> = Vec::new();
     let mut top = None;
     let mut background = None;
+    // each record's pixels worked out side by side (on the canvas, or the bottom layer's one
+    // colour), then the records gone through in order
+    let numbers: Vec<usize> = (0..records.len()).collect();
+    let made_of = |&i: &usize| -> Made {
+        let Some(r) = records.get(i).filter(|r| !matches!(r.section, Some(1..=3))) else { return Made::Nothing };
+        match picture(r, f) {
+            None => Made::Nothing,
+            Some(p) => match p.uniform() {
+                Some(colour) if i == 0 => Made::Uniform(colour),
+                _ => Made::Pixels(p.on_canvas(w, h)),
+            },
+        }
+    };
+    let mut made: Vec<Option<Made>> = crate::par::side_by_side(&numbers, made_of);
     for (i, r) in records.iter().enumerate() {
         // a layer without a name is numbered by where it is, counting from 2 at the bottom
         let name = if r.name.is_empty() { format!("Layer {}", i + 2) } else { r.name.clone() };
@@ -644,18 +677,17 @@ fn build(records: &[Record], f: &Format) -> Built {
             }
             _ => {}
         }
-        let picture = picture(r, f);
-        // the bottom layer all of one colour: the background
-        if i == 0
-            && let Some(colour) = picture.as_ref().and_then(Picture::uniform)
-        {
-            background = Some(colour);
-            continue;
-        }
-        // nothing on the canvas and no text: left out, its mask too
-        if picture.is_none() && r.text.is_none() {
-            continue;
-        }
+        let on_canvas = match made.get_mut(i).and_then(Option::take).unwrap_or_else(|| made_of(&i)) {
+            // the bottom layer all of one colour: the background
+            Made::Uniform(colour) => {
+                background = Some(colour);
+                continue;
+            }
+            Made::Pixels(px) => px,
+            // nothing on the canvas and no text: left out, its mask too
+            Made::Nothing if r.text.is_none() => continue,
+            Made::Nothing => vec![0; w * h * 4],
+        };
         let id = new_id();
         layers.push(Layer {
             visible: !r.hidden,
@@ -667,7 +699,7 @@ fn build(records: &[Record], f: &Format) -> Built {
             text: r.text.clone(),
             ..paint_layer(id, name, open.last().copied())
         });
-        pixels.push((id, picture.map_or_else(|| vec![0; w * h * 4], |p| p.on_canvas(w, h))));
+        pixels.push((id, on_canvas));
         top = Some(id);
         // its mask, just above it (hidden if turned off)
         let mask = r.mask.filter(|m| span(m.left, m.right) * span(m.top, m.bottom) > 0);

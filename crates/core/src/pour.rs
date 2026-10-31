@@ -22,27 +22,56 @@ pub(crate) struct Pour {
     colour: [f32; 3],
     selection: Option<Mask>,
     alpha_lock: bool,
-    /// The threshold last poured, in thousandths.
+    /// The threshold last poured, in thousandths, and where the layer was last poured into (x, y,
+    /// width, height): outside it the layer is as it was.
     shown: i32,
+    shown_region: Option<[u32; 4]>,
+    /// What it last poured, as the flood reached (within the selection).
+    shown_mask: Option<Mask>,
 }
 
 impl Pour {
-    /// The layer's pixels with the colour poured at `threshold`.
-    fn poured(&self, threshold: f32) -> Vec<u8> {
-        let Some(flood) = &self.flood else { return self.before.clone() };
-        let mut mask = flood.mask(threshold);
-        if let Some(sel) = &self.selection {
-            for (m, &s) in mask.data.iter_mut().zip(&sel.data) {
-                *m = ((u16::from(*m) * u16::from(s) + 127) / 255) as u8;
+    /// The colour poured at `threshold`, as the rectangle of the layer it changes now joined with
+    /// the one it changed last (put back as it was where it no longer pours): that rectangle (x, y,
+    /// width, height) and its pixels; none if neither changes anything. Remembered as shown.
+    fn pour_region(&mut self, width: u32, threshold: f32) -> Option<([u32; 4], Vec<u8>)> {
+        let mask = self.flood.as_ref().map(|flood| {
+            let mut mask = flood.mask(threshold);
+            if let Some(sel) = &self.selection {
+                for (m, &s) in mask.data.iter_mut().zip(&sel.data) {
+                    *m = ((u16::from(*m) * u16::from(s) + 127) / 255) as u8;
+                }
+            }
+            mask
+        });
+        let now = mask.as_ref().and_then(Mask::bounds);
+        let region = match (now, self.shown_region) {
+            (Some(a), Some(b)) => join(a, b),
+            (a, b) => a.or(b)?,
+        };
+        self.shown_region = now;
+        let [x, y, w, h] = region.map(|v| v as usize);
+        let stride = width as usize;
+        // the layer as it was there, and what of the flood falls there (a row at a time)
+        let cut = |all: &[u8], px: usize| -> Vec<u8> {
+            let mut out = Vec::with_capacity(w * h * px);
+            for r in y..y + h {
+                out.extend_from_slice(all.get((r * stride + x) * px..(r * stride + x + w) * px).unwrap_or(&[]));
+            }
+            out
+        };
+        let mut pixels = cut(&self.before, 4);
+        if let (Some(mask), Some(flood)) = (&mask, &self.flood) {
+            let data = cut(&mask.data, 1);
+            let part = Mask { width: region[2], height: region[3], data };
+            if self.elsewhere.is_some() {
+                fill::pour_over(&mut pixels, &part, self.colour, self.alpha_lock);
+            } else {
+                fill::pour(&mut pixels, &part, flood.colour, self.colour, self.alpha_lock);
             }
         }
-        let mut pixels = self.before.clone();
-        if self.elsewhere.is_some() {
-            fill::pour_over(&mut pixels, &mask, self.colour, self.alpha_lock);
-        } else {
-            fill::pour(&mut pixels, &mask, flood.colour, self.colour, self.alpha_lock);
-        }
-        pixels
+        self.shown_mask = mask;
+        Some((region, pixels))
     }
 
     /// The area measured again from canvas point `seed`, on the reference layer or the layer as
@@ -52,10 +81,40 @@ impl Pour {
         self.flood = Flood::new(width, height, sample, seed);
     }
 
-    /// The pour as it now is, for the layer.
-    fn shown(&self) -> Vec<u8> {
-        self.poured(self.shown as f32 / 1000.0)
+    /// The point moved to `seed`: true if the pour stays as it is, the new point being of the
+    /// same colour inside what it poured (the area joined to it then the same), so only the seed
+    /// moves; otherwise measured again from it, and false.
+    fn moved(&mut self, width: u32, height: u32, seed: (u32, u32)) -> bool {
+        let sample = self.elsewhere.as_deref().unwrap_or(&self.before);
+        let i = seed.1 as usize * width as usize + seed.0 as usize;
+        let colour: Option<[u8; 4]> = sample.get(i * 4..i * 4 + 4).and_then(|c| c.try_into().ok());
+        let inside = self.shown_mask.as_ref().and_then(|m| m.data.get(i)).is_some_and(|&v| v > 0);
+        if let Some(flood) = self.flood.as_mut()
+            && inside
+            && colour == Some(flood.colour)
+            && flood.reseed(seed)
+        {
+            return true;
+        }
+        self.measure(width, height, seed);
+        false
     }
+
+    /// The pour as it now is, put on its layer in `canvas` where it changed.
+    fn show(&mut self, width: u32, canvas: Option<&mut procraft_gpu::Canvas>) {
+        let Some(([x, y, w, h], pixels)) = self.pour_region(width, self.shown as f32 / 1000.0) else { return };
+        if let Some(canvas) = canvas {
+            canvas.put_layer_region(self.layer, x, y, w, h, pixels);
+        }
+    }
+}
+
+/// The smallest rectangle (x, y, width, height) holding both `a` and `b`.
+fn join(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
+    let [ax, ay, aw, ah] = a;
+    let [bx, by, bw, bh] = b;
+    let (x, y) = (ax.min(bx), ay.min(by));
+    [x, y, (ax + aw).max(bx + bw) - x, (ay + ah).max(by + bh) - y]
 }
 
 fn thousandths(threshold: f32) -> i32 {
@@ -102,16 +161,17 @@ impl CanvasSession {
             selection: st.selection.clone(),
             alpha_lock: layer.alpha_lock,
             shown: thousandths(threshold),
+            shown_region: None,
+            shown_mask: None,
         };
         pour.measure(w, h, seed);
         if pour.flood.is_none() {
             return false;
         }
-        let pixels = pour.poured(threshold);
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.hold_layer(current);
-            canvas.put_layer(current, pixels);
         }
+        pour.show(w, st.canvas.as_mut());
         st.pour = Some(pour);
         self.shared.frame(st);
         true
@@ -125,15 +185,18 @@ impl CanvasSession {
         let seed = seed_at(st, x, y);
         let (w, h) = (st.doc.width(), st.doc.height());
         let Some(pour) = st.pour.as_mut() else { return false };
-        match seed {
-            Some(seed) => pour.measure(w, h, seed),
-            None => pour.flood = None,
+        let same = match seed {
+            Some(seed) => pour.moved(w, h, seed),
+            None => {
+                pour.flood = None;
+                false
+            }
+        };
+        // moved within what it filled, from the same colour: nothing changes
+        if !same {
+            pour.show(w, st.canvas.as_mut());
+            self.shared.frame(st);
         }
-        let (layer, pixels) = (pour.layer, pour.shown());
-        if let Some(canvas) = st.canvas.as_mut() {
-            canvas.put_layer(layer, pixels);
-        }
-        self.shared.frame(st);
         true
     }
 
@@ -147,10 +210,8 @@ impl CanvasSession {
             return;
         }
         pour.colour = colour;
-        let (layer, pixels) = (pour.layer, pour.shown());
-        if let Some(canvas) = st.canvas.as_mut() {
-            canvas.put_layer(layer, pixels);
-        }
+        let w = st.doc.width();
+        pour.show(w, st.canvas.as_mut());
         self.shared.frame(st);
     }
 
@@ -164,10 +225,8 @@ impl CanvasSession {
             return;
         }
         pour.shown = t;
-        let (layer, pixels) = (pour.layer, pour.shown());
-        if let Some(canvas) = st.canvas.as_mut() {
-            canvas.put_layer(layer, pixels);
-        }
+        let w = st.doc.width();
+        pour.show(w, st.canvas.as_mut());
         self.shared.frame(st);
     }
 

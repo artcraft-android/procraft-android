@@ -13,6 +13,10 @@ use crate::layers::ThumbnailImage;
 use crate::project::{file_error, thumbnail, write_atomically};
 use crate::{CanvasSession, MobileError};
 
+/// How much of an animated GIF's frames is drawn at once (a frame to a core), so a big canvas's
+/// export doesn't hold many full-size frames.
+const GIF_BATCH_BYTES: usize = 256 << 20;
+
 /// The frames: the visible top-level layers and groups, bottom first.
 fn frames(doc: &Document) -> Vec<LayerId> {
     animation::frames(doc)
@@ -69,9 +73,32 @@ impl CanvasSession {
         let units = sequence(&self.shared.lock().doc);
         let delay = (100.0 / fps.clamp(0.1, 100.0)).round() as u16;
         let mut gif: Option<GifWriter> = None;
-        for unit in units {
-            let (w, h, rgba) = self.render_frame(unit, transparent, max_side)?;
-            gif.get_or_insert_with(|| GifWriter::new(w, h)).frame(&rgba, delay.max(1), dither);
+        // drawn a few at a time (a frame to a core, as many as fit in GIF_BATCH_BYTES), each few
+        // made into the GIF's frames side by side, then added in order
+        let mut next = 0;
+        let mut few = 1;
+        while next < units.len() {
+            let frames = units
+                .iter()
+                .skip(next)
+                .take(few)
+                .map(|&unit| self.render_frame(unit, transparent, max_side))
+                .collect::<Result<Vec<_>, _>>()?;
+            next += frames.len();
+            let Some(&(w, h, _)) = frames.first() else { break };
+            let frame_bytes = (w as usize * h as usize * 4).max(1);
+            few = (GIF_BATCH_BYTES / frame_bytes).clamp(1, procraft_engine::par::cores());
+            let writer = gif.get_or_insert_with(|| GifWriter::new(w, h));
+            let made = {
+                let writer = &*writer;
+                procraft_engine::par::side_by_side(&frames, |(_, _, rgba)| {
+                    writer.encoded_frame(rgba, delay.max(1), dither)
+                })
+            };
+            for ((_, _, rgba), frame) in frames.iter().zip(made) {
+                let frame = frame.unwrap_or_else(|| writer.encoded_frame(rgba, delay.max(1), dither));
+                writer.add_encoded(&frame);
+            }
         }
         let bytes = gif.ok_or_else(|| file_error("saving", "there are no frames"))?.finish();
         write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))

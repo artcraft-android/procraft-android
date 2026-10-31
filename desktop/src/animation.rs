@@ -418,6 +418,7 @@ impl AnimationBar {
         harmony: HarmonyKind,
     ) {
         let colours_page = self.colours.is_some();
+        let p3 = procraft_core::colours_in_p3(session.profile());
         let content = if colours_page {
             34.0 + 7.0 + 26.0 + 11.0 + PICKER_BODY + compact_colours::TABS
         } else {
@@ -483,7 +484,7 @@ impl AnimationBar {
                         TSTransform::from_translation(at.to_vec2()) * TSTransform::from_scaling(k),
                     );
                     egui::Area::new(layer).fixed_pos(Pos2::ZERO).order(Order::Tooltip).show(ui.ctx(), |ui| {
-                        hex = picker.picker(ui, 0.0, 0.0, palettes, harmony);
+                        hex = picker.picker(ui, 0.0, 0.0, palettes, harmony, p3);
                     });
                     keypad = Rect::from_min_size(at + hex.min.to_vec2() * k, hex.size() * k);
                     let tabs = Rect::from_min_size(

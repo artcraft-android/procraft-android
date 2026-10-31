@@ -79,6 +79,10 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
+import io.github.artcraftandroid.procraft.core.HueControl
+import io.github.artcraftandroid.procraft.core.hueAt
+import io.github.artcraftandroid.procraft.core.huePosition
+import io.github.artcraftandroid.procraft.core.hueStops
 
 private val PanelWidth = 376.dp
 
@@ -95,39 +99,10 @@ private val RingInner = 124.dp
 private val DiscRadius = 105.dp
 private val HarmonyRadius = 149.dp
 
-/**
- * The hue controls are not linear in hue. These are the hues (degrees) at evenly spaced points
- * along each, measured; positions between them interpolate. The classic slider has 25, the
- * disc's ring 49 (every 7.5 degrees, anticlockwise from the right).
- */
-private val SliderHues = floatArrayOf(
-    0f, 0.2f, 8f, 17.7f, 27.3f, 36.4f, 44.2f, 52.7f, 80.4f, 112.8f, 120.5f, 120.5f, 133.3f,
-    154.3f, 178.2f, 196.1f, 211.1f, 226.1f, 241.1f, 259.7f, 275.1f, 291.7f, 310f, 340.2f, 360f,
-)
-private val RingHues = floatArrayOf(
-    0f, 0.2f, 0.2f, 0.2f, 4.5f, 13.2f, 18.9f, 23.7f, 27.9f, 32.4f, 36.4f, 40.9f, 44.6f, 49.1f,
-    53.1f, 57.2f, 61.4f, 74.2f, 88.6f, 114.8f, 120.5f, 120.5f, 120.5f, 120.5f, 134.8f, 149.9f,
-    162.2f, 173.4f, 180f, 186.9f, 195.4f, 203.4f, 211.4f, 219.4f, 227.5f, 235.3f, 242.1f, 251.1f,
-    258.5f, 268f, 276.5f, 285.3f, 293.6f, 300.2f, 303.3f, 318.2f, 333.7f, 351.2f, 360f,
-)
-
-/** The hue (0..1) at [position] (0..1) along a control whose hues are [stops]. */
-private fun hueAt(stops: FloatArray, position: Float): Float {
-    val p = position.coerceIn(0f, 1f) * (stops.size - 1)
-    val i = p.toInt().coerceAtMost(stops.size - 2)
-    return (stops[i] + (stops[i + 1] - stops[i]) * (p - i)) / 360f
-}
-
-/** Where [hue] (0..1) sits (0..1) along a control whose hues are [stops]. */
-private fun huePosition(stops: FloatArray, hue: Float): Float {
-    val h = hue.coerceIn(0f, 1f) * 360f
-    for (i in 0 until stops.size - 1) {
-        val a = stops[i]
-        val b = stops[i + 1]
-        if (h <= b && b > a) return (i + ((h - a) / (b - a)).coerceIn(0f, 1f)) / (stops.size - 1)
-    }
-    return 1f
-}
+// The hue controls are not linear in hue: the core keeps the hues measured at evenly spaced
+// points along each (the classic slider's 25, the disc's ring's 49), for drawing them
+private val SliderHues = hueStops(HueControl.SLIDER).toFloatArray()
+private val RingHues = hueStops(HueControl.RING).toFloatArray()
 
 private fun rgbColor(rgb: Int) = CanvasSpace.color(rgb)
 
@@ -344,47 +319,33 @@ private fun Classic(c: ColorPick, compact: Boolean = false, square: Dp = 344.dp)
     if (compact) {
         // the hue only, 240 wide under the 248 square
         Box(Modifier.padding(start = 10.dp, end = 10.dp).height(40.dp)) {
-            SliderRow(huePosition(SliderHues, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }) { c.setHsv(hueAt(SliderHues, it), c.saturation, c.brightness) }
+            SliderRow(huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }) { c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness) }
         }
         return
     }
     Column(Modifier.padding(horizontal = 20.dp)) {
         val pure = hsvColor(c.hue, 1f, 1f)
-        SliderRow(huePosition(SliderHues, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }) { c.setHsv(hueAt(SliderHues, it), c.saturation, c.brightness) }
+        SliderRow(huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }) { c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness) }
         SliderRow(c.saturation, listOf(Pc.SaturationGrey, pure)) { c.setHsv(c.hue, it, c.brightness) }
         SliderRow(c.brightness, BrightnessTrack) { c.setHsv(c.hue, c.saturation, it) }
     }
 }
 
-/** Square (saturation across, brightness up, both -1..1 with y down) to disc, by the elliptical grid map. */
-private fun squareToDisc(x: Float, y: Float): Offset = Offset(x * sqrt(1f - y * y / 2f), y * sqrt(1f - x * x / 2f))
+/** Square (saturation across, brightness up, both -1..1 with y down) to disc, by the elliptical grid map (the core's). */
+private fun squareToDisc(x: Float, y: Float): Offset =
+    io.github.artcraftandroid.procraft.core.squareToDiscPoint(x, y).let { Offset(it[0], it[1]) }
 
 /** The inverse of [squareToDisc]. */
-private fun discToSquare(u: Float, v: Float): Offset {
-    val r2 = 2f * sqrt(2f)
-    fun half(a: Float, b: Float, s: Float) = 0.5f * sqrt(max(0f, 2f + a * a - b * b + r2 * s)) - 0.5f * sqrt(max(0f, 2f + a * a - b * b - r2 * s))
-    return Offset(half(u, v, u).coerceIn(-1f, 1f), half(v, u, v).coerceIn(-1f, 1f))
-}
+private fun discToSquare(u: Float, v: Float): Offset =
+    io.github.artcraftandroid.procraft.core.discToSquarePoint(u, v).let { Offset(it[0], it[1]) }
 
-/** The saturation/brightness disc for [hue], [side] pixels square, with a soft edge. */
+/** The saturation/brightness disc for [hue], [side] pixels square, with a soft edge, as the core draws it. */
 private fun discImage(hue: Float, side: Int): ImageBitmap {
-    val pixels = IntArray(side * side)
-    val hsv = floatArrayOf(hue * 360f, 0f, 0f)
-    val half = side / 2f
-    for (j in 0 until side) {
-        for (i in 0 until side) {
-            val u = (i + 0.5f) / half - 1f
-            val v = (j + 0.5f) / half - 1f
-            val edge = ((1f - sqrt(u * u + v * v)) * half + 0.5f).coerceIn(0f, 1f)
-            if (edge <= 0f) continue
-            val sq = discToSquare(u, v)
-            hsv[1] = (sq.x + 1f) / 2f
-            hsv[2] = (1f - sq.y) / 2f
-            val rgb = android.graphics.Color.HSVToColor(hsv) and 0xFFFFFF
-            pixels[j * side + i] = ((edge * 255f).toInt() shl 24) or rgb
-        }
-    }
-    return CanvasSpace.tag(android.graphics.Bitmap.createBitmap(pixels, side, side, android.graphics.Bitmap.Config.ARGB_8888)).asImageBitmap()
+    val n = side.coerceAtLeast(1)
+    val rgba = io.github.artcraftandroid.procraft.core.discPicture(hue, n.toUInt())
+    val bitmap = android.graphics.Bitmap.createBitmap(n, n, android.graphics.Bitmap.Config.ARGB_8888)
+    bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(rgba))
+    return CanvasSpace.tag(bitmap).asImageBitmap()
 }
 
 /**
@@ -425,7 +386,7 @@ private fun Disc(c: ColorPick, compact: Boolean = false, short: Boolean = false)
                         val d = p - centre
                         if (onRing) {
                             val turn = (atan2(-d.y, d.x) / (2f * PI.toFloat()) + 1f) % 1f
-                            c.setHsv(hueAt(RingHues, turn), sat, bri)
+                            c.setHsv(hueAt(HueControl.RING, turn), sat, bri)
                         } else {
                             val r = discRadius.toPx()
                             var uv = Offset(d.x / r, d.y / r)
@@ -453,7 +414,7 @@ private fun Disc(c: ColorPick, compact: Boolean = false, short: Boolean = false)
                 val r = discRadius.toPx()
                 drawImage(disc, topLeft = Offset(o.x - r, o.y - r))
                 // the ring knob sits on the middle of the ring, where the hue is
-                val turn = huePosition(RingHues, c.hue) * 2f * PI.toFloat()
+                val turn = huePosition(HueControl.RING, c.hue) * 2f * PI.toFloat()
                 val mid = (inner + outer) / 2f
                 knob(o + Offset(cos(turn) * mid, -sin(turn) * mid), 26.2.dp.toPx() * k, hsvColor(c.hue, 1f, 1f))
                 val p = squareToDisc(c.saturation * 2f - 1f, 1f - c.brightness * 2f)
@@ -522,56 +483,24 @@ private fun SliderRow(value: Float, colours: List<Color>, onChange: (Float) -> U
     )
 }
 
-// The harmony disc is a hue/saturation wheel in Display P3: on an sRGB canvas its colours are
-// turned into sRGB (clipped), on a P3 one they are taken as they are (both spaces use the sRGB
-// transfer curve).
-private fun toLinear(c: Float) = if (c <= 0.04045f) c / 12.92f else ((c + 0.055f) / 1.055f).pow(2.4f)
+// The harmony disc is a hue/saturation wheel in Display P3 (the core's): on an sRGB canvas its
+// colours are turned into sRGB (clipped), on a P3 one they are taken as they are.
 
-private fun toEncoded(c: Float) = if (c <= 0.0031308f) c * 12.92f else 1.055f * c.pow(1f / 2.4f) - 0.055f
-
-/** P3 hue (0..1), saturation and value to a canvas colour (0xRRGGBB), clipped to sRGB on an sRGB canvas. */
-private fun p3HsvToRgb(h: Float, s: Float, v: Float): Int {
-    val p = CanvasViewModel.hsvToRgb(h, s, v)
-    if (CanvasSpace.p3) return p
-    val r = toLinear(((p shr 16) and 0xFF) / 255f)
-    val g = toLinear(((p shr 8) and 0xFF) / 255f)
-    val b = toLinear((p and 0xFF) / 255f)
-    fun out(x: Float) = (toEncoded(x.coerceIn(0f, 1f)) * 255f).roundToInt()
-    return (out(1.2249f * r - 0.2247f * g) shl 16) or (out(-0.0420f * r + 1.0419f * g) shl 8) or out(-0.0197f * r - 0.0786f * g + 1.0979f * b)
-}
+/** P3 hue (0..1), saturation and value to a canvas colour (0xRRGGBB). */
+private fun p3HsvToRgb(h: Float, s: Float, v: Float): Int =
+    io.github.artcraftandroid.procraft.core.p3HsvToRgb(h, s, v, CanvasSpace.p3).toInt()
 
 /** A canvas colour (0xRRGGBB) as P3 hue (0..1), saturation and value. */
-private fun rgbToP3Hsv(rgb: Int): FloatArray {
-    if (CanvasSpace.p3) {
-        val hsv = FloatArray(3)
-        android.graphics.Color.RGBToHSV((rgb shr 16) and 0xFF, (rgb shr 8) and 0xFF, rgb and 0xFF, hsv)
-        return floatArrayOf(hsv[0] / 360f, hsv[1], hsv[2])
-    }
-    val r = toLinear(((rgb shr 16) and 0xFF) / 255f)
-    val g = toLinear(((rgb shr 8) and 0xFF) / 255f)
-    val b = toLinear((rgb and 0xFF) / 255f)
-    fun enc(x: Float) = (toEncoded(x.coerceIn(0f, 1f)) * 255f).roundToInt()
-    val hsv = FloatArray(3)
-    android.graphics.Color.RGBToHSV(enc(0.8225f * r + 0.1774f * g), enc(0.0332f * r + 0.9669f * g), enc(0.0171f * r + 0.0724f * g + 0.9108f * b), hsv)
-    return floatArrayOf(hsv[0] / 360f, hsv[1], hsv[2])
-}
+private fun rgbToP3Hsv(rgb: Int): FloatArray =
+    io.github.artcraftandroid.procraft.core.rgbToP3Hsv(rgb.toUInt(), CanvasSpace.p3).toFloatArray()
 
-/** The harmony wheel at value [v], [side] pixels square: hue anticlockwise from the right, saturation outwards. */
+/** The harmony wheel at value [v], [side] pixels square, as the core draws it. */
 private fun harmonyImage(v: Float, side: Int): ImageBitmap {
-    val pixels = IntArray(side * side)
-    val half = side / 2f
-    for (j in 0 until side) {
-        for (i in 0 until side) {
-            val u = (i + 0.5f) / half - 1f
-            val w = (j + 0.5f) / half - 1f
-            val d = sqrt(u * u + w * w)
-            val edge = ((1f - d) * half + 0.5f).coerceIn(0f, 1f)
-            if (edge <= 0f) continue
-            val h = (atan2(-w, u) / (2f * PI.toFloat()) + 1f) % 1f
-            pixels[j * side + i] = ((edge * 255f).toInt() shl 24) or p3HsvToRgb(h, d.coerceAtMost(1f), v)
-        }
-    }
-    return CanvasSpace.tag(android.graphics.Bitmap.createBitmap(pixels, side, side, android.graphics.Bitmap.Config.ARGB_8888)).asImageBitmap()
+    val n = side.coerceAtLeast(1)
+    val rgba = io.github.artcraftandroid.procraft.core.harmonyWheel(v, n.toUInt(), CanvasSpace.p3)
+    val bitmap = android.graphics.Bitmap.createBitmap(n, n, android.graphics.Bitmap.Config.ARGB_8888)
+    bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(rgba))
+    return CanvasSpace.tag(bitmap).asImageBitmap()
 }
 
 /** The harmony kind under the title; tapping it lists the kinds. */
@@ -614,7 +543,7 @@ private fun Harmony(vm: CanvasViewModel, c: ColorPick, compact: Boolean = false,
     val density = LocalDensity.current
     // compact, the wheel is 200 across instead of 298; short, 296
     val radius = if (compact) 100.dp else if (short) HarmonyRadius - 1.dp else HarmonyRadius
-    val wheel = remember(hsv[2], radius) { harmonyImage(hsv[2], with(density) { radius.roundToPx() }) }
+    val wheel = remember(hsv[2], radius, CanvasSpace.p3) { harmonyImage(hsv[2], with(density) { radius.roundToPx() }) }
     // the header is 78 tall here, with the kind under the title; the wheel starts 88 down (short, 82)
     Column(Modifier.padding(top = if (short) 4.dp else 10.dp)) {
         Box(
@@ -876,8 +805,8 @@ private fun Value(c: ColorPick, compact: Boolean = false, short: Boolean = false
     }
     Column(Modifier.padding(horizontal = 8.dp)) {
         ValueGroup(short = short) {
-            ValueRow("H", huePosition(SliderHues, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }, "${(c.hue * 360f).roundToInt()}°") {
-                c.setHsv(hueAt(SliderHues, it), c.saturation, c.brightness)
+            ValueRow("H", huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }, "${(c.hue * 360f).roundToInt()}°") {
+                c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness)
             }
             ValueRow("S", c.saturation, listOf(Pc.SaturationGrey, hsvColor(c.hue, 1f, 1f)), "${(c.saturation * 100f).roundToInt()}%") {
                 c.setHsv(c.hue, it, c.brightness)
@@ -908,8 +837,8 @@ private fun InkValue(c: ColorPick, inks: Inks) {
     fun inksWith(k: Int, v: Float) = now.copyOf().also { it[k] = v.coerceIn(0f, 1f) }
     Column(Modifier.padding(horizontal = 8.dp)) {
         ValueGroup(height = 142.dp, gap = 4.dp, top = 1.dp) {
-            ValueRow("H", huePosition(SliderHues, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }, "${(c.hue * 360f).roundToInt()}°") {
-                c.setHsv(hueAt(SliderHues, it), c.saturation, c.brightness)
+            ValueRow("H", huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }, "${(c.hue * 360f).roundToInt()}°") {
+                c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness)
             }
             ValueRow("S", c.saturation, listOf(Pc.SaturationGrey, hsvColor(c.hue, 1f, 1f)), "${(c.saturation * 100f).roundToInt()}%") {
                 c.setHsv(c.hue, it, c.brightness)
@@ -962,8 +891,8 @@ private fun CompactValue(c: ColorPick) {
                 CompactValueRow("G", g / 255f, listOf(Color(r, 0, b), Color(r, 255, b)), "$g") { c.setRgb((r shl 16) or ((it * 255f).roundToInt() shl 8) or b) }
                 CompactValueRow("B", b / 255f, listOf(Color(r, g, 0), Color(r, g, 255)), "$b") { c.setRgb((r shl 16) or (g shl 8) or (it * 255f).roundToInt()) }
             } else {
-                CompactValueRow("H", huePosition(SliderHues, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }, "${(c.hue * 360f).roundToInt()}°") {
-                    c.setHsv(hueAt(SliderHues, it), c.saturation, c.brightness)
+                CompactValueRow("H", huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }, "${(c.hue * 360f).roundToInt()}°") {
+                    c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness)
                 }
                 CompactValueRow("S", c.saturation, listOf(Pc.SaturationGrey, hsvColor(c.hue, 1f, 1f)), "${(c.saturation * 100f).roundToInt()}%") {
                     c.setHsv(c.hue, it, c.brightness)

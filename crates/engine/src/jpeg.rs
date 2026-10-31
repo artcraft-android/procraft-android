@@ -171,7 +171,13 @@ enum Kind {
 /// `rgb` (`width` × `height`, 3 bytes a pixel, top row first) as a baseline JPEG at `quality`
 /// (1..100).
 pub fn encode(rgb: &[u8], width: u32, height: u32, quality: u8) -> Vec<u8> {
-    encode_with(Kind::Ycc, width, height, quality, |at| {
+    encode_tagged(rgb, width, height, quality, &[])
+}
+
+/// As [`encode`], carrying the colour profile `icc` (none if it is empty) in APP2 markers, where
+/// programs look for it.
+pub fn encode_tagged(rgb: &[u8], width: u32, height: u32, quality: u8, icc: &[u8]) -> Vec<u8> {
+    encode_with(Kind::Ycc, width, height, quality, icc, |at| {
         let (r, g, b) = match rgb.get(at * 3..at * 3 + 3) {
             Some(&[r, g, b]) => (f32::from(r), f32::from(g), f32::from(b)),
             _ => (0.0, 0.0, 0.0),
@@ -189,15 +195,26 @@ pub fn encode(rgb: &[u8], width: u32, height: u32, quality: u8) -> Vec<u8> {
 /// as a baseline JPEG at `quality` (1..100), each ink inverted under an Adobe marker as print
 /// programs keep them (a PDF reading it says `/Decode [1 0 1 0 1 0 1 0]`).
 pub fn encode_cmyk(cmyk: &[u8], width: u32, height: u32, quality: u8) -> Vec<u8> {
-    encode_with(Kind::Cmyk, width, height, quality, |at| {
+    encode_with(Kind::Cmyk, width, height, quality, &[], |at| {
         let ink = |k: usize| f32::from(cmyk.get(at * 4 + k).copied().unwrap_or(0));
         [127.0 - ink(0), 127.0 - ink(1), 127.0 - ink(2), 127.0 - ink(3)]
     })
 }
 
+/// The most of a colour profile one APP2 marker holds (a marker's 65535 bytes less its length and
+/// the 14 that name and number it).
+const ICC_PIECE: usize = 65519;
+
 /// The JPEG of a `width` × `height` picture whose components (level-shifted: −128..127) at each
-/// pixel `pixel` gives, top row first.
-fn encode_with(kind: Kind, width: u32, height: u32, quality: u8, pixel: impl Fn(usize) -> [f32; 4]) -> Vec<u8> {
+/// pixel `pixel` gives, top row first, with colour profile `icc` if it isn't empty.
+fn encode_with(
+    kind: Kind,
+    width: u32,
+    height: u32,
+    quality: u8,
+    icc: &[u8],
+    pixel: impl Fn(usize) -> [f32; 4],
+) -> Vec<u8> {
     let (w, h) = (width.clamp(1, 65535) as usize, height.clamp(1, 65535) as usize);
     let n = if kind == Kind::Cmyk { 4 } else { 3 };
     // the tables (quantisation and Huffman) each component uses: inks all use the first
@@ -209,6 +226,15 @@ fn encode_with(kind: Kind, width: u32, height: u32, quality: u8, pixel: impl Fn(
         Kind::Ycc => out.extend_from_slice(&[0xFF, 0xE0, 0, 16, b'J', b'F', b'I', b'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0]),
         // the Adobe marker: version 100, no flags, no colour transform
         Kind::Cmyk => out.extend_from_slice(&[0xFF, 0xEE, 0, 14, b'A', b'd', b'o', b'b', b'e', 0, 100, 0, 0, 0, 0, 0]),
+    }
+    // the colour profile, in pieces as big as a marker holds, numbered from 1 out of how many
+    let pieces: Vec<&[u8]> = icc.chunks(ICC_PIECE).collect();
+    for (k, piece) in pieces.iter().enumerate() {
+        out.extend_from_slice(&[0xFF, 0xE2]);
+        out.extend_from_slice(&((2 + 14 + piece.len()) as u16).to_be_bytes());
+        out.extend_from_slice(b"ICC_PROFILE\0");
+        out.extend_from_slice(&[k as u8 + 1, pieces.len() as u8]);
+        out.extend_from_slice(piece);
     }
     for (id, t) in tables.iter().enumerate() {
         out.extend_from_slice(&[0xFF, 0xDB, 0, 67, id as u8]);
@@ -312,6 +338,27 @@ fn encode_with(kind: Kind, width: u32, height: u32, quality: u8, pixel: impl Fn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_profile_goes_in_numbered_pieces_after_the_header() {
+        let rgb = vec![200u8; 8 * 8 * 3];
+        let plain = encode(&rgb, 8, 8, 92);
+        let icc: Vec<u8> = (0..70_000u32).map(|i| (i % 251) as u8).collect();
+        let tagged = encode_tagged(&rgb, 8, 8, 92, &icc);
+        // after SOI and the JFIF header (20 bytes): two APP2 markers, then the rest as before
+        let first = &tagged[20..];
+        assert_eq!(&first[..4], &[0xFF, 0xE2, 0xFF, 0xFF]);
+        assert_eq!(&first[4..18], b"ICC_PROFILE\0\x01\x02");
+        let second = &first[2 + 65535..];
+        assert_eq!(&second[..2], &[0xFF, 0xE2]);
+        assert_eq!(usize::from(u16::from_be_bytes([second[2], second[3]])), 2 + 14 + 70_000 - ICC_PIECE);
+        assert_eq!(&second[16..18], &[2, 2]);
+        let rest = &second[2 + 2 + 14 + 70_000 - ICC_PIECE..];
+        assert_eq!(rest, &plain[20..]);
+        let mut joined = first[18..2 + 65535].to_vec();
+        joined.extend_from_slice(&second[18..2 + 2 + 14 + 70_000 - ICC_PIECE]);
+        assert_eq!(joined, icc);
+    }
 
     #[test]
     fn a_picture_encodes_to_a_well_formed_file() {

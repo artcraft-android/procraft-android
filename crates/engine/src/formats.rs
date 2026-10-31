@@ -85,8 +85,14 @@ pub fn psd(
     let mut records = Vec::new();
     let mut channels = Vec::new();
     let count = layers.len();
-    for layer in layers.iter().rev() {
-        record(&mut records, &mut channels, width, height, layer, press);
+    // each layer's channels packed side by side, then written in order
+    let order: Vec<&PsdLayer<'_>> = layers.iter().rev().collect();
+    // each layer holds its planes (and inks) apart while they are packed
+    let each = width as usize * height as usize * 9;
+    let packed = crate::par::side_by_side_within(&order, each, |layer| layer_channels(width, height, layer, press));
+    for (layer, channels_of) in order.iter().zip(packed) {
+        let (rect, data) = channels_of.unwrap_or_else(|| layer_channels(width, height, layer, press));
+        record(&mut records, &mut channels, width, height, layer, rect, &data);
     }
     let mut info = Vec::new();
     put16(&mut info, (count as i16).wrapping_neg() as u16);
@@ -127,18 +133,16 @@ pub fn psd(
     out
 }
 
-/// A layer's record (into `records`) and its channels' pixels (into `channels`): RGB, or the
-/// inks `press` gives (inverted).
-fn record(
-    records: &mut Vec<u8>,
-    channels: &mut Vec<u8>,
+/// A layer's channels as written: the rectangle its pixels fill, and each channel (by id) packed,
+/// RGB or the inks `press` gives (inverted).
+fn layer_channels(
     width: u32,
     height: u32,
     layer: &PsdLayer<'_>,
     press: Option<&Lut>,
-) {
+) -> ([u32; 4], Vec<(i16, Vec<u8>)>) {
     let ids: &[i16] = if press.is_some() { &[-1, 0, 1, 2, 3] } else { &[-1, 0, 1, 2] };
-    let (rect, data): ([u32; 4], Vec<(i16, Vec<u8>)>) = match &layer.kind {
+    match &layer.kind {
         PsdKind::Pixels { rgba, mask } => {
             let rect = bounds(rgba, width, height).unwrap_or([0, 0, 0, 0]);
             // five bytes a pixel for inks: the four inverted, then alpha
@@ -165,13 +169,26 @@ fn record(
         }
         // groups have no pixels: empty channels
         _ => ([0, 0, 0, 0], ids.iter().map(|&id| (id, vec![0, 0])).collect()),
-    };
+    }
+}
+
+/// A layer's record (into `records`) and its channels (`data`, from [`layer_channels`], filling
+/// `rect`) into `channels`.
+fn record(
+    records: &mut Vec<u8>,
+    channels: &mut Vec<u8>,
+    width: u32,
+    height: u32,
+    layer: &PsdLayer<'_>,
+    rect: [u32; 4],
+    data: &[(i16, Vec<u8>)],
+) {
     let [left, top, right, bottom] = rect;
     for v in [top, left, bottom, right] {
         put32(records, v);
     }
     put16(records, data.len() as u16);
-    for (id, bytes) in &data {
+    for (id, bytes) in data {
         put16(records, *id as u16);
         put32(records, bytes.len() as u32);
     }
@@ -239,7 +256,7 @@ fn record(
     put32(records, extra.len() as u32);
     records.extend_from_slice(&extra);
     for (_, bytes) in data {
-        channels.extend_from_slice(&bytes);
+        channels.extend_from_slice(bytes);
     }
 }
 
@@ -406,19 +423,43 @@ pub fn tiff_cmyk(width: u32, height: u32, dpi: f32, icc: &[u8], rgba: &[u8], pre
 }
 
 /// A TIFF of four bytes a pixel: RGBA, or (`cmyk`) four inks with no alpha.
+/// The rows a TIFF's strip holds (its strips compressed side by side).
+const TIFF_STRIP_ROWS: u32 = 256;
+
 fn write_tiff(width: u32, height: u32, dpi: f32, icc: &[u8], pixels: &[u8], cmyk: bool) -> Vec<u8> {
     let tenths = (dpi.clamp(1.0, 9999.0) * 10.0).round() as u32;
-    let data = miniz_oxide::deflate::compress_to_vec_zlib(pixels, 6);
+    // the pixels in strips of rows, each compressed on its own, side by side
+    let zlib = |strip: &&[u8]| miniz_oxide::deflate::compress_to_vec_zlib(strip, 6);
+    let strips: Vec<&[u8]> = pixels.chunks((width as usize * 4 * TIFF_STRIP_ROWS as usize).max(1)).collect();
+    let packed: Vec<Vec<u8>> = crate::par::side_by_side(&strips, zlib)
+        .into_iter()
+        .zip(&strips)
+        .map(|(packed, strip)| packed.unwrap_or_else(|| zlib(strip)))
+        .collect();
     // header, then the pixels, then the bits per sample, the resolutions and the directory
     let mut out = Vec::new();
     out.extend_from_slice(b"II");
     out.extend_from_slice(&42u16.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes());
-    let pixels_at = out.len() as u32;
-    out.extend_from_slice(&data);
+    let mut offsets = Vec::with_capacity(packed.len());
+    for strip in &packed {
+        offsets.push(out.len() as u32);
+        out.extend_from_slice(strip);
+    }
     if out.len() % 2 == 1 {
         out.push(0);
     }
+    // the strips' places and sizes: in the directory's entries for one, else listed here
+    let sizes: Vec<u32> = packed.iter().map(|p| p.len() as u32).collect();
+    let (offsets_at, sizes_at) = if packed.len() == 1 {
+        (offsets.first().copied().unwrap_or(0), sizes.first().copied().unwrap_or(0))
+    } else {
+        let offsets_at = out.len() as u32;
+        offsets.iter().for_each(|o| out.extend_from_slice(&o.to_le_bytes()));
+        let sizes_at = out.len() as u32;
+        sizes.iter().for_each(|s| out.extend_from_slice(&s.to_le_bytes()));
+        (offsets_at, sizes_at)
+    };
     let bits_at = out.len() as u32;
     for _ in 0..4 {
         out.extend_from_slice(&8u16.to_le_bytes());
@@ -445,10 +486,10 @@ fn write_tiff(width: u32, height: u32, dpi: f32, icc: &[u8], pixels: &[u8], cmyk
         (259, 3, 1, 8),
         // RGB, or separated inks
         (262, 3, 1, if cmyk { 5 } else { 2 }),
-        (273, 4, 1, pixels_at),
+        (273, 4, packed.len() as u32, offsets_at),
         (277, 3, 1, 4),
-        (278, 4, 1, height),
-        (279, 4, 1, data.len() as u32),
+        (278, 4, 1, TIFF_STRIP_ROWS.min(height)),
+        (279, 4, packed.len() as u32, sizes_at),
         (282, 5, 1, res_at),
         (283, 5, 1, res_at + 8),
         (296, 3, 1, 2),
@@ -500,9 +541,12 @@ pub fn pdf(
     let device = if press.is_some() { "/DeviceCMYK" } else { "/DeviceRGB" };
     let colours =
         if icc.is_empty() { device.to_owned() } else { format!("[/ICCBased {} 0 R]", first + pages.len() * 4) };
-    for (i, rgba) in pages.iter().enumerate() {
-        let n = first + i * 4;
-        objects.push(
+    // each page's four objects (the page, its contents, its image and the image's alpha) made
+    // side by side, then numbered in order
+    let page_objects = |&i: &usize| -> Vec<Vec<u8>> {
+        let (Some(rgba), n) = (pages.get(i), first + i * 4) else { return Vec::new() };
+        let mut made = Vec::with_capacity(4);
+        made.push(
             format!(
                 "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.2} {ph:.2}] /Contents {} 0 R /Resources << /XObject << /Im0 {} 0 R >> >> >>",
                 n + 1,
@@ -511,10 +555,10 @@ pub fn pdf(
             .into_bytes(),
         );
         let draw = format!("q {pw:.2} 0 0 {ph:.2} 0 0 cm /Im0 Do Q");
-        objects.push(stream(&format!("<< /Length {} >>", draw.len()), draw.as_bytes()));
+        made.push(stream(&format!("<< /Length {} >>", draw.len()), draw.as_bytes()));
         if let Some(table) = press {
             let jpg = crate::jpeg::encode_cmyk(&inks(rgba, table, true), width, height, quality.max(1));
-            objects.push(stream(
+            made.push(stream(
                 &format!(
                     "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /Interpolate true /ColorSpace {colours} /Decode [1 0 1 0 1 0 1 0] /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>",
                     jpg.len()
@@ -522,8 +566,8 @@ pub fn pdf(
                 &jpg,
             ));
             // no alpha: kept so the objects keep their numbers
-            objects.push(b"null".to_vec());
-            continue;
+            made.push(b"null".to_vec());
+            return made;
         }
         let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
         for &[r, g, b, _] in rgba.as_chunks::<4>().0 {
@@ -536,7 +580,7 @@ pub fn pdf(
             (crate::jpeg::encode(&rgb, width, height, quality), "DCTDecode")
         };
         let alpha = miniz_oxide::deflate::compress_to_vec_zlib(&alpha, 6);
-        objects.push(stream(
+        made.push(stream(
             &format!(
                 "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace {colours} /BitsPerComponent 8 /Filter /{filter} /SMask {} 0 R /Length {} >>",
                 n + 3,
@@ -544,13 +588,20 @@ pub fn pdf(
             ),
             &rgb,
         ));
-        objects.push(stream(
+        made.push(stream(
             &format!(
                 "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>",
                 alpha.len()
             ),
             &alpha,
         ));
+        made
+    };
+    let numbers: Vec<usize> = (0..pages.len()).collect();
+    // each page holds its colours and alpha apart while it is made
+    let each = width as usize * height as usize * 4;
+    for (i, made) in numbers.iter().zip(crate::par::side_by_side_within(&numbers, each, page_objects)) {
+        objects.extend(made.unwrap_or_else(|| page_objects(i)));
     }
     if !icc.is_empty() {
         let n = if press.is_some() { 4 } else { 3 };
@@ -620,12 +671,20 @@ impl GifWriter {
     /// Adds a frame (straight-alpha RGBA, the GIF's size) shown `delay_cs` hundredths of a
     /// second; `dither` spreads each pixel's palette error to its neighbours.
     pub fn frame(&mut self, rgba: &[u8], delay_cs: u16, dither: bool) {
+        let bytes = self.encoded_frame(rgba, delay_cs, dither);
+        self.add_encoded(&bytes);
+    }
+
+    /// A frame's bytes as [`GifWriter::frame`] adds them, made apart (frames stand alone, so
+    /// several can be made side by side) for [`GifWriter::add_encoded`].
+    pub fn encoded_frame(&self, rgba: &[u8], delay_cs: u16, dither: bool) -> Vec<u8> {
         let (w, h) = (self.width, self.height);
         let pixels = rgba.as_chunks::<4>().0;
         let (palette, used) = palette(pixels, usize::from(w) * usize::from(h));
         let indices =
             if dither { dithered(pixels, usize::from(w), &palette, used) } else { nearest_all(pixels, &palette, used) };
-        let out = &mut self.out;
+        let mut out = Vec::new();
+        let out = &mut out;
         // the frame clears to transparent after it shows; index 255 is transparent
         out.extend_from_slice(&[0x21, 0xF9, 4, 0b0000_1001]);
         out.extend_from_slice(&delay_cs.to_le_bytes());
@@ -645,6 +704,12 @@ impl GifWriter {
             out.extend_from_slice(block);
         }
         out.push(0);
+        std::mem::take(out)
+    }
+
+    /// Adds a frame made with [`GifWriter::encoded_frame`].
+    pub fn add_encoded(&mut self, frame: &[u8]) {
+        self.out.extend_from_slice(frame);
     }
 
     /// The GIF's bytes.

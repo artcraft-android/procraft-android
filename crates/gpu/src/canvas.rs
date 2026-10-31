@@ -866,6 +866,15 @@ enum Op {
     },
     /// A layer's pixels are replaced with no undo step (during an edit held with `Hold`).
     Put(LayerId, Vec<u8>),
+    /// Part of a layer's pixels replaced so: the rectangle at (`x`, `y`), `width` x `height`.
+    PutRegion {
+        layer: LayerId,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    },
     /// A layer's pixels are set aside: what an edit made of many changes goes back to.
     Hold(LayerId),
     /// The held pixels, and the document as it was (`before`), become one undo step (`keep`), or
@@ -1959,6 +1968,20 @@ impl Canvas {
         }
     }
 
+    /// Replaces the rectangle of a layer's pixels at (`x`, `y`), `width` x `height` (`pixels` its
+    /// RGBA8, row by row) with no undo step, as [`Canvas::put_layer`] does the whole of it. Left
+    /// out if it isn't on the canvas or `pixels` isn't its size.
+    pub fn put_layer_region(&mut self, layer: LayerId, x: u32, y: u32, width: u32, height: u32, pixels: Vec<u8>) {
+        let on = width > 0
+            && height > 0
+            && x.checked_add(width).is_some_and(|r| r <= self.width)
+            && y.checked_add(height).is_some_and(|b| b <= self.height);
+        if on && pixels.len() == width as usize * height as usize * 4 {
+            self.ops.push(Op::PutRegion { layer, x, y, width, height, pixels });
+            self.invalidate();
+        }
+    }
+
     /// Sets a layer's pixels aside, for an edit made of many changes (with [`Canvas::put_layer`])
     /// that ends with [`Canvas::release_layer`].
     pub fn hold_layer(&mut self, layer: LayerId) {
@@ -2219,6 +2242,7 @@ impl Canvas {
                 | Op::TransformBegin(id)
                 | Op::TransformAlso(id)
                 | Op::Put(id, _)
+                | Op::PutRegion { layer: id, .. }
                 | Op::Hold(id) => written.push(*id),
                 Op::Write { layers, .. } => written.extend(layers.iter().map(|(id, _)| *id)),
                 Op::Duplicate { pairs, .. } => {
@@ -2555,7 +2579,7 @@ impl Canvas {
                 Op::Commit(s) => ids.push(s.layer),
                 Op::Clear(id) | Op::Wipe(id) | Op::TransformBegin(id) | Op::TransformAlso(id) => ids.push(*id),
                 Op::Write { layers, .. } => ids.extend(layers.iter().map(|(id, _)| *id)),
-                Op::Put(id, _) | Op::Hold(id) => ids.push(*id),
+                Op::Put(id, _) | Op::PutRegion { layer: id, .. } | Op::Hold(id) => ids.push(*id),
                 Op::Release { before: Some(d), .. } => ids.extend(d.pixel_layer_ids()),
                 _ => {}
             }
@@ -2862,6 +2886,27 @@ impl Canvas {
                             copy_at(&staging, 0, 0),
                             copy_at(&layer.texture, 0, 0),
                             extent(self.width, self.height),
+                        );
+                    }
+                    self.dirty = self.full();
+                }
+                Op::PutRegion { layer: id, x, y, width, height, pixels } => {
+                    if let Some(layer) = self.layers.get(&id) {
+                        let staging = texture(device, "layer put", width, height, LAYER_FORMAT);
+                        gpu.queue.write_texture(
+                            copy_at(&staging, 0, 0),
+                            &pixels,
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(width * 4),
+                                rows_per_image: Some(height),
+                            },
+                            extent(width, height),
+                        );
+                        encoder.copy_texture_to_texture(
+                            copy_at(&staging, 0, 0),
+                            copy_at(&layer.texture, i32::try_from(x).unwrap_or(0), i32::try_from(y).unwrap_or(0)),
+                            extent(width, height),
                         );
                     }
                     self.dirty = self.full();
@@ -4533,6 +4578,7 @@ impl Canvas {
             | Op::TransformAlso(id)
             | Op::Hold(id)
             | Op::Put(id, _)
+            | Op::PutRegion { layer: id, .. }
             | Op::Clear(id)
             | Op::Wipe(id) => live.contains(id),
             Op::TransformSet { .. }

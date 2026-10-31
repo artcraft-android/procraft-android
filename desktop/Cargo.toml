@@ -38,8 +38,18 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 wgpu = { workspace = true, features = ["metal"] }
 
 # Animated MP4 and HEVC through the system's own encoders (Media Foundation); Feedback Sounds'
-# click played by the system (PlaySound)
+# click played by the system (PlaySound); a PDF's pages drawn by the system's renderer; a pen's
+# lean from the pointer messages
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Media_Audio", "Win32_Media_MediaFoundation", "Win32_System_Com"] }
+windows = { version = "0.62", features = [
+    "Data_Pdf",
+    "Storage_Streams",
+    "UI",
+    "Win32_Media_Audio",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_UI_Input_Pointer",
+    "Win32_UI_WindowsAndMessaging",
+] }
 # An artwork dragged out of the gallery, handed to the system as a file
 drag = "2.1"

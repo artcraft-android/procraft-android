@@ -1197,6 +1197,48 @@ fn the_drawing_guide_mirrors_and_assists_strokes() {
 }
 
 #[test]
+fn a_layer_s_options_follow_what_it_is() {
+    use crate::layers::{LayerOption as O, LayerOptionRow};
+    let s = CanvasSession::new(64, 64);
+    let bottom = s.layers()[0].id;
+    let top = s.add_layer();
+    let options = |id| s.layer_options(id).into_iter().map(|r: LayerOptionRow| r.option).collect::<Vec<_>>();
+    let row = |id, o| s.layer_options(id).into_iter().find(|r| r.option == o).unwrap();
+    // a paint layer with one under it: everything but the text's and a group's
+    assert_eq!(
+        options(top),
+        [
+            O::Rename,
+            O::Select,
+            O::Copy,
+            O::Fill,
+            O::Clear,
+            O::AlphaLock,
+            O::Mask,
+            O::ClippingMask,
+            O::DrawingAssist,
+            O::Invert,
+            O::Reference,
+            O::MergeDown,
+            O::CombineDown
+        ]
+    );
+    // the bottom one has nothing to merge into or clip to
+    assert!(!options(bottom).contains(&O::MergeDown) && !options(bottom).contains(&O::ClippingMask));
+    // switches say whether they are on; a lock greys what would change its pixels
+    assert!(s.set_layer_alpha_lock(top, true));
+    assert_eq!(row(top, O::AlphaLock).switch_on, Some(true));
+    assert_eq!(row(top, O::Fill).switch_on, None);
+    assert!(s.set_layer_locked(top, true));
+    assert!(!row(top, O::Fill).enabled && !row(top, O::MergeDown).enabled && row(top, O::Select).enabled);
+    // with a mask, no second one; the mask's own menu is short
+    let mask = s.add_mask(bottom).unwrap();
+    assert!(!row(bottom, O::Mask).enabled);
+    assert_eq!(options(mask), [O::Rename, O::Select, O::Fill, O::Clear, O::Invert]);
+    assert!(s.layer_options(9999).is_empty());
+}
+
+#[test]
 fn a_layers_own_actions() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.4);
@@ -1956,6 +1998,15 @@ fn a_canvas_keeps_its_colour_profile() {
 }
 
 #[test]
+fn an_export_is_named_after_its_artwork() {
+    use crate::project::export_file_name;
+    assert_eq!(export_file_name(" Sky / Sea: 2 ".to_owned(), false), "Sky  Sea 2");
+    assert_eq!(export_file_name("?!".to_owned(), false), "Untitled Artwork");
+    assert_eq!(export_file_name(String::new(), true), "Untitled_Artwork");
+    assert_eq!(export_file_name("Night walk".to_owned(), true), "Night_walk");
+}
+
+#[test]
 fn a_p3_canvas_exports_with_its_profile() {
     let Some(s) = session(20, 10) else { return };
     assert!(s.set_new_profile("Display P3".to_owned()));
@@ -1964,6 +2015,14 @@ fn a_p3_canvas_exports_with_its_profile() {
     let reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap())).read_info().unwrap();
     let icc = reader.info().icc_profile.as_ref().expect("an embedded profile").to_vec();
     assert_eq!(icc, procraft_engine::icc::icc(procraft_engine::profile::Profile::DisplayP3));
+    let _ = std::fs::remove_file(path);
+    // a JPEG carries it too, the see-through canvas laid onto white
+    let path = std::env::temp_dir().join(format!("procraft-p3-{}.jpg", std::process::id()));
+    s.export_jpeg(path.to_string_lossy().into_owned()).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
+    let at = bytes.windows(12).position(|w| w == b"ICC_PROFILE ").expect("an embedded profile");
+    assert_eq!(&bytes[at + 14..at + 14 + icc.len()], &icc[..]);
     let _ = std::fs::remove_file(path);
 }
 
@@ -2556,6 +2615,45 @@ fn the_brushes_in_use_are_kept_between_sessions() {
 }
 
 #[test]
+fn a_zip_of_brushes_is_told_from_other_zips() {
+    let s = CanvasSession::new(64, 64);
+    assert!(crate::brush_files::is_brush_zip(s.brush_as_file(0, 0).unwrap()));
+    let mut other = procraft_engine::zip::ZipWriter::new();
+    other.add("model.obj", b"v 0 0 0");
+    assert!(!crate::brush_files::is_brush_zip(other.finish()));
+    assert!(!crate::brush_files::is_brush_zip(b"not a zip".to_vec()));
+}
+
+#[test]
+fn the_brushes_are_kept_in_their_folder_and_an_earlier_version_s_taken_in() {
+    let dir = std::env::temp_dir().join(format!("procraft-brushes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = dir.to_string_lossy().into_owned();
+    // nothing kept: the library as it ships, what shipped noted
+    let s = CanvasSession::new(64, 64);
+    assert!(!s.open_brushes(d.clone()));
+    assert!(dir.join("seen.txt").exists());
+    // a brush chosen and kept, alone, then with the library: a new session opens on it
+    assert!(s.select_brush(0, 3));
+    assert!(s.keep_brush_choices(d.clone()));
+    assert!(!dir.join("library.json").exists());
+    assert!(s.keep_brushes(d.clone()));
+    let t = CanvasSession::new(64, 64);
+    assert!(t.open_brushes(d.clone()));
+    assert_eq!((t.current_brush().set, t.current_brush().index), (0, 3));
+    // an earlier version's choices and seen counts go in only where the folder has none
+    let other = r#"{"tools":[[0,1],[0,0],[0,0]],"sets":[],"sliders":[]}"#.to_owned();
+    assert!(crate::brush_library::adopt_kept_brushes(d.clone(), Some("1,1".to_owned()), Some(other.clone())));
+    assert_eq!(std::fs::read_to_string(dir.join("choices.json")).unwrap(), t.saved_brush_choices());
+    std::fs::remove_file(dir.join("choices.json")).unwrap();
+    assert!(crate::brush_library::adopt_kept_brushes(d.clone(), None, Some(other)));
+    let u = CanvasSession::new(64, 64);
+    assert!(u.open_brushes(d));
+    assert_eq!((u.current_brush().set, u.current_brush().index), (0, 1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_brush_keeps_its_maker_and_a_reset_point() {
     use procraft_engine::brush::Brush;
     use procraft_engine::brushfile::{self, Pictures};
@@ -2867,6 +2965,13 @@ fn recolor_follows_its_point_and_colour_and_is_a_named_step() {
     assert_eq!(pixel(&s, 80, 50), [255, 0, 0, 255]);
     // a new colour refills
     s.pour_colour(0.0, 0.0, 1.0);
+    assert_eq!(pixel(&s, 80, 50), [0, 0, 255, 255]);
+    // moved within what it fills it stays; onto the line it fills the line alone
+    assert!(s.pour_move(90.0, 20.0));
+    assert_eq!((pixel(&s, 20, 50), pixel(&s, 80, 50)), ([255, 255, 255, 255], [0, 0, 255, 255]));
+    assert!(s.pour_move(50.0, 50.0));
+    assert_eq!((pixel(&s, 50, 50), pixel(&s, 80, 50)), ([0, 0, 255, 255], [255, 255, 255, 255]));
+    assert!(s.pour_move(80.0, 50.0));
     assert_eq!(pixel(&s, 80, 50), [0, 0, 255, 255]);
     // off the canvas nothing is filled, back on it is again
     assert!(s.pour_move(-5.0, 50.0));

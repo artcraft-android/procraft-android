@@ -293,9 +293,14 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     }
     let (w, h) = (file.document.width(), file.document.height());
     fs::create_dir_all(dir.join("layers")).map_err(|e| file_error("making the folder", e))?;
-    // only those not already there as they are
-    for (id, hash, rgba) in &layers {
-        write_atomically(&layer_path(dir, *id), |p| write_png(p, w, h, rgba, &[]))?;
+    // only those not already there as they are, encoded and written side by side
+    // each layer's PNG is made in memory before it is written
+    let each = w as usize * h as usize * 4;
+    let written = procraft_engine::par::side_by_side_within(&layers, each, |(id, _, rgba)| {
+        write_atomically(&layer_path(dir, *id), |p| write_png(p, w, h, rgba, &[]))
+    });
+    for ((id, hash, _), result) in layers.iter().zip(written) {
+        result.unwrap_or_else(|| Err(file_error("writing a layer", "it stopped")))?;
         saved.layers.insert(*id, *hash);
     }
     for (id, bytes) in &files {
@@ -483,27 +488,16 @@ impl CanvasSession {
 
     /// Writes the flattened picture, full size and with straight alpha, to `path` as a PNG.
     pub fn export_png(&self, path: String) -> Result<(), MobileError> {
-        let (w, h, rgba, icc) = {
-            let mut guard = self.shared.lock_finished();
-            let st = &mut *guard;
-            st.finish_stroke();
-            st.settle();
-            let (w, h) = (st.doc.width(), st.doc.height());
-            let icc = st.doc.picture_icc();
-            let proof = proof_table(&st.doc);
-            let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else {
-                return Err(file_error("reading the picture", "the canvas is not shown yet"));
-            };
-            canvas.render_finished(gpu, &mut st.doc);
-            let rgba = canvas.read_composite(gpu).map_err(|e| file_error("reading the picture", e))?;
-            (w, h, rgba, (icc, proof))
-        };
-        let (icc, proof) = icc;
-        let mut straight = straight_alpha(&rgba);
-        if let Some(table) = proof {
-            table.apply_rgba(&mut straight, false);
-        }
+        let (w, h, straight, icc) = self.finished_picture()?;
         write_atomically(Path::new(&path), |p| write_png(p, w, h, &straight, &icc))
+    }
+
+    /// Writes the flattened picture, full size and onto white, to `path` as a JPEG, with the
+    /// canvas's colour profile.
+    pub fn export_jpeg(&self, path: String) -> Result<(), MobileError> {
+        let (w, h, straight, icc) = self.finished_picture()?;
+        let bytes = procraft_engine::jpeg::encode_tagged(&onto_white(&straight), w, h, JPEG_QUALITY, &icc);
+        write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("saving", e)))
     }
 
     /// Opens a layered artwork package (as the Share menu's first row writes) from `path`.
@@ -962,6 +956,62 @@ fn decode_png(from: impl std::io::BufRead + std::io::Seek, width: u32, height: u
 }
 
 /// Premultiplied RGBA8 pixels with straight alpha instead.
+impl CanvasSession {
+    /// The flattened picture as it is exported, full size: its width, height, pixels (straight
+    /// RGBA8; a CMYK canvas's as its press prints them) and the colour profile they are in.
+    fn finished_picture(&self) -> Result<(u32, u32, Vec<u8>, Vec<u8>), MobileError> {
+        let (w, h, rgba, icc) = {
+            let mut guard = self.shared.lock_finished();
+            let st = &mut *guard;
+            st.finish_stroke();
+            st.settle();
+            let (w, h) = (st.doc.width(), st.doc.height());
+            let icc = st.doc.picture_icc();
+            let proof = proof_table(&st.doc);
+            let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else {
+                return Err(file_error("reading the picture", "the canvas is not shown yet"));
+            };
+            canvas.render_finished(gpu, &mut st.doc);
+            let rgba = canvas.read_composite(gpu).map_err(|e| file_error("reading the picture", e))?;
+            (w, h, rgba, (icc, proof))
+        };
+        let (icc, proof) = icc;
+        let mut straight = straight_alpha(&rgba);
+        if let Some(table) = proof {
+            table.apply_rgba(&mut straight, false);
+        }
+        Ok((w, h, straight, icc))
+    }
+}
+
+/// What an artwork called `name` is called as a file it is exported to, before the extension:
+/// its letters, digits, spaces, `_` and `-` (the rest left out, the ends trimmed), or "Untitled
+/// Artwork" with none left; a layered package's (`package`) with underscores for its spaces.
+#[uniffi::export]
+pub fn export_file_name(name: String, package: bool) -> String {
+    let kept: String = name.chars().filter(|c| c.is_alphanumeric() || " _-".contains(*c)).collect();
+    let base = match kept.trim() {
+        "" => "Untitled Artwork",
+        k => k,
+    };
+    if package { base.replace(' ', "_") } else { base.to_owned() }
+}
+
+/// How finely JPEGs are written (1..100): fine enough to keep a painting's edges and grain.
+pub(crate) const JPEG_QUALITY: u8 = 92;
+
+/// Straight RGBA8 pixels laid onto white, as RGB8 (for a JPEG, which has nothing see-through).
+pub(crate) fn onto_white(rgba: &[u8]) -> Vec<u8> {
+    let (pixels, _) = rgba.as_chunks::<4>();
+    let mut out = Vec::with_capacity(pixels.len() * 3);
+    for &[r, g, b, a] in pixels {
+        let a = u16::from(a);
+        let over = |c: u8| ((u16::from(c) * a + 255 * (255 - a) + 127) / 255) as u8;
+        out.extend_from_slice(&[over(r), over(g), over(b)]);
+    }
+    out
+}
+
 pub(crate) fn straight_alpha(rgba: &[u8]) -> Vec<u8> {
     let (pixels, _) = rgba.as_chunks::<4>();
     let mut out = Vec::with_capacity(rgba.len());

@@ -333,7 +333,8 @@ impl CustomCanvas {
         if let Some(pick) = self.picking.as_mut() {
             let size = pick.size();
             let rect = Rect::from_min_size(pos2(screen.right() - size.x, screen.top() + 168.0), size);
-            match pick.show(ctx, look, rect, rect.left() + 200.0, palettes, harmony) {
+            let p3 = procraft_core::colours_in_p3(self.profile.clone());
+            match pick.show(ctx, look, rect, rect.left() + 200.0, palettes, harmony, p3) {
                 Some(Picked::Colour(rgb)) => self.background = rgb,
                 Some(Picked::Closed) => self.picking = None,
                 None => {}

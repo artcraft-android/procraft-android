@@ -97,32 +97,27 @@ impl Input {
         any
     }
 
-    fn sample(&self, (x, y): (f32, f32), pressure: f32) -> Vec<PenSample> {
-        vec![PenSample {
-            x,
-            y,
-            pressure: pressure.clamp(0.0, 1.0),
-            tilt: 0.0,
-            orientation: 0.0,
-            time_ms: self.now_ms(),
-        }]
+    /// A sample of pointer `id` at `(x, y)`: a pen's with its lean, if the system gave one.
+    fn sample(&self, id: u64, (x, y): (f32, f32), pressure: f32) -> Vec<PenSample> {
+        let (tilt, orientation) = crate::pen::lean(id).unwrap_or((0.0, 0.0));
+        vec![PenSample { x, y, pressure: pressure.clamp(0.0, 1.0), tilt, orientation, time_ms: self.now_ms() }]
     }
 
     fn pressed(&mut self, session: &CanvasSession, id: u64, kind: PointerKind, at: (f32, f32), pressure: f32) {
         self.down.retain(|d| *d != id);
         self.down.push(id);
-        let out = session.touch_down(id, kind, self.sample(at, pressure));
+        let out = session.touch_down(id, kind, self.sample(id, at, pressure));
         self.take(out);
     }
 
     fn moved(&mut self, session: &CanvasSession, id: u64, at: (f32, f32), pressure: f32) {
-        let out = session.touch_move(id, self.sample(at, pressure));
+        let out = session.touch_move(id, self.sample(id, at, pressure));
         self.take(out);
     }
 
     fn lifted(&mut self, session: &CanvasSession, id: u64, at: (f32, f32), pressure: f32, cancelled: bool) {
         self.down.retain(|d| *d != id);
-        let out = if cancelled { session.touch_cancel() } else { session.touch_up(id, self.sample(at, pressure)) };
+        let out = if cancelled { session.touch_cancel() } else { session.touch_up(id, self.sample(id, at, pressure)) };
         self.take(out);
     }
 

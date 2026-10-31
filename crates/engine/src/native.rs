@@ -17,7 +17,7 @@ use crate::document::{BlendMode, Document, Layer, LayerId, LayerKind};
 use crate::keyed::{Archive, Builder, Object};
 use crate::plist::Value;
 use crate::profile::Profile;
-use crate::zip::{ZipReader, ZipWriter};
+use crate::zip::{Ready, ZipReader, ZipWriter};
 
 /// The file extension of the package.
 pub const EXTENSION: &str = "procreate";
@@ -250,23 +250,32 @@ impl Canvas<'_> {
         let prefix = format!("{uuid}/");
         let names: Vec<String> =
             self.zip.names().filter(|n| n.starts_with(&prefix) && n.ends_with(".lz4")).map(str::to_owned).collect();
-        for name in names {
-            let Some((tx, ty)) = name
-                .get(prefix.len()..name.len() - 4)
-                .and_then(|s| s.split_once('~'))
-                .and_then(|(x, y)| Some((x.parse::<usize>().ok()?, y.parse::<usize>().ok()?)))
-            else {
-                continue;
-            };
-            if tx * t >= w || ty * t >= h {
-                continue;
-            }
+        // the tiles on the canvas, where they go
+        let tiles: Vec<(String, usize, usize)> = names
+            .into_iter()
+            .filter_map(|name| {
+                let (tx, ty) = name
+                    .get(prefix.len()..name.len() - 4)
+                    .and_then(|s| s.split_once('~'))
+                    .and_then(|(x, y)| Some((x.parse::<usize>().ok()?, y.parse::<usize>().ok()?)))?;
+                (tx * t < w && ty * t < h).then_some((name, tx, ty))
+            })
+            .collect();
+        // unpacked side by side, then put in place
+        let unpack = |(name, tx, ty): &(String, usize, usize)| -> Result<Vec<u8>, ReadError> {
             let (tw, th) = (t.min(w - tx * t), t.min(h - ty * t));
-            let Some(packed) = self.zip.read(&name) else { return Err(ReadError::Damaged("tile")) };
+            let packed = self.zip.read(name).ok_or(ReadError::Damaged("tile"))?;
             let raw = applz4::decode(&packed, tw * th * bpp).ok_or(ReadError::Damaged("tile"))?;
             if raw.len() != tw * th * bpp {
                 return Err(ReadError::Damaged("tile size"));
             }
+            Ok(raw)
+        };
+        let unpacked = crate::par::side_by_side(&tiles, unpack);
+        for ((_, tx, ty), raw) in tiles.iter().zip(unpacked) {
+            let raw = raw.ok_or(ReadError::Damaged("tile"))??;
+            let (tx, ty) = (*tx, *ty);
+            let (tw, th) = (t.min(w - tx * t), t.min(h - ty * t));
             for r in 0..th {
                 // rows are stored bottom-up
                 let row = h - 1 - (ty * t + r);
@@ -275,15 +284,15 @@ impl Canvas<'_> {
                 out.get_mut(at..at + tw * bpp).ok_or(ReadError::Damaged("tile"))?.copy_from_slice(src);
             }
         }
-        Ok(orient(&out, w, h, bpp, self.turns, self.flip_x, self.flip_y))
+        Ok(orient(out, w, h, bpp, self.turns, self.flip_x, self.flip_y))
     }
 }
 
 /// `src` (`w` × `h`, `bpp` bytes a pixel, top row first) turned `turns` quarter turns clockwise,
 /// then mirrored.
-fn orient(src: &[u8], w: usize, h: usize, bpp: usize, turns: u32, flip_x: bool, flip_y: bool) -> Vec<u8> {
+fn orient(src: Vec<u8>, w: usize, h: usize, bpp: usize, turns: u32, flip_x: bool, flip_y: bool) -> Vec<u8> {
     if turns == 0 && !flip_x && !flip_y {
-        return src.to_vec();
+        return src;
     }
     let (dw, dh) = if turns % 2 == 1 { (h, w) } else { (w, h) };
     let mut out = vec![0u8; src.len()];
@@ -934,19 +943,29 @@ fn bounds(px: &[u8], w: u32, h: u32, bpp: usize, blank: u8) -> [f64; 4] {
 /// those whose every byte is `blank` (clear paint, white mask).
 fn write_tiles(zip: &mut ZipWriter, uuid: &str, px: &[u8], w: u32, h: u32, bpp: usize, blank: u8) {
     let (w, h, t) = (w as usize, h as usize, TILE as usize);
-    for ty in 0..h.div_ceil(t) {
-        for tx in 0..w.div_ceil(t) {
-            let (tw, th) = (t.min(w - tx * t), t.min(h - ty * t));
-            let mut raw = Vec::with_capacity(tw * th * bpp);
-            for r in 0..th {
-                let row = h - 1 - (ty * t + r);
-                let at = (row * w + tx * t) * bpp;
-                raw.extend_from_slice(px.get(at..at + tw * bpp).unwrap_or(&[]));
-            }
-            if raw.len() != tw * th * bpp || raw.iter().all(|&v| v == blank) {
-                continue;
-            }
-            zip.add(&format!("{uuid}/{tx}~{ty}.lz4"), &applz4::encode(&raw));
+    let tiles: Vec<(usize, usize)> =
+        (0..h.div_ceil(t)).flat_map(|ty| (0..w.div_ceil(t)).map(move |tx| (tx, ty))).collect();
+    // a tile packed: none if it is blank; deflated too when that packing found something to
+    // shrink (what LZ4 can't shrink, deflate barely does, and slowly)
+    let pack = |&(tx, ty): &(usize, usize)| -> Option<Ready> {
+        let (tw, th) = (t.min(w - tx * t), t.min(h - ty * t));
+        let mut raw = Vec::with_capacity(tw * th * bpp);
+        for r in 0..th {
+            let row = h - 1 - (ty * t + r);
+            let at = (row * w + tx * t) * bpp;
+            raw.extend_from_slice(px.get(at..at + tw * bpp).unwrap_or(&[]));
+        }
+        if raw.len() != tw * th * bpp || raw.iter().all(|&v| v == blank) {
+            return None;
+        }
+        let packed = applz4::encode(&raw);
+        Some(Ready::of(&packed, packed.len() < raw.len()))
+    };
+    // packed side by side, added in order (a tile whose thread stopped is left out)
+    let packed = crate::par::side_by_side(&tiles, pack);
+    for (&(tx, ty), ready) in tiles.iter().zip(packed) {
+        if let Some(ready) = ready.flatten() {
+            zip.add_ready(&format!("{uuid}/{tx}~{ty}.lz4"), ready);
         }
     }
 }
@@ -1277,10 +1296,10 @@ mod tests {
     fn turned_canvases_are_shown_upright() {
         // 3 × 2, values = index; a quarter turn clockwise makes it 2 × 3
         let src: Vec<u8> = (0..6).collect();
-        assert_eq!(orient(&src, 3, 2, 1, 1, false, false), [3, 0, 4, 1, 5, 2]);
-        assert_eq!(orient(&src, 3, 2, 1, 2, false, false), [5, 4, 3, 2, 1, 0]);
-        assert_eq!(orient(&src, 3, 2, 1, 3, false, false), [2, 5, 1, 4, 0, 3]);
-        assert_eq!(orient(&src, 3, 2, 1, 0, true, false), [2, 1, 0, 5, 4, 3]);
+        assert_eq!(orient(src.clone(), 3, 2, 1, 1, false, false), [3, 0, 4, 1, 5, 2]);
+        assert_eq!(orient(src.clone(), 3, 2, 1, 2, false, false), [5, 4, 3, 2, 1, 0]);
+        assert_eq!(orient(src.clone(), 3, 2, 1, 3, false, false), [2, 5, 1, 4, 0, 3]);
+        assert_eq!(orient(src.clone(), 3, 2, 1, 0, true, false), [2, 1, 0, 5, 4, 3]);
         assert_eq!(parse_size("{1488, 2266}"), Some((1488, 2266)));
         assert_eq!(parse_size("1488x2266"), None);
     }
