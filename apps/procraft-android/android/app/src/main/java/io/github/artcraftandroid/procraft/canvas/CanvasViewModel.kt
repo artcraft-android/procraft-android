@@ -4849,10 +4849,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Takes back the adjustment's changes, or with none, the last one kept. */
     fun undoAdjustment() {
-        if (adjustPencil) { 
-          session?.undo(); 
-          refresh; 
-          return 
+        if (adjustPencil) {
+          session?.undo();
+          refresh();
+          return
         }
         val a = adjustment ?: return
         if (adjustChanged()) {
