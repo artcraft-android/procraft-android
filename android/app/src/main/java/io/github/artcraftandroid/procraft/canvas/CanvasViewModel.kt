@@ -1765,9 +1765,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             GesturePurpose.COPY_PASTE -> copyPasteOpen = true
             GesturePurpose.LAYER_SELECT -> layerSelectAt(at)
             GesturePurpose.QUICKSHAPE -> quickShapeLast()
+            // nothing set for the first button: between the current tool and the eraser, as a
+            // pen's double-tap does by default
+            null -> if (!secondary) {
+                if (tool == ToolKind.ERASE) {
+                    select(toolBeforeEraser)
+                } else {
+                    toolBeforeEraser = tool
+                    select(ToolKind.ERASE)
+                }
+            }
             else -> Unit
         }
     }
+
+    /** The tool the pen's button left for the eraser, to go back to. */
+    private var toolBeforeEraser = ToolKind.PAINT
 
     /** The modify button tapped: what Tap □ is set to do (open or close the eyedropper at first). */
     fun tapModify() {
