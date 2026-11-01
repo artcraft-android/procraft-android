@@ -115,27 +115,25 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
     let mut pixels: Vec<(LayerId, Vec<u8>)> = Vec::new();
     let mut next = 1u64;
     let mut holds = Vec::new();
-    let mut selected = None;
-    let selected_uuid = root.object("selectedLayer").and_then(|l| l.string("UUID"));
+    // each layer's UUID, for the layers the document points at (the selected, the sampled)
+    let mut uuids: Vec<(String, LayerId)> = Vec::new();
     let mut items = root.array("unwrappedLayers");
     if items.is_empty() {
         items = root.array("layers");
     }
     // the archive lists the top first; ours goes bottom first
     for item in items.iter().rev() {
-        add_item(
-            &canvas,
-            item,
-            None,
-            &mut layers,
-            &mut pixels,
-            &mut holds,
-            &mut next,
-            selected_uuid.as_deref(),
-            &mut selected,
-        )?;
+        add_item(&canvas, item, None, &mut layers, &mut pixels, &mut holds, &mut next, &mut uuids)?;
     }
-    let mut document = Document::from_layers(dw, dh, layers, selected.unwrap_or(LayerId(1)));
+    let pointed = |key: &str| {
+        let uuid = root.object(key).and_then(|l| l.string("UUID"))?;
+        uuids.iter().find(|(u, _)| *u == uuid).map(|(_, id)| *id)
+    };
+    let mut document = Document::from_layers(dw, dh, layers, pointed("selectedLayer").unwrap_or(LayerId(1)));
+    // the layer sampled from is the reference layer
+    if let Some(sampled) = pointed("selectedSamplerLayer") {
+        document.set_reference(sampled, true);
+    }
     if let Some(c) = root.data("backgroundColor").and_then(floats4) {
         document.background = [c[0], c[1], c[2]].map(|v| v.clamp(0.0, 1.0));
     }
@@ -163,7 +161,10 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
         }
         _ => document.profile = nearest,
     }
-    if let Some(a) = root.object("animation").and_then(|a| animation(&a, holds)) {
+    if let Some(mut a) = root.object("animation").and_then(|a| animation(&a, holds)) {
+        // the layers are listed top first: the first item is the last frame, the last the first
+        a.foreground = root.bool("isFirstItemAnimationForeground").unwrap_or(false);
+        a.background = root.bool("isLastItemAnimationBackground").unwrap_or(false);
         document.animation = Some(a);
     }
     let document = document.repaired();
@@ -326,8 +327,7 @@ fn add_item(
     pixels: &mut Vec<(LayerId, Vec<u8>)>,
     holds: &mut Vec<(LayerId, u32)>,
     next: &mut u64,
-    selected_uuid: Option<&str>,
-    selected: &mut Option<LayerId>,
+    uuids: &mut Vec<(String, LayerId)>,
 ) -> Result<(), ReadError> {
     if layers.len() > 4096 {
         return Err(ReadError::TooLarge);
@@ -344,7 +344,7 @@ fn add_item(
             holds.extend(held.map(|n| (gid, n)));
             // the group sits above what it holds
             for child in item.array("children").iter().rev() {
-                add_item(canvas, child, Some(gid), layers, pixels, holds, next, selected_uuid, selected)?;
+                add_item(canvas, child, Some(gid), layers, pixels, holds, next, uuids)?;
             }
             layers.push(Layer {
                 id: gid,
@@ -368,9 +368,7 @@ fn add_item(
             let lid = id();
             holds.extend(held.map(|n| (lid, n)));
             let uuid = item.string("UUID").unwrap_or_default();
-            if selected_uuid == Some(uuid.as_str()) {
-                *selected = Some(lid);
-            }
+            uuids.push((uuid.clone(), lid));
             let blend = item
                 .int("extendedBlend2")
                 .or_else(|| item.int("extendedBlend"))
@@ -504,10 +502,10 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
 
     // layers and groups, top first, as nested lists
     let tops = top_first(doc, None);
-    let mut selected = Builder::null();
+    let (mut selected, mut sampled) = (Builder::null(), Builder::null());
     let mut items = Vec::new();
     for id in tops {
-        items.push(write_item(&mut b, &mut zip, &mut uuids, e, &doc_ref, id, &mut selected));
+        items.push(write_item(&mut b, &mut zip, &mut uuids, e, &doc_ref, id, [&mut selected, &mut sampled]));
     }
     let layers = b.array(items.clone(), true);
     let unwrapped = b.array(items, false);
@@ -573,8 +571,8 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
         ("featureSet", Value::Int(1)),
         ("flippedHorizontally", Value::Bool(false)),
         ("flippedVertically", Value::Bool(false)),
-        ("isFirstItemAnimationForeground", Value::Bool(false)),
-        ("isLastItemAnimationBackground", Value::Bool(false)),
+        ("isFirstItemAnimationForeground", Value::Bool(doc.animation.as_ref().is_some_and(|a| a.foreground))),
+        ("isLastItemAnimationBackground", Value::Bool(doc.animation.as_ref().is_some_and(|a| a.background))),
         ("layers", layers),
         ("legacyBehaviour", Value::Int(1)),
         ("mask", mask),
@@ -590,7 +588,7 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
         ("referenceSize", reference_size),
         ("referenceVisibility", Value::Bool(false)),
         ("selectedLayer", selected),
-        ("selectedSamplerLayer", Builder::null()),
+        ("selectedSamplerLayer", sampled),
         ("size", size),
         ("solo", Builder::null()),
         ("strokeCount", strokes),
@@ -737,14 +735,16 @@ fn write_item(
     e: &Export<'_>,
     doc_ref: &Value,
     id: LayerId,
-    selected: &mut Value,
+    [selected, sampled]: [&mut Value; 2],
 ) -> Value {
     let doc = e.document;
     let (w, h) = (doc.width(), doc.height());
     let Some(l) = doc.layer(id) else { return Builder::null() };
     if l.kind == LayerKind::Group {
-        let children: Vec<Value> =
-            top_first(doc, Some(id)).into_iter().map(|c| write_item(b, zip, uuids, e, doc_ref, c, selected)).collect();
+        let children: Vec<Value> = top_first(doc, Some(id))
+            .into_iter()
+            .map(|c| write_item(b, zip, uuids, e, doc_ref, c, [&mut *selected, &mut *sampled]))
+            .collect();
         let children = b.array(children, true);
         let name = b.string(&l.name);
         return b.object(
@@ -809,6 +809,10 @@ fn write_item(
     let r = layer_record(b, doc_ref, &uuid, mask, rec, w, h);
     if id == doc.current() {
         *selected = r.clone();
+    }
+    // the reference layer is the one sampled from
+    if l.reference {
+        *sampled = r.clone();
     }
     r
 }

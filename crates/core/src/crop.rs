@@ -78,7 +78,9 @@ impl CanvasSession {
         }
         let old_canvas = st.canvas.replace(canvas);
         let old_doc = std::mem::replace(&mut st.doc, doc);
-        if let Some(old_canvas) = old_canvas {
+        if let Some(mut old_canvas) = old_canvas {
+            // the crop is a new step: what was undone before it can't be redone
+            old_canvas.forget_redo();
             st.crop_undo = Some((old_canvas, old_doc));
         }
         st.crop_redo = None;

@@ -1757,6 +1757,14 @@ impl Canvas {
         !self.redo.is_empty()
     }
 
+    /// Drops what could be redone, as a new step would: the canvas is set aside for something new
+    /// (a crop), and what was undone on it can no longer come back.
+    pub fn forget_redo(&mut self) {
+        for dropped in std::mem::take(&mut self.redo) {
+            self.keep_spare_snapshot(dropped);
+        }
+    }
+
     /// Names the next step made (what undo and redo call it), queued with the work that makes it.
     pub fn name_next_step(&mut self, name: &str) {
         self.ops.push(Op::Name(name.to_owned()));
