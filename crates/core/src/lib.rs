@@ -78,7 +78,7 @@ pub use adjust_menu::{
 };
 pub use adjusting::{AdjustShown, CLONE_PUCK_RADIUS};
 pub use animation::{AnimationPlayback, AnimationSettings, PlayStep, animation_next_step};
-pub use brush_files::{OTHER_BRUSH_EXTENSIONS, is_brush_zip};
+pub use brush_files::{OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip, read_any_brushes};
 pub use brushes::{BrushInfo, BrushSetInfo};
 pub use colour::{
     cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,

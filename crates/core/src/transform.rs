@@ -171,7 +171,7 @@ const MAX_SNAP_LAYERS: usize = 16;
 impl State {
     /// Ends an open transform: `commit` keeps it as one undo step, otherwise the layer is put back.
     pub(crate) fn end_transform(&mut self, commit: bool) {
-        let within = if commit { self.changed_since_begin() } else { None };
+        let within = if commit && self.transform.is_some() { self.changed_since_begin() } else { None };
         if self.transform.take().is_some()
             && let Some(canvas) = self.canvas.as_mut()
         {

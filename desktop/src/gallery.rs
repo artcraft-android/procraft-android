@@ -184,6 +184,13 @@ pub struct Gallery {
     stack: Option<(String, String)>,
     /// Each artwork's thumbnail (by folder), and when the artwork was changed when it was read.
     thumbs: HashMap<String, (i64, Option<TextureHandle>)>,
+    /// Thumbnails being read on a thread of their own (a gallery of many would hold up the
+    /// window), and that thread.
+    reading: std::collections::HashSet<(String, i64)>,
+    reader: Option<ThumbnailReader>,
+    /// Artworks being duplicated on threads of their own (a big one's files take a while): the
+    /// gallery is read again as each batch is done.
+    duplicating: Vec<std::sync::mpsc::Receiver<()>>,
     new_open: bool,
     presets: Vec<CanvasPreset>,
     /// The screen's size, pixels: Screen Size's canvas.
@@ -296,6 +303,9 @@ impl Gallery {
             entries: Vec::new(),
             stack: None,
             thumbs: HashMap::new(),
+            reading: Default::default(),
+            reader: None,
+            duplicating: Vec::new(),
             new_open: false,
             presets,
             screen_px: (1920, 1080),
@@ -445,6 +455,8 @@ impl Gallery {
 
     /// Shows the gallery over the whole window; returns what a tap asked for.
     pub fn show(&mut self, ctx: &egui::Context, look: &mut Look, colours: &crate::colours::Colours) -> Option<Asked> {
+        self.thumbnails_read(ctx);
+        self.duplicated(ctx);
         let screen = ctx.content_rect();
         let mut asked = self.page(ctx, look, Order::Background, 1.0, false);
         self.stack_flights(ctx, look);
@@ -558,9 +570,7 @@ impl Gallery {
                 self.preview = Some((self.picked_artworks(), 0, false, 0.0));
             }
             SelectAction::Duplicate => {
-                for a in self.picked_artworks() {
-                    self.store.duplicate(a.dir);
-                }
+                self.duplicate(self.picked_artworks().into_iter().map(|a| a.dir).collect());
                 self.end_selecting();
             }
             SelectAction::Delete => {
@@ -868,7 +878,7 @@ impl Gallery {
         egui::Area::new(Id::unique("preview")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
             let response = ui.allocate_rect(screen, Sense::click_and_drag());
             ui.painter().rect_filled(screen, 0, Color32::BLACK);
-            if let Some(t) = self.texture(ctx, &a) {
+            if let Some(t) = self.texture(&a) {
                 let picture = Self::fitted(screen, &a);
                 let picture = picture.translate(vec2(0.0, screen.center().y - picture.center().y));
                 let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -1256,7 +1266,7 @@ impl Gallery {
             let k = self.lifts.get(&dir).map_or(LIFTED.0, Lift::now);
             let picture = Self::fitted(Self::thumb_box(cell), &a).translate(p - from);
             let picture = Rect::from_min_max(p + (picture.min - p) * k, p + (picture.max - p) * k);
-            let texture = self.texture(ui.ctx(), &a);
+            let texture = self.texture(&a);
             let painter = ui.ctx().layer_painter(egui::LayerId::new(Order::Tooltip, Id::unique("lifted artwork")));
             let shadow =
                 egui::epaint::Shadow { offset: [0, 4], blur: 24, spread: 0, color: Color32::from_black_alpha(0x80) };
@@ -1327,8 +1337,7 @@ impl Gallery {
                 match label {
                     "Duplicate" => {
                         self.swiped = None;
-                        self.store.duplicate(a.dir.clone());
-                        self.refresh();
+                        self.duplicate(vec![a.dir.clone()]);
                     }
                     "Delete" => {
                         self.swiped = None;
@@ -1464,24 +1473,80 @@ impl Gallery {
         Rect::from_min_size(pos2(frame.center().x - size.x / 2.0, frame.bottom() - size.y), size)
     }
 
-    fn texture(&mut self, ctx: &egui::Context, a: &GalleryArtwork) -> Option<egui::TextureId> {
+    /// An artwork's thumbnail: read on the reader's thread the first time (and after it
+    /// changes), the one before (or none) shown meanwhile.
+    fn texture(&mut self, a: &GalleryArtwork) -> Option<egui::TextureId> {
         let fresh = self.thumbs.get(&a.dir).is_none_or(|(when, _)| *when != a.modified_ms);
-        if fresh {
+        let asked = (a.dir.clone(), a.modified_ms);
+        if fresh && !self.reading.contains(&asked) {
             let path = std::path::Path::new(&a.dir).join("thumbnail.png");
-            let texture = crate::files::read_png(&path).ok().map(|image| {
-                let size = [image.width as usize, image.height as usize];
-                let pixels = egui::ColorImage::from_rgba_unmultiplied(size, &image.rgba);
-                ctx.load_texture(format!("thumbnail {}", a.dir), pixels, egui::TextureOptions::LINEAR)
-            });
-            self.thumbs.insert(a.dir.clone(), (a.modified_ms, texture));
+            let reader = self.reader.get_or_insert_with(ThumbnailReader::start);
+            if reader.asks.send((asked.0.clone(), asked.1, path)).is_ok() {
+                self.reading.insert(asked);
+            }
         }
         self.thumbs.get(&a.dir).and_then(|(_, t)| t.as_ref().map(TextureHandle::id))
+    }
+
+    /// The artworks in `dirs` duplicated, each beside itself, on a thread of their own (one batch
+    /// at a time, so each finds the order the last left); the copies show once made.
+    fn duplicate(&mut self, dirs: Vec<String>) {
+        static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let (store, (done, duplicating)) = (Arc::clone(&self.store), std::sync::mpsc::channel());
+        std::thread::spawn(move || {
+            let _one = ONE_AT_A_TIME.lock();
+            for dir in dirs {
+                store.duplicate(dir);
+            }
+            let _ = done.send(());
+        });
+        self.duplicating.push(duplicating);
+    }
+
+    /// Duplicates made since the last frame shown (the gallery read again); looked at again soon
+    /// while more are being made.
+    fn duplicated(&mut self, ctx: &egui::Context) {
+        let before = self.duplicating.len();
+        self.duplicating.retain(|d| matches!(d.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+        if self.duplicating.len() < before {
+            self.refresh();
+        }
+        if !self.duplicating.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The thumbnails read since the last frame made textures; looked at again soon while more
+    /// are coming.
+    fn thumbnails_read(&mut self, ctx: &egui::Context) {
+        let Some(reader) = &self.reader else { return };
+        loop {
+            match reader.read.try_recv() {
+                Ok((dir, when, image)) => {
+                    self.reading.remove(&(dir.clone(), when));
+                    let texture = image.map(|pixels| {
+                        ctx.load_texture(format!("thumbnail {dir}"), pixels, egui::TextureOptions::LINEAR)
+                    });
+                    self.thumbs.insert(dir, (when, texture));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                // its thread stopped: started again for those still wanted
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.reader = None;
+                    self.reading.clear();
+                    break;
+                }
+            }
+        }
+        if !self.reading.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
     }
 
     /// An artwork's thumbnail in `rect`, turned `turn` degrees: white under its picture, rounded
     /// 8 (but turned), with a soft shadow.
     fn thumbnail(&mut self, ui: &Ui, rect: Rect, a: &GalleryArtwork, turn: f32) {
-        let texture = self.texture(ui.ctx(), a);
+        let texture = self.texture(a);
         let painter = ui.painter();
         if turn == 0.0 {
             let shadow =
@@ -1776,6 +1841,37 @@ fn one_line(ui: &Ui, text: &str, size: f32, weight: Weight, colour: Color32, max
 
 fn presets_path() -> std::path::PathBuf {
     crate::files::app_dir().join("presets.json")
+}
+
+/// A thread reading the gallery's thumbnails one after another: an artwork's folder, when it was
+/// changed and its picture's file asked; the folder, the time and the picture (none if it can't
+/// be read) sent back.
+struct ThumbnailReader {
+    asks: std::sync::mpsc::Sender<(String, i64, std::path::PathBuf)>,
+    read: std::sync::mpsc::Receiver<(String, i64, Option<egui::ColorImage>)>,
+}
+
+impl ThumbnailReader {
+    fn start() -> ThumbnailReader {
+        let (asks, asked) = std::sync::mpsc::channel::<(String, i64, std::path::PathBuf)>();
+        let (send, read) = std::sync::mpsc::channel();
+        // it ends when the gallery lets go of it
+        let _ = std::thread::Builder::new().name("thumbnails".into()).spawn(move || {
+            for (dir, when, path) in asked {
+                let image = crate::files::read_png(&path)
+                    .ok()
+                    .filter(|image| image.rgba.len() == image.width as usize * image.height as usize * 4)
+                    .map(|image| {
+                        let size = [image.width as usize, image.height as usize];
+                        egui::ColorImage::from_rgba_unmultiplied(size, &image.rgba)
+                    });
+                if send.send((dir, when, image)).is_err() {
+                    return;
+                }
+            }
+        });
+        ThumbnailReader { asks, read }
+    }
 }
 
 #[cfg(test)]

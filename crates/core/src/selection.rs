@@ -209,8 +209,11 @@ impl CanvasSession {
     pub fn select_feather(&self, amount: f32) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let Some(current) = st.selection.clone() else { return };
-        let mut m = st.feather_base.get_or_insert(current).clone();
+        // the selection as it was before the first, kept once
+        if st.feather_base.is_none() {
+            st.feather_base = st.selection.clone();
+        }
+        let Some(mut m) = st.feather_base.clone() else { return };
         m.feather(feather_radius(amount));
         st.selection = Some(m);
         st.show_selection();

@@ -28,13 +28,17 @@ impl State {
     }
 
     /// Where layer `id` is painted (as the GPU finds it, everything queued drawn first); none if
-    /// nowhere, or if that can't be told.
-    fn painted_box(&mut self, id: LayerId) -> Option<IRect> {
+    /// nowhere, the whole canvas if the GPU can't tell.
+    pub(crate) fn painted_box(&mut self, id: LayerId) -> Option<IRect> {
         self.finish_stroke();
         self.settle();
         self.flush();
+        let whole = IRect::from_size(self.doc.width(), self.doc.height());
         let (Some(canvas), Some(gpu)) = (self.canvas.as_ref(), self.gpu.as_ref()) else { return None };
-        canvas.painted_boxes(gpu, &[id]).pop().flatten()
+        match canvas.painted_boxes_or_why(gpu, &[id]).pop() {
+            Some(Ok(painted)) => painted,
+            Some(Err(_)) | None => Some(whole),
+        }
     }
 
     /// Replaces an unlocked layer's pixels inside `rect` with `part` (its rows), as one undo step.

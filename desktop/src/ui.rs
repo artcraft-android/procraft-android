@@ -2,6 +2,7 @@
 //! the top bar, and the keyboard's shortcuts.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, Rect, Stroke, Ui, vec2};
@@ -65,6 +66,10 @@ pub struct Interface {
     pub path: Option<PathBuf>,
     /// The artwork's edits when it was last saved: anything else is unsaved.
     pub saved_edits: u64,
+    /// Inserts being read, each on a thread of its own.
+    inserting: Vec<std::sync::mpsc::Receiver<Inserted>>,
+    /// A Save As being written: where and at which edits, or why it couldn't be.
+    pub saving: Option<std::sync::mpsc::Receiver<Result<(std::path::PathBuf, u64), String>>>,
     open: Option<Popover>,
     pub(crate) colours: Colours,
     drop: ColourDrop,
@@ -158,6 +163,8 @@ impl Default for Interface {
             popover_open: false,
             path: None,
             saved_edits: 0,
+            saving: None,
+            inserting: Vec::new(),
             open: None,
             colours: Colours::default(),
             drop: ColourDrop::default(),
@@ -215,12 +222,29 @@ impl Default for Interface {
 }
 
 impl Interface {
+    /// A Save As written meanwhile: its file kept as where the artwork saves, or why it couldn't
+    /// be told. True while one is still being written.
+    pub fn saved_as(&mut self) -> bool {
+        let Some(saving) = &self.saving else { return false };
+        match saving.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+            Ok(Ok((path, edits))) => {
+                self.path = Some(path);
+                self.saved_edits = edits;
+            }
+            Ok(Err(e)) => crate::files::tell("Can't save", &e),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+        self.saving = None;
+        false
+    }
+
     /// `session` is shown now (at `scale` window pixels a point): it paints in the colour chosen.
-    pub fn opened(&mut self, session: &CanvasSession, scale: f32) {
+    pub fn opened(&mut self, session: &Arc<CanvasSession>, scale: f32) {
         self.model = session.model_info().is_some();
         self.lighting.forget();
         // brush files given while no canvas was open
-        self.add_brushes(session, crate::files::take_pending_brushes());
+        self.library.add_brushes(crate::files::take_pending_brushes(), true);
         session.set_touch_layer_opacity(None);
         if self.model {
             crate::lighting::light_model(session);
@@ -243,9 +267,10 @@ impl Interface {
         self.place_canvas(session, scale);
     }
 
-    /// The artwork is put away (to the gallery, for another, or with the window): Recolor ends
-    /// keeping what it filled, and Layer Opacity ends.
+    /// The artwork is put away (to the gallery, for another, or with the window): brushes coming
+    /// in from files are waited for, Recolor ends keeping what it filled, and Layer Opacity ends.
     pub fn closing(&mut self, session: &CanvasSession) {
+        self.library.finish_importing(session);
         self.end_recolor(session);
         session.set_touch_layer_opacity(None);
     }
@@ -309,6 +334,11 @@ impl Interface {
     pub fn show(&mut self, ui: &mut Ui, session: &std::sync::Arc<CanvasSession>, input: &mut Input) {
         let ctx = ui.ctx().clone();
         self.style_once(&ctx);
+        // looked at again soon while an insert is read, or brushes made
+        let brushes_coming = self.brushes_added(session);
+        if self.inserted(session) || brushes_coming {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         self.commands(&ctx, session, input);
         // the brush library closed: what was done in it is kept
         let brushes_open = self.open == Some(Popover::Brushes);
@@ -1090,7 +1120,7 @@ impl Interface {
     /// A picture the user picks put on a new layer of its own, then transformed (a moving GIF's
     /// frames each on a layer of its own, for the timeline), as Insert a file and Insert a photo
     /// do.
-    fn insert_picture(&mut self, session: &CanvasSession, photo: bool, private: bool) {
+    fn insert_picture(&mut self, session: &Arc<CanvasSession>, photo: bool, private: bool) {
         let title = if photo { "Insert a photo" } else { "Insert a file" };
         let Some(path) = rfd::FileDialog::new()
             .set_title(title)
@@ -1104,7 +1134,7 @@ impl Interface {
 
     /// Files dropped on the canvas: each picture inserted as Insert a file does; brushes (ours
     /// or another app's) added to the library.
-    pub fn dropped(&mut self, session: &CanvasSession, paths: &[std::path::PathBuf]) {
+    pub fn dropped(&mut self, session: &Arc<CanvasSession>, paths: &[std::path::PathBuf]) {
         let mut brushes = Vec::new();
         for path in paths {
             let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
@@ -1118,98 +1148,68 @@ impl Interface {
                 brushes.push((bytes, name));
             }
         }
-        self.add_brushes(session, brushes);
+        self.library.add_brushes(brushes, true);
     }
 
-    /// Brush files' `(bytes, name)` added to the library, which says so; or that none held any.
-    fn add_brushes(&mut self, session: &CanvasSession, files: Vec<(Vec<u8>, String)>) {
-        if files.is_empty() {
-            return;
+    /// Brushes read from files meanwhile added to the library and told of (when asked to), the
+    /// library kept. True while more are being read or wait to be added.
+    fn brushes_added(&mut self, session: &CanvasSession) -> bool {
+        for (any, tell) in self.library.added(session, self.studio.open) {
+            if tell {
+                let said = if any { "Brushes added to the library." } else { "This file has no brushes in it." };
+                self.overlays.notice(said, false);
+            } else if !any {
+                crate::files::say("This file has no brushes in it.");
+            }
         }
-        let mut any = false;
-        for (bytes, name) in files {
-            any |= self.library.add_brushes(session, bytes, name);
-        }
-        let said = if any { "Brushes added to the library." } else { "This file has no brushes in it." };
-        self.overlays.notice(said, false);
+        self.keep_brushes |= std::mem::take(&mut self.library.changed);
+        self.library.importing()
     }
 
     /// The picture in file `path` as a new layer (a private one, if `private`), ready to
     /// transform; a GIF's frames each a layer.
-    fn insert_file(&mut self, session: &CanvasSession, path: &std::path::Path, private: bool) {
-        let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-        if VIDEOS.contains(&extension.as_str()) {
-            self.insert_video(session, path, private);
-            return;
-        }
-        let Ok(bytes) = std::fs::read(path) else {
-            crate::files::tell("Can't insert it", "This picture can't be opened.");
-            return;
-        };
-        if let Some(done) = session.insert_gif_frames(bytes.clone(), private) {
-            if done.added == 0 && !done.full {
-                crate::files::tell("Can't insert it", "This picture can't be opened.");
-                return;
-            }
-            if done.added > 0 {
-                self.overlays.notice("Frames saved to timeline", false);
-            }
-            if done.full {
-                crate::files::no_room(session);
-            }
-            return;
-        }
-        match image::load_from_memory(&bytes) {
-            Ok(picture) => {
-                let rgba = picture.to_rgba8();
-                let image =
-                    procraft_core::ThumbnailImage { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() };
-                if session.insert_image(image, private).is_some() {
-                    self.toggle_transform(session);
-                } else {
-                    crate::files::no_room(session);
-                }
-            }
-            Err(_) => crate::files::tell("Can't insert it", "This picture can't be opened."),
-        }
+    fn insert_file(&mut self, session: &Arc<CanvasSession>, path: &std::path::Path, private: bool) {
+        // read on a thread of its own (a video's frames take seconds), what it came to told on a
+        // frame after (`inserted`)
+        let (session, path, (done, inserting)) = (Arc::clone(session), path.to_path_buf(), std::sync::mpsc::channel());
+        std::thread::spawn(move || {
+            let _ = done.send(read_insert(&session, &path, private));
+        });
+        self.inserting.push(inserting);
     }
 
-    /// A video's frames as layers above the current one (private ones, if `private`), each
-    /// fitted to the canvas, at the animation's frame rate (or 15 a second): for each time a
-    /// frame falls due, the video's frame nearest it. As many as there is room for, 999 at most;
-    /// Animation Assist comes on with them in its timeline.
-    fn insert_video(&mut self, session: &CanvasSession, path: &std::path::Path, private: bool) {
-        let settings = session.animation_settings();
-        let fps = f64::from(settings.as_ref().map_or(VIDEO_FPS, |a| a.fps).clamp(1, 60));
-        let (mut added, mut full, mut start) = (0u32, false, None);
-        let read = crate::video::read_frames(path, |rgba, width, height, at| {
-            // its time from the first frame's (a video may start late); the frames falling due
-            // nearer it than the next one's take it
-            let at = at - *start.get_or_insert(at);
-            while !full && added < MOST_VIDEO_FRAMES && at + 0.5 / fps + 1e-3 >= f64::from(added) / fps {
-                let image = procraft_core::ThumbnailImage { width, height, rgba: rgba.clone() };
-                if session.insert_image(image, private).is_some() {
-                    added += 1;
-                } else {
-                    full = true;
-                }
+    /// What inserts read meanwhile came to: a picture transformed, frames told of (Animation
+    /// Assist on for a video's), or why it couldn't be. True while one is still being read.
+    fn inserted(&mut self, session: &CanvasSession) -> bool {
+        let mut came = Vec::new();
+        self.inserting.retain(|r| match r.try_recv() {
+            Ok(i) => {
+                came.push(i);
+                false
             }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
         });
-        if added == 0 {
-            match read {
-                Ok(_) if full => crate::files::no_room(session),
-                _ => crate::files::tell("Can't insert it", "This video can't be opened."),
+        for inserted in came {
+            match inserted {
+                Inserted::Picture(true) => self.toggle_transform(session),
+                Inserted::Picture(false) => crate::files::no_room(session),
+                Inserted::Frames { added, full, assist } => {
+                    if assist {
+                        self.animation.reset(session);
+                        session.set_animation_assist(true);
+                    }
+                    if added > 0 {
+                        self.overlays.notice("Frames saved to timeline", false);
+                    }
+                    if full {
+                        crate::files::no_room(session);
+                    }
+                }
+                Inserted::Failed(what) => crate::files::tell("Can't insert it", what),
             }
-            return;
         }
-        if settings.is_none_or(|a| a.pages) {
-            self.animation.reset(session);
-            session.set_animation_assist(true);
-        }
-        self.overlays.notice("Frames saved to timeline", false);
-        if full {
-            crate::files::no_room(session);
-        }
+        !self.inserting.is_empty()
     }
 
     fn toggle_transform(&mut self, session: &CanvasSession) {
@@ -1554,7 +1554,7 @@ impl Interface {
     fn popover(
         &mut self,
         ctx: &egui::Context,
-        session: &CanvasSession,
+        session: &Arc<CanvasSession>,
         which: Popover,
         button: Option<Rect>,
         tool: ToolKind,
@@ -1888,4 +1888,62 @@ fn style(ctx: &egui::Context) {
         s.spacing.button_padding = vec2(10.0, 5.0);
         s.spacing.item_spacing = vec2(8.0, 6.0);
     });
+}
+
+/// What an insert read on its own thread came to.
+enum Inserted {
+    /// A picture on a layer of its own (to transform), or none for want of room.
+    Picture(bool),
+    /// Frames each on a layer of its own (a moving picture's or a video's): how many, whether the
+    /// canvas ran out of room, and whether Animation Assist comes on with them.
+    Frames { added: u32, full: bool, assist: bool },
+    /// It couldn't be read.
+    Failed(&'static str),
+}
+
+/// The file at `path` brought onto the canvas (private layers, if `private`): a video's frames
+/// each fitted on a layer of their own at the animation's frame rate (or 15 a second; for each
+/// time a frame falls due, the video's frame nearest it; 999 at most), a moving picture's frames,
+/// or a picture on a layer of its own.
+fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -> Inserted {
+    let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if VIDEOS.contains(&extension.as_str()) {
+        let settings = session.animation_settings();
+        let fps = f64::from(settings.as_ref().map_or(VIDEO_FPS, |a| a.fps).clamp(1, 60));
+        let (mut added, mut full, mut start) = (0u32, false, None);
+        let read = crate::video::read_frames(path, |rgba, width, height, at| {
+            // its time from the first frame's (a video may start late); the frames falling due
+            // nearer it than the next one's take it
+            let at = at - *start.get_or_insert(at);
+            while !full && added < MOST_VIDEO_FRAMES && at + 0.5 / fps + 1e-3 >= f64::from(added) / fps {
+                let image = procraft_core::ThumbnailImage { width, height, rgba: rgba.to_vec() };
+                if session.insert_image(image, private).is_some() {
+                    added += 1;
+                } else {
+                    full = true;
+                }
+            }
+        });
+        return match (added, read) {
+            (0, Ok(_)) if full => Inserted::Frames { added: 0, full: true, assist: false },
+            (0, _) => Inserted::Failed("This video can't be opened."),
+            _ => Inserted::Frames { added, full, assist: settings.is_none_or(|a| a.pages) },
+        };
+    }
+    let Ok(bytes) = std::fs::read(path) else { return Inserted::Failed("This picture can't be opened.") };
+    if let Some(done) = session.insert_gif_frames(bytes.clone(), private) {
+        if done.added == 0 && !done.full {
+            return Inserted::Failed("This picture can't be opened.");
+        }
+        return Inserted::Frames { added: done.added, full: done.full, assist: false };
+    }
+    match image::load_from_memory(&bytes) {
+        Ok(picture) => {
+            let rgba = picture.to_rgba8();
+            let image =
+                procraft_core::ThumbnailImage { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() };
+            Inserted::Picture(session.insert_image(image, private).is_some())
+        }
+        Err(_) => Inserted::Failed("This picture can't be opened."),
+    }
 }

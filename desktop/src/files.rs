@@ -157,6 +157,56 @@ pub fn tell(title: &str, text: &str) {
     MessageDialog::new().set_level(MessageLevel::Error).set_title(title).set_description(text).show();
 }
 
+/// Files being written on threads of their own (exports, shares, Save As): since when, whether
+/// from the artwork open (which takes no input meanwhile, so nothing the export would end is
+/// started), and the thread, waited for before the app ends so none is cut short. And what they
+/// had to say, shown on the window's thread (some systems show dialogs only from there).
+type Writing = (std::time::Instant, bool, std::thread::JoinHandle<()>);
+static WRITING: std::sync::Mutex<Vec<Writing>> = std::sync::Mutex::new(Vec::new());
+static TOLD: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Runs `write` on a thread of its own, among those the app waits for as it ends; `from_canvas`
+/// when it writes the artwork open.
+pub fn write_meanwhile(from_canvas: bool, write: impl FnOnce() + Send + 'static) {
+    let started = std::thread::spawn(write);
+    let mut writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    writing.retain(|(.., w)| !w.is_finished());
+    writing.push((std::time::Instant::now(), from_canvas, started));
+}
+
+/// Whether a file is still being written.
+pub fn still_writing() -> bool {
+    WRITING.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(.., w)| !w.is_finished())
+}
+
+/// Since when the artwork open has been written, if it still is.
+pub fn exporting_since() -> Option<std::time::Instant> {
+    let writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    writing.iter().filter(|(_, from_canvas, w)| *from_canvas && !w.is_finished()).map(|(since, ..)| *since).min()
+}
+
+/// Waits for the files still being written.
+pub fn finish_writing() {
+    let writing = std::mem::take(&mut *WRITING.lock().unwrap_or_else(|e| e.into_inner()));
+    for (.., w) in writing {
+        let _ = w.join();
+    }
+}
+
+/// A message from a thread of its own (writing, reading), to show on the window's
+/// ([`tell_what_was_told`]).
+pub fn tell_later(title: &str, text: &str) {
+    TOLD.lock().unwrap_or_else(|e| e.into_inner()).push((title.to_owned(), text.to_owned()));
+}
+
+/// Shows the messages the writing threads left.
+pub fn tell_what_was_told() {
+    let told = std::mem::take(&mut *TOLD.lock().unwrap_or_else(|e| e.into_inner()));
+    for (title, text) in told {
+        tell(&title, &text);
+    }
+}
+
 /// Asks where to keep a file called `name` (ending `extension`, a `kind` of file) and writes
 /// `bytes` there.
 pub fn save_file(bytes: &[u8], name: &str, extension: &str, kind: &str) {
@@ -261,25 +311,23 @@ pub fn import_profile() -> Option<String> {
     name
 }
 
-/// A picture the user picks (PNG, JPEG, WebP, GIF, BMP or TIFF) as a new one-layer artwork its
-/// size.
-pub fn pick_picture() -> Option<Arc<CanvasSession>> {
-    let path = FileDialog::new()
+/// A picture the user picks (PNG, JPEG, WebP, GIF, BMP or TIFF), to make a new artwork of
+/// ([`picture_artwork`]).
+pub fn pick_picture() -> Option<PathBuf> {
+    FileDialog::new()
         .set_title("Photo")
         .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"])
-        .pick_file()?;
+        .pick_file()
+}
+
+/// The picture at `path` as a new one-layer artwork its size, named after the file; why not if
+/// it can't be read.
+pub fn picture_artwork(path: &Path) -> Result<Arc<CanvasSession>, String> {
     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    match image::open(&path) {
-        Ok(picture) => {
-            let rgba = picture.to_rgba8();
-            let image = ThumbnailImage { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() };
-            Some(CanvasSession::from_image(image, name))
-        }
-        Err(e) => {
-            tell("Can't open the picture", &e.to_string());
-            None
-        }
-    }
+    let picture = image::open(path).map_err(|e| e.to_string())?;
+    let rgba = picture.to_rgba8();
+    let image = ThumbnailImage { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() };
+    Ok(CanvasSession::from_image(image, name))
 }
 
 /// What a model to paint on can be: an OBJ, a USD (packaged or not), or a zip holding one with
@@ -351,7 +399,7 @@ fn pick_artwork_files(more: &[&str]) -> Option<Vec<PathBuf>> {
 pub fn open_artwork_files(paths: Vec<PathBuf>) -> Option<(Arc<CanvasSession>, Option<PathBuf>)> {
     // a model among them takes the rest as the files picked with it
     if let Some(model) = paths.iter().find(|p| is_model_file(p)) {
-        return open_model(model, &paths).map(|s| (s, None)).map_err(|e| tell("Can't open the model", &e)).ok();
+        return open_model(model, &paths).map(|s| (s, None)).map_err(|e| tell_later("Can't open the model", &e)).ok();
     }
     let path = paths.into_iter().next()?;
     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -371,7 +419,7 @@ pub fn open_artwork_files(paths: Vec<PathBuf>) -> Option<(Arc<CanvasSession>, Op
     };
     // a package brings its time-lapse too
     let package = matches!(extension.as_str(), "procraft" | "procreate").then_some(path);
-    opened.map(|s| (s, package)).map_err(|e| tell("Can't open the file", &e)).ok()
+    opened.map(|s| (s, package)).map_err(|e| tell_later("Can't open the file", &e)).ok()
 }
 
 /// The PDF in file `path` as a new artwork named `name`: each page a layer ("Page 1" at the
@@ -496,8 +544,9 @@ pub fn about() {
 }
 
 /// Saves the artwork as a .procraft package, where it was last saved unless `ask` (or it never
-/// was). True if it was saved.
-pub fn save(session: &CanvasSession, ui: &mut Interface, ask: bool) -> bool {
+/// was): written on a thread of its own (a large one takes seconds), the interface told when it
+/// is ([`Interface::saved_as`]).
+pub fn save(session: &Arc<CanvasSession>, ui: &mut Interface, ask: bool) {
     let path = match ui.path.clone().filter(|_| !ask) {
         Some(p) => p,
         None => {
@@ -507,42 +556,34 @@ pub fn save(session: &CanvasSession, ui: &mut Interface, ask: bool) -> bool {
                 .set_file_name(format!("{}.procraft", session.name()))
                 .save_file()
             else {
-                return false;
+                return;
             };
             with_extension(p, "procraft")
         }
     };
     let edits = session.edits();
     let time_lapse = ui.artwork_dir.as_deref().map(crate::timelapse::for_package);
-    match session.export_package(path.to_string_lossy().into_owned(), seed(), time_lapse) {
-        Ok(()) => {
-            ui.path = Some(path);
-            ui.saved_edits = edits;
-            true
-        }
-        Err(e) => {
-            tell("Can't save", &e.to_string());
-            false
-        }
-    }
+    let (session, (done, saved)) = (Arc::clone(session), std::sync::mpsc::channel());
+    write_meanwhile(true, move || {
+        let written = session.export_package(path.to_string_lossy().into_owned(), seed(), time_lapse);
+        let _ = done.send(written.map(|()| (path, edits)).map_err(|e| e.to_string()));
+    });
+    ui.saving = Some(saved);
 }
 
 /// Writes the artwork as `format` where the user picks.
-pub fn export(session: &CanvasSession, format: Format, dir: Option<&str>, pdf_quality: u8) {
+pub fn export(session: &Arc<CanvasSession>, format: Format, dir: Option<&str>, pdf_quality: u8) {
     // each layer (or a model's texture set) a PNG file, in a folder the user picks
     if matches!(format, Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures) {
         let title =
             if format == Format::ModelTextures { "Share textures as PNG files" } else { "Share layers as PNG files" };
         let Some(dir) = FileDialog::new().set_title(title).pick_folder() else { return };
         let dir = dir.to_string_lossy().into_owned();
-        let written = match format {
+        writing(session, "Can't share", move |session| match format {
             Format::LayerPngs => session.export_layer_pngs(dir).map(drop),
             Format::ModelTextures => session.export_model_textures(dir).map(drop),
             _ => session.export_chosen_pngs(dir).map(drop),
-        };
-        if let Err(e) = written {
-            tell("Can't share", &e.to_string());
-        }
+        });
         return;
     }
     let Some(path) = FileDialog::new()
@@ -554,10 +595,9 @@ pub fn export(session: &CanvasSession, format: Format, dir: Option<&str>, pdf_qu
         return;
     };
     let path = with_extension(path, format.extension()).to_string_lossy().into_owned();
-    let written = match format {
-        Format::Procraft | Format::Package => {
-            session.export_package(path, seed(), dir.map(crate::timelapse::for_package))
-        }
+    let time_lapse = dir.map(crate::timelapse::for_package);
+    writing(session, "Can't export", move |session| match format {
+        Format::Procraft | Format::Package => session.export_package(path, seed(), time_lapse),
         Format::Psd => session.export_psd(path),
         Format::Pdf => session.export_pdf(path, false, pdf_quality),
         Format::LayersPdf => session.export_pdf(path, true, pdf_quality),
@@ -569,11 +609,23 @@ pub fn export(session: &CanvasSession, format: Format, dir: Option<&str>, pdf_qu
         Format::ModelUsdz => session.export_model_usdz(path),
         Format::ModelRender => session.export_model_render(path, false),
         Format::ModelTiff => session.export_model_tiff(path),
-        Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures => return,
-    };
-    if let Err(e) = written {
-        tell("Can't export", &e.to_string());
-    }
+        Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures => Ok(()),
+    });
+}
+
+/// Writes an export on a thread of its own (a large one takes seconds, the window drawing on
+/// meanwhile, as the tablet's does), telling `failed` with the reason if it can't.
+fn writing(
+    session: &Arc<CanvasSession>,
+    failed: &'static str,
+    write: impl FnOnce(&CanvasSession) -> Result<(), procraft_core::MobileError> + Send + 'static,
+) {
+    let session = Arc::clone(session);
+    write_meanwhile(true, move || {
+        if let Err(e) = write(&session) {
+            tell_later(failed, &e.to_string());
+        }
+    });
 }
 
 /// Artworks from the gallery written as `format`: one where the user picks, several into a folder
@@ -582,7 +634,7 @@ pub fn export(session: &CanvasSession, format: Format, dir: Option<&str>, pdf_qu
 pub fn share_artworks(list: &[procraft_core::GalleryArtwork], format: Format, pdf_quality: u8) {
     let extension = format.extension();
     let file_name = |name: &str| export_file_name(name.to_owned(), false);
-    let targets: Vec<(&procraft_core::GalleryArtwork, PathBuf)> = if let [one] = list {
+    let targets: Vec<(procraft_core::GalleryArtwork, PathBuf)> = if let [one] = list {
         let Some(path) = FileDialog::new()
             .set_title(format!("Share {}", format.name()))
             .add_filter(format.name(), &[extension])
@@ -591,7 +643,7 @@ pub fn share_artworks(list: &[procraft_core::GalleryArtwork], format: Format, pd
         else {
             return;
         };
-        vec![(one, with_extension(path, extension))]
+        vec![(one.clone(), with_extension(path, extension))]
     } else {
         let Some(dir) = FileDialog::new().set_title(format!("Share as {}", format.name())).pick_folder() else {
             return;
@@ -605,16 +657,20 @@ pub fn share_artworks(list: &[procraft_core::GalleryArtwork], format: Format, pd
                     name = format!("{base} {n}");
                     n += 1;
                 }
-                (a, dir.join(format!("{name}.{extension}")))
+                (a.clone(), dir.join(format!("{name}.{extension}")))
             })
             .collect()
     };
-    for (a, path) in targets {
-        if let Err(e) = write_artwork(a, format, &path.to_string_lossy(), pdf_quality) {
-            tell("Can't share", &format!("{}: {e}", a.name));
-            return;
+    // written on a thread of their own (each opened on a device of its own takes seconds), the
+    // window drawing on meanwhile
+    write_meanwhile(false, move || {
+        for (a, path) in targets {
+            if let Err(e) = write_artwork(&a, format, &path.to_string_lossy(), pdf_quality) {
+                tell_later("Can't share", &format!("{}: {e}", a.name));
+                return;
+            }
         }
-    }
+    });
 }
 
 /// The artwork `a` from the gallery written as `format` at `path` (a PDF's pictures at

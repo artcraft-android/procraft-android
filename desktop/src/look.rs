@@ -170,8 +170,22 @@ impl Weight {
 }
 
 /// Inter (bundled with the Android app, OFL) for all text, egui's own fonts behind it for what it
-/// lacks.
+/// lacks, and the system's behind those for other scripts (read on a thread of their own, put in
+/// once read).
 pub fn install_fonts(ctx: &egui::Context) {
+    ctx.set_fonts(fonts(Vec::new()));
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let system = system_fonts();
+        if !system.is_empty() {
+            ctx.set_fonts(fonts(system));
+            ctx.request_repaint();
+        }
+    });
+}
+
+/// The app's fonts, with `system`'s `(name, font)` after egui's own.
+fn fonts(system: Vec<(String, egui::FontData)>) -> egui::FontDefinitions {
     const FACES: [(Weight, &[u8]); 4] = [
         (Weight::Regular, include_bytes!("../../android/app/src/main/assets/fonts/Inter-Regular.ttf")),
         (Weight::Medium, include_bytes!("../../android/app/src/main/assets/fonts/Inter-Medium.ttf")),
@@ -179,7 +193,14 @@ pub fn install_fonts(ctx: &egui::Context) {
         (Weight::Bold, include_bytes!("../../android/app/src/main/assets/fonts/Inter-Bold.ttf")),
     ];
     let mut fonts = egui::FontDefinitions::default();
-    let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    let mut fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    for (name, font) in system {
+        fonts.font_data.insert(name.clone(), Arc::new(font));
+        if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
+            mono.push(name.clone());
+        }
+        fallback.push(name);
+    }
     for (weight, bytes) in FACES {
         let name = weight.name().to_owned();
         fonts.font_data.insert(name.clone(), Arc::new(egui::FontData::from_static(bytes)));
@@ -187,10 +208,66 @@ pub fn install_fonts(ctx: &egui::Context) {
         family.extend(fallback.iter().cloned());
         fonts.families.insert(FontFamily::Name(weight.name().into()), family);
     }
-    if let Some(p) = fonts.families.get_mut(&FontFamily::Proportional) {
-        p.insert(0, Weight::Regular.name().to_owned());
-    }
-    ctx.set_fonts(fonts);
+    fonts
+        .families
+        .insert(FontFamily::Proportional, [Weight::Regular.name().to_owned()].into_iter().chain(fallback).collect());
+    fonts
+}
+
+/// The system's fonts for the scripts Inter and egui's own lack (Chinese, Japanese, Korean,
+/// Arabic, Hebrew, Indic, Thai, ...), those of them it has: names (a brush's from another app,
+/// an artwork's typed in any language) shown as written. `(name, font)` each.
+fn system_fonts() -> Vec<(String, egui::FontData)> {
+    #[cfg(windows)]
+    let (dir, files): (std::path::PathBuf, &[&str]) = (
+        std::path::PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into())).join("Fonts"),
+        &[
+            "msyh.ttc",
+            "malgun.ttf",
+            "segoeui.ttf",
+            "Nirmala.ttc",
+            "LeelawUI.ttf",
+            "ebrima.ttf",
+            "gadugi.ttf",
+            "seguisym.ttf",
+        ],
+    );
+    #[cfg(target_os = "macos")]
+    let (dir, files): (std::path::PathBuf, &[&str]) = (
+        std::path::PathBuf::from("/System/Library/Fonts"),
+        &[
+            "PingFang.ttc",
+            "Hiragino Sans GB.ttc",
+            "AppleSDGothicNeo.ttc",
+            "Supplemental/Arial Unicode.ttf",
+            "Apple Symbols.ttf",
+        ],
+    );
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let (dir, files): (std::path::PathBuf, &[&str]) = (
+        std::path::PathBuf::from("/usr/share/fonts"),
+        &[
+            "opentype/noto/NotoSansCJK-Regular.ttc",
+            "noto-cjk/NotoSansCJK-Regular.ttc",
+            "google-noto-cjk/NotoSansCJK-Regular.ttc",
+            "truetype/droid/DroidSansFallbackFull.ttf",
+            "truetype/noto/NotoSansArabic-Regular.ttf",
+            "truetype/noto/NotoSansHebrew-Regular.ttf",
+            "truetype/noto/NotoSansDevanagari-Regular.ttf",
+            "truetype/noto/NotoSansThai-Regular.ttf",
+            "truetype/dejavu/DejaVuSans.ttf",
+        ],
+    );
+    #[cfg(not(any(windows, unix)))]
+    let (dir, files): (std::path::PathBuf, &[&str]) = (std::path::PathBuf::new(), &[]);
+    files
+        .iter()
+        .filter_map(|file| {
+            let bytes = std::fs::read(dir.join(file)).ok()?;
+            // a collection's first face (each of these has its regular weight first)
+            Some((format!("system {file}"), egui::FontData::from_owned(bytes)))
+        })
+        .collect()
 }
 
 /// Text in runs of weights, `size` points, placed by `align` at `at`; returns where it went.

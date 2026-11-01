@@ -1,6 +1,7 @@
 //! Copy, cut and paste, the canvas flipped, and pictures brought in as layers.
 
 use procraft_engine::document::LayerId;
+use procraft_engine::geom::IRect;
 
 use crate::layers::ThumbnailImage;
 use crate::{CanvasSession, State};
@@ -17,19 +18,39 @@ pub struct FramesInserted {
 const MOST_FRAMES: usize = 999;
 
 impl State {
-    /// The current layer's pixels within the selection (all of it without one).
+    /// The current layer's pixels within the selection (all of it without one), the canvas's
+    /// size.
     fn selected_pixels(&mut self) -> Option<Vec<u8>> {
+        self.canvas.as_ref().zip(self.gpu.as_ref())?;
+        let current = self.doc.current();
+        let (w, h) = (self.doc.width(), self.doc.height());
+        let mut out = vec![0u8; w as usize * h as usize * 4];
+        // only what is selected where the layer is painted is read back; the rest is clear
         let mask = self.selection.clone();
-        let mut pixels = self.current_pixels()?;
-        if let Some(mask) = mask {
-            for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&mask.data) {
+        let selected = mask.as_ref().map_or(Some(IRect::from_size(w, h)), crate::layer_ops::mask_rect);
+        let painted = self.painted_box(current);
+        let Some(rect) = selected.zip(painted).map(|(a, b)| a.intersect(b)).filter(|r| !r.is_empty()) else {
+            return Some(out);
+        };
+        let mut part = self.layer_part(current, rect)?;
+        if let Some(mask) = &mask {
+            let taken = crate::layer_ops::mask_part(mask, rect);
+            for (px, &m) in part.as_chunks_mut::<4>().0.iter_mut().zip(&taken) {
                 let k = u16::from(m);
                 for c in px.iter_mut() {
                     *c = ((u16::from(*c) * k + 127) / 255) as u8;
                 }
             }
         }
-        Some(pixels)
+        // the part put back in its place
+        let (row, x0, y0) = (rect.width() as usize * 4, rect.x0.max(0) as usize, rect.y0.max(0) as usize);
+        for (y, from) in part.chunks(row.max(1)).enumerate() {
+            let at = ((y0 + y) * w as usize + x0) * 4;
+            if let Some(to) = out.get_mut(at..at + row) {
+                to.copy_from_slice(from);
+            }
+        }
+        Some(out)
     }
 }
 
@@ -67,8 +88,10 @@ fn placed(image: &ThumbnailImage, width: u32, height: u32, fit: bool) -> Option<
     Some(out)
 }
 
-/// `pixels` (premultiplied RGBA8, `width` wide) mirrored left to right, or top to bottom.
-fn flipped(pixels: &[u8], width: usize, horizontal: bool) -> Vec<u8> {
+/// `pixels` (premultiplied RGBA8, `width` wide) mirrored left to right, or top to bottom (as the
+/// GPU's flip should).
+#[cfg(test)]
+pub(crate) fn flipped(pixels: &[u8], width: usize, horizontal: bool) -> Vec<u8> {
     let rows: Vec<&[[u8; 4]]> = pixels.as_chunks::<4>().0.chunks(width.max(1)).collect();
     if horizontal {
         rows.iter().flat_map(|r| r.iter().rev()).flatten().copied().collect()
@@ -187,15 +210,11 @@ impl CanvasSession {
         st.finish_stroke();
         st.settle();
         st.flush();
-        let width = st.doc.width() as usize;
         let ids: Vec<LayerId> = st.doc.layer_ids().collect();
-        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return };
-        let layers: Vec<(LayerId, Vec<u8>)> = ids
-            .into_iter()
-            .filter_map(|id| canvas.read_layer(gpu, id).ok().map(|p| (id, flipped(&p, width, horizontal))))
-            .collect();
+        let Some(canvas) = st.canvas.as_mut() else { return };
         canvas.name_next_step(if horizontal { "flip canvas horizontally" } else { "flip canvas vertically" });
-        canvas.write_layers(layers);
+        // mirrored on the GPU, nothing read back
+        canvas.flip_layers(ids, horizontal);
         st.revision += 1;
         self.shared.frame(st);
     }

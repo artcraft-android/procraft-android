@@ -113,35 +113,38 @@ impl Mask {
         let edges: Vec<(Vec2, Vec2)> = pts.iter().zip(pts.iter().cycle().skip(1)).map(|(a, b)| (*a, *b)).collect();
         let (lo, hi) = pts.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)));
         let (y_lo, y_hi) = (lo.max(0.0) as usize, (hi.max(0.0).ceil() as usize).min(height as usize));
-        let mut coverage = vec![0.0f32; w + 1];
-        let mut crossings: Vec<(f32, i32)> = Vec::new();
-        for y in y_lo..y_hi {
-            coverage.iter_mut().for_each(|c| *c = 0.0);
-            for sub in 0..POLYGON_ROWS {
-                let sy = y as f32 + (sub as f32 + 0.5) / POLYGON_ROWS as f32;
-                crossings.clear();
-                for &(a, b) in &edges {
-                    if (a.y <= sy) != (b.y <= sy) {
-                        let x = a.x + (sy - a.y) / (b.y - a.y) * (b.x - a.x);
-                        crossings.push((x, if b.y > a.y { 1 } else { -1 }));
+        // the rows it reaches, in bands side by side
+        let reached = m.data.get_mut(y_lo * w..y_hi * w).unwrap_or_default();
+        by_bands(reached, w, |first, rows| {
+            let mut coverage = vec![0.0f32; w + 1];
+            let mut crossings: Vec<(f32, i32)> = Vec::new();
+            for (k, row) in rows.chunks_mut(w.max(1)).enumerate() {
+                let y = y_lo + first + k;
+                coverage.iter_mut().for_each(|c| *c = 0.0);
+                for sub in 0..POLYGON_ROWS {
+                    let sy = y as f32 + (sub as f32 + 0.5) / POLYGON_ROWS as f32;
+                    crossings.clear();
+                    for &(a, b) in &edges {
+                        if (a.y <= sy) != (b.y <= sy) {
+                            let x = a.x + (sy - a.y) / (b.y - a.y) * (b.x - a.x);
+                            crossings.push((x, if b.y > a.y { 1 } else { -1 }));
+                        }
+                    }
+                    crossings.sort_by(|p, q| p.0.total_cmp(&q.0));
+                    let mut winding = 0;
+                    for pair in crossings.windows(2) {
+                        let [(x0, d), (x1, _)] = pair else { continue };
+                        winding += d;
+                        if winding != 0 {
+                            add_span(&mut coverage, *x0, *x1, 1.0 / POLYGON_ROWS as f32);
+                        }
                     }
                 }
-                crossings.sort_by(|p, q| p.0.total_cmp(&q.0));
-                let mut winding = 0;
-                for pair in crossings.windows(2) {
-                    let [(x0, d), (x1, _)] = pair else { continue };
-                    winding += d;
-                    if winding != 0 {
-                        add_span(&mut coverage, *x0, *x1, 1.0 / POLYGON_ROWS as f32);
-                    }
-                }
-            }
-            if let Some(row) = m.data.get_mut(y * w..(y + 1) * w) {
                 for (v, c) in row.iter_mut().zip(&coverage) {
                     *v = to_byte(*c);
                 }
             }
-        }
+        });
         m
     }
 
@@ -165,6 +168,32 @@ impl Mask {
         if r == 0 {
             return;
         }
+        // only around what is selected can change: past three blurs' reach of it all stays clear,
+        // so the box that far around it is blurred alone (its edges clear, as the canvas's are
+        // there), with the very same sums
+        let Some([bx, by, bw, bh]) = self.bounds() else { return };
+        let reach = 3 * r + 1;
+        let (w, h) = (self.width as usize, self.height as usize);
+        let (x0, y0) = ((bx as usize).saturating_sub(reach), (by as usize).saturating_sub(reach));
+        let (x1, y1) = (((bx + bw) as usize + reach).min(w), ((by + bh) as usize + reach).min(h));
+        if (x1 - x0) * (y1 - y0) < w * h * 3 / 4 {
+            let mut part = Mask { width: (x1 - x0) as u32, height: (y1 - y0) as u32, data: Vec::new() };
+            for row in self.data.chunks(w.max(1)).skip(y0).take(y1 - y0) {
+                part.data.extend_from_slice(row.get(x0..x1).unwrap_or_default());
+            }
+            part.feather_all(r);
+            for (row, from) in self.data.chunks_mut(w.max(1)).skip(y0).zip(part.data.chunks((x1 - x0).max(1))) {
+                if let Some(to) = row.get_mut(x0..x1) {
+                    to.copy_from_slice(from);
+                }
+            }
+            return;
+        }
+        self.feather_all(r);
+    }
+
+    /// [`Mask::feather`] over the whole mask, `r` pixels a blur.
+    fn feather_all(&mut self, r: usize) {
         let (w, h) = (self.width as usize, self.height as usize);
         let mut values = vec![0.0f32; self.data.len()];
         by_bands(&mut values, w, |first, rows| {
@@ -208,15 +237,14 @@ impl Mask {
             _ => [0.0; 4],
         };
         let limit = threshold.clamp(0.0, 1.0) * 2.0;
-        // which pixels are near the seed's colour, each worked out once
-        let mut near: Vec<bool> = pixels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .take(w * h)
-            .map(|p| unit(p).iter().zip(&target).map(|(a, b)| (a - b).abs()).sum::<f32>() <= limit)
-            .collect();
-        near.resize(w * h, false);
+        // which pixels are near the seed's colour, each worked out once, in bands side by side
+        let mut near = vec![false; w * h];
+        let colours = pixels.as_chunks::<4>().0;
+        by_bands(&mut near, w, |first, rows| {
+            for (n, p) in rows.iter_mut().zip(colours.iter().skip(first * w)) {
+                *n = unit(p).iter().zip(&target).map(|(a, b)| (a - b).abs()).sum::<f32>() <= limit;
+            }
+        });
         let open = |m: &Mask, i: usize| m.data.get(i) == Some(&0) && near.get(i) == Some(&true);
         // scanlines: each span selected whole, then the runs above and below it seeded
         let mut stack = vec![(sx, sy)];
@@ -463,6 +491,32 @@ fn blur_row(row: &mut [f32], r: usize, line: &mut Vec<f32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feathering_around_the_selection_alone_matches_feathering_it_all() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for (w, h, at, radius) in
+            [(400u32, 300u32, (150u32, 120u32), 6.0f32), (500, 400, (2, 380), 11.0), (300, 300, (100, 100), 40.0)]
+        {
+            let mut m = Mask::empty(w, h);
+            // a blotch of random coverage, and a few lone pixels near it
+            for y in at.1..(at.1 + 40).min(h) {
+                for x in at.0..(at.0 + 60).min(w) {
+                    m.data[(y * w + x) as usize] = (next() % 256) as u8;
+                }
+            }
+            let mut whole = m.clone();
+            whole.feather_all(radius.round() as usize);
+            m.feather(radius);
+            assert!(m.data == whole.data, "{w}x{h} at {at:?} radius {radius}");
+        }
+    }
 
     #[test]
     fn a_colour_selection_joins_sides_not_corners() {

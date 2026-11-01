@@ -47,6 +47,27 @@ pub fn side_by_side_within<T: Sync, R: Send>(items: &[T], each: usize, f: impl F
     out
 }
 
+/// `f` of each `part`-long piece of `items` (the last perhaps shorter), side by side on a few
+/// threads (each taking the next piece there is); no threads for items of one piece or less.
+pub fn each_part<T: Send>(items: &mut [T], part: usize, f: impl Fn(&mut [T]) + Sync) {
+    let part = part.max(1);
+    if items.len() <= part {
+        f(items);
+        return;
+    }
+    let workers = cores().min(items.len().div_ceil(part));
+    let parts = std::sync::Mutex::new(items.chunks_mut(part));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                while let Some(piece) = parts.lock().ok().and_then(|mut p| p.next()) {
+                    f(piece);
+                }
+            });
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,5 +81,14 @@ mod tests {
         // work too big for two at once still comes back whole, in order
         let out = side_by_side_within(&items, BUDGET / 2 + 1, |v| v + 1);
         assert!(out.iter().enumerate().all(|(i, r)| *r == Some(i as u32 + 1)));
+    }
+
+    #[test]
+    fn each_part_is_done_once() {
+        for (len, part) in [(1000, 7), (1000, 1000), (5, 0), (0, 3)] {
+            let mut items: Vec<u32> = (0..len).collect();
+            each_part(&mut items, part, |piece| piece.iter_mut().for_each(|v| *v = *v * 3 + 1));
+            assert!(items.iter().enumerate().all(|(i, v)| *v == i as u32 * 3 + 1), "{len} {part}");
+        }
     }
 }

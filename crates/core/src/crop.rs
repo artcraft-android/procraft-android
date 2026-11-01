@@ -49,16 +49,6 @@ impl CanvasSession {
         let (sw, sh) = (st.doc.width(), st.doc.height());
         let c = crop([x, y, width, height], angle, resample_to.then_some((new_width, new_height)));
         let doc = st.doc.resized(c.width, c.height);
-        let mut layers = Vec::new();
-        for id in st.doc.pixel_layer_ids() {
-            match old.read_layer(gpu, id) {
-                Ok(pixels) => layers.push((id, resample(&pixels, sw, sh, &c))),
-                Err(e) => {
-                    log::error!("cropping: {e}");
-                    return false;
-                }
-            }
-        }
         let mut canvas = match Canvas::new(gpu, &doc) {
             Ok(c) => c,
             Err(e) => {
@@ -66,8 +56,25 @@ impl CanvasSession {
                 return false;
             }
         };
-        for (id, pixels) in &layers {
-            let _ = canvas.upload_layer(gpu, *id, pixels);
+        for id in st.doc.pixel_layer_ids() {
+            // copied (moved by whole pixels) or resampled on the GPU, nothing read back
+            let m = c.to_old;
+            let on_gpu = match c.whole_pixels() {
+                Some(offset) => canvas.copy_layer_from(gpu, old, id, offset),
+                None => canvas.resample_layer_from(gpu, old, id, [m.a, m.b, m.c, m.d, m.e, m.f]),
+            };
+            if on_gpu {
+                continue;
+            }
+            match old.read_layer(gpu, id) {
+                Ok(pixels) => {
+                    let _ = canvas.upload_layer(gpu, id, &resample(&pixels, sw, sh, &c));
+                }
+                Err(e) => {
+                    log::error!("cropping: {e}");
+                    return false;
+                }
+            }
         }
         let old_canvas = st.canvas.replace(canvas);
         let old_doc = std::mem::replace(&mut st.doc, doc);
@@ -125,17 +132,26 @@ impl CanvasSession {
         st.settle();
         st.flush();
         let ids: Vec<_> = st.doc.colour_layer_ids().collect();
+        let full = procraft_engine::geom::IRect::from_size(st.doc.width(), st.doc.height());
         let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return false };
+        // only where each layer is painted is read and turned (clear pixels stay clear); a layer
+        // painted nowhere is left as it is, one the GPU can't tell about read whole
+        let painted = canvas.painted_boxes_or_why(gpu, &ids);
         let mut layers = Vec::new();
-        for id in ids {
-            match canvas.read_layer(gpu, id) {
+        for (id, painted) in ids.into_iter().zip(painted) {
+            let rect = match painted {
+                Ok(Some(rect)) => rect,
+                Ok(None) => continue,
+                Err(_) => full,
+            };
+            match canvas.read_layer_part(gpu, id, rect) {
                 Ok(mut pixels) => {
                     match &table {
                         Some(t) => t.apply_rgba(&mut pixels, true),
                         None if icc.is_none() && st.doc.icc.is_none() => from.convert_pixels(&mut pixels, to),
                         None => {}
                     }
-                    layers.push((id, pixels));
+                    layers.push((id, rect, pixels));
                 }
                 Err(e) => {
                     log::error!("changing the colour profile: {e}");
@@ -146,7 +162,7 @@ impl CanvasSession {
         let before = st.doc.clone();
         st.doc.change_to(to, icc);
         canvas.name_next_step(&format!("Set color profile \"{name}\""));
-        canvas.write_layers_and_document(layers, before);
+        canvas.write_layer_parts_and_document(layers, before);
         st.revision += 1;
         self.shared.frame(st);
         true

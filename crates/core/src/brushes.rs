@@ -137,29 +137,32 @@ impl CanvasSession {
     /// A sample stroke drawn with the brush, white on transparent, fitted into `width` × `height`
     /// pixels.
     pub fn brush_preview(&self, set: u32, index: u32, width: u32, height: u32) -> Option<ThumbnailImage> {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let brush = st.library.get(set as usize)?.brushes.get(index as usize)?.clone();
         let (w, h) = (width.clamp(16, 2048), height.clamp(16, 1024));
-        // the preview it came with, while it is as it came
-        if let Some((tw, th, rgba)) = brush.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) {
-            return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
-        }
-        let gpu = st.gpu.as_ref()?;
-        // drawn on a canvas of the sample stroke's own, then fitted into the preview
         let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
-        if st.preview.is_none() {
-            let mut doc = Document::new(cw, ch);
-            doc.background_visible = false;
-            let canvas = Canvas::new(gpu, &doc).ok()?;
-            st.preview = Some((canvas, doc));
-        }
-        let (canvas, doc) = st.preview.as_mut()?;
+        // what it needs taken under the lock; drawn without it, so painting goes on meanwhile
+        let (brush, gpu, kept) = {
+            let mut st = self.shared.lock();
+            let brush = st.library.get(set as usize)?.brushes.get(index as usize)?.clone();
+            // the preview it came with, while it is as it came
+            if let Some((tw, th, rgba)) = brush.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) {
+                return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
+            }
+            (brush, st.gpu.clone()?, st.preview.take())
+        };
+        // drawn on a canvas of the sample stroke's own, then fitted into the preview
+        let (mut canvas, mut doc) = match kept {
+            Some(kept) => kept,
+            None => {
+                let mut doc = Document::new(cw, ch);
+                doc.background_visible = false;
+                (Canvas::new(&gpu, &doc).ok()?, doc)
+            }
+        };
         let layer = doc.current();
         canvas.wipe_layer(layer);
         let mut style = StrokeStyle::for_brush(&brush, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false);
         style.preview = true;
-        canvas.use_sources(gpu, &mut style, &brush);
+        canvas.use_sources(&gpu, &mut style, &brush);
         canvas.begin_stroke(layer, style);
         if brush.setting("preview_stamp") >= 0.5 {
             // the brush's stamp on its own, filling the preview's height
@@ -170,10 +173,12 @@ impl CanvasSession {
             canvas.replace_stamps(&stroke.finish());
         }
         canvas.end_stroke();
-        canvas.render(gpu, doc, None);
+        canvas.render(&gpu, &mut doc, None);
         canvas.forget_history();
-        let rgba = canvas.read_composite(gpu).ok()?;
-        Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba, w, h) })
+        let rgba = canvas.read_composite(&gpu).ok();
+        // kept for the next (one drawn meanwhile elsewhere already is)
+        self.shared.lock().preview.get_or_insert((canvas, doc));
+        Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba?, w, h) })
     }
 }
 

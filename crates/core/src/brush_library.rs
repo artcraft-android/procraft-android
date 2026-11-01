@@ -285,6 +285,12 @@ struct SetFile {
     set: SavedSet,
 }
 
+/// Whether `text` is one of our brush or set files from before (what
+/// [`CanvasSession::import_brush_file`] reads).
+pub(crate) fn is_brush_text(text: &str) -> bool {
+    serde_json::from_str::<SetFile>(text).is_ok() || serde_json::from_str::<BrushFile>(text).is_ok()
+}
+
 impl State {
     /// What brush `origin` started as.
     pub(crate) fn origin_brush(&self, origin: Option<(usize, usize)>) -> Brush {

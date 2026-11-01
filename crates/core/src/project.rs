@@ -208,6 +208,8 @@ impl crate::State {
             && self.pending_doc.is_none()
             && self.feather_base.is_none()
             && self.selection_before.is_none()
+            // a ColorDrop's fill still open
+            && self.pour.is_none()
             && self.scene.as_ref().is_none_or(|s| !s.stroking)
     }
 
@@ -257,22 +259,31 @@ impl crate::State {
             canvas.render(gpu, &mut self.doc, None);
             let changed_now = canvas.take_changed();
             changed_ids = changed_now.iter().copied().collect();
-            for layer in self.doc.layers() {
-                // unchanged since it was read or saved, its file there: left as it is, unread
-                if !changed_now.contains(&layer.id)
-                    && known.contains_key(&layer.id)
-                    && layer_path(dir, layer.id).exists()
-                {
-                    continue;
+            let mut read_all = || -> Result<(), MobileError> {
+                for layer in self.doc.layers() {
+                    // unchanged since it was read or saved, its file there: left as it is, unread
+                    if !changed_now.contains(&layer.id)
+                        && known.contains_key(&layer.id)
+                        && layer_path(dir, layer.id).exists()
+                    {
+                        continue;
+                    }
+                    let read =
+                        canvas.start_reading_layer(gpu, layer.id).map_err(|e| file_error("reading a layer", e))?;
+                    let after: usize = reading.iter().map(|(_, r): &(LayerId, procraft_gpu::Readback)| r.bytes()).sum();
+                    if after + read.bytes() <= READ_AFTER_LOCK {
+                        reading.push((layer.id, read));
+                    } else {
+                        let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
+                        layers.extend(changed(layer.id, rgba));
+                    }
                 }
-                let read = canvas.start_reading_layer(gpu, layer.id).map_err(|e| file_error("reading a layer", e))?;
-                let after: usize = reading.iter().map(|(_, r): &(LayerId, procraft_gpu::Readback)| r.bytes()).sum();
-                if after + read.bytes() <= READ_AFTER_LOCK {
-                    reading.push((layer.id, read));
-                } else {
-                    let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
-                    layers.extend(changed(layer.id, rgba));
-                }
+                Ok(())
+            };
+            // a layer that can't be read: those changed count as changed again, for the next save
+            if let Err(e) = read_all() {
+                canvas.mark_changed(changed_ids);
+                return Err(e);
             }
             // for the gallery's thumbnail: private layers left out
             let private = self.doc.private_layers();

@@ -621,6 +621,94 @@ fn a_selection_copied_to_a_layer_is_what_it_takes_of_the_layer() {
 }
 
 #[test]
+fn the_canvas_flips_on_the_gpu_as_on_the_cpu_and_undoes() {
+    let Some(s) = session(300, 300) else { return };
+    s.set_brush_size(0.2);
+    let mut ids = vec![s.layers()[0].id];
+    for (k, (x, y)) in [(40.0, 60.0), (250.0, 120.0)].into_iter().enumerate() {
+        if k > 0 {
+            ids.push(s.add_layer());
+        }
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_add(vec![sample(x + 30.0, y + 140.0, 40.0)]);
+        s.stroke_end(vec![]);
+    }
+    let layers = |s: &CanvasSession| -> Vec<Vec<u8>> {
+        let _ = pixel(s, 0, 0);
+        ids.iter().map(|id| s.copy_layer_contents(*id).unwrap().rgba).collect()
+    };
+    let before = layers(&s);
+    for horizontal in [true, false] {
+        let start = layers(&s);
+        s.flip_canvas(horizontal);
+        let after = layers(&s);
+        for (a, b) in start.iter().zip(&after) {
+            assert!(crate::clipboard::flipped(a, 300, horizontal) == *b, "{horizontal}");
+        }
+    }
+    s.undo();
+    s.undo();
+    assert!(layers(&s) == before);
+}
+
+#[test]
+fn a_crop_by_whole_pixels_copies_the_layers_as_the_cpu_would() {
+    let Some(s) = session(300, 300) else { return };
+    s.set_brush_size(0.2);
+    let mut ids = vec![s.layers()[0].id];
+    for (k, (x, y)) in [(40.0, 60.0), (250.0, 220.0)].into_iter().enumerate() {
+        if k > 0 {
+            ids.push(s.add_layer());
+        }
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_add(vec![sample(x + 20.0, y + 60.0, 40.0)]);
+        s.stroke_end(vec![]);
+    }
+    let _ = pixel(&s, 0, 0);
+    let before: Vec<Vec<u8>> = ids.iter().map(|id| s.copy_layer_contents(*id).unwrap().rgba).collect();
+    // reaching past the left and the bottom edges
+    let rect = [-30.0f32, 50.0, 250.0, 280.0];
+    assert!(s.crop_canvas(rect[0], rect[1], rect[2], rect[3], 0.0, false, 0, 0));
+    let c = procraft_engine::crop::crop(rect, 0.0, None);
+    assert!(c.whole_pixels().is_some());
+    let _ = pixel(&s, 0, 0);
+    for (id, old) in ids.iter().zip(&before) {
+        let now = s.copy_layer_contents(*id).unwrap();
+        assert_eq!((now.width, now.height), (c.width, c.height));
+        assert!(now.rgba == procraft_engine::crop::resample(old, 300, 300, &c), "{id}");
+    }
+}
+
+#[test]
+fn a_crop_turned_or_resized_resamples_on_the_gpu_as_the_cpu_would() {
+    for (rect, angle, size) in
+        [([20.0f32, 30.0, 240.0, 200.0], 0.4f32, None), ([-10.0, 5.0, 260.0, 250.0], 0.0, Some((180u32, 150u32)))]
+    {
+        let Some(s) = session(300, 300) else { return };
+        s.set_brush_size(0.3);
+        s.set_color(0.9, 0.3, 0.1);
+        s.stroke_begin(PointerKind::Finger, vec![sample(60.0, 80.0, 0.0)]);
+        s.stroke_add(vec![sample(220.0, 210.0, 40.0)]);
+        s.stroke_end(vec![]);
+        let id = s.layers()[0].id;
+        let _ = pixel(&s, 0, 0);
+        let before = s.copy_layer_contents(id).unwrap().rgba;
+        let (w, h) = size.unwrap_or((0, 0));
+        assert!(s.crop_canvas(rect[0], rect[1], rect[2], rect[3], angle, size.is_some(), w, h));
+        let c = procraft_engine::crop::crop(rect, angle, size);
+        assert!(c.whole_pixels().is_none());
+        let _ = pixel(&s, 0, 0);
+        let now = s.copy_layer_contents(id).unwrap();
+        assert_eq!((now.width, now.height), (c.width, c.height));
+        let cpu = procraft_engine::crop::resample(&before, 300, 300, &c);
+        let off = now.rgba.iter().zip(&cpu).filter(|(a, b)| a != b).count();
+        let worst = now.rgba.iter().zip(&cpu).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+        eprintln!("crop {rect:?} {angle}: {off} of {} values differ, by {worst} at most", cpu.len());
+        assert!(worst <= 1 && off * 1000 <= cpu.len(), "{off} differ, by {worst}");
+    }
+}
+
+#[test]
 fn a_cleared_layer_keeps_only_what_was_painted_to_undo() {
     let Some(s) = session(300, 300) else { return };
     s.set_brush_size(0.2);
@@ -1347,6 +1435,38 @@ fn copy_cut_paste_and_flip() {
     assert!(s.insert_image(photo, false).is_some());
     let canvas = s.copy_canvas().unwrap();
     assert_eq!(canvas.rgba.len(), 100 * 100 * 4);
+}
+
+#[test]
+fn a_copy_reads_only_what_is_selected_and_painted_as_the_whole_layer_would_give() {
+    use crate::selection::SelectionJoin;
+    let Some(s) = session(300, 300) else { return };
+    s.set_brush_size(0.3);
+    s.set_color(0.2, 0.6, 1.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(60.0, 80.0, 0.0)]);
+    s.stroke_add(vec![sample(220.0, 200.0, 40.0)]);
+    s.stroke_end(vec![]);
+    let current = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
+    // the whole layer, as much of each pixel as the selection takes (as copying did)
+    let whole = |s: &CanvasSession| {
+        let mut pixels = s.copy_layer_contents(current).unwrap().rgba;
+        if let Some(mask) = s.shared.lock().selection.clone() {
+            for (px, &m) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(&mask.data) {
+                for c in px.iter_mut() {
+                    *c = ((u16::from(*c) * u16::from(m) + 127) / 255) as u8;
+                }
+            }
+        }
+        pixels
+    };
+    assert!(s.copy_layer().unwrap().rgba == whole(&s));
+    // an ellipse over part of the stroke (its soft edge), then one away from any paint
+    s.select_shape(true, 100.0, 90.0, 190.0, 170.0, SelectionJoin::Add);
+    let copied = s.copy_layer().unwrap();
+    assert!(copied.rgba == whole(&s) && copied.rgba.iter().any(|&v| v > 0));
+    s.select_none();
+    s.select_shape(false, 0.0, 250.0, 40.0, 290.0, SelectionJoin::Add);
+    assert!(s.copy_layer().unwrap().rgba.iter().all(|&v| v == 0));
 }
 
 #[test]

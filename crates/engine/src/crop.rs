@@ -31,15 +31,24 @@ pub fn crop(rect: [f32; 4], angle: f32, size: Option<(u32, u32)>) -> Crop {
     Crop { width, height, to_old }
 }
 
+impl Crop {
+    /// Where the new canvas's top left is on the old one, when the crop only moves the pixels by
+    /// whole pixels (each kept as it is); none when it turns or resizes them.
+    pub fn whole_pixels(&self) -> Option<(i64, i64)> {
+        let m = self.to_old;
+        let whole = |v: f32| (v - v.round()).abs() < 1e-4;
+        (m.a == 1.0 && m.b == 0.0 && m.c == 0.0 && m.d == 1.0 && whole(m.e) && whole(m.f))
+            .then(|| (m.e.round() as i64, m.f.round() as i64))
+    }
+}
+
 /// `src` (premultiplied RGBA8, `sw` × `sh`) seen through `crop`: bilinear, transparent past its
 /// edges. A move by whole pixels copies them as they are.
 pub fn resample(src: &[u8], sw: u32, sh: u32, crop: &Crop) -> Vec<u8> {
     let (w, h) = (crop.width as usize, crop.height as usize);
     let mut out = vec![0u8; w * h * 4];
     let m = crop.to_old;
-    let whole = |v: f32| (v - v.round()).abs() < 1e-4;
-    if m.a == 1.0 && m.b == 0.0 && m.c == 0.0 && m.d == 1.0 && whole(m.e) && whole(m.f) {
-        let (dx, dy) = (m.e.round() as i64, m.f.round() as i64);
+    if let Some((dx, dy)) = crop.whole_pixels() {
         for y in 0..h {
             let sy = y as i64 + dy;
             if sy < 0 || sy >= i64::from(sh) {
@@ -67,23 +76,29 @@ pub fn resample(src: &[u8], sw: u32, sh: u32, crop: &Crop) -> Vec<u8> {
         let i = ((y as usize) * sw as usize + x as usize) * 4;
         src.get(i..i + 4).and_then(|p| <[u8; 4]>::try_from(p).ok()).map_or([0.0; 4], |p| p.map(f32::from))
     };
-    for y in 0..h {
-        for x in 0..w {
+    // the rows made side by side
+    let rows: Vec<usize> = (0..h).collect();
+    let made = crate::par::side_by_side(&rows, |&y| {
+        let mut line = vec![0u8; w * 4];
+        for (x, dst) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let p = m.apply(Vec2::new(x as f32 + 0.5, y as f32 + 0.5));
             let (fx, fy) = (p.x - 0.5, p.y - 0.5);
             let (x0, y0) = (fx.floor(), fy.floor());
             let (tx, ty) = (fx - x0, fy - y0);
             let (ix, iy) = (x0 as i64, y0 as i64);
             let (a, b, c, d) = (pixel(ix, iy), pixel(ix + 1, iy), pixel(ix, iy + 1), pixel(ix + 1, iy + 1));
-            let i = (y * w + x) * 4;
-            if let Some(dst) = out.get_mut(i..i + 4) {
-                for (k, v) in dst.iter_mut().enumerate() {
-                    let at = |p: [f32; 4]| p.get(k).copied().unwrap_or(0.0);
-                    let top = at(a) + (at(b) - at(a)) * tx;
-                    let bottom = at(c) + (at(d) - at(c)) * tx;
-                    *v = (top + (bottom - top) * ty).round().clamp(0.0, 255.0) as u8;
-                }
+            for (k, v) in dst.iter_mut().enumerate() {
+                let at = |p: [f32; 4]| p.get(k).copied().unwrap_or(0.0);
+                let top = at(a) + (at(b) - at(a)) * tx;
+                let bottom = at(c) + (at(d) - at(c)) * tx;
+                *v = (top + (bottom - top) * ty).round().clamp(0.0, 255.0) as u8;
             }
+        }
+        line
+    });
+    for (line, row) in made.into_iter().zip(out.chunks_exact_mut((w * 4).max(1))) {
+        if let Some(line) = line {
+            row.copy_from_slice(&line);
         }
     }
     out

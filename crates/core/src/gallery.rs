@@ -108,16 +108,20 @@ fn fresh_name() -> String {
     )
 }
 
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+/// The folder `from` copied to `to`, the file named `last` in it (if there is one) after the rest.
+fn copy_dir(from: &Path, to: &Path, last: Option<&str>) -> std::io::Result<()> {
     fs::create_dir_all(to)?;
     for entry in fs::read_dir(from)? {
         let entry = entry?;
         let target = to.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            copy_dir(&entry.path(), &target)?;
-        } else {
+            copy_dir(&entry.path(), &target, None)?;
+        } else if last.is_none_or(|last| entry.file_name() != last) {
             fs::copy(entry.path(), target)?;
         }
+    }
+    if let Some(last) = last.map(|l| from.join(l)).filter(|l| l.is_file()) {
+        fs::copy(&last, to.join(name_of(&last)))?;
     }
     Ok(())
 }
@@ -316,7 +320,8 @@ impl ArtworkStore {
         let at = self.parent_of(&dir);
         let before = self.order(&at);
         let copy = at.join(fresh_name());
-        let _ = copy_dir(&dir, &copy);
+        // the artwork's own file last: a copy half made isn't an artwork in the gallery yet
+        let _ = copy_dir(&dir, &copy, Some(ARTWORK_FILE));
         // not worked on yet: as recent as the original
         let when = fs::metadata(dir.join(ARTWORK_FILE)).and_then(|m| m.modified());
         if let (Ok(when), Ok(file)) = (when, fs::File::options().write(true).open(copy.join(ARTWORK_FILE))) {
@@ -470,9 +475,13 @@ mod tests {
             matches!(&list[0], GalleryEntry::Artwork { artwork } if artwork.width == 64 && artwork.height == 32),
             "{list:?}"
         );
-        // a duplicate goes right after its original
-        store.duplicate(a.clone());
+        // a duplicate goes right after its original, with all its files
+        fs::create_dir_all(Path::new(&a).join("layers")).unwrap();
+        fs::write(Path::new(&a).join("layers").join("1.bin"), [7u8; 3]).unwrap();
+        let copy = store.duplicate(a.clone());
         assert_eq!(shown(&store, None), names(&["A", "A", "B", "C"]));
+        assert_eq!(fs::read(Path::new(&copy).join("layers").join("1.bin")).unwrap(), [7u8; 3]);
+        assert!(Path::new(&copy).join(ARTWORK_FILE).is_file());
         // C dropped onto B makes a stack where B was, C first
         store.put_onto(c.clone(), b.clone());
         let stack = match &store.list(None)[2] {

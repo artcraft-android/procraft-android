@@ -90,19 +90,33 @@ impl Profile {
         let m = self.matrix_to(to);
         let linear: [f32; 256] = std::array::from_fn(|i| decode(i as f32 / 255.0));
         let encoded: Vec<f32> = (0..=ENCODE_STEPS).map(|i| encode(i as f32 / ENCODE_STEPS as f32)).collect();
-        for px in pixels.as_chunks_mut::<4>().0 {
-            let a = u32::from(px[3]);
-            if a == 0 {
-                continue;
+        // a canvas's layers in pieces (whole pixels) side by side
+        crate::par::each_part(pixels, 1 << 18, |piece| {
+            // a pixel as the one before it (paint lies in runs) turns as it did
+            let mut last: Option<([u8; 4], [u8; 4])> = None;
+            for px in piece.as_chunks_mut::<4>().0 {
+                if let Some((was, became)) = last
+                    && *px == was
+                {
+                    *px = became;
+                    continue;
+                }
+                let was = *px;
+                let a = u32::from(px[3]);
+                if a == 0 {
+                    continue;
+                }
+                let straight = [px[0], px[1], px[2]]
+                    .map(|c| linear.get(((u32::from(c) * 255 + a / 2) / a).min(255) as usize).copied().unwrap_or(1.0));
+                let [r, g, b] = apply(m, straight).map(|v| {
+                    let e =
+                        encoded.get((v.clamp(0.0, 1.0) * ENCODE_STEPS as f32).round() as usize).copied().unwrap_or(1.0);
+                    (e * a as f32).round().clamp(0.0, 255.0) as u8
+                });
+                [px[0], px[1], px[2]] = [r, g, b];
+                last = Some((was, *px));
             }
-            let straight = [px[0], px[1], px[2]]
-                .map(|c| linear.get(((u32::from(c) * 255 + a / 2) / a).min(255) as usize).copied().unwrap_or(1.0));
-            let [r, g, b] = apply(m, straight).map(|v| {
-                let e = encoded.get((v.clamp(0.0, 1.0) * ENCODE_STEPS as f32).round() as usize).copied().unwrap_or(1.0);
-                (e * a as f32).round().clamp(0.0, 255.0) as u8
-            });
-            [px[0], px[1], px[2]] = [r, g, b];
-        }
+        });
     }
 }
 

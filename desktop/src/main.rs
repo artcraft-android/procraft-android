@@ -74,6 +74,14 @@ use crate::ui::{Action, Interface};
 /// A new artwork's size when the screen's isn't known.
 const FALLBACK_CANVAS: (u32, u32) = (1920, 1080);
 
+/// A picture being made a new artwork: since when, the gallery folder it goes in, and its reading.
+type ReadingPhoto = (Instant, Option<String>, std::thread::JoinHandle<Result<Arc<CanvasSession>, String>>);
+
+/// An artwork in the gallery being opened: since when, its folder, the moving format it is
+/// opened to be shared as (the gallery's Share), and its reading.
+type ReadingArtwork =
+    (Instant, String, Option<animated_export::Animated>, std::thread::JoinHandle<Result<Arc<CanvasSession>, String>>);
+
 /// Artworks being brought in into a gallery folder: one read on a thread of its own (an artwork of
 /// many layers takes seconds), since when, and those still to come.
 struct Importing {
@@ -98,25 +106,40 @@ impl Importing {
 
 /// How long an artwork opens before it says so, as the tablet's.
 const SLOW_OPENING: Duration = Duration::from_millis(500);
+
+/// A window event (a frame among them) that takes longer than this is logged: the window waits on
+/// it.
+const SLOW_EVENT: Duration = Duration::from_millis(100);
+
+/// Logs, once dropped, a window event that took longer than [`SLOW_EVENT`] (a dialog it waited on
+/// counts too): what holds the window up shows in the log.
+struct Timed(&'static str, Instant);
+
+impl Drop for Timed {
+    fn drop(&mut self) {
+        let took = self.1.elapsed();
+        if took > SLOW_EVENT {
+            log::warn!("{} took {} ms", self.0, took.as_millis());
+        }
+    }
+}
 /// The veil over the window while it does.
 const OPENING_VEIL: u32 = 0x66000000;
 
 /// Over the window while a slow artwork opens: veiled, saying so (and taking the presses).
 fn opening_veil(ctx: &egui::Context) {
+    veil(ctx, "Opening…");
+}
+
+/// Over the window while something slow is under way: veiled, saying `what` (and taking the
+/// presses).
+fn veil(ctx: &egui::Context, what: &str) {
     let screen = ctx.content_rect();
     egui::Area::new(egui::Id::unique("opening")).fixed_pos(screen.min).order(egui::Order::Foreground).show(ctx, |ui| {
         ui.allocate_rect(screen, egui::Sense::click_and_drag());
         ui.painter().rect_filled(screen, 0, look::argb(OPENING_VEIL));
         let ink = look::argb(look::pc::TEXT);
-        look::text(
-            ui.painter(),
-            screen.center(),
-            egui::Align2::CENTER_CENTER,
-            "Opening…",
-            17.0,
-            look::Weight::Regular,
-            ink,
-        );
+        look::text(ui.painter(), screen.center(), egui::Align2::CENTER_CENTER, what, 17.0, look::Weight::Regular, ink);
     });
 }
 
@@ -138,6 +161,8 @@ fn main() {
         again: None,
         opening: None,
         importing: None,
+        reading_artwork: None,
+        reading_photo: None,
         screen: None,
         session: None,
         artwork: None,
@@ -168,6 +193,12 @@ struct App {
     opening: Option<(Instant, std::thread::JoinHandle<()>)>,
     /// Artworks being brought in, read on a thread of their own one after another.
     importing: Option<Importing>,
+    /// An artwork in the gallery being opened, read on a thread of its own (an artwork of many
+    /// layers holds hundreds of MB): since when, its folder, and the reading.
+    reading_artwork: Option<ReadingArtwork>,
+    /// A picture made a new artwork (the gallery's Photo), read on a thread of its own: since
+    /// when, the gallery folder it goes in, and the reading.
+    reading_photo: Option<ReadingPhoto>,
     screen: Option<Screen>,
     /// The artwork open and its folder in the gallery; none while the gallery shows.
     session: Option<Arc<CanvasSession>>,
@@ -235,6 +266,8 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let _timed =
+            Timed(if event == WindowEvent::RedrawRequested { "a frame" } else { "a window event" }, Instant::now());
         if self.projection.as_ref().is_some_and(|p| p.window.id() == id) {
             self.projection_event(event);
             return;
@@ -250,8 +283,10 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                // the artwork open is kept in the gallery
+                // the artwork open is kept in the gallery, and files still being written finish
                 if self.leave_artwork() {
+                    files::finish_writing();
+                    files::tell_what_was_told();
                     event_loop.exit();
                 }
             }
@@ -275,8 +310,10 @@ impl ApplicationHandler for App {
             }
             event => {
                 let Some(session) = session else { return };
-                // with a popover open, a press on the canvas only closes it
-                let (blocked, canvas) = (self.ui.popover_open, self.ui.canvas_rect);
+                // with a popover open, a press on the canvas only closes it; while the artwork is
+                // being exported none reaches it (nothing the export would end is started)
+                let blocked = self.ui.popover_open || files::exporting_since().is_some();
+                let canvas = self.ui.canvas_rect;
                 let over = |p: (f32, f32)| blocked || screen.over_interface(p, canvas);
                 if self.input.on_event(&session, &event, response.consumed, over) {
                     screen.window.request_redraw();
@@ -289,6 +326,12 @@ impl ApplicationHandler for App {
         if self.screen.as_ref().is_some_and(|s| s.gpu.is_lost()) {
             self.gpu_lost(event_loop);
             return;
+        }
+        // what the files written meanwhile had to say; looked at again soon while any is writing
+        files::tell_what_was_told();
+        if files::still_writing() {
+            let soon = Instant::now() + Duration::from_millis(250);
+            self.again = Some(self.again.map_or(soon, |due| due.min(soon)));
         }
         self.sync_projection(event_loop);
         let Some(screen) = self.screen.as_ref() else { return };
@@ -382,6 +425,8 @@ impl App {
         }
         self.take_dropped();
         self.imported();
+        self.artwork_read();
+        self.photo_read();
         let Some(screen) = self.screen.as_mut() else { return };
         let Some(session) = self.session.clone() else {
             self.gallery_frame();
@@ -402,6 +447,7 @@ impl App {
         {
             zoom.hold();
         }
+        let exporting = files::exporting_since().is_some_and(|since| since.elapsed() >= SLOW_OPENING);
         let raw = screen.egui.take_egui_input(&screen.window);
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             self.ui.show(ui, &session, &mut self.input);
@@ -411,6 +457,8 @@ impl App {
             }
             if slow {
                 opening_veil(ui.ctx());
+            } else if exporting {
+                veil(ui.ctx(), "Exporting…");
             }
         });
         let pad_soon = self.studio_pad(&session);
@@ -419,8 +467,8 @@ impl App {
         if pad_soon {
             self.again = Some(Instant::now());
         }
-        // looked at again soon while the canvas is being made, or an artwork read
-        if self.opening.is_some() || self.importing.is_some() {
+        // looked at again soon while the canvas is being made, an artwork read or saved as
+        if self.ui.saved_as() || self.opening.is_some() || self.importing.is_some() {
             let soon = Instant::now() + Duration::from_millis(50);
             self.again = Some(self.again.map_or(soon, |due| due.min(soon)));
         }
@@ -458,7 +506,14 @@ impl App {
         let mut asked = None;
         let (gallery, interface) = (&mut self.gallery, &mut self.ui);
         let closing = self.zoom.as_ref().filter(|z| !z.opening);
-        let reading = self.importing.as_ref().map(|i| i.since.elapsed() >= SLOW_OPENING);
+        let reading = match (&self.importing, &self.reading_artwork, &self.reading_photo) {
+            (None, None, None) => None,
+            (importing, opening, photo) => Some(
+                importing.as_ref().is_some_and(|i| i.since.elapsed() >= SLOW_OPENING)
+                    || opening.as_ref().is_some_and(|(since, ..)| since.elapsed() >= SLOW_OPENING)
+                    || photo.as_ref().is_some_and(|(since, ..)| since.elapsed() >= SLOW_OPENING),
+            ),
+        };
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             interface.style_once(ui.ctx());
             // closing: the gallery settling back into place, the canvas fading over it
@@ -487,49 +542,48 @@ impl App {
         if let (Some(p), Some(screen)) = (self.projection.as_mut(), &self.screen) {
             p.draw(&screen.gpu, None);
         }
+        // while an artwork, a photo or an import is being read, the first tap stands: another
+        // artwork, a new one or a photo isn't opened over it
+        let busy = self.reading_artwork.is_some() || self.reading_photo.is_some() || self.importing.is_some();
         match asked {
-            Some(gallery::Asked::Open(dir)) => match CanvasSession::open(dir.clone()) {
-                Ok(session) => {
-                    let cell = self.gallery.picture_of(&dir);
-                    self.open_artwork(Arc::clone(&session), dir);
-                    // the gallery zooms into its picture
-                    if let (Some(cell), Some(screen)) = (cell, &self.screen) {
-                        let size = screen.window.inner_size();
-                        let scale = screen.window.scale_factor() as f32;
-                        self.zoom = Some(zoom::Zoom::opening(&session, cell, (size.width, size.height), scale));
-                    }
+            // read on a thread of its own; one at a time
+            Some(gallery::Asked::Open(dir)) => {
+                if !busy {
+                    self.read_artwork(dir, None);
                 }
-                Err(e) => files::tell("Can't open the artwork", &e.to_string()),
-            },
+            }
             Some(gallery::Asked::New(preset, folder)) => {
-                let session = files::new_from_preset(&preset);
-                let dir = self.gallery.store.new_folder(folder);
-                self.open_artwork(session, dir);
-                self.ui.started_new();
+                if !busy {
+                    let session = files::new_from_preset(&preset);
+                    let dir = self.gallery.store.new_folder(folder);
+                    self.open_artwork(session, dir);
+                    self.ui.started_new();
+                }
             }
             Some(gallery::Asked::ScreenSize(folder)) => {
-                let (w, h) = self.gallery.screen_px;
-                let session = CanvasSession::new(w, h);
-                session.set_new_profile(procraft_core::P3.into());
-                let dir = self.gallery.store.new_folder(folder);
-                self.open_artwork(session, dir);
-                self.ui.started_new();
+                if !busy {
+                    let (w, h) = self.gallery.screen_px;
+                    let session = CanvasSession::new(w, h);
+                    session.set_new_profile(procraft_core::P3.into());
+                    let dir = self.gallery.store.new_folder(folder);
+                    self.open_artwork(session, dir);
+                    self.ui.started_new();
+                }
             }
             Some(gallery::Asked::Share(list, format)) => files::share_artworks(&list, format, 100),
             Some(gallery::Asked::SharePdf(list, quality)) => files::share_artworks(&list, files::Format::Pdf, quality),
             Some(gallery::Asked::DragOut(artwork)) => self.drag_out(&artwork),
-            Some(gallery::Asked::ShareAnimated(artwork, format)) => match CanvasSession::open(artwork.dir.clone()) {
-                Ok(session) => {
-                    self.open_artwork(session, artwork.dir);
-                    self.ui.share_animated_from_gallery(format);
+            // opened (read as Open reads it), then shared
+            Some(gallery::Asked::ShareAnimated(artwork, format)) => {
+                if !busy {
+                    self.read_artwork(artwork.dir, Some(format));
                 }
-                Err(e) => files::tell("Can't open the artwork", &e.to_string()),
-            },
+            }
+            // read on a thread of its own (a large photo takes a while); one at a time
             Some(gallery::Asked::Photo(folder)) => {
-                if let Some(session) = files::pick_picture() {
-                    let dir = self.gallery.store.new_folder(folder);
-                    self.open_artwork(session, dir);
-                    self.ui.started_new();
+                if !busy && let Some(path) = files::pick_picture() {
+                    let reading = std::thread::spawn(move || files::picture_artwork(&path));
+                    self.reading_photo = Some((Instant::now(), folder, reading));
                 }
             }
             Some(gallery::Asked::Import(folder)) => {
@@ -683,6 +737,63 @@ impl App {
         match &mut self.importing {
             Some(importing) => importing.rest.extend(artworks),
             None => self.importing = Importing::next(artworks, folder),
+        }
+    }
+
+    /// Starts reading the artwork in gallery folder `dir` on a thread of its own, to open it (to
+    /// share it as `shared_as`, if given).
+    fn read_artwork(&mut self, dir: String, shared_as: Option<animated_export::Animated>) {
+        let folder = dir.clone();
+        let reading = std::thread::spawn(move || CanvasSession::open(folder).map_err(|e| e.to_string()));
+        self.reading_artwork = Some((Instant::now(), dir, shared_as, reading));
+    }
+
+    /// The artwork opened from the gallery, once read: shown, the gallery zooming into its
+    /// picture (unless another was opened meanwhile); or, opened to be shared, shared.
+    fn artwork_read(&mut self) {
+        let Some((_, dir, shared_as, reading)) = self.reading_artwork.take_if(|(.., r)| r.is_finished()) else {
+            return;
+        };
+        let read = reading.join().unwrap_or_else(|_| Err("it stopped".to_owned()));
+        if self.session.is_some() {
+            return;
+        }
+        match read {
+            Ok(session) if shared_as.is_some() => {
+                self.open_artwork(session, dir);
+                if let Some(format) = shared_as {
+                    self.ui.share_animated_from_gallery(format);
+                }
+            }
+            Ok(session) => {
+                let cell = self.gallery.picture_of(&dir);
+                self.open_artwork(Arc::clone(&session), dir);
+                // the gallery zooms into its picture
+                if let (Some(cell), Some(screen)) = (cell, &self.screen) {
+                    let size = screen.window.inner_size();
+                    let scale = screen.window.scale_factor() as f32;
+                    self.zoom = Some(zoom::Zoom::opening(&session, cell, (size.width, size.height), scale));
+                }
+            }
+            Err(e) => files::tell("Can't open the artwork", &e),
+        }
+    }
+
+    /// The gallery's Photo, once read: a new artwork of the picture, opened (unless another was
+    /// opened meanwhile).
+    fn photo_read(&mut self) {
+        let Some((_, folder, reading)) = self.reading_photo.take_if(|(.., r)| r.is_finished()) else { return };
+        let read = reading.join().unwrap_or_else(|_| Err("it stopped".to_owned()));
+        if self.session.is_some() {
+            return;
+        }
+        match read {
+            Ok(session) => {
+                let dir = self.gallery.store.new_folder(folder);
+                self.open_artwork(session, dir);
+                self.ui.started_new();
+            }
+            Err(e) => files::tell("Can't open the picture", &e),
         }
     }
 
@@ -842,6 +953,9 @@ impl App {
                     if new {
                         self.ui.started_new();
                     }
+                } else if let Some(dir) = self.artwork.clone() {
+                    // none picked: this one stays open, kept saved again
+                    Arc::clone(session).start_autosave(dir);
                 }
                 None
             }

@@ -12,7 +12,7 @@ use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{
     Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, pos2, vec2,
 };
-use procraft_core::{BrushInfo, BrushSetInfo, CanvasSession, ToolKind};
+use procraft_core::{BrushInfo, BrushSetInfo, CanvasSession, ReadBrushes, ToolKind, read_any_brushes};
 
 use crate::alert::{Alert, Answer};
 use crate::icons;
@@ -140,6 +140,10 @@ pub struct Library {
     stale: bool,
     /// The studio asked for: on the brush now chosen, or on one just made (Cancel throws it away).
     pub studio: Option<Option<(u32, u32)>>,
+    /// Brush files read on threads of their own (another app's big ones take a while): each
+    /// batch's brushes come back (a file that held none left out), and whether to say that they
+    /// came in.
+    importing: Vec<(std::sync::mpsc::Receiver<Vec<ReadBrushes>>, bool)>,
     /// The search: what is typed, whether its field has the keys, whether it has come down into
     /// sight, and whether the sets and the brushes were at their tops last frame.
     query: String,
@@ -159,14 +163,72 @@ impl Library {
         self.plus_menu.is_open() || self.set_menu.is_open() || self.icon_picker.is_open() || self.deleting.is_open()
     }
 
-    /// Brushes came in from a file (not through the library): they are added to the set it shows
-    /// (or the current brush's), and that set shows once they are in. True if the file held any.
-    pub fn add_brushes(&mut self, session: &CanvasSession, bytes: Vec<u8>, name: String) -> bool {
-        let shown = self.shown_set.unwrap_or(session.current_brush().set as usize) as u32;
-        let Some(set) = session.import_any_brushes(bytes, Some(name), shown) else { return false };
-        self.shown_set = Some(set as usize);
-        self.library_changed();
-        true
+    /// Brush files' `(bytes, name)` read on a thread of their own, their brushes added to the
+    /// library once read (`added`). `tell`: say that they came in (else only that they held none).
+    pub fn add_brushes(&mut self, files: Vec<(Vec<u8>, String)>, tell: bool) {
+        if files.is_empty() {
+            return;
+        }
+        let (done, importing) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let read = files.into_iter().filter_map(|(bytes, name)| read_any_brushes(&bytes, Some(name))).collect();
+            let _ = done.send(read);
+        });
+        self.importing.push((importing, tell));
+    }
+
+    /// Brushes read meanwhile added to the library, each batch's set shown: whether any came in,
+    /// and whether to say so. Not while the library holds brushes or sets by their places (a
+    /// menu, a question, a set being renamed, a brush pressed, the studio asked for or open:
+    /// `studio_open`), which brushes added at the top would move; they wait for that to end.
+    pub fn added(&mut self, session: &CanvasSession, studio_open: bool) -> Vec<(bool, bool)> {
+        let holding = self.modal() || self.renaming_set.is_some() || self.press.is_some() || self.studio.is_some();
+        if studio_open || holding {
+            return Vec::new();
+        }
+        let mut came = Vec::new();
+        self.importing.retain(|(r, tell)| match r.try_recv() {
+            Ok(read) => {
+                came.push((read, *tell));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        });
+        came.into_iter().map(|(read, tell)| (self.add_read(session, read), tell)).collect()
+    }
+
+    /// Brushes read from files added one after another, each into the set the library shows (or
+    /// the current brush's) when it is one of ours from before, that set then shown. Whether any
+    /// were.
+    fn add_read(&mut self, session: &CanvasSession, read: Vec<ReadBrushes>) -> bool {
+        let mut any = false;
+        for brushes in read {
+            let shown = self.shown_set.unwrap_or(session.current_brush().set as usize) as u32;
+            if let Some(set) = session.add_read_brushes(brushes, shown) {
+                self.shown_set = Some(set as usize);
+                any = true;
+            }
+        }
+        if any {
+            self.library_changed();
+        }
+        any
+    }
+
+    /// Brush files are still being read, or their brushes wait to be added.
+    pub fn importing(&self) -> bool {
+        !self.importing.is_empty()
+    }
+
+    /// Waits for brush files still being read and adds their brushes (the artwork is closing:
+    /// they are kept with the rest).
+    pub fn finish_importing(&mut self, session: &CanvasSession) {
+        for (importing, _) in std::mem::take(&mut self.importing) {
+            if let Ok(read) = importing.recv() {
+                self.add_read(session, read);
+            }
+        }
     }
 
     /// The library changed: its sample strokes are drawn again (they go by place), and it is kept.
@@ -182,7 +244,7 @@ impl Library {
         &mut self,
         ctx: &egui::Context,
         look: &mut Look,
-        session: &CanvasSession,
+        session: &Arc<CanvasSession>,
         tool: ToolKind,
         button: Rect,
         backdrops: &mut Vec<f32>,
@@ -416,7 +478,7 @@ impl Library {
         &mut self,
         ctx: &egui::Context,
         look: &mut Look,
-        session: &CanvasSession,
+        session: &Arc<CanvasSession>,
         plus: Rect,
         shown: usize,
         backdrops: &mut Vec<f32>,
@@ -453,14 +515,9 @@ impl Library {
                 self.library_changed();
             }
             _ => {
-                let Some((bytes, name)) = crate::files::pick_file("Import brushes") else { return };
-                match session.import_any_brushes(bytes, Some(name), shown as u32) {
-                    Some(set) => {
-                        self.shown_set = Some(set as usize);
-                        self.library_changed();
-                    }
-                    None => crate::files::say("This file has no brushes in it."),
-                }
+                let Some(file) = crate::files::pick_file("Import brushes") else { return };
+                self.shown_set = Some(shown);
+                self.add_brushes(vec![file], false);
             }
         }
     }

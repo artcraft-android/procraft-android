@@ -58,7 +58,8 @@ struct OverlayUniform {
     srgb: u32,
     _pad: [u32; 2],
 }
-/// Undo steps kept, and the most memory their pixels may hold.
+/// Undo steps kept, and the most memory they may hold (their pixels and the selections they put
+/// back).
 const MAX_UNDO: usize = 100;
 const MAX_UNDO_BYTES: u64 = 768 << 20;
 
@@ -376,6 +377,7 @@ struct SelectionUniform {
 /// The selection on the GPU: its coverage, and that bound for drawing the stripes.
 struct SelectionGpu {
     coverage: Vec<u8>,
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
     bind: wgpu::BindGroup,
 }
@@ -863,6 +865,11 @@ enum Op {
     Mark,
     /// The steps made since the mark become one.
     Collapse,
+    /// Layers mirrored, left to right (`horizontal`) or top to bottom, together as one undo step.
+    Flip {
+        layers: Vec<LayerId>,
+        horizontal: bool,
+    },
     /// Layers' pixels are replaced inside a rectangle each (premultiplied RGBA8, the rectangle's
     /// rows), together as one undo step keeping those rectangles, with the document as it was
     /// (`before`) when that changed too.
@@ -1082,8 +1089,11 @@ struct Step {
 }
 
 impl Step {
+    /// What it holds: its pixels on the GPU, and the selection it puts back (a byte a canvas
+    /// pixel), so many selection changes can't outgrow the history's budget either.
     fn bytes(&self) -> u64 {
-        self.pixels.iter().map(Snapshot::bytes).sum()
+        let selection = self.selection.as_ref().and_then(Option::as_ref).map_or(0, |s| s.len() as u64);
+        self.pixels.iter().map(Snapshot::bytes).sum::<u64>() + selection
     }
 }
 
@@ -1122,6 +1132,12 @@ pub(crate) struct Pipelines {
     changed_layout: wgpu::BindGroupLayout,
     changed_rows: wgpu::RenderPipeline,
     changed_columns: wgpu::RenderPipeline,
+    /// A layer mirrored left to right, and top to bottom.
+    flip_across: wgpu::RenderPipeline,
+    flip_down: wgpu::RenderPipeline,
+    /// A layer of the canvas before a crop, seen through it.
+    crop_layout: wgpu::BindGroupLayout,
+    crop: wgpu::RenderPipeline,
     /// Adjustments: the copy alone, and the passes.
     before_layout: wgpu::BindGroupLayout,
     /// Adjustment passes by their fragment entry.
@@ -1687,6 +1703,7 @@ impl Canvas {
                         | Op::Flatten { .. }
                         | Op::TransformEnd { commit: true, .. }
                         | Op::Write { .. }
+                        | Op::Flip { .. }
                         | Op::Release { keep: true, .. }
                 )
             })
@@ -2031,6 +2048,13 @@ impl Canvas {
         self.ops.push(Op::Write { layers: vec![(layer, rect, part)], before: None });
     }
 
+    /// Mirrors `layers`, left to right (`horizontal`) or top to bottom, as one undo step; on the
+    /// GPU, nothing read back.
+    pub fn flip_layers(&mut self, layers: Vec<LayerId>, horizontal: bool) {
+        self.end_stroke();
+        self.ops.push(Op::Flip { layers, horizontal });
+    }
+
     /// Replaces several layers' pixels at once, as one undo step; pictures of the wrong size are
     /// left out.
     pub fn write_layers(&mut self, layers: Vec<(LayerId, Vec<u8>)>) {
@@ -2043,13 +2067,18 @@ impl Canvas {
         }
     }
 
-    /// Replaces several layers' pixels and changes the document together, as one undo step back
-    /// to the pixels and to `before` (the document as it was); pictures of the wrong size are left
-    /// out.
-    pub fn write_layers_and_document(&mut self, layers: Vec<(LayerId, Vec<u8>)>, before: Document) {
-        let (size, full) = (self.width as usize * self.height as usize * 4, self.full());
-        let layers: Vec<(LayerId, IRect, Vec<u8>)> =
-            layers.into_iter().filter(|(_, p)| p.len() == size).map(|(id, p)| (id, full, p)).collect();
+    /// Replaces a rectangle of several layers' pixels (premultiplied RGBA8, the rectangle's rows),
+    /// the rest of each as it was, and changes the document together, as one undo step back to
+    /// the pixels and to `before` (the document as it was); parts that don't fit their rectangle,
+    /// or the canvas, are left out.
+    pub fn write_layer_parts_and_document(&mut self, layers: Vec<(LayerId, IRect, Vec<u8>)>, before: Document) {
+        let full = self.full();
+        let fits = |rect: &IRect, part: &[u8]| {
+            !rect.is_empty()
+                && rect.intersect(full) == *rect
+                && part.len() == rect.width() as usize * rect.height() as usize * 4
+        };
+        let layers: Vec<(LayerId, IRect, Vec<u8>)> = layers.into_iter().filter(|(_, r, p)| fits(r, p)).collect();
         self.end_stroke();
         self.ops.push(Op::Write { layers, before: Some(Box::new(before)) });
         self.invalidate();
@@ -2282,6 +2311,7 @@ impl Canvas {
                 | Op::PutRegion { layer: id, .. }
                 | Op::Hold(id) => written.push(*id),
                 Op::Write { layers, .. } => written.extend(layers.iter().map(|(id, ..)| *id)),
+                Op::Flip { layers, .. } => written.extend(layers.iter().copied()),
                 Op::Duplicate { pairs, .. } => {
                     read.extend(pairs.iter().map(|(from, _)| *from));
                     written.extend(pairs.iter().map(|(_, to)| *to));
@@ -2370,7 +2400,7 @@ impl Canvas {
     /// Sets the selection: one byte of coverage per canvas pixel, rows top to bottom; none (or a
     /// buffer of the wrong size) selects everything. Painting and erasing keep inside it.
     pub fn set_selection(&mut self, gpu: &Gpu, coverage: Option<&[u8]>) {
-        self.put_selection(&gpu.device, &gpu.queue, coverage.map(<[u8]>::to_vec));
+        self.put_selection(&gpu.device, &gpu.queue, coverage.map(std::borrow::Cow::Borrowed));
     }
 
     /// Sets the selection as [`Self::set_selection`] does, as one undo step that puts `before` back
@@ -2392,13 +2422,45 @@ impl Canvas {
         self.selection.as_ref().map(|s| s.coverage.as_slice())
     }
 
-    fn put_selection(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, coverage: Option<Vec<u8>>) {
+    fn put_selection(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        coverage: Option<std::borrow::Cow<'_, [u8]>>,
+    ) {
         let size = self.width as usize * self.height as usize;
-        self.selection = coverage.filter(|c| c.len() == size).map(|coverage| {
-            let view = coverage_texture(device, queue, self.width, self.height, &coverage)
-                .create_view(&wgpu::TextureViewDescriptor::default());
+        let coverage = coverage.filter(|c| c.len() == size);
+        // a selection already shown takes the new coverage in its own texture (a slider drags it
+        // a frame at a time), its bindings as they are; only the rows that changed are sent
+        if let (Some(coverage), Some(shown)) = (&coverage, self.selection.as_mut()) {
+            let row = (self.width as usize).max(1);
+            let differs = |(a, b): (&[u8], &[u8])| a != b;
+            let rows = || shown.coverage.chunks(row).zip(coverage.chunks(row));
+            let first = rows().position(differs);
+            let last = rows().rposition(differs);
+            if let (Some(first), Some(last)) = (first, last) {
+                let changed = coverage.get(first * row..(last + 1) * row).unwrap_or_default();
+                queue.write_texture(
+                    copy_at(&shown.texture, 0, i32::try_from(first).unwrap_or(0)),
+                    changed,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(self.width),
+                        rows_per_image: Some(u32::try_from(last + 1 - first).unwrap_or(0)),
+                    },
+                    extent(self.width, u32::try_from(last + 1 - first).unwrap_or(0)),
+                );
+                if let Some(kept) = shown.coverage.get_mut(first * row..(last + 1) * row) {
+                    kept.copy_from_slice(changed);
+                }
+            }
+            return;
+        }
+        self.selection = coverage.map(|coverage| {
+            let texture = coverage_texture(device, queue, self.width, self.height, &coverage);
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             let bind = sampled_bind(device, &self.pipelines.sampled_layout, &view, &self.sampler);
-            SelectionGpu { coverage, view, bind }
+            SelectionGpu { coverage: coverage.into_owned(), texture, view, bind }
         });
         let mask = self.selection.as_ref().map_or(&self.everything, |s| &s.view);
         self.brush_bind = brush_bind(
@@ -2622,6 +2684,7 @@ impl Canvas {
                 Op::Commit(s) => ids.push(s.layer),
                 Op::Clear(id, _) | Op::Wipe(id) | Op::TransformBegin(id) | Op::TransformAlso(id) => ids.push(*id),
                 Op::Write { layers, .. } => ids.extend(layers.iter().map(|(id, ..)| *id)),
+                Op::Flip { layers, .. } => ids.extend(layers.iter().copied()),
                 Op::Put(id, _) | Op::PutRegion { layer: id, .. } | Op::Hold(id) => ids.push(*id),
                 Op::Release { before: Some(d), .. } => ids.extend(d.pixel_layer_ids()),
                 _ => {}
@@ -2982,6 +3045,45 @@ impl Canvas {
                         );
                     }
                     self.dirty = self.full();
+                }
+                Op::Flip { layers, horizontal } => {
+                    let full = self.full();
+                    let snapshots: Vec<Snapshot> =
+                        layers.iter().filter_map(|id| self.snapshot(device, &mut encoder, *id, full)).collect();
+                    if !snapshots.is_empty() {
+                        self.push_step(Step { made: 0, name: None, doc: None, pixels: snapshots, selection: None });
+                    }
+                    let pipeline = if horizontal { &self.pipelines.flip_across } else { &self.pipelines.flip_down };
+                    for id in &layers {
+                        let Some(layer) = self.layers.get(id) else { continue };
+                        // drawn mirrored from a copy of itself (a pass can't read what it draws into)
+                        let copy = texture(device, "flip", self.width, self.height, LAYER_FORMAT);
+                        encoder.copy_texture_to_texture(
+                            copy_at(&layer.texture, 0, 0),
+                            copy_at(&copy, 0, 0),
+                            extent(self.width, self.height),
+                        );
+                        let view = copy.create_view(&wgpu::TextureViewDescriptor::default());
+                        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("flip"),
+                            layout: &self.pipelines.bounds_layout,
+                            entries: &[wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&view),
+                            }],
+                        });
+                        let mut pass = render_pass(
+                            &mut encoder,
+                            "flip",
+                            &layer.view,
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        );
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &bind, &[]);
+                        pass.draw(0..3, 0..1);
+                    }
+                    self.dirty = full;
+                    history_changed = true;
                 }
                 Op::Write { layers, before } => {
                     let snapshots: Vec<Snapshot> = layers
@@ -3914,7 +4016,7 @@ impl Canvas {
         }
         let selection = step.selection.map(|before| {
             let now = self.selection.take().map(|s| s.coverage);
-            self.put_selection(device, &gpu.queue, before);
+            self.put_selection(device, &gpu.queue, before.map(std::borrow::Cow::Owned));
             now
         });
         // put back last first, so pixels that several snapshots cover end as the first left them
@@ -5417,6 +5519,84 @@ impl Canvas {
         Ok(Thumbnail { width: w, height: h, rgba })
     }
 
+    /// Layer `id` of canvas `from` (on the same device) as this canvas's, its pixels moved by
+    /// whole pixels: this canvas's (x, y) is `from`'s (x + `offset.0`, y + `offset.1`), clear
+    /// where that is off `from`. Copied on the GPU; false (nothing done) if `from` has no texture
+    /// for it (a parked layer). Not an undo step.
+    pub fn copy_layer_from(&mut self, gpu: &Gpu, from: &Canvas, id: LayerId, offset: (i64, i64)) -> bool {
+        let Some(source) = from.layers.get(&id) else { return false };
+        if !self.layers.contains_key(&id) {
+            let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.layers.insert(id, LayerGpu { texture, view });
+        }
+        self.touched(id);
+        self.caches = None;
+        self.parked.remove(&id);
+        self.pictures.remove(&id);
+        let Some(layer) = self.layers.get(&id) else { return false };
+        // the part of this canvas that falls on `from`
+        let clamp = |v: i64, hi: u32| v.clamp(0, i64::from(hi));
+        let (x0, x1) = (clamp(-offset.0, self.width), clamp(i64::from(from.width) - offset.0, self.width));
+        let (y0, y1) = (clamp(-offset.1, self.height), clamp(i64::from(from.height) - offset.1, self.height));
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("crop") });
+        // what was there first cleared (a layer made just now is clear already)
+        drop(render_pass(&mut encoder, "crop clear", &layer.view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
+        if x1 > x0 && y1 > y0 {
+            let at = |v: i64| i32::try_from(v).unwrap_or(0);
+            encoder.copy_texture_to_texture(
+                copy_at(&source.texture, at(x0 + offset.0), at(y0 + offset.1)),
+                copy_at(&layer.texture, at(x0), at(y0)),
+                extent(u32::try_from(x1 - x0).unwrap_or(0), u32::try_from(y1 - y0).unwrap_or(0)),
+            );
+        }
+        gpu.queue.submit([encoder.finish()]);
+        self.invalidate();
+        true
+    }
+
+    /// Layer `id` of canvas `from` (on the same device) seen through a crop as this canvas's:
+    /// each pixel's middle mapped onto `from` by `to_old` (a, b, c, d, e, f: x' = a x + c y + e,
+    /// y' = b x + d y + f), bilinear, clear past its edges, as the engine's crop resamples on the
+    /// CPU. Drawn on the GPU; false (nothing done) if `from` has no texture for it (a parked
+    /// layer). Not an undo step.
+    pub fn resample_layer_from(&mut self, gpu: &Gpu, from: &Canvas, id: LayerId, to_old: [f32; 6]) -> bool {
+        let Some(source) = from.layers.get(&id) else { return false };
+        if !self.layers.contains_key(&id) {
+            let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.layers.insert(id, LayerGpu { texture, view });
+        }
+        self.touched(id);
+        self.caches = None;
+        self.parked.remove(&id);
+        self.pictures.remove(&id);
+        let Some(layer) = self.layers.get(&id) else { return false };
+        let [a, b, c, d, e, f] = to_old;
+        let map = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("crop"),
+            contents: bytemuck::cast_slice(&[a, b, c, d, e, f, 0.0, 0.0]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("crop"),
+            layout: &self.pipelines.crop_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&source.view) },
+                wgpu::BindGroupEntry { binding: 1, resource: map.as_entire_binding() },
+            ],
+        });
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("crop") });
+        let mut pass = render_pass(&mut encoder, "crop", &layer.view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+        pass.set_pipeline(&self.pipelines.crop);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..3, 0..1);
+        drop(pass);
+        gpu.queue.submit([encoder.finish()]);
+        self.invalidate();
+        true
+    }
+
     /// Replaces a layer's pixels (premultiplied RGBA8, the canvas's size, rows top to bottom), for
     /// opening a saved artwork. Not an undo step.
     pub fn upload_layer(&mut self, gpu: &Gpu, id: LayerId, rgba: &[u8]) -> Result<(), GpuError> {
@@ -5534,6 +5714,11 @@ impl Canvas {
     /// with nothing on it (or not on the canvas). Found on the GPU, which sends back only a few
     /// bytes a row and column; a parked layer's is known already. Waits for the GPU.
     pub fn painted_boxes(&self, gpu: &Gpu, layers: &[LayerId]) -> Vec<Option<IRect>> {
+        self.painted_boxes_or_why(gpu, layers).into_iter().map(|b| b.ok().flatten()).collect()
+    }
+
+    /// [`Canvas::painted_boxes`], an error where the GPU didn't say (rather than nothing painted).
+    pub fn painted_boxes_or_why(&self, gpu: &Gpu, layers: &[LayerId]) -> Vec<Result<Option<IRect>, GpuError>> {
         let sources = layers
             .iter()
             .map(|id| match self.layers.get(id) {
@@ -5549,9 +5734,6 @@ impl Canvas {
             })
             .collect();
         self.boxes(gpu, sources, [&self.pipelines.bounds_rows, &self.pipelines.bounds_columns])
-            .into_iter()
-            .map(|b| b.ok().flatten())
-            .collect()
     }
 
     /// Where the layers being transformed or adjusted differ from their copies from when it
@@ -5928,6 +6110,37 @@ impl Pipelines {
             bounds_pipeline(&changed_layout, "fs_changed_rows"),
             bounds_pipeline(&changed_layout, "fs_changed_columns"),
         );
+        let flip_module = module("flip", include_str!("shaders/flip.wgsl"));
+        let flip_layout = layout("flip", &[Some(&bounds_layout)]);
+        let flip_pipeline =
+            |fs| blended_pipeline(device, &flip_layout, &flip_module, fs, ("vs_full", fs), LAYER_FORMAT, None);
+        let (flip_across, flip_down) = (flip_pipeline("fs_across"), flip_pipeline("fs_down"));
+        let crop_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("crop"),
+            entries: &[
+                tex_entry(0),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let crop_module = module("crop", include_str!("shaders/crop.wgsl"));
+        let crop = blended_pipeline(
+            device,
+            &layout("crop", &[Some(&crop_layout)]),
+            &crop_module,
+            "crop",
+            ("vs_full", "fs_crop"),
+            LAYER_FORMAT,
+            None,
+        );
         let filter_module = module("filter", include_str!("shaders/filter.wgsl"));
         let filters = FILTER_PASSES
             .iter()
@@ -6149,6 +6362,10 @@ impl Pipelines {
             changed_layout,
             changed_rows,
             changed_columns,
+            flip_across,
+            flip_down,
+            crop_layout,
+            crop,
             before_layout,
             filters,
             liquify_add,

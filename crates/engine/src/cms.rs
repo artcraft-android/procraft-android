@@ -781,18 +781,31 @@ impl Lut {
         if self.outputs != 3 {
             return;
         }
-        for px in pixels.as_chunks_mut::<4>().0 {
-            let a = f32::from(px[3]) / 255.0;
-            if a == 0.0 {
-                continue;
+        // a canvas's layers in pieces (whole pixels) side by side
+        crate::par::each_part(pixels, 1 << 18, |piece| {
+            // a pixel as the one before it (paint lies in runs) turns as it did
+            let mut last: Option<([u8; 4], [u8; 4])> = None;
+            for px in piece.as_chunks_mut::<4>().0 {
+                if let Some((was, became)) = last
+                    && *px == was
+                {
+                    *px = became;
+                    continue;
+                }
+                let was = *px;
+                let a = f32::from(px[3]) / 255.0;
+                if a == 0.0 {
+                    continue;
+                }
+                let un = |c: u8| if premultiplied { (f32::from(c) / 255.0 / a).min(1.0) } else { f32::from(c) / 255.0 };
+                let out = self.apply([un(px[0]), un(px[1]), un(px[2])]);
+                for (c, v) in px.iter_mut().zip(&out).take(3) {
+                    let v = if premultiplied { v * a } else { *v };
+                    *c = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+                last = Some((was, *px));
             }
-            let un = |c: u8| if premultiplied { (f32::from(c) / 255.0 / a).min(1.0) } else { f32::from(c) / 255.0 };
-            let out = self.apply([un(px[0]), un(px[1]), un(px[2])]);
-            for (c, v) in px.iter_mut().zip(&out).take(3) {
-                let v = if premultiplied { v * a } else { *v };
-                *c = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-            }
-        }
+        });
     }
 }
 

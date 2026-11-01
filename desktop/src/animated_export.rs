@@ -177,7 +177,9 @@ impl AnimatedExport {
         let session = Arc::clone(session);
         let format = self.format;
         let (web_ready, dither, transparent, turntable) = wanted;
-        std::thread::spawn(move || {
+        // among the files being written (the app waits for them as it ends; the panel over the
+        // canvas keeps presses off it meanwhile)
+        crate::files::write_meanwhile(false, move || {
             let dir = std::env::temp_dir().join("procraft-exports");
             let base = procraft_core::export_file_name(session.name(), false);
             let path = dir.join(format!("{base}.{}", format.extension()));
