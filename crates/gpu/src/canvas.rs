@@ -22,10 +22,6 @@ use crate::{Gpu, GpuError};
 
 const LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// The side of the checks shown under see-through parts of the canvas (a hidden background),
-/// window pixels.
-const CHECKS: f32 = 16.0;
-
 /// The most textures the canvas's size kept for reuse (see `Canvas::spares`).
 const SPARES_KEPT: usize = 1;
 /// How many pixels of a row or column each pixel of a layer's bounds lines stands for (as
@@ -5451,14 +5447,15 @@ impl Canvas {
         let ScreenPipelines { display, surround: surround_pipelines, overlay, selection: selection_pipelines, .. } =
             &mut self.screen;
         let pipeline = display.entry(target.format).or_insert_with(|| {
-            sampled_pipeline(
+            // over the surround, which shows through see-through parts (a hidden background)
+            blended_pipeline(
                 device,
                 display_lut_layout,
                 display_module,
                 "display",
-                "vs_display",
-                "fs_display",
+                ("vs_display", "fs_display"),
                 target.format,
+                Some(PREMULTIPLIED_OVER),
             )
         });
         let (w, h) = (target.size.0.max(1) as f32, target.size.1.max(1) as f32);
@@ -5467,7 +5464,7 @@ impl Canvas {
         let m = unit_to_canvas.then(target.to_screen).then(to_clip);
         let offset = uniforms.push(&DisplayUniform::new(
             [m.a, m.b, m.c, m.d],
-            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, CHECKS],
+            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, 0.0],
             target.convert,
             target.lut.is_some(),
         ));
@@ -5682,14 +5679,15 @@ impl Canvas {
             &*self.pipelines;
         let ScreenPipelines { display, blur, frost, .. } = &mut self.screen;
         let display = display.entry(target.format).or_insert_with(|| {
-            sampled_pipeline(
+            // over the surround, which shows through see-through parts (a hidden background)
+            blended_pipeline(
                 device,
                 display_lut_layout,
                 display_module,
                 "display",
-                "vs_display",
-                "fs_display",
+                ("vs_display", "fs_display"),
                 target.format,
+                Some(PREMULTIPLIED_OVER),
             )
         });
         let blur = blur.entry(target.format).or_insert_with(|| {
@@ -5740,7 +5738,7 @@ impl Canvas {
         let m = unit_to_canvas.then(target.to_screen).then(shrink).then(to_clip);
         let offset = uniforms.push(&DisplayUniform::new(
             [m.a, m.b, m.c, m.d],
-            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, CHECKS / k],
+            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, 0.0],
             target.convert,
             target.lut.is_some(),
         ));
@@ -7097,27 +7095,7 @@ fn sampled_pipeline(
     fs: &str,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module,
-            entry_point: Some(vs),
-            compilation_options: Default::default(),
-            buffers: &[],
-        },
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        fragment: Some(wgpu::FragmentState {
-            module,
-            entry_point: Some(fs),
-            compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
-        }),
-        multiview_mask: None,
-        cache: None,
-    })
+    blended_pipeline(device, layout, module, label, (vs, fs), format, None)
 }
 
 /// One frame's uniforms, a slot per draw.

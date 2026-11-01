@@ -1441,11 +1441,13 @@ fn background_row(ui: &mut Ui, look: &mut Look, session: &CanvasSession) {
     ui.painter().rect_filled(row, 17, argb(BACKGROUND_ROW));
     let swatch = Rect::from_min_size(pos2(row.left() + 4.0, row.center().y - 21.0), vec2(92.0, 42.0));
     let colour = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    ui.painter().rect_filled(
-        swatch,
-        14,
-        Color32::from_rgb(colour(background.r), colour(background.g), colour(background.b)),
-    );
+    // hidden, the swatch shows no colour: a faint white over the row
+    let fill = if background.visible {
+        Color32::from_rgb(colour(background.r), colour(background.g), colour(background.b))
+    } else {
+        Color32::from_white_alpha(15)
+    };
+    ui.painter().rect_filled(swatch, 14, fill);
     let ink = argb(PANEL_TITLE);
     let visibility = Rect::from_min_size(pos2(row.right() - 8.0 - 44.0, row.center().y - 20.5), vec2(44.0, 41.0));
     let g = galley(ui, "Background color", 17.0, Weight::Regular, ink, visibility.left() - swatch.right() - 14.0);

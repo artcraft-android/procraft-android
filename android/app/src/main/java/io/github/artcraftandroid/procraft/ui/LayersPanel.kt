@@ -981,7 +981,9 @@ private fun BackgroundRow(vm: CanvasViewModel) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(Modifier.weight(1f).fillMaxHeight().clickable { vm.pickBackground() }, verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.padding(start = 4.dp).size(92.dp, 42.dp).clip(RoundedCornerShape(14.dp)).background(Color(bg.r, bg.g, bg.b)))
+            // hidden, the swatch shows no colour: a faint white over the row
+            val swatch = if (bg.visible) Color(bg.r, bg.g, bg.b) else Color.White.copy(alpha = 0.06f)
+            Box(Modifier.padding(start = 4.dp).size(92.dp, 42.dp).clip(RoundedCornerShape(14.dp)).background(swatch))
             Text("Background color", color = Pc.PanelTitle, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f).padding(start = 14.dp))
         }
         Box(Modifier.size(44.dp, 41.dp).clickable { vm.toggleBackground() }, contentAlignment = Alignment.Center) {
