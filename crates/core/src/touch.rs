@@ -1937,6 +1937,52 @@ mod tests {
         assert!(copy_paste);
     }
 
+    /// As a hand does them on a tablet at twice the pixels a point: the fingers landing and moving
+    /// one after another, a swipe down wobbling sideways, a scrub drifting up and down.
+    #[test]
+    fn a_hand_s_swipe_down_never_clears_and_its_scrub_does() {
+        let fingers = [(1, 400.0f32), (2, 600.0), (3, 800.0)];
+        let s = session();
+        s.set_display_scale(2.0);
+        for (k, (id, x)) in fingers.into_iter().enumerate() {
+            s.touch_down(id, PointerKind::Finger, at(x, 300.0, 5.0 * k as f64));
+        }
+        let (mut cleared, mut copy_paste) = (false, false);
+        for step in 1..=25 {
+            for (k, (id, x)) in fingers.into_iter().enumerate() {
+                // 12 down a step, each finger swaying 15 to the sides out of step with the others
+                let sway = 15.0 * (step as f32 * 0.9 + k as f32 * 2.1).sin();
+                let out = s.touch_move(id, at(x + sway, 300.0 + 12.0 * step as f32, 10.0 + 8.0 * f64::from(step)));
+                cleared |= out.contains(&TouchCommand::ClearLayer);
+                copy_paste |= out.contains(&TouchCommand::CopyPaste);
+            }
+        }
+        for (id, x) in fingers {
+            s.touch_up(id, at(x, 600.0, 300.0));
+        }
+        assert!(copy_paste && !cleared, "swipe: copy and paste {copy_paste}, cleared {cleared}");
+
+        let s = session();
+        s.set_display_scale(2.0);
+        for (k, (id, x)) in fingers.into_iter().enumerate() {
+            s.touch_down(id, PointerKind::Finger, at(x, 300.0, 5.0 * k as f64));
+        }
+        let (mut cleared, mut copy_paste) = (false, false);
+        // four legs 90 across (45 points), 6 moves each, drifting 20 up and down
+        for step in 1..=24 {
+            let leg = (step - 1) / 6;
+            let along = ((step - 1) % 6 + 1) as f32 * 15.0;
+            let dx = if leg % 2 == 0 { along } else { 90.0 - along };
+            let drift = 20.0 * (step as f32 * 0.5).sin();
+            for (id, x) in fingers {
+                let out = s.touch_move(id, at(x + dx, 300.0 + drift, 10.0 + 12.0 * f64::from(step)));
+                cleared |= out.contains(&TouchCommand::ClearLayer);
+                copy_paste |= out.contains(&TouchCommand::CopyPaste);
+            }
+        }
+        assert!(cleared && !copy_paste, "scrub: cleared {cleared}, copy and paste {copy_paste}");
+    }
+
     #[test]
     fn the_modify_button_picks_with_the_next_touch_or_while_held() {
         let s = session();
