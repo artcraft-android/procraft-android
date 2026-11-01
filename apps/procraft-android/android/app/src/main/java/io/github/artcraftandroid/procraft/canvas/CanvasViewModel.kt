@@ -4377,8 +4377,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         cloneSourceBack()
 
         if (adjustment != null && !adjustPencil) {
-          undoAdjustment();
-          return
+            undoAdjustment()
+            return
         }
         // recoloring, the fill under the reticle is taken back first
         if (recolorOpen) {
@@ -4422,15 +4422,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (transforming) return
         cloneSourceForward()
         if (adjustment != null && !adjustPencil) {
-          if (adjustChanged()) return
-          val a = adjustment ?: return
-          val could = canRedo
-          endAdjustment(false)
-          val name = session?.redo()
-          startAdjustment(a)
-          if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
-          refresh()
-          return
+            if (adjustChanged()) return
+            val a = adjustment ?: return
+            val could = canRedo
+            endAdjustment(false)
+            val name = session?.redo()
+            startAdjustment(a)
+            if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
+            refresh()
+            return
         }
         // recoloring, the open fill steps aside for the redo and is made again over what it brings back
         if (recolorOpen) {
