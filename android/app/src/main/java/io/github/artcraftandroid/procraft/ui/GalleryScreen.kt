@@ -131,6 +131,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
     // where each stack's cell is (window pixels), for its artworks to fly out of as it opens
     val stackCellAt = remember { mutableMapOf<String, androidx.compose.ui.geometry.Rect>() }
     var renaming by remember { mutableStateOf<Artwork?>(null) }
+    // a stack renamed as an artwork is: its name tapped
+    var renamingStack by remember { mutableStateOf<io.github.artcraftandroid.procraft.gallery.Stack?>(null) }
     // the app's name tapped: what it is and its version, over the gallery
     var about by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<Artwork?>(null) }
@@ -173,8 +175,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
         vm.windowPx = androidx.compose.ui.unit.IntSize(constraints.maxWidth, constraints.maxHeight)
         // out of focus while an artwork is being renamed
         val blur by androidx.compose.animation.core.animateDpAsState(
-            if (renaming != null || about) RenameBlur else 0.dp,
-            if (renaming != null || about) tween(300) else tween(150),
+            if (renaming != null || renamingStack != null || about) RenameBlur else 0.dp,
+            if (renaming != null || renamingStack != null || about) tween(300) else tween(150),
             label = "blur",
         )
         val dropCell = cellSize(screenWidth, if (screenWidth > screenHeight) 4 else 3)
@@ -309,6 +311,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                                             }
                                         }
                                     },
+                                    onRename = { if (!selecting) renamingStack = entry },
                                 ) {
                                     if (!selecting) vm.showStack(entry)
                                 }
@@ -562,6 +565,18 @@ fun GalleryScreen(vm: CanvasViewModel) {
             RenameArtwork(a, vm.galleryVersion, vm.thumbAt[a.dir.name], closing = renaming == null, shown = shown) { name ->
                 if (name != a.name) vm.renameArtwork(a, name)
                 renaming = null
+            }
+        }
+        // a stack: its top artwork shown, under the stack's name
+        FadingValue(renamingStack, Motion.renameFade()) { st, shown ->
+            val top = st.artworks.firstOrNull()
+            if (top == null) {
+                renamingStack = null
+                return@FadingValue
+            }
+            RenameArtwork(top.copy(name = st.name), vm.galleryVersion, vm.thumbAt[top.dir.name], closing = renamingStack == null, shown = shown) { name ->
+                if (name != st.name) vm.renameStack(st, name)
+                renamingStack = null
             }
         }
         FadingValue(vm.message, Motion.message()) { text, shown ->
@@ -1154,6 +1169,7 @@ private fun StackCell(
     modifier: Modifier,
     onPlaced: (androidx.compose.ui.geometry.Rect) -> Unit,
     onDrag: (Offset) -> Unit,
+    onRename: () -> Unit,
     onOpen: () -> Unit,
 ) {
     val top = s.artworks.firstOrNull() ?: return
@@ -1166,7 +1182,8 @@ private fun StackCell(
             onPlaced(it.boundsInWindow())
             cellAt[0] = it.positionInWindow()
         }.pointerInput(s) {
-            // a tap opens it; held and moved, it is dragged ([onDrag], with the finger's place in the window)
+            // a tap opens it (on its name, renames it); held and moved, it is dragged ([onDrag], with
+            // the finger's place in the window)
             awaitEachGesture {
                 val down = awaitFirstDown()
                 var up: androidx.compose.ui.input.pointer.PointerInputChange? = null
@@ -1181,7 +1198,7 @@ private fun StackCell(
                 if (!held) {
                     up?.let {
                         it.consume()
-                        onOpen()
+                        if (it.position.y > (39.dp + cell.thumb + 8.dp).toPx()) onRename() else onOpen()
                     }
                     return@awaitEachGesture
                 }

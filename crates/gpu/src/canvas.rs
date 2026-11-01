@@ -1685,6 +1685,8 @@ impl Canvas {
             self.second_stroke.let_go();
         }
         self.uploads.kept.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        // made again when a group composites on its own
+        self.groups.clear();
     }
 
     /// Lets go of the shape and grain images until something wants them again (a canvas left
@@ -2982,8 +2984,9 @@ impl Canvas {
             self.prepare_brush_images(gpu);
         }
         let device = &gpu.device;
+        // groups flattened or merged are composited on their own, whatever they are
         let flattening = self.ops.iter().filter_map(|op| match op {
-            Op::Flatten { before, .. } => Some(before.max_depth()),
+            Op::Flatten { before, .. } | Op::MergeMany { before, .. } => Some(before.max_depth()),
             _ => None,
         });
         let depth = flattening.max().unwrap_or(0);
@@ -3684,7 +3687,7 @@ impl Canvas {
         if !smudge_uniforms.data.is_empty() {
             gpu.queue.write_buffer(&self.smudge_params, 0, &smudge_uniforms.data);
         }
-        self.make_groups(device, doc.max_depth());
+        self.make_groups(device, group_levels(doc));
         self.ensure_caches(gpu, doc, &mut encoder, &mut uniforms);
         // after the caches: caches just made want the whole picture composited again
         let dirty = self.dirty.intersect(self.full());
@@ -4693,7 +4696,7 @@ impl Canvas {
         let start = tops.iter().position(|t| *t == top)?;
         let layer = |i: usize| tops.get(i).and_then(|t| doc.layer(*t));
         let mut end = tops.len();
-        while end > start + 1 && layer(end - 1).is_some_and(|l| l.blend == BlendMode::Normal) {
+        while end > start + 1 && tops.get(end - 1).is_some_and(|t| plain(doc, *t)) {
             end -= 1;
         }
         while end < tops.len() && layer(end).is_some_and(|l| l.clipped) {
@@ -5265,6 +5268,13 @@ impl Canvas {
                 }
                 LayerKind::Group => {
                     if !layer.visible || layer.opacity <= 0.0 {
+                        continue;
+                    }
+                    // its members straight onto what is below (an onion skin's frame on its own,
+                    // to be tinted whole)
+                    if layer.passes_through() && look.tint[3] == 0.0 {
+                        let members = doc.members(Some(id));
+                        self.composite_items(device, doc, encoder, uniforms, rect, &members, false, stack, current);
                         continue;
                     }
                     let Some(view) = self.composite_group(device, doc, encoder, uniforms, rect, id) else { continue };
@@ -7487,6 +7497,27 @@ struct Remake {
     largest_part: usize,
     restored: usize,
     restoring: std::time::Duration,
+}
+
+/// How many levels of group textures compositing `doc` takes: down to the deepest group
+/// composited on its own (with Animation Assist any group, its frame's onion skin tinted whole).
+fn group_levels(doc: &Document) -> usize {
+    if doc.animation.is_some() {
+        return doc.max_depth();
+    }
+    let alone = doc.layers().iter().filter(|l| l.kind == LayerKind::Group && !l.passes_through());
+    alone.map(|l| doc.depth(l.id) + 1).max().unwrap_or(0)
+}
+
+/// Whether item `id` composited over transparency, then over what is below, shows as it does
+/// composited straight onto it: normal, and if a group passing through, only of such items.
+fn plain(doc: &Document, id: LayerId) -> bool {
+    match doc.layer(id) {
+        Some(l) if l.kind == LayerKind::Mask => true,
+        Some(l) if l.blend != BlendMode::Normal => false,
+        Some(l) if l.passes_through() => doc.members(Some(id)).iter().all(|m| plain(doc, *m)),
+        _ => true,
+    }
 }
 
 /// What a top-level item composites from: itself and its mask, or a group and all it holds.

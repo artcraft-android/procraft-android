@@ -7018,6 +7018,40 @@ fn merging_down_keeps_only_where_the_upper_layer_is_painted() {
 }
 
 #[test]
+fn a_blend_mode_inside_a_group_blends_with_what_is_below_the_group() {
+    use procraft_engine::document::BlendMode;
+    let Some(s) = session(32, 32) else { return };
+    // red below, a grey Multiply layer grouped above it
+    let bottom = s.layers()[0].id;
+    s.set_color(1.0, 0.0, 0.0);
+    assert!(s.fill_layer(bottom));
+    let grey = s.add_layer();
+    s.set_color(0.5, 0.5, 0.5);
+    assert!(s.fill_layer(grey));
+    assert!(s.set_layer_blend(grey, BlendMode::Multiply.id()));
+    let shown = pixel(&s, 16, 16);
+    let group = s.group_picked();
+    assert!(s.layers().iter().any(|l| l.id == group));
+    // the grey multiplies the red as it did ungrouped, not just what is in the group
+    let through = pixel(&s, 16, 16);
+    assert_eq!(through, shown);
+    assert!(through[0].abs_diff(128) <= 2 && through[1] <= 2, "{through:?}");
+    // the same while what is below and above is kept aside
+    s.shared.lock().canvas.as_mut().unwrap().set_cache_composites(true);
+    let top = s.add_layer();
+    assert!(s.select_layer(grey));
+    assert_eq!(pixel(&s, 16, 16), through);
+    // given an opacity of its own the group is composited first: grey over the red, halved
+    assert!(s.set_layer_opacity(group, 0.5, true));
+    let alone = pixel(&s, 16, 16);
+    assert!(alone[0].abs_diff(192) <= 2 && alone[1].abs_diff(64) <= 2, "{alone:?}");
+    s.undo();
+    assert_eq!(pixel(&s, 16, 16), through);
+    assert!(s.delete_layer(top));
+    assert_eq!(pixel(&s, 16, 16), through);
+}
+
+#[test]
 fn selection_work_undoes_and_redoes_whole() {
     use crate::selection::SelectionJoin;
     for seed in [4u32, 63] {
@@ -7527,4 +7561,56 @@ fn touches_in_every_mode_leave_nothing_open_and_undo_whole() {
         assert_eq!(steps, again, "seed {seed}");
         assert!(composite(&s) == end, "seed {seed}: redone {again} of {done:?}");
     }
+}
+
+#[test]
+fn leaving_with_liquify_or_crop_open_keeps_the_work() {
+    use crate::adjust::{LiquifyBrush, LiquifyKind};
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.5);
+    s.set_color(0.0, 0.0, 0.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 50.0, 0.0)]);
+    s.stroke_add((1..12).map(|k| sample(20.0 + k as f32 * 5.0, 50.0, k as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let composite = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render_finished(gpu, &mut st.doc);
+        canvas.read_composite(gpu).unwrap()
+    };
+    let reopened = |dir: &std::path::Path| {
+        let o = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+        o.use_gpu(gpu.clone());
+        {
+            let mut st = o.shared.lock();
+            st.window_size = (100, 100);
+            st.view = Some(View::fit((100, 100), (100, 100)));
+            st.ensure_canvas();
+        }
+        composite(&o)
+    };
+    let dir = std::env::temp_dir().join(format!("procraft-leave-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // liquified, then off to the gallery with Liquify still open: saved as shown
+    assert!(s.liquify_begin());
+    let brush = LiquifyBrush { kind: LiquifyKind::Push, size: 0.2, pressure: 1.0, distortion: 0.0 };
+    s.liquify_stroke((0..=20).flat_map(|i| [40.0, 30.0 + i as f32 * 2.0, 1.0]).collect(), true, brush);
+    let liquified = composite(&s);
+    s.save(dir.join("a").to_string_lossy().into_owned()).unwrap();
+    assert!(reopened(&dir.join("a")) == liquified, "Liquify's work lost on leaving");
+    // undone inside Liquify, it still liquifies
+    s.undo();
+    s.liquify_stroke((0..=20).flat_map(|i| [60.0, 30.0 + i as f32 * 2.0, 1.0]).collect(), true, brush);
+    assert!(composite(&s) != liquified, "Liquify stopped after an undo");
+    s.adjust_end(true);
+    // Crop and Resize open, a smaller frame not applied, off to the gallery: the canvas as it was
+    let before = composite(&s);
+    s.crop_begin();
+    s.crop_set_size(Some(60), Some(60));
+    s.save(dir.join("b").to_string_lossy().into_owned()).unwrap();
+    assert!(reopened(&dir.join("b")) == before, "Crop and Resize lost the work on leaving");
+    s.crop_end(false);
+    let _ = std::fs::remove_dir_all(&dir);
 }

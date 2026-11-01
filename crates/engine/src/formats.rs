@@ -194,7 +194,7 @@ fn record(
     }
     records.extend_from_slice(b"8BIM");
     let group_start = matches!(layer.kind, PsdKind::GroupStart { .. });
-    records.extend_from_slice(if group_start && layer.blend == BlendMode::Normal {
+    records.extend_from_slice(if group_start && layer.blend == BlendMode::Normal && layer.opacity >= 1.0 {
         b"pass"
     } else {
         blend_key(layer.blend)

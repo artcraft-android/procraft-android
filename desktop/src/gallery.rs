@@ -209,6 +209,8 @@ pub struct Gallery {
     dragged_out: Option<GalleryArtwork>,
     /// The artwork being renamed, its name as typed, and whether its field has had the focus.
     renaming: Option<(GalleryArtwork, String, bool)>,
+    /// The stack being renamed instead (its folder), shown as its top artwork under its name.
+    renaming_stack: Option<String>,
     /// When the renaming began (its picture rising from its cell), and one just done, fading
     /// away (its name as kept, since when).
     rename_since: Option<Instant>,
@@ -318,6 +320,7 @@ impl Gallery {
             pdf_for: None,
             dragged_out: None,
             renaming: None,
+            renaming_stack: None,
             rename_since: None,
             rename_fading: None,
             swiped: None,
@@ -810,7 +813,10 @@ impl Gallery {
             let kept = if name.trim().is_empty() { a.name.clone() } else { name.trim().to_owned() };
             self.rename_since = None;
             self.rename_fading = Some((a.clone(), kept.clone(), Instant::now()));
-            self.store.rename(a.dir, kept);
+            match self.renaming_stack.take() {
+                Some(stack) => self.store.rename_stack(stack, kept),
+                None => self.store.rename(a.dir, kept),
+            }
             self.refresh();
         } else {
             self.renaming = Some((a, name, focused));
@@ -1119,6 +1125,7 @@ impl Gallery {
                                 self.swiped = None;
                             } else if tapped && on_name && !self.selecting {
                                 self.renaming = Some((artwork.clone(), artwork.name.clone(), false));
+                                self.renaming_stack = None;
                             } else if tapped && self.selecting {
                                 if let Some(at) = self.picked.iter().position(|d| *d == artwork.dir) {
                                     self.picked.remove(at);
@@ -1131,7 +1138,18 @@ impl Gallery {
                         }
                         GalleryEntry::Stack { dir, name, artworks } => {
                             self.stack_cell(ui, cell, name, artworks);
-                            if tapped && !self.selecting {
+                            // on its name, a tap renames it, as an artwork's does
+                            let below = cell.top() + 39.0 + Self::thumb_box(cell).height() + 8.0;
+                            let on_name = response.interact_pointer_pos().is_some_and(|p| p.y > below);
+                            if tapped
+                                && on_name
+                                && !self.selecting
+                                && let Some(top) = artworks.first()
+                            {
+                                let shown = GalleryArtwork { name: name.clone(), ..top.clone() };
+                                self.renaming = Some((shown, name.clone(), false));
+                                self.renaming_stack = Some(dir.clone());
+                            } else if tapped && !self.selecting {
                                 self.stack = Some((dir.clone(), name.clone()));
                                 self.opening_stack = Some((cell, Instant::now()));
                                 into_stack = true;

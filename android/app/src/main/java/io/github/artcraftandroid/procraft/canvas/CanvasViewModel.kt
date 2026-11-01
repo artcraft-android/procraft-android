@@ -312,12 +312,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             cursorAt = null
             return
         }
-        if (cursorAt == null) session?.let { s ->
+        // sized as it shows, and while hovering again now and then: the size may have changed
+        // meanwhile (painting, it keeps the size the stroke began at)
+        val now = android.os.SystemClock.uptimeMillis()
+        if (cursorAt == null || (hovering && now - cursorReadAt >= CURSOR_REREAD_MS)) session?.let { s ->
             cursorRadius = s.info().let { it.brushDiameter * it.zoom / 2f }
             cursorOutline = s.currentBrushSetting("cursor_outline").roundToInt()
+            cursorReadAt = now
         }
         cursorAt = p
     }
+
+    /** When the cursor's size was last read (uptime ms). */
+    private var cursorReadAt = 0L
 
     /** The light interface: light grey panels and bars with dark text. */
     var lightInterface by mutableStateOf(interfacePrefs.getBoolean(LIGHT_INTERFACE, false).also { io.github.artcraftandroid.procraft.ui.Pc.light = it })
@@ -5751,6 +5758,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val TEXT_BOX_OF_WIDTH = 1f
         const val RIGHT_HANDED = "right_handed"
         const val COLOR_MODE = "color_mode"
+
+        /** How often a hovering brush cursor reads its size again, ms. */
+        const val CURSOR_REREAD_MS = 100L
         const val ACTIONS_TAB = "actions_tab"
         const val STUDIO_TAB = "studio_tab"
         const val PAD_3D = "pad_3d_preview"

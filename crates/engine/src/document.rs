@@ -292,6 +292,15 @@ pub struct Layer {
     pub assisted: bool,
 }
 
+impl Layer {
+    /// A group as groups are made (normal, fully opaque): its members blend with what is below
+    /// it as they would ungrouped. A group given another mode or opacity (by Layer Opacity or a
+    /// file) is composited on its own first, then blended.
+    pub fn passes_through(&self) -> bool {
+        self.kind == LayerKind::Group && self.blend == BlendMode::Normal && self.opacity >= 1.0
+    }
+}
+
 /// Largest canvas edge, pixels.
 pub const MAX_CANVAS_EDGE: u32 = 16384;
 
