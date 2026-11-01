@@ -164,6 +164,9 @@ struct SavedBrush {
     metallic_stock: Option<(String, bool)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     roughness_stock: Option<(String, bool)>,
+    /// A dual brush's second, kept whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secondary: Option<Box<SavedBrush>>,
 }
 
 /// A brush's maker as kept: their name, and their picture and signature (PNG, as text).
@@ -356,6 +359,7 @@ impl State {
             roughness_image: image(brush.roughness.image, base.roughness.image),
             metallic_stock: brush.stock.metallic.as_ref().map(|s| (s.name.clone(), s.inverted)),
             roughness_stock: brush.stock.roughness.as_ref().map(|s| (s.name.clone(), s.inverted)),
+            secondary: brush.secondary.as_ref().map(|s| Box::new(self.saved_brush(s, None))),
         }
     }
 
@@ -448,6 +452,7 @@ impl State {
             signature: png(&a.signature),
         });
         brush.reset_point = b.reset.map(|r| ResetPoint::of(&self.restored(*r.brush), r.made));
+        brush.secondary = b.secondary.map(|s| Box::new(self.restored(*s)));
         brush
     }
 

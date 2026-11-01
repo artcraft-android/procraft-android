@@ -71,7 +71,7 @@ use procraft_engine::input::{Pointer, Sample};
 use procraft_engine::library::{BrushSet, library};
 use procraft_engine::stroke::StrokeBuilder;
 use procraft_engine::view::View;
-use procraft_gpu::{Canvas, Gpu, StrokeStyle, StrokeTool};
+use procraft_gpu::{Canvas, Gpu, SecondStroke, StrokeStyle, StrokeTool};
 
 pub use adjust::{ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, SwipeAdjustment};
 pub use adjust_menu::{
@@ -390,6 +390,8 @@ pub(crate) struct State {
     /// The app's colour history, which paint strokes add to.
     colour_history: Option<std::sync::Arc<ColourHistory>>,
     stroke: Option<StrokeBuilder>,
+    /// The open stroke's second, a dual brush's (drawn along the same input).
+    second: Option<StrokeBuilder>,
     #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
     pub(crate) gpu: Option<Gpu>,
     pub(crate) canvas: Option<Canvas>,
@@ -553,7 +555,7 @@ impl State {
             return;
         }
         if let (Some(open), Some(canvas)) = (self.stroke.take(), self.canvas.as_mut()) {
-            close_stroke(canvas, open, &self.doc.stroke_guide());
+            close_stroke(canvas, open, self.second.take(), &self.doc.stroke_guide());
             self.bake_painted_on();
         }
     }
@@ -635,6 +637,43 @@ impl State {
             canvas.use_sources(gpu, &mut style, &brush);
         }
         (brush, style, diameter)
+    }
+
+    /// A dual brush's second for a stroke of `tool` on `layer` with `first` (as
+    /// [`State::stroke_brush`] gave it, with `first_style`): its brush, how it is drawn and
+    /// combines, and its diameter at the size slider (before the brush scale). None for a brush
+    /// without one, or a stroke drawn in place (a smudge, wet paint).
+    pub(crate) fn second_brush(
+        &mut self,
+        tool: ToolKind,
+        layer: procraft_engine::document::LayerId,
+        first: &Brush,
+        first_style: &StrokeStyle,
+    ) -> Option<(Brush, SecondStroke, f32)> {
+        let mut second = first.secondary.as_deref()?.clone();
+        if first_style.in_place() || !matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) {
+            return None;
+        }
+        let sliders = self.sliders(tool);
+        let opacity = if second.blends() {
+            second.flow *= sliders.opacity.clamp(0.0, 1.0).powf(procraft_engine::brush::FLOW_POWER);
+            1.0
+        } else {
+            second.opacity(sliders.opacity)
+        };
+        let diameter = second.diameter(sliders.size);
+        let alpha_lock = self.doc.layer(layer).is_some_and(|l| l.alpha_lock);
+        let mut style = StrokeStyle::for_brush(&second, tool.stroke_tool(), self.color, opacity, alpha_lock);
+        if style.in_place() {
+            return None;
+        }
+        style.secondary = self.secondary;
+        style.preview = first_style.preview;
+        if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
+            canvas.use_sources(gpu, &mut style, &second);
+        }
+        let mode = first.setting("dual_blend").round().max(0.0) as u32;
+        Some((second, SecondStroke { style, mode, threshold: style.alpha_threshold }, diameter))
     }
 
     /// More input for the pad's last kept stroke, if it keeps them.
@@ -753,9 +792,14 @@ impl State {
 fn draw_samples(
     canvas: &mut Canvas,
     builder: &mut StrokeBuilder,
+    second: Option<&mut StrokeBuilder>,
     samples: &[Sample],
     guide: &procraft_engine::guide::Guide,
 ) -> bool {
+    // a dual brush's second, as its stamps come (no tip of its own)
+    if let Some(second) = second {
+        canvas.add_second_stamps(&guide::mirrored(guide, &second.add(samples)));
+    }
     if canvas.shows_tip() && builder.shows_tip() {
         let (kept, tip) = builder.add_tipped(samples);
         canvas.add_stamps(&guide::mirrored(guide, &kept));
@@ -773,7 +817,15 @@ fn draw_samples(
 /// Ends the canvas's open stroke with `builder`'s final stamps: a painted or erased stroke is
 /// redrawn once in its final form (end taper); a smudge, which has already changed the layer, and
 /// an adjustment painted on, which adds to its mask, only get the stamps not drawn yet.
-fn close_stroke(canvas: &mut Canvas, mut builder: StrokeBuilder, guide: &procraft_engine::guide::Guide) {
+fn close_stroke(
+    canvas: &mut Canvas,
+    mut builder: StrokeBuilder,
+    second: Option<StrokeBuilder>,
+    guide: &procraft_engine::guide::Guide,
+) {
+    if let Some(mut second) = second {
+        canvas.replace_second_stamps(&guide::mirrored(guide, &second.finish()));
+    }
     let drawn = builder.stamp_count();
     let all = builder.finish();
     // what undo calls it
@@ -1054,6 +1106,7 @@ impl CanvasSession {
             secondary: [1.0, 1.0, 1.0],
             colour_history: None,
             stroke: None,
+            second: None,
             gpu: None,
             canvas: None,
             scene: None,
@@ -1225,25 +1278,33 @@ impl CanvasSession {
         }
         let tool = if pointer == PointerKind::StylusEraser { ToolKind::Erase } else { st.tool };
         let (brush, style, diameter) = st.stroke_brush(tool, current);
+        let second = st.second_brush(tool, current, &brush, &style);
         let diameter = diameter * st.brush_scale();
         st.strokes = st.strokes.wrapping_add(1);
         st.info.strokes = st.info.strokes.saturating_add(1);
         let seed = st.strokes.wrapping_mul(0x9e37_79b9);
-        let mut builder = StrokeBuilder::with_seed(brush.clone(), diameter, pointer.into(), seed)
-            .scaled(st.brush_scale())
-            .with_input(st.input.clone())
-            .on_view_turned(st.view.map_or(0.0, |v| v.rotation()))
-            .seen_at(st.view.map_or(1.0, |v| v.zoom()) / st.display_scale);
-        if st.pad_strokes.is_some() {
-            // on the studio's pad the lean moves no stamps, and the tilt switches act only when
-            // the brush previews tilt
-            builder = builder.on_pad(brush.setting("preview_tilt") >= 0.5);
-        }
-        if st.pad_sample {
-            // the pad's sample scribble is drawn as given: its path whatever the brush's
-            // streamline, its pressure as it comes (its pace still counts)
-            builder = builder.exact_path();
-        }
+        let make = |st: &State, brush: Brush, diameter: f32, seed: u32| {
+            let preview_tilt = brush.setting("preview_tilt") >= 0.5;
+            let mut builder = StrokeBuilder::with_seed(brush, diameter, pointer.into(), seed)
+                .scaled(st.brush_scale())
+                .with_input(st.input.clone())
+                .on_view_turned(st.view.map_or(0.0, |v| v.rotation()))
+                .seen_at(st.view.map_or(1.0, |v| v.zoom()) / st.display_scale);
+            if st.pad_strokes.is_some() {
+                // on the studio's pad the lean moves no stamps, and the tilt switches act only
+                // when the brush previews tilt
+                builder = builder.on_pad(preview_tilt);
+            }
+            if st.pad_sample {
+                // the pad's sample scribble is drawn as given: its path whatever the brush's
+                // streamline, its pressure as it comes (its pace still counts)
+                builder = builder.exact_path();
+            }
+            builder
+        };
+        let mut builder = make(st, brush.clone(), diameter, seed);
+        let mut second_builder =
+            second.as_ref().map(|(b, _, d)| make(st, b.clone(), d * st.brush_scale(), seed ^ 0x5eed_0002));
         let canvas_samples = st.to_canvas(&samples);
         st.assist_from = canvas_samples.first().map(|s| s.pos);
         st.assist_angle = None;
@@ -1265,9 +1326,13 @@ impl CanvasSession {
                 steps: 0,
             });
         let Some(canvas) = st.canvas.as_mut() else { return };
-        canvas.begin_stroke(current, style);
-        draw_samples(canvas, &mut builder, &canvas_samples, &st.doc.stroke_guide());
+        match second {
+            Some((_, second, _)) => canvas.begin_dual_stroke(current, style, second),
+            None => canvas.begin_stroke(current, style),
+        }
+        draw_samples(canvas, &mut builder, second_builder.as_mut(), &canvas_samples, &st.doc.stroke_guide());
         st.stroke = Some(builder);
+        st.second = second_builder;
         self.shared.frame(st);
     }
 
@@ -1293,7 +1358,7 @@ impl CanvasSession {
         }
         st.remember_input(&canvas_samples);
         let (Some(builder), Some(canvas)) = (st.stroke.as_mut(), st.canvas.as_mut()) else { return };
-        if draw_samples(canvas, builder, &canvas_samples, &st.doc.stroke_guide()) {
+        if draw_samples(canvas, builder, st.second.as_mut(), &canvas_samples, &st.doc.stroke_guide()) {
             st.redraw_painted_on();
             self.shared.frame(st);
         }
@@ -1353,7 +1418,11 @@ impl CanvasSession {
         let (Some(mut builder), Some(canvas)) = (st.stroke.take(), st.canvas.as_mut()) else { return };
         let stamps = builder.add(&canvas_samples);
         canvas.add_stamps(&guide::mirrored(&st.doc.stroke_guide(), &stamps));
-        close_stroke(canvas, builder, &st.doc.stroke_guide());
+        let mut second = st.second.take();
+        if let Some(second) = second.as_mut() {
+            second.add(&canvas_samples);
+        }
+        close_stroke(canvas, builder, second, &st.doc.stroke_guide());
         st.redraw_painted_on();
         st.bake_painted_on();
         st.remember_last_stroke();
@@ -1373,6 +1442,7 @@ impl CanvasSession {
             kept.pop();
         }
         st.stroke = None;
+        st.second = None;
         st.shape = None;
         st.began = None;
         if let Some(canvas) = st.canvas.as_mut() {

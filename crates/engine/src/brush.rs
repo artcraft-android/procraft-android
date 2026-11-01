@@ -449,6 +449,9 @@ pub struct Brush {
     /// The stock images its file named for its shape, grain and materials, which our own stand in
     /// for.
     pub stock: StockImages,
+    /// A dual brush's second: its own stroke along the same path, whose coverage combines with
+    /// this one's by `dual_blend` (the colour this one's).
+    pub secondary: Option<Box<Brush>>,
 }
 
 /// The stock images a brush's file names for its shape, grain, metalness and roughness (drawn with
@@ -594,6 +597,7 @@ impl Brush {
             author: None,
             reset_point: None,
             stock: StockImages::default(),
+            secondary: None,
         }
     }
 

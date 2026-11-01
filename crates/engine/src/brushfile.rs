@@ -48,6 +48,8 @@ pub struct BrushFile {
     /// Its author's picture and signature (PNG), if it has them.
     pub author_picture: Option<Vec<u8>>,
     pub signature: Option<Vec<u8>>,
+    /// A dual brush's second (in the folder `Sub01` beside it).
+    pub secondary: Option<Box<BrushFile>>,
 }
 
 /// A shape or grain image as a brush file names it.
@@ -466,9 +468,13 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     let root = archive.root()?;
     let f = Fields(root);
     let mut settings: Vec<(String, f32)> = Vec::new();
+    // (a control set again takes the later value, where it was first set)
     let mut set = |key: &str, v: f32| {
         if v.is_finite() {
-            settings.push((key.to_owned(), v));
+            match settings.iter_mut().find(|(k, _)| k == key) {
+                Some(kept) => kept.1 = v,
+                None => settings.push((key.to_owned(), v)),
+            }
         }
     };
     for &(control, key, kept) in PLAIN {
@@ -569,6 +575,21 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     if let Some(m) = blend(&["burntEdgesBlendModeExtended", "burntEdgesBlendMode"]) {
         set("burnt_blend", m as f32);
     }
+    // the grain editor's quarter turns of its image (1 none, 2 to 4 a quarter turn more each),
+    // added to the grain's turn (half turns, -1..1), so that a file written back needs none
+    let quarter_turns =
+        |keys: &[&str]| keys.iter().find_map(|k| f.num(k)).map_or(0, |n| (n.round() as i64 - 1).rem_euclid(4));
+    let grain_turns = quarter_turns(&["textureOrientation", "grainOrientation"]);
+    if grain_turns != 0 {
+        let turned = f.num("textureRotation").unwrap_or(0.0) as f32 + grain_turns as f32 * 0.5;
+        set("grain_rotation", (turned + 1.0).rem_euclid(2.0) - 1.0);
+    }
+    // how a dual brush's two strokes combine: as the layers' modes number, or by the grain's own
+    if let Some(n) = ["dualBlendModeExtended", "dualBlendMode"].iter().find_map(|k| f.num(k)) {
+        let n = n.round() as i64;
+        let own = [GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT].into_iter().find(|&m| i64::from(m) == n);
+        set("dual_blend", own.unwrap_or_else(|| crate::native::blend_from(n).id()) as f32);
+    }
     // an image of the brush's own is in the file by a name of its own (its path then null), or
     // by the name its path gives; else the path names a stock image
     let texture = |path: &str, own: &str, inverted: &str| {
@@ -608,7 +629,9 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         settings,
         max_size: f.num("maxSize").unwrap_or(1.0) as f32,
         min_size: f.num("minSize").map(|v| v as f32),
-        shape_angle: f.num("shapeAngle").unwrap_or(0.0) as f32,
+        // with the shape editor's quarter turns of its image (as the grain's)
+        shape_angle: f.num("shapeAngle").unwrap_or(0.0) as f32
+            + quarter_turns(&["shapeOrientation"]) as f32 * std::f32::consts::FRAC_PI_2,
         pressure_curve: f.curve("dynamicsPressureOverall").filter(|c| !is_straight(c)),
         size_curve: f.curve("dynamicsPressureSizeCurve").filter(|c| !is_straight(c)),
         opacity_curve: f.curve("dynamicsPressureOpacityCurve").filter(|c| !is_straight(c)),
@@ -626,6 +649,11 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         thumbnail: zip.read(&format!("{prefix}QuickLook/Thumbnail.png")),
         author_picture: zip.read(&format!("{prefix}{AUTHOR_PICTURE}")),
         signature: zip.read(&format!("{prefix}{SIGNATURE}")),
+        secondary: if prefix.ends_with(SECONDARY) {
+            None
+        } else {
+            read_in(zip, &format!("{prefix}{SECONDARY}")).map(Box::new)
+        },
     })
 }
 
@@ -647,6 +675,8 @@ pub struct Pictures<'a> {
     /// Its author's picture and signature (PNG), if it has them.
     pub author_png: Option<&'a [u8]>,
     pub signature_png: Option<&'a [u8]>,
+    /// A dual brush's second's pictures (its preview left empty).
+    pub secondary: Option<Box<Pictures<'a>>>,
 }
 
 /// Where a brush's folder keeps its author's picture and signature.
@@ -656,6 +686,8 @@ const SLIDERS: [(&str, &str); 3] =
     [("paintSize", "paintOpacity"), ("smudgeSize", "smudgeOpacity"), ("eraseSize", "eraseOpacity")];
 
 const AUTHOR_PICTURE: &str = "AuthorPicture/AuthorPicture.png";
+/// The folder a dual brush's second is kept in, beside the first's files.
+const SECONDARY: &str = "Sub01/";
 const SIGNATURE: &str = "Signature/SignaturePicture.png";
 
 /// Writes `brush` as a brush file by `author`, with `pictures`.
@@ -692,8 +724,8 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
     let mut put = |key: &str, v: Value| fields.push((key.to_owned(), v));
     let name = b.string(&brush.name);
     put("name", name);
-    let author = b.string(author);
-    put("authorName", author);
+    let author_name = b.string(author);
+    put("authorName", author_name);
     put("version", Value::Int(4));
     put("maxSize", Value::Real(f64::from(brush.max_size / brush.size_unit())));
     put("minSize", Value::Real(f64::from(brush.min_size / brush.size_unit())));
@@ -742,6 +774,14 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
     let burnt = number("burnt_blend");
     put("burntEdgesBlendMode", Value::Int(crate::native::older_blends(burnt).1));
     put("burntEdgesBlendModeExtended", Value::Int(burnt));
+    if brush.secondary.is_some() || brush.extra.contains_key("dual_blend") {
+        let dual = match brush.setting("dual_blend").round() as u32 {
+            own @ (GRAIN_HEIGHT | GRAIN_LINEAR_HEIGHT) => i64::from(own),
+            _ => number("dual_blend"),
+        };
+        put("dualBlendMode", Value::Int(crate::native::older_blends(dual).1));
+        put("dualBlendModeExtended", Value::Int(dual));
+    }
     put("shapeAngle", Value::Real(f64::from(brush.shape.rotation)));
     // a stock image as the brush's file named it; otherwise the image is its own, the file by
     // its own name
@@ -812,11 +852,17 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
             zip.add(&format!("{prefix}{name}"), png);
         }
     }
-    zip.add(&format!("{prefix}QuickLook/Thumbnail.png"), pictures.thumbnail_png);
+    // (a dual brush's second has no preview of its own)
+    if !pictures.thumbnail_png.is_empty() {
+        zip.add(&format!("{prefix}QuickLook/Thumbnail.png"), pictures.thumbnail_png);
+    }
     for (path, png) in [(AUTHOR_PICTURE, pictures.author_png), (SIGNATURE, pictures.signature_png)] {
         if let Some(png) = png {
             zip.add(&format!("{prefix}{path}"), png);
         }
+    }
+    if let (Some(second), Some(pictures)) = (&brush.secondary, &pictures.secondary) {
+        add_brush(zip, &format!("{prefix}{SECONDARY}"), second, author, pictures);
     }
 }
 
@@ -864,6 +910,7 @@ mod tests {
                 thumbnail_png: b"thumb",
                 author_png: Some(b"face"),
                 signature_png: None,
+                secondary: None,
             },
         );
         let back = read(&file).unwrap();
@@ -926,6 +973,7 @@ mod tests {
                 thumbnail_png: b"t",
                 author_png: None,
                 signature_png: None,
+                secondary: None,
             };
             let back = read(&write(&brush, "", &pictures)).unwrap();
             let read_mode = back.settings.iter().find(|(k, _)| k == "grain_blend").map(|(_, v)| *v);
@@ -950,6 +998,7 @@ mod tests {
             thumbnail_png: b"t",
             author_png: None,
             signature_png: None,
+            secondary: None,
         };
         let back = read(&write(&brush, "", &pictures)).unwrap();
         for key in ["blend_mode", "burnt_blend"] {
@@ -985,6 +1034,7 @@ mod tests {
             thumbnail_png: b"thumb",
             author_png: None,
             signature_png: None,
+            secondary: None,
         };
         let list: Vec<(&Brush, &str, Pictures<'_>)> = brushes.iter().map(|b| (b, "", pictures())).collect();
         let file = write_set("Sketch & Ink", &list, |i| format!("BRUSH-{i}"));
@@ -1013,12 +1063,40 @@ mod tests {
             thumbnail_png: b"t",
             author_png: None,
             signature_png: None,
+            secondary: None,
         };
         let back = read(&write(&brush, "", &pictures)).unwrap();
         let kinds: Vec<PressureCurve> = back.pressure_curves.iter().map(|(k, _)| *k).collect();
         assert_eq!(kinds, [PressureCurve::Count, PressureCurve::HueJitter]);
         let count = &back.pressure_curves[0].1;
         assert!((count[1] - Vec2::new(0.5, 0.8)).length() < 1e-5);
+    }
+
+    #[test]
+    fn the_editors_quarter_turns_turn_the_shape_and_the_grain() {
+        let mut b = Builder::new();
+        let root = b.reserve();
+        let name = b.string("Turned");
+        b.fill(
+            &root,
+            &["SilicaBrush", "ValkyrieBrush", "NSObject"],
+            vec![
+                ("name", name),
+                ("shapeAngle", Value::Real(0.1)),
+                ("shapeOrientation", Value::Int(2)),
+                ("textureRotation", Value::Real(0.75)),
+                ("textureOrientation", Value::Int(3)),
+                ("grainOrientation", Value::Int(3)),
+            ],
+        );
+        let mut zip = ZipWriter::new();
+        zip.add("Brush.archive", &b.finish(root));
+        let back = read(&zip.finish()).unwrap();
+        assert!((back.shape_angle - (0.1 + std::f32::consts::FRAC_PI_2)).abs() < 1e-5, "{}", back.shape_angle);
+        // half a turn more, past the end: round to the other side
+        let turns: Vec<f32> = back.settings.iter().filter(|(k, _)| k == "grain_rotation").map(|(_, v)| *v).collect();
+        assert_eq!(turns.len(), 1);
+        assert!((turns[0] - -0.25).abs() < 1e-5, "{turns:?}");
     }
 
     #[test]

@@ -36,6 +36,8 @@ struct Made {
     thumbnail: Vec<u8>,
     author: Option<std::sync::Arc<[u8]>>,
     signature: Option<std::sync::Arc<[u8]>>,
+    /// A dual brush's second's (no preview).
+    secondary: Option<Box<Made>>,
 }
 
 impl Made {
@@ -48,6 +50,7 @@ impl Made {
             thumbnail_png: &self.thumbnail,
             author_png: self.author.as_deref(),
             signature_png: self.signature.as_deref(),
+            secondary: self.secondary.as_ref().map(|m| Box::new(m.pictures())),
         }
     }
 }
@@ -74,6 +77,18 @@ impl CanvasSession {
             thumbnail,
             author: author.and_then(|a| a.picture.clone()),
             signature: author.and_then(|a| a.signature.clone()),
+            secondary: brush.secondary.as_ref().map(|second| {
+                Box::new(Made {
+                    shape: gray_png(&shape_pixels(second)),
+                    grain: grain_pixels(second).map(|p| gray_png(&p)),
+                    metallic: material_pixels(&second.metallic).map(|p| gray_png(&p)),
+                    roughness: material_pixels(&second.roughness).map(|p| gray_png(&p)),
+                    thumbnail: Vec::new(),
+                    author: None,
+                    signature: None,
+                    secondary: None,
+                })
+            }),
         }
     }
 }
@@ -600,6 +615,7 @@ fn brush_from(file: &BrushFile) -> Brush {
     }
     b.notches = file.notches.clone();
     b.sliders = file.sliders;
+    b.secondary = file.secondary.as_deref().map(|second| Box::new(brush_from(second)));
     let (image, source) = grain_for(&file.grain, file.thumbnail.as_deref());
     b.grain.image = image;
     b.grain.source = source;

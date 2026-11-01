@@ -41,7 +41,7 @@ const MULTIPLY_MODE: u32 = 1;
 const STROKE_LUMINANCE: u32 = 0x100;
 
 /// The largest uniform block a shader reads.
-const UNIFORM_SIZE: u64 = 112;
+const UNIFORM_SIZE: u64 = 128;
 const _: () = assert!(
     size_of::<LayerUniform>() as u64 <= UNIFORM_SIZE
         && size_of::<StampUniform>() as u64 <= UNIFORM_SIZE
@@ -542,6 +542,11 @@ struct LayerUniform {
     burnt_blend: u32,
     /// 1 when the grain is read unfiltered (sharp).
     grain_sharp: f32,
+    /// A dual brush's second stroke: how its coverage combines with the first's (a blend mode's
+    /// number + 1; 0: no second), and where it is cut first (0..1; negative: not cut).
+    dual: u32,
+    dual_threshold: f32,
+    _dual_pad: [u32; 2],
 }
 
 impl Default for LayerUniform {
@@ -569,6 +574,9 @@ impl Default for LayerUniform {
             grain_blend: MULTIPLY_MODE,
             burnt_blend: MULTIPLY_MODE,
             grain_sharp: 0.0,
+            dual: 0,
+            dual_threshold: -1.0,
+            _dual_pad: [0; 2],
         }
     }
 }
@@ -585,6 +593,14 @@ impl Look {
 }
 
 impl LayerUniform {
+    /// With the stroke's second, if it has one (a dual brush's).
+    fn with_dual(self, stroke: Option<&ActiveStroke>) -> LayerUniform {
+        match stroke.and_then(|s| s.second) {
+            Some(d) => LayerUniform { dual: d.mode + 1, dual_threshold: d.threshold, ..self },
+            None => self,
+        }
+    }
+
     /// With the stroke's look: its canvas grain, if it has one, and its edges and threshold.
     fn with_grain(self, style: Option<&StrokeStyle>) -> LayerUniform {
         let Some(s) = style else { return self };
@@ -801,11 +817,28 @@ struct ActiveStroke {
     bounds: IRect,
     /// Painting an adjustment on: the stamps go into the adjustment's mask, not a layer.
     pencil: bool,
+    /// A dual brush's second stroke, if it has one.
+    second: Option<SecondStroke>,
+}
+
+/// A dual brush's second stroke, drawn along the open stroke's path into a texture of its own
+/// (in the stroke's colour): where the two meet, its coverage combines with the first's by `mode`
+/// (a blend mode's number: by that blend of the two amounts; Normal: the second shows where the
+/// first doesn't), cut at `threshold` first if that is 0..1.
+#[derive(Clone, Copy, Debug)]
+pub struct SecondStroke {
+    pub style: StrokeStyle,
+    pub mode: u32,
+    pub threshold: f32,
 }
 
 enum Op {
+    /// The open stroke's second cleared (a dual brush's stroke begins).
+    ClearSecond,
     /// Stamps added to the stroke (`clear`: the stroke is redrawn from scratch).
     Stamps {
+        /// Into the stroke's second (a dual brush's).
+        second: bool,
         instances: Vec<StampInstance>,
         /// Each stamp's wet-mix scaling (see [`Stamp::wet`]), for the wet paint drawn in place.
         wet: Vec<[f32; 8]>,
@@ -1223,6 +1256,8 @@ pub struct Canvas {
     /// Where a stroke of a blend mode, or one on a locked layer, and a merge are drawn before
     /// they go back into the layer; made the first time one is.
     scratch: OnDemand,
+    /// A dual brush's second stroke (see [`SecondStroke`]), made when one is first drawn.
+    second_stroke: OnDemand,
     /// A blur's working textures by size and part, kept from one step of an adjustment to the
     /// next (made each step, those the canvas's size were most of a narrow blur's cost on a
     /// tablet); let go when the adjustment ends.
@@ -1498,7 +1533,7 @@ impl Canvas {
             [&shapes_view, &grains_view, &everything],
             [&shape_sampler, &grain_sampler],
         );
-        let stroke_bind = quad_bind(device, &pipelines.quad_layout, [&stroke_view; 5], &grains_view, &grain_sampler);
+        let stroke_bind = quad_bind(device, &pipelines.quad_layout, [&stroke_view; 6], &grains_view, &grain_sampler);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -1529,6 +1564,7 @@ impl Canvas {
             groups: Vec::new(),
             play_frame: None,
             scratch: OnDemand::new("scratch", width, height, LAYER_FORMAT),
+            second_stroke: OnDemand::new("second stroke", width, height, STROKE_FORMAT),
             blur_textures: Mutex::new(HashMap::new()),
             spare_before: None,
             spares: Mutex::new(Vec::new()),
@@ -1638,6 +1674,16 @@ impl Canvas {
         self.spare_before = None;
         self.spares.lock().unwrap_or_else(PoisonError::into_inner).clear();
         self.blur_textures.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        // a dual brush's second stroke's, unless one is open (or queued)
+        let dual = self.active.is_some_and(|a| a.second.is_some())
+            || self.ops.iter().any(|op| match op {
+                Op::ClearSecond | Op::Stamps { second: true, .. } => true,
+                Op::Commit(stroke) => stroke.second.is_some(),
+                _ => false,
+            });
+        if !dual {
+            self.second_stroke.let_go();
+        }
         self.uploads.kept.lock().unwrap_or_else(PoisonError::into_inner).clear();
     }
 
@@ -1699,7 +1745,7 @@ impl Canvas {
         self.stroke_bind = quad_bind(
             device,
             &self.pipelines.quad_layout,
-            [&self.stroke_view; 5],
+            [&self.stroke_view; 6],
             self.grain_view(),
             &self.grain_sampler,
         );
@@ -1837,7 +1883,36 @@ impl Canvas {
     pub fn begin_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
-        self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false });
+        self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: false, second: None });
+    }
+
+    /// Begins a stroke as [`Canvas::begin_stroke`] does, with a dual brush's second (its stamps
+    /// given with [`Canvas::add_second_stamps`]).
+    pub fn begin_dual_stroke(&mut self, layer: LayerId, style: StrokeStyle, second: SecondStroke) {
+        self.begin_stroke(layer, style);
+        if let Some(active) = self.active.as_mut() {
+            active.second = Some(second);
+        }
+        self.ops.push(Op::ClearSecond);
+    }
+
+    /// Draws more of the open stroke's second.
+    pub fn add_second_stamps(&mut self, stamps: &[Stamp]) {
+        self.push_stamps_to(stamps, false, true);
+    }
+
+    /// Redraws the open stroke's second from scratch with `stamps` (its final form).
+    pub fn replace_second_stamps(&mut self, stamps: &[Stamp]) {
+        self.push_stamps_to(stamps, true, true);
+    }
+
+    /// The open stroke goes on without its second (it was made into a shape).
+    pub fn drop_second(&mut self) {
+        if let Some(active) = self.active.as_mut()
+            && active.second.take().is_some()
+        {
+            self.dirty = self.dirty.union(active.bounds);
+        }
     }
 
     /// Begins a stroke whose pixels another pass draws into [`Canvas::stroke_target`] (3D
@@ -1918,10 +1993,19 @@ impl Canvas {
 
     /// Queues `stamps` into the open stroke (`clear`: from scratch); where they reach.
     fn push_stamps(&mut self, stamps: &[Stamp], clear: bool) -> IRect {
+        self.push_stamps_to(stamps, clear, false)
+    }
+
+    /// As [`Canvas::push_stamps`], into the open stroke's second if `second` (none without one).
+    fn push_stamps_to(&mut self, stamps: &[Stamp], clear: bool, second: bool) -> IRect {
         let full = self.full();
         let Some(active) = self.active.as_mut() else { return IRect::EMPTY };
         let mut bounds = IRect::EMPTY;
-        let style = active.style;
+        let style = match (second, active.second) {
+            (false, _) => active.style,
+            (true, Some(s)) => s.style,
+            (true, None) => return IRect::EMPTY,
+        };
         let capped = self.pipelines.stamp_capped.is_some();
         let drawn: Vec<&Stamp> =
             stamps.iter().filter(|s| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite()).collect();
@@ -1957,7 +2041,7 @@ impl Canvas {
             })
             .collect();
         let bounds = bounds.intersect(full);
-        if clear {
+        if clear && !second {
             self.dirty = self.dirty.union(active.bounds);
             active.bounds = bounds;
         } else {
@@ -1969,10 +2053,11 @@ impl Canvas {
             self.ops.push(Op::Stamps {
                 instances,
                 wet,
-                style: active.style,
+                style,
                 clear: clear && !pencil,
                 layer: active.layer,
                 pencil,
+                second,
             });
         }
         bounds
@@ -1983,7 +2068,12 @@ impl Canvas {
     /// never into the layer. Only painting strokes show them.
     pub fn set_prediction(&mut self, stamps: &[Stamp]) {
         self.prediction.clear();
-        let Some(style) = self.active.map(|a| a.style).filter(|s| s.tool == StrokeTool::Paint) else { return };
+        // (a dual brush's not: drawn over the canvas, it couldn't be cut by its second)
+        let Some(style) =
+            self.active.filter(|a| a.second.is_none()).map(|a| a.style).filter(|s| s.tool == StrokeTool::Paint)
+        else {
+            return;
+        };
         let capped = self.pipelines.stamp_capped.is_some();
         self.prediction.extend(
             stamps.iter().filter(|s| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite()).map(|s| {
@@ -2657,7 +2747,7 @@ impl Canvas {
     pub fn begin_pencil_stroke(&mut self, layer: LayerId, style: StrokeStyle) {
         self.end_stroke();
         self.prediction.clear();
-        self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: true });
+        self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: true, second: None });
     }
 
     /// Liquify stamps drawn into the field, in order.
@@ -2965,7 +3055,16 @@ impl Canvas {
                     let stamps = (instances.as_slice(), wet.as_slice());
                     self.smudge_stamps(device, &mut encoder, &mut smudge_uniforms, stamps, &style, layer, clear);
                 }
-                Op::Stamps { instances, style, clear, pencil, .. } => {
+                Op::ClearSecond => {
+                    let (_, view) = self.second_stroke.get(device);
+                    drop(render_pass(
+                        &mut encoder,
+                        "second clear",
+                        view,
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    ));
+                }
+                Op::Stamps { instances, style, clear, pencil, second, .. } => {
                     let count = u32::try_from(instances.len()).unwrap_or(u32::MAX);
                     let first = next_instance;
                     next_instance = next_instance.saturating_add(count);
@@ -2990,6 +3089,7 @@ impl Canvas {
                     });
                     let load = if clear { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load };
                     let target = match (&self.pencil, pencil) {
+                        _ if second => self.second_stroke.get(device).1,
                         (Some(mask), true) => &mask.view,
                         _ => &self.stroke_view,
                     };
@@ -3941,6 +4041,13 @@ impl Canvas {
             let opacity = stroke.style.opacity.clamp(0.0, 1.0);
             let locked = stroke.style.preserve_alpha;
             let burns = stroke.style.burnt_edges > 0.0 && !stroke.style.preview;
+            // a dual brush's: its second's texture read too (the stroke has ended: told here)
+            let second = if stroke.second.is_some() { self.second_stroke.get(device).1 } else { &self.stroke_view };
+            let stroke_view = &self.stroke_view;
+            let quad = |layer: &wgpu::TextureView| {
+                let views = [layer, stroke_view, stroke_view, stroke_view, stroke_view, second];
+                quad_bind(device, &self.pipelines.quad_layout, views, self.grain_view(), &self.grain_sampler)
+            };
             match (stroke.style.tool, locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
                 (StrokeTool::Paint, true) => {
                     // recolour where the layer has alpha, or blend by a mode or burn edges (which
@@ -3952,11 +4059,11 @@ impl Canvas {
                             stroke_opacity: opacity,
                             ..Default::default()
                         }
-                        .with_grain(Some(&stroke.style)),
+                        .with_grain(Some(&stroke.style))
+                        .with_dual(Some(&stroke)),
                     );
                     if let Some(layer) = self.layers.get(&stroke.layer) {
-                        let bind =
-                            self.quad(device, [&layer.view, &self.stroke_view, &self.stroke_view, &self.stroke_view]);
+                        let bind = quad(&layer.view);
                         let (scratch, scratch_view) = self.scratch.get(device);
                         let mut pass = render_pass(encoder, "commit locked", scratch_view, wgpu::LoadOp::Load);
                         pass.set_pipeline(&self.pipelines.commit_locked);
@@ -3975,8 +4082,10 @@ impl Canvas {
                 (tool, _) => {
                     let offset = uniforms.push(
                         &LayerUniform { opacity: 1.0, stroke_opacity: opacity, ..Default::default() }
-                            .with_grain(Some(&stroke.style)),
+                            .with_grain(Some(&stroke.style))
+                            .with_dual(Some(&stroke)),
                     );
+                    let dual = stroke.second.map(|_| quad(&self.stroke_view));
                     if let Some(layer) = self.layers.get(&stroke.layer) {
                         let mut pass = render_pass(encoder, "commit", &layer.view, wgpu::LoadOp::Load);
                         pass.set_pipeline(match tool {
@@ -3984,7 +4093,7 @@ impl Canvas {
                             StrokeTool::Erase => &self.pipelines.commit_erase,
                         });
                         scissor(&mut pass, rect);
-                        pass.set_bind_group(0, &self.stroke_bind, &[]);
+                        pass.set_bind_group(0, dual.as_ref().unwrap_or(&self.stroke_bind), &[]);
                         pass.set_bind_group(1, &self.uniform_bind, &[offset]);
                         pass.draw(0..3, 0..1);
                     }
@@ -5248,7 +5357,8 @@ impl Canvas {
             stroke_on_mask: if stroke.is_some_and(|s| Some(s.layer) == mask) { 1.0 } else { 0.0 },
             ..Default::default()
         }
-        .with_grain(stroke.as_ref().map(|s| &s.style));
+        .with_grain(stroke.as_ref().map(|s| &s.style))
+        .with_dual(stroke.as_ref());
         let mask_view = mask_view.unwrap_or(&self.stroke_view);
         self.draw_onto(
             device,
@@ -6263,7 +6373,22 @@ impl Canvas {
         mask: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         let [a, b, c, d] = views;
-        quad_bind(device, &self.pipelines.quad_layout, [a, b, c, d, mask], self.grain_view(), &self.grain_sampler)
+        quad_bind(
+            device,
+            &self.pipelines.quad_layout,
+            [a, b, c, d, mask, self.second_view(device)],
+            self.grain_view(),
+            &self.grain_sampler,
+        )
+    }
+
+    /// The open stroke's second's texture while it has one (else any, unread).
+    fn second_view(&self, device: &wgpu::Device) -> &wgpu::TextureView {
+        if self.active.is_some_and(|a| a.second.is_some()) {
+            self.second_stroke.get(device).1
+        } else {
+            &self.stroke_view
+        }
     }
 
     /// Layer textures held (the document's and those the history still needs).
@@ -6279,6 +6404,7 @@ impl Canvas {
         all.extend(self.tip_backup.as_ref());
         all.extend(self.composite_second.made());
         all.extend(self.scratch.made());
+        all.extend(self.second_stroke.made());
         all.extend(self.groups.iter().flat_map(|(pair, _)| pair));
         all.push(self.everything.texture());
         all.extend(self.pencil.as_ref().map(|p| p.view.texture()));
@@ -6364,6 +6490,7 @@ impl Pipelines {
                 array_entry(4),
                 sampler_entry(5),
                 tex_entry(6),
+                tex_entry(7),
             ],
         });
         let brush_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -7234,6 +7361,11 @@ impl OnDemand {
     fn made(&self) -> Option<&wgpu::Texture> {
         self.made.get().map(|(t, _)| t)
     }
+
+    /// Lets the texture go, to be made again when next wanted.
+    fn let_go(&mut self) {
+        self.made.take();
+    }
 }
 
 /// Buffers that pixels go to the GPU through, written while mapped and copied in a command
@@ -7417,11 +7549,11 @@ impl<'a> Stack<'a> {
 fn quad_bind(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    views: [&wgpu::TextureView; 5],
+    views: [&wgpu::TextureView; 6],
     grains: &wgpu::TextureView,
     grain_sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
-    let [a, b, c, d, mask] = views;
+    let [a, b, c, d, mask, second] = views;
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("layer, stroke, clip, backdrop, grains"),
         layout,
@@ -7433,6 +7565,7 @@ fn quad_bind(
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(grains) },
             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(grain_sampler) },
             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(mask) },
+            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(second) },
         ],
     })
 }

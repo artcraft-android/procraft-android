@@ -14,8 +14,8 @@ use std::sync::{Arc, OnceLock};
 
 pub use canvas::{
     Backdrop, Canvas, DisplayLut, Filter, LiquifyMode, LiquifyStamp, Readback, ReadyToPark, RemakeStats, Resample,
-    SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail,
-    most_resident, read_texture, start_reading, textures_bytes,
+    SecondStroke, SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target,
+    Thumbnail, most_resident, read_texture, start_reading, textures_bytes,
 };
 pub use lighting::Lighting;
 pub use scene::{GrainLook, Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, SurfaceMap, material_source};

@@ -136,9 +136,12 @@ impl State {
             // nothing drawn ahead of the pen before it snapped stays over the shape
             canvas.set_prediction(&[]);
             canvas.set_tip(&[]);
+            // made a shape, a dual brush's stroke goes on as its first alone
+            canvas.drop_second();
             canvas.replace_stamps(&stamps);
         }
         self.stroke = Some(builder);
+        self.second = None;
     }
 
     /// The pen still down after a snap moved to `to` (canvas point): the shape turns and grows
@@ -281,6 +284,7 @@ impl CanvasSession {
         canvas.undo();
         canvas.begin_stroke(last.layer, last.style);
         st.stroke = Some(StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), 0x5eed_1234));
+        st.second = None;
         st.shape = Some(ShapeEdit { shape: first, choices, drawn: last.drawn, pressure: last.pressure, held: None });
         st.draw_shape();
         self.shared.frame(st);

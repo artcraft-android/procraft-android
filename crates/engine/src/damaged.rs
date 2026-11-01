@@ -111,6 +111,7 @@ fn pictures() -> Pictures<'static> {
         thumbnail_png: b"preview",
         author_png: Some(b"author"),
         signature_png: None,
+        secondary: None,
     }
 }
 

@@ -39,6 +39,10 @@ struct LayerUniform {
     burnt_blend: u32,
     // 1: the grain read unfiltered (sharp)
     grain_sharp: f32,
+    // a dual brush's second stroke (second_tex): how its coverage combines with the first's (a
+    // blend mode's number + 1; 0: none), and where it is cut first (negative: not cut)
+    dual: u32,
+    dual_threshold: f32,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -51,6 +55,7 @@ const STROKE_LUMINANCE: u32 = 256u;
 @group(0) @binding(4) var grains: texture_2d_array<f32>;
 @group(0) @binding(5) var grain_smp: sampler;
 @group(0) @binding(6) var mask_tex: texture_2d<f32>;
+@group(0) @binding(7) var second_tex: texture_2d<f32>;
 @group(1) @binding(0) var<uniform> lu: LayerUniform;
 
 // one triangle covering the target
@@ -115,6 +120,25 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         // only where the stroke is
         let a = grain_combine(s.a, g, lu.grain_depth, lu.grain_blend);
         s = s * (a / max(s.a, 1e-6));
+    }
+    // a dual brush's second: its coverage (cut at its threshold) combined with the first's by
+    // the dual mode, or by Normal showing where the first doesn't
+    if (lu.dual != 0u) {
+        let t = textureLoad(second_tex, p, 0);
+        var b = t.a;
+        if (lu.dual_threshold >= 0.0) {
+            b = select(0.0, 1.0, b > lu.dual_threshold);
+        }
+        let mode = lu.dual - 1u;
+        var a = s.a + (1.0 - s.a) * b;
+        if (mode == DUAL_HEIGHT || mode == DUAL_LINEAR_HEIGHT) {
+            a = dual_height(s.a, b);
+        } else if (mode != 0u) {
+            a = clamp(blend_rgb(vec3<f32>(s.a), vec3<f32>(b), mode).x, 0.0, 1.0);
+        }
+        // the first's colour where it is, else the second's (drawn in the stroke's colour too)
+        let colour = select(t.rgb / max(t.a, 1e-6), s.rgb / max(s.a, 1e-6), s.a > 0.0);
+        s = vec4<f32>(colour * a, a);
     }
     // burnt edges show where the stroke is thin: where its paper grain took paint away, or
     // without one wherever it is less than full
@@ -227,6 +251,19 @@ fn unpremultiply(c: vec4<f32>) -> vec3<f32> {
         return vec3<f32>(0.0);
     }
     return clamp(c.rgb / c.a, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// a dual brush's two strokes' own modes (the grain's numbers)
+const DUAL_HEIGHT: u32 = 27u;
+const DUAL_LINEAR_HEIGHT: u32 = 28u;
+
+// the first stroke's amount `a` cut by the second's `b` as a height: where the second is thin
+// (under 0.2) the first rises (most where it is near none or full), and the second's coverage
+// lifts what the first has
+fn dual_height(a: f32, b: f32) -> f32 {
+    let mid = 2.0 * (0.5 - abs(a - 0.5));
+    let rise = 40.0 * max(0.2 - b, 0.0) * (pow(a, 6.0) + pow(mid, 6.0));
+    return clamp(max(rise + 0.5 * a, (rise - a) * b + 2.0 * a), 0.0, 1.0);
 }
 
 // premultiplied colour squared (nearer to light), and back

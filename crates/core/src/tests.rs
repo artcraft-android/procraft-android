@@ -1677,6 +1677,7 @@ fn an_imported_brush_shows_its_own_preview_until_changed() {
             thumbnail_png: &thumbnail,
             author_png: None,
             signature_png: None,
+            secondary: None,
         },
     );
     let set = s.import_brushes(file.clone()).unwrap();
@@ -3333,6 +3334,7 @@ fn a_brush_files_sliders_start_where_it_left_them_and_go_back_out() {
         thumbnail_png: &png,
         author_png: None,
         signature_png: None,
+        secondary: None,
     };
     let sliders = [Some([0.2, 0.6]), None, Some([0.7, 0.4])];
     let file = brushfile::write(&Brush { name: "Sliders".to_owned(), sliders, ..Brush::round_pen() }, "", &pictures);
@@ -3804,6 +3806,7 @@ fn a_brush_keeps_its_maker_and_a_reset_point() {
             thumbnail_png: &shape,
             author_png: Some(&face),
             signature_png: Some(b"not a png"),
+            secondary: None,
         },
     );
     let set = s.import_brushes(file).unwrap();
@@ -3954,6 +3957,7 @@ fn stock_images_a_file_names_are_kept_and_named_again() {
             thumbnail_png: &png,
             author_png: None,
             signature_png: None,
+            secondary: None,
         },
     );
     let set = s.import_brushes(file).unwrap();
@@ -6337,6 +6341,21 @@ fn brushes_set_anyhow_paint_smudge_and_erase_without_errors() {
         s.set_studio_shipped_source(SourceKind::Shape, next(shapes.max(1)));
         s.set_studio_shipped_source(SourceKind::Grain, next(grains.max(1)));
         s.studio_end(true);
+        // now and then a dual brush: a second set anyhow too, combined by any mode
+        {
+            let mut second = procraft_engine::brush::Brush::round_pen();
+            for key in KEYS {
+                second.set_setting(key, next(1400) as f32 / 1000.0 - 0.2);
+            }
+            let dual = next(3) == 0;
+            let mode = next(29) as f32;
+            let mut st = s.shared.lock();
+            let tool = st.tool;
+            if let Some(brush) = st.brush_mut(tool) {
+                brush.secondary = dual.then(|| Box::new(second));
+                brush.set_setting("dual_blend", mode);
+            }
+        }
         s.set_tool([ToolKind::Paint, ToolKind::Smudge, ToolKind::Erase][next(3) as usize]);
         s.set_brush_size(next(100) as f32 / 100.0);
         s.set_color(next(255) as f32 / 255.0, next(255) as f32 / 255.0, next(255) as f32 / 255.0);
@@ -7144,4 +7163,101 @@ fn luminance_blending_mixes_a_stroke_in_by_squared_colour() {
     // black over white: the white's share of the light, not of the number
     let want = 255.0 * (f32::from(plain) / 255.0).sqrt();
     assert!((f32::from(squared) - want).abs() < 4.0, "{squared} against {want} (plain {plain})");
+}
+
+#[test]
+fn a_dual_brush_keeps_its_second_through_the_library_and_its_file() {
+    use procraft_engine::brush::Brush;
+    use procraft_engine::brushfile::{self, Pictures};
+    let Some(s) = session(100, 100) else { return };
+    let png = crate::project::rgba_png(1, 1, &[255; 4]);
+    let pictures = |secondary| Pictures {
+        shape_png: &png,
+        grain_png: None,
+        metallic_png: None,
+        roughness_png: None,
+        thumbnail_png: &png,
+        author_png: None,
+        signature_png: None,
+        secondary,
+    };
+    let mut second = Brush { name: "Dabs".to_owned(), ..Brush::round_pen() };
+    second.set_setting("spacing", 0.6);
+    second.set_setting("scatter", 0.4);
+    let mut first =
+        Brush { name: "Paired".to_owned(), secondary: Some(Box::new(second.clone())), ..Brush::round_pen() };
+    // multiply, by the layers' numbering
+    first.set_setting("dual_blend", 1.0);
+    let file = brushfile::write(&first, "", &pictures(Some(Box::new(pictures(None)))));
+    let read = brushfile::read(&file).unwrap();
+    assert_eq!(read.secondary.as_ref().map(|b| b.name.as_str()), Some("Dabs"));
+    let set = s.import_brushes(file).unwrap();
+    let kept = |s: &CanvasSession| {
+        let st = s.shared.lock();
+        let b = &st.library[set as usize].brushes[0];
+        let second = b.secondary.as_deref().map(|b| (b.name.clone(), b.setting("spacing"), b.setting("scatter")));
+        (b.setting("dual_blend"), second)
+    };
+    let want = (1.0, Some(("Dabs".to_owned(), second.setting("spacing"), second.setting("scatter"))));
+    assert_eq!(kept(&s), want);
+    // kept with the library
+    let t = CanvasSession::new(64, 64);
+    assert!(t.load_brush_library(s.saved_brush_library()));
+    assert_eq!(kept(&t), want);
+    // shared again: the second in its folder
+    let again = brushfile::read(&s.brush_as_file(set, 0).unwrap()).unwrap();
+    let second_again = again.secondary.unwrap();
+    assert_eq!(second_again.name, "Dabs");
+    assert!(again.settings.iter().any(|(k, v)| k == "dual_blend" && *v == 1.0));
+    // a brush without a second has none, and its file no folder for one
+    let plain = brushfile::write(&Brush::round_pen(), "", &pictures(None));
+    assert!(brushfile::read(&plain).unwrap().secondary.is_none());
+}
+
+#[test]
+fn a_dual_brush_draws_its_two_strokes_combined_by_its_mode() {
+    use procraft_engine::brush::Brush;
+    let Some(s) = session(120, 120) else { return };
+    s.set_brush_size(0.5);
+    s.set_color(0.0, 0.0, 0.0);
+    // how much of the layer one straight stroke covers with the current brush
+    let covered = |s: &CanvasSession| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 60.0, 0.0)]);
+        s.stroke_add((1..30).map(|k| sample(10.0 + k as f32 * 3.4, 60.0, k as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+        let n = {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let id = st.doc.current();
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render_finished(gpu, &mut st.doc);
+            canvas.read_layer(gpu, id).unwrap().chunks(4).filter(|p| p[3] > 8).count()
+        };
+        s.undo();
+        n
+    };
+    let plain = covered(&s);
+    // the second: wide dabs far apart
+    let mut second = Brush { name: "Dabs".to_owned(), ..Brush::round_pen() };
+    second.set_setting("spacing", 1.0);
+    let set = |s: &CanvasSession, mode: Option<f32>| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let tool = st.tool;
+        let brush = st.brush_mut(tool).unwrap();
+        brush.secondary = mode.map(|_| Box::new(second.clone()));
+        if let Some(m) = mode {
+            brush.set_setting("dual_blend", m);
+        }
+    };
+    // multiply: only where both cover
+    set(&s, Some(1.0));
+    let both = covered(&s);
+    // normal: where either does
+    set(&s, Some(0.0));
+    let either = covered(&s);
+    set(&s, None);
+    assert_eq!(covered(&s), plain, "back to one stroke");
+    assert!(both > 0 && both < plain, "multiply {both} of {plain}");
+    assert!(either >= plain, "normal {either} of {plain}");
 }
