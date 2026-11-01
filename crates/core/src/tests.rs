@@ -3320,6 +3320,52 @@ fn slider_notches_are_kept_with_the_library() {
 }
 
 #[test]
+fn a_brush_files_sliders_start_where_it_left_them_and_go_back_out() {
+    use procraft_engine::brush::Brush;
+    use procraft_engine::brushfile::{self, Pictures};
+    let Some(s) = session(100, 100) else { return };
+    let png = crate::project::rgba_png(1, 1, &[255; 4]);
+    let pictures = Pictures {
+        shape_png: &png,
+        grain_png: None,
+        metallic_png: None,
+        roughness_png: None,
+        thumbnail_png: &png,
+        author_png: None,
+        signature_png: None,
+    };
+    let sliders = [Some([0.2, 0.6]), None, Some([0.7, 0.4])];
+    let file = brushfile::write(&Brush { name: "Sliders".to_owned(), sliders, ..Brush::round_pen() }, "", &pictures);
+    let set = s.import_brushes(file).unwrap();
+    // kept with the library until it is picked
+    let t = CanvasSession::new(64, 64);
+    assert!(t.load_brush_library(s.saved_brush_library()));
+    let kept = t.shared.lock().library[set as usize].brushes[0].sliders;
+    let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+    let same = |a: [Option<[f32; 2]>; 3], b: [Option<[f32; 2]>; 3]| {
+        a.iter().zip(&b).all(|(a, b)| match (a, b) {
+            (Some(a), Some(b)) => near(a[0], b[0]) && near(a[1], b[1]),
+            (a, b) => a.is_none() && b.is_none(),
+        })
+    };
+    // (written out, smudging's where it starts: its preview size, fully opaque)
+    assert!(same([kept[0], None, kept[2]], sliders) && kept[1].is_some_and(|s| s[1] == 1.0), "{kept:?}");
+    // each tool's sliders start where the file left them
+    for (tool, size, opacity) in [(ToolKind::Paint, 0.2, 0.6), (ToolKind::Erase, 0.7, 0.4)] {
+        s.set_tool(tool);
+        assert!(s.select_brush(set, 0));
+        let info = s.info();
+        assert!(near(info.size, size) && near(info.opacity, opacity), "{tool:?}: {} {}", info.size, info.opacity);
+    }
+    // moved, they are written out where they stand; smudging's where it starts (fully opaque)
+    s.set_brush_size(0.5);
+    let out = brushfile::read(&s.brush_as_file(set, 0).unwrap()).unwrap();
+    let [paint, smudge, erase] = out.sliders.map(Option::unwrap);
+    assert!(near(paint[0], 0.2) && near(paint[1], 0.6) && near(smudge[1], 1.0), "{:?}", out.sliders);
+    assert!(near(erase[0], 0.5) && near(erase[1], 0.4), "{:?}", out.sliders);
+}
+
+#[test]
 fn a_brushs_own_pressure_curves_are_kept_with_the_library() {
     use procraft_engine::brush::PressureCurve;
     use procraft_engine::curve::Curve;
@@ -4390,6 +4436,16 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
     assert!(failures.is_empty(), "{} failed:\n{}", failures.len(), failures.join("\n"));
 }
 
+/// Whether the sliders' places `a` came back as `b` (written out, those not given come back where
+/// they start).
+fn sliders_kept(a: &[Option<[f32; 2]>; 3], b: &[Option<[f32; 2]>; 3]) -> bool {
+    a.iter().zip(b).all(|(a, b)| match (a, b) {
+        (None, _) => true,
+        (Some(a), Some(b)) => a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-4),
+        (Some(_), None) => false,
+    })
+}
+
 /// What differs between two brush files (nothing: empty): the settings that changed, and the other
 /// fields.
 fn changes(a: &procraft_engine::brushfile::BrushFile, b: &procraft_engine::brushfile::BrushFile) -> String {
@@ -4420,7 +4476,7 @@ fn changes(a: &procraft_engine::brushfile::BrushFile, b: &procraft_engine::brush
         ("shape", a.shape == b.shape),
         ("grain", a.grain == b.grain),
         ("metallic and roughness", a.metallic == b.metallic && a.roughness == b.roughness),
-        ("paint sliders", a.paint_size == b.paint_size && a.paint_opacity == b.paint_opacity),
+        ("sliders", sliders_kept(&a.sliders, &b.sliders)),
         ("notches", a.notches == b.notches),
         ("author pictures", a.author_picture == b.author_picture && a.signature == b.signature),
     ];

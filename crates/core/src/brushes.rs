@@ -183,6 +183,6 @@ impl CanvasSession {
 }
 
 /// Where a tool's notches are kept on a brush.
-fn notch_tool(tool: crate::ToolKind) -> usize {
+pub(crate) fn notch_tool(tool: crate::ToolKind) -> usize {
     procraft_engine::brush::Notches::tool(tool == crate::ToolKind::Paint, tool == crate::ToolKind::Smudge)
 }

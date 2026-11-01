@@ -134,6 +134,9 @@ struct SavedBrush {
     /// The values saved on the side sliders while using it.
     #[serde(default, skip_serializing_if = "SavedNotches::is_empty")]
     notches: SavedNotches,
+    /// Where its sliders stand for painting, smudging and erasing, as its file brought them.
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    sliders: Vec<Option<[f32; 2]>>,
     /// Who made it, if its file said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     author: Option<SavedAuthor>,
@@ -335,6 +338,7 @@ impl State {
             grain_image: image(brush.grain.image, base.grain.image),
             thumbnail: brush.thumbnail.as_deref().map(procraft_engine::base64::encode),
             notches: SavedNotches::of(&brush.notches),
+            sliders: if brush.sliders.iter().any(Option::is_some) { brush.sliders.to_vec() } else { Vec::new() },
             author: brush.author.as_ref().map(|a| SavedAuthor {
                 name: a.name.clone(),
                 picture: text(&a.picture),
@@ -435,6 +439,9 @@ impl State {
             }
         }
         brush.notches = b.notches.notches();
+        for (kept, slider) in brush.sliders.iter_mut().zip(&b.sliders) {
+            *kept = slider.filter(|s| s.iter().all(|v| (0.0..=1.0).contains(v)));
+        }
         brush.author = b.author.as_ref().map(|a| Author {
             name: a.name.clone(),
             picture: png(&a.picture),

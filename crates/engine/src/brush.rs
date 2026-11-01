@@ -435,6 +435,10 @@ pub struct Brush {
     pub extra: BTreeMap<String, f32>,
     /// Values saved on the side sliders while this brush is in use, shown there as notches.
     pub notches: Notches,
+    /// Where its size and opacity sliders stand for painting, smudging and erasing (slider places
+    /// 0..1, kept as [`Notches::tool`] says), as its file brought them: a tool's start there when
+    /// the brush is first picked for it. None: at its preview size, fully opaque.
+    pub sliders: [Option<[f32; 2]>; 3],
     /// Its preview as its file brought it (PNG), shown in place of a drawn one until the brush is
     /// changed.
     pub thumbnail: Option<std::sync::Arc<[u8]>>,
@@ -585,6 +589,7 @@ impl Brush {
             rendering: Rendering::BuildUp,
             extra: BTreeMap::new(),
             notches: Notches::default(),
+            sliders: [None; 3],
             thumbnail: None,
             author: None,
             reset_point: None,

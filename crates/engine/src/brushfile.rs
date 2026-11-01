@@ -38,9 +38,9 @@ pub struct BrushFile {
     /// What it paints a model's metalness and roughness through.
     pub metallic: Texture,
     pub roughness: Texture,
-    /// Where the size and opacity sliders start when it is picked, 0..1.
-    pub paint_size: f32,
-    pub paint_opacity: f32,
+    /// Where its size and opacity sliders stand for painting, smudging and erasing (slider
+    /// places 0..1), where the file says.
+    pub sliders: [Option<[f32; 2]>; 3],
     /// The sliders' notches for painting, smudging and erasing.
     pub notches: Notches,
     /// Its preview (`QuickLook/Thumbnail.png`), if it has one.
@@ -617,8 +617,11 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         grain: texture("bundledGrainPath", "Grain.png", "textureInverted"),
         metallic: texture("bundledMetallicPath", "Metallic.png", "metallicGrainInverted"),
         roughness: texture("bundledRoughnessPath", "Roughness.png", "roughnessGrainInverted"),
-        paint_size: f.num("paintSize").unwrap_or(0.5) as f32,
-        paint_opacity: f.num("paintOpacity").unwrap_or(1.0) as f32,
+        sliders: SLIDERS.map(|(size, opacity)| {
+            let (size, opacity) = (f.num(size)?, f.num(opacity)?);
+            (size.is_finite() && opacity.is_finite())
+                .then(|| [(size.clamp(0.0, 1.0) as f32).powf(1.0 / SIZE_CURVE), opacity.clamp(0.0, 1.0) as f32])
+        }),
         notches,
         thumbnail: zip.read(&format!("{prefix}QuickLook/Thumbnail.png")),
         author_picture: zip.read(&format!("{prefix}{AUTHOR_PICTURE}")),
@@ -647,6 +650,11 @@ pub struct Pictures<'a> {
 }
 
 /// Where a brush's folder keeps its author's picture and signature.
+/// The keys of the size and opacity sliders' places for painting, smudging and erasing (the size as
+/// the size it sets: its place to the power of its curve).
+const SLIDERS: [(&str, &str); 3] =
+    [("paintSize", "paintOpacity"), ("smudgeSize", "smudgeOpacity"), ("eraseSize", "eraseOpacity")];
+
 const AUTHOR_PICTURE: &str = "AuthorPicture/AuthorPicture.png";
 const SIGNATURE: &str = "Signature/SignaturePicture.png";
 
@@ -783,8 +791,13 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
             put(&format!("saved{tool}{kind}"), array);
         }
     }
-    put("paintSize", Value::Real(0.5));
-    put("paintOpacity", Value::Real(1.0));
+    // where its sliders stand: as kept, else where they start (its preview size, fully opaque)
+    let start = [brush.setting("preview_size").clamp(0.0, 1.0).powf(1.0 / SIZE_CURVE), 1.0];
+    for ((size, opacity), slider) in SLIDERS.iter().zip(brush.sliders) {
+        let [place, alpha] = slider.unwrap_or(start);
+        put(size, Value::Real(f64::from(place.clamp(0.0, 1.0).powf(SIZE_CURVE))));
+        put(opacity, Value::Real(f64::from(alpha.clamp(0.0, 1.0))));
+    }
     let refs: Vec<(&str, Value)> = fields.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
     b.fill(&root, &["SilicaBrush", "ValkyrieBrush", "NSObject"], refs);
     let archive = b.finish(root);

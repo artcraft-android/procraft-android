@@ -230,7 +230,10 @@ impl CanvasSession {
 
     /// Brush `index` of `set` as a brush file.
     pub fn brush_as_file(&self, set: u32, index: u32) -> Option<Vec<u8>> {
-        let brush = self.shared.lock().library.get(set as usize)?.brushes.get(index as usize)?.clone();
+        let brush = {
+            let st = self.shared.lock();
+            st.with_sliders(st.library.get(set as usize)?.brushes.get(index as usize)?, set as usize, index as usize)
+        };
         let made = self.brush_pictures(&brush, set, index);
         Some(brushfile::write(&brush, author_name(&brush), &made.pictures()))
     }
@@ -240,7 +243,9 @@ impl CanvasSession {
         let (name, brushes) = {
             let st = self.shared.lock();
             let entry = st.library.get(set as usize)?;
-            (entry.name.clone(), entry.brushes.clone())
+            let brushes: Vec<Brush> =
+                entry.brushes.iter().enumerate().map(|(i, b)| st.with_sliders(b, set as usize, i)).collect();
+            (entry.name.clone(), brushes)
         };
         let made: Vec<Made> = brushes.iter().enumerate().map(|(i, b)| self.brush_pictures(b, set, i as u32)).collect();
         let list: Vec<(&Brush, &str, Pictures<'_>)> =
@@ -594,6 +599,7 @@ fn brush_from(file: &BrushFile) -> Brush {
         b.pressure_curves.set(*kind, Some(Curve::new(points)));
     }
     b.notches = file.notches.clone();
+    b.sliders = file.sliders;
     let (image, source) = grain_for(&file.grain, file.thumbnail.as_deref());
     b.grain.image = image;
     b.grain.source = source;

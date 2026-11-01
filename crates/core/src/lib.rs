@@ -657,9 +657,28 @@ impl State {
 
     /// Where a brush's sliders start: at the size its preview shows it, full opacity.
     fn starting_sliders(&self, tool: ToolKind) -> Sliders {
+        let brush = self.brush(tool);
+        // where its file left them, else its preview size
+        if let Some(&Some([size, opacity])) = brush.sliders.get(brushes::notch_tool(tool)) {
+            return Sliders { size, opacity };
+        }
         let curve = procraft_engine::brush::SIZE_CURVE;
-        let size = self.brush(tool).setting("preview_size").clamp(0.0, 1.0).powf(1.0 / curve);
+        let size = brush.setting("preview_size").clamp(0.0, 1.0).powf(1.0 / curve);
         Sliders { size, ..DEFAULT_SLIDERS }
+    }
+
+    /// Brush `index` of `set` (`brush`) holding where its sliders stand for each tool it has been
+    /// used with, to be written out.
+    pub(crate) fn with_sliders(&self, brush: &Brush, set: usize, index: usize) -> Brush {
+        let mut brush = brush.clone();
+        for tool in [ToolKind::Paint, ToolKind::Smudge, ToolKind::Erase] {
+            if let (Some(s), Some(kept)) =
+                (self.sliders.get(&(tool, set, index)), brush.sliders.get_mut(brushes::notch_tool(tool)))
+            {
+                *kept = Some([s.size, s.opacity]);
+            }
+        }
+        brush
     }
 
     /// The sliders the side bar shows: the clone brush's while cloning, the paint brush's while
