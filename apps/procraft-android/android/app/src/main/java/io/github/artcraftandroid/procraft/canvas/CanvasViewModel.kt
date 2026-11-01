@@ -143,6 +143,25 @@ enum class Adjustment(val label: String, val ready: Boolean = false, val swiped:
     }
 }
 
+/** Whether the open adjustment has changed anything yet: what undo inside it would take back. */
+internal fun adjustmentChanged(
+    adjustment: Adjustment?,
+    hue: Float,
+    saturation: Float,
+    brightness: Float,
+    balance: List<Float>,
+    curves: List<List<Offset>>,
+    amount: Float,
+    liquified: Boolean,
+): Boolean = when (adjustment) {
+    null -> false
+    Adjustment.HSB -> listOf(hue, saturation, brightness).any { it != 0.5f }
+    Adjustment.COLOR_BALANCE -> balance.any { it != 0.5f }
+    Adjustment.CURVES -> curves.any { it.size != 2 || it[0] != Offset(0f, 0f) || it[1] != Offset(1f, 1f) }
+    Adjustment.LIQUIFY -> liquified
+    else -> amount > 0f
+}
+
 /** The selection tool's ways of making a selection. */
 enum class SelectionKind(val label: String) { AUTOMATIC("Automatic"), FREEHAND("Freehand"), RECTANGLE("Rectangle"), ELLIPSE("Ellipse") }
 
@@ -4902,13 +4921,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         startAdjustment(a)
     }
 
-    private fun adjustChanged(): Boolean = when (adjustment) {
-        Adjustment.HSB -> listOf(hue50, saturation50, brightness50).any { it != 0.5f }
-        Adjustment.COLOR_BALANCE -> balance.any { it != 0.5f }
-        Adjustment.CURVES -> curves.any { it.size != 2 || it[0] != Offset(0f, 0f) || it[1] != Offset(1f, 1f) }
-        Adjustment.LIQUIFY -> liquified
-        else -> adjustAmount > 0f
-    }
+    private fun adjustChanged(): Boolean =
+        adjustmentChanged(adjustment, hue50, saturation50, brightness50, balance, curves, adjustAmount, liquified)
 
     /** A liquify stroke's window points (x, y, pressure each); [start] begins it. */
     /** The liquify brush lifted moving at ([vx], [vy]) window pixels a millisecond: it carries on with its momentum. */
