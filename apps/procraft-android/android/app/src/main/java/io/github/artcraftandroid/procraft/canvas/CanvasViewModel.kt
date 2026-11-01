@@ -4345,6 +4345,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         panel = Panel.NONE
     }
 
+    /** Cloning, the source goes back to where it was before the stroke (undo). */
+    private fun cloneSourceBack() {
+        if (adjustment != Adjustment.CLONE) return
+        puckBefore.removeLastOrNull()?.let { before -> clonePuck?.let { puckAfter.addLast(it) }; clonePuck = before }
+    }
+
+    /** Cloning, the source goes forward to where the stroke put it again (redo). */
+    private fun cloneSourceForward() {
+        if (adjustment != Adjustment.CLONE) return
+        puckAfter.removeLastOrNull()?.let { after -> clonePuck?.let { puckBefore.addLast(it) }; clonePuck = after }
+    }
+
     fun undo() {
         feedback()
         // a finished text's step goes back to editing that text first, as a step of its own
@@ -4358,10 +4370,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             transformBox = session?.transformApply(TransformAction.UNDO) ?: transformBox
             return
         }
-        // cloning, the source goes back to where it was before the stroke
-        if (adjustment == Adjustment.CLONE) {
-            puckBefore.removeLastOrNull()?.let { before -> clonePuck?.let { puckAfter.addLast(it) }; clonePuck = before }
-        }
+        // cloning, the source goes back with the stroke
+        cloneSourceBack()
 
         if (adjustment != null && !adjustPencil) {
           undoAdjustment();
@@ -4407,9 +4417,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun redo() {
         feedback()
         if (transforming) return
-        if (adjustment == Adjustment.CLONE) {
-            puckAfter.removeLastOrNull()?.let { after -> clonePuck?.let { puckBefore.addLast(it) }; clonePuck = after }
-        }
+        cloneSourceForward()
         if (adjustment != null && !adjustPencil) {
           if (adjustChanged()) return
           val a = adjustment ?: return
@@ -4849,12 +4857,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Takes back the adjustment's changes, or with none, the last one kept. */
     fun undoAdjustment() {
-        if (adjustPencil) {
-          session?.undo();
-          refresh();
-          return
-        }
         val a = adjustment ?: return
+        // painting the adjustment on, each stroke is a step: it goes back with the source
+        if (adjustPencil) {
+            cloneSourceBack()
+            session?.undo()
+            refresh()
+            return
+        }
         if (adjustChanged()) {
             resetAdjustment()
             return
