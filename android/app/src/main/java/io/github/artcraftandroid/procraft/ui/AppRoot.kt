@@ -75,7 +75,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 }
                 vm.picking?.let { pick ->
                     Loupe(pick, CanvasSpace.color(vm.colorRgb()))
-                    if (!vm.barsHidden) PickingBar(Modifier.offset(y = Pc.BarHeight))
+                    if (!vm.barsHidden) PickingBar(Modifier.offset(y = Pc.BarHeight), pick.fromReference)
                 }
                 // the bars fade out as the interface hides, and back
                 val barsShown = androidx.compose.animation.core.animateFloatAsState(if (vm.barsHidden) 0f else 1f, Motion.bars(), label = "bars").value

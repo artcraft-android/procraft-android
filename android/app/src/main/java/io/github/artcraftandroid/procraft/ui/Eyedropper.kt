@@ -35,11 +35,11 @@ private val LoupeOuter = 69.dp
 private val LoupeInner = 53.5.dp
 private val LoupeLift = 41.dp
 
-/** The bar under the top bar while the eyedropper is open. */
+/** The bar under the top bar while the eyedropper is open (on the canvas, or the reference window). */
 @Composable
-fun PickingBar(modifier: Modifier = Modifier) {
+fun PickingBar(modifier: Modifier = Modifier, fromReference: Boolean = false) {
     Box(modifier.fillMaxWidth().height(24.dp).background(Pc.MessageBar), contentAlignment = Alignment.Center) {
-        Text("Picking color from canvas", color = Pc.MessageText, fontSize = 14.sp)
+        Text(if (fromReference) "Picking color from reference" else "Picking color from canvas", color = Pc.MessageText, fontSize = 14.sp)
     }
 }
 

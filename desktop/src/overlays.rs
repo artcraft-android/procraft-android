@@ -38,11 +38,16 @@ pub struct Picking {
     pub at: Pos2,
     image: Option<TextureHandle>,
     pub rgb: Option<u32>,
+    /// On the reference window's picture, not the canvas.
+    from_reference: bool,
 }
 
 pub struct Overlays {
     notice: Option<Notice>,
     pub picking: Option<Picking>,
+    /// The loupe's picture as the eyedropper let go, kept a frame (it may have been drawn in this
+    /// one, and a texture let go of is gone before the frame is).
+    spent: Option<TextureHandle>,
     /// A snapped shape is shown, and whether its handles show (it is being edited).
     pub shape: Option<QuickShapeInfo>,
     pub shape_editing: bool,
@@ -58,6 +63,7 @@ impl Default for Overlays {
         Overlays {
             notice: None,
             picking: None,
+            spent: None,
             shape: None,
             shape_editing: false,
             cursor: None,
@@ -97,28 +103,37 @@ impl Overlays {
         });
     }
 
+    /// The eyedropper lets go: the colour it picks, if it read one.
+    pub fn finish_pick(&mut self) -> Option<u32> {
+        let p = self.picking.take()?;
+        self.spent = p.image;
+        p.rgb
+    }
+
     /// The eyedropper reads under (x, y), window pixels.
     pub fn pick(&mut self, ctx: &egui::Context, session: &CanvasSession, x: f32, y: f32) {
         let side = ((crate::input::PICK_WINDOW * ctx.pixels_per_point()) as u32) | 1;
         let seen: Option<Pick> = session.pick(x, y, side);
-        let image = seen.as_ref().map(|p| {
-            let n = p.side as usize;
-            let rgba = p.pixels.get(..n * n * 4).unwrap_or(&[]);
-            let image = if rgba.len() == n * n * 4 {
-                egui::ColorImage::from_rgba_unmultiplied([n, n], rgba)
-            } else {
-                egui::ColorImage::filled([1, 1], Color32::TRANSPARENT)
-            };
-            ctx.load_texture("eyedropper", image, TextureOptions::NEAREST)
-        });
+        let kept = self.picking.take();
+        let image = match seen.as_ref() {
+            Some(p) => Some(loupe_texture(ctx, kept.as_ref(), p.side as usize, &p.pixels)),
+            None => kept.as_ref().and_then(|k| k.image.clone()),
+        };
         let rgb = seen.and_then(|p| p.rgb);
         let ppp = ctx.pixels_per_point();
-        let kept = self.picking.take();
         self.picking = Some(Picking {
             at: pos2(x, y) / ppp,
-            image: image.or_else(|| kept.as_ref().and_then(|k| k.image.clone())),
+            image,
             rgb: rgb.or_else(|| kept.and_then(|k| k.rgb)),
+            from_reference: false,
         });
+    }
+
+    /// The eyedropper on the reference window's picture, at window point `at` (points), over
+    /// `rgb`, the `side` x `side` pixels (RGBA) around it shown.
+    pub fn pick_reference(&mut self, ctx: &egui::Context, at: Pos2, side: usize, rgba: &[u8], rgb: u32) {
+        let image = Some(loupe_texture(ctx, self.picking.as_ref(), side, rgba));
+        self.picking = Some(Picking { at, image, rgb: Some(rgb), from_reference: true });
     }
 
     /// Draws them; `bar_shown` when the interface shows (the bands hang under the top bar).
@@ -128,7 +143,8 @@ impl Overlays {
         let window = ctx.content_rect();
         let under_bar = window.top() + if bar_shown { pc::BAR_HEIGHT } else { 0.0 };
         let mut chosen = None;
-        egui::Area::new(egui::Id::unique("canvas overlays"))
+        self.spent = None;
+        let shown = egui::Area::new(egui::Id::unique("canvas overlays"))
             .fixed_pos(window.min)
             .order(egui::Order::Middle)
             .interactable(true)
@@ -146,7 +162,7 @@ impl Overlays {
                             ui.painter(),
                             band.center(),
                             Align2::CENTER_CENTER,
-                            "Picking color from canvas",
+                            if p.from_reference { "Picking color from reference" } else { "Picking color from canvas" },
                             14.0,
                             Weight::Regular,
                             ink,
@@ -192,6 +208,10 @@ impl Overlays {
             });
         if self.notice.is_some() || self.picking.is_some() {
             ctx.request_repaint();
+        }
+        // the loupe over a window it picks from (one pressed comes to the top)
+        if self.picking.is_some() {
+            ctx.move_to_top(shown.response.layer_id);
         }
         chosen
     }
@@ -305,6 +325,22 @@ impl Overlays {
 
 /// The eyedropper's loupe, centred `LOUPE_LIFT` above the pointer: a ring whose top half is the
 /// colour under it and bottom half the current colour, round what is shown there at twice the size.
+/// What the loupe shows, the `side` x `side` pixels (RGBA) `rgba`: in the texture it showed
+/// before, if there was one (a new texture each move frees the one still being drawn).
+fn loupe_texture(ctx: &egui::Context, before: Option<&Picking>, side: usize, rgba: &[u8]) -> TextureHandle {
+    let image = match rgba.get(..side * side * 4) {
+        Some(rgba) if side > 0 => egui::ColorImage::from_rgba_unmultiplied([side, side], rgba),
+        _ => egui::ColorImage::filled([1, 1], Color32::TRANSPARENT),
+    };
+    match before.and_then(|p| p.image.clone()) {
+        Some(mut texture) => {
+            texture.set(image, TextureOptions::NEAREST);
+            texture
+        }
+        None => ctx.load_texture("eyedropper", image, TextureOptions::NEAREST),
+    }
+}
+
 fn loupe(ui: &Ui, p: &Picking, current: Color32) {
     let c = p.at - vec2(0.0, LOUPE_LIFT);
     let painter = ui.painter();

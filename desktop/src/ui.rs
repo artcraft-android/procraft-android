@@ -582,7 +582,18 @@ impl Interface {
             self.adjustment_asked(session, asked);
         }
         guide_lines(&ctx, session);
-        self.reference.show(&ctx, &mut self.look, session);
+        let hold = std::time::Duration::from_secs_f32(self.gestures.delay(GesturePurpose::Eyedropper).max(0.0));
+        match self.reference.show(&ctx, &mut self.look, session, hold) {
+            Some(crate::reference::Picked::Moving { at, side, rgba, rgb }) => {
+                self.overlays.pick_reference(&ctx, at, side, &rgba, rgb);
+            }
+            Some(crate::reference::Picked::Done) => {
+                if let Some(rgb) = self.overlays.finish_pick() {
+                    self.colours.set_rgb(session, rgb);
+                }
+            }
+            None => {}
+        }
         // a full-screen page covers the timeline, as it covers the canvas
         if self.canvas_info.is_none() && !self.gesture_controls.open {
             let said = self.animation.show(&ctx, &mut self.look, session, &self.colours.palettes, self.colours.harmony);
@@ -835,7 +846,7 @@ impl Interface {
                 }
                 TouchCommand::Pick { x, y } => self.overlays.pick(ctx, session, x, y),
                 TouchCommand::PickDone => {
-                    if let Some(rgb) = self.overlays.picking.take().and_then(|p| p.rgb) {
+                    if let Some(rgb) = self.overlays.finish_pick() {
                         self.colours.set_rgb(session, rgb);
                     }
                 }

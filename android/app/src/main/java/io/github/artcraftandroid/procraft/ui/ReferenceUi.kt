@@ -3,7 +3,19 @@ package io.github.artcraftandroid.procraft.ui
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -34,7 +46,6 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -113,16 +124,33 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
                     }
                 }
             }
-            Box(Modifier.fillMaxWidth().height(picture.height), contentAlignment = Alignment.Center) {
-                when (vm.referenceMode) {
-                    CanvasViewModel.ReferenceMode.CANVAS -> vm.referenceCanvas?.let {
-                        Image(it, contentDescription = "The canvas", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+            // the picture: two fingers zoom and move it, a finger held still picks a colour from it;
+            // touches here never reach the canvas under the window
+            val shown = when (vm.referenceMode) {
+                CanvasViewModel.ReferenceMode.CANVAS -> vm.referenceCanvas
+                CanvasViewModel.ReferenceMode.IMAGE -> vm.referenceImage
+                CanvasViewModel.ReferenceMode.FACE -> null
+            }
+            val view = if (vm.referenceMode == CanvasViewModel.ReferenceMode.IMAGE) vm.referenceImageView else vm.referenceCanvasView
+            var origin by remember { mutableStateOf(Offset.Zero) }
+            Box(
+                Modifier.fillMaxWidth().height(picture.height).clipToBounds()
+                    .onGloballyPositioned { origin = it.positionInRoot() }
+                    .pointerInput(shown) {
+                        if (shown != null) pictureGestures(vm, shown) { origin } else awaitEachGesture { awaitFirstDown(requireUnconsumed = false) }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (shown != null) {
+                    Canvas(Modifier.fillMaxSize()) {
+                        val r = io.github.artcraftandroid.procraft.core.referencePictureRect(view, pictureSizes(size.width, size.height, shown))
+                        drawImage(shown, dstOffset = IntOffset(r[0].roundToInt(), r[1].roundToInt()), dstSize = IntSize(r[2].roundToInt(), r[3].roundToInt()))
                     }
+                }
+                when (vm.referenceMode) {
+                    CanvasViewModel.ReferenceMode.CANVAS -> Unit
                     CanvasViewModel.ReferenceMode.IMAGE -> {
-                        val image = vm.referenceImage
-                        if (image != null) {
-                            Image(image, contentDescription = "Reference picture", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
-                        } else {
+                        if (vm.referenceImage == null) {
                             Box(
                                 Modifier.width(180.dp).height(60.dp).clip(RoundedCornerShape(30.dp)).background(SegmentTrack)
                                     .clickable { pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
@@ -165,6 +193,68 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
                         }
                     },
             )
+        }
+    }
+}
+
+/** The window's picture area ([width] × [height] pixels) and [picture]'s size, for the core's view of it. */
+private fun pictureSizes(width: Float, height: Float, picture: ImageBitmap) =
+    io.github.artcraftandroid.procraft.core.ReferenceSizes(width, height, picture.width.toFloat(), picture.height.toFloat())
+
+/**
+ * Touches on the window's [picture]: a finger held still for the eyedropper's delay picks a colour
+ * from it, following the finger until it lets go; two fingers zoom and move it. [origin] is where
+ * the picture's area is in the window, for the loupe.
+ */
+private suspend fun PointerInputScope.pictureGestures(vm: CanvasViewModel, picture: ImageBitmap, origin: () -> Offset) {
+    awaitEachGesture {
+        val first = awaitFirstDown(requireUnconsumed = false)
+        first.consume()
+        val sizes = pictureSizes(size.width.toFloat(), size.height.toFloat(), picture)
+        val hold = (vm.gestures.delay(io.github.artcraftandroid.procraft.core.GesturePurpose.EYEDROPPER) * 1000f).toLong().coerceAtLeast(1L)
+        val slop = viewConfiguration.touchSlop
+        var fingers = 1
+        // held still (no other finger, not moved) until the delay is up: null
+        val ended = withTimeoutOrNull(hold) {
+            while (true) {
+                val e = awaitPointerEvent()
+                e.changes.forEach { it.consume() }
+                val down = e.changes.filter { it.pressed }
+                fingers = down.size
+                if (down.size != 1 || (down[0].position - first.position).getDistance() > slop) break
+            }
+            true
+        }
+        if (ended == null) {
+            fun pickAt(p: Offset) {
+                val view = if (vm.referenceMode == CanvasViewModel.ReferenceMode.IMAGE) vm.referenceImageView else vm.referenceCanvasView
+                val at = io.github.artcraftandroid.procraft.core.referencePicturePoint(view, sizes, p.x, p.y) ?: return
+                vm.pickReference(picture, at[0], at[1], at[2], origin() + p)
+            }
+            pickAt(first.position)
+            while (true) {
+                val e = awaitPointerEvent()
+                e.changes.forEach { it.consume() }
+                val finger = e.changes.firstOrNull { it.id == first.id }
+                if (finger == null || !finger.pressed) break
+                pickAt(finger.position)
+            }
+            if (vm.picking != null) vm.finishPick()
+            return@awaitEachGesture
+        }
+        // until every finger lets go, two or more zoom and move the picture
+        while (fingers > 0) {
+            val e = awaitPointerEvent()
+            e.changes.forEach { it.consume() }
+            val down = e.changes.filter { it.pressed }
+            fingers = down.size
+            val both = down.filter { it.previousPressed }
+            if (both.size < 2) continue
+            val before = both.fold(Offset.Zero) { a, c -> a + c.previousPosition } / both.size.toFloat()
+            val after = both.fold(Offset.Zero) { a, c -> a + c.position } / both.size.toFloat()
+            val apartBefore = both.sumOf { (it.previousPosition - before).getDistance().toDouble() }.toFloat()
+            val apartAfter = both.sumOf { (it.position - after).getDistance().toDouble() }.toFloat()
+            vm.pinchReference(sizes, before, after, if (apartBefore > 0f) apartAfter / apartBefore else 1f)
         }
     }
 }

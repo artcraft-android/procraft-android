@@ -89,7 +89,7 @@ private const val TAG = "ProCraft"
 enum class Panel { NONE, LAYERS, COLOR, BRUSHES, ACTIONS, ADJUSTMENTS }
 
 /** The eyedropper while it is open: the window point (pixels), what is shown around it, the colour it would pick. */
-class PickState(val x: Float, val y: Float, val image: ImageBitmap?, val rgb: Int?)
+class PickState(val x: Float, val y: Float, val image: ImageBitmap?, val rgb: Int?, val fromReference: Boolean = false)
 
 /** The colour panel's ways of choosing a colour. */
 enum class ColorMode { DISC, CLASSIC, HARMONY, VALUE, PALETTES }
@@ -2779,6 +2779,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var referenceImage by mutableStateOf<ImageBitmap?>(null)
         private set
 
+    /** How the window shows the canvas and a picture imported, each zoomed and moved by two fingers on its own. */
+    var referenceCanvasView by mutableStateOf(io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f))
+        private set
+    var referenceImageView by mutableStateOf(io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f))
+        private set
+
     /** Where the window is (window pixels), and the size of its picture. */
     var referenceOffset by mutableStateOf(Offset.Unspecified)
         private set
@@ -2830,12 +2836,44 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }) }
                 }.getOrNull()
             }
-            if (image != null) referenceImage = image.asImageBitmap() else message = "This picture can't be opened."
+            if (image != null) {
+                referenceImage = image.asImageBitmap()
+                referenceImageView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
+            } else {
+                message = "This picture can't be opened."
+            }
         }
     }
 
     fun clearReference() {
         referenceImage = null
+        referenceImageView = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
+    }
+
+    /**
+     * Two fingers on the window's picture ([sizes]) moved from [from] to [to] (their middle, pixels
+     * in the picture's area), [spread] times as far apart: the picture zooms and moves with them.
+     */
+    fun pinchReference(sizes: io.github.artcraftandroid.procraft.core.ReferenceSizes, from: Offset, to: Offset, spread: Float) {
+        val image = referenceMode == ReferenceMode.IMAGE
+        val view = if (image) referenceImageView else referenceCanvasView
+        val next = io.github.artcraftandroid.procraft.core.referenceViewPinched(view, sizes, from.x, from.y, to.x, to.y, spread)
+        if (image) referenceImageView = next else referenceCanvasView = next
+    }
+
+    /**
+     * The eyedropper over the window's [picture] at its point ([px], [py]) (a window pixel spanning
+     * [per] of its pixels), the finger at window point [at]: the colour there and what is around it.
+     */
+    fun pickReference(picture: ImageBitmap, px: Float, py: Float, per: Float, at: Offset) {
+        val bitmap = picture.asAndroidBitmap()
+        val x = px.toInt().coerceIn(0, bitmap.width - 1)
+        val y = py.toInt().coerceIn(0, bitmap.height - 1)
+        val rgb = bitmap.getPixel(x, y) and 0xFFFFFF
+        // as much of the picture as the loupe's window shows, around the point
+        val n = (PICK_WINDOW_DP * density * per).roundToInt().coerceIn(1, minOf(bitmap.width, bitmap.height))
+        val around = Bitmap.createBitmap(bitmap, (x - n / 2).coerceIn(0, bitmap.width - n), (y - n / 2).coerceIn(0, bitmap.height - n), n, n)
+        picking = PickState(at.x, at.y, around.asImageBitmap(), rgb, fromReference = true)
     }
 
     /** Reads the canvas again for the window, at most every so often while changes come. */
@@ -5700,6 +5738,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val REFERENCE_MAX_DP = 700f
         const val REFERENCE_PIXELS = 700
         const val REFERENCE_INTERVAL_MS = 300L
+
+        /** The window the eyedropper shows (magnified twice), dp across. */
+        const val PICK_WINDOW_DP = 54f
         /** New text's size: the canvas's shorter side over this. */
         /** New text's size and its box's width, as fractions of the canvas width. */
         const val TEXT_SIZE_OF_WIDTH = 0.13f

@@ -44,6 +44,7 @@ mod projection;
 mod quick_menu;
 mod quickshape;
 mod recolor;
+mod reference_view;
 #[cfg(target_os = "android")]
 mod render;
 mod scene3d;
@@ -119,6 +120,9 @@ pub use quick_menu::{
     quick_menu_saved, quick_menu_slots,
 };
 pub use quickshape::{QuickShapeInfo, QuickShapeKind};
+pub use reference_view::{
+    ReferenceSizes, ReferenceView, reference_picture_point, reference_picture_rect, reference_view_pinched,
+};
 pub use scene3d::{ModelFile, ModelInfo, ModelLight, ModelTextureFile, SubmeshInfo, Turntable, zip_model_name};
 pub use selection::{SelectionDisplay, SelectionJoin};
 pub use studio::{

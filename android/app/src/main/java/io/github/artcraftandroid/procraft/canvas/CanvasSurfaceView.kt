@@ -44,7 +44,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     private var strokePointer = -1
 
-    private val pickSide get() = (PICK_WINDOW_DP * resources.displayMetrics.density).toInt() or 1
+    private val pickSide get() = (CanvasViewModel.PICK_WINDOW_DP * resources.displayMetrics.density).toInt() or 1
 
     init {
         holder.addCallback(this)
@@ -358,8 +358,5 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     private companion object {
         const val TAG = "ProCraft"
-
-        /** The window the eyedropper shows (magnified twice), dp across. */
-        const val PICK_WINDOW_DP = 54f
     }
 }
