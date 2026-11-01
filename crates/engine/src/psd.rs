@@ -40,28 +40,87 @@ pub fn is_psd(bytes: &[u8]) -> bool {
 struct Format {
     width: u32,
     height: u32,
-    /// Bytes a sample: 1 or 2.
+    /// Bytes a sample: 1, 2, or 4 (32-bit floats, linear light); 0 for a bitmap's bits.
     sample: usize,
     colour: Colour,
+    /// An indexed file's colours (its colour mode data).
+    palette: [[u8; 3]; 256],
     /// PSB: some lengths take eight bytes.
     big: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Colour {
+    /// One bit a pixel, set for black.
+    Bitmap,
+    /// Grey, and a duotone's grey (its inks left out).
     Grey,
+    /// A colour from the file's table of 256.
+    Indexed,
     Rgb,
     Cmyk,
+    /// CIE L*a*b* (D50), brought to sRGB.
+    Lab,
 }
 
 impl Colour {
     fn channels(self) -> usize {
         match self {
-            Colour::Grey => 1,
-            Colour::Rgb => 3,
+            Colour::Bitmap | Colour::Grey | Colour::Indexed => 1,
+            Colour::Rgb | Colour::Lab => 3,
             Colour::Cmyk => 4,
         }
     }
+}
+
+/// What a file's colour `mode` and `depth` make of its samples: the colour, the bytes a sample
+/// (0: a bitmap's bits), and an indexed file's colours from its colour mode `data`; else what
+/// isn't read (multichannel files, other depths).
+fn format_of(mode: u16, depth: u16, data: &[u8]) -> Result<(Colour, usize, [[u8; 3]; 256]), PsdError> {
+    let colour = match mode {
+        0 => Colour::Bitmap,
+        1 | 8 => Colour::Grey,
+        2 => Colour::Indexed,
+        3 => Colour::Rgb,
+        4 => Colour::Cmyk,
+        9 => Colour::Lab,
+        _ => return Err(PsdError::Unsupported("colour mode")),
+    };
+    let sample = match (colour, depth) {
+        (Colour::Bitmap, 1) => 0,
+        (Colour::Bitmap, _) => return Err(PsdError::Unsupported("bit depth")),
+        (_, 8) => 1,
+        (_, 16) => 2,
+        (_, 32) => 4,
+        _ => return Err(PsdError::Unsupported("bit depth")),
+    };
+    let mut palette = [[0u8; 3]; 256];
+    if colour == Colour::Indexed {
+        // the reds, then the greens, then the blues
+        let table = data.get(..768).ok_or(PsdError::Damaged("colour data"))?;
+        for (i, c) in palette.iter_mut().enumerate() {
+            *c = [0, 256, 512].map(|k| table.get(k + i).copied().unwrap_or(0));
+        }
+    }
+    Ok((colour, sample, palette))
+}
+
+/// Bytes a row of `w` samples of `sample` bytes takes (a bitmap's bits packed eight a byte).
+fn row_bytes(w: usize, sample: usize) -> Option<usize> {
+    if sample == 0 { Some(w.div_ceil(8)) } else { w.checked_mul(sample) }
+}
+
+/// A bitmap's rows of packed bits (`w` x `h`) as a byte a pixel: black (a bit set) 0, white 255.
+fn spread_bits(packed: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let row = w.div_ceil(8);
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for x in 0..w {
+            let bit = packed.get(y * row + x / 8).is_some_and(|b| b >> (7 - x % 8) & 1 == 1);
+            out.push(if bit { 0 } else { 255 });
+        }
+    }
+    out
 }
 
 /// Reads a PSD or PSB.
@@ -81,27 +140,18 @@ pub fn read(bytes: &[u8]) -> Result<Imported, PsdError> {
     let height = r.u32().ok_or(damaged("header"))?;
     let width = r.u32().ok_or(damaged("header"))?;
     let depth = r.u16().ok_or(damaged("header"))?;
-    let colour = match r.u16().ok_or(damaged("header"))? {
-        1 => Colour::Grey,
-        3 => Colour::Rgb,
-        4 => Colour::Cmyk,
-        _ => return Err(PsdError::Unsupported("colour mode")),
-    };
-    let sample = match depth {
-        8 => 1,
-        16 => 2,
-        _ => return Err(PsdError::Unsupported("bit depth")),
-    };
+    let mode = r.u16().ok_or(damaged("header"))?;
     if width == 0 || height == 0 {
         return Err(damaged("size"));
     }
     if width > MAX_CANVAS_EDGE || height > MAX_CANVAS_EDGE {
         return Err(PsdError::TooLarge);
     }
-    let format = Format { width, height, sample, colour, big };
-    // colour mode data: nothing for these modes
+    // colour mode data: an indexed file's table (a duotone's inks are left out)
     let n = r.u32().ok_or(damaged("colour data"))?;
-    r.take(n as usize).ok_or(damaged("colour data"))?;
+    let data = r.take(n as usize).ok_or(damaged("colour data"))?;
+    let (colour, sample, palette) = format_of(mode, depth, data)?;
+    let format = Format { width, height, sample, colour, palette, big };
     let n = r.u32().ok_or(damaged("resources"))?;
     let resources = resources(r.take(n as usize).ok_or(damaged("resources"))?);
 
@@ -114,12 +164,12 @@ pub fn read(bytes: &[u8]) -> Result<Imported, PsdError> {
         if !info.is_empty() {
             records = layer_info(info, &format)?;
         }
-        // the global mask, then blocks; 16-bit files keep their layers in one of them
+        // the global mask, then blocks; 16- and 32-bit files keep their layers in one of them
         let global = section.u32().unwrap_or(0) as usize;
         section.take(global);
         while records.is_empty() {
             let Some(block) = block(&mut section, big) else { break };
-            if block.key == *b"Lr16" || block.key == *b"Layr" {
+            if [*b"Lr16", *b"Lr32", *b"Layr"].contains(&block.key) {
                 records = layer_info(block.data, &format)?;
             }
         }
@@ -191,27 +241,18 @@ pub fn flattened(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let channels = r.u16()?;
     let height = r.u32()?;
     let width = r.u32()?;
-    let sample = match r.u16()? {
-        8 => 1,
-        16 => 2,
-        _ => return None,
-    };
-    let colour = match r.u16()? {
-        1 => Colour::Grey,
-        3 => Colour::Rgb,
-        4 => Colour::Cmyk,
-        _ => return None,
-    };
+    let depth = r.u16()?;
+    let mode = r.u16()?;
     if width == 0 || height == 0 || width > MAX_CANVAS_EDGE || height > MAX_CANVAS_EDGE {
         return None;
     }
-    for _ in 0..2 {
-        let n = r.u32()?;
-        r.take(n as usize)?;
-    }
+    let n = r.u32()?;
+    let (colour, sample, palette) = format_of(mode, depth, r.take(n as usize)?).ok()?;
+    let n = r.u32()?;
+    r.take(n as usize)?;
     let n = r.len(big)?;
     r.take(n)?;
-    merged(&mut r, &Format { width, height, sample, colour, big }, channels).map(|rgba| (width, height, rgba))
+    merged(&mut r, &Format { width, height, sample, colour, palette, big }, channels).map(|rgba| (width, height, rgba))
 }
 
 /// What the image resources say.
@@ -403,10 +444,10 @@ fn layer_info(bytes: &[u8], f: &Format) -> Result<Vec<Record>, PsdError> {
             found.push((i, id, data, w, h));
         }
     }
-    let unpack = |&(_, _, data, w, h): &(usize, i16, &[u8], usize, usize)| {
+    let unpack = |&(_, id, data, w, h): &(usize, i16, &[u8], usize, usize)| {
         let mut d = Reader::new(data);
         let compression = d.u16()?;
-        plane(&mut d, compression, w, h, f)
+        plane(&mut d, compression, w, h, f, usize::try_from(id).is_ok_and(|c| c < f.colour.channels()))
     };
     let planes = crate::par::side_by_side(&found, unpack);
     for (&(i, id, ..), plane) in found.iter().zip(planes) {
@@ -445,9 +486,10 @@ fn block<'a>(r: &mut Reader<'a>, big: bool) -> Option<Block<'a>> {
     Some(Block { key, data })
 }
 
-/// A channel's samples, `w` x `h`, decoded and brought to 8 bits.
-fn plane(r: &mut Reader<'_>, compression: u16, w: usize, h: usize, f: &Format) -> Option<Vec<u8>> {
-    let row = w.checked_mul(f.sample)?;
+/// A channel's samples, `w` x `h`, decoded and brought to 8 bits (a `colour` one's floats through
+/// the sRGB tone curve; transparency and masks as they are).
+fn plane(r: &mut Reader<'_>, compression: u16, w: usize, h: usize, f: &Format, colour: bool) -> Option<Vec<u8>> {
+    let row = row_bytes(w, f.sample)?;
     let size = row.checked_mul(h)?;
     let raw = match compression {
         0 => r.take(size)?.to_vec(),
@@ -474,16 +516,10 @@ fn plane(r: &mut Reader<'_>, compression: u16, w: usize, h: usize, f: &Format) -
     if raw.len() < size {
         return None;
     }
-    Some(match f.sample {
-        2 => raw
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .take(w * h)
-            .map(|&[hi, lo]| ((u32::from(u16::from_be_bytes([hi, lo])) * 255 + 32767) / 65535) as u8)
-            .collect(),
-        _ => raw.into_iter().take(w * h).collect(),
-    })
+    if f.sample == 0 {
+        return Some(spread_bits(&raw, w, h));
+    }
+    Some(to8(raw, f.sample, colour).into_iter().take(w * h).collect())
 }
 
 /// PackBits: a row of `row` bytes unpacked onto `out` (short rows filled with zeros).
@@ -505,10 +541,27 @@ fn unpack(packed: &[u8], row: usize, out: &mut Vec<u8>) {
     out.resize(end, 0);
 }
 
-/// ZIP with prediction keeps each sample as its difference from the one before it in the row.
+/// ZIP with prediction keeps each sample as its difference from the one before it in the row; a
+/// 32-bit row keeps each byte so, its floats' bytes laid out as four planes (first bytes, then
+/// second...).
 fn undo_prediction(data: &mut [u8], row: usize, sample: usize) {
+    let mut planar = Vec::new();
     for line in data.chunks_mut(row.max(1)) {
-        if sample == 2 {
+        if sample == 4 {
+            let mut last = 0u8;
+            for b in line.iter_mut() {
+                last = last.wrapping_add(*b);
+                *b = last;
+            }
+            planar.clear();
+            planar.extend_from_slice(line);
+            let w = line.len() / 4;
+            for (x, s) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                for (k, v) in s.iter_mut().enumerate() {
+                    *v = planar.get(k * w + x).copied().unwrap_or(0);
+                }
+            }
+        } else if sample == 2 {
             let mut last = 0u16;
             for s in line.as_chunks_mut::<2>().0 {
                 last = last.wrapping_add(u16::from_be_bytes(*s));
@@ -528,6 +581,7 @@ fn undo_prediction(data: &mut [u8], row: usize, sample: usize) {
 fn merged(r: &mut Reader<'_>, f: &Format, channels: u16) -> Option<Vec<u8>> {
     let (w, h) = (f.width as usize, f.height as usize);
     let count = usize::from(channels).max(f.colour.channels());
+    let colours = f.colour.channels();
     let compression = r.u16()?;
     let planes: Vec<Vec<u8>> = match compression {
         1 => {
@@ -536,45 +590,97 @@ fn merged(r: &mut Reader<'_>, f: &Format, channels: u16) -> Option<Vec<u8>> {
             let counts: Vec<usize> = (0..rows)
                 .map(|_| if f.big { r.u32().map(|c| c as usize) } else { r.u16().map(usize::from) })
                 .collect::<Option<_>>()?;
-            let row = w * f.sample;
+            let row = row_bytes(w, f.sample)?;
             let mut planes = Vec::with_capacity(count);
             for chunk in counts.chunks(h.max(1)) {
                 let mut raw = Vec::with_capacity(row * h);
                 for &c in chunk {
                     unpack(r.take(c)?, row, &mut raw);
                 }
-                planes.push(to8(raw, f.sample));
+                planes.push(if f.sample == 0 {
+                    spread_bits(&raw, w, h)
+                } else {
+                    to8(raw, f.sample, planes.len() < colours)
+                });
             }
             planes
         }
-        0 => (0..count).map(|_| r.take(w * h * f.sample).map(|p| to8(p.to_vec(), f.sample))).collect::<Option<_>>()?,
+        0 => {
+            let size = row_bytes(w, f.sample)?.checked_mul(h)?;
+            (0..count)
+                .map(|c| {
+                    let raw = r.take(size)?;
+                    Some(if f.sample == 0 { spread_bits(raw, w, h) } else { to8(raw.to_vec(), f.sample, c < colours) })
+                })
+                .collect::<Option<_>>()?
+        }
         _ => return None,
     };
-    let colours = f.colour.channels();
     let alpha = planes.get(colours);
     let mut rgba = vec![0u8; w * h * 4];
     for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let s = |c: usize| planes.get(c).and_then(|p| p.get(i)).copied().unwrap_or(0);
-        let [r, g, b] = rgb(f.colour, s);
+        let [r, g, b] = rgb(f, s);
         *px = [r, g, b, alpha.and_then(|a| a.get(i)).copied().unwrap_or(255)];
     }
     Some(rgba)
 }
 
-fn to8(raw: Vec<u8>, sample: usize) -> Vec<u8> {
-    if sample == 2 { raw.as_chunks::<2>().0.iter().map(|&[hi, _]| hi).collect() } else { raw }
+/// Samples of `sample` bytes as 8 bits: 16-bit ones rounded, 32-bit floats (linear light) a
+/// `colour` channel's through the sRGB tone curve, transparency's as they are, both clamped.
+fn to8(raw: Vec<u8>, sample: usize, colour: bool) -> Vec<u8> {
+    match sample {
+        2 => raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&s| ((u32::from(u16::from_be_bytes(s)) * 255 + 32767) / 65535) as u8)
+            .collect(),
+        4 => raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&s| {
+                let v = f32::from_be_bytes(s);
+                let v = if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+                let v = if colour { crate::profile::encode(v) } else { v };
+                (v * 255.0).round() as u8
+            })
+            .collect(),
+        _ => raw,
+    }
 }
 
 /// A pixel's colour from its samples (CMYK's kept inverted, as PSDs keep them).
-fn rgb(colour: Colour, s: impl Fn(usize) -> u8) -> [u8; 3] {
-    match colour {
-        Colour::Grey => [s(0); 3],
+fn rgb(f: &Format, s: impl Fn(usize) -> u8) -> [u8; 3] {
+    match f.colour {
+        Colour::Bitmap | Colour::Grey => [s(0); 3],
+        Colour::Indexed => f.palette.get(usize::from(s(0))).copied().unwrap_or([0; 3]),
+        Colour::Lab => lab_to_srgb(s(0), s(1), s(2)),
         Colour::Rgb => [s(0), s(1), s(2)],
         Colour::Cmyk => {
             let k = u16::from(s(3));
             [0, 1, 2].map(|c| ((u16::from(s(c)) * k + 127) / 255) as u8)
         }
     }
+}
+
+/// A L*a*b* colour (D50) as a PSD keeps it in 8 bits (L 0..255 for 0..100, a and b 128 for
+/// none) brought to sRGB (the white point adapted to D65), clipped.
+fn lab_to_srgb(l: u8, a: u8, b: u8) -> [u8; 3] {
+    let l = f32::from(l) * 100.0 / 255.0;
+    let (a, b) = (f32::from(a) - 128.0, f32::from(b) - 128.0);
+    let fy = (l + 16.0) / 116.0;
+    let (fx, fz) = (fy + a / 500.0, fy - b / 200.0);
+    let back = |t: f32| if t > 6.0 / 29.0 { t * t * t } else { 3.0 * (6.0f32 / 29.0).powi(2) * (t - 4.0 / 29.0) };
+    let (x, y, z) = (0.9642 * back(fx), back(fy), 0.8249 * back(fz));
+    // D50 XYZ to linear sRGB (Bradford adapted)
+    let linear = [
+        3.133_856 * x - 1.616_867 * y - 0.490_615 * z,
+        -0.978_768 * x + 1.916_142 * y + 0.033_454 * z,
+        0.071_945 * x - 0.228_991 * y + 1.405_243 * z,
+    ];
+    linear.map(|c| (crate::profile::encode(c.clamp(0.0, 1.0)) * 255.0).round() as u8)
 }
 
 /// Straight RGBA made premultiplied.
@@ -771,7 +877,7 @@ fn picture(r: &Record, f: &Format) -> Option<Picture> {
             let s = |c: usize| colours.get(c).and_then(|p| p.get(j)).copied().unwrap_or(0);
             // no alpha channel: opaque (as a background layer is)
             let a = alpha.map_or(255, |p| p.get(j).copied().unwrap_or(0));
-            let [r, g, b] = rgb(f.colour, s);
+            let [r, g, b] = rgb(f, s);
             rgba.extend_from_slice(&[r, g, b, a]);
         }
     }
@@ -996,8 +1102,8 @@ mod tests {
         assert_eq!(got.document.layers().len(), 1);
         assert_eq!(&got.pixels[0].1[0..4], &[10, 20, 30, 255]);
         assert_eq!(read(b"PNG.").err(), Some(PsdError::NotAPsd));
-        // Lab
-        bytes[25] = 9;
+        // multichannel
+        bytes[25] = 7;
         assert_eq!(read(&bytes).err(), Some(PsdError::Unsupported("colour mode")));
         bytes[25] = 3;
         bytes.truncate(40);
@@ -1382,6 +1488,52 @@ mod tests {
             files.len()
         );
         assert!(failures.is_empty(), "{} failed:\n{}", failures.len(), failures.join("\n"));
+    }
+
+    #[test]
+    fn thirty_two_bit_samples_undo_their_prediction_and_come_to_eight_bits() {
+        // two floats a row: 0.5 and 1.0, laid out as byte planes, each byte the difference from
+        // the one before it
+        let (a, b) = (0.5f32.to_be_bytes(), 1.0f32.to_be_bytes());
+        let planar = [a[0], b[0], a[1], b[1], a[2], b[2], a[3], b[3]];
+        let mut row: Vec<u8> = planar
+            .iter()
+            .scan(0u8, |last, &v| {
+                let d = v.wrapping_sub(*last);
+                *last = v;
+                Some(d)
+            })
+            .collect();
+        undo_prediction(&mut row, 8, 4);
+        assert_eq!(row, [a, b].concat());
+        // colour through the sRGB curve (linear 0.5 shows as 188), transparency as it is
+        assert_eq!(to8(row.clone(), 4, true), [188, 255]);
+        assert_eq!(to8(row, 4, false), [128, 255]);
+        // out of range and not a number: clamped, nothing
+        let odd = [2.0f32, -1.0, f32::NAN].iter().flat_map(|v| v.to_be_bytes()).collect();
+        assert_eq!(to8(odd, 4, true), [255, 0, 0]);
+    }
+
+    #[test]
+    fn bitmaps_indexed_colours_and_lab_come_to_rgb() {
+        // set bits are black; a row's bits end at a byte
+        assert_eq!(spread_bits(&[0b1010_0000, 0b0100_0000], 3, 2), [0, 255, 0, 255, 0, 255]);
+        // an indexed file's table: its reds, greens and blues one after another
+        let mut table = vec![0u8; 768];
+        (table[5], table[256 + 5], table[512 + 5]) = (10, 20, 30);
+        let (colour, sample, palette) = format_of(2, 8, &table).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(colour == Colour::Indexed && sample == 1);
+        assert_eq!(palette[5], [10, 20, 30]);
+        assert_eq!(format_of(2, 8, &[0; 10]).err(), Some(PsdError::Damaged("colour data")));
+        // white, black and middle grey (L* 50 is sRGB 119)
+        assert_eq!(lab_to_srgb(255, 128, 128), [255, 255, 255]);
+        assert_eq!(lab_to_srgb(0, 128, 128), [0, 0, 0]);
+        let grey = lab_to_srgb(128, 128, 128);
+        assert!(grey.iter().all(|&c| (118..=120).contains(&c)), "{grey:?}");
+        // duotones read as their grey, bitmaps only as bits; multichannel files not at all
+        assert!(format_of(8, 8, &[]).is_ok_and(|(c, ..)| c == Colour::Grey));
+        assert_eq!(format_of(0, 8, &[]).err(), Some(PsdError::Unsupported("bit depth")));
+        assert_eq!(format_of(7, 8, &[]).err(), Some(PsdError::Unsupported("colour mode")));
     }
 
     #[test]

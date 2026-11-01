@@ -105,6 +105,9 @@ impl Importing {
     }
 }
 
+/// What the layers' textures may take on the GPU, bytes: as much as the layers may (2 GiB).
+const LAYERS_ON_GPU: u64 = 2 << 30;
+
 /// How long an artwork opens before it says so, as the tablet's.
 const SLOW_OPENING: Duration = Duration::from_millis(500);
 
@@ -149,6 +152,10 @@ fn main() {
         // a system font it can't read is left out; one line for each says nothing to act on
         .filter_module("fontdb", log::LevelFilter::Error)
         .init();
+    // the layers' textures may take what the layers themselves may (the engine's budget): none is
+    // ever kept off the GPU, but the composite is made around the layers not being worked on, so
+    // a frame composites only those (as the tablet's)
+    procraft_core::set_resident_budget(LAYERS_ON_GPU);
     let event_loop = match EventLoop::new() {
         Ok(l) => l,
         Err(e) => {

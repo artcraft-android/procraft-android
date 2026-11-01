@@ -99,7 +99,7 @@ pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_sto
 pub use keys::{KeyShortcut, key_shortcut};
 pub use layers::{
     BlendModeInfo, Blocked, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
-    brush_blend_modes, grain_blend_modes, layers_for,
+    brush_blend_modes, grain_blend_modes, layers_for, set_resident_budget,
 };
 pub use modes::{ModeButton, ModeSwitch, Modes, mode_switch};
 pub use palettes::{PaletteInfo, Palettes, colour_name};

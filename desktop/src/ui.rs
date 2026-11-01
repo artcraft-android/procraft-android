@@ -129,6 +129,9 @@ pub struct Interface {
     /// Animation Assist's bar, while it is on, and sharing the layers as an animation.
     animation: crate::animation::AnimationBar,
     animated_export: Option<crate::animated_export::AnimatedExport>,
+    /// The export screen just ended, kept a frame: its preview's textures were drawn in the frame
+    /// it ended in, and a texture let go of is gone before that frame is.
+    ended_export: Option<crate::animated_export::AnimatedExport>,
     /// The artwork was opened from the gallery's Share only to be shared as an animation: when
     /// that ends, the gallery comes back.
     exporting_from_gallery: bool,
@@ -207,6 +210,7 @@ impl Default for Interface {
             licences: false,
             animation: crate::animation::AnimationBar::default(),
             animated_export: None,
+            ended_export: None,
             exporting_from_gallery: false,
             time_lapse: crate::timelapse::TimeLapseUi::default(),
             studio: crate::studio::Studio::default(),
@@ -339,6 +343,7 @@ impl Interface {
     pub fn show(&mut self, ui: &mut Ui, session: &std::sync::Arc<CanvasSession>, input: &mut Input) {
         let ctx = ui.ctx().clone();
         self.style_once(&ctx);
+        self.ended_export = None;
         // looked at again soon while an insert is read, or brushes made
         let brushes_coming = self.brushes_added(session);
         if self.inserted(session) || brushes_coming {
@@ -410,7 +415,7 @@ impl Interface {
             self.animation.reset(session);
             let ended = export.show(&ctx, &mut self.look, session);
             if let Some(ended) = ended {
-                self.animated_export = None;
+                self.ended_export = self.animated_export.take();
                 if matches!(ended, crate::animated_export::Ended::Failed) {
                     crate::files::tell("Share", "The animation could not be exported.");
                 }

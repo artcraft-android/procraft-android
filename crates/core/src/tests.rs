@@ -41,6 +41,234 @@ fn pixel(s: &CanvasSession, x: u32, y: u32) -> [u8; 4] {
     [px[i], px[i + 1], px[i + 2], px[i + 3]]
 }
 
+/// What a pen stroke costs with the GPU, for a few kinds of brush on a 2048 square canvas: each
+/// event's work, each frame's (one every two events, as a 240 Hz pen at 120 frames a second), and
+/// the whole stroke with the GPU done, an event's share. Run on a device with `--ignored
+/// --nocapture`.
+#[test]
+#[ignore]
+fn stroke_cost() {
+    let Some(s) = session(2048, 1600) else { return };
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let at = |v: &mut Vec<f64>, q: f64| {
+        v.sort_by(f64::total_cmp);
+        v.get(((v.len().max(1) - 1) as f64 * q) as usize).copied().unwrap_or(0.0)
+    };
+    let point = |k: usize| {
+        let t = k as f32 / 2000.0;
+        PenSample {
+            x: 100.0 + t * 1400.0,
+            y: 800.0 + (t * 25.0).sin() * 500.0,
+            pressure: 0.3 + 0.6 * (t * 40.0).sin().abs(),
+            tilt: 0.0,
+            orientation: 0.0,
+            time_ms: k as f64 * 4.17,
+        }
+    };
+    let frame = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        if let (Some(c), Some(g)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
+            c.render(g, &mut st.doc, None);
+        }
+    };
+    let library = s.brush_library();
+    for wanted in ["Technical Pencil", "Soft Airbrush", "Charcoal Stick", "Oil Paint", "Gouache", "Wet Wash"] {
+        let found = library
+            .iter()
+            .enumerate()
+            .find_map(|(i, set)| set.brushes.iter().position(|b| b.name == wanted).map(|j| (i as u32, j as u32)));
+        let Some((set, index)) = found else {
+            eprintln!("no {wanted}");
+            continue;
+        };
+        s.select_brush(set, index);
+        s.set_brush_size(0.4);
+        let started = std::time::Instant::now();
+        s.stroke_begin(PointerKind::Stylus, vec![point(0)]);
+        let (mut adds, mut frames) = (Vec::new(), Vec::new());
+        for e in 1..=1000 {
+            let t = std::time::Instant::now();
+            s.stroke_add(vec![point(2 * e - 1), point(2 * e)]);
+            adds.push(ms(t));
+            if e % 2 == 0 {
+                let t = std::time::Instant::now();
+                frame(&s);
+                frames.push(ms(t));
+            }
+        }
+        s.stroke_end(vec![]);
+        frame(&s);
+        if let Some(g) = s.shared.lock().gpu.as_ref() {
+            g.flush();
+        }
+        let whole = ms(started) / 1000.0;
+        println!(
+            "{wanted}: event {:.3} ms (99th {:.3}), frame {:.3} ms (99th {:.3}), whole with the GPU {:.3} ms an event",
+            at(&mut adds, 0.5),
+            at(&mut adds, 0.99),
+            at(&mut frames, 0.5),
+            at(&mut frames, 0.99),
+            whole
+        );
+        s.undo();
+    }
+}
+
+/// Real files damaged (cut short, bytes changed) never bring a reader down: each brush file, PSD,
+/// layered package, model, palette and colour profile in the folders `READER_FUZZ` lists (`;` between), each damaged in
+/// `READER_FUZZ_ROUNDS` ways (12 unless said). Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn readers_never_panic_on_damaged_files() {
+    let Ok(roots) = std::env::var("READER_FUZZ") else { return };
+    let mut files = Vec::new();
+    let mut folders: Vec<std::path::PathBuf> = roots.split(';').map(std::path::PathBuf::from).collect();
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                folders.push(path);
+            } else if path.metadata().is_ok_and(|m| m.len() < 8 << 20) {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let rounds: usize = std::env::var("READER_FUZZ_ROUNDS").ok().and_then(|r| r.parse().ok()).unwrap_or(12);
+    let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let (mut tried, mut panics) = (0, Vec::new());
+    for path in &files {
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        let name = path.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+        for round in 0..rounds {
+            let mut damaged = bytes.clone();
+            if round % 3 == 0 && !damaged.is_empty() {
+                damaged.truncate((next() % damaged.len() as u64) as usize);
+            } else {
+                for _ in 0..1 + round % 12 {
+                    if damaged.is_empty() {
+                        break;
+                    }
+                    let at = (next() % damaged.len() as u64) as usize;
+                    if let Some(b) = damaged.get_mut(at) {
+                        *b = (next() & 0xff) as u8;
+                    }
+                }
+            }
+            tried += 1;
+            let read = std::panic::catch_unwind(|| match extension.as_str() {
+                "psd" | "psb" => _ = procraft_engine::psd::read(&damaged),
+                "procreate" | "procraft" => _ = procraft_engine::native::read(&damaged),
+                "obj" => _ = procraft_engine::mesh::read_obj(&String::from_utf8_lossy(&damaged), None),
+                "usdz" => _ = procraft_engine::usd::read_usdz(&damaged),
+                "usd" | "usdc" | "usda" => _ = procraft_engine::usd::read_usd(&damaged),
+                "swatches" => _ = procraft_engine::palette::read_swatches(&damaged),
+                "ase" | "aco" => _ = procraft_engine::palette::read_other(&damaged, name.as_deref()),
+                "icc" | "icm" => _ = procraft_engine::cms::IccProfile::parse(&damaged),
+                _ => _ = crate::brush_files::read_any_brushes(&damaged, name.clone()),
+            });
+            if read.is_err() {
+                panics.push(format!("{} (round {round})", path.display()));
+            }
+        }
+    }
+    eprintln!("{} files, {tried} damaged copies read, {} panics", files.len(), panics.len());
+    assert!(
+        panics.is_empty(),
+        "{}",
+        panics.join(
+            "
+"
+        )
+    );
+}
+
+/// What the heavier steps cost on a canvas of 4K's pixels (2896 square) with six painted layers,
+/// each with the GPU done: a Gaussian blur's slider dragged (a step and the frame after it), HSB
+/// likewise, the adjustments kept, an undo and a redo, a transform dragged and kept, a save. Run
+/// on a device with `--ignored --nocapture` (`OP_COST_DIR` a folder to save into).
+#[test]
+#[ignore]
+fn operation_cost() {
+    use crate::Adjustment;
+    use crate::transform::TransformHandle;
+    // as the tablet keeps them (OP_COST_CACHE): the layers not worked on composited once, kept
+    if std::env::var("OP_COST_CACHE").is_ok() {
+        crate::layers::set_resident_budget(4 << 30);
+    }
+    let Some(s) = session(2896, 1600) else { return };
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let done = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        if let (Some(c), Some(g)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
+            c.render(g, &mut st.doc, None);
+            g.flush();
+        }
+    };
+    let timed = |name: &str, f: &dyn Fn()| {
+        let t = std::time::Instant::now();
+        f();
+        done(&s);
+        println!("{name}: {:.1} ms", ms(t));
+    };
+    let steps = |name: &str, n: usize, f: &dyn Fn(usize)| {
+        let mut each: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = std::time::Instant::now();
+                f(i);
+                done(&s);
+                ms(t)
+            })
+            .collect();
+        each.sort_by(f64::total_cmp);
+        println!("{name}: {:.1} ms a step (most {:.1})", each[n / 2], each[n - 1]);
+    };
+    s.set_brush_size(1.0);
+    for layer in 0..6 {
+        if layer > 0 {
+            s.add_layer();
+        }
+        let y = 200.0 + layer as f32 * 220.0;
+        s.stroke_begin(PointerKind::Finger, vec![sample(100.0, y, 0.0)]);
+        s.stroke_add(
+            (1..40)
+                .map(|i| sample(100.0 + i as f32 * 35.0, y + (i as f32 * 0.4).sin() * 80.0, i as f64 * 8.0))
+                .collect(),
+        );
+        s.stroke_end(vec![]);
+    }
+    done(&s);
+    s.adjustment_start(Adjustment::GaussianBlur);
+    steps("Gaussian blur slider", 20, &|_| s.adjustment_amount_by(0.02));
+    timed("Gaussian blur kept", &|| _ = s.adjustment_end(true));
+    s.adjustment_start(Adjustment::Hsb);
+    steps("HSB slider", 20, &|i| s.adjustment_hsb(0.5 + i as f32 * 0.01, 0.5, 0.5));
+    timed("HSB kept", &|| _ = s.adjustment_end(true));
+    timed("undo", &|| _ = s.undo());
+    timed("redo", &|| _ = s.redo());
+    timed("transform begun", &|| _ = s.transform_begin());
+    s.transform_grab(TransformHandle::Move, 800.0, 800.0);
+    steps("transform drag", 20, &|i| _ = s.transform_drag(800.0 + i as f32 * 5.0, 800.0 + i as f32 * 3.0));
+    s.transform_release();
+    timed("transform kept", &|| s.transform_end(true));
+    if let Ok(dir) = std::env::var("OP_COST_DIR") {
+        timed("first save", &|| s.save(dir.clone()).unwrap());
+        s.stroke_begin(PointerKind::Finger, vec![sample(300.0, 300.0, 0.0)]);
+        s.stroke_end(vec![]);
+        timed("save after a stroke", &|| s.save(dir.clone()).unwrap());
+    }
+    crate::layers::set_resident_budget(0);
+}
+
 #[test]
 fn a_pen_stroke_paints_and_undoes() {
     let Some(s) = session(100, 200) else { return };
