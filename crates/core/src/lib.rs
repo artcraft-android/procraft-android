@@ -1531,6 +1531,15 @@ impl CanvasSession {
         if self.recolor_step_aside() {
             return Some(recolor::STEP.to_owned());
         }
+        // an adjustment open on the layer: its changes taken back, or the step before it
+        if let Some(name) = self.step_adjusting(Self::undo_step, true) {
+            return name;
+        }
+        self.undo_step()
+    }
+
+    /// Undoes the last step (cloning, the source going back too); returns its name.
+    fn undo_step(&self) -> Option<String> {
         // cloning, the source goes back to where it was before the stroke
         self.shared.lock().adjust.puck_step(true);
         self.edit(Canvas::undo);
@@ -1542,15 +1551,24 @@ impl CanvasSession {
         if self.swap_crop(false) {
             return Some("Crop canvas".to_owned());
         }
+        // an adjustment open on the layer, with nothing changed yet: the step after it
+        if let Some(name) = self.step_adjusting(Self::redo_step, false) {
+            return name;
+        }
         // recoloring, the open fill steps aside and is made again over what comes back
         let recoloring = self.recolor_step_aside();
-        self.shared.lock().adjust.puck_step(false);
-        self.edit(Canvas::redo);
-        let name = self.shared.lock().canvas.as_ref().and_then(Canvas::undo_name);
+        let name = self.redo_step();
         if recoloring {
             self.recolor_again();
         }
         name
+    }
+
+    /// Redoes the last step undone (cloning, the source going forward too); returns its name.
+    fn redo_step(&self) -> Option<String> {
+        self.shared.lock().adjust.puck_step(false);
+        self.edit(Canvas::redo);
+        self.shared.lock().canvas.as_ref().and_then(Canvas::undo_name)
     }
 
     pub fn clear_layer(&self) {
@@ -1604,7 +1622,10 @@ impl CanvasSession {
             opacity: sliders.opacity,
             brush_diameter: st.brush(st.tool).diameter(sliders.size) * st.brush_scale(),
             // an open shape is kept, then undone
-            can_undo: st.canvas.as_ref().is_some_and(Canvas::can_undo) || st.crop_undo.is_some() || st.shape.is_some(),
+            can_undo: st.canvas.as_ref().is_some_and(Canvas::can_undo)
+                || st.crop_undo.is_some()
+                || st.shape.is_some()
+                || st.adjust.touched(),
             // keeping an open shape drops what could be redone
             can_redo: st.shape.is_none() && (st.canvas.as_ref().is_some_and(Canvas::can_redo) || st.crop_redo_ready()),
             zoom: st.view.map_or(1.0, |v| v.zoom()),

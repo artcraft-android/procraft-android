@@ -2793,7 +2793,8 @@ impl Canvas {
         let frosted = target.as_ref().and_then(|t| t.backdrop).map_or(0, |b| b.regions.len() + 3);
         // remaking the caches composites the layers once more
         let cached = if self.cache_composites { doc.layers().len() + 2 } else { 0 };
-        let slots = (ops.len() + doc.layers().len() + 4 + frosted + cached) as u64;
+        let worked: usize = ops.iter().map(|op| self.slots_for(op, &ops)).sum();
+        let slots = (worked + doc.layers().len() + 4 + frosted + cached) as u64;
         if slots > self.uniform_slots {
             self.uniform_slots = slots.next_power_of_two();
             let (buffer, bind) = uniforms(device, &self.pipelines.uniform_layout, self.uniform_slots);
@@ -3448,6 +3449,9 @@ impl Canvas {
             }
         }
         if !uniforms.data.is_empty() {
+            if uniforms.data.len() as u64 > self.uniform_slots * SLOT {
+                log::error!("a render's uniforms outgrew their buffer ({} bytes)", uniforms.data.len());
+            }
             gpu.queue.write_buffer(&self.uniform_buffer, 0, &uniforms.data);
         }
         gpu.queue.submit([encoder.finish()]);
@@ -4720,6 +4724,21 @@ impl Canvas {
         self.pictures.insert(id, ready.pictures);
         self.caches = None;
         self.invalidate();
+    }
+
+    /// The most uniform slots `op` takes in a render (among `ops`, the render's work): a liquify
+    /// drag's stamps one each, a transform one for each layer it moves (those the same render adds
+    /// too), a filter one for each halving of a wide blur and its passes; the rest one or none.
+    fn slots_for(&self, op: &Op, ops: &[Op]) -> usize {
+        match op {
+            Op::LiquifyStamps(stamps) => stamps.len(),
+            Op::TransformSet { .. } | Op::TransformMesh { .. } => {
+                let added = ops.iter().filter(|o| matches!(o, Op::TransformAlso(_))).count();
+                1 + self.transform_more.len() + added
+            }
+            Op::FilterSet(_) => FILTER_SLOTS,
+            _ => 2,
+        }
     }
 
     /// Whether work keeps the caches: it changes only the pixels of layers worked on (painting,
@@ -6862,6 +6881,10 @@ const LET_GO_ROOM: usize = 2 * MOST_PART_ITEMS;
 
 /// The most items a part of a remake composites before it is sent (and the time looked at).
 const MOST_PART_ITEMS: usize = 8;
+
+/// The most uniform slots a filter takes: a wide blur's halvings (at most five), its two passes
+/// and the filter's own.
+const FILTER_SLOTS: usize = 8;
 
 /// How long each render goes on remaking caches before it lets the app go on.
 const REMAKE_SLICE: std::time::Duration = std::time::Duration::from_millis(16);

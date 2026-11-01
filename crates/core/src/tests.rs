@@ -270,6 +270,78 @@ fn operation_cost() {
 }
 
 #[test]
+fn undo_with_an_adjustment_open_takes_back_its_changes_then_steps_and_it_stays_open() {
+    use crate::Adjustment;
+    let Some(s) = session(64, 64) else { return };
+    let open = |s: &CanvasSession| s.adjustment_shown().adjustment;
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_brush_size(1.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(5.0, 32.0, 0.0)]);
+    s.stroke_add((1..12).map(|i| sample(5.0 + i as f32 * 5.0, 32.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let red = pixel(&s, 32, 32);
+    assert!(red[0] > 200 && red[1] < 40, "{red:?}");
+    assert!(s.adjustment_start(Adjustment::Hsb));
+    s.adjustment_hsb(0.8, 0.5, 0.5);
+    assert_ne!(pixel(&s, 32, 32), red);
+    assert!(s.info().can_undo);
+    // the change taken back, HSB still open
+    assert_eq!(s.undo().as_deref(), Some("Hue, Saturation, Brightness"));
+    assert_eq!(open(&s), Some(Adjustment::Hsb));
+    assert_eq!(pixel(&s, 32, 32), red);
+    // nothing changed now: the stroke goes, and HSB opens again on what is left
+    assert!(s.undo().is_some());
+    assert_eq!(open(&s), Some(Adjustment::Hsb));
+    assert_eq!(pixel(&s, 32, 32)[3], 255);
+    assert_ne!(pixel(&s, 32, 32), red);
+    assert!(s.redo().is_some());
+    assert_eq!(open(&s), Some(Adjustment::Hsb));
+    assert_eq!(pixel(&s, 32, 32), red);
+    // redo leaves a change made since alone; kept, it is one step
+    s.adjustment_hsb(0.8, 0.5, 0.5);
+    let changed = pixel(&s, 32, 32);
+    assert_eq!(s.redo(), None);
+    assert_eq!(pixel(&s, 32, 32), changed);
+    assert!(s.adjustment_end(true));
+    assert_eq!(pixel(&s, 32, 32), changed);
+    assert!(s.undo().is_some());
+    assert_eq!(pixel(&s, 32, 32), red);
+    // a gradient map shows as it opens: undo steps back rather than standing still
+    assert!(s.adjustment_start(Adjustment::GradientMap));
+    assert!(s.undo().is_some());
+    assert_eq!(open(&s), Some(Adjustment::GradientMap));
+    assert!(s.adjustment_end(false));
+    assert_ne!(pixel(&s, 32, 32), red);
+}
+
+#[test]
+fn a_long_liquify_drag_between_frames_renders_without_errors() {
+    use crate::Adjustment;
+    let Some(s) = session(256, 256) else { return };
+    s.set_brush_size(0.3);
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 128.0, 0.0)]);
+    s.stroke_add((1..20).map(|i| sample(20.0 + i as f32 * 11.0, 128.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    assert!(s.adjustment_start(Adjustment::Liquify));
+    // hundreds of stamps queued before a frame draws (a slow frame, a fast drag)
+    s.set_brush_size(0.02);
+    let points: Vec<f32> = (0..20)
+        .flat_map(|leg| {
+            (0..=46).map(move |i| {
+                let x = if leg % 2 == 0 { 10.0 + i as f32 * 5.0 } else { 240.0 - i as f32 * 5.0 };
+                [x, 20.0 + leg as f32 * 10.0, 1.0]
+            })
+        })
+        .flatten()
+        .collect();
+    s.adjustment_liquify_stroke(points, true);
+    // `pixel` renders and asserts the GPU took every command
+    pixel(&s, 128, 128);
+    assert!(s.adjustment_end(true));
+    pixel(&s, 128, 128);
+}
+
+#[test]
 fn a_pen_stroke_paints_and_undoes() {
     let Some(s) = session(100, 200) else { return };
     // the 100 px canvas is shown at 2×: window (100, 100) is canvas (50, 50)

@@ -111,6 +111,8 @@ pub(crate) struct Adjusting {
     liquify: [f32; 4],
     liquify_amount: f32,
     liquified: bool,
+    /// Changed since it opened (a slider, a choice, a liquify stroke): undo takes that back.
+    touched: bool,
     /// Cloning: the source (canvas pixels), how far it is from the brush once a stroke fixed that,
     /// and where it was before each stroke kept and each undone (for undo and redo).
     puck: Option<Vec2>,
@@ -149,6 +151,7 @@ impl Default for Adjusting {
             liquify: [0.5, 1.0, 0.0, 0.8],
             liquify_amount: 1.0,
             liquified: false,
+            touched: false,
             puck: None,
             puck_offset: None,
             puck_before: Vec::new(),
@@ -198,6 +201,11 @@ impl Adjusting {
     /// Chromatic aberration displacing: a drag moves the fringes.
     pub(crate) fn displacing(&self) -> bool {
         self.open == Some(Adjustment::ChromaticAberration) && self.chroma_kind == ChromaticKind::Displace
+    }
+
+    /// Open, and changed since it opened: undo takes that back.
+    pub(crate) fn touched(&self) -> bool {
+        self.open.is_some() && self.touched
     }
 
     fn changed(&self) -> bool {
@@ -302,6 +310,33 @@ impl Adjusting {
 }
 
 impl CanvasSession {
+    /// Undo (`undo`) or redo with an adjustment open on the layer (not painted on): undo takes
+    /// back what it changed since it opened and it stays open (named for the notice); with nothing
+    /// changed, `step` is made and it opens again on what that leaves. Redo leaves changes made
+    /// alone (they would be lost). None when no such adjustment is open.
+    pub(crate) fn step_adjusting(
+        &self,
+        step: impl FnOnce(&Self) -> Option<String>,
+        undo: bool,
+    ) -> Option<Option<String>> {
+        let (open, touched) = self.adjusting(|a, _| (a.open, a.touched));
+        let open = open?;
+        if self.shared.lock().pencil {
+            return None;
+        }
+        if touched {
+            if !undo {
+                return Some(None);
+            }
+            self.adjustment_reset();
+            return Some(Some(crate::adjust_menu::adjustment_label(open)));
+        }
+        self.adjustment_end(false);
+        let name = step(self);
+        self.adjustment_start(open);
+        Some(name)
+    }
+
     fn adjusting<R>(&self, f: impl FnOnce(&mut Adjusting, (u32, u32)) -> R) -> R {
         let mut st = self.shared.lock();
         let window = st.window_size;
@@ -339,6 +374,7 @@ impl CanvasSession {
             if a.open.is_none() {
                 return Redraw::None;
             }
+            a.touched = true;
             f(a, window);
             a.redraw()
         });
@@ -376,6 +412,7 @@ impl CanvasSession {
             a.curves = [straight(), straight(), straight(), straight()];
             a.chroma_offset = (0.0, 0.0);
             a.liquified = false;
+            a.touched = false;
             a.liquify_amount = 1.0;
             a.puck = None;
             a.puck_offset = None;
@@ -675,6 +712,7 @@ impl CanvasSession {
     pub fn adjustment_liquify_stroke(&self, points: Vec<f32>, start: bool) {
         let brush = self.adjusting(|a, _| {
             a.liquified = true;
+            a.touched = true;
             a.liquify_brush()
         });
         self.liquify_stroke(points, start, brush);
