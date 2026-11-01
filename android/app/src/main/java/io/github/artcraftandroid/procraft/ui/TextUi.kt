@@ -166,9 +166,21 @@ private fun windowBox(vm: CanvasViewModel, info: TextInfo): androidx.compose.ui.
 @Composable
 private fun TextBox(vm: CanvasViewModel, info: TextInfo) {
     val box = remember(info) { TextRenderer.bounds(info) }
-    val layout = remember(info) { TextRenderer.layout(info) }
     val corners = listOf(Offset(box.left, box.top), Offset(box.right, box.top), Offset(box.right, box.bottom), Offset(box.left, box.bottom)).map(vm::canvasToWindow)
     val selection = vm.textField.selection
+    val length = info.text.length
+    val (start, end) = selection.min.coerceIn(0, length) to selection.max.coerceIn(0, length)
+    // the caret at each end, and the chosen letters ringed (the core's, on the canvas)
+    val caretStart = remember(info, start) { TextRenderer.caret(info, start) }
+    val caretEnd = remember(info, end) { TextRenderer.caret(info, end) }
+    val chosen = remember(info, start, end) {
+        if (info.vertical || start == end) null
+        else TextRenderer.chosen(info, start, end, BoxLine.toArgb())?.let { p ->
+            val bitmap = android.graphics.Bitmap.createBitmap(p.width.toInt(), p.height.toInt(), android.graphics.Bitmap.Config.ARGB_8888)
+            bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(p.rgba))
+            Triple(bitmap, p.x.toFloat(), p.y.toFloat())
+        }
+    }
     Canvas(Modifier.fillMaxSize()) {
         val path = Path().apply {
             moveTo(corners[0].x, corners[0].y)
@@ -180,55 +192,33 @@ private fun TextBox(vm: CanvasViewModel, info: TextInfo) {
             drawCircle(BoxLine, 3.dp.toPx(), side)
         }
         // the caret, or the selected letters ringed in blue with a handle at each end (the text as
-        // laid out; vertical text spreads its letters apart, so it shows none)
+        // the core lays it out; vertical text spreads its letters apart, so it shows none)
         if (info.vertical) return@Canvas
-        val length = layout.text.length
-        val (start, end) = selection.min.coerceIn(0, length) to selection.max.coerceIn(0, length)
         val m = vm.viewMatrix
-        val toWindow = android.graphics.Matrix().apply {
-            setValues(floatArrayOf(m[0], m[2], m[4], m[1], m[3], m[5], 0f, 0f, 1f))
-            preTranslate(info.x, info.y - info.baseline * info.size)
-        }
-        fun at(offset: Int, bottom: Boolean): Offset {
-            val line = layout.getLineForOffset(offset)
-            val p = floatArrayOf(layout.getPrimaryHorizontal(offset), (if (bottom) layout.getLineBottom(line) else layout.getLineTop(line)).toFloat())
-            toWindow.mapPoints(p)
-            return Offset(p[0], p[1])
-        }
+        val toWindow = android.graphics.Matrix().apply { setValues(floatArrayOf(m[0], m[2], m[4], m[1], m[3], m[5], 0f, 0f, 1f)) }
+        fun at(caret: FloatArray?, bottom: Boolean): Offset? = caret?.let { vm.canvasToWindow(Offset(it[0], if (bottom) it[2] else it[1])) }
         if (start == end) {
-            drawLine(BoxLine, at(start, false), at(start, true), 2.dp.toPx())
+            val (top, bottom) = (at(caretStart, false) ?: return@Canvas) to (at(caretStart, true) ?: return@Canvas)
+            drawLine(BoxLine, top, bottom, 2.dp.toPx())
             return@Canvas
         }
-        drawIntoCanvas { c ->
-            val canvas = c.nativeCanvas
-            val chosen = android.graphics.Path().also { layout.getSelectionPath(start, end, it) }
-            val paint = layout.paint
-            val (style, width, colour) = Triple(paint.style, paint.strokeWidth, paint.color)
-            canvas.save()
-            canvas.concat(toWindow)
-            canvas.clipPath(chosen)
-            paint.style = android.graphics.Paint.Style.STROKE
-            paint.strokeWidth = info.size * SELECTED_RING
-            paint.strokeJoin = android.graphics.Paint.Join.ROUND
-            paint.color = BoxLine.toArgb()
-            layout.draw(canvas)
-            // the letters again in their own colour over their ring
-            paint.style = style
-            paint.strokeWidth = width
-            paint.color = colour
-            layout.draw(canvas)
-            canvas.restore()
+        chosen?.let { (bitmap, x, y) ->
+            drawIntoCanvas { c ->
+                val canvas = c.nativeCanvas
+                canvas.save()
+                canvas.concat(toWindow)
+                canvas.drawBitmap(bitmap, x, y, android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
+                canvas.restore()
+            }
         }
-        val (top, bottom) = at(start, false) to at(end, true)
-        drawLine(BoxLine, top, at(start, true), 2.dp.toPx())
-        drawLine(BoxLine, at(end, false), bottom, 2.dp.toPx())
+        val top = at(caretStart, false) ?: return@Canvas
+        val bottom = at(caretEnd, true) ?: return@Canvas
+        drawLine(BoxLine, top, at(caretStart, true) ?: top, 2.dp.toPx())
+        drawLine(BoxLine, at(caretEnd, false) ?: bottom, bottom, 2.dp.toPx())
         drawCircle(BoxLine, 6.dp.toPx(), top)
         drawCircle(BoxLine, 6.dp.toPx(), bottom)
     }
 }
-
-/** How wide the blue ring round selected letters is, as a fraction of the text's size. */
-private const val SELECTED_RING = 0.08f
 
 /** Above the keyboard: Edit style on the right. */
 @Composable

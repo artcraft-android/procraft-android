@@ -34,8 +34,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
@@ -522,13 +524,39 @@ private fun squareToDisc(x: Float, y: Float): Offset =
 private fun discToSquare(u: Float, v: Float): Offset =
     io.github.artcraftandroid.procraft.core.discToSquarePoint(u, v).let { Offset(it[0], it[1]) }
 
-/** The saturation/brightness disc for [hue], [side] pixels square, with a soft edge, as the core draws it. */
-private fun discImage(hue: Float, side: Int): ImageBitmap {
+/**
+ * A picker's picture, [side] pixels square, kept in one Bitmap for its size: the first made at
+ * once, each after it off the main thread (only the newest asked for), so a drag never waits on
+ * the core making it. Read [version] where it is drawn, so a new one draws.
+ */
+private class PickerPicture(side: Int) {
+    val bitmap: android.graphics.Bitmap =
+        CanvasSpace.tag(android.graphics.Bitmap.createBitmap(side, side, android.graphics.Bitmap.Config.ARGB_8888))
+    val image: ImageBitmap = bitmap.asImageBitmap()
+    var version by mutableIntStateOf(0)
+
+    fun fill(rgba: ByteArray) {
+        bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(rgba))
+        version++
+    }
+}
+
+/** The picture [make] draws for [key] at [side] pixels, as [PickerPicture] keeps it. */
+@Composable
+private fun rememberPickerPicture(key: Any, side: Int, p3: Boolean, make: (Int) -> ByteArray): PickerPicture {
     val n = side.coerceAtLeast(1)
-    val rgba = io.github.artcraftandroid.procraft.core.discPicture(hue, n.toUInt())
-    val bitmap = android.graphics.Bitmap.createBitmap(n, n, android.graphics.Bitmap.Config.ARGB_8888)
-    bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(rgba))
-    return CanvasSpace.tag(bitmap).asImageBitmap()
+    val picture = remember(n, p3) { PickerPicture(n).also { it.fill(make(n)) } }
+    val first = remember(picture) { arrayOf(true) }
+    LaunchedEffect(picture, key) {
+        // the first was made with the picture itself
+        if (first[0]) {
+            first[0] = false
+            return@LaunchedEffect
+        }
+        val rgba = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { make(n) }
+        picture.fill(rgba)
+    }
+    return picture
 }
 
 /**
@@ -546,7 +574,10 @@ private fun Disc(c: ColorPick, compact: Boolean = false, short: Boolean = false)
     val discRadius = DiscRadius * k
     val ringInner = RingInner * k
     val ringOuter = RingOuter * k
-    val disc = remember(c.hue, k) { discImage(c.hue, with(density) { (discRadius * 2).roundToPx() }) }
+    // the saturation/brightness disc for the hue, with a soft edge, as the core draws it
+    val disc = rememberPickerPicture(c.hue, with(density) { (discRadius * 2).roundToPx() }, CanvasSpace.p3) { n ->
+        io.github.artcraftandroid.procraft.core.discPicture(c.hue, n.toUInt())
+    }
     val ring = remember {
         val stops = Array(RingHues.size) { i -> (1f - i / (RingHues.size - 1f)) to hsvColor(RingHues[i] / 360f, 1f, 1f) }
         Brush.sweepGradient(*stops.reversedArray())
@@ -595,7 +626,8 @@ private fun Disc(c: ColorPick, compact: Boolean = false, short: Boolean = false)
                 val outer = ringOuter.toPx()
                 drawCircle(ring, (inner + outer) / 2f, o, style = Stroke(outer - inner))
                 val r = discRadius.toPx()
-                drawImage(disc, topLeft = Offset(o.x - r, o.y - r))
+                disc.version
+                drawImage(disc.image, topLeft = Offset(o.x - r, o.y - r))
                 // the ring knob sits on the middle of the ring, where the hue is
                 val turn = huePosition(HueControl.RING, c.hue) * 2f * PI.toFloat()
                 val mid = (inner + outer) / 2f
@@ -677,15 +709,6 @@ private fun p3HsvToRgb(h: Float, s: Float, v: Float): Int =
 private fun rgbToP3Hsv(rgb: Int): FloatArray =
     io.github.artcraftandroid.procraft.core.rgbToP3Hsv(rgb.toUInt(), CanvasSpace.p3).toFloatArray()
 
-/** The harmony wheel at value [v], [side] pixels square, as the core draws it. */
-private fun harmonyImage(v: Float, side: Int): ImageBitmap {
-    val n = side.coerceAtLeast(1)
-    val rgba = io.github.artcraftandroid.procraft.core.harmonyWheel(v, n.toUInt(), CanvasSpace.p3)
-    val bitmap = android.graphics.Bitmap.createBitmap(n, n, android.graphics.Bitmap.Config.ARGB_8888)
-    bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(rgba))
-    return CanvasSpace.tag(bitmap).asImageBitmap()
-}
-
 /** The harmony kind under the title; tapping it lists the kinds. */
 @Composable
 private fun HarmonyKindButton(vm: CanvasViewModel, start: Dp = 20.dp, top: Dp = 50.dp, menuX: Dp = (-204).dp) {
@@ -734,7 +757,11 @@ private fun Harmony(vm: CanvasViewModel, c: ColorPick, compact: Boolean = false,
     val density = LocalDensity.current
     // compact, the wheel is 200 across instead of 298; short, 296
     val radius = radius ?: if (compact) 100.dp else if (short) HarmonyRadius - 1.dp else HarmonyRadius
-    val wheel = remember(hsv[2], radius, CanvasSpace.p3) { harmonyImage(hsv[2], with(density) { radius.roundToPx() }) }
+    // the harmony wheel at the colour's value, as the core draws it
+    val p3 = CanvasSpace.p3
+    val wheel = rememberPickerPicture(hsv[2], with(density) { radius.roundToPx() }, p3) { n ->
+        io.github.artcraftandroid.procraft.core.harmonyWheel(hsv[2], n.toUInt(), p3)
+    }
     // the header is 78 tall here, with the kind under the title; the wheel starts 88 down (short, 82)
     Column(Modifier.padding(top = if (short) 4.dp else 10.dp)) {
         Box(
@@ -748,7 +775,8 @@ private fun Harmony(vm: CanvasViewModel, c: ColorPick, compact: Boolean = false,
                     }
                 }
                 .drawBehind {
-                    drawImage(wheel, dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()))
+                    wheel.version
+                    drawImage(wheel.image, dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()))
                     val r = size.width / 2f
                     fun at(turn: Float) = center + Offset(cos(turn) * hsv[1] * r, -sin(turn) * hsv[1] * r)
                     for (t in vm.harmonyKind.turns) {

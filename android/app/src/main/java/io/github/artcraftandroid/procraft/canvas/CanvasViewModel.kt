@@ -1779,7 +1779,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         keepChoices(s)
         s.detachProjection()
         val dir = artworkDir
-        autosave?.cancel()
         // the gallery zooms out of the artwork's cell, the canvas fading away over it
         val cell = dir?.let { thumbAt[it.name] }
         galleryZoom = cell?.let { c ->
@@ -1797,6 +1796,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         screen = Screen.GALLERY
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
+                // after the autosave's save under way, if one is
+                s.stopAutosave()
                 dir?.let { told(runCatching { s.save(it.path) }.map { true }) }
                 // its memory free at once, not when the object is collected
                 s.releaseCanvas()
@@ -2058,27 +2059,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         screen = Screen.CANVAS
         // a new artwork exists in the gallery from the start (an opened one is there already)
         if (!File(dir, "artwork.json").exists()) viewModelScope.launch(Dispatchers.IO) { runCatching { s.save(dir.path) } }
-        startAutosave(s, dir)
-    }
-
-    private var autosave: kotlinx.coroutines.Job? = null
-
-    /**
-     * Keeps [s] saved into [dir] while it is open: a few seconds after it changes, once nothing is
-     * under way that saving would cut short (only the layers that changed are written).
-     */
-    private fun startAutosave(s: CanvasSession, dir: File) {
-        autosave?.cancel()
-        autosave = viewModelScope.launch(Dispatchers.IO) {
-            var saved = s.edits()
+        // kept saved by the core, a few seconds after it changes, once nothing is under way that
+        // saving would cut short (only the layers that changed are written); a failure told
+        s.startAutosave(dir.path)
+        viewModelScope.launch(Dispatchers.IO) {
             while (session === s) {
-                kotlinx.coroutines.delay(AUTOSAVE_MS)
-                val now = s.edits()
-                if (now != saved && session === s) {
-                    val result = runCatching { s.saveIfIdle(dir.path) }
-                    told(result)
-                    if (result.getOrDefault(false)) saved = now
-                }
+                kotlinx.coroutines.delay(SAVE_FAILURE_POLL_MS)
+                s.takeSaveFailure()?.let { told(Result.failure(Exception(it))) }
             }
         }
     }
@@ -3098,9 +3085,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         changeTextField(TextFieldValue(text, TextRange(v.selection.min + add.length)))
     }
 
-    private val fontDir get() = File(getApplication<Application>().filesDir, "fonts")
-
-    /** Copies a font file into the app and offers it; the text being edited takes it. */
+    /** Copies a font file into the app and offers it (the core keeps it); the text being edited takes it. */
     fun importFont(uri: android.net.Uri) {
         viewModelScope.launch {
             val family = withContext(Dispatchers.IO) {
@@ -3109,16 +3094,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     val name = resolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
                         if (c.moveToFirst()) c.getString(0) else null
                     } ?: "Font.ttf"
-                    val safe = name.filter { it.isLetterOrDigit() || it in " ._-" }.ifEmpty { "Font.ttf" }
-                    val file = File(fontDir.apply { mkdirs() }, if (safe.substringAfterLast('.', "").lowercase() in listOf("ttf", "otf")) safe else "$safe.ttf")
-                    resolver.openInputStream(uri)?.use { input -> file.outputStream().use { input.copyTo(it) } }
-                    // a file that isn't a font is dropped
-                    if (android.graphics.Typeface.createFromFile(file) == android.graphics.Typeface.DEFAULT && file.length() == 0L) file.delete()
-                    TextRenderer.FILE + file.path
+                    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
+                    // kept in the fonts folder by the core; a file that isn't a font is dropped
+                    TextRenderer.importFont(bytes, name)
                 }.getOrNull()
             }
-            TextRenderer.loadImported(fontDir)
-            if (family != null && TextRenderer.families.any { it.family == family }) {
+            if (family != null) {
                 changeText { it.copy(font = family) }
                 showNotice("Font imported")
             }
@@ -3201,16 +3182,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         renderText()
     }
 
-    /** Draws the text into its layer off the main thread; only the latest drawing lands. */
+    /**
+     * Draws the text into its layer off the main thread (only where it was and now reaches), one
+     * drawing at a time: those asked for while one draws are passed over for the latest.
+     */
     private fun renderText() {
         val s = session ?: return
-        val info = textInfo ?: return
-        val c = s.info()
+        if (textInfo == null) return
         val generation = ++textGeneration
-        textJob?.cancel()
+        val before = textJob
         textJob = viewModelScope.launch {
-            val pixels = withContext(Dispatchers.Default) { TextRenderer.render(info, c.width.toInt(), c.height.toInt()) }
-            if (generation == textGeneration) s.putTextPixels(pixels)
+            before?.join()
+            if (generation == textGeneration) withContext(Dispatchers.Default) { TextRenderer.drawInto(s) }
         }
     }
 
@@ -3385,12 +3368,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             val name = withContext(Dispatchers.IO) { fileName(uri) }
             // the name says which kind, when it has one we know; else our own kinds first, then
             // the other apps' (each told apart by its contents)
-            val added = session?.let { s ->
-                // the shared core tells the kinds apart
-                val set = withContext(Dispatchers.Default) { s.importAnyBrushes(bytes, name, shownSet.toUInt()) }
-                set?.let {
-                    shownSet = it.toInt()
-                    libraryChanged()
+            val added = session?.let {
+                // the shared core tells the kinds apart and makes them brushes off the main
+                // thread; they join the library here, once nothing holds a place in it
+                val read = withContext(Dispatchers.Default) {
+                    io.github.artcraftandroid.procraft.core.readBrushes(bytes, name)
+                }
+                read?.let {
+                    brushesRead += it
+                    addBrushesRead()
                 } != null
             } ?: if (name != null && isOtherBrushFile(name)) {
                 addOtherBrushes(bytes, name)
@@ -3399,6 +3385,31 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             }
             if (!added) message = "This file has no brushes in it."
         }
+    }
+
+    /** Brushes read from files, waiting to join the library. */
+    private val brushesRead = mutableListOf<io.github.artcraftandroid.procraft.core.BrushesRead>()
+
+    /** The library's Delete question is up (it holds a brush or set by its place). */
+    var brushQuestionOpen = false
+        set(open) {
+            field = open
+            if (!open) addBrushesRead()
+        }
+
+    /**
+     * Brushes read meanwhile join the library (a set of their own at the top, or a brush at the
+     * top of a set), that set shown; not while the studio or the Delete question holds a brush
+     * by its place, which they would move: then once that ends.
+     */
+    fun addBrushesRead() {
+        val s = session ?: return
+        if (studioOpen || brushQuestionOpen || brushesRead.isEmpty()) return
+        for (read in brushesRead.toList()) {
+            s.addBrushesRead(read, shownSet.toUInt())?.let { shownSet = it.toInt() }
+        }
+        brushesRead.clear()
+        libraryChanged()
     }
 
     /** All of [uri]'s bytes, read into one array of the file's own size when it is known. */
@@ -3850,6 +3861,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         studioPreview = null
         libraryChanged()
         readSliders()
+        // brushes read while the studio was open join the library now
+        addBrushesRead()
     }
 
     /** Draws the brush's sample stroke again, a moment after the last change. */
@@ -5859,6 +5872,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         saveNow()
+        session?.stopAutosave()
         session = null
         pourThread.shutdown()
     }
@@ -5973,6 +5987,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val CANVAS_POLL_MS = 32L
         const val CANVAS_DRAWN_LIMIT_MS = 15_000L
 
+        /** How often the open artwork's autosave is asked whether it failed. */
+        const val SAVE_FAILURE_POLL_MS = 3_000L
+
         /** How near a slider value is on a notch (and is pulled onto it), and the most a slider takes. */
         const val NOTCH_NEAR = 0.04f
 
@@ -5980,7 +5997,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val COLOR_NAME_GAP_MS = 150L
 
         /** How often an open artwork is saved when it has changed, milliseconds. */
-        const val AUTOSAVE_MS = 3000L
         const val SPEED_DISTANCE = "speed_distance"
 
         /** What an artwork dragged out of the gallery becomes (an index into [DRAG_FORMATS]), and a picture's format when one is wanted. */

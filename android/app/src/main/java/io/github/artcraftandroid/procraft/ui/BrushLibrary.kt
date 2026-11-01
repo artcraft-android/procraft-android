@@ -544,6 +544,8 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         }
     }
 
+    // while the question is up, brushes read from a file wait to join the library
+    LaunchedEffect(deleting != null) { vm.brushQuestionOpen = deleting != null }
     Alert(
         deleting,
         title = { (title, _) -> title },
