@@ -193,7 +193,8 @@ fn readers_never_panic_on_damaged_files() {
 
 /// What the heavier steps cost on a canvas of 4K's pixels (2896 square) with six painted layers,
 /// each with the GPU done: a Gaussian blur's slider dragged (a step and the frame after it), HSB
-/// likewise, the adjustments kept, an undo and a redo, a transform dragged and kept, a save. Run
+/// likewise, the adjustments kept, an undo and a redo, a transform dragged and kept, text typed, a
+/// save. Run
 /// on a device with `--ignored --nocapture` (`OP_COST_DIR` a folder to save into).
 #[test]
 #[ignore]
@@ -229,6 +230,9 @@ fn operation_cost() {
                 ms(t)
             })
             .collect();
+        if std::env::var("OP_COST_EACH").is_ok() {
+            println!("{name}: {}", each.iter().map(|v| format!("{v:.1}")).collect::<Vec<_>>().join(" "));
+        }
         each.sort_by(f64::total_cmp);
         println!("{name}: {:.1} ms a step (most {:.1})", each[n / 2], each[n - 1]);
     };
@@ -247,9 +251,33 @@ fn operation_cost() {
         s.stroke_end(vec![]);
     }
     done(&s);
-    s.adjustment_start(Adjustment::GaussianBlur);
+    // a colour poured around the top stroke and its threshold dragged, then let go (the layers
+    // left as they were for what follows)
+    if s.pour_begin(1400.0, 1500.0, 0.2, 0.4, 0.8, 0.3) {
+        done(&s);
+        steps("colour fill threshold dragged", 20, &|i| s.pour_threshold(0.3 + i as f32 * 0.02));
+        s.pour_end(false, None);
+        done(&s);
+    }
+    // Recolor's reticle dragged across the strokes (each move onto another colour measured
+    // again), then its Flood slid
+    s.recolor_start(700.0, 1150.0, 0.8, 0.3, 0.1, 0.3);
+    steps("recolor dragged", 20, &|i| s.recolor_move_to(700.0 + i as f32 * 3.0, 1150.0 + i as f32 * 20.0));
+    steps("recolor flood slid", 20, &|i| s.recolor_threshold(0.3 + i as f32 * 0.02));
+    s.recolor_end();
+    s.undo();
+    done(&s);
+    timed("Gaussian blur opened", &|| _ = s.adjustment_start(Adjustment::GaussianBlur));
+    timed("its first step", &|| s.adjustment_amount_by(0.02));
     steps("Gaussian blur slider", 20, &|_| s.adjustment_amount_by(0.02));
     timed("Gaussian blur kept", &|| _ = s.adjustment_end(true));
+    // other blurs' first steps: a filter's first use, or only the first adjustment's
+    for other in [Adjustment::MotionBlur, Adjustment::GaussianBlur, Adjustment::Noise] {
+        timed(&format!("{other:?} opened"), &|| _ = s.adjustment_start(other));
+        timed(&format!("{other:?} first step"), &|| s.adjustment_amount_by(0.1));
+        timed(&format!("{other:?} second step"), &|| s.adjustment_amount_by(0.1));
+        _ = s.adjustment_end(false);
+    }
     s.adjustment_start(Adjustment::Hsb);
     steps("HSB slider", 20, &|i| s.adjustment_hsb(0.5 + i as f32 * 0.01, 0.5, 0.5));
     timed("HSB kept", &|| _ = s.adjustment_end(true));
@@ -260,11 +288,120 @@ fn operation_cost() {
     steps("transform drag", 20, &|i| _ = s.transform_drag(800.0 + i as f32 * 5.0, 800.0 + i as f32 * 3.0));
     s.transform_release();
     timed("transform kept", &|| s.transform_end(true));
+    // one-off steps the apps call as a button is tapped
+    let current = || s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+    // a stroke across most of the canvas let go: its undo copy kept
+    steps("a long stroke ended", 6, &|i| {
+        let y = 300.0 + i as f32 * 150.0;
+        s.stroke_begin(PointerKind::Finger, vec![sample(60.0, y, 0.0)]);
+        s.stroke_add(
+            (1..40)
+                .map(|k| sample(60.0 + k as f32 * 37.0, y + (k as f32 * 0.3).sin() * 600.0, k as f64 * 8.0))
+                .collect(),
+        );
+        done(&s);
+        let t = std::time::Instant::now();
+        s.stroke_end(vec![]);
+        done(&s);
+        if std::env::var("OP_COST_EACH").is_ok() {
+            println!("  its end alone: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+        }
+    });
+    // the layer list changed: the pictures of the layers around the one worked on made again
+    let added = std::cell::Cell::new(0);
+    timed("add layer", &|| added.set(s.add_layer()));
+    timed("delete it", &|| _ = s.delete_layer(added.get()));
+    let bottom = s.layers().last().map_or(0, |l| l.id);
+    timed("bottom layer hidden", &|| _ = s.set_layer_visible(bottom, false));
+    timed("shown again", &|| _ = s.set_layer_visible(bottom, true));
+    timed("flip canvas", &|| s.flip_canvas(true));
+    timed("duplicate layer", &|| _ = s.duplicate_layer(current()));
+    timed("merge down", &|| _ = s.merge_down(current()));
+    timed("fill layer", &|| _ = s.fill_layer(current()));
+    // all of the layer put back and again
+    timed("its undo", &|| _ = s.undo());
+    timed("its redo", &|| _ = s.redo());
+    // tried again: the step undone is let go for the new one
+    timed("undone and filled again", &|| {
+        s.undo();
+        s.fill_layer(current());
+    });
+    timed("invert layer", &|| _ = s.invert_layer(current()));
+    // the filled layer, all of it painted, copied and pasted as a layer of its own
+    let copied = std::cell::RefCell::new(None);
+    timed("copy layer", &|| *copied.borrow_mut() = s.copy_layer());
+    assert!(copied.borrow().is_some());
+    timed("paste", &|| _ = copied.borrow_mut().take().and_then(|c| s.paste(c)));
+    timed("clear layer", &|| s.clear_layer());
+    // the automatic selection's threshold dragged, then let go
+    steps("select by colour dragged", 20, &|i| {
+        s.select_by_colour(800.0, 800.0, 0.1 + i as f32 * 0.02, crate::SelectionJoin::Add, true)
+    });
+    s.select_by_colour(800.0, 800.0, 0.5, crate::SelectionJoin::Add, false);
+    s.undo();
+    timed("select by colour", &|| s.select_by_colour(800.0, 800.0, 0.3, crate::SelectionJoin::Add, false));
+    timed("select invert", &|| s.select_invert());
+    timed("canvas thumbnail", &|| _ = s.canvas_thumbnail(300));
+    timed("six layer thumbnails", &|| {
+        for l in s.layers() {
+            _ = s.layer_thumbnail(l.id, 120);
+        }
+    });
+    // the brush library opened on a set: each brush's preview drawn (as Android asks for them)
+    let library = s.brush_library();
+    if let Some((set, brushes)) = library.iter().enumerate().max_by_key(|(_, b)| b.brushes.len()) {
+        let mut each: Vec<f64> = (0..brushes.brushes.len() as u32)
+            .map(|i| {
+                let t = std::time::Instant::now();
+                _ = s.brush_preview(set as u32, i, 530, 162);
+                ms(t)
+            })
+            .collect();
+        let total: f64 = each.iter().sum();
+        each.sort_by(f64::total_cmp);
+        println!(
+            "brush previews: {} in {total:.0} ms ({:.1} each, most {:.1})",
+            each.len(),
+            each[each.len() / 2],
+            each[each.len() - 1]
+        );
+    }
+    // text typed into a layer of its own, a letter at a time: each drawing into the layer as the
+    // apps make it (only where the text reaches), then the whole canvas drawn as it was before
+    crate::add_text_font(include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec());
+    let typed = |i: usize| crate::TextInfo {
+        size: 60.0,
+        x: 300.0,
+        y: 300.0,
+        ..text_info(&"Hello there, typed".chars().take(i + 1).collect::<String>())
+    };
+    if s.text_begin(None, typed(0)).is_some() {
+        timed("text's first drawing", &|| _ = s.draw_text_into_layer());
+        steps("a letter typed", 17, &|i| {
+            s.set_text(typed(i + 1));
+            s.draw_text_into_layer();
+        });
+        let c = s.info();
+        steps("a letter typed, the whole canvas drawn", 5, &|_| {
+            s.set_text(typed(17));
+            s.put_text_pixels(crate::draw_text(typed(17), c.width, c.height));
+        });
+        s.text_end(true);
+    }
     if let Ok(dir) = std::env::var("OP_COST_DIR") {
         timed("first save", &|| s.save(dir.clone()).unwrap());
         s.stroke_begin(PointerKind::Finger, vec![sample(300.0, 300.0, 0.0)]);
         s.stroke_end(vec![]);
         timed("save after a stroke", &|| s.save(dir.clone()).unwrap());
+        // opened again: read, then its canvas made (as the window does on its thread)
+        let t = std::time::Instant::now();
+        let opened = CanvasSession::open(dir.clone()).unwrap();
+        let read = ms(t);
+        // the device the app already has (its pipelines made)
+        let Some(gpu) = s.shared.lock().gpu.clone() else { return };
+        let t = std::time::Instant::now();
+        opened.use_gpu(gpu);
+        println!("opened: read {read:.1} ms, canvas made {:.1} ms", ms(t));
     }
     crate::layers::set_resident_budget(0);
 }
@@ -312,6 +449,79 @@ fn undo_with_an_adjustment_open_takes_back_its_changes_then_steps_and_it_stays_o
     assert_eq!(open(&s), Some(Adjustment::GradientMap));
     assert!(s.adjustment_end(false));
     assert_ne!(pixel(&s, 32, 32), red);
+}
+
+/// Much of the app's work in one session, each step with a frame drawn and the GPU taking every
+/// command: strokes on a few layers, every adjustment opened, changed and kept, liquify and clone,
+/// each kind of transform dragged and kept, layers merged and grouped, all undone and redone.
+#[test]
+fn much_of_the_work_in_one_session_gives_the_gpu_no_errors() {
+    use crate::Adjustment;
+    use crate::transform::{TransformHandle, TransformKind};
+    let Some(s) = session(300, 300) else { return };
+    let stroke = |y: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(20.0, y, 0.0)]);
+        s.stroke_add(
+            (1..20).map(|i| sample(20.0 + i as f32 * 13.0, y + (i as f32).sin() * 20.0, i as f64 * 8.0)).collect(),
+        );
+        s.stroke_end(vec![]);
+        pixel(&s, 150, 150);
+    };
+    s.set_brush_size(0.4);
+    s.set_color(0.9, 0.3, 0.1);
+    stroke(80.0);
+    let second = s.add_layer();
+    s.set_color(0.1, 0.4, 0.9);
+    stroke(150.0);
+    s.add_layer();
+    stroke(220.0);
+    for group in crate::adjust_menu::adjustment_groups() {
+        for adjustment in group {
+            assert!(s.adjustment_start(adjustment), "{adjustment:?}");
+            match adjustment {
+                Adjustment::Hsb => s.adjustment_hsb(0.7, 0.6, 0.4),
+                Adjustment::Liquify => {
+                    let points = (0..60).flat_map(|i| [40.0 + i as f32 * 3.0, 150.0, 1.0]).collect();
+                    s.adjustment_liquify_stroke(points, true);
+                }
+                Adjustment::Clone => {
+                    s.stroke_begin(PointerKind::Finger, vec![sample(60.0, 60.0, 0.0)]);
+                    s.stroke_add((1..10).map(|i| sample(60.0 + i as f32 * 8.0, 60.0, i as f64 * 8.0)).collect());
+                    s.stroke_end(vec![]);
+                }
+                _ => s.adjustment_amount_by(0.4),
+            }
+            pixel(&s, 150, 150);
+            assert!(s.adjustment_end(true), "{adjustment:?}");
+            pixel(&s, 150, 150);
+        }
+    }
+    for kind in [TransformKind::Freeform, TransformKind::Uniform, TransformKind::Distort, TransformKind::Warp] {
+        assert!(s.transform_begin().is_some(), "{kind:?}");
+        s.transform_set_kind(kind);
+        s.transform_grab(TransformHandle::Corner { index: 2 }, 250.0, 250.0);
+        for i in 1..8 {
+            s.transform_drag(250.0 - i as f32 * 4.0, 250.0 - i as f32 * 3.0);
+            pixel(&s, 150, 150);
+        }
+        s.transform_release();
+        s.transform_end(true);
+        pixel(&s, 150, 150);
+    }
+    assert!(s.pick_layer(second));
+    assert!(s.merge_picked());
+    pixel(&s, 150, 150);
+    let mut undone = 0;
+    while s.info().can_undo && undone < 200 {
+        s.undo();
+        undone += 1;
+        pixel(&s, 150, 150);
+    }
+    for _ in 0..undone {
+        s.redo();
+        pixel(&s, 150, 150);
+    }
+    assert!(undone > 10, "{undone}");
 }
 
 #[test]
@@ -655,6 +865,44 @@ fn nothing_is_saved_from_a_lost_graphics_device() {
 }
 
 #[test]
+fn an_artwork_opened_again_has_every_layer_as_it_was() {
+    let Some(s) = session(160, 160) else { return };
+    // a few strokes on one, nothing on another, all of a third filled
+    s.set_brush_size(0.2);
+    s.set_color(0.9, 0.2, 0.1);
+    s.stroke_begin(PointerKind::Finger, vec![sample(40.0, 50.0, 0.0)]);
+    s.stroke_add((1..8).map(|i| sample(40.0 + i as f32 * 6.0, 50.0 + i as f32 * 3.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let empty = s.add_layer();
+    let full = s.add_layer();
+    s.set_color(0.1, 0.5, 0.2);
+    assert!(s.fill_layer(full));
+    let contents = |s: &CanvasSession| -> Vec<(u64, Vec<u8>)> {
+        let _ = pixel(s, 0, 0);
+        s.layers().iter().map(|l| (l.id, s.copy_layer_contents(l.id).map(|c| c.rgba).unwrap_or_default())).collect()
+    };
+    let before = contents(&s);
+    assert!(before.iter().any(|(id, px)| *id == empty && px.iter().all(|&v| v == 0)));
+    let dir = std::env::temp_dir().join(format!("procraft-reopen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    let Some(gpu) = s.shared.lock().gpu.clone() else { return };
+    opened.use_gpu(gpu);
+    {
+        let mut st = opened.shared.lock();
+        st.window_size = (160, 160);
+        st.view = Some(View::fit((160, 160), (160, 160)));
+    }
+    let after = contents(&opened);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(before.len(), after.len());
+    for ((id, a), (_, b)) in before.iter().zip(&after) {
+        assert!(a == b, "layer {id} differs when opened again");
+    }
+}
+
+#[test]
 fn artworks_save_and_open() {
     let Some(s) = session(100, 100) else { return };
     s.set_color(0.0, 1.0, 0.0);
@@ -921,6 +1169,46 @@ fn a_selection_copied_to_a_layer_is_what_it_takes_of_the_layer() {
 }
 
 #[test]
+fn a_layer_inverts_on_the_gpu_as_on_the_cpu_and_undoes() {
+    let Some(s) = session(200, 200) else { return };
+    let id = s.layers()[0].id;
+    // a soft stroke: edges partly covered
+    let soft =
+        s.brush_library().iter().enumerate().find_map(|(i, set)| {
+            set.brushes.iter().position(|b| b.name == "Soft Airbrush").map(|j| (i as u32, j as u32))
+        });
+    if let Some((set, index)) = soft {
+        s.select_brush(set, index);
+    }
+    s.set_brush_size(0.3);
+    s.set_color(0.2, 0.6, 0.9);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 100.0, 0.0)]);
+    s.stroke_add(
+        (1..15).map(|i| sample(30.0 + i as f32 * 10.0, 100.0 + (i as f32).sin() * 30.0, i as f64 * 8.0)).collect(),
+    );
+    s.stroke_end(vec![]);
+    let layer = |s: &CanvasSession| {
+        let _ = pixel(s, 0, 0);
+        s.copy_layer_contents(id).unwrap().rgba
+    };
+    let before = layer(&s);
+    assert!(before.as_chunks::<4>().0.iter().any(|p| p[3] > 0 && p[3] < 255), "soft edges");
+    assert!(s.invert_layer(id));
+    let after = layer(&s);
+    let want: Vec<u8> = before
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, a]| [a.saturating_sub(r), a.saturating_sub(g), a.saturating_sub(b), a])
+        .collect();
+    assert!(after == want, "inverted as on the CPU");
+    s.undo();
+    assert!(layer(&s) == before);
+    s.redo();
+    assert!(layer(&s) == want);
+}
+
+#[test]
 fn the_canvas_flips_on_the_gpu_as_on_the_cpu_and_undoes() {
     let Some(s) = session(300, 300) else { return };
     s.set_brush_size(0.2);
@@ -946,9 +1234,14 @@ fn the_canvas_flips_on_the_gpu_as_on_the_cpu_and_undoes() {
             assert!(crate::clipboard::flipped(a, 300, horizontal) == *b, "{horizontal}");
         }
     }
+    let flipped = layers(&s);
     s.undo();
     s.undo();
     assert!(layers(&s) == before);
+    // redone, each flips again
+    s.redo();
+    s.redo();
+    assert!(layers(&s) == flipped);
 }
 
 #[test]
@@ -1950,6 +2243,13 @@ fn a_layers_own_actions() {
     assert!(s.fill_layer(id));
     assert_eq!(pixel(&s, 80, 80), [0, 0, 255, 255]);
     assert_eq!(s.copy_layer_contents(id).unwrap().rgba.len(), 100 * 100 * 4);
+    assert!(s.copy_layer_contents(id).unwrap().rgba.chunks(4).all(|p| p == [0, 0, 255, 255]));
+    // undone, the layer as the fill within the selection left it; redone, all of it again
+    s.undo();
+    assert_eq!(pixel(&s, 80, 80), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 30, 30), [0, 0, 255, 255]);
+    s.redo();
+    assert_eq!(pixel(&s, 80, 80), [0, 0, 255, 255]);
     // one reference layer at a time
     let other = s.add_layer();
     assert!(s.set_layer_reference(id, true));
@@ -2517,6 +2817,21 @@ fn a_moved_layer_snaps_onto_another_layers_bounds() {
     let moved = s.transform_drag(30.0 + (middle - 30.0) + 2.5, 80.0).unwrap();
     let now = (moved.corners[0] + moved.corners[2]) / 2.0;
     assert!((now - middle).abs() < 0.01, "{now} vs {middle}");
+    s.transform_end(false);
+    // snapping on before the transform begins: the same
+    s.transform_begin().unwrap();
+    s.transform_grab(TransformHandle::Move, 30.0, 80.0);
+    let moved = s.transform_drag(30.0 + (middle - 30.0) + 2.5, 80.0).unwrap();
+    let now = (moved.corners[0] + moved.corners[2]) / 2.0;
+    assert!((now - middle).abs() < 0.01, "{now} vs {middle}");
+    s.transform_end(false);
+    // and off: the box goes where it is dragged
+    s.transform_set_guides(GuideSettings { magnetics: false, snapping: false, distance: 3.0, velocity: 10.0 });
+    s.transform_begin().unwrap();
+    s.transform_grab(TransformHandle::Move, 30.0, 80.0);
+    let moved = s.transform_drag(30.0 + (middle - 30.0) + 2.5, 80.0).unwrap();
+    let now = (moved.corners[0] + moved.corners[2]) / 2.0;
+    assert!((now - middle - 2.5).abs() < 0.01, "{now} vs {middle} + 2.5");
     s.transform_end(false);
 }
 
@@ -3646,6 +3961,40 @@ fn a_dropped_colour_fills_up_to_lines_and_is_one_undo_step() {
 }
 
 #[test]
+fn a_dragged_threshold_leaves_the_layer_as_a_pour_made_at_it() {
+    let Some(s) = session(120, 120) else { return };
+    s.set_brush_size(0.6);
+    // soft-edged lines across: their edges near the seed's colour by every amount
+    for (x0, y0, dx, dy) in [(-10.0, 30.0, 5.0, 1.5), (20.0, -10.0, 1.0, 5.0), (-10.0, 100.0, 5.0, -2.5)] {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x0, y0, 0.0)]);
+        s.stroke_add((1..30).map(|i| sample(x0 + i as f32 * dx, y0 + i as f32 * dy, i as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+    }
+    let id = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
+    let layer_now = |s: &CanvasSession| {
+        let _ = pixel(s, 0, 0);
+        s.copy_layer_contents(id).map(|c| c.rgba).unwrap()
+    };
+    // the threshold dragged up and down over one pour, then each made afresh: the same layer
+    let thresholds = [0.1, 0.35, 0.2, 0.6, 0.05, 0.9, 0.45, 0.45, 1.0, 0.0];
+    assert!(s.pour_begin(70.0, 60.0, 0.9, 0.2, 0.1, 0.0));
+    let dragged: Vec<Vec<u8>> = thresholds
+        .iter()
+        .map(|&t| {
+            s.pour_threshold(t);
+            layer_now(&s)
+        })
+        .collect();
+    s.pour_end(false, None);
+    assert!(dragged.windows(2).filter(|w| w[0] != w[1]).count() >= 6);
+    for (t, layer) in thresholds.iter().zip(dragged) {
+        assert!(s.pour_begin(70.0, 60.0, 0.9, 0.2, 0.1, *t));
+        assert!(layer_now(&s) == layer, "{t}");
+        s.pour_end(false, None);
+    }
+}
+
+#[test]
 fn crop_and_resize_takes_typed_sizes_and_crops_on_done() {
     let Some(s) = session(100, 100) else { return };
     s.crop_begin();
@@ -4265,6 +4614,237 @@ fn inked(px: &[u8], w: usize) -> (usize, [usize; 4]) {
         }
     }
     (n, b)
+}
+
+#[test]
+fn text_drawn_into_its_layer_a_part_at_a_time_is_as_drawn_whole() {
+    crate::add_text_font(include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec());
+    let Some(s) = session(300, 300) else { return };
+    let layer_now = |s: &CanvasSession, id: u64| {
+        let _ = pixel(s, 0, 0);
+        s.copy_layer_contents(id).map(|c| c.rgba).unwrap_or_else(|| vec![0; 300 * 300 * 4])
+    };
+    let first = crate::TextInfo { size: 40.0, x: 20.0, y: 30.0, ..text_info("Hi") };
+    let id = s.text_begin(None, first.clone()).unwrap();
+    // typed on, moved, made larger and italic, then shorter and back up: each drawing only where
+    // the text was and is, the layer each time as the whole canvas drawn
+    let edits = [
+        crate::TextInfo { text: "Hello there".to_owned(), ..first.clone() },
+        crate::TextInfo { text: "Hello there".to_owned(), x: 60.0, y: 150.0, ..first.clone() },
+        crate::TextInfo {
+            text: "Hello there".to_owned(),
+            size: 60.0,
+            style: "Italic".to_owned(),
+            x: 10.0,
+            y: 140.0,
+            ..first.clone()
+        },
+        crate::TextInfo { text: "Hey".to_owned(), x: 200.0, y: 10.0, ..first.clone() },
+    ];
+    assert!(s.draw_text_into_layer());
+    assert!(layer_now(&s, id) == crate::draw_text(first.clone(), 300, 300));
+    for info in edits {
+        assert!(s.set_text(info.clone()));
+        assert!(s.draw_text_into_layer());
+        assert!(
+            layer_now(&s, id) == crate::draw_text(info.clone(), 300, 300),
+            "{:?} at {}, {}",
+            info.text,
+            info.x,
+            info.y
+        );
+    }
+    // a drawing begun before the text changed again is dropped; the next one draws it
+    let job = s.text_draw_start().unwrap();
+    let last = crate::TextInfo { text: "Bye".to_owned(), ..first.clone() };
+    assert!(s.set_text(last.clone()));
+    assert!(!s.text_draw_put(job.draw()));
+    assert!(s.draw_text_into_layer());
+    assert!(layer_now(&s, id) == crate::draw_text(last.clone(), 300, 300));
+    s.text_end(true);
+    assert!(s.text_draw_start().is_none());
+    // edited again later, moved far off where it was: the first drawing takes the whole layer
+    assert_eq!(s.text_begin(Some(id), last.clone()), Some(id));
+    let moved = crate::TextInfo { text: "Again".to_owned(), x: 150.0, y: 200.0, ..first.clone() };
+    assert!(s.set_text(moved.clone()));
+    assert!(s.draw_text_into_layer());
+    assert!(layer_now(&s, id) == crate::draw_text(moved, 300, 300));
+    s.text_end(true);
+}
+
+#[test]
+fn every_letter_drawn_falls_within_where_the_text_reaches() {
+    crate::add_text_font(include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec());
+    crate::add_text_font(include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Bold.ttf").to_vec());
+    let (w, h) = (700u32, 700u32);
+    let base = crate::TextInfo { size: 60.0, x: 200.0, y: 200.0, ..text_info("Wavy Æ gjpq ÅÉ ffi %@ ~") };
+    // each setting that moves ink at its widest
+    let mut cases = vec![base.clone()];
+    for style in ["Italic", "Bold Italic", "Black"] {
+        cases.push(crate::TextInfo { style: style.to_owned(), ..base.clone() });
+    }
+    for v in [-1.0f32, 1.0] {
+        cases.push(crate::TextInfo { kerning: v, ..base.clone() });
+        cases.push(crate::TextInfo { tracking: v, ..base.clone() });
+        cases.push(crate::TextInfo {
+            leading: v,
+            text: "Two
+lines gj"
+                .to_owned(),
+            ..base.clone()
+        });
+        cases.push(crate::TextInfo { baseline: v, ..base.clone() });
+    }
+    cases.push(crate::TextInfo { underline: true, outline: true, ..base.clone() });
+    cases.push(crate::TextInfo { vertical: true, text: "Tall gj".to_owned(), ..base.clone() });
+    cases.push(crate::TextInfo { width: 150.0, align: crate::TextAlignment::Right, ..base.clone() });
+    cases.push(crate::TextInfo { all_caps: true, style: "Italic".to_owned(), size: 140.0, x: 40.0, ..base.clone() });
+    for info in cases {
+        let drawn = crate::draw_text(info.clone(), w, h);
+        let Some(inked) = crate::layer_ops::painted_rect(&drawn, w) else { continue };
+        let reach = crate::text_draw::text_reach(&info);
+        assert!(inked.intersect(reach) == inked, "{info:?}: ink {inked:?} past {reach:?}");
+    }
+}
+
+#[test]
+fn memory_trimmed_mid_work_leaves_the_canvas_as_it_was_and_working() {
+    use crate::Adjustment;
+    let Some(s) = session(240, 240) else { return };
+    s.set_brush_size(0.5);
+    for i in 0..2 {
+        if i > 0 {
+            s.add_layer();
+        }
+        let y = 60.0 + i as f32 * 90.0;
+        s.stroke_begin(PointerKind::Finger, vec![sample(20.0, y, 0.0)]);
+        s.stroke_add((1..20).map(|k| sample(20.0 + k as f32 * 10.0, y + k as f32, k as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+    }
+    let composite = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render_finished(gpu, &mut st.doc);
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+        canvas.read_composite(gpu).unwrap()
+    };
+    // a blur under way (its working textures kept), a layer read back and a picture pasted (the
+    // buffers kept): let go between its steps, then the work goes on
+    s.adjustment_start(Adjustment::GaussianBlur);
+    s.adjustment_amount_by(0.05);
+    let blurred = composite(&s);
+    let copied = s.copy_layer().unwrap();
+    s.trim_memory();
+    assert!(composite(&s) == blurred);
+    s.adjustment_amount_by(0.05);
+    s.adjustment_amount_by(-0.05);
+    assert!(composite(&s) == blurred);
+    s.adjustment_end(true);
+    s.trim_memory();
+    let kept = composite(&s);
+    assert!(s.paste(copied).is_some());
+    s.undo();
+    assert!(composite(&s) == kept);
+}
+
+#[test]
+fn text_typed_keeps_the_pictures_of_the_layers_below_it() {
+    crate::add_text_font(include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec());
+    let Some(s) = session(300, 300) else { return };
+    s.set_brush_size(0.5);
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 150.0, 0.0)]);
+    s.stroke_add((1..30).map(|i| sample(20.0 + i as f32 * 9.0, 150.0 + i as f32, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    s.add_layer();
+    s.stroke_begin(PointerKind::Finger, vec![sample(150.0, 20.0, 0.0)]);
+    s.stroke_add((1..30).map(|i| sample(150.0 + i as f32, 20.0 + i as f32 * 9.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let composite = |s: &CanvasSession, cached: bool| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        if canvas.composites_cached() != cached {
+            canvas.set_cache_composites(cached);
+        }
+        canvas.render_finished(gpu, &mut st.doc);
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+        assert_eq!(canvas.composites_cached(), cached);
+        canvas.read_composite(gpu).unwrap()
+    };
+    let first = crate::TextInfo { size: 50.0, x: 30.0, y: 100.0, ..text_info("Hi") };
+    s.text_begin(None, first.clone()).unwrap();
+    assert!(s.draw_text_into_layer());
+    composite(&s, true);
+    // each letter put into the text layer leaves the picture of those below it as it was, and
+    // the canvas shows as it would composited whole
+    for (i, text) in ["Hi t", "Hi the", "Hi there", "Hey"].into_iter().enumerate() {
+        assert!(s.set_text(crate::TextInfo { text: text.to_owned(), y: 100.0 + i as f32 * 20.0, ..first.clone() }));
+        assert!(s.draw_text_into_layer());
+        assert!(s.shared.lock().canvas.as_ref().unwrap().composites_cached(), "{text}");
+        let cached = composite(&s, true);
+        assert!(cached == composite(&s, false), "{text}");
+        composite(&s, true);
+    }
+    s.text_end(true);
+}
+
+#[test]
+fn pictures_of_the_layers_made_again_in_kept_textures_show_what_changed() {
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.5);
+    let bottom = s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+    for i in 0..3 {
+        if i > 0 {
+            s.add_layer();
+        }
+        let y = 40.0 + i as f32 * 60.0;
+        s.stroke_begin(PointerKind::Finger, vec![sample(10.0, y, 0.0)]);
+        s.stroke_add((1..20).map(|k| sample(10.0 + k as f32 * 10.0, y + k as f32, k as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+    }
+    let composite = |s: &CanvasSession, cached: bool| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        if canvas.composites_cached() != cached {
+            canvas.set_cache_composites(cached);
+        }
+        canvas.render_finished(gpu, &mut st.doc);
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+        assert_eq!(canvas.composites_cached(), cached);
+        canvas.read_composite(gpu).unwrap()
+    };
+    let first = composite(&s, true);
+    assert!(first == composite(&s, false));
+    composite(&s, true);
+    // the bottom layer's pixels sent again (as an artwork's are), nothing about it in the layer
+    // list changed: the caches made again over it show them
+    {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        let red = [200u8, 0, 0, 255].repeat(200 * 200);
+        canvas.upload_layer(gpu, procraft_engine::document::LayerId(bottom), &red).unwrap();
+    }
+    let cached = composite(&s, true);
+    assert!(cached != first);
+    assert!(cached == composite(&s, false));
+    composite(&s, true);
+    // and as the layer list changes, each time as composited whole
+    let added = std::cell::Cell::new(0);
+    let changes: [(&str, &dyn Fn()); 4] = [
+        ("hidden", &|| _ = s.set_layer_visible(bottom, false)),
+        ("shown", &|| _ = s.set_layer_visible(bottom, true)),
+        ("added", &|| added.set(s.add_layer())),
+        ("deleted", &|| _ = s.delete_layer(added.get())),
+    ];
+    for (what, change) in changes {
+        change();
+        let cached = composite(&s, true);
+        assert!(cached == composite(&s, false), "{what}");
+        composite(&s, true);
+    }
 }
 
 #[test]

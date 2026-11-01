@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 pub use canvas::{
     Backdrop, Canvas, DisplayLut, Filter, LiquifyMode, LiquifyStamp, Readback, ReadyToPark, RemakeStats, Resample,
     SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail,
-    read_texture, start_reading, textures_bytes,
+    most_resident, read_texture, start_reading, textures_bytes,
 };
 pub use lighting::Lighting;
 pub use scene::{GrainLook, Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, SurfaceMap, material_source};
@@ -48,6 +48,9 @@ pub struct Gpu {
     lost: Arc<AtomicBool>,
     /// The canvases' pipelines, once the first canvas has made them.
     canvas_pipelines: Arc<OnceLock<Arc<canvas::Pipelines>>>,
+    /// Buffers pixels came back from the GPU through, kept for the next readback (see
+    /// [`Gpu::readback_buffer`]).
+    readbacks: Arc<std::sync::Mutex<Vec<wgpu::Buffer>>>,
 }
 
 impl Gpu {
@@ -118,7 +121,39 @@ impl Gpu {
             flag.store(true, Ordering::Relaxed);
             log::error!("GPU lost ({reason:?}): {message}");
         });
-        Ok(Gpu { instance, adapter, device, queue, errors, lost, canvas_pipelines: Arc::default() })
+        Ok(Gpu {
+            instance,
+            adapter,
+            device,
+            queue,
+            errors,
+            lost,
+            canvas_pipelines: Arc::default(),
+            readbacks: Arc::default(),
+        })
+    }
+
+    /// A buffer of `size` bytes or more to read pixels back through: one kept from an earlier
+    /// readback, or a new one. Making one the size of a layer each time took twice the read
+    /// itself on a tablet.
+    pub(crate) fn readback_buffer(&self, size: u64) -> wgpu::Buffer {
+        let mut kept = self.readbacks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let best =
+            kept.iter().enumerate().filter(|(_, b)| b.size() >= size).min_by_key(|(_, b)| b.size()).map(|(i, _)| i);
+        if let Some(i) = best {
+            return kept.swap_remove(i);
+        }
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Lets go of the readback buffers kept for next time (see [`Gpu::readback_buffer`]).
+    pub fn let_go_of_kept_buffers(&self) {
+        self.readbacks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     }
 
     /// Whether the device has been lost: nothing it held can be read back.

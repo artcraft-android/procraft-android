@@ -129,7 +129,7 @@ pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
     source_from_picture, source_library, source_size,
 };
-pub use text::{TextAlignment, TextInfo};
+pub use text::{TextAlignment, TextDraw, TextDrawn, TextInfo};
 pub use text_draw::{
     TextPicture, TextTypeface, add_system_text_fonts, add_text_font, add_text_font_file, draw_chosen_text, draw_text,
     import_text_font, set_text_family_alias, set_text_font_folder, text_box, text_caret, text_families,
@@ -357,6 +357,9 @@ pub(crate) struct State {
     crop_redo: Option<(Canvas, Document, u64)>,
     /// The text layer being edited, and the document as the edit began.
     text_edit: Option<(procraft_engine::document::LayerId, Document)>,
+    /// Where the edit last drew its text into the layer (none: not yet, on a layer already there,
+    /// so the next draw takes the whole layer).
+    text_drawn: Option<procraft_engine::geom::IRect>,
     /// The steps finished text edits made (by [`Canvas::undo_step`]'s numbering) and their layers:
     /// undo and redo of one go back to editing that text.
     pub(crate) text_steps: Vec<(u64, procraft_engine::document::LayerId)>,
@@ -442,6 +445,9 @@ pub(crate) struct State {
     transform_mode: procraft_engine::transform::TransformMode,
     interpolation: transform::Interpolation,
     transform_guides: transform::GuideSettings,
+    /// An open transform's layers, while what its box snaps onto (the other layers' bounds) isn't
+    /// found yet: snapping was off as it began; found when snapping comes on.
+    snap_pending: Option<Vec<procraft_engine::document::LayerId>>,
     /// What is selected, if anything, and selections kept to load again.
     selection: Option<procraft_engine::selection::Mask>,
     saved_selections: Vec<procraft_engine::selection::Mask>,
@@ -839,26 +845,30 @@ impl Shared {
         let started = std::time::Instant::now();
         /// A layer read, for the GPU or (past what fits) to keep compressed.
         enum Read {
-            /// With its compressed copy, when layers are paged.
-            Upload(Vec<u8>, Option<procraft_gpu::ReadyToPark>),
+            /// Where it is painted (only that is sent), with its compressed copy when layers may
+            /// soon be paged.
+            Upload(Vec<u8>, Option<procraft_engine::geom::IRect>, Option<procraft_gpu::ReadyToPark>),
             Park(procraft_gpu::ReadyToPark),
         }
-        let made = Canvas::new(&gpu, &doc).map(|mut c| {
+        let made: Result<Canvas, procraft_gpu::GpuError> = {
             let budget = crate::layers::resident_budget();
-            c.set_resident_budget(budget);
             let (w, h) = (doc.width(), doc.height());
             // read on a few threads (each file decoded and its compressed copy made: those below
             // the top layers that fit are parked, those that fit keep it, so letting them go
             // later needs no reading back), put on the canvas here in order
-            let first_resident = ids.len().saturating_sub(c.most_resident());
+            let first_resident = ids.len().saturating_sub(procraft_gpu::most_resident(budget, w, h));
             // the copies of layers that go up take an eighth of the textures' budget at most, and
             // only those that pack to a quarter or less are kept
             let copy_room = budget / 8;
             let mut copies = 0u64;
+            // and only when the layers take half the textures' budget or more: far under it,
+            // none is likely to be let go (one that is is read back then)
+            let layers_bytes = ids.len() as u64 * u64::from(w) * u64::from(h) * 4;
+            let copying = budget > 0 && layers_bytes.saturating_mul(2) >= budget;
             let workers = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 6);
             let next = std::sync::atomic::AtomicUsize::new(0);
-            let (send, receive) = std::sync::mpsc::sync_channel(workers);
             std::thread::scope(|scope| {
+                let (send, receive) = std::sync::mpsc::sync_channel(workers);
                 for _ in 0..workers {
                     let (send, next, ids) = (send.clone(), &next, &ids);
                     scope.spawn(move || {
@@ -872,8 +882,9 @@ impl Shared {
                                 l.pixels(w, h).map(|px| {
                                     let hash = project::pixels_hash(&px);
                                     if i >= first_resident {
-                                        let copy = (budget > 0).then(|| procraft_gpu::ReadyToPark::of(&px, w, h));
-                                        (Read::Upload(px, copy), hash)
+                                        let copy = copying.then(|| procraft_gpu::ReadyToPark::of(&px, w, h));
+                                        let painted = crate::layer_ops::painted_rect(&px, w);
+                                        (Read::Upload(px, painted, copy), hash)
                                     } else {
                                         (Read::Park(procraft_gpu::ReadyToPark::of(&px, w, h)), hash)
                                     }
@@ -886,6 +897,10 @@ impl Shared {
                     });
                 }
                 drop(send);
+                // the canvas made while the first layers are read (its textures take a while); if
+                // it can't be, the readers stop at their next layer, nothing taking what they read
+                let mut c = Canvas::new(&gpu, &doc)?;
+                c.set_resident_budget(budget);
                 let mut waiting = std::collections::BTreeMap::new();
                 let mut at = 0;
                 for (i, read) in receive {
@@ -900,14 +915,14 @@ impl Shared {
                                     saved.read(*id, hash);
                                 }
                                 let opened = match layer {
-                                    Read::Upload(px, Some(copy))
+                                    Read::Upload(px, painted, Some(copy))
                                         if copy.bytes() * 4 <= px.len()
                                             && copies + copy.bytes() as u64 <= copy_room =>
                                     {
                                         copies += copy.bytes() as u64;
-                                        c.upload_layer_kept(&gpu, *id, &px, copy)
+                                        c.upload_layer_kept(&gpu, *id, &px, copy, painted)
                                     }
-                                    Read::Upload(px, _) => c.upload_layer(&gpu, *id, &px),
+                                    Read::Upload(px, painted, _) => c.upload_layer_painted(&gpu, *id, &px, painted),
                                     Read::Park(ready) => {
                                         c.park_ready(*id, ready);
                                         Ok(())
@@ -921,18 +936,18 @@ impl Shared {
                         }
                     }
                 }
-            });
-            // as read: not changed
-            c.take_changed();
-            log::info!(
-                "canvas made in {} ms: {} layers, {} kept compressed, {} KB of copies of the rest",
-                started.elapsed().as_millis(),
-                ids.len(),
-                c.parked_layers(),
-                copies / 1024
-            );
-            c
-        });
+                // as read: not changed
+                c.take_changed();
+                log::info!(
+                    "canvas made in {} ms: {} layers, {} kept compressed, {} KB of copies of the rest",
+                    started.elapsed().as_millis(),
+                    ids.len(),
+                    c.parked_layers(),
+                    copies / 1024
+                );
+                Ok(c)
+            })
+        };
         let mut st = self.lock();
         if st.canvas.is_some() {
             return;
@@ -994,6 +1009,7 @@ impl CanvasSession {
             reconfigure: false,
             tool: ToolKind::Paint,
             text_edit: None,
+            text_drawn: None,
             text_steps: Vec::new(),
             pour: None,
             recolor: None,
@@ -1045,6 +1061,7 @@ impl CanvasSession {
             transform_mode: procraft_engine::transform::TransformMode::Freeform,
             interpolation: transform::Interpolation::Bilinear,
             transform_guides: transform::GuideSettings::default(),
+            snap_pending: None,
             selection: None,
             saved_selections: Vec::new(),
             selection_display: selection::SelectionDisplay::Stripes,

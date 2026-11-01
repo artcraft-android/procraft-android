@@ -68,8 +68,7 @@ pub(crate) fn mask_rect(mask: &Mask) -> Option<IRect> {
 }
 
 /// The rectangle around the pixels of a picture `width` wide (RGBA) that aren't clear; none when
-/// all are (as the GPU's [`procraft_gpu::Canvas::painted_boxes`] should find it).
-#[cfg(test)]
+/// all are (as the GPU's [`procraft_gpu::Canvas::painted_boxes`] finds a layer's).
 pub(crate) fn painted_rect(pixels: &[u8], width: u32) -> Option<IRect> {
     let row_len = width as usize * 4;
     if row_len == 0 {
@@ -145,6 +144,15 @@ impl CanvasSession {
         let Some(rect) = selected.zip(painted).map(|(a, b)| a.intersect(b)).filter(|r| !r.is_empty()) else {
             return false;
         };
+        // nothing selected and the alpha not locked: the colour everywhere, on the GPU (nothing
+        // read back or sent)
+        if mask.is_none() && !layer.alpha_lock {
+            let Some(canvas) = st.canvas.as_mut() else { return false };
+            canvas.fill_layer(id, [r, g, b].map(|c| c as u8));
+            st.revision += 1;
+            self.shared.frame(st);
+            return true;
+        }
         let Some(mut pixels) = st.layer_part(id, rect) else { return false };
         let taken = mask.as_ref().map(|m| mask_part(m, rect));
         for (i, px) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
@@ -170,16 +178,11 @@ impl CanvasSession {
         if st.doc.layer(id).is_none_or(|l| l.locked || l.text.is_some()) {
             return false;
         }
-        // only what is painted changes: only that is read back
+        // only what is painted changes, inverted on the GPU (nothing read back)
         let Some(rect) = st.painted_box(id) else { return false };
-        let Some(mut pixels) = st.layer_part(id, rect) else { return false };
-        for px in pixels.as_chunks_mut::<4>().0 {
-            let a = px[3];
-            for c in px.iter_mut().take(3) {
-                *c = a.saturating_sub(*c);
-            }
-        }
-        st.rewrite_layer(id, rect, pixels);
+        let Some(canvas) = st.canvas.as_mut() else { return false };
+        canvas.invert_layer(id, rect);
+        st.revision += 1;
         self.shared.frame(st);
         true
     }

@@ -529,6 +529,46 @@ fn glyph_image(
     Some((image, physical.x, physical.y))
 }
 
+/// Where `info`'s letters may reach on the canvas: its laid-out box and each letter where it
+/// lands (tight kerning or tracking can take letters out of the box), with a letter's height
+/// around them (slanted and overhanging letters, the underline, an outline).
+pub(crate) fn text_reach(info: &TextInfo) -> procraft_engine::geom::IRect {
+    let laid = lay_out(&mut fonts(), info);
+    let (left, top) = (info.x, info.y - info.baseline * info.size);
+    let margin = info.size.abs() + 4.0;
+    let n = |v: f32| if v.is_finite() { v.clamp(-1e9, 1e9) as i32 } else { 0 };
+    let around = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        procraft_engine::geom::IRect::new(
+            n((x0 - margin).floor()),
+            n((y0 - margin).floor()),
+            n((x1 + margin).ceil()),
+            n((y1 + margin).ceil()),
+        )
+    };
+    let mut reach = around(left, top, left + laid.width, top + laid.height);
+    for line in &laid.lines {
+        let baseline = top + line.baseline;
+        for glyph in &line.glyphs {
+            let at = glyph.physical((left, baseline), 1.0);
+            let (x, y) = (at.x as f32, at.y as f32);
+            reach = reach.union(around(x, y - laid.ascent, x + glyph.w.max(0.0), y + laid.descent));
+        }
+    }
+    reach
+}
+
+/// The text drawn over transparency within `region` of the canvas: that region's pixels only,
+/// premultiplied RGBA8.
+pub(crate) fn draw_text_within(info: &TextInfo, region: procraft_engine::geom::IRect) -> Vec<u8> {
+    let mut out = Picture::new(region.width(), region.height());
+    let mut guard = fonts();
+    let f = &mut *guard;
+    let laid = lay_out(f, info);
+    let (left, top) = (info.x - region.x0 as f32, info.y - info.baseline * info.size - region.y0 as f32);
+    letters(f, &laid, info, &mut out, (left, top), |_, _| true);
+    out.rgba
+}
+
 /// The text drawn over transparency on a picture `width` × `height`, as the canvas is:
 /// premultiplied RGBA8.
 #[uniffi::export]

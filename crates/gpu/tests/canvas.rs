@@ -76,6 +76,87 @@ fn paint_undo_redo() {
 }
 
 #[test]
+fn steps_run_together_over_one_another_undo_and_redo_whole() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(96, 96);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let layer = doc.current();
+    let stroke = |canvas: &mut Canvas, colour: [f32; 3], at: Vec2, radius: f32| {
+        canvas.begin_stroke(layer, StrokeStyle::new(StrokeTool::Paint, colour, 1.0));
+        canvas.add_stamps(&[dot(at, radius)]);
+        canvas.end_stroke();
+    };
+    stroke(&mut canvas, [0.2, 0.2, 0.9], Vec2::new(30.0, 30.0), 20.0);
+    canvas.render(&gpu, &mut doc, None);
+    let before = canvas.read_layer(&gpu, layer).unwrap();
+    // three strokes, each over the last, made one step
+    canvas.mark_steps();
+    stroke(&mut canvas, [0.9, 0.1, 0.1], Vec2::new(40.0, 40.0), 22.0);
+    stroke(&mut canvas, [0.1, 0.8, 0.2], Vec2::new(50.0, 45.0), 18.0);
+    stroke(&mut canvas, [0.9, 0.9, 0.1], Vec2::new(45.0, 55.0), 25.0);
+    canvas.collapse_steps();
+    canvas.render(&gpu, &mut doc, None);
+    let after = canvas.read_layer(&gpu, layer).unwrap();
+    assert!(after != before);
+    // undone and redone twice: each time all three or none, every pixel as it was
+    for _ in 0..2 {
+        canvas.undo();
+        canvas.render(&gpu, &mut doc, None);
+        assert!(canvas.read_layer(&gpu, layer).unwrap() == before, "undone");
+        canvas.redo();
+        canvas.render(&gpu, &mut doc, None);
+        assert!(canvas.read_layer(&gpu, layer).unwrap() == after, "redone");
+    }
+    // and the first stroke undone after them
+    canvas.undo();
+    canvas.undo();
+    canvas.render(&gpu, &mut doc, None);
+    assert!(canvas.read_layer(&gpu, layer).unwrap().iter().all(|&v| v == 0));
+}
+
+#[test]
+fn a_whole_layer_kept_in_a_step_let_go_undoes_as_it_should() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(80, 80);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let layer = doc.current();
+    let stroke = |canvas: &mut Canvas, colour: [f32; 3], at: Vec2| {
+        canvas.begin_stroke(layer, StrokeStyle::new(StrokeTool::Paint, colour, 1.0));
+        canvas.add_stamps(&[dot(at, 15.0)]);
+        canvas.end_stroke();
+    };
+    stroke(&mut canvas, [0.9, 0.1, 0.1], Vec2::new(25.0, 25.0));
+    canvas.render(&gpu, &mut doc, None);
+    let red = canvas.read_layer(&gpu, layer).unwrap();
+    // cleared and undone: the redo keeps the whole layer
+    canvas.clear_layer(layer);
+    canvas.undo();
+    canvas.render(&gpu, &mut doc, None);
+    assert!(canvas.read_layer(&gpu, layer).unwrap() == red);
+    // another stroke drops that redo; cleared again, the whole layer kept in its texture
+    stroke(&mut canvas, [0.1, 0.2, 0.9], Vec2::new(55.0, 50.0));
+    canvas.render(&gpu, &mut doc, None);
+    let both = canvas.read_layer(&gpu, layer).unwrap();
+    canvas.clear_layer(layer);
+    canvas.render(&gpu, &mut doc, None);
+    assert!(canvas.read_layer(&gpu, layer).unwrap().iter().all(|&v| v == 0));
+    for _ in 0..2 {
+        canvas.undo();
+        canvas.render(&gpu, &mut doc, None);
+        assert!(canvas.read_layer(&gpu, layer).unwrap() == both, "undone");
+        canvas.redo();
+        canvas.render(&gpu, &mut doc, None);
+        assert!(canvas.read_layer(&gpu, layer).unwrap().iter().all(|&v| v == 0), "redone");
+    }
+    canvas.undo();
+    canvas.undo();
+    canvas.render(&gpu, &mut doc, None);
+    assert!(canvas.read_layer(&gpu, layer).unwrap() == red);
+}
+
+#[test]
 fn stroke_opacity_caps_build_up() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
@@ -726,6 +807,65 @@ fn adjustments_redraw_the_layer_and_keep_to_the_selection() {
     canvas.set_filter(procraft_gpu::Filter::Blur { sigma: 60.0 });
     canvas.end_transform(true);
     canvas.render(&gpu, &mut doc, None);
+}
+
+#[test]
+fn a_narrow_blur_is_a_gaussian_of_every_pixel_either_side() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let (w, h) = (48u32, 40u32);
+    let mut doc = Document::new(w, h);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let layer = doc.current();
+    // noise, premultiplied: every pixel unlike its neighbours
+    let mut seed = 7u32;
+    let mut next = || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (seed >> 24) as u8
+    };
+    let picture: Vec<u8> = (0..w * h)
+        .flat_map(|_| {
+            let a = next();
+            let c = [next(), next(), next()].map(|v| (u16::from(v) * u16::from(a) / 255) as u8);
+            [c[0], c[1], c[2], a]
+        })
+        .collect();
+    canvas.upload_layer(&gpu, layer, &picture).unwrap();
+    // each pass a Gaussian out to three sigmas either side, the edges held, kept to 8 bits between
+    let pass = |src: &[u8], across: bool, sigma: f32| -> Vec<u8> {
+        let reach = (sigma * 3.0).ceil().min(64.0) as i32;
+        let weights: Vec<f32> = (-reach..=reach).map(|k| (-((k * k) as f32) / (2.0 * sigma * sigma)).exp()).collect();
+        let total: f32 = weights.iter().sum();
+        let mut out = vec![0u8; src.len()];
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                for c in 0..4 {
+                    let mut sum = 0.0;
+                    for (k, wt) in (-reach..=reach).zip(&weights) {
+                        let (sx, sy) = if across {
+                            ((x + k).clamp(0, w as i32 - 1), y)
+                        } else {
+                            (x, (y + k).clamp(0, h as i32 - 1))
+                        };
+                        sum += f32::from(src[((sy * w as i32 + sx) * 4 + c) as usize]) * wt;
+                    }
+                    out[((y * w as i32 + x) * 4 + c) as usize] = (sum / total).round() as u8;
+                }
+            }
+        }
+        out
+    };
+    for sigma in [0.7, 2.5, 6.0, 7.9] {
+        canvas.begin_transform(layer);
+        canvas.set_filter(procraft_gpu::Filter::Blur { sigma });
+        canvas.render(&gpu, &mut doc, None);
+        let blurred = canvas.read_layer(&gpu, layer).unwrap();
+        let expected = pass(&pass(&picture, true, sigma), false, sigma);
+        let most = blurred.iter().zip(&expected).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+        assert!(most <= 2, "sigma {sigma}: off by {most}");
+        canvas.end_transform(false);
+        canvas.render(&gpu, &mut doc, None);
+    }
 }
 
 #[test]

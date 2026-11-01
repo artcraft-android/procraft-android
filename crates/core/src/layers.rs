@@ -236,6 +236,20 @@ pub fn grain_blend_modes() -> Vec<BlendModeInfo> {
 
 #[uniffi::export]
 impl CanvasSession {
+    /// Lets go of the GPU memory kept only to make later work quicker (spare textures, upload and
+    /// readback buffers): for when the system is short of memory or the app is put away. Nothing
+    /// shown changes; what is let go is made again when next wanted.
+    pub fn trim_memory(&self) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        if let Some(canvas) = st.canvas.as_mut() {
+            canvas.let_go_of_spares();
+        }
+        if let Some(gpu) = st.gpu.as_ref() {
+            gpu.let_go_of_kept_buffers();
+        }
+    }
+
     /// The visible paint layers with something drawn under window point (`x`, `y`), top first.
     pub fn layers_at(&self, x: f32, y: f32) -> Vec<u64> {
         let mut guard = self.shared.lock();

@@ -33,8 +33,10 @@ pub(crate) struct Pour {
 impl Pour {
     /// The colour poured at `threshold`, as the rectangle of the layer it changes now joined with
     /// the one it changed last (put back as it was where it no longer pours): that rectangle (x, y,
-    /// width, height) and its pixels; none if neither changes anything. Remembered as shown.
-    fn pour_region(&mut self, width: u32, threshold: f32) -> Option<([u32; 4], Vec<u8>)> {
+    /// width, height) and its pixels; none if neither changes anything. With `same_flood` (only
+    /// the threshold changed since it was shown) only the rectangle where what it pours changed.
+    /// Remembered as shown.
+    fn pour_region(&mut self, width: u32, threshold: f32, same_flood: bool) -> Option<([u32; 4], Vec<u8>)> {
         let mask = self.flood.as_ref().map(|flood| {
             let mut mask = flood.mask(threshold);
             if let Some(sel) = &self.selection {
@@ -45,9 +47,21 @@ impl Pour {
             mask
         });
         let now = mask.as_ref().and_then(Mask::bounds);
-        let region = match (now, self.shown_region) {
-            (Some(a), Some(b)) => join(a, b),
-            (a, b) => a.or(b)?,
+        // the same colour poured from the same seed colour: the pixels change only where the
+        // flood reaches differently (a threshold dragged over a large fill changes its edges)
+        let changed = match (&mask, &self.shown_mask) {
+            (Some(m), Some(old)) if same_flood && m.data.len() == old.data.len() => Some(differ(m, old)),
+            _ => None,
+        };
+        let region = match (changed, now, self.shown_region) {
+            (Some(Some(r)), ..) => r,
+            (Some(None), ..) => {
+                self.shown_region = now;
+                self.shown_mask = mask;
+                return None;
+            }
+            (None, Some(a), Some(b)) => join(a, b),
+            (None, a, b) => a.or(b)?,
         };
         self.shown_region = now;
         let [x, y, w, h] = region.map(|v| v as usize);
@@ -100,13 +114,36 @@ impl Pour {
         false
     }
 
-    /// The pour as it now is, put on its layer in `canvas` where it changed.
-    fn show(&mut self, width: u32, canvas: Option<&mut procraft_gpu::Canvas>) {
-        let Some(([x, y, w, h], pixels)) = self.pour_region(width, self.shown as f32 / 1000.0) else { return };
+    /// The pour as it now is, put on its layer in `canvas` where it changed (`same_flood`: only
+    /// its threshold changed since it was last shown).
+    fn show(&mut self, width: u32, canvas: Option<&mut procraft_gpu::Canvas>, same_flood: bool) {
+        let threshold = self.shown as f32 / 1000.0;
+        let Some(([x, y, w, h], pixels)) = self.pour_region(width, threshold, same_flood) else { return };
         if let Some(canvas) = canvas {
             canvas.put_layer_region(self.layer, x, y, w, h, pixels);
         }
     }
+}
+
+/// The smallest rectangle (x, y, width, height) holding every pixel where masks `a` and `b` (of
+/// the same size) differ; none where they don't.
+fn differ(a: &Mask, b: &Mask) -> Option<[u32; 4]> {
+    let w = (a.width as usize).max(1);
+    let (mut top, mut bottom, mut left, mut right) = (None, 0, usize::MAX, 0);
+    for (y, (p, q)) in a.data.chunks(w).zip(b.data.chunks(w)).enumerate() {
+        if p == q {
+            continue;
+        }
+        let Some(first) = p.iter().zip(q).position(|(u, v)| u != v) else { continue };
+        let last = p.iter().zip(q).rposition(|(u, v)| u != v).unwrap_or(first);
+        top.get_or_insert(y);
+        bottom = y;
+        left = left.min(first);
+        right = right.max(last);
+    }
+    let top = top?;
+    let n = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+    Some([n(left), n(top), n(right - left + 1), n(bottom - top + 1)])
 }
 
 /// The smallest rectangle (x, y, width, height) holding both `a` and `b`.
@@ -171,7 +208,7 @@ impl CanvasSession {
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.hold_layer(current);
         }
-        pour.show(w, st.canvas.as_mut());
+        pour.show(w, st.canvas.as_mut(), false);
         st.pour = Some(pour);
         self.shared.frame(st);
         true
@@ -194,7 +231,7 @@ impl CanvasSession {
         };
         // moved within what it filled, from the same colour: nothing changes
         if !same {
-            pour.show(w, st.canvas.as_mut());
+            pour.show(w, st.canvas.as_mut(), false);
             self.shared.frame(st);
         }
         true
@@ -211,7 +248,7 @@ impl CanvasSession {
         }
         pour.colour = colour;
         let w = st.doc.width();
-        pour.show(w, st.canvas.as_mut());
+        pour.show(w, st.canvas.as_mut(), false);
         self.shared.frame(st);
     }
 
@@ -226,7 +263,7 @@ impl CanvasSession {
         }
         pour.shown = t;
         let w = st.doc.width();
-        pour.show(w, st.canvas.as_mut());
+        pour.show(w, st.canvas.as_mut(), true);
         self.shared.frame(st);
     }
 

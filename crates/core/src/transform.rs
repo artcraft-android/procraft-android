@@ -168,9 +168,34 @@ fn shown(doc: &Document, l: &Layer) -> bool {
 /// How many other layers a moved box snaps onto at most (each is read back once, at the start).
 const MAX_SNAP_LAYERS: usize = 16;
 
+/// The bounds (left, top, width, height) of the layers shown besides `targets`, nearest the top
+/// first, for a moved box to snap onto: found on the GPU, every one of them read.
+fn snap_bounds(
+    doc: &Document,
+    canvas: &procraft_gpu::Canvas,
+    gpu: &procraft_gpu::Gpu,
+    targets: &[LayerId],
+) -> Vec<[f32; 4]> {
+    let others: Vec<_> = doc
+        .layers()
+        .iter()
+        .rev()
+        .filter(|l| !targets.contains(&l.id) && l.kind == LayerKind::Paint && shown(doc, l))
+        .take(MAX_SNAP_LAYERS)
+        .map(|l| l.id)
+        .collect();
+    canvas
+        .painted_boxes(gpu, &others)
+        .into_iter()
+        .flatten()
+        .map(|r| [r.x0 as f32, r.y0 as f32, r.width() as f32, r.height() as f32])
+        .collect()
+}
+
 impl State {
     /// Ends an open transform: `commit` keeps it as one undo step, otherwise the layer is put back.
     pub(crate) fn end_transform(&mut self, commit: bool) {
+        self.snap_pending = None;
         let within = if commit && self.transform.is_some() { self.changed_since_begin() } else { None };
         if self.transform.take().is_some()
             && let Some(canvas) = self.canvas.as_mut()
@@ -324,22 +349,11 @@ impl CanvasSession {
         let ([x, y, w, h], hull) = content_shape(&pixels, area.width())?;
         let corner = Vec2::new(area.x0 as f32, area.y0 as f32);
         let (x, y, hull) = (x + corner.x, y + corner.y, hull.into_iter().map(|p| p + corner).collect());
-        // the other layers shown, nearest the top first, are snapped onto by their bounds
-        let others: Vec<_> = st
-            .doc
-            .layers()
-            .iter()
-            .rev()
-            .filter(|l| !targets.contains(&l.id) && l.kind == LayerKind::Paint && shown(&st.doc, l))
-            .take(MAX_SNAP_LAYERS)
-            .map(|l| l.id)
-            .collect();
-        let bounds: Vec<[f32; 4]> = canvas
-            .painted_boxes(gpu, &others)
-            .into_iter()
-            .flatten()
-            .map(|r| [r.x0 as f32, r.y0 as f32, r.width() as f32, r.height() as f32])
-            .collect();
+        // the other layers shown are snapped onto by their bounds: found now with snapping on,
+        // else when it comes on (each layer read on the GPU, most transforms needn't)
+        let bounds =
+            if st.transform_guides.snapping { snap_bounds(&st.doc, canvas, gpu, &targets) } else { Vec::new() };
+        st.snap_pending = (!st.transform_guides.snapping).then(|| targets.clone());
         canvas.begin_transform_layers(&targets);
         let mut t = Transform::new(x, y, w, h, hull);
         t.set_snap_targets(&bounds);
@@ -461,7 +475,20 @@ impl CanvasSession {
 
     /// Magnetics and snapping from now on.
     pub fn transform_set_guides(&self, guides: GuideSettings) {
-        self.shared.lock().transform_guides = guides;
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.transform_guides = guides;
+        // snapping on during a transform: what its box snaps onto found now
+        if guides.snapping
+            && st.transform.is_some()
+            && let Some(targets) = st.snap_pending.take()
+            && let (Some(canvas), Some(gpu)) = (st.canvas.as_ref(), st.gpu.as_ref())
+        {
+            let bounds = snap_bounds(&st.doc, canvas, gpu, &targets);
+            if let Some(t) = st.transform.as_mut() {
+                t.set_snap_targets(&bounds);
+            }
+        }
     }
 
     /// How the handles act from now on; a warp lays its mesh over the content. Returns the box.

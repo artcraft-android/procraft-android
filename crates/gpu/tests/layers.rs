@@ -877,7 +877,9 @@ fn layers_uploaded_with_their_copies_are_let_go_without_reading_them_back() {
     t.canvases[0].set_resident_budget(3 * u64::from(W * W * 4));
     for (id, px) in ids.iter().zip(&pixels) {
         let ready = procraft_gpu::ReadyToPark::of(px, W, W);
-        t.canvases[0].upload_layer_kept(&gpu, *id, px, ready).unwrap();
+        t.canvases[0]
+            .upload_layer_kept(&gpu, *id, px, ready, Some(procraft_engine::geom::IRect::from_size(W, W)))
+            .unwrap();
         t.canvases[1].upload_layer(&gpu, *id, px).unwrap();
     }
     // one render lets all but what fits go: nothing to read back first
@@ -917,7 +919,9 @@ fn a_remake_lets_go_only_what_its_parts_need_room_for() {
     t.canvases[0].set_resident_budget(30 * u64::from(W * W * 4));
     for (id, px) in ids.iter().zip(&pixels) {
         let ready = procraft_gpu::ReadyToPark::of(px, W, W);
-        t.canvases[0].upload_layer_kept(&gpu, *id, px, ready).unwrap();
+        t.canvases[0]
+            .upload_layer_kept(&gpu, *id, px, ready, Some(procraft_engine::geom::IRect::from_size(W, W)))
+            .unwrap();
         t.canvases[1].upload_layer(&gpu, *id, px).unwrap();
     }
     t.same(&gpu, 2, "opened");

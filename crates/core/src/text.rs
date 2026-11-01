@@ -3,6 +3,7 @@
 //! An edit is one undo step, back to the text and the pixels as it began.
 
 use procraft_engine::document::{LayerId, LayerText, TextAlign};
+use procraft_engine::geom::IRect;
 
 use crate::CanvasSession;
 
@@ -133,6 +134,8 @@ impl CanvasSession {
             canvas.hold_layer(layer);
         }
         st.text_edit = Some((layer, before));
+        // a new layer is clear: its first drawing needn't wipe the rest of it
+        st.text_drawn = id.is_none().then_some(IRect::EMPTY);
         st.revision += 1;
         self.shared.frame(st);
         Some(layer.0)
@@ -148,6 +151,14 @@ impl CanvasSession {
             st.revision += 1;
         }
         ok
+    }
+
+    /// Draws the text being edited into its layer, here (a caller may run it off its main
+    /// thread): only where it was drawn last and where it now reaches (the whole layer the first
+    /// time an edit of a text layer already there draws), nothing handed across. A drawing finished after the text changed
+    /// again is dropped (the next one draws it). False when no text is being edited.
+    pub fn draw_text_into_layer(&self) -> bool {
+        self.text_draw_start().is_some_and(|job| self.text_draw_put(job.draw()))
     }
 
     /// The text being edited, drawn into its layer: premultiplied RGBA8, the canvas's size.
@@ -226,5 +237,68 @@ impl CanvasSession {
     /// Makes text layer `id` an ordinary layer, its pixels kept, as one undo step.
     pub fn rasterize_layer(&self, id: u64) -> bool {
         self.change("rasterize", |d| d.rasterize(LayerId(id)).then_some(())).is_some()
+    }
+}
+
+/// The text being edited, to be drawn into its layer within `region` of the canvas (as
+/// [`CanvasSession::text_draw_start`] finds it): drawn on any thread, then put in.
+pub struct TextDraw {
+    layer: LayerId,
+    info: TextInfo,
+    region: IRect,
+}
+
+/// A [`TextDraw`] drawn: the region's pixels, and where in it the text landed.
+pub struct TextDrawn {
+    job: TextDraw,
+    pixels: Vec<u8>,
+    painted: Option<IRect>,
+}
+
+impl TextDraw {
+    /// The letters drawn over transparency within the region (the slow part).
+    pub fn draw(self) -> TextDrawn {
+        let region = self.region;
+        let pixels =
+            if region.is_empty() { Vec::new() } else { crate::text_draw::draw_text_within(&self.info, region) };
+        let painted = crate::layer_ops::painted_rect(&pixels, region.width())
+            .map(|r| IRect::new(r.x0 + region.x0, r.y0 + region.y0, r.x1 + region.x0, r.y1 + region.y0));
+        TextDrawn { job: self, pixels, painted }
+    }
+}
+
+impl CanvasSession {
+    /// The text being edited and the part of its layer a drawing of it takes: where it was drawn
+    /// last and where it now reaches (all of it the first time on a layer already there); none
+    /// when no text is edited.
+    pub fn text_draw_start(&self) -> Option<TextDraw> {
+        let st = self.shared.lock();
+        let (layer, _) = st.text_edit.as_ref()?;
+        let info = st.doc.layer(*layer).and_then(|l| l.text.as_ref()).map(TextInfo::from)?;
+        let full = IRect::from_size(st.doc.width(), st.doc.height());
+        let region = st.text_drawn.map_or(full, |d| d.union(crate::text_draw::text_reach(&info))).intersect(full);
+        Some(TextDraw { layer: *layer, info, region })
+    }
+
+    /// Puts a drawing into its layer, unless the text changed since it began (a newer one follows)
+    /// or isn't edited any more.
+    pub fn text_draw_put(&self, drawn: TextDrawn) -> bool {
+        let TextDrawn { job, pixels, painted } = drawn;
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let now = st.doc.layer(job.layer).and_then(|l| l.text.as_ref()).map(TextInfo::from);
+        if st.text_edit.as_ref().map(|(l, _)| *l) != Some(job.layer) || now.as_ref() != Some(&job.info) {
+            return false;
+        }
+        let region = job.region;
+        if !region.is_empty()
+            && let Some(canvas) = st.canvas.as_mut()
+        {
+            let (x, y) = (region.x0.max(0) as u32, region.y0.max(0) as u32);
+            canvas.put_layer_region(job.layer, x, y, region.width(), region.height(), pixels);
+        }
+        st.text_drawn = Some(painted.unwrap_or(IRect::EMPTY));
+        self.shared.frame(st);
+        true
     }
 }

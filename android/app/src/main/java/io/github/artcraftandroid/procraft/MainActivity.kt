@@ -93,6 +93,13 @@ class MainActivity : ComponentActivity() {
         projection = null
     }
 
+    /** The system short of memory, or the app out of sight: the canvas lets go of what it keeps only to be quicker. */
+    @Suppress("DEPRECATION")
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) vm.session?.trimMemory()
+    }
+
     /** Project canvas: while it is on, the canvas shows on the first second display there is. */
     private fun showProjection() {
         val display = if (vm.projectCanvas) displays.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION).firstOrNull() else null

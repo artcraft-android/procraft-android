@@ -12,7 +12,7 @@ use egui::{
     Align2, Color32, CornerRadius, Id, Key, KeyboardShortcut, Modifiers, Order, Pos2, Rect, Sense, Shape, Stroke,
     TextureHandle, TextureOptions, UiBuilder, Vec2, pos2, vec2,
 };
-use procraft_core::{CanvasSession, TextAlignment, TextInfo};
+use procraft_core::{CanvasSession, TextAlignment, TextDraw, TextDrawn, TextInfo};
 
 use crate::alert::{Alert, Answer, Asking};
 use crate::icons::{self, Icon};
@@ -97,8 +97,8 @@ pub enum Said {
     Redo,
 }
 
-/// Draws the text into its layer's pixels on a thread of its own: only the newest text asked for
-/// is drawn, and the newest drawn is put into the layer.
+/// Draws the text into its layer's pixels on a thread of its own (only the part it was drawn in
+/// and now reaches): only the newest text asked for is drawn, and the newest drawn is put in.
 #[derive(Default)]
 struct Drawer {
     shared: Arc<Drawing>,
@@ -109,13 +109,13 @@ struct Drawer {
 
 #[derive(Default)]
 struct Drawing {
-    asked: Mutex<Option<(u64, TextInfo, u32, u32)>>,
+    asked: Mutex<Option<(u64, TextDraw)>>,
     wake: Condvar,
-    drawn: Mutex<Option<(u64, Vec<u8>)>>,
+    drawn: Mutex<Option<(u64, TextDrawn)>>,
 }
 
 impl Drawer {
-    fn ask(&mut self, ctx: &egui::Context, info: TextInfo, width: u32, height: u32) {
+    fn ask(&mut self, ctx: &egui::Context, job: TextDraw) {
         if !self.started {
             self.started = true;
             let (shared, ctx) = (self.shared.clone(), ctx.clone());
@@ -125,25 +125,25 @@ impl Drawer {
                     while asked.is_none() {
                         asked = shared.wake.wait(asked).unwrap_or_else(PoisonError::into_inner);
                     }
-                    let Some((n, info, w, h)) = asked.take() else { continue };
+                    let Some((n, job)) = asked.take() else { continue };
                     drop(asked);
-                    let pixels = procraft_core::draw_text(info, w, h);
-                    *shared.drawn.lock().unwrap_or_else(PoisonError::into_inner) = Some((n, pixels));
+                    let drawn = job.draw();
+                    *shared.drawn.lock().unwrap_or_else(PoisonError::into_inner) = Some((n, drawn));
                     ctx.request_repaint();
                 }
             });
         }
         self.asked += 1;
-        *self.shared.asked.lock().unwrap_or_else(PoisonError::into_inner) = Some((self.asked, info, width, height));
+        *self.shared.asked.lock().unwrap_or_else(PoisonError::into_inner) = Some((self.asked, job));
         self.shared.wake.notify_one();
     }
 
     /// The newest drawing, once, if it is newer than the last put in.
-    fn take(&mut self) -> Option<Vec<u8>> {
-        let (n, pixels) = self.shared.drawn.lock().unwrap_or_else(PoisonError::into_inner).take()?;
+    fn take(&mut self) -> Option<TextDrawn> {
+        let (n, drawn) = self.shared.drawn.lock().unwrap_or_else(PoisonError::into_inner).take()?;
         (n > self.landed).then(|| {
             self.landed = n;
-            pixels
+            drawn
         })
     }
 
@@ -318,24 +318,30 @@ impl TextEditor {
     }
 
     fn draw(&mut self, session: &CanvasSession) {
-        let Some(info) = self.info.clone() else { return };
-        let c = session.info();
+        if self.info.is_none() {
+            return;
+        }
         match &self.ctx {
-            Some(ctx) => self.drawer.ask(ctx, info, c.width, c.height),
-            None => _ = session.put_text_pixels(procraft_core::draw_text(info, c.width, c.height)),
+            Some(ctx) => {
+                if let Some(job) = session.text_draw_start() {
+                    self.drawer.ask(ctx, job);
+                }
+            }
+            None => _ = session.draw_text_into_layer(),
         }
     }
 
     /// Ends editing text: `keep` makes it one undo step, otherwise it goes back.
     pub fn end(&mut self, session: &CanvasSession, keep: bool) {
-        let Some(info) = self.info.take() else { return };
+        if self.info.take().is_none() {
+            return;
+        }
         // the last drawing lands first
-        if let Some(pixels) = self.drawer.take() {
-            session.put_text_pixels(pixels);
+        if let Some(drawn) = self.drawer.take() {
+            session.text_draw_put(drawn);
         }
         if !self.drawer.current() {
-            let c = session.info();
-            session.put_text_pixels(procraft_core::draw_text(info, c.width, c.height));
+            session.draw_text_into_layer();
         }
         self.drawer.forget();
         session.text_end(keep);
@@ -381,8 +387,8 @@ impl TextEditor {
         if shortcut(Modifiers::COMMAND) {
             return Some(Said::Undo);
         }
-        if let Some(pixels) = self.drawer.take() {
-            session.put_text_pixels(pixels);
+        if let Some(drawn) = self.drawer.take() {
+            session.text_draw_put(drawn);
         }
         if let Some(s) = self.canvas_part(ctx, session) {
             said = Some(s);
