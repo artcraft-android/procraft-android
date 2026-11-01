@@ -890,6 +890,13 @@ enum Op {
         lower: LayerId,
         before: Box<Document>,
     },
+    /// Layer `layer` multiplied by its mask `mask` in place; the caller removes the mask once
+    /// this is queued (`before` is the document with it).
+    ApplyMask {
+        layer: LayerId,
+        mask: LayerId,
+        before: Box<Document>,
+    },
     /// Group `group` of `before` is drawn into `into`: a new layer, or (`onto`) the layer it
     /// merges into.
     Flatten {
@@ -1807,6 +1814,7 @@ impl Canvas {
                         | Op::Duplicate { .. }
                         | Op::MergeDown { .. }
                         | Op::MergeMany { .. }
+                        | Op::ApplyMask { .. }
                         | Op::Flatten { .. }
                         | Op::TransformEnd { commit: true, .. }
                         | Op::Write { .. }
@@ -2309,6 +2317,14 @@ impl Canvas {
         self.invalidate();
     }
 
+    /// Layer `layer` takes on its mask `mask` (shown as much as the mask is light) as one undo
+    /// step; the caller removes the mask once this is queued (`before` is the document with it).
+    pub fn apply_mask(&mut self, layer: LayerId, mask: LayerId, before: Document) {
+        self.end_stroke();
+        self.ops.push(Op::ApplyMask { layer, mask, before: Box::new(before) });
+        self.invalidate();
+    }
+
     /// Blends `uppers` (bottom first: layers, or groups composited first) into `lower` in turn as
     /// one undo step; the caller removes them from the document once this is queued (`before` is
     /// the document with them).
@@ -2511,6 +2527,10 @@ impl Canvas {
                 Op::MergeMany { uppers, lower, before, .. } => {
                     read.extend(uppers.iter().flat_map(|u| contents(before, *u)));
                     written.push(*lower);
+                }
+                Op::ApplyMask { layer, mask, .. } => {
+                    read.extend([*layer, *mask]);
+                    written.push(*layer);
                 }
                 Op::Flatten { group, into, before, .. } => {
                     read.extend(before.contents(*group));
@@ -2878,6 +2898,7 @@ impl Canvas {
                 | Op::Duplicate { before: d, .. }
                 | Op::MergeDown { before: d, .. }
                 | Op::MergeMany { before: d, .. }
+                | Op::ApplyMask { before: d, .. }
                 | Op::Flatten { before: d, .. } => ids.extend(d.pixel_layer_ids()),
                 Op::Commit(s) => ids.push(s.layer),
                 Op::Clear(id, _)
@@ -2954,6 +2975,7 @@ impl Canvas {
             | Op::Duplicate { before: d, .. }
             | Op::MergeDown { before: d, .. }
             | Op::MergeMany { before: d, .. }
+            | Op::ApplyMask { before: d, .. }
             | Op::Flatten { before: d, .. }
             | Op::Release { before: Some(d), .. }
             | Op::Write { before: Some(d), .. } = op
@@ -3654,6 +3676,20 @@ impl Canvas {
                     self.dirty = self.full();
                     history_changed = true;
                 }
+                Op::ApplyMask { layer, mask, before } => {
+                    let pixels =
+                        self.masked_in_place(device, &mut encoder, &mut uniforms, layer, mask).into_iter().collect();
+                    self.push_step(Step {
+                        made: 0,
+                        name: None,
+                        doc: Some(before),
+                        pixels,
+                        selection: None,
+                        flip: None,
+                    });
+                    self.dirty = self.full();
+                    history_changed = true;
+                }
                 Op::Flatten { group, into, onto, before } => {
                     let pixels = self
                         .flatten(device, &mut encoder, &mut uniforms, &before, group, into, onto)
@@ -4172,6 +4208,37 @@ impl Canvas {
             extent(self.width, self.height),
         );
         Some(())
+    }
+
+    /// Layer `layer` multiplied by mask `mask` (its brightness), by way of the scratch texture;
+    /// returns what the layer was.
+    fn masked_in_place(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        layer: LayerId,
+        mask: LayerId,
+    ) -> Option<Snapshot> {
+        let snapshot = self.snapshot(device, encoder, layer, self.full());
+        let target = self.layers.get(&layer)?;
+        let mask_view = &self.layers.get(&mask)?.view;
+        let offset = uniforms.push(&LayerUniform { opacity: 1.0, masked: 1.0, ..Default::default() });
+        let none = &self.stroke_view;
+        let bind = self.quad_masked(device, [&target.view, none, none, none], mask_view);
+        let (scratch, scratch_view) = self.scratch.get(device);
+        let mut pass = render_pass(encoder, "apply mask", scratch_view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+        pass.set_pipeline(&self.pipelines.layer);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.set_bind_group(1, &self.uniform_bind, &[offset]);
+        pass.draw(0..3, 0..1);
+        drop(pass);
+        encoder.copy_texture_to_texture(
+            copy_at(scratch, 0, 0),
+            copy_at(&target.texture, 0, 0),
+            extent(self.width, self.height),
+        );
+        snapshot
     }
 
     /// Group `group` of `doc` composited into layer `into`: copied into it (a new layer), or

@@ -5291,7 +5291,7 @@ fn layers_settings_and_selections_paged_out_undo_and_redo_whole() {
         };
         let mut done = Vec::new();
         for _ in 0..60 {
-            let op = next(20);
+            let op = next(21);
             done.push(op);
             let (x, y) = (5.0 + next(110) as f32, 5.0 + next(110) as f32);
             match op {
@@ -5341,7 +5341,13 @@ fn layers_settings_and_selections_paged_out_undo_and_redo_whole() {
                 }
                 17 => _ = s.undo(),
                 18 => _ = s.invert_layer(current(&s)),
-                _ => _ = s.duplicate_layer(current(&s)),
+                19 => _ = s.duplicate_layer(current(&s)),
+                _ => {
+                    // two rows pinched together: the current layer's mask into it, if it has one
+                    let a = current(&s);
+                    let mask = s.layers().iter().find(|l| l.parent == Some(a)).map(|l| l.id);
+                    _ = s.merge_between(a, mask.unwrap_or_else(|| any(&s, next(16))));
+                }
             }
         }
         while can(&s, false) {
@@ -7049,6 +7055,47 @@ fn a_blend_mode_inside_a_group_blends_with_what_is_below_the_group() {
     assert_eq!(pixel(&s, 16, 16), through);
     assert!(s.delete_layer(top));
     assert_eq!(pixel(&s, 16, 16), through);
+}
+
+#[test]
+fn a_mask_pinched_into_its_layer_is_applied_to_it() {
+    let Some(s) = session(32, 32) else { return };
+    let blue = s.layers()[0].id;
+    s.set_color(0.0, 0.0, 1.0);
+    assert!(s.fill_layer(blue));
+    let red = s.add_layer();
+    s.set_color(1.0, 0.0, 0.0);
+    assert!(s.fill_layer(red));
+    // the mask black at the top half: the red shows only below it
+    let mask = s.add_mask(red).unwrap();
+    s.set_color(0.0, 0.0, 0.0);
+    s.set_brush_size(0.15);
+    s.stroke_begin(PointerKind::Finger, vec![sample(0.0, 2.0, 0.0)]);
+    s.stroke_add((1..=16).map(|k| sample(k as f32 * 2.0, 2.0, k as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let (top, bottom) = (pixel(&s, 16, 2), pixel(&s, 16, 30));
+    assert!(top[2] > 200 && top[0] < 50, "{top:?}");
+    assert!(bottom[0] > 200 && bottom[2] < 50, "{bottom:?}");
+    let count = s.layers().len();
+    // pinched (either way round): the mask goes into the layer's pixels, the picture the same
+    assert!(s.merge_between(red, mask));
+    assert_eq!(s.layers().len(), count - 1);
+    assert!(s.layers().iter().all(|l| l.id != mask));
+    assert_eq!((pixel(&s, 16, 2), pixel(&s, 16, 30)), (top, bottom));
+    // the layer itself is clear where the mask was black
+    s.set_layer_visible(blue, false);
+    assert_eq!(pixel(&s, 16, 2), [255, 255, 255, 255]);
+    s.set_layer_visible(blue, true);
+    // undone, the mask is back and the red whole under it
+    s.undo();
+    s.undo();
+    s.undo();
+    assert!(s.layers().iter().any(|l| l.id == mask));
+    s.set_layer_visible(mask, false);
+    assert!(pixel(&s, 16, 2)[0] > 200, "{:?}", pixel(&s, 16, 2));
+    s.set_layer_visible(mask, true);
+    assert!(s.merge_between(mask, red));
+    assert_eq!((pixel(&s, 16, 2), pixel(&s, 16, 30)), (top, bottom));
 }
 
 #[test]

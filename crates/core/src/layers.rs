@@ -769,6 +769,29 @@ impl CanvasSession {
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
+        // a mask pinched into its own layer is merged into it
+        if let Some((a, b)) = between {
+            let mask_of = |m: LayerId, l: LayerId| {
+                st.doc.layer(m).is_some_and(|m| m.kind == LayerKind::Mask && m.parent == Some(l))
+            };
+            let mask = if mask_of(a, b) { Some((a, b)) } else { mask_of(b, a).then_some((b, a)) };
+            if let Some((mask, layer)) = mask {
+                if [mask, layer].iter().any(|l| st.doc.layer(*l).is_none_or(|l| l.locked)) {
+                    return false;
+                }
+                let before = st.doc.clone();
+                if let Some(canvas) = st.canvas.as_mut() {
+                    canvas.name_next_step("merge mask");
+                    canvas.apply_mask(layer, mask, before);
+                }
+                st.doc.delete_layer(mask);
+                st.doc.set_current(layer);
+                st.doc.rasterize(layer);
+                st.revision += 1;
+                self.shared.frame(st);
+                return true;
+            }
+        }
         let chosen_before = st.doc.clone();
         if let Some((a, b)) = between
             && !st.doc.choose_between(a, b)
