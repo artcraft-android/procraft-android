@@ -6997,3 +6997,151 @@ fn merging_down_keeps_only_where_the_upper_layer_is_painted() {
     s.undo();
     assert_eq!(s.layers().len(), count);
 }
+
+#[test]
+fn selection_work_undoes_and_redoes_whole() {
+    use crate::selection::SelectionJoin;
+    for seed in [4u32, 63] {
+        let Some(s) = session(64, 64) else { return };
+        s.shared.lock().canvas.as_mut().unwrap().set_cache_composites(true);
+        s.set_brush_size(0.4);
+        let mut state = seed;
+        let mut next = |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n.max(1)
+        };
+        let composite = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render_finished(gpu, &mut st.doc);
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            canvas.read_composite(gpu).unwrap()
+        };
+        // what shows, and what is selected
+        let look = |s: &CanvasSession| {
+            let shown = composite(s);
+            let selected = s.shared.lock().selection.as_ref().map(|m| m.data.clone());
+            (shown, selected, s.layers().len())
+        };
+        let can = |s: &CanvasSession, undo: bool| {
+            let info = s.info();
+            if undo { info.can_undo } else { info.can_redo }
+        };
+        let blank = look(&s);
+        let mut done = Vec::new();
+        let mut saved = 0u32;
+        for _ in 0..40 {
+            let (x, y) = (4.0 + next(56) as f32, 4.0 + next(56) as f32);
+            let join = if next(3) == 0 { SelectionJoin::Remove } else { SelectionJoin::Add };
+            let op = next(15);
+            done.push(op);
+            match op {
+                0..=2 => {
+                    s.set_color(next(255) as f32 / 255.0, next(255) as f32 / 255.0, next(255) as f32 / 255.0);
+                    let (dx, dy) = (next(40) as f32 - 20.0, next(40) as f32 - 20.0);
+                    s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+                    s.stroke_add(
+                        (1..8)
+                            .map(|k| sample(x + dx * k as f32 / 7.0, y + dy * k as f32 / 7.0, k as f64 * 8.0))
+                            .collect(),
+                    );
+                    s.stroke_end(vec![]);
+                }
+                3 => s.select_shape(next(2) == 0, x, y, x + 6.0 + next(30) as f32, y + 6.0 + next(30) as f32, join),
+                4 => {
+                    let points: Vec<f32> =
+                        (0..3 + next(4)).flat_map(|_| [4.0 + next(56) as f32, 4.0 + next(56) as f32]).collect();
+                    s.select_polygon(points, join);
+                }
+                5 => s.select_by_colour(x, y, next(60) as f32 / 100.0, join, false),
+                6 => {
+                    let layers = s.layers();
+                    if let Some(l) = layers.get(next(layers.len() as u32) as usize) {
+                        _ = s.select_layer_contents(l.id);
+                    }
+                }
+                7 => s.select_invert(),
+                8 => {
+                    s.select_feather(next(100) as f32 / 100.0);
+                    s.select_feather_done();
+                }
+                9 => s.select_none(),
+                10 => {
+                    if next(2) == 0 {
+                        saved = s.save_selection().max(saved);
+                    } else if saved > 0 {
+                        _ = s.load_selection(next(saved + 1));
+                    }
+                }
+                11 => match next(3) {
+                    0 => s.clear_layer(),
+                    1 => _ = s.fill_layer(s.layers().iter().find(|l| l.current).map_or(0, |l| l.id)),
+                    _ => {
+                        if let Some(c) = s.copy_layer() {
+                            _ = s.paste(c);
+                        }
+                    }
+                },
+                12 => _ = s.add_layer(),
+                _ => {
+                    if next(2) == 0 {
+                        _ = s.undo();
+                    } else {
+                        _ = s.redo();
+                    }
+                }
+            }
+        }
+        while can(&s, false) {
+            s.redo();
+        }
+        let end = look(&s);
+        let mut steps = 0;
+        while can(&s, true) && steps < 400 {
+            s.undo();
+            steps += 1;
+        }
+        let undone = look(&s);
+        assert!(undone.0 == blank.0, "seed {seed}: undone {steps} steps of {done:?}: the picture");
+        assert!(undone.1 == blank.1, "seed {seed}: undone {steps} steps of {done:?}: the selection");
+        assert_eq!(undone.2, blank.2, "seed {seed}");
+        let mut again = 0;
+        while can(&s, false) && again < 400 {
+            s.redo();
+            again += 1;
+        }
+        assert_eq!(steps, again, "seed {seed}");
+        let redone = look(&s);
+        assert!(redone.0 == end.0, "seed {seed}: redone {again} steps of {done:?}: the picture");
+        assert!(redone.1 == end.1, "seed {seed}: redone {again} steps of {done:?}: the selection");
+        assert_eq!(redone.2, end.2, "seed {seed}");
+    }
+}
+
+#[test]
+fn luminance_blending_mixes_a_stroke_in_by_squared_colour() {
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.6);
+    s.set_brush_opacity(0.5);
+    // white paint on the layer to mix with (the background is apart: a stroke covers it as it is)
+    s.set_color(1.0, 1.0, 1.0);
+    assert!(s.fill_layer(s.layers()[0].id));
+    s.set_color(0.0, 0.0, 0.0);
+    let line = |s: &CanvasSession| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 50.0, 0.0)]);
+        s.stroke_add((1..20).map(|k| sample(10.0 + k as f32 * 4.0, 50.0, k as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+        pixel(s, 50, 50)[0]
+    };
+    let plain = line(&s);
+    s.undo();
+    assert!(plain > 40 && plain < 215, "{plain}");
+    s.studio_begin();
+    s.set_studio_setting("luminance_blending".to_owned(), 1.0);
+    s.studio_end(true);
+    let squared = line(&s);
+    // black over white: the white's share of the light, not of the number
+    let want = 255.0 * (f32::from(plain) / 255.0).sqrt();
+    assert!((f32::from(squared) - want).abs() < 4.0, "{squared} against {want} (plain {plain})");
+}

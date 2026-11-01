@@ -37,6 +37,8 @@ const STROKE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const SLOT: u64 = 256;
 /// The Multiply blend mode's number.
 const MULTIPLY_MODE: u32 = 1;
+/// Set in a layer uniform's `stroke_blend` (over the blend mode's number): luminance blending.
+const STROKE_LUMINANCE: u32 = 0x100;
 
 /// The largest uniform block a shader reads.
 const UNIFORM_SIZE: u64 = 112;
@@ -156,6 +158,9 @@ pub struct StrokeStyle {
     /// Drawn as a brush preview (the studio's drawing pad, the library's strokes), which draws
     /// wet edges only as a firmer rim and burns nothing.
     pub preview: bool,
+    /// Luminance blending: the stroke mixed into its layer by its coverage in squared colour
+    /// (nearer to light), not as the colour's numbers are.
+    pub luminance: bool,
 }
 
 impl StrokeStyle {
@@ -202,6 +207,7 @@ impl StrokeStyle {
             shape_sharp: false,
             secondary: [1.0, 1.0, 1.0],
             preview: false,
+            luminance: false,
         }
     }
 
@@ -255,6 +261,7 @@ impl StrokeStyle {
             shape_sharp: brush.setting("shape_filtering") < 0.5,
             secondary: [1.0, 1.0, 1.0],
             preview: false,
+            luminance: brush.setting("luminance_blending") >= 0.5,
         }
     }
 
@@ -587,7 +594,7 @@ impl LayerUniform {
             threshold: s.alpha_threshold,
             grain_brightness: s.grain_brightness,
             grain_contrast: s.grain_contrast,
-            stroke_blend: s.blend,
+            stroke_blend: s.blend | if s.luminance { STROKE_LUMINANCE } else { 0 },
             grain_rotation: s.grain_rotation,
             grain_blend: s.grain_blend,
             burnt_blend: s.burnt_blend,
@@ -3934,7 +3941,7 @@ impl Canvas {
             let opacity = stroke.style.opacity.clamp(0.0, 1.0);
             let locked = stroke.style.preserve_alpha;
             let burns = stroke.style.burnt_edges > 0.0 && !stroke.style.preview;
-            match (stroke.style.tool, locked || stroke.style.blend != 0 || burns) {
+            match (stroke.style.tool, locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
                 (StrokeTool::Paint, true) => {
                     // recolour where the layer has alpha, or blend by a mode or burn edges (which
                     // read the layer): into scratch, then back

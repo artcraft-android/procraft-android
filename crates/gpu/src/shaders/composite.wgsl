@@ -27,7 +27,8 @@ struct LayerUniform {
     // 1: the layer shows through its mask (mask_tex); 1: the stroke being drawn is on the mask
     masked: f32,
     stroke_on_mask: f32,
-    // how the stroke blends into the layer: a blend mode's number (0: normal)
+    // how the stroke blends into the layer: a blend mode's number (0: normal) in the low byte,
+    // with STROKE_LUMINANCE for luminance blending
     stroke_blend: u32,
     // an onion skin's colour (rgb), screened over the layer, and how much (a)
     tint: vec4<f32>,
@@ -39,6 +40,9 @@ struct LayerUniform {
     // 1: the grain read unfiltered (sharp)
     grain_sharp: f32,
 }
+
+// in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
+const STROKE_LUMINANCE: u32 = 256u;
 
 @group(0) @binding(0) var layer_tex: texture_2d<f32>;
 @group(0) @binding(1) var stroke_tex: texture_2d<f32>;
@@ -146,12 +150,12 @@ fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
         let px = stroke_pixel(p);
         let s = px.s;
         if (lu.stroke_mode == 1u) {
-            c = burnt(c0, blend(c, s, lu.stroke_blend), px.burn);
+            c = burnt(c0, stroke_into(c, s), px.burn);
         } else if (lu.stroke_mode == 2u) {
             c = c * (1.0 - s.a);
         } else {
             // recolour, keeping the layer's alpha
-            let painted = burnt(c0, blend(c, s, lu.stroke_blend), px.burn);
+            let painted = burnt(c0, stroke_into(c, s), px.burn);
             c = painted * (c.a / max(painted.a, 1e-6));
         }
     }
@@ -223,6 +227,32 @@ fn unpremultiply(c: vec4<f32>) -> vec3<f32> {
         return vec3<f32>(0.0);
     }
     return clamp(c.rgb / c.a, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// premultiplied colour squared (nearer to light), and back
+fn squared(c: vec4<f32>) -> vec4<f32> {
+    let u = unpremultiply(c);
+    return vec4<f32>(u * u * c.a, c.a);
+}
+
+fn unsquared(c: vec4<f32>) -> vec4<f32> {
+    let u = unpremultiply(c);
+    return vec4<f32>(sqrt(u) * c.a, c.a);
+}
+
+// the stroke `s` into the layer `b`: blended by its mode, and with luminance blending mixed in
+// by its coverage in squared colour (the colour it lays down where it covers fully, mixed with
+// the layer's)
+fn stroke_into(b: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
+    let mode = lu.stroke_blend & 255u;
+    if ((lu.stroke_blend & STROKE_LUMINANCE) == 0u || mode == 26u || mode == 29u || s.a <= 0.0) {
+        return blend(b, s, mode);
+    }
+    let cb = unpremultiply(b);
+    let cs = unpremultiply(s);
+    let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(1.0));
+    let full = vec4<f32>((1.0 - b.a) * cs + b.a * mixed, 1.0);
+    return unsquared(mix(squared(b), squared(full), s.a));
 }
 
 // source `s` over backdrop `b` (both premultiplied) with blend function `mode`
