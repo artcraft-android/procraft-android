@@ -7261,3 +7261,270 @@ fn a_dual_brush_draws_its_two_strokes_combined_by_its_mode() {
     assert!(both > 0 && both < plain, "multiply {both} of {plain}");
     assert!(either >= plain, "normal {either} of {plain}");
 }
+
+#[test]
+fn touches_anyhow_leave_no_stroke_open_and_undo_whole() {
+    use crate::TouchCommand;
+    for seed in [12u32, 90] {
+        let Some(s) = session(100, 100) else { return };
+        s.set_brush_size(0.3);
+        let mut state = seed;
+        let mut next = |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n.max(1)
+        };
+        // what the apps do with what the touches hand back
+        let run = |s: &CanvasSession, commands: Vec<TouchCommand>| {
+            for c in commands {
+                match c {
+                    TouchCommand::Undo => _ = s.undo(),
+                    TouchCommand::Redo => _ = s.redo(),
+                    TouchCommand::ClearLayer => s.clear_layer(),
+                    _ => {}
+                }
+            }
+        };
+        let composite = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render_finished(gpu, &mut st.doc);
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            canvas.read_composite(gpu).unwrap()
+        };
+        let mut t = 0.0;
+        let mut down: Vec<(u64, f32, f32)> = Vec::new();
+        let mut ids = 0u64;
+        let mut done = Vec::new();
+        for _ in 0..300 {
+            t += 6.0 + f64::from(next(60));
+            let op = next(12);
+            done.push(op);
+            match op {
+                0 | 1 if down.len() < 4 => {
+                    ids += 1;
+                    let kind = [PointerKind::Finger, PointerKind::Finger, PointerKind::Stylus][next(3) as usize];
+                    let (x, y) = (5.0 + next(90) as f32, 5.0 + next(90) as f32);
+                    run(&s, s.touch_down(ids, kind, vec![sample(x, y, t)]));
+                    down.push((ids, x, y));
+                }
+                2..=6 if !down.is_empty() => {
+                    let i = next(down.len() as u32) as usize;
+                    let (id, x, y) = down[i];
+                    let (nx, ny) = (x + next(30) as f32 - 15.0, y + next(30) as f32 - 15.0);
+                    run(&s, s.touch_move(id, vec![sample(nx, ny, t)]));
+                    down[i] = (id, nx, ny);
+                }
+                7..=9 if !down.is_empty() => {
+                    let (id, x, y) = down.remove(next(down.len() as u32) as usize);
+                    run(&s, s.touch_up(id, vec![sample(x, y, t)]));
+                }
+                10 => run(&s, s.touch_tick(t)),
+                11 if next(15) == 0 => {
+                    run(&s, s.touch_cancel());
+                    down.clear();
+                }
+                _ => {}
+            }
+        }
+        for (id, x, y) in down.drain(..) {
+            run(&s, s.touch_up(id, vec![sample(x, y, t)]));
+        }
+        run(&s, s.touch_tick(t + 5000.0));
+        assert!(s.shared.lock().stroke.is_none(), "seed {seed}: a stroke left open after {done:?}");
+        // redone to the end (a gesture may have undone), then undone all the way and redone: it
+        // comes back as it was
+        let can = |s: &CanvasSession, undo: bool| {
+            let info = s.info();
+            if undo { info.can_undo } else { info.can_redo }
+        };
+        while can(&s, false) {
+            s.redo();
+        }
+        let end = composite(&s);
+        let mut steps = 0;
+        while can(&s, true) && steps < 400 {
+            s.undo();
+            steps += 1;
+        }
+        let mut again = 0;
+        while can(&s, false) && again < 400 {
+            s.redo();
+            again += 1;
+        }
+        assert_eq!(steps, again, "seed {seed}");
+        assert!(composite(&s) == end, "seed {seed}: redone {again} of {done:?}");
+    }
+}
+
+#[test]
+fn touches_in_every_mode_leave_nothing_open_and_undo_whole() {
+    use crate::TouchCommand;
+    use crate::touch::{Fill, SelectKind, SelectTouch, TransformTouch};
+    for seed in [7u32, 58] {
+        let Some(s) = session(100, 100) else { return };
+        s.set_brush_size(0.3);
+        let mut state = seed;
+        let mut next = |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n.max(1)
+        };
+        let run = |s: &CanvasSession, commands: Vec<TouchCommand>| {
+            for c in commands {
+                match c {
+                    TouchCommand::Undo => _ = s.undo(),
+                    TouchCommand::Redo => _ = s.redo(),
+                    TouchCommand::ClearLayer => s.clear_layer(),
+                    _ => {}
+                }
+            }
+        };
+        let composite = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render_finished(gpu, &mut st.doc);
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            canvas.read_composite(gpu).unwrap()
+        };
+        // the mode the app has open: none, selecting, transforming, filling, adjusting
+        let mut mode = 0;
+        let close = |s: &CanvasSession, mode: &mut u32, keep: bool| {
+            match *mode {
+                1 => s.set_touch_selecting(None),
+                2 => {
+                    s.set_touch_transforming(None);
+                    s.transform_end(keep);
+                }
+                3 => s.set_touch_filling(None),
+                4 => _ = s.adjustment_end(keep),
+                _ => {}
+            }
+            *mode = 0;
+        };
+        let mut t = 0.0;
+        let mut down: Vec<(u64, f32, f32)> = Vec::new();
+        let mut ids = 0u64;
+        let mut done = Vec::new();
+        for _ in 0..300 {
+            t += 6.0 + f64::from(next(60));
+            let op = next(14);
+            done.push(op);
+            match op {
+                0 | 1 if down.len() < 3 => {
+                    ids += 1;
+                    let kind = [PointerKind::Finger, PointerKind::Stylus][next(2) as usize];
+                    let (x, y) = (5.0 + next(90) as f32, 5.0 + next(90) as f32);
+                    run(&s, s.touch_down(ids, kind, vec![sample(x, y, t)]));
+                    down.push((ids, x, y));
+                }
+                2..=5 if !down.is_empty() => {
+                    let i = next(down.len() as u32) as usize;
+                    let (id, x, y) = down[i];
+                    let (nx, ny) = (x + next(30) as f32 - 15.0, y + next(30) as f32 - 15.0);
+                    run(&s, s.touch_move(id, vec![sample(nx, ny, t)]));
+                    down[i] = (id, nx, ny);
+                }
+                6..=8 if !down.is_empty() => {
+                    let (id, x, y) = down.remove(next(down.len() as u32) as usize);
+                    run(&s, s.touch_up(id, vec![sample(x, y, t)]));
+                }
+                9 => run(&s, s.touch_tick(t)),
+                // the app changes mode only with nothing down
+                10..=12 if down.is_empty() => {
+                    close(&s, &mut mode, next(3) != 0);
+                    match next(5) {
+                        3 => {
+                            use crate::Adjustment as A;
+                            let kinds = [
+                                A::Hsb,
+                                A::ColorBalance,
+                                A::Curves,
+                                A::GradientMap,
+                                A::GaussianBlur,
+                                A::MotionBlur,
+                                A::PerspectiveBlur,
+                                A::Noise,
+                                A::Sharpen,
+                                A::Bloom,
+                                A::Glitch,
+                                A::Halftone,
+                                A::ChromaticAberration,
+                                A::Liquify,
+                                A::Clone,
+                            ];
+                            if s.adjustment_start(kinds[next(kinds.len() as u32) as usize]) {
+                                mode = 4;
+                            }
+                        }
+                        0 => {
+                            let kinds = [
+                                SelectKind::Automatic,
+                                SelectKind::Freehand,
+                                SelectKind::Rectangle,
+                                SelectKind::Ellipse,
+                            ];
+                            let join =
+                                if next(3) == 0 { crate::SelectionJoin::Remove } else { crate::SelectionJoin::Add };
+                            s.set_touch_selecting(Some(SelectTouch {
+                                kind: kinds[next(4) as usize],
+                                join,
+                                threshold: next(80) as f32 / 100.0,
+                            }));
+                            mode = 1;
+                        }
+                        1 => {
+                            if s.transform_begin().is_some() {
+                                s.set_touch_transforming(Some(TransformTouch { advanced_mesh: next(2) == 0 }));
+                                mode = 2;
+                            }
+                        }
+                        2 => {
+                            let fill = Fill {
+                                r: next(255) as f32 / 255.0,
+                                g: 0.4,
+                                b: next(255) as f32 / 255.0,
+                                threshold: next(60) as f32 / 100.0,
+                            };
+                            s.set_touch_filling(Some(fill));
+                            mode = 3;
+                        }
+                        _ => _ = s.set_modify_held(next(2) == 0),
+                    }
+                }
+                13 if next(20) == 0 => {
+                    run(&s, s.touch_cancel());
+                    down.clear();
+                }
+                _ => {}
+            }
+        }
+        for (id, x, y) in down.drain(..) {
+            run(&s, s.touch_up(id, vec![sample(x, y, t)]));
+        }
+        run(&s, s.touch_tick(t + 5000.0));
+        close(&s, &mut mode, true);
+        s.set_modify_held(false);
+        assert!(s.shared.lock().stroke.is_none(), "seed {seed}: a stroke left open after {done:?}");
+        let can = |s: &CanvasSession, undo: bool| {
+            let info = s.info();
+            if undo { info.can_undo } else { info.can_redo }
+        };
+        while can(&s, false) {
+            s.redo();
+        }
+        let end = composite(&s);
+        let mut steps = 0;
+        while can(&s, true) && steps < 400 {
+            s.undo();
+            steps += 1;
+        }
+        let mut again = 0;
+        while can(&s, false) && again < 400 {
+            s.redo();
+            again += 1;
+        }
+        assert_eq!(steps, again, "seed {seed}");
+        assert!(composite(&s) == end, "seed {seed}: redone {again} of {done:?}");
+    }
+}
