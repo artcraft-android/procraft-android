@@ -4362,6 +4362,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (adjustment == Adjustment.CLONE) {
             puckBefore.removeLastOrNull()?.let { before -> clonePuck?.let { puckAfter.addLast(it) }; clonePuck = before }
         }
+
+        if (adjustment != null && !adjustPencil) {
+          undoAdjustment();
+          return
+        }
         // recoloring, the fill under the reticle is taken back first
         if (recolorOpen) {
             session?.let { s -> pourNow { s.pourEnd(false, null) } }
@@ -4404,6 +4409,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (transforming) return
         if (adjustment == Adjustment.CLONE) {
             puckAfter.removeLastOrNull()?.let { after -> clonePuck?.let { puckBefore.addLast(it) }; clonePuck = after }
+        }
+        if (adjustment != null && !adjustPencil) {
+          if (adjustChanged()) return
+          val a = adjustment ?: return
+          val could = canRedo
+          endAdjustment(false)
+          val name = session?.redo()
+          startAdjustment(a)
+          if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
+          refresh()
+          return
         }
         // recoloring, the open fill steps aside for the redo and is made again over what it brings back
         if (recolorOpen) {
@@ -4461,13 +4477,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         liquified = false
         liquifyAmount = 1f
         liquifyPopup = 0
-        adjustAmount = if (a == Adjustment.GRADIENT_MAP) 1f else 0f
+        adjustAmount = 0f
         hue50 = 0.5f
         saturation50 = 0.5f
         brightness50 = 0.5f
         balance = List(9) { 0.5f }
         curves = List(4) { listOf(Offset(0f, 0f), Offset(1f, 1f)) }
-        if (a == Adjustment.GRADIENT_MAP) applyGradient()
         if (a == Adjustment.GLITCH) applyGlitch()
     }
 
@@ -4641,6 +4656,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun chooseGradient(i: Int) {
         gradientIndex = i.coerceIn(0, gradients.size - 1)
+        if (adjustAmount == 0f) adjustAmount = 1f
         applyGradient()
     }
 
@@ -4651,6 +4667,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         gradientIndex = at
         gradientEditing = at
         gradientStore.save(gradients)
+        if (adjustAmount == 0f) adjustAmount = 1f
         applyGradient()
     }
 
@@ -4680,6 +4697,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         gradients = gradients.toMutableList().apply { add(i + 1, g) }
         gradientIndex = i + 1
         gradientStore.save(gradients)
+        if (adjustAmount == 0f) adjustAmount = 1f
         applyGradient()
     }
 
@@ -4831,6 +4849,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Takes back the adjustment's changes, or with none, the last one kept. */
     fun undoAdjustment() {
+        if (adjustPencil) { 
+          session?.undo(); 
+          refresh; 
+          return 
+        }
         val a = adjustment ?: return
         if (adjustChanged()) {
             resetAdjustment()
@@ -4839,6 +4862,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         endAdjustment(false)
         session?.undo()
         startAdjustment(a)
+        refresh()
     }
 
     fun togglePreview() {
@@ -4860,7 +4884,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         Adjustment.HSB -> listOf(hue50, saturation50, brightness50).any { it != 0.5f }
         Adjustment.COLOR_BALANCE -> balance.any { it != 0.5f }
         Adjustment.CURVES -> curves.any { it.size != 2 || it[0] != Offset(0f, 0f) || it[1] != Offset(1f, 1f) }
-        Adjustment.GRADIENT_MAP -> true
+        Adjustment.LIQUIFY -> liquified
         else -> adjustAmount > 0f
     }
 
