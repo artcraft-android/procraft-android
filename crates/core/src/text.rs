@@ -191,7 +191,8 @@ impl CanvasSession {
             canvas.release_layer(keep, keep.then(|| before.clone()));
         }
         if !keep {
-            st.doc = before;
+            let edited = std::mem::replace(&mut st.doc, before);
+            st.doc.keep_ids_from(&edited);
         }
         if keep {
             // the step made, so undo and redo of it can go back to editing this text

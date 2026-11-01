@@ -414,6 +414,13 @@ impl Document {
         doc
     }
 
+    /// Takes on `other`'s layer numbering where it has gone further, so that no id it handed out
+    /// is handed out again here (this document put back in its place by undo, or made to follow
+    /// another's layers): a canvas may still hold pixels for that id.
+    pub fn keep_ids_from(&mut self, other: &Document) {
+        self.next_id = self.next_id.max(other.next_id);
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }

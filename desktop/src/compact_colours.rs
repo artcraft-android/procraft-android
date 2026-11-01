@@ -7,8 +7,8 @@ use egui::{Align2, Color32, Rect, ScrollArea, Sense, Ui, UiBuilder, Vec2, pos2, 
 use procraft_core::{HueControl, Palettes, SLIDER_HUES, hue_at, hue_position};
 
 use crate::colours::{
-    self, EMPTY_SLOT, HarmonyKind, Mode, Pickers, SATURATION_GREY, harmony_brightness, hex_pad, hex_row, hsv_to_rgb,
-    hue_slider, paint_row, rgb_of, set, slider_row, srgb, take_rgb, to_hex,
+    self, EMPTY_SLOT, HarmonyKind, Mode, Pickers, SATURATION_GREY, hex_pad, hex_row, hsv_to_rgb, hue_slider, paint_row,
+    rgb_of, set, slider_row, srgb, take_rgb, to_hex,
 };
 use crate::look::{Look, Weight, argb, pc, text};
 use crate::panel::{self, PANEL_TITLE};
@@ -163,7 +163,7 @@ impl CompactColours {
                 let wheel = Rect::from_min_size(pos2(left + 30.0, top + 10.0), vec2(200.0, 200.0));
                 self.pickers.harmony(ui, &mut self.hsv, wheel, harmony, p3);
                 let row = Rect::from_min_size(pos2(left + 10.0, wheel.bottom() + 8.0), vec2(240.0, 36.0));
-                harmony_brightness(ui, row, &mut self.hsv, p3);
+                self.pickers.harmony_brightness(ui, row, &mut self.hsv, p3);
             }
             Mode::Value => return self.value(ui, left + 10.0, top),
             Mode::Palettes => {

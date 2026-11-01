@@ -190,7 +190,7 @@ fn merge_down_and_undo() {
     fill(&mut canvas, &doc, upper, [100, 50, 0]);
     doc.set_blend(upper, BlendMode::Multiply);
     let before = doc.clone();
-    canvas.merge_down(upper, lower, before);
+    canvas.merge_down(upper, lower, before, None);
     assert!(doc.finish_merge_down(upper));
     assert_eq!(doc.layers().len(), 1);
     let merged = layer_at(&gpu, &mut doc, &mut canvas, lower, 8, 8);
@@ -510,7 +510,7 @@ fn parked_layers_come_back_as_they_were() {
     let (upper, lower) = (ids[5], ids[4]);
     t.each(|doc, canvas| {
         let before = doc.clone();
-        canvas.merge_down(upper, lower, before);
+        canvas.merge_down(upper, lower, before, None);
         assert!(doc.finish_merge_down(upper));
     });
     t.same(&gpu, 2, "merged");

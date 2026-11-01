@@ -6497,3 +6497,503 @@ fn transforms_of_every_kind_undo_and_redo_whole() {
         assert!(composite(&s) == end, "seed {seed}: redone {again} steps of {done:?}");
     }
 }
+
+#[test]
+fn group_work_undoes_and_redoes_whole_and_comes_back_saved() {
+    use crate::layers::LayerType;
+    for seed in [3u32, 41] {
+        let Some(s) = session(64, 64) else { return };
+        s.shared.lock().canvas.as_mut().unwrap().set_cache_composites(true);
+        s.set_brush_size(0.4);
+        let mut state = seed;
+        let mut next = |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n.max(1)
+        };
+        let composite = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render_finished(gpu, &mut st.doc);
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            canvas.read_composite(gpu).unwrap()
+        };
+        let can = |s: &CanvasSession, undo: bool| {
+            let info = s.info();
+            if undo { info.can_undo } else { info.can_redo }
+        };
+        // the list as it shows: each row's name, kind, depth and look
+        let look = |s: &CanvasSession| {
+            s.layers()
+                .into_iter()
+                .map(|l| (l.name, l.kind, l.depth, l.visible, (l.opacity * 100.0).round() as i32, l.blend))
+                .collect::<Vec<_>>()
+        };
+        let blank = (composite(&s), look(&s));
+        let mut done = Vec::new();
+        for _ in 0..40 {
+            let layers = s.layers();
+            let any = |k: u32| layers.get(k as usize % layers.len().max(1)).map_or(0, |l| l.id);
+            let groups: Vec<u64> = layers.iter().filter(|l| l.kind == LayerType::Group).map(|l| l.id).collect();
+            let group = |k: u32| groups.get(k as usize % groups.len().max(1)).copied();
+            let op = next(14);
+            done.push(op);
+            match op {
+                0 | 1 => {
+                    s.set_color(next(255) as f32 / 255.0, next(255) as f32 / 255.0, next(255) as f32 / 255.0);
+                    let (x, y) = (5.0 + next(50) as f32, 5.0 + next(50) as f32);
+                    s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+                    s.stroke_add((1..6).map(|k| sample(x + k as f32 * 2.0, y + k as f32, k as f64 * 8.0)).collect());
+                    s.stroke_end(vec![]);
+                }
+                2 => _ = s.add_layer(),
+                3 => _ = s.pick_layer(any(next(16))),
+                4 => _ = s.group_picked(),
+                5 => {
+                    if let Some(g) = group(next(8)) {
+                        _ = s.ungroup(g);
+                    }
+                }
+                6 => _ = s.move_layer(any(next(16)), next(layers.len() as u32 + 1)),
+                7 => _ = s.merge_down(any(next(16))),
+                8 => _ = s.merge_picked(),
+                9 => _ = s.duplicate_layer(any(next(16))),
+                10 => {
+                    if let Some(g) = group(next(8)) {
+                        _ = s.flatten_group(g);
+                    }
+                }
+                11 => _ = s.delete_layer(any(next(16))),
+                12 => {
+                    // a group's (or layer's) look, or two combined into a group
+                    let id = group(next(8)).filter(|_| next(3) != 0).unwrap_or_else(|| any(next(16)));
+                    match next(4) {
+                        0 => _ = s.set_layer_visible(id, next(3) == 0),
+                        1 => _ = s.set_layer_opacity(id, 0.2 + next(80) as f32 / 100.0, true),
+                        2 => _ = s.set_layer_blend(id, next(20)),
+                        _ => _ = s.combine_down(id),
+                    }
+                }
+                _ => {
+                    if next(2) == 0 {
+                        _ = s.undo();
+                    } else {
+                        _ = s.redo();
+                    }
+                }
+            }
+        }
+        while can(&s, false) {
+            s.redo();
+        }
+        let end = (composite(&s), look(&s));
+        let mut steps = 0;
+        while can(&s, true) && steps < 400 {
+            s.undo();
+            steps += 1;
+        }
+        let undone = (composite(&s), look(&s));
+        assert!(undone.0 == blank.0, "seed {seed}: undone {steps} steps of {done:?}");
+        assert_eq!(undone.1, blank.1, "seed {seed}: undone {steps} steps of {done:?}");
+        let mut again = 0;
+        while can(&s, false) && again < 400 {
+            s.redo();
+            again += 1;
+        }
+        assert_eq!(steps, again, "seed {seed}");
+        let redone = (composite(&s), look(&s));
+        assert!(redone.0 == end.0, "seed {seed}: redone {again} steps of {done:?}");
+        assert_eq!(redone.1, end.1, "seed {seed}: redone {again} steps of {done:?}");
+        // saved and opened again: the same list and picture (both composited whole: the caches,
+        // 8-bit pictures of what is below and above, round a little differently)
+        {
+            let mut st = s.shared.lock();
+            let canvas = st.canvas.as_mut().unwrap();
+            canvas.set_cache_composites(false);
+            canvas.invalidate();
+        }
+        let whole = composite(&s);
+        let gpu = s.shared.lock().gpu.clone().unwrap();
+        let dir = std::env::temp_dir().join(format!("procraft-groups-{}-{seed}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        s.save(dir.to_string_lossy().into_owned()).unwrap();
+        let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        opened.use_gpu(gpu);
+        {
+            let mut st = opened.shared.lock();
+            st.window_size = (64, 64);
+            st.view = Some(View::fit((64, 64), (64, 64)));
+            st.ensure_canvas();
+            st.canvas.as_mut().unwrap().set_cache_composites(false);
+        }
+        assert_eq!(look(&opened), end.1, "seed {seed}: reopened, after {done:?}");
+        assert!(composite(&opened) == whole, "seed {seed}: reopened, after {done:?}");
+    }
+}
+
+#[test]
+fn painting_in_every_mode_undoes_redoes_and_saves_whole() {
+    use crate::adjust::{LiquifyBrush, LiquifyKind};
+    use crate::layers::LayerType;
+    use crate::selection::SelectionJoin;
+    for seed in [5u32, 77] {
+        let Some(s) = session(64, 64) else { return };
+        s.shared.lock().canvas.as_mut().unwrap().set_cache_composites(true);
+        let mut state = seed;
+        let mut next = |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n.max(1)
+        };
+        let composite = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render_finished(gpu, &mut st.doc);
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            canvas.read_composite(gpu).unwrap()
+        };
+        let can = |s: &CanvasSession, undo: bool| {
+            let info = s.info();
+            if undo { info.can_undo } else { info.can_redo }
+        };
+        let look = |s: &CanvasSession| {
+            s.layers()
+                .into_iter()
+                .map(|l| (l.name, l.kind, l.depth, l.alpha_lock, l.clipped, l.reference))
+                .collect::<Vec<_>>()
+        };
+        let blank = (composite(&s), look(&s));
+        let mut done = Vec::new();
+        for _ in 0..40 {
+            let layers = s.layers();
+            let any = |k: u32| layers.get(k as usize % layers.len().max(1)).map_or(0, |l| l.id);
+            let paint = |k: u32| {
+                let p: Vec<u64> = layers.iter().filter(|l| l.kind == LayerType::Paint).map(|l| l.id).collect();
+                p.get(k as usize % p.len().max(1)).copied().unwrap_or(0)
+            };
+            let current = layers.iter().find(|l| l.current).map_or(0, |l| l.id);
+            let (x, y) = (4.0 + next(56) as f32, 4.0 + next(56) as f32);
+            let op = next(14);
+            done.push(op);
+            match op {
+                0..=2 => {
+                    s.set_tool([ToolKind::Paint, ToolKind::Paint, ToolKind::Smudge, ToolKind::Erase][next(4) as usize]);
+                    s.set_brush_size(0.2 + next(60) as f32 / 100.0);
+                    s.set_color(next(255) as f32 / 255.0, next(255) as f32 / 255.0, next(255) as f32 / 255.0);
+                    let (dx, dy) = (next(30) as f32 - 15.0, next(30) as f32 - 15.0);
+                    s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+                    s.stroke_add(
+                        (1..8)
+                            .map(|k| sample(x + dx * k as f32 / 7.0, y + dy * k as f32 / 7.0, k as f64 * 8.0))
+                            .collect(),
+                    );
+                    s.stroke_end(vec![]);
+                }
+                3 => _ = s.add_layer(),
+                4 => _ = s.select_layer(any(next(16))),
+                5 => _ = s.add_mask(current),
+                6 => _ = s.set_layer_alpha_lock(paint(next(16)), next(2) == 0),
+                7 => _ = s.set_layer_clipped(paint(next(16)), next(2) == 0),
+                8 => {
+                    if next(3) == 0 {
+                        s.select_none();
+                    } else {
+                        let (w, h) = (8.0 + next(40) as f32, 8.0 + next(40) as f32);
+                        s.select_shape(next(2) == 0, x, y, x + w, y + h, SelectionJoin::Add);
+                    }
+                }
+                9 => _ = s.set_layer_reference(paint(next(16)), next(2) == 0),
+                10 => {
+                    s.pour_begin(
+                        x,
+                        y,
+                        next(255) as f32 / 255.0,
+                        next(255) as f32 / 255.0,
+                        0.3,
+                        next(60) as f32 / 100.0,
+                    );
+                    s.pour_threshold(next(80) as f32 / 100.0);
+                    s.pour_end(next(4) != 0, None);
+                }
+                11 => {
+                    s.recolor_start(
+                        x,
+                        y,
+                        next(255) as f32 / 255.0,
+                        0.5,
+                        next(255) as f32 / 255.0,
+                        next(50) as f32 / 100.0,
+                    );
+                    s.recolor_tap(4.0 + next(56) as f32, 4.0 + next(56) as f32);
+                    s.recolor_end();
+                }
+                12 => {
+                    if s.liquify_begin() {
+                        let kinds = [
+                            LiquifyKind::Push,
+                            LiquifyKind::TwirlRight,
+                            LiquifyKind::Pinch,
+                            LiquifyKind::Expand,
+                            LiquifyKind::Crystals,
+                        ];
+                        let brush =
+                            LiquifyBrush { kind: kinds[next(5) as usize], size: 0.2, pressure: 1.0, distortion: 0.3 };
+                        s.liquify_stroke((0..=10).flat_map(|k| [x + k as f32, y, 1.0]).collect(), true, brush);
+                        s.adjust_end(next(4) != 0);
+                    }
+                }
+                _ => {
+                    if next(2) == 0 {
+                        _ = s.undo();
+                    } else {
+                        _ = s.redo();
+                    }
+                }
+            }
+        }
+        while can(&s, false) {
+            s.redo();
+        }
+        let end = (composite(&s), look(&s));
+        let mut steps = 0;
+        while can(&s, true) && steps < 400 {
+            s.undo();
+            steps += 1;
+        }
+        let undone = (composite(&s), look(&s));
+        assert!(undone.0 == blank.0, "seed {seed}: undone {steps} steps of {done:?}");
+        assert_eq!(undone.1, blank.1, "seed {seed}: undone {steps} steps of {done:?}");
+        let mut again = 0;
+        while can(&s, false) && again < 400 {
+            s.redo();
+            again += 1;
+        }
+        assert_eq!(steps, again, "seed {seed}");
+        let redone = (composite(&s), look(&s));
+        assert!(redone.0 == end.0, "seed {seed}: redone {again} steps of {done:?}");
+        assert_eq!(redone.1, end.1, "seed {seed}: redone {again} steps of {done:?}");
+        // saved and opened again, both composited whole (see the group work's test)
+        {
+            let mut st = s.shared.lock();
+            let canvas = st.canvas.as_mut().unwrap();
+            canvas.set_cache_composites(false);
+            canvas.invalidate();
+        }
+        let whole = composite(&s);
+        let gpu = s.shared.lock().gpu.clone().unwrap();
+        let dir = std::env::temp_dir().join(format!("procraft-modes-{}-{seed}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        s.save(dir.to_string_lossy().into_owned()).unwrap();
+        let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        opened.use_gpu(gpu);
+        {
+            let mut st = opened.shared.lock();
+            st.window_size = (64, 64);
+            st.view = Some(View::fit((64, 64), (64, 64)));
+            st.ensure_canvas();
+            st.canvas.as_mut().unwrap().set_cache_composites(false);
+        }
+        assert_eq!(look(&opened), end.1, "seed {seed}: reopened, after {done:?}");
+        assert!(composite(&opened) == whole, "seed {seed}: reopened, after {done:?}");
+    }
+}
+
+#[test]
+fn a_layer_added_after_an_undo_starts_clear() {
+    let Some(s) = session(64, 64) else { return };
+    s.set_brush_size(0.5);
+    s.set_color(1.0, 0.0, 0.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 30.0, 0.0)]);
+    s.stroke_add((1..10).map(|k| sample(10.0 + k as f32 * 4.0, 30.0, k as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let first = s.layers()[0].id;
+    // a painted copy undone: the next layer added isn't given its id (nor its pixels, kept for redo)
+    let copy = s.duplicate_layer(first).unwrap();
+    s.undo();
+    let added = s.add_layer();
+    assert_ne!(added, copy);
+    s.set_layer_visible(first, false);
+    assert_eq!(pixel(&s, 30, 30), [255, 255, 255, 255]);
+    // nor after a document step undone and redone
+    s.undo();
+    s.redo();
+    let again = s.add_layer();
+    assert!(again != copy && again != added);
+}
+
+#[test]
+fn every_studio_setting_comes_back_from_the_library_and_a_brush_file() {
+    use procraft_engine::brushfile;
+    let mut keys: Vec<&str> = procraft_engine::studio::DRAWN.to_vec();
+    for k in [
+        "count_jitter",
+        "flow",
+        "grain_behavior",
+        "grain_blend",
+        "grain_depth",
+        "grain_depth_jitter",
+        "grain_movement",
+        "grain_scale",
+        "grain_zoom",
+        "jitter_lateral",
+        "jitter_linear",
+        "jitter_opacity",
+        "jitter_size",
+        "max_opacity",
+        "max_size",
+        "min_opacity",
+        "min_size",
+        "most_size",
+        "pressure_bleed",
+        "pressure_brightness",
+        "pressure_flow",
+        "pressure_hue",
+        "pressure_opacity",
+        "pressure_roundness",
+        "pressure_saturation",
+        "pressure_secondary",
+        "pressure_size",
+        "rendering_mode",
+        "roundness",
+        "roundness_jitter_x",
+        "roundness_jitter_y",
+        "shape_angle",
+        "smudge_pull",
+        "spacing_jitter",
+        "stamp_darkness",
+        "stamp_hue",
+        "stamp_lightness",
+        "stamp_saturation",
+        "stamp_secondary",
+        "tilt_angle",
+        "tilt_bleed",
+        "tilt_brightness",
+        "tilt_gradation",
+        "tilt_hue",
+        "tilt_opacity",
+        "tilt_roundness",
+        "tilt_saturation",
+        "tilt_secondary",
+        "tilt_size",
+        "wet_attack",
+        "wet_blur",
+        "wet_blur_jitter",
+        "wet_charge",
+        "wet_dilution",
+        "wet_grade",
+        "wet_jitter",
+        "wet_pull",
+    ] {
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    let owned: Vec<String> = keys.iter().map(|k| (*k).to_owned()).collect();
+    let Some(s) = session(64, 64) else { return };
+    let read = |s: &CanvasSession| {
+        s.studio_begin();
+        let v = s.studio_settings(owned.clone());
+        s.studio_end(false);
+        v
+    };
+    let mut state = 9u32;
+    let mut next = |n: u32| {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) % n.max(1)
+    };
+    let mut library = Vec::new();
+    let mut file = Vec::new();
+    for round in 0..6 {
+        s.studio_begin();
+        for key in &keys {
+            s.set_studio_setting((*key).to_owned(), next(1001) as f32 / 1000.0);
+        }
+        s.studio_end(true);
+        let want = read(&s);
+        let (set, index) = {
+            let st = s.shared.lock();
+            st.brush_ref(st.tool)
+        };
+        // the library kept and loaded again
+        let t = CanvasSession::new(64, 64);
+        assert!(t.load_brush_library(s.saved_brush_library()));
+        assert!(t.select_brush(set as u32, index as u32));
+        let got = read(&t);
+        for ((k, w), g) in keys.iter().zip(&want).zip(&got) {
+            if (w - g).abs() > 1e-5 {
+                library.push(format!("round {round} {k}: {w} -> {g}"));
+            }
+        }
+        // shared as a brush file and imported
+        let Some(u) = session(64, 64) else { return };
+        let bytes = s.brush_as_file(set as u32, index as u32).unwrap();
+        assert!(brushfile::read(&bytes).is_some());
+        let into = u.import_brushes(bytes).unwrap();
+        assert!(u.select_brush(into, 0));
+        let got = read(&u);
+        for ((k, w), g) in keys.iter().zip(&want).zip(&got) {
+            if (w - g).abs() > 2e-3 {
+                file.push(format!("round {round} {k}: {w} -> {g}"));
+            }
+        }
+    }
+    assert!(library.is_empty(), "library: {} changed:\n{}", library.len(), library.join("\n"));
+    assert!(file.is_empty(), "brush file: {} changed:\n{}", file.len(), file.join("\n"));
+}
+
+#[test]
+fn merging_down_keeps_only_where_the_upper_layer_is_painted() {
+    let Some(s) = session(200, 200) else { return };
+    let bytes = |s: &CanvasSession| s.shared.lock().canvas.as_ref().unwrap().history_bytes();
+    s.set_brush_size(0.2);
+    s.set_color(0.0, 0.0, 1.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 20.0, 0.0)]);
+    s.stroke_add((1..20).map(|k| sample(20.0 + k as f32 * 8.0, 20.0 + k as f32 * 8.0, k as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let lower = s.layers()[0].id;
+    let upper = s.add_layer();
+    s.set_color(1.0, 0.0, 0.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(140.0, 40.0, 0.0)]);
+    s.stroke_add((1..4).map(|k| sample(140.0 + k as f32 * 3.0, 40.0, k as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let shown = (pixel(&s, 142, 40), pixel(&s, 40, 40));
+    let before = bytes(&s);
+    assert!(s.merge_down(upper));
+    assert_eq!((pixel(&s, 142, 40), pixel(&s, 40, 40)), shown);
+    // a dab's worth kept, not the whole lower layer (200 x 200 x 4)
+    let kept = bytes(&s) - before;
+    assert!(kept > 0 && kept < 200 * 200 * 4 / 10, "{kept}");
+    assert_eq!((pixel(&s, 142, 40), pixel(&s, 40, 40)), shown);
+    assert_eq!(s.layers().len(), 1);
+    // undone, both layers as they were
+    s.undo();
+    assert_eq!(s.layers().len(), 2);
+    s.set_layer_visible(upper, false);
+    assert_eq!(pixel(&s, 142, 40), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 40, 40), shown.1);
+    s.set_layer_visible(upper, true);
+    s.select_layer(lower);
+    s.redo();
+    s.redo();
+    s.redo();
+    assert_eq!((pixel(&s, 142, 40), pixel(&s, 40, 40)), shown);
+    // two dabbed layers picked and merged into it: the same
+    let dab = |s: &CanvasSession, x: f32| {
+        let id = s.add_layer();
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 160.0, 0.0)]);
+        s.stroke_end(vec![]);
+        id
+    };
+    let (a, b) = (dab(&s, 30.0), dab(&s, 60.0));
+    assert!(s.select_layer(lower) && s.pick_layer(a) && s.pick_layer(b));
+    let both = (pixel(&s, 30, 160), pixel(&s, 60, 160));
+    let (before, count) = (bytes(&s), s.layers().len());
+    assert!(s.merge_picked());
+    assert_eq!((pixel(&s, 30, 160), pixel(&s, 60, 160)), both);
+    let kept = bytes(&s) - before;
+    assert!(kept > 0 && kept < 200 * 200 * 4 / 4, "{kept}");
+    s.undo();
+    assert_eq!(s.layers().len(), count);
+}

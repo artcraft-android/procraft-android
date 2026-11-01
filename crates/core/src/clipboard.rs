@@ -28,13 +28,13 @@ impl State {
             return None;
         }
         let (w, h) = (self.doc.width(), self.doc.height());
-        let mut out = vec![0u8; w as usize * h as usize * 4];
+        let clear = || vec![0u8; w as usize * h as usize * 4];
         // only what is selected where the layer is painted is read back; the rest is clear
         let mask = self.selection.clone();
         let selected = mask.as_ref().map_or(Some(IRect::from_size(w, h)), crate::layer_ops::mask_rect);
         let painted = self.painted_box(current);
         let Some(rect) = selected.zip(painted).map(|(a, b)| a.intersect(b)).filter(|r| !r.is_empty()) else {
-            return Some(out);
+            return Some(clear());
         };
         let mut part = self.layer_part(current, rect)?;
         if let Some(mask) = &mask {
@@ -46,7 +46,12 @@ impl State {
                 }
             }
         }
+        // the whole canvas: the part is the copy
+        if rect == IRect::from_size(w, h) && part.len() == w as usize * h as usize * 4 {
+            return Some(part);
+        }
         // the part put back in its place
+        let mut out = clear();
         let (row, x0, y0) = (rect.width() as usize * 4, rect.x0.max(0) as usize, rect.y0.max(0) as usize);
         for (y, from) in part.chunks(row.max(1)).enumerate() {
             let at = ((y0 + y) * w as usize + x0) * 4;
@@ -60,10 +65,14 @@ impl State {
 
 /// `image` placed on a `width` × `height` canvas: centred, and scaled down to fit when `fit` and
 /// it is larger (premultiplied RGBA8; anything outside is cut off).
-fn placed(image: &ThumbnailImage, width: u32, height: u32, fit: bool) -> Option<Vec<u8>> {
+fn placed(image: ThumbnailImage, width: u32, height: u32, fit: bool) -> Option<Vec<u8>> {
     let (iw, ih) = (image.width as usize, image.height as usize);
     if iw == 0 || ih == 0 || image.rgba.len() != iw * ih * 4 {
         return None;
+    }
+    // the canvas's size: as it is
+    if (image.width, image.height) == (width, height) {
+        return Some(image.rgba);
     }
     let (w, h) = (width as usize, height as usize);
     let scale = if fit { (w as f32 / iw as f32).min(h as f32 / ih as f32).min(1.0) } else { 1.0 };
@@ -145,12 +154,12 @@ impl CanvasSession {
     /// A new layer above the current one holding `image` where it was copied from (centred when
     /// it is another size); returns its id.
     pub fn paste(&self, image: ThumbnailImage) -> Option<u64> {
-        self.add_picture(&image, false, false)
+        self.add_picture(image, false, false)
     }
 
     /// As [`paste`](Self::paste), on a private layer: one the gallery's thumbnail leaves out.
     pub fn paste_private(&self, image: ThumbnailImage) -> Option<u64> {
-        self.add_picture(&image, false, true)
+        self.add_picture(image, false, true)
     }
 
     /// A new layer above the current one holding `image` (a photo or file, straight RGBA8),
@@ -164,7 +173,7 @@ impl CanvasSession {
                 *c = ((u16::from(*c) * a + 127) / 255) as u8;
             }
         }
-        self.add_picture(&premultiplied, true, private)
+        self.add_picture(premultiplied, true, private)
     }
 
     /// The frames of the animated GIF `bytes` as layers above the current one, each fitted to the
@@ -188,7 +197,7 @@ impl CanvasSession {
                     *c = ((u16::from(*c) * a + 127) / 255) as u8;
                 }
             }
-            let Some(id) = self.add_picture(&image, true, private) else {
+            let Some(id) = self.add_picture(image, true, private) else {
                 full = true;
                 return false;
             };
@@ -233,7 +242,7 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
-    fn add_picture(&self, image: &ThumbnailImage, fit: bool, private: bool) -> Option<u64> {
+    fn add_picture(&self, image: ThumbnailImage, fit: bool, private: bool) -> Option<u64> {
         let (w, h) = {
             let st = self.shared.lock();
             (st.doc.width(), st.doc.height())
@@ -293,13 +302,15 @@ mod tests {
     #[test]
     fn pictures_are_centred_and_fitted() {
         let image = ThumbnailImage { width: 4, height: 2, rgba: vec![200; 4 * 2 * 4] };
-        let on = placed(&image, 8, 8, true).unwrap();
+        let on = placed(image, 8, 8, true).unwrap();
         // centred: rows 3 and 4, columns 2 to 5
         assert_eq!(on[(3 * 8 + 2) * 4], 200);
         assert_eq!(on[(3 * 8 + 1) * 4], 0);
         let big = ThumbnailImage { width: 16, height: 16, rgba: vec![9; 16 * 16 * 4] };
-        let fitted = placed(&big, 8, 8, true).unwrap();
+        let fitted = placed(big, 8, 8, true).unwrap();
         assert!(fitted.iter().all(|&v| v == 9));
-        assert!(placed(&ThumbnailImage { width: 3, height: 3, rgba: vec![] }, 8, 8, true).is_none());
+        let same = ThumbnailImage { width: 8, height: 8, rgba: (0..=255).cycle().take(8 * 8 * 4).collect() };
+        assert_eq!(placed(same.clone(), 8, 8, false).unwrap(), same.rgba);
+        assert!(placed(ThumbnailImage { width: 3, height: 3, rgba: vec![] }, 8, 8, true).is_none());
     }
 }

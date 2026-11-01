@@ -646,6 +646,10 @@ pub struct Pickers {
     /// Classic's square for its hue, and Harmony's wheel for its brightness.
     square: Option<(u32, usize, TextureHandle)>,
     wheel: Option<(u32, usize, TextureHandle)>,
+    /// Harmony's hue, saturation and brightness (Display P3) as dragged to, with the colour they
+    /// made: kept while that is the colour, not worked out again from it (a dark or greyish
+    /// colour's would wander, and black's be lost).
+    harmony_held: Option<(u32, [f32; 3])>,
 }
 
 impl Pickers {
@@ -751,14 +755,14 @@ impl Pickers {
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
         let rgb = to_hex(hsv_to_rgb(*hsv));
-        let [h, sat, v] = p3_hsv_of(rgb, p3);
+        let [h, sat, v] = self.harmony_hsv(rgb, p3);
         let before = *hsv;
         let response = ui.interact(wheel, ui.scope_id().with("harmony wheel"), Sense::click_and_drag());
         if let Some(p) = response.interact_pointer_pos() {
             let u = ((p.x - wheel.left()) / wheel.width()).clamp(0.0, 1.0) * 2.0 - 1.0;
             let w = ((p.y - wheel.top()) / wheel.height()).clamp(0.0, 1.0) * 2.0 - 1.0;
             let turn = ((-w).atan2(u) / std::f32::consts::TAU + 1.0) % 1.0;
-            take_rgb(hsv, p3_hsv_to_rgb(turn, u.hypot(w).min(1.0), v, p3));
+            self.harmony_set(hsv, [turn, u.hypot(w).min(1.0), v], p3);
         }
         // the brightness and the space in one key
         let v_key = (v * 10_000.0).round() as u32 * 2 + u32::from(p3);
@@ -781,6 +785,34 @@ impl Pickers {
         }
         knob(ui, at(h), 14.5, srgb(of_hex(rgb)));
         *hsv != before
+    }
+
+    /// Harmony's brightness slider (the colour's value in Display P3, the canvas's colours in P3
+    /// or not as `p3` says); returns whether it changed `hsv`.
+    pub fn harmony_brightness(&mut self, ui: &Ui, rect: Rect, hsv: &mut [f32; 3], p3: bool) -> bool {
+        let [h, sat, v] = self.harmony_hsv(to_hex(hsv_to_rgb(*hsv)), p3);
+        let Some(b) = slider_row(ui, rect, "harmony brightness", v, &[Color32::BLACK, Color32::WHITE]) else {
+            return false;
+        };
+        let before = *hsv;
+        self.harmony_set(hsv, [h, sat, b], p3);
+        *hsv != before
+    }
+
+    /// Harmony's hue, saturation and brightness for colour `rgb`: as dragged to while it is that
+    /// colour, else worked out from it.
+    fn harmony_hsv(&self, rgb: u32, p3: bool) -> [f32; 3] {
+        match self.harmony_held {
+            Some((held, p3_hsv)) if held == rgb => p3_hsv,
+            _ => p3_hsv_of(rgb, p3),
+        }
+    }
+
+    /// `hsv` set to the colour of Harmony's `p3_hsv`, which is kept with it.
+    fn harmony_set(&mut self, hsv: &mut [f32; 3], p3_hsv: [f32; 3], p3: bool) {
+        let [h, s, v] = p3_hsv;
+        take_rgb(hsv, p3_hsv_to_rgb(h, s, v, p3));
+        self.harmony_held = Some((to_hex(hsv_to_rgb(*hsv)), p3_hsv));
     }
 }
 
@@ -877,7 +909,7 @@ impl Colours {
             pos2(body.left() + 20.0, wheel.bottom() + shape.harmony_gap),
             vec2(body.width() - 40.0, SLIDER_ROW),
         );
-        changed |= harmony_brightness(ui, row, &mut self.hsv, p3);
+        changed |= self.pickers.harmony_brightness(ui, row, &mut self.hsv, p3);
         if changed {
             self.send(session);
         }
@@ -1586,18 +1618,6 @@ pub(crate) fn hue_slider(ui: &Ui, rect: Rect, id: &str, hsv: &mut [f32; 3]) -> b
         .is_some_and(|v| set(&mut hsv[0], hue_at(HueControl::Slider, v)))
 }
 
-/// Harmony's brightness slider (the colour's value in Display P3, the canvas's colours in P3 or
-/// not as `p3` says); returns whether it changed `hsv`.
-pub(crate) fn harmony_brightness(ui: &Ui, rect: Rect, hsv: &mut [f32; 3], p3: bool) -> bool {
-    let [h, sat, v] = p3_hsv_of(to_hex(hsv_to_rgb(*hsv)), p3);
-    let Some(b) = slider_row(ui, rect, "harmony brightness", v, &[Color32::BLACK, Color32::WHITE]) else {
-        return false;
-    };
-    let before = *hsv;
-    take_rgb(hsv, p3_hsv_to_rgb(h, sat, b, p3));
-    *hsv != before
-}
-
 /// A colour knob: `fill` inside a thin white ring, over a soft shadow.
 fn knob(ui: &Ui, at: Pos2, r: f32, fill: Color32) {
     let shadow = egui::epaint::Shadow { offset: [0, 2], blur: 8, spread: 0, color: Color32::from_black_alpha(0x59) };
@@ -1676,6 +1696,22 @@ pub fn rgb_to_hsv([r, g, b]: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harmony_keeps_its_hue_and_saturation_through_black() {
+        let mut pickers = Pickers::default();
+        let mut hsv = [0.6, 0.8, 0.9];
+        let [h, s, _] = pickers.harmony_hsv(to_hex(hsv_to_rgb(hsv)), false);
+        // its brightness down to black and up again
+        pickers.harmony_set(&mut hsv, [h, s, 0.0], false);
+        assert_eq!(to_hex(hsv_to_rgb(hsv)), 0);
+        assert_eq!(pickers.harmony_hsv(0, false), [h, s, 0.0]);
+        pickers.harmony_set(&mut hsv, [h, s, 0.9], false);
+        let [h2, s2, _] = p3_hsv_of(to_hex(hsv_to_rgb(hsv)), false);
+        assert!((h2 - h).abs() < 0.01 && (s2 - s).abs() < 0.02, "{h2} {s2} (was {h} {s})");
+        // a colour set elsewhere is worked out afresh
+        assert_eq!(pickers.harmony_hsv(0xFF0000, false), p3_hsv_of(0xFF0000, false));
+    }
 
     #[test]
     fn a_gradient_is_mixed_as_written_and_hues_go_round_their_stops() {

@@ -538,8 +538,16 @@ private fun HarmonyKindButton(vm: CanvasViewModel) {
 @Composable
 private fun Harmony(vm: CanvasViewModel, c: ColorPick, compact: Boolean = false, short: Boolean = false) {
     val rgb = c.rgb()
-    val hsv = remember(rgb) { rgbToP3Hsv(rgb) }
+    // the hue, saturation and brightness dragged to, kept while the colour they make is the colour
+    // (not worked out again from it: a dark or greyish colour's would wander, and black's be lost)
+    var held by remember { mutableStateOf<Pair<Int, FloatArray>?>(null) }
+    val worked = remember(rgb) { rgbToP3Hsv(rgb) }
+    val hsv = held?.takeIf { it.first == rgb }?.second ?: worked
     val state by rememberUpdatedState(hsv)
+    fun set(h: Float, s: Float, v: Float) {
+        c.setRgb(p3HsvToRgb(h, s, v))
+        held = c.rgb() to floatArrayOf(h, s, v)
+    }
     val density = LocalDensity.current
     // compact, the wheel is 200 across instead of 298; short, 296
     val radius = if (compact) 100.dp else if (short) HarmonyRadius - 1.dp else HarmonyRadius
@@ -553,7 +561,7 @@ private fun Harmony(vm: CanvasViewModel, c: ColorPick, compact: Boolean = false,
                         val u = x * 2f - 1f
                         val w = y * 2f - 1f
                         val h = (atan2(-w, u) / (2f * PI.toFloat()) + 1f) % 1f
-                        c.setRgb(p3HsvToRgb(h, sqrt(u * u + w * w).coerceAtMost(1f), state[2]))
+                        set(h, sqrt(u * u + w * w).coerceAtMost(1f), state[2])
                     }
                 }
                 .drawBehind {
@@ -568,7 +576,7 @@ private fun Harmony(vm: CanvasViewModel, c: ColorPick, compact: Boolean = false,
                 },
         )
         Box(Modifier.padding(start = if (compact) 10.dp else 20.dp, end = if (compact) 10.dp else 20.dp, top = if (compact) 8.dp else if (short) 10.dp else 31.dp)) {
-            SliderRow(hsv[2], BrightnessTrack) { c.setRgb(p3HsvToRgb(state[0], state[1], it)) }
+            SliderRow(hsv[2], BrightnessTrack) { set(state[0], state[1], it) }
         }
     }
 }

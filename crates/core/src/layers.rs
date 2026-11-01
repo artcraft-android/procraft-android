@@ -600,12 +600,15 @@ impl CanvasSession {
         }
         let before = st.doc.clone();
         let group = st.doc.layer(upper).is_some_and(|l| l.kind == LayerKind::Group);
+        // a layer changes the one below only where it is painted: only that much is kept for undo
+        // (none at all for an empty one), not a copy of the whole of it
+        let within = (!group).then(|| st.painted_box(upper).unwrap_or(procraft_engine::geom::IRect::new(0, 0, 0, 0)));
         if let Some(canvas) = st.canvas.as_mut() {
             if group {
                 canvas.flatten_group(upper, lower, true, before);
             } else {
                 canvas.name_next_step("merge down");
-                canvas.merge_down(upper, lower, before);
+                canvas.merge_down(upper, lower, before, within);
             }
         }
         st.doc.finish_merge_down(upper);
@@ -778,9 +781,27 @@ impl CanvasSession {
         };
         // undone, the layers come back chosen as they were before the pinch
         let before = chosen_before;
+        // the layer below changes only where they (a group's layers within it) are painted: only
+        // that much is kept for undo, where the GPU can tell
+        st.flush();
+        let painted: Vec<LayerId> = uppers
+            .iter()
+            .flat_map(|&u| {
+                if st.doc.layer(u).is_some_and(|l| l.kind == LayerKind::Group) { st.doc.contents(u) } else { vec![u] }
+            })
+            .collect();
+        let within = match (st.canvas.as_ref(), st.gpu.as_ref()) {
+            (Some(canvas), Some(gpu)) => canvas
+                .painted_boxes_or_why(gpu, &painted)
+                .into_iter()
+                .try_fold(procraft_engine::geom::IRect::new(0, 0, 0, 0), |all, b| {
+                    b.ok().map(|b| b.map_or(all, |b| if all.is_empty() { b } else { all.union(b) }))
+                }),
+            _ => None,
+        };
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.name_next_step("merge layers");
-            canvas.merge_layers(uppers.clone(), lower, before);
+            canvas.merge_layers(uppers.clone(), lower, before, within);
         }
         st.doc.finish_merge_chosen(lower, &uppers);
         st.revision += 1;

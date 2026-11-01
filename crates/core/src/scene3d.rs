@@ -1806,16 +1806,20 @@ fn follow_layers(set: &mut TextureSet, structure: &Document) {
     let side = set.doc.width();
     let mut doc = Document::from_layers(side, side, structure.layers().to_vec(), structure.current());
     doc.background_visible = false;
+    // no id handed out in any channel handed out again: a layer new here is clear, or holds what
+    // this channel's own steps left on it (undone away and back on the other channel)
+    doc.keep_ids_from(structure);
+    doc.keep_ids_from(&set.doc);
     set.doc = doc;
     if !changed {
         return;
     }
     set.pending.retain(|(id, _)| had.contains(id) && structure.layer(*id).is_some());
     if let Some(canvas) = set.canvas.as_mut() {
-        for l in structure.layers().iter().filter(|l| !had.contains(&l.id)) {
-            canvas.wipe_layer(l.id);
-        }
-        canvas.forget_history();
+        // its strokes' steps stay, to be undone with the colour's
+        canvas.forget_document_steps();
+        // composited again with the layers it has now
+        canvas.invalidate();
     }
 }
 
@@ -3722,5 +3726,136 @@ f 1/1 2/2",
         again.choose_texture_set(0);
         assert_eq!(painted(&again), front);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn model_painting_undoes_redoes_and_saves_whole() {
+        for seed in [2u32, 30] {
+            let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
+            if !shown(&s) {
+                return;
+            }
+            frame(&s, 200);
+            let mut state = seed;
+            let mut next = |n: u32| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) % n.max(1)
+            };
+            // every channel's texture as composited, the channel painted on kept
+            let all = |s: &CanvasSession| {
+                let kept = s.model_channel();
+                let out: Vec<Vec<u8>> = (0..3)
+                    .map(|c| {
+                        s.set_model_channel(c);
+                        let mut guard = s.shared.lock();
+                        let st = &mut *guard;
+                        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+                        canvas.render_finished(gpu, &mut st.doc);
+                        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+                        canvas.read_composite(gpu).unwrap()
+                    })
+                    .collect();
+                s.set_model_channel(kept);
+                out
+            };
+            let can = |s: &CanvasSession, undo: bool| {
+                let info = s.info();
+                if undo { info.can_undo } else { info.can_redo }
+            };
+            // each channel keeps its own history (a stroke on the colour steps in all three):
+            // every channel's undone (or redone) in turn until none has any left; how many
+            let through = |s: &CanvasSession, undo: bool| {
+                let mut count = 0;
+                loop {
+                    let before = count;
+                    for c in 0..3 {
+                        s.set_model_channel(c);
+                        while can(s, undo) && count < 400 {
+                            if undo {
+                                s.undo();
+                            } else {
+                                s.redo();
+                            }
+                            count += 1;
+                        }
+                    }
+                    if count == before {
+                        break count;
+                    }
+                }
+            };
+            let start = all(&s);
+            let mut done = Vec::new();
+            let mut t = 0.0;
+            for _ in 0..30 {
+                let op = next(10);
+                done.push(op);
+                let (x, y) = (60.0 + next(80) as f32, 60.0 + next(80) as f32);
+                let (dx, dy) = (next(60) as f32 - 30.0, next(60) as f32 - 30.0);
+                t += 1000.0;
+                match op {
+                    0..=3 => {
+                        s.set_tool(
+                            [
+                                crate::ToolKind::Paint,
+                                crate::ToolKind::Paint,
+                                crate::ToolKind::Erase,
+                                crate::ToolKind::Smudge,
+                            ][next(4) as usize],
+                        );
+                        s.set_brush_size(0.2 + next(60) as f32 / 100.0);
+                        s.set_color(next(255) as f32 / 255.0, next(255) as f32 / 255.0, next(255) as f32 / 255.0);
+                        s.stroke_begin(PointerKind::Stylus, vec![sample(x, y, t)]);
+                        frame(&s, 200);
+                        s.stroke_add(
+                            (1..8)
+                                .map(|k| {
+                                    sample(x + dx * k as f32 / 7.0, y + dy * k as f32 / 7.0, t + f64::from(k) * 8.0)
+                                })
+                                .collect(),
+                        );
+                        s.stroke_end(vec![]);
+                    }
+                    4 => {
+                        // a finger turns it
+                        s.touch_down(1, PointerKind::Finger, vec![sample(x, y, t)]);
+                        s.touch_move(1, vec![sample(x + dx, y + dy, t + 16.0)]);
+                        s.touch_up(1, vec![sample(x + dx, y + dy, t + 32.0)]);
+                    }
+                    5 => s.set_model_channel(next(3)),
+                    // from whichever channel is painted on (the others follow its layers)
+                    6 => _ = s.add_layer(),
+                    7 => {
+                        let layers = s.layers();
+                        if let Some(l) = layers.get(next(layers.len() as u32) as usize) {
+                            _ = s.select_layer(l.id);
+                        }
+                    }
+                    8 => materials(&s, next(100) as f32 / 100.0, next(100) as f32 / 100.0),
+                    _ => {
+                        if next(2) == 0 {
+                            _ = s.undo();
+                        } else {
+                            _ = s.redo();
+                        }
+                    }
+                }
+                frame(&s, 200);
+            }
+            through(&s, false);
+            let end = all(&s);
+            let steps = through(&s, true);
+            assert!(all(&s) == start, "seed {seed}: undone {steps} steps of {done:?}");
+            let again = through(&s, false);
+            assert!(all(&s) == end, "seed {seed}: redone {again} steps of {done:?}");
+            // saved and opened again
+            let dir = std::env::temp_dir().join(format!("procraft-model-work-{}-{seed}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            s.save(dir.to_string_lossy().into_owned()).unwrap();
+            let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(shown(&opened));
+            assert!(all(&opened) == end, "seed {seed}: reopened, after {done:?}");
+        }
     }
 }

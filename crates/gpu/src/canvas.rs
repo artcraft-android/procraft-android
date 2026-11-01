@@ -21,6 +21,9 @@ use wgpu::util::DeviceExt;
 use crate::{Gpu, GpuError};
 
 const LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// The most textures the canvas's size kept for reuse (see `Canvas::spares`).
+const SPARES_KEPT: usize = 1;
 /// How many pixels of a row or column each pixel of a layer's bounds lines stands for (as
 /// `bounds.wgsl` has it).
 const BOUNDS_STRETCH: u32 = 512;
@@ -830,15 +833,19 @@ enum Op {
         pairs: Vec<(LayerId, LayerId)>,
         before: Box<Document>,
     },
-    /// `upper` is blended into `lower` and removed from the document.
+    /// `upper` is blended into `lower` and removed from the document; `within` (where `upper` is
+    /// painted, if known) is all of `lower` that can change, and all its undo step keeps.
     MergeDown {
         upper: LayerId,
         lower: LayerId,
         before: Box<Document>,
+        within: Option<IRect>,
     },
     /// `uppers` (bottom first; groups drawn first) are blended into `lower` in turn, as one step,
     /// and removed from the document.
     MergeMany {
+        /// Where they are painted, if known: all of `lower` that can change, all the step keeps.
+        within: Option<IRect>,
         uppers: Vec<LayerId>,
         lower: LayerId,
         before: Box<Document>,
@@ -1212,9 +1219,10 @@ pub struct Canvas {
     /// The copy a transform or adjustment kept of its layer, when it ended without it (let go,
     /// or kept only in part): the next one copies into it.
     spare_before: Option<wgpu::Texture>,
-    /// A texture the canvas's size from an undo step let go (redo cleared by a new step, or the
-    /// oldest dropped), for the next step that keeps the whole of a layer.
-    spare_snapshot: Mutex<Option<wgpu::Texture>>,
+    /// Textures the canvas's size let go (an undo step's, redo cleared by a new step or the
+    /// oldest dropped; a layer's nothing refers to any more), a few kept for the next new layer or
+    /// step that keeps the whole of a layer: making one takes a tablet 15-25 ms.
+    spares: Mutex<Vec<wgpu::Texture>>,
     /// Buffers pixels go up to the layers through, kept mapped for the next upload once the GPU
     /// is done with them (see [`Uploads`]).
     uploads: Uploads,
@@ -1512,7 +1520,7 @@ impl Canvas {
             scratch: OnDemand::new("scratch", width, height, LAYER_FORMAT),
             blur_textures: Mutex::new(HashMap::new()),
             spare_before: None,
-            spare_snapshot: Mutex::new(None),
+            spares: Mutex::new(Vec::new()),
             uploads: Uploads::default(),
             sampler,
             grains_view,
@@ -1617,7 +1625,7 @@ impl Canvas {
     pub fn let_go_of_spares(&mut self) {
         self.spare_caches = None;
         self.spare_before = None;
-        *self.spare_snapshot.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        self.spares.lock().unwrap_or_else(PoisonError::into_inner).clear();
         self.blur_textures.lock().unwrap_or_else(PoisonError::into_inner).clear();
         self.uploads.kept.lock().unwrap_or_else(PoisonError::into_inner).clear();
     }
@@ -2163,6 +2171,14 @@ impl Canvas {
         self.redo.clear();
     }
 
+    /// Drops the steps (to undo and to redo) that change the document's layers, keeping those
+    /// that only put pixels back: the document now follows another's layers (a model's channels
+    /// share theirs), which its own such steps would undo and redo out of step with.
+    pub fn forget_document_steps(&mut self) {
+        self.undo.retain(|s| s.doc.is_none());
+        self.redo.retain(|s| s.doc.is_none());
+    }
+
     /// The document was changed (layers added, removed, reordered, their settings...): `before`
     /// is how it was, for undo.
     pub fn record_document(&mut self, before: Document) {
@@ -2186,19 +2202,21 @@ impl Canvas {
     }
 
     /// Blends `upper` into `lower`; the caller removes `upper` from the document once this is
-    /// queued (`before` is the document with it).
-    pub fn merge_down(&mut self, upper: LayerId, lower: LayerId, before: Document) {
+    /// queued (`before` is the document with it). `within`: where `upper` is painted, if known
+    /// (the undo step keeps only that much of `lower`).
+    pub fn merge_down(&mut self, upper: LayerId, lower: LayerId, before: Document, within: Option<IRect>) {
         self.end_stroke();
-        self.ops.push(Op::MergeDown { upper, lower, before: Box::new(before) });
+        self.ops.push(Op::MergeDown { upper, lower, before: Box::new(before), within });
         self.invalidate();
     }
 
     /// Blends `uppers` (bottom first: layers, or groups composited first) into `lower` in turn as
     /// one undo step; the caller removes them from the document once this is queued (`before` is
     /// the document with them).
-    pub fn merge_layers(&mut self, uppers: Vec<LayerId>, lower: LayerId, before: Document) {
+    /// `within`: where they are painted, if known (the undo step keeps only that much of `lower`).
+    pub fn merge_layers(&mut self, uppers: Vec<LayerId>, lower: LayerId, before: Document, within: Option<IRect>) {
         self.end_stroke();
-        self.ops.push(Op::MergeMany { uppers, lower, before: Box::new(before) });
+        self.ops.push(Op::MergeMany { uppers, lower, before: Box::new(before), within });
         self.invalidate();
     }
 
@@ -2387,11 +2405,11 @@ impl Canvas {
                     read.extend(pairs.iter().map(|(from, _)| *from));
                     written.extend(pairs.iter().map(|(_, to)| *to));
                 }
-                Op::MergeDown { upper, lower, before } => {
+                Op::MergeDown { upper, lower, before, .. } => {
                     read.extend(contents(before, *upper));
                     written.push(*lower);
                 }
-                Op::MergeMany { uppers, lower, before } => {
+                Op::MergeMany { uppers, lower, before, .. } => {
                     read.extend(uppers.iter().flat_map(|u| contents(before, *u)));
                     written.push(*lower);
                 }
@@ -2797,15 +2815,26 @@ impl Canvas {
         self.restore_all(gpu, read, false);
         self.restore_all(gpu, written, true);
         let mut added = false;
+        // spares cleared before this render's work
+        let mut clears: Option<wgpu::CommandEncoder> = None;
         for id in ids {
             if self.layers.contains_key(&id) || self.parked.contains_key(&id) {
                 continue;
             }
-            let texture = texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT);
+            // a kept texture, cleared, else a new one (new textures are zeroed: transparent)
+            let spare = self.take_spare();
+            let reused = spare.is_some();
+            let texture = spare.unwrap_or_else(|| texture(&gpu.device, "layer", self.width, self.height, LAYER_FORMAT));
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            // new textures are zeroed: transparent
+            if reused {
+                let encoder = clears.get_or_insert_with(|| gpu.device.create_command_encoder(&Default::default()));
+                drop(render_pass(encoder, "spare cleared", &view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)));
+            }
             self.layers.insert(id, LayerGpu { texture, view });
             added = true;
+        }
+        if let Some(encoder) = clears {
+            gpu.queue.submit([encoder.finish()]);
         }
         if added {
             self.invalidate();
@@ -2833,7 +2862,12 @@ impl Canvas {
                 keep.extend(d.layer_ids());
             }
         }
-        self.layers.retain(|id, _| keep.contains(id));
+        let gone: Vec<LayerId> = self.layers.keys().filter(|id| !keep.contains(id)).copied().collect();
+        for id in gone {
+            if let Some(layer) = self.layers.remove(&id) {
+                self.keep_spare(layer.texture);
+            }
+        }
         self.parked.retain(|id, _| keep.contains(id));
         self.pictures.retain(|id, _| keep.contains(id));
         self.needed_at.retain(|id, _| keep.contains(id));
@@ -3473,9 +3507,11 @@ impl Canvas {
                     self.dirty = self.full();
                     history_changed = true;
                 }
-                Op::MergeDown { upper, lower, before } => {
-                    let pixels =
-                        self.merge(device, &mut encoder, &mut uniforms, &before, upper, lower).into_iter().collect();
+                Op::MergeDown { upper, lower, before, within } => {
+                    let pixels = self
+                        .merge(device, &mut encoder, &mut uniforms, &before, upper, lower, within)
+                        .into_iter()
+                        .collect();
                     self.push_step(Step {
                         made: 0,
                         name: None,
@@ -3487,9 +3523,8 @@ impl Canvas {
                     self.dirty = self.full();
                     history_changed = true;
                 }
-                Op::MergeMany { uppers, lower, before } => {
-                    let full = self.full();
-                    let snapshot = self.snapshot(device, &mut encoder, lower, full);
+                Op::MergeMany { uppers, lower, before, within } => {
+                    let snapshot = self.snapshot(device, &mut encoder, lower, within.unwrap_or(self.full()));
                     for upper in uppers {
                         if before.layer(upper).is_some_and(|l| l.kind == LayerKind::Group) {
                             self.draw_group_onto(device, &mut encoder, &mut uniforms, &before, upper, lower);
@@ -3959,10 +3994,12 @@ impl Canvas {
         doc: &Document,
         upper: LayerId,
         lower: LayerId,
+        within: Option<IRect>,
     ) -> Option<Snapshot> {
-        let snapshot = self.snapshot(device, encoder, lower, self.full())?;
+        // nothing painted on it: nothing to keep (an empty box), nor anything that changes
+        let snapshot = self.snapshot(device, encoder, lower, within.unwrap_or(self.full()));
         self.blend_layer_into(device, encoder, uniforms, doc, upper, lower)?;
-        Some(snapshot)
+        snapshot
     }
 
     /// Layer `upper` of `doc` blended into layer `lower` with its opacity, mode and clipping.
@@ -4097,10 +4134,11 @@ impl Canvas {
         if rect.is_empty() {
             return None;
         }
-        // the whole layer: into a step's texture let go, if there is one
-        let spare =
-            (rect == self.full()).then(|| self.spare_snapshot.lock().unwrap_or_else(PoisonError::into_inner).take());
-        if let Some(texture) = spare.flatten() {
+        // the whole layer: into a texture let go, if one is kept, else one that can be kept when
+        // this step is let go in turn
+        if rect == self.full() {
+            let texture =
+                self.take_spare().unwrap_or_else(|| texture(device, "undo", self.width, self.height, LAYER_FORMAT));
             encoder.copy_texture_to_texture(
                 copy_at(&layer.texture, 0, 0),
                 copy_at(&texture, 0, 0),
@@ -4152,7 +4190,9 @@ impl Canvas {
         }
         let solo = doc.solo;
         let replaced = step.doc.map(|before| Box::new(std::mem::replace(doc, *before)));
-        if replaced.is_some() {
+        if let Some(replaced) = &replaced {
+            // no layer it numbered numbered again: its pixels may still be held for redo
+            doc.keep_ids_from(replaced);
             // a layer shown alone is how the artwork is looked at, not a change to undo
             doc.solo = solo.filter(|s| doc.layer(*s).is_some());
             self.dirty = self.full();
@@ -4360,7 +4400,13 @@ impl Canvas {
         let (lw, lh) = small(scale);
         let reach = (s_sigma * 3.0).ceil().min(64.0);
         let size = [lw as f32, lh as f32, 0.0, 0.0];
-        let across = self.blur_texture(device, "adjustment across", lw, lh, 1);
+        // the canvas's size: the first pass's into the scratch texture, read straight back (one
+        // texture the canvas's size fewer to make: a tablet takes 15-25 ms for each)
+        let across = if (lw, lh) == (w, h) {
+            self.scratch.get(device).1.clone()
+        } else {
+            self.blur_texture(device, "adjustment across", lw, lh, 1)
+        };
         let down = self.blur_texture(device, "adjustment down", lw, lh, 2);
         let source = current.as_ref().map(|v| self.adjustment_bind(device, v, false));
         pass(
@@ -4411,14 +4457,33 @@ impl Canvas {
         }
     }
 
-    /// A step let go: a texture of it the canvas's size kept for the next whole-layer step, when
-    /// none is kept yet.
+    /// A step let go: its textures the canvas's size kept as spares.
     fn keep_spare_snapshot(&self, step: Step) {
-        let mut spare = self.spare_snapshot.lock().unwrap_or_else(PoisonError::into_inner);
-        if spare.is_none() {
-            let size = (self.width, self.height);
-            *spare = step.pixels.into_iter().map(|s| s.texture).find(|t| (t.width(), t.height()) == size);
+        for s in step.pixels {
+            self.keep_spare(s.texture);
         }
+    }
+
+    /// `texture` kept for reuse if it is the canvas's size and can be a layer, and fewer than
+    /// [`SPARES_KEPT`] are kept.
+    fn keep_spare(&self, texture: wgpu::Texture) {
+        let layer_like = wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST;
+        let mut spares = self.spares.lock().unwrap_or_else(PoisonError::into_inner);
+        if (texture.width(), texture.height()) == (self.width, self.height)
+            && texture.format() == LAYER_FORMAT
+            && texture.usage().contains(layer_like)
+            && spares.len() < SPARES_KEPT
+        {
+            spares.push(texture);
+        }
+    }
+
+    /// A kept texture the canvas's size, if there is one (its pixels whatever they were).
+    fn take_spare(&self) -> Option<wgpu::Texture> {
+        self.spares.lock().unwrap_or_else(PoisonError::into_inner).pop()
     }
 
     /// Composites the visible layers over the background inside `rect`, into `composite[0]`.
