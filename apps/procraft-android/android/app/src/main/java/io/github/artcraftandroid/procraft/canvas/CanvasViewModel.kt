@@ -688,10 +688,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var background by mutableStateOf(BackgroundInfo(1f, 1f, 1f, true))
         private set
-    var canUndo by mutableStateOf(false)
-        private set
+    /** Whether a kept step is there to undo, not counting the open adjustment's live changes. */
+    private var historyUndo by mutableStateOf(false)
     var canRedo by mutableStateOf(false)
         private set
+
+    /** Undo has something to take back: a kept step, or the changes the open adjustment is making. */
+    val canUndo: Boolean get() = historyUndo || (!adjustPencil && adjustment != null && adjustChanged())
     val thumbnails = mutableStateMapOf<ULong, ImageBitmap>()
     /** The pixels' version each thumbnail was read at: it is read again only once its layer's is new. */
     private val thumbnailVersions = HashMap<ULong, ULong>()
@@ -4385,7 +4388,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             refresh()
             return
         }
-        val could = canUndo
+        val could = historyUndo
         val name = session?.undo()
         if (could) showNotice("Undo" + name?.let { " $it" }.orEmpty())
         refresh()
@@ -4855,23 +4858,32 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         startAdjustment(a)
     }
 
-    /** Takes back the adjustment's changes, or with none, the last one kept. */
+    /**
+     * Takes back the adjustment's changes, or with none, the last one kept. What it is doing now is
+     * not a step yet: it goes back as a whole and cannot be redone. Painting the adjustment on is
+     * the exception, as each stroke is kept as a step of its own: undo takes back one stroke.
+     */
     fun undoAdjustment() {
         val a = adjustment ?: return
         // painting the adjustment on, each stroke is a step: it goes back with the source
         if (adjustPencil) {
             cloneSourceBack()
-            session?.undo()
+            val could = historyUndo
+            val name = session?.undo()
+            if (could) showNotice("Undo" + name?.let { " $it" }.orEmpty())
             refresh()
             return
         }
         if (adjustChanged()) {
             resetAdjustment()
+            showNotice("Undo ${a.label}")
             return
         }
         endAdjustment(false)
-        session?.undo()
+        val could = historyUndo
+        val name = session?.undo()
         startAdjustment(a)
+        if (could) showNotice("Undo" + name?.let { " $it" }.orEmpty())
         refresh()
     }
 
@@ -5917,7 +5929,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun refreshFlags() {
         val info = session?.info() ?: return
-        canUndo = info.canUndo
+        historyUndo = info.canUndo
         canRedo = info.canRedo
         hasSelection = session?.hasSelection() ?: false
     }
