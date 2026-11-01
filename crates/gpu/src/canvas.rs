@@ -22,6 +22,10 @@ use crate::{Gpu, GpuError};
 
 const LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// The side of the checks shown under see-through parts of the canvas (a hidden background),
+/// window pixels.
+const CHECKS: f32 = 16.0;
+
 /// The most textures the canvas's size kept for reuse (see `Canvas::spares`).
 const SPARES_KEPT: usize = 1;
 /// How many pixels of a row or column each pixel of a layer's bounds lines stands for (as
@@ -5336,7 +5340,7 @@ impl Canvas {
         let m = unit_to_canvas.then(target.to_screen).then(to_clip);
         let offset = uniforms.push(&DisplayUniform::new(
             [m.a, m.b, m.c, m.d],
-            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, 0.0],
+            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, CHECKS],
             target.convert,
             target.lut.is_some(),
         ));
@@ -5609,7 +5613,7 @@ impl Canvas {
         let m = unit_to_canvas.then(target.to_screen).then(shrink).then(to_clip);
         let offset = uniforms.push(&DisplayUniform::new(
             [m.a, m.b, m.c, m.d],
-            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, 0.0],
+            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, CHECKS / k],
             target.convert,
             target.lut.is_some(),
         ));

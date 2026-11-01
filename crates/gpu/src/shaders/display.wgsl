@@ -3,7 +3,8 @@
 struct DisplayUniform {
     // the map from the canvas's 0..1 coordinates to clip space: (a, b, c, d) ...
     m0: vec4<f32>,
-    // ... (e, f), then 1 when the target encodes sRGB itself
+    // ... (e, f), then 1 when the target encodes sRGB itself, then the side of the checks shown
+    // under see-through parts (a hidden background), target pixels (0: white under them)
     m1: vec4<f32>,
     // the canvas's colours to the target's, in linear light: three rows, c0.w 1 to apply them
     c0: vec4<f32>,
@@ -14,6 +15,10 @@ struct DisplayUniform {
 @group(0) @binding(0) var composite: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
 @group(1) @binding(0) var<uniform> du: DisplayUniform;
+// the checks under see-through parts of the canvas, light and dark (sRGB)
+const CHECK_LIGHT: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
+const CHECK_DARK: vec3<f32> = vec3<f32>(0.8, 0.8, 0.8);
+
 // a colour table taking the canvas's colours to the target's (the display only): red along z,
 // green along y, blue along x; c1.w 1 to use it
 @group(2) @binding(0) var lut: texture_3d<f32>;
@@ -52,8 +57,13 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_display(i: Out) -> @location(0) vec4<f32> {
     let c = textureSample(composite, smp, i.uv);
-    // transparent pixels (a hidden background) show as white for now
-    var rgb = c.rgb + (1.0 - c.a) * vec3<f32>(1.0);
+    // see-through pixels (a hidden background) show the checks under them, fixed to the window
+    var under = vec3<f32>(1.0);
+    if (du.m1.w > 0.0) {
+        let k = floor(i.pos.xy / du.m1.w);
+        under = select(CHECK_LIGHT, CHECK_DARK, (i32(k.x) + i32(k.y)) % 2 != 0);
+    }
+    var rgb = c.rgb + (1.0 - c.a) * under;
     // into the target's colour space (another profile's primaries), clipped to it
     if (du.c0.w > 0.5) {
         let lin = srgb_to_linear(rgb);
