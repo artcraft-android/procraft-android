@@ -66,6 +66,7 @@ pub enum Act {
     ModelFlat,
     PaintThrough,
     LightingStudio,
+    AddText,
     Flip {
         horizontal: bool,
     },
@@ -264,7 +265,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                     Some(Act::InsertPrivatePhoto),
                 ),
                 Private("Take a photo", "Take a private photo", None, None),
-                Button("Add text", None, None),
+                Button("Add text", None, Some(Act::AddText)),
             ],
             vec![
                 Button("Cut", None, Some(Act::Cut)),

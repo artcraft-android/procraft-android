@@ -153,6 +153,8 @@ pub struct Interface {
     lighting: crate::lighting::LightingStudio,
     /// The colour last named (Color Description Notifications) and when.
     named: Option<(u32, Instant)>,
+    /// Text being added or edited.
+    text: crate::text::TextEditor,
 }
 
 impl Default for Interface {
@@ -217,6 +219,7 @@ impl Default for Interface {
             recolor_rgb: [0.0; 3],
             brush_now: None,
             brush_last: None,
+            text: crate::text::TextEditor::default(),
         }
     }
 }
@@ -250,6 +253,8 @@ impl Interface {
             crate::lighting::light_model(session);
         }
         self.layers.forget();
+        self.text.forget();
+        crate::text::prepare_fonts();
         self.transform.on = false;
         self.selection.on = false;
         self.drop.end_filling();
@@ -460,8 +465,9 @@ impl Interface {
             if self.show_interface_button(&ctx) {
                 self.toggle_bars(session);
             }
+            self.text_editor(&ctx, session);
             session.set_backdrops(Vec::new());
-            self.popover_open = false;
+            self.popover_open = self.text.editing();
             return;
         }
         let bar = crate::chrome::top_bar(ui, &mut self.look, info.tool, colour, self.colours.hsv[2], &lit);
@@ -515,6 +521,7 @@ impl Interface {
             && !self.transform.on
             && !self.selection.on
             && session.touch_layer_opacity().is_none()
+            && !self.text.editing()
             && (adjusting.adjustment.is_none() || adjusting.pencil);
         crate::panel::side_bar_at(&ctx, self.side_bar_shown, self.prefs.right_handed);
         let taps = if side_bar {
@@ -591,6 +598,7 @@ impl Interface {
         self.quick_menu(&ctx, session);
         self.blocked_alert(&ctx, session);
         self.pdf_quality_alert(&ctx);
+        self.text_editor(&ctx, session);
         // a gesture setting changed: the touches follow it, and it is kept
         if self.gesture_controls.show(&ctx, &mut self.look, &self.gestures) {
             session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
@@ -625,7 +633,7 @@ impl Interface {
         if input.moving_view() && !ctx.is_pointer_over_egui() {
             ctx.set_cursor_icon(egui::CursorIcon::Grab);
         }
-        self.popover_open = self.open.is_some() || self.settings;
+        self.popover_open = self.open.is_some() || self.settings || self.text.editing();
     }
 
     /// The touch companion, with its switch on in Advanced settings.
@@ -773,6 +781,25 @@ impl Interface {
         }
     }
 
+    /// Text being edited, and the question about rasterizing a text layer.
+    fn text_editor(&mut self, ctx: &egui::Context, session: &CanvasSession) {
+        use crate::text::Said;
+        match self.text.show(ctx, &mut self.look, session) {
+            Some(Said::Notice(text, warning)) => self.overlays.notice(text, warning),
+            Some(Said::Undo) => self.undo(session),
+            Some(Said::Redo) => self.redo(session),
+            None => {}
+        }
+    }
+
+    /// New text over the canvas, in the colour chosen.
+    fn add_text(&mut self, ctx: &egui::Context, session: &CanvasSession) {
+        self.open = None;
+        if !self.text.add(ctx, session, self.colours.rgb()) {
+            crate::files::no_room(session);
+        }
+    }
+
     /// The brush's outline where the mouse hovers over the canvas, as the pen's hover shows it,
     /// while nothing is pressed (and while it would paint there).
     fn hover_cursor(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo, input: &mut Input) {
@@ -865,15 +892,16 @@ impl Interface {
                 TouchCommand::TransformNumeric { angle, x, y, right } => {
                     self.transform.numbers(angle, egui::pos2(x, y) / ctx.pixels_per_point(), right);
                 }
-                // (a text layer's question about rasterizing comes with text, still to come here)
                 // Recolor's reticle moved or tapped elsewhere: the fill follows at once
                 TouchCommand::RecolorMoved { x, y } => session.recolor_move_to(x, y),
                 TouchCommand::RecolorTapped { x, y } => session.recolor_tap(x, y),
                 TouchCommand::CopyPaste => self.copy_paste = true,
                 TouchCommand::LayerSelect { x, y } => self.layer_select(ctx, session, x, y),
                 TouchCommand::QuickMenu { x, y } => self.quick_menu.toggle(egui::pos2(x, y) / ctx.pixels_per_point()),
+                // a stroke or a fill on a text layer: it takes them once rasterized
+                TouchCommand::TextLayer => self.text.ask_rasterize(),
                 // (the pen's hover, which sets the brush with a finger, isn't the desktop's)
-                TouchCommand::ViewMoved | TouchCommand::TextLayer | TouchCommand::BrushChanged => {}
+                TouchCommand::ViewMoved | TouchCommand::BrushChanged => {}
             }
         }
         // a slid threshold redoes the whole fill: once a frame, at the last
@@ -902,6 +930,16 @@ impl Interface {
     /// Undo (recoloring, the core takes back the open fill first).
     fn undo(&mut self, session: &CanvasSession) {
         self.feedback();
+        // a finished text's step goes back to editing that text first, as a step of its own
+        if !self.text.editing()
+            && !self.transform.on
+            && let Some(id) = session.text_undo_layer()
+            && self.text.edit(session, id)
+        {
+            return;
+        }
+        // undoing while editing text undoes the whole edit
+        self.text.end(session, true);
         let could = session.info().can_undo;
         let name = session.undo();
         if could || name.is_some() {
@@ -911,10 +949,18 @@ impl Interface {
 
     fn redo(&mut self, session: &CanvasSession) {
         self.feedback();
+        // text being edited is kept first
+        let editing = self.text.editing();
+        self.text.end(session, true);
         let could = session.info().can_redo;
+        // a text edit redone is edited again
+        let text = if editing { None } else { session.text_redo_layer() };
         let name = session.redo();
         if could {
             self.overlays.notice(name.map_or("Redo".into(), |n| format!("Redo {n}")), false);
+        }
+        if let Some(id) = text {
+            self.text.edit(session, id);
         }
     }
 
@@ -1098,6 +1144,7 @@ impl Interface {
                 session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
                 crate::files::keep_gestures(&self.gestures.kept());
             }
+            QuickAction::AddText => self.add_text(ctx, session),
             QuickAction::LayerSelect => {
                 let ppp = ctx.pixels_per_point();
                 self.layer_select(ctx, session, at.x * ppp, at.y * ppp);
@@ -1588,6 +1635,10 @@ impl Interface {
                 if std::mem::take(&mut self.layers.share) {
                     self.actions.push(Action::Export(Format::ChosenLayerPngs, 100));
                 }
+                if let Some(id) = self.layers.edit_text.take() {
+                    self.open = None;
+                    self.text.edit(session, id);
+                }
                 shown
             }
             Popover::Colour => {
@@ -1668,6 +1719,7 @@ impl Interface {
                         self.settings = true;
                     }
                     Some(Act::Flip { horizontal }) => session.flip_canvas(horizontal),
+                    Some(Act::AddText) => self.add_text(ctx, session),
                     Some(
                         act @ (Act::InsertFile | Act::InsertPhoto | Act::InsertPrivateFile | Act::InsertPrivatePhoto),
                     ) => {
@@ -1747,8 +1799,11 @@ impl Interface {
     /// A hardware keyboard's shortcuts: the core's (keys.rs), and the desktop's files: Ctrl (⌘)
     /// with N, O, S (and Shift).
     fn shortcuts(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo) {
-        // a text field, or the hex keypad, takes the keys
-        if ctx.egui_wants_keyboard_input() || (self.open == Some(Popover::Colour) && self.colours.takes_keys()) {
+        // a text field, or the hex keypad, takes the keys; text being edited takes them all
+        if ctx.egui_wants_keyboard_input()
+            || self.text.editing()
+            || (self.open == Some(Popover::Colour) && self.colours.takes_keys())
+        {
             return;
         }
         let pressed = |modifiers: Modifiers, key: Key| {
@@ -1777,6 +1832,16 @@ impl Interface {
                 .collect()
         });
         for (key, modifiers) in keys {
+            // R turns the canvas a step clockwise about the window's middle, Shift+R back (the
+            // desktop's own: a mouse, or a pen tablet's keys set to them; touch turns it as on
+            // the tablet)
+            if key == Key::R && !modifiers.command && !modifiers.alt {
+                let middle = ctx.content_rect().center() * ctx.pixels_per_point();
+                let turn = if modifiers.shift { -KEY_TURN } else { KEY_TURN };
+                session.view_gesture(middle.x, middle.y, 0.0, 0.0, 1.0, turn);
+                ctx.input_mut(|i| i.consume_key(modifiers, key));
+                continue;
+            }
             let Some(name) = key_name(key) else { continue };
             let transforming = self.transform.on;
             let Some(shortcut) = procraft_core::key_shortcut(
@@ -1828,6 +1893,9 @@ impl Interface {
         self.library.tool_changed();
     }
 }
+
+/// How far R turns the canvas (radians, 15°).
+const KEY_TURN: f32 = 15.0 * std::f32::consts::PI / 180.0;
 
 /// The name the core's shortcuts know `key` by (keys.rs), if it has one.
 fn key_name(key: Key) -> Option<&'static str> {

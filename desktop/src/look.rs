@@ -169,6 +169,14 @@ impl Weight {
     }
 }
 
+/// Inter's faces (bundled with the Android app, OFL).
+pub static INTER_FACES: [(Weight, &[u8]); 4] = [
+    (Weight::Regular, include_bytes!("../../android/app/src/main/assets/fonts/Inter-Regular.ttf")),
+    (Weight::Medium, include_bytes!("../../android/app/src/main/assets/fonts/Inter-Medium.ttf")),
+    (Weight::SemiBold, include_bytes!("../../android/app/src/main/assets/fonts/Inter-SemiBold.ttf")),
+    (Weight::Bold, include_bytes!("../../android/app/src/main/assets/fonts/Inter-Bold.ttf")),
+];
+
 /// Inter (bundled with the Android app, OFL) for all text, egui's own fonts behind it for what it
 /// lacks, and the system's behind those for other scripts (read on a thread of their own, put in
 /// once read).
@@ -186,12 +194,6 @@ pub fn install_fonts(ctx: &egui::Context) {
 
 /// The app's fonts, with `system`'s `(name, font)` after egui's own.
 fn fonts(system: Vec<(String, egui::FontData)>) -> egui::FontDefinitions {
-    const FACES: [(Weight, &[u8]); 4] = [
-        (Weight::Regular, include_bytes!("../../android/app/src/main/assets/fonts/Inter-Regular.ttf")),
-        (Weight::Medium, include_bytes!("../../android/app/src/main/assets/fonts/Inter-Medium.ttf")),
-        (Weight::SemiBold, include_bytes!("../../android/app/src/main/assets/fonts/Inter-SemiBold.ttf")),
-        (Weight::Bold, include_bytes!("../../android/app/src/main/assets/fonts/Inter-Bold.ttf")),
-    ];
     let mut fonts = egui::FontDefinitions::default();
     let mut fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     for (name, font) in system {
@@ -201,7 +203,7 @@ fn fonts(system: Vec<(String, egui::FontData)>) -> egui::FontDefinitions {
         }
         fallback.push(name);
     }
-    for (weight, bytes) in FACES {
+    for &(weight, bytes) in &INTER_FACES {
         let name = weight.name().to_owned();
         fonts.font_data.insert(name.clone(), Arc::new(egui::FontData::from_static(bytes)));
         let mut family = vec![name];

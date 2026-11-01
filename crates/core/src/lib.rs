@@ -52,6 +52,7 @@ mod studio;
 #[cfg(test)]
 mod tests;
 mod text;
+mod text_draw;
 mod timelapse;
 mod touch;
 mod transform;
@@ -78,7 +79,7 @@ pub use adjust_menu::{
 };
 pub use adjusting::{AdjustShown, CLONE_PUCK_RADIUS};
 pub use animation::{AnimationPlayback, AnimationSettings, PlayStep, animation_next_step};
-pub use brush_files::{OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip, read_any_brushes};
+pub use brush_files::{BrushesRead, OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip, read_any_brushes, read_brushes};
 pub use brushes::{BrushInfo, BrushSetInfo};
 pub use colour::{
     cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,
@@ -123,6 +124,12 @@ pub use selection::{SelectionDisplay, SelectionJoin};
 pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
     source_from_picture, source_library, source_size,
+};
+pub use text::{TextAlignment, TextInfo};
+pub use text_draw::{
+    TextPicture, TextTypeface, add_system_text_fonts, add_text_font, add_text_font_file, draw_chosen_text, draw_text,
+    import_text_font, set_text_family_alias, set_text_font_folder, text_box, text_caret, text_families,
+    text_index_from_utf16, text_index_to_utf16, text_styles, text_typefaces,
 };
 pub use timelapse::{
     SegmentPlan, TIME_LAPSE_FPS, TimeLapse, TimeLapseSettings, time_lapse_bits_per_pixel, time_lapse_picks,
@@ -460,8 +467,9 @@ pub(crate) struct State {
     clone_sliders: Sliders,
     clone_source: Option<Vec2>,
     clone_offset: Option<Vec2>,
-    /// The selection before the feather popover softened it.
-    feather_base: Option<procraft_engine::selection::Mask>,
+    /// The selection before the feather popover softened it, and the room its feathering works
+    /// in (kept while the popover is open, so each step doesn't ask the system for it again).
+    feather_base: Option<(procraft_engine::selection::Mask, Vec<f32>)>,
     /// The last drag step on the box (window point, when), for its speed.
     last_drag: Option<(Vec2, std::time::Instant)>,
     /// The stroke being drawn as input (canvas points) and its pressures summed, for QuickShape,
@@ -1434,6 +1442,12 @@ impl CanvasSession {
     /// Whether the view is still moving into place (what is drawn over the canvas follows it).
     pub fn view_moving(&self) -> bool {
         self.shared.lock().view_motion.is_some()
+    }
+
+    /// Whether the canvas is made (once the artwork is shown): until then nothing can read its
+    /// pictures (an animation's frames).
+    pub fn canvas_made(&self) -> bool {
+        self.shared.lock().canvas.is_some()
     }
 
     /// The frosted panels open over the canvas, five numbers each (left, top, right, bottom and

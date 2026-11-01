@@ -15,6 +15,10 @@ pub const PICK_WINDOW: f32 = 54.0;
 const WHEEL_ZOOM: f32 = 1.15;
 /// How much a pixel of scrolling zooms by, with Ctrl (or ⌘) held.
 const SCROLL_ZOOM: f32 = 0.005;
+/// How far a notch of the wheel turns the canvas with Shift held (radians, 5°).
+const WHEEL_TURN: f32 = 5.0 * std::f32::consts::PI / 180.0;
+/// How far a pixel of scrolling turns it with Shift held (radians, a quarter of a degree).
+const SCROLL_TURN: f32 = 0.25 * std::f32::consts::PI / 180.0;
 
 /// The mouse's pointer id: touches have the platform's.
 const MOUSE: u64 = u64::MAX;
@@ -200,6 +204,17 @@ impl Input {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let Some(p) = self.cursor.filter(|p| !consumed && !over(*p)) else { return false };
+                // with Shift the wheel turns the canvas about the pointer, up clockwise (the
+                // desktop's own, for a mouse or a pen without touch; touch and trackpads turn it
+                // as on the tablet); some systems send Shift's wheel sideways
+                if self.shift {
+                    let turn = match delta {
+                        MouseScrollDelta::LineDelta(x, y) => (if *y == 0.0 { *x } else { *y }) * WHEEL_TURN,
+                        MouseScrollDelta::PixelDelta(d) => (if d.y == 0.0 { d.x } else { d.y }) as f32 * SCROLL_TURN,
+                    };
+                    session.view_gesture(p.0, p.1, 0.0, 0.0, 1.0, turn);
+                    return true;
+                }
                 match delta {
                     MouseScrollDelta::LineDelta(_, y) => {
                         session.view_gesture(p.0, p.1, 0.0, 0.0, WHEEL_ZOOM.powf(*y), 0.0);

@@ -3615,9 +3615,9 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
         let bytes = std::fs::read(path).unwrap();
         let kind = extension(path);
         let set = if kind == "brush" || kind == "brushset" {
-            s.import_brushes(bytes)
+            s.import_brushes(bytes.clone())
         } else {
-            s.import_other_brushes(bytes, "Corpus".to_owned())
+            s.import_other_brushes(bytes.clone(), "Corpus".to_owned())
         };
         let Some(set) = set else {
             failures.push(format!("{}: not imported", path.display()));
@@ -3625,6 +3625,27 @@ fn a_corpus_of_real_brush_files_imports_draws_and_round_trips() {
         };
         // a brush goes in at the top of its set; a set's brushes, or the tips, fill one of their own
         let count = if kind == "brush" { 1 } else { s.brush_library()[set as usize].brushes.len() as u32 };
+        // the apps' way, read by the file's name off the window's thread, then added: the same brushes
+        let Some(u) = session(64, 64) else { return };
+        let name = path.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+        match crate::brush_files::read_brushes(bytes, name).and_then(|r| u.add_brushes_read(r, 0)) {
+            None => failures.push(format!("{}: not read the apps' way", path.display())),
+            Some(v) => {
+                let theirs = if kind == "brush" { 1 } else { u.brush_library()[v as usize].brushes.len() as u32 };
+                if theirs != count {
+                    failures.push(format!("{}: {theirs} brushes the apps' way, {count} imported", path.display()));
+                }
+                for i in 0..count.min(theirs) {
+                    match (
+                        s.brush_as_file(set, i).as_deref().and_then(read),
+                        u.brush_as_file(v, i).as_deref().and_then(read),
+                    ) {
+                        (Some(a), Some(b)) if changes(&a, &b).is_empty() => {}
+                        _ => failures.push(format!("{} #{}: not the same the apps' way", path.display(), i + 1)),
+                    }
+                }
+            }
+        }
         for i in 0..count {
             brushes += 1;
             if s.shared
@@ -3868,4 +3889,261 @@ fn the_clone_source_starts_in_the_middle_is_dragged_and_follows_the_brush() {
     near(25.0, 42.0);
     assert!(s.adjustment_end(true));
     assert_eq!(s.adjustment_shown().clone_puck, None);
+}
+
+/// Text as the tests draw it: Inter, black, at the canvas's top left.
+fn text_info(text: &str) -> crate::TextInfo {
+    crate::TextInfo {
+        text: text.to_owned(),
+        font: "inter".to_owned(),
+        style: "Regular".to_owned(),
+        size: 40.0,
+        kerning: 0.0,
+        tracking: 0.0,
+        leading: 0.0,
+        baseline: 0.0,
+        opacity: 1.0,
+        align: crate::TextAlignment::Left,
+        underline: false,
+        outline: false,
+        vertical: false,
+        all_caps: false,
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        x: 10.0,
+        y: 10.0,
+        width: 0.0,
+    }
+}
+
+/// The inked pixels of premultiplied RGBA `px` (`w` across), and their bounds.
+fn inked(px: &[u8], w: usize) -> (usize, [usize; 4]) {
+    let mut n = 0;
+    let mut b = [usize::MAX, usize::MAX, 0, 0];
+    for (i, p) in px.as_chunks::<4>().0.iter().enumerate() {
+        if p[3] > 0 {
+            n += 1;
+            let (x, y) = (i % w, i / w);
+            b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+        }
+    }
+    (n, b)
+}
+
+#[test]
+fn text_is_drawn_inside_its_box_and_as_it_is_set() {
+    let regular = include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf");
+    assert_eq!(crate::add_text_font(regular.to_vec()), vec!["Inter".to_owned()]);
+    assert!(crate::text_families().contains(&"Inter".to_owned()));
+    let (w, h) = (600u32, 400u32);
+    let plain = text_info("Hello");
+    let b = crate::text_box(plain.clone());
+    let (n, ink) = inked(&crate::draw_text(plain.clone(), w, h), w as usize);
+    assert!(n > 200, "{n}");
+    // the letters inside the box (a pixel's rounding allowed)
+    assert!(ink[0] as f32 >= b[0] - 1.0 && ink[1] as f32 >= b[1] - 1.0, "{ink:?} {b:?}");
+    assert!(ink[2] as f32 <= b[0] + b[2] + 1.0 && ink[3] as f32 <= b[1] + b[3] + 1.0, "{ink:?} {b:?}");
+    // centred in a wide box, the letters move to its middle
+    let centred = crate::TextInfo { width: 500.0, align: crate::TextAlignment::Center, ..plain.clone() };
+    let (_, c) = inked(&crate::draw_text(centred, w, h), w as usize);
+    let middle = (c[0] + c[2]) as f32 / 2.0;
+    assert!((middle - (10.0 + 250.0)).abs() < 8.0, "{middle}");
+    // underlined, ink below the baseline across the word
+    let under = crate::TextInfo { underline: true, ..plain.clone() };
+    let (nu, u) = inked(&crate::draw_text(under, w, h), w as usize);
+    assert!(nu > n && u[3] > ink[3], "{nu} {u:?}");
+    // outlined, a stroke round each letter: not the letters filled
+    let outlined = crate::TextInfo { outline: true, size: 120.0, text: "O".to_owned(), ..plain.clone() };
+    let filled = crate::TextInfo { size: 120.0, text: "O".to_owned(), ..plain.clone() };
+    let (no, _) = inked(&crate::draw_text(outlined, w, h), w as usize);
+    let (nf, _) = inked(&crate::draw_text(filled, w, h), w as usize);
+    assert!(no > 0 && no < nf * 2, "{no} {nf}");
+    // wrapped in a narrow box, taller; vertical, one letter a line; the leading spreads lines
+    let wrapped =
+        crate::text_box(crate::TextInfo { text: "Hello there world".to_owned(), width: 80.0, ..plain.clone() });
+    assert!(wrapped[3] > b[3] * 2.0, "{wrapped:?} {b:?}");
+    let vertical = crate::text_box(crate::TextInfo { vertical: true, ..plain.clone() });
+    assert!(vertical[3] > b[3] * 4.0 && vertical[2] < b[2], "{vertical:?} {b:?}");
+    let spread = crate::text_box(crate::TextInfo {
+        text: "a
+b"
+        .to_owned(),
+        leading: 1.0,
+        ..plain.clone()
+    });
+    let tight = crate::text_box(crate::TextInfo {
+        text: "a
+b"
+        .to_owned(),
+        ..plain.clone()
+    });
+    assert!((spread[3] - tight[3] - 40.0).abs() < 1.0, "{spread:?} {tight:?}");
+    // tracking widens the word; capitals are what all caps draws
+    let tracked = crate::text_box(crate::TextInfo { tracking: 0.5, ..plain.clone() });
+    assert!(tracked[2] > b[2] + 60.0, "{tracked:?} {b:?}");
+    let caps = crate::draw_text(crate::TextInfo { all_caps: true, ..plain.clone() }, w, h);
+    let upper = crate::draw_text(crate::TextInfo { text: "HELLO".to_owned(), ..plain.clone() }, w, h);
+    assert_eq!(caps, upper);
+    // the baseline lifts the box: its top is the origin less the baseline
+    let lifted = crate::text_box(crate::TextInfo { baseline: 1.0, ..plain });
+    assert!((lifted[1] - (10.0 - 40.0)).abs() < 0.01, "{lifted:?}");
+}
+
+#[test]
+fn the_caret_and_chosen_letters_stand_where_the_text_is_drawn() {
+    let regular = include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf");
+    crate::add_text_font(regular.to_vec());
+    let plain = crate::TextInfo {
+        text: "Hello
+there"
+            .to_owned(),
+        ..text_info("")
+    };
+    let b = crate::text_box(plain.clone());
+    // before the first letter, at the box's left on the first line; after the last, at the
+    // second line's end
+    let first = crate::text_caret(plain.clone(), 0);
+    assert!((first[0] - b[0]).abs() < 2.0 && (first[1] - b[1]).abs() < 0.01, "{first:?} {b:?}");
+    let last = crate::text_caret(plain.clone(), 11);
+    assert!(last[1] > first[2] - 1.0 && last[0] > b[0] + 20.0, "{last:?} {first:?}");
+    // further along a line, further right
+    let third = crate::text_caret(plain.clone(), 3);
+    assert!(third[0] > first[0] + 10.0 && third[1] == first[1], "{third:?}");
+    // an empty line centred: its caret in the middle
+    let centred = crate::TextInfo {
+        text: "ab
+"
+        .to_owned(),
+        width: 300.0,
+        align: crate::TextAlignment::Center,
+        ..plain.clone()
+    };
+    let empty = crate::text_caret(centred, 3);
+    assert!((empty[0] - (10.0 + 150.0)).abs() < 1.0, "{empty:?}");
+    assert!(crate::text_caret(crate::TextInfo { vertical: true, ..plain.clone() }, 1).is_empty());
+    // "ell" chosen: a picture from the caret before it to the one after it, ringed in blue
+    let chosen = crate::draw_chosen_text(plain.clone(), 1, 4, 0xFF0076FD).expect("chosen letters");
+    let (from, to) = (crate::text_caret(plain.clone(), 1), crate::text_caret(plain.clone(), 4));
+    assert!((chosen.x as f32 - from[0]).abs() < 2.0, "{} {from:?}", chosen.x);
+    assert!(((chosen.x + chosen.width as i32) as f32 - to[0]).abs() < 2.0, "{} {to:?}", chosen.width);
+    assert_eq!(chosen.rgba.len(), chosen.width as usize * chosen.height as usize * 4);
+    let blue = chosen.rgba.chunks(4).filter(|p| p[3] > 200 && p[2] > 200 && p[0] < 60).count();
+    assert!(blue > 20, "{blue}");
+    assert!(crate::draw_chosen_text(plain.clone(), 2, 2, 0xFF0076FD).is_none());
+    // across both lines: as tall as two
+    let both = crate::draw_chosen_text(plain, 0, 11, 0xFF0076FD).expect("both lines");
+    assert!(both.height as f32 > (first[2] - first[1]) * 1.5, "{} {first:?}", both.height);
+}
+
+#[test]
+fn the_text_tools_typefaces_and_styles() {
+    let faces = crate::text_typefaces();
+    assert_eq!(faces.first().map(|f| f.family.as_str()), Some("sans-serif"));
+    // the eight generic ones, then Inter (then any imported)
+    assert_eq!(faces.get(8).map(|f| (f.name.as_str(), f.family.as_str())), Some(("Inter", "inter")));
+    let styles = crate::text_styles();
+    assert_eq!(styles.len(), 12);
+    assert_eq!(&styles[..6], ["Thin", "Thin Italic", "Light", "Light Italic", "Regular", "Italic"]);
+    assert_eq!(styles.last().map(String::as_str), Some("Black Italic"));
+}
+
+#[test]
+fn imported_fonts_are_kept_in_their_folder_and_offered() {
+    let dir = std::env::temp_dir().join(format!("procraft-fonts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // nowhere to keep them yet
+    assert!(crate::import_text_font(vec![1, 2, 3], "Nothing.ttf".into()).is_none());
+    crate::set_text_font_folder(dir.to_string_lossy().into_owned());
+    let inter = include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec();
+    let kept = crate::import_text_font(inter, "My Font!.ttf".into()).unwrap();
+    assert_eq!(kept.name, "My Font");
+    assert!(kept.family.starts_with("file:") && dir.join("My Font.ttf").is_file());
+    assert!(crate::text_typefaces().contains(&kept));
+    // a file that isn't a font isn't kept
+    assert!(crate::import_text_font(b"not a font".to_vec(), "Bad".into()).is_none());
+    assert!(!dir.join("Bad.ttf").exists());
+    // a font imported under a name kept already never overwrites it
+    let regular = include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec();
+    let bold = include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Bold.ttf").to_vec();
+    let first = crate::import_text_font(regular.clone(), "Same.ttf".into()).unwrap();
+    // the same file again: the same typeface, one file
+    assert_eq!(crate::import_text_font(regular.clone(), "Same.ttf".into()), Some(first.clone()));
+    // another under that name: a name of its own, the first kept as it was
+    let second = crate::import_text_font(bold, "Same.ttf".into()).unwrap();
+    assert_eq!(second.name, "Same 2");
+    assert_eq!(std::fs::read(dir.join("Same.ttf")).unwrap(), regular);
+    // a file that isn't a font, under that name: dropped, the first kept
+    assert!(crate::import_text_font(b"no font".to_vec(), "Same.ttf".into()).is_none());
+    assert_eq!(std::fs::read(dir.join("Same.ttf")).unwrap(), regular);
+    assert!(!dir.join("Same 3.ttf").exists());
+    // a name of nothing but signs still makes a file of its own
+    assert!(crate::import_text_font(regular, "!!!".into()).is_some_and(|t| t.name == "Font"));
+    // a text layer naming a font file outside the folder never opens it: the sans serif instead
+    let outside = crate::TextInfo { font: r"file:\\server\share\x.ttf".to_owned(), ..text_info("Hi") };
+    assert!(!crate::draw_text(outside, 200, 80).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn brushes_read_apart_are_added_once_where_they_belong() {
+    let Some(s) = session(100, 100) else { return };
+    let sets = s.brush_library().len();
+    let file = s.brush_as_file(0, 0).unwrap();
+    // read with nothing changed: a brush file's brush, for the "Imported" set made at the top
+    let read = crate::read_brushes(file, Some("Brush.brush".into())).unwrap();
+    assert!(crate::read_brushes(b"neither".to_vec(), Some("x.brush".into())).is_none());
+    // meanwhile a set is made at the top: the brushes still go where they belong
+    s.new_brush_set();
+    let set = s.add_brushes_read(std::sync::Arc::clone(&read), 0).unwrap();
+    let library = s.brush_library();
+    assert_eq!(library.len(), sets + 2);
+    assert_eq!(library.get(set as usize).map(|l| (l.name.as_str(), l.brushes.len())), Some(("Imported", 1)));
+    // added once
+    assert!(s.add_brushes_read(read, 0).is_none());
+    assert_eq!(s.brush_library().len(), sets + 2);
+}
+
+#[test]
+fn text_with_negative_leading_keeps_its_letters_in_its_box() {
+    crate::add_text_font(include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec());
+    // as Android lays it out: the leading only between lines
+    let plain = crate::text_box(text_info("Hello"));
+    let tight = crate::text_box(crate::TextInfo { leading: -0.5, ..text_info("Hello") });
+    assert!((plain[3] - tight[3]).abs() < 0.5, "{plain:?} {tight:?}");
+    let two = crate::text_box(crate::TextInfo { leading: -0.5, ..text_info("Hello\nthere") });
+    assert!((two[3] - (2.0 * plain[3] - 0.5 * 40.0)).abs() < 1.0, "{two:?} {plain:?}");
+}
+
+#[test]
+fn the_caret_in_capitals_follows_letters_that_become_two() {
+    crate::add_text_font(include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec());
+    // "ß" shows as "SS": the caret after it stands after both
+    let caps = crate::TextInfo { all_caps: true, ..text_info("straße") };
+    let shown = text_info("STRASSE");
+    assert_eq!(crate::text_caret(caps.clone(), 6), crate::text_caret(shown.clone(), 7));
+    assert_eq!(crate::text_caret(caps, 5), crate::text_caret(shown, 6));
+}
+
+#[test]
+fn a_group_has_nothing_to_copy() {
+    let Some(s) = session(64, 64) else { return };
+    let group = s.group_picked();
+    assert!(group != 0);
+    assert!(s.select_layer(group));
+    assert!(s.copy_layer().is_none());
+}
+
+#[test]
+fn text_places_count_between_utf16_and_characters() {
+    // "a😀b": the emoji is two UTF-16 units and one character
+    let text = "a\u{1F600}b".to_owned();
+    assert_eq!(crate::text_index_from_utf16(text.clone(), 0), 0);
+    assert_eq!(crate::text_index_from_utf16(text.clone(), 1), 1);
+    assert_eq!(crate::text_index_from_utf16(text.clone(), 3), 2);
+    assert_eq!(crate::text_index_from_utf16(text.clone(), 4), 3);
+    // inside the pair: after it
+    assert_eq!(crate::text_index_from_utf16(text.clone(), 2), 2);
+    assert_eq!(crate::text_index_to_utf16(text.clone(), 2), 3);
+    assert_eq!(crate::text_index_to_utf16(text, 9), 4);
 }

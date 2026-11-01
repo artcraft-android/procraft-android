@@ -50,6 +50,7 @@ mod settings;
 mod sound;
 mod source_editor;
 mod studio;
+mod text;
 mod timelapse;
 mod tool_header;
 mod transform;
@@ -144,7 +145,10 @@ fn veil(ctx: &egui::Context, what: &str) {
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        // a system font it can't read is left out; one line for each says nothing to act on
+        .filter_module("fontdb", log::LevelFilter::Error)
+        .init();
     let event_loop = match EventLoop::new() {
         Ok(l) => l,
         Err(e) => {
@@ -162,6 +166,7 @@ fn main() {
         opening: None,
         importing: None,
         reading_artwork: None,
+        share_once_made: None,
         reading_photo: None,
         screen: None,
         session: None,
@@ -196,6 +201,9 @@ struct App {
     /// An artwork in the gallery being opened, read on a thread of its own (an artwork of many
     /// layers holds hundreds of MB): since when, its folder, and the reading.
     reading_artwork: Option<ReadingArtwork>,
+    /// The gallery's animated Share of the artwork just opened, started once its canvas is made
+    /// (the preview's frames and the file are read from it).
+    share_once_made: Option<animated_export::Animated>,
     /// A picture made a new artwork (the gallery's Photo), read on a thread of its own: since
     /// when, the gallery folder it goes in, and the reading.
     reading_photo: Option<ReadingPhoto>,
@@ -275,6 +283,11 @@ impl ApplicationHandler for App {
         let Some(event) = self.tap_assist(event) else { return };
         let Some(screen) = self.screen.as_mut() else { return };
         let session = self.session.clone();
+        // on the canvas Ctrl+X, C and V are the app's shortcuts (a layer cut, copied or pasted,
+        // from a clipboard of its own, the system's perhaps empty); a text field keeps them for
+        // the system's clipboard
+        let canvas_keys = session.is_some() && !screen.egui.egui_ctx().egui_wants_keyboard_input();
+        screen.egui.set_clipboard_shortcuts(!canvas_keys);
         let response = screen.egui.on_window_event(&screen.window, &event);
         // egui counts every redraw as wanting another; the frames it does want come from its
         // repaint delay, paced in `about_to_wait`
@@ -438,6 +451,12 @@ impl App {
             && let Some((_, made)) = self.opening.take()
         {
             let _ = made.join();
+        }
+        // the gallery's animated Share, now there is a canvas to read the frames from
+        if self.opening.is_none()
+            && let Some(format) = self.share_once_made.take()
+        {
+            self.ui.share_animated_from_gallery(format);
         }
         let slow = self.opening.as_ref().is_some_and(|(since, _)| since.elapsed() >= SLOW_OPENING)
             || self.importing.as_ref().is_some_and(|i| i.since.elapsed() >= SLOW_OPENING);
@@ -761,9 +780,7 @@ impl App {
         match read {
             Ok(session) if shared_as.is_some() => {
                 self.open_artwork(session, dir);
-                if let Some(format) = shared_as {
-                    self.ui.share_animated_from_gallery(format);
-                }
+                self.share_once_made = shared_as;
             }
             Ok(session) => {
                 let cell = self.gallery.picture_of(&dir);
@@ -873,6 +890,12 @@ impl App {
         event_loop.exit();
     }
 
+    /// The stack the open artwork is in (its folder in the gallery's), none at the top.
+    fn artwork_folder(&self) -> Option<String> {
+        let folder = self.artwork.as_deref().and_then(|d| std::path::Path::new(d).parent());
+        folder.map(|f| f.to_string_lossy().into_owned()).filter(|f| *f != self.gallery.store.root())
+    }
+
     /// The artwork open is put away and kept; false if it couldn't be.
     fn leave_artwork(&mut self) -> bool {
         if let Some(session) = self.session.clone() {
@@ -929,33 +952,26 @@ impl App {
                 }
                 None
             }
-            // a new artwork the size of this one, or one picked, beside it in the gallery
-            Action::New | Action::Open => {
+            // a new artwork the size of this one beside it in the gallery
+            Action::New => {
                 if !self.leave_artwork() {
                     return;
                 }
-                let next = if matches!(action, Action::New) {
-                    let info = session.info();
-                    Some((CanvasSession::new(info.width, info.height), None))
-                } else {
-                    files::pick_artwork()
-                };
-                if let Some((next, package)) = next {
-                    let folder = self.artwork.as_deref().and_then(|d| std::path::Path::new(d).parent());
-                    let folder =
-                        folder.map(|f| f.to_string_lossy().into_owned()).filter(|f| *f != self.gallery.store.root());
-                    let dir = self.gallery.store.new_folder(folder);
-                    let new = package.is_none() && (matches!(action, Action::New) || next.model_info().is_some());
-                    if let Some(package) = package {
-                        timelapse::take_package(&package, &dir);
+                let info = session.info();
+                let dir = self.gallery.store.new_folder(self.artwork_folder());
+                self.open_artwork(CanvasSession::new(info.width, info.height), dir);
+                self.ui.started_new();
+                None
+            }
+            // one picked, beside it: read on a thread of its own as the gallery's Import does (a
+            // big file takes seconds), this one open meanwhile and kept as that one opens
+            Action::Open => {
+                if let Some(paths) = files::pick_artwork_files(&[]) {
+                    let folder = self.artwork_folder();
+                    match &mut self.importing {
+                        Some(importing) => importing.rest.push_back(paths),
+                        None => self.importing = Importing::next([paths].into(), folder),
                     }
-                    self.open_artwork(next, dir);
-                    if new {
-                        self.ui.started_new();
-                    }
-                } else if let Some(dir) = self.artwork.clone() {
-                    // none picked: this one stays open, kept saved again
-                    Arc::clone(session).start_autosave(dir);
                 }
                 None
             }

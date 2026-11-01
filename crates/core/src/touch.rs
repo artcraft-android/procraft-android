@@ -1804,6 +1804,48 @@ mod tests {
         CanvasSession::new(64, 64)
     }
 
+    /// What the touches cost a pen stroke's events, the router and the stroke's own work (no GPU):
+    /// run on a device with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn touch_cost() {
+        let s = CanvasSession::new(2048, 2048);
+        let sample = |i: usize, ms: f64| {
+            let u = i as f32 * 0.5;
+            PenSample {
+                x: 100.0 + u % 1800.0,
+                y: 600.0 + (u * 0.02).sin() * 400.0,
+                pressure: 0.3 + 0.6 * (u * 0.01).sin().abs(),
+                tilt: 0.4,
+                orientation: 1.0,
+                time_ms: ms,
+            }
+        };
+        s.touch_down(1, PointerKind::Stylus, vec![sample(0, 0.0)]);
+        // a 240 Hz pen read at 120 frames a second: two samples an event
+        let mut took: Vec<f64> = (1..=4000)
+            .map(|k| {
+                let samples = vec![sample(2 * k - 1, k as f64 * 8.33 - 4.0), sample(2 * k, k as f64 * 8.33)];
+                let start = std::time::Instant::now();
+                s.touch_move(1, samples);
+                start.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        s.touch_up(1, vec![sample(8001, 4000.0 * 8.33 + 4.0)]);
+        let up = start.elapsed().as_secs_f64() * 1000.0;
+        let (first, last) = (took[..400].iter().sum::<f64>() / 400.0, took[3600..].iter().sum::<f64>() / 400.0);
+        took.sort_by(f64::total_cmp);
+        let at = |q: f64| took[((took.len() - 1) as f64 * q) as usize];
+        println!(
+            "pen event ms: median {:.4}, 90th {:.4}, 99th {:.4}, most {:.4}; first 400 {first:.4}, last 400 {last:.4}; up {up:.4}",
+            at(0.5),
+            at(0.9),
+            at(0.99),
+            at(1.0)
+        );
+    }
+
     #[test]
     fn two_fingers_tapped_undo_and_three_redo() {
         let s = session();

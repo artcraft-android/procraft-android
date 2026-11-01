@@ -466,7 +466,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         get() = selectionPopupState
         set(value) {
             if (selectionPopupState == SelectionPopup.FEATHER && value != SelectionPopup.FEATHER) {
-                session?.selectFeatherDone()
+                // after the feathering still on its way
+                session?.let { s -> pourNow { s.selectFeatherDone() } }
                 refreshFlags()
             }
             selectionPopupState = value
@@ -1626,11 +1627,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         } to mime
     }
 
-    /** Opens artwork [a] to set up its animated export as [kind], going back to the gallery after. */
+    /**
+     * Opens artwork [a] to set up its animated export as [kind], going back to the gallery after;
+     * the export shows once the canvas is made, as its frames and file are read from it.
+     */
     fun openForAnimatedExport(a: Artwork, kind: Animated) {
         openArtwork(a) {
             exportingFromGallery = true
-            animatedExport = kind
+            val s = session ?: return@openArtwork
+            viewModelScope.launch {
+                while (session === s && !s.canvasMade()) kotlinx.coroutines.delay(16)
+                if (session === s) animatedExport = kind
+            }
         }
     }
 
@@ -3716,8 +3724,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         keepBrushLibrary(s)
     }
 
-    /** Keeps the library as it is now in its file, off the main thread. */
-    /** Keeps the library with the brushes in use. */
+    /** Keeps the library as it is now, with the brushes in use, in its folder, off the main thread. */
     private fun keepBrushLibrary(s: CanvasSession) {
         viewModelScope.launch(Dispatchers.IO) {
             // each write takes the library as it is when it runs, so the last one is the latest
@@ -4875,7 +4882,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         refresh()
     }
 
-    /** A fill's work, in order, off the main thread (a slid threshold redoes the whole fill). */
+    /** A fill's work (and feathering's), in order, off the main thread (a slid threshold redoes the whole fill). */
     private val pourThread = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     /** The latest of each kind of change waiting for the fill's thread (a threshold, a point, a colour). */
@@ -4985,7 +4992,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The feather popover's amount (0..1): the selection's edges softened from how they were before. */
     fun featherTo(amount: Float) {
         featherAmount = amount
-        session?.selectFeather(amount)
+        // a big selection takes a while: off the main thread, the newest amount when it gets there
+        val s = session ?: return
+        pourLater("feather") { s.selectFeather(amount) }
     }
 
     fun openSelectionPopup(p: SelectionPopup) {

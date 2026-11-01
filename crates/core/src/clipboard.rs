@@ -23,6 +23,10 @@ impl State {
     fn selected_pixels(&mut self) -> Option<Vec<u8>> {
         self.canvas.as_ref().zip(self.gpu.as_ref())?;
         let current = self.doc.current();
+        // a group has no pixels of its own to copy
+        if !self.doc.pixel_layer_ids().any(|id| id == current) {
+            return None;
+        }
         let (w, h) = (self.doc.width(), self.doc.height());
         let mut out = vec![0u8; w as usize * h as usize * 4];
         // only what is selected where the layer is painted is read back; the rest is clear

@@ -184,8 +184,28 @@ impl CanvasSession {
     }
 }
 
+/// Brushes read from a file for an app's interface (Android's) to add on its own thread once
+/// nothing there holds a library place (see [`ReadBrushes`]); the first add takes them.
+#[derive(uniffi::Object)]
+pub struct BrushesRead(std::sync::Mutex<Option<ReadBrushes>>);
+
+/// The brushes in a file the user chose, called `file_name` (if known), read as
+/// [`read_any_brushes`] reads them, not yet added; none if it holds none.
+#[uniffi::export]
+pub fn read_brushes(bytes: Vec<u8>, file_name: Option<String>) -> Option<std::sync::Arc<BrushesRead>> {
+    read_any_brushes(&bytes, file_name).map(|read| std::sync::Arc::new(BrushesRead(std::sync::Mutex::new(Some(read)))))
+}
+
 #[uniffi::export]
 impl CanvasSession {
+    /// Adds brushes read meanwhile ([`read_brushes`]) to the library, as
+    /// [`CanvasSession::add_read_brushes`] does (one of ours from before into set `shown`).
+    /// Returns the set they went into; none if they were added already or couldn't be.
+    pub fn add_brushes_read(&self, read: std::sync::Arc<BrushesRead>, shown: u32) -> Option<u32> {
+        let brushes = read.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()?;
+        self.add_read_brushes(brushes, shown)
+    }
+
     /// Adds the brushes in `bytes`: a brush file's (to the top of the "Imported" set, made at the
     /// top of the library if there isn't one) or a set file's (a set of their own at the top).
     /// Returns the set they went into, or none if the file is neither.

@@ -52,45 +52,45 @@ impl Flood {
             let d = d as f32;
             if d <= t { 255 } else { (((t + fade - d) / fade).clamp(0.0, 1.0) * 255.0).round() as u8 }
         });
-        let reach = |i: usize| self.distance.get(i).map_or(0, |&d| weights.get(usize::from(d)).copied().unwrap_or(0));
+        // the farthest distance the fill reaches (the weights only fall with distance)
+        let cut = weights.iter().rposition(|&v| v > 0).unwrap_or(0) as u8;
         let mut m = Mask::empty(self.width, self.height);
         let (w, h) = (self.width as usize, self.height as usize);
-        // a pixel not yet filled (reached ones are at least 1) that the fill can reach
-        let open = |m: &Mask, i: usize| m.data.get(i) == Some(&0) && reach(i) > 0;
-        // scanlines: each span filled whole, then the runs above and below it seeded
+        // a pixel not yet filled (filled ones are at least 1) that the fill can reach
+        let open = |(m, d): (&u8, &u8)| *m == 0 && *d <= cut;
+        fn before(s: &[u8], n: usize) -> &[u8] {
+            s.get(..n).unwrap_or_default()
+        }
+        fn after(s: &[u8], n: usize) -> &[u8] {
+            s.get(n..).unwrap_or_default()
+        }
+        // scanlines: each span filled whole, then the runs above and below it seeded; each row
+        // looked along as a slice
         let mut stack = vec![(self.seed.0 as usize, self.seed.1 as usize)];
         while let Some((x, y)) = stack.pop() {
-            let row = y * w;
-            if !open(&m, row + x) {
+            let (Some(line), Some(far)) = (m.data.get_mut(y * w..(y + 1) * w), self.distance.get(y * w..(y + 1) * w))
+            else {
+                continue;
+            };
+            if !line.get(x).zip(far.get(x)).is_some_and(open) {
                 continue;
             }
-            let (mut l, mut r) = (x, x);
-            while l > 0 && open(&m, row + l - 1) {
-                l -= 1;
-            }
-            while r + 1 < w && open(&m, row + r + 1) {
-                r += 1;
-            }
-            for i in row + l..=row + r {
-                if let Some(v) = m.data.get_mut(i) {
-                    *v = reach(i);
-                }
+            let l = x - before(line, x).iter().rev().zip(before(far, x).iter().rev()).take_while(|&p| open(p)).count();
+            let r = x + after(line, x + 1).iter().zip(after(far, x + 1)).take_while(|&p| open(p)).count();
+            for (v, &d) in line.get_mut(l..=r).unwrap_or_default().iter_mut().zip(far.get(l..=r).unwrap_or_default()) {
+                *v = weights.get(usize::from(d)).copied().unwrap_or(0);
             }
             for ny in [y.wrapping_sub(1), y + 1] {
                 if ny >= h {
                     continue;
                 }
-                let next = ny * w;
-                let mut xi = l;
-                while xi <= r {
-                    if open(&m, next + xi) {
-                        stack.push((xi, ny));
-                        while xi <= r && open(&m, next + xi) {
-                            xi += 1;
-                        }
-                    } else {
-                        xi += 1;
-                    }
+                let under = m.data.get(ny * w + l..=ny * w + r).unwrap_or_default();
+                let far = self.distance.get(ny * w + l..=ny * w + r).unwrap_or_default();
+                let mut xi = 0;
+                while let Some(start) = after(under, xi).iter().zip(after(far, xi)).position(open) {
+                    stack.push((l + xi + start, ny));
+                    xi += start;
+                    xi += after(under, xi).iter().zip(after(far, xi)).take_while(|&p| open(p)).count();
                 }
             }
         }
@@ -186,6 +186,34 @@ mod tests {
     /// A row of pixels, each (grey, alpha) as premultiplied black or grey over nothing.
     fn row(px: &[[u8; 4]]) -> Vec<u8> {
         px.iter().flatten().copied().collect()
+    }
+
+    /// How long a pour's area over most of a 4K layer takes at a few thresholds (redone a frame at
+    /// a time while one slides): run on a device with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn pour_cost() {
+        let (w, h) = (3840u32, 2160u32);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for (i, p) in px.chunks_mut(4).enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            let v = (100 + x * 60 / w + y * 40 / h) as u8;
+            let blob = (x as i32 - 1900).pow(2) + (y as i32 - 1000).pow(2) < 400 * 400;
+            p.copy_from_slice(&if blob { [30, 30, 40, 255] } else { [v, v, v, 255] });
+        }
+        let start = std::time::Instant::now();
+        let Some(flood) = Flood::new(w, h, &px, (100, 100)) else { return };
+        println!("measured: {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+        for threshold in [0.05f32, 0.2, 0.5] {
+            let mut each = Vec::new();
+            for _ in 0..5 {
+                let start = std::time::Instant::now();
+                std::hint::black_box(flood.mask(threshold));
+                each.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            each.sort_by(f64::total_cmp);
+            println!("pour {threshold}: {:.1} ms (fastest {:.1})", each[2], each[0]);
+        }
     }
 
     #[test]

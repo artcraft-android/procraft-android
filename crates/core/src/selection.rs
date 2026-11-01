@@ -206,15 +206,26 @@ impl CanvasSession {
 
     /// Softens the selection's edges by `amount` (0..1, the feather popover's): each call feathers
     /// the selection as it was before the first, until the selection is changed some other way.
+    /// A big selection takes a while, so the canvas is let go of meanwhile (a host may call this
+    /// off its main thread, one call at a time); a selection changed some other way meanwhile
+    /// stays as it was changed.
     pub fn select_feather(&self, amount: f32) {
+        let (base, mut room) = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            // the selection as it was before the first, kept once
+            if st.feather_base.is_none() {
+                st.feather_base = st.selection.clone().map(|m| (m, Vec::new()));
+            }
+            let Some((base, room)) = st.feather_base.as_mut() else { return };
+            (base.clone(), std::mem::take(room))
+        };
+        let mut m = base.clone();
+        m.feather_in(feather_radius(amount), &mut room);
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        // the selection as it was before the first, kept once
-        if st.feather_base.is_none() {
-            st.feather_base = st.selection.clone();
-        }
-        let Some(mut m) = st.feather_base.clone() else { return };
-        m.feather(feather_radius(amount));
+        let Some((_, kept)) = st.feather_base.as_mut().filter(|(now, _)| *now == base) else { return };
+        *kept = room;
         st.selection = Some(m);
         st.show_selection();
         self.shared.frame(st);
@@ -224,7 +235,7 @@ impl CanvasSession {
     pub fn select_feather_done(&self) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if let Some(base) = st.feather_base.take() {
+        if let Some((base, _)) = st.feather_base.take() {
             st.record_selection(Some(base), "feather");
             self.shared.frame(st);
         }

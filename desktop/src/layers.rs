@@ -140,10 +140,11 @@ pub struct Layers {
     /// A press on a row's visibility box: whose, since when, and whether holding it has acted.
     box_press: Option<(u64, Instant, bool)>,
     /// What the panel asks of the app: a notice to show, a layer's contents copied, the chosen
-    /// layers shared.
+    /// layers shared, a text layer's text edited.
     pub notice: Option<(String, bool)>,
     pub copied: Option<ThumbnailImage>,
     pub share: bool,
+    pub edit_text: Option<u64>,
     /// On a model: the mesh open (its texture set's layers under it), the layer whose channels
     /// show, whether a channel's tile was chosen (painting goes to that channel of the current
     /// layer), each channel's own colour (hue, saturation, brightness) kept while another is
@@ -898,7 +899,7 @@ impl Layers {
 
     /// The current layer's options, left of the panel and centred on its row (kept below the top
     /// bar): what doesn't apply to it is left out; lock, duplicate and delete are on the row's
-    /// swipe. Editing a text layer's text is still to come here.
+    /// swipe.
     #[allow(clippy::too_many_arguments)]
     fn layer_options(
         &mut self,
@@ -910,9 +911,7 @@ impl Layers {
         row_y: f32,
         backdrops: &mut Vec<f32>,
     ) {
-        // the core's rows, but for editing text (not on the desktop yet)
-        let rows: Vec<LayerOptionRow> =
-            session.layer_options(l.id).into_iter().filter(|r| r.option != LayerOption::EditText).collect();
+        let rows: Vec<LayerOptionRow> = session.layer_options(l.id);
         let height = 7.0 * 2.0 + menu::OPTION_HEIGHT * rows.len() as f32;
         let screen = ctx.content_rect();
         let lowest = (screen.bottom() - height).max(screen.top() + OPTIONS_TOP);
@@ -957,7 +956,7 @@ impl Layers {
             LayerOption::ClippingMask => _ = session.set_layer_clipped(l.id, !l.clipped),
             LayerOption::DrawingAssist => _ = session.set_guide_assisted(!l.assisted),
             LayerOption::Reference => _ = session.set_layer_reference(l.id, !l.reference),
-            LayerOption::EditText => {}
+            LayerOption::EditText => self.edit_text = Some(l.id),
             LayerOption::Rasterize => {
                 session.rasterize_layer(l.id);
                 self.notice = Some(("Text rasterized".into(), true));

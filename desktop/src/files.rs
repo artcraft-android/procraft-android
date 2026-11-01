@@ -351,12 +351,6 @@ pub fn is_palette_file(path: &Path) -> bool {
     PALETTE_EXTENSIONS.contains(&extension_of(path).as_str())
 }
 
-/// An artwork the user picks: a layered package, a PSD, a PNG as a one-layer artwork, or a model
-/// to paint on (picked with its files: an OBJ's material file and the images it maps).
-pub fn pick_artwork() -> Option<(Arc<CanvasSession>, Option<PathBuf>)> {
-    open_artwork_files(pick_artwork_files(&[])?)
-}
-
 /// The files the gallery's Import brings in, as the user picks them: an artwork or a model (as
 /// [`pick_artwork`] takes), palettes and brushes.
 pub fn pick_import() -> Option<Vec<PathBuf>> {
@@ -366,7 +360,7 @@ pub fn pick_import() -> Option<Vec<PathBuf>> {
 }
 
 /// Artworks, models and the files with extensions `more`, as the user picks them.
-fn pick_artwork_files(more: &[&str]) -> Option<Vec<PathBuf>> {
+pub fn pick_artwork_files(more: &[&str]) -> Option<Vec<PathBuf>> {
     let artworks = [
         "procraft",
         "procreate",
