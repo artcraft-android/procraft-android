@@ -1525,9 +1525,10 @@ fn set_pixels(set: &mut TextureSet, gpu: Option<&procraft_gpu::Gpu>) -> Result<P
         (Some(canvas), Some(gpu)) => {
             canvas.render(gpu, &mut set.doc, None);
             let mut pixels = Vec::new();
-            for layer in set.doc.layers() {
-                let rgba = canvas.read_layer(gpu, layer.id).map_err(|e| file_error("reading a layer", e))?;
-                pixels.push((layer.id, rgba));
+            // the layers with pixels (a group has none of its own)
+            for id in set.doc.pixel_layer_ids() {
+                let rgba = canvas.read_layer(gpu, id).map_err(|e| file_error("reading a layer", e))?;
+                pixels.push((id, rgba));
             }
             Ok(pixels)
         }

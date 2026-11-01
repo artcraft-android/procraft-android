@@ -5315,7 +5315,7 @@ fn a_mixed_artwork_saved_and_opened_again_shows_the_same() {
         };
         let mut done = Vec::new();
         for _ in 0..40 {
-            let op = next(12);
+            let op = next(13);
             done.push(op);
             let (x, y) = (5.0 + next(110) as f32, 5.0 + next(110) as f32);
             match op {
@@ -5342,6 +5342,10 @@ fn a_mixed_artwork_saved_and_opened_again_shows_the_same() {
                 8 => _ = s.set_layer_clipped(current(&s), next(2) == 0),
                 9 => _ = s.add_mask(current(&s)),
                 10 => _ = s.duplicate_layer(current(&s)),
+                12 => {
+                    s.pick_layer(any(&s, next(16)));
+                    s.group_picked();
+                }
                 _ => {
                     let info = crate::TextInfo { size: 18.0, x, y, ..text_info("Hi") };
                     if s.text_begin(None, info.clone()).is_some() {
@@ -5402,7 +5406,7 @@ fn a_mixed_artwork_through_a_layered_package_comes_back_the_same() {
         };
         let mut done = Vec::new();
         for _ in 0..40 {
-            let op = next(12);
+            let op = next(13);
             done.push(op);
             let (x, y) = (5.0 + next(110) as f32, 5.0 + next(110) as f32);
             match op {
@@ -5429,6 +5433,10 @@ fn a_mixed_artwork_through_a_layered_package_comes_back_the_same() {
                 8 => _ = s.set_layer_clipped(current(&s), next(2) == 0),
                 9 => _ = s.add_mask(current(&s)),
                 10 => _ = s.duplicate_layer(current(&s)),
+                12 => {
+                    s.pick_layer(any(&s, next(16)));
+                    s.group_picked();
+                }
                 _ => {
                     let info = crate::TextInfo { size: 18.0, x, y, ..text_info("Hi") };
                     if s.text_begin(None, info.clone()).is_some() {

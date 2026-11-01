@@ -260,22 +260,19 @@ impl crate::State {
             let changed_now = canvas.take_changed();
             changed_ids = changed_now.iter().copied().collect();
             let mut read_all = || -> Result<(), MobileError> {
-                for layer in self.doc.layers() {
+                // the layers with pixels (a group has none of its own)
+                for id in self.doc.pixel_layer_ids() {
                     // unchanged since it was read or saved, its file there: left as it is, unread
-                    if !changed_now.contains(&layer.id)
-                        && known.contains_key(&layer.id)
-                        && layer_path(dir, layer.id).exists()
-                    {
+                    if !changed_now.contains(&id) && known.contains_key(&id) && layer_path(dir, id).exists() {
                         continue;
                     }
-                    let read =
-                        canvas.start_reading_layer(gpu, layer.id).map_err(|e| file_error("reading a layer", e))?;
+                    let read = canvas.start_reading_layer(gpu, id).map_err(|e| file_error("reading a layer", e))?;
                     let after: usize = reading.iter().map(|(_, r): &(LayerId, procraft_gpu::Readback)| r.bytes()).sum();
                     if after + read.bytes() <= READ_AFTER_LOCK {
-                        reading.push((layer.id, read));
+                        reading.push((id, read));
                     } else {
                         let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
-                        layers.extend(changed(layer.id, rgba));
+                        layers.extend(changed(id, rgba));
                     }
                 }
                 Ok(())
