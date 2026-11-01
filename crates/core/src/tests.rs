@@ -2108,6 +2108,21 @@ fn the_drawing_guide_mirrors_and_assists_strokes() {
     assert_eq!(pixel(&s, 60, 80), [255, 255, 255, 255]);
     let info = s.guide();
     assert!(info.on && info.assisted && !info.lines.is_empty());
+    // a wavering stroke near the diagonal keeps the direction it set out in, not zigzagging
+    // between the grid's two
+    s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 10.0, 0.0)]);
+    s.stroke_add(
+        (1..=20)
+            .map(|i| sample(10.0 + i as f32 * 2.0, 10.0 + i as f32 * 2.0 + [1.5, -1.5][i % 2], i as f64 * 8.0))
+            .collect(),
+    );
+    s.stroke_end(vec![]);
+    let row = (10..55).filter(|&x| pixel(&s, x, 10)[0] == 0).count();
+    let column = (10..55).filter(|&y| pixel(&s, 10, y)[0] == 0).count();
+    // (the symmetry dot is at 20, 30)
+    let off =
+        [(20, 20), (30, 30), (40, 40), (30, 20), (40, 25)].iter().filter(|&&(x, y)| pixel(&s, x, y)[0] == 0).count();
+    assert!(row.max(column) > 40 && row.min(column) < 8 && off == 0, "row {row} column {column} off the line {off}");
     // drawing assist belongs to the layer: a new one draws freely
     let assisted = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
     assert!(s.layers().iter().any(|l| l.id == assisted && l.assisted));

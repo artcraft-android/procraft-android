@@ -84,12 +84,17 @@ pub(crate) fn mirrored(guide: &Guide, stamps: &[Stamp]) -> Vec<Stamp> {
     out
 }
 
+/// How far (window pixels) an assisted stroke goes before the direction it is kept to is settled.
+const ASSIST_SETTLE: f32 = 10.0;
+
 /// Vanishing points closer than this to the input (window pixels) are taken, not added.
 const VANISHING_REACH: f32 = 30.0;
 
 impl State {
-    /// Stroke input kept to the guide when assisted drawing is on.
-    pub(crate) fn assisted(&self, mut samples: Vec<Sample>) -> Vec<Sample> {
+    /// Stroke input kept to the guide when assisted drawing is on: along the guide direction
+    /// the stroke heads in once it has gone [`ASSIST_SETTLE`] window pixels, kept to its end,
+    /// so a wavering hand doesn't switch it (before then, held where it began).
+    pub(crate) fn assisted(&mut self, mut samples: Vec<Sample>) -> Vec<Sample> {
         if let Some(start) = self.assist_from {
             let forced = self.force_assist.then(|| {
                 let mut g = self.doc.guide.clone();
@@ -98,8 +103,22 @@ impl State {
             });
             let layer_guide = self.doc.stroke_guide();
             let guide = forced.as_ref().unwrap_or(&layer_guide);
+            let settle = ASSIST_SETTLE / self.view.map_or(1.0, |v| v.zoom()).max(1e-6);
             for s in &mut samples {
-                s.pos = guide.assist(start, s.pos);
+                let heading = match self.assist_angle {
+                    Some(a) => a,
+                    None => {
+                        let Some(a) = guide.assist_direction(start, s.pos) else { continue };
+                        if s.pos.distance(start) < settle {
+                            // too near the start to tell the direction yet: held there
+                            s.pos = start;
+                            continue;
+                        }
+                        self.assist_angle = Some(a);
+                        a
+                    }
+                };
+                s.pos = procraft_engine::guide::assist_along(start, s.pos, heading);
             }
         }
         samples

@@ -495,6 +495,9 @@ pub(crate) struct State {
     /// Where the stroke began (canvas pixels), for assisted drawing; the guide and view as the
     /// guide editor opened.
     assist_from: Option<Vec2>,
+    /// The direction (radians) an assisted stroke is kept to, once it has gone far enough to
+    /// tell: chosen then and kept to its end, so a wavering hand doesn't switch it.
+    assist_angle: Option<f32>,
     pub(crate) guide_before: Option<(procraft_engine::guide::Guide, Option<View>)>,
 }
 
@@ -1089,6 +1092,7 @@ impl CanvasSession {
             last_stroke: None,
             force_assist: false,
             assist_from: None,
+            assist_angle: None,
             guide_before: None,
             name,
             pending_pixels: project::opened(pixels),
@@ -1223,6 +1227,7 @@ impl CanvasSession {
         }
         let canvas_samples = st.to_canvas(&samples);
         st.assist_from = canvas_samples.first().map(|s| s.pos);
+        st.assist_angle = None;
         let canvas_samples = st.assisted(canvas_samples);
         st.drawn.clear();
         st.drawn_pressure = 0.0;

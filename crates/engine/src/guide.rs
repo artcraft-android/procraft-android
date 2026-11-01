@@ -272,21 +272,31 @@ impl Guide {
     /// Assisted drawing: where a stroke begun at `start` goes when the input is at `p` (canvas
     /// pixels), kept along the guide's nearest direction.
     pub fn assist(&self, start: Vec2, p: Vec2) -> Vec2 {
+        match self.assist_direction(start, p) {
+            Some(a) => assist_along(start, p, a),
+            None => p,
+        }
+    }
+
+    /// The direction (an angle, radians) a stroke from `start` that has reached `p` is kept to:
+    /// of the guide's directions, the one its movement is nearest to; none when the guide doesn't
+    /// assist (off, not assisted, or symmetry).
+    pub fn assist_direction(&self, start: Vec2, p: Vec2) -> Option<f32> {
         if !self.on || !self.assisted {
-            return p;
+            return None;
         }
         let d = p - start;
-        let along = |dirs: &[f32]| -> Vec2 {
+        let along = |dirs: &[f32]| -> f32 {
             // the direction (or its reverse) the movement is nearest to
-            let best = dirs.iter().copied().fold((0.0f32, f32::MIN), |best, a| {
-                let u = Vec2::new(a.cos(), a.sin());
-                let dot = d.dot(u).abs();
-                if dot > best.1 { (a, dot) } else { best }
-            });
-            let u = Vec2::new(best.0.cos(), best.0.sin());
-            start + u * d.dot(u)
+            dirs.iter()
+                .copied()
+                .fold((0.0f32, f32::MIN), |best, a| {
+                    let dot = d.dot(Vec2::new(a.cos(), a.sin())).abs();
+                    if dot > best.1 { (a, dot) } else { best }
+                })
+                .0
         };
-        match self.kind {
+        Some(match self.kind {
             GuideKind::Grid => along(&[self.angle, self.angle + PI / 2.0]),
             GuideKind::Isometric => along(&[self.angle + PI / 2.0, self.angle + FRAC_PI_6, self.angle - FRAC_PI_6]),
             GuideKind::Perspective => {
@@ -307,9 +317,15 @@ impl Guide {
                 }
                 along(&dirs)
             }
-            GuideKind::Symmetry => p,
-        }
+            GuideKind::Symmetry => return None,
+        })
     }
+}
+
+/// `p` brought onto the line through `start` at angle `a` (radians).
+pub fn assist_along(start: Vec2, p: Vec2, a: f32) -> Vec2 {
+    let u = Vec2::new(a.cos(), a.sin());
+    start + u * (p - start).dot(u)
 }
 
 #[cfg(test)]
