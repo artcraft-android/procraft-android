@@ -115,7 +115,7 @@ enum class Adjustment(val label: String, val ready: Boolean = false, val swiped:
     HSB("Hue, Saturation, Brightness", ready = true),
     COLOR_BALANCE("Color Balance", ready = true),
     CURVES("Curves", ready = true),
-    GRADIENT_MAP("Gradient Map", ready = true, swiped = true),
+    GRADIENT_MAP("Gradient Map", ready = true, swiped = true, pencilAmount = 1f),
     GAUSSIAN_BLUR("Gaussian Blur", ready = true, swiped = true, pencilAmount = 0.6f),
     MOTION_BLUR("Motion Blur", ready = true, swiped = true, pencilAmount = 0.6f),
     PERSPECTIVE_BLUR("Perspective Blur", ready = true, swiped = true, pencilAmount = 0.4f),
