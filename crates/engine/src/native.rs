@@ -476,8 +476,8 @@ pub(crate) fn older_blends(id: i64) -> (i64, i64) {
 }
 
 /// What an export writes besides the document: each paint layer's pixels (premultiplied RGBA)
-/// and each mask's (grey in red), the flattened picture (premultiplied, background included) and
-/// the preview PNG.
+/// and each mask's (its brightness as grey), the flattened picture (premultiplied, background
+/// included) and the preview PNG.
 pub struct Export<'a> {
     pub document: &'a Document,
     pub pixels: &'a std::collections::HashMap<LayerId, Vec<u8>>,
@@ -771,7 +771,8 @@ fn write_item(
     let mask = doc.mask_of(id).and_then(|m| {
         let ml = doc.layer(m)?;
         let mask_uuid = uuids.next();
-        let grey: Option<Vec<u8>> = e.pixels.get(&m).map(|px| px.as_chunks::<4>().0.iter().map(|&[r, ..]| r).collect());
+        let grey: Option<Vec<u8>> =
+            e.pixels.get(&m).map(|px| px.as_chunks::<4>().0.iter().map(|&p| crate::document::mask_grey(p)).collect());
         if let Some(grey) = &grey {
             write_tiles(zip, &mask_uuid, grey, w, h, 1, 255);
         }

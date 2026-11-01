@@ -5063,3 +5063,496 @@ fn text_places_count_between_utf16_and_characters() {
     assert_eq!(crate::text_index_to_utf16(text.clone(), 2), 3);
     assert_eq!(crate::text_index_to_utf16(text, 9), 4);
 }
+
+#[test]
+fn a_long_run_of_mixed_work_undoes_to_nothing_and_redoes_to_the_end() {
+    use crate::Adjustment;
+    use crate::transform::TransformHandle;
+    crate::add_text_font(include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec());
+    for seed in [3u32, 11, 29] {
+        let Some(s) = session(160, 160) else { return };
+        s.shared.lock().canvas.as_mut().unwrap().set_cache_composites(true);
+        s.set_brush_size(0.3);
+        let mut state = seed;
+        let mut next = |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n.max(1)
+        };
+        let composite = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render_finished(gpu, &mut st.doc);
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            canvas.read_composite(gpu).unwrap()
+        };
+        let blank = composite(&s);
+        let current = |s: &CanvasSession| s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+        let mut done = Vec::new();
+        for _ in 0..50 {
+            let op = next(16);
+            done.push(op);
+            let (x, y) = (10.0 + next(140) as f32, 10.0 + next(140) as f32);
+            match op {
+                0 | 1 => {
+                    s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+                    let (dx, dy) = (next(60) as f32 - 30.0, next(60) as f32 - 30.0);
+                    s.stroke_add(
+                        (1..12)
+                            .map(|k| sample(x + dx * k as f32 / 11.0, y + dy * k as f32 / 11.0, k as f64 * 8.0))
+                            .collect(),
+                    );
+                    s.stroke_end(vec![]);
+                }
+                2 => _ = s.add_layer(),
+                3 => {
+                    let layers = s.layers();
+                    if let Some(l) = layers.get(next(layers.len() as u32) as usize) {
+                        s.select_layer(l.id);
+                    }
+                }
+                4 => {
+                    s.set_color(next(255) as f32 / 255.0, next(255) as f32 / 255.0, next(255) as f32 / 255.0);
+                    _ = s.fill_layer(current(&s));
+                }
+                5 => s.clear_layer(),
+                6 => _ = s.invert_layer(current(&s)),
+                7 => s.flip_canvas(next(2) == 0),
+                8 => _ = s.duplicate_layer(current(&s)),
+                9 => _ = s.merge_down(current(&s)),
+                10 => {
+                    if s.transform_begin().is_some() {
+                        s.transform_grab(TransformHandle::Move, x, y);
+                        s.transform_drag(x + next(40) as f32 - 20.0, y + next(40) as f32 - 20.0);
+                        s.transform_release();
+                        s.transform_end(true);
+                    }
+                }
+                11 => {
+                    if s.adjustment_start(Adjustment::GaussianBlur) {
+                        s.adjustment_amount_by(0.02 + next(10) as f32 / 100.0);
+                        s.adjustment_end(true);
+                    }
+                }
+                12 => {
+                    if s.pour_begin(x, y, 0.3, 0.6, 0.2, 0.2) {
+                        s.pour_threshold(next(100) as f32 / 100.0);
+                        s.pour_end(true, None);
+                    }
+                }
+                13 => {
+                    if let Some(c) = s.copy_layer() {
+                        _ = s.paste(c);
+                    }
+                }
+                14 => _ = s.undo(),
+                _ => {
+                    let info = crate::TextInfo { size: 20.0, x, y, ..text_info("Ab") };
+                    if s.text_begin(None, info.clone()).is_some() {
+                        s.set_text(crate::TextInfo { text: "Abc d".to_owned(), ..info });
+                        s.draw_text_into_layer();
+                        s.text_end(true);
+                    }
+                }
+            }
+        }
+        let can = |s: &CanvasSession, undo: bool| {
+            let st = s.shared.lock();
+            st.canvas.as_ref().is_some_and(|c| if undo { c.can_undo() } else { c.can_redo() })
+        };
+        // what is left undone redone first (work refused since, on a text layer, didn't drop it)
+        while can(&s, false) {
+            s.redo();
+        }
+        let end = composite(&s);
+        // all of it taken back: the blank canvas; all of it done again: as it ended
+        let mut steps = 0;
+        while can(&s, true) && steps < 400 {
+            s.undo();
+            steps += 1;
+        }
+        assert!(composite(&s) == blank, "seed {seed}: undone {steps} steps of {done:?}");
+        let mut again = 0;
+        while can(&s, false) && again < 400 {
+            s.redo();
+            again += 1;
+        }
+        assert_eq!(steps, again, "seed {seed}");
+        assert!(composite(&s) == end, "seed {seed}: redone {again} steps of {done:?}");
+    }
+}
+
+#[test]
+fn layers_settings_and_selections_paged_out_undo_and_redo_whole() {
+    use crate::selection::SelectionJoin;
+    use crate::transform::TransformHandle;
+    for seed in [5u32, 23] {
+        let Some(s) = session(120, 120) else { return };
+        // room for three layers on the GPU: the rest parked and brought back as they are wanted
+        s.shared.lock().canvas.as_mut().unwrap().set_resident_budget(3 * 120 * 120 * 4);
+        s.set_brush_size(0.3);
+        let mut state = seed;
+        let mut next = |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n.max(1)
+        };
+        let composite = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render_finished(gpu, &mut st.doc);
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            canvas.read_composite(gpu).unwrap()
+        };
+        let can = |s: &CanvasSession, undo: bool| {
+            let st = s.shared.lock();
+            st.canvas.as_ref().is_some_and(|c| if undo { c.can_undo() } else { c.can_redo() })
+        };
+        let blank = composite(&s);
+        let current = |s: &CanvasSession| s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+        let any = |s: &CanvasSession, k: u32| {
+            let layers = s.layers();
+            layers.get(k as usize % layers.len().max(1)).map_or(0, |l| l.id)
+        };
+        let mut done = Vec::new();
+        for _ in 0..60 {
+            let op = next(20);
+            done.push(op);
+            let (x, y) = (5.0 + next(110) as f32, 5.0 + next(110) as f32);
+            match op {
+                0 | 1 => {
+                    s.set_color(next(255) as f32 / 255.0, next(255) as f32 / 255.0, next(255) as f32 / 255.0);
+                    s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+                    let (dx, dy) = (next(50) as f32 - 25.0, next(50) as f32 - 25.0);
+                    s.stroke_add(
+                        (1..10)
+                            .map(|k| sample(x + dx * k as f32 / 9.0, y + dy * k as f32 / 9.0, k as f64 * 8.0))
+                            .collect(),
+                    );
+                    s.stroke_end(vec![]);
+                }
+                2 => _ = s.add_layer(),
+                3 => _ = s.select_layer(any(&s, next(16))),
+                4 => _ = s.fill_layer(current(&s)),
+                5 => {
+                    let (w, h) = (10.0 + next(60) as f32, 10.0 + next(60) as f32);
+                    let join = if next(3) == 0 { SelectionJoin::Remove } else { SelectionJoin::Add };
+                    s.select_shape(next(2) == 0, x, y, x + w, y + h, join);
+                }
+                6 => s.select_invert(),
+                7 => {
+                    s.select_feather(next(30) as f32 / 100.0);
+                    s.select_feather_done();
+                }
+                8 => s.select_none(),
+                9 => {
+                    let id = any(&s, next(16));
+                    let shown = s.layers().iter().find(|l| l.id == id).is_some_and(|l| l.visible);
+                    _ = s.set_layer_visible(id, !shown);
+                }
+                10 => _ = s.set_layer_opacity(any(&s, next(16)), 0.2 + next(80) as f32 / 100.0, true),
+                11 => _ = s.set_layer_blend(any(&s, next(16)), next(34)),
+                12 => _ = s.set_layer_alpha_lock(current(&s), next(2) == 0),
+                13 => _ = s.set_layer_clipped(current(&s), next(2) == 0),
+                14 => _ = s.add_mask(current(&s)),
+                15 => _ = s.move_layer(current(&s), next(8)),
+                16 => {
+                    if s.transform_begin().is_some() {
+                        s.transform_grab(TransformHandle::Move, x, y);
+                        s.transform_drag(x + next(30) as f32 - 15.0, y + next(30) as f32 - 15.0);
+                        s.transform_release();
+                        s.transform_end(true);
+                    }
+                }
+                17 => _ = s.undo(),
+                18 => _ = s.invert_layer(current(&s)),
+                _ => _ = s.duplicate_layer(current(&s)),
+            }
+        }
+        while can(&s, false) {
+            s.redo();
+        }
+        let end = composite(&s);
+        let mut steps = 0;
+        while can(&s, true) && steps < 400 {
+            s.undo();
+            steps += 1;
+        }
+        assert!(composite(&s) == blank, "seed {seed}: undone {steps} steps of {done:?}");
+        let mut again = 0;
+        while can(&s, false) && again < 400 {
+            s.redo();
+            again += 1;
+        }
+        assert_eq!(steps, again, "seed {seed}");
+        assert!(composite(&s) == end, "seed {seed}: redone {again} steps of {done:?}");
+    }
+}
+
+#[test]
+fn a_mixed_artwork_saved_and_opened_again_shows_the_same() {
+    crate::add_text_font(include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec());
+    for seed in [7u32, 31] {
+        let Some(s) = session(120, 120) else { return };
+        s.set_brush_size(0.3);
+        let mut state = seed;
+        let mut next = |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n.max(1)
+        };
+        let composite = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render_finished(gpu, &mut st.doc);
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            canvas.read_composite(gpu).unwrap()
+        };
+        let current = |s: &CanvasSession| s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+        let any = |s: &CanvasSession, k: u32| {
+            let layers = s.layers();
+            layers.get(k as usize % layers.len().max(1)).map_or(0, |l| l.id)
+        };
+        let mut done = Vec::new();
+        for _ in 0..40 {
+            let op = next(12);
+            done.push(op);
+            let (x, y) = (5.0 + next(110) as f32, 5.0 + next(110) as f32);
+            match op {
+                0..=2 => {
+                    s.set_color(next(255) as f32 / 255.0, next(255) as f32 / 255.0, next(255) as f32 / 255.0);
+                    s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+                    let (dx, dy) = (next(50) as f32 - 25.0, next(50) as f32 - 25.0);
+                    s.stroke_add(
+                        (1..10)
+                            .map(|k| sample(x + dx * k as f32 / 9.0, y + dy * k as f32 / 9.0, k as f64 * 8.0))
+                            .collect(),
+                    );
+                    s.stroke_end(vec![]);
+                }
+                3 => _ = s.add_layer(),
+                4 => _ = s.select_layer(any(&s, next(16))),
+                5 => {
+                    let id = any(&s, next(16));
+                    let shown = s.layers().iter().find(|l| l.id == id).is_some_and(|l| l.visible);
+                    _ = s.set_layer_visible(id, !shown);
+                }
+                6 => _ = s.set_layer_opacity(any(&s, next(16)), 0.2 + next(80) as f32 / 100.0, true),
+                7 => _ = s.set_layer_blend(any(&s, next(16)), next(34)),
+                8 => _ = s.set_layer_clipped(current(&s), next(2) == 0),
+                9 => _ = s.add_mask(current(&s)),
+                10 => _ = s.duplicate_layer(current(&s)),
+                _ => {
+                    let info = crate::TextInfo { size: 18.0, x, y, ..text_info("Hi") };
+                    if s.text_begin(None, info.clone()).is_some() {
+                        s.set_text(crate::TextInfo { text: "Hi there".to_owned(), ..info });
+                        s.draw_text_into_layer();
+                        s.text_end(true);
+                    }
+                }
+            }
+        }
+        let shown = composite(&s);
+        let dir = std::env::temp_dir().join(format!("procraft-mixed-{}-{seed}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        s.save(dir.to_string_lossy().into_owned()).unwrap();
+        let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+        let gpu = s.shared.lock().gpu.clone().unwrap();
+        opened.use_gpu(gpu);
+        {
+            let mut st = opened.shared.lock();
+            st.window_size = (120, 120);
+            st.view = Some(View::fit((120, 120), (120, 120)));
+            st.ensure_canvas();
+        }
+        let again = composite(&opened);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(again == shown, "seed {seed}: {done:?}");
+    }
+}
+
+#[test]
+fn a_mixed_artwork_through_a_layered_package_comes_back_the_same() {
+    crate::add_text_font(include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec());
+    for seed in [13u32, 58] {
+        let Some(s) = session(120, 120) else { return };
+        s.set_brush_size(0.3);
+        let mut state = seed;
+        let mut next = |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n.max(1)
+        };
+        let composite = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render_finished(gpu, &mut st.doc);
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            canvas.read_composite(gpu).unwrap()
+        };
+        let current = |s: &CanvasSession| s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+        let any = |s: &CanvasSession, k: u32| {
+            let layers = s.layers();
+            layers.get(k as usize % layers.len().max(1)).map_or(0, |l| l.id)
+        };
+        // a mask has no blend mode or opacity of its own in the package
+        let any_paint = |s: &CanvasSession, k: u32| {
+            let layers: Vec<_> = s.layers().into_iter().filter(|l| l.kind != crate::layers::LayerType::Mask).collect();
+            layers.get(k as usize % layers.len().max(1)).map_or(0, |l| l.id)
+        };
+        let mut done = Vec::new();
+        for _ in 0..40 {
+            let op = next(12);
+            done.push(op);
+            let (x, y) = (5.0 + next(110) as f32, 5.0 + next(110) as f32);
+            match op {
+                0..=2 => {
+                    s.set_color(next(255) as f32 / 255.0, next(255) as f32 / 255.0, next(255) as f32 / 255.0);
+                    s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+                    let (dx, dy) = (next(50) as f32 - 25.0, next(50) as f32 - 25.0);
+                    s.stroke_add(
+                        (1..10)
+                            .map(|k| sample(x + dx * k as f32 / 9.0, y + dy * k as f32 / 9.0, k as f64 * 8.0))
+                            .collect(),
+                    );
+                    s.stroke_end(vec![]);
+                }
+                3 => _ = s.add_layer(),
+                4 => _ = s.select_layer(any(&s, next(16))),
+                5 => {
+                    let id = any(&s, next(16));
+                    let shown = s.layers().iter().find(|l| l.id == id).is_some_and(|l| l.visible);
+                    _ = s.set_layer_visible(id, !shown);
+                }
+                6 => _ = s.set_layer_opacity(any_paint(&s, next(16)), 0.2 + next(80) as f32 / 100.0, true),
+                7 => _ = s.set_layer_blend(any_paint(&s, next(16)), next(34)),
+                8 => _ = s.set_layer_clipped(current(&s), next(2) == 0),
+                9 => _ = s.add_mask(current(&s)),
+                10 => _ = s.duplicate_layer(current(&s)),
+                _ => {
+                    let info = crate::TextInfo { size: 18.0, x, y, ..text_info("Hi") };
+                    if s.text_begin(None, info.clone()).is_some() {
+                        s.set_text(crate::TextInfo { text: "Hi there".to_owned(), ..info });
+                        s.draw_text_into_layer();
+                        s.text_end(true);
+                    }
+                }
+            }
+        }
+        let shown = composite(&s);
+        let dir = std::env::temp_dir().join(format!("procraft-package-{}-{seed}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("out.package");
+        s.export_package(file.to_string_lossy().into_owned(), u64::from(seed), None).unwrap();
+        let opened = CanvasSession::open_package(file.to_string_lossy().into_owned()).unwrap();
+        let gpu = s.shared.lock().gpu.clone().unwrap();
+        opened.use_gpu(gpu);
+        {
+            let mut st = opened.shared.lock();
+            st.window_size = (120, 120);
+            st.view = Some(View::fit((120, 120), (120, 120)));
+            st.ensure_canvas();
+        }
+        let again = composite(&opened);
+        let _ = std::fs::remove_dir_all(&dir);
+        // a mask's brightness kept as a grey byte: within a level
+        let most = shown.iter().zip(&again).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+        assert!(most <= 1, "seed {seed}: off by {most} after {done:?}");
+    }
+}
+
+#[test]
+fn a_mixed_artwork_through_a_psd_comes_back_the_same() {
+    use procraft_engine::document::BlendMode;
+    // every mode the format names as it is (shade is written as darken)
+    let modes: Vec<u32> = BlendMode::ALL.iter().filter(|m| **m != BlendMode::Shade).map(|m| m.id()).collect();
+    for seed in [9u32, 44] {
+        let Some(s) = session(96, 96) else { return };
+        s.set_brush_size(0.3);
+        let mut state = seed;
+        let mut next = |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n.max(1)
+        };
+        let composite = |s: &CanvasSession| {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render_finished(gpu, &mut st.doc);
+            assert_eq!(gpu.errors(), 0, "GPU validation errors");
+            canvas.read_composite(gpu).unwrap()
+        };
+        let current = |s: &CanvasSession| s.layers().iter().find(|l| l.current).map_or(0, |l| l.id);
+        let any = |s: &CanvasSession, k: u32| {
+            let layers = s.layers();
+            layers.get(k as usize % layers.len().max(1)).map_or(0, |l| l.id)
+        };
+        let mut done = Vec::new();
+        for _ in 0..30 {
+            let op = next(10);
+            done.push(op);
+            let (x, y) = (5.0 + next(86) as f32, 5.0 + next(86) as f32);
+            match op {
+                0..=2 => {
+                    s.set_color(next(255) as f32 / 255.0, next(255) as f32 / 255.0, next(255) as f32 / 255.0);
+                    s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+                    let (dx, dy) = (next(40) as f32 - 20.0, next(40) as f32 - 20.0);
+                    s.stroke_add(
+                        (1..10)
+                            .map(|k| sample(x + dx * k as f32 / 9.0, y + dy * k as f32 / 9.0, k as f64 * 8.0))
+                            .collect(),
+                    );
+                    s.stroke_end(vec![]);
+                }
+                3 => _ = s.add_layer(),
+                4 => _ = s.select_layer(any(&s, next(16))),
+                5 => {
+                    let id = any(&s, next(16));
+                    let shown = s.layers().iter().find(|l| l.id == id).is_some_and(|l| l.visible);
+                    _ = s.set_layer_visible(id, !shown);
+                }
+                6 => _ = s.set_layer_opacity(any(&s, next(16)), (50 + next(205)) as f32 / 255.0, true),
+                7 => _ = s.set_layer_blend(any(&s, next(16)), modes[next(modes.len() as u32) as usize]),
+                8 => _ = s.set_layer_clipped(current(&s), next(2) == 0),
+                _ => _ = s.add_mask(current(&s)),
+            }
+        }
+        // a dot on every layer: an empty one isn't read back from a PSD (our reader leaves empty
+        // layers out), and what was clipped to it would be clipped to the one below
+        for l in s.layers() {
+            s.select_layer(l.id);
+            // a hidden layer takes no paint: shown for it
+            s.set_layer_visible(l.id, true);
+            s.stroke_begin(PointerKind::Finger, vec![sample(5.0 + next(80) as f32, 5.0 + next(80) as f32, 0.0)]);
+            s.stroke_end(vec![]);
+            s.set_layer_visible(l.id, l.visible);
+        }
+        let shown = composite(&s);
+        let dir = std::env::temp_dir().join(format!("procraft-psd-mixed-{}-{seed}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("out.psd");
+        s.export_psd(file.to_string_lossy().into_owned()).unwrap();
+        let art = dir.join("art");
+        let outcome = crate::project::import_psd(
+            file.to_string_lossy().into_owned(),
+            art.to_string_lossy().into_owned(),
+            "Back".into(),
+        );
+        assert_eq!(outcome, crate::project::PsdOutcome::Imported, "seed {seed}");
+        let opened = CanvasSession::open(art.to_string_lossy().into_owned()).unwrap();
+        opened.use_gpu(s.shared.lock().gpu.clone().unwrap());
+        {
+            let mut st = opened.shared.lock();
+            st.window_size = (96, 96);
+            st.view = Some(View::fit((96, 96), (96, 96)));
+            st.ensure_canvas();
+        }
+        let again = composite(&opened);
+        let _ = std::fs::remove_dir_all(&dir);
+        // as the format keeps colours (8 bits, not premultiplied) and opacity (a byte)
+        let most = shown.iter().zip(&again).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+        assert!(most <= 3, "seed {seed}: off by {most} after {done:?}");
+    }
+}

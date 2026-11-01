@@ -267,16 +267,16 @@ impl CanvasSession {
         self.shared.frame(st);
     }
 
-    /// Ends the open pour: `keep` makes it one undo step, called `name` if given; otherwise (or
-    /// with nothing poured) the layer goes back to how it was.
+    /// Ends the open pour: `keep` makes it one undo step, called `name` if given (else
+    /// "ColorDrop"); otherwise (or with nothing poured) the layer goes back to how it was.
     pub fn pour_end(&self, keep: bool, name: Option<String>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let Some(pour) = st.pour.take() else { return };
         let keep = keep && pour.flood.is_some();
         if let Some(canvas) = st.canvas.as_mut() {
-            if let Some(name) = name.filter(|_| keep) {
-                canvas.name_next_step(&name);
+            if keep {
+                canvas.name_next_step(name.as_deref().unwrap_or("ColorDrop"));
             }
             canvas.release_layer(keep, None);
         }

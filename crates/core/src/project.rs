@@ -884,7 +884,8 @@ impl CanvasSession {
                     }
                     LayerKind::Mask => {
                         let rgba = canvas.read_layer(gpu, l.id).map_err(|e| file_error("reading a mask", e))?;
-                        masks.insert(l.id, rgba.as_chunks::<4>().0.iter().map(|&[r, ..]| r).collect());
+                        let grey = rgba.as_chunks::<4>().0.iter().map(|&p| procraft_engine::document::mask_grey(p));
+                        masks.insert(l.id, grey.collect());
                     }
                     LayerKind::Group => {}
                 }

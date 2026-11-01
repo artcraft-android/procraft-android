@@ -146,6 +146,13 @@ impl BlendMode {
     }
 }
 
+/// How much a mask's pixel (RGBA, as painted) shows its layer, as a grey byte: its brightness, as
+/// the canvas composites it (a colour painted on a mask counts by how light it is).
+pub fn mask_grey([r, g, b, _]: [u8; 4]) -> u8 {
+    let lit = 299 * u32::from(r) + 587 * u32::from(g) + 114 * u32::from(b);
+    u8::try_from((lit + 500) / 1000).unwrap_or(u8::MAX)
+}
+
 /// What a layer in the stack is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LayerKind {
@@ -1399,6 +1406,16 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mask_pixel_counts_by_its_brightness_and_greys_stay_as_they_are() {
+        for g in 0..=255u8 {
+            assert_eq!(mask_grey([g, g, g, 255]), g);
+        }
+        assert_eq!(mask_grey([255, 0, 0, 255]), 76);
+        assert_eq!(mask_grey([0, 255, 0, 255]), 150);
+        assert_eq!(mask_grey([0, 0, 255, 255]), 29);
+    }
 
     #[test]
     fn new_document_has_one_current_layer() {

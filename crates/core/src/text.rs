@@ -185,6 +185,9 @@ impl CanvasSession {
         let unchanged = !new && before.layer(layer).map(|l| &l.text) == st.doc.layer(layer).map(|l| &l.text);
         let keep = keep && !(new && empty) && !unchanged;
         if let Some(canvas) = st.canvas.as_mut() {
+            if keep {
+                canvas.name_next_step("Text editing");
+            }
             canvas.release_layer(keep, keep.then(|| before.clone()));
         }
         if !keep {

@@ -148,6 +148,7 @@ impl CanvasSession {
         // read back or sent)
         if mask.is_none() && !layer.alpha_lock {
             let Some(canvas) = st.canvas.as_mut() else { return false };
+            canvas.name_next_step("fill layer");
             canvas.fill_layer(id, [r, g, b].map(|c| c as u8));
             st.revision += 1;
             self.shared.frame(st);
@@ -165,6 +166,9 @@ impl CanvasSession {
                 *c = (f32::from(*c) + (f - f32::from(*c)) * k).round().clamp(0.0, 255.0) as u8;
             }
         }
+        if let Some(canvas) = st.canvas.as_mut() {
+            canvas.name_next_step("fill layer");
+        }
         st.rewrite_layer(id, rect, pixels);
         self.shared.frame(st);
         true
@@ -181,6 +185,7 @@ impl CanvasSession {
         // only what is painted changes, inverted on the GPU (nothing read back)
         let Some(rect) = st.painted_box(id) else { return false };
         let Some(canvas) = st.canvas.as_mut() else { return false };
+        canvas.name_next_step("invert");
         canvas.invert_layer(id, rect);
         st.revision += 1;
         self.shared.frame(st);
