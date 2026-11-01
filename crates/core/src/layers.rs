@@ -413,20 +413,14 @@ impl CanvasSession {
 
     /// Merges the picked layers above the bottom one of what is chosen into it.
     pub fn merge_picked(&self) -> bool {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        st.finish_stroke();
-        st.settle();
-        let Some((lower, uppers)) = st.doc.merge_chosen_plan() else { return false };
-        let before = st.doc.clone();
-        if let Some(canvas) = st.canvas.as_mut() {
-            canvas.name_next_step("merge layers");
-            canvas.merge_layers(uppers.clone(), lower, before);
-        }
-        st.doc.finish_merge_chosen(lower, &uppers);
-        st.revision += 1;
-        self.shared.frame(st);
-        true
+        self.merge_chosen(None)
+    }
+
+    /// Two rows pinched together in the panel (layers `a` and `b`, either way up): they and every
+    /// layer between merge into the lowest, as Merge does with layers picked. False (what was
+    /// chosen kept) if they can't, a locked one among them, or nothing to merge.
+    pub fn merge_between(&self, a: u64, b: u64) -> bool {
+        self.merge_chosen(Some((LayerId(a), LayerId(b))))
     }
 
     pub fn delete_layer(&self, id: u64) -> bool {
@@ -752,6 +746,34 @@ fn changed(d: &Document, id: u64, differs: impl FnOnce(&procraft_engine::documen
 }
 
 impl CanvasSession {
+    /// Merges what is chosen, or the layers between `between` (chosen first).
+    fn merge_chosen(&self, between: Option<(LayerId, LayerId)>) -> bool {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.finish_stroke();
+        st.settle();
+        let chosen_before = st.doc.clone();
+        if let Some((a, b)) = between
+            && !st.doc.choose_between(a, b)
+        {
+            return false;
+        }
+        let Some((lower, uppers)) = st.doc.merge_chosen_plan() else {
+            st.doc = chosen_before;
+            return false;
+        };
+        // undone, the layers come back chosen as they were before the pinch
+        let before = chosen_before;
+        if let Some(canvas) = st.canvas.as_mut() {
+            canvas.name_next_step("merge layers");
+            canvas.merge_layers(uppers.clone(), lower, before);
+        }
+        st.doc.finish_merge_chosen(lower, &uppers);
+        st.revision += 1;
+        self.shared.frame(st);
+        true
+    }
+
     /// An undoable change to the document, called `name` by undo and redo; `f` returns `Some`
     /// when it changed something (and must leave the document alone otherwise).
     pub(crate) fn change<T>(&self, name: &str, f: impl FnOnce(&mut Document) -> Option<T>) -> Option<T> {

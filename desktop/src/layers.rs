@@ -139,6 +139,10 @@ pub struct Layers {
     swiped: Option<u64>,
     /// A press on a row's visibility box: whose, since when, and whether holding it has acted.
     box_press: Option<(u64, Instant, bool)>,
+    /// The fingers on a touch screen, and two put on two rows: those rows' layers, how far apart
+    /// the fingers were, and whether they came half as close (let go, the rows merge).
+    touches: HashMap<u64, Pos2>,
+    pinch: Option<(u64, u64, f32, bool)>,
     /// What the panel asks of the app: a notice to show, a layer's contents copied, the chosen
     /// layers shared, a text layer's text edited.
     pub notice: Option<(String, bool)>,
@@ -465,6 +469,7 @@ impl Layers {
             },
         );
         self.follow_press(ctx, session, &layers, &row_rects);
+        self.follow_pinch(ctx, session, &row_rects);
         // a layer tapped: picked layers give way to it; the current one shows its options (or
         // hides them); any other becomes the current one
         if let Some(l) = tapped {
@@ -755,6 +760,53 @@ impl Layers {
                     _ => _ = session.delete_layer(l.id),
                 }
                 self.swiped = None;
+            }
+        }
+    }
+
+    /// Two fingers put on two rows and pinched together to [`PINCH_MERGE`] of how far apart they
+    /// were: as a finger lets go, those layers and every one between merge (as on the tablet).
+    fn follow_pinch(&mut self, ctx: &egui::Context, session: &CanvasSession, rows: &HashMap<u64, Rect>) {
+        let touches: Vec<(egui::TouchId, egui::TouchPhase, Pos2)> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Touch { id, phase, pos, .. } => Some((*id, *phase, *pos)),
+                    _ => None,
+                })
+                .collect()
+        });
+        for (id, phase, pos) in touches {
+            match phase {
+                egui::TouchPhase::Start | egui::TouchPhase::Move => {
+                    self.touches.insert(id.0, pos);
+                }
+                egui::TouchPhase::End | egui::TouchPhase::Cancel => {
+                    self.touches.remove(&id.0);
+                    if let Some((a, b, _, pinched)) = self.pinch.take()
+                        && pinched
+                        && phase == egui::TouchPhase::End
+                    {
+                        session.merge_between(a, b);
+                    }
+                }
+            }
+        }
+        let fingers: Vec<Pos2> = self.touches.values().copied().collect();
+        let [one, two] = fingers[..] else { return };
+        let row_at = |p: Pos2| rows.iter().find(|(_, r)| r.contains(p)).map(|(id, _)| *id);
+        match &mut self.pinch {
+            None => {
+                if let (Some(a), Some(b)) = (row_at(one), row_at(two))
+                    && a != b
+                {
+                    self.pinch = Some((a, b, (one.y - two.y).abs(), false));
+                }
+            }
+            Some((_, _, apart, pinched)) => {
+                if (one.y - two.y).abs() <= *apart * PINCH_MERGE {
+                    *pinched = true;
+                }
             }
         }
     }
@@ -1491,3 +1543,6 @@ fn galley(
     job.wrap = TextWrapping { max_width, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
     ui.painter().layout_job(job)
 }
+
+/// Two rows pinched to this share of how far apart they were merge.
+const PINCH_MERGE: f32 = 0.5;

@@ -2859,6 +2859,42 @@ fn picked_layers_merge_duplicate_and_group_as_one_step_each() {
 }
 
 #[test]
+fn rows_pinched_together_merge_with_all_between() {
+    let Some(s) = session(100, 100) else { return };
+    let dot = |x: f32, y: f32, rgb: [f32; 3]| {
+        s.set_color(rgb[0], rgb[1], rgb[2]);
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    s.set_brush_size(0.6);
+    let bottom = s.layers()[0].id;
+    let red = s.add_layer();
+    dot(30.0, 30.0, [1.0, 0.0, 0.0]);
+    let middle = s.add_layer();
+    let blue = s.add_layer();
+    dot(70.0, 70.0, [0.0, 0.0, 1.0]);
+    let top = s.add_layer();
+    // the top row's finger is on blue, the lower one's on red: those and the middle merge
+    assert!(s.select_layer(top));
+    assert!(s.merge_between(blue, red));
+    let ids: Vec<u64> = s.layers().iter().map(|l| l.id).collect();
+    assert_eq!(ids, [top, red, bottom]);
+    assert_eq!(s.chosen_layers(), [red]);
+    assert_eq!(pixel(&s, 70, 70), [0, 0, 255, 255]);
+    assert_eq!(pixel(&s, 30, 30), [255, 0, 0, 255]);
+    // one step, and undone the layers come back as they were chosen
+    assert_eq!(s.undo().as_deref(), Some("merge layers"));
+    let ids: Vec<u64> = s.layers().iter().map(|l| l.id).collect();
+    assert_eq!(ids, [top, blue, middle, red, bottom]);
+    assert_eq!(s.chosen_layers(), [top]);
+    // a locked one among them: nothing merges, nothing chosen changes
+    assert!(s.set_layer_locked(middle, true));
+    assert!(!s.merge_between(red, blue));
+    assert_eq!(s.layers().len(), 5);
+    assert_eq!(s.chosen_layers(), [top]);
+}
+
+#[test]
 fn picked_layers_transform_together() {
     use crate::transform::TransformHandle;
     let Some(s) = session(100, 100) else { return };

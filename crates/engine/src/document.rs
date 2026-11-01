@@ -599,6 +599,19 @@ impl Document {
         true
     }
 
+    /// Chooses layers `a` and `b` and every one between them in the list (two rows pinched
+    /// together in the panel): the lowest made current, the rest picked. False if either isn't
+    /// there.
+    pub fn choose_between(&mut self, a: LayerId, b: LayerId) -> bool {
+        let (Some(i), Some(j)) = (self.index_of(a), self.index_of(b)) else { return false };
+        let Some(span) = self.layers.get(i.min(j)..=i.max(j)) else { return false };
+        let ids: Vec<LayerId> = span.iter().map(|l| l.id).collect();
+        let Some(&lowest) = ids.first() else { return false };
+        self.current = lowest;
+        self.picked = ids.into_iter().skip(1).collect();
+        true
+    }
+
     /// Unpicks everything; false if nothing was picked.
     pub fn clear_picks(&mut self) -> bool {
         let any = !self.picked().is_empty();

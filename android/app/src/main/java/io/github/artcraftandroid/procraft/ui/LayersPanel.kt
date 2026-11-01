@@ -65,6 +65,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -190,8 +191,14 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
             if (added != null && added <= list.firstVisibleItemIndex) list.requestScrollToItem(added)
         }
         lastIds[0] = ids
+        var listAt by remember { mutableStateOf(Offset.Zero) }
         LazyColumn(
-            Modifier.weight(1f, fill = false).padding(horizontal = 12.dp),
+            Modifier.weight(1f, fill = false).padding(horizontal = 12.dp)
+                .onGloballyPositioned { listAt = it.positionInWindow() }
+                // two rows pinched together merge with every layer between
+                .pinchRows({ listAt }, { y -> rows.entries.firstOrNull { y >= it.value.top && y <= it.value.bottom }?.key }) { a, b ->
+                    vm.mergeBetween(a, b)
+                },
             state = list,
             verticalArrangement = Arrangement.spacedBy(RowGap),
             contentPadding = PaddingValues(bottom = 12.dp),
@@ -1008,3 +1015,44 @@ private fun Modifier.twoFingerTap(enabled: Boolean, onTap: () -> Unit): Modifier
 
 /** How long two fingers may stay down and still tap, milliseconds. */
 private const val TWO_FINGER_TAP_MS = 400L
+
+/**
+ * Two fingers put on two rows of the list (their layers by [rowAt], from a window y; [origin] the
+ * list's place in the window) and pinched together to [PINCH_MERGE] of how far apart they were:
+ * the list stays put from then, and as a finger lets go [onPinched] gets the two layers.
+ */
+private fun Modifier.pinchRows(origin: () -> Offset, rowAt: (Float) -> ULong?, onPinched: (ULong, ULong) -> Unit): Modifier = pointerInput(Unit) {
+    val initial = androidx.compose.ui.input.pointer.PointerEventPass.Initial
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false, pass = initial)
+        var ends: Pair<ULong, ULong>? = null
+        var apart = 0f
+        var pinched = false
+        while (true) {
+            val e = awaitPointerEvent(initial)
+            val down = e.changes.filter { it.pressed }
+            if (ends == null && down.size == 2) {
+                val (a, b) = down
+                val rows = rowAt(origin().y + a.position.y) to rowAt(origin().y + b.position.y)
+                val (ra, rb) = rows
+                if (ra != null && rb != null && ra != rb) {
+                    ends = ra to rb
+                    apart = kotlin.math.abs(a.position.y - b.position.y)
+                }
+            }
+            val pair = ends
+            if (pair != null && down.size >= 2) {
+                if (kotlin.math.abs(down[0].position.y - down[1].position.y) <= apart * PINCH_MERGE) pinched = true
+                if (pinched) e.changes.forEach { it.consume() }
+            }
+            if (pair != null && down.size < 2) {
+                if (pinched) onPinched(pair.first, pair.second)
+                break
+            }
+            if (down.isEmpty()) break
+        }
+    }
+}
+
+/** Two rows pinched to this share of how far apart they were merge. */
+private const val PINCH_MERGE = 0.5f

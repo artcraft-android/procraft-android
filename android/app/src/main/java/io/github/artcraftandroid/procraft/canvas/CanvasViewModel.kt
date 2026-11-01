@@ -5538,6 +5538,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun mergePicked() = layerChange { it.mergePicked() }
 
+    /** Two rows pinched together: layers [a] and [b] and every one between merge into the lowest. */
+    fun mergeBetween(a: ULong, b: ULong) = layerChange { it.mergeBetween(a, b) }
+
     fun duplicatePicked() = layerChange { if (!it.duplicatePicked()) message = noRoom() }
 
     fun deletePicked() = layerChange { it.deletePicked() }
