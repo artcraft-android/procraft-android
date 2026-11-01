@@ -156,7 +156,12 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             MotionEvent.ACTION_MOVE -> (0 until e.pointerCount).flatMap { i -> s.touchMove(e.getPointerId(i).toULong(), samples(e, i)) }
             MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP -> {
                 val i = e.actionIndex
-                s.touchUp(e.getPointerId(i).toULong(), samples(e, i))
+                // the system took the pointer back (a palm): what it did is undone, not ended
+                if (e.flags and MotionEvent.FLAG_CANCELED != 0) {
+                    s.touchCancelOne(e.getPointerId(i).toULong())
+                } else {
+                    s.touchUp(e.getPointerId(i).toULong(), samples(e, i))
+                }
             }
             MotionEvent.ACTION_CANCEL -> s.touchCancel()
             else -> emptyList()

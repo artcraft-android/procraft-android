@@ -676,6 +676,34 @@ impl CanvasSession {
                 return out;
             }
         }
+        // the pen landing while only fingers are down (a hand resting on the screen) draws as it
+        // would alone: what the fingers were doing is taken back, and they are left alone until
+        // lifted
+        if is_pen(kind)
+            && t.down.len() > 1
+            && t.modify_pointer.is_none()
+            && matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Gesture | Mode::Pick)
+        {
+            let mode = std::mem::replace(&mut t.mode, Mode::None);
+            t.down.retain(|d| d.id == id);
+            t.hold_due = None;
+            t.quickshape_due = None;
+            t.rapid_due = None;
+            match mode {
+                Mode::Finger => {
+                    self.end_stroke_tools(&mut t);
+                    drop(t);
+                    self.stroke_cancel();
+                    t = self.touches();
+                }
+                Mode::Pick => {
+                    t.pick_next = false;
+                    out.push(TouchCommand::PickCancel);
+                }
+                _ => {}
+            }
+            out.push(TouchCommand::CursorGone);
+        }
         if t.down.len() == 1 {
             self.first_down(&mut t, kind, first, &samples, &mut out);
         } else {
@@ -903,6 +931,12 @@ impl CanvasSession {
     /// A pointer lifts (`samples` its last input).
     pub fn touch_up(&self, id: u64, samples: Vec<PenSample>) -> Vec<TouchCommand> {
         self.lifted(id, samples, false)
+    }
+
+    /// The platform took back one pointer (it was a hand resting on the screen): what it alone
+    /// was doing is taken back, and the touch it was part of is no tap.
+    pub fn touch_cancel_one(&self, id: u64) -> Vec<TouchCommand> {
+        self.lifted(id, Vec::new(), true)
     }
 
     /// The platform called the touches off: what they were doing is taken back.
@@ -1323,6 +1357,20 @@ impl CanvasSession {
             return out;
         }
         if !t.down.is_empty() {
+            // one pointer taken back: a stroke of its goes, and what is left is no tap
+            if cancelled {
+                t.tap_moved = f32::INFINITY;
+                if t.mode == Mode::Finger && id == t.stroke_pointer {
+                    t.mode = Mode::Idle;
+                    t.hold_due = None;
+                    t.quickshape_due = None;
+                    self.end_stroke_tools(&mut t);
+                    drop(t);
+                    self.stroke_cancel();
+                    out.push(TouchCommand::CursorGone);
+                    return out;
+                }
+            }
             if t.mode == Mode::Gesture {
                 Self::follow_fingers(&mut t);
             }
@@ -1862,6 +1910,46 @@ mod tests {
         s.touch_up(2, at(300.0, 100.0, 1100.0));
         let out = s.touch_up(1, at(100.0, 100.0, 1110.0));
         assert!(out.contains(&TouchCommand::Redo), "{out:?}");
+    }
+
+    #[test]
+    fn the_pen_landing_on_a_resting_hand_draws_and_the_hand_does_nothing() {
+        let s = session();
+        // the hand touches first: a finger stroke begins (fingers paint as the pen does)
+        s.touch_down(1, PointerKind::Finger, at(100.0, 300.0, 0.0));
+        s.touch_move(1, at(104.0, 302.0, 20.0));
+        // the pen lands: it draws, the hand's stroke taken back
+        let out = s.touch_down(2, PointerKind::Stylus, at(300.0, 100.0, 40.0));
+        assert!(out.contains(&TouchCommand::Cursor { x: 300.0, y: 100.0 }), "{out:?}");
+        assert!(s.touch_move(1, at(140.0, 320.0, 60.0)).is_empty());
+        s.touch_move(2, at(340.0, 120.0, 80.0));
+        let out = s.touch_up(2, at(360.0, 130.0, 100.0));
+        assert!(out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+        assert!(s.touch_up(1, at(140.0, 320.0, 120.0)).is_empty());
+        // two fingers resting, then the pen tapped: a dot, no undo for the fingers lifted quickly
+        s.touch_down(1, PointerKind::Finger, at(100.0, 300.0, 1000.0));
+        s.touch_down(3, PointerKind::Finger, at(160.0, 300.0, 1005.0));
+        s.touch_down(2, PointerKind::Stylus, at(300.0, 100.0, 1010.0));
+        let out = s.touch_up(2, at(300.0, 100.0, 1040.0));
+        assert!(out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+        let mut out = s.touch_up(3, at(160.0, 300.0, 1050.0));
+        out.extend(s.touch_up(1, at(100.0, 300.0, 1060.0)));
+        assert!(!out.contains(&TouchCommand::Undo), "{out:?}");
+    }
+
+    #[test]
+    fn a_pointer_the_platform_takes_back_makes_no_tap_and_no_stroke() {
+        let s = session();
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
+        s.touch_down(2, PointerKind::Finger, at(300.0, 100.0, 10.0));
+        s.touch_cancel_one(2);
+        let out = s.touch_up(1, at(100.0, 100.0, 110.0));
+        assert!(!out.contains(&TouchCommand::Undo), "{out:?}");
+        // a finger stroke taken back ends without being kept
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 1000.0));
+        s.touch_move(1, at(140.0, 100.0, 1020.0));
+        let out = s.touch_cancel_one(1);
+        assert!(!out.contains(&TouchCommand::StrokeEnded), "{out:?}");
     }
 
     #[test]
