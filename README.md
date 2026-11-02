@@ -2,10 +2,10 @@
   <img src="assets/app-icon/procraft-1024.png" alt="ProCraft's app icon: a paintbrush in a warm-to-cool blend on a black tile" width="128">
 </p>
 
-<h1 align="center">ProCraft for Android</h1>
+<h1 align="center">ProCraft</h1>
 
 <p align="center">
-  <b>An Android native open-source painting app for tablets, with its own Rust engine and GPU renderer under a Kotlin/Jetpack Compose UI.</b><br>
+  <b>An open-source painting app for Android tablets, Windows and Linux, with its own Rust engine and GPU renderer: a Kotlin/Jetpack Compose UI on Android, the same interface in egui on the desktop.</b><br>
   Pressure-sensitive brushes, layers with blend modes, adjustments, selection and transform, animation and 3D painting, written from scratch.
 </p>
 
@@ -21,7 +21,12 @@
   <img alt="Minimum: Android 10 (API 29)" src="https://img.shields.io/badge/min-Android%2010%20%28API%2029%29-blue?style=flat">
   <img alt="Target: Android 16 (API 36)" src="https://img.shields.io/badge/target-Android%2016%20%28API%2036%29-blue?style=flat">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat">
+  <img alt="Desktop: Windows and Linux" src="https://img.shields.io/badge/desktop-Windows%20%C2%B7%20Linux-blue?style=flat">
   <img alt="Status: beta" src="https://img.shields.io/badge/status-beta-lightblue?style=flat">
+</p>
+
+<p align="center">
+  <sub>From <a href="https://github.com/artcraft-android/procraft/releases">Releases</a>: Android tablets take the <code>.apk</code> (or Obtainium, for updates); Windows the <code>.msi</code> installer or the portable <code>.zip</code>; Linux the <code>.AppImage</code>, the <code>.deb</code> or the <code>.tar.gz</code>.</sub>
 </p>
 
 <p align="center">
@@ -96,7 +101,7 @@
 
 ## Planned features
 
-ProCraft for Android is in beta.
+ProCraft is in beta, on Android tablets and on the desktop (Windows and Linux).
 
 | Area | Status |
 |---|---|
@@ -110,6 +115,7 @@ ProCraft for Android is in beta.
 | Animation and page assists, the reference window | ✅ |
 | Gallery: stacks, new-canvas presets, import and share (PNG, JPEG, PSD, PDF, TIFF, GIF, MP4), time-lapse | 🚧 nearly done |
 | 3D painting: OBJ and USDZ models, texture sets, painting on the mesh, lights and environments | 🚧 |
+| Desktop: Windows and Linux, the same interface with a mouse, a pen tablet and keyboard shortcuts; an installer, an AppImage and a .deb | 🚧 beta |
 | Phones: their own app, ProCraft Pocket (this one is for tablets) | ⬜ |
 
 <sub>✅ works today · 🚧 in progress · ⬜ not started · 🚫 not planned</sub>
@@ -122,7 +128,7 @@ ProCraft for Android is in beta.
 * Clone this repository
 * Make sure you have at least 6 GB of free disk space
 * enter `android` and run `./gradlew assembleRelease -Pprocraft.abis=arm64-v8a`, or open that folder in Android Studio and press Run.
-* the desktop app (in progress): `cargo run --release -p procraft-desktop` from the repository's root.
+* the desktop app: `cargo run --release -p procraft-desktop` from the repository's root; its installer and packages with `packaging/windows/package.ps1` (WiX v5) and `packaging/linux/package.sh` (nfpm, appimagetool).
 
 Build time dependencies:
 
@@ -145,7 +151,8 @@ Build time dependencies:
 | `crates/gpu` | wgpu renderer: layers, strokes, compositing, display |
 | `crates/core` | what both apps share above the renderer: the canvas session, every touch and gesture, the tools' state (adjustments, transform, selection, crop, Recolor) and which of them a button ends, the gallery, presets, gradients, time-lapse, the brush library's files, the layer menu, exports and their file names, and keyboard shortcuts; with the Android app's UniFFI bindings |
 | `android` | the Android app (Gradle) |
-| `desktop` | the desktop app (egui), in progress |
+| `desktop` | the desktop app (egui) for Windows and Linux |
+| `packaging` | the desktop app's Windows installer and Linux packages, as the release workflow builds them |
 
 *Builds are only tested on Windows 11.*
 
