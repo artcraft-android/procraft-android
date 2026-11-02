@@ -575,15 +575,27 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     if let Some(m) = blend(&["burntEdgesBlendModeExtended", "burntEdgesBlendMode"]) {
         set("burnt_blend", m as f32);
     }
-    // the grain editor's quarter turns of its image (1 none, 2 to 4 a quarter turn more each),
-    // added to the grain's turn (half turns, -1..1), so that a file written back needs none
-    let quarter_turns =
-        |keys: &[&str]| keys.iter().find_map(|k| f.num(k)).map_or(0, |n| (n.round() as i64 - 1).rem_euclid(4));
-    let grain_turns = quarter_turns(&["textureOrientation", "grainOrientation"]);
-    if grain_turns != 0 {
-        let turned = f.num("textureRotation").unwrap_or(0.0) as f32 + grain_turns as f32 * 0.5;
+    // the editors' turns of their images, as an orientation (1 none, 2 a half turn, 3 and 4 a
+    // quarter turn one way and the other; the grain's two quarter turns the other way round from
+    // the shape's), added to the grain's turn (half turns, -1..1) and the shape's angle, so that a
+    // file written back needs none
+    let orientation = |keys: &[&str]| keys.iter().find_map(|k| f.num(k)).map_or(1, |n| n.round() as i64);
+    let grain_turns = match orientation(&["textureOrientation", "grainOrientation"]) {
+        2 => 1.0,
+        3 => -0.5,
+        4 => 0.5,
+        _ => 0.0,
+    };
+    if grain_turns != 0.0 {
+        let turned = f.num("textureRotation").unwrap_or(0.0) as f32 + grain_turns;
         set("grain_rotation", (turned + 1.0).rem_euclid(2.0) - 1.0);
     }
+    let shape_turn = match orientation(&["shapeOrientation"]) {
+        2 => std::f32::consts::PI,
+        3 => std::f32::consts::FRAC_PI_2,
+        4 => -std::f32::consts::FRAC_PI_2,
+        _ => 0.0,
+    };
     // how a dual brush's two strokes combine: as the layers' modes number, or by the grain's own
     if let Some(n) = ["dualBlendModeExtended", "dualBlendMode"].iter().find_map(|k| f.num(k)) {
         let n = n.round() as i64;
@@ -629,9 +641,8 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         settings,
         max_size: f.num("maxSize").unwrap_or(1.0) as f32,
         min_size: f.num("minSize").map(|v| v as f32),
-        // with the shape editor's quarter turns of its image (as the grain's)
-        shape_angle: f.num("shapeAngle").unwrap_or(0.0) as f32
-            + quarter_turns(&["shapeOrientation"]) as f32 * std::f32::consts::FRAC_PI_2,
+        // with the shape editor's turn of its image
+        shape_angle: f.num("shapeAngle").unwrap_or(0.0) as f32 + shape_turn,
         pressure_curve: f.curve("dynamicsPressureOverall").filter(|c| !is_straight(c)),
         size_curve: f.curve("dynamicsPressureSizeCurve").filter(|c| !is_straight(c)),
         opacity_curve: f.curve("dynamicsPressureOpacityCurve").filter(|c| !is_straight(c)),
@@ -1092,11 +1103,12 @@ mod tests {
         let mut zip = ZipWriter::new();
         zip.add("Brush.archive", &b.finish(root));
         let back = read(&zip.finish()).unwrap();
-        assert!((back.shape_angle - (0.1 + std::f32::consts::FRAC_PI_2)).abs() < 1e-5, "{}", back.shape_angle);
-        // half a turn more, past the end: round to the other side
+        // 2: a half turn
+        assert!((back.shape_angle - (0.1 + std::f32::consts::PI)).abs() < 1e-5, "{}", back.shape_angle);
+        // the grain's 3: a quarter turn back
         let turns: Vec<f32> = back.settings.iter().filter(|(k, _)| k == "grain_rotation").map(|(_, v)| *v).collect();
         assert_eq!(turns.len(), 1);
-        assert!((turns[0] - -0.25).abs() < 1e-5, "{turns:?}");
+        assert!((turns[0] - 0.25).abs() < 1e-5, "{turns:?}");
     }
 
     #[test]

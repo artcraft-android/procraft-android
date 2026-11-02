@@ -126,6 +126,10 @@ pub struct TouchSettings {
     pub modify_pen: Option<GestureAction>,
     pub four_tap: Option<GestureAction>,
     pub three_swipe: Option<GestureAction>,
+    /// The pen's first and second buttons (the first, set to nothing, switches to the eraser and
+    /// back).
+    pub pen_button: Option<GestureAction>,
+    pub pen_second_button: Option<GestureAction>,
     /// Three fingers rubbed back and forth clear the layer.
     pub scrub: bool,
     /// While the pen hovers over the canvas, a finger dragged across moves the brush's opacity and
@@ -151,6 +155,8 @@ impl Default for TouchSettings {
             modify_pen: Some(GestureAction::Eyedropper),
             four_tap: Some(GestureAction::FullScreen),
             three_swipe: Some(GestureAction::CopyPaste),
+            pen_button: None,
+            pen_second_button: None,
             scrub: true,
             hover_touch: false,
             hold_ms: 400.0,
@@ -326,6 +332,8 @@ pub(crate) struct Touches {
     stroke_pointer: u64,
     /// The tool chosen before this stroke used another (Touch set to erase), to put back after.
     tool_before: Option<ToolKind>,
+    /// The tool the pen's button left for the eraser, to go back to.
+    tool_before_eraser: Option<ToolKind>,
     assisted: bool,
     down_at: (f32, f32),
     tap_start: f64,
@@ -412,6 +420,7 @@ impl Default for Touches {
             down: Vec::new(),
             stroke_pointer: 0,
             tool_before: None,
+            tool_before_eraser: None,
             assisted: false,
             down_at: (0.0, 0.0),
             tap_start: 0.0,
@@ -931,6 +940,37 @@ impl CanvasSession {
     /// A pointer lifts (`samples` its last input).
     pub fn touch_up(&self, id: u64, samples: Vec<PenSample>) -> Vec<TouchCommand> {
         self.lifted(id, samples, false)
+    }
+
+    /// The pen's button pressed (its `second`), hovering or touching at (`x`, `y`): what Gesture
+    /// controls set it to do. Set to nothing, the first switches between the current tool and the
+    /// eraser, and back, as a pen's double-tap does by default.
+    pub fn touch_pen_button(&self, second: bool, x: f32, y: f32) -> Vec<TouchCommand> {
+        let mut out = Vec::new();
+        let mut t = self.touches();
+        match if second { t.settings.pen_second_button } else { t.settings.pen_button } {
+            // the next touch picks a colour
+            Some(GestureAction::Eyedropper) => t.pick_next = true,
+            Some(GestureAction::Assisted) => {
+                drop(t);
+                let on = self.guide().assisted;
+                self.set_guide_assisted(!on);
+            }
+            Some(action) => Self::act(action, (x, y), &mut out),
+            None if !second => {
+                let tool = self.shared.lock().tool;
+                let next = if tool == ToolKind::Erase {
+                    t.tool_before_eraser.take().unwrap_or(ToolKind::Paint)
+                } else {
+                    t.tool_before_eraser = Some(tool);
+                    ToolKind::Erase
+                };
+                drop(t);
+                self.set_tool(next);
+            }
+            None => {}
+        }
+        out
     }
 
     /// The platform took back one pointer (it was a hand resting on the screen): what it alone
@@ -1950,6 +1990,30 @@ mod tests {
         s.touch_move(1, at(140.0, 100.0, 1020.0));
         let out = s.touch_cancel_one(1);
         assert!(!out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+    }
+
+    #[test]
+    fn the_pen_button_switches_to_the_eraser_and_back_unless_set_otherwise() {
+        let s = session();
+        s.set_tool(ToolKind::Smudge);
+        assert!(s.touch_pen_button(false, 10.0, 10.0).is_empty());
+        assert_eq!(s.info().tool, ToolKind::Erase);
+        s.touch_pen_button(false, 10.0, 10.0);
+        assert_eq!(s.info().tool, ToolKind::Smudge);
+        // the second button, set to nothing, does nothing
+        assert!(s.touch_pen_button(true, 10.0, 10.0).is_empty());
+        assert_eq!(s.info().tool, ToolKind::Smudge);
+        // set to the quick menu, the first opens it where the pen is, the tool left alone
+        s.set_touch_settings(TouchSettings { pen_button: Some(GestureAction::QuickMenu), ..TouchSettings::default() });
+        assert_eq!(s.touch_pen_button(false, 30.0, 40.0), vec![TouchCommand::QuickMenu { x: 30.0, y: 40.0 }]);
+        assert_eq!(s.info().tool, ToolKind::Smudge);
+        // set to the eyedropper, the next touch picks
+        s.set_touch_settings(TouchSettings {
+            pen_second_button: Some(GestureAction::Eyedropper),
+            ..TouchSettings::default()
+        });
+        s.touch_pen_button(true, 0.0, 0.0);
+        assert!(s.pick_next());
     }
 
     #[test]

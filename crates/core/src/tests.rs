@@ -2789,6 +2789,38 @@ fn the_last_stroke_snaps_to_a_shape_until_something_else_is_done() {
 }
 
 #[test]
+fn two_brushes_combine_into_a_dual_brush_and_come_apart_again() {
+    let s = CanvasSession::new(64, 64);
+    let before = s.brush_library();
+    let names: Vec<String> = before[0].brushes.iter().map(|b| b.name.clone()).collect();
+    // the tool on the brush that joins: it then uses the dual brush, in the first's place
+    assert!(s.select_brush(0, 3));
+    assert!(s.combine_brushes(0, 1, 3));
+    let after = s.brush_library();
+    assert_eq!(after[0].brushes.len(), names.len() - 1);
+    assert_eq!(after[0].brushes[1].name, names[1]);
+    assert_eq!(after[0].brushes[3].name, names[4]);
+    assert!(s.brush_is_dual(0, 1));
+    assert_eq!((s.current_brush().set, s.current_brush().index), (0, 1));
+    // a dual brush takes no third, and a brush can't join itself
+    assert!(!s.combine_brushes(0, 1, 2));
+    assert!(!s.combine_brushes(0, 2, 1));
+    assert!(!s.combine_brushes(0, 2, 2));
+    // written out and read back, it stays dual
+    let saved = s.saved_brush_library();
+    let t = CanvasSession::new(64, 64);
+    assert!(t.load_brush_library(saved));
+    assert!(t.brush_is_dual(0, 1));
+    // apart: the second just below the first, the rest as before
+    assert!(s.uncombine_brush(0, 1));
+    assert!(!s.brush_is_dual(0, 1));
+    let apart: Vec<String> = s.brush_library()[0].brushes.iter().map(|b| b.name.clone()).collect();
+    assert_eq!(apart.len(), names.len());
+    assert_eq!(apart[2], names[3]);
+    assert!(!s.uncombine_brush(0, 1));
+}
+
+#[test]
 fn a_brush_moves_to_another_set_and_the_tool_keeps_it() {
     let s = CanvasSession::new(64, 64);
     let before = s.brush_library();

@@ -1757,36 +1757,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     val gestures = GestureSettings(app.getSharedPreferences("gestures", android.content.Context.MODE_PRIVATE))
 
     /**
-     * The pen's side button pressed ([secondary]: its second one), at window point [at]: what Pen
-     * double-tap (or Pen squeeze) is set to do in Gesture controls.
+     * The pen's side button did what the shared touches set it to: the tool, the eyedropper and
+     * drawing assist read again as they now are.
      */
-    fun penButton(secondary: Boolean, at: Offset) {
-        val trigger = if (secondary) Trigger.PEN_SQUEEZE else Trigger.PEN_DOUBLE_TAP
-        when (gestures.purposeOf(trigger)) {
-            GesturePurpose.EYEDROPPER -> pickNext = true
-            GesturePurpose.ASSISTED -> guide?.let { setGuideAssisted(!it.assisted) }
-            GesturePurpose.QUICKMENU -> toggleQuickMenu(at)
-            GesturePurpose.FULL_SCREEN -> toggleBars()
-            GesturePurpose.CLEAR_LAYER -> clearCurrentLayer()
-            GesturePurpose.COPY_PASTE -> copyPasteOpen = true
-            GesturePurpose.LAYER_SELECT -> layerSelectAt(at)
-            GesturePurpose.QUICKSHAPE -> quickShapeLast()
-            // nothing set for the first button: between the current tool and the eraser, as a
-            // pen's double-tap does by default
-            null -> if (!secondary) {
-                if (tool == ToolKind.ERASE) {
-                    select(toolBeforeEraser)
-                } else {
-                    toolBeforeEraser = tool
-                    select(ToolKind.ERASE)
-                }
-            }
-            else -> Unit
+    fun penButtonDone() {
+        val s = session ?: return
+        pickNextShown = s.pickNext()
+        val now = s.info().tool
+        if (now != tool) {
+            feedback()
+            endRecolor()
+            tool = now
+            readSliders()
+            currentBrush = s.currentBrush()
         }
+        guide = s.guide()
     }
-
-    /** The tool the pen's button left for the eraser, to go back to. */
-    private var toolBeforeEraser = ToolKind.PAINT
 
     /** The modify button tapped: what Tap □ is set to do (open or close the eyedropper at first). */
     fun tapModify() {

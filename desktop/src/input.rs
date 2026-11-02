@@ -65,6 +65,11 @@ impl Default for Input {
 impl Input {
     /// Where the mouse hovers (window pixels): over the window, nothing pressed, the view not
     /// moving.
+    /// Where the mouse (or a pen moving the pointer) last was over the window, window pixels.
+    pub fn cursor(&self) -> Option<(f32, f32)> {
+        self.cursor
+    }
+
     pub fn hovering(&self) -> Option<(f32, f32)> {
         self.cursor.filter(|_| self.inside && self.down.is_empty() && !self.panning && !self.space)
     }
@@ -248,7 +253,12 @@ impl Input {
         let p = (touch.location.x as f32, touch.location.y as f32);
         // the platform gives a pen's pressure, and none for a finger
         let pen = touch.force.map(|f| f.normalized() as f32);
-        let kind = if pen.is_some() { PointerKind::Stylus } else { PointerKind::Finger };
+        // a pen turned over rubs out with its eraser end
+        let kind = match pen {
+            Some(_) if crate::pen::eraser_end(touch.id) => PointerKind::StylusEraser,
+            Some(_) => PointerKind::Stylus,
+            None => PointerKind::Finger,
+        };
         let pressure = pen.unwrap_or(1.0);
         let known = self.down.contains(&touch.id);
         match touch.phase {

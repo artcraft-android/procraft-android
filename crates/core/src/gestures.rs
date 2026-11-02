@@ -401,6 +401,8 @@ impl GestureSettings {
             modify_pen: action(self.purpose_of(Trigger::ModifyPen)),
             four_tap: action(self.purpose_of(Trigger::FourTap)),
             three_swipe: action(self.purpose_of(Trigger::ThreeSwipe)),
+            pen_button: action(self.purpose_of(Trigger::PenDoubleTap)),
+            pen_second_button: action(self.purpose_of(Trigger::PenSqueeze)),
             scrub: self.is_on(GesturePurpose::ClearLayer, "SCRUB".to_owned()),
             hover_touch: self.is_on(GesturePurpose::Hover, "HOVER_TOUCH".to_owned()),
             hold_ms: f64::from(self.delay(hold.unwrap_or(GesturePurpose::Eyedropper))) * 1000.0,

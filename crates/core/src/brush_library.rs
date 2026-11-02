@@ -575,6 +575,58 @@ impl CanvasSession {
         true
     }
 
+    /// Brush `second` of `set` becomes brush `first`'s second (a dual brush: two strokes along
+    /// the same path): it leaves the set, `first` keeping its place, and a tool that used either
+    /// uses the dual brush. False if they are one brush or either is a dual brush already.
+    pub fn combine_brushes(&self, set: u32, first: u32, second: u32) -> bool {
+        let mut st = self.shared.lock();
+        let (s, a, b) = (set as usize, first as usize, second as usize);
+        let Some(entry) = st.library.get_mut(s) else { return false };
+        let dual = |i: usize| entry.brushes.get(i).is_none_or(|brush| brush.secondary.is_some());
+        if a == b || dual(a) || dual(b) {
+            return false;
+        }
+        let joining = entry.brushes.remove(b);
+        if b < entry.origins.len() {
+            entry.origins.remove(b);
+        }
+        // where the first is once the second has left
+        let at = if a > b { a - 1 } else { a };
+        let Some(dual) = entry.brushes.get_mut(at) else { return false };
+        dual.secondary = Some(Box::new(joining));
+        st.move_brush_refs(|(rs, ri)| {
+            if rs != s {
+                return Some((rs, ri));
+            }
+            if ri == b {
+                return Some((rs, at));
+            }
+            Some((rs, if ri > b { ri - 1 } else { ri }))
+        });
+        true
+    }
+
+    /// Dual brush `index` of `set` comes apart: its second goes back into the set just below it.
+    /// False if it isn't a dual brush.
+    pub fn uncombine_brush(&self, set: u32, index: u32) -> bool {
+        let mut st = self.shared.lock();
+        let (s, i) = (set as usize, index as usize);
+        let Some(entry) = st.library.get_mut(s) else { return false };
+        let Some(second) = entry.brushes.get_mut(i).and_then(|brush| brush.secondary.take()) else { return false };
+        entry.brushes.insert(i + 1, *second);
+        if i < entry.origins.len() {
+            entry.origins.insert(i + 1, None);
+        }
+        st.move_brush_refs(|(rs, ri)| Some(if rs == s && ri > i { (rs, ri + 1) } else { (rs, ri) }));
+        true
+    }
+
+    /// Whether brush `index` of `set` is a dual brush.
+    pub fn brush_is_dual(&self, set: u32, index: u32) -> bool {
+        let st = self.shared.lock();
+        st.library.get(set as usize).and_then(|e| e.brushes.get(index as usize)).is_some_and(|b| b.secondary.is_some())
+    }
+
     /// A new plain round brush at the top of `set`, chosen for the current tool; returns its
     /// index.
     pub fn new_brush(&self, set: u32) -> Option<u32> {

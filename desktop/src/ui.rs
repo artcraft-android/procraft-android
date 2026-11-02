@@ -349,6 +349,13 @@ impl Interface {
         if self.inserted(session) || brushes_coming {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
+        // the pen's barrel button: what Gesture controls set it to do (else the eraser and back),
+        // where the pointer is
+        for _ in 0..crate::pen::take_button_presses() {
+            let (x, y) = input.cursor().unwrap_or_default();
+            input.commands.extend(session.touch_pen_button(false, x, y));
+            self.library.tool_changed();
+        }
         self.commands(&ctx, session, input);
         // the brush library closed: what was done in it is kept
         let brushes_open = self.open == Some(Popover::Brushes);

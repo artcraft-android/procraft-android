@@ -290,14 +290,20 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     /** The touch went down where Continue filling takes no fill: the rest of it does nothing. */
     private var skipping = false
 
-    /** The pen's side buttons, hovering or touching: what Pen double-tap or squeeze is set to do. */
+    /**
+     * The pen's side buttons, hovering or touching: what the shared touches say Gesture controls set
+     * them to do (the first, set to nothing, switches to the eraser and back).
+     */
     private fun penButton(e: MotionEvent): Boolean {
         if (e.actionMasked != MotionEvent.ACTION_BUTTON_PRESS) return false
-        when (e.actionButton) {
-            MotionEvent.BUTTON_STYLUS_PRIMARY -> vm.penButton(secondary = false, Offset(e.x, e.y))
-            MotionEvent.BUTTON_STYLUS_SECONDARY -> vm.penButton(secondary = true, Offset(e.x, e.y))
+        val second = when (e.actionButton) {
+            MotionEvent.BUTTON_STYLUS_PRIMARY -> false
+            MotionEvent.BUTTON_STYLUS_SECONDARY -> true
             else -> return false
         }
+        val s = session ?: return true
+        obey(s.touchPenButton(second, e.x, e.y))
+        vm.penButtonDone()
         return true
     }
 

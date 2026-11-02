@@ -1,17 +1,50 @@
-//! A pen's lean, which winit leaves out of its touches: on Windows read from the system's pointer
-//! messages as they reach the window (before winit makes its touches of them), kept by pointer
-//! for the touches to carry.
+//! A pen's lean, its buttons and its eraser end, which winit leaves out of its touches: on Windows
+//! read from the system's pointer messages as they reach the window (before winit makes its
+//! touches of them), kept by pointer for the touches to carry.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Each pen pointer's last lean: radians from upright, and the direction it leans (radians
 /// clockwise from screen-up), as the strokes take them.
 static LEANS: Mutex<Option<HashMap<u64, (f32, f32)>>> = Mutex::new(None);
 
+/// Each pen pointer's last flags (its barrel button held, its eraser end down).
+static FLAGS: Mutex<Option<HashMap<u64, u32>>> = Mutex::new(None);
+
+/// How many times a pen's barrel button went down since the app last asked.
+static PRESSES: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg_attr(not(windows), allow(dead_code))]
+const FLAG_BARREL: u32 = 0x1;
+const FLAG_INVERTED: u32 = 0x2;
+const FLAG_ERASER: u32 = 0x4;
+
 /// The lean of the pen that is pointer `id` (a touch's id), if it is a pen that gives one.
 pub fn lean(id: u64) -> Option<(f32, f32)> {
     LEANS.lock().ok()?.as_ref()?.get(&id).copied()
+}
+
+/// Whether the pen that is pointer `id` is turned over, its eraser end on the screen.
+pub fn eraser_end(id: u64) -> bool {
+    let flags = FLAGS.lock().ok().and_then(|f| f.as_ref()?.get(&id).copied()).unwrap_or(0);
+    flags & (FLAG_INVERTED | FLAG_ERASER) != 0
+}
+
+/// How many times a pen's barrel button was pressed since the last call.
+pub fn take_button_presses() -> usize {
+    PRESSES.swap(0, Ordering::Relaxed)
+}
+
+/// Pointer `id`'s pen flags as they now are: a press of its barrel button counted.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pen_flags(id: u64, flags: u32) {
+    let Ok(mut all) = FLAGS.lock() else { return };
+    let before = all.get_or_insert_with(Default::default).insert(id, flags).unwrap_or(0);
+    if flags & FLAG_BARREL != 0 && before & FLAG_BARREL == 0 {
+        PRESSES.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// The lean of a pen tilted `tilt_x` degrees towards the right and `tilt_y` towards the user
@@ -77,6 +110,7 @@ mod system {
                 if let Ok(mut leans) = super::LEANS.lock() {
                     leans.get_or_insert_with(Default::default).insert(u64::from(id), lean);
                 }
+                super::pen_flags(u64::from(id), info.penFlags);
             }
         }
         // SAFETY: the procedure winit set, as SetWindowLongPtrW gave it back
@@ -88,6 +122,20 @@ mod system {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_barrel_button_counts_once_each_time_it_goes_down() {
+        take_button_presses();
+        pen_flags(901, 0);
+        pen_flags(901, FLAG_BARREL);
+        pen_flags(901, FLAG_BARREL);
+        pen_flags(901, 0);
+        pen_flags(901, FLAG_BARREL);
+        assert_eq!(take_button_presses(), 2);
+        assert!(!eraser_end(901));
+        pen_flags(902, FLAG_INVERTED);
+        assert!(eraser_end(902));
+    }
 
     #[test]
     fn a_tilt_becomes_a_lean_clockwise_from_up() {
