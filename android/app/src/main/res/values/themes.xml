@@ -4,10 +4,13 @@
     <color name="window_background">#FF000000</color>
     <color name="ic_launcher_background">#FF0B0B0C</color>
 
-    <style name="Theme.ProCraft" parent="android:Theme.Material.NoActionBar">
+    <style name="Base.Theme.ProCraft" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/window_background</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
+        <!-- "always" is only known from Android 11 (values-v30); Android 10 stops on it -->
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
     </style>
+
+    <style name="Theme.ProCraft" parent="Base.Theme.ProCraft" />
 </resources>
