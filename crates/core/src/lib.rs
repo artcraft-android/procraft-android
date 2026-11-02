@@ -855,6 +855,8 @@ pub(crate) struct Shared {
     /// The artwork's edits as the last save that worked found them, [`project::NOT_SAVED`]
     /// before one (read without waiting on a save).
     pub(crate) edits_saved: std::sync::atomic::AtomicU64,
+    /// How far the export under way has come (0..1, an f32's bits), read without waiting on it.
+    pub(crate) export_progress: std::sync::atomic::AtomicU32,
     /// Why the autosave failed, not yet asked for, and whether it is failing (told once until a
     /// save works again); a lock of its own, never held through a save.
     pub(crate) save_failure: Mutex<(Option<String>, bool)>,
@@ -1189,6 +1191,7 @@ impl CanvasSession {
                 projection: Mutex::new(None),
                 saving: Mutex::new(project::Saved::default()),
                 edits_saved: std::sync::atomic::AtomicU64::new(project::NOT_SAVED),
+                export_progress: std::sync::atomic::AtomicU32::new(0),
                 save_failure: Mutex::new((None, false)),
                 touches: Mutex::new(touch::Touches::default()),
             }),

@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -136,6 +137,102 @@ fun <T : Any> Alert(
                     extra?.let { AlertButton(it, Pc.Accent, Color.White, Modifier.weight(1f)) { if (value != null) onExtra(kept) } }
                     AlertButton(action, if (destructive) AlertDestroyFill else Pc.Accent, Color.White, Modifier.weight(1f)) { if (value != null) onAction(kept) }
                 }
+            }
+        }
+    }
+}
+
+// the export card, as measured: 398 across, its one button 17 in from the sides, a pie 76 across
+// (its ring 4 wide) 40 under the title and 22 over the button, 15 under that
+private val ExportCardWidth = 398.dp
+private val ExportPie = 76.dp
+private val ExportRing = 4.dp
+// the check drawn in the full pie: through these points about its middle, 6 wide, round
+private val ExportCheck = listOf(-14f to 1f, -4f to 11f, 16f to -10f)
+private val ExportCheckWidth = 6.dp
+private const val EXPORT_CHECK_DRAW_MS = 300
+
+/**
+ * The card over everything while an export runs ([shown] not null): "Exporting" after the share
+ * glyph, a pie filling clockwise from the top with how far it has come, and Cancel. Once
+ * [CanvasViewModel.ExportShown.done] the pie is full and a check is drawn in it. It comes and goes
+ * as an alert does, the screen dimmed; nothing under it is touched meanwhile.
+ */
+@Composable
+fun ExportProgress(shown: io.github.artcraftandroid.procraft.canvas.CanvasViewModel.ExportShown?, onCancel: () -> Unit) {
+    val last = remember { arrayOfNulls<io.github.artcraftandroid.procraft.canvas.CanvasViewModel.ExportShown>(1) }
+    if (shown != null) last[0] = shown
+    val appear by animateFloatAsState(
+        if (shown != null) 1f else 0f,
+        if (shown != null) tween(300, easing = Motion.EaseInOut) else tween(350, easing = CubicBezierEasing(0f, 0f, 0.58f, 1f)),
+        label = "export card",
+    )
+    val kept = last[0] ?: return
+    val check by animateFloatAsState(if (kept.done) 1f else 0f, tween(EXPORT_CHECK_DRAW_MS), label = "export check")
+    if (appear <= 0f) return
+    PcPopup(
+        textScale = MATCHED_POPUP_TEXT,
+        alignment = Alignment.Center,
+        onDismissRequest = {},
+        properties = PopupProperties(focusable = shown != null, clippingEnabled = false),
+    ) {
+        Box(
+            Modifier.fillMaxSize().background(Color.Black.copy(alpha = ALERT_DIM * appear))
+                .pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } },
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                Modifier.width(ExportCardWidth).graphicsLayer {
+                    alpha = appear
+                    val k = ALERT_START_SCALE + (1f - ALERT_START_SCALE) * appear
+                    scaleX = k
+                    scaleY = k
+                }.clip(RoundedCornerShape(24.dp)).background(AlertFill).border(1.dp, Pc.GlassMenuEdge, RoundedCornerShape(24.dp))
+                    .padding(start = 17.dp, end = 17.dp, top = 21.dp, bottom = 15.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Row(Modifier.height(31.dp), verticalAlignment = Alignment.CenterVertically) {
+                    // the glyph 22 tall (it fills 18.6 of its 50 frame), 13 before the title
+                    Box(Modifier.size(22.dp, 31.dp), contentAlignment = Alignment.Center) {
+                        Icon(PcIcons.TabShare, contentDescription = null, tint = Pc.Accent, modifier = Modifier.requiredSize(59.dp))
+                    }
+                    Spacer(Modifier.width(13.dp))
+                    Text("Exporting", color = AlertInk, fontSize = 26.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                }
+                Spacer(Modifier.height(40.dp))
+                val accent = Pc.Accent
+                androidx.compose.foundation.Canvas(Modifier.size(ExportPie)) {
+                    val r = size.minDimension / 2f
+                    val ring = ExportRing.toPx()
+                    if (kept.done) {
+                        drawCircle(accent, r)
+                        // the check drawn along its length as it shows
+                        val path = androidx.compose.ui.graphics.Path().apply {
+                            ExportCheck.forEachIndexed { i, (x, y) ->
+                                val at = center + androidx.compose.ui.geometry.Offset(x.dp.toPx(), y.dp.toPx())
+                                if (i == 0) moveTo(at.x, at.y) else lineTo(at.x, at.y)
+                            }
+                        }
+                        val measure = androidx.compose.ui.graphics.PathMeasure().apply { setPath(path, false) }
+                        val part = androidx.compose.ui.graphics.Path()
+                        if (check > 0f && measure.getSegment(0f, measure.length * check, part, true)) {
+                            drawPath(
+                                part,
+                                Color.White,
+                                style = androidx.compose.ui.graphics.drawscope.Stroke(
+                                    ExportCheckWidth.toPx(),
+                                    cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                                    join = androidx.compose.ui.graphics.StrokeJoin.Round,
+                                ),
+                            )
+                        }
+                    } else {
+                        drawCircle(accent, r - ring / 2f, style = androidx.compose.ui.graphics.drawscope.Stroke(ring))
+                        drawArc(accent, -90f, 360f * kept.progress.coerceIn(0f, 1f), useCenter = true)
+                    }
+                }
+                Spacer(Modifier.height(22.dp))
+                AlertButton("Cancel", AlertCancelFill, AlertCancelInk, Modifier.fillMaxWidth()) { if (shown != null && !kept.done) onCancel() }
             }
         }
     }

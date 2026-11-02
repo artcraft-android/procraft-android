@@ -20,6 +20,7 @@ mod copy_paste;
 mod crop;
 mod curve;
 mod custom_canvas;
+mod export_card;
 mod files;
 mod gallery;
 mod gesture_controls;
@@ -490,7 +491,9 @@ impl App {
         {
             zoom.hold();
         }
-        let exporting = files::exporting_since().is_some_and(|since| since.elapsed() >= SLOW_OPENING);
+        // an export shows its own card; the veil is for a slow save
+        let exporting = !self.ui.export_card.busy()
+            && files::exporting_since().is_some_and(|since| since.elapsed() >= SLOW_OPENING);
         let raw = screen.egui.take_egui_input(&screen.window);
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             self.ui.show(ui, &session, &mut self.input);
@@ -566,6 +569,8 @@ impl App {
                 None => zoom::Zoom::end(ui.ctx()),
             }
             asked = gallery.show(ui.ctx(), &mut interface.look, &interface.colours);
+            // a share from the gallery shows its card there
+            interface.export_card.show(ui.ctx(), &mut interface.look);
             if reading == Some(true) {
                 opening_veil(ui.ctx());
             }
@@ -613,8 +618,12 @@ impl App {
                     self.ui.started_new();
                 }
             }
-            Some(gallery::Asked::Share(list, format)) => files::share_artworks(&list, format, 100),
-            Some(gallery::Asked::SharePdf(list, quality)) => files::share_artworks(&list, files::Format::Pdf, quality),
+            Some(gallery::Asked::Share(list, format)) => {
+                files::share_artworks(&list, format, 100, &mut self.ui.export_card);
+            }
+            Some(gallery::Asked::SharePdf(list, quality)) => {
+                files::share_artworks(&list, files::Format::Pdf, quality, &mut self.ui.export_card);
+            }
             Some(gallery::Asked::DragOut(artwork)) => self.drag_out(&artwork),
             // opened (read as Open reads it), then shared
             Some(gallery::Asked::ShareAnimated(artwork, format)) => {
@@ -1010,7 +1019,7 @@ impl App {
                 None
             }
             Action::Export(format, pdf_quality) => {
-                files::export(session, format, self.ui.artwork_dir.as_deref(), pdf_quality);
+                files::export(session, format, self.ui.artwork_dir.as_deref(), pdf_quality, &mut self.ui.export_card);
                 None
             }
         };

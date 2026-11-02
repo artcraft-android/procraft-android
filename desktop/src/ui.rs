@@ -117,6 +117,8 @@ pub struct Interface {
     /// Share's PDF asks how well it keeps its pictures first (for this format).
     pdf_alert: Alert,
     pdf_for: Option<Format>,
+    /// An export under way, as its card shows it.
+    pub export_card: crate::export_card::ExportCard,
     /// The brushes changed (the library closed, a slider let go, a notch saved): keep them.
     pub keep_brushes: bool,
     /// A tool button held long enough has acted (its tap, when let go, does nothing).
@@ -203,6 +205,7 @@ impl Default for Interface {
             blocked_alert: Alert::default(),
             pdf_alert: Alert::default(),
             pdf_for: None,
+            export_card: crate::export_card::ExportCard::default(),
             keep_brushes: false,
             tool_hold_acted: false,
             brushes_were_open: false,
@@ -484,6 +487,7 @@ impl Interface {
             self.quick_menu(&ctx, session);
             self.blocked_alert(&ctx, session);
             self.pdf_quality_alert(&ctx);
+            self.export_card.show(&ctx, &mut self.look);
             self.touch_companion(&ctx, session);
             if self.show_interface_button(&ctx) {
                 self.toggle_bars(session);
@@ -634,6 +638,7 @@ impl Interface {
         self.quick_menu(&ctx, session);
         self.blocked_alert(&ctx, session);
         self.pdf_quality_alert(&ctx);
+        self.export_card.show(&ctx, &mut self.look);
         self.text_editor(&ctx, session);
         // a gesture setting changed: the touches follow it, and it is kept
         if self.gesture_controls.show(&ctx, &mut self.look, &self.gestures) {

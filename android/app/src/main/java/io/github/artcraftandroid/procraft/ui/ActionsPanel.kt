@@ -129,13 +129,9 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         // one at a time: the one under way shares when it's made
         if (vm.timeLapseExporting) return
         // made outside the panel, which may be closed meanwhile: the share comes all the same
+        // (cancelled or failed, there is nothing to share; a failure is told)
         vm.viewModelScope.launch {
-            val file = vm.exportTimeLapse(seconds)
-            if (file != null) {
-                runCatching { shareFile(context, file, "video/mp4") }
-            } else {
-                vm.showNotice("The time-lapse video couldn't be made.", warning = true)
-            }
+            vm.exportTimeLapse(seconds)?.let { runCatching { shareFile(context, it, "video/mp4") } }
         }
     }
     var page by remember { mutableStateOf(ActionsPage.TABS) }
@@ -152,23 +148,23 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     var scalingMenu by remember { mutableStateOf(false) }
     // a PDF waiting on its quality
     var pdfAsking by remember { mutableStateOf<CanvasViewModel.Export?>(null) }
+    // made outside the panel, which may be closed meanwhile; cancelled or failed (that is told),
+    // nothing is shared
     fun share(kind: CanvasViewModel.Export, pdfQuality: Int = 100) {
-        scope.launch {
+        vm.viewModelScope.launch {
             val files = vm.export(kind, pdfQuality)
-            if (files.isNotEmpty()) shareFiles(context, files, kind.mime) else dialog = "Share" to "The artwork could not be exported."
+            if (files.isNotEmpty()) runCatching { shareFiles(context, files, kind.mime) }
         }
     }
     // the layered package, named with ours or the other app's extension
     fun sharePackage(extension: String) {
-        scope.launch {
-            val file = vm.exportPackageFile(extension)
-            if (file != null) shareFile(context, file, "application/octet-stream") else dialog = "Share" to "The artwork could not be exported."
+        vm.viewModelScope.launch {
+            vm.exportPackageFile(extension)?.let { runCatching { shareFile(context, it, "application/octet-stream") } }
         }
     }
     fun share(jpeg: Boolean) {
-        scope.launch {
-            val file = vm.exportImage(jpeg)
-            if (file != null) shareFile(context, file, if (jpeg) "image/jpeg" else "image/png") else dialog = "Share" to "The picture could not be exported."
+        vm.viewModelScope.launch {
+            vm.exportImage(jpeg)?.let { runCatching { shareFile(context, it, if (jpeg) "image/jpeg" else "image/png") } }
         }
     }
     // whether the picture being picked or taken goes on a private layer

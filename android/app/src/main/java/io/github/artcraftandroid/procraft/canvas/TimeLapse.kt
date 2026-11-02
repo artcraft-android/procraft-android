@@ -63,16 +63,18 @@ class TimeLapse(artwork: File) {
 
     /**
      * The frames as an H.264 MP4 at [out]: all of them, or (with [seconds]) spread evenly over
-     * that long. False if there are none or the encoder fails.
+     * that long. [going] hears how far it has come (0..1) before each frame, and stops it by saying
+     * false. False if there are none or the encoder fails.
      */
-    fun export(out: File, seconds: Int?): Boolean =
-        encode(out, timeLapsePicks(count.toUInt(), seconds?.toUInt()).map { it.toInt() }, null) != null
+    fun export(out: File, seconds: Int?, going: (Float) -> Boolean = { true }): Boolean =
+        encode(out, timeLapsePicks(count.toUInt(), seconds?.toUInt()).map { it.toInt() }, null, going) != null
 
     /**
      * The frames [picks] as a video at [out], each fitted on white into [size] (else into the first
      * one's, within the settings' side); its size, or null if there are none or the encoder fails.
+     * [going] as for [export]: the frames after it says false are left out.
      */
-    private fun encode(out: File, picks: List<Int>, size: Pair<Int, Int>?): Pair<Int, Int>? {
+    private fun encode(out: File, picks: List<Int>, size: Pair<Int, Int>?, going: (Float) -> Boolean = { true }): Pair<Int, Int>? {
         if (picks.isEmpty()) return null
         val video = settings
         val mime = if (video.hevc) android.media.MediaFormat.MIMETYPE_VIDEO_HEVC else android.media.MediaFormat.MIMETYPE_VIDEO_AVC
@@ -84,6 +86,7 @@ class TimeLapse(artwork: File) {
         val paint = Paint(Paint.FILTER_BITMAP_FLAG)
         try {
             val ok = VideoWriter.write(out, w, h, FPS, picks.size, mime, video.bitsPerPixel) { n, pixels ->
+                if (!going(n / picks.size.toFloat())) return@write false
                 val source = frame(picks[n]) ?: return@write false
                 // fitted on white
                 Canvas(frameBitmap).apply {

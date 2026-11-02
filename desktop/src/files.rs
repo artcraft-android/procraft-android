@@ -597,18 +597,31 @@ pub fn save(session: &Arc<CanvasSession>, ui: &mut Interface, ask: bool) {
     ui.saving = Some(saved);
 }
 
-/// Writes the artwork as `format` where the user picks.
-pub fn export(session: &Arc<CanvasSession>, format: Format, dir: Option<&str>, pdf_quality: u8) {
+/// Writes the artwork as `format` where the user picks, its card showing how far it has come;
+/// cancelled, nothing is left there.
+pub fn export(
+    session: &Arc<CanvasSession>,
+    format: Format,
+    dir: Option<&str>,
+    pdf_quality: u8,
+    card: &mut crate::export_card::ExportCard,
+) {
+    if card.busy() {
+        return;
+    }
     // each layer (or a model's texture set) a PNG file, in a folder the user picks
     if matches!(format, Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures) {
         let title =
             if format == Format::ModelTextures { "Share textures as PNG files" } else { "Share layers as PNG files" };
         let Some(dir) = FileDialog::new().set_title(title).pick_folder() else { return };
         let dir = dir.to_string_lossy().into_owned();
-        writing(session, "Can't share", move |session| match format {
-            Format::LayerPngs => session.export_layer_pngs(dir).map(drop),
-            Format::ModelTextures => session.export_model_textures(dir).map(drop),
-            _ => session.export_chosen_pngs(dir).map(drop),
+        writing(session, card, "Can't share", move |session| {
+            match format {
+                Format::LayerPngs => session.export_layer_pngs(dir),
+                Format::ModelTextures => session.export_model_textures(dir),
+                _ => session.export_chosen_pngs(dir),
+            }
+            .map(|files| files.into_iter().map(PathBuf::from).collect())
         });
         return;
     }
@@ -620,44 +633,92 @@ pub fn export(session: &Arc<CanvasSession>, format: Format, dir: Option<&str>, p
     else {
         return;
     };
-    let path = with_extension(path, format.extension()).to_string_lossy().into_owned();
+    let path = with_extension(path, format.extension());
     let time_lapse = dir.map(crate::timelapse::for_package);
-    writing(session, "Can't export", move |session| match format {
-        Format::Procraft | Format::Package => session.export_package(path, seed(), time_lapse),
-        Format::Psd => session.export_psd(path),
-        Format::Pdf => session.export_pdf(path, false, pdf_quality),
-        Format::LayersPdf => session.export_pdf(path, true, pdf_quality),
-        Format::Png => session.export_png(path),
-        Format::Tiff => session.export_tiff(path),
-        Format::Jpeg => session.export_jpeg(path),
-        Format::ModelJpeg => session.export_model_jpeg(path),
-        Format::ModelObj => session.export_model_obj(path),
-        Format::ModelUsdz => session.export_model_usdz(path),
-        Format::ModelRender => session.export_model_render(path, false),
-        Format::ModelTiff => session.export_model_tiff(path),
-        Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures => Ok(()),
+    writing(session, card, "Can't export", move |session| {
+        // written beside it first, so a cancelled export leaves what was there as it was
+        let part = PathBuf::from(format!("{}.part", path.to_string_lossy()));
+        let at = part.to_string_lossy().into_owned();
+        match format {
+            Format::Procraft | Format::Package => session.export_package(at, seed(), time_lapse),
+            Format::Psd => session.export_psd(at),
+            Format::Pdf => session.export_pdf(at, false, pdf_quality),
+            Format::LayersPdf => session.export_pdf(at, true, pdf_quality),
+            Format::Png => session.export_png(at),
+            Format::Tiff => session.export_tiff(at),
+            Format::Jpeg => session.export_jpeg(at),
+            Format::ModelJpeg => session.export_model_jpeg(at),
+            Format::ModelObj => session.export_model_obj(at),
+            Format::ModelUsdz => session.export_model_usdz(at),
+            Format::ModelRender => session.export_model_render(at, false),
+            Format::ModelTiff => session.export_model_tiff(at),
+            Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures => Ok(()),
+        }?;
+        Ok(vec![part])
     });
 }
 
 /// Writes an export on a thread of its own (a large one takes seconds, the window drawing on
-/// meanwhile, as the tablet's does), telling `failed` with the reason if it can't.
+/// meanwhile, as the tablet's does), `card` showing how far it has come; telling `failed` with the
+/// reason if it can't. `write` returns what it wrote: a file ending ".part" is put in place of the
+/// one it was written beside once made; cancelled, everything it wrote goes.
 fn writing(
     session: &Arc<CanvasSession>,
+    card: &mut crate::export_card::ExportCard,
     failed: &'static str,
-    write: impl FnOnce(&CanvasSession) -> Result<(), procraft_core::MobileError> + Send + 'static,
+    write: impl FnOnce(&CanvasSession) -> Result<Vec<PathBuf>, procraft_core::MobileError> + Send + 'static,
 ) {
+    session.reset_export_progress();
+    let following = Arc::clone(session);
+    let exporting = card.start(move || following.export_progress());
     let session = Arc::clone(session);
     write_meanwhile(true, move || {
-        if let Err(e) = write(&session) {
-            tell_later(failed, &e.to_string());
+        let written = write(&session);
+        let placed = written.map_err(|e| e.to_string()).and_then(|files| place_written(&files, exporting.cancelled()));
+        match placed {
+            Ok(made) => exporting.ended(made),
+            Err(e) => {
+                exporting.ended(false);
+                if !exporting.cancelled() {
+                    tell_later(failed, &e);
+                }
+            }
         }
     });
 }
 
+/// What an export wrote, put where it goes: a file ending ".part" moved over the one it was
+/// written beside (others, as a folder's PNGs, are where they go already); `cancelled`, everything
+/// it wrote removed instead, so what was there stays as it was. Whether it was put in place.
+fn place_written(files: &[PathBuf], cancelled: bool) -> Result<bool, String> {
+    if cancelled {
+        for f in files {
+            let _ = std::fs::remove_file(f);
+        }
+        return Ok(false);
+    }
+    for f in files {
+        let name = f.to_string_lossy();
+        if let Some(target) = name.strip_suffix(".part") {
+            std::fs::rename(f, target).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(true)
+}
+
 /// Artworks from the gallery written as `format`: one where the user picks, several into a folder
 /// the user picks, each named by its name (a number after it when two share one). Each is opened
-/// on a GPU device of its own, never shown.
-pub fn share_artworks(list: &[procraft_core::GalleryArtwork], format: Format, pdf_quality: u8) {
+/// on a GPU device of its own, never shown. `card` shows them made, an artwork at a time;
+/// cancelled, none is left where it was going.
+pub fn share_artworks(
+    list: &[procraft_core::GalleryArtwork],
+    format: Format,
+    pdf_quality: u8,
+    card: &mut crate::export_card::ExportCard,
+) {
+    if card.busy() {
+        return;
+    }
     let extension = format.extension();
     let file_name = |name: &str| export_file_name(name.to_owned(), false);
     let targets: Vec<(procraft_core::GalleryArtwork, PathBuf)> = if let [one] = list {
@@ -688,12 +749,34 @@ pub fn share_artworks(list: &[procraft_core::GalleryArtwork], format: Format, pd
             .collect()
     };
     // written on a thread of their own (each opened on a device of its own takes seconds), the
-    // window drawing on meanwhile
+    // window drawing on meanwhile; each beside where it goes until all are made
+    let done = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let following = Arc::clone(&done);
+    let exporting = card.start(move || f32::from_bits(following.load(std::sync::atomic::Ordering::Relaxed)));
+    let count = targets.len().max(1);
     write_meanwhile(false, move || {
-        for (a, path) in targets {
-            if let Err(e) = write_artwork(&a, format, &path.to_string_lossy(), pdf_quality) {
+        let mut written = Vec::new();
+        for (i, (a, path)) in targets.into_iter().enumerate() {
+            if exporting.cancelled() {
+                break;
+            }
+            let part = PathBuf::from(format!("{}.part", path.to_string_lossy()));
+            if let Err(e) = write_artwork(&a, format, &part.to_string_lossy(), pdf_quality) {
+                // those made before it are kept, as before
+                let _ = place_written(&written, false);
+                exporting.ended(false);
                 tell_later("Can't share", &format!("{}: {e}", a.name));
                 return;
+            }
+            written.push(part);
+            let progress = (i + 1) as f32 / count as f32;
+            done.store(progress.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        }
+        match place_written(&written, exporting.cancelled()) {
+            Ok(made) => exporting.ended(made),
+            Err(e) => {
+                exporting.ended(false);
+                tell_later("Can't share", &e);
             }
         }
     });
@@ -765,4 +848,43 @@ fn with_extension(path: PathBuf, extension: &str) -> PathBuf {
 /// A new number for a package's layer ids.
 fn seed() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folder(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("procraft-place-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_made_export_replaces_the_file_it_was_written_beside() {
+        let dir = folder("made");
+        let (target, part) = (dir.join("art.psd"), dir.join("art.psd.part"));
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(&part, b"new").unwrap();
+        assert_eq!(place_written(std::slice::from_ref(&part), false), Ok(true));
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!part.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cancelled_export_leaves_what_was_there_as_it_was() {
+        let dir = folder("cancelled");
+        let (target, part) = (dir.join("art.psd"), dir.join("art.psd.part"));
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(&part, b"new").unwrap();
+        // a folder's PNGs, written where they go: removed too
+        let png = dir.join("Layer 1.png");
+        std::fs::write(&png, b"png").unwrap();
+        assert_eq!(place_written(&[part.clone(), png.clone()], true), Ok(false));
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert!(!part.exists() && !png.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

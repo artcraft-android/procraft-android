@@ -31,8 +31,11 @@ pub struct TimeLapseUi {
     recording: Option<Receiver<()>>,
     replay: Option<Replay>,
     length: Alert,
-    /// The video being made, to save once made.
-    exporting: Option<Receiver<Result<PathBuf, String>>>,
+    /// The video being made, to save once made, as its card shows it; made, it waits for the card
+    /// to go before it is saved.
+    exporting: Option<(Receiver<Result<PathBuf, String>>, crate::export_card::Exporting)>,
+    card: crate::export_card::ExportCard,
+    made: Option<PathBuf>,
 }
 
 impl TimeLapseUi {
@@ -129,20 +132,29 @@ impl TimeLapseUi {
             Some(Answer::Action) => said = self.export(Some(30), name),
             _ => {}
         }
-        if let Some(rx) = &self.exporting {
+        if let Some((rx, exporting)) = &self.exporting {
             match rx.try_recv() {
                 Ok(made) => {
+                    let cancelled = exporting.cancelled();
                     self.exporting = None;
                     match made {
-                        Ok(path) => save_as(&path),
-                        Err(e) => {
+                        Ok(path) if !cancelled => self.made = Some(path),
+                        Ok(_) => {}
+                        Err(e) if !cancelled => {
                             log::warn!("exporting the time-lapse: {e}");
-                            said = Some("There is no time-lapse to export yet.");
+                            said = Some("The time-lapse video couldn't be made.");
                         }
+                        Err(_) => {}
                     }
                 }
                 Err(_) => ctx.request_repaint_after(Duration::from_millis(100)),
             }
+        }
+        // saved once its card has gone, as the tablet shares it
+        if self.card.show(ctx, look) == Some(crate::export_card::Ended::Made)
+            && let Some(path) = self.made.take()
+        {
+            save_as(&path);
         }
         said
     }
@@ -154,8 +166,15 @@ impl TimeLapseUi {
         if lapse.count() == 0 {
             return Some("There is no time-lapse to export yet.");
         }
+        if self.card.busy() {
+            return None;
+        }
         let (tx, rx) = channel();
         let lapse = Arc::clone(lapse);
+        let done = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let following = Arc::clone(&done);
+        let exporting = self.card.start(move || f32::from_bits(following.load(std::sync::atomic::Ordering::Relaxed)));
+        let told = exporting.clone();
         let name: String = name.chars().filter(|c| c.is_alphanumeric() || " _-".contains(*c)).collect();
         let name = if name.trim().is_empty() { "Untitled Artwork".to_owned() } else { name.trim().to_owned() };
         std::thread::spawn(move || {
@@ -174,13 +193,22 @@ impl TimeLapseUi {
                     settings.hevc,
                     time_lapse_bits_per_pixel(settings),
                     picks.len(),
-                    |n, w, h| Some(on_white(&lapse.frame(*picks.get(n)?)?, w, h)),
+                    |n, w, h| {
+                        // cancelled, the frames stop (and the video is not made)
+                        if told.cancelled() {
+                            return None;
+                        }
+                        let progress = n as f32 / picks.len().max(1) as f32;
+                        done.store(progress.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                        Some(on_white(&lapse.frame(*picks.get(n)?)?, w, h))
+                    },
                 )?;
                 Ok(out)
             })();
+            told.ended(made.is_ok() && !told.cancelled());
             let _ = tx.send(made);
         });
-        self.exporting = Some(rx);
+        self.exporting = Some((rx, exporting));
         None
     }
 }

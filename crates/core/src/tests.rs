@@ -940,6 +940,25 @@ fn a_failing_autosave_is_told_once_until_a_save_works() {
     assert!(crate::save_failure_said("No space left on device (os error 28)".into()).contains("no room"));
 }
 
+/// An export says how far it has come while it runs (read without waiting on it): all the way
+/// once its file is written.
+#[test]
+fn an_export_tells_how_far_it_has_come() {
+    let Some(s) = session(64, 64) else { return };
+    s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 10.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let dir = std::env::temp_dir().join(format!("procraft-progress-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |n: &str| dir.join(n).to_string_lossy().into_owned();
+    s.export_psd(path("a.psd")).unwrap();
+    assert_eq!(s.export_progress(), 1.0);
+    s.export_jpeg(path("a.jpg")).unwrap();
+    assert_eq!(s.export_progress(), 1.0);
+    assert!(!s.export_layer_pngs(path("layers")).unwrap().is_empty());
+    assert_eq!(s.export_progress(), 1.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn nothing_is_saved_from_a_lost_graphics_device() {
     let Some(s) = session(64, 64) else { return };

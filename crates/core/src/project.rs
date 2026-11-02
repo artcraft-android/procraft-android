@@ -686,18 +686,40 @@ impl CanvasSession {
         st.canvas.is_some()
     }
 
+    /// How far the export under way has come, 0 to 1 (read while it runs, without waiting on it):
+    /// the layers read back take it to 0.7, the file made to 0.95, written to 1.
+    pub fn export_progress(&self) -> f32 {
+        f32::from_bits(self.shared.export_progress.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Starts the count again before an export (those that don't tell their progress stay at 0).
+    pub fn reset_export_progress(&self) {
+        self.exported(0.0);
+    }
+
+    fn exported(&self, done: f32) {
+        self.shared.export_progress.store(done.clamp(0.0, 1.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Writes the flattened picture, full size and with straight alpha, to `path` as a PNG.
     pub fn export_png(&self, path: String) -> Result<(), MobileError> {
         let (w, h, straight, icc) = self.finished_picture()?;
-        write_atomically(Path::new(&path), |p| write_png(p, w, h, &straight, &icc))
+        self.exported(0.7);
+        write_atomically(Path::new(&path), |p| write_png(p, w, h, &straight, &icc))?;
+        self.exported(1.0);
+        Ok(())
     }
 
     /// Writes the flattened picture, full size and onto white, to `path` as a JPEG, with the
     /// canvas's colour profile.
     pub fn export_jpeg(&self, path: String) -> Result<(), MobileError> {
         let (w, h, straight, icc) = self.finished_picture()?;
+        self.exported(0.7);
         let bytes = procraft_engine::jpeg::encode_tagged(&onto_white(&straight), w, h, JPEG_QUALITY, &icc);
-        write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("saving", e)))
+        self.exported(0.95);
+        write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("saving", e)))?;
+        self.exported(1.0);
+        Ok(())
     }
 
     /// Opens a layered artwork package (as the Share menu's first row writes) from `path`.
@@ -742,6 +764,7 @@ impl CanvasSession {
             }
             None => None,
         };
+        self.exported(0.0);
         let (doc, pixels, composite, name, info) = {
             let mut guard = self.shared.lock_finished();
             let st = &mut *guard;
@@ -756,10 +779,12 @@ impl CanvasSession {
                 .read_composite_without(gpu, &mut st.doc, &private)
                 .map_err(|e| file_error("reading the picture", e))?;
             let mut pixels = std::collections::HashMap::new();
-            for l in st.doc.layers() {
+            let count = st.doc.layers().len().max(1);
+            for (i, l) in st.doc.layers().iter().enumerate() {
                 if l.kind != LayerKind::Group {
                     pixels.insert(l.id, canvas.read_layer(gpu, l.id).map_err(|e| file_error("reading a layer", e))?);
                 }
+                self.exported(0.1 + 0.6 * (i + 1) as f32 / count as f32);
             }
             (st.doc.clone(), pixels, composite, st.name.clone(), st.info.clone())
         };
@@ -781,7 +806,10 @@ impl CanvasSession {
             seed,
             time_lapse: time_lapse.as_ref(),
         });
-        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))
+        self.exported(0.95);
+        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
+        self.exported(1.0);
+        Ok(())
     }
 
     /// The artwork as a layered PSD (groups, masks, clipping, blend modes kept) at `path`.
@@ -790,7 +818,10 @@ impl CanvasSession {
         let layers = psd_layers(&p);
         let (icc, inks) = file_colours(&p.doc);
         let bytes = formats::psd(p.width, p.height, p.doc.dpi, &icc, &layers, &p.composite, inks.as_ref());
-        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))
+        self.exported(0.95);
+        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
+        self.exported(1.0);
+        Ok(())
     }
 
     /// The flattened picture as a TIFF at `path`.
@@ -800,7 +831,10 @@ impl CanvasSession {
             (icc, Some(inks)) => formats::tiff_cmyk(p.width, p.height, p.doc.dpi, &icc, &p.composite, &inks),
             (icc, None) => formats::tiff(p.width, p.height, p.doc.dpi, &icc, &p.composite),
         };
-        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))
+        self.exported(0.95);
+        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
+        self.exported(1.0);
+        Ok(())
     }
 
     /// The picture as a one-page PDF, or (`layers`) a page for each layer, bottom first, at `path`.
@@ -815,7 +849,10 @@ impl CanvasSession {
         };
         let (icc, inks) = file_colours(&p.doc);
         let bytes = formats::pdf(p.width, p.height, p.doc.dpi, &icc, &pages, quality.min(100), inks.as_ref());
-        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))
+        self.exported(0.95);
+        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
+        self.exported(1.0);
+        Ok(())
     }
 
     /// Each layer as a PNG in `dir` (made if missing), bottom first, named after it; returns
@@ -934,7 +971,9 @@ impl CanvasSession {
         fs::create_dir_all(&dir).map_err(|e| file_error("making the folder", e))?;
         let mut paths = Vec::new();
         let mut used = std::collections::HashSet::new();
-        for l in p.doc.layers() {
+        let count = p.doc.layers().len().max(1);
+        for (i, l) in p.doc.layers().iter().enumerate() {
+            self.exported(0.7 + 0.3 * i as f32 / count as f32);
             if !wanted(&p.doc, l.id) {
                 continue;
             }
@@ -957,10 +996,12 @@ impl CanvasSession {
             write_atomically(&path, |f| write_png(f, p.width, p.height, proofed.as_ref().unwrap_or(rgba), &icc))?;
             paths.push(path.to_string_lossy().into_owned());
         }
+        self.exported(1.0);
         Ok(paths)
     }
 
     fn pictures(&self, with_layers: bool) -> Result<Pictures, MobileError> {
+        self.exported(0.0);
         let mut guard = self.shared.lock_finished();
         let st = &mut *guard;
         st.finish_stroke();
@@ -972,8 +1013,11 @@ impl CanvasSession {
         let composite = straight_alpha(&canvas.read_composite(gpu).map_err(|e| file_error("reading the picture", e))?);
         let mut layers = std::collections::HashMap::new();
         let mut masks = std::collections::HashMap::new();
+        self.exported(0.1);
         if with_layers {
-            for l in st.doc.layers() {
+            let count = st.doc.layers().len().max(1);
+            for (i, l) in st.doc.layers().iter().enumerate() {
+                self.exported(0.1 + 0.6 * i as f32 / count as f32);
                 match l.kind {
                     LayerKind::Paint => {
                         let rgba = canvas.read_layer(gpu, l.id).map_err(|e| file_error("reading a layer", e))?;
@@ -991,6 +1035,7 @@ impl CanvasSession {
         let [r, g, b] = st.doc.background.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
         let (w, h) = (st.doc.width(), st.doc.height());
         let background = if with_layers { [r, g, b, 255].repeat(w as usize * h as usize) } else { Vec::new() };
+        self.exported(0.7);
         Ok(Pictures { width: w, height: h, doc: st.doc.clone(), composite, layers, masks, background })
     }
 }
@@ -1213,6 +1258,7 @@ impl CanvasSession {
     /// The flattened picture as it is exported, full size: its width, height, pixels (straight
     /// RGBA8; a CMYK canvas's as its press prints them) and the colour profile they are in.
     fn finished_picture(&self) -> Result<(u32, u32, Vec<u8>, Vec<u8>), MobileError> {
+        self.exported(0.0);
         let (w, h, rgba, icc) = {
             let mut guard = self.shared.lock_finished();
             let st = &mut *guard;

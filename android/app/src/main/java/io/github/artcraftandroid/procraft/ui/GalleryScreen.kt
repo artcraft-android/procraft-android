@@ -87,6 +87,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewModelScope
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.gallery.Artwork
 import io.github.artcraftandroid.procraft.gallery.GalleryEntry
@@ -519,9 +520,9 @@ fun GalleryScreen(vm: CanvasViewModel) {
                     } else if (format == "PDF") {
                         pdfFor = share.artworks
                     } else {
-                        scope.launch {
-                            val (files, mime) = vm.shareableFiles(share.artworks, format)
-                            if (files.isNotEmpty()) shareFiles(context, files, mime) else vm.message = "The artwork could not be exported."
+                        // with the export card; a failure is told, a cancel shares nothing
+                        vm.viewModelScope.launch {
+                            vm.shareFromGallery(share.artworks, format)?.let { (files, mime) -> runCatching { shareFiles(context, files, mime) } }
                         }
                     }
                 }
@@ -530,9 +531,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
         PdfQualityAlert(pdfFor != null, onCancel = { pdfFor = null }) { quality ->
             val list = pdfFor.orEmpty()
             pdfFor = null
-            scope.launch {
-                val (files, mime) = vm.shareableFiles(list, "PDF", quality.jpeg)
-                if (files.isNotEmpty()) shareFiles(context, files, mime) else vm.message = "The artwork could not be exported."
+            vm.viewModelScope.launch {
+                vm.shareFromGallery(list, "PDF", quality.jpeg)?.let { (files, mime) -> runCatching { shareFiles(context, files, mime) } }
             }
         }
         previewing?.let { list -> ArtworkPreview(list, vm.galleryVersion) { previewing = null } }
