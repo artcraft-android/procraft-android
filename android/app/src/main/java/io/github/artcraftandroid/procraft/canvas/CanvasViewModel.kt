@@ -2769,16 +2769,26 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** A time-lapse video is being made: another isn't started over it (they'd share its file). */
+    var timeLapseExporting by mutableStateOf(false)
+        private set
+
     /** The time-lapse as a video in the cache, to share: all of it, or [seconds] long. */
     suspend fun exportTimeLapse(seconds: Int?): File? {
         val t = timeLapse ?: return null
         val s = session ?: return null
-        return withContext(Dispatchers.IO) {
-            val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
-            val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
-            val out = File(dir, "$base.mp4")
-            out.delete()
-            if (t.export(out, seconds)) out else null
+        if (timeLapseExporting) return null
+        timeLapseExporting = true
+        try {
+            return withContext(Dispatchers.IO) {
+                val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
+                val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
+                val out = File(dir, "$base.mp4")
+                out.delete()
+                if (runCatching { t.export(out, seconds) }.onFailure { Log.e(TAG, "exporting the time-lapse", it) }.getOrDefault(false)) out else null
+            }
+        } finally {
+            timeLapseExporting = false
         }
     }
 

@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewModelScope
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -121,9 +122,20 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     var exportingVideo by remember { mutableStateOf(false) }
     fun shareVideo(seconds: Int?) {
         exportingVideo = false
-        scope.launch {
+        if (vm.timeLapseFrames() == 0) {
+            dialog = "Time-lapse" to "There is no time-lapse to export yet."
+            return
+        }
+        // one at a time: the one under way shares when it's made
+        if (vm.timeLapseExporting) return
+        // made outside the panel, which may be closed meanwhile: the share comes all the same
+        vm.viewModelScope.launch {
             val file = vm.exportTimeLapse(seconds)
-            if (file != null) shareFile(context, file, "video/mp4") else dialog = "Time-lapse" to "There is no time-lapse to export yet."
+            if (file != null) {
+                runCatching { shareFile(context, file, "video/mp4") }
+            } else {
+                vm.showNotice("The time-lapse video couldn't be made.", warning = true)
+            }
         }
     }
     var page by remember { mutableStateOf(ActionsPage.TABS) }

@@ -34,11 +34,30 @@ object VideoWriter {
     /**
      * [count] frames, [width] × [height] (even), [fps] a second, as an MP4 at [out] encoded with
      * [mime]. [frame] fills a frame's ARGB pixels (rows top to bottom) and says whether it has one.
-     * False if the encoder fails.
+     * Each encoder that takes the size is tried in the system's order (a tablet's own may refuse a
+     * size its software one takes); false if none makes it.
      */
     fun write(
         out: File, width: Int, height: Int, fps: Int, count: Int, mime: String = MediaFormat.MIMETYPE_VIDEO_AVC,
         bitsPerPixel: Int = BITS_PER_PIXEL, frame: (Int, IntArray) -> Boolean,
+    ): Boolean {
+        for (name in encoders(mime, width, height)) {
+            if (writeWith(name, out, width, height, fps, count, mime, bitsPerPixel, frame)) return true
+            out.delete()
+        }
+        return false
+    }
+
+    /** The names of the encoders for [mime] that take [width] × [height], in the system's order. */
+    private fun encoders(mime: String, width: Int, height: Int): List<String> =
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+            .filter { it.isEncoder && it.supportedTypes.any { t -> t.equals(mime, ignoreCase = true) } }
+            .filter { runCatching { it.getCapabilitiesForType(mime).videoCapabilities?.isSizeSupported(width, height) == true }.getOrDefault(false) }
+            .map { it.name }
+
+    private fun writeWith(
+        name: String, out: File, width: Int, height: Int, fps: Int, count: Int, mime: String, bitsPerPixel: Int,
+        frame: (Int, IntArray) -> Boolean,
     ): Boolean {
         val format = MediaFormat.createVideoFormat(mime, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
@@ -46,7 +65,7 @@ object VideoWriter {
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         }
-        val codec = runCatching { MediaCodec.createEncoderByType(mime) }.getOrNull() ?: return false
+        val codec = runCatching { MediaCodec.createByCodecName(name) }.getOrNull() ?: return false
         val muxer = MediaMuxer(out.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         var track = -1
         val info = MediaCodec.BufferInfo()
@@ -86,7 +105,8 @@ object VideoWriter {
             for (i in 0 until count) {
                 if (!frame(i, pixels)) continue
                 val input = nextInput()
-                val image = codec.getInputImage(input) ?: continue
+                // without a picture to fill, the buffer could never be given back
+                val image = codec.getInputImage(input) ?: return false
                 writeYuv(image, pixels, width, height)
                 codec.queueInputBuffer(input, 0, width * height * 3 / 2, n * 1_000_000L / fps, 0)
                 n++
