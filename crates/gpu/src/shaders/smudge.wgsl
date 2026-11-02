@@ -1,7 +1,8 @@
-// Smudge: the brush carries colour. A small grid in the stamp's own frame holds what it carries;
-// for each stamp, in order, it picks up some of what is under it (cs_carry) and lays what it
-// carries back down under the stamp's shape (cs_deposit). The layer being smudged is a buffer of
-// packed premultiplied RGBA8 pixels, read and written in place.
+// Smudge: the brush carries colour. A grid fixed to the canvas's axes, a pixel a cell, moving
+// with the brush a whole pixel at a time, holds what it carries (so nothing is resampled as it
+// goes); for each stamp, in order, it picks up some of what is under it (cs_carry) and lays what
+// it carries back down under the stamp's shape (cs_deposit). The layer being smudged is a buffer
+// of packed premultiplied RGBA8 pixels, read and written in place.
 
 struct SmudgeStamp {
     center: vec2<f32>,
@@ -14,8 +15,9 @@ struct SmudgeStamp {
     pull: f32,
     hardness: f32,
     shape: i32,
-    // 1 for the stroke's first stamp: the brush starts loaded with what is under it
-    first: u32,
+    // the cells carried over from the stamp before: those within this many of the middle (-1 at
+    // the stroke's first stamp); the rest load what is under them, as a stroke's start does
+    kept: i32,
     preserve_alpha: u32,
     // u32 words per buffer row
     stride: u32,
@@ -32,7 +34,7 @@ struct SmudgeStamp {
     mode: u32,
     mixture: f32,
     final_mixture: f32,
-    // the mix's grade and blur (0..1), folded into the mixtures for now
+    // the mix's grade (-1..1, folded into the mixtures) and the stamp's blur (0..1, see cs_blur_down)
     grade: f32,
     blur: f32,
     // the brush's grain: a layer of `grains` (-1: none), the size of a tile in pixels (negative
@@ -54,6 +56,12 @@ struct SmudgeStamp {
     // 1: wet paint with a texturized grain, laid over the stroke once: `raw` holds the stroke
     // without it and `orig` the layer as it was
     grain_once: f32,
+    // where the grid's middle cell is on the canvas (a whole pixel when a cell is one), canvas
+    // pixels a cell (1 unless the stroke's first stamp was wider than the grid), and this stamp's
+    // cells: those within `half` of the middle
+    anchor: vec2<f32>,
+    scale: f32,
+    half: i32,
 }
 
 @group(0) @binding(0) var<uniform> st: SmudgeStamp;
@@ -87,23 +95,28 @@ fn layer_at(q: vec2<f32>) -> vec4<f32> {
     return mix(top, bottom, f.y);
 }
 
-// stamp frame (-1..1, before roundness and rotation) to canvas
-fn to_canvas(t: vec2<f32>) -> vec2<f32> {
-    let local = vec2<f32>(t.x * st.radius, t.y * st.radius * st.roundness);
-    let c = cos(st.angle);
-    let s = sin(st.angle);
-    return st.center + vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
+// the grid's middle cell
+fn middle() -> i32 {
+    return i32(st.grid) / 2;
+}
+
+// this stamp's cell `id` across its window, as a cell of the grid
+fn window_cell(id: vec2<u32>) -> vec2<i32> {
+    return vec2<i32>(id) + vec2<i32>(middle() - st.half);
 }
 
 @compute @workgroup_size(8, 8)
 fn cs_carry(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= st.grid || id.y >= st.grid) {
+    let n = u32(2 * st.half + 1);
+    if (id.x >= n || id.y >= n) {
         return;
     }
-    let t = (vec2<f32>(id.xy) + 0.5) / f32(st.grid) * 2.0 - 1.0;
-    let under = layer_at(to_canvas(t));
-    let k = id.y * st.grid + id.x;
-    if (st.first == 1u) {
+    let c = window_cell(id.xy);
+    // the cell's middle on the canvas: a pixel's middle when a cell is one
+    let under = layer_at(st.anchor + (vec2<f32>(c - vec2<i32>(middle())) + 0.5) * st.scale);
+    let k = c.y * i32(st.grid) + c.x;
+    let off = abs(c - vec2<i32>(middle()));
+    if (max(off.x, off.y) > st.kept) {
         carry[k] = under;
     } else {
         carry[k] = mix(under, carry[k], st.pull);
@@ -114,17 +127,80 @@ fn cs_carry(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
-fn carried(t: vec2<f32>) -> vec4<f32> {
+// The stamp's blur: what the brush lays down this stamp blurred (a Gaussian as wide in canvas
+// pixels as the blur says: at 1, 32 pixels a side with a sigma of about 21, growing with the
+// blur squared), kept to the stamp's own patch. What it carries stays as it was, so the blur
+// never builds up from stamp to stamp. The carry buffer holds three grids: the carry, the blur
+// down its columns, then across its rows, which the deposit reads.
+
+// how far the blur reaches and its sigma, in cells `cell` canvas pixels wide
+fn blur_reach(cell: f32) -> vec2<f32> {
+    let a = clamp(st.blur, 0.0, 1.0);
+    let reach = clamp(ceil(32.0 * a), 1.0, 32.0);
+    let sigma = a / 3.0 * ceil(64.0 * a);
+    return vec2<f32>(min(ceil(reach / max(cell, 1e-3)), f32(st.grid)), sigma / max(cell, 1e-3));
+}
+
+fn gauss(j: i32, sigma: f32) -> f32 {
+    return exp(-0.5 * f32(j * j) / max(sigma * sigma, 1e-6));
+}
+
+@compute @workgroup_size(8, 8)
+fn cs_blur_down(@builtin(global_invocation_id) id: vec3<u32>) {
+    let n = u32(2 * st.half + 1);
+    if (id.x >= n || id.y >= n) {
+        return;
+    }
     let g = i32(st.grid);
-    let p = (t * 0.5 + 0.5) * f32(st.grid) - 0.5;
-    let i = vec2<i32>(floor(p));
-    let f = p - floor(p);
-    let x0 = clamp(i.x, 0, g - 1);
-    let x1 = clamp(i.x + 1, 0, g - 1);
-    let y0 = clamp(i.y, 0, g - 1);
-    let y1 = clamp(i.y + 1, 0, g - 1);
-    let top = mix(carry[y0 * g + x0], carry[y0 * g + x1], f.x);
-    let bottom = mix(carry[y1 * g + x0], carry[y1 * g + x1], f.x);
+    let c = window_cell(id.xy);
+    let r = blur_reach(st.scale);
+    var sum = vec4<f32>(0.0);
+    var weight = 0.0;
+    for (var j = -i32(r.x); j <= i32(r.x); j++) {
+        let y = clamp(c.y + j, middle() - st.half, middle() + st.half);
+        let w = gauss(j, r.y);
+        sum += carry[y * g + c.x] * w;
+        weight += w;
+    }
+    carry[g * g + c.y * g + c.x] = sum / weight;
+}
+
+@compute @workgroup_size(8, 8)
+fn cs_blur_across(@builtin(global_invocation_id) id: vec3<u32>) {
+    let n = u32(2 * st.half + 1);
+    if (id.x >= n || id.y >= n) {
+        return;
+    }
+    let g = i32(st.grid);
+    let c = window_cell(id.xy);
+    let r = blur_reach(st.scale);
+    var sum = vec4<f32>(0.0);
+    var weight = 0.0;
+    for (var j = -i32(r.x); j <= i32(r.x); j++) {
+        let x = clamp(c.x + j, middle() - st.half, middle() + st.half);
+        let w = gauss(j, r.y);
+        sum += carry[g * g + c.y * g + x] * w;
+        weight += w;
+    }
+    carry[2 * g * g + c.y * g + c.x] = sum / weight;
+}
+
+// what the brush lays down at canvas pixel `p`: what it carries there (blurred, when it blurs),
+// the cell itself when a cell is a pixel
+fn carried(p: vec2<i32>) -> vec4<f32> {
+    let g = i32(st.grid);
+    let base = select(0, 2 * g * g, st.blur > 0.0);
+    let at = (vec2<f32>(p) + 0.5 - st.anchor) / st.scale + f32(middle()) - 0.5;
+    let i = vec2<i32>(floor(at));
+    let f = at - floor(at);
+    let least = middle() - st.half;
+    let most = middle() + st.half;
+    let x0 = clamp(i.x, least, most);
+    let x1 = clamp(i.x + 1, least, most);
+    let y0 = clamp(i.y, least, most);
+    let y1 = clamp(i.y + 1, least, most);
+    let top = mix(carry[base + y0 * g + x0], carry[base + y0 * g + x1], f.x);
+    let bottom = mix(carry[base + y1 * g + x0], carry[base + y1 * g + x1], f.x);
     return mix(top, bottom, f.y);
 }
 
@@ -201,11 +277,11 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     let k = u32(p.y) * st.stride + u32(p.x);
     let w = select(unpack4x8unorm(work[k]), unpack4x8unorm(raw[k]), once);
     // smudging: the grain lets less of what is carried through
-    var out = mix(w, carried(t), m * g);
+    var out = mix(w, carried(p), m * g);
     if (st.mode == 1u) {
         // wet: what it carries (its paint and what it picked up, alpha and all), as much as the
         // final mixture lays down, over what is there, as far as the stamp covers
-        let laid = carried(t) * st.final_mixture;
+        let laid = carried(p) * st.final_mixture;
         out = mix(w, laid + w * (1.0 - laid.a), m * g);
     }
     if (st.preserve_alpha == 1u) {

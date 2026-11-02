@@ -127,9 +127,9 @@ pub struct StrokeStyle {
     /// The brush's fall off, 0..1: the paint it mixes in runs out along the stroke as its stamps
     /// fade.
     pub falloff: f32,
-    /// Wet mix: how hard the paint goes on over what is there (less of it pulled in), its grain
-    /// (the mix uneven from pixel to pixel), how blurred what it pulls in is, and how much the
-    /// pull varies from stamp to stamp; each 0..1.
+    /// Wet mix: how hard the paint goes on over what is there (less of it pulled in), its grade
+    /// (how much of its mixture each stamp lays down, -1..1), how blurred what it lays down is,
+    /// and how much the pull varies from stamp to stamp; each 0..1 but the grade.
     pub attack: f32,
     pub grade: f32,
     pub blur: f32,
@@ -244,8 +244,8 @@ impl StrokeStyle {
             dilution: if wet { brush.setting("wet_dilution").clamp(0.0, 1.0) } else { 0.0 },
             falloff: brush.setting("falloff").clamp(0.0, 1.0),
             attack: if wet { brush.setting("wet_attack").clamp(0.0, 1.0) } else { 0.0 },
-            // the grade goes both ways; drawn yet only as how uneven the mix is
-            grade: if wet { brush.setting("wet_grade").abs().clamp(0.0, 1.0) } else { 0.0 },
+            // the grade goes both ways (below 0 the stamps lay down less than their mixture)
+            grade: if wet { brush.setting("wet_grade").clamp(-1.0, 1.0) } else { 0.0 },
             blur: if wet { brush.setting("wet_blur").clamp(0.0, 1.0) } else { 0.0 },
             wet_jitter: if wet { brush.setting("wet_jitter").clamp(0.0, 1.0) } else { 0.0 },
             blend: brush.setting("blend_mode").round().clamp(0.0, BRUSH_BEHIND as f32) as u32,
@@ -692,8 +692,11 @@ fn unit_hash(n: u32) -> f32 {
     (x & 0xffff) as f32 / 65535.0
 }
 
-/// Resolution of what a smudge brush carries, cells on a side.
-const SMUDGE_GRID: u32 = 32;
+/// What a smudge brush carries: a grid fixed to the canvas's axes, this many cells on a side, a
+/// canvas pixel a cell unless the stroke's first stamp is wider than it (see the shader).
+const SMUDGE_GRID: u32 = 256;
+/// The most cells a stamp reaches from the grid's middle.
+const SMUDGE_REACH: i32 = SMUDGE_GRID as i32 / 2 - 1;
 const SMUDGE_UNIFORM_SIZE: u64 = std::mem::size_of::<SmudgeUniform>() as u64;
 
 /// A wet stamp's (mixture, final mixture, pull) once the stroke has gone `length` canvas pixels:
@@ -701,7 +704,8 @@ const SMUDGE_UNIFORM_SIZE: u64 = std::mem::size_of::<SmudgeUniform>() as u64;
 /// far as the fall off has not run it out) and its charge (running out by the cube root of the
 /// length), at least its attack (the stamp's
 /// `attack` share of it: its pressure), times `jitter`; it
-/// lays down what it carries by the mixture, a share of it by the grade; the pull is the wet
+/// lays down what it carries by the mixture, a share of it by the grade (signed: on the way to
+/// the full mixture from the grade, as far as halfway, the stamps' mean); the pull is the wet
 /// pull's eighth root (a pull of 0.9 keeps 0.99 a stamp). The stamp's pressure scales the
 /// dilution and the charge by `dilution_by` and `charge_by` (their curves).
 fn wet_mixture(
@@ -720,7 +724,7 @@ fn wet_mixture(
     let pull = style.wet_pull.unwrap_or(0.0).clamp(0.0, 1.0).powf(0.125);
     // undiluted the brush only paints; otherwise over a stroke it lays down half to all of what
     // its grade says
-    let grade = style.grade.clamp(0.0, 1.0);
+    let grade = style.grade.clamp(-1.0, 1.0);
     let laid =
         if style.dilution <= 0.0 || pull * mixture <= 0.0 { 1.0 } else { mixture * (grade + (1.0 - grade) * 0.5) };
     (mixture, laid, pull)
@@ -737,7 +741,9 @@ struct SmudgeUniform {
     pull: f32,
     hardness: f32,
     shape: i32,
-    first: u32,
+    /// The cells carried over from the stamp before (those within this many of the middle; -1
+    /// at the stroke's first stamp).
+    kept: i32,
     preserve_alpha: u32,
     stride: u32,
     bbox: [i32; 4],
@@ -773,7 +779,11 @@ struct SmudgeUniform {
     grain_bleed: f32,
     /// 1 when the texturized grain is laid over the wet stroke once (see `grain_once`).
     grain_once: f32,
-    _pad: [f32; 4],
+    /// Where the grid's middle cell is (a whole pixel when a cell is one), canvas pixels a cell,
+    /// and the cells this stamp reaches from the middle.
+    anchor: [f32; 2],
+    scale: f32,
+    half: i32,
 }
 
 /// A smudge stroke in progress: the layer as a buffer the compute passes read and write, what the
@@ -784,6 +794,10 @@ struct Smudge {
     carry: wgpu::Buffer,
     before: wgpu::Texture,
     started: bool,
+    /// Canvas pixels a cell of what the brush carries (see `SMUDGE_GRID`), and the cells the stamp
+    /// before reached (-1 before the first).
+    scale: f32,
+    kept: i32,
     /// Stamps laid so far (for the wetness jitter).
     stamps: u32,
     /// How far the stroke has gone (canvas pixels, from stamp to stamp) and where its last stamp
@@ -1212,6 +1226,8 @@ pub(crate) struct Pipelines {
     selection_module: wgpu::ShaderModule,
     smudge_layout: wgpu::BindGroupLayout,
     smudge_carry: wgpu::ComputePipeline,
+    smudge_blur_down: wgpu::ComputePipeline,
+    smudge_blur_across: wgpu::ComputePipeline,
     smudge_deposit: wgpu::ComputePipeline,
     display_module: wgpu::ShaderModule,
     display_pipeline_layout: wgpu::PipelineLayout,
@@ -3789,6 +3805,8 @@ impl Canvas {
                 extent(self.width, self.height),
             );
             smudge.started = false;
+            smudge.scale = 1.0;
+            smudge.kept = -1;
             smudge.stamps = 0;
             smudge.length = 0.0;
             smudge.last = None;
@@ -3818,7 +3836,8 @@ impl Canvas {
             });
             let carry = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("smudge carry"),
-                size: u64::from(SMUDGE_GRID * SMUDGE_GRID) * 16,
+                // the carry, and the blur's two passes over it (see the shader's cs_blur_down)
+                size: u64::from(SMUDGE_GRID * SMUDGE_GRID) * 16 * 3,
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             });
@@ -3873,6 +3892,8 @@ impl Canvas {
                 carry,
                 before,
                 started: false,
+                scale: 1.0,
+                kept: -1,
                 stamps: 0,
                 length: 0.0,
                 last: None,
@@ -3940,6 +3961,18 @@ impl Canvas {
                 (0.0, 1.0, style.pull.clamp(0.0, 1.0) * smudge_pull_by)
             };
             let moving = style.grain_mode == GrainMode::Moving;
+            // the blur as far as this stamp's pressure takes it, jitter only ever lowering it
+            let blur = style.blur
+                * blur_by
+                * (1.0 - style.blur_jitter * blur_jitter_by * unit_hash(smudge.stamps.wrapping_add(7919)));
+            // what the brush carries a pixel a cell, unless the stroke's first stamp is wider than
+            // the grid; its middle at the stamp's pixel, and the cells the stamp reaches around it
+            let reach = s.radius.max(0.5) + 1.0;
+            if !smudge.started {
+                smudge.scale = (reach / SMUDGE_REACH as f32).max(1.0);
+            }
+            let anchor = if smudge.scale <= 1.0 { s.center.map(f32::floor) } else { s.center };
+            let half = ((reach / smudge.scale).ceil() as i32).clamp(1, SMUDGE_REACH);
             let offset = params.push(&SmudgeUniform {
                 center: s.center,
                 radius: s.radius.max(0.5),
@@ -3949,7 +3982,7 @@ impl Canvas {
                 pull: wet_pull,
                 hardness: style.hardness.clamp(0.0, 1.0),
                 shape: style.shape.map_or(-1, |s| s as i32),
-                first: u32::from(!smudge.started),
+                kept: smudge.kept,
                 preserve_alpha: u32::from(style.preserve_alpha),
                 stride: row / 4,
                 bbox: [bbox.x0, bbox.y0, bbox.x1, bbox.y1],
@@ -3961,9 +3994,7 @@ impl Canvas {
                 mixture,
                 final_mixture,
                 grade: stamp_style.grade,
-                blur: style.blur
-                    * blur_by
-                    * (1.0 - style.blur_jitter * blur_jitter_by * unit_hash(smudge.stamps.wrapping_add(7919))),
+                blur,
                 grain: style.grain.map_or(-1, |g| g as i32),
                 // a moving grain sized and as deep as this stamp says
                 grain_scale: if moving { -style.grain_scale * s.look[1].max(0.05) } else { style.grain_scale },
@@ -3975,12 +4006,22 @@ impl Canvas {
                 grain_press: s.more[0],
                 grain_bleed: s.more[1],
                 grain_once: if smudge.raw.is_some() { 1.0 } else { 0.0 },
-                _pad: [0.0; 4],
+                anchor,
+                scale: smudge.scale,
+                half,
             });
             smudge.started = true;
+            smudge.kept = half;
+            let cells = (2 * half.unsigned_abs() + 1).div_ceil(8);
             pass.set_bind_group(0, &bind, &[offset]);
             pass.set_pipeline(&self.pipelines.smudge_carry);
-            pass.dispatch_workgroups(SMUDGE_GRID.div_ceil(8), SMUDGE_GRID.div_ceil(8), 1);
+            pass.dispatch_workgroups(cells, cells, 1);
+            if blur > 0.0 {
+                pass.set_pipeline(&self.pipelines.smudge_blur_down);
+                pass.dispatch_workgroups(cells, cells, 1);
+                pass.set_pipeline(&self.pipelines.smudge_blur_across);
+                pass.dispatch_workgroups(cells, cells, 1);
+            }
             pass.set_pipeline(&self.pipelines.smudge_deposit);
             pass.dispatch_workgroups(bbox.width().div_ceil(8), bbox.height().div_ceil(8), 1);
         }
@@ -6842,6 +6883,8 @@ impl Pipelines {
             })
         };
         let smudge_carry = compute("smudge carry", "cs_carry");
+        let smudge_blur_down = compute("smudge blur down", "cs_blur_down");
+        let smudge_blur_across = compute("smudge blur across", "cs_blur_across");
         let smudge_deposit = compute("smudge deposit", "cs_deposit");
 
         let overlay_module = module("overlay", include_str!("shaders/overlay.wgsl"));
@@ -7031,6 +7074,8 @@ impl Pipelines {
             stamp_capped,
             smudge_layout,
             smudge_carry,
+            smudge_blur_down,
+            smudge_blur_across,
             smudge_deposit,
             lut_layout,
             display_lut_layout,
@@ -8113,5 +8158,24 @@ mod tests {
         assert!((wet_mixture(&style, 0.0, 1.0, 0.0, 1.0, 1.0).0 - diluted).abs() < 1e-5);
         assert!((wet_mixture(&style, 33.0, 1.0, 0.0, 1.0, 1.0).0 - diluted * 0.5).abs() < 1e-5);
         assert!(wet_mixture(&style, 264.0, 1.0, 0.0, 1.0, 1.0).0.abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_grade_goes_both_ways() {
+        let graded = |grade: f32| {
+            let style = StrokeStyle {
+                dilution: 0.5,
+                wet_pull: Some(0.5),
+                grade,
+                ..StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0)
+            };
+            let (mixture, laid, _) = wet_mixture(&style, 0.0, 1.0, 0.0, 1.0, 1.0);
+            laid / mixture
+        };
+        // smooth lays the whole mixture; less grade, less of it; below 0 less again, none at -1
+        assert!((graded(1.0) - 1.0).abs() < 1e-5);
+        assert!((graded(0.5) - 0.75).abs() < 1e-5);
+        assert!((graded(-0.5) - 0.25).abs() < 1e-5);
+        assert!(graded(-1.0).abs() < 1e-5);
     }
 }

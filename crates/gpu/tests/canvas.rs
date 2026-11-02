@@ -1203,6 +1203,94 @@ fn wet_paint_mixes_with_what_is_under_it() {
 }
 
 #[test]
+fn the_wet_mix_blur_softens_what_a_smudge_lays_down() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // black on the left of x = 32, clear on the right; one smudge stamp over the edge lays back
+    // what it picked up: the edge as sharp as it was, or blurred as far as the blur says
+    let smudged = |blur: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0));
+        canvas.add_stamps(&(0..64).map(|y| dot(Vec2::new(-8.0, y as f32), 40.0)).collect::<Vec<_>>());
+        canvas.end_stroke();
+        let smudge = StrokeStyle { blur, ..StrokeStyle::new(StrokeTool::Smudge, [0.0; 3], 1.0) };
+        canvas.begin_stroke(doc.current(), smudge);
+        canvas.add_stamps(&[dot(Vec2::new(32.0, 32.0), 16.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (pixel(&layer, 64, 28, 32)[3], pixel(&layer, 64, 36, 32)[3])
+    };
+    let (inside, outside) = smudged(0.0);
+    assert!(inside >= 250 && outside <= 5, "unblurred: {inside} {outside}");
+    // a little blur is under a pixel's sigma: still sharp
+    let (inside, outside) = smudged(0.1);
+    assert!(inside >= 245 && outside <= 10, "a little: {inside} {outside}");
+    // the whole blur spreads the edge across the stamp
+    let (inside, outside) = smudged(1.0);
+    assert!(inside < 230 && outside > 25, "blurred: {inside} {outside}");
+}
+
+#[test]
+fn a_smudge_carries_fine_detail_without_blurring_it() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a thin line down the middle; what a smudge carries is a pixel a cell, moving a whole pixel
+    // at a time, so nothing it picks up and lays back down is resampled on the way
+    let mut doc = Document::new(128, 128);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0));
+    canvas.add_stamps(&(0..128).map(|y| dot(Vec2::new(64.0, y as f32), 1.0)).collect::<Vec<_>>());
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let id = doc.current();
+    let line = |canvas: &Canvas| {
+        let layer = canvas.read_layer(&gpu, id).unwrap();
+        (60..68).map(|x| pixel(&layer, 128, x, 64)[3]).collect::<Vec<_>>()
+    };
+    let lost = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    let before = line(&canvas);
+    // a big stamp held over it, twice (the second lays back what the first picked up)
+    canvas.begin_stroke(id, StrokeStyle::new(StrokeTool::Smudge, [0.0; 3], 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(64.0, 64.0), 48.0), dot(Vec2::new(64.0, 64.0), 48.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let held = line(&canvas);
+    assert!(lost(&before, &held) <= 2, "{before:?} {held:?}");
+    canvas.undo();
+    // a stroke along the line, its stamps anywhere between pixels: the line stays as sharp
+    canvas.begin_stroke(id, StrokeStyle::new(StrokeTool::Smudge, [0.0; 3], 1.0));
+    canvas.add_stamps(&(0..120).map(|i| dot(Vec2::new(64.3, 20.0 + i as f32 * 0.73), 12.0)).collect::<Vec<_>>());
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let along = line(&canvas);
+    assert!(lost(&before, &along) <= 4, "{before:?} {along:?}");
+}
+
+#[test]
+fn a_smudge_wider_than_what_it_carries_still_drags_colour() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // red on the left, blue on the right; a stamp wider than the carried grid (more than a pixel
+    // a cell) dragged from the red into the blue takes red along
+    let mut doc = Document::new(512, 128);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    for (rgb, x) in [([1.0, 0.0, 0.0], 128.0), ([0.0, 0.0, 1.0], 384.0)] {
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, rgb, 1.0));
+        canvas.add_stamps(&(0..128).map(|y| dot(Vec2::new(x, y as f32), 128.0)).collect::<Vec<_>>());
+        canvas.end_stroke();
+    }
+    canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Smudge, [0.0; 3], 1.0));
+    canvas.add_stamps(&(0..40).map(|i| dot(Vec2::new(200.0 + i as f32 * 2.0, 64.0), 150.0)).collect::<Vec<_>>());
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    let dragged = pixel(&layer, 512, 290, 64);
+    assert!(dragged[0] > 60, "red carried into the blue: {dragged:?}");
+}
+
+#[test]
 fn a_wet_stroke_redrawn_whole_is_laid_once() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
@@ -1493,13 +1581,15 @@ fn a_drawn_stroke_takes_its_grain_from_a_picture_of_its_own() {
     let _check = NoErrors(&gpu);
     let mut doc = Document::new(32, 32);
     let mut canvas = Canvas::new(&gpu, &doc).unwrap();
-    // the grain: black on the left half, white on the right
-    let pixels: Vec<u8> = (0..32 * 32).map(|i| if i % 32 < 16 { 0 } else { 255 }).collect();
+    // the grain: black on the left half, white on the right (in as many layers as an array
+    // needs to be read on this backend, as the app's are)
+    let layers = gpu.array_layers_least();
+    let pixels: Vec<u8> = (0..32 * 32 * layers).map(|i| if i % 32 < 16 { 0 } else { 255 }).collect();
     let picture = gpu.device.create_texture_with_data(
         &gpu.queue,
         &wgpu::TextureDescriptor {
             label: Some("stroke grain"),
-            size: wgpu::Extent3d { width: 32, height: 32, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: 32, height: 32, depth_or_array_layers: layers },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
