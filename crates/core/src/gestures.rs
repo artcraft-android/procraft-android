@@ -235,6 +235,13 @@ pub fn gesture_options(purpose: GesturePurpose) -> Vec<GestureOption> {
         GesturePurpose::General => vec![
             own("FINGER_PAINT", "Painting with a finger", "One finger paints as the pen does", true, false),
             own(
+                "ONE_FINGER_PAN",
+                "Move the canvas with one finger",
+                "One finger drags the canvas instead of painting; the pen still paints",
+                false,
+                false,
+            ),
+            own(
                 "NO_UNDO",
                 "Disable undo and redo gestures",
                 "Two- and three-finger taps leave the history alone",
@@ -323,6 +330,32 @@ impl GestureSettings {
                 }
             }
         }
+        // one finger moves the canvas, paints, or does what a page's Touch is set to: one at a time
+        if value {
+            let general = |key: &str| name(GesturePurpose::General, key);
+            let off: Vec<String> = if purpose == GesturePurpose::General && key == "ONE_FINGER_PAN" {
+                PURPOSES
+                    .iter()
+                    .flat_map(|&(p, _, _, _)| {
+                        gesture_options(p)
+                            .into_iter()
+                            .filter(|o| o.trigger == Some(Trigger::Touch))
+                            .map(move |o| name(p, &o.key))
+                    })
+                    .chain([general("FINGER_PAINT")])
+                    .collect()
+            } else if (purpose == GesturePurpose::General && key == "FINGER_PAINT") || trigger == Some(Trigger::Touch) {
+                vec![general("ONE_FINGER_PAN")]
+            } else {
+                Vec::new()
+            };
+            for n in off {
+                if st.on.get(&n) == Some(&true) {
+                    st.on.insert(n.clone(), false);
+                    changed.insert(n, false);
+                }
+            }
+        }
         let n = name(purpose, &key);
         st.on.insert(n.clone(), value);
         changed.insert(n, value);
@@ -389,12 +422,15 @@ impl GestureSettings {
         };
         let general = |key: &str| self.is_on(GesturePurpose::General, key.to_owned());
         let hold = self.purpose_of(Trigger::Hold);
+        // moving the canvas with one finger, the finger neither paints nor does a page's Touch
+        let pan = general("ONE_FINGER_PAN");
         TouchSettings {
-            finger_paint: general("FINGER_PAINT"),
+            finger_paint: general("FINGER_PAINT") && !pan,
+            one_finger_pan: pan,
             undo_taps: !general("NO_UNDO"),
             rotate: general("ROTATE"),
             draw_and_hold: self.is_on(GesturePurpose::Quickshape, "DRAW_HOLD".to_owned()),
-            touch: action(self.purpose_of(Trigger::Touch)),
+            touch: if pan { None } else { action(self.purpose_of(Trigger::Touch)) },
             pen: action(self.purpose_of(Trigger::Pen)),
             hold: action(hold),
             modify_touch: action(self.purpose_of(Trigger::ModifyTouch)),

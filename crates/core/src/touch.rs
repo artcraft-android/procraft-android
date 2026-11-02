@@ -113,6 +113,8 @@ pub enum GestureAction {
 pub struct TouchSettings {
     /// One finger paints as the pen does.
     pub finger_paint: bool,
+    /// One finger, not painting, moves the canvas once past a tap's slop.
+    pub one_finger_pan: bool,
     /// Two- and three-finger taps undo and redo.
     pub undo_taps: bool,
     /// Two fingers turn the canvas as they zoom it.
@@ -145,6 +147,7 @@ impl Default for TouchSettings {
     fn default() -> TouchSettings {
         TouchSettings {
             finger_paint: true,
+            one_finger_pan: false,
             undo_taps: true,
             rotate: true,
             draw_and_hold: true,
@@ -403,6 +406,10 @@ pub(crate) struct Touches {
     companion_last: (f32, f32),
     /// Where the finger turning a model last was.
     turn_last: (f32, f32),
+    /// The lone finger set to move the canvas: where it last was, and whether it has moved past
+    /// a tap's slop (it moves the canvas from then on).
+    pan_last: Option<(f32, f32)>,
+    panned: bool,
     /// The pen held over the canvas, and Hover's touch: where its finger last was (window x) and
     /// how far apart two fingers last were.
     pen_hovering: bool,
@@ -472,6 +479,8 @@ impl Default for Touches {
             companion: None,
             companion_last: (0.0, 0.0),
             turn_last: (0.0, 0.0),
+            pan_last: None,
+            panned: false,
             pen_hovering: false,
             hover_x: 0.0,
             hover_spread: 0.0,
@@ -902,6 +911,16 @@ impl CanvasSession {
                 if dist(at, t.down_at) > slop {
                     t.hold_due = None;
                 }
+                // the lone finger set to move the canvas moves it, from where it went down
+                if let Some(last) = t.pan_last.filter(|_| id == t.stroke_pointer && t.down.len() == 1)
+                    && (t.panned || dist(at, t.down_at) > slop)
+                {
+                    t.panned = true;
+                    t.pan_last = Some(at);
+                    drop(t);
+                    self.view_gesture(at.0, at.1, at.0 - last.0, at.1 - last.1, 1.0, 0.0);
+                    out.push(TouchCommand::ViewMoved);
+                }
             }
             Mode::Gesture => {
                 if t.down.len() >= 3 {
@@ -1076,6 +1095,7 @@ impl CanvasSession {
         let at = (first.x, first.y);
         let now = first.time_ms;
         t.down_at = at;
+        t.pan_last = None;
         t.tap_start = now;
         t.tap_pointers = 1;
         t.tap_moved = 0.0;
@@ -1250,6 +1270,12 @@ impl CanvasSession {
         }
         if !pen && does.is_none() && !t.settings.finger_paint {
             t.mode = Mode::Idle;
+            // set to move the canvas: it does once it moves past a tap's slop
+            if t.settings.one_finger_pan {
+                t.stroke_pointer = id;
+                t.pan_last = Some(at);
+                t.panned = false;
+            }
             if t.settings.hold.is_some() {
                 t.hold_due = Some(now + t.settings.hold_ms);
             }
@@ -1293,6 +1319,7 @@ impl CanvasSession {
         }
         t.hold_due = None;
         t.quickshape_due = None;
+        t.pan_last = None;
         // a finger down while the stroke is held as a snapped shape snaps it, until lifted
         let snapped = self.shared.lock().shape.is_some();
         if matches!(t.mode, Mode::Pen | Mode::Finger | Mode::ShapePin) && snapped {
@@ -2327,6 +2354,53 @@ mod tests {
         s.touch_move(1, at(60.0, 10.0, 120.0));
         let out = s.touch_up(1, at(60.0, 10.0, 140.0));
         assert!(out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+    }
+
+    #[test]
+    fn one_finger_set_to_move_the_canvas_moves_it_and_the_pen_still_paints() {
+        let s = session();
+        s.shared.lock().view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+        let g = crate::gestures::GestureSettings::new(crate::gestures::KeptGestures::default());
+        let changed = g.set(crate::gestures::GesturePurpose::General, "ONE_FINGER_PAN".into(), true);
+        // painting with a finger goes off with it, and back on turns it off again
+        assert_eq!(changed.get("GENERAL.FINGER_PAINT"), Some(&false));
+        let settings = g.touch_settings(0.0);
+        assert!(settings.one_finger_pan && !settings.finger_paint && settings.touch.is_none());
+        s.set_touch_settings(settings);
+        // a drag moves the canvas with the finger, painting nothing
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
+        let out = s.touch_move(1, at(120.0, 110.0, 8.0));
+        assert!(!out.contains(&TouchCommand::ViewMoved), "within a tap's slop: {out:?}");
+        let out = s.touch_move(1, at(160.0, 140.0, 16.0));
+        assert!(out.contains(&TouchCommand::ViewMoved), "{out:?}");
+        s.touch_move(1, at(170.0, 145.0, 24.0));
+        let out = s.touch_up(1, at(170.0, 145.0, 40.0));
+        assert!(!out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+        assert!(!s.info().can_undo);
+        let m = s.view_matrix();
+        assert_eq!((m.get(4).copied(), m.get(5).copied()), (Some(70.0), Some(45.0)));
+        // held still, it still picks a colour
+        s.touch_down(1, PointerKind::Finger, at(200.0, 200.0, 1000.0));
+        assert!(s.touch_tick(1450.0).contains(&TouchCommand::Pick { x: 200.0, y: 200.0 }));
+        s.touch_up(1, at(200.0, 200.0, 1500.0));
+        // two fingers tapped still undo
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 2000.0));
+        s.touch_down(2, PointerKind::Finger, at(200.0, 100.0, 2010.0));
+        s.touch_up(1, at(100.0, 100.0, 2050.0));
+        assert!(s.touch_up(2, at(200.0, 100.0, 2060.0)).contains(&TouchCommand::Undo));
+        // the pen paints
+        s.touch_down(3, PointerKind::Stylus, at(10.0, 10.0, 3000.0));
+        s.touch_move(3, at(60.0, 10.0, 3020.0));
+        assert!(s.touch_up(3, at(60.0, 10.0, 3040.0)).contains(&TouchCommand::StrokeEnded));
+        // painting with a finger back on: the finger paints again
+        assert_eq!(
+            g.set(crate::gestures::GesturePurpose::General, "FINGER_PAINT".into(), true).get("GENERAL.ONE_FINGER_PAN"),
+            Some(&false)
+        );
+        s.set_touch_settings(g.touch_settings(0.0));
+        s.touch_down(1, PointerKind::Finger, at(10.0, 30.0, 4000.0));
+        s.touch_move(1, at(60.0, 30.0, 4020.0));
+        assert!(s.touch_up(1, at(60.0, 30.0, 4040.0)).contains(&TouchCommand::StrokeEnded));
     }
 
     #[test]
