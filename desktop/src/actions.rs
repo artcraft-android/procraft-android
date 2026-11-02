@@ -117,6 +117,7 @@ pub enum Page {
 enum Slid {
     RapidUndo,
     SelectionVisibility,
+    FillGap,
     Stabilization,
     MotionFiltering,
     MotionExpression,
@@ -326,6 +327,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
         4 => {
             let delay = prefs.rapid_undo_delay;
             let visibility = prefs.selection_visibility;
+            let gap = prefs.fill_gap;
             vec![
                 vec![
                     Switch("Light interface", prefs.light_interface, Some(Act::LightInterface)),
@@ -357,6 +359,13 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                         visibility,
                         SLIDE_HEIGHT,
                         Slid::SelectionVisibility,
+                    ),
+                    Slide(
+                        "ColorDrop gap closing",
+                        if gap == 0 { "Off".to_owned() } else { format!("{gap} px") },
+                        gap as f32 / procraft_engine::fill::MOST_GAP as f32,
+                        SLIDE_HEIGHT,
+                        Slid::FillGap,
                     ),
                 ],
                 vec![Switch("Size & Opacity sidebar", showing.side_bar, Some(Act::SideBar))],
@@ -608,6 +617,7 @@ impl Actions {
                         prefs.rapid_undo_delay = RAPID_UNDO_MIN_S + at * (RAPID_UNDO_MAX_S - RAPID_UNDO_MIN_S);
                     }
                     Slid::SelectionVisibility => prefs.selection_visibility = at,
+                    Slid::FillGap => prefs.fill_gap = (at * procraft_engine::fill::MOST_GAP as f32).round() as u32,
                     Slid::Stabilization => prefs.stabilization = at,
                     Slid::MotionFiltering => prefs.motion_filtering = at,
                     Slid::MotionExpression => prefs.motion_expression = at,

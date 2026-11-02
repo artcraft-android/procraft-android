@@ -4510,6 +4510,33 @@ fn a_dragged_threshold_leaves_the_layer_as_a_pour_made_at_it() {
 }
 
 #[test]
+fn color_fill_set_to_close_gaps_stays_on_its_side_of_a_wall_with_a_gap() {
+    let Some(s) = session(120, 120) else { return };
+    s.set_brush_size(0.1);
+    // a wall down the middle, open for a short way half down
+    for (y0, y1) in [(-10.0, 50.0), (70.0, 130.0)] {
+        s.stroke_begin(PointerKind::Finger, vec![sample(60.0, y0, 0.0)]);
+        s.stroke_add((1..20).map(|i| sample(60.0, y0 + (y1 - y0) * i as f32 / 20.0, i as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+    }
+    let red = |s: &CanvasSession, x, y| {
+        let p = pixel(s, x, y);
+        p[0] > 200 && p[1] < 100
+    };
+    // through the gap as it ships; kept to its side with gap closing
+    assert!(s.pour_begin(30.0, 60.0, 0.9, 0.2, 0.1, 0.3));
+    s.pour_end(true, None);
+    assert!(red(&s, 30, 20) && red(&s, 100, 60) && red(&s, 100, 20));
+    s.undo();
+    assert!(!red(&s, 30, 20));
+    s.set_fill_gap(32);
+    assert!(s.pour_begin(30.0, 60.0, 0.9, 0.2, 0.1, 0.3));
+    s.pour_end(true, None);
+    assert!(red(&s, 30, 20) && red(&s, 50, 100) && red(&s, 5, 115));
+    assert!(!red(&s, 100, 60) && !red(&s, 100, 20) && !red(&s, 115, 115));
+}
+
+#[test]
 fn crop_and_resize_takes_typed_sizes_and_crops_on_done() {
     let Some(s) = session(100, 100) else { return };
     s.crop_begin();

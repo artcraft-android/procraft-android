@@ -43,6 +43,8 @@ pub struct Prefs {
     pub rapid_undo_delay: f32,
     /// How strongly what isn't selected is banded, 0..1.
     pub selection_visibility: f32,
+    /// ColorDrop keeps out of gaps up to this many canvas pixels wide in its lines (0: none).
+    pub fill_gap: u32,
     /// The app's own smoothing for every stroke, each 0..1, and its pressure curve.
     pub stabilization: f32,
     pub motion_filtering: f32,
@@ -92,6 +94,7 @@ impl Default for Prefs {
             cursor_style: CursorStyle::Brush,
             rapid_undo_delay: 0.65,
             selection_visibility: 0.25,
+            fill_gap: 0,
             stabilization: 0.0,
             motion_filtering: 0.0,
             motion_expression: 0.0,
@@ -148,6 +151,11 @@ impl Prefs {
                     }
                 }
                 "selection_visibility" => p.selection_visibility = unit.unwrap_or(p.selection_visibility),
+                "fill_gap" => {
+                    if let Some(v) = number {
+                        p.fill_gap = (v.max(0.0).round() as u32).min(procraft_engine::fill::MOST_GAP);
+                    }
+                }
                 "stabilization" => p.stabilization = unit.unwrap_or(0.0),
                 "motion_filtering" => p.motion_filtering = unit.unwrap_or(0.0),
                 "motion_expression" => p.motion_expression = unit.unwrap_or(0.0),
@@ -196,6 +204,7 @@ impl Prefs {
             format!("cursor_style {}", place(&STYLES, self.cursor_style)),
             format!("rapid_undo_delay {}", self.rapid_undo_delay),
             format!("selection_visibility {}", self.selection_visibility),
+            format!("fill_gap {}", self.fill_gap),
             format!("stabilization {}", self.stabilization),
             format!("motion_filtering {}", self.motion_filtering),
             format!("motion_expression {}", self.motion_expression),
@@ -227,6 +236,7 @@ impl Prefs {
         session.set_light_interface(self.light_interface);
         session.set_brush_scaling(self.brush_on_screen);
         session.set_selection_visibility(self.selection_visibility);
+        session.set_fill_gap(self.fill_gap);
         session.set_simplified_undos(self.simplified_undos);
         session.set_speed_distance(self.speed_distance);
         session.set_input_settings(

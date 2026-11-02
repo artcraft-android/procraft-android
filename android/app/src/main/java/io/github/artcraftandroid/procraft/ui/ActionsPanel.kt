@@ -289,6 +289,12 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                     (vm.rapidUndoDelay - CanvasViewModel.RAPID_UNDO_MIN_S) / (CanvasViewModel.RAPID_UNDO_MAX_S - CanvasViewModel.RAPID_UNDO_MIN_S),
                 ) { vm.changeRapidUndoDelay(CanvasViewModel.RAPID_UNDO_MIN_S + it * (CanvasViewModel.RAPID_UNDO_MAX_S - CanvasViewModel.RAPID_UNDO_MIN_S)) },
                 Slide("Selection mask visibility", "%.1f%%".format(vm.selectionVisibility * 100f), vm.selectionVisibility, onChange = vm::changeSelectionVisibility),
+                Slide(
+                    "ColorDrop gap closing",
+                    if (vm.fillGap == 0) "Off" else "${vm.fillGap} px",
+                    vm.fillGap / CanvasViewModel.MOST_FILL_GAP.toFloat(),
+                    onChange = vm::changeFillGap,
+                ),
             ),
             listOf(Toggle("Size & Opacity sidebar", vm.showSideBar) { vm.showSideBar = it }),
         )

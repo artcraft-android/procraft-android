@@ -351,6 +351,8 @@ pub(crate) struct State {
     /// Brush scaling relative to the screen: the brush keeps its size on the screen as the canvas
     /// zooms (else it keeps its size on the canvas).
     pub(crate) brush_on_screen: bool,
+    /// ColorDrop keeps out of gaps up to this many pixels wide in what bounds it (0: none).
+    pub(crate) fill_gap: u32,
     /// Crops kept for undo: the canvas and document from before; and one undone, for redo, with
     /// the steps the canvas then put back had made (redo only while that hasn't changed).
     crop_undo: Option<(Canvas, Document)>,
@@ -1100,6 +1102,7 @@ impl CanvasSession {
             crop_undo: None,
             selection_visibility: 0.25,
             brush_on_screen: false,
+            fill_gap: 0,
             input: procraft_engine::stroke::InputSettings::default(),
             crop_redo: None,
             library: shelf,

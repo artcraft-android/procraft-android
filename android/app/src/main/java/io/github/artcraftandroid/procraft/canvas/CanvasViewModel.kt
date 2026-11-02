@@ -412,6 +412,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         interfacePrefs.edit().putFloat(SELECTION_VISIBILITY, selectionVisibility).apply()
     }
 
+    /** ColorDrop keeps out of gaps up to this many canvas pixels wide in its lines (0: none). */
+    var fillGap by mutableStateOf(interfacePrefs.getInt(FILL_GAP, 0).coerceIn(0, MOST_FILL_GAP))
+        private set
+
+    /** The gap's slider moved to [share] (0..1) of its way. */
+    fun changeFillGap(share: Float) {
+        fillGap = (share.coerceIn(0f, 1f) * MOST_FILL_GAP).roundToInt()
+        session?.setFillGap(fillGap.toUInt())
+        interfacePrefs.edit().putInt(FILL_GAP, fillGap).apply()
+    }
+
     // pressure and smoothing, for every stroke
 
     var inputStabilization by mutableStateOf(interfacePrefs.getFloat(INPUT_STABILIZATION, 0f))
@@ -2033,6 +2044,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // the canvas's colours are P3 or sRGB numbers: the colour panel and swatches follow
         refreshCanvasSpace(s)
         s.setSelectionVisibility(selectionVisibility)
+        s.setFillGap(fillGap.toUInt())
         s.setBrushScaling(brushOnScreen)
         s.setLightInterface(lightInterface)
         // as it was left, or fitted
@@ -6166,6 +6178,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val RAPID_UNDO_MIN_S = 0.1f
         const val RAPID_UNDO_MAX_S = 1.5f
         const val SELECTION_VISIBILITY = "selection_visibility"
+        const val FILL_GAP = "fill_gap"
+
+        /** The widest gap ColorDrop can keep out of, canvas pixels (the core's `MOST_GAP`). */
+        const val MOST_FILL_GAP = 32
         /** The guide editor fits the canvas this far in from the window's sides, top and bottom (points). */
         const val GUIDE_FIT_SIDE_DP = 40f
         const val GUIDE_FIT_BAND = 0.2f

@@ -28,6 +28,8 @@ pub(crate) struct Pour {
     shown_region: Option<[u32; 4]>,
     /// What it last poured, as the flood reached (within the selection).
     shown_mask: Option<Mask>,
+    /// It keeps out of gaps up to this many pixels wide (0: none).
+    gap: u32,
 }
 
 impl Pour {
@@ -39,6 +41,9 @@ impl Pour {
     fn pour_region(&mut self, width: u32, threshold: f32, same_flood: bool) -> Option<([u32; 4], Vec<u8>)> {
         let mask = self.flood.as_ref().map(|flood| {
             let mut mask = flood.mask(threshold);
+            if self.gap > 0 {
+                mask = fill::close_gaps(&mask, flood.seed(), self.gap);
+            }
             if let Some(sel) = &self.selection {
                 for (m, &s) in mask.data.iter_mut().zip(&sel.data) {
                     *m = ((u16::from(*m) * u16::from(s) + 127) / 255) as u8;
@@ -171,6 +176,12 @@ fn seed_at(st: &crate::State, x: f32, y: f32) -> Option<(u32, u32)> {
 
 #[uniffi::export]
 impl CanvasSession {
+    /// ColorDrop keeps out of gaps up to `pixels` wide (canvas pixels, at most
+    /// [`fill::MOST_GAP`]) in the lines that bound it; 0 fills through any.
+    pub fn set_fill_gap(&self, pixels: u32) {
+        self.shared.lock().fill_gap = pixels.min(fill::MOST_GAP);
+    }
+
     /// Pours colour (`r`, `g`, `b`, 0..1) at window point (`x`, `y`) with `threshold` (0..1) on
     /// the current layer, within the selection if there is one. False if nothing was poured (off
     /// the canvas, or the layer locked or text). The pour stays open for
@@ -200,6 +211,7 @@ impl CanvasSession {
             shown: thousandths(threshold),
             shown_region: None,
             shown_mask: None,
+            gap: st.fill_gap,
         };
         pour.measure(w, h, seed);
         if pour.flood.is_none() {
