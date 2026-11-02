@@ -291,7 +291,8 @@ impl ColourFlood {
     }
 
     /// Starts working out each pixel's reach on a thread of its own (not for very large pictures,
-    /// nor if a thread can't start: the selections stay floods).
+    /// nor if a thread can't start: the selections stay floods). The thread stops if the
+    /// measure is let go first.
     pub fn work_out_reach(&self) {
         if u64::from(self.width) * u64::from(self.height) > crate::fill::REACH_MOST {
             return;
@@ -299,7 +300,10 @@ impl ColourFlood {
         let (apart, reach) = (self.apart.clone(), self.reach.clone());
         let (w, h, seed) = (self.width as usize, self.height as usize, (self.seed.0 as usize, self.seed.1 as usize));
         let _ = std::thread::Builder::new().name("selection reach".to_owned()).spawn(move || {
-            let _ = reach.set(crate::fill::reaches(&apart, w, h, seed, APART_MOST + 1));
+            let wanted = || Arc::strong_count(&reach) > 1;
+            if let Some(found) = crate::fill::reaches(&apart, w, h, seed, APART_MOST + 1, &wanted) {
+                let _ = reach.set(found);
+            }
         });
     }
 
@@ -641,8 +645,8 @@ mod tests {
             let start = (next(w), next(h));
             let flood = ColourFlood::new(w, h, &px, start).unwrap();
             let top = APART_MOST + 1;
-            let reach =
-                crate::fill::reaches(&flood.apart, w as usize, h as usize, (start.0 as usize, start.1 as usize), top);
+            let at = (start.0 as usize, start.1 as usize);
+            let reach = crate::fill::reaches(&flood.apart, w as usize, h as usize, at, top, &|| true).unwrap();
             let _ = flood.reach.set(reach);
             for threshold in [0.0f32, 0.05, 0.1, 0.3, 0.5, 0.9, 1.0] {
                 let plain = selected(w as usize, h as usize, &px, (start.0 as usize, start.1 as usize), threshold);
