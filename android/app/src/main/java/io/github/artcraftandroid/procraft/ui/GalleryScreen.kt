@@ -194,6 +194,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                     },
                     onMove = vm::moveInGallery,
                     onStack = vm::dropOnto,
+                    onFiles = vm::importFiles,
                 ),
             ),
         ) {
@@ -926,6 +927,7 @@ private fun galleryDrop(
     onEnded: () -> Unit,
     onMove: (GalleryEntry, Int) -> Unit,
     onStack: (Artwork, GalleryEntry) -> Unit,
+    onFiles: (List<android.net.Uri>) -> Unit,
 ): Modifier {
     val now = androidx.compose.runtime.rememberUpdatedState(entries)
     val inGallery = androidx.compose.runtime.rememberUpdatedState(stacking)
@@ -936,6 +938,9 @@ private fun galleryDrop(
     val ended = androidx.compose.runtime.rememberUpdatedState(onEnded)
     val move = androidx.compose.runtime.rememberUpdatedState(onMove)
     val stack = androidx.compose.runtime.rememberUpdatedState(onStack)
+    // files dragged in from another app are imported, as Import's
+    val files = androidx.compose.runtime.rememberUpdatedState(onFiles)
+    val activity = androidx.compose.ui.platform.LocalContext.current.activity()
     val density = androidx.compose.ui.platform.LocalDensity.current
     val sizes = androidx.compose.runtime.rememberUpdatedState(
         with(density) { Triple(39.dp.toPx(), androidx.compose.ui.geometry.Size(cell.width.toPx(), cell.thumb.toPx()), DragScrollEdge.toPx()) },
@@ -1016,7 +1021,11 @@ private fun galleryDrop(
             }
 
             override fun onDrop(event: androidx.compose.ui.draganddrop.DragAndDropEvent): Boolean {
-                val e = dragged(event) ?: return false
+                val e = dragged(event) ?: run {
+                    val uris = event.droppedFiles(activity)
+                    if (uris.isNotEmpty()) files.value(uris)
+                    return uris.isNotEmpty()
+                }
                 val drop = at ?: return true
                 val list = now.value
                 val onto = drop.onto?.let { name -> list.firstOrNull { it.dir.name == name } }
@@ -1040,7 +1049,7 @@ private fun galleryDrop(
         }
     }
     return Modifier.dragAndDropTarget(
-        shouldStartDragAndDrop = { it.toAndroidDragEvent().localState is io.github.artcraftandroid.procraft.gallery.GalleryDrag },
+        shouldStartDragAndDrop = { it.toAndroidDragEvent().localState is io.github.artcraftandroid.procraft.gallery.GalleryDrag || it.fromElsewhere() },
         target = target,
     )
 }

@@ -286,9 +286,17 @@ pub fn keep_quick_menu(saved: &str) {
 /// A small file of the app's settings written (a failure only logged: the setting holds this run).
 pub fn keep_text(name: &str, text: &str) {
     let dir = app_dir();
-    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(name), text)) {
+    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| write_whole(&dir.join(name), text.as_bytes())) {
         log::warn!("keeping {name}: {e}");
     }
+}
+
+/// Writes `bytes` to the app's file `path` whole or not at all: into a file beside it, then
+/// renamed over it, so a write cut short leaves the last one.
+pub fn write_whole(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let next = path.with_extension("next");
+    std::fs::write(&next, bytes)?;
+    std::fs::rename(&next, path)
 }
 
 /// A new artwork as `preset` says: its size, DPI, background and colour profile.

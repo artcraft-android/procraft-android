@@ -346,6 +346,10 @@ impl Interface {
         self.ended_export = None;
         // looked at again soon while an insert is read, or brushes made
         let brushes_coming = self.brushes_added(session);
+        // the autosave told of when it fails (once until a save works again)
+        if let Some(why) = session.take_save_failure() {
+            self.overlays.notice(procraft_core::save_failure_said(why), true);
+        }
         if self.inserted(session) || brushes_coming {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }

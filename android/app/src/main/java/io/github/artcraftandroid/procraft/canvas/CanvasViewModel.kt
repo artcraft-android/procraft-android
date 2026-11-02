@@ -145,6 +145,26 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var message by mutableStateOf<String?>(null)
     private var artworkDir: File? = null
 
+    /** A save failed and was told of: the next failure isn't, until one succeeds again. */
+    private var saveFailing = false
+
+    /**
+     * What a save came to, told when it failed (the first time since one last succeeded: autosave
+     * would say it again each time); false (nothing saved, nothing wrong) says nothing.
+     */
+    private suspend fun told(result: Result<Boolean>) {
+        val e = result.exceptionOrNull()
+        withContext(Dispatchers.Main) {
+            when {
+                e == null -> if (result.getOrDefault(false)) saveFailing = false
+                !saveFailing -> {
+                    saveFailing = true
+                    message = io.github.artcraftandroid.procraft.core.saveFailureSaid(e.message.orEmpty())
+                }
+            }
+        }
+    }
+
     var tool by mutableStateOf(ToolKind.PAINT)
         private set
     var size by mutableFloatStateOf(0f)
@@ -1736,7 +1756,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         screen = Screen.GALLERY
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
-                dir?.let { runCatching { s.save(it.path) } }
+                dir?.let { told(runCatching { s.save(it.path) }.map { true }) }
                 // its memory free at once, not when the object is collected
                 s.releaseCanvas()
             }
@@ -1873,7 +1893,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         noteTime()
         keepChoices(s)
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { s.save(dir.path) }
+            told(runCatching { s.save(dir.path) }.map { true })
             // its new picture on the home screen's widget
             io.github.artcraftandroid.procraft.gallery.RecentArtworkWidget.refresh(getApplication<Application>())
         }
@@ -1987,7 +2007,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             while (session === s) {
                 kotlinx.coroutines.delay(AUTOSAVE_MS)
                 val now = s.edits()
-                if (now != saved && session === s && runCatching { s.saveIfIdle(dir.path) }.getOrDefault(false)) saved = now
+                if (now != saved && session === s) {
+                    val result = runCatching { s.saveIfIdle(dir.path) }
+                    told(result)
+                    if (result.getOrDefault(false)) saved = now
+                }
             }
         }
     }
@@ -2379,42 +2403,72 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * [private] one is left out of the gallery's thumbnail.
      */
     fun insertPicture(uri: android.net.Uri, private: Boolean = false) {
-        val s = session ?: return
+        if (session == null) return
         closePanels()
-        val resolver = getApplication<Application>().contentResolver
-        val type = resolver.getType(uri)
+        val type = getApplication<Application>().contentResolver.getType(uri)
         if (type?.startsWith("video/") == true) {
             insertFrames(uri, private)
             return
         }
+        viewModelScope.launch { insertPictureNow(uri, private, transform = true) }
+    }
+
+    /**
+     * Files dragged onto the canvas from another app: a picture comes in as [insertPicture] puts
+     * it, ready to transform (several each on a new layer of its own, one after another); other
+     * files' brushes join the library.
+     */
+    fun dropOnCanvas(uris: List<android.net.Uri>) {
+        if (session == null || uris.isEmpty()) return
+        val resolver = getApplication<Application>().contentResolver
+        val (pictures, others) = uris.partition { runCatching { resolver.getType(it) }.getOrNull()?.startsWith("image/") == true }
+        others.forEach(::importBrushes)
+        if (pictures.isEmpty()) return
+        if (transforming) endTransform(true)
+        closePanels()
         viewModelScope.launch {
-            // a moving GIF: its frames, as a video's (a still one is a picture)
-            if (type == "image/gif" || withContext(Dispatchers.IO) { fileName(uri) }?.endsWith(".gif", ignoreCase = true) == true) {
-                val bytes = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }
-                val done = bytes?.let { withContext(Dispatchers.Default) { runCatching { s.insertGifFrames(it, private) }.getOrNull() } }
-                if (done != null) {
-                    if (done.added == 0u) {
-                        message = if (done.full) noRoom() else "This picture can't be opened."
-                        return@launch
-                    }
-                    refresh()
-                    showNotice("Frames saved to timeline")
-                    if (done.full) message = noRoom()
-                    return@launch
-                }
-            }
-            val image = withContext(Dispatchers.IO) { decodePicture(uri, io.github.artcraftandroid.procraft.ui.CanvasSpace.p3) }
-            if (image == null) {
-                message = "This picture can't be opened."
-                return@launch
-            }
-            if (s.insertImage(image, private) != null) {
-                refresh()
-                toggleTransform()
-            } else {
-                message = noRoom()
+            for (uri in pictures) {
+                if (!insertPictureNow(uri, private = false, transform = pictures.size == 1)) break
             }
         }
+    }
+
+    /**
+     * The picture at [uri] on a new layer, fitted to the canvas (a moving GIF's frames on the
+     * timeline instead), then with [transform] ready to transform; false, and a message, if it
+     * couldn't be.
+     */
+    private suspend fun insertPictureNow(uri: android.net.Uri, private: Boolean, transform: Boolean): Boolean {
+        val s = session ?: return false
+        val resolver = getApplication<Application>().contentResolver
+        val type = withContext(Dispatchers.IO) { runCatching { resolver.getType(uri) }.getOrNull() }
+        // a moving GIF: its frames, as a video's (a still one is a picture)
+        if (type == "image/gif" || withContext(Dispatchers.IO) { fileName(uri) }?.endsWith(".gif", ignoreCase = true) == true) {
+            val bytes = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }
+            val done = bytes?.let { withContext(Dispatchers.Default) { runCatching { s.insertGifFrames(it, private) }.getOrNull() } }
+            if (done != null) {
+                if (done.added == 0u) {
+                    message = if (done.full) noRoom() else "This picture can't be opened."
+                    return false
+                }
+                refresh()
+                showNotice("Frames saved to timeline")
+                if (done.full) message = noRoom()
+                return !done.full
+            }
+        }
+        val image = withContext(Dispatchers.IO) { decodePicture(uri, io.github.artcraftandroid.procraft.ui.CanvasSpace.p3) }
+        if (image == null) {
+            message = "This picture can't be opened."
+            return false
+        }
+        if (s.insertImage(image, private) == null) {
+            message = noRoom()
+            return false
+        }
+        refresh()
+        if (transform) toggleTransform()
+        return true
     }
 
     /**
@@ -3414,7 +3468,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Keeps the tools' brushes, the sets' choices and each brush's sliders for the next session. */
     private fun keepChoices(s: CanvasSession) {
         viewModelScope.launch(Dispatchers.IO) {
-            brushLibraryWrites.withLock { runCatching { s.keepBrushChoices(brushesDir.path) } }
+            val kept = brushLibraryWrites.withLock { runCatching { s.keepBrushChoices(brushesDir.path) }.getOrDefault(false) }
+            libraryKept(kept)
+        }
+    }
+
+    /** The library couldn't be kept and that was told: not again until it is kept once more. */
+    private var libraryFailing = false
+
+    /** Tells, once until the library is kept again, that it couldn't be (the storage full, say). */
+    private suspend fun libraryKept(kept: Boolean) = withContext(Dispatchers.Main) {
+        if (kept) {
+            libraryFailing = false
+        } else if (!libraryFailing) {
+            libraryFailing = true
+            message = "The brush library couldn't be kept."
         }
     }
 
@@ -3786,7 +3854,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun keepBrushLibrary(s: CanvasSession) {
         viewModelScope.launch(Dispatchers.IO) {
             // each write takes the library as it is when it runs, so the last one is the latest
-            brushLibraryWrites.withLock { runCatching { s.keepBrushes(brushesDir.path) } }
+            val kept = brushLibraryWrites.withLock { runCatching { s.keepBrushes(brushesDir.path) }.getOrDefault(false) }
+            libraryKept(kept)
         }
     }
 

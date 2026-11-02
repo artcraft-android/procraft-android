@@ -390,11 +390,18 @@ fn lay_out(f: &mut Fonts, t: &TextInfo) -> Laid {
     }
     let family = family_name(f, &t.font);
     let (weight, italic) = weight_and_slant(&t.style);
-    let attrs = Attrs::new()
+    let mut attrs = Attrs::new()
         .family(Family::Name(&family))
         .weight(Weight(weight))
         .style(if italic { Style::Italic } else { Style::Normal })
         .letter_spacing(t.tracking + t.kerning);
+    // the small capitals family: lower case as small capitals where the font has them (a
+    // computer's stand-ins for Android's small-capitals face do)
+    if t.font == "sans-serif-smallcaps" {
+        let mut features = cosmic_text::FontFeatures::new();
+        features.enable(cosmic_text::FeatureTag::SMALL_CAPS);
+        attrs = attrs.font_features(features);
+    }
     // the font's own ascent and descent, as a line's height before the leading
     let (ascent, descent, underline) = font_metrics(f, &family, weight, italic, size);
     let line_height = (ascent + descent + t.leading * size).max(1.0);

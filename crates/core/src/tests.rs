@@ -845,6 +845,47 @@ fn an_open_artwork_is_kept_saved_until_that_stops() {
 }
 
 #[test]
+fn a_failing_autosave_is_told_once_until_a_save_works() {
+    let Some(s) = session(64, 64) else { return };
+    // a file where its folder would be: every save there fails
+    let blocked = std::env::temp_dir().join(format!("procraft-blocked-{}", std::process::id()));
+    let good = std::env::temp_dir().join(format!("procraft-unblocked-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&good);
+    std::fs::write(&blocked, b"not a folder").unwrap();
+    let paint = |x: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 30.0, 0.0)]);
+        s.stroke_end(vec![]);
+        let _ = pixel(&s, 0, 0);
+    };
+    let told = || {
+        (0..300).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            s.take_save_failure()
+        })
+    };
+    std::sync::Arc::clone(&s).start_autosave(blocked.to_string_lossy().into_owned());
+    paint(30.0);
+    let why = told();
+    assert!(why.is_some(), "a failed autosave told");
+    assert_eq!(crate::save_failure_said(why.unwrap_or_default()), "This artwork couldn't be saved.");
+    // failing still: not told again
+    paint(40.0);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(s.take_save_failure(), None);
+    // a save that works, then the autosave failing again: told again
+    s.stop_autosave();
+    s.save(good.to_string_lossy().into_owned()).unwrap();
+    std::sync::Arc::clone(&s).start_autosave(blocked.to_string_lossy().into_owned());
+    paint(20.0);
+    let again = told();
+    s.stop_autosave();
+    let _ = std::fs::remove_file(&blocked);
+    let _ = std::fs::remove_dir_all(&good);
+    assert!(again.is_some(), "told again after a save worked");
+    assert!(crate::save_failure_said("No space left on device (os error 28)".into()).contains("no room"));
+}
+
+#[test]
 fn nothing_is_saved_from_a_lost_graphics_device() {
     let Some(s) = session(64, 64) else { return };
     s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
@@ -2915,6 +2956,194 @@ fn library_work_keeps_the_tool_on_a_brush_and_comes_back_saved() {
         assert!(t.load_brush_library(s.saved_brush_library()));
         assert_eq!(shown(&t), shown(&s), "seed {seed}: after {done:?}");
     }
+}
+
+/// Changes one place in `v` at random (`next(n)` a number below n): a number made 0, -1, huge or
+/// a half, a flag turned over, a text emptied, an entry dropped or repeated, a key taken out.
+fn damage_json(v: &mut serde_json::Value, next: &mut dyn FnMut(usize) -> usize) {
+    fn places(v: &serde_json::Value, at: &mut Vec<Vec<String>>, path: Vec<String>) {
+        at.push(path.clone());
+        match v {
+            serde_json::Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    places(item, at, [path.clone(), vec![i.to_string()]].concat());
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (k, item) in map {
+                    places(item, at, [path.clone(), vec![k.clone()]].concat());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut at = Vec::new();
+    places(v, &mut at, Vec::new());
+    let Some(path) = at.get(next(at.len())) else { return };
+    let mut node = &mut *v;
+    for key in path {
+        node = match node {
+            serde_json::Value::Array(items) => &mut items[key.parse::<usize>().unwrap()],
+            serde_json::Value::Object(map) => map.get_mut(key).unwrap(),
+            _ => return,
+        };
+    }
+    let pick = next(4);
+    match node {
+        serde_json::Value::Number(_) => *node = [0.0, -1.0, 1e9, 0.5][pick].into(),
+        serde_json::Value::Bool(b) => *b = !*b,
+        serde_json::Value::String(t) => t.clear(),
+        serde_json::Value::Array(items) if !items.is_empty() => {
+            let i = next(items.len());
+            if pick < 2 {
+                items.remove(i);
+            } else {
+                let copy = items[i].clone();
+                items.insert(i, copy);
+            }
+        }
+        serde_json::Value::Object(map) if !map.is_empty() => {
+            let key = map.keys().nth(next(map.len())).cloned().unwrap();
+            map.remove(&key);
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn saves_before_and_after_a_crop_leave_nothing_beside_and_open_at_the_new_size() {
+    let Some(s) = session(64, 160) else { return };
+    s.add_layer();
+    s.stroke_begin(PointerKind::Stylus, vec![sample(20.0, 80.0, 0.0)]);
+    s.stroke_end(vec![sample(140.0, 80.0, 50.0)]);
+    let dir = std::env::temp_dir().join(format!("procraft-staged-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = dir.to_string_lossy().into_owned();
+    s.save(d.clone()).unwrap();
+    assert!(s.crop_canvas(8.0, 8.0, 40.0, 30.0, 0.0, false, 0, 0));
+    s.save(d.clone()).unwrap();
+    // every file in place, none left beside it
+    let mut files = Vec::new();
+    for folder in [dir.clone(), dir.join("layers")] {
+        for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+            files.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    let opened = CanvasSession::open(d);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(files.iter().all(|f| !f.ends_with(".tmp")), "{files:?}");
+    let opened = opened.unwrap();
+    assert_eq!((opened.info().width, opened.info().height), (40, 30));
+    // each layer's file read at that size
+    let pending = std::mem::take(&mut opened.shared.lock().pending_pixels);
+    assert_eq!(crate::project::opened_pixels(pending, 40, 30).len(), s.layers().len());
+}
+
+#[test]
+fn an_artwork_whose_file_has_settings_it_cant_read_opens_with_its_layers() {
+    let Some(s) = session(64, 160) else { return };
+    s.add_layer();
+    s.add_layer();
+    let dir = std::env::temp_dir().join(format!("procraft-unreadable-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    // how it was last shown, what it keeps about itself and the guide no longer readable
+    let file = dir.join("artwork.json");
+    let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    v["view"] = "here".into();
+    v["info"] = 5.into();
+    v["document"]["guide"] = serde_json::json!([1, 2]);
+    std::fs::write(&file, v.to_string()).unwrap();
+    let opened = CanvasSession::open(dir.to_string_lossy().into_owned());
+    let _ = std::fs::remove_dir_all(&dir);
+    let opened = opened.unwrap();
+    assert_eq!(opened.layers().len(), s.layers().len());
+}
+
+#[test]
+fn a_kept_library_with_a_brush_it_cant_read_keeps_the_rest() {
+    let s = CanvasSession::new(64, 64);
+    let before = s.brush_library();
+    let mut v: serde_json::Value = serde_json::from_str(&s.saved_brush_library()).unwrap();
+    // the first set's second brush damaged, the second set's name gone
+    v[0]["brushes"][1]["from"] = 0.5.into();
+    v[1].as_object_mut().unwrap().remove("name");
+    let t = CanvasSession::new(64, 64);
+    assert!(t.load_brush_library(v.to_string()));
+    let after = t.brush_library();
+    assert_eq!(after.len(), before.len() - 1, "the set without a name left out");
+    assert_eq!(after[0].brushes.len(), before[0].brushes.len() - 1, "the brush left out");
+    assert_eq!(after[0].brushes[1].name, before[0].brushes[2].name);
+    assert_eq!(after[1].name, before[2].name);
+}
+
+#[test]
+fn a_kept_library_damaged_anyhow_opens_with_each_tool_on_a_brush_that_paints() {
+    let dir = std::env::temp_dir().join(format!("procraft-library-damaged-{}", std::process::id()));
+    for seed in 0u32..10 {
+        let mut state = seed.wrapping_mul(2_654_435_761) | 1;
+        let mut next = |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as usize % n.max(1)
+        };
+        // a library worked on, each tool on a brush, kept
+        let s = CanvasSession::new(64, 64);
+        for _ in 0..10 {
+            let library = s.brush_library();
+            let set = next(library.len()) as u32;
+            let n = library.get(set as usize).map_or(0, |x| x.brushes.len());
+            match next(5) {
+                0 => _ = s.duplicate_brush(set, next(n) as u32),
+                1 => _ = s.delete_brush(set, next(n) as u32),
+                2 => _ = s.combine_brushes(set, next(n) as u32, next(n) as u32),
+                3 => _ = s.new_brush(set),
+                _ => {
+                    s.set_tool([ToolKind::Paint, ToolKind::Erase, ToolKind::Smudge][next(3)]);
+                    _ = s.select_brush(set, next(n) as u32);
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let d = dir.to_string_lossy().into_owned();
+        assert!(s.keep_brushes(d.clone()));
+        // its files damaged in a few places each
+        for file in ["library.json", "choices.json"] {
+            let path = dir.join(file);
+            let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap()) else {
+                continue;
+            };
+            for _ in 0..1 + next(6) {
+                damage_json(&mut v, &mut next);
+            }
+            std::fs::write(&path, v.to_string()).unwrap();
+        }
+        // opened: each tool on a brush there is, which paints without a GPU error
+        let Some(t) = session(64, 64) else { return };
+        let _ = t.open_brushes(d);
+        for (k, tool) in [ToolKind::Paint, ToolKind::Erase, ToolKind::Smudge].into_iter().enumerate() {
+            t.set_tool(tool);
+            let library = t.brush_library();
+            let c = t.current_brush();
+            if library.iter().any(|x| !x.brushes.is_empty()) {
+                let there = library.get(c.set as usize).is_some_and(|x| (c.index as usize) < x.brushes.len());
+                assert!(there, "seed {seed}: {tool:?} on ({}, {})", c.set, c.index);
+            }
+            let y = 10.0 + k as f32 * 20.0;
+            t.stroke_begin(PointerKind::Stylus, vec![sample(5.0, y, 0.0)]);
+            t.stroke_add((1..12).map(|i| sample(5.0 + i as f32 * 5.0, y, f64::from(i) * 8.0)).collect());
+            t.stroke_end(vec![sample(60.0, y, 100.0)]);
+        }
+        let mut guard = t.shared.lock();
+        let st = &mut *guard;
+        if let (Some(c), Some(g)) = (st.canvas.as_mut(), st.gpu.as_ref()) {
+            c.render(g, &mut st.doc, None);
+            g.flush();
+            assert_eq!(g.errors(), 0, "seed {seed}: GPU errors");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -152,7 +152,10 @@ fn write_order(at: &Path, order: &[String]) {
 
 fn write_stack_name(dir: &Path, name: &str) {
     let name = if name.trim().is_empty() { STACK } else { name.trim() };
-    let _ = fs::write(dir.join(STACK_FILE), serde_json::json!({ "name": name }).to_string());
+    let text = serde_json::json!({ "name": name }).to_string();
+    let _ = crate::project::write_atomically(&dir.join(STACK_FILE), |p| {
+        fs::write(p, &text).map_err(|e| crate::project::file_error("naming the stack", e))
+    });
 }
 
 /// The artworks in the app's own storage.
@@ -372,7 +375,11 @@ impl ArtworkStore {
         };
         if let Some(o) = json.as_object_mut() {
             o.insert("name".into(), name.trim().into());
-            let _ = fs::write(&file, json.to_string());
+            // written whole or not at all: cut short, the artwork couldn't be opened
+            let text = json.to_string();
+            let _ = crate::project::write_atomically(&file, |p| {
+                fs::write(p, &text).map_err(|e| crate::project::file_error("renaming the artwork", e))
+            });
         }
     }
 
@@ -456,6 +463,160 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn gallery_work_at_random_loses_no_artwork_and_never_nests_a_stack() {
+        for seed in 0u64..20 {
+            let root =
+                std::env::temp_dir().join(format!("procraft-gallery-fuzz-{}-{}", std::process::id(), fresh_name()));
+            let store = ArtworkStore::open(root.to_string_lossy().into_owned());
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut next = |n: usize| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state % n.max(1) as u64) as usize
+            };
+            // every artwork's name, as many times as there are artworks of it
+            let mut names: Vec<String> = Vec::new();
+            let mut made = 0;
+            let mut done: Vec<usize> = Vec::new();
+            for _ in 0..40 {
+                let gallery = store.list(None);
+                let stacks: Vec<(String, Vec<GalleryArtwork>)> = gallery
+                    .iter()
+                    .filter_map(|e| match e {
+                        GalleryEntry::Stack { dir, artworks, .. } => Some((dir.clone(), artworks.clone())),
+                        GalleryEntry::Artwork { .. } => None,
+                    })
+                    .collect();
+                let loose: Vec<String> = gallery
+                    .iter()
+                    .filter_map(|e| match e {
+                        GalleryEntry::Artwork { artwork } => Some(artwork.dir.clone()),
+                        GalleryEntry::Stack { .. } => None,
+                    })
+                    .collect();
+                let stacked: Vec<String> = stacks.iter().flat_map(|(_, a)| a.iter().map(|x| x.dir.clone())).collect();
+                let all: Vec<String> = loose.iter().chain(&stacked).cloned().collect();
+                let op = next(10);
+                done.push(op);
+                match op {
+                    // a new artwork, in the gallery or in a stack
+                    0 | 1 => {
+                        made += 1;
+                        let name = format!("a{made}");
+                        let folder =
+                            if next(3) == 0 { stacks.get(next(stacks.len())).map(|s| s.0.clone()) } else { None };
+                        artwork(&store, &name, folder);
+                        names.push(name);
+                    }
+                    2 if !all.is_empty() => {
+                        let dir = &all[next(all.len())];
+                        let name = name_in(dir);
+                        store.duplicate(dir.clone());
+                        names.push(name);
+                    }
+                    3 if !all.is_empty() => {
+                        let dir = &all[next(all.len())];
+                        let name = name_in(dir);
+                        store.delete(dir.clone());
+                        let at = names.iter().position(|n| *n == name).unwrap();
+                        names.remove(at);
+                    }
+                    // moved within the gallery or within its stack
+                    4 if !gallery.is_empty() => {
+                        let dir = gallery[next(gallery.len())].dir().to_owned();
+                        store.move_entry(dir, next(gallery.len() + 1) as i64, None);
+                    }
+                    5 if !stacked.is_empty() => {
+                        let dir = stacked[next(stacked.len())].clone();
+                        let to = if next(2) == 0 { Some(store.root()) } else { None };
+                        store.move_entry(dir, next(gallery.len() + 2) as i64, to);
+                    }
+                    // an artwork of the gallery dropped onto another of its entries
+                    6 if !loose.is_empty() && gallery.len() > 1 => {
+                        let dir = loose[next(loose.len())].clone();
+                        let onto = gallery[next(gallery.len())].dir().to_owned();
+                        if onto != dir {
+                            store.put_onto(dir, onto);
+                        }
+                    }
+                    7 if loose.len() > 1 => {
+                        let picked: Vec<String> = loose.iter().filter(|_| next(2) == 0).cloned().collect();
+                        if !picked.is_empty() {
+                            store.stack(picked);
+                        }
+                    }
+                    8 if !all.is_empty() => {
+                        let dir = &all[next(all.len())];
+                        let old = name_in(dir);
+                        made += 1;
+                        let name = format!("a{made}");
+                        store.rename(dir.clone(), name.clone());
+                        let at = names.iter().position(|n| *n == old).unwrap();
+                        names[at] = name;
+                    }
+                    9 if !stacks.is_empty() => store.rename_stack(stacks[next(stacks.len())].0.clone(), "S".into()),
+                    _ => {}
+                }
+                // what is listed is every artwork there is, each once, and no stack empty
+                let mut listed: Vec<String> = Vec::new();
+                let mut dirs: Vec<String> = Vec::new();
+                for e in store.list(None) {
+                    match e {
+                        GalleryEntry::Artwork { artwork } => {
+                            listed.push(artwork.name);
+                            dirs.push(artwork.dir);
+                        }
+                        GalleryEntry::Stack { artworks, .. } => {
+                            assert!(!artworks.is_empty(), "seed {seed}: an empty stack after {done:?}");
+                            for a in artworks {
+                                listed.push(a.name);
+                                dirs.push(a.dir);
+                            }
+                        }
+                    }
+                }
+                let mut want = names.clone();
+                want.sort();
+                listed.sort();
+                assert_eq!(listed, want, "seed {seed}: after {done:?}");
+                // on disk: each artwork's folder listed once, no stack within a stack
+                let mut on_disk: Vec<String> = Vec::new();
+                for entry in fs::read_dir(&root).unwrap().flatten() {
+                    let path = entry.path();
+                    if path.join(ARTWORK_FILE).is_file() {
+                        on_disk.push(path.to_string_lossy().into_owned());
+                    } else if path.join(STACK_FILE).is_file() {
+                        for inner in fs::read_dir(&path).unwrap().flatten() {
+                            let inner = inner.path();
+                            assert!(
+                                !inner.join(STACK_FILE).is_file(),
+                                "seed {seed}: a stack in a stack after {done:?}"
+                            );
+                            if inner.join(ARTWORK_FILE).is_file() {
+                                on_disk.push(inner.to_string_lossy().into_owned());
+                            }
+                        }
+                    }
+                }
+                on_disk.sort();
+                dirs.sort();
+                let canon = |v: &[String]| {
+                    v.iter().map(|d| PathBuf::from(d).components().collect::<PathBuf>()).collect::<Vec<_>>()
+                };
+                assert_eq!(canon(&dirs), canon(&on_disk), "seed {seed}: after {done:?}");
+            }
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    /// The name kept in the artwork's file in `dir`.
+    fn name_in(dir: &str) -> String {
+        let text = fs::read_to_string(Path::new(dir).join(ARTWORK_FILE)).unwrap();
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["name"].as_str().unwrap().to_owned()
     }
 
     #[test]

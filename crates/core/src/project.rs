@@ -37,10 +37,15 @@ struct ArtworkFile {
     version: u32,
     name: String,
     document: Document,
-    #[serde(default)]
+    /// Read as kept, or its default if it can't be (as are the document's own settings).
+    #[serde(default, deserialize_with = "procraft_engine::document::or_default")]
     info: ArtworkInfo,
     /// How it was last shown, if it was.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "procraft_engine::document::or_default",
+        skip_serializing_if = "Option::is_none"
+    )]
     view: Option<SavedView>,
     /// The model painted on, if it is one (its current texture set is `document`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -366,22 +371,77 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
     }
     let (w, h) = (file.document.width(), file.document.height());
     fs::create_dir_all(dir.join("layers")).map_err(|e| file_error("making the folder", e))?;
-    // only those not already there as they are, encoded and written side by side
-    // each layer's PNG is made in memory before it is written
-    let each = w as usize * h as usize * 4;
-    let written = procraft_engine::par::side_by_side_within(&layers, each, |(id, _, rgba)| {
-        write_atomically(&layer_path(dir, *id), |p| write_png(p, w, h, rgba, &[]))
+    // Everything new is written beside its place first and only then put in place, the document
+    // last: a save cut short while writing (the slow part) leaves the last one as it was. Written
+    // in place one by one, a save after a crop cut short left layers of the new size beside a
+    // document of the old, which the next open would drop.
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let stage = |result: Result<PathBuf, MobileError>, to: PathBuf, staged: &mut Vec<(PathBuf, PathBuf)>| {
+        result.map(|tmp| staged.push((tmp, to)))
+    };
+    let written = (|| {
+        // only those not already there as they are, encoded and written side by side, each
+        // layer's PNG made in memory before it is written
+        let each = w as usize * h as usize * 4;
+        let results = procraft_engine::par::side_by_side_within(&layers, each, |(id, _, rgba)| {
+            write_beside(&layer_path(dir, *id), |p| write_png(p, w, h, rgba, &[]))
+        });
+        for ((id, _, _), result) in layers.iter().zip(results) {
+            let result = result.unwrap_or_else(|| Err(file_error("writing a layer", "it stopped")));
+            stage(result, layer_path(dir, *id), &mut staged)?;
+        }
+        for (id, bytes) in &files {
+            let to = layer_path(dir, *id);
+            stage(
+                write_beside(&to, |p| fs::write(p, bytes).map_err(|e| file_error("writing a layer", e))),
+                to,
+                &mut staged,
+            )?;
+        }
+        if let Some(model) = model.as_ref() {
+            crate::scene3d::write_model(&mut saved.sets, dir, model)?;
+        }
+        // a model's thumbnail is the model as last shown
+        let thumb = dir.join("thumbnail.png");
+        if let Some((pw, ph, rgba)) = model.and_then(|m| m.picture) {
+            let (tw, th, small) = thumbnail(&rgba, pw, ph, THUMBNAIL_SIDE);
+            stage(write_beside(&thumb, |p| write_png(p, tw, th, &small, &[])), thumb, &mut staged)?;
+        } else if let Some(rgba) = composite {
+            let (tw, th, mut small) = thumbnail(&rgba, w, h, THUMBNAIL_SIDE);
+            // the gallery shows it in the artwork's colours (a CMYK canvas's: as its press prints them)
+            if let Some(table) = proof_table(&file.document) {
+                table.apply_rgba(&mut small, false);
+            }
+            let icc = file.document.picture_icc();
+            stage(write_beside(&thumb, |p| write_png(p, tw, th, &small, &icc)), thumb, &mut staged)?;
+        }
+        let json = serde_json::to_string(&file).map_err(|e| file_error("writing the artwork", e))?;
+        let doc = dir.join("artwork.json");
+        stage(
+            write_beside(&doc, |p| fs::write(p, json.as_bytes()).map_err(|e| file_error("writing the artwork", e))),
+            doc,
+            &mut staged,
+        )
+    })();
+    // in place, in the order written (the document last), or, short of that, none of it
+    let placed = written.and_then(|()| {
+        staged.iter().try_for_each(|(tmp, to)| fs::rename(tmp, to).map_err(|e| file_error("saving", e)))
     });
-    for ((id, hash, _), result) in layers.iter().zip(written) {
-        result.unwrap_or_else(|| Err(file_error("writing a layer", "it stopped")))?;
+    if let Err(e) = placed {
+        for (tmp, _) in &staged {
+            let _ = fs::remove_file(tmp);
+        }
+        return Err(e);
+    }
+    for (id, hash, _) in &layers {
         saved.layers.insert(*id, *hash);
     }
-    for (id, bytes) in &files {
-        write_atomically(&layer_path(dir, *id), |p| fs::write(p, bytes).map_err(|e| file_error("writing a layer", e)))?;
+    for (id, _) in &files {
         // its pixels' hash isn't known: the next save writes it again
         saved.layers.remove(id);
     }
-    // layer files the document no longer has
+    // layer files the document no longer has (and any left beside by a save cut short), now that
+    // the document saying so is in place
     saved.layers.retain(|id, _| file.document.layer(*id).is_some());
     if let Ok(entries) = fs::read_dir(dir.join("layers")) {
         let keep: Vec<PathBuf> = file.document.layer_ids().map(|id| layer_path(dir, id)).collect();
@@ -392,26 +452,7 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
             }
         }
     }
-    if let Some(model) = model.as_ref() {
-        crate::scene3d::write_model(&mut saved.sets, dir, model)?;
-    }
-    // a model's thumbnail is the model as last shown
-    if let Some((pw, ph, rgba)) = model.and_then(|m| m.picture) {
-        let (tw, th, thumb) = thumbnail(&rgba, pw, ph, THUMBNAIL_SIDE);
-        write_atomically(&dir.join("thumbnail.png"), |p| write_png(p, tw, th, &thumb, &[]))?;
-    } else if let Some(rgba) = composite {
-        let (tw, th, mut thumb) = thumbnail(&rgba, w, h, THUMBNAIL_SIDE);
-        // the gallery shows it in the artwork's colours (a CMYK canvas's: as its press prints them)
-        if let Some(table) = proof_table(&file.document) {
-            table.apply_rgba(&mut thumb, false);
-        }
-        let icc = file.document.picture_icc();
-        write_atomically(&dir.join("thumbnail.png"), |p| write_png(p, tw, th, &thumb, &icc))?;
-    }
-    let json = serde_json::to_string(&file).map_err(|e| file_error("writing the artwork", e))?;
-    write_atomically(&dir.join("artwork.json"), |p| {
-        fs::write(p, json.as_bytes()).map_err(|e| file_error("writing the artwork", e))
-    })
+    Ok(())
 }
 
 #[uniffi::export]
@@ -539,6 +580,8 @@ impl CanvasSession {
         };
         write_or_keep_changed(self, &mut saved, Path::new(&dir), snapshot)?;
         self.shared.edits_saved.store(edits, std::sync::atomic::Ordering::Relaxed);
+        // saves work again: the autosave's next failure is told
+        self.shared.save_failure.lock().unwrap_or_else(|e| e.into_inner()).1 = false;
         Ok(())
     }
 
@@ -584,10 +627,20 @@ impl CanvasSession {
                 if now == kept {
                     continue;
                 }
-                match session.save_if_idle_with(&mut saved, &dir) {
-                    Ok(true) => kept = now,
+                let result = session.save_if_idle_with(&mut saved, &dir);
+                let mut failure = session.shared.save_failure.lock().unwrap_or_else(|e| e.into_inner());
+                match result {
+                    Ok(true) => {
+                        kept = now;
+                        failure.1 = false;
+                    }
                     Ok(false) => {}
-                    Err(e) => log::error!("keeping the artwork saved: {e}"),
+                    Err(e) => {
+                        log::error!("keeping the artwork saved: {e}");
+                        if !failure.1 {
+                            *failure = (Some(e.to_string()), true);
+                        }
+                    }
                 }
             }
         });
@@ -597,6 +650,12 @@ impl CanvasSession {
     }
 
     /// Ends the autosave started last: a save it is making is finished first, and none follows.
+    /// Why the autosave failed, once until a save works and another fails (for the app to tell,
+    /// as [`save_failure_said`] puts it); none if it hasn't. Never waits on a save.
+    pub fn take_save_failure(&self) -> Option<String> {
+        self.shared.save_failure.lock().unwrap_or_else(|e| e.into_inner()).0.take()
+    }
+
     pub fn stop_autosave(&self) {
         let mut saved = self.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
         saved.autosave = saved.autosave.wrapping_add(1);
@@ -985,17 +1044,40 @@ fn layer_path(dir: &Path, id: LayerId) -> PathBuf {
     dir.join("layers").join(format!("{}.png", id.0))
 }
 
+/// What the apps say when saving an artwork failed for `reason` (a save's error).
+#[uniffi::export]
+pub fn save_failure_said(reason: String) -> String {
+    if reason.to_lowercase().contains("space") {
+        "There's no room left to save this artwork.".to_owned()
+    } else {
+        "This artwork couldn't be saved.".to_owned()
+    }
+}
+
 /// Writes `path` by writing a temporary file beside it and renaming it into place.
 pub(crate) fn write_atomically(
     path: &Path,
     write: impl FnOnce(&Path) -> Result<(), MobileError>,
 ) -> Result<(), MobileError> {
+    let tmp = write_beside(path, write)?;
+    fs::rename(&tmp, path).map_err(|e| file_error("saving", e))
+}
+
+/// Writes what goes in `path` into a file beside it (removed again if the write fails), to be
+/// renamed over it; the file written.
+pub(crate) fn write_beside(
+    path: &Path,
+    write: impl FnOnce(&Path) -> Result<(), MobileError>,
+) -> Result<PathBuf, MobileError> {
     // a name of its own, so that no other write of the same file can touch it
     static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_extension(format!("{}.tmp", n));
-    write(&tmp)?;
-    fs::rename(&tmp, path).map_err(|e| file_error("saving", e))
+    if let Err(e) = write(&tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(tmp)
 }
 
 /// A PNG of RGBA8 pixels, carrying the colour profile `icc` (none if empty).

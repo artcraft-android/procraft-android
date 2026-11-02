@@ -346,6 +346,7 @@ pub struct Document {
     pub background: [f32; 3],
     pub background_visible: bool,
     /// Bottom layer first.
+    #[serde(deserialize_with = "readable_layers")]
     layers: Vec<Layer>,
     current: LayerId,
     /// Layers picked to act on together with the current one (in the layers panel); not saved.
@@ -353,16 +354,16 @@ pub struct Document {
     picked: Vec<LayerId>,
     next_id: u64,
     /// The drawing guide over the canvas.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub guide: crate::guide::Guide,
     /// Dots per inch, for the canvas's printed size and in files that carry one.
     #[serde(default = "default_dpi")]
     pub dpi: f32,
     /// Animation Assist's settings while it is on.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub animation: Option<crate::animation::Animation>,
     /// The colour profile its pixels and colours are in.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub profile: crate::profile::Profile,
     /// A profile of its own: an RGB one its pixels and colours are in, or a CMYK one its colours
     /// print to (its pixels then in Display P3, shown as the press would print them). None for the
@@ -372,6 +373,24 @@ pub struct Document {
     /// The layer shown alone, the others left out of the picture (solo visibility).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solo: Option<LayerId>,
+}
+
+/// The layers a file lists, as many as can be read: in a damaged file a layer that can't be is
+/// left out rather than the artwork failing to open (the repair mends what that leaves).
+fn readable_layers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Layer>, D::Error> {
+    let entries: Vec<serde_json::Value> = serde::Deserialize::deserialize(d)?;
+    Ok(entries.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect())
+}
+
+/// A setting as a file keeps it, or its default if it can't be read (the artwork opens without
+/// it).
+pub fn or_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let v: serde_json::Value = serde::Deserialize::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
 }
 
 /// A document's profile settings apart from it.
@@ -1351,7 +1370,9 @@ impl Document {
         let mut k = keep.iter();
         self.layers.retain(|_| k.next().copied().unwrap_or(true));
         for l in &mut self.layers {
-            if l.kind != LayerKind::Mask && l.parent.and_then(kind_of) != Some(LayerKind::Group) {
+            if l.kind != LayerKind::Mask
+                && (l.parent == Some(l.id) || l.parent.and_then(kind_of) != Some(LayerKind::Group))
+            {
                 l.parent = None;
             }
         }
@@ -1691,6 +1712,157 @@ mod tests {
         assert!(fixed.layer(fixed.current()).is_some());
         let id = fixed.clone().add_layer();
         assert!(fixed.layer(id).is_none(), "new ids don't collide");
+    }
+
+    /// What holds in a document the app works on: ids unique; each group's parent a group in it
+    /// and each mask's its paint layer just below; no group inside itself; each group's contents
+    /// just below it; a paint layer; the current layer in it.
+    fn assert_sound(d: &Document, why: &str) {
+        let layers = d.layers();
+        let ids: Vec<LayerId> = layers.iter().map(|l| l.id).collect();
+        let unique: std::collections::HashSet<LayerId> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "{why}: ids repeat");
+        for (i, l) in layers.iter().enumerate() {
+            assert_ne!(l.parent, Some(l.id), "{why}: {:?} its own parent", l.id);
+            if l.kind == LayerKind::Mask {
+                let below = i.checked_sub(1).and_then(|b| layers.get(b));
+                assert!(
+                    below.is_some_and(|b| Some(b.id) == l.parent && b.kind == LayerKind::Paint),
+                    "{why}: mask {:?} not over its layer",
+                    l.id
+                );
+            } else if let Some(p) = l.parent {
+                assert_eq!(d.layer(p).map(|g| g.kind), Some(LayerKind::Group), "{why}: {:?}'s parent", l.id);
+            }
+            let mut at = d.group_of(l.id);
+            for _ in 0..=layers.len() {
+                at = at.and_then(|g| d.group_of(g));
+            }
+            assert_eq!(at, None, "{why}: {:?} inside a loop of groups", l.id);
+            if l.kind == LayerKind::Group {
+                let inside = d.contents(l.id);
+                assert!(
+                    inside.iter().rev().zip((0..i).rev()).all(|(id, j)| layers.get(j).map(|x| x.id) == Some(*id)),
+                    "{why}: group {:?}'s contents not just below it",
+                    l.id
+                );
+            }
+        }
+        assert!(layers.iter().any(|l| l.kind == LayerKind::Paint), "{why}: no paint layer");
+        assert!(d.layer(d.current()).is_some(), "{why}: the current layer");
+    }
+
+    #[test]
+    fn a_document_damaged_anyhow_repairs_into_one_that_holds_together() {
+        for seed in 0u64..2000 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut next = |n: usize| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state % n.max(1) as u64) as usize
+            };
+            // a document worked on: layers, masks, groups, moves, copies and deletions
+            let mut d = Document::new(64, 64);
+            let work = |d: &mut Document, n: usize, next: &mut dyn FnMut(usize) -> usize| {
+                for _ in 0..n {
+                    let ids: Vec<LayerId> = d.layers().iter().map(|l| l.id).collect();
+                    let any = ids.get(next(ids.len())).copied().unwrap_or(LayerId(0));
+                    match next(9) {
+                        0 | 1 => _ = d.add_layer(),
+                        2 => _ = d.add_mask(any),
+                        3 => _ = d.combine_down(any),
+                        4 => _ = d.set_current(any),
+                        5 => _ = d.duplicate_layer(any),
+                        6 => _ = d.delete_layer(any),
+                        7 => _ = d.move_layer(any, next(ids.len() + 1)),
+                        _ => _ = d.ungroup(any),
+                    }
+                }
+            };
+            work(&mut d, 4 + next(20), &mut next);
+            assert_sound(&d, &format!("seed {seed} worked on"));
+            // its file damaged: parents, kinds, ids and the current layer changed, entries dropped,
+            // repeated and swapped, groups put inside each other, fields and settings made unreadable
+            let mut v = serde_json::to_value(&d).unwrap();
+            let top = d.layers().iter().map(|l| l.id.0).max().unwrap_or(0) + 3;
+            for _ in 0..1 + next(4) {
+                let Some(layers) = v["layers"].as_array_mut() else { break };
+                let n = layers.len();
+                let i = next(n);
+                match next(10) {
+                    // a field of a layer, or a setting, no longer readable
+                    8 => {
+                        if let Some(fields) = layers[i].as_object_mut() {
+                            let key = fields.keys().nth(next(fields.len())).cloned().unwrap_or_default();
+                            fields.insert(key, "?".into());
+                        }
+                    }
+                    9 => v[["guide", "animation", "profile"][next(3)]] = 7.into(),
+                    // two groups inside each other
+                    7 => {
+                        let j = next(n);
+                        let (a, b) = (layers[i]["id"].clone(), layers[j]["id"].clone());
+                        layers[i]["kind"] = "Group".into();
+                        layers[j]["kind"] = "Group".into();
+                        layers[i]["parent"] = b;
+                        layers[j]["parent"] = a;
+                    }
+                    0 => {
+                        layers[i]["parent"] =
+                            if next(3) == 0 { serde_json::Value::Null } else { (next(top as usize) as u64).into() }
+                    }
+                    1 => layers[i]["kind"] = ["Paint", "Group", "Mask"][next(3)].into(),
+                    2 => layers[i]["id"] = (next(top as usize) as u64).into(),
+                    3 if n > 1 => _ = layers.remove(i),
+                    4 => {
+                        let copy = layers[i].clone();
+                        layers.insert(next(n + 1), copy);
+                    }
+                    5 => layers.swap(i, next(n)),
+                    _ => v["current"] = (next(top as usize) as u64).into(),
+                }
+            }
+            let Ok(damaged) = serde_json::from_value::<Document>(v) else { continue };
+            let why = format!("seed {seed} repaired");
+            // every paint layer and group kept (masks not over their layer may go; of entries
+            // sharing an id, the first stands)
+            let mut first = std::collections::HashSet::new();
+            let kept: Vec<LayerId> = damaged
+                .layers()
+                .iter()
+                .filter(|l| first.insert(l.id) && l.kind != LayerKind::Mask)
+                .map(|l| l.id)
+                .collect();
+            let fixed = damaged.repaired();
+            assert_sound(&fixed, &why);
+            for id in kept {
+                assert!(fixed.layer(id).is_some(), "{why}: {id:?} lost");
+            }
+            assert_eq!(fixed.clone().repaired(), fixed, "{why}: a second repair changes it");
+            // and worked on after
+            let mut after = fixed;
+            work(&mut after, 10, &mut next);
+            assert_sound(&after, &format!("seed {seed} worked on after its repair"));
+        }
+    }
+
+    #[test]
+    fn a_file_with_a_layer_or_setting_it_cant_read_opens_with_the_rest() {
+        let mut d = Document::new(40, 30);
+        let a = d.current();
+        let b = d.add_layer();
+        let c = d.add_layer();
+        d.guide.assisted = true;
+        let mut v = serde_json::to_value(&d).unwrap();
+        // the middle layer's opacity and the guide no longer what they should be
+        v["layers"][1]["opacity"] = "half".into();
+        v["guide"] = 7.into();
+        let back = serde_json::from_value::<Document>(v).unwrap().repaired();
+        assert_eq!(ids(&back), vec![a, c]);
+        assert!(back.layer(b).is_none());
+        assert_eq!(back.guide, crate::guide::Guide::default());
+        assert_eq!((back.width(), back.height()), (40, 30));
     }
 
     #[test]

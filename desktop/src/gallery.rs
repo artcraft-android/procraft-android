@@ -357,7 +357,9 @@ impl Gallery {
     }
 
     fn keep_presets(&self) {
-        if let Err(e) = std::fs::write(presets_path(), procraft_core::presets_json(self.presets.clone())) {
+        if let Err(e) =
+            crate::files::write_whole(&presets_path(), procraft_core::presets_json(self.presets.clone()).as_bytes())
+        {
             log::warn!("keeping the presets: {e}");
         }
     }

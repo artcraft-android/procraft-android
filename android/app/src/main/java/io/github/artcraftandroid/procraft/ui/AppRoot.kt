@@ -1,5 +1,6 @@
 package io.github.artcraftandroid.procraft.ui
 
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.activity.compose.BackHandler
@@ -65,7 +66,23 @@ fun AppRoot(vm: CanvasViewModel) {
         }
         // panels over the canvas are frosted
         CompositionLocalProvider(LocalBackdrops provides vm.backdrops) {
-            BoxWithConstraints(Modifier.fillMaxSize().background(Pc.Surround)) {
+            // files dragged in from another app: pictures as layers, brushes into the library
+            val activity = androidx.compose.ui.platform.LocalContext.current.activity()
+            val dropped = androidx.compose.runtime.remember(vm) {
+                object : androidx.compose.ui.draganddrop.DragAndDropTarget {
+                    override fun onDrop(event: androidx.compose.ui.draganddrop.DragAndDropEvent): Boolean {
+                        val uris = event.droppedFiles(activity)
+                        vm.dropOnCanvas(uris)
+                        return uris.isNotEmpty()
+                    }
+                }
+            }
+            BoxWithConstraints(
+                Modifier.fillMaxSize().background(Pc.Surround).dragAndDropTarget(
+                    shouldStartDragAndDrop = { it.fromElsewhere() },
+                    target = dropped,
+                ),
+            ) {
                 AndroidView(factory = { CanvasSurfaceView(it, vm) }, modifier = Modifier.fillMaxSize())
                 if (vm.transforming) TransformOverlay(vm)
                 if (vm.selecting) SelectionOverlay(vm, Pc.BarHeight)

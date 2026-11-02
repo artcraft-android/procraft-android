@@ -225,6 +225,24 @@ struct SavedSet {
     icons: u32,
 }
 
+/// The sets kept in `json`, as many of them and of their brushes as can be read: in a damaged
+/// file a set or a brush that can't be is left out, not the whole library. None if it isn't a
+/// list.
+fn read_saved_sets(json: &str) -> Option<Vec<SavedSet>> {
+    let serde_json::Value::Array(sets) = serde_json::from_str(json).ok()? else { return None };
+    let sets = sets.into_iter().filter_map(|set| {
+        let serde_json::Value::Object(mut fields) = set else { return None };
+        let brushes = match fields.insert("brushes".to_owned(), serde_json::Value::Array(Vec::new())) {
+            Some(serde_json::Value::Array(brushes)) => brushes,
+            _ => Vec::new(),
+        };
+        let mut set: SavedSet = serde_json::from_value(serde_json::Value::Object(fields)).ok()?;
+        set.brushes = brushes.into_iter().filter_map(|b| serde_json::from_value(b).ok()).collect();
+        Some(set)
+    });
+    Some(sets.collect())
+}
+
 impl SavedSet {
     /// Its icon, in today's numbering.
     fn icon_now(&self) -> u32 {
@@ -741,7 +759,7 @@ impl CanvasSession {
     /// Puts back a library kept with [`Self::saved_brush_library`]; false, changing nothing, if it
     /// can't be read.
     pub fn load_brush_library(&self, json: String) -> bool {
-        let Ok(saved) = serde_json::from_str::<Vec<SavedSet>>(&json) else { return false };
+        let Some(saved) = read_saved_sets(&json) else { return false };
         if saved.is_empty() {
             return false;
         }
@@ -781,8 +799,12 @@ impl CanvasSession {
             }
             let text = shipped.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
             let _ = std::fs::create_dir_all(&dir);
-            if let Err(e) = std::fs::write(&seen_file, text) {
-                log::error!("keeping the brushes seen: {e}");
+            // whole or not at all: cut short, the next start would add shipped brushes again
+            let kept = crate::project::write_atomically(&seen_file, |p| {
+                std::fs::write(p, &text).map_err(|e| crate::project::file_error("keeping the brushes seen", e))
+            });
+            if let Err(e) = kept {
+                log::error!("{e}");
             }
         }
         if loaded && let Ok(choices) = std::fs::read_to_string(dir.join(CHOICES_FILE)) {

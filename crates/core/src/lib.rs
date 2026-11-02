@@ -112,7 +112,7 @@ pub use presets::{
     CanvasPreset, P3, SRGB, per_inch, preset_height, preset_label, preset_number, preset_width, presets_from_json,
     presets_json, profile_chip, standard_presets,
 };
-pub use project::{ArtworkInfo, export_file_name, read_signature, write_signature};
+pub use project::{ArtworkInfo, export_file_name, read_signature, save_failure_said, write_signature};
 pub use project::{PackageTimeLapse, package_time_lapse};
 pub use project::{PagesOutcome, PsdOutcome, import_pages, import_psd};
 pub use quick_menu::{
@@ -855,6 +855,9 @@ pub(crate) struct Shared {
     /// The artwork's edits as the last save that worked found them, [`project::NOT_SAVED`]
     /// before one (read without waiting on a save).
     pub(crate) edits_saved: std::sync::atomic::AtomicU64,
+    /// Why the autosave failed, not yet asked for, and whether it is failing (told once until a
+    /// save works again); a lock of its own, never held through a save.
+    pub(crate) save_failure: Mutex<(Option<String>, bool)>,
     /// The canvas's touches (they call into the session, so they keep their own lock).
     pub(crate) touches: touch::TouchState,
 }
@@ -1186,6 +1189,7 @@ impl CanvasSession {
                 projection: Mutex::new(None),
                 saving: Mutex::new(project::Saved::default()),
                 edits_saved: std::sync::atomic::AtomicU64::new(project::NOT_SAVED),
+                save_failure: Mutex::new((None, false)),
                 touches: Mutex::new(touch::Touches::default()),
             }),
         })
