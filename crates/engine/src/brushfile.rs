@@ -278,7 +278,13 @@ const PLAIN: &[(&str, &str, Kept)] = &[
     ("stamp_secondary_tilt_angle", "secondaryColorJitterTiltAngle", Kept::Same),
     ("attack_tilt", "attackTilt", Kept::Switch),
     ("attack_tilt_angle", "attackTiltAngle", Kept::Same),
+    // the barrel roll's switch for the attack, as `attackTilt` is the tilt's
+    ("attack_roll", "attackRoll", Kept::Switch),
     ("tilt_roundness_max", "dynamicsTiltShapeRoundness", Kept::Same),
+    // the roundness at full pressure (the tilt's counterpart above), and a switch on the
+    // pressure's size: kept for a brush shared again, not drawn
+    ("pressure_roundness_max", "dynamicsPressureShapeRoundness", Kept::Same),
+    ("pressure_size_clamped", "maxPressureSizeClamped", Kept::Switch),
     ("tilt_opacity", "dynamicsTiltOpacity", Kept::Same),
     ("tilt_gradation", "dynamicsTiltGradation", Kept::Same),
     ("tilt_bleed", "dynamicsTiltBleed", Kept::Curve(1.0)),
@@ -968,6 +974,37 @@ mod tests {
                 brush.setting(key)
             );
         }
+    }
+
+    #[test]
+    fn the_rolls_attack_and_the_pressures_roundness_and_size_switch_go_out_again() {
+        let pictures = Pictures {
+            shape_png: b"s",
+            grain_png: None,
+            metallic_png: None,
+            roughness_png: None,
+            thumbnail_png: b"t",
+            author_png: None,
+            signature_png: None,
+            secondary: None,
+        };
+        let keys = ["attack_roll", "pressure_size_clamped", "pressure_roundness_max"];
+        let values = |back: &BrushFile| keys.map(|key| back.settings.iter().find(|(k, _)| k == key).map(|(_, v)| *v));
+        // a brush made here writes them as the files' own brushes have them: off, off and 1
+        let plain = read(&write(&Brush::round_pen(), "", &pictures)).unwrap();
+        assert_eq!(values(&plain), [Some(0.0), Some(0.0), Some(1.0)]);
+        // one that had them keeps them, and writes them again
+        let mut brush = Brush::round_pen();
+        for (k, v) in keys.into_iter().zip([1.0, 1.0, 0.4]) {
+            brush.set_setting(k, v);
+        }
+        let back = read(&write(&brush, "", &pictures)).unwrap();
+        assert_eq!(values(&back), [Some(1.0), Some(1.0), Some(0.4)]);
+        let mut again = Brush::round_pen();
+        for (k, v) in &back.settings {
+            again.set_setting(k, *v);
+        }
+        assert_eq!(keys.map(|k| again.setting(k)), [1.0, 1.0, 0.4]);
     }
 
     #[test]

@@ -30,6 +30,7 @@ const STARTS: &[(&str, f32)] = &[
     // its shape until the roundness tilt takes it
     ("tilt_size_compression", 1.0),
     ("tilt_roundness_max", 1.0),
+    ("pressure_roundness_max", 1.0),
     // the newer spacing (see [`Brush::spacing`])
     ("spacing_version", 1.0),
     ("classic_taper", 1.0),
