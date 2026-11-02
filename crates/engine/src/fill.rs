@@ -1,10 +1,16 @@
 //! Filling by colour (dropping a colour on the canvas): a flood from a point over the pixels whose
 //! colour is near its own, and the colour poured into it so that soft edges stay soft.
 
+use std::sync::{Arc, OnceLock};
+
 use crate::selection::Mask;
 
 /// How far past the threshold (as a colour distance, 0..1) the fill fades out.
 pub const FADE: f32 = 0.09;
+
+/// The most pixels a flood works each pixel's reach out for (8K x 4K): past it, the memory the
+/// lists may take outweighs the speed, and each fill is a flood.
+pub(crate) const REACH_MOST: u64 = 8192 * 4096;
 
 /// The pixels' colour distances from a seed pixel, kept to flood again at another threshold.
 pub struct Flood {
@@ -13,9 +19,13 @@ pub struct Flood {
     seed: (u32, u32),
     /// Each pixel's distance from the seed's colour: the largest difference of their
     /// premultiplied channels, 0..255.
-    distance: Vec<u8>,
+    distance: Arc<Vec<u8>>,
     /// The seed pixel's colour (premultiplied RGBA8).
     pub colour: [u8; 4],
+    /// Each pixel's reach, worked out on a thread of its own as the flood starts: the least
+    /// threshold (as a distance) at which the fill gets to it, over every way there from the
+    /// seed. With it a fill is one pass over the pixels; until then, a flood.
+    reach: Arc<OnceLock<Vec<u8>>>,
 }
 
 impl Flood {
@@ -28,16 +38,20 @@ impl Flood {
         }
         let i = (seed.1 as usize * width as usize + seed.0 as usize) * 4;
         let colour: [u8; 4] = pixels.get(i..i + 4)?.try_into().ok()?;
-        let distance = pixels.as_chunks::<4>().0.iter().take(count).map(|p| distance(p, &colour)).collect();
-        Some(Flood { width, height, seed, distance, colour })
+        let distance = Arc::new(pixels.as_chunks::<4>().0.iter().take(count).map(|p| distance(p, &colour)).collect());
+        let flood = Flood { width, height, seed, distance, colour, reach: Arc::new(OnceLock::new()) };
+        flood.work_out_reach();
+        Some(flood)
     }
 
     /// The pixel the fill is measured from, now `seed`, for a seed of the same colour (the
     /// distances stay as they are). False, and left as it was, if `seed` is off the picture.
     pub fn reseed(&mut self, seed: (u32, u32)) -> bool {
         let on = seed.0 < self.width && seed.1 < self.height;
-        if on {
+        if on && seed != self.seed {
             self.seed = seed;
+            self.reach = Arc::new(OnceLock::new());
+            self.work_out_reach();
         }
         on
     }
@@ -46,12 +60,30 @@ impl Flood {
     /// through pixels within reach, fully where the distance is within the threshold, fading out
     /// over [`FADE`] past it.
     pub fn mask(&self, threshold: f32) -> Mask {
-        let t = threshold.clamp(0.0, 1.0) * 255.0;
-        let fade = FADE * 255.0;
-        let weights: [u8; 256] = std::array::from_fn(|d| {
-            let d = d as f32;
-            if d <= t { 255 } else { (((t + fade - d) / fade).clamp(0.0, 1.0) * 255.0).round() as u8 }
-        });
+        match self.reach.get() {
+            Some(reach) => self.by_reach(reach, threshold),
+            None => self.by_scanlines(threshold),
+        }
+    }
+
+    /// [`Flood::mask`] by each pixel's reach: one pass.
+    fn by_reach(&self, reach: &[u8], threshold: f32) -> Mask {
+        let weights = weights(threshold);
+        // the farthest distance the fill reaches (the weights only fall with distance)
+        let cut = weights.iter().rposition(|&v| v > 0).unwrap_or(0) as u8;
+        let mut m = Mask::empty(self.width, self.height);
+        for ((v, &r), &d) in m.data.iter_mut().zip(reach).zip(self.distance.iter()) {
+            if r <= cut {
+                *v = weights.get(usize::from(d)).copied().unwrap_or(0);
+            }
+        }
+        m
+    }
+
+    /// [`Flood::mask`] by a flood: scanlines from the seed, each span filled whole, then the runs
+    /// above and below it seeded.
+    fn by_scanlines(&self, threshold: f32) -> Mask {
+        let weights = weights(threshold);
         // the farthest distance the fill reaches (the weights only fall with distance)
         let cut = weights.iter().rposition(|&v| v > 0).unwrap_or(0) as u8;
         let mut m = Mask::empty(self.width, self.height);
@@ -96,6 +128,122 @@ impl Flood {
         }
         m
     }
+
+    /// Starts working out each pixel's reach on a thread of its own (none if one can't start: the
+    /// fills stay floods).
+    fn work_out_reach(&self) {
+        if u64::from(self.width) * u64::from(self.height) > REACH_MOST {
+            return;
+        }
+        let (distance, reach) = (self.distance.clone(), self.reach.clone());
+        let (w, h, seed) = (self.width as usize, self.height as usize, (self.seed.0 as usize, self.seed.1 as usize));
+        let _ = std::thread::Builder::new().name("flood reach".to_owned()).spawn(move || {
+            let _ = reach.set(reaches(&distance, w, h, seed, u8::MAX));
+        });
+    }
+}
+
+/// Each pixel's reach (see [`Flood::reach`]) over `far`, the distances (0 to `top`) of a `w` x
+/// `h` picture, from `seed`: a flood level by level, from the least distance up, each level's
+/// scanlines filling what it reaches. A pixel past the level it is met at is reached at its own
+/// distance, whichever way it is met, so it waits once in that level's list. What no level below
+/// `top` reaches is reached at it.
+pub(crate) fn reaches<T>(far: &[T], w: usize, h: usize, seed: (usize, usize), top: T) -> Vec<T>
+where
+    T: Copy + Ord + Into<usize> + TryFrom<usize>,
+{
+    // not yet reached (or reached at the top)
+    let open_mark = top;
+    let mut reach = vec![open_mark; w * h];
+    // pixels waiting in a later level's list, a bit each
+    let mut waiting = vec![0u64; (w * h).div_ceil(64)];
+    let mut levels: Vec<Vec<u32>> = vec![Vec::new(); top.into() + 1];
+    let index = |i: usize| u32::try_from(i).unwrap_or(u32::MAX);
+    let start = seed.1 * w + seed.0;
+    if let Some(list) = far.get(start).and_then(|&d| levels.get_mut(d.into())) {
+        list.push(index(start));
+    }
+    for level in 0..top.into() {
+        let Ok(lv) = T::try_from(level) else { break };
+        let open = |i: usize, reach: &[T]| reach.get(i) == Some(&open_mark) && far.get(i).is_some_and(|&d| d <= lv);
+        while let Some(i) = levels.get_mut(level).and_then(Vec::pop) {
+            let i = i as usize;
+            if !open(i, &reach) {
+                continue;
+            }
+            let (y, x) = (i / w, i % w);
+            let row = y * w;
+            let mut l = x;
+            while l > 0 && open(row + l - 1, &reach) {
+                l -= 1;
+            }
+            let mut r = x;
+            while r + 1 < w && open(row + r + 1, &reach) {
+                r += 1;
+            }
+            if let Some(span) = reach.get_mut(row + l..=row + r) {
+                span.fill(lv);
+            }
+            // what meets the span: runs within this level go on now, pixels past it wait (once)
+            // for their own
+            let mut meet = |j: usize, levels: &mut Vec<Vec<u32>>, reach: &[T]| -> bool {
+                let Some(&d) = far.get(j) else { return false };
+                if reach.get(j) != Some(&open_mark) {
+                    return false;
+                }
+                if d <= lv {
+                    if let Some(list) = levels.get_mut(level) {
+                        list.push(index(j));
+                    }
+                    return true;
+                }
+                if let Some(word) = waiting.get_mut(j / 64) {
+                    let bit = 1u64 << (j % 64);
+                    if *word & bit == 0 {
+                        *word |= bit;
+                        if let Some(list) = levels.get_mut(d.into()) {
+                            list.push(index(j));
+                        }
+                    }
+                }
+                false
+            };
+            if l > 0 {
+                meet(row + l - 1, &mut levels, &reach);
+            }
+            if r + 1 < w {
+                meet(row + r + 1, &mut levels, &reach);
+            }
+            for ny in [y.wrapping_sub(1), y + 1] {
+                if ny >= h {
+                    continue;
+                }
+                let nrow = ny * w;
+                let mut xi = l;
+                while xi <= r {
+                    if meet(nrow + xi, &mut levels, &reach) {
+                        // the rest of this run is reached from there
+                        while xi < r && open(nrow + xi + 1, &reach) {
+                            xi += 1;
+                        }
+                    }
+                    xi += 1;
+                }
+            }
+        }
+    }
+    reach
+}
+
+/// How much a pixel at each distance takes a fill at `threshold` (0..1): fully within it,
+/// fading out over [`FADE`] past it.
+fn weights(threshold: f32) -> [u8; 256] {
+    let t = threshold.clamp(0.0, 1.0) * 255.0;
+    let fade = FADE * 255.0;
+    std::array::from_fn(|d| {
+        let d = d as f32;
+        if d <= t { 255 } else { (((t + fade - d) / fade).clamp(0.0, 1.0) * 255.0).round() as u8 }
+    })
 }
 
 /// The largest difference of two premultiplied pixels' channels.
@@ -204,6 +352,16 @@ mod tests {
         let start = std::time::Instant::now();
         let Some(flood) = Flood::new(w, h, &px, (100, 100)) else { return };
         println!("measured: {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+        let start = std::time::Instant::now();
+        std::hint::black_box(flood.by_scanlines(0.2));
+        println!("a fill by flood (before the reach is in): {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+        let start = std::time::Instant::now();
+        std::hint::black_box(reaches(&flood.distance, w as usize, h as usize, (100, 100), u8::MAX));
+        println!("each pixel's reach (on its own thread): {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+        // the thread's own, before the fills are timed
+        while flood.reach.get().is_none() {
+            std::thread::yield_now();
+        }
         for threshold in [0.05f32, 0.2, 0.5] {
             let mut each = Vec::new();
             for _ in 0..5 {
@@ -213,6 +371,62 @@ mod tests {
             }
             each.sort_by(f64::total_cmp);
             println!("pour {threshold}: {:.1} ms (fastest {:.1})", each[2], each[0]);
+        }
+    }
+
+    /// The fill at `threshold` the plain way: a scanline flood over the pixels within reach.
+    fn flooded(flood: &Flood, threshold: f32) -> Vec<u8> {
+        let weights = weights(threshold);
+        let cut = weights.iter().rposition(|&v| v > 0).unwrap_or(0) as u8;
+        let (w, h) = (flood.width as usize, flood.height as usize);
+        let mut m = vec![0u8; w * h];
+        let mut stack = vec![(flood.seed.0 as usize, flood.seed.1 as usize)];
+        while let Some((x, y)) = stack.pop() {
+            let i = y * w + x;
+            if m[i] != 0 || flood.distance[i] > cut {
+                continue;
+            }
+            m[i] = weights[usize::from(flood.distance[i])].max(1);
+            for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
+                if nx < w && ny < h {
+                    stack.push((nx, ny));
+                }
+            }
+        }
+        // reached but weighed nothing (past the fade): as the masks keep it
+        for (v, &d) in m.iter_mut().zip(flood.distance.iter()) {
+            if *v != 0 {
+                *v = weights[usize::from(d)];
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn the_flood_by_reach_fills_what_a_plain_flood_does() {
+        for seed in 0u32..40 {
+            let mut state = seed;
+            let mut next = |n: u32| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) % n.max(1)
+            };
+            let (w, h) = (8 + next(40), 8 + next(30));
+            // blobs of a few greys over noise, so there are walls, gaps and soft steps
+            let greys: Vec<u8> = (0..4).map(|_| next(256) as u8).collect();
+            let mut px = vec![0u8; (w * h * 4) as usize];
+            for p in px.chunks_mut(4) {
+                let g = greys[next(4) as usize].saturating_add(next(20) as u8);
+                p.copy_from_slice(&[g, g, g, 255]);
+            }
+            let start = (next(w), next(h));
+            let Some(flood) = Flood::new(w, h, &px, start) else { continue };
+            for threshold in [0.0f32, 0.03, 0.1, 0.25, 0.5, 0.8, 1.0] {
+                let plain = flooded(&flood, threshold);
+                let reach =
+                    reaches(&flood.distance, w as usize, h as usize, (start.0 as usize, start.1 as usize), u8::MAX);
+                assert_eq!(flood.by_reach(&reach, threshold).data, plain, "seed {seed} threshold {threshold}");
+                assert_eq!(flood.by_scanlines(threshold).data, plain, "seed {seed} threshold {threshold}");
+            }
         }
     }
 

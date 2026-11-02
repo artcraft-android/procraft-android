@@ -1015,6 +1015,12 @@ fn the_eyedropper_sees_the_window_and_the_colour_under_the_point() {
     // the window is 200 wide and the canvas fills it: nothing is off the canvas inside it, but
     // outside the window is
     assert_eq!(s.pick(250.0, 100.0, 21).unwrap().rgb, None);
+    // the background hidden: a clear spot holds nothing (black), though the surround shows there
+    s.set_background_visible(false);
+    let clear = s.pick(100.0, 40.0, 21).unwrap();
+    assert_eq!(clear.rgb, Some(0x000000));
+    assert_ne!(&clear.pixels[(10 * 21 + 10) * 4..(10 * 21 + 10) * 4 + 3], &[0, 0, 0]);
+    assert_eq!(s.pick(100.0, 100.0, 21).unwrap().rgb, Some(0x000000));
 }
 
 #[test]
@@ -2806,6 +2812,13 @@ fn two_brushes_combine_into_a_dual_brush_and_come_apart_again() {
     assert!(!s.combine_brushes(0, 1, 2));
     assert!(!s.combine_brushes(0, 2, 1));
     assert!(!s.combine_brushes(0, 2, 2));
+    // the two trade places: the second leads, and back
+    assert!(s.swap_dual_brush(0, 1));
+    assert_eq!(s.brush_library()[0].brushes[1].name, names[3]);
+    assert!(s.brush_is_dual(0, 1));
+    assert!(s.swap_dual_brush(0, 1));
+    assert_eq!(s.brush_library()[0].brushes[1].name, names[1]);
+    assert!(!s.swap_dual_brush(0, 2));
     // written out and read back, it stays dual
     let saved = s.saved_brush_library();
     let t = CanvasSession::new(64, 64);
@@ -2818,6 +2831,71 @@ fn two_brushes_combine_into_a_dual_brush_and_come_apart_again() {
     assert_eq!(apart.len(), names.len());
     assert_eq!(apart[2], names[3]);
     assert!(!s.uncombine_brush(0, 1));
+}
+
+#[test]
+fn library_work_keeps_the_tool_on_a_brush_and_comes_back_saved() {
+    for seed in [7u32, 33] {
+        let s = CanvasSession::new(64, 64);
+        let mut state = seed;
+        let mut next = |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n.max(1)
+        };
+        // each set's brushes as they show: names, and which are dual
+        let shown = |s: &CanvasSession| {
+            s.brush_library()
+                .into_iter()
+                .enumerate()
+                .map(|(i, set)| {
+                    let brushes: Vec<(String, bool)> =
+                        set.brushes.iter().map(|b| (b.name.clone(), s.brush_is_dual(i as u32, b.index))).collect();
+                    (set.name, brushes)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut done = Vec::new();
+        for _ in 0..200 {
+            let library = s.brush_library();
+            let sets = library.len() as u32;
+            let set = next(sets);
+            let n = library.get(set as usize).map_or(0, |x| x.brushes.len() as u32);
+            let op = next(9);
+            done.push(op);
+            match op {
+                0 => _ = s.duplicate_brush(set, next(n)),
+                1 => _ = s.move_brush(set, next(n), next(sets), next(8)),
+                2 => _ = s.delete_brush(set, next(n)),
+                3 => {
+                    // a tool on either of the two then uses the dual brush, in the first's place
+                    let (a, b) = (next(n), next(n));
+                    let c = s.current_brush();
+                    if s.combine_brushes(set, a, b) && c.set == set && (c.index == a || c.index == b) {
+                        let now = s.current_brush();
+                        let at = if a > b { a - 1 } else { a };
+                        assert_eq!((now.set, now.index), (set, at), "seed {seed}: after {done:?}");
+                        assert!(s.brush_is_dual(set, at));
+                    }
+                }
+                4 => _ = s.uncombine_brush(set, next(n)),
+                5 => _ = s.swap_dual_brush(set, next(n)),
+                6 => _ = s.select_brush(set, next(n)),
+                7 => s.set_tool([ToolKind::Paint, ToolKind::Erase, ToolKind::Smudge][next(3) as usize]),
+                _ => _ = s.new_brush(set),
+            }
+            // the tool is on a brush there is
+            let library = s.brush_library();
+            let c = s.current_brush();
+            if library.iter().any(|x| !x.brushes.is_empty()) {
+                let there = library.get(c.set as usize).is_some_and(|x| (c.index as usize) < x.brushes.len());
+                assert!(there, "seed {seed}: the tool on ({}, {}) after {done:?}", c.set, c.index);
+            }
+        }
+        // written out and read back: the same sets, brushes and dual brushes
+        let t = CanvasSession::new(64, 64);
+        assert!(t.load_brush_library(s.saved_brush_library()));
+        assert_eq!(shown(&t), shown(&s), "seed {seed}: after {done:?}");
+    }
 }
 
 #[test]
@@ -6670,6 +6748,9 @@ fn group_work_undoes_and_redoes_whole_and_comes_back_saved() {
             canvas.invalidate();
         }
         let whole = composite(&s);
+        // what the caches showed is what compositing it all shows (but their 8-bit rounding)
+        let most = whole.iter().zip(&end.0).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+        assert!(most <= 4, "seed {seed}: cached and whole differ by {most} after {done:?}");
         let gpu = s.shared.lock().gpu.clone().unwrap();
         let dir = std::env::temp_dir().join(format!("procraft-groups-{}-{seed}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -7074,11 +7155,18 @@ fn a_blend_mode_inside_a_group_blends_with_what_is_below_the_group() {
     let through = pixel(&s, 16, 16);
     assert_eq!(through, shown);
     assert!(through[0].abs_diff(128) <= 2 && through[1] <= 2, "{through:?}");
-    // the same while what is below and above is kept aside
+    // the same while what is below and above is kept aside, the group with its Multiply above
+    // the layer worked on as much as around it
     s.shared.lock().canvas.as_mut().unwrap().set_cache_composites(true);
     let top = s.add_layer();
     assert!(s.select_layer(grey));
     assert_eq!(pixel(&s, 16, 16), through);
+    assert!(s.select_layer(bottom));
+    s.set_color(1.0, 0.0, 0.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(4.0, 4.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert_eq!(pixel(&s, 16, 16), through);
+    assert!(s.select_layer(grey));
     // given an opacity of its own the group is composited first: grey over the red, halved
     assert!(s.set_layer_opacity(group, 0.5, true));
     let alone = pixel(&s, 16, 16);
@@ -7411,7 +7499,7 @@ fn touches_anyhow_leave_no_stroke_open_and_undo_whole() {
         let mut done = Vec::new();
         for _ in 0..300 {
             t += 6.0 + f64::from(next(60));
-            let op = next(12);
+            let op = next(14);
             done.push(op);
             match op {
                 0 | 1 if down.len() < 4 => {
@@ -7436,6 +7524,15 @@ fn touches_anyhow_leave_no_stroke_open_and_undo_whole() {
                 11 if next(15) == 0 => {
                     run(&s, s.touch_cancel());
                     down.clear();
+                }
+                // the platform takes one pointer back (a hand on the screen)
+                12 if !down.is_empty() && next(4) == 0 => {
+                    let (id, _, _) = down.remove(next(down.len() as u32) as usize);
+                    run(&s, s.touch_cancel_one(id));
+                }
+                13 if next(3) == 0 => {
+                    let (x, y) = (5.0 + next(90) as f32, 5.0 + next(90) as f32);
+                    run(&s, s.touch_pen_button(next(2) == 0, x, y));
                 }
                 _ => {}
             }

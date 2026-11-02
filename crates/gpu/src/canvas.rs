@@ -6245,6 +6245,17 @@ impl Canvas {
         read_texture(gpu, &self.composite, self.width, self.height)
     }
 
+    /// The composite's pixel at canvas pixel (`x`, `y`) as last rendered (premultiplied RGBA8);
+    /// none off the canvas. Waits for the GPU.
+    pub fn read_composite_pixel(&self, gpu: &Gpu, x: u32, y: u32) -> Option<[u8; 4]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let (x, y) = (i32::try_from(x).ok()?, i32::try_from(y).ok()?);
+        let px = start_reading_part(gpu, &self.composite, IRect::new(x, y, x + 1, y + 1)).pixels().ok()?;
+        Some([*px.first()?, *px.get(1)?, *px.get(2)?, *px.get(3)?])
+    }
+
     /// The composite's pixels as they would be without the layers `left_out` (the gallery's
     /// thumbnail leaves private layers out); the canvas's own composite is made again after.
     pub fn read_composite_without(

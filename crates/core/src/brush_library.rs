@@ -621,6 +621,19 @@ impl CanvasSession {
         true
     }
 
+    /// Dual brush `index` of `set` swaps its two brushes: the second leads (its own settings, and
+    /// the colour) and the first follows. False if it isn't a dual brush.
+    pub fn swap_dual_brush(&self, set: u32, index: u32) -> bool {
+        let mut st = self.shared.lock();
+        let Some(brush) = st.library.get_mut(set as usize).and_then(|e| e.brushes.get_mut(index as usize)) else {
+            return false;
+        };
+        let Some(mut second) = brush.secondary.take() else { return false };
+        std::mem::swap(brush, &mut *second);
+        brush.secondary = Some(second);
+        true
+    }
+
     /// Whether brush `index` of `set` is a dual brush.
     pub fn brush_is_dual(&self, set: u32, index: u32) -> bool {
         let st = self.shared.lock();

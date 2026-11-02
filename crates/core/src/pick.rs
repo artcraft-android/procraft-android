@@ -60,14 +60,14 @@ impl CanvasSession {
             }),
         );
         let pixels = read_texture(gpu, &texture, side, side).ok()?;
-        let on_canvas = view
+        // the colour is the canvas's own pixel there as composited, not as shown: where it is
+        // clear with the background hidden, that is what the composite holds, not the surround
+        let (w, h) = (st.doc.width() as f32, st.doc.height() as f32);
+        let rgb = view
             .screen_to_canvas(Vec2::new(x, y))
-            .is_some_and(|p| p.x >= 0.0 && p.y >= 0.0 && p.x < st.doc.width() as f32 && p.y < st.doc.height() as f32);
-        let middle = ((side / 2 * side + side / 2) * 4) as usize;
-        let rgb = pixels
-            .get(middle..middle + 3)
-            .filter(|_| on_canvas)
-            .map(|c| c.iter().fold(0u32, |acc, v| (acc << 8) | u32::from(*v)));
+            .filter(|p| p.x >= 0.0 && p.y >= 0.0 && p.x < w && p.y < h)
+            .and_then(|p| canvas.read_composite_pixel(gpu, p.x as u32, p.y as u32))
+            .map(|[r, g, b, _]| u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b));
         Some(Pick { rgb, side, pixels })
     }
 }

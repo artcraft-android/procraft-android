@@ -1,6 +1,8 @@
 //! Selections: how much of each canvas pixel is selected (0 none, 255 all), made from shapes or by
 //! colour, and combined, inverted and feathered.
 
+use std::sync::{Arc, OnceLock};
+
 use crate::geom::Vec2;
 use crate::par::cores;
 
@@ -239,31 +241,99 @@ impl Mask {
     /// The pixels joined to `seed` whose colour is within `threshold` (0..1) of the seed's, in
     /// premultiplied RGBA8 `pixels` the mask's size: an automatic selection.
     pub fn by_colour(width: u32, height: u32, pixels: &[u8], seed: (u32, u32), threshold: f32) -> Mask {
-        let mut m = Mask::empty(width, height);
+        ColourFlood::new(width, height, pixels, seed).map_or_else(|| Mask::empty(width, height), |f| f.mask(threshold))
+    }
+}
+
+/// How far apart two colours may be added up (the four channels' differences, 0..255 each) and
+/// still be within a threshold: twice 255. Farther ones are kept as one more.
+const APART_MOST: u16 = 510;
+
+/// An automatic selection's measure of a layer from a seed, kept while its threshold is dragged:
+/// each pixel's colour difference from the seed's (the four channels' differences added up), and,
+/// once worked out on a thread of its own, each pixel's reach (the least difference at which the
+/// selection gets to it, see [`crate::fill::reaches`]): with it a selection is one pass, until
+/// then a flood.
+pub struct ColourFlood {
+    width: u32,
+    height: u32,
+    seed: (u32, u32),
+    apart: Arc<Vec<u16>>,
+    reach: Arc<OnceLock<Vec<u16>>>,
+}
+
+impl ColourFlood {
+    /// `pixels` (premultiplied RGBA8, `width` x `height`) measured from the pixel at `seed`; None
+    /// when the seed is off the picture.
+    pub fn new(width: u32, height: u32, pixels: &[u8], seed: (u32, u32)) -> Option<ColourFlood> {
         let (w, h) = (width as usize, height as usize);
         let (sx, sy) = (seed.0 as usize, seed.1 as usize);
-        if sx >= w || sy >= h {
-            return m;
+        if sx >= w || sy >= h || pixels.len() < w * h * 4 {
+            return None;
         }
         let i = (sy * w + sx) * 4;
-        let target = match pixels.get(i..i + 4) {
-            Some(&[r, g, b, a]) => [r, g, b, a],
-            _ => [0; 4],
-        };
-        // the four channels' differences added up (0..255 each), at most this
-        let limit = threshold.clamp(0.0, 1.0) * 2.0 * 255.0;
-        // the pixels near the seed's colour, each worked out once, in bands side by side, are
-        // marked open (1) in the mask until the fill reaches them (255)
+        let target: [u8; 4] = pixels.get(i..i + 4)?.try_into().ok()?;
+        // each worked out once, in bands side by side
         let colours = pixels.as_chunks::<4>().0;
-        by_bands(&mut m.data, w, |first, rows| {
+        let mut apart = vec![0u16; w * h];
+        by_bands(&mut apart, w, |first, rows| {
             for (n, p) in rows.iter_mut().zip(colours.iter().skip(first * w)) {
-                let apart: u32 = p.iter().zip(&target).map(|(a, b)| u32::from(a.abs_diff(*b))).sum();
-                *n = u8::from(apart as f32 <= limit);
+                let sum: u16 = p.iter().zip(&target).map(|(a, b)| u16::from(a.abs_diff(*b))).sum();
+                *n = sum.min(APART_MOST + 1);
             }
         });
-        // scanlines: each span selected whole, then the runs above and below it seeded; each row
-        // looked along as a slice
-        let mut stack = vec![(sx, sy)];
+        Some(ColourFlood { width, height, seed, apart: Arc::new(apart), reach: Arc::new(OnceLock::new()) })
+    }
+
+    /// The pixel it is measured from.
+    pub fn seed(&self) -> (u32, u32) {
+        self.seed
+    }
+
+    /// Starts working out each pixel's reach on a thread of its own (not for very large pictures,
+    /// nor if a thread can't start: the selections stay floods).
+    pub fn work_out_reach(&self) {
+        if u64::from(self.width) * u64::from(self.height) > crate::fill::REACH_MOST {
+            return;
+        }
+        let (apart, reach) = (self.apart.clone(), self.reach.clone());
+        let (w, h, seed) = (self.width as usize, self.height as usize, (self.seed.0 as usize, self.seed.1 as usize));
+        let _ = std::thread::Builder::new().name("selection reach".to_owned()).spawn(move || {
+            let _ = reach.set(crate::fill::reaches(&apart, w, h, seed, APART_MOST + 1));
+        });
+    }
+
+    /// The pixels joined to the seed whose colour is within `threshold` (0..1) of the seed's.
+    pub fn mask(&self, threshold: f32) -> Mask {
+        // the differences added up, at most this
+        let cut = (threshold.clamp(0.0, 1.0) * 2.0 * 255.0).floor() as u16;
+        match self.reach.get() {
+            Some(reach) => {
+                let mut m = Mask::empty(self.width, self.height);
+                by_bands(&mut m.data, self.width as usize, |first, rows| {
+                    let w = self.width as usize;
+                    for (v, &r) in rows.iter_mut().zip(reach.iter().skip(first * w)) {
+                        *v = if r <= cut { 255 } else { 0 };
+                    }
+                });
+                m
+            }
+            None => self.by_scanlines(cut),
+        }
+    }
+
+    /// [`ColourFlood::mask`] by a flood: scanlines from the seed, each span selected whole, then
+    /// the runs above and below it seeded; each row looked along as a slice.
+    fn by_scanlines(&self, cut: u16) -> Mask {
+        let mut m = Mask::empty(self.width, self.height);
+        let (w, h) = (self.width as usize, self.height as usize);
+        // the pixels near the seed's colour are marked open (1) until the fill reaches them (255)
+        by_bands(&mut m.data, w, |first, rows| {
+            for (n, &d) in rows.iter_mut().zip(self.apart.iter().skip(first * w)) {
+                *n = u8::from(d <= cut);
+            }
+        });
+        let mut stack = vec![(self.seed.0 as usize, self.seed.1 as usize)];
         while let Some((x, y)) = stack.pop() {
             let Some(line) = m.data.get_mut(y * w..(y + 1) * w) else { continue };
             if line.get(x) != Some(&1) {
@@ -523,6 +593,65 @@ fn blur_row(row: &mut [f32], r: usize, line: &mut Vec<f32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An automatic selection the plain way: the pixels joined to the seed through pixels whose
+    /// colour, the four channels' differences added up, is within the threshold.
+    fn selected(w: usize, h: usize, pixels: &[u8], seed: (usize, usize), threshold: f32) -> Vec<u8> {
+        let limit = threshold.clamp(0.0, 1.0) * 2.0 * 255.0;
+        let i = (seed.1 * w + seed.0) * 4;
+        let target = [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]];
+        let near = |j: usize| {
+            let p = &pixels[j * 4..j * 4 + 4];
+            let apart: u32 = p.iter().zip(&target).map(|(a, b)| u32::from(a.abs_diff(*b))).sum();
+            apart as f32 <= limit
+        };
+        let mut m = vec![0u8; w * h];
+        let mut stack = vec![seed];
+        while let Some((x, y)) = stack.pop() {
+            let j = y * w + x;
+            if m[j] != 0 || !near(j) {
+                continue;
+            }
+            m[j] = 255;
+            for (nx, ny) in [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)] {
+                if nx < w && ny < h {
+                    stack.push((nx, ny));
+                }
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn an_automatic_selection_by_reach_or_flood_selects_what_a_plain_flood_does() {
+        for seed in 0u32..40 {
+            let mut state = seed;
+            let mut next = |n: u32| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) % n.max(1)
+            };
+            let (w, h) = (8 + next(40), 8 + next(30));
+            let colours: Vec<[u8; 4]> =
+                (0..4).map(|_| [next(256) as u8, next(256) as u8, next(256) as u8, next(256) as u8]).collect();
+            let mut px = vec![0u8; (w * h * 4) as usize];
+            for p in px.chunks_mut(4) {
+                let c = colours[next(4) as usize];
+                p.copy_from_slice(&c.map(|v| v.saturating_add(next(24) as u8)));
+            }
+            let start = (next(w), next(h));
+            let flood = ColourFlood::new(w, h, &px, start).unwrap();
+            let top = APART_MOST + 1;
+            let reach =
+                crate::fill::reaches(&flood.apart, w as usize, h as usize, (start.0 as usize, start.1 as usize), top);
+            let _ = flood.reach.set(reach);
+            for threshold in [0.0f32, 0.05, 0.1, 0.3, 0.5, 0.9, 1.0] {
+                let plain = selected(w as usize, h as usize, &px, (start.0 as usize, start.1 as usize), threshold);
+                let cut = (threshold * 2.0 * 255.0).floor() as u16;
+                assert_eq!(flood.by_scanlines(cut).data, plain, "seed {seed} threshold {threshold}");
+                assert_eq!(flood.mask(threshold).data, plain, "seed {seed} threshold {threshold}");
+            }
+        }
+    }
 
     /// How long feathering a 4K selection takes at a few amounts: run on a device with
     /// `--ignored --nocapture`.

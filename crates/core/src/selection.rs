@@ -2,7 +2,7 @@
 //! inside, and which can be inverted, feathered, saved, filled or copied to a layer of its own.
 
 use procraft_engine::geom::Vec2;
-use procraft_engine::selection::{Combine, Mask, feather_radius};
+use procraft_engine::selection::{ColourFlood, Combine, Mask, feather_radius};
 
 use crate::{CanvasSession, State};
 
@@ -148,21 +148,32 @@ impl CanvasSession {
         if !(p.x >= 0.0 && p.y >= 0.0 && p.x < w as f32 && p.y < h as f32) {
             return;
         }
-        // the layer is read once for the whole drag
-        let pixels = match st.colour_source.take() {
-            Some(px) => px,
+        // the layer is read and measured from the seed once for the whole drag
+        let seed = (p.x as u32, p.y as u32);
+        let (pixels, flood) = match st.colour_source.take() {
+            Some((px, flood)) if flood.seed() == seed => (px, Some(flood)),
+            Some((px, _)) => (px, None),
             None => {
                 let Some(px) = st.current_pixels() else { return };
                 st.selection_before = Some(st.selection.clone());
-                px
+                (px, None)
             }
         };
-        let shape = Mask::by_colour(w, h, &pixels, (p.x as u32, p.y as u32), threshold);
+        let Some(flood) = flood.or_else(|| {
+            let flood = ColourFlood::new(w, h, &pixels, seed)?;
+            if live {
+                flood.work_out_reach();
+            }
+            Some(flood)
+        }) else {
+            return;
+        };
+        let shape = flood.mask(threshold);
         let before = st.selection_before.clone().flatten();
         st.selection = before.clone();
         if live {
             st.join(shape, join, false);
-            st.colour_source = Some(pixels);
+            st.colour_source = Some((pixels, flood));
         } else {
             // the drag ends: one step from before it
             st.join(shape, join, false);
