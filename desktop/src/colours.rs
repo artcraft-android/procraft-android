@@ -17,7 +17,11 @@ use crate::icons;
 use crate::look::{Look, Shade, Themed, Weight, argb, pc, text};
 use crate::panel::{self, PANEL_TITLE};
 
+mod floating;
+
 const PANEL_WIDTH: f32 = 376.0;
+/// How far the grabber is dragged before the panel floats, points.
+const UNDOCK_DRAG: f32 = 30.0;
 const HEADER_HEIGHT: f32 = 64.0;
 const RING_OUTER: f32 = 182.0;
 const RING_INNER: f32 = 124.0;
@@ -256,6 +260,11 @@ pub struct Colours {
     /// The short panel's "•••" (where it is) and its menu.
     short_dots: Rect,
     short_menu: crate::menu::Menu,
+    /// Floating: where the window is (its top-left), where the pointer holds its grabber while
+    /// it moves, and whether its Value shows red, green and blue.
+    pub floating: Option<Pos2>,
+    floating_grab: Option<egui::Vec2>,
+    floating_rgb: bool,
 }
 
 impl Default for Colours {
@@ -279,6 +288,9 @@ impl Default for Colours {
             swatch_press: None,
             short_dots: Rect::NOTHING,
             short_menu: crate::menu::Menu::default(),
+            floating: None,
+            floating_grab: None,
+            floating_rgb: false,
         }
     }
 }
@@ -403,6 +415,15 @@ impl Colours {
                 }
                 let grabber = Rect::from_center_size(pos2(body.center().x, body.top() + 6.0), vec2(40.0, 4.0));
                 ui.painter().rect_filled(grabber, 2, argb(GRABBER));
+                // dragged out by its grabber, the panel floats as a window of its own
+                let handle = Rect::from_center_size(pos2(body.center().x, body.top() + 15.0), vec2(150.0, 30.0));
+                let held = ui.interact(handle, ui.scope_id().with("undock"), Sense::drag());
+                if held.dragged()
+                    && let (Some(p), Some(from)) = (held.interact_pointer_pos(), ui.input(|i| i.pointer.press_origin()))
+                    && p.distance(from) > UNDOCK_DRAG
+                {
+                    self.float_at(p - floating::GRAB);
+                }
 
                 let top = body.top() + header;
                 match self.mode {
@@ -862,6 +883,11 @@ impl Colours {
             pos2(body.left() + 20.0 - 204.0, body.top() + 50.0 + 36.0),
             vec2(195.0, 9.0 * 2.0 + 38.0 * HarmonyKind::ALL.len() as f32),
         );
+        self.harmony_menu_in(ctx, look, rect, backdrops);
+    }
+
+    /// Harmony's kinds as a menu at `rect`, the kind shown ticked.
+    fn harmony_menu_in(&mut self, ctx: &egui::Context, look: &mut Look, rect: Rect, backdrops: &mut Vec<f32>) {
         let glass = crate::menu::Glass { fill: HARMONY_MENU_FILL, edge: None, frost: false, corner: 24.0 };
         let current = self.harmony;
         let mut chosen = None;

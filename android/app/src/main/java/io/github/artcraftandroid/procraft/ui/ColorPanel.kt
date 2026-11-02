@@ -9,6 +9,11 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -128,7 +133,7 @@ interface ColorPick {
 }
 
 /** The colour painted with. */
-private class BrushColor(private val vm: CanvasViewModel) : ColorPick {
+internal class BrushColor(private val vm: CanvasViewModel) : ColorPick {
     override val hue get() = vm.hue
     override val saturation get() = vm.saturation
     override val brightness get() = vm.brightness
@@ -194,7 +199,11 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
     }
     // a swatch dragged out and let go over the panel itself fills nothing
     if (!background) androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.dropAvoid = null } }
-    Popover(PanelWidth, arrowX, if (background) modifier else modifier.onGloballyPositioned { vm.dropAvoid = it.boundsInRoot() }) {
+    // dragged out by its grabber, it is not seen (nor its blur) until let go, the window floating
+    val undocking = !background && vm.colorsUndocking
+    val look = LocalPanelLook.current
+    ProvidePanelLook(if (undocking) PanelLook(0f, look.scale, look.pivot) else look) {
+    Popover(PanelWidth, arrowX, (if (background) modifier else modifier.onGloballyPositioned { vm.dropAvoid = it.boundsInRoot() }).alpha(if (undocking) 0f else 1f)) {
         Box {
             if (background) {
                 PanelHeader("Background", start = 20.dp, end = 12.dp, height = headerHeight, chevron = false) {
@@ -215,6 +224,7 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
                 }
             }
             Box(Modifier.align(Alignment.TopCenter).padding(top = 4.dp).size(40.dp, 4.dp).clip(CircleShape).background(Pc.Grabber))
+            if (!background) UndockHandle(vm, Modifier.align(Alignment.TopCenter))
             if (vm.colorMode == ColorMode.HARMONY) HarmonyKindButton(vm)
         }
         // the other modes come one by one; until then they show the classic picker
@@ -237,6 +247,179 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
             }
         }
         ModeTabs(vm)
+    }
+    }
+}
+
+/** How far the grabber is dragged before the panel floats. */
+private val UndockDrag = 30.dp
+/** The floating window, and where its grabber is held from (its middle). */
+private val FloatingWidth = 260.dp
+private val FloatingGrab = DpOffset(130.dp, 7.5.dp)
+private val FloatingGroup = Color.White.copy(alpha = 0.06f)
+private val FloatingField = Color.White.copy(alpha = 0.06f)
+
+/** The panel's grabber: dragged out past [UndockDrag], the panel floats and the window follows. */
+@Composable
+private fun UndockHandle(vm: CanvasViewModel, modifier: Modifier) {
+    var origin by remember { mutableStateOf(Offset.Zero) }
+    val density = LocalDensity.current
+    Box(
+        modifier.size(150.dp, 30.dp).onGloballyPositioned { origin = it.positionInRoot() }.pointerInput(vm) {
+            var total = Offset.Zero
+            val grab = with(density) { Offset(FloatingGrab.x.toPx(), FloatingGrab.y.toPx()) }
+            fun letGo() {
+                if (vm.colorsUndocking) {
+                    vm.colorsUndocking = false
+                    vm.closePanels()
+                }
+            }
+            detectDragGestures(
+                onDragStart = { total = Offset.Zero },
+                onDragEnd = { letGo() },
+                onDragCancel = { letGo() },
+            ) { change, delta ->
+                change.consume()
+                total += delta
+                if (vm.colorsUndocking || total.getDistance() > UndockDrag.toPx()) {
+                    vm.colorsUndocking = true
+                    vm.floatingColorsAt = origin + change.position - grab
+                }
+            }
+        },
+    )
+}
+
+/**
+ * The colour panel floating: a window of its own, 260 wide, moved by its grabber and closed by its
+ * Close (the colour button then opens the panel again). The same colour and mode as the panel; no
+ * swatches, history or palette under the pickers, the modes as icons under them.
+ */
+@Composable
+fun FloatingColors(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
+    val at = vm.floatingColorsAt ?: return
+    val c: ColorPick = remember(vm) { BrushColor(vm) }
+    val density = LocalDensity.current
+    val height = if (vm.colorMode == ColorMode.DISC) 351.dp else 390.dp
+    // kept on the screen
+    val x = with(density) { at.x.toDp() }.coerceIn(0.dp, (maxWidth - FloatingWidth).coerceAtLeast(0.dp))
+    val y = with(density) { at.y.toDp() }.coerceIn(0.dp, (maxHeight - height).coerceAtLeast(0.dp))
+    Popover(
+        FloatingWidth,
+        0.dp,
+        Modifier.offset(x, y).height(height).pointerInput(Unit) {
+            // the canvas under it takes no touch
+            awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
+        },
+        side = ArrowSide.NONE,
+    ) {
+        Box(Modifier.fillMaxWidth().height(height - 52.dp)) {
+            Box(Modifier.align(Alignment.TopCenter).padding(top = 5.5.dp).size(40.dp, 4.dp).clip(CircleShape).background(Pc.Grabber))
+            Box(
+                Modifier.align(Alignment.TopCenter).size(150.dp, 30.dp).pointerInput(vm) {
+                    detectDragGestures { change, delta ->
+                        change.consume()
+                        vm.floatingColorsAt = (vm.floatingColorsAt ?: Offset.Zero) + delta
+                    }
+                },
+            )
+            val title = if (vm.colorMode == ColorMode.PALETTES) "Palettes" else "Colors"
+            Box(Modifier.padding(start = 18.dp, top = 4.dp).height(40.dp), contentAlignment = Alignment.CenterStart) {
+                Text(title, color = Pc.PanelTitle, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            }
+            FloatingClose(Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 4.dp)) { vm.floatingColorsAt = null }
+            Column(Modifier.padding(top = 44.dp)) {
+                when (vm.colorMode) {
+                    ColorMode.DISC -> {
+                        Spacer(Modifier.height(5.dp))
+                        Disc(c, compact = true)
+                    }
+                    ColorMode.CLASSIC -> {
+                        Spacer(Modifier.height(6.dp))
+                        Classic(c, compact = true)
+                    }
+                    ColorMode.HARMONY -> Box {
+                        HarmonyKindButton(vm, start = 18.dp, top = 0.dp, menuX = 0.dp)
+                        Box(Modifier.padding(top = 21.dp)) { Harmony(vm, c, compact = true, radius = 106.dp) }
+                    }
+                    ColorMode.VALUE -> {
+                        Spacer(Modifier.height(4.dp))
+                        CompactValue(c, FloatingGroup, FloatingField)
+                    }
+                    ColorMode.PALETTES -> FloatingPalettes(vm, c)
+                }
+            }
+        }
+        CompactTabs(vm.colorMode) { vm.colorMode = it }
+    }
+}
+
+/** Close: a disc with a cross cut out of it. */
+@Composable
+private fun FloatingClose(modifier: Modifier, onClose: () -> Unit) {
+    Box(
+        modifier.size(40.dp).clickable(onClick = onClose).drawBehind {
+            val r = 8.5.dp.toPx()
+            drawCircle(Color.White.copy(alpha = 0.15f), r)
+            val d = 3.2.dp.toPx()
+            val ink = Color.Black.copy(alpha = 0.3f)
+            val w = 1.3.dp.toPx()
+            drawLine(ink, center + Offset(-d, -d), center + Offset(d, d), w)
+            drawLine(ink, center + Offset(d, -d), center + Offset(-d, d), w)
+        },
+    )
+}
+
+/** Palettes floating: Compact or Cards, then each palette as a card of swatches six to a row. */
+@Composable
+private fun FloatingPalettes(vm: CanvasViewModel, c: ColorPick) {
+    Row(Modifier.padding(start = 10.dp, end = 10.dp, top = 4.dp).fillMaxWidth().height(36.dp).clip(RoundedCornerShape(9.dp)).background(FloatingGroup)) {
+        for ((i, label) in listOf("Compact", "Cards").withIndex()) {
+            val on = vm.paletteCards == (i == 1)
+            Box(
+                Modifier.weight(1f).fillMaxSize().clip(RoundedCornerShape(9.dp)).background(if (on) Pc.Accent else Color.Transparent).clickable { vm.changePaletteCards(i == 1) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(label, color = if (on) Color.White else Pc.PanelTitle, fontSize = 15.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
+            }
+        }
+    }
+    LazyColumn(
+        Modifier.padding(top = 6.dp).fillMaxWidth().height(246.dp),
+        contentPadding = PaddingValues(horizontal = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        itemsIndexed(vm.palettes) { i, p ->
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(FloatingGroup)) {
+                Row(Modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (i == vm.defaultPalette) {
+                        Box(Modifier.padding(start = 8.5.dp).size(21.dp).clip(CircleShape).background(Pc.Accent), contentAlignment = Alignment.Center) {
+                            Icon(PcIcons.Tick, contentDescription = "Default", tint = Color.White, modifier = Modifier.size(13.dp))
+                        }
+                    }
+                    Text(
+                        p.name,
+                        color = Pc.PanelTitle,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f).padding(start = if (i == vm.defaultPalette) 6.dp else 12.dp),
+                    )
+                    PaletteMenu(vm, i)
+                }
+                for (row in 0 until (p.colors.size + 5) / 6) {
+                    Row {
+                        for (col in 0 until 6) {
+                            val rgb = p.colors.getOrNull(row * 6 + col)
+                            Box(
+                                Modifier.weight(1f).height(40.dp).background(if (rgb != null) rgbColor(rgb) else Pc.EmptySlot)
+                                    .then(if (rgb != null) Modifier.clickable { c.setRgb(rgb) } else Modifier),
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -505,13 +688,13 @@ private fun harmonyImage(v: Float, side: Int): ImageBitmap {
 
 /** The harmony kind under the title; tapping it lists the kinds. */
 @Composable
-private fun HarmonyKindButton(vm: CanvasViewModel) {
+private fun HarmonyKindButton(vm: CanvasViewModel, start: Dp = 20.dp, top: Dp = 50.dp, menuX: Dp = (-204).dp) {
     var open by remember { mutableStateOf(false) }
-    Box(Modifier.padding(start = 20.dp, top = 50.dp).height(28.dp).clickable { open = true }, contentAlignment = Alignment.CenterStart) {
+    Box(Modifier.padding(start = start, top = top).height(28.dp).clickable { open = true }, contentAlignment = Alignment.CenterStart) {
         Text(vm.harmonyKind.label, color = Pc.PanelTitle, fontSize = 17.sp)
         MenuPresence(open, androidx.compose.ui.graphics.TransformOrigin(1f, 0f)) { look ->
             // the menu opens to the left of the panel, its top level with the wheel
-            PcPopup(textScale = MATCHED_POPUP_TEXT, offset = with(LocalDensity.current) { IntOffset((-204).dp.roundToPx(), 36.dp.roundToPx()) }, properties = PopupProperties(focusable = true), onDismissRequest = { open = false }) {
+            PcPopup(textScale = MATCHED_POPUP_TEXT, offset = with(LocalDensity.current) { IntOffset(menuX.roundToPx(), 36.dp.roundToPx()) }, properties = PopupProperties(focusable = true), onDismissRequest = { open = false }) {
                 Column(look.width(195.dp).clip(RoundedCornerShape(24.dp)).background(Pc.MenuFill).padding(vertical = 9.dp)) {
                     for (kind in HarmonyKind.entries) {
                         Row(
@@ -536,7 +719,7 @@ private fun HarmonyKindButton(vm: CanvasViewModel) {
  * the colour and one for each companion of the harmony kind, and a brightness slider below.
  */
 @Composable
-private fun Harmony(vm: CanvasViewModel, c: ColorPick, compact: Boolean = false, short: Boolean = false) {
+private fun Harmony(vm: CanvasViewModel, c: ColorPick, compact: Boolean = false, short: Boolean = false, radius: Dp? = null) {
     val rgb = c.rgb()
     // the hue, saturation and brightness dragged to, kept while the colour they make is the colour
     // (not worked out again from it: a dark or greyish colour's would wander, and black's be lost)
@@ -550,12 +733,12 @@ private fun Harmony(vm: CanvasViewModel, c: ColorPick, compact: Boolean = false,
     }
     val density = LocalDensity.current
     // compact, the wheel is 200 across instead of 298; short, 296
-    val radius = if (compact) 100.dp else if (short) HarmonyRadius - 1.dp else HarmonyRadius
+    val radius = radius ?: if (compact) 100.dp else if (short) HarmonyRadius - 1.dp else HarmonyRadius
     val wheel = remember(hsv[2], radius, CanvasSpace.p3) { harmonyImage(hsv[2], with(density) { radius.roundToPx() }) }
     // the header is 78 tall here, with the kind under the title; the wheel starts 88 down (short, 82)
     Column(Modifier.padding(top = if (short) 4.dp else 10.dp)) {
         Box(
-            Modifier.padding(start = if (compact) 30.dp else PanelWidth / 2 - radius).size(radius * 2)
+            Modifier.padding(start = if (compact) CompactWidth / 2 - radius else PanelWidth / 2 - radius).size(radius * 2)
                 .pointerInput(Unit) {
                     track { x, y ->
                         val u = x * 2f - 1f
@@ -872,14 +1055,14 @@ private fun InkValue(c: ColorPick, inks: Inks) {
 
 /** Value, compact: HSB or RGB (a switch picks), then the hex code; 240 wide. */
 @Composable
-private fun CompactValue(c: ColorPick) {
+private fun CompactValue(c: ColorPick, group: Color = CompactGroup, field: Color = CompactHexField) {
     var rgbShown by remember { mutableStateOf(false) }
     val rgb = c.rgb()
     val r = (rgb shr 16) and 0xFF
     val g = (rgb shr 8) and 0xFF
     val b = rgb and 0xFF
     Column(Modifier.padding(horizontal = 10.dp)) {
-        Row(Modifier.fillMaxWidth().height(36.dp).clip(RoundedCornerShape(9.dp)).background(CompactGroup)) {
+        Row(Modifier.fillMaxWidth().height(36.dp).clip(RoundedCornerShape(9.dp)).background(group)) {
             for ((i, label) in listOf("HSB", "RGB").withIndex()) {
                 val on = rgbShown == (i == 1)
                 Box(
@@ -891,7 +1074,7 @@ private fun CompactValue(c: ColorPick) {
             }
         }
         Column(
-            Modifier.padding(top = 6.dp).fillMaxWidth().height(188.dp).clip(RoundedCornerShape(10.dp)).background(CompactGroup).padding(start = 12.dp, end = 12.dp, top = 10.dp),
+            Modifier.padding(top = 6.dp).fillMaxWidth().height(188.dp).clip(RoundedCornerShape(10.dp)).background(group).padding(start = 12.dp, end = 12.dp, top = 10.dp),
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
             if (rgbShown) {
@@ -910,7 +1093,7 @@ private fun CompactValue(c: ColorPick) {
                 }
             }
         }
-        HexRow(rgb, CompactGroup, CompactHexField) { c.setRgb(it) }
+        HexRow(rgb, group, field) { c.setRgb(it) }
         Spacer(Modifier.height(10.dp))
     }
 }

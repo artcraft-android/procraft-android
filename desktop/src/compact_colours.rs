@@ -192,70 +192,7 @@ impl CompactColours {
     /// Value: HSB or RGB (a switch picks), then the hex code; 240 wide from `left`. Returns the
     /// hex row.
     fn value(&mut self, ui: &Ui, left: f32, top: f32) -> Rect {
-        let switch = Rect::from_min_size(pos2(left, top), vec2(240.0, 36.0));
-        ui.painter().rect_filled(switch, 9, argb(GROUP));
-        for (i, label) in ["HSB", "RGB"].into_iter().enumerate() {
-            let half = Rect::from_min_size(pos2(left + 120.0 * i as f32, top), vec2(120.0, 36.0));
-            let on = self.rgb_shown == (i == 1);
-            if on {
-                ui.painter().rect_filled(half, 9, argb(pc::ACCENT));
-            }
-            let (ink, weight) =
-                if on { (Color32::WHITE, Weight::SemiBold) } else { (argb(PANEL_TITLE), Weight::Regular) };
-            text(ui.painter(), half.center(), Align2::CENTER_CENTER, label, 15.0, weight, ink);
-            if ui.interact(half, ui.scope_id().with(("value switch", i)), Sense::click()).clicked() {
-                self.rgb_shown = i == 1;
-            }
-        }
-        let group = Rect::from_min_size(pos2(left, switch.bottom() + 6.0), vec2(240.0, 188.0));
-        ui.painter().rect_filled(group, 10, argb(GROUP));
-        let rgb = self.rgb();
-        let [r, g, b] = [rgb >> 16 & 0xFF, rgb >> 8 & 0xFF, rgb & 0xFF];
-        let hsv = self.hsv;
-        for i in 0..3 {
-            let row =
-                Rect::from_min_size(pos2(group.left() + 12.0, group.top() + 10.0 + 62.0 * i as f32), vec2(216.0, 44.0));
-            let (letter, value, colours, shown): (&str, f32, Vec<Color32>, String) = match (self.rgb_shown, i) {
-                (false, 0) => (
-                    "H",
-                    hue_position(HueControl::Slider, hsv[0]),
-                    SLIDER_HUES.iter().map(|h| srgb(hsv_to_rgb([h / 360.0, 1.0, 1.0]))).collect(),
-                    format!("{}\u{b0}", (hsv[0] * 360.0).round() as i32),
-                ),
-                (false, 1) => (
-                    "S",
-                    hsv[1],
-                    vec![argb(SATURATION_GREY), srgb(hsv_to_rgb([hsv[0], 1.0, 1.0]))],
-                    format!("{}%", (hsv[1] * 100.0).round() as i32),
-                ),
-                (false, _) => {
-                    ("B", hsv[2], vec![Color32::BLACK, Color32::WHITE], format!("{}%", (hsv[2] * 100.0).round() as i32))
-                }
-                (true, 0) => ("R", r as f32 / 255.0, vec![rgb_of(0, g, b), rgb_of(255, g, b)], r.to_string()),
-                (true, 1) => ("G", g as f32 / 255.0, vec![rgb_of(r, 0, b), rgb_of(r, 255, b)], g.to_string()),
-                _ => ("B", b as f32 / 255.0, vec![rgb_of(r, g, 0), rgb_of(r, g, 255)], b.to_string()),
-            };
-            let ink = argb(PANEL_TITLE);
-            let y = row.center().y;
-            text(ui.painter(), pos2(row.left(), y), Align2::LEFT_CENTER, letter, 15.0, Weight::Regular, ink);
-            text(ui.painter(), pos2(row.right(), y), Align2::RIGHT_CENTER, &shown, 15.0, Weight::Regular, ink);
-            let track = Rect::from_min_max(pos2(row.left() + 20.0, y - 18.0), pos2(row.right() - 48.0, y + 18.0));
-            let Some(to) = slider_row(ui, track, ("compact value", self.rgb_shown, i), value, &colours) else {
-                continue;
-            };
-            let byte = (to * 255.0).round() as u32;
-            match (self.rgb_shown, i) {
-                (false, 0) => _ = set(&mut self.hsv[0], hue_at(HueControl::Slider, to)),
-                (false, 1) => _ = set(&mut self.hsv[1], to),
-                (false, _) => _ = set(&mut self.hsv[2], to),
-                (true, 0) => take_rgb(&mut self.hsv, byte << 16 | g << 8 | b),
-                (true, 1) => take_rgb(&mut self.hsv, r << 16 | byte << 8 | b),
-                _ => take_rgb(&mut self.hsv, r << 16 | g << 8 | byte),
-            }
-        }
-        let row = Rect::from_min_size(pos2(left, group.bottom() + 6.0), vec2(240.0, 44.0));
-        hex_row(ui, row, rgb, &mut self.hex, GROUP, HEX_FIELD);
-        row
+        value_view(ui, (left, top), &mut self.hsv, &mut self.rgb_shown, &mut self.hex, (GROUP, HEX_FIELD))
     }
 
     /// The palettes' swatches, one grid after another (10 across, rounded 8), a tap taking a
@@ -303,7 +240,7 @@ impl CompactColours {
 }
 
 /// The modes as a row of icons, the one shown blue; returns the one tapped.
-fn tabs_row(ui: &Ui, look: &mut Look, rect: Rect, mode: Mode) -> Option<Mode> {
+pub(crate) fn tabs_row(ui: &Ui, look: &mut Look, rect: Rect, mode: Mode) -> Option<Mode> {
     let w = rect.width() / colours::MODE_TABS.len() as f32;
     let mut chosen = None;
     for (i, (icon, _, m)) in colours::MODE_TABS.into_iter().enumerate() {
@@ -316,4 +253,80 @@ fn tabs_row(ui: &Ui, look: &mut Look, rect: Rect, mode: Mode) -> Option<Mode> {
         look.icon(ui, icon, tab.center(), 33.0, ink);
     }
     chosen
+}
+
+/// Value's picker for `hsv`: HSB or RGB (a switch picks, `rgb_shown`), then the hex code (`hex`
+/// the keypad's digits while it is open); 240 wide from `at`, its groups filled `fills` (the
+/// groups', the hex field's). Returns the hex row.
+pub(crate) fn value_view(
+    ui: &Ui,
+    (left, top): (f32, f32),
+    hsv: &mut [f32; 3],
+    rgb_shown: &mut bool,
+    hex: &mut Option<String>,
+    (group_fill, field_fill): (u32, u32),
+) -> Rect {
+    let switch = Rect::from_min_size(pos2(left, top), vec2(240.0, 36.0));
+    ui.painter().rect_filled(switch, 9, argb(group_fill));
+    for (i, label) in ["HSB", "RGB"].into_iter().enumerate() {
+        let half = Rect::from_min_size(pos2(left + 120.0 * i as f32, top), vec2(120.0, 36.0));
+        let on = *rgb_shown == (i == 1);
+        if on {
+            ui.painter().rect_filled(half, 9, argb(pc::ACCENT));
+        }
+        let (ink, weight) = if on { (Color32::WHITE, Weight::SemiBold) } else { (argb(PANEL_TITLE), Weight::Regular) };
+        text(ui.painter(), half.center(), Align2::CENTER_CENTER, label, 15.0, weight, ink);
+        if ui.interact(half, ui.scope_id().with(("value switch", i)), Sense::click()).clicked() {
+            *rgb_shown = i == 1;
+        }
+    }
+    let group = Rect::from_min_size(pos2(left, switch.bottom() + 6.0), vec2(240.0, 188.0));
+    ui.painter().rect_filled(group, 10, argb(group_fill));
+    let rgb = to_hex(hsv_to_rgb(*hsv));
+    let [r, g, b] = [rgb >> 16 & 0xFF, rgb >> 8 & 0xFF, rgb & 0xFF];
+    let now = *hsv;
+    for i in 0..3 {
+        let row =
+            Rect::from_min_size(pos2(group.left() + 12.0, group.top() + 10.0 + 62.0 * i as f32), vec2(216.0, 44.0));
+        let (letter, value, colours, shown): (&str, f32, Vec<Color32>, String) = match (*rgb_shown, i) {
+            (false, 0) => (
+                "H",
+                hue_position(HueControl::Slider, now[0]),
+                SLIDER_HUES.iter().map(|h| srgb(hsv_to_rgb([h / 360.0, 1.0, 1.0]))).collect(),
+                format!("{}\u{b0}", (now[0] * 360.0).round() as i32),
+            ),
+            (false, 1) => (
+                "S",
+                now[1],
+                vec![argb(SATURATION_GREY), srgb(hsv_to_rgb([now[0], 1.0, 1.0]))],
+                format!("{}%", (now[1] * 100.0).round() as i32),
+            ),
+            (false, _) => {
+                ("B", now[2], vec![Color32::BLACK, Color32::WHITE], format!("{}%", (now[2] * 100.0).round() as i32))
+            }
+            (true, 0) => ("R", r as f32 / 255.0, vec![rgb_of(0, g, b), rgb_of(255, g, b)], r.to_string()),
+            (true, 1) => ("G", g as f32 / 255.0, vec![rgb_of(r, 0, b), rgb_of(r, 255, b)], g.to_string()),
+            _ => ("B", b as f32 / 255.0, vec![rgb_of(r, g, 0), rgb_of(r, g, 255)], b.to_string()),
+        };
+        let ink = argb(PANEL_TITLE);
+        let y = row.center().y;
+        text(ui.painter(), pos2(row.left(), y), Align2::LEFT_CENTER, letter, 15.0, Weight::Regular, ink);
+        text(ui.painter(), pos2(row.right(), y), Align2::RIGHT_CENTER, &shown, 15.0, Weight::Regular, ink);
+        let track = Rect::from_min_max(pos2(row.left() + 20.0, y - 18.0), pos2(row.right() - 48.0, y + 18.0));
+        let Some(to) = slider_row(ui, track, ("compact value", *rgb_shown, i), value, &colours) else {
+            continue;
+        };
+        let byte = (to * 255.0).round() as u32;
+        match (*rgb_shown, i) {
+            (false, 0) => _ = set(&mut hsv[0], hue_at(HueControl::Slider, to)),
+            (false, 1) => _ = set(&mut hsv[1], to),
+            (false, _) => _ = set(&mut hsv[2], to),
+            (true, 0) => take_rgb(hsv, byte << 16 | g << 8 | b),
+            (true, 1) => take_rgb(hsv, r << 16 | byte << 8 | b),
+            _ => take_rgb(hsv, r << 16 | g << 8 | byte),
+        }
+    }
+    let row = Rect::from_min_size(pos2(left, group.bottom() + 6.0), vec2(240.0, 44.0));
+    hex_row(ui, row, rgb, hex, group_fill, field_fill);
+    row
 }

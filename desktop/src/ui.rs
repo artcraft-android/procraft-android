@@ -570,6 +570,8 @@ impl Interface {
         if let Some(open) = self.open {
             self.popover(&ctx, session, open, anchor(open), info.tool, &mut backdrops);
         }
+        // the colour panel dragged out by its grabber: a window over the canvas until closed
+        self.colours.show_floating(&ctx, &mut self.look, session, &mut backdrops);
         if self.open != Some(Popover::Actions) {
             self.actions_panel.closed();
         }
@@ -1567,6 +1569,10 @@ impl Interface {
     fn toggle(&mut self, session: &CanvasSession, popover: Popover) {
         self.feedback();
         self.switch_modes(session, ModeButton::Panel { colour: popover == Popover::Colour });
+        // the colour button with the panel floating: it goes back in its place
+        if popover == Popover::Colour && self.colours.floating.take().is_some() {
+            self.open = None;
+        }
         self.open = if self.open == Some(popover) { None } else { Some(popover) };
     }
 
@@ -1663,6 +1669,10 @@ impl Interface {
                 let rect = self.colours.show(ctx, &mut self.look, session, &mut self.drop, button, history, backdrops);
                 if self.prefs.colour_history_shown != shown {
                     self.prefs.keep();
+                }
+                // dragged out, it floats instead
+                if self.colours.floating.is_some() {
+                    self.open = None;
                 }
                 rect
             }
@@ -1818,7 +1828,7 @@ impl Interface {
         // a text field, or the hex keypad, takes the keys; text being edited takes them all
         if ctx.egui_wants_keyboard_input()
             || self.text.editing()
-            || (self.open == Some(Popover::Colour) && self.colours.takes_keys())
+            || ((self.open == Some(Popover::Colour) || self.colours.floating.is_some()) && self.colours.takes_keys())
         {
             return;
         }

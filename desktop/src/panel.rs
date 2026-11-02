@@ -84,6 +84,27 @@ pub fn frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, arrow_x: 
     });
 }
 
+/// Draws a floating panel at `rect` (no arrow): the shadow round it, then its frosted body, whose
+/// blur goes into `backdrops` (window pixels).
+pub fn floating_frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, backdrops: &mut Vec<f32>) {
+    let ppp = ui.ctx().pixels_per_point();
+    backdrops.extend([rect.left(), rect.top(), rect.right(), rect.bottom(), POPOVER_CORNER].map(|v| v * ppp));
+    backdrops.push(1.0);
+    let shadow = egui::epaint::Shadow {
+        offset: [0, 0],
+        blur: POPOVER_SHADOW_RADIUS as u8,
+        spread: 0,
+        color: argb(POPOVER_SHADOW),
+    };
+    ui.painter().add(shadow.as_shape(rect, POPOVER_CORNER));
+    let size = rect.size();
+    look.shape(ui, slot, (size.y * 10.0).round() as i32, rect, |pixmap, t| {
+        let mut pb = tiny_skia::PathBuilder::new();
+        round_rect(&mut pb, Rect::from_min_size(pos2(0.0, 0.0), size), [POPOVER_CORNER; 4]);
+        frost(pixmap, pb, t);
+    });
+}
+
 /// Draws a panel at `rect` (arrow included) with its arrow on its `left` side, else its right, the
 /// tip `arrow_y` from its top, and `corner` rounding: the shadow round it, then its frosted body,
 /// whose blur goes into `backdrops` (window pixels). Returns the body.

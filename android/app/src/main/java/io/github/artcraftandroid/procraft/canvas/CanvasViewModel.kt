@@ -675,6 +675,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var panel by mutableStateOf(Panel.NONE)
         private set
 
+    /** The colour panel floating, dragged out by its grabber: its window's top-left (window pixels). */
+    var floatingColorsAt by mutableStateOf<androidx.compose.ui.geometry.Offset?>(null)
+
+    /** The colour panel's grabber is being dragged out: the panel stays, unseen, until let go. */
+    var colorsUndocking by mutableStateOf(false)
+
     /** The panel just closed fades away (an adjustment picked from its list) instead of going at once. */
     var panelFading by mutableStateOf(false)
 
@@ -4275,6 +4281,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         feedback()
         switchModes(ModeButton.Panel(p == Panel.COLOR))
+        // the colour button with the panel floating: it goes back in its place
+        if (p == Panel.COLOR && floatingColorsAt != null) {
+            floatingColorsAt = null
+            panel = Panel.NONE
+        }
         panel = if (panel == p) Panel.NONE else p
         if (panel == Panel.LAYERS) refreshThumbnails()
     }

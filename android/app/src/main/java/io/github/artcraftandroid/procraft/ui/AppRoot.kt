@@ -175,6 +175,8 @@ fun AppRoot(vm: CanvasViewModel) {
                         }
                     }
                 }
+                // the colour panel dragged out by its grabber: a window over the canvas until closed
+                FloatingColors(vm, maxWidth, maxHeight)
                 // the bottom toolbars rise from below the screen, and drop away
                 androidx.compose.animation.AnimatedVisibility(
                     vm.transforming && !vm.barsHidden,
