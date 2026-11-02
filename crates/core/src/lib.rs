@@ -1783,9 +1783,11 @@ impl CanvasSession {
         if let Some(canvas) = st.canvas.as_mut() {
             f(canvas);
             st.flush();
-            // a stroke on a model's colour painted its roughness and metalness too
+            // a stroke on a model's colour painted its roughness and metalness too; a tile's choice
+            // chooses again what was before (or after) it
             if let Some(before) = before {
                 st.follow_joint_step(before);
+                st.follow_tile_step(before);
             }
             st.sync_selection();
             st.revision += 1;

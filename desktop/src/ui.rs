@@ -990,6 +990,8 @@ impl Interface {
         if could || name.is_some() {
             self.overlays.notice(name.map_or("Undo".into(), |n| format!("Undo {n}")), false);
         }
+        // a model's tile chosen before comes back, with its channel's colour
+        self.layers.follow_channel(session, &mut self.colours);
     }
 
     fn redo(&mut self, session: &CanvasSession) {
@@ -1004,6 +1006,7 @@ impl Interface {
         if could {
             self.overlays.notice(name.map_or("Redo".into(), |n| format!("Redo {n}")), false);
         }
+        self.layers.follow_channel(session, &mut self.colours);
         if let Some(id) = text {
             self.text.edit(session, id);
         }

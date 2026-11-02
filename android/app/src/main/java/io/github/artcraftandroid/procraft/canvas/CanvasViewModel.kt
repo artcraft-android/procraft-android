@@ -1282,16 +1282,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var channelTileChosen by mutableStateOf(false)
         private set
 
-    /** Chooses a layer's channel tile: [channel] painted from now on. */
+    /** Chooses a layer's channel tile: [channel] painted from now on (an undo step). */
     fun chooseChannelTile(channel: Int) {
-        chooseChannel(channel)
-        channelTileChosen = true
+        val s = session ?: return
+        if (channel !in 0..2) return
+        s.chooseChannelTile(channel.toUInt())
+        followModelChannel()
     }
 
-    /** A layer's row tapped on a model: the layer itself (its colour) is painted, no tile chosen. */
+    /** A layer's row tapped on a model: the layer itself (its colour) is painted, no tile chosen (an undo step). */
     fun leaveChannelTiles() {
-        chooseChannel(0)
-        channelTileChosen = false
+        val s = session ?: return
+        s.leaveChannelTiles()
+        followModelChannel()
     }
 
     /** The layer whose channels show under it in the layers panel, if one's do; and their pictures. */
@@ -1305,10 +1308,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun chooseChannel(channel: Int) {
         val s = session ?: return
         if (channel == modelChannel || channel !in 0..2) return
-        channelColors[modelChannel] = floatArrayOf(hue, saturation, brightness)
         s.setModelChannel(channel.toUInt())
-        modelChannel = s.modelChannel().toInt()
-        val c = channelColors[modelChannel] ?: if (modelChannel == 0) null else floatArrayOf(0f, 0f, 0f)
+        followModelChannel()
+    }
+
+    /** The channel and tile as the core has them now (a tile chosen, or its choice undone or redone), the channel's own colour shown. */
+    private fun followModelChannel() {
+        val s = session ?: return
+        channelTileChosen = s.channelTileChosen()
+        val now = s.modelChannel().toInt()
+        if (now == modelChannel) return
+        channelColors[modelChannel] = floatArrayOf(hue, saturation, brightness)
+        modelChannel = now
+        val c = channelColors[now] ?: if (now == 0) null else floatArrayOf(0f, 0f, 0f)
         c?.let { setColor(it[0], it[1], it[2]) }
         refresh()
         refreshThumbnails()
@@ -1339,10 +1351,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun chooseTextureSet(index: Int) {
         val s = session ?: return
         if (index == textureSet || index !in textureSets.indices) return
-        // a texture set is opened on its colour
-        leaveChannelTiles()
+        // a texture set is opened on its colour, no tile chosen
+        chooseChannel(0)
         channelTrayFor = null
         s.chooseTextureSet(index.toUInt())
+        channelTileChosen = s.channelTileChosen()
         textureSet = index
         refresh()
         refreshThumbnails()
@@ -4620,6 +4633,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val could = canUndo
         val name = session?.let { s -> if (recoloring) pourNow { s.undo() } else s.undo() }
         if (could || name != null) showNotice("Undo" + name?.let { " $it" }.orEmpty())
+        // a model's tile chosen before comes back, with its channel's colour
+        if (modelOpen) followModelChannel()
         // cloning, the core put the source back where it was before the stroke
         if (adjustment != null) readAdjust()
         refresh()
@@ -4657,6 +4672,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // recoloring, the core steps the open fill aside and makes it again over what comes back
         val name = session?.let { s -> if (recoloring) pourNow { s.redo() } else s.redo() }
         if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
+        if (modelOpen) followModelChannel()
         refresh()
         if (panel == Panel.LAYERS) refreshThumbnails()
         if (adjustment != null) readAdjust()

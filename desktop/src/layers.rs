@@ -150,13 +150,12 @@ pub struct Layers {
     pub share: bool,
     pub edit_text: Option<u64>,
     /// On a model: the mesh open (its texture set's layers under it), the layer whose channels
-    /// show, whether a channel's tile was chosen (painting goes to that channel of the current
-    /// layer), each channel's own colour (hue, saturation, brightness) kept while another is
-    /// painted, the meshes' and channels' pictures, and the frame the panel last showed in (the
-    /// meshes are pictured anew as it opens).
+    /// show, the channel whose colour shows, each channel's own colour (hue, saturation,
+    /// brightness) kept while another is painted, the meshes' and channels' pictures, and the
+    /// frame the panel last showed in (the meshes are pictured anew as it opens).
     open_mesh: Option<usize>,
     tray_for: Option<u64>,
-    tile_chosen: bool,
+    channel: u32,
     channel_colours: [Option<[f32; 3]>; 3],
     mesh_pictures: HashMap<usize, TextureHandle>,
     channel_pictures: HashMap<(u32, u64), TextureHandle>,
@@ -234,7 +233,7 @@ impl Layers {
         self.swiped = None;
         self.open_mesh = None;
         self.tray_for = None;
-        self.tile_chosen = false;
+        self.channel = 0;
         self.channel_colours = [None; 3];
         self.mesh_pictures.clear();
         self.channel_pictures.clear();
@@ -259,7 +258,7 @@ impl Layers {
         let (left, arrow_x) = panel::place(ctx, LAYERS_WIDTH, button.center().x);
         // on a model: its meshes pictured as it is seen when the panel opens
         let model = session.model_info();
-        let chosen_tile = model.is_some() && self.tile_chosen;
+        let chosen_tile = model.is_some() && session.channel_tile_chosen();
         let frame = ctx.cumulative_frame_nr();
         if frame > self.last_frame + 1 {
             self.mesh_pictures.clear();
@@ -475,8 +474,8 @@ impl Layers {
         if let Some(l) = tapped {
             if chosen_tile && l.kind != LayerType::Group {
                 // on a model the row means the layer itself: its colour, no channel's tile
-                self.tile_chosen = false;
-                self.choose_channel(session, colours, 0);
+                session.leave_channel_tiles();
+                self.follow_channel(session, colours);
                 if !l.current {
                     session.select_layer(l.id);
                 }
@@ -657,8 +656,7 @@ impl Layers {
         let Some(set) = set else { return };
         self.open_mesh = Some(index);
         if set != session.texture_set() {
-            // a texture set is opened on its colour
-            self.tile_chosen = false;
+            // a texture set is opened on its colour, no tile chosen
             self.choose_channel(session, colours, 0);
             self.tray_for = None;
             session.choose_texture_set(set);
@@ -666,17 +664,26 @@ impl Layers {
     }
 
     /// Paints on `channel` of the texture set from now on (its layers stay the layers), with that
-    /// channel's own colour: roughness and metalness start black.
+    /// channel's own colour.
     fn choose_channel(&mut self, session: &CanvasSession, colours: &mut Colours, channel: u32) {
-        let now = session.model_channel();
-        if channel == now || channel > 2 {
+        if channel == session.model_channel() || channel > 2 {
             return;
         }
-        if let Some(slot) = self.channel_colours.get_mut(now as usize) {
+        session.set_model_channel(channel);
+        self.follow_channel(session, colours);
+    }
+
+    /// The channel painted on as the session has it now (a tile chosen, or its choice undone or
+    /// redone), shown with its own colour: roughness and metalness start black.
+    pub fn follow_channel(&mut self, session: &CanvasSession, colours: &mut Colours) {
+        let now = session.model_channel();
+        if now == self.channel {
+            return;
+        }
+        if let Some(slot) = self.channel_colours.get_mut(self.channel as usize) {
             *slot = Some(colours.hsv);
         }
-        session.set_model_channel(channel);
-        let now = session.model_channel();
+        self.channel = now;
         let kept = self.channel_colours.get(now as usize).copied().flatten();
         if let Some(hsv) = kept.or((now != 0).then_some([0.0, 0.0, 0.0])) {
             colours.hsv = hsv;
@@ -697,11 +704,12 @@ impl Layers {
         let inner = tray.shrink(4.0);
         let w = (inner.width() - 12.0) / 3.0;
         let painted = session.model_channel();
+        let tile_chosen = session.channel_tile_chosen();
         for (c, label) in CHANNELS.iter().enumerate() {
             let c = c as u32;
             let tile =
                 Rect::from_min_size(pos2(inner.left() + (w + 6.0) * c as f32, inner.top()), vec2(w, inner.height()));
-            let chosen = l.current && self.tile_chosen && painted == c;
+            let chosen = l.current && tile_chosen && painted == c;
             ui.painter().rect_filled(tile, 6, if chosen { argb(pc::ACCENT) } else { argb(TILE_FILL) });
             let picture = Rect::from_min_size(tile.min + vec2(6.0, 6.0), vec2(w - 12.0, 102.0));
             ui.painter().rect_filled(picture, 3, argb(THUMB_BACKGROUND));
@@ -729,8 +737,8 @@ impl Layers {
                 if !l.current {
                     session.select_layer(l.id);
                 }
-                self.choose_channel(session, colours, c);
-                self.tile_chosen = true;
+                session.choose_channel_tile(c);
+                self.follow_channel(session, colours);
             }
         }
     }

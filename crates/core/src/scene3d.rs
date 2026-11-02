@@ -334,6 +334,12 @@ pub(crate) struct Scene {
     /// The channel painted on the current part: 0 its colour, 1 roughness, 2 metalness. While it
     /// isn't the colour, the part's colour document waits in [`Scene::sets`].
     channel: usize,
+    /// A channel's tile is chosen under the current layer (shown blue, painting going to that
+    /// channel), not the layer's own row.
+    tile_chosen: bool,
+    /// The tiles chosen (and rows chosen again), each an undo step in the channels it was made
+    /// between.
+    tile_steps: Vec<TileStep>,
     /// Each part's channel maps as last given to the view (as [`Scene::filtered`]).
     channel_shown: Vec<[Option<(u64, bool)>; 2]>,
     /// The images picked with an OBJ, until its materials' maps have been taken from them.
@@ -386,6 +392,32 @@ struct JointStep {
 /// history).
 const MOST_JOINT_STEPS: usize = 512;
 
+/// A tile chosen under part `part`'s current layer, or its row chosen again: the channel painted
+/// and whether a tile was chosen, before and after, and the step it left in the canvas of each
+/// channel it was made between (as [`Canvas::undo_step`] numbers them), for undo and redo to
+/// follow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TileStep {
+    part: usize,
+    from: (usize, bool),
+    to: (usize, bool),
+    steps: [Option<u64>; 3],
+}
+
+/// What undo and redo call a tile chosen, and the layer's row chosen again.
+const TILE_CHOSEN: &str = "select material layer";
+const ROW_CHOSEN: &str = "deselect material layer";
+
+/// The step undone (true) or redone by work on `canvas`, from its next undo and redo steps
+/// `before` it.
+fn stepped(before: (Option<u64>, Option<u64>), canvas: &Canvas) -> Option<(u64, bool)> {
+    match (before, (canvas.undo_step(), canvas.redo_step())) {
+        ((Some(s), _), (u, Some(r))) if r == s && u != Some(s) => Some((s, true)),
+        ((_, Some(s)), (Some(u), r)) if u == s && r != Some(s) => Some((s, false)),
+        _ => None,
+    }
+}
+
 impl Scene {
     /// `mesh` with a texture set `texture_size` square for each of its parts, set `current` the
     /// session's own; the others are `waiting` where given, else new.
@@ -428,6 +460,8 @@ impl Scene {
             hidden: Vec::new(),
             channels: Vec::new(),
             channel: 0,
+            tile_chosen: false,
+            tile_steps: Vec::new(),
             channel_shown: Vec::new(),
             picked: Vec::new(),
             surface_maps: Vec::new(),
@@ -632,6 +666,28 @@ impl CanvasSession {
     pub fn set_model_channel(&self, channel: u32) {
         let mut st = self.shared.lock();
         st.choose_channel(channel as usize);
+        self.shared.frame(&mut st);
+    }
+
+    /// Whether a channel's tile is chosen under the current layer (Color, Roughness or Metallic,
+    /// shown blue), not the layer's own row.
+    pub fn channel_tile_chosen(&self) -> bool {
+        self.shared.lock().scene.as_ref().is_some_and(|s| s.tile_chosen)
+    }
+
+    /// Chooses `channel`'s tile under the current layer (0 Color, 1 Roughness, 2 Metallic), its
+    /// channel painted on from now on: an undo step, which chooses again what was before.
+    pub fn choose_channel_tile(&self, channel: u32) {
+        let mut st = self.shared.lock();
+        st.choose_tile(Some(channel as usize));
+        self.shared.frame(&mut st);
+    }
+
+    /// Chooses the current layer's own row again (its colour painted, no tile chosen), as an undo
+    /// step.
+    pub fn leave_channel_tiles(&self) {
+        let mut st = self.shared.lock();
+        st.choose_tile(None);
         self.shared.frame(&mut st);
     }
 
@@ -1868,6 +1924,105 @@ impl State {
         self.ensure_canvas();
     }
 
+    /// Chooses a tile (`Some` channel) under the current layer, or the layer's own row, as an
+    /// undo step: one left in the canvas of the channel painted until now and one in the
+    /// chosen channel's (one step when the channel stays the same).
+    pub(crate) fn choose_tile(&mut self, tile: Option<usize>) {
+        let Some(scene) = self.scene.as_ref() else { return };
+        let to = match tile {
+            Some(c) if c <= 2 => (c, true),
+            Some(_) => return,
+            None => (0, false),
+        };
+        let (from, part) = ((scene.channel, scene.tile_chosen), scene.current);
+        if from == to {
+            return;
+        }
+        let name = if to.1 { TILE_CHOSEN } else { ROW_CHOSEN };
+        let mut steps = [None; 3];
+        if from.0 == to.0 {
+            if self.scene_shown() {
+                self.scene_stroke_cancel();
+            } else {
+                self.finish_stroke();
+            }
+            self.settle();
+        } else {
+            self.choose_channel(to.0);
+            // the step in the channel left, waiting now
+            let set = self.scene.as_mut().and_then(|s| s.slot(part, from.0)).and_then(Option::as_mut);
+            if let (Some(gpu), Some(set)) = (self.gpu.as_ref(), set)
+                && let Some(c) = set.canvas.as_mut()
+            {
+                c.record_outside_change(name);
+                c.render(gpu, &mut set.doc, None);
+                if let Some(s) = steps.get_mut(from.0) {
+                    *s = c.undo_step();
+                }
+            }
+        }
+        if let Some(c) = self.canvas.as_mut() {
+            c.record_outside_change(name);
+            self.flush();
+            if let Some(s) = steps.get_mut(to.0) {
+                *s = self.canvas.as_ref().and_then(Canvas::undo_step);
+            }
+        }
+        let Some(scene) = self.scene.as_mut() else { return };
+        scene.tile_chosen = to.1;
+        if steps.iter().any(Option::is_some) {
+            if scene.tile_steps.len() >= MOST_JOINT_STEPS {
+                scene.tile_steps.remove(0);
+            }
+            scene.tile_steps.push(TileStep { part, from, to, steps });
+        }
+        self.revision += 1;
+    }
+
+    /// After an undo or redo (`before`: the session canvas's next undo and redo steps before
+    /// it), a tile's choice undone or redone chooses again what was chosen before or after it:
+    /// its channel painted, and its step in that channel's canvas taken with it.
+    pub(crate) fn follow_tile_step(&mut self, before: (Option<u64>, Option<u64>)) {
+        let Some((step, undone)) = self.canvas.as_ref().and_then(|c| stepped(before, c)) else { return };
+        let Some(scene) = self.scene.as_ref() else { return };
+        let (part, channel) = (scene.current, scene.channel);
+        let found = scene.tile_steps.iter().rev().find(|t| t.part == part && t.steps.get(channel) == Some(&Some(step)));
+        let Some(&TileStep { from, to, steps, .. }) = found else { return };
+        let chosen = if undone { from } else { to };
+        let follow = |c: &mut Canvas, want: Option<u64>| {
+            let next = if undone { c.undo_step() } else { c.redo_step() };
+            if want.is_some() && next == want {
+                if undone {
+                    c.undo();
+                } else {
+                    c.redo();
+                }
+            }
+        };
+        // the other channel it was made between: chosen again, or its step taken where it waits
+        if let Some(other) = [from.0, to.0].into_iter().find(|&c| c != channel) {
+            let want = steps.get(other).copied().flatten();
+            if chosen.0 == other {
+                self.choose_channel(other);
+                if let Some(c) = self.canvas.as_mut() {
+                    follow(c, want);
+                    self.flush();
+                }
+            } else {
+                let set = self.scene.as_mut().and_then(|s| s.slot(part, other)).and_then(Option::as_mut);
+                if let (Some(gpu), Some(set)) = (self.gpu.as_ref(), set)
+                    && let Some(c) = set.canvas.as_mut()
+                {
+                    follow(c, want);
+                    c.render(gpu, &mut set.doc, None);
+                }
+            }
+        }
+        if let Some(scene) = self.scene.as_mut() {
+            scene.tile_chosen = chosen.1;
+        }
+    }
+
     /// Runs `f` with the colour of the current part as the session's document (as saves need),
     /// the channel painted on put back after.
     pub(crate) fn with_colour<T>(&mut self, f: impl FnOnce(&mut State) -> T) -> T {
@@ -1893,6 +2048,8 @@ impl State {
         self.scene_stroke_cancel();
         self.settle();
         let Some(scene) = self.scene.as_mut() else { return };
+        // opened on its colour, no tile chosen
+        scene.tile_chosen = false;
         let Some(mut set) = scene.sets.get_mut(index).and_then(Option::take) else { return };
         let (w, h) = (self.doc.width(), self.doc.height());
         let pending = std::mem::replace(&mut self.pending_pixels, crate::project::opened(set.take_pending()));
@@ -2200,13 +2357,7 @@ impl State {
     /// it), the rest of a stroke that painted every channel follows: the step it made in each
     /// other channel is undone or redone too, if that is that channel's next step.
     pub(crate) fn follow_joint_step(&mut self, before: (Option<u64>, Option<u64>)) {
-        let Some(canvas) = self.canvas.as_ref() else { return };
-        let after = (canvas.undo_step(), canvas.redo_step());
-        let (step, undone) = match (before, after) {
-            ((Some(s), _), (u, Some(r))) if r == s && u != Some(s) => (s, true),
-            ((_, Some(s)), (Some(u), r)) if u == s && r != Some(s) => (s, false),
-            _ => return,
-        };
+        let Some((step, undone)) = self.canvas.as_ref().and_then(|c| stepped(before, c)) else { return };
         let (Some(gpu), Some(scene)) = (self.gpu.as_ref(), self.scene.as_mut()) else { return };
         let (part, channel) = (scene.current, scene.channel);
         let Some(joint) =
@@ -3731,6 +3882,58 @@ f 1/1 2/2",
     }
 
     #[test]
+    fn choosing_a_tile_is_an_undo_step_that_chooses_again_what_was_before() {
+        let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let chosen = |s: &CanvasSession| (s.model_channel(), s.channel_tile_chosen());
+        assert_eq!(chosen(&s), (0, false));
+        assert!(!s.info().can_undo);
+        // the Roughness tile, a stroke on it, the Color tile, the layer's row again
+        s.choose_channel_tile(1);
+        assert_eq!(chosen(&s), (1, true));
+        assert!(s.info().can_undo);
+        dab(&s);
+        let rough = painted(&s);
+        assert!(rough > 20, "{rough}");
+        s.choose_channel_tile(0);
+        assert_eq!(chosen(&s), (0, true));
+        s.leave_channel_tiles();
+        assert_eq!(chosen(&s), (0, false));
+        // undone one by one, each choice taken back to what was chosen before it
+        assert_eq!(s.undo().as_deref(), Some(super::ROW_CHOSEN));
+        assert_eq!(chosen(&s), (0, true));
+        assert_eq!(s.undo().as_deref(), Some(super::TILE_CHOSEN));
+        assert_eq!(chosen(&s), (1, true));
+        assert_eq!(painted(&s), rough);
+        s.undo();
+        assert_eq!((chosen(&s), painted(&s)), ((1, true), 0));
+        assert_eq!(s.undo().as_deref(), Some(super::TILE_CHOSEN));
+        assert_eq!(chosen(&s), (0, false));
+        assert!(!s.info().can_undo);
+        // and redone the same way
+        s.redo();
+        assert_eq!((chosen(&s), painted(&s)), ((1, true), 0));
+        s.redo();
+        assert_eq!((chosen(&s), painted(&s)), ((1, true), rough));
+        s.redo();
+        assert_eq!(chosen(&s), (0, true));
+        s.redo();
+        assert_eq!(chosen(&s), (0, false));
+        assert!(!s.info().can_redo);
+        // a channel switched to for a moment (as a save does) leaves the steps in order
+        s.choose_channel_tile(2);
+        s.set_model_channel(0);
+        s.set_model_channel(2);
+        assert_eq!(s.undo().as_deref(), Some(super::TILE_CHOSEN));
+        assert_eq!(chosen(&s), (0, false));
+        s.redo();
+        assert_eq!(chosen(&s), (2, true));
+    }
+
+    #[test]
     fn model_painting_undoes_redoes_and_saves_whole() {
         for seed in [2u32, 30] {
             let s = CanvasSession::open_model(CUBE.into(), "cube.obj".into(), Vec::new(), "Cube".into(), 64).unwrap();
@@ -3824,7 +4027,11 @@ f 1/1 2/2",
                         s.touch_move(1, vec![sample(x + dx, y + dy, t + 16.0)]);
                         s.touch_up(1, vec![sample(x + dx, y + dy, t + 32.0)]);
                     }
-                    5 => s.set_model_channel(next(3)),
+                    5 => match next(3) {
+                        0 => s.set_model_channel(next(3)),
+                        1 => s.choose_channel_tile(next(3)),
+                        _ => s.leave_channel_tiles(),
+                    },
                     // from whichever channel is painted on (the others follow its layers)
                     6 => _ = s.add_layer(),
                     7 => {

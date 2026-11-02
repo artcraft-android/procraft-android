@@ -936,6 +936,8 @@ enum Op {
     },
     /// The next step made is named so.
     Name(String),
+    /// A step that changes nothing here, named so (see [`Canvas::record_outside_change`]).
+    OutsideChange(String),
     /// Where the history is now is marked.
     Mark,
     /// The steps made since the mark become one.
@@ -1827,6 +1829,7 @@ impl Canvas {
                         | Op::Invert(..)
                         | Op::Fill(..)
                         | Op::Record(_)
+                        | Op::OutsideChange(_)
                         | Op::Duplicate { .. }
                         | Op::MergeDown { .. }
                         | Op::MergeMany { .. }
@@ -2300,6 +2303,14 @@ impl Canvas {
     pub fn forget_document_steps(&mut self) {
         self.undo.retain(|s| s.doc.is_none());
         self.redo.retain(|s| s.doc.is_none());
+    }
+
+    /// An undo step that changes nothing here, named `name`: a change kept outside the canvas
+    /// (which of a model's channels is painted), which its owner follows as the step is undone
+    /// and redone.
+    pub fn record_outside_change(&mut self, name: &str) {
+        self.end_stroke();
+        self.ops.push(Op::OutsideChange(name.to_owned()));
     }
 
     /// The document was changed (layers added, removed, reordered, their settings...): `before`
@@ -3637,6 +3648,17 @@ impl Canvas {
                         flip: None,
                     });
                     self.dirty = self.full();
+                    history_changed = true;
+                }
+                Op::OutsideChange(name) => {
+                    self.push_step(Step {
+                        made: 0,
+                        name: Some(name),
+                        doc: None,
+                        pixels: Vec::new(),
+                        selection: None,
+                        flip: None,
+                    });
                     history_changed = true;
                 }
                 Op::Duplicate { pairs, before } => {
@@ -5279,7 +5301,14 @@ impl Canvas {
         match op {
             Op::Stamps { layer, .. } => live.contains(layer),
             Op::Commit(stroke) => live.contains(&stroke.layer),
-            Op::Cancel | Op::SaveTip(_) | Op::Untip(_) | Op::Mark | Op::Name(_) | Op::Collapse | Op::Within(_) => true,
+            Op::Cancel
+            | Op::SaveTip(_)
+            | Op::Untip(_)
+            | Op::Mark
+            | Op::Name(_)
+            | Op::OutsideChange(_)
+            | Op::Collapse
+            | Op::Within(_) => true,
             Op::Undo => only_live(self.undo.last()),
             Op::Redo => only_live(self.redo.last()),
             Op::TransformBegin(id)
