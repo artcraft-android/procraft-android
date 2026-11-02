@@ -46,7 +46,7 @@ impl CanvasPreset {
 
     fn pixels(&self, v: f32) -> u32 {
         let px = per_inch(self.unit.clone()).map_or(v, |k| v / k * self.dpi);
-        (px.round().max(1.0) as u32).min(MAX_SIDE)
+        (px.round().max(1.0) as u32).min(MAX_SIDE).min(procraft_engine::document::canvas_edge_most())
     }
 
     fn to_json(&self) -> serde_json::Value {

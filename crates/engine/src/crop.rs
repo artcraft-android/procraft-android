@@ -1,7 +1,7 @@
 //! Cropping and resizing the canvas: where the new canvas's pixels come from on the old one, and
 //! the pixels resampled.
 
-use crate::document::MAX_CANVAS_EDGE;
+use crate::document::canvas_edge_most;
 use crate::geom::{Affine, Vec2};
 
 /// A new canvas: its size, and the map from its pixels to the old canvas's.
@@ -18,10 +18,11 @@ pub struct Crop {
 pub fn crop(rect: [f32; 4], angle: f32, size: Option<(u32, u32)>) -> Crop {
     let finite = |v: f32, or: f32| if v.is_finite() { v } else { or };
     let [x, y] = [finite(rect[0], 0.0), finite(rect[1], 0.0)];
-    let max = MAX_CANVAS_EDGE as f32;
+    let most = canvas_edge_most();
+    let max = most as f32;
     let (w, h) = (finite(rect[2], 1.0).clamp(1.0, max), finite(rect[3], 1.0).clamp(1.0, max));
     let (width, height) = size.unwrap_or((w.round() as u32, h.round() as u32));
-    let (width, height) = (width.clamp(1, MAX_CANVAS_EDGE), height.clamp(1, MAX_CANVAS_EDGE));
+    let (width, height) = (width.clamp(1, most), height.clamp(1, most));
     let (fw, fh) = (width as f32, height as f32);
     // a new pixel, about the new canvas's middle, scaled to the rectangle, turned, and placed
     let to_old = Affine::translate(Vec2::new(-fw / 2.0, -fh / 2.0))

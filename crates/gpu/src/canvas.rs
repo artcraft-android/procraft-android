@@ -7701,11 +7701,12 @@ impl SourceSlots {
 
 /// One white texel standing in for an array of brush images, until a canvas wants them.
 fn stand_in_images(gpu: &Gpu, label: &str) -> wgpu::Texture {
+    let layers = gpu.array_layers_least();
     gpu.device.create_texture_with_data(
         &gpu.queue,
         &wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: layers },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -7714,7 +7715,7 @@ fn stand_in_images(gpu: &Gpu, label: &str) -> wgpu::Texture {
             view_formats: &[],
         },
         wgpu::util::TextureDataOrder::LayerMajor,
-        &[255],
+        &vec![255; layers as usize],
     )
 }
 

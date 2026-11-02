@@ -17,3 +17,7 @@ bytemuck = { workspace = true }
 pollster = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
+
+# OpenGL ES where a device's Vulkan is missing or can't make a device
+[target.'cfg(target_os = "android")'.dependencies]
+wgpu = { workspace = true, features = ["gles"] }

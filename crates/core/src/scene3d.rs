@@ -3481,7 +3481,9 @@ f 1/1 2/2",
         materials(&s, 0.2, 0.8);
         s.stroke_begin(PointerKind::Stylus, vec![sample(90.0, 100.0, 0.0)]);
         frame(&s, 200);
-        let small = 1024 + 1 + 2;
+        // the two stand-ins for brush images a texel a layer
+        let layers = s.shared.lock().gpu.as_ref().map_or(1, |g| u64::from(g.array_layers_least()));
+        let small = 1024 + 1 + 2 * layers;
         let (bytes, _, made) = channel_bytes(&s);
         assert_eq!(made, [true, true]);
         assert_eq!(bytes, 2 * (side * side * 8 + small) + side * side * 8);

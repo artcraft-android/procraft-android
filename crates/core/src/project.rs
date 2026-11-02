@@ -427,7 +427,8 @@ impl CanvasSession {
         background_visible: bool,
         name: String,
     ) -> Arc<CanvasSession> {
-        let mut doc = Document::new(width.max(1), height.max(1));
+        let most = procraft_engine::document::canvas_edge_most();
+        let mut doc = Document::new(width.clamp(1, most), height.clamp(1, most));
         doc.dpi = dpi;
         if let [r, g, b] = background[..] {
             doc.background = [r, g, b];
@@ -441,20 +442,41 @@ impl CanvasSession {
         CanvasSession::with_document(doc.repaired(), name, Vec::new())
     }
 
-    /// A new artwork the size of `image` (straight RGBA8), the picture as its one layer.
+    /// A new artwork the size of `image` (straight RGBA8), the picture as its one layer; scaled
+    /// down to fit if it is larger than a canvas may be here.
     #[uniffi::constructor]
     pub fn from_image(image: crate::layers::ThumbnailImage, name: String) -> Arc<CanvasSession> {
-        let (w, h) = (image.width.max(1), image.height.max(1));
-        let doc = Document::new(w, h);
-        let layer = doc.current();
+        let (sw, sh) = (image.width.max(1), image.height.max(1));
         let mut pixels = image.rgba;
-        pixels.resize(w as usize * h as usize * 4, 0);
+        pixels.resize(sw as usize * sh as usize * 4, 0);
         for px in pixels.as_chunks_mut::<4>().0 {
             let a = u16::from(px[3]);
             for c in px.iter_mut().take(3) {
                 *c = ((u16::from(*c) * a + 127) / 255) as u8;
             }
         }
+        let most = procraft_engine::document::canvas_edge_most();
+        let (w, h) = if sw.max(sh) > most {
+            let k = most as f32 / sw.max(sh) as f32;
+            let side = |v: u32| ((v as f32 * k).round() as u32).clamp(1, most);
+            let (w, h) = (side(sw), side(sh));
+            let to_old = procraft_engine::geom::Affine {
+                a: sw as f32 / w as f32,
+                d: sh as f32 / h as f32,
+                ..procraft_engine::geom::Affine::IDENTITY
+            };
+            pixels = procraft_engine::crop::resample(
+                &pixels,
+                sw,
+                sh,
+                &procraft_engine::crop::Crop { width: w, height: h, to_old },
+            );
+            (w, h)
+        } else {
+            (sw, sh)
+        };
+        let doc = Document::new(w, h);
+        let layer = doc.current();
         let name = if name.trim().is_empty() {
             "Untitled Artwork".to_owned()
         } else {
@@ -1173,10 +1195,8 @@ pub fn import_pages(
     name: String,
 ) -> PagesOutcome {
     use procraft_engine::document::Layer;
-    let (w, h) = (
-        width.clamp(1, procraft_engine::document::MAX_CANVAS_EDGE),
-        height.clamp(1, procraft_engine::document::MAX_CANVAS_EDGE),
-    );
+    let most = procraft_engine::document::canvas_edge_most();
+    let (w, h) = (width.clamp(1, most), height.clamp(1, most));
     let most = Document::new(w, h).layer_cap();
     if count as usize > most {
         return PagesOutcome::TooManyPages { most: u32::try_from(most).unwrap_or(u32::MAX) };

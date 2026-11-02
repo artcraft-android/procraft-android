@@ -3,7 +3,7 @@
 //! frame follows: which part a press takes, snapping to the canvas's sides and middle, a locked
 //! aspect following the width. The app draws the frame and the settings; Done crops (crop.rs).
 
-use procraft_engine::document::MAX_CANVAS_EDGE;
+use procraft_engine::document::canvas_edge_most;
 use procraft_engine::geom::Vec2;
 
 use crate::CanvasSession;
@@ -258,13 +258,14 @@ impl CanvasSession {
         let e = &mut st.crop_edit;
         let Some([l, t, _, _]) = e.rect else { return };
         let (w0, h0) = e.size;
-        let mut w = width.unwrap_or(w0).clamp(1, MAX_CANVAS_EDGE);
-        let mut h = height.unwrap_or(h0).clamp(1, MAX_CANVAS_EDGE);
+        let most = canvas_edge_most();
+        let mut w = width.unwrap_or(w0).clamp(1, most);
+        let mut h = height.unwrap_or(h0).clamp(1, most);
         if e.aspect_locked && w0 > 0 && h0 > 0 {
             if width.is_some() {
-                h = ((w as f32 * h0 as f32 / w0 as f32).round() as u32).clamp(1, MAX_CANVAS_EDGE);
+                h = ((w as f32 * h0 as f32 / w0 as f32).round() as u32).clamp(1, most);
             } else if height.is_some() {
-                w = ((h as f32 * w0 as f32 / h0 as f32).round() as u32).clamp(1, MAX_CANVAS_EDGE);
+                w = ((h as f32 * w0 as f32 / h0 as f32).round() as u32).clamp(1, most);
             }
         }
         e.size = (w, h);

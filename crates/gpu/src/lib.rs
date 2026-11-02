@@ -56,9 +56,26 @@ pub struct Gpu {
 impl Gpu {
     /// A wgpu instance for this platform: Vulkan on Android, the native API elsewhere.
     pub fn instance() -> wgpu::Instance {
+        Gpu::instance_after(0)
+            .unwrap_or_else(|| wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle()))
+    }
+
+    /// The backends a device is made from, best first: on Android Vulkan, then OpenGL ES (for
+    /// a device whose Vulkan is missing or fails); elsewhere the native API alone.
+    fn backends() -> &'static [wgpu::Backends] {
+        if cfg!(target_os = "android") {
+            &[wgpu::Backends::VULKAN, wgpu::Backends::GL]
+        } else {
+            &[wgpu::Backends::PRIMARY]
+        }
+    }
+
+    /// The instance to try after `tries` failed to make a device (see [`Gpu::backends`]); None
+    /// past the last.
+    pub fn instance_after(tries: usize) -> Option<wgpu::Instance> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        desc.backends = if cfg!(target_os = "android") { wgpu::Backends::VULKAN } else { wgpu::Backends::PRIMARY };
-        wgpu::Instance::new(desc)
+        desc.backends = *Gpu::backends().get(tries)?;
+        Some(wgpu::Instance::new(desc))
     }
 
     /// Sends the writes queued so far to the device and waits for them, so the copies they were
@@ -70,9 +87,42 @@ impl Gpu {
         }
     }
 
-    /// A device for offscreen work (tests, exports).
+    /// A device for offscreen work (tests, exports), from the first instance that makes one.
     pub fn headless() -> Result<Gpu, GpuError> {
-        Gpu::create(Gpu::instance(), None)
+        Gpu::first_that(|_| true)
+    }
+
+    /// The app's device, the canvases' pipelines made: from the first instance that makes one
+    /// and builds them without an error or losing it (a driver that fails on them gives way to
+    /// the next backend; the last is kept as it is).
+    pub fn for_canvases() -> Result<Gpu, GpuError> {
+        Gpu::first_that(|gpu| {
+            gpu.prepare_canvases();
+            let fine = gpu.errors() == 0 && !gpu.is_lost();
+            if !fine {
+                log::warn!("the canvases' pipelines: {} GPU errors, lost {}", gpu.errors(), gpu.is_lost());
+            }
+            fine
+        })
+    }
+
+    /// A device from the first instance that makes one `fine` takes, or the last's.
+    fn first_that(fine: impl Fn(&Gpu) -> bool) -> Result<Gpu, GpuError> {
+        let count = Gpu::backends().len();
+        let mut tries = 0;
+        loop {
+            let Some(instance) = Gpu::instance_after(tries) else {
+                return Err(GpuError::NoAdapter("no backend".to_owned()));
+            };
+            let last = tries + 1 >= count;
+            match Gpu::create(instance, None) {
+                Ok(gpu) if last || fine(&gpu) => return Ok(gpu),
+                Ok(_) => log::warn!("trying the next backend"),
+                Err(e) if !last => log::warn!("{e}; trying the next backend"),
+                Err(e) => return Err(e),
+            }
+            tries += 1;
+        }
     }
 
     /// A device that can present to `surface` (made from `instance`).
@@ -103,6 +153,8 @@ impl Gpu {
             ..Default::default()
         }))
         .map_err(|e| GpuError::Device(e.to_string()))?;
+        // new canvases and crops kept to what its textures can be
+        procraft_engine::document::set_gpu_texture_most(device.limits().max_texture_dimension_2d);
         log::info!(
             "GPU capped strokes (dual-source blending): {}",
             device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING)
@@ -186,6 +238,12 @@ impl Gpu {
 
     pub fn max_texture_size(&self) -> u32 {
         self.device.limits().max_texture_dimension_2d
+    }
+
+    /// The fewest layers a texture viewed as an array has: two on OpenGL (ES), which makes a
+    /// texture of one a plain 2D one that an array view reads nothing from; else one.
+    pub fn array_layers_least(&self) -> u32 {
+        if self.adapter.get_info().backend == wgpu::Backend::Gl { 2 } else { 1 }
     }
 }
 

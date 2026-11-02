@@ -1820,7 +1820,7 @@ impl MeshView {
         if projector.grain.is_none() {
             let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("stroke grain"),
-                size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: gpu.array_layers_least() },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -1830,9 +1830,15 @@ impl MeshView {
                     | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
-            let whole = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            // drawn and read in its first layer
+            let whole = texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                array_layer_count: Some(1),
+                ..Default::default()
+            });
             let array = texture.create_view(&wgpu::TextureViewDescriptor {
                 dimension: Some(wgpu::TextureViewDimension::D2Array),
+                array_layer_count: Some(1),
                 ..Default::default()
             });
             projector.grain = Some((whole, array));

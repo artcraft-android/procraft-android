@@ -1052,7 +1052,12 @@ impl CanvasSession {
     /// A new artwork of `width` × `height` pixels.
     #[uniffi::constructor]
     pub fn new(width: u32, height: u32) -> Arc<CanvasSession> {
-        CanvasSession::with_document(Document::new(width, height), DEFAULT_NAME.to_owned(), Vec::new())
+        let most = procraft_engine::document::canvas_edge_most();
+        CanvasSession::with_document(
+            Document::new(width.min(most), height.min(most)),
+            DEFAULT_NAME.to_owned(),
+            Vec::new(),
+        )
     }
 }
 

@@ -20,7 +20,7 @@ pub fn warm_gpu() {
     if kept.is_some() {
         return;
     }
-    match Gpu::headless() {
+    match Gpu::for_canvases() {
         Ok(gpu) => {
             gpu.prepare_canvases();
             *kept = Some(gpu);

@@ -1568,15 +1568,23 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * Waits (off the main thread, as a big artwork's first frame holds the session a while) until
-     * the open artwork's canvas has drawn a frame, or a few seconds have passed.
+     * the open artwork's canvas has drawn a frame, or a few seconds have passed; if the canvas can't
+     * draw (the device's GPU couldn't make it), says so at once.
      */
-    suspend fun awaitCanvasDrawn() = withContext(Dispatchers.IO) {
-        val s = session ?: return@withContext
-        var waited = 0L
-        while (waited < CANVAS_DRAWN_LIMIT_MS && runCatching { s.info().frames }.getOrDefault(1uL) == 0uL) {
-            kotlinx.coroutines.delay(CANVAS_POLL_MS)
-            waited += CANVAS_POLL_MS
+    suspend fun awaitCanvasDrawn() {
+        val s = session ?: return
+        val failed = withContext(Dispatchers.IO) {
+            var waited = 0L
+            while (waited < CANVAS_DRAWN_LIMIT_MS) {
+                val info = runCatching { s.info() }.getOrNull() ?: return@withContext false
+                if (info.error != null) return@withContext true
+                if (info.frames != 0uL) return@withContext false
+                kotlinx.coroutines.delay(CANVAS_POLL_MS)
+                waited += CANVAS_POLL_MS
+            }
+            false
         }
+        if (failed && session === s) message = "This device's graphics can't draw the canvas."
     }
 
     /**

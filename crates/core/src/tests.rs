@@ -2624,6 +2624,25 @@ fn an_artwork_from_a_picture() {
 }
 
 #[test]
+fn a_picture_larger_than_a_canvas_may_be_is_scaled_down_to_fit() {
+    use crate::layers::ThumbnailImage;
+    let most = procraft_engine::document::canvas_edge_most();
+    let (w, h) = (most + most / 4, 8);
+    // the left half red, the right half blue
+    let rgba: Vec<u8> =
+        (0..w * h).flat_map(|i| if i % w < w / 2 { [255, 0, 0, 255] } else { [0, 0, 255, 255] }).collect();
+    let s = CanvasSession::from_image(ThumbnailImage { width: w, height: h, rgba }, "Wide".to_owned());
+    let (cw, ch) = (s.info().width, s.info().height);
+    assert_eq!((cw, ch), (most, (h as f32 * most as f32 / w as f32).round() as u32));
+    let st = s.shared.lock();
+    let (_, layer) = st.pending_pixels.first().unwrap();
+    let px = layer.clone().pixels(cw, ch).unwrap();
+    let at = |x: u32, y: u32| px[((y * cw + x) * 4) as usize..][..4].to_vec();
+    assert_eq!(at(10, ch / 2), [255, 0, 0, 255]);
+    assert_eq!(at(cw - 10, ch / 2), [0, 0, 255, 255]);
+}
+
+#[test]
 fn curve_samples_follow_the_curve() {
     let straight = crate::studio::curve_samples(vec![0.0, 0.0, 1.0, 1.0], 5);
     assert_eq!(straight.len(), 5);

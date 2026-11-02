@@ -16,7 +16,7 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
     // kept for every artwork after
     let mut kept = crate::device::kept();
     let instance = own.clone().or_else(|| kept.as_ref().map(|g| g.instance.clone())).unwrap_or_else(Gpu::instance);
-    let surface = match crate::window::create_surface(&instance, &window) {
+    let mut surface = match crate::window::create_surface(&instance, &window) {
         Ok(s) => s,
         Err(e) => return fail(&shared, e),
     };
@@ -25,12 +25,26 @@ pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
     } else if let Some(gpu) = kept.as_ref() {
         Some(gpu.clone())
     } else {
-        match Gpu::for_surface(instance, &surface) {
-            Ok(gpu) => {
-                *kept = Some(gpu.clone());
-                Some(gpu)
+        // the first instance that makes a device for the window (see `Gpu::instance_after`)
+        let mut instance = instance;
+        let mut tries = 0;
+        loop {
+            match Gpu::for_surface(instance.clone(), &surface) {
+                Ok(gpu) => {
+                    *kept = Some(gpu.clone());
+                    break Some(gpu);
+                }
+                Err(e) => {
+                    tries += 1;
+                    let Some(next) = Gpu::instance_after(tries) else { return fail(&shared, e.to_string()) };
+                    log::warn!("{e}; trying the next backend");
+                    surface = match crate::window::create_surface(&next, &window) {
+                        Ok(s) => s,
+                        Err(e) => return fail(&shared, e),
+                    };
+                    instance = next;
+                }
             }
-            Err(e) => return fail(&shared, e.to_string()),
         }
     };
     drop(kept);

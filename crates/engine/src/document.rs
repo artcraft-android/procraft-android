@@ -304,6 +304,21 @@ impl Layer {
 /// Largest canvas edge, pixels.
 pub const MAX_CANVAS_EDGE: u32 = 16384;
 
+/// The largest edge a new canvas or a crop may have here: [`MAX_CANVAS_EDGE`], or the GPU's
+/// largest texture where that is less (set as its device is made).
+static EDGE_MOST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(MAX_CANVAS_EDGE);
+
+/// The largest edge a new canvas or a crop may have on this device, pixels (a canvas opened from
+/// a file is as large as it is, and a GPU that can't hold it refuses it).
+pub fn canvas_edge_most() -> u32 {
+    EDGE_MOST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The GPU's textures are at most `side` pixels a side: new canvases and crops keep within it.
+pub fn set_gpu_texture_most(side: u32) {
+    EDGE_MOST.store(side.clamp(1, MAX_CANVAS_EDGE), std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Memory the layers' pixels may take unless the device says otherwise, bytes.
 pub const LAYER_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
 
