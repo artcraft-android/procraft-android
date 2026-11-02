@@ -12,7 +12,7 @@ section: graphics
 priority: optional
 maintainer: ArtCraft Team <bearincrypto@gmail.com>
 vendor: ArtCraft Team
-homepage: https://github.com/artcraft-android/procraft-android
+homepage: https://github.com/artcraft-android/procraft
 license: MIT OR Apache-2.0
 description: |-
   Paint, draw and sketch

@@ -24,9 +24,9 @@
     <!-- an advertised shortcut to an .exe takes an icon whose id ends in .exe (ICE50) -->
     <Icon Id="ProCraftIcon.exe" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="ProCraftIcon.exe" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/artcraft-android/procraft-android" />
-    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/artcraft-android/procraft-android/releases" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/artcraft-android/procraft-android/issues" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/artcraft-android/procraft" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/artcraft-android/procraft/releases" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/artcraft-android/procraft/issues" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="ProCraft" />
