@@ -256,7 +256,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 if (vm.adjustment != null && !vm.barsHidden) {
                     AdjustmentBar(vm, Modifier.offset(y = Pc.BarHeight))
                     AdjustModes(vm, Modifier.align(Alignment.TopCenter).offset(y = Pc.BarHeight + 52.dp))
-                    AdjustmentMenu(vm)
+                    AdjustmentMenu(vm, maxWidth, maxHeight)
                 }
                 // the adjustment's own panel rises from below the screen, and drops away
                 val bottomPanel = vm.adjustment?.takeIf { !vm.barsHidden && it in BottomPanels }

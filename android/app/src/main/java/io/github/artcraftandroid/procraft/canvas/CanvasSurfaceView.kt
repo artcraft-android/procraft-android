@@ -226,7 +226,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             TouchCommand.SelectionChanged -> vm.selectionTouched()
             // an adjustment's amount, liquify, the clone source and the like changed; a tap opens its menu
             TouchCommand.AdjustChanged -> vm.adjustTouched()
-            is TouchCommand.AdjustMenu -> vm.adjustMenuAt = Offset(c.x, c.y)
+            is TouchCommand.AdjustMenu -> if (!closedAdjustMenu) vm.adjustMenuAt = Offset(c.x, c.y)
         }
     }
 
@@ -256,6 +256,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             }
             skipping = false
             // a touch on the canvas closes an adjustment's menu, its Layer / Pencil choice and liquify's popups
+            closedAdjustMenu = vm.adjustMenuAt != null
             if (vm.adjustment != null) {
                 vm.adjustMenuAt = null
                 vm.adjustModesOpen = false
@@ -289,6 +290,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     /** The touch went down where Continue filling takes no fill: the rest of it does nothing. */
     private var skipping = false
+
+    /** The touch went down with an adjustment's menu open: a tap only closes it. */
+    private var closedAdjustMenu = false
 
     /**
      * The pen's side buttons, hovering or touching: what the shared touches say Gesture controls set

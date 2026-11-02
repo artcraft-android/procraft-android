@@ -158,17 +158,17 @@ impl Adjustments {
         if let Some(&[x, y]) = shown.clone_puck.as_deref() {
             clone_puck(ctx, pos2(x, y) / ctx.pixels_per_point());
         }
-        // the bar's triangle opens Layer or Pencil under it
-        if let Some(d) = bar(ctx, look, &shown, a, bar_top) {
-            egui::Area::new(Id::unique("adjust modes button")).fixed_pos(d.min).order(Order::Foreground).show(
-                ctx,
-                |ui| {
-                    if ui.allocate_rect(d, Sense::click()).clicked() {
-                        self.modes_open = !self.modes_open;
-                    }
-                },
-            );
-        }
+        // the bar takes its touches: a tap anywhere on it opens Layer or Pencil under it, a swipe
+        // from it adjusts nothing
+        let band = bar(ctx, look, &shown, a, bar_top);
+        egui::Area::new(Id::unique("adjust modes button")).fixed_pos(band.min).order(Order::Foreground).show(
+            ctx,
+            |ui| {
+                if ui.allocate_rect(band, Sense::click()).clicked() && procraft_core::adjustment_paintable(a) {
+                    self.modes_open = !self.modes_open;
+                }
+            },
+        );
         if self.modes_open
             && let Some(pencil) = modes(ctx, look, shown.pencil, bar_top + 52.0)
         {
@@ -183,10 +183,18 @@ impl Adjustments {
     }
 
     /// The menu a tap on the canvas opens: apply above, undo to the left, preview in the middle,
-    /// cancel to the right and reset below, round the tap. A tap elsewhere closes it.
+    /// cancel to the right and reset below, round the tap, kept on the screen. A tap elsewhere
+    /// closes it.
     fn pie(&mut self, ctx: &egui::Context, look: &mut Look) -> Option<Asked> {
-        let at = self.menu_at?;
+        let tapped = self.menu_at?;
         let screen = ctx.content_rect();
+        // 12 from the sides, against the top, 25 above the bottom (as measured)
+        let reach = PIE_STEP + 40.0;
+        let (left, top) = (screen.left() + reach + 12.0, screen.top() + reach);
+        let at = pos2(
+            tapped.x.clamp(left, (screen.right() - reach - 12.0).max(left)),
+            tapped.y.clamp(top, (screen.bottom() - reach - 25.0).max(top)),
+        );
         let mut asked = None;
         let mut close = false;
         egui::Area::new(Id::unique("adjustment pie")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
@@ -236,19 +244,18 @@ fn clone_puck(ctx: &egui::Context, at: Pos2) {
 /// The bar under the top bar: the adjustment's icon and name, its amount when it has one, the
 /// triangle that opens Layer or Pencil; under it the amount as a thin blue line.
 /// Returns where the triangle is, for the adjustments that have one.
-fn bar(ctx: &egui::Context, look: &mut Look, shown: &AdjustShown, a: Adjustment, top: f32) -> Option<Rect> {
+fn bar(ctx: &egui::Context, look: &mut Look, shown: &AdjustShown, a: Adjustment, top: f32) -> Rect {
     let screen = ctx.content_rect();
     let band = Rect::from_min_size(pos2(screen.left(), top), vec2(screen.width(), 32.0));
-    // drawn over the canvas without taking its touches: a swipe across it still adjusts
     egui::Area::new(Id::unique("adjustment bar"))
         .fixed_pos(band.min)
         .order(Order::Middle)
         .interactable(false)
-        .show(ctx, |ui| bar_in(ui, look, shown, a, band, screen.width()))
-        .inner
+        .show(ctx, |ui| bar_in(ui, look, shown, a, band, screen.width()));
+    band
 }
 
-fn bar_in(ui: &Ui, look: &mut Look, shown: &AdjustShown, a: Adjustment, band: Rect, width_all: f32) -> Option<Rect> {
+fn bar_in(ui: &Ui, look: &mut Look, shown: &AdjustShown, a: Adjustment, band: Rect, width_all: f32) {
     let painter = ui.painter();
     painter.rect_filled(band, 0, argb(MODE_BAR));
     let ink = argb(MODE_TEXT);
@@ -269,15 +276,13 @@ fn bar_in(ui: &Ui, look: &mut Look, shown: &AdjustShown, a: Adjustment, band: Re
         x = text(painter, pos2(x + 3.0, band.center().y), Align2::LEFT_CENTER, &amount, 14.0, Weight::Regular, ink)
             .right();
     }
-    let disclose = paintable.then(|| Rect::from_min_size(pos2(x, band.top()), vec2(33.0, 32.0)));
-    if let Some(d) = disclose {
-        look.icon(ui, &icons::DISCLOSE, d.center(), 32.0, ink);
+    if paintable {
+        look.icon(ui, &icons::DISCLOSE, pos2(x + 16.5, band.center().y), 32.0, ink);
     }
     if swiped {
         let line = Rect::from_min_size(band.left_bottom(), vec2(width_all * shown.amount.clamp(0.0, 1.0), 4.0));
         painter.rect_filled(line, 0, argb(pc::ACCENT));
     }
-    disclose
 }
 
 /// Layer Opacity's band under the top bar (at `top`): its glyph, "Opacity" and the layer's

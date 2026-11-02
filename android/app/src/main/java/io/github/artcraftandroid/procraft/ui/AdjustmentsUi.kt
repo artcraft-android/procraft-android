@@ -108,13 +108,34 @@ fun AdjustmentsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modif
 
 /**
  * The bar under the top bar while an adjustment is open: its icon and name, its amount when it has
- * one, and the triangle that opens its options; and under it the amount as a thin blue bar.
+ * one, and the triangle that opens its options; and under it the amount as a thin blue bar. The
+ * bar takes its touches: a tap anywhere on it opens Layer or Pencil, a swipe from it adjusts
+ * nothing.
  */
 @Composable
 fun AdjustmentBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
     val a = vm.adjustment ?: return
     Column(modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth().height(32.dp).background(ModeBar), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth().height(32.dp).background(ModeBar).pointerInput(a) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    down.consume()
+                    var slid = false
+                    while (true) {
+                        val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                        if ((c.position - down.position).getDistance() > viewConfiguration.touchSlop) slid = true
+                        c.consume()
+                        if (!c.pressed) {
+                            if (!slid && a.paintable) vm.adjustModesOpen = !vm.adjustModesOpen
+                            break
+                        }
+                    }
+                }
+            },
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Box(Modifier.size(33.dp, 32.dp), contentAlignment = Alignment.Center) {
                 // drawn in a 32 frame, shown as it is
                 Icon(a.icon(), contentDescription = null, tint = ModeText, modifier = Modifier.requiredSize(32.dp))
@@ -126,7 +147,7 @@ fun AdjustmentBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
             }
             // Layer or Pencil, for the adjustments that can be painted on
             if (a.paintable) {
-                Box(Modifier.size(33.dp, 32.dp).tap { vm.adjustModesOpen = !vm.adjustModesOpen }, contentAlignment = Alignment.Center) {
+                Box(Modifier.size(33.dp, 32.dp), contentAlignment = Alignment.Center) {
                     Icon(PcIcons.Disclose, contentDescription = null, tint = ModeText, modifier = Modifier.requiredSize(32.dp))
                 }
             }
@@ -664,14 +685,20 @@ private val MenuButtonText get() = if (Pc.light) Color(0xFF414141) else Color(0x
 
 /**
  * The menu a tap on the canvas opens during an adjustment: apply above, undo to the left, preview
- * in the middle, cancel to the right and reset below, around the tap.
+ * in the middle, cancel to the right and reset below, around the tap, kept on the screen.
  */
 @Composable
-fun AdjustmentMenu(vm: CanvasViewModel) {
+fun AdjustmentMenu(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp) {
     val at = vm.adjustMenuAt ?: return
     val density = androidx.compose.ui.platform.LocalDensity.current
-    val centre = with(density) { androidx.compose.ui.unit.DpOffset(at.x.toDp(), at.y.toDp()) }
+    val tapped = with(density) { androidx.compose.ui.unit.DpOffset(at.x.toDp(), at.y.toDp()) }
     val step = 88.dp
+    // 12 from the sides, against the top, 25 above the bottom (as measured)
+    val reach = step + 40.dp
+    val centre = androidx.compose.ui.unit.DpOffset(
+        tapped.x.coerceIn(reach + 12.dp, maxOf(reach + 12.dp, screenWidth - reach - 12.dp)),
+        tapped.y.coerceIn(reach, maxOf(reach, screenHeight - reach - 25.dp)),
+    )
     val items = listOf(
         Triple(PcIcons.Apply, "Apply", Offset(0f, -1f)) to { vm.applyAdjustment() },
         Triple(PcIcons.PieUndo, "Undo", Offset(-1f, 0f)) to { vm.undoAdjustment() },
