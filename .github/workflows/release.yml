@@ -1,9 +1,10 @@
 # Release pipeline: pushing a version tag (v0.0.1-beta, v0.2.0, v1.0.0-rc.1, …) builds the APK for
-# 64-bit ARM tablets signed with the release key and makes it a draft GitHub release named after
-# the tag, with an empty "What's Changed" section. Fill that in on GitHub and publish the draft.
+# 64-bit ARM tablets signed with the release key, and the desktop app for Windows and Linux
+# (x86-64), and makes them a draft GitHub release named after the tag, with an empty "What's
+# Changed" section. Fill that in on GitHub and publish the draft.
 #
-# A manual run (Actions › Release › Run workflow) is a dry run: it builds the APK at the version in
-# gradle.properties and keeps it as the run's artifact, and releases nothing.
+# A manual run (Actions › Release › Run workflow) is a dry run: it builds them at the version in
+# gradle.properties and keeps them as the run's artifacts, and releases nothing.
 name: Release
 
 on:
@@ -123,9 +124,66 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/release.p12"
 
+  desktop:
+    name: Desktop (${{ matrix.name }})
+    strategy:
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-2025
+          - name: linux-x64
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: v
+        name: Resolve version
+        run: |
+          listed="$(sed -n 's/^procraft\.version=//p' android/gradle.properties | tr -d '\r')"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="$listed"; fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-desktop-${{ matrix.name }}
+
+      - name: Build
+        run: cargo build --release --locked -p procraft-desktop
+
+      - name: Package
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          name="procraft-desktop-$VERSION-${{ matrix.name }}"
+          mkdir -p "dist/$name"
+          cp LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md "dist/$name/"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp target/release/procraft.exe "dist/$name/ProCraft.exe"
+            (cd dist && 7z a -tzip "$name.zip" "$name" >/dev/null)
+          else
+            cp target/release/procraft "dist/$name/procraft"
+            (cd dist && tar -czf "$name.tar.gz" "$name")
+          fi
+          rm -rf "dist/$name"
+          ls -l dist >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-desktop-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
   release:
     name: GitHub Release
-    needs: apk
+    needs: [apk, desktop]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
@@ -136,7 +194,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: release-apk
+          pattern: release-*
+          merge-multiple: true
           path: dist
 
       - name: Draft the release
