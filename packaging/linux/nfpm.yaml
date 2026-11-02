@@ -1,0 +1,50 @@
+# The .deb (nfpm: https://nfpm.goreleaser.com). Run by package.sh, which stages the file tree,
+# puts its path for ${STAGE} (nfpm doesn't expand variables in `src`) and exports VERSION and
+# NFPM_ARCH.
+name: procraft
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${VERSION}
+# semver: 0.0.3-beta becomes 0.0.3~beta, so a beta sorts before its release
+version_schema: semver
+release: 1
+section: graphics
+priority: optional
+maintainer: ArtCraft Team <bearincrypto@gmail.com>
+vendor: ArtCraft Team
+homepage: https://github.com/artcraft-android/procraft-android
+license: MIT OR Apache-2.0
+description: |-
+  Paint, draw and sketch
+  ProCraft is a painting app with brushes, layers, adjustments, text and animation: the same
+  engine and interface as on Android tablets.
+
+# The binary links only glibc and libgcc_s itself. The windowing (X11 or Wayland, xkbcommon) and
+# the GPU (Vulkan) are loaded while it runs, so the package tools can't find them: listed here.
+depends:
+  - libc6 (>= 2.35)
+  - libgcc-s1
+  - libxkbcommon0
+  - libxkbcommon-x11-0
+  - libwayland-client0
+  - libx11-6
+  - libx11-xcb1
+  - libxcb1
+  - libxcursor1
+  - libxi6
+  - libvulkan1
+recommends:
+  - mesa-vulkan-drivers
+  - xdg-desktop-portal
+
+contents:
+  - src: ${STAGE}/usr/bin/procraft
+    dst: /usr/bin/procraft
+    file_info: { mode: 0755 }
+  - src: ${STAGE}/usr/share/
+    dst: /usr/share/
+    type: tree
+
+scripts:
+  postinstall: packaging/linux/postinst.sh
+  postremove: packaging/linux/postinst.sh

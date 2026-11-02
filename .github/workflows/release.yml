@@ -1,7 +1,14 @@
-# Release pipeline: pushing a version tag (v0.0.1-beta, v0.2.0, v1.0.0-rc.1, …) builds the APK for
-# 64-bit ARM tablets signed with the release key, and the desktop app for Windows and Linux
-# (x86-64), and makes them a draft GitHub release named after the tag, with an empty "What's
-# Changed" section. Fill that in on GitHub and publish the draft.
+# Release pipeline: pushing a version tag (v0.0.1-beta, v0.2.0, v1.0.0-rc.1, …) builds, and makes a
+# draft GitHub release named after the tag (with an empty "What's Changed" section: fill it in on
+# GitHub and publish the draft) of:
+#
+#   procraft-<version>-android-arm64.apk          64-bit ARM tablets, signed with the release key
+#   procraft-<version>-windows-x64.msi            the desktop app's installer (packaging/windows)
+#   procraft-<version>-windows-x64-portable.zip   the desktop app to run from anywhere
+#   procraft-<version>-linux-x86_64.AppImage      any distro (packaging/linux)
+#   procraft-<version>-linux-x86_64.deb           Debian, Ubuntu and the like
+#   procraft-<version>-linux-x86_64.tar.gz        the plain tree
+#   SHA256SUMS.txt                                each file's SHA-256
 #
 # A manual run (Actions › Release › Run workflow) is a dry run: it builds them at the version in
 # gradle.properties and keeps them as the run's artifacts, and releases nothing.
@@ -96,7 +103,7 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"
           ./gradlew --no-daemon :app:assembleRelease -Pprocraft.abis=arm64-v8a "-Pprocraft.version=$VERSION"
-          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/dist/procraft-android-$VERSION.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/dist/procraft-$VERSION-android-arm64.apk"
 
       - name: APK
         run: |
@@ -131,12 +138,15 @@ jobs:
         include:
           - name: windows-x64
             os: windows-2025
-          - name: linux-x64
-            os: ubuntu-24.04
+          # an older Ubuntu, so the binary runs on any distro with glibc 2.35 or newer
+          - name: linux-x86_64
+            os: ubuntu-22.04
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
+    env:
+      DIST: ${{ github.workspace }}/dist
     steps:
       - uses: actions/checkout@v4
 
@@ -155,25 +165,35 @@ jobs:
         with:
           key: release-desktop-${{ matrix.name }}
 
-      - name: Build
-        run: cargo build --release --locked -p procraft-desktop
+      - name: Install WiX v5
+        if: runner.os == 'Windows'
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          echo "$USERPROFILE/.dotnet/tools" >>"$GITHUB_PATH"
+          "$USERPROFILE/.dotnet/tools/wix" extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
 
-      - name: Package
+      - name: Package for Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
         env:
           VERSION: ${{ steps.v.outputs.version }}
+        run: ./packaging/windows/package.ps1
+
+      - name: Install nfpm
+        if: runner.os == 'Linux'
         run: |
-          name="procraft-desktop-$VERSION-${{ matrix.name }}"
-          mkdir -p "dist/$name"
-          cp LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md "dist/$name/"
-          if [ "$RUNNER_OS" = Windows ]; then
-            cp target/release/procraft.exe "dist/$name/ProCraft.exe"
-            (cd dist && 7z a -tzip "$name.zip" "$name" >/dev/null)
-          else
-            cp target/release/procraft "dist/$name/procraft"
-            (cd dist && tar -czf "$name.tar.gz" "$name")
-          fi
-          rm -rf "dist/$name"
-          ls -l dist >>"$GITHUB_STEP_SUMMARY"
+          curl -fsSL https://github.com/goreleaser/nfpm/releases/download/v2.47.0/nfpm_2.47.0_Linux_x86_64.tar.gz | tar -xz -C "$RUNNER_TEMP" nfpm
+          sudo install -m755 "$RUNNER_TEMP/nfpm" /usr/local/bin/nfpm
+          sudo apt-get install -y --no-install-recommends desktop-file-utils >/dev/null
+
+      - name: Package for Linux
+        if: runner.os == 'Linux'
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: bash packaging/linux/package.sh
+
+      - name: Files
+        run: ls -l dist >>"$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -197,6 +217,9 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: dist
+
+      - name: Checksums
+        run: (cd dist && sha256sum -- * >SHA256SUMS.txt && cat SHA256SUMS.txt >>"$GITHUB_STEP_SUMMARY")
 
       - name: Draft the release
         run: |

@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ProCraft's Windows installer (WiX v5 with its UI and Util extensions), built by package.ps1:
+
+    wix build procraft.wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext
+      -d Version=0.0.3 -d DisplayVersion=0.0.3-beta -d BinDir=... -d IconPath=... -o out.msi
+
+  For every user of the machine, with a wizard: Welcome, the install folder (Program Files\ProCraft
+  at first, then wherever the last version went), Ready, progress, and Finish with a ticked
+  "Launch ProCraft". It installs ProCraft.exe, the licence files and a Start menu shortcut. A newer
+  version takes an older one's place. Modelled on SolidCraft's (tangency-labs/solidcraft).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <!-- Never change the UpgradeCode: it is what lets a new installer replace an earlier one. -->
+  <Package Name="ProCraft" Manufacturer="ArtCraft Team" Version="$(var.Version)"
+           UpgradeCode="EC507040-DA02-41B4-AB27-7FE1AA22F2E5" Scope="perMachine" Compressed="yes"
+           Language="1033">
+    <SummaryInformation Description="ProCraft: paint, draw and sketch" Manufacturer="ArtCraft Team" />
+    <!-- the same numbers again: one beta after another of a version replaces the last -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of ProCraft is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- an advertised shortcut to an .exe takes an icon whose id ends in .exe (ICE50) -->
+    <Icon Id="ProCraftIcon.exe" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="ProCraftIcon.exe" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/artcraft-android/procraft-android" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/artcraft-android/procraft-android/releases" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/artcraft-android/procraft-android/issues" />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="ProCraft" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <!-- an upgrade goes where the version before it went (kept by the App component) -->
+    <Property Id="INSTALLFOLDER">
+      <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Key="Software\ProCraft" Name="InstallDir" Type="raw" />
+    </Property>
+
+    <Feature Id="Main" Title="ProCraft" Level="1">
+      <ComponentGroupRef Id="ProCraftFiles" />
+    </Feature>
+
+    <!-- the install folder wizard without its licence page (MIT OR Apache-2.0: nothing to accept) -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <UI>
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="2" Condition="NOT Installed" />
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchProCraft"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="ProCraft $(var.DisplayVersion) is installed. You can start it any time from the Start menu." />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch ProCraft" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#ProCraftExe]" />
+    <!-- in the wizard's own (unelevated) process, so the app starts as the user -->
+    <CustomAction Id="LaunchProCraft" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixShellExec"
+                  Impersonate="yes" Return="ignore" />
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="ProCraftFiles" Directory="INSTALLFOLDER">
+      <Component Id="App" Guid="ACC6EA13-1460-4C60-8E6A-0479BAD6FEB4">
+        <File Id="ProCraftExe" Source="$(var.BinDir)\ProCraft.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="ProCraft"
+                    Description="Paint, draw and sketch" WorkingDirectory="INSTALLFOLDER" Advertise="yes"
+                    Icon="ProCraftIcon.exe" IconIndex="0" />
+        </File>
+        <RegistryValue Root="HKLM" Key="Software\ProCraft" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" />
+      </Component>
+      <Component Id="LicenseMit"><File Source="$(var.BinDir)\LICENSE-MIT" /></Component>
+      <Component Id="LicenseApache"><File Source="$(var.BinDir)\LICENSE-APACHE" /></Component>
+      <Component Id="Notice"><File Source="$(var.BinDir)\NOTICE" /></Component>
+      <Component Id="Attribution"><File Source="$(var.BinDir)\ATTRIBUTION.md" /></Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

@@ -8,6 +8,8 @@ Writes:
   tile (the desktop app's window and Linux menus use the 256 and 512 ones).
 - assets/app-icon/procraft.ico: the tile at every size Windows shows (the desktop app's .exe and
   its installer).
+- assets/app-icon/hicolor/<n>x<n>/apps/procraft.png: the tile at the sizes Linux desktops look up
+  for the app's menu entry and window (copied as it is into the packages' share/icons/).
 - the Android adaptive icon's layers (108 dp, the tile its middle 72 dp): the brush and its glow
   (drawable-*dpi/ic_launcher_foreground.png), the brush alone in white for themed icons
   (drawable-*dpi/ic_launcher_monochrome.png), and a large copy for the About screen
@@ -127,6 +129,8 @@ def main():
         save(tile, os.path.join(ROOT, 'assets', 'app-icon', f'procraft-{size}.png'), size)
     sizes = [(n, n) for n in (16, 20, 24, 32, 40, 48, 64, 128, 256)]
     tile.resize((256, 256), Image.LANCZOS).save(os.path.join(ROOT, 'assets', 'app-icon', 'procraft.ico'), sizes=sizes)
+    for size in (16, 24, 32, 48, 64, 128, 256, 512):
+        save(tile, os.path.join(ROOT, 'assets', 'app-icon', 'hicolor', f'{size}x{size}', 'apps', 'procraft.png'), size)
 
     foreground = adaptive(picture)
     mono = Image.new('RGBA', turned.size, (255, 255, 255, 0))
