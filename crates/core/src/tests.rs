@@ -7889,7 +7889,7 @@ fn touches_anyhow_leave_no_stroke_open_and_undo_whole() {
         let mut done = Vec::new();
         for _ in 0..300 {
             t += 6.0 + f64::from(next(60));
-            let op = next(14);
+            let op = next(15);
             done.push(op);
             match op {
                 0 | 1 if down.len() < 4 => {
@@ -7923,6 +7923,15 @@ fn touches_anyhow_leave_no_stroke_open_and_undo_whole() {
                 13 if next(3) == 0 => {
                     let (x, y) = (5.0 + next(90) as f32, 5.0 + next(90) as f32);
                     run(&s, s.touch_pen_button(next(2) == 0, x, y));
+                }
+                // one finger set to move the canvas, or to paint again
+                14 if next(6) == 0 => {
+                    let pan = next(2) == 0;
+                    s.set_touch_settings(crate::touch::TouchSettings {
+                        one_finger_pan: pan,
+                        finger_paint: !pan,
+                        ..Default::default()
+                    });
                 }
                 _ => {}
             }
