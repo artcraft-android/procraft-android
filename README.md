@@ -15,6 +15,7 @@
 </p>
 
 <p align="center">
+  <a href="https://discord.gg/EmRrVN2X"><img alt="Discord: join the community" src="https://img.shields.io/badge/Discord-join%20the%20community-5865F2?style=flat&logo=discord&logoColor=white"></a>
   <img alt="Rust engine" src="https://img.shields.io/badge/engine-Rust-lightblue?style=flat&logo=rust&logoColor=white">
   <img alt="GPU renderer: wgpu" src="https://img.shields.io/badge/renderer-wgpu-lightblue?style=flat">
   <img alt="Kotlin and Jetpack Compose" src="https://img.shields.io/badge/UI-Kotlin%20%C2%B7%20Jetpack%20Compose-blue?style=flat">
@@ -35,7 +36,8 @@
   <a href="#adjustments-and-transform">Adjustments &amp; transform</a> ·
   <a href="#actions">Actions</a> ·
   <a href="#planned-features">Planned features</a> ·
-  <a href="#building-instructions">Building</a>
+  <a href="#building-instructions">Building</a> ·
+  <a href="#community">Community</a>
 </p>
 
 <br>
@@ -155,6 +157,15 @@ Build time dependencies:
 | `packaging` | the desktop app's Windows installer and Linux packages, as the release workflow builds them |
 
 *Builds are only tested on Windows 11.*
+
+<br>
+
+## Community
+
+Come and say hello on the [ProCraft Discord](https://discord.gg/EmRrVN2X): ask questions, share
+what you paint, talk through ideas and bugs, and follow what's coming next. Bugs and requests can
+also go in [Issues](https://github.com/artcraft-android/procraft/issues), and pull requests are
+welcome.
 
 <br>
 
