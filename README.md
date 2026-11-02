@@ -12,6 +12,7 @@
 <p align="center">
   <a href="https://github.com/artcraft-android/procraft/releases"><img src="https://raw.githubusercontent.com/Kunzisoft/Github-badge/main/get-it-on-github.png" alt="Get it on GitHub" height="60"></a>
   <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/artcraft-android/procraft"><img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="60"></a>
+  <a href="https://discord.gg/EmRrVN2X"><img src="docs/images/discord-badge.svg" alt="Join us on Discord" height="60"></a>
 </p>
 
 <p align="center">
@@ -36,8 +37,7 @@
   <a href="#adjustments-and-transform">Adjustments &amp; transform</a> ·
   <a href="#actions">Actions</a> ·
   <a href="#planned-features">Planned features</a> ·
-  <a href="#building-instructions">Building</a> ·
-  <a href="#community">Community</a>
+  <a href="#building-instructions">Building</a>
 </p>
 
 <br>
@@ -157,15 +157,6 @@ Build time dependencies:
 | `packaging` | the desktop app's Windows installer and Linux packages, as the release workflow builds them |
 
 *Builds are only tested on Windows 11.*
-
-<br>
-
-## Community
-
-Come and say hello on the [ProCraft Discord](https://discord.gg/EmRrVN2X): ask questions, share
-what you paint, talk through ideas and bugs, and follow what's coming next. Bugs and requests can
-also go in [Issues](https://github.com/artcraft-android/procraft/issues), and pull requests are
-welcome.
 
 <br>
 

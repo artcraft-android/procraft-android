@@ -18,6 +18,7 @@ them.
 | `android/app/src/main/res/drawable/widget_back.xml`, `android/app/src/main/res/drawable-v31/widget_back.xml` | Recent-artwork widget background | ProCraft contributors | Original work | MIT OR Apache-2.0 |
 | `docs/images/{canvas,layers,brushes,studio,colour,actions,adjust,transform}.jpg`, `docs/images/demo.webp`, `docs/images/demo.mp4` | The README's screenshots and demo: ProCraft on a tablet, painting *Dusk* | ProCraft contributors | Original work: the painting made in the app by `tools/showcase/paint_dusk2.py`, captured from the screen | MIT OR Apache-2.0 |
 | Brushes, brush shapes and grains | Made in code at run time (`crates/engine`) | ProCraft contributors | Original work | MIT OR Apache-2.0 |
+| `docs/images/discord-badge.svg` | The README's "Join us on Discord" badge | ProCraft contributors; the Discord mark from Simple Icons | Drawn to match the download badges beside it; the mark's path from <https://simpleicons.org> (simple-icons 13.21.0, `icons/discord.svg`) | MIT OR Apache-2.0; the mark CC0 1.0 (Discord's trademark, shown to link to the project's server) |
 
 ### Lucide icons in `LucideIcons.kt`
 
