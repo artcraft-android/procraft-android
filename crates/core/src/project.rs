@@ -386,9 +386,16 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         let results = procraft_engine::par::side_by_side_within(&layers, each, |(id, _, rgba)| {
             write_beside(&layer_path(dir, *id), |p| write_png(p, w, h, rgba, &[]))
         });
+        // every one written kept track of, so a failure among them leaves none of them beside
+        let mut failed = None;
         for ((id, _, _), result) in layers.iter().zip(results) {
             let result = result.unwrap_or_else(|| Err(file_error("writing a layer", "it stopped")));
-            stage(result, layer_path(dir, *id), &mut staged)?;
+            if let Err(e) = stage(result, layer_path(dir, *id), &mut staged) {
+                failed.get_or_insert(e);
+            }
+        }
+        if let Some(e) = failed {
+            return Err(e);
         }
         for (id, bytes) in &files {
             let to = layer_path(dir, *id);
@@ -866,7 +873,18 @@ pub fn write_signature(dir: String, strokes: Vec<Vec<f32>>) -> Result<(), Mobile
     let about = Path::new(&dir).join("about");
     fs::create_dir_all(&about).map_err(|e| file_error("keeping the signature", e))?;
     let json = serde_json::to_string(&strokes).map_err(|e| file_error("keeping the signature", e))?;
-    fs::write(about.join("signature.json"), json).map_err(|e| file_error("keeping the signature", e))
+    write_atomically(&about.join("signature.json"), |p| {
+        fs::write(p, &json).map_err(|e| file_error("keeping the signature", e))
+    })
+}
+
+/// Keeps the picture `bytes` as the author's photo in the artwork's folder `dir`, in the old
+/// one's place only once written whole.
+#[uniffi::export]
+pub fn write_photo(dir: String, bytes: Vec<u8>) -> Result<(), MobileError> {
+    let about = Path::new(&dir).join("about");
+    fs::create_dir_all(&about).map_err(|e| file_error("keeping the photo", e))?;
+    write_atomically(&about.join("photo.jpg"), |p| fs::write(p, &bytes).map_err(|e| file_error("keeping the photo", e)))
 }
 
 /// The table showing a CMYK canvas's colours as its press prints them (in Display P3, as its
@@ -1157,17 +1175,35 @@ pub(crate) fn read_png(path: &Path, width: u32, height: u32) -> Result<Vec<u8>, 
 fn decode_png(from: impl std::io::BufRead + std::io::Seek, width: u32, height: u32) -> Result<Vec<u8>, MobileError> {
     let decoder = png::Decoder::new(from);
     let mut reader = decoder.read_info().map_err(|e| file_error("opening a layer", e))?;
-    let size = reader.output_buffer_size().ok_or_else(|| file_error("opening a layer", "too large"))?;
-    let mut buf = vec![0; size];
-    let info = reader.next_frame(&mut buf).map_err(|e| file_error("opening a layer", e))?;
-    if info.width != width
-        || info.height != height
-        || info.color_type != png::ColorType::Rgba
-        || info.bit_depth != png::BitDepth::Eight
-    {
-        return Err(file_error("opening a layer", format!("{}×{} {:?}", info.width, info.height, info.color_type)));
+    let (color, depth) = reader.output_color_type();
+    let (w, h, interlaced) = (reader.info().width, reader.info().height, reader.info().interlaced);
+    if w != width || h != height || color != png::ColorType::Rgba || depth != png::BitDepth::Eight {
+        return Err(file_error("opening a layer", format!("{w}×{h} {color:?}")));
     }
-    buf.truncate(info.buffer_size());
+    let line = width as usize * 4;
+    let mut buf = vec![0; line * height as usize];
+    if interlaced {
+        // not one of ours: whole or not at all
+        reader.next_frame(&mut buf).map_err(|e| file_error("opening a layer", e))?;
+        return Ok(buf);
+    }
+    // row by row: one damaged part way keeps the rows before the damage (the rest clear) rather
+    // than the whole layer being lost
+    for (y, row) in buf.chunks_mut(line).enumerate() {
+        match reader.next_row() {
+            Ok(Some(read)) => {
+                for (to, from) in row.iter_mut().zip(read.data()) {
+                    *to = *from;
+                }
+            }
+            Ok(None) => break,
+            Err(e) if y == 0 => return Err(file_error("opening a layer", e)),
+            Err(e) => {
+                log::error!("a layer read as far as row {y}: {e}");
+                break;
+            }
+        }
+    }
     Ok(buf)
 }
 
@@ -1481,6 +1517,31 @@ mod signature_tests {
     use super::*;
 
     #[test]
+    fn a_layer_file_cut_short_keeps_the_rows_before_the_cut() {
+        let (w, h) = (64u32, 64u32);
+        // each row its own grey, so a row in the wrong place shows
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let g = (i / w * 4) as u8;
+                [g, 255 - g, g, 255]
+            })
+            .collect();
+        let path = std::env::temp_dir().join(format!("procraft-cut-layer-{}.png", std::process::id()));
+        write_png(&path, w, h, &rgba, &[]).unwrap();
+        let whole = fs::read(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert_eq!(Opened::Png(whole.clone()).pixels(w, h).unwrap(), rgba);
+        // cut short part way: the first rows as they were, the rest clear
+        let cut = Opened::Png(whole[..whole.len() * 2 / 3].to_vec()).pixels(w, h).unwrap();
+        let line = w as usize * 4;
+        let kept = cut.chunks(line).zip(rgba.chunks(line)).take_while(|(a, b)| a == b).count();
+        assert!(kept > 0 && kept < h as usize, "{kept} rows kept");
+        assert!(cut[kept * line..].iter().all(|&v| v == 0));
+        // cut before any row: none can be read
+        assert!(Opened::Png(whole[..40].to_vec()).pixels(w, h).is_err());
+    }
+
+    #[test]
     fn a_signature_is_kept_as_the_android_app_keeps_it() {
         let dir = std::env::temp_dir().join(format!("procraft-signature-{}", std::process::id()));
         let path = dir.to_string_lossy().into_owned();
@@ -1491,6 +1552,24 @@ mod signature_tests {
         // as the Android app wrote it: an array of arrays of numbers
         fs::write(dir.join("about").join("signature.json"), "[[0.25,0.75,1.0,0.0]]").unwrap();
         assert_eq!(read_signature(path), vec![vec![0.25, 0.75, 1.0, 0.0]]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_photo_and_signature_are_replaced_whole_with_nothing_left_beside() {
+        let dir = std::env::temp_dir().join(format!("procraft-about-{}", std::process::id()));
+        let path = dir.to_string_lossy().into_owned();
+        write_photo(path.clone(), b"first photo".to_vec()).unwrap();
+        write_signature(path.clone(), vec![vec![0.1, 0.2]]).unwrap();
+        write_photo(path.clone(), b"second".to_vec()).unwrap();
+        write_signature(path.clone(), vec![vec![0.3, 0.4, 0.5, 0.6]]).unwrap();
+        let about = dir.join("about");
+        assert_eq!(fs::read(about.join("photo.jpg")).unwrap(), b"second");
+        assert_eq!(read_signature(path), vec![vec![0.3, 0.4, 0.5, 0.6]]);
+        let mut left: Vec<String> =
+            fs::read_dir(&about).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["photo.jpg", "signature.json"]);
         let _ = fs::remove_dir_all(&dir);
     }
 }

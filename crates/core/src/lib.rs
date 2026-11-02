@@ -112,7 +112,7 @@ pub use presets::{
     CanvasPreset, P3, SRGB, per_inch, preset_height, preset_label, preset_number, preset_width, presets_from_json,
     presets_json, profile_chip, standard_presets,
 };
-pub use project::{ArtworkInfo, export_file_name, read_signature, save_failure_said, write_signature};
+pub use project::{ArtworkInfo, export_file_name, read_signature, save_failure_said, write_photo, write_signature};
 pub use project::{PackageTimeLapse, package_time_lapse};
 pub use project::{PagesOutcome, PsdOutcome, import_pages, import_psd};
 pub use quick_menu::{

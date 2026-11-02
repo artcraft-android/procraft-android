@@ -9,9 +9,32 @@ use crate::selection::Mask;
 /// How far past the threshold (as a colour distance, 0..1) the fill fades out.
 pub const FADE: f32 = 0.09;
 
+/// A flood is first worked out on its own thread, quickest when it fills little; past this share
+/// of the picture (one in so many pixels) it is worked out again on every core, quicker then.
+pub(crate) const FLOOD_HERE_MOST: usize = 8;
+
+/// The most pixels of `pixels` a flood fills on its own thread before going over to every core
+/// ([`FLOOD_HERE_MOST`]). Never on Android: on the Legion every core was slower than one (a 4K
+/// flood 23-25 ms against 19, the screen off), though on a computer 2.5 times quicker.
+pub(crate) fn flood_here_most(pixels: usize) -> usize {
+    if cfg!(target_os = "android") { usize::MAX } else { pixels / FLOOD_HERE_MOST }
+}
+
 /// The most pixels a flood works each pixel's reach out for (8K x 4K): past it, the memory the
 /// lists may take outweighs the speed, and each fill is a flood.
 pub(crate) const REACH_MOST: u64 = 8192 * 4096;
+
+/// Whether working out the reach of `pixels` pixels, `bytes` each at most while it runs (its
+/// lists included), is worth its memory here: within [`REACH_MOST`], and within an eighth of the
+/// device's layer budget (half its memory), so a tablet with little doesn't run short for it.
+pub(crate) fn reach_fits(pixels: u64, bytes: u64) -> bool {
+    reach_fits_within(pixels, bytes, crate::document::layer_budget())
+}
+
+/// [`reach_fits`] with a layer budget of `budget` bytes.
+fn reach_fits_within(pixels: u64, bytes: u64, budget: u64) -> bool {
+    pixels <= REACH_MOST && pixels.saturating_mul(bytes) <= budget / 8
+}
 
 /// The pixels' colour distances from a seed pixel, kept to flood again at another threshold.
 pub struct Flood {
@@ -82,7 +105,8 @@ impl Flood {
                 if self.asked.swap(true, Ordering::Relaxed) && !self.reaching.swap(true, Ordering::Relaxed) {
                     self.work_out_reach();
                 }
-                self.by_scanlines(threshold)
+                self.by_scanlines(threshold, flood_here_most(self.distance.len()))
+                    .unwrap_or_else(|| self.by_runs(threshold))
             }
         }
     }
@@ -100,9 +124,10 @@ impl Flood {
         m
     }
 
-    /// [`Flood::mask`] by a flood: scanlines from the seed, each span filled whole, then the runs
-    /// above and below it seeded.
-    fn by_scanlines(&self, threshold: f32) -> Mask {
+    /// [`Flood::mask`] by a flood on this thread: scanlines from the seed, each span filled whole,
+    /// then the runs above and below it seeded; none once it has filled more than `most` pixels
+    /// (a large fill is quicker on every core, [`Flood::by_runs`]).
+    fn by_scanlines(&self, threshold: f32, most: usize) -> Option<Mask> {
         let weights = weights(threshold);
         // the farthest distance the fill reaches (the weights only fall with distance)
         let cut = weights.iter().rposition(|&v| v > 0).unwrap_or(0) as u8;
@@ -119,6 +144,7 @@ impl Flood {
         // scanlines: each span filled whole, then the runs above and below it seeded; each row
         // looked along as a slice
         let mut stack = vec![(self.seed.0 as usize, self.seed.1 as usize)];
+        let mut filled = 0;
         while let Some((x, y)) = stack.pop() {
             let (Some(line), Some(far)) = (m.data.get_mut(y * w..(y + 1) * w), self.distance.get(y * w..(y + 1) * w))
             else {
@@ -129,6 +155,10 @@ impl Flood {
             }
             let l = x - before(line, x).iter().rev().zip(before(far, x).iter().rev()).take_while(|&p| open(p)).count();
             let r = x + after(line, x + 1).iter().zip(after(far, x + 1)).take_while(|&p| open(p)).count();
+            filled += r + 1 - l;
+            if filled > most {
+                return None;
+            }
             for (v, &d) in line.get_mut(l..=r).unwrap_or_default().iter_mut().zip(far.get(l..=r).unwrap_or_default()) {
                 *v = weights.get(usize::from(d)).copied().unwrap_or(0);
             }
@@ -146,14 +176,26 @@ impl Flood {
                 }
             }
         }
-        m
+        Some(m)
+    }
+
+    /// [`Flood::mask`] by a flood, worked out on every core ([`joined`]).
+    fn by_runs(&self, threshold: f32) -> Mask {
+        let weights = weights(threshold);
+        let (w, h) = (self.width as usize, self.height as usize);
+        let seed = (self.seed.0 as usize, self.seed.1 as usize);
+        let data = joined(&self.distance, w, h, seed, farthest(threshold), |i| {
+            self.distance.get(i).and_then(|&d| weights.get(usize::from(d))).copied().unwrap_or(0)
+        });
+        Mask { width: self.width, height: self.height, data }
     }
 
     /// Starts working out each pixel's reach on a thread of its own (none for very large
     /// pictures, nor if a thread can't start: the fills stay floods). The thread stops if the
     /// flood is let go first.
     fn work_out_reach(&self) {
-        if u64::from(self.width) * u64::from(self.height) > REACH_MOST {
+        // a distance and a reach a pixel, and lists of up to four bytes a pixel
+        if !reach_fits(u64::from(self.width) * u64::from(self.height), 6) {
             return;
         }
         let (distance, reach) = (self.distance.clone(), self.reach.clone());
@@ -269,6 +311,142 @@ where
         }
     }
     Some(reach)
+}
+
+/// The pixels of a `w` x `h` picture joined to `seed` (side by side or one above the other)
+/// through pixels whose `far` is at most `cut`, each given `value(i)` (its index), the rest 0. The
+/// rows' runs within the cut are found in bands side by side, each run joined to those it
+/// touches in the row above (a union-find), then the bands' edges are joined and the seed's runs
+/// filled, again side by side: a flood's result, on every core.
+pub(crate) fn joined<T: Copy + PartialOrd + Sync>(
+    far: &[T],
+    w: usize,
+    h: usize,
+    seed: (usize, usize),
+    cut: T,
+    value: impl Fn(usize) -> u8 + Sync,
+) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    let start = seed.1 * w + seed.0;
+    if seed.0 >= w || seed.1 >= h || far.len() < w * h || !far.get(start).is_some_and(|&d| d <= cut) {
+        return out;
+    }
+    let band = h.div_ceil(crate::par::cores()).max(1);
+    let bands: Vec<(usize, usize)> = (0..h).step_by(band).map(|y0| (y0, (y0 + band).min(h))).collect();
+    // each band's runs (first and last x), where each of its rows starts in them, and their
+    // union-find, its runs joined to those above them within it
+    let found = crate::par::side_by_side(&bands, |&(y0, y1)| {
+        let mut runs: Vec<[u32; 2]> = Vec::new();
+        let mut rows: Vec<usize> = Vec::with_capacity(y1 - y0 + 1);
+        let mut parent: Vec<u32> = Vec::new();
+        for y in y0..y1 {
+            rows.push(runs.len());
+            let line = far.get(y * w..(y + 1) * w).unwrap_or_default();
+            let mut from: Option<usize> = None;
+            for (x, &d) in line.iter().enumerate() {
+                match (d <= cut, from) {
+                    (true, None) => from = Some(x),
+                    (false, Some(s)) => {
+                        runs.push([s as u32, x as u32 - 1]);
+                        from = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(s) = from {
+                runs.push([s as u32, w as u32 - 1]);
+            }
+            parent.extend(parent.len() as u32..runs.len() as u32);
+            if let (Some(&above), Some(&here)) = (rows.len().checked_sub(2).and_then(|i| rows.get(i)), rows.last()) {
+                join_runs(&runs, &mut parent, above..here, here..runs.len());
+            }
+        }
+        rows.push(runs.len());
+        (runs, rows, parent)
+    });
+    // all of them in one union-find, each band's runs after the last band's
+    let mut runs: Vec<[u32; 2]> = Vec::new();
+    let mut parent: Vec<u32> = Vec::new();
+    // where each row's runs start in `runs`, and the end
+    let mut rows: Vec<usize> = Vec::with_capacity(h + 1);
+    for (band_runs, band_rows, band_parent) in found.into_iter().flatten() {
+        let offset = runs.len();
+        rows.extend(band_rows.iter().take(band_rows.len().saturating_sub(1)).map(|r| r + offset));
+        parent.extend(band_parent.iter().map(|p| p + offset as u32));
+        runs.extend(band_runs);
+    }
+    rows.push(runs.len());
+    if rows.len() != h + 1 {
+        return out;
+    }
+    let row = |y: usize| rows.get(y).copied().unwrap_or(0)..rows.get(y + 1).copied().unwrap_or(0);
+    for &(y0, _) in bands.iter().skip(1) {
+        join_runs(&runs, &mut parent, row(y0 - 1), row(y0));
+    }
+    let x = seed.0 as u32;
+    let Some(first) = row(seed.1).find(|&i| runs.get(i).is_some_and(|&[x0, x1]| x0 <= x && x <= x1)) else {
+        return out;
+    };
+    let mine = run_root(&mut parent, first);
+    let inside: Vec<bool> = (0..runs.len()).map(|i| run_root(&mut parent, i) == mine).collect();
+    // the seed's runs filled, band by band side by side
+    std::thread::scope(|scope| {
+        for ((y0, y1), part) in bands.iter().copied().zip(out.chunks_mut(band * w)) {
+            let (runs, inside, value, row) = (&runs, &inside, &value, &row);
+            scope.spawn(move || {
+                for y in y0..y1 {
+                    for i in row(y) {
+                        let (Some(&[x0, x1]), Some(true)) = (runs.get(i), inside.get(i).copied()) else { continue };
+                        let at = (y - y0) * w;
+                        let base = y * w;
+                        for (x, v) in
+                            part.get_mut(at + x0 as usize..=at + x1 as usize).unwrap_or_default().iter_mut().enumerate()
+                        {
+                            *v = value(base + x0 as usize + x);
+                        }
+                    }
+                }
+            });
+        }
+    });
+    out
+}
+
+/// Joins each run in `below` to each in `above` it touches (the rows next to each other, runs in
+/// order along them).
+fn join_runs(runs: &[[u32; 2]], parent: &mut [u32], above: std::ops::Range<usize>, below: std::ops::Range<usize>) {
+    let (mut a, mut b) = (above.start, below.start);
+    while a < above.end && b < below.end {
+        let (Some(&[a0, a1]), Some(&[b0, b1])) = (runs.get(a), runs.get(b)) else { return };
+        if a0 <= b1 && b0 <= a1 {
+            let (ra, rb) = (run_root(parent, a), run_root(parent, b));
+            if ra != rb
+                && let Some(p) = parent.get_mut(ra.max(rb))
+            {
+                *p = ra.min(rb) as u32;
+            }
+        }
+        if a1 < b1 {
+            a += 1;
+        } else {
+            b += 1;
+        }
+    }
+}
+
+/// The run that stands for every run joined to `i` (halving the way there as it goes).
+fn run_root(parent: &mut [u32], mut i: usize) -> usize {
+    loop {
+        let Some(&p) = parent.get(i) else { return i };
+        if p as usize == i {
+            return i;
+        }
+        let up = parent.get(p as usize).copied().unwrap_or(p);
+        if let Some(slot) = parent.get_mut(i) {
+            *slot = up;
+        }
+        i = up as usize;
+    }
 }
 
 /// The farthest distance a fill at `threshold` reaches (the weights only fall with distance).
@@ -394,8 +572,11 @@ mod tests {
         let Some(flood) = Flood::new(w, h, &px, (100, 100)) else { return };
         println!("measured: {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
         let start = std::time::Instant::now();
-        std::hint::black_box(flood.by_scanlines(0.2));
+        std::hint::black_box(flood.by_runs(0.2));
         println!("a fill by flood (before the reach is in): {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+        let start = std::time::Instant::now();
+        std::hint::black_box(flood.by_scanlines(0.2, usize::MAX));
+        println!("the same on one thread: {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
         let start = std::time::Instant::now();
         std::hint::black_box(reaches(&flood.distance, w as usize, h as usize, (100, 100), u8::MAX, &|| true));
         println!("each pixel's reach (on its own thread): {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
@@ -468,7 +649,9 @@ mod tests {
             for threshold in [0.0f32, 0.03, 0.1, 0.25, 0.5, 0.8, 1.0] {
                 let plain = flooded(&flood, threshold);
                 assert_eq!(flood.by_reach(&reach, threshold).data, plain, "seed {seed} threshold {threshold}");
-                assert_eq!(flood.by_scanlines(threshold).data, plain, "seed {seed} threshold {threshold}");
+                assert_eq!(flood.by_runs(threshold).data, plain, "seed {seed} threshold {threshold}");
+                let here = flood.by_scanlines(threshold, usize::MAX).map(|m| m.data);
+                assert_eq!(here, Some(plain.clone()), "seed {seed} threshold {threshold}");
             }
             // moved on to other pixels of the seed's colour, the reach kept from the first
             let _ = flood.reach.set(reach);
@@ -490,6 +673,18 @@ mod tests {
     }
 
     #[test]
+    fn a_large_fill_goes_over_to_every_core_and_comes_out_the_same() {
+        let px: Vec<u8> =
+            (0..64u32 * 64).flat_map(|i| if i % 64 == 40 { [0, 0, 0, 255] } else { [200, 0, 0, 255] }).collect();
+        let flood = Flood::new(64, 64, &px, (3, 3)).unwrap();
+        // left of the line: 40 columns, more than the one thread is let fill
+        assert!(flood.by_scanlines(0.1, 64 * 64 / FLOOD_HERE_MOST).is_none());
+        let filled = flood.mask(0.1);
+        assert_eq!(filled.data, flooded(&flood, 0.1));
+        assert_eq!(filled.data.iter().filter(|&&v| v == 255).count(), 40 * 64);
+    }
+
+    #[test]
     fn a_flood_works_its_reach_out_only_once_a_second_fill_is_asked_for() {
         let px: Vec<u8> = (0..64u32 * 64).flat_map(|i| [(i % 7 * 30) as u8, 0, 0, 255]).collect();
         let flood = Flood::new(64, 64, &px, (3, 3)).unwrap();
@@ -503,6 +698,17 @@ mod tests {
         }
         assert!(flood.reach.get().is_some(), "a second fill starts the reach");
         assert_eq!(flood.mask(0.1).data, first.data);
+    }
+
+    #[test]
+    fn the_reach_is_worked_out_only_where_its_memory_fits() {
+        // a 4 GB tablet (a 2 GiB layer budget): even 8K x 4K fits; a 2 GB one (1 GiB): a 4K
+        // canvas's reach fits, an 8K x 4K one's doesn't; nothing past 8K x 4K anywhere
+        let gib = 1u64 << 30;
+        assert!(reach_fits_within(8192 * 4096, 8, 2 * gib));
+        assert!(reach_fits_within(3840 * 2160, 8, gib));
+        assert!(!reach_fits_within(8192 * 4096, 6, gib));
+        assert!(!reach_fits_within(REACH_MOST + 1, 1, 64 * gib));
     }
 
     #[test]

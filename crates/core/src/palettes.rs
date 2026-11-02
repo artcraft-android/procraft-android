@@ -24,6 +24,9 @@ impl From<&Palette> for PaletteInfo {
 pub struct Palettes {
     file: Option<PathBuf>,
     kept: Mutex<(Vec<Palette>, usize)>,
+    /// Why writing them out failed, not yet asked for, and whether it is failing (told once
+    /// until a write works again).
+    failure: Mutex<(Option<String>, bool)>,
 }
 
 #[uniffi::export]
@@ -37,7 +40,13 @@ impl Palettes {
             .ok()
             .and_then(|t| palette::read_store(&t))
             .unwrap_or_else(|| (palette::starters(), 0));
-        Arc::new(Palettes { file: Some(file), kept: Mutex::new(kept) })
+        Arc::new(Palettes { file: Some(file), kept: Mutex::new(kept), failure: Mutex::default() })
+    }
+
+    /// Why writing the palettes out failed, once until a write works and another fails (for the
+    /// app to tell); none if it hasn't.
+    pub fn take_failure(&self) -> Option<String> {
+        self.failure.lock().unwrap_or_else(|e| e.into_inner()).0.take()
     }
 
     pub fn list(&self) -> Vec<PaletteInfo> {
@@ -219,7 +228,7 @@ impl Palettes {
     /// Palettes kept nowhere (tests).
     #[cfg(test)]
     pub(crate) fn in_memory() -> Arc<Palettes> {
-        Arc::new(Palettes { file: None, kept: Mutex::new((palette::starters(), 0)) })
+        Arc::new(Palettes { file: None, kept: Mutex::new((palette::starters(), 0)), failure: Mutex::default() })
     }
 
     fn kept(&self) -> std::sync::MutexGuard<'_, (Vec<Palette>, usize)> {
@@ -240,8 +249,16 @@ impl Palettes {
                 let _ = std::fs::create_dir_all(dir);
             }
             let tmp = file.with_extension("json.tmp");
-            if let Err(e) = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, file)) {
-                log::error!("saving the palettes: {e}");
+            let written = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, file));
+            let mut failure = self.failure.lock().unwrap_or_else(|e| e.into_inner());
+            match written {
+                Ok(()) => failure.1 = false,
+                Err(e) => {
+                    log::error!("saving the palettes: {e}");
+                    if !failure.1 {
+                        *failure = (Some(e.to_string()), true);
+                    }
+                }
             }
         }
     }
@@ -250,6 +267,23 @@ impl Palettes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palettes_that_cant_be_written_say_so_once() {
+        // a file where their folder would be
+        let blocked = std::env::temp_dir().join(format!("procraft-palettes-blocked-{}", std::process::id()));
+        std::fs::write(&blocked, b"not a folder").unwrap();
+        let p = Palettes::open(blocked.join("palettes.json").to_string_lossy().into_owned());
+        assert_eq!(p.take_failure(), None);
+        p.add();
+        let told = p.take_failure();
+        p.add();
+        let again = p.take_failure();
+        let _ = std::fs::remove_file(&blocked);
+        assert!(told.is_some(), "a failed write told");
+        assert_eq!(again, None, "not told again while failing");
+        assert_eq!(p.list().len(), 4, "the palettes as changed, though not kept");
+    }
 
     #[test]
     fn palettes_change_and_keep_their_default() {

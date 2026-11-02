@@ -110,7 +110,7 @@ ProCraft for Android is in beta.
 | Animation and page assists, the reference window | ✅ |
 | Gallery: stacks, new-canvas presets, import and share (PNG, JPEG, PSD, PDF, TIFF, GIF, MP4), time-lapse | 🚧 nearly done |
 | 3D painting: OBJ and USDZ models, texture sets, painting on the mesh, lights and environments | 🚧 |
-| Phone layout | ⬜ |
+| Phones: their own app, ProCraft Pocket (this one is for tablets) | ⬜ |
 
 <sub>✅ works today · 🚧 in progress · ⬜ not started · 🚫 not planned</sub>
 

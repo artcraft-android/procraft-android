@@ -293,6 +293,27 @@ pub struct Layer {
 }
 
 impl Layer {
+    /// A layer of `kind` as new ones are: shown, opaque, normal, nothing else set.
+    pub(crate) fn plain(id: LayerId, kind: LayerKind, name: String, parent: Option<LayerId>) -> Layer {
+        Layer {
+            id,
+            name,
+            visible: true,
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            alpha_lock: false,
+            clipped: false,
+            locked: false,
+            reference: false,
+            kind,
+            parent,
+            collapsed: false,
+            text: None,
+            private: false,
+            assisted: false,
+        }
+    }
+
     /// A group as groups are made (normal, fully opaque): its members blend with what is below
     /// it as they would ungrouped. A group given another mode or opacity (by Layer Opacity or a
     /// file) is composited on its own first, then blended.
@@ -331,6 +352,11 @@ pub fn layer_cap_for(width: u32, height: u32) -> usize {
     let bytes = u64::from(width) * u64::from(height) * 4;
     let budget = BUDGET.load(std::sync::atomic::Ordering::Relaxed);
     usize::try_from(budget / bytes.max(1)).unwrap_or(usize::MAX).max(1)
+}
+
+/// The memory layers may take on this device, bytes.
+pub fn layer_budget() -> u64 {
+    BUDGET.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Sets the memory layers may take on this device (256 MiB to 64 GiB).
@@ -375,11 +401,33 @@ pub struct Document {
     pub solo: Option<LayerId>,
 }
 
-/// The layers a file lists, as many as can be read: in a damaged file a layer that can't be is
-/// left out rather than the artwork failing to open (the repair mends what that leaves).
+/// The layers a file lists, as many as can be read: in a damaged file a layer with fields that
+/// can't be read keeps those that can ([`readable_layer`]), and one whose id can't be is left out,
+/// rather than the artwork failing to open (the repair mends what that leaves).
 fn readable_layers<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Layer>, D::Error> {
     let entries: Vec<serde_json::Value> = serde::Deserialize::deserialize(d)?;
-    Ok(entries.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect())
+    Ok(entries.into_iter().filter_map(readable_layer).collect())
+}
+
+/// A layer as a file lists it; if some of its fields can't be read, it keeps those that can and
+/// the rest as a new layer has them, so long as its id (which ties it to its pixels) can be.
+fn readable_layer(entry: serde_json::Value) -> Option<Layer> {
+    if let Ok(layer) = serde_json::from_value::<Layer>(entry.clone()) {
+        return Some(layer);
+    }
+    let serde_json::Value::Object(fields) = entry else { return None };
+    let id: LayerId = serde_json::from_value(fields.get("id")?.clone()).ok()?;
+    let mut layer = serde_json::to_value(Layer::plain(id, LayerKind::Paint, "Layer".to_owned(), None)).ok()?;
+    for (key, value) in fields {
+        let mut tried = layer.clone();
+        if let Some(o) = tried.as_object_mut() {
+            o.insert(key, value);
+        }
+        if serde_json::from_value::<Layer>(tried.clone()).is_ok() {
+            layer = tried;
+        }
+    }
+    serde_json::from_value(layer).ok()
 }
 
 /// A setting as a file keeps it, or its default if it can't be read (the artwork opens without
@@ -857,23 +905,7 @@ impl Document {
 
     /// A blank layer of `kind` named `name`, with a new id.
     fn blank(&mut self, kind: LayerKind, name: String, parent: Option<LayerId>) -> Layer {
-        Layer {
-            id: self.new_id(),
-            name,
-            visible: true,
-            opacity: 1.0,
-            blend: BlendMode::Normal,
-            alpha_lock: false,
-            clipped: false,
-            locked: false,
-            reference: false,
-            kind,
-            parent,
-            collapsed: false,
-            text: None,
-            private: false,
-            assisted: false,
-        }
+        Layer::plain(self.new_id(), kind, name, parent)
     }
 
     /// Adds a text layer above the current one (in its group), named after its text, and makes
@@ -1859,8 +1891,9 @@ mod tests {
         v["layers"][1]["opacity"] = "half".into();
         v["guide"] = 7.into();
         let back = serde_json::from_value::<Document>(v).unwrap().repaired();
-        assert_eq!(ids(&back), vec![a, c]);
-        assert!(back.layer(b).is_none());
+        // the middle layer kept with what of it can be read, its opacity as a new layer's
+        assert_eq!(ids(&back), vec![a, b, c]);
+        assert_eq!(back.layer(b).map(|l| (l.name.as_str(), l.opacity)), d.layer(b).map(|l| (l.name.as_str(), 1.0)));
         assert_eq!(back.guide, crate::guide::Guide::default());
         assert_eq!((back.width(), back.height()), (40, 30));
     }

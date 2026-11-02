@@ -210,6 +210,46 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     private val interfacePrefs = app.getSharedPreferences("interface", android.content.Context.MODE_PRIVATE)
 
+    /** Whether a mask is current, the colour then the one masks paint with. */
+    private var onMask = false
+
+    /**
+     * The colour not in use (hue, saturation, brightness): masks' (black at first) while a layer
+     * of another kind is current, the brush colour while a mask is.
+     */
+    private var otherColour = floatArrayOf(0f, 0f, 0f)
+
+    init {
+        // the colours as they were last left
+        hue = interfacePrefs.getFloat(KEPT_HUE, DEFAULT_HUE).coerceIn(0f, 1f)
+        saturation = interfacePrefs.getFloat(KEPT_SATURATION, 1f).coerceIn(0f, 1f)
+        brightness = interfacePrefs.getFloat(KEPT_BRIGHTNESS, 1f).coerceIn(0f, 1f)
+        otherColour = listOf(KEPT_MASK_HUE, KEPT_MASK_SATURATION, KEPT_MASK_BRIGHTNESS).map { interfacePrefs.getFloat(it, 0f).coerceIn(0f, 1f) }.toFloatArray()
+    }
+
+    /** Keeps the brush colour and the masks' for the next session. */
+    private fun keepColour() {
+        val now = floatArrayOf(hue, saturation, brightness)
+        val (brush, mask) = if (onMask) otherColour to now else now to otherColour
+        interfacePrefs.edit()
+            .putFloat(KEPT_HUE, brush[0]).putFloat(KEPT_SATURATION, brush[1]).putFloat(KEPT_BRIGHTNESS, brush[2])
+            .putFloat(KEPT_MASK_HUE, mask[0]).putFloat(KEPT_MASK_SATURATION, mask[1]).putFloat(KEPT_MASK_BRIGHTNESS, mask[2])
+            .apply()
+    }
+
+    /**
+     * A mask became current, or stopped being: the colour trades places with the other kind's, as
+     * masks paint with a colour of their own.
+     */
+    private fun followMaskColour() {
+        val mask = layers.firstOrNull { it.current }?.kind == LayerType.MASK
+        if (mask == onMask) return
+        onMask = mask
+        val now = floatArrayOf(hue, saturation, brightness)
+        setColor(otherColour[0], otherColour[1], otherColour[2])
+        otherColour = now
+    }
+
     /** The colour panel's mode, kept from one session to the next. */
     private var colorModeState by mutableStateOf(ColorMode.entries.getOrElse(interfacePrefs.getInt(COLOR_MODE, ColorMode.DISC.ordinal)) { ColorMode.DISC })
     var colorMode: ColorMode
@@ -1750,6 +1790,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             }
             GalleryZoom(c, canvasRect(s, s.viewMatrix()), opening = false, picture = picture)
         }
+        keepColour()
         session = null
         artworkDir = null
         panel = Panel.NONE
@@ -1876,6 +1917,31 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.setAuthor(author)
     }
 
+    /**
+     * Keeps the author's photo (the picture at [photo], when one was picked) and the [signature]
+     * (strokes of x, y across its box) in the artwork's folder, off the main thread; each takes
+     * the old one's place only once written whole, and a notice says which couldn't be kept.
+     */
+    fun keepAbout(photo: android.net.Uri?, signature: List<List<Float>>) {
+        val dir = artworkDir ?: return
+        viewModelScope.launch {
+            val failed = withContext(Dispatchers.IO) {
+                val resolver = getApplication<Application>().contentResolver
+                val photoKept = photo == null || runCatching {
+                    val bytes = resolver.openInputStream(photo)?.use { it.readBytes() } ?: error("no photo")
+                    io.github.artcraftandroid.procraft.core.writePhoto(dir.path, bytes)
+                }.isSuccess
+                val signed = runCatching { io.github.artcraftandroid.procraft.core.writeSignature(dir.path, signature) }.isSuccess
+                when {
+                    !photoKept -> "The photo couldn't be kept."
+                    !signed -> "The signature couldn't be kept."
+                    else -> null
+                }
+            }
+            failed?.let { showNotice(it, warning = true) }
+        }
+    }
+
     /** Puts the canvas in colour profile [name], its colours and the current colour turned into it. */
     fun changeProfile(name: String) {
         val s = session ?: return
@@ -1888,6 +1954,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Saves the open artwork where it is (the app going into the background). */
     fun saveNow() {
+        keepColour()
         val s = session ?: return
         val dir = artworkDir ?: return
         noteTime()
@@ -2414,21 +2481,25 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Files dragged onto the canvas from another app: a picture comes in as [insertPicture] puts
-     * it, ready to transform (several each on a new layer of its own, one after another); other
-     * files' brushes join the library.
+     * Files dragged onto the canvas from another app: a picture or a video comes in as
+     * [insertPicture] puts it, a picture alone ready to transform (several each on a new layer of
+     * their own, one after another, a video's as its frames); other files' brushes join the
+     * library.
      */
     fun dropOnCanvas(uris: List<android.net.Uri>) {
         if (session == null || uris.isEmpty()) return
         val resolver = getApplication<Application>().contentResolver
-        val (pictures, others) = uris.partition { runCatching { resolver.getType(it) }.getOrNull()?.startsWith("image/") == true }
+        val types = uris.associateWith { runCatching { resolver.getType(it) }.getOrNull().orEmpty() }
+        val video = { uri: android.net.Uri -> types[uri]?.startsWith("video/") == true }
+        val (inserted, others) = uris.partition { types[it]?.startsWith("image/") == true || video(it) }
         others.forEach(::importBrushes)
-        if (pictures.isEmpty()) return
+        if (inserted.isEmpty()) return
         if (transforming) endTransform(true)
         closePanels()
         viewModelScope.launch {
-            for (uri in pictures) {
-                if (!insertPictureNow(uri, private = false, transform = pictures.size == 1)) break
+            for (uri in inserted) {
+                val came = if (video(uri)) insertFramesNow(uri, private = false) else insertPictureNow(uri, private = false, transform = inserted.size == 1)
+                if (!came) break
             }
         }
     }
@@ -2477,42 +2548,46 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * comes on with them in its timeline.
      */
     private fun insertFrames(uri: android.net.Uri, private: Boolean) {
-        val s = session ?: return
+        viewModelScope.launch { insertFramesNow(uri, private) }
+    }
+
+    /** [insertFrames] done here; whether any frame came in. */
+    private suspend fun insertFramesNow(uri: android.net.Uri, private: Boolean): Boolean {
+        val s = session ?: return false
         val fps = (animation?.fps?.toInt() ?: DEFAULT_FPS).coerceIn(1, 60)
-        viewModelScope.launch {
-            var added = 0
-            var full = false
-            withContext(Dispatchers.IO) {
-                val retriever = android.media.MediaMetadataRetriever()
-                try {
-                    retriever.setDataSource(getApplication<Application>(), uri)
-                    val ms = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                    val count = (ms * fps / 1000L).toInt().coerceIn(1, MAX_VIDEO_FRAMES)
-                    for (i in 0 until count) {
-                        val us = i * 1_000_000L / fps
-                        val frame = retriever.getFrameAtTime(us, android.media.MediaMetadataRetriever.OPTION_CLOSEST) ?: continue
-                        val image = frameImage(frame)
-                        frame.recycle()
-                        if (s.insertImage(image, private) == null) {
-                            full = true
-                            break
-                        }
-                        added++
+        var added = 0
+        var full = false
+        withContext(Dispatchers.IO) {
+            val retriever = android.media.MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(getApplication<Application>(), uri)
+                val ms = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                val count = (ms * fps / 1000L).toInt().coerceIn(1, MAX_VIDEO_FRAMES)
+                for (i in 0 until count) {
+                    val us = i * 1_000_000L / fps
+                    val frame = retriever.getFrameAtTime(us, android.media.MediaMetadataRetriever.OPTION_CLOSEST) ?: continue
+                    val image = frameImage(frame)
+                    frame.recycle()
+                    if (s.insertImage(image, private) == null) {
+                        full = true
+                        break
                     }
-                } catch (e: Exception) {
-                    android.util.Log.e("ProCraft", "a video's frames", e)
-                } finally {
-                    retriever.release()
+                    added++
                 }
+            } catch (e: Exception) {
+                android.util.Log.e("ProCraft", "a video's frames", e)
+            } finally {
+                retriever.release()
             }
-            if (added == 0) {
-                message = if (full) noRoom() else "This video can't be opened."
-                return@launch
-            }
-            if (animation == null || animation?.pages == true) changeAnimationAssist(true) else refresh()
-            showNotice("Frames saved to timeline")
-            if (full) message = noRoom()
         }
+        if (added == 0) {
+            message = if (full) noRoom() else "This video can't be opened."
+            return false
+        }
+        if (animation == null || animation?.pages == true) changeAnimationAssist(true) else refresh()
+        showNotice("Frames saved to timeline")
+        if (full) message = noRoom()
+        return true
     }
 
     /** A video frame's straight RGBA pixels, at most [MAX_PICTURE] on a side. */
@@ -4198,6 +4273,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The palettes as the core keeps them now. */
     private fun refreshPalettes() {
         palettes = paletteStore.list().map { p -> Palette(p.name, p.colors.map { it?.toInt() }) }
+        // a change that couldn't be written out (the storage full, say) told, once until one is
+        if (paletteStore.takeFailure() != null) message = "The palettes couldn't be kept."
         defaultPalette = paletteStore.defaultPalette().toInt()
     }
 
@@ -5724,6 +5801,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             quickShapeEditing = false
         }
         layers = s.layers()
+        followMaskColour()
         // drawing assist is the current layer's
         if (guide != null) guide = s.guide()
         background = s.background()
@@ -5952,6 +6030,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val STUDIO_PREVIEW_DELAY_MS = 60L
         /** The first colour: a saturated blue. */
         const val DEFAULT_HUE = 0.59f
+        const val KEPT_HUE = "colour.hue"
+        const val KEPT_SATURATION = "colour.saturation"
+        const val KEPT_BRIGHTNESS = "colour.brightness"
+        const val KEPT_MASK_HUE = "colour.mask.hue"
+        const val KEPT_MASK_SATURATION = "colour.mask.saturation"
+        const val KEPT_MASK_BRIGHTNESS = "colour.mask.brightness"
         /** Layer thumbnails are read at about the size they show (93 dp at 2 px a dp). */
         const val THUMB_SIDE = 192
         const val HISTORY_SIZE = 10

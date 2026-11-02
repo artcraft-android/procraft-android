@@ -57,8 +57,11 @@ pub fn read_store(text: &str) -> Option<(Vec<Palette>, usize)> {
     let palettes: Vec<Palette> = list
         .iter()
         .filter_map(|p| {
-            let name = p.get("name")?.as_str()?.to_owned();
-            let colors = p.get("colors")?.as_array()?;
+            // one damaged in part keeps what can be read: a name it can't be "Untitled Palette",
+            // colours it can't be empty slots (dropped, it would be gone at the next write)
+            p.as_object()?;
+            let name = p.get("name").and_then(Value::as_str).unwrap_or("Untitled Palette").to_owned();
+            let colors = p.get("colors").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
             // a colour kept with its alpha, as a signed 32-bit number, keeps its red, green and blue
             Some(Palette::new(name, colors.iter().map(|c| c.as_i64().map(|v| (v as u32) & 0xFF_FFFF))))
         })
@@ -558,6 +561,11 @@ mod tests {
         let kept = r#"{"default":0,"palettes":[{"name":"Old","colors":[-15584170,null,1193046]}]}"#;
         let (palettes, _) = read_store(kept).unwrap();
         assert_eq!(palettes.first().map(|p| p.colors[..3].to_vec()), Some(vec![Some(0x123456), None, Some(0x123456)]));
+        // damaged in part: a palette without a name, one with its colours unreadable, kept
+        let damaged = r#"{"default":0,"palettes":[{"colors":[1193046]},{"name":"Bare","colors":"x"},7]}"#;
+        let (palettes, _) = read_store(damaged).unwrap();
+        let shown: Vec<(&str, Option<u32>)> = palettes.iter().map(|p| (p.name.as_str(), p.colors[0])).collect();
+        assert_eq!(shown, vec![("Untitled Palette", Some(0x123456)), ("Bare", None)]);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::layers::ThumbnailImage;
-use crate::project::PackageTimeLapse;
+use crate::project::{PackageTimeLapse, file_error, write_atomically};
 
 /// The replay's and the video's frames a second.
 pub const TIME_LAPSE_FPS: u32 = 30;
@@ -134,8 +134,12 @@ impl TimeLapse {
 
     pub fn set_settings(&self, s: TimeLapseSettings) {
         let json = serde_json::json!({ "resolution": s.resolution, "quality": s.quality, "hevc": s.hevc });
-        let written =
-            fs::create_dir_all(&self.dir).and_then(|()| fs::write(self.dir.join("settings.json"), json.to_string()));
+        let written = fs::create_dir_all(&self.dir).map_err(|e| e.to_string()).and_then(|()| {
+            write_atomically(&self.dir.join("settings.json"), |p| {
+                fs::write(p, json.to_string()).map_err(|e| file_error("saving", e))
+            })
+            .map_err(|e| e.to_string())
+        });
         if let Err(e) = written {
             log::warn!("keeping the time-lapse's settings: {e}");
         }
@@ -452,10 +456,15 @@ impl TimeLapse {
         holds.then_some(k)
     }
 
+    /// Notes the videos made (an imported package's are its time-lapse's only copy), in place of
+    /// the note before only once written whole.
     fn write_segments(&self, k: &Segments) {
-        let written = serde_json::to_string(k)
+        let written = serde_json::to_string(k).map_err(|e| e.to_string()).and_then(|text| {
+            write_atomically(&self.dir.join("segments.json"), |p| {
+                fs::write(p, text).map_err(|e| file_error("saving", e))
+            })
             .map_err(|e| e.to_string())
-            .and_then(|text| fs::write(self.dir.join("segments.json"), text).map_err(|e| e.to_string()));
+        });
         if let Err(e) = written {
             log::warn!("keeping the time-lapse's videos: {e}");
         }

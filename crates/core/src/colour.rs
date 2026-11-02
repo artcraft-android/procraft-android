@@ -87,7 +87,12 @@ pub fn set_profile_folder(dir: String) {
     let folder = PathBuf::from(dir);
     let mut profiles = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&folder) {
-        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        // not one a write cut short left beside its profile
+        let mut paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_none_or(|e| !e.eq_ignore_ascii_case("tmp")))
+            .collect();
         paths.sort();
         for path in paths {
             if let Some(p) = std::fs::read(&path).ok().and_then(|b| IccProfile::parse(&b)).filter(|p| p.can_receive()) {
@@ -114,7 +119,11 @@ pub fn import_profile(bytes: Vec<u8>) -> Option<String> {
         let safe: String =
             p.name.chars().map(|c| if c.is_alphanumeric() || " -_.".contains(c) { c } else { '_' }).collect();
         let _ = std::fs::create_dir_all(folder);
-        if let Err(e) = std::fs::write(folder.join(format!("{}.icc", safe.trim())), &bytes) {
+        // one of the same name is replaced only once this is written whole
+        let file = folder.join(format!("{}.icc", safe.trim()));
+        if let Err(e) = crate::project::write_atomically(&file, |f| {
+            std::fs::write(f, &bytes).map_err(|e| crate::project::file_error("keeping a profile", e))
+        }) {
             log::error!("keeping an imported profile: {e}");
         }
     }
@@ -259,5 +268,38 @@ mod tests {
         assert!(colours_in_p3("Display P3".to_owned()));
         assert!(colours_in_p3(procraft_engine::cmyk::NAME.to_owned()));
         assert!(!colours_in_p3("sRGB IEC61966-2.1".to_owned()));
+    }
+
+    /// Display P3's profile under another name of as many letters (so no offset moves).
+    fn named(name: &str) -> Vec<u8> {
+        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_be_bytes).collect::<Vec<u8>>();
+        let (from, to) = (utf16("Display P3"), utf16(name));
+        assert_eq!(from.len(), to.len());
+        let mut icc = procraft_engine::icc::icc(Profile::DisplayP3);
+        let at = icc.windows(from.len()).position(|w| w == from).unwrap();
+        icc[at..at + to.len()].copy_from_slice(&to);
+        icc
+    }
+
+    #[test]
+    fn an_imported_profile_is_kept_and_read_again_but_not_a_write_cut_short() {
+        let dir = std::env::temp_dir().join(format!("procraft-profiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // what a write cut short before its rename left
+        std::fs::write(dir.join("Leftover 3.0.tmp"), named("Leftover 3")).unwrap();
+        set_profile_folder(dir.to_string_lossy().into_owned());
+        assert!(!color_profiles().iter().any(|p| p == "Leftover 3"));
+        assert_eq!(import_profile(named("Imported 3")).as_deref(), Some("Imported 3"));
+        assert!(color_profiles().iter().any(|p| p == "Imported 3"));
+        let mut files: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        files.sort();
+        assert_eq!(files, ["Imported 3.icc", "Leftover 3.0.tmp"]);
+        // the app started again: the kept one is there, the leftover still not
+        set_profile_folder(dir.to_string_lossy().into_owned());
+        let names = color_profiles();
+        assert!(names.iter().any(|p| p == "Imported 3") && !names.iter().any(|p| p == "Leftover 3"), "{names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

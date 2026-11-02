@@ -294,7 +294,8 @@ impl ColourFlood {
     /// nor if a thread can't start: the selections stay floods). The thread stops if the
     /// measure is let go first.
     pub fn work_out_reach(&self) {
-        if u64::from(self.width) * u64::from(self.height) > crate::fill::REACH_MOST {
+        // two bytes apart and two of reach a pixel, and lists of up to four
+        if !crate::fill::reach_fits(u64::from(self.width) * u64::from(self.height), 8) {
             return;
         }
         let (apart, reach) = (self.apart.clone(), self.reach.clone());
@@ -322,13 +323,17 @@ impl ColourFlood {
                 });
                 m
             }
-            None => self.by_scanlines(cut),
+            None => self
+                .by_scanlines(cut, crate::fill::flood_here_most(self.apart.len()))
+                .unwrap_or_else(|| self.by_runs(cut)),
         }
     }
 
-    /// [`ColourFlood::mask`] by a flood: scanlines from the seed, each span selected whole, then
-    /// the runs above and below it seeded; each row looked along as a slice.
-    fn by_scanlines(&self, cut: u16) -> Mask {
+    /// [`ColourFlood::mask`] by a flood on this thread: scanlines from the seed, each span selected
+    /// whole, then the runs above and below it seeded, each row looked along as a slice; none once
+    /// it has selected more than `most` pixels (a large one is quicker on every core,
+    /// [`ColourFlood::by_runs`]).
+    fn by_scanlines(&self, cut: u16, most: usize) -> Option<Mask> {
         let mut m = Mask::empty(self.width, self.height);
         let (w, h) = (self.width as usize, self.height as usize);
         // the pixels near the seed's colour are marked open (1) until the fill reaches them (255)
@@ -338,6 +343,7 @@ impl ColourFlood {
             }
         });
         let mut stack = vec![(self.seed.0 as usize, self.seed.1 as usize)];
+        let mut filled = 0;
         while let Some((x, y)) = stack.pop() {
             let Some(line) = m.data.get_mut(y * w..(y + 1) * w) else { continue };
             if line.get(x) != Some(&1) {
@@ -345,11 +351,19 @@ impl ColourFlood {
             }
             let l = x - line.get(..x).unwrap_or_default().iter().rev().take_while(|&&v| v == 1).count();
             let r = x + line.get(x + 1..).unwrap_or_default().iter().take_while(|&&v| v == 1).count();
+            filled += r + 1 - l;
+            if filled > most {
+                return None;
+            }
             if let Some(span) = line.get_mut(l..=r) {
                 span.fill(255);
             }
             for ny in [y.wrapping_sub(1), y + 1] {
-                let Some(next) = m.data.get(ny * w..(ny + 1) * w).filter(|_| ny < h) else { continue };
+                // off the top (wrapped round) or the bottom: the row's place isn't worked out
+                if ny >= h {
+                    continue;
+                }
+                let Some(next) = m.data.get(ny * w..(ny + 1) * w) else { continue };
                 let Some(under) = next.get(l..=r) else { continue };
                 let mut xi = 0;
                 while let Some(start) = under.get(xi..).and_then(|rest| rest.iter().position(|&v| v == 1)) {
@@ -365,7 +379,15 @@ impl ColourFlood {
                 *v = 0;
             }
         });
-        m
+        Some(m)
+    }
+
+    /// [`ColourFlood::mask`] by a flood, worked out on every core ([`crate::fill::joined`]).
+    fn by_runs(&self, cut: u16) -> Mask {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let seed = (self.seed.0 as usize, self.seed.1 as usize);
+        let data = crate::fill::joined(&self.apart, w, h, seed, cut, |_| 255);
+        Mask { width: self.width, height: self.height, data }
     }
 }
 
@@ -626,6 +648,30 @@ mod tests {
         m
     }
 
+    /// What measuring a 4K picture from a seed costs, in bands side by side against one thread:
+    /// run on a device with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn colour_flood_cost() {
+        let (w, h) = (3840u32, 2160u32);
+        let px: Vec<u8> = (0..w * h).flat_map(|i| [(i % 251) as u8, (i % 7) as u8, 90, 255]).collect();
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            std::hint::black_box(ColourFlood::new(w, h, &px, (100, 100)));
+            let bands = start.elapsed().as_secs_f64() * 1000.0;
+            let start = std::time::Instant::now();
+            let target = [100u8, 2, 90, 255];
+            let one: Vec<u16> = px
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| p.iter().zip(&target).map(|(a, b)| u16::from(a.abs_diff(*b))).sum::<u16>().min(APART_MOST + 1))
+                .collect();
+            std::hint::black_box(one);
+            println!("measured in bands {bands:.1} ms, on one thread {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+
     #[test]
     fn an_automatic_selection_by_reach_or_flood_selects_what_a_plain_flood_does() {
         for seed in 0u32..40 {
@@ -651,7 +697,9 @@ mod tests {
             for threshold in [0.0f32, 0.05, 0.1, 0.3, 0.5, 0.9, 1.0] {
                 let plain = selected(w as usize, h as usize, &px, (start.0 as usize, start.1 as usize), threshold);
                 let cut = (threshold * 2.0 * 255.0).floor() as u16;
-                assert_eq!(flood.by_scanlines(cut).data, plain, "seed {seed} threshold {threshold}");
+                assert_eq!(flood.by_runs(cut).data, plain, "seed {seed} threshold {threshold}");
+                let here = flood.by_scanlines(cut, usize::MAX).map(|m| m.data);
+                assert_eq!(here, Some(plain.clone()), "seed {seed} threshold {threshold}");
                 assert_eq!(flood.mask(threshold).data, plain, "seed {seed} threshold {threshold}");
             }
         }

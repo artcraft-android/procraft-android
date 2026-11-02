@@ -67,7 +67,8 @@ pub struct Interface {
     /// The artwork's edits when it was last saved: anything else is unsaved.
     pub saved_edits: u64,
     /// Inserts being read, each on a thread of its own.
-    inserting: Vec<std::sync::mpsc::Receiver<Inserted>>,
+    /// Inserts being read, each what it came to and whether it is to be transformed.
+    inserting: Vec<std::sync::mpsc::Receiver<(Inserted, bool)>>,
     /// A Save As being written: where and at which edits, or why it couldn't be.
     pub saving: Option<std::sync::mpsc::Receiver<Result<(std::path::PathBuf, u64), String>>>,
     open: Option<Popover>,
@@ -346,10 +347,16 @@ impl Interface {
         self.ended_export = None;
         // looked at again soon while an insert is read, or brushes made
         let brushes_coming = self.brushes_added(session);
-        // the autosave told of when it fails (once until a save works again)
+        // the autosave told of when it fails (once until a save works again), the palettes too
         if let Some(why) = session.take_save_failure() {
             self.overlays.notice(procraft_core::save_failure_said(why), true);
         }
+        if self.colours.palettes.take_failure().is_some() {
+            self.overlays.notice("The palettes couldn't be kept.", true);
+        }
+        // a mask current paints with masks' own colour
+        let on_mask = session.layers().iter().any(|l| l.current && l.kind == procraft_core::LayerType::Mask);
+        self.colours.follow_mask(session, on_mask);
         if self.inserted(session) || brushes_coming {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -635,7 +642,11 @@ impl Interface {
         }
         if let Some(info) = self.canvas_info.as_mut() {
             use crate::canvas_info::Ended;
-            match info.show(&ctx, &mut self.look, session) {
+            let ended = info.show(&ctx, &mut self.look, session);
+            if let Some(failure) = info.take_failure() {
+                self.overlays.notice(failure, true);
+            }
+            match ended {
                 // another profile: the canvas and the current colour turned into it
                 Some(Ended::Done(Some(profile))) => {
                     let (from, rgb) = (session.profile(), to_hex(self.colours.rgb()));
@@ -1205,18 +1216,18 @@ impl Interface {
         else {
             return;
         };
-        self.insert_file(session, &path, private);
+        self.insert_files(session, vec![path], private);
     }
 
-    /// Files dropped on the canvas: each picture inserted as Insert a file does; brushes (ours
-    /// or another app's) added to the library.
+    /// Files dropped on the canvas: a picture inserted as Insert a file does (several each a layer,
+    /// in turn); brushes (ours or another app's) added to the library.
     pub fn dropped(&mut self, session: &Arc<CanvasSession>, paths: &[std::path::PathBuf]) {
         let mut brushes = Vec::new();
+        let mut pictures = Vec::new();
         for path in paths {
             let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
             if PICTURES.contains(&extension.as_str()) || VIDEOS.contains(&extension.as_str()) {
-                self.open = None;
-                self.insert_file(session, path, false);
+                pictures.push(path.clone());
             } else if crate::files::is_brush_file(path)
                 && let Ok(bytes) = std::fs::read(path)
             {
@@ -1225,6 +1236,10 @@ impl Interface {
             }
         }
         self.library.add_brushes(brushes, true);
+        if !pictures.is_empty() {
+            self.open = None;
+            self.insert_files(session, pictures, false);
+        }
     }
 
     /// Brushes read from files meanwhile added to the library and told of (when asked to), the
@@ -1244,31 +1259,42 @@ impl Interface {
 
     /// The picture in file `path` as a new layer (a private one, if `private`), ready to
     /// transform; a GIF's frames each a layer.
-    fn insert_file(&mut self, session: &Arc<CanvasSession>, path: &std::path::Path, private: bool) {
-        // read on a thread of its own (a video's frames take seconds), what it came to told on a
-        // frame after (`inserted`)
-        let (session, path, (done, inserting)) = (Arc::clone(session), path.to_path_buf(), std::sync::mpsc::channel());
+    fn insert_files(&mut self, session: &Arc<CanvasSession>, paths: Vec<std::path::PathBuf>, private: bool) {
+        // read one after another on a thread of their own (a video's frames take seconds), what
+        // each came to told on a frame after (`inserted`); a picture alone is transformed
+        let transform = paths.len() == 1;
+        let (session, (done, inserting)) = (Arc::clone(session), std::sync::mpsc::channel());
         std::thread::spawn(move || {
-            let _ = done.send(read_insert(&session, &path, private));
+            for path in paths {
+                if done.send((read_insert(&session, &path, private), transform)).is_err() {
+                    return;
+                }
+            }
         });
         self.inserting.push(inserting);
     }
 
-    /// What inserts read meanwhile came to: a picture transformed, frames told of (Animation
+    /// What inserts read meanwhile came to: a picture alone transformed, frames told of (Animation
     /// Assist on for a video's), or why it couldn't be. True while one is still being read.
     fn inserted(&mut self, session: &CanvasSession) -> bool {
         let mut came = Vec::new();
-        self.inserting.retain(|r| match r.try_recv() {
-            Ok(i) => {
-                came.push(i);
-                false
+        // each read's results so far, kept while more may come
+        self.inserting.retain(|r| {
+            loop {
+                match r.try_recv() {
+                    Ok(i) => came.push(i),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break true,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break false,
+                }
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => true,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
         });
-        for inserted in came {
+        for (inserted, transform) in came {
             match inserted {
-                Inserted::Picture(true) => self.toggle_transform(session),
+                Inserted::Picture(true) => {
+                    if transform {
+                        self.toggle_transform(session);
+                    }
+                }
                 Inserted::Picture(false) => crate::files::no_room(session),
                 Inserted::Frames { added, full, assist } => {
                     if assist {

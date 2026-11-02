@@ -234,6 +234,11 @@ impl HarmonyKind {
 pub struct Colours {
     /// The colour painted with, as hue, saturation and brightness of its sRGB values (0..1).
     pub hsv: [f32; 3],
+    /// The colour not in use: masks' (black at first) while a layer of another kind is current,
+    /// the brush colour while a mask is.
+    other: [f32; 3],
+    /// Whether a mask is current, the colour then the one masks paint with.
+    on_mask: bool,
     /// The second colour (secondary colour dynamics), sRGB.
     pub secondary: [f32; 3],
     /// The colours painted with lately, kept by the shared core (each canvas adds to it).
@@ -269,8 +274,12 @@ pub struct Colours {
 
 impl Default for Colours {
     fn default() -> Colours {
+        let kept = crate::files::kept_colours().unwrap_or(([0.59, 1.0, 1.0], [0.0; 3]));
         Colours {
-            hsv: [0.0, 0.0, 0.0],
+            // as last left, else the blue a first start has (as Android's)
+            hsv: kept.0,
+            other: kept.1,
+            on_mask: false,
             secondary: [1.0, 1.0, 1.0],
             history: ColourHistory::new(),
             palettes: Palettes::open(crate::files::app_dir().join("palettes.json").to_string_lossy().into_owned()),
@@ -320,6 +329,22 @@ impl Colours {
         self.hsv = [if s > 0.0 { h } else { self.hsv[0] }, s, v];
         self.secondary = was;
         self.send(session);
+    }
+
+    /// A mask became current, or stopped being: the colour trades places with the other kind's,
+    /// as masks paint with a colour of their own.
+    pub fn follow_mask(&mut self, session: &CanvasSession, on_mask: bool) {
+        if on_mask == self.on_mask {
+            return;
+        }
+        self.on_mask = on_mask;
+        std::mem::swap(&mut self.hsv, &mut self.other);
+        self.send(session);
+    }
+
+    /// The brush colour and masks', whichever is in use.
+    pub fn brush_and_mask(&self) -> ([f32; 3], [f32; 3]) {
+        if self.on_mask { (self.other, self.hsv) } else { (self.hsv, self.other) }
     }
 
     pub fn send(&self, session: &CanvasSession) {

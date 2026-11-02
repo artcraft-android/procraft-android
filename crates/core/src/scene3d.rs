@@ -3655,7 +3655,7 @@ f 1/1 2/2",
             return;
         }
         dab(&s);
-        let dir = std::env::temp_dir().join(format!("procraft-reopen-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("procraft-reopen-model-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         s.save(dir.join("a").to_string_lossy().into_owned()).unwrap();
         let again = CanvasSession::open(dir.join("a").to_string_lossy().into_owned()).unwrap();

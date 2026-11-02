@@ -3065,15 +3065,19 @@ fn a_kept_library_with_a_brush_it_cant_read_keeps_the_rest() {
     let s = CanvasSession::new(64, 64);
     let before = s.brush_library();
     let mut v: serde_json::Value = serde_json::from_str(&s.saved_brush_library()).unwrap();
-    // the first set's second brush damaged, the second set's name gone
+    // the first set's second brush damaged in part, its third without a name, the second set's
+    // name gone
     v[0]["brushes"][1]["from"] = 0.5.into();
+    v[0]["brushes"][1]["settings"]["size"] = "big".into();
+    v[0]["brushes"][2].as_object_mut().unwrap().remove("name");
     v[1].as_object_mut().unwrap().remove("name");
     let t = CanvasSession::new(64, 64);
     assert!(t.load_brush_library(v.to_string()));
     let after = t.brush_library();
     assert_eq!(after.len(), before.len() - 1, "the set without a name left out");
-    assert_eq!(after[0].brushes.len(), before[0].brushes.len() - 1, "the brush left out");
-    assert_eq!(after[0].brushes[1].name, before[0].brushes[2].name);
+    assert_eq!(after[0].brushes.len(), before[0].brushes.len() - 1, "only the brush without a name left out");
+    assert_eq!(after[0].brushes[1].name, before[0].brushes[1].name, "the damaged one kept, by name");
+    assert_eq!(after[0].brushes[2].name, before[0].brushes[3].name);
     assert_eq!(after[1].name, before[2].name);
 }
 
@@ -3530,7 +3534,7 @@ fn an_artwork_never_shown_exports_offscreen() {
 #[test]
 fn saving_while_idle_writes_only_what_changed() {
     let Some(s) = session(40, 40) else { return };
-    let dir = std::env::temp_dir().join(format!("procraft-autosave-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("procraft-idle-save-{}", std::process::id()));
     let path = dir.to_string_lossy().into_owned();
     s.save(path.clone()).unwrap();
     let edits = s.edits();
@@ -4114,6 +4118,20 @@ fn a_zip_of_brushes_is_told_from_other_zips() {
     other.add("model.obj", b"v 0 0 0");
     assert!(!crate::brush_files::is_brush_zip(other.finish()));
     assert!(!crate::brush_files::is_brush_zip(b"not a zip".to_vec()));
+}
+
+#[test]
+fn kept_brush_choices_with_entries_it_cant_read_keep_the_rest() {
+    let s = CanvasSession::new(64, 64);
+    // the eraser's place and a set's choice unreadable, a slider cut short
+    let json = r#"{"tools":[[0,3],"bad",[0,1]],"sets":[[0,2],"x"],"sliders":[[0,0,3,0.25,0.5],[9]]}"#;
+    assert!(s.load_brush_choices(json.to_owned()));
+    let on = |tool: ToolKind| {
+        s.set_tool(tool);
+        (s.current_brush().set, s.current_brush().index)
+    };
+    assert_eq!(on(ToolKind::Paint), (0, 3));
+    assert_eq!(on(ToolKind::Smudge), (0, 1));
 }
 
 #[test]

@@ -927,6 +927,8 @@ impl App {
             let _ = made.join();
         }
         session.keep_brushes(files::brushes_dir());
+        let (brush, mask) = self.ui.colours.brush_and_mask();
+        files::keep_colours(brush, mask);
         let edits = session.edits();
         match session.save(dir) {
             Ok(()) => {

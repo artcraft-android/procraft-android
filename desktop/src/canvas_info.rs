@@ -10,7 +10,7 @@ use egui::{
 };
 use procraft_core::{
     ArtworkInfo, CanvasSession, cmyk_profiles, color_profiles, convert_color, is_cmyk_profile, read_signature,
-    write_signature,
+    write_photo, write_signature,
 };
 
 use crate::icons::{self, Icon};
@@ -73,6 +73,8 @@ pub struct CanvasInfo {
     lapse: (u32, u64),
     /// Done with another profile picked while a time-lapse was recorded asks first.
     asking: crate::alert::Alert,
+    /// What couldn't be kept on Done, for the window to tell.
+    failure: Option<&'static str>,
 }
 
 impl CanvasInfo {
@@ -91,29 +93,38 @@ impl CanvasInfo {
             profile: session.profile(),
             lapse,
             asking: crate::alert::Alert::default(),
+            failure: None,
         }
     }
 
+    /// What couldn't be kept on Done (the photo or the signature), once.
+    pub fn take_failure(&mut self) -> Option<&'static str> {
+        self.failure.take()
+    }
+
     /// Keeps what was changed: the name and author, and in the artwork's folder the photo and
-    /// signature.
-    fn keep(&self, session: &CanvasSession) {
+    /// signature (each in the old one's place only once written whole).
+    fn keep(&mut self, session: &CanvasSession) {
         if !self.name.trim().is_empty() && self.name.trim() != session.name() {
             session.set_name(self.name.clone());
         }
         session.set_author(self.author.clone());
         let Some(dir) = &self.dir else { return };
         if let Some(photo) = &self.new_photo {
-            let about = Path::new(dir).join("about");
             let rgb = image::DynamicImage::ImageRgba8(photo.clone()).to_rgb8();
-            let written = std::fs::create_dir_all(&about).map_err(|e| e.to_string()).and_then(|()| {
-                rgb.save_with_format(about.join("photo.jpg"), image::ImageFormat::Jpeg).map_err(|e| e.to_string())
-            });
+            let mut jpeg = Vec::new();
+            let written = rgb
+                .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+                .map_err(|e| e.to_string())
+                .and_then(|()| write_photo(dir.clone(), jpeg).map_err(|e| e.to_string()));
             if let Err(e) = written {
                 log::warn!("keeping the author's photo: {e}");
+                self.failure = Some("The photo couldn't be kept.");
             }
         }
         if let Err(e) = write_signature(dir.clone(), self.signature.clone()) {
             log::warn!("keeping the signature: {e}");
+            self.failure = self.failure.or(Some("The signature couldn't be kept."));
         }
     }
 

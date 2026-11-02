@@ -237,10 +237,34 @@ fn read_saved_sets(json: &str) -> Option<Vec<SavedSet>> {
             _ => Vec::new(),
         };
         let mut set: SavedSet = serde_json::from_value(serde_json::Value::Object(fields)).ok()?;
-        set.brushes = brushes.into_iter().filter_map(|b| serde_json::from_value(b).ok()).collect();
+        set.brushes = brushes.into_iter().filter_map(read_brush).collect();
         Some(set)
     });
     Some(sets.collect())
+}
+
+/// A brush as the library file keeps it; if some of it can't be read, it keeps what can (its
+/// settings one by one, then each of its fields), so long as its name can be.
+fn read_brush(entry: serde_json::Value) -> Option<SavedBrush> {
+    if let Ok(brush) = serde_json::from_value(entry.clone()) {
+        return Some(brush);
+    }
+    let serde_json::Value::Object(mut fields) = entry else { return None };
+    if let Some(serde_json::Value::Object(settings)) = fields.get_mut("settings") {
+        settings.retain(|_, v| v.is_number());
+    }
+    let name = fields.get("name")?.as_str()?.to_owned();
+    let mut brush = serde_json::json!({ "name": name });
+    for (key, value) in fields {
+        let mut tried = brush.clone();
+        if let Some(o) = tried.as_object_mut() {
+            o.insert(key, value);
+        }
+        if serde_json::from_value::<SavedBrush>(tried.clone()).is_ok() {
+            brush = tried;
+        }
+    }
+    serde_json::from_value(brush).ok()
 }
 
 impl SavedSet {
@@ -853,13 +877,19 @@ impl CanvasSession {
     /// Puts back what [`Self::saved_brush_choices`] kept, after the library it was kept with;
     /// places the library no longer has are left as they are. False if it can't be read.
     pub fn load_brush_choices(&self, json: String) -> bool {
-        let Ok(saved) = serde_json::from_str::<SavedChoices>(&json) else { return false };
+        let Ok(saved) = serde_json::from_str::<serde_json::Value>(&json) else { return false };
+        // entry by entry: in a damaged file one that can't be read is left out, not the rest
+        fn each<T: serde::de::DeserializeOwned>(saved: &serde_json::Value, key: &str) -> Vec<Option<T>> {
+            let list = saved.get(key).and_then(serde_json::Value::as_array).map(Vec::as_slice).unwrap_or_default();
+            list.iter().map(|v| serde_json::from_value(v.clone()).ok()).collect()
+        }
+        let tools: Vec<Option<(usize, usize)>> = each(&saved, "tools");
+        let sets: Vec<(usize, usize)> = each(&saved, "sets").into_iter().flatten().collect();
+        let sliders: Vec<(u8, usize, usize, f32, f32)> = each(&saved, "sliders").into_iter().flatten().collect();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        for (tool, place) in TOOLS.into_iter().zip(saved.tools) {
-            if !st.holds(place) {
-                continue;
-            }
+        for (tool, place) in TOOLS.into_iter().zip(tools) {
+            let Some(place) = place.filter(|&p| st.holds(p)) else { continue };
             match tool {
                 crate::ToolKind::Paint => st.paint_brush = place,
                 crate::ToolKind::Erase => st.erase_brush = place,
@@ -867,12 +897,12 @@ impl CanvasSession {
             }
         }
         st.set_choices.clear();
-        for place in saved.sets {
+        for place in sets {
             if st.holds(place) {
                 st.note_choice(place);
             }
         }
-        for (tool, s, i, size, opacity) in saved.sliders {
+        for (tool, s, i, size, opacity) in sliders {
             let Some(&tool) = TOOLS.get(usize::from(tool)) else { continue };
             if st.holds((s, i)) && size.is_finite() && opacity.is_finite() {
                 let v = crate::Sliders { size: size.clamp(0.0, 1.0), opacity: opacity.clamp(0.0, 1.0) };

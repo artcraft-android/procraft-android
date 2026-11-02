@@ -160,9 +160,11 @@ fun CanvasInfo(vm: CanvasViewModel) {
         }
     }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) {
+        // only a picture that reads takes the old photo's place
+        val picked = uri?.let { runCatching { context.contentResolver.openInputStream(it)?.use { s -> BitmapFactory.decodeStream(s) }?.asImageBitmap() }.getOrNull() }
+        if (picked != null) {
             newPhoto = uri
-            photo = runCatching { context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }?.asImageBitmap() }.getOrNull()
+            photo = picked
         }
     }
     fun close() {
@@ -175,11 +177,7 @@ fun CanvasInfo(vm: CanvasViewModel) {
             return
         }
         vm.changeArtworkInfo(name, author)
-        about?.let { folder ->
-            folder.mkdirs()
-            newPhoto?.let { uri -> runCatching { context.contentResolver.openInputStream(uri)?.use { input -> File(folder, "photo.jpg").outputStream().use { input.copyTo(it) } } } }
-            dir?.let { writeSignature(it, signature) }
-        }
+        vm.keepAbout(newPhoto, signature.map { s -> s.flatMap { listOf(it.x, it.y) } })
         if (profile != session.profile()) vm.changeProfile(profile)
         close()
     }
@@ -420,7 +418,3 @@ private fun megabytes(bytes: Long) = "%.2f MB".format(bytes / 1_000_000.0)
 private fun readSignature(dir: File?): List<List<Offset>> =
     dir?.let { io.github.artcraftandroid.procraft.core.readSignature(it.path) }.orEmpty()
         .map { pts -> List(pts.size / 2) { j -> Offset(pts[j * 2], pts[j * 2 + 1]) } }
-
-private fun writeSignature(dir: File, strokes: List<List<Offset>>) {
-    runCatching { io.github.artcraftandroid.procraft.core.writeSignature(dir.path, strokes.map { s -> s.flatMap { listOf(it.x, it.y) } }) }
-}
