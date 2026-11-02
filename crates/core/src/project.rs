@@ -573,14 +573,15 @@ impl CanvasSession {
     }
 
     /// Saves the artwork into `dir` (made if missing): its document, every layer and a thumbnail.
-    /// Saves started together run one after the other.
+    /// Saves started together run one after the other. An adjustment or transform still open (the
+    /// app going into the background) stays open: its layers are saved as they show, and again
+    /// once it ends.
     pub fn save(&self, dir: String) -> Result<(), MobileError> {
         let mut saved = self.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
         let (snapshot, edits) = {
             let mut guard = self.shared.lock_finished();
             let st = &mut *guard;
             st.finish_stroke();
-            st.settle();
             // a model saves its colour as the artwork's document
             let known = saved.known(Path::new(&dir));
             (st.with_colour(|st| st.save_snapshot(Path::new(&dir), &known))?, st.edits())

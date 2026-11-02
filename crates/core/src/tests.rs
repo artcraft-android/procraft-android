@@ -551,6 +551,61 @@ fn a_long_liquify_drag_between_frames_renders_without_errors() {
     pixel(&s, 128, 128);
 }
 
+/// A save with liquify open (the app going into the background) leaves it working, and the next
+/// save keeps what it ended with, kept or cancelled.
+#[test]
+fn a_save_leaves_liquify_working_and_the_next_keeps_how_it_ended() {
+    use crate::Adjustment;
+    let Some(s) = session(128, 128) else { return };
+    let Some(gpu) = s.shared.lock().gpu.clone() else { return };
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_brush_size(0.3);
+    s.stroke_begin(PointerKind::Finger, vec![sample(4.0, 64.0, 0.0)]);
+    s.stroke_add((1..13).map(|i| sample(4.0 + i as f32 * 10.0, 64.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![]);
+    let red = pixel(&s, 96, 64);
+    assert!(red[0] > 200 && red[1] < 40, "{red:?}");
+    let dir = std::env::temp_dir().join(format!("procraft-save-liquify-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.to_string_lossy().into_owned();
+    let contents = |s: &CanvasSession| -> Vec<Vec<u8>> {
+        let _ = pixel(s, 0, 0);
+        s.layers().iter().map(|l| s.copy_layer_contents(l.id).map(|c| c.rgba).unwrap_or_default()).collect()
+    };
+    let saved = || {
+        let opened = CanvasSession::open(path.clone()).unwrap();
+        opened.use_gpu(gpu.clone());
+        {
+            let mut st = opened.shared.lock();
+            st.window_size = (128, 128);
+            st.view = Some(View::fit((128, 128), (128, 128)));
+        }
+        contents(&opened)
+    };
+    // a small brush pushed down across the line
+    let push =
+        |x: f32| s.adjustment_liquify_stroke((0..12).flat_map(|i| [x, 24.0 + i as f32 * 8.0, 1.0]).collect(), true);
+    assert!(s.adjustment_start(Adjustment::Liquify));
+    s.adjustment_liquify_value(0, 0.1);
+    push(32.0);
+    s.save(path.clone()).unwrap();
+    assert_eq!(s.adjustment_shown().adjustment, Some(Adjustment::Liquify));
+    push(96.0);
+    assert_ne!(pixel(&s, 96, 64), red, "liquify still works after the save");
+    assert!(s.adjustment_end(true));
+    s.save(path.clone()).unwrap();
+    assert!(contents(&s) == saved(), "kept: saved as it ended");
+    // cancelled after a save: the next keeps the layer as it was before
+    assert!(s.adjustment_start(Adjustment::Liquify));
+    s.adjustment_liquify_value(0, 0.1);
+    push(64.0);
+    s.save(path.clone()).unwrap();
+    assert!(s.adjustment_end(false));
+    s.save(path.clone()).unwrap();
+    assert!(contents(&s) == saved(), "cancelled: saved as it was");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_pen_stroke_paints_and_undoes() {
     let Some(s) = session(100, 200) else { return };

@@ -3552,6 +3552,11 @@ impl Canvas {
                     self.blur_textures.lock().unwrap_or_else(PoisonError::into_inner).clear();
                     let painted = self.pencil.take().map(|p| p.bounds.intersect(self.full()));
                     let more = std::mem::take(&mut self.transform_more);
+                    // a save made while it was open read them as they showed then
+                    let ended: Vec<LayerId> = self.transforming.iter().chain(&more).map(|t| t.layer).collect();
+                    for id in ended {
+                        self.touched(id);
+                    }
                     if let Some(t) = self.transforming.take() {
                         if commit && let Some(rect) = painted {
                             // painted on: only where it was painted changed, and nothing if nowhere
