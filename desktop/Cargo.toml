@@ -53,3 +53,6 @@ windows = { version = "0.62", features = [
 ] }
 # An artwork dragged out of the gallery, handed to the system as a file
 drag = "2.1"
+
+[build-dependencies]
+winresource = "0.1"

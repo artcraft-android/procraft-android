@@ -235,6 +235,14 @@ struct App {
     tap_held: Option<(u64, winit::dpi::PhysicalPosition<f64>, Instant)>,
 }
 
+/// The app's icon, for the window's title bar and the task bar.
+fn window_icon() -> Option<winit::window::Icon> {
+    let picture = image::load_from_memory(include_bytes!("../../assets/app-icon/procraft-256.png")).ok()?;
+    let rgba = picture.into_rgba8();
+    let (width, height) = rgba.dimensions();
+    winit::window::Icon::from_rgba(rgba.into_raw(), width, height).ok()
+}
+
 /// Tap Assistance holds a finger's touch where it landed this long.
 const TAP_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
 
@@ -245,10 +253,19 @@ impl ApplicationHandler for App {
         }
         let attributes = Window::default_attributes()
             .with_title("ProCraft")
+            .with_window_icon(window_icon())
             .with_inner_size(LogicalSize::new(1440.0, 900.0))
             .with_min_inner_size(LogicalSize::new(640.0, 480.0))
             // opened for a test (PROCRAFT_BACKGROUND set), it leaves the keyboard where it was
             .with_active(std::env::var_os("PROCRAFT_BACKGROUND").is_none());
+        // on Linux the desktop's menus match the window to the app's entry (procraft.desktop)
+        #[cfg(target_os = "linux")]
+        let attributes = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            use winit::platform::x11::WindowAttributesExtX11;
+            let attributes = WindowAttributesExtWayland::with_name(attributes, "procraft", "procraft");
+            WindowAttributesExtX11::with_name(attributes, "procraft", "ProCraft")
+        };
         let window = match event_loop.create_window(attributes) {
             Ok(w) => Arc::new(w),
             Err(e) => {
