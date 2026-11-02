@@ -7,7 +7,7 @@
     procraft-<version>-windows-x64-portable.zip   ProCraft.exe and the licences, to run anywhere
   The C runtime is linked in (+crt-static), so nothing else needs installing. The version is
   $env:VERSION, else procraft.version in android\gradle.properties (the one a release is tagged
-  with). Needs Rust (MSVC) and WiX v5 with its UI and Util extensions ($env:WIX can name another
+  with). Needs Rust (MSVC) and WiX v5 with its UI and Util extensions ($env:WIX_EXE can name another
   wix.exe):
     dotnet tool install --global wix --version 5.0.2
     wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
@@ -37,7 +37,8 @@ $MsiVersion = ($Version -split '-')[0]
 $Target = 'x86_64-pc-windows-msvc'
 $Dist = if ($env:DIST) { $env:DIST } else { Join-Path $Root 'dist' }
 $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root 'target' }
-$Wix = if ($env:WIX) { $env:WIX } else { 'wix' }
+# WIX_EXE, not WIX: Windows runners set WIX to an old WiX 3's folder
+$Wix = if ($env:WIX_EXE) { $env:WIX_EXE } else { 'wix' }
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 Write-Output "ProCraft $Version for Windows x64"
 
