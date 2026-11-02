@@ -565,7 +565,7 @@ pub fn about() {
     MessageDialog::new()
         .set_level(MessageLevel::Info)
         .set_title("ProCraft")
-        .set_description(format!("Version {}", env!("CARGO_PKG_VERSION")))
+        .set_description(format!("Version {}", env!("PROCRAFT_VERSION")))
         .show();
 }
 

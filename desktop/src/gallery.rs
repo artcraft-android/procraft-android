@@ -854,7 +854,7 @@ impl Gallery {
                 Weight::Bold,
                 Color32::WHITE,
             );
-            let version = concat!("Version ", env!("CARGO_PKG_VERSION"));
+            let version = concat!("Version ", env!("PROCRAFT_VERSION"));
             text(
                 ui.painter(),
                 pos2(field.center().x, name.bottom() + 14.0),
