@@ -3,9 +3,11 @@ package io.github.artcraftandroid.procraft.canvas
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
+import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import java.io.File
+import java.nio.ByteBuffer
 
 /** Video files made a frame at a time with the device's encoder. */
 object VideoWriter {
@@ -124,6 +126,76 @@ object VideoWriter {
             runCatching { if (track >= 0) muxer.stop() }
             muxer.release()
         }
+    }
+
+    /**
+     * Videos [parts] (made alike: one video track each, the same kind, size and stream settings) one
+     * after another at [out], their frames copied, nothing encoded again; each part's frames follow
+     * the last one's by one frame at [fps]. False if a part can't be read or was made otherwise.
+     */
+    fun join(parts: List<File>, out: File, fps: Int): Boolean {
+        val muxer = runCatching { MediaMuxer(out.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4) }.getOrNull() ?: return false
+        var track = -1
+        var first: MediaFormat? = null
+        var offset = 0L
+        var buffer = ByteBuffer.allocate(0)
+        val info = MediaCodec.BufferInfo()
+        try {
+            for (part in parts) {
+                val extractor = MediaExtractor()
+                try {
+                    extractor.setDataSource(part.path)
+                    val index = (0 until extractor.trackCount).firstOrNull {
+                        extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true
+                    } ?: return false
+                    val format = extractor.getTrackFormat(index)
+                    val lead = first
+                    if (lead == null) {
+                        first = format
+                        track = muxer.addTrack(format)
+                        muxer.start()
+                    } else if (!madeAlike(lead, format)) {
+                        return false
+                    }
+                    val most = maxOf(
+                        if (format.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) else 0,
+                        format.getInteger(MediaFormat.KEY_WIDTH) * format.getInteger(MediaFormat.KEY_HEIGHT) * 3 / 2,
+                    )
+                    if (buffer.capacity() < most) buffer = ByteBuffer.allocate(most)
+                    extractor.selectTrack(index)
+                    var last = -1L
+                    while (true) {
+                        val size = extractor.readSampleData(buffer, 0)
+                        if (size < 0) break
+                        val key = extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
+                        info.set(0, size, offset + extractor.sampleTime, if (key) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0)
+                        muxer.writeSampleData(track, buffer, info)
+                        last = maxOf(last, extractor.sampleTime)
+                        extractor.advance()
+                    }
+                    if (last < 0) return false
+                    offset += last + 1_000_000L / fps
+                } finally {
+                    extractor.release()
+                }
+            }
+            return track >= 0
+        } catch (e: Exception) {
+            android.util.Log.e("ProCraft", "joining videos", e)
+            return false
+        } finally {
+            runCatching { if (track >= 0) muxer.stop() }
+            muxer.release()
+        }
+    }
+
+    /** Whether two videos were made the same way: the same kind and size, and the same stream settings. */
+    private fun madeAlike(a: MediaFormat, b: MediaFormat): Boolean {
+        val same = { key: String -> a.containsKey(key) == b.containsKey(key) }
+        return a.getString(MediaFormat.KEY_MIME) == b.getString(MediaFormat.KEY_MIME) &&
+            a.getInteger(MediaFormat.KEY_WIDTH) == b.getInteger(MediaFormat.KEY_WIDTH) &&
+            a.getInteger(MediaFormat.KEY_HEIGHT) == b.getInteger(MediaFormat.KEY_HEIGHT) &&
+            listOf("csd-0", "csd-1", "csd-2").all { key -> same(key) && (!a.containsKey(key) || a.getByteBuffer(key) == b.getByteBuffer(key)) }
     }
 
     /** The bit rate a [width] × [height] video is encoded at, bits a second. */

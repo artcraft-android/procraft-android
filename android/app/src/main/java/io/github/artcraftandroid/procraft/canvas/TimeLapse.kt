@@ -66,8 +66,41 @@ class TimeLapse(artwork: File) {
      * that long. [going] hears how far it has come (0..1) before each frame, and stops it by saying
      * false. False if there are none or the encoder fails.
      */
-    fun export(out: File, seconds: Int?, going: (Float) -> Boolean = { true }): Boolean =
-        encode(out, timeLapsePicks(count.toUInt(), seconds?.toUInt()).map { it.toInt() }, null, going) != null
+    fun export(out: File, seconds: Int?, going: (Float) -> Boolean = { true }): Boolean {
+        // all of it: the videos kept for packages, made where they don't reach yet, put end to end
+        if (seconds == null) joined(out, going)?.let { return it }
+        return encode(out, timeLapsePicks(count.toUInt(), seconds?.toUInt()).map { it.toInt() }, null, going) != null
+    }
+
+    /**
+     * Every frame at [out] as the package's videos joined: the frames in none yet made into one
+     * first (as [forPackage] makes them), the videos then copied one after another, nothing made
+     * again. False if [going] stopped it (the videos kept as they were); null if they can't be
+     * joined, so it is made afresh.
+     */
+    private fun joined(out: File, going: (Float) -> Boolean): Boolean? {
+        val total = count
+        if (total <= 0) return null
+        var plan = core.segmentPlan()
+        while (plan != null) {
+            val todo = plan.frames.size
+            val before = total - todo
+            var stopped = false
+            val size = if (plan.width > 0u && plan.height > 0u) plan.width.toInt() to plan.height.toInt() else null
+            val made = encode(File(plan.path), plan.frames.map { it.toInt() }, size) { done ->
+                going((before + done * todo) / total).also { stopped = !it }
+            }
+            if (stopped) {
+                // not kept: the next one makes it again
+                File(plan.path).delete()
+                return false
+            }
+            plan = core.segmentMade(plan, (made?.first ?: 0).toUInt(), (made?.second ?: 0).toUInt(), made != null)
+            if (made == null && plan == null) return null
+        }
+        val parts = core.forPackage().segments.map(::File)
+        return if (parts.isNotEmpty() && VideoWriter.join(parts, out, FPS)) true else null
+    }
 
     /**
      * The frames [picks] as a video at [out], each fitted on white into [size] (else into the first
