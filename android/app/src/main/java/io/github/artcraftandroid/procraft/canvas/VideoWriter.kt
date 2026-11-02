@@ -129,6 +129,18 @@ object VideoWriter {
     /** The bit rate a [width] × [height] video is encoded at, bits a second. */
     fun bitRate(width: Int, height: Int, bitsPerPixel: Int = BITS_PER_PIXEL): Int = (width * height * bitsPerPixel).coerceAtLeast(1_000_000)
 
+    /**
+     * Whether [second]'s chroma samples are [first]'s memory one byte on (the two take turns in one
+     * plane, each two apart): a byte written through one is read back through the other.
+     */
+    private fun takeTurns(first: java.nio.ByteBuffer, second: java.nio.ByteBuffer): Boolean {
+        if (first.capacity() < 2 || second.capacity() < 1) return false
+        return listOf(0x5A, 0xA5).all { mark ->
+            first.put(1, mark.toByte())
+            second.get(0) == mark.toByte()
+        }
+    }
+
     /** ARGB pixels into the encoder's YUV 4:2:0 planes (BT.601, video range). */
     private fun writeYuv(image: android.media.Image, argb: IntArray, w: Int, h: Int) {
         val planes = image.planes
@@ -138,12 +150,20 @@ object VideoWriter {
         val yb = y.buffer
         val ub = u.buffer
         val vb = v.buffer
-        // a row at a time where a plane's samples are packed; interleaved chroma one by one
+        // a row at a time where a plane's samples are packed, and where the chroma's take turns in one
+        // plane (U then V, or V then U, as encoders mostly take it); else one by one
         val luma = ByteArray(w)
         val half = (w + 1) / 2
         val cus = ByteArray(half)
         val cvs = ByteArray(half)
         val packedChroma = u.pixelStride == 1 && v.pixelStride == 1
+        val interleaved = u.pixelStride == 2 && v.pixelStride == 2 && u.rowStride == v.rowStride
+        val vAfterU = interleaved && takeTurns(ub, vb)
+        val uAfterV = interleaved && !vAfterU && takeTurns(vb, ub)
+        // the plane that starts first takes the row; the other's last sample goes after it
+        val (lead, trail) = if (uAfterV) vb to ub else ub to vb
+        val (leading, trailing) = if (uAfterV) cvs to cus else cus to cvs
+        val turns = ByteArray(half * 2)
         for (row in 0 until h) {
             val even = row % 2 == 0
             for (col in 0 until w) {
@@ -170,6 +190,14 @@ object VideoWriter {
                 ub.put(cus, 0, half)
                 vb.position(at * v.rowStride)
                 vb.put(cvs, 0, half)
+            } else if (vAfterU || uAfterV) {
+                for (i in 0 until half) {
+                    turns[2 * i] = leading[i]
+                    turns[2 * i + 1] = trailing[i]
+                }
+                lead.position(at * u.rowStride)
+                lead.put(turns, 0, half * 2 - 1)
+                trail.put(at * u.rowStride + (half - 1) * 2, trailing[half - 1])
             } else {
                 for (i in 0 until half) {
                     ub.put(at * u.rowStride + i * u.pixelStride, cus[i])
