@@ -1675,6 +1675,29 @@ fn adjustments_change_the_layer_as_one_undo_step() {
 }
 
 #[test]
+fn a_discarded_adjustment_is_no_step_and_keeps_redo() {
+    let Some(s) = session(100, 200) else { return };
+    // one stroke, shown at 2x: window (60..140, 100) is canvas (30..70, 50)
+    s.stroke_begin(PointerKind::Stylus, vec![sample(60.0, 100.0, 0.0)]);
+    s.stroke_add((1..20).map(|i| sample(60.0 + i as f32 * 4.0, 100.0, i as f64 * 8.0)).collect());
+    s.stroke_end(vec![sample(140.0, 100.0, 170.0)]);
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
+    // undone, so redo holds the stroke
+    s.undo();
+    assert_eq!(pixel(&s, 50, 50), [255, 255, 255, 255]);
+    assert!(s.info().can_redo);
+    // an adjustment changed and thrown away is no step, and redo still holds the stroke
+    assert!(s.adjust_begin());
+    s.adjust_hsb(0.5, 0.5, 0.0);
+    s.adjust_end(false);
+    assert_eq!(pixel(&s, 50, 50), [255, 255, 255, 255]);
+    assert!(!s.info().can_undo, "discarding the adjustment must leave no step");
+    assert!(s.info().can_redo, "discarding the adjustment must not clear redo");
+    s.redo();
+    assert_eq!(pixel(&s, 50, 50), [0, 0, 0, 255]);
+}
+
+#[test]
 fn liquify_moves_paint_as_one_undo_step() {
     use crate::adjust::{LiquifyBrush, LiquifyKind};
     let Some(s) = session(100, 100) else { return };
