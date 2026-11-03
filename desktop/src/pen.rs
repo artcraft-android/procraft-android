@@ -1,6 +1,8 @@
 //! A pen's lean, its buttons and its eraser end, which winit leaves out of its touches: on Windows
 //! read from the system's pointer messages as they reach the window (before winit makes its
-//! touches of them), kept by pointer for the touches to carry.
+//! touches of them), kept by pointer for the touches to carry. Under X11 winit gives a tablet's pen
+//! as the mouse: its pressure, lean and eraser end are read from its own XInput 2 events instead,
+//! for the mouse's samples to carry.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -15,6 +17,20 @@ static FLAGS: Mutex<Option<HashMap<u64, u32>>> = Mutex::new(None);
 
 /// How many times a pen's barrel button went down since the app last asked.
 static PRESSES: AtomicUsize = AtomicUsize::new(0);
+
+/// A tablet's pen moving the mouse pointer (X11 gives it as the mouse): its pressure (0..1) and
+/// whether its eraser end is the one on the screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MousePen {
+    pub pressure: f32,
+    pub eraser: bool,
+}
+
+/// The pen moving the mouse pointer now, while a tablet's pen is what moves it.
+static MOUSE_PEN: Mutex<Option<MousePen>> = Mutex::new(None);
+
+/// The mouse pointer's id among the touches (`input.rs`): a pen moving it keeps its lean there.
+const MOUSE: u64 = u64::MAX;
 
 #[cfg_attr(not(windows), allow(dead_code))]
 const FLAG_BARREL: u32 = 0x1;
@@ -35,6 +51,93 @@ pub fn eraser_end(id: u64) -> bool {
 /// How many times a pen's barrel button was pressed since the last call.
 pub fn take_button_presses() -> usize {
     PRESSES.swap(0, Ordering::Relaxed)
+}
+
+/// The tablet pen moving the mouse pointer, if one is (none: a mouse, or a system that gives the
+/// pen as a pen).
+pub fn mouse_pen() -> Option<MousePen> {
+    MOUSE_PEN.lock().ok().and_then(|p| *p)
+}
+
+/// What moves the mouse pointer now: a tablet's pen with its lean, or (none) something else.
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+fn set_mouse_pen(pen: Option<(MousePen, (f32, f32))>) {
+    if let Ok(mut p) = MOUSE_PEN.lock() {
+        *p = pen.map(|(p, _)| p);
+    }
+    if let Ok(mut leans) = LEANS.lock() {
+        let leans = leans.get_or_insert_with(Default::default);
+        match pen {
+            Some((_, lean)) => leans.insert(MOUSE, lean),
+            None => leans.remove(&MOUSE),
+        };
+    }
+}
+
+/// Where a tablet pen's pressure and tilts are among its device's axes (XInput valuators): each
+/// one's number and range; and whether the device is the pen's eraser end.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+struct PenAxes {
+    pressure: Option<(u16, f64, f64)>,
+    tilt_x: Option<(u16, f64, f64)>,
+    tilt_y: Option<(u16, f64, f64)>,
+    eraser: bool,
+}
+
+/// A pen's reading as it last was: pressure (0..1) and tilts towards the right and the user,
+/// degrees.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+struct PenReading {
+    pressure: f32,
+    tilt_x: f32,
+    tilt_y: f32,
+}
+
+/// The axes an XInput event carries, by number: `mask` says which (a bit each), `values` gives
+/// them in that order, as fixed point (whole part, fraction of 2^32).
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+fn axis_values(mask: &[u32], values: &[(i32, u32)]) -> Vec<(u16, f64)> {
+    let mut next = values.iter();
+    let mut out = Vec::new();
+    for (word, bits) in mask.iter().enumerate() {
+        for bit in 0..32 {
+            if bits & (1 << bit) == 0 {
+                continue;
+            }
+            let Some(&(whole, part)) = next.next() else { return out };
+            out.push(((word * 32 + bit) as u16, f64::from(whole) + f64::from(part) / 4_294_967_296.0));
+        }
+    }
+    out
+}
+
+/// `last` with what an event's `values` change of the pen's `axes` (an axis it leaves out is as
+/// it was): pressure from its range to 0..1; a tilt as degrees, its range taken as degrees when it
+/// lies within ±90 (as tablets' drivers give it), else spread over ±60.
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+fn pen_reading(axes: &PenAxes, values: &[(u16, f64)], last: PenReading) -> PenReading {
+    let of = |axis: Option<(u16, f64, f64)>| {
+        let (n, min, max) = axis?;
+        values.iter().find(|(k, _)| *k == n).map(|&(_, v)| (v, min, max))
+    };
+    let tilt = |axis, was: f32| {
+        of(axis).map_or(was, |(v, min, max)| {
+            if min >= -90.0 && max <= 90.0 {
+                v as f32
+            } else {
+                let mid = (min + max) / 2.0;
+                ((v - mid) / ((max - min) / 2.0).max(1e-9) * 60.0) as f32
+            }
+        })
+    };
+    PenReading {
+        pressure: of(axes.pressure)
+            .map_or(last.pressure, |(v, min, max)| ((v - min) / (max - min).max(1e-9)).clamp(0.0, 1.0) as f32),
+        tilt_x: tilt(axes.tilt_x, last.tilt_x),
+        tilt_y: tilt(axes.tilt_y, last.tilt_y),
+    }
 }
 
 /// Pointer `id`'s pen flags as they now are: a press of its barrel button counted.
@@ -63,8 +166,122 @@ pub fn watch(window: &winit::window::Window) {
     system::watch(window);
 }
 
-#[cfg(not(windows))]
+/// Starts reading a tablet pen's pressure, lean and eraser end from its XInput events, under X11.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn watch(window: &winit::window::Window) {
+    tablet::watch(window);
+}
+
+#[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
 pub fn watch(_window: &winit::window::Window) {}
+
+/// A tablet's pen under X11: its devices found by their pressure axis, their XInput 2 events read
+/// on a connection of our own, on a thread of its own.
+#[cfg(all(unix, not(target_os = "macos")))]
+mod tablet {
+    use std::collections::HashMap;
+    use std::error::Error;
+
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use x11rb::connection::Connection;
+    use x11rb::protocol::Event;
+    use x11rb::protocol::xinput::{self, ConnectionExt as _, DeviceClassData, XIEventMask};
+    use x11rb::protocol::xproto::ConnectionExt as _;
+
+    use super::{MousePen, PenAxes, PenReading};
+
+    pub fn watch(window: &winit::window::Window) {
+        let Ok(handle) = window.window_handle() else { return };
+        let id = match handle.as_raw() {
+            RawWindowHandle::Xlib(h) => h.window as u32,
+            RawWindowHandle::Xcb(h) => h.window.get(),
+            // Wayland: winit has no pen there either; nothing to read it from
+            _ => return,
+        };
+        let started = std::thread::Builder::new().name("tablet pen".into()).spawn(move || {
+            if let Err(e) = read(id) {
+                log::warn!("a tablet's pen isn't read: {e}");
+            }
+        });
+        if let Err(e) = started {
+            log::warn!("a tablet's pen isn't read: {e}");
+        }
+    }
+
+    /// The pens' events on `window`, each kept as what moves the mouse pointer; a pointer that
+    /// isn't a pen moving it lets that go. Devices plugged in or out are found again.
+    fn read(window: u32) -> Result<(), Box<dyn Error>> {
+        let (conn, screen) = x11rb::connect(None)?;
+        conn.xinput_xi_query_version(2, 2)?.reply()?;
+        let root = conn.setup().roots.get(screen).map(|s| s.root).ok_or("no screen")?;
+        let select = |on: u32, mask: XIEventMask| {
+            conn.xinput_xi_select_events(
+                on,
+                &[xinput::EventMask { deviceid: xinput::Device::ALL.into(), mask: vec![mask] }],
+            )
+        };
+        select(window, XIEventMask::MOTION | XIEventMask::BUTTON_PRESS | XIEventMask::BUTTON_RELEASE)?;
+        select(root, XIEventMask::HIERARCHY)?;
+        conn.flush()?;
+        let mut pens = find_pens(&conn)?;
+        let mut last: HashMap<u16, PenReading> = HashMap::new();
+        loop {
+            match conn.wait_for_event()? {
+                Event::XinputHierarchy(_) => pens = find_pens(&conn)?,
+                Event::XinputMotion(e) | Event::XinputButtonPress(e) | Event::XinputButtonRelease(e)
+                    if e.deviceid == e.sourceid =>
+                {
+                    let Some(axes) = pens.get(&e.deviceid) else {
+                        super::set_mouse_pen(None);
+                        continue;
+                    };
+                    let values: Vec<(i32, u32)> = e.axisvalues.iter().map(|v| (v.integral, v.frac)).collect();
+                    let was = last.get(&e.deviceid).copied().unwrap_or_default();
+                    let now = super::pen_reading(axes, &super::axis_values(&e.valuator_mask, &values), was);
+                    last.insert(e.deviceid, now);
+                    let pen = MousePen { pressure: now.pressure, eraser: axes.eraser };
+                    super::set_mouse_pen(Some((pen, super::lean_of(now.tilt_x, now.tilt_y))));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The pointer devices that are pens: those with a pressure axis, by id.
+    fn find_pens(conn: &impl Connection) -> Result<HashMap<u16, PenAxes>, Box<dyn Error>> {
+        let reply = conn.xinput_xi_query_device(xinput::Device::ALL)?.reply()?;
+        let mut names: HashMap<u32, String> = HashMap::new();
+        let mut out = HashMap::new();
+        for info in reply.infos {
+            if info.type_ != xinput::DeviceType::SLAVE_POINTER {
+                continue;
+            }
+            let name = String::from_utf8_lossy(&info.name).to_lowercase();
+            let mut axes = PenAxes { eraser: name.contains("eraser"), ..PenAxes::default() };
+            for class in &info.classes {
+                let DeviceClassData::Valuator(v) = &class.data else { continue };
+                if v.label == 0 {
+                    continue;
+                }
+                if let std::collections::hash_map::Entry::Vacant(e) = names.entry(v.label) {
+                    e.insert(String::from_utf8_lossy(&conn.get_atom_name(v.label)?.reply()?.name).into_owned());
+                }
+                let fixed = |f: xinput::Fp3232| f64::from(f.integral) + f64::from(f.frac) / 4_294_967_296.0;
+                let axis = Some((v.number, fixed(v.min), fixed(v.max)));
+                match names.get(&v.label).map(String::as_str) {
+                    Some("Abs Pressure") => axes.pressure = axis,
+                    Some("Abs Tilt X") => axes.tilt_x = axis,
+                    Some("Abs Tilt Y") => axes.tilt_y = axis,
+                    _ => {}
+                }
+            }
+            if axes.pressure.is_some() {
+                out.insert(info.deviceid, axes);
+            }
+        }
+        Ok(out)
+    }
+}
 
 /// The window's own procedure, put in front of winit's: unsafe as the system's calls are.
 #[cfg(windows)]
@@ -135,6 +352,27 @@ mod tests {
         assert!(!eraser_end(901));
         pen_flags(902, FLAG_INVERTED);
         assert!(eraser_end(902));
+    }
+
+    #[test]
+    fn a_tablets_axes_give_its_pressure_and_tilts() {
+        // axes 2 (pressure 0..65535), 3 and 4 (tilts, degrees) in a mask with gaps
+        let values = axis_values(&[0b11100, 0b1], &[(32768, 0), (-30, 0), (15, 1 << 31), (7, 0)]);
+        assert_eq!(values, [(2, 32768.0), (3, -30.0), (4, 15.5), (32, 7.0)]);
+        let axes = PenAxes {
+            pressure: Some((2, 0.0, 65535.0)),
+            tilt_x: Some((3, -64.0, 63.0)),
+            tilt_y: Some((4, -64.0, 63.0)),
+            eraser: false,
+        };
+        let now = pen_reading(&axes, &values, PenReading::default());
+        assert!((now.pressure - 0.5).abs() < 1e-3 && now.tilt_x == -30.0 && now.tilt_y == 15.5, "{now:?}");
+        // an event that leaves an axis out keeps it as it was
+        let later = pen_reading(&axes, &axis_values(&[0b100], &[(65535, 0)]), now);
+        assert_eq!((later.pressure, later.tilt_x, later.tilt_y), (1.0, -30.0, 15.5));
+        // tilts in a raw range are spread over ±60 degrees
+        let raw = PenAxes { tilt_x: Some((3, 0.0, 1000.0)), ..axes };
+        assert_eq!(pen_reading(&raw, &[(3, 1000.0)], now).tilt_x, 60.0);
     }
 
     #[test]

@@ -54,5 +54,10 @@ windows = { version = "0.62", features = [
 # An artwork dragged out of the gallery, handed to the system as a file
 drag = "2.1"
 
+# A tablet's pen under X11, which winit gives as the mouse: its pressure, lean and eraser end from
+# its own XInput 2 events
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = { version = "0.13", features = ["xinput"] }
+
 [build-dependencies]
 winresource = "0.1"

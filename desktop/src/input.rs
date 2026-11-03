@@ -106,6 +106,15 @@ impl Input {
         any
     }
 
+    /// What the mouse pointer is now: a tablet's pen moving it (X11 gives a pen as the mouse), as
+    /// a pen or its eraser end with its pressure; else the mouse.
+    fn mouse_kind() -> (PointerKind, f32) {
+        match crate::pen::mouse_pen() {
+            Some(pen) => (if pen.eraser { PointerKind::StylusEraser } else { PointerKind::Stylus }, pen.pressure),
+            None => (PointerKind::Mouse, 1.0),
+        }
+    }
+
     /// A sample of pointer `id` at `(x, y)`: a pen's with its lean, if the system gave one.
     fn sample(&self, id: u64, (x, y): (f32, f32), pressure: f32) -> Vec<PenSample> {
         let (tilt, orientation) = crate::pen::lean(id).unwrap_or((0.0, 0.0));
@@ -178,7 +187,7 @@ impl Input {
                     return true;
                 }
                 if self.down.contains(&MOUSE) {
-                    self.moved(session, MOUSE, p, 1.0);
+                    self.moved(session, MOUSE, p, Self::mouse_kind().1);
                     return true;
                 }
                 self.hover_shown
@@ -193,11 +202,12 @@ impl Input {
                         false
                     }
                     (MouseButton::Left, ElementState::Pressed) if !self.panning && !over(p) => {
-                        self.pressed(session, MOUSE, PointerKind::Mouse, p, 1.0);
+                        let (kind, pressure) = Self::mouse_kind();
+                        self.pressed(session, MOUSE, kind, p, pressure);
                         true
                     }
                     (MouseButton::Left, ElementState::Released) if self.down.contains(&MOUSE) => {
-                        self.lifted(session, MOUSE, p, 1.0, false);
+                        self.lifted(session, MOUSE, p, Self::mouse_kind().1, false);
                         true
                     }
                     (MouseButton::Left | MouseButton::Middle, ElementState::Released) => {
