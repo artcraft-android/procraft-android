@@ -400,7 +400,10 @@ private val NotchWidth = 20.dp
 private val NotchHeight = 4.dp
 private val NotchMark = Color(0x1AFFFFFF)
 
-/** The brush's outline where the pen paints or hovers: a thin grey ring with a light edge. */
+/**
+ * The brush's outline where the pen paints or hovers, in the brush's own shape (the round tip's a
+ * circle): a thin dark line with a light edge, or in the colour painted with.
+ */
 @Composable
 fun BrushCursor(vm: CanvasViewModel) {
     val at = vm.cursorAt ?: return
@@ -408,27 +411,33 @@ fun BrushCursor(vm: CanvasViewModel) {
     if (r < 2f) return
     val style = vm.cursorStyle
     val paint = CanvasSpace.color(vm.colorRgb())
+    val shape = vm.cursorShape
     androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+        // its loops across the brush's diameter, about where it is
+        val paths = shape.map { ring ->
+            Path().apply {
+                for (i in 0 until ring.size / 2) {
+                    val x = at.x + ring[i * 2] * r * 2f
+                    val y = at.y + ring[i * 2 + 1] * r * 2f
+                    if (i == 0) moveTo(x, y) else lineTo(x, y)
+                }
+                close()
+            }
+        }
+        fun outline(color: Color, width: Float) {
+            if (paths.isEmpty()) drawCircle(color, r, at, style = Stroke(width))
+            for (p in paths) drawPath(p, color, style = Stroke(width))
+        }
+        val contrast = { outline(Color.White, 3.dp.toPx()); outline(Color.Black, 1.dp.toPx()) }
+        val colour = { outline(Color(0x99FFFFFF), 3.dp.toPx()); outline(paint, 1.5.dp.toPx()) }
         when (style) {
-            CanvasViewModel.CursorStyle.CONTRAST -> {
-                drawCircle(Color.White, r, at, style = Stroke(3.dp.toPx()))
-                drawCircle(Color.Black, r, at, style = Stroke(1.dp.toPx()))
-            }
-            CanvasViewModel.CursorStyle.COLOR -> {
-                drawCircle(Color(0x99FFFFFF), r, at, style = Stroke(3.dp.toPx()))
-                drawCircle(paint, r, at, style = Stroke(1.5.dp.toPx()))
-            }
-            // as the brush says: none, contrasting rings, or the colour
+            CanvasViewModel.CursorStyle.CONTRAST -> contrast()
+            CanvasViewModel.CursorStyle.COLOR -> colour()
+            // as the brush says: none, contrasting lines, or the colour
             CanvasViewModel.CursorStyle.BRUSH -> when (vm.cursorOutline) {
                 0 -> Unit
-                2 -> {
-                    drawCircle(Color(0x99FFFFFF), r, at, style = Stroke(3.dp.toPx()))
-                    drawCircle(paint, r, at, style = Stroke(1.5.dp.toPx()))
-                }
-                else -> {
-                    drawCircle(Color.White, r, at, style = Stroke(3.dp.toPx()))
-                    drawCircle(Color.Black, r, at, style = Stroke(1.dp.toPx()))
-                }
+                2 -> colour()
+                else -> contrast()
             }
         }
     }

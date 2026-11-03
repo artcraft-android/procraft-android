@@ -309,14 +309,16 @@ mod system {
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::UI::Input::Pointer::{GetPointerPenInfo, GetPointerType, POINTER_PEN_INFO};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, SetWindowLongPtrW, WM_POINTERDOWN,
-        WM_POINTERUPDATE, WNDPROC,
+        CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, SetWindowLongPtrW,
+        WM_POINTERDOWN, WM_POINTERUPDATE, WNDPROC,
     };
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     /// What the pen info's tilts are given in (`penMask`).
     const PEN_MASK_TILT_X: u32 = 0x4;
     const PEN_MASK_TILT_Y: u32 = 0x8;
+    /// A pointer message's flags (its `wparam`'s high word): the pointer touches the screen.
+    const POINTER_FLAG_INCONTACT: usize = 0x4;
 
     /// winit's procedure for the window, called after ours.
     static WINIT: AtomicIsize = AtomicIsize::new(0);
@@ -332,8 +334,10 @@ mod system {
         WINIT.store(winit, Ordering::Relaxed);
     }
 
-    /// A pen's pointer message: its tilt kept by pointer, then the message on to winit.
+    /// A pen's pointer message: its tilt kept by pointer, then the message on to winit (a hovering
+    /// pen's to the system, as the mouse's).
     unsafe extern "system" fn pointer_messages(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        let mut hovering = false;
         if msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE {
             // the pointer's id is the low word of `wparam`
             let id = (wparam.0 & 0xFFFF) as u32;
@@ -343,6 +347,9 @@ mod system {
             if unsafe { GetPointerType(id, &mut kind) }.is_ok() && (kind == PT_PEN || kind == PT_TOUCH) {
                 super::pointer_kind(u64::from(id), kind == PT_PEN);
             }
+            // a pen held above the screen (not touching it)
+            let touching = (wparam.0 >> 16) & POINTER_FLAG_INCONTACT != 0;
+            hovering = msg == WM_POINTERUPDATE && kind == PT_PEN && !touching;
             let mut info = POINTER_PEN_INFO::default();
             // SAFETY: `info` is a pen info to fill; a pointer that isn't a pen fails and is left
             if unsafe { GetPointerPenInfo(id, &mut info) }.is_ok() {
@@ -353,6 +360,13 @@ mod system {
                 }
                 super::pen_flags(u64::from(id), info.penFlags);
             }
+        }
+        // a hovering pen's moves to the system's own handling, which makes them the mouse's, so the
+        // brush cursor follows it (winit would take them as touches moving that never began, and
+        // the cursor would stay where the mouse last was)
+        if hovering {
+            // SAFETY: the message as it came, to the system's default procedure
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         }
         // SAFETY: the procedure winit set, as SetWindowLongPtrW gave it back
         let winit: WNDPROC = unsafe { std::mem::transmute::<isize, WNDPROC>(WINIT.load(Ordering::Relaxed)) };

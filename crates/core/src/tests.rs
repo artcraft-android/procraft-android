@@ -3280,6 +3280,33 @@ fn a_brush_moves_to_another_set_and_the_tool_keeps_it() {
 }
 
 #[test]
+fn a_shaped_brush_outlines_its_shape_and_the_round_tip_none() {
+    let s = CanvasSession::new(64, 64);
+    // across the library: some brushes are the round tip (no outline, the cursor a circle), others
+    // outline their shape within their size (and their roundness)
+    let (mut round, mut shaped) = (0, 0);
+    for (set, brushes) in s.brush_library().into_iter().enumerate() {
+        for b in brushes.brushes {
+            assert!(s.select_brush(set as u32, b.index));
+            let loops = s.brush_outline();
+            if loops.is_empty() {
+                round += 1;
+                continue;
+            }
+            shaped += 1;
+            let tall = s.current_brush_setting("roundness".into()).max(1.0);
+            for ring in &loops {
+                assert!(ring.len() >= 6 && ring.len() % 2 == 0, "{}: {} numbers", b.name, ring.len());
+                assert!(ring.iter().all(|v| v.is_finite() && v.abs() <= 0.75 * tall), "{}: {ring:?}", b.name);
+            }
+            // asked again for the same brush: the same (kept)
+            assert_eq!(s.brush_outline(), loops);
+        }
+    }
+    assert!(round > 0 && shaped > 0, "round {round}, shaped {shaped}");
+}
+
+#[test]
 fn a_set_moves_with_its_brushes_and_the_tools_keep_theirs() {
     let s = CanvasSession::new(64, 64);
     let names = |s: &CanvasSession| s.brush_library().into_iter().map(|set| set.name).collect::<Vec<_>>();

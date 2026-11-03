@@ -33,6 +33,7 @@ pub mod library;
 pub mod mesh;
 pub mod motion;
 pub mod native;
+pub mod outline;
 pub mod palette;
 pub mod par;
 pub mod plist;

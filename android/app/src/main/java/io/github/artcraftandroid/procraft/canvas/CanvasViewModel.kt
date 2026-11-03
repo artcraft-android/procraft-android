@@ -286,6 +286,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var cursorOutline by mutableStateOf(1)
         private set
 
+    /** The brush's own shape for the cursor: loops of x, y in brush diameters (none: the round tip's circle). */
+    var cursorShape by mutableStateOf<List<List<Float>>>(emptyList())
+        private set
+
     /** When the brush cursor shows: while the pen hovers, while painting, or both. */
     enum class CursorShows { HOVERING, PAINTING, BOTH }
 
@@ -378,6 +382,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (cursorAt == null || (hovering && now - cursorReadAt >= CURSOR_REREAD_MS)) session?.let { s ->
             cursorRadius = s.info().let { it.brushDiameter * it.zoom / 2f }
             cursorOutline = s.currentBrushSetting("cursor_outline").roundToInt()
+            cursorShape = s.brushOutline()
             cursorReadAt = now
         }
         cursorAt = p

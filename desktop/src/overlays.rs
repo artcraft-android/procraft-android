@@ -54,6 +54,9 @@ pub struct Overlays {
     /// The brush's outline where the pen paints (points): its radius, and the brush's outline
     /// setting (none, contrasting rings, or the colour).
     cursor: Option<(Pos2, f32, i32)>,
+    /// The brush's own shape for it, loops of x, y in brush diameters (none: the round tip's
+    /// circle).
+    cursor_shape: Vec<Vec<f32>>,
     /// How the cursor is drawn (Advanced cursor settings).
     pub cursor_style: CursorStyle,
 }
@@ -67,6 +70,7 @@ impl Default for Overlays {
             shape: None,
             shape_editing: false,
             cursor: None,
+            cursor_shape: Vec::new(),
             cursor_style: CursorStyle::Brush,
         }
     }
@@ -82,6 +86,9 @@ impl Overlays {
     /// or away.
     pub fn cursor(&mut self, ctx: &egui::Context, session: &CanvasSession, at: Option<(f32, f32)>) {
         let ppp = ctx.pixels_per_point();
+        if self.cursor.is_none() && at.is_some() {
+            self.cursor_shape = session.brush_outline();
+        }
         self.cursor = at.map(|(x, y)| {
             let (r, outline) = self.cursor.map(|(_, r, o)| (r, o)).unwrap_or_else(|| {
                 let info = session.info();
@@ -97,6 +104,10 @@ impl Overlays {
     /// The brush's outline goes to `at` (points), where the pointer hovers, sized for the brush
     /// as it is now (`info`); or away.
     pub fn hover(&mut self, session: &CanvasSession, info: &procraft_core::CanvasInfo, ppp: f32, at: Option<Pos2>) {
+        if at.is_some() {
+            // the core keeps the brush's outline: asked again, it is handed back as it was
+            self.cursor_shape = session.brush_outline();
+        }
         self.cursor = at.map(|at| {
             let outline = session.current_brush_setting("cursor_outline".into()).round() as i32;
             (at, info.brush_diameter * info.zoom / 2.0 / ppp, outline)
@@ -179,15 +190,34 @@ impl Overlays {
                         CursorStyle::Colour => 2,
                         CursorStyle::Brush => outline,
                     };
-                    match outline {
-                        0 => {}
-                        2 => {
-                            ui.painter().circle_stroke(at, r, egui::Stroke::new(3.0, Color32::from_white_alpha(0x99)));
-                            ui.painter().circle_stroke(at, r, egui::Stroke::new(1.5, current));
-                        }
+                    // shown, it stands in for the system's pointer (none drawn over it); without one
+                    // the pointer stays
+                    if outline != 0 {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                    }
+                    let (under, over) = match outline {
+                        0 => (None, None),
+                        2 => (
+                            Some(egui::Stroke::new(3.0, Color32::from_white_alpha(0x99))),
+                            Some(egui::Stroke::new(1.5, current)),
+                        ),
                         _ => {
-                            ui.painter().circle_stroke(at, r, egui::Stroke::new(3.0, Color32::WHITE));
-                            ui.painter().circle_stroke(at, r, egui::Stroke::new(1.0, Color32::BLACK));
+                            (Some(egui::Stroke::new(3.0, Color32::WHITE)), Some(egui::Stroke::new(1.0, Color32::BLACK)))
+                        }
+                    };
+                    for stroke in [under, over].into_iter().flatten() {
+                        if self.cursor_shape.is_empty() {
+                            ui.painter().circle_stroke(at, r, stroke);
+                        }
+                        // the brush's own shape, across its diameter
+                        for ring in &self.cursor_shape {
+                            let points: Vec<Pos2> = ring
+                                .as_chunks::<2>()
+                                .0
+                                .iter()
+                                .map(|&[x, y]| at + egui::vec2(x, y) * (2.0 * r))
+                                .collect();
+                            ui.painter().add(egui::Shape::closed_line(points, stroke));
                         }
                     }
                 }

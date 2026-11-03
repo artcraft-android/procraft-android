@@ -11,6 +11,15 @@ use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
 use crate::CanvasSession;
 use crate::layers::ThumbnailImage;
 
+/// Where a shape's outline is traced: where its paint is a quarter strong.
+const OUTLINE_LEVEL: f32 = 0.25;
+
+/// The last brush outline traced, by what it was traced from (shape image, own image, roundness,
+/// rotation): a cursor asks each frame.
+#[allow(clippy::type_complexity)]
+static OUTLINES: std::sync::Mutex<Option<((Option<u32>, Option<u64>, u32, u32), Vec<Vec<f32>>)>> =
+    std::sync::Mutex::new(None);
+
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct BrushInfo {
     pub set: u32,
@@ -58,6 +67,57 @@ impl CanvasSession {
         let st = self.shared.lock();
         let (set, index) = st.brush_ref(st.tool);
         BrushInfo { set: set as u32, index: index as u32, name: st.brush(st.tool).name.clone() }
+    }
+
+    /// The current tool's brush's own outline, for a brush cursor in its shape: loops of x, y
+    /// pairs in brush diameters about its middle (y down, as on the screen), squashed across by
+    /// its roundness and turned by its fixed rotation; none for the round tip (a circle).
+    pub fn brush_outline(&self) -> Vec<Vec<f32>> {
+        let (key, pixels) = {
+            let st = self.shared.lock();
+            let shape = &st.brush(st.tool).shape;
+            let key =
+                (shape.image, shape.source.as_ref().map(|s| s.id), shape.roundness.to_bits(), shape.rotation.to_bits());
+            let pixels = shape.source.as_ref().map(|s| std::sync::Arc::clone(&s.pixels));
+            (key, pixels)
+        };
+        let (image, source, roundness, rotation) = key;
+        if image.is_none() && source.is_none() {
+            return Vec::new();
+        }
+        let mut kept = OUTLINES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((k, loops)) = kept.as_ref()
+            && *k == key
+        {
+            return loops.clone();
+        }
+        let side = procraft_engine::textures::TEXTURE_SIZE;
+        let traced = match (pixels, image) {
+            (Some(own), _) => procraft_engine::outline::shape_outline(&own, side, OUTLINE_LEVEL),
+            (None, Some(i)) => procraft_engine::textures::shapes()
+                .get(i as usize)
+                .map(|shape| procraft_engine::outline::shape_outline(&shape.pixels, side, OUTLINE_LEVEL))
+                .unwrap_or_default(),
+            (None, None) => Vec::new(),
+        };
+        // as a stamp is drawn: across its full size, squashed across, turned on the screen
+        let (roundness, turn) = (f32::from_bits(roundness), f32::from_bits(rotation));
+        let roundness =
+            if roundness.is_finite() { roundness.clamp(0.05, procraft_engine::stroke::MOST_ROUNDNESS) } else { 1.0 };
+        let (sin, cos) = if turn.is_finite() { turn.sin_cos() } else { (0.0, 1.0) };
+        let loops: Vec<Vec<f32>> = traced
+            .iter()
+            .map(|ring| {
+                ring.iter()
+                    .flat_map(|p| {
+                        let (x, y) = (p.x - 0.5, (p.y - 0.5) * roundness);
+                        [x * cos - y * sin, x * sin + y * cos]
+                    })
+                    .collect()
+            })
+            .collect();
+        *kept = Some((key, loops.clone()));
+        loops
     }
 
     /// The current tool's brush's control `key`, as the studio shows it.
