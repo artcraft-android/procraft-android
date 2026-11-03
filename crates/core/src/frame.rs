@@ -148,7 +148,7 @@ pub(crate) fn colours_to(from: Profile, to: Profile) -> Option<[[f32; 3]; 3]> {
 }
 
 /// Configures the surface for `size`: a format that doesn't re-encode sRGB, the lowest-latency
-/// present mode on offer, and one frame in flight.
+/// present mode on offer, and one frame in flight. None if it can't be (yet).
 pub fn configure(gpu: &Gpu, surface: &wgpu::Surface<'_>, size: (u32, u32)) -> Option<wgpu::SurfaceConfiguration> {
     let caps = surface.get_capabilities(&gpu.adapter);
     let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).or_else(|| caps.formats.first().copied())?;
@@ -173,7 +173,14 @@ pub fn configure(gpu: &Gpu, surface: &wgpu::Surface<'_>, size: (u32, u32)) -> Op
         config.color_space = wgpu::SurfaceColorSpace::DisplayP3;
     }
     config.desired_maximum_frame_latency = 1;
+    // a configure the GPU refuses (it couldn't come idle in time, as while an artwork opens) leaves
+    // the surface unconfigured: none, so the next frame tries again (else it stayed blank)
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
     surface.configure(&gpu.device, &config);
+    if let Some(e) = pollster::block_on(scope.pop()) {
+        log::warn!("the surface couldn't be configured yet: {e}");
+        return None;
+    }
     log::info!(
         "surface {}×{} {:?} {:?} {:?}",
         config.width,

@@ -20,6 +20,8 @@ procraft-engine = { workspace = true }
 procraft-gpu = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
+# waits for the GPU to say whether the window's surface took its configuration
+pollster = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 png = { workspace = true }
