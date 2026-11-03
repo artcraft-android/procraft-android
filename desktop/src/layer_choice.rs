@@ -20,6 +20,10 @@ pub enum Chose {
 
 /// Draws the list of `ids` (of `layers`) by `at` (points), kept in the window.
 pub fn show(ctx: &egui::Context, at: Pos2, ids: &[u64], layers: &[LayerInfo]) -> Option<Chose> {
+    // Escape chooses nothing, as a tap beside it does
+    if crate::ui::escape(ctx) {
+        return Some(Chose::Nothing);
+    }
     let screen = ctx.content_rect();
     let rows: Vec<&LayerInfo> = ids.iter().filter_map(|id| layers.iter().find(|l| l.id == *id)).collect();
     let height = rows.len() as f32 * ROW + 16.0;

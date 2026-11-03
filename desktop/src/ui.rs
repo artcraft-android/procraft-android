@@ -164,6 +164,8 @@ pub struct Interface {
     named: Option<(u32, Instant)>,
     /// Text being added or edited.
     text: crate::text::TextEditor,
+    /// A field had the keys as the last frame ended.
+    typing: bool,
 }
 
 impl Default for Interface {
@@ -232,6 +234,7 @@ impl Default for Interface {
             brush_now: None,
             brush_last: None,
             text: crate::text::TextEditor::default(),
+            typing: false,
         }
     }
 }
@@ -348,7 +351,21 @@ impl Interface {
         }
     }
 
+    /// The interface for a frame. Escape closes what is open (each popover, panel, menu, alert and
+    /// page sees to it, taking it with [`escape`]); one nothing took turns the canvas back upright,
+    /// unless it only let go of a field (egui drops the field's keys as the frame begins).
     pub fn show(&mut self, ui: &mut Ui, session: &std::sync::Arc<CanvasSession>, input: &mut Input) {
+        let typing = self.typing;
+        self.show_frame(ui, session, input);
+        let ctx = ui.ctx();
+        if !typing && escape_untaken(ctx) && self.canvas_shown() && input.idle() {
+            session.settle_upright();
+        }
+        self.typing = ctx.memory(|m| m.focused().is_some());
+        input.keys_taken = self.keys_taken();
+    }
+
+    fn show_frame(&mut self, ui: &mut Ui, session: &std::sync::Arc<CanvasSession>, input: &mut Input) {
         let ctx = ui.ctx().clone();
         self.style_once(&ctx);
         self.ended_export = None;
@@ -681,7 +698,8 @@ impl Interface {
         self.place_canvas(session, ctx.pixels_per_point());
         session.set_backdrops(backdrops);
         if input.moving_view() && !ctx.is_pointer_over_egui() {
-            ctx.set_cursor_icon(egui::CursorIcon::Grab);
+            let icon = if input.zooming_view() { egui::CursorIcon::ZoomIn } else { egui::CursorIcon::Grab };
+            ctx.set_cursor_icon(icon);
         }
         self.popover_open = self.open.is_some() || self.settings || self.text.editing();
         self.library_lets_paint =
@@ -1906,19 +1924,36 @@ impl Interface {
             i.pointer.any_pressed()
                 && i.pointer.interact_pos().is_some_and(|p| !shown.contains(p) && !button.contains(p))
         });
-        if pressed_outside || ctx.input(|i| i.key_pressed(Key::Escape)) {
+        if escape(ctx) || pressed_outside {
             self.open = None;
         }
+    }
+
+    /// A hex keypad, or text being edited, takes the keys (a text field's are egui's own).
+    fn keys_taken(&self) -> bool {
+        self.text.editing()
+            || ((self.open == Some(Popover::Colour) || self.colours.floating.is_some()) && self.colours.takes_keys())
+            || self.animation.takes_keys()
+    }
+
+    /// Nothing covers the canvas: no full-screen page or editor is open.
+    fn canvas_shown(&self) -> bool {
+        !(self.studio.open
+            || self.time_lapse.replaying()
+            || self.animated_export.is_some()
+            || self.lighting.open
+            || self.crop.open
+            || self.guide_editor.open
+            || self.gesture_controls.open
+            || self.canvas_info.is_some()
+            || self.settings)
     }
 
     /// A hardware keyboard's shortcuts: the core's (keys.rs), and the desktop's files: Ctrl (⌘)
     /// with N, O, S (and Shift).
     fn shortcuts(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo) {
         // a text field, or the hex keypad, takes the keys; text being edited takes them all
-        if ctx.egui_wants_keyboard_input()
-            || self.text.editing()
-            || ((self.open == Some(Popover::Colour) || self.colours.floating.is_some()) && self.colours.takes_keys())
-        {
+        if ctx.egui_wants_keyboard_input() || self.keys_taken() {
             return;
         }
         let pressed = |modifiers: Modifiers, key: Key| {
@@ -1947,13 +1982,9 @@ impl Interface {
                 .collect()
         });
         for (key, modifiers) in keys {
-            // R turns the canvas a step clockwise about the window's middle, Shift+R back (the
-            // desktop's own: a mouse, or a pen tablet's keys set to them; touch turns it as on
-            // the tablet)
+            // R tapped turns the canvas a step, held it turns it by dragging: the window's input
+            // sees to it (input.rs)
             if key == Key::R && !modifiers.command && !modifiers.alt {
-                let middle = ctx.content_rect().center() * ctx.pixels_per_point();
-                let turn = if modifiers.shift { -KEY_TURN } else { KEY_TURN };
-                session.view_gesture(middle.x, middle.y, 0.0, 0.0, 1.0, turn);
                 ctx.input_mut(|i| i.consume_key(modifiers, key));
                 continue;
             }
@@ -2021,10 +2052,29 @@ impl Interface {
     }
 }
 
-/// How far R turns the canvas (radians, 15°).
-const KEY_TURN: f32 = 15.0 * std::f32::consts::PI / 180.0;
 /// How far Ctrl with + or - zooms the canvas each time.
 const KEY_ZOOM: f32 = 1.25;
+
+/// Whether Escape was pressed this frame, for what is open to close: it counts as taken, so it
+/// doesn't also turn the canvas upright ([`Interface::show`]).
+pub fn escape(ctx: &egui::Context) -> bool {
+    let pressed = ctx.input(|i| i.key_pressed(Key::Escape));
+    if pressed {
+        let frame = ctx.cumulative_pass_nr();
+        ctx.data_mut(|d| d.insert_temp(escape_id(), frame));
+    }
+    pressed
+}
+
+/// Escape was pressed this frame, and nothing open took it.
+fn escape_untaken(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.key_pressed(Key::Escape))
+        && ctx.data(|d| d.get_temp::<u64>(escape_id())) != Some(ctx.cumulative_pass_nr())
+}
+
+fn escape_id() -> egui::Id {
+    egui::Id::unique("escape taken")
+}
 
 /// The name the core's shortcuts know `key` by (keys.rs), if it has one.
 fn key_name(key: Key) -> Option<&'static str> {

@@ -31,6 +31,10 @@ pub enum Choice {
 
 /// Draws the panel (Paste greyed unless `can_paste`); returns what was chosen, if anything.
 pub fn show(ctx: &egui::Context, look: &mut Look, can_paste: bool) -> Option<Choice> {
+    // Escape closes it, as a tap off it does
+    if crate::ui::escape(ctx) {
+        return Some(Choice::Close);
+    }
     let screen = ctx.content_rect();
     let panel = Rect::from_min_size(
         pos2(screen.left() + (screen.width() - PANEL.0) / 2.0, screen.top() + screen.height() * PANEL_TOP),

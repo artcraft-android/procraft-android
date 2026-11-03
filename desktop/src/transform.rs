@@ -210,6 +210,10 @@ impl Transform {
                 Asked::Background => self.popup = Popup::None,
             }
         }
+        // Escape closes the popover, as a touch on the canvas does
+        if self.popup != Popup::None && crate::ui::escape(ctx) {
+            self.popup = Popup::None;
+        }
         self.popover(ctx, look, session);
         if let (Some(numeric), Some(b)) = (self.numeric.as_mut(), self.shown.clone()) {
             let (changed, open) = numeric.show(ctx, look, session, &b, backdrops);

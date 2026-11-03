@@ -112,10 +112,7 @@ impl Menu {
             let screen = ctx.content_rect();
             egui::Area::new(Id::unique((id, "scrim"))).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
                 let shield = ui.allocate_rect(screen, Sense::click_and_drag());
-                if shield.is_pointer_button_down_on()
-                    || shield.clicked()
-                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
-                {
+                if crate::ui::escape(ui.ctx()) || shield.is_pointer_button_down_on() || shield.clicked() {
                     self.close();
                 }
             });

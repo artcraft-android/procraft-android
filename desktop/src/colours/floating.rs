@@ -63,7 +63,8 @@ impl Colours {
         let rect = Rect::from_min_size(at, vec2(WIDTH, height));
         let before = self.hsv;
         let p3 = colours_in_p3(session.profile());
-        let mut closed = false;
+        // Escape closes it, as its Close does (a menu of its, or the hex keypad, takes it first)
+        let mut closed = !self.modal() && crate::ui::escape(ctx);
         let mut hex_row = Rect::NOTHING;
         let mut kind_button = Rect::NOTHING;
         egui::Area::new(egui::Id::unique("floating colours")).fixed_pos(rect.min).order(egui::Order::Foreground).show(
@@ -86,7 +87,7 @@ impl Colours {
                 text(ui.painter(), pos2(at.x + 18.0, at.y + 24.0), Align2::LEFT_CENTER, title, 24.0, Weight::Bold, ink);
                 let close = Rect::from_min_size(pos2(at.x + 216.0, at.y + 4.0), vec2(40.0, 40.0));
                 close_button(ui, close);
-                closed = ui.interact(close, ui.scope_id().with("floating close"), Sense::click()).clicked();
+                closed |= ui.interact(close, ui.scope_id().with("floating close"), Sense::click()).clicked();
                 match self.mode {
                     Mode::Disc => {
                         let disc = Rect::from_min_size(pos2(at.x + 10.0, at.y + 53.0), vec2(240.0, 240.0));

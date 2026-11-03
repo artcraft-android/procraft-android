@@ -419,7 +419,7 @@ impl Replay {
             self.index % TIME_LAPSE_FPS
         );
         let tapped = tool_header::show_in(ctx, look, "Time-lapse Replay", &[(&time, false)], tool_header::OVER_PICTURE);
-        tapped == Some(tool_header::Tapped::Done) || ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        crate::ui::escape(ctx) || tapped == Some(tool_header::Tapped::Done)
     }
 }
 

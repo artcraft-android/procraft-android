@@ -117,7 +117,8 @@ impl Numeric {
         backdrops: &mut Vec<f32>,
     ) -> (Option<TransformBox>, bool) {
         let screen = ctx.content_rect();
-        let mut open = true;
+        // Escape closes it, as a tap beside it does
+        let mut open = !crate::ui::escape(ctx);
         egui::Area::new(Id::unique("transform numbers scrim")).fixed_pos(screen.min).order(Order::Foreground).show(
             ctx,
             |ui| {

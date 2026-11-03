@@ -79,7 +79,7 @@ pub fn show(ctx: &egui::Context) -> bool {
     egui::Area::new(Id::unique("licences scrim")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
         let beside = ui.allocate_rect(screen, Sense::click());
         ui.painter().rect_filled(screen, 0, Color32::from_black_alpha(0x99));
-        close |= beside.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
+        close |= crate::ui::escape(ui.ctx()) || beside.clicked();
     });
     let height = 24.0 + 32.0 + 16.0 + MOST_TEXT + 16.0 + 40.0 + 16.0;
     let panel = Rect::from_center_size(screen.center(), vec2(WIDTH, height.min(screen.height() - 40.0)));

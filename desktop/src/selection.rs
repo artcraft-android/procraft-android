@@ -246,6 +246,10 @@ impl Selection {
             }
             None => {}
         }
+        // Escape closes the popover
+        if self.popup != Popup::None && crate::ui::escape(ctx) {
+            self.set_popup(session, Popup::None);
+        }
         self.popover(ctx, look, session);
     }
 

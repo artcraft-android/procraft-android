@@ -118,6 +118,10 @@ impl GestureControls {
                 changed |= self.options(ui, settings, content);
             },
         );
+        // Escape is Done (with its alert up, it answers that instead)
+        if !self.reset.is_open() && crate::ui::escape(ctx) {
+            self.open = false;
+        }
         if self.reset.show(ctx, look) == Some(Answer::Action) {
             settings.reset_all();
             changed = true;

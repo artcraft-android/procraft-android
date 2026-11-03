@@ -163,7 +163,7 @@ impl SourceEditor {
             self.shown = picture(ctx, &self.result(), self.kind == SourceKind::Shape, self.repeating);
         }
         // Escape closes what is open over the editor, else the editor (as Cancel)
-        let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape)) && ctx.memory(|m| m.focused().is_none());
+        let escape = crate::ui::escape(ctx) && ctx.memory(|m| m.focused().is_none());
         if escape && self.importing.take().is_none() && self.library.take().is_none() {
             return Some(false);
         }

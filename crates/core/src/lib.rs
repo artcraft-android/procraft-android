@@ -96,7 +96,7 @@ pub use gradients::{GradientInfo, GradientStop, Gradients};
 pub use guide::{GuideInfo, GuideType, SymmetryType};
 pub use history::ColourHistory;
 pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_stops};
-pub use keys::{KeyShortcut, key_shortcut};
+pub use keys::{KeyDrag, KeyShortcut, key_shortcut};
 pub use layers::{
     BlendModeInfo, Blocked, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
     brush_blend_modes, grain_blend_modes, layers_for, set_resident_budget,
@@ -341,6 +341,8 @@ pub(crate) struct State {
     pub(crate) view: Option<View>,
     /// The view settling from one place to another (fitting the canvas), stepped each frame.
     pub(crate) view_motion: Option<ViewMotion>,
+    /// A mouse dragged with a key held, moving the view (keys.rs).
+    pub(crate) key_drag: Option<keys::KeyDragging>,
     pub(crate) window_size: (u32, u32),
     pub(crate) reconfigure: bool,
     tool: ToolKind,
@@ -1091,6 +1093,7 @@ impl CanvasSession {
             doc,
             view: None,
             view_motion: None,
+            key_drag: None,
             window_size: (1, 1),
             reconfigure: false,
             tool: ToolKind::Paint,
@@ -1545,6 +1548,22 @@ impl CanvasSession {
         };
         st.view_motion = Some(ViewMotion { from, to, start: std::time::Instant::now(), curve: ViewCurve::Settle });
         self.shared.frame(&mut st);
+    }
+
+    /// Turns the canvas back upright about the middle of the window, keeping its zoom and what is
+    /// in the middle, settling into place as [`CanvasSession::settle_to_fit`] does. False if it
+    /// already was upright.
+    pub fn settle_upright(&self) -> bool {
+        let mut st = self.shared.lock();
+        let Some(from) = st.view.filter(|v| v.rotation().abs() > 1e-5) else { return false };
+        let middle = Vec2::new(st.window_size.0 as f32 / 2.0, st.window_size.1 as f32 / 2.0);
+        let Some(to) = from.screen_to_canvas(middle).and_then(|c| View::centred(c, from.zoom(), 0.0, st.window_size))
+        else {
+            return false;
+        };
+        st.view_motion = Some(ViewMotion { from, to, start: std::time::Instant::now(), curve: ViewCurve::Settle });
+        self.shared.frame(&mut st);
+        true
     }
 
     /// Fits the whole canvas in the window again, growing back into place over 0.3 s, slowing to

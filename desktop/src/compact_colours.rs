@@ -62,6 +62,11 @@ impl CompactColours {
         to_hex(hsv_to_rgb(self.hsv))
     }
 
+    /// The hex keypad is open: it takes the keys.
+    pub fn takes_keys(&self) -> bool {
+        self.hex.is_some()
+    }
+
     /// How tall the mode shown's picker is.
     fn body_height(&self) -> f32 {
         match self.mode {

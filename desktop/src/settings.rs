@@ -4,7 +4,7 @@
 //! maximum speed distance, what an artwork dragged out becomes, the touch companion, colour names,
 //! feedback sounds and tap assistance. Kept with the Prefs tab's.
 
-use egui::{Align2, Color32, Id, Key, Order, Rect, ScrollArea, Sense, Stroke, UiBuilder, Vec2, pos2, vec2};
+use egui::{Align2, Color32, Id, Order, Rect, ScrollArea, Sense, Stroke, UiBuilder, Vec2, pos2, vec2};
 
 use crate::look::{Weight, argb, text};
 use crate::prefs::{DRAG_FORMATS, DRAG_IMAGE_FORMATS, Prefs};
@@ -253,7 +253,7 @@ pub fn show(ctx: &egui::Context, prefs: &mut Prefs) -> Option<Said> {
                 ui.add_space(MARGIN);
             });
         });
-    if ctx.input(|i| i.key_pressed(Key::Escape)) {
+    if crate::ui::escape(ctx) {
         said = Some(Said::Done);
     }
     said

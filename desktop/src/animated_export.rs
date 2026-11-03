@@ -644,7 +644,7 @@ fn turntable_file(
 }
 
 fn ui_escape(ctx: &egui::Context) -> bool {
-    ctx.input(|i| i.key_pressed(egui::Key::Escape))
+    crate::ui::escape(ctx)
 }
 
 /// The artwork's name, or "Untitled Artwork".

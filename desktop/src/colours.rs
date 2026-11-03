@@ -1129,11 +1129,12 @@ pub(crate) fn hex_pad(ctx: &egui::Context, look: &mut Look, typed: &mut Option<S
                     key = t.chars().find(char::is_ascii_hexdigit).map(|c| c.to_ascii_uppercase()).or(key)
                 }
                 egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => back = true,
-                egui::Event::Key { key: egui::Key::Escape | egui::Key::Enter, pressed: true, .. } => close = true,
+                egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => close = true,
                 _ => {}
             }
         }
     });
+    close |= crate::ui::escape(ctx);
     if close {
         *typed = None;
         return None;

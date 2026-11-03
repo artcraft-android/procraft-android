@@ -1,13 +1,15 @@
 //! The window's pointers handed to the session's touches (crates/core's `touch`, shared with the
 //! Android app), which paint, move the canvas and say what the app should do. The mouse adds what
 //! it can't do by touch: the wheel zooms, and the middle button (or space) moves the canvas; on a
-//! model it turns it, as a finger does, and with Shift moves it.
+//! model it turns it, as a finger does, and with Shift moves it. Dragged with Space and Ctrl (⌘)
+//! held it zooms the canvas, with R held it turns it (with Shift in 15° steps), and R tapped turns
+//! it a step (the core's key drags, keys.rs). A pen and fingers go on as they do.
 
 use std::time::{Duration, Instant};
 
-use procraft_core::{CanvasSession, PenSample, PointerKind, TouchCommand};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
-use winit::keyboard::{Key, NamedKey};
+use procraft_core::{CanvasSession, KeyDrag, PenSample, PointerKind, TouchCommand};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 
 /// The eyedropper's window, points.
 pub const PICK_WINDOW: f32 = 54.0;
@@ -19,6 +21,9 @@ const SCROLL_ZOOM: f32 = 0.005;
 const WHEEL_TURN: f32 = 5.0 * std::f32::consts::PI / 180.0;
 /// How far a pixel of scrolling turns it with Shift held (radians, a quarter of a degree).
 const SCROLL_TURN: f32 = 0.25 * std::f32::consts::PI / 180.0;
+
+/// R let go within this, with no drag, is a tap: it turns the canvas a step (the touches' tap).
+const R_TAP: Duration = Duration::from_millis(300);
 
 /// The mouse's pointer id: touches have the platform's.
 const MOUSE: u64 = u64::MAX;
@@ -34,11 +39,22 @@ pub struct Input {
     cursor: Option<(f32, f32)>,
     inside: bool,
     panning: bool,
+    /// The mouse dragged with a key held, zooming or turning the canvas (the core's key drag).
+    key_drag: Option<KeyDrag>,
     /// The brush cursor follows the mouse hovering, so its moves draw a frame.
     pub hover_shown: bool,
     space: bool,
+    /// R held for the canvas (not typed) since when, and whether the mouse went down since (then
+    /// it turned the canvas by dragging, and letting go turns it no step).
+    r_key: Option<Instant>,
+    r_dragged: bool,
     command_key: bool,
+    /// Ctrl and Alt held (on a Mac, Space with Ctrl zooms as with ⌘: the system may keep either).
+    control: bool,
+    alt: bool,
     shift: bool,
+    /// The interface takes the keys (text being edited, the hex keypad): R is typed, not a turn.
+    pub keys_taken: bool,
     /// A model is shown (not its 2D texture): dragging the view turns it, as one finger does (the
     /// touches').
     pub turns_model: bool,
@@ -53,10 +69,16 @@ impl Default for Input {
             cursor: None,
             inside: false,
             panning: false,
+            key_drag: None,
             hover_shown: false,
             space: false,
+            r_key: None,
+            r_dragged: false,
             command_key: false,
+            control: false,
+            alt: false,
             shift: false,
+            keys_taken: false,
             turns_model: false,
         }
     }
@@ -76,17 +98,40 @@ impl Input {
     }
 
     pub fn hovering(&self) -> Option<(f32, f32)> {
-        self.cursor.filter(|_| self.inside && self.down.is_empty() && !self.panning && !self.space)
+        self.cursor.filter(|_| self.inside && self.down.is_empty() && !self.moving_view())
     }
 
     /// Nothing is pressed on the canvas and the view isn't moving.
     pub fn idle(&self) -> bool {
-        self.down.is_empty() && !self.panning
+        self.down.is_empty() && !self.panning && self.key_drag.is_none()
     }
 
-    /// Space is held or the mouse moves the view.
+    /// Space or R is held, or the mouse moves the view.
     pub fn moving_view(&self) -> bool {
-        self.space || self.panning
+        self.space || self.r_key.is_some() || self.panning || self.key_drag.is_some()
+    }
+
+    /// The mouse zooms the view, or would if pressed.
+    pub fn zooming_view(&self) -> bool {
+        self.key_drag.or_else(|| self.drag_held()) == Some(KeyDrag::Zoom)
+    }
+
+    /// The drag the keys held make of the mouse pressed on the canvas: R turns it, Space with
+    /// Ctrl (⌘) zooms it (Space alone moves it, as the middle button does).
+    fn drag_held(&self) -> Option<KeyDrag> {
+        if self.r_key.is_some() {
+            Some(KeyDrag::Turn)
+        } else if self.space && (self.command_key || self.control) {
+            Some(KeyDrag::Zoom)
+        } else {
+            None
+        }
+    }
+
+    fn end_key_drag(&mut self, session: &CanvasSession) {
+        if self.key_drag.take().is_some() {
+            session.key_drag_end();
+        }
     }
 
     fn now_ms(&self) -> f64 {
@@ -159,7 +204,14 @@ impl Input {
             WindowEvent::ModifiersChanged(m) => {
                 let state = m.state();
                 self.command_key = if cfg!(target_os = "macos") { state.super_key() } else { state.control_key() };
-                self.shift = state.shift_key();
+                self.control = state.control_key();
+                self.alt = state.alt_key();
+                let shift = std::mem::replace(&mut self.shift, state.shift_key());
+                // a turn goes onto its steps as Shift goes down, and off them as it comes up
+                if let (Some(KeyDrag::Turn), Some(p), true) = (self.key_drag, self.cursor, shift != self.shift) {
+                    session.key_drag_move(p.0, p.1, self.shift);
+                    return true;
+                }
                 false
             }
             WindowEvent::KeyboardInput { event, .. } if event.logical_key == Key::Named(NamedKey::Space) => {
@@ -167,12 +219,43 @@ impl Input {
                 if !self.space && self.panning && !self.down.contains(&MOUSE) {
                     self.panning = false;
                 }
+                // a zoom ends with it too
+                if !self.space && self.key_drag == Some(KeyDrag::Zoom) {
+                    self.end_key_drag(session);
+                }
+                true
+            }
+            WindowEvent::KeyboardInput { event, is_synthetic, .. } if is_r(event) => {
+                match event.state {
+                    // (a press as the window comes to the front is a key held from before: no tap)
+                    ElementState::Pressed if !event.repeat && !*is_synthetic => {
+                        let typed = consumed || self.keys_taken || self.command_key || self.control || self.alt;
+                        self.r_key = (!typed).then(Instant::now);
+                        self.r_dragged = false;
+                    }
+                    ElementState::Pressed => {}
+                    ElementState::Released => {
+                        // tapped, it turns the canvas a step (with Shift back); a drag turned it
+                        let tapped = self.r_key.take().is_some_and(|since| since.elapsed() < R_TAP);
+                        if tapped && !self.r_dragged && !consumed {
+                            session.key_turn(self.shift);
+                        }
+                        if self.key_drag == Some(KeyDrag::Turn) {
+                            self.end_key_drag(session);
+                        }
+                    }
+                }
                 true
             }
             WindowEvent::Focused(false) => {
                 // keys let go elsewhere never come back up here
                 self.space = false;
+                self.r_key = None;
                 self.command_key = false;
+                self.control = false;
+                self.alt = false;
+                self.shift = false;
+                self.end_key_drag(session);
                 false
             }
             WindowEvent::CursorEntered { .. } | WindowEvent::CursorLeft { .. } => {
@@ -183,6 +266,10 @@ impl Input {
                 let p = (position.x as f32, position.y as f32);
                 self.inside = true;
                 let last = self.cursor.replace(p);
+                if self.key_drag.is_some() {
+                    session.key_drag_move(p.0, p.1, self.shift);
+                    return true;
+                }
                 if let (true, Some(l)) = (self.panning, last) {
                     if self.turns_model && !self.shift {
                         session.turn_model(p.0 - l.0, p.1 - l.1);
@@ -200,6 +287,22 @@ impl Input {
             WindowEvent::MouseInput { state, button, .. } => {
                 let Some(p) = self.cursor else { return false };
                 match (button, state) {
+                    // with R held it turns the canvas, with Space and Ctrl (⌘) zooms it: nothing
+                    // is painted
+                    (MouseButton::Left, ElementState::Pressed)
+                        if self.down.is_empty() && !self.panning && !over(p) && self.drag_held().is_some() =>
+                    {
+                        if let Some(how) = self.drag_held() {
+                            session.key_drag_begin(how, p.0, p.1);
+                            self.key_drag = Some(how);
+                            self.r_dragged |= how == KeyDrag::Turn;
+                        }
+                        false
+                    }
+                    (MouseButton::Left, ElementState::Released) if self.key_drag.is_some() => {
+                        self.end_key_drag(session);
+                        false
+                    }
                     (MouseButton::Left | MouseButton::Middle, ElementState::Pressed)
                         if self.down.is_empty() && !over(p) && (self.space || *button == MouseButton::Middle) =>
                     {
@@ -306,5 +409,17 @@ impl Input {
             }
             _ => false,
         }
+    }
+}
+
+/// Whether `event` is the R key's: by its letter, or (a layout without Latin letters) by its
+/// place, as the interface's own shortcuts take a key.
+fn is_r(event: &KeyEvent) -> bool {
+    match &event.logical_key {
+        Key::Character(c) if c.eq_ignore_ascii_case("r") => true,
+        Key::Character(c) => {
+            egui::Key::from_name(c).is_none() && event.physical_key == PhysicalKey::Code(KeyCode::KeyR)
+        }
+        _ => false,
     }
 }

@@ -123,6 +123,14 @@ impl QuickMenu {
             self.at = None;
             return None;
         }
+        // Escape closes the picker if it is open, else the menu, as a tap elsewhere does
+        if self.open && crate::ui::escape(ctx) {
+            if self.choosing.is_some() {
+                self.choosing = None;
+            } else {
+                self.close();
+            }
+        }
         if self.since.elapsed().as_secs_f32() < OPEN_SECS.max(CLOSE_SECS) {
             ctx.request_repaint();
         }

@@ -5,7 +5,7 @@
 //! environment shows, the exposure, and which environment lights the model. Also the environments
 //! themselves (our own panoramas, bundled with the Android app) a model is lit by.
 
-use egui::{Align2, Color32, Id, Key, Order, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
+use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use procraft_core::{CanvasSession, ModelLight};
 
 use crate::icons::{self, Icon};
@@ -296,7 +296,7 @@ impl LightingStudio {
                 _ => self.light_open = None,
             }
         }
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+        if crate::ui::escape(ctx) {
             if self.light_open.is_some() {
                 self.light_open = None;
             } else if self.environment_open {

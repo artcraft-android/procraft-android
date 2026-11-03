@@ -528,7 +528,7 @@ impl Toolbars {
 }
 
 /// A toolbar's "•••" menu, 16 above its `button`: `title` over what `inside` draws in the
-/// `height` under it. A tap outside closes it (`open` goes false).
+/// `height` under it. A tap outside closes it (`open` goes false), as does Escape.
 pub(crate) fn options_menu(
     ctx: &egui::Context,
     open: &mut bool,
@@ -537,6 +537,10 @@ pub(crate) fn options_menu(
     height: f32,
     inside: impl FnOnce(&mut Ui, Rect),
 ) {
+    if crate::ui::escape(ctx) {
+        *open = false;
+        return;
+    }
     let screen = ctx.content_rect();
     let whole = 16.0 + 28.0 + 16.0 + height + 10.0;
     let menu = Rect::from_min_size(pos2(button.center().x - 130.0, button.top() - 16.0 - whole), vec2(260.0, whole));

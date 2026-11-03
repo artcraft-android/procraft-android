@@ -166,7 +166,7 @@ impl Alert {
             // nothing under it is touched while it is up, and a tap beside the panel cancels
             let beside = ui.allocate_rect(screen, Sense::click_and_drag());
             ui.interact(panel, ui.scope_id().with("panel"), Sense::click_and_drag());
-            if beside.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if crate::ui::escape(ui.ctx()) || beside.clicked() {
                 answer = Some(Answer::Cancel);
             }
             ui.painter().rect_filled(screen, 0, Color32::from_black_alpha((DIM * shown * 255.0) as u8));

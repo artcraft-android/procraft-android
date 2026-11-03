@@ -521,7 +521,7 @@ impl TextEditor {
             self.change(session, |i| i.text = typed);
         }
         // Escape is Done
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+        if crate::ui::escape(ctx) {
             self.end(session, true);
         }
         None

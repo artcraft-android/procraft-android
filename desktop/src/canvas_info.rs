@@ -140,7 +140,7 @@ impl CanvasInfo {
         let screen = ctx.content_rect();
         let wide = screen.width() > screen.height();
         let mut ended = None;
-        let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape)) && ctx.memory(|m| m.focused().is_none());
+        let escape = crate::ui::escape(ctx) && ctx.memory(|m| m.focused().is_none());
         egui::Area::new(Id::unique("canvas info")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
             ui.allocate_rect(screen, Sense::click());
             let painter = ui.painter().clone();

@@ -92,6 +92,11 @@ pub enum Said {
 }
 
 impl AnimationBar {
+    /// The onion skins' colours have their hex keypad open: it takes the keys.
+    pub fn takes_keys(&self) -> bool {
+        self.colours.as_ref().is_some_and(|(_, c)| c.takes_keys())
+    }
+
     /// Playing stops, menus close (Animation Assist went off, or a screen covers the bar).
     pub fn reset(&mut self, session: &CanvasSession) {
         self.stop(session);
@@ -195,6 +200,15 @@ impl AnimationBar {
             let track = Rect::from_min_size(bar.min + vec2(12.0, 42.0), vec2(width - 24.0, 44.0));
             self.timeline(ui, session, &frames, current, track);
         });
+        // Escape closes the onion skins' colours, else the popover (the hex keypad takes it first)
+        if (self.settings_open || self.options_open)
+            && !self.takes_keys()
+            && crate::ui::escape(ctx)
+            && self.colours.take().is_none()
+        {
+            self.settings_open = false;
+            self.options_open = false;
+        }
         if self.settings_open && !pages {
             let left = (settings_at - 145.0).clamp(0.0, width - 290.0);
             self.settings_popover(ctx, look, session, &settings, bar, left, settings_at - left, palettes, harmony);

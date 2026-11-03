@@ -83,6 +83,10 @@ impl Liquify {
                 self.upright(ui, look, session, shown, rect);
             }
         });
+        // Escape closes the popover
+        if self.popup != Popup::None && crate::ui::escape(ctx) {
+            self.popup = Popup::None;
+        }
         match self.popup {
             Popup::Kinds if !wide => self.kinds_popover(ctx, look, session, shown, tip_x, tip_y),
             Popup::Adjust => self.adjust_popover(ctx, session, shown, adjust_tip_x, tip_y),

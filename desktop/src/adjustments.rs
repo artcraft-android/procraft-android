@@ -169,6 +169,12 @@ impl Adjustments {
                 }
             },
         );
+        // Escape closes the tap menu, else Layer or Pencil's
+        if self.menu_at.is_some() && crate::ui::escape(ctx) {
+            self.menu_at = None;
+        } else if self.modes_open && crate::ui::escape(ctx) {
+            self.modes_open = false;
+        }
         if self.modes_open
             && let Some(pencil) = modes(ctx, look, shown.pencil, bar_top + 52.0)
         {
