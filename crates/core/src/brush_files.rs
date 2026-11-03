@@ -1,5 +1,6 @@
-//! Brush and set files as other painting apps share them (`.brush`, `.brushset`): read into the
-//! library, and written from it. A brush's shape and grain images go with it; an image a file only
+//! Brush, set and library files as other painting apps share them (`.brush`, `.brushset`,
+//! `.brushlibrary`): read into the library (a library file as a library of its own), and written
+//! from it. A brush's shape and grain images go with it; an image a file only
 //! names (one that came with the app that made it) is stood in for by the nearest of ours.
 
 use procraft_engine::brush::{
@@ -7,6 +8,7 @@ use procraft_engine::brush::{
     StockImages,
 };
 use procraft_engine::brushfile::{self, BrushFile, Pictures, Texture};
+use procraft_engine::brushlibrary;
 use procraft_engine::curve::Curve;
 use procraft_engine::stroke::LEAST_ROUNDNESS;
 use procraft_engine::textures::{self, TEXTURE_SIZE, grain, shape};
@@ -133,9 +135,11 @@ pub fn is_brush_zip(bytes: Vec<u8>) -> bool {
     procraft_engine::zip::ZipReader::new(&bytes).is_some_and(|zip| brush_names(zip.names()))
 }
 
-/// Whether a zip holding `names` holds brushes.
-pub(crate) fn brush_names<'n>(mut names: impl Iterator<Item = &'n str>) -> bool {
-    names.any(|n| n == "Brush.archive" || n == "brushset.plist" || n.ends_with("/Brush.archive"))
+/// Whether a zip holding `names` holds brushes (a library's among them).
+pub(crate) fn brush_names<'n>(names: impl Iterator<Item = &'n str>) -> bool {
+    let names: Vec<&str> = names.collect();
+    names.iter().any(|n| *n == "Brush.archive" || *n == "brushset.plist" || n.ends_with("/Brush.archive"))
+        || brushlibrary::is_library(names.iter().copied())
 }
 
 /// Brushes read from a file, not yet in the library: reading another app's takes a while, so it
@@ -149,6 +153,27 @@ pub enum ReadBrushes {
     One(Box<Brush>),
     /// A file of ours from before (a set, or a brush for the set shown), as its text.
     Text(String),
+    /// A library of their own called `name` (numbered if another has it): its sets (name, icon,
+    /// brushes) and its tools' brushes (paint, erase, smudge).
+    Library { name: String, sets: Vec<(String, u32, Vec<Brush>)>, tools: [(usize, usize); 3] },
+}
+
+/// A library file's sets in `bytes`, as a library called `name`; none if it isn't one.
+fn read_library(bytes: &[u8], name: String) -> Option<ReadBrushes> {
+    let file = brushlibrary::read(bytes)?;
+    let sets = file
+        .sets
+        .iter()
+        .map(|set| {
+            // its icon as the stock set it names has it
+            let icon = crate::brush_library::shipped_icon(set.icon.as_deref().unwrap_or(&set.name));
+            let brushes = procraft_engine::par::side_by_side(&set.brushes, brush_from).into_iter().flatten().collect();
+            (set.name.clone(), icon, brushes)
+        })
+        .collect();
+    // the file's tools are paint, smudge and erase
+    let [paint, smudge, erase] = file.tools;
+    Some(ReadBrushes::Library { name, sets, tools: [paint, erase, smudge].map(|t| t.unwrap_or((0, 0))) })
 }
 
 /// Our brush file's or set file's brushes in `bytes`.
@@ -176,6 +201,12 @@ pub fn read_any_brushes(bytes: &[u8], file_name: Option<String>) -> Option<ReadB
     let other = name
         .rsplit_once('.')
         .is_some_and(|(_, ext)| OTHER_BRUSH_EXTENSIONS.iter().any(|o| o.eq_ignore_ascii_case(ext)));
+    // a library, by its name or by what the zip holds
+    let library = name.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case(brushlibrary::EXTENSION))
+        || procraft_engine::zip::ZipReader::new(bytes).is_some_and(|zip| brushlibrary::is_library(zip.names()));
+    if library && let Some(read) = read_library(bytes, stem.clone()) {
+        return Some(read);
+    }
     if other {
         return read_other(bytes, stem);
     }
@@ -229,6 +260,7 @@ impl CanvasSession {
                 Some(at as u32)
             }
             ReadBrushes::Text(text) => self.import_brush_file(shown, text),
+            ReadBrushes::Library { name, sets, tools } => self.add_brush_library(name, sets, tools),
         }
     }
 }
@@ -304,6 +336,51 @@ impl CanvasSession {
         let seed =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
         Some(brushfile::write_set(&name, &list, |i| folder_id(seed, i)))
+    }
+}
+
+#[uniffi::export]
+impl CanvasSession {
+    /// The library in use as a library file: its sets and their brushes in order, each tool's
+    /// brush; none if it has no brushes.
+    pub fn brush_library_as_file(&self) -> Option<Vec<u8>> {
+        let (sets, tools) = {
+            let st = self.shared.lock();
+            let sets: Vec<(String, u32, Vec<Brush>)> = st
+                .library
+                .iter()
+                .enumerate()
+                .map(|(s, set)| {
+                    let brushes = set.brushes.iter().enumerate().map(|(i, b)| st.with_sliders(b, s, i)).collect();
+                    (set.name.clone(), set.icon, brushes)
+                })
+                .collect();
+            let tools = [crate::ToolKind::Paint, crate::ToolKind::Smudge, crate::ToolKind::Erase]
+                .map(|tool| Some(st.brush_ref(tool)));
+            (sets, tools)
+        };
+        if sets.iter().all(|(_, _, brushes)| brushes.is_empty()) {
+            return None;
+        }
+        let made: Vec<Vec<Made>> = sets
+            .iter()
+            .enumerate()
+            .map(|(s, (_, _, brushes))| {
+                brushes.iter().enumerate().map(|(i, b)| self.brush_pictures(b, s as u32, i as u32)).collect()
+            })
+            .collect();
+        let out: Vec<brushlibrary::SetOut<'_>> = sets
+            .iter()
+            .zip(&made)
+            .map(|((name, icon, brushes), made)| brushlibrary::SetOut {
+                name,
+                icon: crate::brush_library::shipped_icon_name(*icon),
+                brushes: brushes.iter().zip(made).map(|(b, m)| (b, author_name(b), m.pictures())).collect(),
+            })
+            .collect();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let seed = now.as_nanos() as u64;
+        Some(brushlibrary::write(&out, tools, |i| folder_id(seed, i).replace('-', "").to_lowercase(), now.as_secs()))
     }
 }
 

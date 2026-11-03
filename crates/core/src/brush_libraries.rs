@@ -654,4 +654,42 @@ impl CanvasSession {
         let loaded = self.load_library_file(&sets, first != FIRST);
         (sets, choices, loaded)
     }
+
+    /// A library read from a file (see [`crate::ReadBrushes::Library`]) added after the others
+    /// and brought into use: its sets (name, icon, brushes), its tools' brushes (paint, erase,
+    /// smudge). Its first set's place, or none if it couldn't be kept or the libraries have no
+    /// folder.
+    pub(crate) fn add_brush_library(
+        &self,
+        name: String,
+        sets: Vec<(String, u32, Vec<Brush>)>,
+        tools: [(usize, usize); 3],
+    ) -> Option<u32> {
+        let _writing = library_writes();
+        let dir = self.shared.lock().libraries.dir.clone()?;
+        let mut sets: Vec<LibrarySet> = sets
+            .into_iter()
+            .map(|(name, icon, brushes)| LibrarySet { origins: vec![None; brushes.len()], name, brushes, icon })
+            .collect();
+        {
+            // their grains at their own size into the grains' files, as brushes brought in have
+            let mut st = self.shared.lock();
+            st.grain_store.use_folder(&dir);
+            for brush in sets.iter_mut().flat_map(|set| set.brushes.iter_mut()) {
+                st.grain_store.take(brush);
+            }
+        }
+        let (list, _) = self.index_now(&dir);
+        let id = new_id(&list, &dir);
+        let (sets_file, choices_file) = files(&dir, &id);
+        if !(self.write_library_file(&sets_file, &sets) && write(&choices_file, &CanvasSession::library_choices(tools)))
+        {
+            return None;
+        }
+        let name = name.trim();
+        let name = unique_in(&list, if name.is_empty() { NEW_NAME } else { name });
+        let card = sets.iter().map(CardSet::of_set).collect();
+        let entry = Entry { id: id.clone(), name, stock: false, sets: card };
+        (self.update_index(&dir, |list, _| list.push(entry)) && self.bring_into_use(&dir, &id)).then_some(0)
+    }
 }

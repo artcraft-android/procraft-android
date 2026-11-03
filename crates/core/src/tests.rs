@@ -12435,3 +12435,49 @@ fn laying_a_vector_layer_again_keeps_one_copy_of_it_for_undo() {
     assert_eq!(bytes(&s) - before, 160 * 160 * 4);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_library_shared_comes_back_as_a_library_of_its_own() {
+    let dir = std::env::temp_dir().join(format!("procraft-library-file-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let s = CanvasSession::new(64, 64);
+    assert!(!s.open_brushes(dir.to_string_lossy().into_owned()));
+    // a small library: a set of two brushes of the same name, one of one, and an empty one
+    assert_eq!(s.new_brush_library(), Some(1));
+    assert!(s.open_brush_library(1));
+    let inks = s.new_brush_set();
+    assert!(s.rename_brush_set(inks, "Inks".to_owned()));
+    assert!(s.new_brush(inks).is_some() && s.new_brush(inks).is_some());
+    let pens = s.new_brush_set();
+    assert!(s.rename_brush_set(pens, "Pens".to_owned()));
+    assert!(s.new_brush(pens).is_some());
+    let empty = s.new_brush_set();
+    assert!(s.rename_brush_set(empty, "Empty".to_owned()));
+    let sets = |s: &CanvasSession| -> Vec<(String, Vec<String>)> {
+        s.brush_library().into_iter().map(|set| (set.name, set.brushes.into_iter().map(|b| b.name).collect())).collect()
+    };
+    let before = sets(&s);
+    // each tool on a brush of its own
+    let at = |name: &str| before.iter().position(|(n, _)| n == name).unwrap() as u32;
+    let tools = [(ToolKind::Paint, at("Inks"), 1), (ToolKind::Erase, at("Pens"), 0), (ToolKind::Smudge, at("Inks"), 0)];
+    for (tool, set, index) in tools {
+        s.set_tool(tool);
+        assert!(s.select_brush(set, index));
+    }
+    let file = s.brush_library_as_file().unwrap();
+    // read back as a library of its own, in use, as it was
+    assert_eq!(s.import_any_brushes(file.clone(), Some("Shared.brushlibrary".to_owned()), 0), Some(0));
+    let libraries: Vec<(String, bool)> = s.brush_libraries().into_iter().map(|l| (l.name, l.current)).collect();
+    let expected = [("Brush library", false), ("Untitled library", false), ("Shared", true)];
+    assert_eq!(libraries, expected.map(|(n, c)| (n.to_owned(), c)));
+    assert_eq!(sets(&s), before);
+    for (tool, set, index) in tools {
+        s.set_tool(tool);
+        assert_eq!((s.current_brush().set, s.current_brush().index), (set, index), "{tool:?}");
+    }
+    // told apart by what it holds, under any name
+    assert!(crate::is_brush_zip(file.clone()));
+    assert_eq!(s.import_any_brushes(file, None, 0), Some(0));
+    assert_eq!(s.brush_libraries().last().map(|l| l.name.clone()).as_deref(), Some("Untitled library 2"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -38,33 +38,40 @@ pub(crate) const IMPORTED_ICON: u32 = BRUSH_ICON;
 /// again (their shipped icon, else the brush).
 const ICON_NUMBERING: u32 = 2;
 
+/// The icons shipped sets start with, by name: the six first sets' own, then later sets' glyphs
+/// from the shared choice.
+const SHIPPED_ICONS: [(&str, u32); 21] = [
+    ("Sketching", 42),
+    ("Inking", 43),
+    ("Painting", 44),
+    ("Airbrushing", 45),
+    ("Charcoals", 46),
+    ("Textures", 47),
+    ("Drawing", 1),
+    ("Watercolour", 13),
+    ("Calligraphy", 27),
+    ("Spray Paint", 35),
+    ("Nature", 38),
+    ("Effects", 32),
+    ("Pixel", 9),
+    ("Elements", 18),
+    ("Industrial", 21),
+    ("Organic", 16),
+    ("Abstract", 11),
+    ("Touchups", 40),
+    ("Retro", 15),
+    ("Vintage", 37),
+    ("Luminance", 34),
+];
+
 /// The icon a shipped set starts with, by its name (the brush icon for the rest).
-fn shipped_icon(name: &str) -> u32 {
-    match name {
-        "Sketching" => 42,
-        "Inking" => 43,
-        "Painting" => 44,
-        "Airbrushing" => 45,
-        "Charcoals" => 46,
-        "Textures" => 47,
-        // later sets show glyphs from the shared choice
-        "Drawing" => 1,
-        "Watercolour" => 13,
-        "Calligraphy" => 27,
-        "Spray Paint" => 35,
-        "Nature" => 38,
-        "Effects" => 32,
-        "Pixel" => 9,
-        "Elements" => 18,
-        "Industrial" => 21,
-        "Organic" => 16,
-        "Abstract" => 11,
-        "Touchups" => 40,
-        "Retro" => 15,
-        "Vintage" => 37,
-        "Luminance" => 34,
-        _ => BRUSH_ICON,
-    }
+pub(crate) fn shipped_icon(name: &str) -> u32 {
+    SHIPPED_ICONS.iter().find(|(n, _)| *n == name).map_or(BRUSH_ICON, |&(_, icon)| icon)
+}
+
+/// The shipped set whose icon `icon` is, if it is one's.
+pub(crate) fn shipped_icon_name(icon: u32) -> Option<&'static str> {
+    SHIPPED_ICONS.iter().find(|&&(_, i)| i == icon).map(|&(name, _)| name)
 }
 
 impl LibrarySet {

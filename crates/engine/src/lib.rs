@@ -8,6 +8,7 @@ pub mod applz4;
 pub mod base64;
 pub mod brush;
 pub mod brushfile;
+pub mod brushlibrary;
 pub mod cms;
 pub mod cmyk;
 pub mod crop;
