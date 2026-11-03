@@ -1,8 +1,8 @@
 import os
 import SwiftUI
 
-/// ProCraft on the iPad: for now a plain gallery and the canvas the core draws, painted on with the
-/// Pencil and moved with fingers (the interface over it is still to come).
+/// ProCraft on the iPad: the gallery, and an artwork open on the canvas the core draws, painted
+/// on with the Pencil and moved with fingers, the interface over it.
 @main
 struct ProCraftApp: App {
     init() {
@@ -31,17 +31,20 @@ struct OpenArtwork {
 
 /// The gallery, or the artwork open in place of it.
 struct RootView: View {
-    @State private var open: OpenArtwork?
+    @State private var open: CanvasModel?
 
     var body: some View {
         if let open {
-            CanvasScreen(artwork: open) { self.open = nil }
-                .ignoresSafeArea()
+            CanvasScreen(model: open)
                 .statusBarHidden()
                 .persistentSystemOverlays(.hidden)
                 .defersSystemGestures(on: .all)
         } else {
-            GalleryView { self.open = $0 }
+            GalleryView { artwork in
+                let model = CanvasModel(session: artwork.session, dir: artwork.dir)
+                model.onClose = { self.open = nil }
+                self.open = model
+            }
         }
     }
 }
