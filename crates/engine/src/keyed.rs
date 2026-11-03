@@ -9,6 +9,44 @@ pub struct Archive {
     root: u64,
 }
 
+/// A dictionary's value: an object, or a plain value (a string, a number).
+#[derive(Clone, Copy)]
+pub enum Entry<'a> {
+    Object(Object<'a>),
+    Value(&'a Value),
+}
+
+impl<'a> Entry<'a> {
+    pub fn object(self) -> Option<Object<'a>> {
+        match self {
+            Entry::Object(o) => Some(o),
+            Entry::Value(_) => None,
+        }
+    }
+
+    pub fn real(self) -> Option<f64> {
+        match self {
+            Entry::Value(v) => v.as_real(),
+            Entry::Object(_) => None,
+        }
+    }
+
+    pub fn int(self) -> Option<i64> {
+        match self {
+            Entry::Value(v) => v.as_int().or_else(|| v.as_bool().map(i64::from)),
+            Entry::Object(_) => None,
+        }
+    }
+
+    /// A string: plain, or an `NSString` object.
+    pub fn string(self) -> Option<String> {
+        match self {
+            Entry::Value(v) => v.as_str().map(str::to_owned),
+            Entry::Object(o) => o.fields.get("NS.string")?.as_str().map(str::to_owned),
+        }
+    }
+}
+
 /// An object of an archive: its fields, and its class's name.
 #[derive(Clone, Copy)]
 pub struct Object<'a> {
@@ -112,6 +150,22 @@ impl<'a> Object<'a> {
                 v => Some(v),
             })
             .collect()
+    }
+
+    /// The value at `key` of this dictionary (`NS.keys` and `NS.objects`), references followed
+    /// once.
+    pub fn entry(&self, key: &str) -> Option<Entry<'a>> {
+        let follow = |v: &'a Value| match v {
+            Value::Uid(u) => self.archive.value(*u),
+            v => Some(v),
+        };
+        let keys = self.fields.get("NS.keys")?.as_array()?;
+        let at = keys.iter().position(|k| follow(k).and_then(Value::as_str) == Some(key))?;
+        let value = self.fields.get("NS.objects")?.as_array()?.get(at)?;
+        match value.as_uid().and_then(|u| self.archive.object(u)) {
+            Some(o) => Some(Entry::Object(o)),
+            None => follow(value).map(Entry::Value),
+        }
     }
 
     /// The objects of an array (`NS.objects`) that `key` refers to.

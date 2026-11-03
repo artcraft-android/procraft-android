@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::applz4;
 use crate::cms::{CanvasIcc, IccProfile, Space};
-use crate::document::{BlendMode, Document, Layer, LayerId, LayerKind};
+use crate::document::{BlendMode, Document, Layer, LayerId, LayerKind, LayerText, TextAlign};
 use crate::keyed::{Archive, Builder, Object};
 use crate::plist::Value;
 use crate::profile::Profile;
@@ -100,11 +100,26 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
     }
     let tile =
         root.int("tileSize").and_then(|t| u32::try_from(t).ok()).filter(|t| (16..=4096).contains(t)).unwrap_or(TILE);
+    // the canvas's profile: a built-in one by its name, else the nearest (a CMYK canvas keeps its
+    // pixels in Display P3; an RGB profile of its own keeps them in it)
+    let kept = root.object("colorProfile");
+    let profile = kept.as_ref().and_then(|p| p.string("SiColorProfileArchiveICCNameKey"));
+    let icc = kept.as_ref().and_then(|p| p.data("SiColorProfileArchiveICCDataKey")).and_then(IccProfile::parse);
+    let nearest = match profile.as_deref() {
+        Some(p) if p.contains("P3") => Profile::DisplayP3,
+        _ => Profile::Srgb,
+    };
+    let (profile, icc) = match (profile.as_deref().and_then(Profile::from_name), icc) {
+        (Some(builtin), _) => (builtin, None),
+        (None, Some(icc)) if icc.space == Space::Cmyk => (Profile::DisplayP3, Some(icc)),
+        (None, Some(icc)) if icc.space == Space::Rgb => (nearest, Some(icc)),
+        _ => (nearest, None),
+    };
     let turns = shown_turns(root.int("orientation").unwrap_or(1));
     let flip_x = root.bool("flippedHorizontally").unwrap_or(false);
     let flip_y = root.bool("flippedVertically").unwrap_or(false);
     let (dw, dh) = if turns % 2 == 1 { (h, w) } else { (w, h) };
-    let canvas = Canvas { zip: &zip, w, h, tile, turns, flip_x, flip_y };
+    let canvas = Canvas { zip: &zip, w, h, tile, turns, flip_x, flip_y, profile };
 
     let mut layers: Vec<Layer> = Vec::new();
     let mut pixels: Vec<(LayerId, Vec<u8>)> = Vec::new();
@@ -136,26 +151,8 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
     if let Some(dpi) = root.real("SilicaDocumentArchiveDPIKey").filter(|d| d.is_finite() && *d > 0.0) {
         document.dpi = dpi as f32;
     }
-    let kept = root.object("colorProfile");
-    let profile = kept.as_ref().and_then(|p| p.string("SiColorProfileArchiveICCNameKey"));
-    let icc = kept.as_ref().and_then(|p| p.data("SiColorProfileArchiveICCDataKey")).and_then(IccProfile::parse);
-    let nearest = match profile.as_deref() {
-        Some(p) if p.contains("P3") => Profile::DisplayP3,
-        _ => Profile::Srgb,
-    };
-    match (profile.as_deref().and_then(Profile::from_name), icc) {
-        (Some(builtin), _) => document.profile = builtin,
-        // a CMYK canvas keeps its pixels in Display P3; an RGB profile of its own keeps them in it
-        (None, Some(icc)) if icc.space == Space::Cmyk => {
-            document.profile = Profile::DisplayP3;
-            document.icc = Some(CanvasIcc(Arc::new(icc)));
-        }
-        (None, Some(icc)) if icc.space == Space::Rgb => {
-            document.profile = nearest;
-            document.icc = Some(CanvasIcc(Arc::new(icc)));
-        }
-        _ => document.profile = nearest,
-    }
+    document.profile = profile;
+    document.icc = icc.map(|icc| CanvasIcc(Arc::new(icc)));
     if let Some(mut a) = root.object("animation").and_then(|a| animation(&a, holds)) {
         // the layers are listed top first: the first item is the last frame, the last the first
         a.foreground = root.bool("isFirstItemAnimationForeground").unwrap_or(false);
@@ -235,9 +232,30 @@ struct Canvas<'a> {
     turns: u32,
     flip_x: bool,
     flip_y: bool,
+    /// The canvas's profile, colours read into it.
+    profile: Profile,
 }
 
 impl Canvas<'_> {
+    /// Point `p` of the canvas as kept (its first row first) where it is shown: turned, then
+    /// mirrored, as [`orient`] turns its pixels.
+    fn shown(&self, p: [f64; 2]) -> [f64; 2] {
+        let (w, h) = (f64::from(self.w), f64::from(self.h));
+        let [x, y] = match self.turns % 4 {
+            1 => [h - p[1], p[0]],
+            2 => [w - p[0], h - p[1]],
+            3 => [p[1], w - p[0]],
+            _ => p,
+        };
+        let (dw, dh) = if self.turns % 2 == 1 { (h, w) } else { (w, h) };
+        [if self.flip_x { dw - x } else { x }, if self.flip_y { dh - y } else { y }]
+    }
+
+    /// An sRGB colour (encoded; past 0..1 for one outside sRGB) in the canvas's profile.
+    fn profile_from_srgb(&self, rgb: [f32; 3]) -> [f32; 3] {
+        Profile::Srgb.convert(rgb, self.profile).map(|c| c.clamp(0.0, 1.0))
+    }
+
     /// A layer's pixels, `bpp` bytes each, top row first, turned as the canvas is shown; where no
     /// tile was stored, every byte is `blank`.
     fn pixels(&self, uuid: &str, bpp: usize, blank: u8) -> Result<Vec<u8>, ReadError> {
@@ -294,6 +312,78 @@ fn shown_turns(orientation: i64) -> u32 {
         4 => 1,
         _ => 0,
     }
+}
+
+/// A text layer's text (`text`), its pixels kept as they came: the words with the first run's
+/// look (font, size, colour, alignment) for all of them, its box placed as shown. None if the
+/// layer has none, or its box is turned or scaled on the canvas (it stays its pixels alone).
+fn layer_text(canvas: &Canvas<'_>, item: &Object<'_>) -> Option<LayerText> {
+    let t = item.object("text")?;
+    let s = t.object("attributedString")?;
+    let words = s.string("NSString")?;
+    // one run's attributes, or several (each a dictionary): the first
+    let runs = s.object("NSAttributes")?;
+    let attrs = if runs.raw("NS.keys").is_some() { runs } else { s.array("NSAttributes").into_iter().next()? };
+    // the box's own space (x right, y up, from its top left) on the canvas as kept, y up
+    let m: Vec<f64> = t
+        .string("transform")?
+        .trim_matches(|c| c == '[' || c == ']')
+        .split(',')
+        .map(|v| v.trim().parse::<f64>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let [a, b, c, d, tx, ty] = <[f64; 6]>::try_from(m).ok()?;
+    let h = f64::from(canvas.h);
+    let on_canvas = |x: f64, y: f64| canvas.shown([a * x + c * y + tx, h - (b * x + d * y + ty)]);
+    // shown unturned and unscaled: one along the box goes one right, one down it one down
+    let (origin, right, down) = (on_canvas(0.0, 0.0), on_canvas(1.0, 0.0), on_canvas(0.0, -1.0));
+    let near = |p: [f64; 2], q: [f64; 2]| (p[0] - q[0]).abs() < 1e-3 && (p[1] - q[1]).abs() < 1e-3;
+    if !near(right, [origin[0] + 1.0, origin[1]]) || !near(down, [origin[0], origin[1] + 1.0]) {
+        return None;
+    }
+    // the typeface by its PostScript name: "HelveticaNeue-Medium" is Helvetica Neue, Medium
+    let postscript = attrs.entry("_CFN").and_then(|e| e.string()).unwrap_or_default();
+    let (family, style) = postscript.split_once('-').unwrap_or((&postscript, ""));
+    let spaced = |name: &str| {
+        let mut out = String::new();
+        let mut before: Option<char> = None;
+        for ch in name.chars() {
+            if ch.is_uppercase() && before.is_some_and(char::is_lowercase) {
+                out.push(' ');
+            }
+            out.push(ch);
+            before = Some(ch);
+        }
+        out
+    };
+    let color = attrs.entry("NSColor").and_then(|e| e.object());
+    let channel = |k: &str| color.and_then(|c| c.real(k)).unwrap_or(0.0) as f32;
+    // in sRGB, past its range for colours outside it
+    let rgb = canvas.profile_from_srgb([channel("UIRed"), channel("UIGreen"), channel("UIBlue")]);
+    // the paragraph's alignment as archives number it: left, right, centre, justified, natural
+    let align = match attrs.entry("NSParagraphStyle").and_then(|e| e.object()).and_then(|p| p.int("NSAlignment")) {
+        Some(1) => TextAlign::Right,
+        Some(2) => TextAlign::Center,
+        Some(3) => TextAlign::Justify,
+        _ => TextAlign::Left,
+    };
+    let size = attrs.entry("_CFZ").and_then(|e| e.real()).unwrap_or(64.0) as f32;
+    Some(
+        LayerText {
+            text: words,
+            font: spaced(family),
+            style: if style.is_empty() { "Regular".to_owned() } else { spaced(style) },
+            size,
+            opacity: color.and_then(|c| c.real("UIAlpha")).unwrap_or(1.0) as f32,
+            align,
+            vertical: attrs.entry("CTVerticalForms").and_then(|e| e.int()).is_some_and(|v| v != 0),
+            color: rgb,
+            origin: origin.map(|v| v as f32),
+            width: t.real("width").unwrap_or(0.0) as f32,
+            ..LayerText::default()
+        }
+        .sanitized(),
+    )
 }
 
 /// `src` (`w` × `h`, `bpp` bytes a pixel, top row first) turned `turns` quarter turns clockwise,
@@ -381,9 +471,12 @@ fn add_item(
                 .or_else(|| item.int("extendedBlend"))
                 .or_else(|| item.int("blend"))
                 .unwrap_or(0);
+            let text = layer_text(canvas, item);
+            // a text layer without a name of its own is named after its text, as ours are
+            let name = item.string("name").or_else(|| text.as_ref().and_then(LayerText::name));
             layers.push(Layer {
                 id: lid,
-                name: item.string("name").unwrap_or_else(|| "Layer".to_owned()),
+                name: name.unwrap_or_else(|| "Layer".to_owned()),
                 visible: !item.bool("hidden").unwrap_or(false),
                 opacity: item.real("opacity").unwrap_or(1.0) as f32,
                 blend: blend_from(blend),
@@ -394,7 +487,7 @@ fn add_item(
                 kind: LayerKind::Paint,
                 parent,
                 collapsed: false,
-                text: None,
+                text,
                 private: item.bool("private").unwrap_or(false),
                 assisted: item.bool("perspectiveAssisted").unwrap_or(false),
             });
@@ -1302,6 +1395,75 @@ mod tests {
         assert!(read(&pack(&doc)).unwrap().document.animation.unwrap().pages);
         doc.animation = None;
         assert!(read(&pack(&doc)).unwrap().document.animation.is_none());
+    }
+
+    /// A text layer's archived text (as the samples have it): its box placed by `transform` on
+    /// a canvas `size` square as kept, turned `orientation`.
+    fn text_package(transform: &str, orientation: i64, size: u32) -> Vec<u8> {
+        let mut b = Builder::new();
+        let words = b.object(
+            &["NSMutableString", "NSString", "NSObject"],
+            vec![("NS.string", Value::String("Hi there".into()))],
+        );
+        let paragraph = b
+            .object(&["NSMutableParagraphStyle", "NSParagraphStyle", "NSObject"], vec![("NSAlignment", Value::Int(2))]);
+        let colour = b.object(
+            &["UIColor", "NSObject"],
+            vec![
+                ("UIRed", Value::Real(1.07)),
+                ("UIGreen", Value::Real(0.5)),
+                ("UIBlue", Value::Real(0.2)),
+                ("UIAlpha", Value::Real(1.0)),
+            ],
+        );
+        let keys = ["NSParagraphStyle", "_CFN", "NSColor", "_CFZ"].map(|k| b.string(k)).to_vec();
+        let font = b.string("HelveticaNeue-Medium");
+        let attributes = b.object(
+            &["NSDictionary", "NSObject"],
+            vec![
+                ("NS.keys", Value::Array(keys)),
+                ("NS.objects", Value::Array(vec![paragraph, font, colour, Value::Real(176.0)])),
+            ],
+        );
+        let attributed = b.object(
+            &["NSMutableAttributedString", "NSAttributedString", "NSObject"],
+            vec![("NSString", words), ("NSAttributes", attributes)],
+        );
+        let transform = b.string(transform);
+        let text = b.object(
+            &["ValkyrieText", "NSObject"],
+            vec![("attributedString", attributed), ("width", Value::Real(1344.0)), ("transform", transform)],
+        );
+        let uuid = b.string("T");
+        let layer = b.object(&["SilicaLayer", "NSObject"], vec![("UUID", uuid), ("text", text)]);
+        let layers = b.array(vec![layer], true);
+        let size = b.string(&format!("{{{size}, {size}}}"));
+        let root = b.object(
+            &["SilicaDocument", "NSObject"],
+            vec![("size", size), ("orientation", Value::Int(orientation)), ("layers", layers)],
+        );
+        let mut z = ZipWriter::new();
+        z.add("Document.archive", &b.finish(root));
+        z.finish()
+    }
+
+    #[test]
+    fn a_text_layer_keeps_its_words_and_look_its_box_where_it_shows() {
+        // upright, and made upside down (its box turned with the canvas): the same place shown
+        for (transform, orientation) in [("[1, 0, 0, 1, 352, 1909]", 1), ("[-1, 0, -0, -1, 1696, 139]", 2)] {
+            let back = read(&text_package(transform, orientation, 2048)).unwrap();
+            let layer = back.document.layers().iter().find(|l| l.text.is_some()).unwrap();
+            assert_eq!(layer.name, "Hi there");
+            let t = layer.text.as_ref().unwrap();
+            assert_eq!((t.text.as_str(), t.font.as_str(), t.style.as_str()), ("Hi there", "Helvetica Neue", "Medium"));
+            assert_eq!((t.size, t.align, t.width), (176.0, TextAlign::Center, 1344.0));
+            assert_eq!(t.origin, [352.0, 139.0], "orientation {orientation}");
+            // an sRGB canvas: the colour past sRGB clipped to it
+            assert_eq!(t.color, [1.0, 0.5, 0.2]);
+        }
+        // turned on the canvas: kept as its pixels alone
+        let back = read(&text_package("[0, 1, -1, 0, 1000, 1000]", 1, 2048)).unwrap();
+        assert!(back.document.layers().iter().all(|l| l.text.is_none()));
     }
 
     #[test]
