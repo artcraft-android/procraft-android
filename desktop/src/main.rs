@@ -246,6 +246,8 @@ fn window_icon() -> Option<winit::window::Icon> {
 
 /// Tap Assistance holds a finger's touch where it landed this long.
 const TAP_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
+/// How far it may drift meanwhile and still be held (points): farther, it is a scroll or a drag.
+const TAP_DRIFT: f64 = 24.0;
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -719,19 +721,26 @@ impl App {
 
     /// Tap Assistance: for its first moments a lone finger's touch stays where it landed (its
     /// moves held back, its lift put back there), so a tap that drifts still lands where it began.
-    /// More fingers, a pen, or a touch held longer go on as they are. None: the event is held back.
+    /// More fingers, a pen, a touch held longer, or one gone farther than a drift (a list scrolled)
+    /// go on as they are. None: the event is held back.
     fn tap_assist(&mut self, event: WindowEvent) -> Option<WindowEvent> {
         let WindowEvent::Touch(touch) = &event else { return Some(event) };
         if !self.ui.tap_assistance() || touch.force.is_some() {
             return Some(event);
         }
         let held = self.tap_held.filter(|(id, _, _)| *id == touch.id);
+        let drift = TAP_DRIFT * self.screen.as_ref().map_or(1.0, |s| s.window.scale_factor());
         match touch.phase {
             // a second finger lets the first go on as it is
             winit::event::TouchPhase::Started if self.tap_held.is_some() => self.tap_held = None,
             winit::event::TouchPhase::Started => self.tap_held = Some((touch.id, touch.location, Instant::now())),
             winit::event::TouchPhase::Moved => match held {
-                Some((_, _, since)) if since.elapsed() <= TAP_HOLD => return None,
+                Some((_, at, since))
+                    if since.elapsed() <= TAP_HOLD
+                        && (touch.location.x - at.x).hypot(touch.location.y - at.y) <= drift =>
+                {
+                    return None;
+                }
                 Some(_) => self.tap_held = None,
                 None => {}
             },

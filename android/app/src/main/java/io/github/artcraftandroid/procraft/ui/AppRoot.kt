@@ -86,6 +86,8 @@ fun AppRoot(vm: CanvasViewModel) {
                 ),
             ) {
                 AndroidView(factory = { CanvasSurfaceView(it, vm) }, modifier = Modifier.fillMaxSize())
+                // the drawing guide is the canvas's: under every bar and panel
+                GuideOverlay(vm)
                 if (vm.transforming) TransformOverlay(vm)
                 if (vm.selecting) SelectionOverlay(vm, Pc.BarHeight)
                 if (vm.panel != Panel.NONE) {
@@ -243,7 +245,6 @@ fun AppRoot(vm: CanvasViewModel) {
                 ) { TimeLapseReplay(vm) }
                 // the gallery zooming into the artwork as it opens, over everything
                 ZoomingGallery(vm, overlay = true)
-                GuideOverlay(vm)
                 if (vm.adjustment == Adjustment.CLONE) ClonePuck(vm)
                 if (vm.recoloring) RecolorReticle(vm)
                 QuickShapeHandles(vm)

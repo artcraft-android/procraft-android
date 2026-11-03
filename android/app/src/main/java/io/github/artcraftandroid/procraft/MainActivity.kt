@@ -21,6 +21,9 @@ import io.github.artcraftandroid.procraft.ui.AppRoot
 /** How long a finger's touch stays where it landed with tap assistance on. */
 private const val TAP_HOLD_MS = 300L
 
+/** How far it may drift meanwhile and still be held (dp): farther, it is a scroll or a drag and moves. */
+private const val TAP_DRIFT_DP = 24f
+
 class MainActivity : ComponentActivity() {
     private val vm: CanvasViewModel by viewModels()
 
@@ -115,7 +118,8 @@ class MainActivity : ComponentActivity() {
     /**
      * Tap assistance: for its first moments a finger's touch stays where it landed (its moves are
      * held back and its lift is put back there), so a tap that drifts still lands where it began.
-     * More fingers, or a touch held longer, go on as they are.
+     * More fingers, a touch held longer, or one gone farther than a drift (a list scrolled) go on
+     * as they are.
      */
     override fun dispatchTouchEvent(e: android.view.MotionEvent): Boolean {
         if (!vm.tapAssistance || e.getToolType(0) != android.view.MotionEvent.TOOL_TYPE_FINGER) return super.dispatchTouchEvent(e)
@@ -126,7 +130,9 @@ class MainActivity : ComponentActivity() {
             }
             android.view.MotionEvent.ACTION_POINTER_DOWN, android.view.MotionEvent.ACTION_CANCEL -> heldAt = null
             android.view.MotionEvent.ACTION_MOVE -> {
-                if (heldAt != null && e.eventTime - heldSince <= TAP_HOLD_MS) return true
+                val at = heldAt
+                val drift = TAP_DRIFT_DP * resources.displayMetrics.density
+                if (at != null && e.eventTime - heldSince <= TAP_HOLD_MS && kotlin.math.hypot(e.x - at.x, e.y - at.y) <= drift) return true
                 heldAt = null
             }
             android.view.MotionEvent.ACTION_UP -> {

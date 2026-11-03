@@ -65,6 +65,10 @@ private val CapsuleFill get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF1
 private val CapsuleEdge get() = if (Pc.light) Color(0xFFE0E0E0) else Color(0xFF373737)
 private val DoneBlue = Color(0xFF0190FF)
 
+/** Where the last row the keypad types into (DPI) ends, down from the top: the page's 120, two
+ * rows and their line, 24 between the groups, one row. */
+private val TypedBottom = 286.dp
+
 /** The units sizes are typed in: the key's name, the unit's (as presets keep it) and its mark. */
 private enum class SizeUnit(val label: String, val key: String, val mark: String) {
     MILLIMETERS("Millimeters", "mm", "mm"), CENTIMETERS("Centimeters", "cm", "cm"), INCHES("Inches", "in", "″"), PIXELS("Pixels", "px", "px")
@@ -263,6 +267,7 @@ fun CustomCanvasScreen(vm: CanvasViewModel, onMade: () -> Unit) {
             Keypad(
                 Modifier.align(Alignment.BottomCenter),
                 wide,
+                maxHeight - TypedBottom,
                 unit,
                 onUnit = {
                     commit()
@@ -364,16 +369,19 @@ private fun SwitchLine(label: String, on: Boolean, onChange: (Boolean) -> Unit) 
 /**
  * The keypad: units on the left, the digits, and Backspace, Next and Done on the right. Upright its
  * keys are 120 x 71 (8 apart down) in a 342 panel; on a [wide] screen 150 x 87.5 (9 apart) in a
- * 457 one, the rows from 47 below its top.
+ * 457 one, the rows from 47 below its top. Where the screen leaves it less than that ([room]), it
+ * and its keys are that much shorter (to half), so it stays under the rows it types into.
  */
 @Composable
-private fun Keypad(modifier: Modifier, wide: Boolean, unit: SizeUnit, onUnit: (SizeUnit) -> Unit, onKey: (String) -> Unit, onNext: () -> Unit, onDone: () -> Unit) {
+private fun Keypad(modifier: Modifier, wide: Boolean, room: Dp, unit: SizeUnit, onUnit: (SizeUnit) -> Unit, onKey: (String) -> Unit, onNext: () -> Unit, onDone: () -> Unit) {
+    val full = if (wide) 457.dp else 342.dp
+    val fit = (room / full).coerceIn(0.5f, 1f)
     val w = if (wide) 150.dp else 120.dp
-    val h = if (wide) 87.5.dp else 71.dp
-    val down = if (wide) 9.dp else 8.dp
+    val h = (if (wide) 87.5.dp else 71.dp) * fit
+    val down = (if (wide) 9.dp else 8.dp) * fit
     val across = 9.dp
     Box(
-        modifier.fillMaxWidth().height(if (wide) 457.dp else 342.dp).background(KeypadFill).padding(top = if (wide) 47.dp else 0.dp),
+        modifier.fillMaxWidth().height(full * fit).background(KeypadFill).padding(top = if (wide) 47.dp * fit else 0.dp),
         contentAlignment = if (wide) Alignment.TopCenter else Alignment.Center,
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(30.dp)) {

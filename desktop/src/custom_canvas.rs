@@ -36,6 +36,9 @@ const ROW: f32 = 47.0;
 /// The page, right of the sections.
 const PAGE_LEFT: f32 = 372.0;
 const PAGE_TOP: f32 = 120.0;
+/// Where the last row the keypad types into (DPI) ends, down from the top: two rows and their
+/// line, 24 between the groups, one row.
+const TYPED_BOTTOM: f32 = PAGE_TOP + ROW * 2.0 + 1.0 + 24.0 + ROW;
 
 /// The units sizes are typed in: the key's name, the unit's (as presets keep it) and its mark.
 const UNITS: [(&str, &str, &str); 4] =
@@ -523,17 +526,21 @@ impl CustomCanvas {
 
     /// The keypad: units on the left, the digits, and Backspace, Next and Done on the right. On a
     /// wide window its keys are 150 x 87.5 (9 apart down) in a 457 panel, the rows from 47 below
-    /// its top; upright 120 x 71 (8 apart) in a 342 one, centred in it.
+    /// its top; upright 120 x 71 (8 apart) in a 342 one, centred in it. In a window too short for
+    /// that, it and its keys are that much shorter (to half), so it stays under the rows it types
+    /// into.
     fn keypad(&mut self, ui: &egui::Ui, screen: Rect, wide: bool) {
+        let full = if wide { 457.0 } else { 342.0 };
+        let fit = ((screen.height() - TYPED_BOTTOM) / full).clamp(0.5, 1.0);
         let (w, h, down, across) = if wide { (150.0, 87.5, 9.0, 9.0) } else { (120.0, 71.0, 8.0, 9.0) };
-        let panel_height = if wide { 457.0 } else { 342.0 };
-        let panel = Rect::from_min_max(pos2(screen.left(), screen.bottom() - panel_height), screen.max);
+        let (h, down) = (h * fit, down * fit);
+        let panel = Rect::from_min_max(pos2(screen.left(), screen.bottom() - full * fit), screen.max);
         ui.painter().rect_filled(panel, 0, argb(KEYPAD));
         // the panel takes its own presses
         ui.interact(panel, ui.scope_id().with("keypad"), Sense::click());
         let content = vec2(w + 30.0 + w * 3.0 + across * 2.0 + 30.0 + w, h * 4.0 + down * 3.0);
         let left = panel.center().x - content.x / 2.0;
-        let top = if wide { panel.top() + 47.0 } else { panel.center().y - content.y / 2.0 };
+        let top = if wide { panel.top() + 47.0 * fit } else { panel.center().y - content.y / 2.0 };
         let key = |label: &str, rect: Rect, fill: Themed, ink: Color32, size: f32, id: (&str, usize)| {
             ui.painter().rect_filled(rect, 8.0, argb(fill));
             text(ui.painter(), rect.center(), Align2::CENTER_CENTER, label, size, Weight::Regular, ink);
