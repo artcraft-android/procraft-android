@@ -1,18 +1,20 @@
 //! Frames as an MP4 video through the system's own encoder, as the Android app's VideoWriter does
 //! with MediaCodec: H.264 or HEVC, at a frame rate, the bit rate four bits a pixel a second (at
-//! least a megabit). On Windows that is Media Foundation; elsewhere there is none yet.
+//! least a megabit). On Windows that is Media Foundation; elsewhere the system's ffmpeg, the
+//! frames piped to it raw (and read back from it the same way).
 
 use std::path::Path;
 
+/// What is said where videos are made and read with ffmpeg and it isn't installed.
+pub const NO_FFMPEG: &str = "Making and opening videos needs ffmpeg: install it from your system's packages.";
+
 /// `bits_per_pixel` bits a pixel a second, at least a megabit.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn bit_rate(width: u32, height: u32, bits_per_pixel: u32) -> u32 {
     width.saturating_mul(height).saturating_mul(bits_per_pixel).max(1_000_000)
 }
 
 /// The size a video of a `width` × `height` picture is made at: fitted to `max_side`, even, and
 /// as large as `fits` (the encoder taking it) allows, a tenth smaller at a time.
-#[cfg_attr(not(windows), allow(dead_code))]
 pub fn fit(width: u32, height: u32, max_side: u32, mut fits: impl FnMut(u32, u32) -> bool) -> Option<(u32, u32)> {
     let mut scale = (max_side as f32 / width.max(height).max(1) as f32).min(1.0);
     for _ in 0..40 {
@@ -221,8 +223,7 @@ pub fn read_frames(path: &Path, mut each: impl FnMut(Vec<u8>, u32, u32, f64)) ->
     }
     #[cfg(not(windows))]
     {
-        let _ = (path, &mut each);
-        Err("videos can't be read on this system yet".into())
+        ffmpeg::read(path, &mut each)
     }
 }
 
@@ -269,7 +270,157 @@ pub fn write_mp4(
     }
     #[cfg(not(windows))]
     {
-        let _ = (out, width, height, max_side, fps, hevc, bits_per_pixel, count, frame);
-        Err("videos can't be made on this system yet".into())
+        let (w, h) = fit(width, height, max_side, |_, _| true).ok_or("no size fits")?;
+        ffmpeg::write(out, w, h, fps, hevc, bit_rate(w, h, bits_per_pixel), count, frame)?;
+        Ok((w, h))
+    }
+}
+
+/// The system's ffmpeg, where the system has no encoder of its own to call: frames piped to it as
+/// raw RGBA, and read back from it the same way.
+#[cfg_attr(windows, allow(dead_code))]
+mod ffmpeg {
+    use std::io::{ErrorKind, Read, Write};
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    /// ffmpeg (or ffprobe) to run, its output to read; [`super::NO_FFMPEG`] if it isn't there.
+    fn run(program: &str) -> Command {
+        let mut c = Command::new(program);
+        c.arg("-v").arg("error");
+        c
+    }
+
+    fn missing(e: &std::io::Error) -> String {
+        if e.kind() == ErrorKind::NotFound { super::NO_FFMPEG.to_owned() } else { e.to_string() }
+    }
+
+    /// `count` frames of `width` × `height` (even) as an MP4 at `out`: H.264, or HEVC, at `fps` and
+    /// `bit_rate` bits a second; `frame(i, w, h)` gives frame `i` as straight RGBA rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write(
+        out: &Path,
+        width: u32,
+        height: u32,
+        fps: u32,
+        hevc: bool,
+        bit_rate: u32,
+        count: usize,
+        frame: impl Fn(usize, u32, u32) -> Option<Vec<u8>>,
+    ) -> Result<(), String> {
+        let _ = std::fs::remove_file(out);
+        let mut child = run("ffmpeg")
+            .args(["-y", "-f", "rawvideo", "-pix_fmt", "rgba"])
+            .args(["-s", &format!("{width}x{height}"), "-r", &fps.to_string(), "-i", "-"])
+            // the codec's first encoder there is (libx264, libx265 or another), as players take it
+            .args(["-c:v", if hevc { "hevc" } else { "h264" }, "-pix_fmt", "yuv420p"])
+            .args(["-b:v", &bit_rate.to_string(), "-movflags", "+faststart"])
+            .args(if hevc { &["-tag:v", "hvc1"][..] } else { &[][..] })
+            .arg(out)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| missing(&e))?;
+        let fed = (|| {
+            let mut input = child.stdin.take().ok_or("ffmpeg took no input")?;
+            for i in 0..count {
+                let rgba = frame(i, width, height).ok_or("a frame couldn't be drawn")?;
+                input.write_all(&rgba).map_err(|e| e.to_string())?;
+            }
+            Ok::<(), String>(())
+        })();
+        // its input closed (dropped above), it finishes the file
+        let done = child.wait_with_output().map_err(|e| e.to_string())?;
+        fed?;
+        if !done.status.success() {
+            let _ = std::fs::remove_file(out);
+            return Err(format!("ffmpeg: {}", String::from_utf8_lossy(&done.stderr).trim()));
+        }
+        Ok(())
+    }
+
+    /// The video at `path` frame by frame: `each(rgba, width, height, seconds)`, straight RGBA;
+    /// how many frames.
+    pub fn read(path: &Path, each: &mut dyn FnMut(Vec<u8>, u32, u32, f64)) -> Result<u32, String> {
+        let probe = run("ffprobe")
+            .args(["-select_streams", "v:0", "-show_entries", "stream=width,height,avg_frame_rate", "-of", "csv=p=0"])
+            .arg(path)
+            .output()
+            .map_err(|e| missing(&e))?;
+        let text = String::from_utf8_lossy(&probe.stdout);
+        let mut fields = text.trim().split(',');
+        let mut number = || fields.next().map(str::trim).unwrap_or("");
+        let (width, height): (u32, u32) =
+            (number().parse().map_err(|_| "no video size")?, number().parse().map_err(|_| "no video size")?);
+        let fps = {
+            let rate = number();
+            let (n, d) = rate.split_once('/').unwrap_or((rate, "1"));
+            let (n, d) = (n.parse::<f64>().unwrap_or(0.0), d.parse::<f64>().unwrap_or(1.0));
+            if n > 0.0 && d > 0.0 { n / d } else { 30.0 }
+        };
+        let mut child = run("ffmpeg")
+            .arg("-i")
+            .arg(path)
+            .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| missing(&e))?;
+        let mut output = child.stdout.take().ok_or("ffmpeg gave no output")?;
+        let size = width as usize * height as usize * 4;
+        let mut count = 0u32;
+        loop {
+            let mut rgba = vec![0u8; size];
+            match output.read_exact(&mut rgba) {
+                Ok(()) => {
+                    each(rgba, width, height, f64::from(count) / fps);
+                    count += 1;
+                }
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                Err(e) => {
+                    let _ = child.kill();
+                    return Err(e.to_string());
+                }
+            }
+        }
+        let _ = child.wait();
+        Ok(count)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn frames_made_into_a_video_by_ffmpeg_come_back() {
+            let dir = std::env::temp_dir().join(format!("procraft-ffmpeg-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            let out = dir.join("made.mp4");
+            // six frames, each a flat colour
+            let colour = |i: usize| [(i * 40) as u8, 200 - (i * 30) as u8, 90, 255];
+            let made = super::write(&out, 64, 48, 6, false, 1_000_000, 6, |i, w, h| {
+                Some(colour(i).repeat(w as usize * h as usize))
+            });
+            match made {
+                Err(e) if e == super::super::NO_FFMPEG => return eprintln!("skipped: no ffmpeg"),
+                other => other.unwrap(),
+            }
+            let mut frames = Vec::new();
+            let count = super::read(&out, &mut |rgba, w, h, at| frames.push((rgba, w, h, at))).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(count, 6);
+            for (i, (rgba, w, h, at)) in frames.iter().enumerate() {
+                assert_eq!((*w, *h), (64, 48));
+                assert!((at - i as f64 / 6.0).abs() < 1e-6);
+                // the middle pixel near its colour (the video's own rounding and colour subsampling)
+                let mid = ((24 * 64 + 32) * 4) as usize;
+                let want = colour(i);
+                assert!(
+                    (0..3).all(|c| (i32::from(rgba[mid + c]) - i32::from(want[c])).abs() <= 6),
+                    "{i}: {:?}",
+                    &rgba[mid..mid + 4]
+                );
+            }
+        }
     }
 }

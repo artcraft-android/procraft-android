@@ -459,7 +459,7 @@ fn open_pdf(path: &Path, name: &str) -> Result<Arc<CanvasSession>, String> {
     let opened = crate::pdf::draw_pages(path, &pages)
         .map_err(|e| {
             log::error!("drawing a PDF's pages: {e}");
-            unreadable()
+            if e.to_string() == crate::pdf::NO_POPPLER { crate::pdf::NO_POPPLER.to_owned() } else { unreadable() }
         })
         .and_then(|(count, w, h)| {
             let dir = artwork.to_string_lossy().into_owned();

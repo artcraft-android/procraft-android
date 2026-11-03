@@ -2065,6 +2065,7 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
         });
         return match (added, read) {
             (0, Ok(_)) if full => Inserted::Frames { added: 0, full: true, assist: false },
+            (0, Err(e)) if e == crate::video::NO_FFMPEG => Inserted::Failed(crate::video::NO_FFMPEG),
             (0, _) => Inserted::Failed("This video can't be opened."),
             _ => Inserted::Frames { added, full, assist: settings.is_none_or(|a| a.pages) },
         };

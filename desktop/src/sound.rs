@@ -1,5 +1,6 @@
 //! Feedback Sounds' click, as the Android app plays the system's key click: a few milliseconds of
-//! our own, played by the system from memory (PlaySound on Windows); elsewhere none yet.
+//! our own, played by the system (PlaySound on Windows, from memory; elsewhere the system's own
+//! player of sounds, from a file).
 
 /// The click's sample rate, how long it lasts and how fast it dies away (a second's worth).
 const RATE: u32 = 44_100;
@@ -7,7 +8,6 @@ const LENGTH_MS: u32 = 14;
 const DECAY: f32 = 700.0;
 
 /// The click as a WAV file: a short burst of noise over a falling tone, dying away fast.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn click_wav() -> Vec<u8> {
     let n = (RATE * LENGTH_MS / 1000) as usize;
     let mut noise = 0x2545_f491_u32;
@@ -56,8 +56,46 @@ pub fn click() {
     let _ = unsafe { PlaySoundW(PCWSTR(wav.as_ptr().cast()), None, SND_MEMORY | SND_ASYNC | SND_NODEFAULT) };
 }
 
+/// The players of sounds tried in turn (PipeWire's, PulseAudio's, ALSA's), with what quiets each.
 #[cfg(not(windows))]
-pub fn click() {}
+const PLAYERS: [(&str, &[&str]); 3] = [("pw-play", &[]), ("paplay", &[]), ("aplay", &["-q"])];
+
+/// The first of [`PLAYERS`] there is, handed the click written once to a file (in the user's own
+/// runtime folder where there is one); with none of them the click is silent.
+#[cfg(not(windows))]
+pub fn click() {
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The player last found to be there, its place in [`PLAYERS`]: past the end, none is.
+    static PLAYER: AtomicUsize = AtomicUsize::new(0);
+    static FILE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    let file = FILE.get_or_init(|| {
+        let folder = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
+        let path = folder.join("procraft-click.wav");
+        std::fs::write(&path, click_wav()).ok().map(|()| path)
+    });
+    let Some(file) = file else { return };
+    let mut at = PLAYER.load(Ordering::Relaxed);
+    while let Some((player, quiet)) = PLAYERS.get(at) {
+        let started = Command::new(player)
+            .args(*quiet)
+            .arg(file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Ok(mut playing) = started {
+            // waited for away from the window, so it doesn't linger once done
+            std::thread::spawn(move || playing.wait());
+            return;
+        }
+        at += 1;
+        PLAYER.store(at, Ordering::Relaxed);
+    }
+}
 
 #[cfg(test)]
 mod tests {

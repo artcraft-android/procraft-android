@@ -142,7 +142,11 @@ impl TimeLapseUi {
                         Ok(_) => {}
                         Err(e) if !cancelled => {
                             log::warn!("exporting the time-lapse: {e}");
-                            said = Some("The time-lapse video couldn't be made.");
+                            said = Some(if e == crate::video::NO_FFMPEG {
+                                crate::video::NO_FFMPEG
+                            } else {
+                                "The time-lapse video couldn't be made."
+                            });
                         }
                         Err(_) => {}
                     }
