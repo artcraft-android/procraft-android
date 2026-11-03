@@ -507,6 +507,10 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if let Some(canvas) = st.canvas.as_mut() {
+            // the layer's mask is pushed along with it
+            if let Some(mask) = st.doc.mask_of(st.doc.current()) {
+                canvas.transform_also(mask);
+            }
             canvas.begin_liquify();
         }
         st.adjust(Filter::Liquify { amount: 1.0 });

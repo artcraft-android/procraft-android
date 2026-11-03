@@ -354,7 +354,9 @@ impl CanvasSession {
         let bounds =
             if st.transform_guides.snapping { snap_bounds(&st.doc, canvas, gpu, &targets) } else { Vec::new() };
         st.snap_pending = (!st.transform_guides.snapping).then(|| targets.clone());
-        canvas.begin_transform_layers(&targets);
+        // each layer's mask moves with it (the box is the layers' own)
+        let moved: Vec<LayerId> = targets.iter().flat_map(|&t| std::iter::once(t).chain(st.doc.mask_of(t))).collect();
+        canvas.begin_transform_layers(&moved);
         let mut t = Transform::new(x, y, w, h, hull);
         t.set_snap_targets(&bounds);
         st.transform = Some(t);

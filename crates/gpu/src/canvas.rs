@@ -2823,6 +2823,12 @@ impl Canvas {
         self.ops.push(Op::LiquifyBegin);
     }
 
+    /// Layer `layer` is edited along with the one begun with [`Self::begin_transform`]: liquify
+    /// pushes it the same way (a layer's mask), and the edit's end keeps or puts back both.
+    pub fn transform_also(&mut self, layer: LayerId) {
+        self.ops.push(Op::TransformAlso(layer));
+    }
+
     /// The adjustment being edited shows only where it is painted on from now on: strokes begun with
     /// [`Self::begin_pencil_stroke`] paint where (within the selection).
     pub fn begin_pencil(&mut self) {
@@ -4685,6 +4691,19 @@ impl Canvas {
         out.set_bind_group(2, last, &[]);
         out.draw(0..3, 0..1);
         drop(out);
+        // liquify pushes what is edited along with it (a layer's mask) the same way
+        if let (Filter::Liquify { .. }, Some(field)) = (filter, &self.liquify) {
+            for more in &self.transform_more {
+                let Some(target) = self.layers.get(&more.layer) else { continue };
+                let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
+                let mut along = render_pass(encoder, "liquify along", &target.view, clear);
+                along.set_pipeline(pipeline);
+                along.set_bind_group(0, &more.bind, &[]);
+                along.set_bind_group(1, &self.uniform_bind, &[offset]);
+                along.set_bind_group(2, &field.bind, &[]);
+                along.draw(0..3, 0..1);
+            }
+        }
         self.dirty = self.full();
     }
 

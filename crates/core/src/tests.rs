@@ -1175,6 +1175,34 @@ fn content_shape_holds_every_painted_pixel() {
 }
 
 #[test]
+fn a_layer_s_mask_moves_with_it_in_a_transform() {
+    use crate::transform::TransformHandle;
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let layer = s.layers().into_iter().find(|l| l.current).unwrap().id;
+    // its mask hides the dot
+    s.add_mask(layer).unwrap();
+    s.set_color(0.0, 0.0, 0.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert_eq!(pixel(&s, 30, 30), [255, 255, 255, 255]);
+    // the layer moved: the dot still hidden where it went
+    assert!(s.select_layer(layer));
+    assert!(s.transform_begin().is_some());
+    s.transform_grab(TransformHandle::Move, 30.0, 30.0);
+    s.transform_drag(70.0, 70.0);
+    s.transform_release();
+    s.transform_end(true);
+    assert_eq!(pixel(&s, 70, 70), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 30, 30), [255, 255, 255, 255]);
+    // undone: both back, the dot hidden where it was
+    s.undo();
+    assert_eq!(pixel(&s, 30, 30), [255, 255, 255, 255]);
+}
+
+#[test]
 fn a_transform_moves_the_layer_as_one_undo_step() {
     use crate::transform::{Interpolation, TransformAction, TransformHandle, TransformKind};
     let Some(s) = session(100, 100) else { return };
@@ -1744,6 +1772,30 @@ fn liquify_moves_paint_as_one_undo_step() {
     s.adjust_end(true);
     s.undo();
     assert_eq!(pixel(&s, 30, 50), [0, 0, 0, 255]);
+}
+
+#[test]
+fn liquify_pushes_a_layer_s_mask_along() {
+    use crate::adjust::{LiquifyBrush, LiquifyKind};
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 50.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let layer = s.layers().into_iter().find(|l| l.current).unwrap().id;
+    // its mask hides the dot
+    s.add_mask(layer).unwrap();
+    s.set_color(0.0, 0.0, 0.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 50.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert!(s.select_layer(layer));
+    assert!(s.liquify_begin());
+    let brush = LiquifyBrush { kind: LiquifyKind::Push, size: 0.15, pressure: 1.0, distortion: 0.0 };
+    s.liquify_stroke((0..=20).flat_map(|i| [30.0 + i as f32, 50.0, 1.0]).collect(), true, brush);
+    // pushed right, the dot still hidden where it went
+    assert_eq!(pixel(&s, 45, 50), [255, 255, 255, 255]);
+    s.adjust_end(true);
+    assert_eq!(pixel(&s, 45, 50), [255, 255, 255, 255]);
+    assert_eq!(pixel(&s, 30, 50), [255, 255, 255, 255]);
 }
 
 #[test]
