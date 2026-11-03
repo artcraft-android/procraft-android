@@ -8406,4 +8406,13 @@ fn new_text_is_sized_and_placed_as_it_looks_on_screen() {
     // a point of half the pixels: half as big on the canvas, the same on screen
     let half = s.new_text_placed(text_info("Text"), 2266.0, 1488.0, 1.0);
     assert!((half.size - 64.0).abs() < 1e-3 && (half.width - 488.448).abs() < 1e-3);
+    // a text kept in another typeface: new text starts in it (its size still the screen's)
+    let id = s.text_begin(None, t.clone()).unwrap();
+    let serif = crate::TextInfo { font: "serif".to_owned(), style: "Bold".to_owned(), ..t.clone() };
+    assert!(s.set_text(serif));
+    s.text_end(true);
+    assert!(s.layer_text(id).is_some());
+    let next = s.new_text_placed(text_info("Text"), 2266.0, 1488.0, 2.0);
+    assert_eq!((next.font.as_str(), next.style.as_str()), ("serif", "Bold"));
+    assert!((next.size - 128.0).abs() < 1e-3);
 }

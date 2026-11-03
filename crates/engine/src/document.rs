@@ -248,6 +248,18 @@ impl LayerText {
         self
     }
 
+    /// Its look as new text takes it on: the typeface and style, the alignment and whether it
+    /// runs down; nothing else (new text is sized by the screen and coloured by the brush).
+    pub fn look(&self) -> LayerText {
+        LayerText {
+            font: self.font.clone(),
+            style: self.style.clone(),
+            align: self.align,
+            vertical: self.vertical,
+            ..LayerText::default()
+        }
+    }
+
     /// A layer name from the text: its first line, shortened.
     pub fn name(&self) -> Option<String> {
         let line = self.text.lines().map(str::trim).find(|l| !l.is_empty())?;
@@ -399,6 +411,9 @@ pub struct Document {
     /// The layer shown alone, the others left out of the picture (solo visibility).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solo: Option<LayerId>,
+    /// The look of the text last edited (see [`LayerText::look`]), which new text starts with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_style: Option<LayerText>,
 }
 
 /// The layers a file lists, as many as can be read: in a damaged file a layer with fields that
@@ -481,6 +496,7 @@ impl Document {
             profile: crate::profile::Profile::Srgb,
             icc: None,
             solo: None,
+            text_style: None,
         };
         doc.add_layer();
         doc

@@ -135,6 +135,12 @@ impl CanvasSession {
         let size = NEW_TEXT_POINTS * per_point;
         let box_width = NEW_TEXT_BOX_POINTS * per_point;
         let mut info = TextInfo { size, width: box_width, x: cx - box_width / 2.0, y: 0.0, ..base };
+        // in the last text's typeface, style, alignment and direction
+        if let Some(style) = self.shared.lock().doc.text_style.clone() {
+            let mut look: LayerText = info.into();
+            (look.font, look.style, look.align, look.vertical) = (style.font, style.style, style.align, style.vertical);
+            info = TextInfo::from(&look);
+        }
         let tall = crate::text_draw::text_box(info.clone()).get(3).copied().unwrap_or(size);
         let canvas_height = self.shared.lock().doc.height() as f32;
         info.y = (cy - tall / 2.0).clamp(0.0, (canvas_height - tall).max(0.0));
@@ -228,6 +234,8 @@ impl CanvasSession {
             st.doc.keep_ids_from(&edited);
         }
         if keep {
+            // new text starts with this look
+            st.doc.text_style = st.doc.layer(layer).and_then(|l| l.text.as_ref()).map(LayerText::look);
             // the step made, so undo and redo of it can go back to editing this text
             st.flush();
             if let Some(step) = st.canvas.as_ref().and_then(procraft_gpu::Canvas::undo_step) {

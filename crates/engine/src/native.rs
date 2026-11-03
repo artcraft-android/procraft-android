@@ -149,6 +149,10 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
         document.background = [c[0], c[1], c[2]].map(|v| v.clamp(0.0, 1.0));
     }
     document.background_visible = !root.bool("backgroundHidden").unwrap_or(false);
+    // the last text's look, for new text
+    if let Some((_, attrs)) = root.object("lastTextStyling").as_ref().and_then(attributed) {
+        document.text_style = Some(text_look(&canvas, &attrs).look());
+    }
     // a drawing guide kept means it has been on: the layers' menus offer Drawing Assist
     if let Some(g) = root.object("drawingguide") {
         read_guide(&g, &canvas, &mut document.guide);
@@ -449,11 +453,7 @@ fn shown_turns(orientation: i64) -> u32 {
 /// layer has none, or its box is turned or scaled on the canvas (it stays its pixels alone).
 fn layer_text(canvas: &Canvas<'_>, item: &Object<'_>) -> Option<LayerText> {
     let t = item.object("text")?;
-    let s = t.object("attributedString")?;
-    let words = s.string("NSString")?;
-    // one run's attributes, or several (each a dictionary): the first
-    let runs = s.object("NSAttributes")?;
-    let attrs = if runs.raw("NS.keys").is_some() { runs } else { s.array("NSAttributes").into_iter().next()? };
+    let (words, attrs) = attributed(&t.object("attributedString")?)?;
     // the box's own space (x right, y up, from its top left) on the canvas as kept, y up
     let m: Vec<f64> = t
         .string("transform")?
@@ -471,6 +471,29 @@ fn layer_text(canvas: &Canvas<'_>, item: &Object<'_>) -> Option<LayerText> {
     if !near(right, [origin[0] + 1.0, origin[1]]) || !near(down, [origin[0], origin[1] + 1.0]) {
         return None;
     }
+    Some(
+        LayerText {
+            text: words,
+            origin: origin.map(|v| v as f32),
+            width: t.real("width").unwrap_or(0.0) as f32,
+            ..text_look(canvas, &attrs)
+        }
+        .sanitized(),
+    )
+}
+
+/// An attributed string's words and its attributes: one run's, or the first of several (each a
+/// dictionary).
+fn attributed<'a>(s: &Object<'a>) -> Option<(String, Object<'a>)> {
+    let words = s.string("NSString")?;
+    let runs = s.object("NSAttributes")?;
+    let attrs = if runs.raw("NS.keys").is_some() { runs } else { s.array("NSAttributes").into_iter().next()? };
+    Some((words, attrs))
+}
+
+/// A run of text's look from its attributes: the typeface, size, colour (into the canvas's
+/// profile) and opacity, alignment, and whether it runs down.
+fn text_look(canvas: &Canvas<'_>, attrs: &Object<'_>) -> LayerText {
     // the typeface by its PostScript name: "HelveticaNeue-Medium" is Helvetica Neue, Medium (the
     // style after the last hyphen)
     let postscript = attrs.entry("_CFN").and_then(|e| e.string()).unwrap_or_default();
@@ -499,22 +522,16 @@ fn layer_text(canvas: &Canvas<'_>, item: &Object<'_>) -> Option<LayerText> {
         _ => TextAlign::Left,
     };
     let size = attrs.entry("_CFZ").and_then(|e| e.real()).unwrap_or(64.0) as f32;
-    Some(
-        LayerText {
-            text: words,
-            font: spaced(family),
-            style: if style.is_empty() { "Regular".to_owned() } else { spaced(style) },
-            size,
-            opacity: color.and_then(|c| c.real("UIAlpha")).unwrap_or(1.0) as f32,
-            align,
-            vertical: attrs.entry("CTVerticalForms").and_then(|e| e.int()).is_some_and(|v| v != 0),
-            color: rgb,
-            origin: origin.map(|v| v as f32),
-            width: t.real("width").unwrap_or(0.0) as f32,
-            ..LayerText::default()
-        }
-        .sanitized(),
-    )
+    LayerText {
+        font: spaced(family),
+        style: if style.is_empty() { "Regular".to_owned() } else { spaced(style) },
+        size,
+        opacity: color.and_then(|c| c.real("UIAlpha")).unwrap_or(1.0) as f32,
+        align,
+        vertical: attrs.entry("CTVerticalForms").and_then(|e| e.int()).is_some_and(|v| v != 0),
+        color: rgb,
+        ..LayerText::default()
+    }
 }
 
 /// `src` (`w` × `h`, `bpp` bytes a pixel, top row first) turned `turns` quarter turns clockwise,
@@ -786,6 +803,11 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
     let reference_kind = b.string("{0, 0}");
     let reference_size = b.string("{350, 532}");
     let video = write_time_lapse(&mut b, &mut zip, e.time_lapse);
+    // the last text's look, as a run of a space
+    let text_style = match &doc.text_style {
+        Some(t) => attributed_string(&mut b, " ", t, doc.profile),
+        None => Builder::null(),
+    };
     // the drawing guide, once it has been on
     let guide = if doc.guide.set_up || doc.guide.on { guide_object(&mut b, &doc.guide, w, h) } else { Builder::null() };
     let mut fields = vec![
@@ -807,6 +829,7 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
         ("flippedVertically", Value::Bool(false)),
         ("isFirstItemAnimationForeground", Value::Bool(doc.animation.as_ref().is_some_and(|a| a.foreground))),
         ("isLastItemAnimationBackground", Value::Bool(doc.animation.as_ref().is_some_and(|a| a.background))),
+        ("lastTextStyling", text_style),
         ("layers", layers),
         ("legacyBehaviour", Value::Int(1)),
         ("mask", mask),
@@ -1178,8 +1201,19 @@ fn layer_record(
 /// attributes (alignment, typeface by its PostScript name, size, colour in sRGB, upright or
 /// vertical), the box `width` wide, its top left placed on a canvas `h` high as kept, y up.
 fn text_object(b: &mut Builder, t: &LayerText, profile: Profile, h: u32, width: f64) -> Value {
+    let attributed = attributed_string(b, &t.text, t, profile);
+    let [x, y] = t.origin.map(f64::from);
+    let transform = b.string(&format!("[1, 0, 0, 1, {x}, {}]", f64::from(h) - y));
+    b.object(
+        &["ValkyrieText", "NSObject"],
+        vec![("attributedString", attributed), ("width", Value::Real(width)), ("transform", transform)],
+    )
+}
+
+/// `words` as an attributed string of one run with `t`'s look (see [`text_object`]).
+fn attributed_string(b: &mut Builder, words: &str, t: &LayerText, profile: Profile) -> Value {
     let words =
-        b.object(&["NSMutableString", "NSString", "NSObject"], vec![("NS.string", Value::String(t.text.clone()))]);
+        b.object(&["NSMutableString", "NSString", "NSObject"], vec![("NS.string", Value::String(words.to_owned()))]);
     let alignment = match t.align {
         TextAlign::Left => 0,
         TextAlign::Right => 1,
@@ -1226,15 +1260,9 @@ fn text_object(b: &mut Builder, t: &LayerText, profile: Profile, h: u32, width: 
         &["NSDictionary", "NSObject"],
         vec![("NS.keys", Value::Array(keys)), ("NS.objects", Value::Array(values))],
     );
-    let attributed = b.object(
+    b.object(
         &["NSMutableAttributedString", "NSAttributedString", "NSObject"],
         vec![("NSString", words), ("NSAttributes", attributes)],
-    );
-    let [x, y] = t.origin.map(f64::from);
-    let transform = b.string(&format!("[1, 0, 0, 1, {x}, {}]", f64::from(h) - y));
-    b.object(
-        &["ValkyrieText", "NSObject"],
-        vec![("attributedString", attributed), ("width", Value::Real(width)), ("transform", transform)],
     )
 }
 
@@ -1723,6 +1751,11 @@ mod tests {
         assert!(t.color.iter().zip(text.color).all(|(a, b)| (a - b).abs() < 1e-3), "{:?}", t.color);
         assert_eq!(LayerText { color: text.color, ..t.clone() }, text);
         assert_eq!(layer.name, "Two");
+        // the last text's look goes with it
+        let mut styled = doc.clone();
+        styled.text_style = Some(text.look());
+        let back = read(&write(&Export { document: &styled, ..export })).unwrap();
+        assert_eq!(back.document.text_style, Some(text.look()));
     }
 
     #[test]
