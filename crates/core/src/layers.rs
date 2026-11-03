@@ -355,8 +355,9 @@ impl CanvasSession {
                 collapsed: l.collapsed,
                 text: l.text.is_some(),
                 depth: u32::try_from(st.doc.depth(l.id)).unwrap_or(u32::MAX),
-                can_merge: st.doc.merge_target(l.id).is_some(),
-                can_combine: l.kind != LayerKind::Mask && st.doc.below(l.id).is_some(),
+                // as measured, not onto a locked layer: both left out of its menu then
+                can_merge: st.doc.merge_target(l.id).is_some_and(|b| !st.doc.is_locked(b)),
+                can_combine: l.kind != LayerKind::Mask && st.doc.below(l.id).is_some_and(|b| !st.doc.is_locked(b)),
                 can_clip: st.doc.can_clip(l.id),
             })
             .collect()
@@ -729,9 +730,17 @@ impl CanvasSession {
     }
 
     /// Locks layer `id`, or unlocks it: as measured, a layer locked by its group shows locked and
-    /// its Unlock unlocks the group (its own lock, if any, too).
+    /// its Unlock unlocks the group (its own lock, if any, too). The step is named as measured
+    /// (undo says "Undo lock layer", "Undo lock Layer Group").
     pub fn set_layer_locked(&self, id: u64, on: bool) -> bool {
-        self.change(if on { "lock layer" } else { "unlock layer" }, |d| {
+        let group = self.shared.lock().doc.layer(LayerId(id)).is_some_and(|l| l.kind == LayerKind::Group);
+        let name = match (on, group) {
+            (true, false) => "lock layer",
+            (false, false) => "unlock layer",
+            (true, true) => "lock Layer Group",
+            (false, true) => "unlock Layer Group",
+        };
+        self.change(name, |d| {
             let id = LayerId(id);
             let differs = if on { d.layer(id).is_some_and(|l| !l.locked) } else { d.is_locked(id) };
             (differs && d.set_locked(id, on)).then_some(())

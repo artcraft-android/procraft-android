@@ -2420,6 +2420,9 @@ fn a_group_s_lock_shows_on_its_layers_and_their_unlock_takes_it_off() {
     assert!(!locked(group) && !locked(lower) && locked(upper));
     assert_eq!(s.undo().as_deref(), Some("unlock layer"));
     assert!(locked(group) && locked(lower));
+    // a group's step is named as measured ("Undo unlock Layer Group")
+    assert!(s.set_layer_locked(group, false));
+    assert_eq!(s.undo().as_deref(), Some("unlock Layer Group"));
 }
 
 #[test]
@@ -2455,6 +2458,10 @@ fn a_layer_s_options_follow_what_it_is() {
     );
     // the bottom one has nothing to merge into or clip to
     assert!(!options(bottom).contains(&O::MergeDown) && !options(bottom).contains(&O::ClippingMask));
+    // nor is anything merged or combined onto a locked one, as measured
+    assert!(s.set_layer_locked(bottom, true));
+    assert!(!options(top).contains(&O::MergeDown) && !options(top).contains(&O::CombineDown));
+    assert!(s.set_layer_locked(bottom, false));
     // switches say whether they are on
     assert!(s.set_layer_alpha_lock(top, true));
     assert_eq!(row(top, O::AlphaLock).switch_on, Some(true));

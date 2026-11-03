@@ -63,6 +63,16 @@ const THUMBS_A_FRAME: usize = 4;
 /// from the window's top.
 const OPTIONS_LEFT: f32 = -183.0;
 const OPTIONS_WIDTH: f32 = 194.0;
+/// What the notice band says as a row is locked or unlocked, as measured.
+fn lock_said(on: bool, group: bool) -> &'static str {
+    match (on, group) {
+        (true, false) => "Lock layer",
+        (false, false) => "Unlock layer",
+        (true, true) => "Lock Layer Group",
+        (false, true) => "Unlock Layer Group",
+    }
+}
+
 /// Delete on a locked layer's row says this.
 const LOCKED_DELETE: &str = "A locked layer can’t be deleted. Unlock it first.";
 const OPTIONS_TOP: f32 = 57.0;
@@ -783,7 +793,11 @@ impl Layers {
             text(ui.painter(), rect.center(), Align2::CENTER_CENTER, label, 15.0, Weight::Medium, argb(ink));
             if ui.interact(rect, ui.scope_id().with(("swipe", l.id, label)), Sense::click()).clicked() {
                 match label {
-                    "Lock" | "Unlock" => _ = session.set_layer_locked(l.id, !l.locked),
+                    "Lock" | "Unlock" => {
+                        if session.set_layer_locked(l.id, !l.locked) {
+                            self.notice = Some((lock_said(!l.locked, l.kind == LayerType::Group).to_owned(), false));
+                        }
+                    }
                     "Duplicate" => _ = session.duplicate_layer(l.id),
                     "Clear" => {
                         session.select_layer(l.id);

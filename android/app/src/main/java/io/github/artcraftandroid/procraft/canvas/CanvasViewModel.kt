@@ -5928,7 +5928,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun toggleClipped(l: LayerInfo) = layerChange(thumbs = false) { it.setLayerClipped(l.id, !l.clipped) }
 
-    fun toggleLocked(l: LayerInfo) = layerChange(thumbs = false) { it.setLayerLocked(l.id, !l.locked) }
+    /** Locks or unlocks [l], saying so in the notice band as measured ("Lock layer", "Unlock Layer Group"). */
+    fun toggleLocked(l: LayerInfo) {
+        val on = !l.locked
+        var done = false
+        layerChange(thumbs = false) { done = it.setLayerLocked(l.id, on) }
+        if (done) showNotice(lockSaid(on, l.kind == LayerType.GROUP))
+    }
+
+    private fun lockSaid(on: Boolean, group: Boolean) = when {
+        group -> if (on) "Lock Layer Group" else "Unlock Layer Group"
+        else -> if (on) "Lock layer" else "Unlock layer"
+    }
 
     fun duplicate(l: LayerInfo) = layerChange { if (it.duplicateLayer(l.id) == null) message = noRoom() }
 
