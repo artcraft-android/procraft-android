@@ -192,11 +192,13 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
         }
         lastIds[0] = ids
         var listAt by remember { mutableStateOf(Offset.Zero) }
+        // two rows being pinched, each following its finger part of the way
+        var squeeze by remember { mutableStateOf<Squeeze?>(null) }
         LazyColumn(
             Modifier.weight(1f, fill = false).padding(horizontal = 12.dp)
                 .onGloballyPositioned { listAt = it.positionInWindow() }
                 // two rows pinched together merge with every layer between
-                .pinchRows({ listAt }, { y -> rows.entries.firstOrNull { y >= it.value.top && y <= it.value.bottom }?.key }) { a, b ->
+                .pinchRows({ listAt }, { y -> rows.entries.firstOrNull { y >= it.value.top && y <= it.value.bottom }?.key }, { squeeze = it }) { a, b ->
                     vm.mergeBetween(a, b)
                 },
             state = list,
@@ -212,8 +214,8 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                 Column(
                     Modifier.animateItem(Motion.rowFade(), if (dragging || blendAt >= 0) null else Motion.rowMove(), Motion.rowFade())
                         .onGloballyPositioned { rows[l.id] = it.boundsInWindow() }
-                        .zIndex(if (dragging) 1f else 0f).graphicsLayer {
-                            translationY = if (dragging) dragOffset else 0f
+                        .zIndex(if (dragging) 1f else squeeze?.above(l.id) ?: 0f).graphicsLayer {
+                            translationY = if (dragging) dragOffset else squeeze?.offset(l.id) ?: 0f
                             alpha = if (blendAt in 0 until index) belowShown else 1f
                         }
                         .twoFingerTap(l.kind != LayerType.MASK) {
@@ -1018,43 +1020,76 @@ private fun Modifier.twoFingerTap(enabled: Boolean, onTap: () -> Unit): Modifier
 /** How long two fingers may stay down and still tap, milliseconds. */
 private const val TWO_FINGER_TAP_MS = 400L
 
+/** Two rows being pinched: each moved a share of its finger's way ([SQUEEZE_FOLLOW]), the upper on top. */
+private class Squeeze(val upper: ULong, val lower: ULong, val upperBy: Float, val lowerBy: Float) {
+    fun offset(id: ULong): Float? = when (id) {
+        upper -> upperBy * SQUEEZE_FOLLOW
+        lower -> lowerBy * SQUEEZE_FOLLOW
+        else -> null
+    }
+
+    fun above(id: ULong): Float? = if (id == upper) 1f else null
+}
+
 /**
  * Two fingers put on two rows of the list (their layers by [rowAt], from a window y; [origin] the
  * list's place in the window) and pinched together to [PINCH_MERGE] of how far apart they were:
- * the list stays put from then, and as a finger lets go [onPinched] gets the two layers.
+ * the list stays put from then, and as a finger lets go [onPinched] gets the two layers. Meanwhile
+ * [onSqueeze] follows the two rows' fingers (none once they let go).
  */
-private fun Modifier.pinchRows(origin: () -> Offset, rowAt: (Float) -> ULong?, onPinched: (ULong, ULong) -> Unit): Modifier = pointerInput(Unit) {
+private fun Modifier.pinchRows(
+    origin: () -> Offset,
+    rowAt: (Float) -> ULong?,
+    onSqueeze: (Squeeze?) -> Unit,
+    onPinched: (ULong, ULong) -> Unit,
+): Modifier = this.pointerInput(Unit) {
     val initial = androidx.compose.ui.input.pointer.PointerEventPass.Initial
     awaitEachGesture {
         awaitFirstDown(requireUnconsumed = false, pass = initial)
         var ends: Pair<ULong, ULong>? = null
+        // the fingers on the upper and lower rows, and where they went down
+        var fingers: Pair<androidx.compose.ui.input.pointer.PointerId, androidx.compose.ui.input.pointer.PointerId>? = null
+        var starts = 0f to 0f
         var apart = 0f
         var pinched = false
         while (true) {
             val e = awaitPointerEvent(initial)
             val down = e.changes.filter { it.pressed }
             if (ends == null && down.size == 2) {
-                val (a, b) = down
-                val rows = rowAt(origin().y + a.position.y) to rowAt(origin().y + b.position.y)
-                val (ra, rb) = rows
+                val (a, b) = down.sortedBy { it.position.y }
+                val ra = rowAt(origin().y + a.position.y)
+                val rb = rowAt(origin().y + b.position.y)
                 if (ra != null && rb != null && ra != rb) {
                     ends = ra to rb
-                    apart = kotlin.math.abs(a.position.y - b.position.y)
+                    fingers = a.id to b.id
+                    starts = a.position.y to b.position.y
+                    apart = b.position.y - a.position.y
                 }
             }
             val pair = ends
-            if (pair != null && down.size >= 2) {
-                if (kotlin.math.abs(down[0].position.y - down[1].position.y) <= apart * PINCH_MERGE) pinched = true
+            val ids = fingers
+            if (pair != null && ids != null && down.size >= 2) {
+                val upper = down.firstOrNull { it.id == ids.first }?.position?.y ?: starts.first
+                val lower = down.firstOrNull { it.id == ids.second }?.position?.y ?: starts.second
+                if (kotlin.math.abs(lower - upper) <= apart * PINCH_MERGE) pinched = true
                 if (pinched) e.changes.forEach { it.consume() }
+                onSqueeze(Squeeze(pair.first, pair.second, upper - starts.first, lower - starts.second))
             }
             if (pair != null && down.size < 2) {
+                onSqueeze(null)
                 if (pinched) onPinched(pair.first, pair.second)
                 break
             }
-            if (down.isEmpty()) break
+            if (down.isEmpty()) {
+                onSqueeze(null)
+                break
+            }
         }
     }
 }
 
-/** Two rows pinched to this share of how far apart they were merge. */
-private const val PINCH_MERGE = 0.5f
+/** How much of its finger's way a pinched row moves (as measured, about a quarter to a third). */
+private const val SQUEEZE_FOLLOW = 0.3f
+
+/** Two rows pinched to this share of how far apart they were merge (as measured: a pinch a third closed merges, opened again or not). */
+private const val PINCH_MERGE = 0.65f

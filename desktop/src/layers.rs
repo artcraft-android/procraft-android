@@ -139,10 +139,9 @@ pub struct Layers {
     swiped: Option<u64>,
     /// A press on a row's visibility box: whose, since when, and whether holding it has acted.
     box_press: Option<(u64, Instant, bool)>,
-    /// The fingers on a touch screen, and two put on two rows: those rows' layers, how far apart
-    /// the fingers were, and whether they came half as close (let go, the rows merge).
+    /// The fingers on a touch screen, and two put on two rows being pinched.
     touches: HashMap<u64, Pos2>,
-    pinch: Option<(u64, u64, f32, bool)>,
+    pinch: Option<Pinch>,
     /// What the panel asks of the app: a notice to show, a layer's contents copied, the chosen
     /// layers shared, a text layer's text edited.
     pub notice: Option<(String, bool)>,
@@ -361,6 +360,7 @@ impl Layers {
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                             let mut dragged = None;
+                            let mut squeezed = Vec::new();
                             for item in &items {
                                 let (l, (t, b), indent, shared) = match item {
                                     Item::Set { name, first } => {
@@ -404,6 +404,9 @@ impl Layers {
                                 if self.press.is_some_and(|p| p.id == l.id && p.way == Way::Reorder) {
                                     // held and dragged: drawn where it is dragged to, over the rest
                                     dragged = Some((l, row, looks));
+                                } else if let Some((dy, upper)) = self.pinch.as_ref().and_then(|p| p.moved(l.id)) {
+                                    // pinched: drawn after the rest, moved part of its finger's way
+                                    squeezed.push((l, row.translate(vec2(0.0, dy)), looks, upper));
                                 } else {
                                     let slide = self.slid.get(&l.id).copied().unwrap_or(0.0);
                                     let at = row.translate(vec2(slide, 0.0));
@@ -458,6 +461,12 @@ impl Layers {
                                 background_row(ui, look, session);
                             }
                             ui.add_space(12.0);
+                            // the pinched rows over the rest, the upper over the lower
+                            squeezed.sort_by_key(|s| s.3);
+                            for (l, at, looks, _) in squeezed {
+                                let mut row_ui = ui.new_child(UiBuilder::new().max_rect(at));
+                                self.draw_row(&mut row_ui, look, session, l, at, looks, &modes, &mut read);
+                            }
                             if let Some((l, row, looks)) = dragged {
                                 let at = row.translate(vec2(0.0, self.press.map_or(0.0, |p| p.dy)));
                                 let mut row_ui = ui.new_child(UiBuilder::new().max_rect(at));
@@ -791,30 +800,42 @@ impl Layers {
                 }
                 egui::TouchPhase::End | egui::TouchPhase::Cancel => {
                     self.touches.remove(&id.0);
-                    if let Some((a, b, _, pinched)) = self.pinch.take()
-                        && pinched
+                    if let Some(p) = self.pinch.take()
+                        && p.pinched
                         && phase == egui::TouchPhase::End
                     {
-                        session.merge_between(a, b);
+                        session.merge_between(p.upper, p.lower);
                     }
                 }
             }
         }
-        let fingers: Vec<Pos2> = self.touches.values().copied().collect();
-        let [one, two] = fingers[..] else { return };
+        let mut fingers: Vec<(u64, Pos2)> = self.touches.iter().map(|(id, p)| (*id, *p)).collect();
+        fingers.sort_by(|a, b| a.1.y.total_cmp(&b.1.y));
+        let [(top_id, top), (bottom_id, bottom)] = fingers[..] else { return };
         let row_at = |p: Pos2| rows.iter().find(|(_, r)| r.contains(p)).map(|(id, _)| *id);
         match &mut self.pinch {
             None => {
-                if let (Some(a), Some(b)) = (row_at(one), row_at(two))
-                    && a != b
+                if let (Some(upper), Some(lower)) = (row_at(top), row_at(bottom))
+                    && upper != lower
                 {
-                    self.pinch = Some((a, b, (one.y - two.y).abs(), false));
+                    self.pinch = Some(Pinch {
+                        upper,
+                        lower,
+                        fingers: (top_id, bottom_id),
+                        starts: (top.y, bottom.y),
+                        by: (0.0, 0.0),
+                        pinched: false,
+                    });
                 }
             }
-            Some((_, _, apart, pinched)) => {
-                if (one.y - two.y).abs() <= *apart * PINCH_MERGE {
-                    *pinched = true;
+            Some(p) => {
+                let at = |id: u64, start: f32| self.touches.get(&id).map_or(start, |q| q.y);
+                let (upper, lower) = (at(p.fingers.0, p.starts.0), at(p.fingers.1, p.starts.1));
+                p.by = (upper - p.starts.0, lower - p.starts.1);
+                if (lower - upper).abs() <= (p.starts.1 - p.starts.0) * PINCH_MERGE {
+                    p.pinched = true;
                 }
+                ctx.request_repaint();
             }
         }
     }
@@ -1554,5 +1575,33 @@ fn galley(
     ui.painter().layout_job(job)
 }
 
-/// Two rows pinched to this share of how far apart they were merge.
-const PINCH_MERGE: f32 = 0.5;
+/// Two rows pinched to this share of how far apart they were merge (a pinch a third closed merges,
+/// opened again or not).
+const PINCH_MERGE: f32 = 0.65;
+/// How much of its finger's way a pinched row moves (as measured, about a quarter to a third).
+const SQUEEZE_FOLLOW: f32 = 0.3;
+
+/// Two fingers put on two rows: those rows' layers (the upper and the lower), the fingers' ids and
+/// where they went down, how far each has gone since, and whether they came close enough that,
+/// let go, the rows merge.
+struct Pinch {
+    upper: u64,
+    lower: u64,
+    fingers: (u64, u64),
+    starts: (f32, f32),
+    by: (f32, f32),
+    pinched: bool,
+}
+
+impl Pinch {
+    /// How far row `id` is moved, if it is one of the two, and whether it is the upper.
+    fn moved(&self, id: u64) -> Option<(f32, bool)> {
+        if id == self.upper {
+            Some((self.by.0 * SQUEEZE_FOLLOW, true))
+        } else if id == self.lower {
+            Some((self.by.1 * SQUEEZE_FOLLOW, false))
+        } else {
+            None
+        }
+    }
+}
