@@ -173,6 +173,7 @@ fn main() {
     // the colour profiles imported before
     procraft_core::set_profile_folder(files::app_dir().join("profiles").to_string_lossy().into_owned());
     let mut app = App {
+        wake: event_loop.create_proxy(),
         started: Instant::now(),
         last_frame: Instant::now(),
         again: None,
@@ -203,6 +204,8 @@ fn main() {
 }
 
 struct App {
+    /// Wakes the loop from other threads (the pen's, on Wayland).
+    wake: winit::event_loop::EventLoopProxy<()>,
     started: Instant,
     /// When the last frame was drawn, and when another is wanted (the canvas or the interface still
     /// moving, or a hold to be timed).
@@ -285,8 +288,8 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        // a pen's lean, which winit's touches leave out
-        pen::watch(&window);
+        // a pen's lean, which winit's touches leave out (on Wayland the whole pen)
+        pen::watch(&window, self.wake.clone());
         let screen = match Screen::new(window) {
             Ok(s) => s,
             Err(e) => {
@@ -373,9 +376,19 @@ impl ApplicationHandler for App {
         }
     }
 
+    /// A pen read by the app itself moved: its touches and hovering, as winit's would come.
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
+        let Some(window) = self.screen.as_ref().map(|s| (s.window.id(), s.window.scale_factor())) else { return };
+        for event in pen::take_events(window.1) {
+            self.window_event(event_loop, window.0, event);
+        }
+    }
+
     /// The app ending without its window closed first (a Mac's Quit, from the app menu or
     /// Cmd+Q, ends it with no close asked): the artwork open kept as closing the window keeps it.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // before winit closes the connection the pen is read on
+        pen::stop();
         if std::mem::replace(&mut self.closed, true) {
             return;
         }

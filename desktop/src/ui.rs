@@ -8,7 +8,7 @@ use std::time::Instant;
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, Rect, Stroke, Ui, vec2};
 use procraft_core::{
     Blocked, CanvasInfo, CanvasSession, GesturePurpose, KeyShortcut, ModeButton, ModeSwitch, Modes, QuickAction,
-    ToolKind, TouchCommand, mode_switch,
+    ToolKind, TouchCommand, Trigger, mode_switch,
 };
 
 use crate::actions::{Act, Actions};
@@ -109,6 +109,8 @@ pub struct Interface {
     /// The artwork's folder in the gallery.
     pub artwork_dir: Option<String>,
     quick_menu: crate::quick_menu::QuickMenu,
+    /// A pen button set to the eyedropper is held: its loupe follows the pen until it is let go.
+    pen_picking: bool,
     /// An open adjustment's bar, panel and tap menu; Gradient Map's library (kept between runs).
     adjustments: crate::adjustments::Adjustments,
     gradients: std::sync::Arc<procraft_core::Gradients>,
@@ -202,6 +204,7 @@ impl Default for Interface {
             guide_editor: crate::guide_editor::GuideEditor::default(),
             artwork_dir: None,
             quick_menu: crate::quick_menu::QuickMenu::default(),
+            pen_picking: false,
             adjustments: crate::adjustments::Adjustments::default(),
             gradients: procraft_core::Gradients::open(
                 crate::files::app_dir().join("gradients.json").to_string_lossy().into_owned(),
@@ -384,12 +387,33 @@ impl Interface {
         if self.inserted(session) || brushes_coming {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
-        // the pen's barrel button: what Gesture controls set it to do (else the eraser and back),
-        // where the pointer is
-        for _ in 0..crate::pen::take_button_presses() {
-            let (x, y) = input.cursor().unwrap_or_default();
-            input.commands.extend(session.touch_pen_button(false, x, y));
-            self.library.tool_changed();
+        // the pen's barrel buttons: what Gesture controls set Pen button and Pen second button to
+        // do (the first, set to nothing, the eraser and back), where the pointer is; one set to
+        // the eyedropper picks while it is held, where the pen hovers, and lets go to take it
+        let presses = crate::pen::take_button_presses();
+        let held = crate::pen::buttons_held();
+        let purposes = [Trigger::PenDoubleTap, Trigger::PenSqueeze].map(|t| self.gestures.purpose_of(t));
+        let (x, y) = input.cursor().unwrap_or_default();
+        for (button, (&pressed, &is_held)) in presses.iter().zip(&held).enumerate() {
+            if purposes.get(button).copied().flatten() == Some(GesturePurpose::Eyedropper) {
+                if is_held || pressed > 0 {
+                    self.overlays.pick(&ctx, session, x, y);
+                    self.pen_picking = true;
+                    ctx.request_repaint();
+                }
+                continue;
+            }
+            for _ in 0..pressed {
+                input.commands.extend(session.touch_pen_button(button == 1, x, y));
+                self.library.tool_changed();
+            }
+        }
+        let eyedropper_held = held.iter().zip(&purposes).any(|(h, p)| *h && *p == Some(GesturePurpose::Eyedropper));
+        if self.pen_picking && !eyedropper_held {
+            self.pen_picking = false;
+            if let Some(rgb) = self.overlays.finish_pick() {
+                self.colours.set_rgb(session, rgb);
+            }
         }
         self.commands(&ctx, session, input);
         // the brush library closed: what was done in it is kept
@@ -586,11 +610,12 @@ impl Interface {
         if taps.redo {
             self.redo(session);
         }
-        // the modify button tapped opens or closes the eyedropper; held, touches pick meanwhile
-        // (unless one did, its tap then does nothing)
+        // the modify button tapped does what Tap □ is set to (opens or closes the eyedropper at
+        // first); held, touches do what □ + Touch and □ + Pen are set to (unless one did, its tap
+        // then does nothing)
         let used = session.set_modify_held(taps.modify_down);
         if taps.modify_tapped && !used {
-            session.set_pick_next(!session.pick_next());
+            self.tap_modify(&ctx, session);
         }
         self.hover_cursor(&ctx, session, &info, input);
         self.selection_pointer(&ctx, input);
@@ -926,6 +951,21 @@ impl Interface {
             self.canvas_rect.contains(*at) && ctx.layer_id_at(*at).is_none_or(|l| l.order == egui::Order::Background)
         });
         self.overlays.hover(session, info, ppp, at);
+    }
+
+    /// The modify button tapped: what Tap □ is set to do, as the Android app does it.
+    fn tap_modify(&mut self, ctx: &egui::Context, session: &CanvasSession) {
+        match self.gestures.purpose_of(Trigger::TapModify) {
+            Some(GesturePurpose::Eyedropper) => session.set_pick_next(!session.pick_next()),
+            Some(GesturePurpose::Quickmenu) => self.quick_menu.toggle(ctx.content_rect().center()),
+            Some(GesturePurpose::CopyPaste) => self.copy_paste = true,
+            Some(GesturePurpose::Quickshape) => {
+                if let Some(info) = session.quickshape_last() {
+                    self.snapped(info);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Does what the touches asked.

@@ -2,7 +2,9 @@
 //! read from the system's pointer messages as they reach the window (before winit makes its
 //! touches of them), kept by pointer for the touches to carry. Under X11 and on a Mac winit gives a
 //! tablet's pen as the mouse: its pressure, lean and eraser end are read from its own events
-//! instead (XInput 2's; AppKit's tablet events), for the mouse's samples to carry.
+//! instead (XInput 2's; AppKit's tablet events), for the mouse's samples to carry. On Wayland winit
+//! reads no pen at all (the compositor makes a mouse of it, without pressure), so the whole pen is
+//! read from the tablet protocol and handed on as the touches and hovering a pen makes on Windows.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -14,12 +16,19 @@ static LEANS: Mutex<Option<HashMap<u64, (f32, f32)>>> = Mutex::new(None);
 
 /// Each pen pointer's last pressure (0..1), for a pen that gives one.
 static PRESSURES: Mutex<Option<HashMap<u64, f32>>> = Mutex::new(None);
+/// Each pen pointer's last barrel roll, radians clockwise, for pens that give one.
+static ROLLS: Mutex<Option<HashMap<u64, f32>>> = Mutex::new(None);
+
+/// The pen pointer last heard from, while it is near the window, for the brush cursor to turn as
+/// it leans.
+static LATEST: Mutex<Option<u64>> = Mutex::new(None);
 
 /// Each pen pointer's last flags (its barrel button held, its eraser end down).
 static FLAGS: Mutex<Option<HashMap<u64, u32>>> = Mutex::new(None);
 
-/// How many times a pen's barrel button went down since the app last asked.
+/// How many times a pen's first and second barrel buttons went down since the app last asked.
 static PRESSES: AtomicUsize = AtomicUsize::new(0);
+static SECOND_PRESSES: AtomicUsize = AtomicUsize::new(0);
 
 /// Each pointer the system has said is a pen (true) or a finger (false).
 static KINDS: Mutex<Option<HashMap<u64, bool>>> = Mutex::new(None);
@@ -38,10 +47,13 @@ static MOUSE_PEN: Mutex<Option<MousePen>> = Mutex::new(None);
 /// The mouse pointer's id among the touches (`input.rs`): a pen moving it keeps its lean there.
 const MOUSE: u64 = u64::MAX;
 
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos", target_os = "linux")), allow(dead_code))]
 const FLAG_BARREL: u32 = 0x1;
 const FLAG_INVERTED: u32 = 0x2;
 const FLAG_ERASER: u32 = 0x4;
+/// The pen's second barrel button held: a flag of our own (Windows's pen flags have one barrel
+/// button).
+const FLAG_SECOND_BARREL: u32 = 0x100;
 
 /// The lean of the pen that is pointer `id` (a touch's id), if it is a pen that gives one.
 pub fn lean(id: u64) -> Option<(f32, f32)> {
@@ -65,6 +77,44 @@ fn pen_pressure(id: u64, pressure: Option<f32>) {
     };
 }
 
+/// The barrel roll of the pen that is pointer `id`, if it is a pen that gives one.
+pub fn roll(id: u64) -> Option<f32> {
+    ROLLS.lock().ok()?.as_ref()?.get(&id).copied()
+}
+
+/// The direction the pen near the window leans (radians clockwise from screen-up), if a pen is
+/// near.
+pub fn azimuth() -> Option<f32> {
+    let id = (*LATEST.lock().ok()?)?;
+    Some(lean(id).map_or(0.0, |(_, towards)| towards))
+}
+
+/// Pointer `id`'s lean and roll as they now are; it is the pen last heard from.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+fn keep_pose(id: u64, lean: (f32, f32), roll: Option<f32>) {
+    if let Ok(mut leans) = LEANS.lock() {
+        leans.get_or_insert_with(Default::default).insert(id, lean);
+    }
+    if let Ok(mut rolls) = ROLLS.lock() {
+        let rolls = rolls.get_or_insert_with(Default::default);
+        match roll {
+            Some(r) => rolls.insert(id, r),
+            None => rolls.remove(&id),
+        };
+    }
+    if let Ok(mut latest) = LATEST.lock() {
+        *latest = Some(id);
+    }
+}
+
+/// No pen is near the window any more.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn pen_gone() {
+    if let Ok(mut latest) = LATEST.lock() {
+        *latest = None;
+    }
+}
+
 /// Whether the pen that is pointer `id` is turned over, its eraser end on the screen.
 pub fn eraser_end(id: u64) -> bool {
     let flags = FLAGS.lock().ok().and_then(|f| f.as_ref()?.get(&id).copied()).unwrap_or(0);
@@ -78,16 +128,23 @@ pub fn is_pen(id: u64) -> Option<bool> {
 }
 
 /// The system said pointer `id` is a pen (`pen`) or a finger.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn pointer_kind(id: u64, pen: bool) {
     if let Ok(mut kinds) = KINDS.lock() {
         kinds.get_or_insert_with(Default::default).insert(id, pen);
     }
 }
 
-/// How many times a pen's barrel button was pressed since the last call.
-pub fn take_button_presses() -> usize {
-    PRESSES.swap(0, Ordering::Relaxed)
+/// Whether the first and second barrel buttons of the pen near the window are held now.
+pub fn buttons_held() -> [bool; 2] {
+    let Some(id) = LATEST.lock().ok().and_then(|l| *l) else { return [false; 2] };
+    let flags = FLAGS.lock().ok().and_then(|f| f.as_ref()?.get(&id).copied()).unwrap_or(0);
+    [flags & FLAG_BARREL != 0, flags & FLAG_SECOND_BARREL != 0]
+}
+
+/// How many times a pen's first and second barrel buttons were pressed since the last call.
+pub fn take_button_presses() -> [usize; 2] {
+    [PRESSES.swap(0, Ordering::Relaxed), SECOND_PRESSES.swap(0, Ordering::Relaxed)]
 }
 
 /// The tablet pen moving the mouse pointer, if one is (none: a mouse, or a system that gives the
@@ -177,19 +234,21 @@ fn pen_reading(axes: &PenAxes, values: &[(u16, f64)], last: PenReading) -> PenRe
     }
 }
 
-/// Pointer `id`'s pen flags as they now are: a press of its barrel button counted.
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+/// Pointer `id`'s pen flags as they now are: a press of either barrel button counted.
+#[cfg_attr(not(any(windows, target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn pen_flags(id: u64, flags: u32) {
     let Ok(mut all) = FLAGS.lock() else { return };
     let before = all.get_or_insert_with(Default::default).insert(id, flags).unwrap_or(0);
-    if flags & FLAG_BARREL != 0 && before & FLAG_BARREL == 0 {
-        PRESSES.fetch_add(1, Ordering::Relaxed);
+    for (flag, presses) in [(FLAG_BARREL, &PRESSES), (FLAG_SECOND_BARREL, &SECOND_PRESSES)] {
+        if flags & flag != 0 && before & flag == 0 {
+            presses.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
 /// The lean of a pen tilted `tilt_x` degrees towards the right and `tilt_y` towards the user
 /// (each −90..90): its angle from upright and the direction its top leans, clockwise from up.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn lean_of(tilt_x: f32, tilt_y: f32) -> (f32, f32) {
     // short of flat, where the tangent runs off
     let tangent = |degrees: f32| degrees.clamp(-89.9, 89.9).to_radians().tan();
@@ -199,25 +258,115 @@ fn lean_of(tilt_x: f32, tilt_y: f32) -> (f32, f32) {
 
 /// Starts reading the pen's lean from the pointer messages to `window`.
 #[cfg(windows)]
-pub fn watch(window: &winit::window::Window) {
+pub fn watch(window: &winit::window::Window, _wake: winit::event_loop::EventLoopProxy<()>) {
     system::watch(window);
 }
 
-/// Starts reading a tablet pen's pressure, lean and eraser end from its XInput events, under X11.
+/// Starts reading a tablet's pen: under X11 its pressure, lean and eraser end from its XInput
+/// events; on Wayland the whole pen from the tablet protocol, what it does coming in through
+/// [`take_events`], `wake` waking the app for it.
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn watch(window: &winit::window::Window) {
+pub fn watch(window: &winit::window::Window, wake: winit::event_loop::EventLoopProxy<()>) {
     tablet::watch(window);
+    #[cfg(target_os = "linux")]
+    wayland::watch(window, wake);
+    #[cfg(not(target_os = "linux"))]
+    drop(wake);
 }
 
 /// Starts reading a tablet pen's pressure, lean and eraser end from the system's tablet events, on
 /// a Mac.
 #[cfg(target_os = "macos")]
-pub fn watch(_window: &winit::window::Window) {
+pub fn watch(_window: &winit::window::Window, _wake: winit::event_loop::EventLoopProxy<()>) {
     tablet_events::watch();
 }
 
 #[cfg(not(any(windows, unix)))]
-pub fn watch(_window: &winit::window::Window) {}
+pub fn watch(_window: &winit::window::Window, _wake: winit::event_loop::EventLoopProxy<()>) {}
+
+/// Stops reading the pen, before the window's connection closes.
+pub fn stop() {
+    #[cfg(target_os = "linux")]
+    wayland::stop();
+}
+
+/// The cursor the interface wants, shown for a pen hovering the window as for the mouse.
+pub fn set_cursor(_icon: egui::CursorIcon) {
+    #[cfg(target_os = "linux")]
+    wayland::set_cursor(_icon);
+}
+
+/// What a pen read by the app itself did: where in the window it is in logical pixels, its
+/// pressure 0..1.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PenEvent {
+    /// Over the window, its tip up.
+    Hover {
+        id: u64,
+        x: f64,
+        y: f64,
+    },
+    Down {
+        id: u64,
+        x: f64,
+        y: f64,
+        pressure: f32,
+    },
+    Move {
+        id: u64,
+        x: f64,
+        y: f64,
+        pressure: f32,
+    },
+    Up {
+        id: u64,
+        x: f64,
+        y: f64,
+        pressure: f32,
+    },
+    /// Away from the window.
+    Gone,
+}
+
+/// What pens read by the app itself did since the last call, as the window events winit makes of
+/// a pen on Windows (touches with a force, and the pointer moving as it hovers), for a window at
+/// `scale` physical pixels a logical one.
+pub fn take_events(scale: f64) -> Vec<winit::event::WindowEvent> {
+    #[cfg(target_os = "linux")]
+    let events = wayland::take_events();
+    #[cfg(not(target_os = "linux"))]
+    let events: Vec<PenEvent> = Vec::new();
+    events.into_iter().map(|e| window_event(e, scale)).collect()
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn window_event(event: PenEvent, scale: f64) -> winit::event::WindowEvent {
+    use winit::dpi::PhysicalPosition;
+    use winit::event::{DeviceId, Force, Touch, TouchPhase, WindowEvent};
+    let device_id = DeviceId::dummy();
+    let touch = |id, x: f64, y: f64, phase, pressure: f32| {
+        WindowEvent::Touch(Touch {
+            device_id,
+            phase,
+            location: PhysicalPosition::new(x * scale, y * scale),
+            force: Some(Force::Normalized(f64::from(pressure))),
+            id,
+        })
+    };
+    match event {
+        PenEvent::Hover { x, y, .. } => {
+            WindowEvent::CursorMoved { device_id, position: PhysicalPosition::new(x * scale, y * scale) }
+        }
+        PenEvent::Down { id, x, y, pressure } => touch(id, x, y, TouchPhase::Started, pressure),
+        PenEvent::Move { id, x, y, pressure } => touch(id, x, y, TouchPhase::Moved, pressure),
+        PenEvent::Up { id, x, y, pressure } => touch(id, x, y, TouchPhase::Ended, pressure),
+        PenEvent::Gone => WindowEvent::CursorLeft { device_id },
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod wayland;
 
 /// A Mac tablet's tilt (each −1..1, towards the right and up the tablet) as degrees towards the
 /// right and towards the user, spread over ±60 as the X11 tilts in a raw range are.
@@ -317,7 +466,7 @@ mod tablet {
         let id = match handle.as_raw() {
             RawWindowHandle::Xlib(h) => h.window as u32,
             RawWindowHandle::Xcb(h) => h.window.get(),
-            // Wayland: winit has no pen there either; nothing to read it from
+            // Wayland: the tablet protocol reads it there (`wayland`)
             _ => return,
         };
         let started = std::thread::Builder::new().name("tablet pen".into()).spawn(move || {
@@ -419,8 +568,9 @@ mod system {
     };
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    /// What the pen info gives (`penMask`): its pressure, out of 1024, and its tilts.
+    /// What the pen info gives (`penMask`): its pressure, out of 1024, its turn and its tilts.
     const PEN_MASK_PRESSURE: u32 = 0x1;
+    const PEN_MASK_ROTATION: u32 = 0x2;
     const PEN_MASK_TILT_X: u32 = 0x4;
     const PEN_MASK_TILT_Y: u32 = 0x8;
     /// A pointer message's flags (its `wparam`'s high word): the pointer touches the screen.
@@ -461,9 +611,9 @@ mod system {
             if unsafe { GetPointerPenInfo(id, &mut info) }.is_ok() {
                 let tilted = info.penMask & (PEN_MASK_TILT_X | PEN_MASK_TILT_Y) != 0;
                 let lean = if tilted { super::lean_of(info.tiltX as f32, info.tiltY as f32) } else { (0.0, 0.0) };
-                if let Ok(mut leans) = super::LEANS.lock() {
-                    leans.get_or_insert_with(Default::default).insert(u64::from(id), lean);
-                }
+                // degrees clockwise
+                let roll = (info.penMask & PEN_MASK_ROTATION != 0).then(|| (info.rotation as f32).to_radians());
+                super::keep_pose(u64::from(id), lean, roll);
                 super::pen_flags(u64::from(id), info.penFlags);
                 let pressed = info.penMask & PEN_MASK_PRESSURE != 0;
                 super::pen_pressure(u64::from(id), pressed.then(|| info.pressure as f32 / 1024.0));
@@ -494,7 +644,13 @@ mod tests {
         pen_flags(901, FLAG_BARREL);
         pen_flags(901, 0);
         pen_flags(901, FLAG_BARREL);
-        assert_eq!(take_button_presses(), 2);
+        assert_eq!(take_button_presses(), [2, 0]);
+        // the second button counts apart, held with the first or alone
+        pen_flags(903, FLAG_SECOND_BARREL);
+        pen_flags(903, FLAG_BARREL | FLAG_SECOND_BARREL);
+        pen_flags(903, 0);
+        pen_flags(903, FLAG_SECOND_BARREL);
+        assert_eq!(take_button_presses(), [1, 2]);
         assert!(!eraser_end(901));
         pen_flags(902, FLAG_INVERTED);
         assert!(eraser_end(902));

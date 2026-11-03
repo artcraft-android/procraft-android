@@ -41,6 +41,8 @@ pub struct Input {
     panning: bool,
     /// The mouse dragged with a key held, zooming or turning the canvas (the core's key drag).
     key_drag: Option<KeyDrag>,
+    /// The pen moving the view (pressed with space held), as the mouse does.
+    pen_panning: Option<u64>,
     /// The brush cursor follows the mouse hovering, so its moves draw a frame.
     pub hover_shown: bool,
     space: bool,
@@ -70,6 +72,7 @@ impl Default for Input {
             inside: false,
             panning: false,
             key_drag: None,
+            pen_panning: None,
             hover_shown: false,
             space: false,
             r_key: None,
@@ -168,15 +171,8 @@ impl Input {
     /// A sample of pointer `id` at `(x, y)`: a pen's with its lean, if the system gave one.
     fn sample(&self, id: u64, (x, y): (f32, f32), pressure: f32) -> Vec<PenSample> {
         let (tilt, orientation) = crate::pen::lean(id).unwrap_or((0.0, 0.0));
-        vec![PenSample {
-            x,
-            y,
-            pressure: pressure.clamp(0.0, 1.0),
-            tilt,
-            orientation,
-            time_ms: self.now_ms(),
-            roll: 0.0,
-        }]
+        let roll = crate::pen::roll(id).unwrap_or(0.0);
+        vec![PenSample { x, y, pressure: pressure.clamp(0.0, 1.0), tilt, orientation, time_ms: self.now_ms(), roll }]
     }
 
     fn pressed(&mut self, session: &CanvasSession, id: u64, kind: PointerKind, at: (f32, f32), pressure: f32) {
@@ -226,6 +222,7 @@ impl Input {
                 self.space = event.state == ElementState::Pressed && !consumed;
                 if !self.space && self.panning && !self.down.contains(&MOUSE) {
                     self.panning = false;
+                    self.pen_panning = None;
                 }
                 // a zoom ends with it too
                 if !self.space && self.key_drag == Some(KeyDrag::Zoom) {
@@ -273,17 +270,12 @@ impl Input {
             WindowEvent::CursorMoved { position, .. } => {
                 let p = (position.x as f32, position.y as f32);
                 self.inside = true;
-                let last = self.cursor.replace(p);
                 if self.key_drag.is_some() {
+                    self.cursor = Some(p);
                     session.key_drag_move(p.0, p.1, self.shift);
                     return true;
                 }
-                if let (true, Some(l)) = (self.panning, last) {
-                    if self.turns_model && !self.shift {
-                        session.turn_model(p.0 - l.0, p.1 - l.1);
-                    } else {
-                        session.view_gesture(p.0, p.1, p.0 - l.0, p.1 - l.1, 1.0, 0.0);
-                    }
+                if self.pan_to(session, p) {
                     return true;
                 }
                 if self.down.contains(&MOUSE) {
@@ -375,6 +367,18 @@ impl Input {
         }
     }
 
+    /// The pointer at `p`: while the view is being moved, moved by as much. True if it was.
+    fn pan_to(&mut self, session: &CanvasSession, p: (f32, f32)) -> bool {
+        let last = self.cursor.replace(p);
+        let (true, Some(l)) = (self.panning, last) else { return false };
+        if self.turns_model && !self.shift {
+            session.turn_model(p.0 - l.0, p.1 - l.1);
+        } else {
+            session.view_gesture(p.0, p.1, p.0 - l.0, p.1 - l.1, 1.0, 0.0);
+        }
+        true
+    }
+
     fn on_touch(&mut self, session: &CanvasSession, touch: &Touch, over: &impl Fn((f32, f32)) -> bool) -> bool {
         let p = (touch.location.x as f32, touch.location.y as f32);
         // a pen with its pressure, or a finger: as the system says which (a touch screen may give
@@ -393,6 +397,25 @@ impl Input {
             None => PointerKind::Finger,
         };
         let pressure = pen.unwrap_or(1.0);
+        // with space held the pen moves the view, as the mouse does
+        if pen.is_some() {
+            match touch.phase {
+                TouchPhase::Started if self.space && self.down.is_empty() && !self.panning && !over(p) => {
+                    self.panning = true;
+                    self.pen_panning = Some(touch.id);
+                    self.cursor = Some(p);
+                    return false;
+                }
+                _ if self.pen_panning != Some(touch.id) => {}
+                TouchPhase::Moved => return self.pan_to(session, p),
+                TouchPhase::Ended | TouchPhase::Cancelled => {
+                    self.panning = false;
+                    self.pen_panning = None;
+                    return false;
+                }
+                TouchPhase::Started => {}
+            }
+        }
         let known = self.down.contains(&touch.id);
         match touch.phase {
             TouchPhase::Started => {

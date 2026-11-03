@@ -134,6 +134,8 @@ impl Screen {
     ) -> Option<Duration> {
         let egui::FullOutput { platform_output, mut textures_delta, shapes, pixels_per_point, viewport_output } =
             output;
+        // a pen read by the app itself (on Wayland) has its cursor set apart from the mouse's
+        crate::pen::set_cursor(platform_output.cursor_icon);
         self.egui.handle_platform_output(&self.window, platform_output);
         let interface_after = viewport_output
             .get(&egui::ViewportId::ROOT)
