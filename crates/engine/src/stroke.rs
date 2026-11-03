@@ -400,16 +400,28 @@ const CURVE_STEP: f32 = 4.0;
 const MOST_PIECES: usize = 64;
 
 /// The point at `t` (0 at `p1`, 1 at `p2`) of the centripetal Catmull–Rom curve through four
-/// points: through each of them, with no loops or cusps where they bunch up.
-fn catmull_rom(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: f32) -> Vec2 {
+/// points: through each of them, with no loops or cusps where they bunch up. With no point
+/// before `p1` (or after `p2`) it is the parabola through the three there are, so the first and
+/// last stretches bend as the path does on from them; with neither, the straight line.
+fn catmull_rom(p0: Option<Vec2>, p1: Vec2, p2: Vec2, p3: Option<Vec2>, t: f32) -> Vec2 {
     let knot = |a: Vec2, b: Vec2| a.distance(b).sqrt().max(1e-4);
-    let (t1, t2) = (knot(p0, p1), knot(p0, p1) + knot(p1, p2));
-    let t3 = t2 + knot(p2, p3);
-    let u = t1 + (t2 - t1) * t;
+    let t2 = knot(p1, p2);
+    let u = t2 * t;
     let mix = |a: Vec2, b: Vec2, from: f32, to: f32| a * ((to - u) / (to - from)) + b * ((u - from) / (to - from));
-    let (a1, a2, a3) = (mix(p0, p1, 0.0, t1), mix(p1, p2, t1, t2), mix(p2, p3, t2, t3));
-    let (b1, b2) = (mix(a1, a2, 0.0, t2), mix(a2, a3, t1, t3));
-    mix(b1, b2, t1, t2)
+    let a2 = mix(p1, p2, 0.0, t2);
+    let before = p0.map(|p0| {
+        let t0 = -knot(p0, p1);
+        mix(mix(p0, p1, t0, 0.0), a2, t0, t2)
+    });
+    let after = p3.map(|p3| {
+        let t3 = t2 + knot(p2, p3);
+        mix(a2, mix(p2, p3, t2, t3), 0.0, t3)
+    });
+    match (before, after) {
+        (Some(b1), Some(b2)) => mix(b1, b2, 0.0, t2),
+        (Some(b), None) | (None, Some(b)) => b,
+        (None, None) => a2,
+    }
 }
 
 /// Streamline is tuned for input at this interval; other rates are scaled to match.
@@ -746,7 +758,7 @@ impl StrokeBuilder {
     /// Walks the stretch to the newest path point, as if nothing came after it.
     fn flush(&mut self, out: &mut Vec<Stamp>) {
         if let (Some(c), Some(b)) = (self.ahead.take(), self.head) {
-            self.walk_curve(self.behind.unwrap_or(b), b, c, c, out);
+            self.walk_curve(self.behind, b, c, None, out);
             self.behind = Some(b);
         }
     }
@@ -817,23 +829,33 @@ impl StrokeBuilder {
     /// the stroke's stamps, as they should finally be drawn.
     pub fn finish(&mut self) -> Vec<Stamp> {
         let mut run_on = 0.0;
-        // the last stretch of the curve, with nothing after it
-        self.flush(&mut Vec::new());
+        let mut ignored = Vec::new();
         if let (Some(last), Some(head)) = (self.last_sample, self.head) {
+            let newest = self.ahead.unwrap_or(head);
             let to = PathPoint {
                 pos: last.pos,
                 pressure: self.pressure.unwrap_or(1.0),
-                soft: self.soft.unwrap_or(head.soft),
-                tilt: head.tilt,
-                azimuth: head.azimuth,
-                speed: head.speed,
+                soft: self.soft.unwrap_or(newest.soft),
+                tilt: newest.tilt,
+                azimuth: newest.azimuth,
+                speed: newest.speed,
             };
-            let mut ignored = Vec::new();
-            self.walk_to(to, &mut ignored);
+            if self.averaged() > 1 {
+                // stabilisation's average catches up with the pen in a straight run
+                self.flush(&mut ignored);
+                self.walk_to(to, &mut ignored);
+            } else {
+                // the smoothed path catches up with the pen along the curve, where it lifted the
+                // last point it curves through
+                self.path_to(to, &mut ignored);
+                self.flush(&mut ignored);
+            }
             run_on = match self.ran_on {
                 Some(r) => r,
                 None => self.run_on(to, &mut ignored),
             };
+        } else {
+            self.flush(&mut ignored);
         }
         self.ran_on = Some(run_on);
         let length = self.length;
@@ -894,8 +916,8 @@ impl StrokeBuilder {
         }
         // stabilisation: the average of the latest points, those of a longer time the stronger it
         // is (as many samples as it averages at the tuned rate; half a sample's leeway)
-        let averaged = (self.extras.stabilization.clamp(0.0, 1.0).powf(STABILIZATION_POWER) * MOST_AVERAGED) as usize;
-        if averaged > 1 && !self.exact {
+        let averaged = self.averaged();
+        if averaged > 1 {
             self.recent.push((pos, s.time_ms));
             let from = s.time_ms - (averaged as f64 - 0.5) * interval;
             let over = self.recent.iter().take_while(|r| r.1 < from).count().min(self.recent.len() - 1);
@@ -921,6 +943,15 @@ impl StrokeBuilder {
         self.path_to(smoothed, out);
     }
 
+    /// How many of the latest samples (at the tuned rate) stabilisation averages: more than one
+    /// when it is on (never on an exact path).
+    fn averaged(&self) -> usize {
+        if self.exact {
+            return 0;
+        }
+        (self.extras.stabilization.clamp(0.0, 1.0).powf(STABILIZATION_POWER) * MOST_AVERAGED) as usize
+    }
+
     /// Takes the path on to `to`: the stretch before it walked along the curve through the points
     /// around it (an exact path goes straight, keeping its corners).
     fn path_to(&mut self, to: PathPoint, out: &mut Vec<Stamp>) {
@@ -928,20 +959,41 @@ impl StrokeBuilder {
             self.walk_to(to, out);
             return;
         };
+        // a point where the newest one is (the pen held still, or let go where it last was) adds
+        // nothing to bend by: it only brings that one's pressure and the rest up to date
+        let newest = self.ahead.unwrap_or(head);
+        if newest.pos.distance(to.pos) <= 1e-4 {
+            let held = Some(PathPoint { pos: newest.pos, ..to });
+            if self.ahead.is_some() {
+                self.ahead = held;
+            } else {
+                self.head = held;
+            }
+            return;
+        }
         let Some(next) = self.ahead.replace(to) else { return };
-        self.walk_curve(self.behind.unwrap_or(head), head, next, to, out);
+        self.walk_curve(self.behind, head, next, Some(to), out);
         self.behind = Some(head);
     }
 
     /// Walks from the head `b` to `c` along the centripetal Catmull–Rom curve through `a`, `b`,
-    /// `c` and `d`, in chords of at most [`CURVE_STEP`] (one, straight, if it is that short); the
-    /// pressure and the rest change evenly along it.
-    fn walk_curve(&mut self, a: PathPoint, b: PathPoint, c: PathPoint, d: PathPoint, out: &mut Vec<Stamp>) {
+    /// `c` and `d` (the parabola through three where the path has no point before or after), in
+    /// chords of at most [`CURVE_STEP`] (one, straight, if it is that short); the pressure and
+    /// the rest change evenly along it.
+    fn walk_curve(
+        &mut self,
+        a: Option<PathPoint>,
+        b: PathPoint,
+        c: PathPoint,
+        d: Option<PathPoint>,
+        out: &mut Vec<Stamp>,
+    ) {
         let whole = b.pos.distance(c.pos);
         let pieces = if whole.is_finite() { ((whole / CURVE_STEP).ceil() as usize).clamp(1, MOST_PIECES) } else { 1 };
         for i in 1..=pieces {
             let t = i as f32 / pieces as f32;
-            let pos = if i == pieces { c.pos } else { catmull_rom(a.pos, b.pos, c.pos, d.pos, t) };
+            let pos =
+                if i == pieces { c.pos } else { catmull_rom(a.map(|a| a.pos), b.pos, c.pos, d.map(|d| d.pos), t) };
             self.walk_piece(PathPoint { pos, ..b.lerp(c, t) }, Some(whole), out);
         }
     }
@@ -1052,6 +1104,14 @@ impl StrokeBuilder {
         }
         let d = to.pos - from.pos;
         self.direction = d.y.atan2(d.x);
+        // the stamps where the path starts were placed before it had a direction: they turn with
+        // it now, as the rest will
+        if self.length <= 0.0 {
+            let turn = self.brush.shape.follow * self.direction;
+            for p in &mut self.placed {
+                p.angle += turn;
+            }
+        }
         self.last_seg = whole.unwrap_or(seg);
         let mut done = 0.0f32;
         // each input segment goes on from the plain gap where it starts
@@ -2311,16 +2371,7 @@ mod tests {
         let mut s = StrokeBuilder::new(plain(), 4.0, Pointer::Finger);
         s.add(&round);
         let stamps = s.finish();
-        // away from the ends (whose stretches have nothing beyond them to curve by)
-        let inside = |p: &&Stamp| {
-            let a = (p.center.y - 200.0).atan2(p.center.x - 200.0).rem_euclid(std::f32::consts::TAU);
-            (std::f32::consts::FRAC_PI_4..std::f32::consts::TAU - std::f32::consts::FRAC_PI_4).contains(&a)
-        };
-        let off = stamps
-            .iter()
-            .filter(inside)
-            .map(|p| (p.center.distance(Vec2::new(200.0, 200.0)) - 100.0).abs())
-            .fold(0.0, f32::max);
+        let off = stamps.iter().map(|p| (p.center.distance(Vec2::new(200.0, 200.0)) - 100.0).abs()).fold(0.0, f32::max);
         assert!(off < 1.5, "{off} px off the circle");
         // a square drawn exactly: its corner is a corner, its sides straight
         let square = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)];
@@ -2334,6 +2385,88 @@ mod tests {
         let stamps = s.finish();
         assert!(stamps.iter().all(|p| (p.center.y - 50.0).abs() < 1e-3 || (p.center.x - 150.0).abs() < 1e-3));
         assert!(stamps.iter().any(|p| p.center.distance(Vec2::new(150.0, 50.0)) < 1.0));
+    }
+
+    /// A pen half round a circle of 150 px about (400, 400) in 150 ms, reported 60 times a
+    /// second: 20° between samples.
+    fn half_circle() -> Vec<Sample> {
+        (0..=9)
+            .map(|i| {
+                let a = std::f32::consts::PI * (1.0 - i as f32 / 9.0);
+                let at = Vec2::new(400.0 + 150.0 * a.cos(), 400.0 - 150.0 * a.sin());
+                Sample::at(at, 1.0, f64::from(i) * 1000.0 / 60.0)
+            })
+            .collect()
+    }
+
+    /// How far the furthest of `stamps` is off the circle of [`half_circle`].
+    fn off_the_circle(stamps: &[Stamp]) -> f32 {
+        stamps.iter().map(|s| (s.center.distance(Vec2::new(400.0, 400.0)) - 150.0).abs()).fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn a_strokes_first_and_last_stretches_bend_as_it_does() {
+        let drawn = |samples: &[Sample]| {
+            let mut s = StrokeBuilder::new(plain(), 6.0, Pointer::Stylus);
+            s.add(samples);
+            s.finish()
+        };
+        // straight from one sample to the next the stamps would fall 2.3 px inside the circle;
+        // the first and last stretches, with nothing before or after them, bend as the rest do
+        // (walked as if their end point came twice, they fell 1.1 px inside)
+        let stamps = drawn(&half_circle());
+        assert!(off_the_circle(&stamps) < 0.2, "{} px off the circle", off_the_circle(&stamps));
+        // starting where the pen landed and ending where it lifted
+        assert!(stamps.first().is_some_and(|s| s.center.distance(Vec2::new(250.0, 400.0)) < 1e-3));
+        assert!(stamps.last().is_some_and(|s| s.center.distance(Vec2::new(550.0, 400.0)) < 1.5));
+        // the lift reported where the pen last was, and a landing reported twice, change nothing
+        let mut twice = half_circle();
+        twice.insert(1, Sample { time_ms: 1.0, ..twice[0] });
+        if let Some(&last) = twice.last() {
+            twice.push(Sample { time_ms: last.time_ms + 1000.0 / 60.0, ..last });
+        }
+        let again = drawn(&twice);
+        assert_eq!(again.len(), stamps.len());
+        assert!(again.iter().zip(&stamps).all(|(a, b)| a.center.distance(b.center) < 1e-3));
+    }
+
+    /// The most the stroke turns (degrees) from the chord over `k` stamps to the next, anywhere
+    /// after its first `from` stamps.
+    fn most_turn(stamps: &[Stamp], k: usize, from: usize) -> f32 {
+        let at = |i: usize| stamps.get(i).map_or(Vec2::ZERO, |s| s.center);
+        (from.max(k)..stamps.len().saturating_sub(k))
+            .map(|i| {
+                let (u, v) = (at(i) - at(i - k), at(i + k) - at(i));
+                (u.x * v.y - u.y * v.x).atan2(u.x * v.x + u.y * v.y).abs().to_degrees()
+            })
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn the_smoothed_path_catches_up_with_the_pen_along_the_curve() {
+        let drawn = |input: InputSettings| {
+            let mut s =
+                StrokeBuilder::new(Brush { streamline: 0.35, ..plain() }, 6.0, Pointer::Stylus).with_input(input);
+            s.add(&half_circle());
+            s.finish()
+        };
+        // streamline: the path lags inside the circle, and at the lift it comes back out to where
+        // the pen is along the curve, turning no more sharply there than anywhere (a straight run
+        // to the lift point broke off from the curve by 12°)
+        let stamps = drawn(InputSettings::default());
+        let late = stamps.len() * 2 / 3;
+        let turn = most_turn(&stamps, 3, late);
+        assert!(turn < 4.0, "the end turns {turn}°");
+        assert!(stamps.last().is_some_and(|s| s.center.distance(Vec2::new(550.0, 400.0)) < 1.5));
+        assert!(off_the_circle(&stamps) < 3.0, "{} px off the circle", off_the_circle(&stamps));
+        // stabilisation's average still catches up in a straight run
+        let stamps = drawn(InputSettings { stabilization: 0.3, ..InputSettings::default() });
+        let end = stamps.last().map_or(Vec2::ZERO, |s| s.center);
+        let run = stamps.iter().rev().take(8).map(|s| s.center).collect::<Vec<_>>();
+        let along = end - run.last().copied().unwrap_or(end);
+        let across = |p: Vec2| ((p - end).x * along.y - (p - end).y * along.x).abs() / along.length();
+        assert!(run.iter().all(|&p| across(p) < 0.05), "{run:?}");
+        assert!(end.distance(Vec2::new(550.0, 400.0)) < 1.5);
     }
 
     #[test]
@@ -2372,6 +2505,54 @@ mod tests {
             close(unsmoothed - slow, unsmoothed - fast, 0.15),
             "pressure: {slow} at 240 Hz, {fast} at 720 Hz, {unsmoothed} unsmoothed"
         );
+    }
+
+    #[test]
+    fn a_stroke_leaves_where_the_pen_landed_without_a_hook() {
+        // the half circle, as it is and with a pen's streamline: the first 6 px head down the
+        // circle's tangent (the chord that far along is 1.2° off it; the first stretch walked as
+        // if its first point came twice headed 4° to 6° off)
+        for streamline in [0.0, 0.35] {
+            let mut s = StrokeBuilder::new(Brush { streamline, ..plain() }, 6.0, Pointer::Stylus);
+            s.add(&half_circle());
+            let stamps = s.finish();
+            let landed = Vec2::new(250.0, 400.0);
+            let on = stamps.iter().find(|st| st.center.distance(landed) >= 6.0).map_or(landed, |st| st.center);
+            let heading = (on - landed).y.atan2((on - landed).x).to_degrees();
+            assert!((heading + 90.0).abs() < 2.5, "streamline {streamline}: heads {heading}°");
+        }
+        // a pen landing 2 px off the line it then draws, 240 times a second at 2000 px/s: the
+        // stroke comes back to the line without swinging past it
+        let samples: Vec<Sample> = (0..40)
+            .map(|i| {
+                let y = if i == 1 { 52.0 } else { 50.0 };
+                Sample::at(Vec2::new(100.0 + i as f32 * 25.0 / 3.0, y), 1.0, f64::from(i) * 1000.0 / 240.0)
+            })
+            .collect();
+        let mut s = StrokeBuilder::new(plain(), 6.0, Pointer::Stylus);
+        s.add(&samples);
+        let stamps = s.finish();
+        let lowest = stamps.iter().map(|st| st.center.y).fold(f32::MAX, f32::min);
+        let highest = stamps.iter().map(|st| st.center.y).fold(f32::MIN, f32::max);
+        assert!(lowest > 49.75 && highest < 52.01, "{lowest}..{highest}");
+        assert!(stamps.iter().filter(|st| st.center.x > 130.0).all(|st| (st.center.y - 50.0).abs() < 0.01));
+    }
+
+    #[test]
+    fn the_first_stamp_turns_with_the_stroke_as_the_rest_do() {
+        let brush = Brush { shape: Shape { follow: 1.0, ..Shape::default() }, ..plain() };
+        // straight down the canvas: every stamp turned a quarter, the one where the pen landed too
+        let down: Vec<Sample> =
+            (0..=10).map(|i| Sample::at(Vec2::new(50.0, 4.0 * i as f32), 1.0, f64::from(i) * 4.0)).collect();
+        let mut s = StrokeBuilder::new(brush.clone(), 10.0, Pointer::Stylus);
+        s.add(&down);
+        let stamps = s.finish();
+        assert!(stamps.len() > 10);
+        assert!(stamps.iter().all(|st| (st.angle - std::f32::consts::FRAC_PI_2).abs() < 1e-4), "{:?}", stamps[0]);
+        // a tap goes nowhere: its dot keeps the shape's own turn
+        let mut s = StrokeBuilder::new(brush, 10.0, Pointer::Stylus);
+        s.add(&down[..1]);
+        assert_eq!(s.finish()[0].angle, 0.0);
     }
 
     #[test]
