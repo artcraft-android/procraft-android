@@ -864,6 +864,7 @@ private val CardHeight = 490.dp
 private val CardGap = 8.dp
 private val CardCorner = 16.dp
 private val CardSetRow = 19.dp
+private val CardBrushHeight = 30.dp
 
 /**
  * The library popover showing every library's card (tapped, that library is brought into use;
@@ -1016,10 +1017,16 @@ private fun LibraryCard(vm: CanvasViewModel, i: Int, library: io.github.artcraft
                     }
                 }
             }
-            Column(Modifier.weight(0.55f).padding(start = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(Modifier.weight(0.55f).padding(start = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 library.sets.getOrNull(chosen)?.brushes?.forEach { b ->
-                    Text(b.name, color = Pc.PanelTitle, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Box(Modifier.fillMaxWidth(0.85f).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Pc.PanelTitle.copy(alpha = 0.6f)))
+                    // its name over its stroke, drawn small
+                    val key = "$i-${b.set}-${b.index}"
+                    val stroke = vm.cardPreviews[key]
+                    LaunchedEffect(key, stroke == null) { if (stroke == null) vm.loadCardPreview(i, b.set.toInt(), b.index.toInt()) }
+                    Box(Modifier.fillMaxWidth().height(CardBrushHeight)) {
+                        stroke?.let { androidx.compose.foundation.Image(it, contentDescription = null, contentScale = androidx.compose.ui.layout.ContentScale.FillBounds, modifier = Modifier.fillMaxSize()) }
+                        Text(b.name, color = Pc.PanelTitle, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 3.dp, top = 1.dp))
+                    }
                 }
             }
         }

@@ -4574,6 +4574,29 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun readLibraries() {
         brushLibraries = session?.brushLibraries().orEmpty()
+        // the cards' strokes go by place, which may have changed
+        cardPreviews.clear()
+        cardPreviewsLoading.clear()
+    }
+
+    /** Library cards' brush strokes, drawn small, by "library-set-index". */
+    val cardPreviews = mutableStateMapOf<String, ImageBitmap>()
+    private val cardPreviewsLoading = HashSet<String>()
+
+    /** Renders brush [index] of set [set] of library [library] small for its card, once, off the main thread. */
+    fun loadCardPreview(library: Int, set: Int, index: Int) {
+        val key = "$library-$set-$index"
+        if (cardPreviews.containsKey(key) || !cardPreviewsLoading.add(key)) return
+        val s = session ?: return
+        viewModelScope.launch {
+            val image = withContext(Dispatchers.Default) {
+                val t = s.brushLibraryPreview(library.toUInt(), set.toUInt(), index.toUInt(), 212u, 65u) ?: return@withContext null
+                val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
+                bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
+                bitmap.asImageBitmap()
+            }
+            if (image != null && cardPreviewsLoading.contains(key)) cardPreviews[key] = image
+        }
     }
 
     /**

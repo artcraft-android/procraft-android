@@ -6,9 +6,16 @@
 //! the index changes: cut short anywhere, the libraries are all still there.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use procraft_engine::brush::Brush;
 
 use crate::brush_library::{LibrarySet, library_writes};
+use crate::layers::ThumbnailImage;
 use crate::{BrushInfo, BrushSetInfo, CanvasSession};
+
+/// How many libraries not in use have their brushes kept read, for their cards' previews.
+const READ_KEPT: usize = 4;
 
 /// The library as it ships is called this; a new one is called [`NEW_NAME`], and both are
 /// numbered after their name while another has it.
@@ -102,19 +109,26 @@ struct IndexFile<'a> {
 }
 
 /// The libraries: in order, which the app has in use (by id) and which this session holds in the
-/// state (the same, unless another session brought another into use since), and the folder they
-/// are kept in.
+/// state (the same, unless another session brought another into use since), the folder they are
+/// kept in, and the brushes of a few not in use, read from their files (by id, the latest last).
 #[derive(Clone, Debug)]
 pub(crate) struct Libraries {
     list: Vec<Entry>,
     current: String,
     held: String,
     dir: Option<PathBuf>,
+    read: Vec<(String, Arc<Vec<Vec<Brush>>>)>,
 }
 
 impl Default for Libraries {
     fn default() -> Libraries {
-        Libraries { list: vec![Entry::first()], current: FIRST.to_owned(), held: FIRST.to_owned(), dir: None }
+        Libraries {
+            list: vec![Entry::first()],
+            current: FIRST.to_owned(),
+            held: FIRST.to_owned(),
+            dir: None,
+            read: Vec::new(),
+        }
     }
 }
 
@@ -281,6 +295,30 @@ impl CanvasSession {
             .collect()
     }
 
+    /// A brush of the library at `library` drawn as [`CanvasSession::brush_preview`] draws one of
+    /// the library in use (another's brushes read from its files once, and kept a while); none if
+    /// there is no such brush or it can't be drawn.
+    pub fn brush_library_preview(
+        &self,
+        library: u32,
+        set: u32,
+        index: u32,
+        width: u32,
+        height: u32,
+    ) -> Option<ThumbnailImage> {
+        let (held, id, dir) = {
+            let st = self.shared.lock();
+            let l = &st.libraries;
+            (l.held.clone(), l.list.get(library as usize)?.id.clone(), l.dir.clone())
+        };
+        if id == held {
+            return self.brush_preview(set, index, width, height);
+        }
+        let brushes = self.library_brushes(&id, &dir?)?;
+        let brush = brushes.get(set as usize)?.get(index as usize)?.clone();
+        self.drawn_preview(brush, width, height)
+    }
+
     /// Brings the library at `index` into use, the one in use kept in its files first. False,
     /// changing nothing, if there is none there, its files can't be read, the one in use can't be
     /// kept, or the libraries have no folder ([`CanvasSession::open_brushes`] gives them theirs).
@@ -399,6 +437,8 @@ impl CanvasSession {
         if !removed {
             return false;
         }
+        // its id may be a new library's later
+        self.shared.lock().libraries.read.retain(|(r, _)| *r != gone);
         // the index no longer has it: its files go (the first's stay, for an earlier version), and
         // its pictures and grains once nothing names them
         if gone != FIRST {
@@ -505,6 +545,8 @@ impl CanvasSession {
             st.put_library(library.clone());
             st.library_kept = Some((sets_file.clone(), told));
             st.libraries.held = target.to_owned();
+            // read again once they are wanted: the one left was kept again
+            st.libraries.read.clear();
             drop(st);
             if let Some(choices) = choices {
                 self.load_brush_choices(choices);
@@ -519,6 +561,25 @@ impl CanvasSession {
         }
         log::warn!("the brush library in use kept changing: another wasn't brought into use");
         false
+    }
+
+    /// Library `id`'s brushes, by set, read from its files in `dir` (or as read before).
+    pub(crate) fn library_brushes(&self, id: &str, dir: &Path) -> Option<Arc<Vec<Vec<Brush>>>> {
+        if let Some((_, read)) = self.shared.lock().libraries.read.iter().find(|(r, _)| r == id) {
+            return Some(Arc::clone(read));
+        }
+        let json = std::fs::read_to_string(files(dir, id).0).ok()?;
+        let folder = dir.join(crate::brush_pictures::FOLDER);
+        let sets = crate::brush_library::read_library(self, &json, Some(&folder), true)?;
+        let read = Arc::new(sets.into_iter().map(|set| set.brushes).collect::<Vec<_>>());
+        let mut st = self.shared.lock();
+        let kept = &mut st.libraries.read;
+        kept.retain(|(r, _)| r != id);
+        kept.push((id.to_owned(), Arc::clone(&read)));
+        if kept.len() > READ_KEPT {
+            kept.remove(0);
+        }
+        Some(read)
     }
 
     /// The library in use and its choices kept in its own files in `dir`, and its card where the
@@ -571,8 +632,13 @@ impl CanvasSession {
         let first = list.first().map_or_else(|| FIRST.to_owned(), |e| e.id.clone());
         {
             let mut st = self.shared.lock();
-            st.libraries =
-                Libraries { list, current: current.clone(), held: current.clone(), dir: Some(dir.to_path_buf()) };
+            st.libraries = Libraries {
+                list,
+                current: current.clone(),
+                held: current.clone(),
+                dir: Some(dir.to_path_buf()),
+                read: Vec::new(),
+            };
         }
         let (sets, choices) = files(dir, &current);
         if self.load_library_file(&sets, current != FIRST) {

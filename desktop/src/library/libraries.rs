@@ -16,6 +16,9 @@ const CARD_GAP: f32 = 8.0;
 const CARD_CORNER: u8 = 16;
 const CARD_SET_ROW: f32 = 19.0;
 const CARD_SET_GAP: f32 = 3.0;
+/// A brush's row on a card, and how many cards' strokes are drawn a frame.
+const CARD_BRUSH: f32 = 30.0;
+const CARD_PREVIEWS_A_FRAME: usize = 4;
 /// A set's row on a card, not the one shown.
 const CARD_SET_FILL: Themed = Themed(0x59000000, 0x14000000);
 
@@ -54,6 +57,7 @@ impl Library {
             return;
         }
         let mut cards = Vec::new();
+        let mut made = 0;
         let mut opened = None;
         let mut menu_for = None;
         ui.scope_builder(UiBuilder::new().max_rect(lists), |ui| {
@@ -76,7 +80,7 @@ impl Library {
                         );
                         cards.push((i, card));
                         let response = ui.interact(card, ui.scope_id().with(("library card", i)), Sense::click());
-                        self.library_card(ui, look, session, i, library, card, shown);
+                        self.library_card(ui, look, session, i, library, card, shown, &mut made);
                         if response.secondary_clicked() || response.long_touched() {
                             menu_for = Some(i);
                         } else if response.clicked() {
@@ -120,6 +124,7 @@ impl Library {
         library: &BrushLibraryInfo,
         card: Rect,
         shown: usize,
+        made: &mut usize,
     ) {
         let painter = ui.painter_at(card);
         painter.rect_filled(card, CARD_CORNER, argb(SET_CELL));
@@ -154,15 +159,32 @@ impl Library {
         let width = card.right() - 10.0 - left;
         let mut y = card.top() + 38.0;
         for b in library.sets.get(chosen).map(|s| s.brushes.as_slice()).unwrap_or_default() {
-            if y + 14.0 > card.bottom() - 8.0 {
+            if y + CARD_BRUSH > card.bottom() - 8.0 {
                 break;
             }
-            let name = one_line(ui, &b.name, 8.0, Weight::Regular, argb(PANEL_TITLE), width);
-            let h = name.size().y;
-            painter.galley(pos2(left, y), name, argb(PANEL_TITLE));
-            let bar = Rect::from_min_size(pos2(left, y + h + 1.5), vec2(width * 0.85, 3.0));
-            painter.rect_filled(bar, 2, argb(PANEL_TITLE).gamma_multiply(0.6));
-            y += h + 9.0;
+            // its name over its stroke, drawn small
+            let row = Rect::from_min_size(pos2(left, y), vec2(width, CARD_BRUSH));
+            let key = (i as u32, b.set, b.index);
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.card_previews.entry(key) {
+                if *made < CARD_PREVIEWS_A_FRAME {
+                    *made += 1;
+                    slot.insert(session.brush_library_preview(key.0, key.1, key.2, 212, 65).map(|t| {
+                        let image =
+                            egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
+                        ui.ctx().load_texture(format!("card brush {key:?}"), image, egui::TextureOptions::LINEAR)
+                    }));
+                } else {
+                    ui.ctx().request_repaint();
+                }
+            }
+            if let Some(Some(stroke)) = self.card_previews.get(&key) {
+                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                let tint = if crate::look::light() { Color32::BLACK } else { Color32::WHITE };
+                painter.image(stroke.id(), row, uv, tint);
+            }
+            let name = one_line(ui, &b.name, 8.0, Weight::Regular, argb(PANEL_TITLE), width - 4.0);
+            painter.galley(row.min + vec2(3.0, 1.0), name, argb(PANEL_TITLE));
+            y += CARD_BRUSH + 2.0;
         }
     }
 
@@ -233,6 +255,7 @@ impl Library {
             }
             "Back to libraries" => self.showing_libraries = true,
             _ => {
+                self.card_previews.clear();
                 if session.restore_stock_brush_library().is_none() {
                     log::error!("the shipped brush library couldn't be put back");
                 }
@@ -266,6 +289,7 @@ impl Library {
         );
         if tapped.is_some() {
             self.libraries_plus.close();
+            self.card_previews.clear();
             if session.new_brush_library().is_none() {
                 log::error!("a new brush library couldn't be made");
             }
@@ -306,6 +330,7 @@ impl Library {
                 self.renaming_library = Some((i, name, false));
             }
             "Duplicate" => {
+                self.card_previews.clear();
                 if session.duplicate_brush_library(i as u32).is_none() {
                     log::error!("brush library {i} couldn't be copied");
                 }

@@ -5583,8 +5583,13 @@ fn brush_libraries_come_and_go_each_kept_in_its_own_files() {
     assert!(s.open_brush_library(0));
     assert_eq!(s.brush_library().len(), shipped);
     assert_eq!((s.current_brush().set, s.current_brush().index), (0, 3));
-    // the card of the one not in use shows its sets
+    // the card of the one not in use shows its sets; its brushes are read from its files
     assert_eq!(s.brush_libraries()[1].sets.len(), 1);
+    assert!(s.open_brush_library(1));
+    let kept = s.library_brushes("main", &dir).unwrap();
+    assert_eq!(kept.len(), shipped);
+    assert!(kept.iter().all(|set| !set.is_empty()));
+    assert!(s.open_brush_library(0));
     // kept and opened again in a new session: the same libraries, the same one in use
     assert!(s.keep_brushes(d.clone()));
     let t = CanvasSession::new(64, 64);

@@ -198,6 +198,8 @@ pub struct Library {
     card_menu_for: Option<usize>,
     renaming_library: Option<(usize, String, bool)>,
     card_rects: Vec<(usize, Rect)>,
+    /// The cards' brush strokes, drawn small, by library, set and place (none: it can't be).
+    card_previews: HashMap<(u32, u32, u32), Option<TextureHandle>>,
     press: Option<Press>,
     set_press: Option<SetPress>,
     /// How far each brush is slid (points, left negative), and the brush slid open.
@@ -318,6 +320,7 @@ impl Library {
     /// The library changed: its sample strokes are drawn again (they go by place), and it is kept.
     pub fn library_changed(&mut self) {
         self.stale = true;
+        self.card_previews.clear();
         self.slid.clear();
         self.swiped = None;
         self.picked.clear();
