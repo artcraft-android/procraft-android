@@ -443,6 +443,10 @@ const RUN_ON_TURN: f32 = 1.125;
 const GRAIN_JITTER_SPAN: f32 = 1024.0;
 /// Stamps a stroke may hold (a guard against runaway input, far above any real stroke).
 const MAX_STAMPS: usize = 400_000;
+/// How far the path goes before the stroke's direction (which stamps following it turn to) has
+/// turned the way it now goes, a share of the brush's size, and at the least in canvas pixels.
+const TURN_REACH: f32 = 0.25;
+const TURN_REACH_LEAST: f32 = 1.5;
 
 /// A small deterministic random source (xorshift), so a stroke replays identically.
 #[derive(Clone, Debug)]
@@ -477,6 +481,9 @@ pub struct StrokeBuilder {
     behind: Option<PathPoint>,
     ahead: Option<PathPoint>,
     direction: f32,
+    /// The way the path has been going, smoothed over [`TURN_REACH`] of the brush (unit length
+    /// once settled; zero before the path has moved), which `direction` is the angle of.
+    heading: Vec2,
     /// The length of the last stretch of path walked (canvas pixels), none before the first.
     last_seg: f32,
     /// How much the brush is scaled on this canvas (the size the stroke was asked for over the
@@ -653,6 +660,7 @@ impl StrokeBuilder {
             last_sample: None,
             head: None,
             direction: 0.0,
+            heading: Vec2::ZERO,
             last_seg: 0.0,
             behind: None,
             ahead: None,
@@ -1031,6 +1039,13 @@ impl StrokeBuilder {
         if self.input_length > 0.0 { input * (self.length / self.input_length).min(1.0) } else { input }
     }
 
+    /// How far stamps turn with the stroke: a pen turns them as it is held (its azimuth) in place
+    /// of following the stroke, which is for touch, unless they turn relative to the stroke.
+    fn follow(&self) -> f32 {
+        let held = self.brush.shape.follow_azimuth && self.pointer.has_pressure();
+        if held && self.brush.setting("relative_to_stroke") < 0.5 { 0.0 } else { self.brush.shape.follow }
+    }
+
     fn classic(&self) -> bool {
         self.brush.extra.get("classic_taper").is_some_and(|&v| v >= 0.5)
     }
@@ -1099,6 +1114,18 @@ impl StrokeBuilder {
         self.length - start
     }
 
+    /// The path went `d` (`seg` long): the direction turns towards it as far as its length is of
+    /// the reach, so the pen's wobbles shorter than that (slowing at a stroke's ends) don't swing
+    /// stamps that follow the stroke out across it.
+    fn turn_towards(&mut self, d: Vec2, seg: f32) {
+        let reach = (self.diameter * TURN_REACH).max(TURN_REACH_LEAST);
+        let k = (seg / reach).min(1.0);
+        self.heading = self.heading * (1.0 - k) + d * (k / seg);
+        if self.heading.length() > 1e-6 {
+            self.direction = self.heading.y.atan2(self.heading.x);
+        }
+    }
+
     /// Walks the path from its head to `to`, placing stamps at the brush's spacing.
     fn walk_to(&mut self, to: PathPoint, out: &mut Vec<Stamp>) {
         self.walk_piece(to, None, out);
@@ -1118,12 +1145,11 @@ impl StrokeBuilder {
             self.head = Some(PathPoint { pos: from.pos, ..to });
             return;
         }
-        let d = to.pos - from.pos;
-        self.direction = d.y.atan2(d.x);
+        self.turn_towards(to.pos - from.pos, seg);
         // the stamps where the path starts were placed before it had a direction: they turn with
         // it now, as the rest will
         if self.length <= 0.0 {
-            let turn = self.brush.shape.follow * self.direction;
+            let turn = self.follow() * self.direction;
             for p in &mut self.placed {
                 p.angle += turn;
             }
@@ -1409,6 +1435,9 @@ impl StrokeBuilder {
         let attack = (p.soft[1].clamp(0.0, 1.0) * attack_tilt * curves.through(PC::Attack, pressure)).clamp(0.0, 1.0);
         let [hue_by, saturation_by, lightness_by, darkness_by, secondary_by] = color_first;
         let [hue_more, saturation_more, lightness_more, darkness_more, secondary_more] = color_more;
+        // a pen turns the stamp as it is held (its azimuth, and roll), in place of following the
+        // stroke, which is for touch; relative to the stroke, it turns from the stroke's way
+        let follow = self.follow();
         for _ in 0..count {
             let size = 1.0 - shape.size_jitter.clamp(0.0, 1.0) * size_jitter_by * self.random.next();
             let fade = 1.0 - shape.opacity_jitter.clamp(0.0, 1.0) * opacity_jitter_by * self.random.next();
@@ -1427,7 +1456,7 @@ impl StrokeBuilder {
                 let r = self.random.next().sqrt() * shape.throw * diameter;
                 center = center + Vec2::new(a.cos() * r, a.sin() * r);
             }
-            let mut angle = shape.rotation - self.screen_turn + shape.follow * self.direction;
+            let mut angle = shape.rotation - self.screen_turn + follow * self.direction;
             if shape.follow_azimuth {
                 angle += p.azimuth;
             }
@@ -2238,6 +2267,44 @@ mod tests {
         assert!((shaded[0].gradation - (0.6 * reach).sqrt()).abs() < 1e-4, "{}", shaded[0].gradation);
         let rounded = stamps(&[("tilt_roundness", 0.5), ("tilt_size", 0.0)], 0.0);
         assert!((rounded[0].roundness - (1.0 - 0.5 * reach)).abs() < 1e-4, "{}", rounded[0].roundness);
+    }
+
+    #[test]
+    fn a_wobble_as_the_pen_slows_doesnt_swing_stamps_that_follow_the_stroke() {
+        let mut b = plain();
+        b.set_setting("shape_rotation", 1.0);
+        // along x, then a pen slowing to lift: steps of a fraction of a pixel, every which way
+        let mut samples: Vec<Sample> =
+            (0..=20).map(|i| Sample::at(Vec2::new(i as f32 * 10.0, 0.0), 1.0, f64::from(i) * 8.0)).collect();
+        for (k, (dx, dy)) in
+            [(0.3, 0.6), (-0.2, -0.7), (0.4, 0.5), (-0.5, 0.2), (0.1, -0.6), (0.2, 0.7)].iter().enumerate()
+        {
+            let x = 200.0 + dx * (k + 1) as f32 / 3.0;
+            samples.push(Sample::at(Vec2::new(x, *dy), 1.0, 168.0 + k as f64 * 8.0));
+        }
+        let stamps = StrokeBuilder::new(b, 40.0, Pointer::Stylus).preview(&samples);
+        let off = |a: f32| (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        let worst = stamps.iter().skip(1).map(|s| off(s.angle).abs()).fold(0.0, f32::max);
+        assert!(worst < 0.3, "a stamp turned {worst} radians off the stroke");
+    }
+
+    #[test]
+    fn a_pen_turns_the_stamp_as_held_in_place_of_following_the_stroke() {
+        let angle = |pointer: Pointer, relative: f32| {
+            let mut b = plain();
+            b.set_setting("shape_rotation", 1.0);
+            b.set_setting("input_style", 1.0);
+            b.set_setting("relative_to_stroke", relative);
+            // down the screen (a quarter turn), the pen leaning 0.3 radians
+            let at = |y: f32| Sample { azimuth: 0.3, ..Sample::at(Vec2::new(0.0, y), 1.0, f64::from(y)) };
+            let stamps = StrokeBuilder::new(b, 10.0, pointer).preview(&[at(0.0), at(20.0), at(40.0)]);
+            stamps.last().map_or(f32::NAN, |s| s.angle)
+        };
+        let quarter = std::f32::consts::FRAC_PI_2;
+        // the pen as held; touch follows the stroke (and has no lean); relative, both
+        assert!((angle(Pointer::Stylus, 0.0) - 0.3).abs() < 1e-4, "{}", angle(Pointer::Stylus, 0.0));
+        assert!((angle(Pointer::Finger, 0.0) - quarter).abs() < 1e-4, "{}", angle(Pointer::Finger, 0.0));
+        assert!((angle(Pointer::Stylus, 1.0) - (quarter + 0.3)).abs() < 1e-4, "{}", angle(Pointer::Stylus, 1.0));
     }
 
     #[test]

@@ -708,6 +708,9 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
             } else if has(&["dots"]) {
                 // dots scattered over the stamp, whatever outline they fill
                 (Some(stock_shape(&n)), None, None)
+            } else if has(&["oval"]) && has(&["slim", "thin", "narrow"]) {
+                // a flat oval, not the round tip
+                (Some(shape::SLIM_OVAL), None, None)
             } else if has(&["medium-hard", "medium hard", "mediumhard"]) {
                 (None, None, Some(0.75))
             } else if has(&["hard", "pen", "solid", "oval", "round"]) && !has(&["soft", "ink"]) {
@@ -1031,6 +1034,10 @@ mod tests {
             (None, None, Some(0.95))
         );
         assert_eq!(shape_for(&Texture::Stock { name: "Soft.png".into(), inverted: false }).0, Some(shape::SOFT_ROUND));
+        assert_eq!(
+            shape_for(&Texture::Stock { name: "Slim-Oval.png".into(), inverted: false }),
+            (Some(shape::SLIM_OVAL), None, None)
+        );
         assert_eq!(shape_for(&Texture::Stock { name: "Spray-Fine.jpg".into(), inverted: false }).0, Some(shape::SPRAY));
         // a flat brush's stroke, streaked; dots, not the round or square they fill
         let shape = |name: &str| shape_for(&Texture::Stock { name: name.into(), inverted: false }).0;

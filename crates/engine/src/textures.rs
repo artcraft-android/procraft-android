@@ -67,6 +67,7 @@ pub mod shape {
     pub const STOCK_SQUARE_DOTS: u32 = 49;
     pub const STOCK_BLEED: u32 = 50;
     pub const STOCK_MESS: u32 = 51;
+    pub const SLIM_OVAL: u32 = 52;
 }
 
 /// Grains, by index.
@@ -724,6 +725,16 @@ fn make_shapes() -> Vec<GrayImage> {
     shapes.extend(more);
     shapes.push(GrayImage { name: "Solid dab", pixels: dab.unwrap_or_default() });
     shapes.extend(stock_strokes());
+    // a hard, flat oval lying across its square (the stock slim oval's proportions: as wide as
+    // most of the square, a quarter as tall), for flat brushes that turn with the pen
+    shapes.push(GrayImage {
+        name: "Slim oval",
+        pixels: field(|x, y| {
+            let r = ((x - 0.5) / SLIM_OVAL_HALF.0).hypot((y - 0.5) / SLIM_OVAL_HALF.1);
+            // about a texel of anti-aliasing at the edge
+            smooth((1.0 - r) * SLIM_OVAL_HALF.1 * TEXTURE_SIZE as f32 + 0.5)
+        }),
+    });
     shapes
 }
 
@@ -823,6 +834,9 @@ fn dots(dots: &[(f32, f32, f32, f32)], x: f32, y: f32) -> f32 {
         acc.max(smooth((1.0 - d) * (6.0 - 4.5 * blur)) * (1.0 - 0.35 * blur))
     })
 }
+
+/// The slim oval's half width and half height, shares of its square.
+const SLIM_OVAL_HALF: (f32, f32) = (0.432, 0.102);
 
 /// How much the solid dab raises the small chunk's values.
 const DAB_GAIN: f32 = 1.4;
