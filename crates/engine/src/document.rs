@@ -876,9 +876,10 @@ impl Document {
         any
     }
 
-    /// Merging what is chosen: its bottom paint layer, and what is chosen above that (layers
-    /// without masks, and groups), bottom first, for the renderer to draw into it. None unless
-    /// there is something to merge or if any of it is locked.
+    /// Merging what is chosen: its bottom paint layer, and what is chosen above that (layers and
+    /// groups), bottom first, for the renderer to draw into it, each layer's mask (the bottom
+    /// one's too) applied to it first. None unless there is something to merge or if any of it
+    /// is locked.
     pub fn merge_chosen_plan(&self) -> Option<(LayerId, Vec<LayerId>)> {
         let items = self.chosen_items();
         if items.iter().any(|id| self.layer(*id).is_some_and(|l| l.locked)) {
@@ -890,7 +891,7 @@ impl Document {
             .get(at + 1..)?
             .iter()
             .copied()
-            .filter(|id| self.layer(*id).is_some_and(|l| l.kind == LayerKind::Group) || self.mask_of(*id).is_none())
+            .filter(|id| self.layer(*id).is_some_and(|l| matches!(l.kind, LayerKind::Group | LayerKind::Paint)))
             .collect();
         (!uppers.is_empty()).then_some((lower, uppers))
     }
@@ -901,11 +902,14 @@ impl Document {
         if self.layer(lower).is_none() {
             return false;
         }
+        // their masks go with them; the bottom one's was applied to it
+        let mask = self.mask_of(lower);
         for id in uppers.iter().rev() {
             if let Some(unit) = self.unit(*id) {
                 self.layers.drain(unit);
             }
         }
+        self.layers.retain(|l| Some(l.id) != mask);
         self.current = lower;
         self.picked.clear();
         self.rasterize(lower);
@@ -1274,24 +1278,62 @@ impl Document {
         true
     }
 
-    /// What `id` merges into: the paint layer just below it in its group, if `id` is a paint layer
-    /// or a group and neither has a mask.
+    /// What `id` merges into: for a paint layer, the paint layer just below it in its group; for a
+    /// group, what its top layer merges into (see [`Document::group_merge_pair`]). A layer's mask
+    /// and the one below's are each applied to its layer first.
     pub fn merge_target(&self, id: LayerId) -> Option<LayerId> {
-        let layer = self.layer(id)?;
-        let below = self.below(id)?;
-        let plain = |l: LayerId| self.layer(l).is_some_and(|l| l.kind == LayerKind::Paint) && self.mask_of(l).is_none();
-        ((layer.kind == LayerKind::Group || plain(id)) && plain(below)).then_some(below)
+        match self.layer(id)?.kind {
+            LayerKind::Paint => self.below(id).filter(|b| self.layer(*b).is_some_and(|l| l.kind == LayerKind::Paint)),
+            LayerKind::Group => self.group_merge_pair(id).map(|(_, into)| into),
+            LayerKind::Mask => None,
+        }
     }
 
-    /// Removes `id` (with everything in it) after it was merged down; the layer below becomes
+    /// A group's Merge Down: its top paint layer (in a group in it, if that is on top) and the
+    /// paint layer just under that in the stack, in the group or not. The group stays, emptied or
+    /// not. None for an empty group, or with no paint layer under.
+    pub fn group_merge_pair(&self, group: LayerId) -> Option<(LayerId, LayerId)> {
+        let mut at = self.index_of(group)?;
+        let top = loop {
+            at = at.checked_sub(1)?;
+            let l = self.layers.get(at)?;
+            match l.kind {
+                LayerKind::Paint => break l.id,
+                LayerKind::Mask => break l.parent?,
+                LayerKind::Group => {}
+            }
+        };
+        if !self.is_inside(top, group) {
+            return None;
+        }
+        let start = self.unit(top)?.start;
+        let under = self.layers.get(start.checked_sub(1)?)?;
+        let under = if under.kind == LayerKind::Mask { self.layer(under.parent?)? } else { under };
+        (under.kind == LayerKind::Paint).then_some((top, under.id))
+    }
+
+    /// Removes `id` after it was merged down; the layer below becomes current. For a group, its
+    /// top layer was merged (see [`Document::group_merge_pair`]): that goes, and the group stays
     /// current.
     pub fn finish_merge_down(&mut self, id: LayerId) -> bool {
+        if self.layer(id).is_some_and(|l| l.kind == LayerKind::Group) {
+            let Some((top, into)) = self.group_merge_pair(id) else { return false };
+            return self.finish_merge_into(top, into, id);
+        }
         let Some(below) = self.merge_target(id) else { return false };
-        let Some(unit) = self.unit(id) else { return false };
+        self.finish_merge_into(id, below, below)
+    }
+
+    /// Removes paint layer `upper` merged into `lower`, then makes `current` current.
+    fn finish_merge_into(&mut self, upper: LayerId, lower: LayerId, current: LayerId) -> bool {
+        let Some(unit) = self.unit(upper) else { return false };
+        // its mask goes with it; the one below's was applied to that layer
+        let mask = self.mask_of(lower);
         self.layers.drain(unit);
-        self.current = below;
+        self.layers.retain(|l| Some(l.id) != mask);
+        self.current = current;
         // merged into, a text layer's pixels are no longer just its text
-        self.rasterize(below);
+        self.rasterize(lower);
         true
     }
 
@@ -1594,8 +1636,8 @@ mod tests {
         assert_eq!(d.contents(g), vec![b, m, c]);
         assert_eq!(d.members(Some(g)), vec![b, c]);
         assert_eq!(d.group_of(m), Some(g));
-        // merging needs plain neighbours in the same group; clipping a paint layer below
-        assert_eq!(d.merge_target(c), None);
+        // merging needs neighbours in the same group, masked or not; clipping a paint layer below
+        assert_eq!(d.merge_target(c), Some(b));
         assert!(d.can_clip(c) && !d.can_clip(b));
         // moved out to the bottom it leaves the group, and its mask comes with it
         assert!(d.move_layer(b, 0));
@@ -1655,6 +1697,49 @@ mod tests {
     }
 
     #[test]
+    fn a_masked_layer_merges_down_and_both_masks_go() {
+        let mut d = Document::new(10, 10);
+        let a = d.current();
+        let a_mask = d.add_mask(a).unwrap();
+        assert!(d.set_current(a));
+        let b = d.add_layer();
+        let b_mask = d.add_mask(b).unwrap();
+        assert_eq!(ids(&d), vec![a, a_mask, b, b_mask]);
+        assert_eq!(d.merge_target(b), Some(a));
+        assert!(d.finish_merge_down(b));
+        assert_eq!((ids(&d), d.current()), (vec![a], a));
+        // a group's Merge Down takes its top layer into the one under it, masked or not; the
+        // group stays, emptied, and current
+        let c = d.add_layer();
+        let g = d.combine_down(c).unwrap();
+        assert_eq!(ids(&d), vec![a, c, g]);
+        let a_mask = d.add_mask(a).unwrap();
+        assert_eq!((d.group_merge_pair(g), d.merge_target(g)), (Some((c, a)), Some(a)));
+        assert!(d.finish_merge_down(g));
+        assert_eq!((ids(&d), d.current()), (vec![a, g], g));
+        assert!(d.layer(a_mask).is_none());
+    }
+
+    #[test]
+    fn a_group_s_merge_down_merges_its_top_layer() {
+        let mut d = Document::new(10, 10);
+        let a = d.current();
+        let b = d.add_layer();
+        let c = d.add_layer();
+        // b and c in a group above a: c goes into b, in the group
+        let g = d.combine_down(c).unwrap();
+        assert_eq!(ids(&d), vec![a, b, c, g]);
+        assert_eq!(d.group_merge_pair(g), Some((c, b)));
+        assert!(d.finish_merge_down(g));
+        assert_eq!((ids(&d), d.current()), (vec![a, b, g], g));
+        // its last layer goes into a, outside it; then empty, it has nothing to merge
+        assert_eq!(d.group_merge_pair(g), Some((b, a)));
+        assert!(d.finish_merge_down(g));
+        assert_eq!(ids(&d), vec![a, g]);
+        assert_eq!(d.merge_target(g), None);
+    }
+
+    #[test]
     fn groups_nest_ungroup_and_flatten() {
         let mut d = Document::new(10, 10);
         let a = d.current();
@@ -1673,7 +1758,7 @@ mod tests {
         assert_eq!(ids(&d), vec![a, b, c, inner, g]);
         assert_eq!((d.depth(c), d.depth(inner), d.depth(a), d.max_depth()), (2, 1, 1, 2));
         assert_eq!(d.members(Some(g)), vec![a, inner]);
-        assert_eq!((d.below(inner), d.merge_target(inner)), (Some(a), Some(a)));
+        assert_eq!((d.below(inner), d.merge_target(inner)), (Some(a), Some(b)));
         assert_eq!((d.below(b), d.merge_target(b)), (None, None));
         // a group moves with everything in it
         assert!(d.move_layer(inner, 0));
@@ -2025,5 +2110,19 @@ mod tests {
         assert_eq!(d.merge_chosen_plan(), None);
         assert!(d.delete_chosen());
         assert_eq!(names(&d), ["4"]);
+    }
+
+    #[test]
+    fn picked_layers_merge_with_their_masks() {
+        let (mut d, made) = stack(3);
+        let [one, two, three]: [LayerId; 3] = made.try_into().unwrap();
+        let one_mask = d.add_mask(one).unwrap();
+        let three_mask = d.add_mask(three).unwrap();
+        d.set_current(three);
+        d.toggle_pick(one);
+        assert_eq!(d.merge_chosen_plan(), Some((one, vec![three])));
+        assert!(d.finish_merge_chosen(one, &[three]));
+        assert_eq!(ids(&d), vec![one, two]);
+        assert!(d.layer(one_mask).is_none() && d.layer(three_mask).is_none());
     }
 }

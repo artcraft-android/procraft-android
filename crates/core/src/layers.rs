@@ -96,6 +96,7 @@ pub enum LayerOption {
     Rasterize,
     MergeDown,
     CombineDown,
+    MergeMask,
 }
 
 /// A row of a layer's options menu: what it does, its label, whether it can be chosen, and for a
@@ -139,7 +140,10 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
                 row(O::Clear, "Clear", unlocked, None);
                 row(O::AlphaLock, "Alpha Lock", true, Some(l.alpha_lock));
             }
-            row(O::Mask, "Mask", !masked, None);
+            // one mask each: with one, its Merge Mask comes last instead
+            if !masked {
+                row(O::Mask, "Mask", true, None);
+            }
             if l.can_clip {
                 row(O::ClippingMask, "Clipping Mask", true, Some(l.clipped));
             }
@@ -164,6 +168,9 @@ fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRo
         if l.can_combine {
             row(O::CombineDown, "Combine Down", true, None);
         }
+    }
+    if masked {
+        row(O::MergeMask, "Merge Mask", unlocked, None);
     }
     rows
 }
@@ -514,7 +521,7 @@ impl CanvasSession {
         let before = st.doc.clone();
         let layer = st.doc.flatten(LayerId(id))?;
         if let Some(canvas) = st.canvas.as_mut() {
-            canvas.flatten_group(LayerId(id), layer, false, before);
+            canvas.flatten_group(LayerId(id), layer, before);
         }
         st.revision += 1;
         self.shared.frame(st);
@@ -594,31 +601,41 @@ impl CanvasSession {
         .is_some()
     }
 
+    /// Layer `id`'s mask applied to it and removed, as when the two rows are pinched together.
+    /// False if it has none, or either is locked.
+    pub fn merge_mask(&self, id: u64) -> bool {
+        let mask = self.layers().into_iter().find(|m| m.kind == LayerType::Mask && m.parent == Some(id));
+        mask.is_some_and(|m| self.merge_between(m.id, id))
+    }
+
     /// Blends layer or group `id` into the layer below and removes it.
     pub fn merge_down(&self, id: u64) -> bool {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
-        let upper = LayerId(id);
-        let Some(lower) = st.doc.merge_target(upper) else { return false };
-        if [upper, lower].iter().any(|l| st.doc.layer(*l).is_none_or(|l| l.locked)) {
+        let id = LayerId(id);
+        // a group's takes its top layer into the one under that, in the group or not
+        let pair = if st.doc.layer(id).is_some_and(|l| l.kind == LayerKind::Group) {
+            st.doc.group_merge_pair(id)
+        } else {
+            st.doc.merge_target(id).map(|lower| (id, lower))
+        };
+        let Some((upper, lower)) = pair else { return false };
+        if [id, upper, lower].iter().any(|l| st.doc.layer(*l).is_none_or(|l| l.locked)) {
             return false;
         }
         let before = st.doc.clone();
-        let group = st.doc.layer(upper).is_some_and(|l| l.kind == LayerKind::Group);
         // a layer changes the one below only where it is painted: only that much is kept for undo
         // (none at all for an empty one), not a copy of the whole of it
-        let within = (!group).then(|| st.painted_box(upper).unwrap_or(procraft_engine::geom::IRect::new(0, 0, 0, 0)));
+        let within = st.painted_box(upper).unwrap_or(procraft_engine::geom::IRect::new(0, 0, 0, 0));
         if let Some(canvas) = st.canvas.as_mut() {
-            if group {
-                canvas.flatten_group(upper, lower, true, before);
-            } else {
-                canvas.name_next_step("merge down");
-                canvas.merge_down(upper, lower, before, within);
-            }
+            // each mask applied to its layer first, as one step
+            let masks = [upper, lower].into_iter().filter_map(|l| st.doc.mask_of(l).map(|m| (l, m))).collect();
+            canvas.name_next_step("merge down");
+            canvas.merge_down_with_masks(upper, lower, masks, before, Some(within));
         }
-        st.doc.finish_merge_down(upper);
+        st.doc.finish_merge_down(id);
         st.revision += 1;
         self.shared.frame(st);
         true
@@ -829,9 +846,14 @@ impl CanvasSession {
                 }),
             _ => None,
         };
+        // each layer's mask applied to it first, as one step
+        let masks = std::iter::once(lower)
+            .chain(uppers.iter().copied())
+            .filter_map(|l| st.doc.mask_of(l).map(|m| (l, m)))
+            .collect();
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.name_next_step("merge layers");
-            canvas.merge_layers(uppers.clone(), lower, before, within);
+            canvas.merge_layers_with_masks(uppers.clone(), lower, masks, before, within);
         }
         st.doc.finish_merge_chosen(lower, &uppers);
         st.revision += 1;

@@ -2323,7 +2323,7 @@ fn the_drawing_guide_mirrors_and_assists_strokes() {
 
 #[test]
 fn a_layer_s_options_follow_what_it_is() {
-    use crate::layers::{LayerOption as O, LayerOptionRow};
+    use crate::layers::{LayerOption as O, LayerOptionRow, LayerType};
     let s = CanvasSession::new(64, 64);
     let bottom = s.layers()[0].id;
     let top = s.add_layer();
@@ -2360,10 +2360,16 @@ fn a_layer_s_options_follow_what_it_is() {
     assert_eq!(row(top, O::Fill).switch_on, None);
     assert!(s.set_layer_locked(top, true));
     assert!(!row(top, O::Fill).enabled && !row(top, O::MergeDown).enabled && row(top, O::Select).enabled);
-    // with a mask, no second one; the mask's own menu is short
+    // with a mask, no second one: Merge Mask last instead; the mask's own menu is short
     let mask = s.add_mask(bottom).unwrap();
-    assert!(!row(bottom, O::Mask).enabled);
+    let with_mask = options(bottom);
+    assert!(!with_mask.contains(&O::Mask) && with_mask.last() == Some(&O::MergeMask));
     assert_eq!(options(mask), [O::Rename, O::Select, O::Fill, O::Clear, O::Invert]);
+    // chosen, the mask goes into its layer; with none left, Mask is back
+    assert!(s.merge_mask(bottom));
+    assert!(s.layers().iter().all(|l| l.kind != LayerType::Mask));
+    assert!(options(bottom).contains(&O::Mask) && !options(bottom).contains(&O::MergeMask));
+    assert!(!s.merge_mask(bottom));
     // a text layer: its own two before Reference, nothing that would paint into it
     assert!(s.set_layer_locked(top, false) && s.select_layer(top));
     let text = s.text_begin(None, text_info("Hi")).unwrap();
@@ -2549,14 +2555,14 @@ fn groups_nest_flatten_and_merge_down() {
     assert!(s.layers().iter().any(|l| l.id == inner));
     s.redo();
     assert!(s.layers().iter().all(|l| l.id != inner));
-    // the outer group merged into red: one layer, still looking the same
+    // the outer group's Merge Down takes its top layer into red, under it outside the group: the
+    // group stays, empty, and it all looks the same
     assert!(s.merge_down(outer));
-    assert_eq!(s.layers().len(), 1);
-    assert_eq!(s.layers()[0].id, red);
+    assert_eq!(s.layers().iter().map(|l| l.id).collect::<Vec<_>>(), [outer, red]);
     assert!(near(pixel(&s, 50, 50), [128, 255, 128]), "{:?}", pixel(&s, 50, 50));
     assert_eq!(pixel(&s, 30, 30), [255, 0, 0, 255]);
     s.undo();
-    assert!(s.layers().iter().any(|l| l.id == outer));
+    assert!(s.layers().iter().any(|l| l.id == flat));
     // ungrouped, its layers come out
     assert!(s.ungroup(outer));
     assert!(s.layers().iter().all(|l| l.depth == 0));

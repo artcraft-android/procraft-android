@@ -5936,6 +5936,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun mergeDown(l: LayerInfo) = layerChange { it.mergeDown(l.id) }
 
+    fun mergeMask(l: LayerInfo) = layerChange { it.mergeMask(l.id) }
+
     /** Whether layers are picked to act on with the current one. */
     val anyPicked: Boolean get() = layers.any { it.picked }
 

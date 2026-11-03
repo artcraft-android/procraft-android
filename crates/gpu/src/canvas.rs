@@ -892,21 +892,25 @@ enum Op {
         before: Box<Document>,
     },
     /// `upper` is blended into `lower` and removed from the document; `within` (where `upper` is
-    /// painted, if known) is all of `lower` that can change, and all its undo step keeps.
+    /// painted, if known) is all of `lower` that can change, and all its undo step keeps. Each
+    /// of `masks` (a layer, its mask) is applied to its layer first, in the same step.
     MergeDown {
         upper: LayerId,
         lower: LayerId,
         before: Box<Document>,
         within: Option<IRect>,
+        masks: Vec<(LayerId, LayerId)>,
     },
     /// `uppers` (bottom first; groups drawn first) are blended into `lower` in turn, as one step,
-    /// and removed from the document.
+    /// and removed from the document; each of `masks` (a layer, its mask) applied to its layer
+    /// first.
     MergeMany {
         /// Where they are painted, if known: all of `lower` that can change, all the step keeps.
         within: Option<IRect>,
         uppers: Vec<LayerId>,
         lower: LayerId,
         before: Box<Document>,
+        masks: Vec<(LayerId, LayerId)>,
     },
     /// Layer `layer` multiplied by its mask `mask` in place; the caller removes the mask once
     /// this is queued (`before` is the document with it).
@@ -915,12 +919,10 @@ enum Op {
         mask: LayerId,
         before: Box<Document>,
     },
-    /// Group `group` of `before` is drawn into `into`: a new layer, or (`onto`) the layer it
-    /// merges into.
+    /// Group `group` of `before` is drawn into `into`, a new layer.
     Flatten {
         group: LayerId,
         into: LayerId,
-        onto: bool,
         before: Box<Document>,
     },
     /// The layer is copied aside to be transformed.
@@ -2353,8 +2355,21 @@ impl Canvas {
     /// queued (`before` is the document with it). `within`: where `upper` is painted, if known
     /// (the undo step keeps only that much of `lower`).
     pub fn merge_down(&mut self, upper: LayerId, lower: LayerId, before: Document, within: Option<IRect>) {
+        self.merge_down_with_masks(upper, lower, Vec::new(), before, within);
+    }
+
+    /// [`Canvas::merge_down`], each of `masks` (`upper` or `lower`, and its mask) applied to its
+    /// layer first in the same undo step; the caller removes the masks with `upper`.
+    pub fn merge_down_with_masks(
+        &mut self,
+        upper: LayerId,
+        lower: LayerId,
+        masks: Vec<(LayerId, LayerId)>,
+        before: Document,
+        within: Option<IRect>,
+    ) {
         self.end_stroke();
-        self.ops.push(Op::MergeDown { upper, lower, before: Box::new(before), within });
+        self.ops.push(Op::MergeDown { upper, lower, before: Box::new(before), within, masks });
         self.invalidate();
     }
 
@@ -2371,17 +2386,29 @@ impl Canvas {
     /// the document with them).
     /// `within`: where they are painted, if known (the undo step keeps only that much of `lower`).
     pub fn merge_layers(&mut self, uppers: Vec<LayerId>, lower: LayerId, before: Document, within: Option<IRect>) {
+        self.merge_layers_with_masks(uppers, lower, Vec::new(), before, within);
+    }
+
+    /// [`Canvas::merge_layers`], each of `masks` (`lower` or one of `uppers`, and its mask)
+    /// applied to its layer first in the same undo step; the caller removes the masks too.
+    pub fn merge_layers_with_masks(
+        &mut self,
+        uppers: Vec<LayerId>,
+        lower: LayerId,
+        masks: Vec<(LayerId, LayerId)>,
+        before: Document,
+        within: Option<IRect>,
+    ) {
         self.end_stroke();
-        self.ops.push(Op::MergeMany { uppers, lower, before: Box::new(before), within });
+        self.ops.push(Op::MergeMany { uppers, lower, before: Box::new(before), within, masks });
         self.invalidate();
     }
 
-    /// Draws group `group` into `into`: a new layer (`onto` false, already in the document) or the
-    /// layer it merges into, blended with the group's opacity and mode. `before` is the document
-    /// with the group; the caller changes the document once this is queued.
-    pub fn flatten_group(&mut self, group: LayerId, into: LayerId, onto: bool, before: Document) {
+    /// Draws group `group` into `into`, a new layer already in the document. `before` is the
+    /// document with the group; the caller changes the document once this is queued.
+    pub fn flatten_group(&mut self, group: LayerId, into: LayerId, before: Document) {
         self.end_stroke();
-        self.ops.push(Op::Flatten { group, into, onto, before: Box::new(before) });
+        self.ops.push(Op::Flatten { group, into, before: Box::new(before) });
         self.invalidate();
     }
 
@@ -2561,12 +2588,16 @@ impl Canvas {
                     read.extend(pairs.iter().map(|(from, _)| *from));
                     written.extend(pairs.iter().map(|(_, to)| *to));
                 }
-                Op::MergeDown { upper, lower, before, .. } => {
+                Op::MergeDown { upper, lower, before, masks, .. } => {
                     read.extend(contents(before, *upper));
+                    read.extend(masks.iter().map(|(_, m)| *m));
+                    written.extend(masks.iter().map(|(l, _)| *l));
                     written.push(*lower);
                 }
-                Op::MergeMany { uppers, lower, before, .. } => {
+                Op::MergeMany { uppers, lower, before, masks, .. } => {
                     read.extend(uppers.iter().flat_map(|u| contents(before, *u)));
+                    read.extend(masks.iter().map(|(_, m)| *m));
+                    written.extend(masks.iter().map(|(l, _)| *l));
                     written.push(*lower);
                 }
                 Op::ApplyMask { layer, mask, .. } => {
@@ -3696,11 +3727,20 @@ impl Canvas {
                     self.dirty = self.full();
                     history_changed = true;
                 }
-                Op::MergeDown { upper, lower, before, within } => {
-                    let pixels = self
-                        .merge(device, &mut encoder, &mut uniforms, &before, upper, lower, within)
-                        .into_iter()
+                Op::MergeDown { upper, lower, before, within, masks } => {
+                    // the masks first, each layer kept whole as it was
+                    let mut pixels: Vec<Snapshot> = masks
+                        .iter()
+                        .filter_map(|&(layer, mask)| {
+                            self.masked_in_place(device, &mut encoder, &mut uniforms, layer, mask)
+                        })
                         .collect();
+                    if masks.iter().any(|&(layer, _)| layer == lower) {
+                        // the lower layer already kept: a second copy would put back the masked one
+                        self.blend_layer_into(device, &mut encoder, &mut uniforms, &before, upper, lower);
+                    } else {
+                        pixels.extend(self.merge(device, &mut encoder, &mut uniforms, &before, upper, lower, within));
+                    }
                     self.push_step(Step {
                         made: 0,
                         name: None,
@@ -3712,8 +3752,18 @@ impl Canvas {
                     self.dirty = self.full();
                     history_changed = true;
                 }
-                Op::MergeMany { uppers, lower, before, within } => {
-                    let snapshot = self.snapshot(device, &mut encoder, lower, within.unwrap_or(self.full()));
+                Op::MergeMany { uppers, lower, before, within, masks } => {
+                    // the masks first, each layer kept whole as it was; the lower one, if not
+                    // among them, kept where it can change
+                    let mut pixels: Vec<Snapshot> = masks
+                        .iter()
+                        .filter_map(|&(layer, mask)| {
+                            self.masked_in_place(device, &mut encoder, &mut uniforms, layer, mask)
+                        })
+                        .collect();
+                    if !masks.iter().any(|&(layer, _)| layer == lower) {
+                        pixels.extend(self.snapshot(device, &mut encoder, lower, within.unwrap_or(self.full())));
+                    }
                     for upper in uppers {
                         if before.layer(upper).is_some_and(|l| l.kind == LayerKind::Group) {
                             self.draw_group_onto(device, &mut encoder, &mut uniforms, &before, upper, lower);
@@ -3721,7 +3771,6 @@ impl Canvas {
                             self.blend_layer_into(device, &mut encoder, &mut uniforms, &before, upper, lower);
                         }
                     }
-                    let pixels = snapshot.into_iter().collect();
                     self.push_step(Step {
                         made: 0,
                         name: None,
@@ -3747,11 +3796,10 @@ impl Canvas {
                     self.dirty = self.full();
                     history_changed = true;
                 }
-                Op::Flatten { group, into, onto, before } => {
-                    let pixels = self
-                        .flatten(device, &mut encoder, &mut uniforms, &before, group, into, onto)
-                        .into_iter()
-                        .collect();
+                Op::Flatten { group, into, before } => {
+                    // a new layer: no pixels of its own to keep
+                    self.flatten(device, &mut encoder, &mut uniforms, &before, group, into);
+                    let pixels = Vec::new();
                     self.push_step(Step {
                         made: 0,
                         name: None,
@@ -4323,9 +4371,7 @@ impl Canvas {
         snapshot
     }
 
-    /// Group `group` of `doc` composited into layer `into`: copied into it (a new layer), or
-    /// (`onto`) blended into it with the group's opacity and mode, returning what it was.
-    #[allow(clippy::too_many_arguments)]
+    /// Group `group` of `doc` composited and copied into layer `into` (a new layer).
     fn flatten(
         &self,
         device: &wgpu::Device,
@@ -4334,14 +4380,8 @@ impl Canvas {
         doc: &Document,
         group: LayerId,
         into: LayerId,
-        onto: bool,
-    ) -> Option<Snapshot> {
+    ) -> Option<()> {
         let full = self.full();
-        if onto {
-            let snapshot = self.snapshot(device, encoder, into, full)?;
-            self.draw_group_onto(device, encoder, uniforms, doc, group, into)?;
-            return Some(snapshot);
-        }
         self.composite_group(device, doc, encoder, uniforms, full, group)?;
         let (textures, _) = self.groups.get(doc.depth(group))?;
         let target = self.layers.get(&into)?;
@@ -4350,7 +4390,7 @@ impl Canvas {
             copy_at(&target.texture, 0, 0),
             extent(self.width, self.height),
         );
-        None
+        Some(())
     }
 
     /// Group `group` of `doc` composited and blended into layer `into` with the group's opacity

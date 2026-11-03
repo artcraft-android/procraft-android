@@ -208,6 +208,85 @@ fn merge_down_and_undo() {
 }
 
 #[test]
+fn merge_down_applies_each_mask_first() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    // red all over, hidden at the left by its mask
+    let lower = doc.current();
+    fill(&mut canvas, &doc, lower, [200, 0, 0]);
+    let lower_mask = doc.add_mask(lower).unwrap();
+    fill(&mut canvas, &doc, lower_mask, [255, 255, 255]);
+    paint(&mut canvas, &doc, lower_mask, [0, 0, 0], Vec2::new(1.0, 8.0), 2.0, StrokeTool::Paint);
+    // blue over the right, hidden at its far right by its mask
+    assert!(doc.set_current(lower));
+    let upper = doc.add_layer();
+    paint(&mut canvas, &doc, upper, [0, 0, 200], Vec2::new(12.0, 8.0), 4.0, StrokeTool::Paint);
+    let upper_mask = doc.add_mask(upper).unwrap();
+    fill(&mut canvas, &doc, upper_mask, [255, 255, 255]);
+    paint(&mut canvas, &doc, upper_mask, [0, 0, 0], Vec2::new(15.0, 8.0), 1.5, StrokeTool::Paint);
+    let at = [(1, 8), (5, 8), (11, 8), (15, 8)];
+    let shown: Vec<[u8; 4]> = at.iter().map(|&(x, y)| composite_at(&gpu, &mut doc, &mut canvas, x, y)).collect();
+    let before = doc.clone();
+    canvas.merge_down_with_masks(upper, lower, vec![(upper, upper_mask), (lower, lower_mask)], before, None);
+    assert!(doc.finish_merge_down(upper));
+    assert_eq!(doc.layers().len(), 1, "both masks gone with it");
+    // the layer as the two showed: nothing, red, blue, red
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 1, 8)[3], 0);
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 5, 8), [200, 0, 0, 255]);
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 11, 8), [0, 0, 200, 255]);
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 15, 8), [200, 0, 0, 255]);
+    for (&(x, y), was) in at.iter().zip(&shown) {
+        assert_eq!(composite_at(&gpu, &mut doc, &mut canvas, x, y), *was, "shown at {x}, {y}");
+    }
+    // undone: both layers and masks as they were; redone: merged again
+    canvas.undo();
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 1, 8), [200, 0, 0, 255]);
+    assert_eq!(doc.layers().len(), 4);
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, upper, 15, 8), [0, 0, 200, 255]);
+    for (&(x, y), was) in at.iter().zip(&shown) {
+        assert_eq!(composite_at(&gpu, &mut doc, &mut canvas, x, y), *was, "undone, shown at {x}, {y}");
+    }
+    canvas.redo();
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 1, 8)[3], 0);
+    assert_eq!(doc.layers().len(), 1);
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 11, 8), [0, 0, 200, 255]);
+}
+
+#[test]
+fn merging_picked_layers_applies_each_mask_first() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    // as above: red hidden at the left, blue over the right hidden at its far right
+    let lower = doc.current();
+    fill(&mut canvas, &doc, lower, [200, 0, 0]);
+    let lower_mask = doc.add_mask(lower).unwrap();
+    fill(&mut canvas, &doc, lower_mask, [255, 255, 255]);
+    paint(&mut canvas, &doc, lower_mask, [0, 0, 0], Vec2::new(1.0, 8.0), 2.0, StrokeTool::Paint);
+    assert!(doc.set_current(lower));
+    let upper = doc.add_layer();
+    paint(&mut canvas, &doc, upper, [0, 0, 200], Vec2::new(12.0, 8.0), 4.0, StrokeTool::Paint);
+    let upper_mask = doc.add_mask(upper).unwrap();
+    fill(&mut canvas, &doc, upper_mask, [255, 255, 255]);
+    paint(&mut canvas, &doc, upper_mask, [0, 0, 0], Vec2::new(15.0, 8.0), 1.5, StrokeTool::Paint);
+    let at = [(1, 8), (5, 8), (11, 8), (15, 8)];
+    let shown: Vec<[u8; 4]> = at.iter().map(|&(x, y)| composite_at(&gpu, &mut doc, &mut canvas, x, y)).collect();
+    let before = doc.clone();
+    canvas.merge_layers_with_masks(vec![upper], lower, vec![(lower, lower_mask), (upper, upper_mask)], before, None);
+    assert!(doc.finish_merge_chosen(lower, &[upper]));
+    assert_eq!(doc.layers().len(), 1, "both masks gone with them");
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 1, 8)[3], 0);
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 15, 8), [200, 0, 0, 255]);
+    for (&(x, y), was) in at.iter().zip(&shown) {
+        assert_eq!(composite_at(&gpu, &mut doc, &mut canvas, x, y), *was, "shown at {x}, {y}");
+    }
+    canvas.undo();
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 1, 8), [200, 0, 0, 255]);
+    assert_eq!(doc.layers().len(), 4);
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, upper, 15, 8), [0, 0, 200, 255]);
+    canvas.redo();
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 11, 8), [0, 0, 200, 255]);
+    assert_eq!(doc.layers().len(), 1);
+}
+
+#[test]
 fn duplicate_delete_and_undo_keep_pixels() {
     let Some((gpu, mut doc, mut canvas)) = setup() else { return };
     let a = doc.current();

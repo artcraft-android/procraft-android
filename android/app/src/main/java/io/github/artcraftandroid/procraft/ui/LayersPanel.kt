@@ -218,8 +218,8 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                             translationY = if (dragging) dragOffset else squeeze?.offset(l.id) ?: 0f
                             alpha = if (blendAt in 0 until index) belowShown else 1f
                         }
-                        .twoFingerTap(l.kind != LayerType.MASK) {
-                            // two fingers tapped on a layer: its opacity, dragged across the canvas
+                        .twoFingerTap(l.kind == LayerType.PAINT) {
+                            // two fingers tapped on a layer (not a group or mask): its opacity, dragged across the canvas
                             vm.selectLayer(l.id)
                             vm.startLayerOpacity()
                         }
@@ -284,7 +284,10 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                             l,
                             shape,
                             name,
-                            owner = vm.layers.any { it.current && it.kind == LayerType.MASK && it.parent == l.id },
+                            // the current mask's layer, or the current layer's mask
+                            owner = vm.layers.any {
+                                it.current && (it.kind == LayerType.MASK && it.parent == l.id || l.kind == LayerType.MASK && l.parent == it.id)
+                            },
                             onTap = onTap,
                             onBlend = {
                                 changeBlend(if (blendFor == l.id) null else l.id)
@@ -907,6 +910,7 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
                         LayerOption.RASTERIZE -> { { vm.rasterize(l) } }
                         LayerOption.MERGE_DOWN -> { { vm.mergeDown(l) } }
                         LayerOption.COMBINE_DOWN -> { { vm.combineDown(l) } }
+                        LayerOption.MERGE_MASK -> { { vm.mergeMask(l) } }
                     }
                     Option(r.label, checked = r.switchOn, enabled = r.enabled, onClick = if (r.switchOn != null) act else { { act(); onDone() } })
                 }

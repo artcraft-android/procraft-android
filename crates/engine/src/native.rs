@@ -1568,6 +1568,38 @@ mod tests {
     }
 
     #[test]
+    fn an_emptied_group_is_kept() {
+        let mut doc = Document::new(64, 64);
+        let a = doc.current();
+        doc.add_layer();
+        let c = doc.add_layer();
+        let g = doc.combine_down(c).unwrap();
+        // c merged into b in the group, then b into a, out of it: the group stays, empty
+        assert!(doc.finish_merge_down(g) && doc.finish_merge_down(g));
+        assert_eq!(doc.layers().iter().map(|l| l.id).collect::<Vec<_>>(), [a, g]);
+        let mut pixels = HashMap::new();
+        for l in doc.layers().iter().filter(|l| l.kind != LayerKind::Group) {
+            pixels.insert(l.id, vec![0u8; 64 * 64 * 4]);
+        }
+        let bytes = write(&Export {
+            document: &doc,
+            pixels: &pixels,
+            composite: &[0; 64 * 64 * 4],
+            thumbnail_png: &[],
+            name: "",
+            author: "",
+            strokes: 0,
+            tracked_seconds: 0.0,
+            seed: 1,
+            time_lapse: None,
+        });
+        let back = read(&bytes).unwrap();
+        let kinds = |d: &Document| d.layers().iter().map(|l| l.kind).collect::<Vec<_>>();
+        assert_eq!(kinds(&back.document), kinds(&doc));
+        assert!(back.document.contents(back.document.layers().last().unwrap().id).is_empty());
+    }
+
+    #[test]
     fn animation_settings_are_the_canvases_own() {
         let mut doc = Document::new(16, 16);
         let id = doc.current();

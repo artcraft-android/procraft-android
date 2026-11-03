@@ -323,6 +323,7 @@ impl Layers {
         let rect = Rect::from_min_size(pos2(left, top), vec2(LAYERS_WIDTH, height));
         let any_picked = layers.iter().any(|l| l.picked);
         let current_mask_parent = layers.iter().find(|l| l.current && l.kind == LayerType::Mask).and_then(|l| l.parent);
+        let current = layers.iter().find(|l| l.current).map(|l| l.id);
         // where the rows are, for the options to sit by theirs
         let mut row_rects: HashMap<u64, Rect> = HashMap::new();
         let mut tapped: Option<&LayerInfo> = None;
@@ -380,7 +381,9 @@ impl Layers {
                                 let (row, _) =
                                     ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
                                 row_rects.insert(l.id, row);
-                                let owner = current_mask_parent == Some(l.id);
+                                // the current mask's layer, or the current layer's mask
+                                let owner = current_mask_parent == Some(l.id)
+                                    || (l.kind == LayerType::Mask && l.parent.is_some() && l.parent == current);
                                 // on a model with a channel's tile chosen, the tile is blue, not the row
                                 let chosen = l.current && !chosen_tile;
                                 let fill = if chosen {
@@ -1046,6 +1049,7 @@ impl Layers {
             }
             LayerOption::MergeDown => _ = session.merge_down(l.id),
             LayerOption::CombineDown => _ = session.combine_down(l.id),
+            LayerOption::MergeMask => _ = session.merge_mask(l.id),
         }
     }
 
