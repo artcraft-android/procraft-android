@@ -76,10 +76,11 @@ jobs:
         run: |
           bash ios/build-rust.sh iphonesimulator
           (cd ios && xcodegen generate --spec project.yml)
+          # the core is built for Apple silicon's simulator only
           xcodebuild -project ios/ProCraft.xcodeproj -scheme ProCraft -configuration Debug -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' -derivedDataPath build/simulator build CODE_SIGNING_ALLOWED=NO \
-            | grep -E "error|warning: unre|BUILD" || true
-          test -d "$(find build/simulator -name ProCraft.app -path '*iphonesimulator*' | head -1)"
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath build/simulator build \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO >build-simulator.log 2>&1 \
+            || { grep -E "error|failed" build-simulator.log | head -60; exit 1; }
 
       - name: Capture the screens
         run: |
@@ -91,7 +92,7 @@ jobs:
           xcrun simctl bootstatus "$device" -b
           xcrun simctl install "$device" "$(find build/simulator -name ProCraft.app -path '*iphonesimulator*' | head -1)"
           mkdir -p screens
-          for screen in gallery canvas brushes layers colors; do
+          for screen in gallery canvas brushes layers colors actions adjustments; do
             xcrun simctl launch --terminate-running-process "$device" io.github.artcraftandroid.procraft -screen "$screen"
             sleep 10
             xcrun simctl io "$device" screenshot "screens/$screen.png"

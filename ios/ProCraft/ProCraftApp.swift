@@ -81,6 +81,8 @@ enum ScreenCapture {
             case "brushes": model.toolPressed(.paint)
             case "layers": model.toggle(.layers)
             case "colors": model.toggle(.color)
+            case "actions": model.toggle(.actions)
+            case "adjustments": model.toggle(.adjustments)
             default: break
             }
         }

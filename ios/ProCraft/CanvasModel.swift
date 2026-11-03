@@ -84,6 +84,14 @@ final class CanvasModel {
     private(set) var adjusting = false
     private(set) var recoloring = false
 
+    /// The Actions panel's tab.
+    var actionsTab = 0
+    /// What was last cut or copied, for pasting.
+    @ObservationIgnored private var clipboard: ThumbnailImage?
+    private(set) var canPaste = false
+    /// The drawing guide is on.
+    private(set) var guideOn = false
+
     // the layers, top first, the background under them, and their thumbnails
     private(set) var layers: [LayerInfo] = []
     private(set) var background = BackgroundInfo(r: 1, g: 1, b: 1, visible: true)
@@ -453,6 +461,45 @@ final class CanvasModel {
         if panel == .layers {
             refreshThumbnails()
         }
+    }
+
+    // MARK: Actions
+
+    func cutLayer() {
+        if let cut = session.cutLayer() {
+            clipboard = cut
+            canPaste = true
+        }
+        refresh()
+    }
+
+    func copyLayer() {
+        if let copied = session.copyLayer() {
+            clipboard = copied
+            canPaste = true
+        }
+    }
+
+    func copyCanvas() {
+        if let copied = session.copyCanvas() {
+            clipboard = copied
+            canPaste = true
+        }
+    }
+
+    func paste() {
+        guard let image = clipboard else { return }
+        _ = session.paste(image: image)
+        refresh()
+    }
+
+    func flipCanvas(horizontal: Bool) {
+        session.flipCanvas(horizontal: horizontal)
+        refresh()
+    }
+
+    func setGuideOn(_ on: Bool) {
+        guideOn = session.setGuideOn(on: on).on
     }
 
     // MARK: the layers

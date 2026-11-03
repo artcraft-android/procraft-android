@@ -51,6 +51,19 @@ private struct PanelHost: View {
             let place = popoverPlace(width: layersPanelWidth, buttonCentreX: buttonX, screenWidth: screen.width, minLeft: clear)
             LayersPanel(model: model, arrowX: place.arrowX, maxHeight: screen.height - Pc.barHeight - Pc.popoverGap)
                 .offset(x: place.left, y: Pc.barHeight)
+        case .actions:
+            let buttonX = Pc.actionCentre(0, barWidth: screen.width)
+            let place = popoverPlace(width: actionsPanelWidth, buttonCentreX: buttonX, screenWidth: screen.width, minLeft: clear)
+            // ending 25 above the screen's edge, its rows scrolling, as measured
+            ActionsPanel(model: model, arrowX: place.arrowX)
+                .frame(maxHeight: screen.height - Pc.barHeight - 25, alignment: .top)
+                .offset(x: place.left, y: Pc.barHeight)
+        case .adjustments:
+            let buttonX = Pc.actionCentre(1, barWidth: screen.width)
+            let place = popoverPlace(width: adjustmentsPanelWidth, buttonCentreX: buttonX, screenWidth: screen.width, minLeft: clear)
+            AdjustmentsPanel(model: model, arrowX: place.arrowX)
+                .frame(maxHeight: screen.height - Pc.barHeight - 25, alignment: .top)
+                .offset(x: place.left, y: Pc.barHeight)
         case .color:
             let buttonX = screen.width - Pc.toolCentreFromRight(0, barWidth: screen.width)
             let place = popoverPlace(width: colorPanelWidth, buttonCentreX: buttonX, screenWidth: screen.width, minLeft: clear)
