@@ -8555,3 +8555,45 @@ fn new_text_is_sized_and_placed_as_it_looks_on_screen() {
     assert_eq!((next.font.as_str(), next.style.as_str()), ("serif", "Bold"));
     assert!((next.size - 128.0).abs() < 1e-3);
 }
+
+/// On request (`CROSS_OUT=path.png`, `CROSS_FILE=brush file`, `CROSS_SIZE` slider): the brush
+/// paints an orange stroke across and a cyan one down through it, as a side-by-side check.
+#[test]
+fn crossing_strokes_sheet() {
+    let (Ok(out), Ok(file)) = (std::env::var("CROSS_OUT"), std::env::var("CROSS_FILE")) else { return };
+    let size: f32 = std::env::var("CROSS_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.3);
+    let Some(s) = session(1200, 600) else { return };
+    let set = s.import_any_brushes(std::fs::read(&file).unwrap(), Some(file.clone()), 0).unwrap();
+    assert!(s.select_brush(set, 0));
+    s.set_brush_size(size);
+    let line = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        let n = 108;
+        let at = |i: usize| {
+            let t = i as f32 / n as f32;
+            sample(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, i as f64 * 8.3)
+        };
+        s.stroke_begin(PointerKind::Finger, vec![at(0)]);
+        for i in 1..n {
+            s.stroke_add(vec![at(i)]);
+        }
+        s.stroke_end(vec![at(n)]);
+    };
+    // `CROSS_SET="key=value;..."`: studio settings changed first; then one white stroke on dark
+    if let Ok(set) = std::env::var("CROSS_SET") {
+        s.studio_begin();
+        for kv in set.split(';').filter(|kv| !kv.is_empty()) {
+            let (k, v) = kv.split_once('=').unwrap();
+            s.set_studio_setting(k.to_owned(), v.parse().unwrap());
+        }
+        s.set_background_color(0.12, 0.12, 0.12, true);
+        s.set_color(1.0, 1.0, 1.0);
+        line(100.0, 150.0, 450.0, 150.0);
+        s.export_png(out).unwrap();
+        return;
+    }
+    s.set_color(237.0 / 255.0, 133.0 / 255.0, 68.0 / 255.0);
+    line(100.0, 150.0, 450.0, 150.0);
+    s.set_color(68.0 / 255.0, 209.0 / 255.0, 237.0 / 255.0);
+    line(275.0, 70.0, 275.0, 250.0);
+    s.export_png(out).unwrap();
+}

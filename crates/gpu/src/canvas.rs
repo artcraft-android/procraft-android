@@ -706,15 +706,14 @@ const SMUDGE_GRID: u32 = 256;
 const SMUDGE_REACH: i32 = SMUDGE_GRID as i32 / 2 - 1;
 const SMUDGE_UNIFORM_SIZE: u64 = std::mem::size_of::<SmudgeUniform>() as u64;
 
-/// A wet stamp's (mixture, final mixture, pull) once the stroke has gone `length` canvas pixels:
-/// the paint the brush mixes into what it carries is what its dilution leaves (by 2.4, and as
-/// far as the fall off has not run it out) and its charge (running out by the cube root of the
-/// length), at least its attack (the stamp's
-/// `attack` share of it: its pressure), times `jitter`; it
-/// lays down what it carries by the mixture, a share of it by the grade (signed: on the way to
-/// the full mixture from the grade, as far as halfway, the stamps' mean); the pull is the wet
-/// pull's eighth root (a pull of 0.9 keeps 0.99 a stamp). The stamp's pressure scales the
-/// dilution and the charge by `dilution_by` and `charge_by` (their curves).
+/// A wet stamp's (mixture, final mixture, pull) once the stroke has gone `length` canvas pixels,
+/// as measured: the fresh paint the brush mixes into what it carries is what its dilution leaves
+/// (by 2.4, as far as the fall off has not run it out), times `jitter`; what it lays down of what
+/// it carries is that paint and its charge (running out by the cube root of the length), at least
+/// its attack (the stamp's `attack` share of it: its pressure), by the grade (0 all of it, -1 half,
+/// 1 half again); the pull is the share of what it carries kept at each stamp, the rest picked up
+/// from what is under it. The stamp's pressure scales the dilution and the charge by
+/// `dilution_by` and `charge_by` (their curves).
 fn wet_mixture(
     style: &StrokeStyle,
     length: f32,
@@ -727,13 +726,17 @@ fn wet_mixture(
     let diluted =
         (1.0 - run_out(style.falloff, length)) * (1.0 - style.dilution.clamp(0.0, 1.0) * dilution_by).powf(2.4);
     let attack = style.attack.clamp(0.0, 1.0) * attack.clamp(0.0, 1.0);
-    let mixture = ((diluted + charge).max(attack) * jitter).clamp(0.0, 1.0);
-    let pull = style.wet_pull.unwrap_or(0.0).clamp(0.0, 1.0).powf(0.125);
-    // undiluted the brush only paints; otherwise over a stroke it lays down half to all of what
-    // its grade says
+    // fresh paint mixed into what the brush carries: what the dilution leaves
+    let mixture = (diluted * jitter).clamp(0.0, 1.0);
+    let pull = style.wet_pull.unwrap_or(0.0).clamp(0.0, 1.0);
+    // laid down: the paint and the charge, at least the attack, by the grade (as measured: at 0
+    // all of it, at -1 half, at 1 half again)
     let grade = style.grade.clamp(-1.0, 1.0);
-    let laid =
-        if style.dilution <= 0.0 || pull * mixture <= 0.0 { 1.0 } else { mixture * (grade + (1.0 - grade) * 0.5) };
+    let laid = if style.dilution <= 0.0 {
+        1.0
+    } else {
+        ((diluted + charge).max(attack) * jitter * (1.0 + 0.5 * grade)).clamp(0.0, 1.0)
+    };
     (mixture, laid, pull)
 }
 
@@ -8318,9 +8321,11 @@ mod tests {
         // diluted by half: what it leaves, by 2.4, with no charge
         let (mixed, ..) = wet_mixture(&style, 33.0, 1.0, 0.0, 1.0, 0.0);
         assert!((mixed - 0.5f32.powf(2.4)).abs() < 1e-5);
-        // and the charge, half run out by 33 px, as far as its curve lets it
-        let (charged, ..) = wet_mixture(&style, 33.0, 1.0, 0.0, 1.0, 1.0);
-        assert!((charged - (0.5f32.powf(2.4) + 0.5)).abs() < 1e-5);
+        // the charge, half run out by 33 px, as far as its curve lets it, goes into what is laid
+        // down, not into the fresh paint mixed in
+        let (mixed, laid, _) = wet_mixture(&style, 33.0, 1.0, 0.0, 1.0, 1.0);
+        assert!((mixed - 0.5f32.powf(2.4)).abs() < 1e-5);
+        assert!((laid - (0.5f32.powf(2.4) + 0.5)).abs() < 1e-5);
     }
 
     #[test]
@@ -8350,10 +8355,10 @@ mod tests {
             let (mixture, laid, _) = wet_mixture(&style, 0.0, 1.0, 0.0, 1.0, 1.0);
             laid / mixture
         };
-        // smooth lays the whole mixture; less grade, less of it; below 0 less again, none at -1
-        assert!((graded(1.0) - 1.0).abs() < 1e-5);
-        assert!((graded(0.5) - 0.75).abs() < 1e-5);
-        assert!((graded(-0.5) - 0.25).abs() < 1e-5);
-        assert!(graded(-1.0).abs() < 1e-5);
+        // as measured: at 0 the whole mixture is laid down, at -1 half of it, at 1 half again
+        assert!((graded(0.0) - 1.0).abs() < 1e-5);
+        assert!((graded(1.0) - 1.5).abs() < 1e-5);
+        assert!((graded(0.5) - 1.25).abs() < 1e-5);
+        assert!((graded(-1.0) - 0.5).abs() < 1e-5);
     }
 }

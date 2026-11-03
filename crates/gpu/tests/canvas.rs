@@ -1431,8 +1431,9 @@ fn wet_attack_puts_more_paint_over_what_is_there() {
     };
     let soft = glaze(0.0);
     let hard = glaze(1.0);
+    // nearly the paint, a little of the grey under it picked up on the way
     assert!(hard > soft, "attack {hard} vs none {soft}");
-    assert!(hard >= 250);
+    assert!(hard >= 235, "attack {hard} vs none {soft}");
 }
 
 #[test]
