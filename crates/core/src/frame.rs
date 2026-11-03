@@ -46,6 +46,7 @@ impl State {
                 backdrop: None,
                 convert,
                 lut,
+                grey: false,
             }),
         );
     }
@@ -122,6 +123,7 @@ impl State {
                     backdrop,
                     convert,
                     lut,
+                    grey: self.grey_view,
                 }),
             );
             // caches still being remade: another frame soon, and the artwork isn't shown yet

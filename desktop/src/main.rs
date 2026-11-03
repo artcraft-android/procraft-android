@@ -13,6 +13,7 @@ mod animation;
 mod canvas_info;
 mod chrome;
 mod colour_drop;
+mod colour_models;
 mod colours;
 mod compact_colours;
 mod companion;
@@ -28,6 +29,7 @@ mod gradient_map;
 mod guide_editor;
 mod icons;
 mod input;
+mod ipad;
 mod layer_choice;
 mod layers;
 mod library;
@@ -88,9 +90,25 @@ type ReadingArtwork =
 /// many layers takes seconds), since when, and those still to come.
 struct Importing {
     since: Instant,
-    reading: std::thread::JoinHandle<Option<(Arc<CanvasSession>, Option<std::path::PathBuf>)>>,
+    stage: ImportStage,
     folder: Option<String>,
     rest: std::collections::VecDeque<Vec<std::path::PathBuf>>,
+}
+
+/// An artwork coming in: read, then (a package's) its time-lapse taken into its new folder, both
+/// off the window's thread (a long time-lapse is hundreds of videos, every frame decoded).
+enum ImportStage {
+    Reading(std::thread::JoinHandle<Option<(Arc<CanvasSession>, Option<std::path::PathBuf>)>>),
+    TakingTimeLapse(std::thread::JoinHandle<()>, Arc<CanvasSession>, String),
+}
+
+impl ImportStage {
+    fn is_finished(&self) -> bool {
+        match self {
+            ImportStage::Reading(t) => t.is_finished(),
+            ImportStage::TakingTimeLapse(t, ..) => t.is_finished(),
+        }
+    }
 }
 
 impl Importing {
@@ -102,7 +120,7 @@ impl Importing {
     ) -> Option<Importing> {
         let paths = artworks.pop_front()?;
         let reading = std::thread::spawn(move || files::open_artwork_files(paths));
-        Some(Importing { since: Instant::now(), reading, folder, rest: artworks })
+        Some(Importing { since: Instant::now(), stage: ImportStage::Reading(reading), folder, rest: artworks })
     }
 }
 
@@ -165,6 +183,8 @@ fn main() {
         }
     };
     event_loop.set_control_flow(ControlFlow::Wait);
+    // whether an iPad is plugged in, for the gallery's Import to offer it
+    ipad::watch();
     // the colour profiles imported before
     procraft_core::set_profile_folder(files::app_dir().join("profiles").to_string_lossy().into_owned());
     let mut app = App {
@@ -191,6 +211,7 @@ fn main() {
         // the gallery does
         dropped: std::env::args_os().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_file()).collect(),
         tap_held: None,
+        ipad: None,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         log::error!("event loop: {e}");
@@ -237,6 +258,8 @@ struct App {
     dropped: Vec<std::path::PathBuf>,
     /// Tap Assistance: a lone finger's touch, where it landed and when, while it is held there.
     tap_held: Option<(u64, winit::dpi::PhysicalPosition<f64>, Instant)>,
+    /// The iPad's Procreate files shown over the gallery to bring in, and the folder they go to.
+    ipad: Option<(ipad::Browser, Option<String>)>,
 }
 
 /// The app's icon, for the window's title bar and the task bar.
@@ -572,7 +595,8 @@ impl App {
         self.last_frame = Instant::now();
         let raw = screen.egui.take_egui_input(&screen.window);
         let mut asked = None;
-        let (gallery, interface) = (&mut self.gallery, &mut self.ui);
+        let mut ipad_done = None;
+        let (gallery, interface, ipad) = (&mut self.gallery, &mut self.ui, &mut self.ipad);
         let closing = self.zoom.as_ref().filter(|z| !z.opening);
         let reading = match (&self.importing, &self.reading_artwork, &self.reading_photo) {
             (None, None, None) => None,
@@ -591,6 +615,10 @@ impl App {
                 None => zoom::Zoom::end(ui.ctx()),
             }
             asked = gallery.show(ui.ctx(), &mut interface.look, &interface.colours);
+            // the iPad's files, over the gallery while they show
+            if let Some((browser, _)) = ipad.as_mut() {
+                ipad_done = browser.show(ui.ctx(), &mut interface.look);
+            }
             // a share from the gallery shows its card there
             interface.export_card.show(ui.ctx(), &mut interface.look);
             if reading == Some(true) {
@@ -614,6 +642,15 @@ impl App {
         }
         // while an artwork, a photo or an import is being read, the first tap stands: another
         // artwork, a new one or a photo isn't opened over it
+        // the iPad's files closed, or those chosen copied over: brought in as an import's are
+        match ipad_done {
+            Some(ipad::Done::Closed) => self.ipad = None,
+            Some(ipad::Done::Import(paths)) => {
+                let folder = self.ipad.take().and_then(|(_, folder)| folder);
+                self.import(paths, folder);
+            }
+            None => {}
+        }
         let busy = self.reading_artwork.is_some() || self.reading_photo.is_some() || self.importing.is_some();
         match asked {
             // read on a thread of its own; one at a time
@@ -665,6 +702,11 @@ impl App {
                     self.import(paths, folder);
                 }
             }
+            // one at a time
+            Some(gallery::Asked::ImportIpad(folder)) if self.ipad.is_none() => {
+                self.ipad = Some((ipad::Browser::open(ipad::Kind::Artworks), folder));
+            }
+            Some(gallery::Asked::ImportIpad(_)) => {}
             None => {}
         }
     }
@@ -878,22 +920,38 @@ impl App {
 
     /// An artwork read meanwhile, opened (the one open before kept), and the next one read.
     fn imported(&mut self) {
-        let Some(importing) = self.importing.take_if(|i| i.reading.is_finished()) else { return };
-        let Importing { reading, folder, rest, .. } = importing;
-        if let Ok(Some((session, package))) = reading.join() {
-            if self.session.is_some() && !self.leave_artwork() {
-                return;
+        let Some(importing) = self.importing.take_if(|i| i.stage.is_finished()) else { return };
+        let Importing { since, stage, folder, rest } = importing;
+        let (session, dir) = match stage {
+            ImportStage::Reading(reading) => {
+                let Ok(Some((session, package))) = reading.join() else {
+                    self.importing = Importing::next(rest, folder);
+                    return;
+                };
+                if self.session.is_some() && !self.leave_artwork() {
+                    return;
+                }
+                let dir = self.gallery.store.new_folder(folder.clone());
+                // a package's time-lapse taken in on its own thread first, the window veiled
+                if let Some(package) = package {
+                    let into = dir.clone();
+                    let taking = std::thread::spawn(move || timelapse::take_package(&package, &into));
+                    let stage = ImportStage::TakingTimeLapse(taking, session, dir);
+                    self.importing = Some(Importing { since, stage, folder, rest });
+                    return;
+                }
+                (session, dir)
             }
-            let dir = self.gallery.store.new_folder(folder.clone());
-            // a model is a new artwork painting on it
-            let model = session.model_info().is_some();
-            if let Some(package) = package {
-                timelapse::take_package(&package, &dir);
+            ImportStage::TakingTimeLapse(taking, session, dir) => {
+                let _ = taking.join();
+                (session, dir)
             }
-            self.open_artwork(session, dir);
-            if model {
-                self.ui.started_new();
-            }
+        };
+        // a model is a new artwork painting on it
+        let model = session.model_info().is_some();
+        self.open_artwork(session, dir);
+        if model {
+            self.ui.started_new();
         }
         self.importing = Importing::next(rest, folder);
     }
@@ -1047,8 +1105,9 @@ impl App {
                 files::save(session, &mut self.ui, true);
                 None
             }
-            Action::Export(format, pdf_quality) => {
-                files::export(session, format, self.ui.artwork_dir.as_deref(), pdf_quality, &mut self.ui.export_card);
+            Action::Export(format, pdf_quality, to_ipad) => {
+                let dir = self.ui.artwork_dir.as_deref();
+                files::export(session, format, dir, pdf_quality, to_ipad, &mut self.ui.export_card);
                 None
             }
         };

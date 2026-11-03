@@ -294,6 +294,10 @@ pub struct Target<'a> {
     /// Or a table taking the canvas's colours to the target's (made by [`Canvas::display_lut`]),
     /// in place of the matrix.
     pub lut: Option<&'a DisplayLut>,
+    /// The canvas shown in perceptual greys (each colour as the grey of its Rec. 709 luminance, as
+    /// a soft proof to a grey profile shows it), to judge its values: the window's view only, never
+    /// what is read or recorded from it.
+    pub grey: bool,
 }
 
 /// A colour table on the GPU for [`Target::lut`].
@@ -5606,7 +5610,7 @@ impl Canvas {
         let m = unit_to_canvas.then(target.to_screen).then(to_clip);
         let offset = uniforms.push(&DisplayUniform::new(
             [m.a, m.b, m.c, m.d],
-            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, 0.0],
+            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
             target.convert,
             target.lut.is_some(),
         ));
@@ -5792,6 +5796,7 @@ impl Canvas {
             backdrop: None,
             convert: None,
             lut: None,
+            grey: false,
         };
         self.frost(&gpu.device, &mut encoder, &mut uniforms, &target, backdrop, Some(scene));
         self.write_uniforms(gpu, &uniforms);
@@ -5880,7 +5885,7 @@ impl Canvas {
         let m = unit_to_canvas.then(target.to_screen).then(shrink).then(to_clip);
         let offset = uniforms.push(&DisplayUniform::new(
             [m.a, m.b, m.c, m.d],
-            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, 0.0],
+            [m.e, m.f, if srgb { 1.0 } else { 0.0 }, if target.grey { 1.0 } else { 0.0 }],
             target.convert,
             target.lut.is_some(),
         ));

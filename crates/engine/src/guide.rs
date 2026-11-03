@@ -98,6 +98,46 @@ pub fn bar_color(t: f32) -> [f32; 3] {
 }
 
 /// The part of the segment `a`–`b` inside `0..w` × `0..h` (Liang–Barsky), if a visible part is.
+/// Rays a perspective guide's vanishing point sends out each way from where its fan starts.
+const RAYS_EACH_WAY: usize = 24;
+
+/// Vanishing point `i`'s rays over a `w` × `h` canvas, as Procreate fans them: from the way towards
+/// the other point of the horizon (a third point, or a lone one, towards the canvas's middle), 24
+/// either way. From a point on the canvas they go all the way round, 7.5° apart; from one off it,
+/// they spread over the angle the canvas fills as seen from there, a 24th of it apart (those
+/// that miss the canvas are left out by the clip). Each is long enough to cross the canvas.
+fn perspective_rays(points: &[Vec2], i: usize, w: f32, h: f32) -> Vec<(Vec2, Vec2)> {
+    let Some(&v) = points.get(i) else { return Vec::new() };
+    let mid = Vec2::new(w / 2.0, h / 2.0);
+    let other = match i {
+        0 => points.get(1).copied(),
+        1 => points.first().copied(),
+        _ => None,
+    };
+    let corners = [Vec2::new(0.0, 0.0), Vec2::new(w, 0.0), Vec2::new(w, h), Vec2::new(0.0, h)];
+    let angle = |d: Vec2| d.y.atan2(d.x);
+    let inside = (0.0..=w).contains(&v.x) && (0.0..=h).contains(&v.y);
+    let (start, step) = if inside {
+        // a lone or third point on the canvas starts level, as a guide's horizon does by default
+        (other.map_or(0.0, |o| angle(o - v)), TAU / (2 * RAYS_EACH_WAY) as f32)
+    } else {
+        // the angle the canvas fills, its corners measured about the way to its middle
+        let towards = angle(mid - v);
+        let about = corners.map(|k| (angle(k - v) - towards + PI).rem_euclid(TAU) - PI);
+        let fills = about.iter().copied().fold(f32::MIN, f32::max) - about.iter().copied().fold(f32::MAX, f32::min);
+        (angle(other.unwrap_or(mid) - v), fills / RAYS_EACH_WAY as f32)
+    };
+    // a canvas seen edge on (or a step that is no number) has no fan
+    if step.is_nan() || step <= 0.0 {
+        return Vec::new();
+    }
+    let length = corners.iter().map(|k| v.distance(*k)).fold(0.0, f32::max) + 1.0;
+    (0..RAYS_EACH_WAY)
+        .flat_map(|k| [start + step * k as f32, start - step * (k + 1) as f32])
+        .map(|a| (v, v + Vec2::new(a.cos(), a.sin()) * length))
+        .collect()
+}
+
 fn clip(a: Vec2, b: Vec2, w: f32, h: f32) -> Option<(Vec2, Vec2)> {
     let d = b - a;
     let (mut t0, mut t1) = (0.0f32, 1.0f32);
@@ -193,19 +233,24 @@ impl Guide {
                 out
             }
             GuideKind::Perspective => {
-                // rays from each vanishing point, and a horizon through the first two
+                // each vanishing point's rays, and the horizon through the first two (a lone
+                // point's level through it)
+                let points: Vec<Vec2> = self.vanishing.iter().map(|v| Vec2::new(v[0], v[1])).collect();
                 let mut out = Vec::new();
-                for v in &self.vanishing {
-                    let v = Vec2::new(v[0], v[1]);
-                    out.extend((0..36).map(|k| {
-                        let a = k as f32 * TAU / 36.0;
-                        (v, v + Vec2::new(a.cos(), a.sin()) * reach * 2.0)
-                    }));
+                for i in 0..points.len() {
+                    out.extend(perspective_rays(&points, i, w, h));
                 }
-                if let (Some(a), Some(b)) = (self.vanishing.first(), self.vanishing.get(1)) {
-                    let (a, b) = (Vec2::new(a[0], a[1]), Vec2::new(b[0], b[1]));
-                    let d = (b - a).normalized_or(Vec2::new(1.0, 0.0));
-                    out.push((a - d * reach * 2.0, b + d * reach * 2.0));
+                match points.as_slice() {
+                    [a, b, ..] => {
+                        let d = (*b - *a).normalized_or(Vec2::new(1.0, 0.0));
+                        let far = reach + a.distance(c) + b.distance(c);
+                        out.push((*a - d * far, *b + d * far));
+                    }
+                    [a] => {
+                        let far = reach + a.distance(c);
+                        out.push((*a - Vec2::new(far, 0.0), *a + Vec2::new(far, 0.0)));
+                    }
+                    [] => {}
                 }
                 out
             }
@@ -349,10 +394,43 @@ mod tests {
         p.vanishing = vec![[0.0, 50.0], [200.0, 50.0]];
         let rays = p.lines(200, 100);
         assert!(rays.len() > 30);
+        // a lone point keeps a level horizon through it
+        p.vanishing = vec![[100.0, 50.0]];
+        assert!(
+            p.lines(200, 100)
+                .iter()
+                .any(|(a, b)| (a.y - 50.0).abs() < 1e-3 && (b.y - 50.0).abs() < 1e-3 && (b.x - a.x).abs() > 199.0)
+        );
+        p.vanishing = vec![[0.0, 50.0], [200.0, 50.0]];
         assert!(
             rays.iter()
                 .all(|(a, b)| [a, b].iter().all(|q| q.x >= -1e-3 && q.x <= 200.001 && q.y >= -1e-3 && q.y <= 100.001))
         );
+    }
+
+    #[test]
+    fn perspective_rays_fan_as_procreate_fans_them() {
+        let (w, h) = (3840.0, 2160.0);
+        let angle = |(a, b): &(Vec2, Vec2)| (b.y - a.y).atan2(b.x - a.x);
+        // on the canvas: 48 rays 7.5° apart, one of them along the horizon to the other point
+        let on_canvas = [Vec2::new(1000.0, 1000.0), Vec2::new(3000.0, 1000.0)];
+        let rays = perspective_rays(&on_canvas, 0, w, h);
+        assert_eq!(rays.len(), 48);
+        assert!(rays.iter().any(|r| angle(r).abs() < 1e-5));
+        let mut a: Vec<f32> = rays.iter().map(|r| angle(r).rem_euclid(TAU)).collect();
+        a.sort_by(f32::total_cmp);
+        assert!(a.windows(2).all(|p| (p[1] - p[0] - TAU / 48.0).abs() < 1e-4));
+        // far off it, even far away: the rays still cross the canvas, a 24th of the angle it fills
+        // apart, fanned from the way to the other point
+        let far = [Vec2::new(-2191.25, 1636.2), Vec2::new(4522.7, 2380.2), Vec2::new(2744.9, -8519.9)];
+        for i in 0..3 {
+            let rays = perspective_rays(&far, i, w, h);
+            assert_eq!(rays.len(), 48);
+            let crossing = rays.iter().filter_map(|(a, b)| clip(*a, *b, w, h)).count();
+            assert!(crossing >= 12, "point {i}: {crossing} cross the canvas");
+        }
+        let g = Guide { vanishing: far.iter().map(|v| [v.x, v.y]).collect(), ..on(GuideKind::Perspective) };
+        assert!(g.lines(3840, 2160).len() > 40);
     }
 
     #[test]

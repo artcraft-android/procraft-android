@@ -123,6 +123,49 @@ pub fn names_in_file(path: &std::path::Path) -> Option<Vec<String>> {
     Some(central_entries(&directory, 0, count)?.into_iter().map(|e| e.name).collect())
 }
 
+/// The entry `name` of the archive at `path`, read from the file without reading the rest of it
+/// (its central directory, then the entry alone): a preview out of a big artwork, or one on a slow
+/// drive or a device.
+pub fn read_from_file(path: &std::path::Path, name: &str) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let tail_len = len.min(TAIL as u64);
+    file.seek(SeekFrom::Start(len - tail_len)).ok()?;
+    let mut tail = vec![0; usize::try_from(tail_len).ok()?];
+    file.read_exact(&mut tail).ok()?;
+    let end = end_record(&tail)?;
+    let count = usize::from(u16le(&tail, end + 10)?);
+    let size = usize::try_from(u32le(&tail, end + 12)?).ok()?;
+    let at = u64::from(u32le(&tail, end + 16)?);
+    if size > MAX_ENTRY {
+        return None;
+    }
+    let mut directory = vec![0; size];
+    file.seek(SeekFrom::Start(at)).ok()?;
+    file.read_exact(&mut directory).ok()?;
+    let e = central_entries(&directory, 0, count)?.into_iter().find(|e| e.name == name)?;
+    if e.size > MAX_ENTRY || e.compressed > MAX_ENTRY {
+        return None;
+    }
+    let mut header = [0u8; 30];
+    file.seek(SeekFrom::Start(e.local as u64)).ok()?;
+    file.read_exact(&mut header).ok()?;
+    if u32le(&header, 0)? != 0x0403_4B50 {
+        return None;
+    }
+    let skip = u64::from(u16le(&header, 26)?) + u64::from(u16le(&header, 28)?);
+    file.seek(SeekFrom::Current(i64::try_from(skip).ok()?)).ok()?;
+    let mut raw = vec![0; e.compressed];
+    file.read_exact(&mut raw).ok()?;
+    let data = match e.method {
+        0 => raw,
+        8 => miniz_oxide::inflate::decompress_to_vec_with_limit(&raw, e.size).ok()?,
+        _ => return None,
+    };
+    (data.len() == e.size && crc32(&data) == e.crc).then_some(data)
+}
+
 fn u16le(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(b.get(at..at.checked_add(2)?)?.try_into().ok()?))
 }
@@ -277,6 +320,19 @@ pub fn crc32(data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_entry_is_read_from_a_file_alone() {
+        let mut w = ZipWriter::new();
+        w.add("Document.archive", &vec![7u8; 50_000]);
+        w.add("QuickLook/Thumbnail.png", b"png bytes");
+        let path = std::env::temp_dir().join(format!("procraft-zip-{}.zip", std::process::id()));
+        std::fs::write(&path, w.finish()).unwrap();
+        assert_eq!(read_from_file(&path, "QuickLook/Thumbnail.png").as_deref(), Some(&b"png bytes"[..]));
+        assert_eq!(read_from_file(&path, "Document.archive"), Some(vec![7u8; 50_000]));
+        assert_eq!(read_from_file(&path, "missing"), None);
+        std::fs::remove_file(&path).unwrap();
+    }
 
     #[test]
     fn entries_round_trip() {

@@ -24,8 +24,9 @@ static LATEST: Mutex<Option<u64>> = Mutex::new(None);
 /// Each pen pointer's last flags (its barrel button held, its eraser end down).
 static FLAGS: Mutex<Option<HashMap<u64, u32>>> = Mutex::new(None);
 
-/// How many times a pen's barrel button went down since the app last asked.
+/// How many times a pen's first and second barrel buttons went down since the app last asked.
 static PRESSES: AtomicUsize = AtomicUsize::new(0);
+static SECOND_PRESSES: AtomicUsize = AtomicUsize::new(0);
 
 /// Each pointer the system has said is a pen (true) or a finger (false).
 static KINDS: Mutex<Option<HashMap<u64, bool>>> = Mutex::new(None);
@@ -48,6 +49,9 @@ const MOUSE: u64 = u64::MAX;
 const FLAG_BARREL: u32 = 0x1;
 const FLAG_INVERTED: u32 = 0x2;
 const FLAG_ERASER: u32 = 0x4;
+/// The pen's second barrel button held (ours: Windows gives the pen one).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const FLAG_SECOND_BARREL: u32 = 0x100;
 
 /// The lean of the pen that is pointer `id` (a touch's id), if it is a pen that gives one.
 pub fn lean(id: u64) -> Option<(f32, f32)> {
@@ -112,9 +116,16 @@ fn pointer_kind(id: u64, pen: bool) {
     }
 }
 
-/// How many times a pen's barrel button was pressed since the last call.
-pub fn take_button_presses() -> usize {
-    PRESSES.swap(0, Ordering::Relaxed)
+/// Whether the first and second barrel buttons of the pen near the window are held now.
+pub fn buttons_held() -> [bool; 2] {
+    let Some(id) = LATEST.lock().ok().and_then(|l| *l) else { return [false; 2] };
+    let flags = FLAGS.lock().ok().and_then(|f| f.as_ref()?.get(&id).copied()).unwrap_or(0);
+    [flags & FLAG_BARREL != 0, flags & FLAG_SECOND_BARREL != 0]
+}
+
+/// How many times a pen's first and second barrel buttons were pressed since the last call.
+pub fn take_button_presses() -> [usize; 2] {
+    [PRESSES.swap(0, Ordering::Relaxed), SECOND_PRESSES.swap(0, Ordering::Relaxed)]
 }
 
 /// The tablet pen moving the mouse pointer, if one is (none: a mouse, or a system that gives the
@@ -204,13 +215,15 @@ fn pen_reading(axes: &PenAxes, values: &[(u16, f64)], last: PenReading) -> PenRe
     }
 }
 
-/// Pointer `id`'s pen flags as they now are: a press of its barrel button counted.
+/// Pointer `id`'s pen flags as they now are: a press of either barrel button counted.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn pen_flags(id: u64, flags: u32) {
     let Ok(mut all) = FLAGS.lock() else { return };
     let before = all.get_or_insert_with(Default::default).insert(id, flags).unwrap_or(0);
-    if flags & FLAG_BARREL != 0 && before & FLAG_BARREL == 0 {
-        PRESSES.fetch_add(1, Ordering::Relaxed);
+    for (flag, presses) in [(FLAG_BARREL, &PRESSES), (FLAG_SECOND_BARREL, &SECOND_PRESSES)] {
+        if flags & flag != 0 && before & flag == 0 {
+            presses.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -524,7 +537,13 @@ mod tests {
         pen_flags(901, FLAG_BARREL);
         pen_flags(901, 0);
         pen_flags(901, FLAG_BARREL);
-        assert_eq!(take_button_presses(), 2);
+        assert_eq!(take_button_presses(), [2, 0]);
+        // the second button counts apart, held with the first or alone
+        pen_flags(903, FLAG_SECOND_BARREL);
+        pen_flags(903, FLAG_BARREL | FLAG_SECOND_BARREL);
+        pen_flags(903, 0);
+        pen_flags(903, FLAG_SECOND_BARREL);
+        assert_eq!(take_button_presses(), [1, 2]);
         assert!(!eraser_end(901));
         pen_flags(902, FLAG_INVERTED);
         assert!(eraser_end(902));

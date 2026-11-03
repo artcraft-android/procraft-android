@@ -208,6 +208,11 @@ pub struct TextEditor {
     rasterize: Alert,
     /// The interface, for the drawing thread to ask for a frame once it has drawn.
     ctx: Option<egui::Context>,
+    /// Procreate's fonts on a plugged-in iPad, shown to bring in.
+    fonts_from_ipad: Option<crate::ipad::Browser>,
+    /// Import's dropdown (from this computer or from the iPad), open while an iPad is plugged in
+    /// and it was tapped: under the button, where it is.
+    import_menu: Option<Rect>,
 }
 
 /// The view as [`CanvasSession::view_matrix`] gives it.
@@ -373,6 +378,13 @@ impl TextEditor {
             && session.rasterize_layer(l.id)
         {
             said = Some(Said::Notice("Text rasterized", true));
+        }
+        // fonts chosen on the iPad, copied over: imported as a picked file's are
+        if let Some(done) = self.fonts_from_ipad.as_mut().and_then(|b| b.show(ctx, look)) {
+            self.fonts_from_ipad = None;
+            if let crate::ipad::Done::Import(paths) = done {
+                said = self.import_font_files(session, &paths).or(said);
+            }
         }
         if self.info.is_none() {
             return said;
@@ -664,7 +676,19 @@ impl TextEditor {
         painter.set(behind, Shape::rect_filled(import.union(cancel), 21.5, argb(SHEET_CAPSULE)));
         let mut said = None;
         if tapped(ui, import, "import") {
-            said = self.import_font(session);
+            // with an iPad plugged in, it asks where from
+            if crate::ipad::connected() {
+                self.import_menu = if self.import_menu.is_some() { None } else { Some(import) };
+            } else {
+                said = self.import_font(session);
+            }
+        }
+        if let Some(ipad) = self.import_choice(ui) {
+            if ipad {
+                self.fonts_from_ipad = Some(crate::ipad::Browser::open(crate::ipad::Kind::Fonts));
+            } else {
+                said = self.import_font(session);
+            }
         }
         if tapped(ui, cancel, "cancel") {
             if let (Some(before), Some(now)) = (self.before_style.clone(), self.info.as_ref()) {
@@ -1081,17 +1105,82 @@ impl TextEditor {
         self.change(session, |t| t.text = typed);
     }
 
-    /// Copies a font file the user picks into the app and offers it; the text takes it.
+    /// Import's dropdown, while open: from this computer (the file picker) or from the iPad's
+    /// Procreate fonts (true); a press elsewhere, or the iPad unplugged, closes it.
+    fn import_choice(&mut self, ui: &egui::Ui) -> Option<bool> {
+        let button = self.import_menu?;
+        if !crate::ipad::connected() {
+            self.import_menu = None;
+            return None;
+        }
+        let rows = [("From this computer…", false), ("From iPad…", true)];
+        let menu = Rect::from_min_size(
+            pos2(button.right() - 220.0, button.bottom() + 8.0),
+            vec2(220.0, 12.0 + 44.0 * rows.len() as f32),
+        );
+        let mut chosen = None;
+        egui::Area::new(egui::Id::unique("font import from")).fixed_pos(menu.min).order(egui::Order::Foreground).show(
+            ui.ctx(),
+            |ui| {
+                ui.painter().rect_filled(menu, 16, argb(SHEET_CAPSULE));
+                ui.painter().rect_stroke(
+                    menu,
+                    16,
+                    egui::Stroke::new(1.0, Color32::from_white_alpha(0x1A)),
+                    egui::StrokeKind::Inside,
+                );
+                for (i, (label, ipad)) in rows.into_iter().enumerate() {
+                    let row = Rect::from_min_size(
+                        pos2(menu.left(), menu.top() + 6.0 + 44.0 * i as f32),
+                        vec2(menu.width(), 44.0),
+                    );
+                    if ui.rect_contains_pointer(row) {
+                        ui.painter().rect_filled(row.shrink2(vec2(6.0, 2.0)), 10, Color32::from_white_alpha(0x14));
+                    }
+                    let at = pos2(row.left() + 18.0, row.center().y);
+                    text(ui.painter(), at, Align2::LEFT_CENTER, label, 15.0, Weight::Regular, argb(pc::TEXT));
+                    if ui.interact(row, ui.scope_id().with(("font import from", i)), Sense::click()).clicked() {
+                        chosen = Some(ipad);
+                    }
+                }
+            },
+        );
+        let pressed_elsewhere = ui.input(|i| {
+            i.pointer.any_pressed()
+                && i.pointer.interact_pos().is_some_and(|p| !menu.contains(p) && !button.contains(p))
+        });
+        if chosen.is_some() || pressed_elsewhere {
+            self.import_menu = None;
+        }
+        chosen
+    }
+
+    /// Copies the font files the user picks (one or several) into the app and offers them; the text
+    /// takes the last.
     fn import_font(&mut self, session: &CanvasSession) -> Option<Said> {
-        let from =
-            rfd::FileDialog::new().set_title("Import a font").add_filter("Fonts", &["ttf", "otf"]).pick_file()?;
-        let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let bytes = std::fs::read(&from).ok()?;
+        let from = rfd::FileDialog::new()
+            .set_title("Import fonts")
+            .add_filter("Fonts", &["ttf", "otf", "ttc", "TTF", "OTF", "TTC"])
+            .pick_files()?;
+        self.import_font_files(session, &from)
+    }
+
+    /// The fonts at `paths` kept in the app and offered (a file that isn't a font left out); the
+    /// text takes the last.
+    fn import_font_files(&mut self, session: &CanvasSession, paths: &[std::path::PathBuf]) -> Option<Said> {
         fonts_ready();
-        // kept in the fonts folder by the core (a file that isn't a font is dropped)
-        let typeface = procraft_core::import_text_font(bytes, name)?;
+        let mut last = None;
+        for path in paths {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let Ok(bytes) = std::fs::read(path) else { continue };
+            // kept in the fonts folder by the core
+            if let Some(typeface) = procraft_core::import_text_font(bytes, name) {
+                last = Some(typeface);
+            }
+        }
+        let typeface = last?;
         self.change(session, |t| t.font = typeface.family);
-        Some(Said::Notice("Font imported", false))
+        Some(Said::Notice(if paths.len() > 1 { "Fonts imported" } else { "Font imported" }, false))
     }
 }
 

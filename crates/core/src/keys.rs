@@ -31,6 +31,8 @@ pub enum KeyShortcut {
     /// The interface hidden, or shown again.
     Interface,
     ClearLayer,
+    /// The canvas shown in perceptual greys, or in colour again (the window's view only).
+    GreyView,
     /// The brush's size changed by `by` (of the slider's whole run).
     BrushSize {
         by: f32,
@@ -47,7 +49,8 @@ pub enum KeyShortcut {
 /// "backspace", or an arrow ("left", "right", "up", "down"); `command` is Ctrl (⌘), and the
 /// arrows nudge only while `transforming`.
 ///
-/// With the command key: Z undoes (with Shift redoes), C, X and V copy, cut and paste the layer.
+/// With the command key: Z undoes (with Shift redoes), C, X and V copy, cut and paste the layer,
+/// G shows the canvas in perceptual greys (as Krita's soft proofing does).
 /// Alone: B paints, E erases, M the eyedropper, S selection, V transform, U Hue, Saturation,
 /// Brightness, C the colours, X swaps them, D deselects, J duplicates the layer, K Actions,
 /// L Layers, 0 the interface, Delete (Backspace) clears the layer, [ and ] the brush's size by
@@ -63,6 +66,7 @@ pub fn key_shortcut(key: String, command: bool, shift: bool, alt: bool, transfor
             "c" => Some(CopyLayer),
             "x" => Some(CutLayer),
             "v" => Some(Paste),
+            "g" => Some(GreyView),
             _ => None,
         };
     }
@@ -127,6 +131,8 @@ mod tests {
         assert_eq!(key("Z", true, false, false), Some(Undo));
         assert_eq!(key("z", true, true, false), Some(Redo));
         assert_eq!(key("v", true, false, false), Some(Paste));
+        assert_eq!(key("g", true, false, false), Some(GreyView));
+        assert_eq!(key("y", true, false, false), None);
         assert_eq!(key("v", false, false, false), Some(Transform));
         assert_eq!(key("b", true, false, false), None);
         assert_eq!(key("S", false, true, false), Some(Selection));

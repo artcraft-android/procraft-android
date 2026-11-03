@@ -28,12 +28,15 @@ use wayland_protocols::wp::tablet::zv2::client::zwp_tablet_v2::ZwpTabletV2;
 use winit::event_loop::EventLoopProxy;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 
-use super::{FLAG_BARREL, FLAG_ERASER, PenEvent};
+use super::{FLAG_BARREL, FLAG_ERASER, FLAG_SECOND_BARREL, PenEvent};
 
 /// The pens' ids, apart from the platform's touches and the mouse's.
 const FIRST_ID: u64 = 0x5045_4E00_0000;
 /// The barrel's buttons (linux/input-event-codes.h: BTN_STYLUS, BTN_STYLUS2, BTN_STYLUS3).
 const BARREL_BUTTONS: [u32; 3] = [0x14b, 0x14c, 0x149];
+/// The first barrel button (BTN_STYLUS); the others are its second (a third, where a pen has one,
+/// does as the second).
+const FIRST_BARREL: u32 = 0x14b;
 /// How long the reader waits on the connection before looking whether to stop.
 const WAIT: Timespec = Timespec { tv_sec: 0, tv_nsec: 100_000_000 };
 
@@ -245,7 +248,9 @@ impl Reader {
         let lean = t.tilt.map_or((0.0, 0.0), |(x, y)| super::lean_of(x as f32, y as f32));
         super::keep_pose(t.id, lean, t.roll);
         super::pointer_kind(t.id, true);
-        let barrel = if t.held.is_empty() { 0 } else { FLAG_BARREL };
+        let first = if t.held.contains(&FIRST_BARREL) { FLAG_BARREL } else { 0 };
+        let second = if t.held.iter().any(|b| *b != FIRST_BARREL) { FLAG_SECOND_BARREL } else { 0 };
+        let barrel = first | second;
         super::pen_flags(t.id, barrel | if t.eraser { FLAG_ERASER } else { 0 });
         let (id, (x, y), pressure) = (t.id, t.at, t.pressure);
         let mut out = Vec::new();

@@ -113,6 +113,8 @@ pub enum Asked {
     /// A new artwork the screen's size, in this folder.
     ScreenSize(Option<String>),
     Import(Option<String>),
+    /// Artworks and brushes brought in from a connected iPad, into this folder.
+    ImportIpad(Option<String>),
     Photo(Option<String>),
     /// These artworks written as this format, where the user picks.
     Share(Vec<GalleryArtwork>, crate::files::Format),
@@ -179,6 +181,9 @@ const FORMATS_WIDTH: f32 = 260.0;
 
 pub struct Gallery {
     pub store: Arc<ArtworkStore>,
+    /// Import's dropdown (from this computer or from the iPad), open while an iPad is plugged in
+    /// and it was tapped: under the button, where it is.
+    import_menu: Option<Rect>,
     entries: Vec<GalleryEntry>,
     /// The stack open: its folder and name.
     stack: Option<(String, String)>,
@@ -302,6 +307,7 @@ impl Gallery {
         let presets = presets_from_json(std::fs::read_to_string(presets_path()).ok());
         let mut gallery = Gallery {
             store,
+            import_menu: None,
             entries: Vec::new(),
             stack: None,
             thumbs: HashMap::new(),
@@ -936,6 +942,57 @@ impl Gallery {
 
     /// The app's name (in a stack, the way back and its name), then Select, Import and Photo in a
     /// capsule, and +.
+    /// Import's dropdown, while open: from this computer (the file picker) or from the iPad; a
+    /// press elsewhere closes it.
+    fn import_choice(&mut self, ui: &Ui) -> Option<Asked> {
+        let button = self.import_menu?;
+        let rows = [("From this computer…", false), ("From iPad…", true)];
+        let menu = Rect::from_min_size(
+            pos2(button.center().x - 110.0, button.bottom() + 8.0),
+            vec2(220.0, 12.0 + 44.0 * rows.len() as f32),
+        );
+        let mut chosen = None;
+        let shown = egui::Area::new(egui::Id::unique("import from"))
+            .fixed_pos(menu.min)
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                ui.painter().rect_filled(menu, 16, argb(CAPSULE));
+                ui.painter().rect_stroke(menu, 16, Stroke::new(1.0, argb(CAPSULE_EDGE)), egui::StrokeKind::Inside);
+                for (i, (label, ipad)) in rows.into_iter().enumerate() {
+                    let row = Rect::from_min_size(
+                        pos2(menu.left(), menu.top() + 6.0 + 44.0 * i as f32),
+                        vec2(menu.width(), 44.0),
+                    );
+                    let hovered = ui.rect_contains_pointer(row);
+                    if hovered {
+                        ui.painter().rect_filled(row.shrink2(vec2(6.0, 2.0)), 10, Color32::from_white_alpha(0x14));
+                    }
+                    text(
+                        ui.painter(),
+                        pos2(row.left() + 18.0, row.center().y),
+                        Align2::LEFT_CENTER,
+                        label,
+                        16.0,
+                        Weight::Regular,
+                        argb(TEXT),
+                    );
+                    if ui.interact(row, ui.scope_id().with(("import from", i)), Sense::click()).clicked() {
+                        chosen =
+                            Some(if ipad { Asked::ImportIpad(self.folder()) } else { Asked::Import(self.folder()) });
+                    }
+                }
+            });
+        let pressed_elsewhere = ui.input(|i| {
+            i.pointer.any_pressed()
+                && i.pointer.interact_pos().is_some_and(|p| !menu.contains(p) && !button.contains(p))
+        });
+        if chosen.is_some() || pressed_elsewhere {
+            self.import_menu = None;
+        }
+        let _ = shown;
+        chosen
+    }
+
     fn header(&mut self, ui: &Ui, look: &mut Look, screen: Rect) -> Option<Asked> {
         if self.selecting {
             self.select_header(ui, look, screen);
@@ -1001,6 +1058,11 @@ impl Gallery {
             text(painter, button.center(), Align2::CENTER_CENTER, label, 16.0, Weight::Regular, argb(TEXT));
             if ui.interact(button, ui.scope_id().with(label), Sense::click()).clicked() {
                 asked = match label {
+                    // with an iPad plugged in, it asks where from
+                    "Import" if crate::ipad::connected() => {
+                        self.import_menu = Some(button);
+                        None
+                    }
                     "Import" => Some(Asked::Import(self.folder())),
                     "Photo" => Some(Asked::Photo(self.folder())),
                     _ => {
@@ -1011,6 +1073,9 @@ impl Gallery {
                 };
             }
             x += width;
+        }
+        if let Some(chosen) = self.import_choice(ui) {
+            asked = Some(chosen);
         }
         let disc = Rect::from_center_size(plus.center(), vec2(42.0, 42.0));
         painter.rect_filled(disc, 21.0, argb(CAPSULE));

@@ -13,6 +13,7 @@ use procraft_core::{
 };
 
 use crate::colour_drop::{ColourDrop, Touch};
+use crate::colour_models::{ColourModel, OKLAB_AB, linear_hsy_of, linear_hsy_to_rgb, oklab_of, oklab_to_rgb};
 use crate::icons;
 use crate::look::{Look, Shade, Themed, Weight, argb, pc, text};
 use crate::panel::{self, PANEL_TITLE};
@@ -28,6 +29,7 @@ const RING_INNER: f32 = 124.0;
 const DISC_RADIUS: f32 = 105.0;
 const PICKER: f32 = 364.0;
 const SWATCH_EDGE: Themed = Themed(0xFF5A5A5A, 0xFFC0C0C0);
+const MODEL_BUTTON: Themed = Themed(0xFF3A3A3A, 0xFFDCDCDC);
 const GRABBER: Themed = Themed(0x7AC6C6C6, 0xFFB0B0B0);
 const SET_CELL: Themed = Themed(0x2E5B5B5B, 0xFFD7D7D7);
 const CLEAR_TEXT: Themed = Themed(0xFFB5B5B5, 0xFF4A4A4A);
@@ -270,6 +272,16 @@ pub struct Colours {
     pub floating: Option<Pos2>,
     floating_grab: Option<egui::Vec2>,
     floating_rgb: bool,
+    /// The colour model's button left of the swatches, its menu, and a model chosen there (for
+    /// the preferences to keep).
+    model_button: Rect,
+    model_menu: crate::menu::Menu,
+    pub model_chosen: Option<ColourModel>,
+    /// The colour in the model as last set or worked out, and the model and colour (0xRRGGBB)
+    /// that was for: kept while that is the colour, so a grey or black keeps its hue and
+    /// saturation.
+    coords: [f32; 3],
+    coords_of: Option<(ColourModel, u32)>,
 }
 
 impl Default for Colours {
@@ -300,11 +312,191 @@ impl Default for Colours {
             floating: None,
             floating_grab: None,
             floating_rgb: false,
+            model_button: Rect::NOTHING,
+            model_menu: crate::menu::Menu::default(),
+            model_chosen: None,
+            coords: [0.0; 3],
+            coords_of: None,
         }
     }
 }
 
 impl Colours {
+    /// The colour model the disc and the Value sliders work in.
+    pub fn model(&self) -> ColourModel {
+        self.pickers.model
+    }
+
+    pub fn set_model(&mut self, model: ColourModel) {
+        self.pickers.model = model;
+    }
+
+    /// The colour in the colour model: as last set while it is still the colour, else worked
+    /// out afresh (a grey keeping the hue it had).
+    fn model_coords(&mut self) -> [f32; 3] {
+        let model = self.model();
+        if model == ColourModel::Hsb {
+            return self.hsv;
+        }
+        let rgb = self.rgb();
+        let key = (model, to_hex(rgb));
+        if self.coords_of != Some(key) {
+            let hue = if self.coords_of.is_some_and(|(m, _)| m == model) { self.coords[0] } else { self.hsv[0] };
+            self.coords = model.of_rgb(rgb, hue);
+            self.coords_of = Some(key);
+        }
+        self.coords
+    }
+
+    /// The colour set to `coords` in the colour model.
+    fn set_model_coords(&mut self, coords: [f32; 3]) {
+        let model = self.model();
+        if model == ColourModel::Hsb {
+            self.hsv = coords;
+            return;
+        }
+        let rgb = model.to_rgb(coords);
+        let [h, s, v] = rgb_to_hsv(rgb);
+        self.hsv = [if s > 0.0 { h } else { self.hsv[0] }, s, v];
+        self.coords = coords;
+        self.coords_of = Some((model, to_hex(self.rgb())));
+    }
+
+    /// The disc picker in `rect`, in the colour model; whether it changed the colour.
+    pub(crate) fn model_disc(&mut self, ui: &Ui, rect: Rect) -> bool {
+        let mut coords = self.model_coords();
+        let changed = self.pickers.disc(ui, &mut coords, rect);
+        if changed {
+            self.set_model_coords(coords);
+        }
+        changed
+    }
+
+    /// How much room HSY′'s sliders take under the disc (none for another model).
+    fn luma_sliders_height(&self) -> f32 {
+        if self.model() == ColourModel::Hsy { SLIDER_ROW * 2.0 + 4.0 } else { 0.0 }
+    }
+
+    /// HSY′'s saturation and luma sliders, from `top` across `body`; whether they changed the
+    /// colour.
+    fn luma_sliders(&mut self, ui: &Ui, body: Rect, top: f32) -> bool {
+        let model = ColourModel::Hsy;
+        let coords = self.model_coords();
+        let mut changed = None;
+        for (i, letter) in [(1usize, "S"), (2, "Y\u{2032}")] {
+            let row = Rect::from_min_size(
+                pos2(body.left() + 8.0, top + SLIDER_ROW * (i - 1) as f32),
+                vec2(body.width() - 16.0, SLIDER_ROW),
+            );
+            let ink = argb(PANEL_TITLE);
+            text(
+                ui.painter(),
+                pos2(row.left() + 13.0, row.center().y),
+                Align2::LEFT_CENTER,
+                letter,
+                15.0,
+                Weight::Regular,
+                ink,
+            );
+            let value = coords.get(i).copied().unwrap_or(0.0);
+            let shown = format!("{}%", (value * 100.0).round() as i32);
+            text(
+                ui.painter(),
+                pos2(row.right() - 10.0, row.center().y),
+                Align2::RIGHT_CENTER,
+                &shown,
+                15.0,
+                Weight::Regular,
+                ink,
+            );
+            let gradient: Vec<Color32> = (0..=12)
+                .map(|k| {
+                    let mut c = coords;
+                    if let Some(slot) = c.get_mut(i) {
+                        *slot = k as f32 / 12.0;
+                    }
+                    srgb(model.to_rgb(c))
+                })
+                .collect();
+            let track = Rect::from_min_max(pos2(row.left() + 40.0, row.top()), pos2(row.right() - 56.0, row.bottom()));
+            if let Some(to) = slider_row(ui, track, ("luma slider", i), value, &gradient) {
+                changed = Some((i, to));
+            }
+        }
+        let Some((i, to)) = changed else { return false };
+        let mut c = coords;
+        if let Some(slot) = c.get_mut(i) {
+            *slot = to;
+        }
+        self.set_model_coords(c);
+        true
+    }
+
+    /// The colour model's button: its name in a small box, a tap on which opens its menu.
+    fn model_button(&mut self, ui: &Ui, rect: Rect) {
+        self.model_button = rect;
+        ui.painter().rect_filled(rect, 6, argb(MODEL_BUTTON));
+        let ink = argb(PANEL_TITLE);
+        text(
+            ui.painter(),
+            pos2(rect.left() + 8.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            self.model().label(),
+            13.0,
+            Weight::Regular,
+            ink,
+        );
+        // a small downward chevron, as a menu's button has
+        let c = pos2(rect.right() - 9.0, rect.center().y);
+        let stroke = egui::Stroke::new(1.4, ink);
+        ui.painter().line_segment([c + vec2(-3.5, -1.8), c + vec2(0.0, 1.8)], stroke);
+        ui.painter().line_segment([c + vec2(0.0, 1.8), c + vec2(3.5, -1.8)], stroke);
+        if ui.interact(rect, ui.scope_id().with("colour model"), Sense::click()).clicked() {
+            self.model_menu.open();
+        }
+    }
+
+    /// The colour models as a menu under their button, the one in use ticked.
+    fn model_menu(&mut self, ctx: &egui::Context, look: &mut Look, backdrops: &mut Vec<f32>) {
+        let width = 160.0;
+        let rect = Rect::from_min_size(
+            pos2(self.model_button.right() - width, self.model_button.bottom() + 6.0),
+            vec2(width, 9.0 * 2.0 + 38.0 * ColourModel::ALL.len() as f32),
+        );
+        let glass = crate::menu::Glass { fill: HARMONY_MENU_FILL, edge: None, frost: false, corner: 18.0 };
+        let current = self.model();
+        let mut chosen = None;
+        self.model_menu.show(ctx, "colour models", rect, self.model_button.center_bottom(), glass, backdrops, |ui| {
+            for (i, model) in ColourModel::ALL.into_iter().enumerate() {
+                let row = Rect::from_min_size(
+                    pos2(rect.left(), rect.top() + 9.0 + 38.0 * i as f32),
+                    vec2(rect.width(), 38.0),
+                );
+                let ink = Color32::WHITE;
+                text(
+                    ui.painter(),
+                    pos2(row.left() + 18.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    model.label(),
+                    16.0,
+                    Weight::Regular,
+                    ink,
+                );
+                if model == current {
+                    look.icon(ui, &icons::TICK, pos2(row.right() - 16.0 - 9.0, row.center().y), 18.0, ink);
+                }
+                if ui.interact(row, ui.scope_id().with(("colour model", i)), Sense::click()).clicked() {
+                    chosen = Some(model);
+                }
+            }
+        });
+        if let Some(model) = chosen {
+            self.set_model(model);
+            self.model_chosen = Some(model);
+            self.model_menu.close();
+        }
+    }
+
     /// The colour painted with, sRGB.
     pub fn rgb(&self) -> [f32; 3] {
         hsv_to_rgb(self.hsv)
@@ -384,8 +576,9 @@ impl Colours {
             _ => HEADER_HEIGHT,
         };
         let picker_height = match self.mode {
-            Mode::Disc if short => PICKER + 3.0,
-            Mode::Disc | Mode::Palettes => 8.0 + PICKER + 17.0,
+            Mode::Disc if short => PICKER + 3.0 + self.luma_sliders_height(),
+            Mode::Disc => 8.0 + PICKER + 17.0 + self.luma_sliders_height(),
+            Mode::Palettes => 8.0 + PICKER + 17.0,
             Mode::Classic => shape.square + SLIDER_ROW * 3.0,
             Mode::Harmony => shape.harmony_top + shape.harmony_radius * 2.0 + shape.harmony_gap + SLIDER_ROW,
             Mode::Value => shape.value_group * 2.0 + 6.0 + 6.0 + 44.0 + if short { 2.0 } else { 0.0 },
@@ -426,6 +619,9 @@ impl Colours {
                 let second = Rect::from_min_size(pos2(body.right() - 20.0 - swatch.x, body.top() + 21.5), swatch);
                 let first = second.translate(vec2(-(swatch.x + 7.0), 0.0));
                 if self.mode != Mode::Palettes {
+                    // the colour model, for the disc and the Value sliders
+                    let model = Rect::from_min_size(pos2(first.left() - 8.0 - 70.0, first.top()), vec2(70.0, swatch.y));
+                    self.model_button(ui, model);
                     ui.painter().rect_filled(first, 6, srgb(self.rgb()));
                     ui.painter().rect_stroke(
                         first,
@@ -456,7 +652,11 @@ impl Colours {
                     Mode::Disc => {
                         let at = pos2(body.left() + 6.0, top + if short { 0.0 } else { 8.0 });
                         let picker = Rect::from_min_size(at, vec2(PICKER, PICKER));
-                        if self.pickers.disc(ui, &mut self.hsv, picker) {
+                        if self.model_disc(ui, picker) {
+                            self.send(session);
+                        }
+                        // HSY′: its saturation and luma on sliders under the wheel
+                        if self.model() == ColourModel::Hsy && self.luma_sliders(ui, body, picker.bottom() + 4.0) {
                             self.send(session);
                         }
                     }
@@ -544,6 +744,9 @@ impl Colours {
         );
         if self.mode == Mode::Harmony {
             self.harmony_menu(ctx, look, rect, backdrops);
+        }
+        if self.mode != Mode::Palettes {
+            self.model_menu(ctx, look, backdrops);
         }
         if self.mode == Mode::Value
             && let Some(rgb) = hex_pad(ctx, look, &mut self.hex, hex_row)
@@ -684,9 +887,12 @@ impl Colours {
 /// moves. Each set of pickers (the panel's, a compact picker's) has its own.
 #[derive(Default)]
 pub struct Pickers {
-    /// The disc's picture for its hue, and the ring's (each with its size in pixels).
-    disc: Option<(u32, usize, TextureHandle)>,
-    ring: Option<(usize, TextureHandle)>,
+    /// The colour model the disc works in.
+    pub model: ColourModel,
+    /// The disc's picture for its hue, and the ring's (each with its size in pixels and the model
+    /// it shows).
+    disc: Option<(u32, usize, ColourModel, TextureHandle)>,
+    ring: Option<(usize, ColourModel, TextureHandle)>,
     /// What a drag that started on the disc picker moves: the ring (true) or the disc.
     on_ring: Option<bool>,
     /// Classic's square for its hue, and Harmony's wheel for its brightness.
@@ -715,7 +921,15 @@ impl Pickers {
             let ring = *self.on_ring.get_or_insert(d.length() > (disc_radius + ring_inner) / 2.0);
             if ring {
                 let turn = ((-d.y).atan2(d.x) / std::f32::consts::TAU + 1.0) % 1.0;
-                hsv[0] = hue_at(HueControl::Ring, turn);
+                hsv[0] = ring_hue(self.model, turn);
+            } else if self.model == ColourModel::Hsy {
+                // HSY′'s disc is Krita's wheel: hue round it and saturation out, worked out on
+                // linear light at the colour's luma (the ring and sliders on the encoded values)
+                let turn = ((-d.y).atan2(d.x) / std::f32::consts::TAU + 1.0) % 1.0;
+                let luma = linear_hsy_of(ColourModel::Hsy.to_rgb(*hsv), hsv[0])[2];
+                let hue = ring_hue(self.model, turn);
+                let rgb = linear_hsy_to_rgb([hue, (d.length() / disc_radius).min(1.0), luma]);
+                *hsv = ColourModel::Hsy.of_rgb(rgb, hue);
             } else {
                 let mut uv = d / disc_radius;
                 if uv.length() > 1.0 {
@@ -731,25 +945,37 @@ impl Pickers {
         }
         // the ring, drawn once for its size
         let side = (rect.width() * ppp).round() as usize;
-        if self.ring.as_ref().is_none_or(|(at, _)| *at != side) {
-            let image = ring_image(side, ppp * k);
-            self.ring = Some((side, ctx.load_texture("hue ring", image, TextureOptions::LINEAR)));
+        let model = self.model;
+        if self.ring.as_ref().is_none_or(|(at, m, _)| *at != side || *m != model) {
+            let image = ring_image(side, ppp * k, model);
+            self.ring = Some((side, model, ctx.load_texture("hue ring", image, TextureOptions::LINEAR)));
         }
-        let hue_key = (hsv[0] * 10_000.0).round() as u32;
+        // the disc is drawn for its hue (HSY′'s, all hues, for its linear luma)
+        let wheel = linear_hsy_of(model.to_rgb(*hsv), hsv[0]);
+        let hue_key = if model == ColourModel::Hsy {
+            (wheel[2] * 4000.0).round() as u32
+        } else {
+            (hsv[0] * 10_000.0).round() as u32
+        };
         let disc_side = (disc_radius * 2.0 * ppp).round() as usize;
-        if self.disc.as_ref().is_none_or(|(h, at, _)| *h != hue_key || *at != disc_side) {
-            let image = egui::ColorImage::from_rgba_premultiplied(
-                [disc_side, disc_side],
-                &disc_picture(hsv[0], disc_side as u32),
-            );
-            self.disc = Some((hue_key, disc_side, ctx.load_texture("colour disc", image, TextureOptions::LINEAR)));
+        if self.disc.as_ref().is_none_or(|(h, at, m, _)| *h != hue_key || *at != disc_side || *m != model) {
+            let image = match model {
+                ColourModel::Hsb => egui::ColorImage::from_rgba_premultiplied(
+                    [disc_side, disc_side],
+                    &disc_picture(hsv[0], disc_side as u32),
+                ),
+                ColourModel::Hsy => luma_wheel_image(wheel[2], disc_side),
+                _ => model_disc_image(model, hsv[0], disc_side),
+            };
+            self.disc =
+                Some((hue_key, disc_side, model, ctx.load_texture("colour disc", image, TextureOptions::LINEAR)));
         }
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         let painter = ui.painter();
-        if let Some((_, t)) = &self.ring {
+        if let Some((_, _, t)) = &self.ring {
             painter.image(t.id(), rect, uv, Color32::WHITE);
         }
-        if let Some((_, _, t)) = &self.disc {
+        if let Some((_, _, _, t)) = &self.disc {
             painter.image(
                 t.id(),
                 Rect::from_center_size(centre, vec2(disc_radius * 2.0, disc_radius * 2.0)),
@@ -758,11 +984,18 @@ impl Pickers {
             );
         }
         // the ring's knob sits on the middle of the ring, where the hue is
-        let turn = hue_position(HueControl::Ring, hsv[0]) * std::f32::consts::TAU;
+        let turn = ring_turn(model, hsv[0]) * std::f32::consts::TAU;
         let mid = (ring_inner + ring_outer) / 2.0;
-        knob(ui, centre + vec2(turn.cos() * mid, -turn.sin() * mid), 26.2 * k, srgb(hsv_to_rgb([hsv[0], 1.0, 1.0])));
-        let [x, y] = square_to_disc(hsv[1] * 2.0 - 1.0, 1.0 - hsv[2] * 2.0);
-        knob(ui, centre + vec2(x, y) * disc_radius, 10.75, srgb(hsv_to_rgb(*hsv)));
+        let pure = model.to_rgb([hsv[0], 1.0, model.ring_third(hsv[0])]);
+        knob(ui, centre + vec2(turn.cos() * mid, -turn.sin() * mid), 26.2 * k, srgb(pure));
+        let at = if model == ColourModel::Hsy {
+            let wheel_turn = ring_turn(model, wheel[0]) * std::f32::consts::TAU;
+            centre + vec2(wheel_turn.cos(), -wheel_turn.sin()) * wheel[1] * disc_radius
+        } else {
+            let [x, y] = square_to_disc(hsv[1] * 2.0 - 1.0, 1.0 - hsv[2] * 2.0);
+            centre + vec2(x, y) * disc_radius
+        };
+        knob(ui, at, 10.75, srgb(model.to_rgb(*hsv)));
         *hsv != before
     }
 
@@ -974,6 +1207,27 @@ impl Colours {
         let rgb = to_hex(self.rgb());
         let [r, g, b] = [rgb >> 16 & 0xFF, rgb >> 8 & 0xFF, rgb & 0xFF];
         let (group_height, gap) = (shape.value_group, shape.value_gap);
+        // the first group in the colour model (HSB's as it was; another's gradients worked out)
+        let model = self.model();
+        let coords = self.model_coords();
+        let letters = model.letters();
+        let along = |at: &dyn Fn(f32) -> [f32; 3], n: usize| -> Vec<Color32> {
+            (0..=n).map(|k| srgb(model.to_rgb(at(k as f32 / n as f32)))).collect()
+        };
+        // OKLab's sliders are its own lightness, a and b (a and b ±OKLAB_AB across them)
+        let lab = oklab_of(self.rgb());
+        let lab_along = |i: usize| -> Vec<Color32> {
+            (0..=12)
+                .map(|k| {
+                    let t = k as f32 / 12.0;
+                    let mut c = lab;
+                    if let Some(slot) = c.get_mut(i) {
+                        *slot = if i == 0 { t } else { (t * 2.0 - 1.0) * OKLAB_AB };
+                    }
+                    srgb(oklab_to_rgb(c))
+                })
+                .collect()
+        };
         for (k, group_top) in [top, top + group_height + 6.0].into_iter().enumerate() {
             let group = Rect::from_min_size(pos2(left, group_top), vec2(width, group_height));
             ui.painter().rect_filled(group, 10, argb(VALUE_GROUP));
@@ -981,23 +1235,52 @@ impl Colours {
                 let y = group_top + shape.value_top + (44.0 + gap) * i as f32;
                 let row = Rect::from_min_size(pos2(left, y), vec2(width, 44.0));
                 let (letter, value, colours, shown): (&str, f32, Vec<Color32>, String) = match (k, i) {
+                    (0, 0) if model == ColourModel::Oklab => {
+                        ("L", lab[0], lab_along(0), format!("{}", (lab[0] * 100.0).round() as i32))
+                    }
+                    (0, j) if model == ColourModel::Oklab => {
+                        let v = lab.get(j).copied().unwrap_or(0.0);
+                        let letter = if j == 1 { "a" } else { "b" };
+                        (letter, (v / OKLAB_AB + 1.0) / 2.0, lab_along(j), format!("{v:+.2}"))
+                    }
+                    (0, 0) if model.rgb_hue() => (
+                        letters[0],
+                        hue_position(HueControl::Slider, coords[0]),
+                        SLIDER_HUES
+                            .iter()
+                            .map(|h| srgb(model.to_rgb([h / 360.0, 1.0, model.ring_third(h / 360.0)])))
+                            .collect(),
+                        format!("{}\u{b0}", (coords[0] * 360.0).round() as i32),
+                    ),
                     (0, 0) => (
-                        "H",
-                        hue_position(HueControl::Slider, self.hsv[0]),
-                        SLIDER_HUES.iter().map(|h| srgb(hsv_to_rgb([h / 360.0, 1.0, 1.0]))).collect(),
-                        format!("{}\u{b0}", (self.hsv[0] * 360.0).round() as i32),
+                        letters[0],
+                        coords[0],
+                        along(&|t| [t, 1.0, model.ring_third(t)], 24),
+                        format!("{}\u{b0}", (coords[0] * 360.0).round() as i32),
+                    ),
+                    (0, 1) if model == ColourModel::Hsb => (
+                        letters[1],
+                        coords[1],
+                        vec![argb(SATURATION_GREY), srgb(hsv_to_rgb([coords[0], 1.0, 1.0]))],
+                        format!("{}%", (coords[1] * 100.0).round() as i32),
                     ),
                     (0, 1) => (
-                        "S",
-                        self.hsv[1],
-                        vec![argb(SATURATION_GREY), srgb(hsv_to_rgb([self.hsv[0], 1.0, 1.0]))],
-                        format!("{}%", (self.hsv[1] * 100.0).round() as i32),
+                        letters[1],
+                        coords[1],
+                        along(&|t| [coords[0], t, coords[2]], 8),
+                        format!("{}%", (coords[1] * 100.0).round() as i32),
+                    ),
+                    (0, _) if model == ColourModel::Hsb => (
+                        letters[2],
+                        coords[2],
+                        vec![Color32::BLACK, Color32::WHITE],
+                        format!("{}%", (coords[2] * 100.0).round() as i32),
                     ),
                     (0, _) => (
-                        "B",
-                        self.hsv[2],
-                        vec![Color32::BLACK, Color32::WHITE],
-                        format!("{}%", (self.hsv[2] * 100.0).round() as i32),
+                        letters[2],
+                        coords[2],
+                        along(&|t| [coords[0], coords[1], t], 12),
+                        format!("{}%", (coords[2] * 100.0).round() as i32),
                     ),
                     (_, 0) => ("R", r as f32 / 255.0, vec![rgb_of(0, g, b), rgb_of(255, g, b)], r.to_string()),
                     (_, 1) => ("G", g as f32 / 255.0, vec![rgb_of(r, 0, b), rgb_of(r, 255, b)], g.to_string()),
@@ -1027,9 +1310,21 @@ impl Colours {
                 let Some(to) = slider_row(ui, track, ("value", k, i), value, &colours) else { continue };
                 let byte = (to * 255.0).round() as u32;
                 match (k, i) {
-                    (0, 0) => self.hsv[0] = hue_at(HueControl::Slider, to),
-                    (0, 1) => self.hsv[1] = to,
-                    (0, _) => self.hsv[2] = to,
+                    (0, _) if model == ColourModel::Oklab => {
+                        let mut c = lab;
+                        if let Some(slot) = c.get_mut(i) {
+                            *slot = if i == 0 { to } else { (to * 2.0 - 1.0) * OKLAB_AB };
+                        }
+                        let [h, s, v] = rgb_to_hsv(oklab_to_rgb(c));
+                        self.hsv = [if s > 0.0 { h } else { self.hsv[0] }, s, v];
+                    }
+                    (0, _) => {
+                        let mut c = coords;
+                        if let Some(slot) = c.get_mut(i) {
+                            *slot = if i == 0 && model.rgb_hue() { hue_at(HueControl::Slider, to) } else { to };
+                        }
+                        self.set_model_coords(c);
+                    }
                     (_, 0) => self.set_rgb(session, byte << 16 | g << 8 | b),
                     (_, 1) => self.set_rgb(session, r << 16 | byte << 8 | b),
                     _ => self.set_rgb(session, r << 16 | g << 8 | byte),
@@ -1162,6 +1457,7 @@ impl Colours {
             || self.new_palette_menu.is_open()
             || self.short_menu.is_open()
             || self.harmony_menu.is_open()
+            || self.model_menu.is_open()
             || self.takes_keys()
     }
 
@@ -1677,8 +1973,78 @@ fn knob(ui: &Ui, at: Pos2, r: f32, fill: Color32) {
     ui.painter().circle_stroke(at, r - 0.6, egui::Stroke::new(1.2, Color32::WHITE));
 }
 
-/// The hue ring, `side` pixels square (at `ppp` pixels a point), with soft edges.
-fn ring_image(side: usize, ppp: f32) -> egui::ColorImage {
+/// The ring's hue at `turn` (0..1 anticlockwise from the right): Procreate's spacing for a model
+/// with the RGB hue, else even.
+fn ring_hue(model: ColourModel, turn: f32) -> f32 {
+    if model.rgb_hue() { hue_at(HueControl::Ring, turn) } else { turn }
+}
+
+/// Where on the ring `hue` sits (0..1 anticlockwise from the right).
+fn ring_turn(model: ColourModel, hue: f32) -> f32 {
+    if model.rgb_hue() { hue_position(HueControl::Ring, hue) } else { hue.rem_euclid(1.0) }
+}
+
+/// The disc's picture for a model other than HSB, `side` pixels square: saturation across and the
+/// model's third channel up (the square fitted onto the disc), with a soft edge. Worked out in
+/// bands on threads of their own, as a hue drag redraws it every frame.
+fn model_disc_image(model: ColourModel, hue: f32, side: usize) -> egui::ColorImage {
+    let side = side.clamp(1, 4096);
+    let mut pixels = vec![Color32::TRANSPARENT; side * side];
+    let half = side as f32 / 2.0;
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).clamp(1, 8);
+    let rows = side.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (band, chunk) in pixels.chunks_mut(rows * side).enumerate() {
+            scope.spawn(move || {
+                for (k, px) in chunk.iter_mut().enumerate() {
+                    let (i, j) = ((k % side) as f32 + 0.5, (band * rows + k / side) as f32 + 0.5);
+                    let (u, v) = ((i - half) / half, (j - half) / half);
+                    let edge = ((1.0 - u.hypot(v)) * half + 0.5).clamp(0.0, 1.0);
+                    if edge <= 0.0 {
+                        continue;
+                    }
+                    let [x, y] = disc_to_square(u.clamp(-1.0, 1.0), v.clamp(-1.0, 1.0));
+                    let rgb = model.to_rgb([hue, (x + 1.0) / 2.0, (1.0 - y) / 2.0]);
+                    *px = srgb(rgb).gamma_multiply(edge);
+                }
+            });
+        }
+    });
+    egui::ColorImage::new([side, side], pixels)
+}
+
+/// HSY′'s wheel at linear luma `y`, as Krita's: `side` pixels square, hue round it (as the ring
+/// runs) and saturation out from the grey of that luma in the middle, worked out on linear light,
+/// with a soft edge.
+fn luma_wheel_image(y: f32, side: usize) -> egui::ColorImage {
+    let side = side.clamp(1, 4096);
+    let mut pixels = vec![Color32::TRANSPARENT; side * side];
+    let half = side as f32 / 2.0;
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).clamp(1, 8);
+    let rows = side.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (band, chunk) in pixels.chunks_mut(rows * side).enumerate() {
+            scope.spawn(move || {
+                for (k, px) in chunk.iter_mut().enumerate() {
+                    let (i, j) = ((k % side) as f32 + 0.5 - half, (band * rows + k / side) as f32 + 0.5 - half);
+                    let r = i.hypot(j) / half;
+                    let edge = ((1.0 - r) * half + 0.5).clamp(0.0, 1.0);
+                    if edge <= 0.0 {
+                        continue;
+                    }
+                    let turn = ((-j).atan2(i) / std::f32::consts::TAU + 1.0) % 1.0;
+                    let rgb = linear_hsy_to_rgb([ring_hue(ColourModel::Hsy, turn), r.min(1.0), y]);
+                    *px = srgb(rgb).gamma_multiply(edge);
+                }
+            });
+        }
+    });
+    egui::ColorImage::new([side, side], pixels)
+}
+
+/// The hue ring, `side` pixels square (at `ppp` pixels a point), with soft edges, its hues as
+/// `model` shows them at their purest.
+fn ring_image(side: usize, ppp: f32, model: ColourModel) -> egui::ColorImage {
     let half = side as f32 / 2.0;
     let (inner, outer) = (RING_INNER * ppp, RING_OUTER * ppp);
     let mut pixels = vec![Color32::TRANSPARENT; side * side];
@@ -1690,7 +2056,8 @@ fn ring_image(side: usize, ppp: f32) -> egui::ColorImage {
             continue;
         }
         let turn = ((-j).atan2(i) / std::f32::consts::TAU + 1.0) % 1.0;
-        *px = srgb(hsv_to_rgb([hue_at(HueControl::Ring, turn), 1.0, 1.0])).gamma_multiply(cover);
+        let h = ring_hue(model, turn);
+        *px = srgb(model.to_rgb([h, 1.0, model.ring_third(h)])).gamma_multiply(cover);
     }
     egui::ColorImage::new([side, side], pixels)
 }

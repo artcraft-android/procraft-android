@@ -71,6 +71,8 @@ pub enum Act {
         horizontal: bool,
     },
     Share(Format),
+    /// A format picked to share: saved to the iPad plugged in, or to this computer.
+    ShareTo(Format, bool),
     AnimatedExport(Animated),
     /// A model's turntable as an animation.
     ModelAnimated(Animated),
@@ -100,6 +102,8 @@ pub enum Act {
     RightHanded,
     BrushCursor,
     ProjectCanvas,
+    /// The eyedropper picks from the current layer, or the canvas as composited.
+    EyedropperLayer,
     ResetInput,
 }
 
@@ -245,11 +249,39 @@ pub struct Showing {
     pub model: bool,
     pub model_flat: bool,
     pub paint_through: bool,
+    /// An iPad is plugged in: a format to share asks whether to save it there or here.
+    pub ipad: bool,
+}
+
+/// The Share tab's own groups: the image and the layers, each format a row.
+fn share_groups() -> Vec<Vec<Row>> {
+    use Row::{Button, Heading};
+    vec![
+        vec![
+            Heading("Share Image"),
+            Button("ProCraft", None, Some(Act::Share(Format::Procraft))),
+            Button("Procreate", None, Some(Act::Share(Format::Package))),
+            Button("PSD", None, Some(Act::Share(Format::Psd))),
+            Button("PDF", None, Some(Act::Share(Format::Pdf))),
+            Button("JPEG", None, Some(Act::Share(Format::Jpeg))),
+            Button("PNG", None, Some(Act::Share(Format::Png))),
+            Button("TIFF", None, Some(Act::Share(Format::Tiff))),
+        ],
+        vec![
+            Heading("Share Layers"),
+            Button("PDF", None, Some(Act::Share(Format::LayersPdf))),
+            Button("PNG Files", None, Some(Act::Share(Format::LayerPngs))),
+            Button("Animated GIF", None, Some(Act::AnimatedExport(Animated::Gif))),
+            Button("Animated PNG", None, Some(Act::AnimatedExport(Animated::Png))),
+            Button("Animated MP4", None, Some(Act::AnimatedExport(Animated::Mp4))),
+            Button("Animated HEVC", None, Some(Act::AnimatedExport(Animated::Hevc))),
+        ],
+    ]
 }
 
 /// The groups of rows of tab `tab`.
 fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
-    use Row::{Button, Heading, Private, Slide, Switch};
+    use Row::{Button, Private, Slide, Switch};
     if showing.model && tab <= 3 {
         return model_groups(tab, showing);
     }
@@ -296,27 +328,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
             ],
             vec![Button("Canvas information", None, Some(Act::CanvasInfo))],
         ],
-        2 => vec![
-            vec![
-                Heading("Share Image"),
-                Button("ProCraft", None, Some(Act::Share(Format::Procraft))),
-                Button("Procreate", None, Some(Act::Share(Format::Package))),
-                Button("PSD", None, Some(Act::Share(Format::Psd))),
-                Button("PDF", None, Some(Act::Share(Format::Pdf))),
-                Button("JPEG", None, Some(Act::Share(Format::Jpeg))),
-                Button("PNG", None, Some(Act::Share(Format::Png))),
-                Button("TIFF", None, Some(Act::Share(Format::Tiff))),
-            ],
-            vec![
-                Heading("Share Layers"),
-                Button("PDF", None, Some(Act::Share(Format::LayersPdf))),
-                Button("PNG Files", None, Some(Act::Share(Format::LayerPngs))),
-                Button("Animated GIF", None, Some(Act::AnimatedExport(Animated::Gif))),
-                Button("Animated PNG", None, Some(Act::AnimatedExport(Animated::Png))),
-                Button("Animated MP4", None, Some(Act::AnimatedExport(Animated::Mp4))),
-                Button("Animated HEVC", None, Some(Act::AnimatedExport(Animated::Hevc))),
-            ],
-        ],
+        2 => share_groups(),
         3 => vec![
             vec![
                 Button("Time-lapse Replay", None, Some(Act::TimeLapseReplay)),
@@ -339,6 +351,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                     ),
                     Switch("Project canvas", prefs.project_canvas, Some(Act::ProjectCanvas)),
                     Switch("Brush cursor", prefs.brush_cursor, Some(Act::BrushCursor)),
+                    Switch("Eyedropper picks from layer", prefs.eyedropper_layer, Some(Act::EyedropperLayer)),
                     Button("Advanced cursor settings", None, Some(Act::Page(Page::Cursor))),
                 ],
                 vec![
@@ -440,6 +453,11 @@ pub struct Actions {
     /// Brush scaling's menu, and the row it hangs from.
     scaling: Menu,
     scaling_row: Option<Rect>,
+    /// With an iPad plugged in, the menu hanging beside a format tapped to share: this computer
+    /// or the iPad. The format rows where they are, and the one the menu is for.
+    share_menu: Menu,
+    share_rows: Vec<(Format, Rect)>,
+    share_for: Option<(Format, Rect)>,
     /// Pressure and Smoothing's curve.
     curve: crate::curve::CurveEditor,
     /// The artwork paints on a model: its tabs have 3D in Video's place.
@@ -589,6 +607,18 @@ impl Actions {
                 self.scaling.open();
                 None
             }
+            // a folder of PNG files stays on this computer
+            Some(Tapped::Act(Act::Share(format))) => {
+                let row = self.share_rows.iter().find(|(f, _)| *f == format).map(|(_, r)| *r);
+                match row.filter(|_| showing.ipad && crate::files::to_ipad_ok(format)) {
+                    Some(row) => {
+                        self.share_for = Some((format, row));
+                        self.share_menu.open();
+                        None
+                    }
+                    None => Some(Act::Share(format)),
+                }
+            }
             Some(Tapped::Act(Act::LightInterface)) => {
                 prefs.light_interface = !prefs.light_interface;
                 Some(Act::Prefs)
@@ -603,6 +633,10 @@ impl Actions {
             }
             Some(Tapped::Act(Act::ProjectCanvas)) => {
                 prefs.project_canvas = !prefs.project_canvas;
+                Some(Act::Prefs)
+            }
+            Some(Tapped::Act(Act::EyedropperLayer)) => {
+                prefs.eyedropper_layer = !prefs.eyedropper_layer;
                 Some(Act::Prefs)
             }
             Some(Tapped::Act(Act::ResetInput)) => {
@@ -633,6 +667,9 @@ impl Actions {
         }
         if self.scaling_menu(ctx, look, prefs, backdrops) {
             act = Some(Act::Prefs);
+        }
+        if let Some(picked) = self.share_menu(ctx, showing.ipad, backdrops) {
+            act = Some(picked);
         }
         if self.page != Page::Pressure {
             self.curve.close();
@@ -697,7 +734,7 @@ impl Actions {
 
     /// One of its menus is open: a press elsewhere only closes it.
     pub fn modal(&self) -> bool {
-        self.scaling.is_open() || self.curve.menu_open()
+        self.scaling.is_open() || self.share_menu.is_open() || self.curve.menu_open()
     }
 
     /// The panel's pages go back to the tabs (as it closes).
@@ -708,6 +745,8 @@ impl Actions {
         self.tab_fade = None;
         self.shown_tab = self.tab;
         self.scaling.close();
+        self.share_menu.close();
+        self.share_for = None;
         self.curve.close();
         self.swipes.clear();
     }
@@ -746,6 +785,7 @@ impl Actions {
         );
         let mut tapped = None;
         self.scaling_row = None;
+        self.share_rows.clear();
         let shown_tab = self.shown_tab;
         ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
             ui.multiply_opacity(alpha);
@@ -767,6 +807,13 @@ impl Actions {
                             .position(|r| matches!(r, Row::Button(_, _, Some(Act::ScalingMenu))))
                         {
                             self.scaling_row = cells.get(at).copied();
+                        }
+                        // where each format to share is, for the menu asking where it goes
+                        let tappable = group.iter().filter(|r| !matches!(r, Row::Heading(_)));
+                        for (row, cell) in tappable.zip(&cells) {
+                            if let Row::Button(_, _, Some(Act::Share(format))) = row {
+                                self.share_rows.push((*format, *cell));
+                            }
                         }
                     }
                 });
@@ -808,6 +855,39 @@ impl Actions {
         prefs.brush_on_screen = on_screen;
         self.scaling.close();
         true
+    }
+
+    /// The menu beside a format tapped to share, while open (as Brush scaling's): save it to this
+    /// computer or to the iPad. What was picked.
+    fn share_menu(&mut self, ctx: &egui::Context, ipad: bool, backdrops: &mut Vec<f32>) -> Option<Act> {
+        let Some((format, row)) = self.share_for.filter(|_| ipad) else {
+            self.share_menu.close();
+            self.share_for = None;
+            return None;
+        };
+        if !self.share_menu.is_open() {
+            self.share_for = None;
+            return None;
+        }
+        let rect = Rect::from_min_size(pos2(row.right() - 54.0, row.top() - 8.0), vec2(254.0, 8.0 + 40.0 * 2.0 + 8.0));
+        let mut picked = None;
+        self.share_menu.show(ctx, "share to", rect, rect.min, CHOICE_MENU, backdrops, |ui| {
+            for (i, label) in ["Save to this computer", "Save to iPad"].into_iter().enumerate() {
+                let line = Rect::from_min_size(
+                    pos2(rect.left(), rect.top() + 8.0 + 40.0 * i as f32),
+                    vec2(rect.width(), 40.0),
+                );
+                let at = pos2(line.left() + 20.0, line.center().y);
+                text(ui.painter(), at, Align2::LEFT_CENTER, label, 14.5, Weight::Regular, argb(pc::TEXT));
+                if ui.interact(line, ui.scope_id().with(("share to", i)), Sense::click()).clicked() {
+                    picked = Some(i == 1);
+                }
+            }
+        });
+        let to_ipad = picked?;
+        self.share_menu.close();
+        self.share_for = None;
+        Some(Act::ShareTo(format, to_ipad))
     }
 
     /// A page's header: the back chevron and its title. True when Back was tapped.

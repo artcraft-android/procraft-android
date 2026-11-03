@@ -8,7 +8,8 @@ use crate::CanvasSession;
 /// What the eyedropper sees.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Pick {
-    /// The canvas colour under the point (0xRRGGBB), or none when the point is off the canvas.
+    /// The colour under the point (0xRRGGBB): the canvas's, or the current layer's when the
+    /// eyedropper picks from it (none where that is clear); none when the point is off the canvas.
     pub rgb: Option<u32>,
     /// The window around the point as it is shown, `side` × `side` RGBA8, rows top to bottom.
     pub side: u32,
@@ -57,17 +58,28 @@ impl CanvasSession {
                 backdrop: None,
                 convert: None,
                 lut: None,
+                grey: false,
             }),
         );
         let pixels = read_texture(gpu, &texture, side, side).ok()?;
         // the colour is the canvas's own pixel there as composited, not as shown: where it is
         // clear with the background hidden, that is what the composite holds, not the surround
         let (w, h) = (st.doc.width() as f32, st.doc.height() as f32);
-        let rgb = view
-            .screen_to_canvas(Vec2::new(x, y))
-            .filter(|p| p.x >= 0.0 && p.y >= 0.0 && p.x < w && p.y < h)
-            .and_then(|p| canvas.read_composite_pixel(gpu, p.x as u32, p.y as u32))
-            .map(|[r, g, b, _]| u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b));
+        let at = view.screen_to_canvas(Vec2::new(x, y)).filter(|p| p.x >= 0.0 && p.y >= 0.0 && p.x < w && p.y < h);
+        let rgb = if st.eyedropper_from_layer {
+            // the current layer's own pixel (kept premultiplied): its colour, where it isn't clear
+            at.and_then(|p| {
+                let (px, py) = (p.x as i32, p.y as i32);
+                let rect = procraft_engine::geom::IRect::new(px, py, px + 1, py + 1);
+                let pixel = canvas.read_layer_part(gpu, st.doc.current(), rect).ok()?;
+                let [r, g, b, a] = [pixel.first()?, pixel.get(1)?, pixel.get(2)?, pixel.get(3)?].map(|c| u32::from(*c));
+                let un = |c: u32| ((c * 255 + a / 2) / a.max(1)).min(255);
+                (a > 0).then(|| un(r) << 16 | un(g) << 8 | un(b))
+            })
+        } else {
+            at.and_then(|p| canvas.read_composite_pixel(gpu, p.x as u32, p.y as u32))
+                .map(|[r, g, b, _]| u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
+        };
         Some(Pick { rgb, side, pixels })
     }
 }

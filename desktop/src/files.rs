@@ -570,6 +570,11 @@ pub fn about() {
         .show();
 }
 
+/// Whether `format` can be saved to the iPad: one file, not a folder of PNG files.
+pub fn to_ipad_ok(format: Format) -> bool {
+    !matches!(format, Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures)
+}
+
 /// Saves the artwork as a .procraft package, where it was last saved unless `ask` (or it never
 /// was): written on a thread of its own (a large one takes seconds), the interface told when it
 /// is ([`Interface::saved_as`]).
@@ -605,9 +610,31 @@ pub fn export(
     format: Format,
     dir: Option<&str>,
     pdf_quality: u8,
+    to_ipad: bool,
     card: &mut crate::export_card::ExportCard,
 ) {
     if card.busy() {
+        return;
+    }
+    // to the iPad: written here first (no dialog), then copied into Procreate's folder there
+    if to_ipad && to_ipad_ok(format) {
+        let name = format!("{}.{}", export_file_name(session.name(), format.package()), format.extension());
+        let local = app_dir().join("to-ipad").join(&name);
+        let time_lapse = dir.map(crate::timelapse::for_package);
+        writing(session, card, "Can't save to the iPad", move |session| {
+            let _ = std::fs::create_dir_all(local.parent().unwrap_or(&local));
+            let at = local.to_string_lossy().into_owned();
+            export_as(session, format, at, time_lapse, pdf_quality)?;
+            let sent = crate::ipad::ready().and_then(|udid| crate::ipad::send(&udid, &local));
+            let _ = std::fs::remove_file(&local);
+            match sent {
+                Ok(name) => {
+                    say(&format!("Saved to the iPad as {name}, in On My iPad › Procreate."));
+                    Ok(Vec::new())
+                }
+                Err(why) => Err(procraft_core::MobileError::File { reason: why }),
+            }
+        });
         return;
     }
     // each layer (or a model's texture set) a PNG file, in a folder the user picks
@@ -640,23 +667,34 @@ pub fn export(
         // written beside it first, so a cancelled export leaves what was there as it was
         let part = PathBuf::from(format!("{}.part", path.to_string_lossy()));
         let at = part.to_string_lossy().into_owned();
-        match format {
-            Format::Procraft | Format::Package => session.export_package(at, seed(), time_lapse),
-            Format::Psd => session.export_psd(at),
-            Format::Pdf => session.export_pdf(at, false, pdf_quality),
-            Format::LayersPdf => session.export_pdf(at, true, pdf_quality),
-            Format::Png => session.export_png(at),
-            Format::Tiff => session.export_tiff(at),
-            Format::Jpeg => session.export_jpeg(at),
-            Format::ModelJpeg => session.export_model_jpeg(at),
-            Format::ModelObj => session.export_model_obj(at),
-            Format::ModelUsdz => session.export_model_usdz(at),
-            Format::ModelRender => session.export_model_render(at, false),
-            Format::ModelTiff => session.export_model_tiff(at),
-            Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures => Ok(()),
-        }?;
+        export_as(session, format, at, time_lapse, pdf_quality)?;
         Ok(vec![part])
     });
+}
+
+/// The artwork written as `format` at `at` (a single file's formats).
+fn export_as(
+    session: &CanvasSession,
+    format: Format,
+    at: String,
+    time_lapse: Option<procraft_core::PackageTimeLapse>,
+    pdf_quality: u8,
+) -> Result<(), procraft_core::MobileError> {
+    match format {
+        Format::Procraft | Format::Package => session.export_package(at, seed(), time_lapse),
+        Format::Psd => session.export_psd(at),
+        Format::Pdf => session.export_pdf(at, false, pdf_quality),
+        Format::LayersPdf => session.export_pdf(at, true, pdf_quality),
+        Format::Png => session.export_png(at),
+        Format::Tiff => session.export_tiff(at),
+        Format::Jpeg => session.export_jpeg(at),
+        Format::ModelJpeg => session.export_model_jpeg(at),
+        Format::ModelObj => session.export_model_obj(at),
+        Format::ModelUsdz => session.export_model_usdz(at),
+        Format::ModelRender => session.export_model_render(at, false),
+        Format::ModelTiff => session.export_model_tiff(at),
+        Format::LayerPngs | Format::ChosenLayerPngs | Format::ModelTextures => Ok(()),
+    }
 }
 
 /// Writes an export on a thread of its own (a large one takes seconds, the window drawing on

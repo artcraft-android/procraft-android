@@ -8,7 +8,7 @@ use std::time::Instant;
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, Rect, Stroke, Ui, vec2};
 use procraft_core::{
     Blocked, CanvasInfo, CanvasSession, GesturePurpose, KeyShortcut, ModeButton, ModeSwitch, Modes, QuickAction,
-    ToolKind, TouchCommand, mode_switch,
+    ToolKind, TouchCommand, Trigger, mode_switch,
 };
 
 use crate::actions::{Act, Actions};
@@ -43,8 +43,9 @@ pub enum Action {
     Open,
     Save,
     SaveAs,
-    /// The artwork written as this format; a PDF keeps its pictures at this JPEG quality.
-    Export(Format, u8),
+    /// The artwork written as this format; a PDF keeps its pictures at this JPEG quality; to the
+    /// iPad plugged in (On My iPad › Procreate), or to a file picked here.
+    Export(Format, u8, bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -106,6 +107,8 @@ pub struct Interface {
     /// The artwork's folder in the gallery.
     pub artwork_dir: Option<String>,
     quick_menu: crate::quick_menu::QuickMenu,
+    /// A pen button set to the eyedropper is held: its loupe follows the pen until it is let go.
+    pen_picking: bool,
     /// An open adjustment's bar, panel and tap menu; Gradient Map's library (kept between runs).
     adjustments: crate::adjustments::Adjustments,
     gradients: std::sync::Arc<procraft_core::Gradients>,
@@ -116,7 +119,7 @@ pub struct Interface {
     blocked_alert: Alert,
     /// Share's PDF asks how well it keeps its pictures first (for this format).
     pdf_alert: Alert,
-    pdf_for: Option<Format>,
+    pdf_for: Option<(Format, bool)>,
     /// An export under way, as its card shows it.
     pub export_card: crate::export_card::ExportCard,
     /// The brushes changed (the library closed, a slider let go, a notch saved): keep them.
@@ -196,6 +199,7 @@ impl Default for Interface {
             guide_editor: crate::guide_editor::GuideEditor::default(),
             artwork_dir: None,
             quick_menu: crate::quick_menu::QuickMenu::default(),
+            pen_picking: false,
             adjustments: crate::adjustments::Adjustments::default(),
             gradients: procraft_core::Gradients::open(
                 crate::files::app_dir().join("gradients.json").to_string_lossy().into_owned(),
@@ -363,12 +367,34 @@ impl Interface {
         if self.inserted(session) || brushes_coming {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
-        // the pen's barrel button: what Gesture controls set it to do (else the eraser and back),
-        // where the pointer is
-        for _ in 0..crate::pen::take_button_presses() {
-            let (x, y) = input.cursor().unwrap_or_default();
-            input.commands.extend(session.touch_pen_button(false, x, y));
-            self.library.tool_changed();
+        // the pen's barrel buttons: what Gesture controls set Pen button and Pen second button to
+        // do (the first, set to nothing, the eraser and back), where the pointer is; one set to
+        // the eyedropper picks while it is held, where the pen hovers, and lets go to take it
+        session.set_eyedropper_from_layer(self.prefs.eyedropper_layer);
+        let presses = crate::pen::take_button_presses();
+        let held = crate::pen::buttons_held();
+        let purposes = [Trigger::PenDoubleTap, Trigger::PenSqueeze].map(|t| self.gestures.purpose_of(t));
+        let (x, y) = input.cursor().unwrap_or_default();
+        for (button, (&pressed, &is_held)) in presses.iter().zip(&held).enumerate() {
+            if purposes.get(button).copied().flatten() == Some(GesturePurpose::Eyedropper) {
+                if is_held || pressed > 0 {
+                    self.overlays.pick(&ctx, session, x, y);
+                    self.pen_picking = true;
+                    ctx.request_repaint();
+                }
+                continue;
+            }
+            for _ in 0..pressed {
+                input.commands.extend(session.touch_pen_button(button == 1, x, y));
+                self.library.tool_changed();
+            }
+        }
+        let eyedropper_held = held.iter().zip(&purposes).any(|(h, p)| *h && *p == Some(GesturePurpose::Eyedropper));
+        if self.pen_picking && !eyedropper_held {
+            self.pen_picking = false;
+            if let Some(rgb) = self.overlays.finish_pick() {
+                self.colours.set_rgb(session, rgb);
+            }
         }
         self.commands(&ctx, session, input);
         // the brush library closed: what was done in it is kept
@@ -470,12 +496,14 @@ impl Interface {
         // the drawing guide's editor: the canvas, the guide and the editor alone
         if self.guide_editor.open {
             self.canvas_rect = Rect::EVERYTHING;
-            guide_lines(&ctx, session);
+            guide_lines(ui.painter(), session);
             self.guide_editor.show(&ctx, &mut self.look, session);
             session.set_backdrops(Vec::new());
             self.popover_open = false;
             return;
         }
+        // the drawing guide over the canvas, under the bars (and shown full screen too)
+        guide_lines(ui.painter(), session);
         if self.bars_hidden {
             // full screen: the canvas alone (the overlays still show)
             self.canvas_rect = Rect::EVERYTHING;
@@ -565,11 +593,12 @@ impl Interface {
         if taps.redo {
             self.redo(session);
         }
-        // the modify button tapped opens or closes the eyedropper; held, touches pick meanwhile
-        // (unless one did, its tap then does nothing)
+        // the modify button tapped does what Tap □ is set to (opens or closes the eyedropper at
+        // first); held, touches do what □ + Touch and □ + Pen are set to (unless one did, its tap
+        // then does nothing)
         let used = session.set_modify_held(taps.modify_down);
         if taps.modify_tapped && !used {
-            session.set_pick_next(!session.pick_next());
+            self.tap_modify(&ctx, session);
         }
         self.hover_cursor(&ctx, session, &info, input);
         if let Some(kind) = self.overlays.show(ui, &mut self.look, colour, true) {
@@ -594,6 +623,12 @@ impl Interface {
         }
         // the colour panel dragged out by its grabber: a window over the canvas until closed
         self.colours.show_floating(&ctx, &mut self.look, session, &mut backdrops);
+        // the colour model chosen on the panel, kept; the panel works in the one kept
+        if let Some(model) = self.colours.model_chosen.take() {
+            self.prefs.colour_model = model;
+            self.prefs.keep();
+        }
+        self.colours.set_model(self.prefs.colour_model);
         if self.open != Some(Popover::Actions) {
             self.actions_panel.closed();
         }
@@ -610,7 +645,6 @@ impl Interface {
         ) {
             self.adjustment_asked(session, asked);
         }
-        guide_lines(&ctx, session);
         let hold = std::time::Duration::from_secs_f32(self.gestures.delay(GesturePurpose::Eyedropper).max(0.0));
         match self.reference.show(&ctx, &mut self.look, session, hold) {
             Some(crate::reference::Picked::Moving { at, side, rgba, rgb }) => {
@@ -858,6 +892,22 @@ impl Interface {
             self.canvas_rect.contains(*at) && ctx.layer_id_at(*at).is_none_or(|l| l.order == egui::Order::Background)
         });
         self.overlays.hover(session, info, ppp, at);
+    }
+
+    /// The modify button tapped: what Tap □ is set to do, as the Android app does it.
+    fn tap_modify(&mut self, ctx: &egui::Context, session: &CanvasSession) {
+        use procraft_core::{GesturePurpose, Trigger};
+        match self.gestures.purpose_of(Trigger::TapModify) {
+            Some(GesturePurpose::Eyedropper) => session.set_pick_next(!session.pick_next()),
+            Some(GesturePurpose::Quickmenu) => self.quick_menu.toggle(ctx.content_rect().center()),
+            Some(GesturePurpose::CopyPaste) => self.copy_paste = true,
+            Some(GesturePurpose::Quickshape) => {
+                if let Some(info) = session.quickshape_last() {
+                    self.snapped(info);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Does what the touches asked.
@@ -1512,12 +1562,24 @@ impl Interface {
         false
     }
 
+    /// Shares the artwork as `format`, to the iPad or here; a PDF asks how well it keeps its
+    /// pictures first.
+    fn share(&mut self, format: Format, to_ipad: bool) {
+        if matches!(format, Format::Pdf | Format::LayersPdf) {
+            self.pdf_for = Some((format, to_ipad));
+            self.pdf_alert.ask(crate::alert::pdf_quality());
+        } else {
+            self.actions.push(Action::Export(format, 100, to_ipad));
+            self.open = None;
+        }
+    }
+
     /// The PDF quality alert, while it shows: the PDF made at the quality picked.
     fn pdf_quality_alert(&mut self, ctx: &egui::Context) {
         let Some(answer) = self.pdf_alert.show(ctx, &mut self.look) else { return };
-        let Some(format) = self.pdf_for.take() else { return };
+        let Some((format, to_ipad)) = self.pdf_for.take() else { return };
         if let Some(quality) = crate::alert::pdf_jpeg(answer) {
-            self.actions.push(Action::Export(format, quality));
+            self.actions.push(Action::Export(format, quality, to_ipad));
             self.open = None;
         }
     }
@@ -1702,7 +1764,7 @@ impl Interface {
                 }
                 self.clipboard = self.layers.copied.take().or(self.clipboard.take());
                 if std::mem::take(&mut self.layers.share) {
-                    self.actions.push(Action::Export(Format::ChosenLayerPngs, 100));
+                    self.actions.push(Action::Export(Format::ChosenLayerPngs, 100, false));
                 }
                 if let Some(id) = self.layers.edit_text.take() {
                     self.open = None;
@@ -1743,6 +1805,7 @@ impl Interface {
                     model: self.model,
                     model_flat: self.model && session.model_flat(),
                     paint_through: self.model && session.paint_through(),
+                    ipad: crate::ipad::connected(),
                 };
                 let (shown, act) =
                     self.actions_panel.show(ctx, &mut self.look, button, &showing, &mut self.prefs, backdrops);
@@ -1801,15 +1864,9 @@ impl Interface {
                         let private = matches!(act, Act::InsertPrivateFile | Act::InsertPrivatePhoto);
                         self.insert_picture(session, photo, private);
                     }
-                    Some(Act::Share(format @ (Format::Pdf | Format::LayersPdf))) => {
-                        // how well it keeps its pictures, asked first
-                        self.pdf_for = Some(format);
-                        self.pdf_alert.ask(crate::alert::pdf_quality());
-                    }
-                    Some(Act::Share(format)) => {
-                        self.actions.push(Action::Export(format, 100));
-                        self.open = None;
-                    }
+                    // to this computer, or (picked from the menu beside it) to the iPad
+                    Some(Act::Share(format)) => self.share(format, false),
+                    Some(Act::ShareTo(format, to_ipad)) => self.share(format, to_ipad),
                     Some(Act::About) => crate::files::about(),
                     Some(Act::GestureControls) => {
                         self.open = None;
@@ -1846,6 +1903,7 @@ impl Interface {
                         | Act::RightHanded
                         | Act::BrushCursor
                         | Act::ProjectCanvas
+                        | Act::EyedropperLayer
                         | Act::ResetInput,
                     )
                     | None => {}
@@ -1953,6 +2011,7 @@ impl Interface {
             KeyShortcut::DuplicateLayer => self.duplicate_current(session),
             KeyShortcut::Interface => self.toggle_bars(session),
             KeyShortcut::ClearLayer => self.clear_layer(session),
+            KeyShortcut::GreyView => session.set_grey_view(!session.grey_view()),
             KeyShortcut::BrushSize { by } => session.set_brush_size((info.size + by).clamp(0.0, 1.0)),
             KeyShortcut::Nudge { dx, dy } => self.transform.moved(session.transform_arrow(dx, dy)),
         }
@@ -1999,16 +2058,17 @@ fn toggle_guide_kind(session: &CanvasSession, kind: procraft_core::GuideType) {
     session.set_guide_kind(kind);
 }
 
-fn guide_lines(ctx: &egui::Context, session: &CanvasSession) {
+/// The drawing guide's lines, painted on `painter`: the main panel's own, before the top bar is, so
+/// that the bar (and everything over the canvas) shows above them, as the canvas under it does.
+fn guide_lines(painter: &egui::Painter, session: &CanvasSession) {
     let g = session.guide();
     if !g.on {
         return;
     }
-    let ppp = ctx.pixels_per_point();
+    let ppp = painter.ctx().pixels_per_point();
     let [r, gr, b] = [0, 1, 2].map(|k| (g.color.get(k).copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8);
     let colour = Color32::from_rgba_unmultiplied(r, gr, b, (g.opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
     let stroke = Stroke::new(0.25 + 1.5 * g.thickness, colour);
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::unique("drawing guide")));
     for &[x0, y0, x1, y1] in g.lines.as_chunks::<4>().0 {
         painter.line_segment([egui::pos2(x0, y0) / ppp, egui::pos2(x1, y1) / ppp], stroke);
     }
@@ -2064,6 +2124,7 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
                     full = true;
                 }
             }
+            !full && added < MOST_VIDEO_FRAMES
         });
         return match (added, read) {
             (0, Ok(_)) if full => Inserted::Frames { added: 0, full: true, assist: false },
