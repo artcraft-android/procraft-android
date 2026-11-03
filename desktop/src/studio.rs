@@ -12,6 +12,10 @@ use egui::{
 };
 use procraft_core::{CanvasSession, PenSample, PointerKind, SourceKind, slider_extras};
 
+/// The mouse pointer's id among the pen's pointers (`pen.rs`): a tablet pen moving it keeps its lean
+/// there.
+const MOUSE_POINTER: u64 = u64::MAX;
+
 use crate::icons::{self, Icon};
 use crate::look::{Look, Themed, Weight, argb, pc, text};
 
@@ -683,6 +687,8 @@ pub struct Studio {
     pad_ready: bool,
     pad_colour: usize,
     pad_stroke: bool,
+    /// The pen painting on the pad, if one is: its pointer and pressure as last given.
+    pad_pen: Option<(u64, f32)>,
     pad_menu: bool,
     /// The frame the pad menu opened in (the press that opened it doesn't close it).
     pad_menu_frame: u64,
@@ -1365,30 +1371,57 @@ impl Studio {
         let Some(pad) = &self.pad else { return };
         let ppp = ui.ctx().pixels_per_point();
         let ms = self.started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
-        let sample = |p: Pos2| {
+        // a pen paints on the pad as on the canvas: its pressure, lean, roll and eraser end (a
+        // pen's touches carry a force; under X11 a tablet's pen moves the mouse pointer), and every
+        // one of its moves, not only where it is once a frame (a brush that turns with the pen
+        // would turn in steps)
+        let mut moves = Vec::new();
+        ui.input(|i| {
+            for event in &i.events {
+                if let egui::Event::Touch { id, force: Some(force), phase, pos, .. } = event
+                    && matches!(phase, egui::TouchPhase::Start | egui::TouchPhase::Move)
+                    && crate::pen::is_pen(id.0) != Some(false)
+                {
+                    self.pad_pen = Some((id.0, *force));
+                    moves.push((*pos, *force));
+                }
+            }
+        });
+        let pen = self.pad_pen.or_else(|| crate::pen::mouse_pen().map(|m| (u64::MAX, m.pressure)));
+        let sample = |p: Pos2, pressure: Option<f32>| {
             let local = (p - area.min) * ppp;
-            vec![PenSample {
-                x: local.x,
-                y: local.y,
-                pressure: 1.0,
-                tilt: 0.0,
-                orientation: 0.0,
-                time_ms: ms,
-                roll: 0.0,
-            }]
+            let (pressure, (tilt, orientation), roll) = pen.map_or((1.0, (0.0, 0.0), 0.0), |(id, given)| {
+                let lean = crate::pen::lean(id).unwrap_or((0.0, 0.0));
+                (pressure.unwrap_or(given), lean, crate::pen::roll(id).unwrap_or(0.0))
+            });
+            PenSample { x: local.x, y: local.y, pressure, tilt, orientation, time_ms: ms, roll }
+        };
+        let kind = match pen {
+            Some((MOUSE_POINTER, _)) if crate::pen::mouse_pen().is_some_and(|m| m.eraser) => PointerKind::StylusEraser,
+            Some((id, _)) if id != MOUSE_POINTER && crate::pen::eraser_end(id) => PointerKind::StylusEraser,
+            Some(_) => PointerKind::Stylus,
+            None => PointerKind::Mouse,
         };
         let Some(p) = response.interact_pointer_pos() else { return };
         if response.drag_started() {
             self.pad_menu = false;
             pad.begin_own_stroke();
-            pad.stroke_begin(PointerKind::Mouse, sample(p));
+            pad.stroke_begin(kind, vec![sample(p, None)]);
             self.pad_stroke = true;
         } else if self.pad_stroke && response.dragged() {
-            pad.stroke_add(sample(p));
+            let samples: Vec<PenSample> = if moves.is_empty() {
+                vec![sample(p, None)]
+            } else {
+                moves.iter().map(|&(at, force)| sample(at, Some(force))).collect()
+            };
+            pad.stroke_add(samples);
         }
         if self.pad_stroke && response.drag_stopped() {
-            pad.stroke_end(sample(p));
+            pad.stroke_end(vec![sample(p, None)]);
             self.pad_stroke = false;
+        }
+        if !self.pad_stroke {
+            self.pad_pen = None;
         }
         if self.pad_stroke {
             ui.ctx().request_repaint();
