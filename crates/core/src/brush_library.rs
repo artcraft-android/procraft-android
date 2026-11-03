@@ -338,7 +338,7 @@ impl SavedSet {
 }
 
 /// The brushes in use, as kept between sessions (by place in the library).
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 struct SavedChoices {
     /// The paint, erase and smudge tools' brushes.
     tools: [(usize, usize); 3],
@@ -373,19 +373,20 @@ const TOOLS: [crate::ToolKind; 3] = [crate::ToolKind::Paint, crate::ToolKind::Er
 const FIRST_SHIPPED: [u32; 6] = [3, 3, 3, 2, 2, 2];
 /// The files a library is kept in, in the app's folder for it: the library, the brushes' choices
 /// and sliders, and how many brushes of each shipped set it has seen.
-const LIBRARY_FILE: &str = "library.json";
+pub(crate) const LIBRARY_FILE: &str = "library.json";
 
-/// Held while the library or its choices are read out and written, so that writes from two threads
-/// (a window's, one keeping it in the background) land in the order they read it.
+/// Held while a library or its choices are read out and written, and while another library is
+/// brought into use, so that writes from two threads (a window's, one keeping it in the background)
+/// land in the order they read it, and none lands in a library's files once it was left.
 static LIBRARY_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn library_writes() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn library_writes() -> std::sync::MutexGuard<'static, ()> {
     LIBRARY_WRITES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The library as last kept or read whole in this run: the next artwork takes it from here while
 /// its file is as it was then, not read again (tens of megabytes with many brushes brought in, which
-/// took seconds to read on a tablet). One for the app: it keeps one library.
+/// took seconds to read on a tablet). One for the app: the library in use.
 static LAST_LIBRARY: std::sync::Mutex<Option<LastLibrary>> = std::sync::Mutex::new(None);
 
 struct LastLibrary {
@@ -397,31 +398,37 @@ struct LastLibrary {
     library: Vec<LibrarySet>,
 }
 
-/// Reads the library kept in folder `dir` ahead of the first artwork (while the gallery shows), so
-/// that it opens without reading it (see [`CanvasSession::open_brushes`]); nothing if it is held
-/// already or there is none. Slow with many brushes brought in: call it off the main thread.
+/// Reads the library in use kept in folder `dir` ahead of the first artwork (while the gallery
+/// shows), so that it opens without reading it (see [`CanvasSession::open_brushes`]); nothing if it
+/// is held already or there is none. Slow with many brushes brought in: call it off the main thread.
 #[uniffi::export]
 pub fn prepare_brushes(dir: String) {
-    let library = std::path::Path::new(&dir).join(LIBRARY_FILE);
+    let (library, first) = crate::brush_libraries::file_in_use(std::path::Path::new(&dir));
     if holds(&LAST_LIBRARY, &library) || !library.is_file() {
         return;
     }
     let started = std::time::Instant::now();
-    if CanvasSession::new(1, 1).load_brush_library_file(library.to_string_lossy().into_owned()) {
+    if CanvasSession::new(1, 1).load_library_file(&library, !first) {
         log::info!("the brushes read ahead in {} ms", started.elapsed().as_millis());
     }
 }
 
-/// Puts back the library kept in `json` (see [`CanvasSession::load_brush_library`]), the pictures it
-/// names in files read from `folder` (beside it) first, not while the canvas waits.
-fn load_library(session: &CanvasSession, json: &str, folder: Option<&std::path::Path>) -> bool {
-    let Some(saved) = read_saved_sets(json) else { return false };
-    if saved.is_empty() {
-        return false;
+/// The sets of the library kept in `json` (see [`CanvasSession::load_brush_library`]), the pictures
+/// it names in files read from `folder` (beside it) first, not while the canvas waits; none if it
+/// can't be read, or holds no set and `empty` doesn't allow that (a new library holds none).
+pub(crate) fn read_library(
+    session: &CanvasSession,
+    json: &str,
+    folder: Option<&std::path::Path>,
+    empty: bool,
+) -> Option<Vec<LibrarySet>> {
+    let saved = read_saved_sets(json)?;
+    if saved.is_empty() && !empty {
+        return None;
     }
     let pictures = folder.map(|folder| crate::brush_pictures::read(folder, json)).unwrap_or_default();
-    let mut st = session.shared.lock();
-    let library: Vec<LibrarySet> = saved
+    let st = session.shared.lock();
+    let library = saved
         .into_iter()
         .map(|set| {
             let icon = set.icon_now();
@@ -430,9 +437,13 @@ fn load_library(session: &CanvasSession, json: &str, folder: Option<&std::path::
             LibrarySet { name: set.name, brushes, origins, icon }
         })
         .collect();
-    st.library = library;
-    st.sliders.clear();
-    st.move_brush_refs(Some);
+    Some(library)
+}
+
+/// Puts back the library kept in `json` (see [`read_library`]).
+fn load_library(session: &CanvasSession, json: &str, folder: Option<&std::path::Path>) -> bool {
+    let Some(library) = read_library(session, json, folder, false) else { return false };
+    session.shared.lock().put_library(library);
     true
 }
 
@@ -463,7 +474,7 @@ fn remembered(slot: &std::sync::Mutex<Option<LastLibrary>>, path: &std::path::Pa
     let held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     held.as_ref().filter(|last| last.path == path).map(|last| (last.library.clone(), last.told))
 }
-const CHOICES_FILE: &str = "choices.json";
+pub(crate) const CHOICES_FILE: &str = "choices.json";
 const SEEN_FILE: &str = "seen.txt";
 
 /// Puts what an earlier version kept elsewhere into folder `dir` for [`CanvasSession::open_brushes`]:
@@ -525,8 +536,12 @@ impl State {
 
     /// The library's sets as kept, their images put as `images` says.
     fn saved_sets(&self, images: Images<'_>) -> Vec<SavedSet> {
-        self.library
-            .iter()
+        self.sets_saved(&self.library, images)
+    }
+
+    /// `sets` as kept, their images put as `images` says.
+    fn sets_saved(&self, sets: &[LibrarySet], images: Images<'_>) -> Vec<SavedSet> {
+        sets.iter()
             .map(|set| SavedSet {
                 name: set.name.clone(),
                 brushes: (0..set.brushes.len()).filter_map(|i| self.saved_as(set, i, images)).collect(),
@@ -540,7 +555,49 @@ impl State {
     /// by what tells it apart in place of the image (quick, where the whole library written out
     /// is tens of megabytes with many brushes brought in).
     fn library_told(&self) -> u64 {
-        crate::project::pixels_hash(&serde_json::to_vec(&self.saved_sets(Images::Told)).unwrap_or_default())
+        self.told_of(&self.library)
+    }
+
+    /// What `sets` hold, told apart from any other (see [`Self::library_told`]).
+    fn told_of(&self, sets: &[LibrarySet]) -> u64 {
+        crate::project::pixels_hash(&serde_json::to_vec(&self.sets_saved(sets, Images::Told)).unwrap_or_default())
+    }
+
+    /// `library` in use in place of the one there was: the brushes' sliders go, and every place
+    /// that names a brush stays where it can.
+    pub(crate) fn put_library(&mut self, library: Vec<LibrarySet>) {
+        self.library = library;
+        self.sliders.clear();
+        self.move_brush_refs(Some);
+    }
+
+    /// The tools on the first brush, and no set's choice, brush's sliders, Recent brush or QuickMenu
+    /// brush: for a library brought into use, before its own choices (places in another library).
+    pub(crate) fn reset_brush_choices(&mut self) {
+        self.set_choices.clear();
+        self.sliders.clear();
+        self.recent_brushes.clear();
+        self.pinned_brushes.clear();
+        self.quick_brushes.clear();
+        (self.paint_brush, self.erase_brush, self.smudge_brush) = ((0, 0), (0, 0), (0, 0));
+    }
+
+    /// The tools' brushes, the sets' last choices and each brush's sliders, as kept between
+    /// sessions (JSON; see [`CanvasSession::saved_brush_choices`]).
+    pub(crate) fn choices_saved(&self) -> String {
+        let tool_index = |tool| TOOLS.iter().position(|&t| t == tool).unwrap_or(0) as u8;
+        let mut sliders: Vec<_> =
+            self.sliders.iter().map(|(&(tool, s, i), v)| (tool_index(tool), s, i, v.size, v.opacity)).collect();
+        sliders.sort_by_key(|&(t, s, i, ..)| (t, s, i));
+        let choices = SavedChoices {
+            tools: TOOLS.map(|tool| self.brush_ref(tool)),
+            sets: self.set_choices.clone(),
+            sliders,
+            recents: self.recent_brushes.clone(),
+            pinned: self.pinned_brushes.clone(),
+            quick: self.quick_brushes.iter().map(|&(key, (s, i))| (key, s, i)).collect(),
+        };
+        serde_json::to_string(&choices).unwrap_or_default()
     }
 
     /// `brush` as kept, as changed from what it started as (`from`), its images put as `images`
@@ -907,7 +964,11 @@ impl CanvasSession {
         if let Some(&(key, _)) = st.quick_brushes.iter().find(|q| q.1 == place) {
             return key;
         }
-        let key = st.quick_brushes.iter().map(|q| q.0).max().unwrap_or(0) + 1;
+        // counted on among the library's own keys (a copy's are another's): a button set to one
+        // library's brush picks none in another
+        let first = st.libraries.first_quick_key();
+        let own = |key: u64| key >> 32 == first >> 32;
+        let key = st.quick_brushes.iter().map(|q| q.0).filter(|&k| own(k)).max().unwrap_or(first).max(first) + 1;
         if st.quick_brushes.len() >= QUICK_BRUSHES {
             st.quick_brushes.remove(0);
         }
@@ -1165,68 +1226,13 @@ impl CanvasSession {
     /// False if it couldn't be written.
     pub fn save_brush_library_file(&self, path: String) -> bool {
         let _writing = library_writes();
-        let path = std::path::PathBuf::from(path);
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-            self.shared.lock().grain_store.use_folder(dir);
-        }
-        let pictures = std::cell::RefCell::new(Vec::new());
-        let (told, json, library) = {
-            let st = self.shared.lock();
-            let told = st.library_told();
-            if path.is_file() && st.library_kept.as_ref().is_some_and(|(at, was)| *at == path && *was == told) {
-                return true;
-            }
-            let json = serde_json::to_string(&st.saved_sets(Images::Filed(&pictures))).unwrap_or_default();
-            (told, json, st.library.clone())
-        };
-        // the pictures first: the library names none that isn't kept
-        let folder = path.parent().unwrap_or(std::path::Path::new(".")).join(crate::brush_pictures::FOLDER);
-        if !crate::brush_pictures::keep(&folder, &pictures.into_inner()) {
-            return false;
-        }
-        let written = crate::project::write_atomically(&path, |p| {
-            std::fs::write(p, json.as_bytes()).map_err(|e| crate::project::file_error("keeping the brushes", e))
-        });
-        match &written {
-            Ok(()) => {
-                remember(&LAST_LIBRARY, &path, told, library);
-                self.shared.lock().library_kept = Some((path, told));
-            }
-            Err(e) => log::error!("{e}"),
-        }
-        written.is_ok()
+        self.save_library_at(std::path::Path::new(&path)).is_some()
     }
 
     /// Puts back a library kept with [`Self::save_brush_library_file`]; false, changing nothing,
     /// if there is none or it can't be read.
     pub fn load_brush_library_file(&self, path: String) -> bool {
-        let path = std::path::PathBuf::from(path);
-        if let Some(dir) = path.parent() {
-            self.shared.lock().grain_store.use_folder(dir);
-        }
-        // as last kept or read in this run, the file unchanged since
-        if let Some((library, told)) = remembered(&LAST_LIBRARY, &path) {
-            let mut st = self.shared.lock();
-            st.library = library;
-            st.sliders.clear();
-            st.move_brush_refs(Some);
-            st.library_kept = Some((path, told));
-            return true;
-        }
-        let folder = path.parent().map(|dir| dir.join(crate::brush_pictures::FOLDER));
-        let loaded = std::fs::read_to_string(&path).is_ok_and(|json| load_library(self, &json, folder.as_deref()));
-        if loaded {
-            // the file holds this (or more, of what couldn't be read back): kept again once it changes
-            let (told, library) = {
-                let mut st = self.shared.lock();
-                let told = st.library_told();
-                st.library_kept = Some((path.clone(), told));
-                (told, st.library.clone())
-            };
-            remember(&LAST_LIBRARY, &path, told, library);
-        }
-        loaded
+        self.load_library_file(std::path::Path::new(&path), false)
     }
 
     /// Puts back a library kept with [`Self::saved_brush_library`]; false, changing nothing, if it
@@ -1235,23 +1241,29 @@ impl CanvasSession {
         load_library(self, &json, None)
     }
 
-    /// The library as the app kept it in folder `dir` (see [`Self::keep_brushes`]), what shipped
-    /// since joining it once, with the tools' brushes, the sets' choices and the brushes' sliders
-    /// as they were left; with none kept, the library as it ships. True if a kept one was put back.
+    /// The library in use as the app kept it in folder `dir` (see [`Self::keep_brushes`]), what
+    /// shipped since joining it once (if it is the one they join), with the tools' brushes, the
+    /// sets' choices and the brushes' sliders as they were left; with none kept, the library as it
+    /// ships. The other libraries are found there too. True if a kept one was put back.
     pub fn open_brushes(&self, dir: String) -> bool {
         let dir = std::path::PathBuf::from(dir);
-        let library = dir.join(LIBRARY_FILE).to_string_lossy().into_owned();
-        let loaded = self.load_brush_library_file(library.clone());
+        let (library, choices, loaded) = self.open_library_in_use(&dir);
         let seen_file = dir.join(SEEN_FILE);
         let kept_seen = std::fs::read_to_string(&seen_file).ok();
         let seen: Vec<u32> = kept_seen
             .as_deref()
             .map_or_else(|| FIRST_SHIPPED.to_vec(), |t| t.split(',').filter_map(|v| v.trim().parse().ok()).collect());
-        let shipped = if loaded { self.add_shipped_brushes(seen.clone()) } else { self.shipped_brush_counts() };
+        // shipped brushes join only the library they join (not in use: at a later start)
+        let stock = self.shared.lock().libraries.stock();
+        let shipped = match (loaded, stock) {
+            (true, true) => self.add_shipped_brushes(seen.clone()),
+            (true, false) => seen.clone(),
+            (false, _) => self.shipped_brush_counts(),
+        };
         if shipped != seen || kept_seen.is_none() {
             // kept with them, or the next start would put the library back without them
             if loaded {
-                self.save_brush_library_file(library);
+                self.save_brush_library_file(library.to_string_lossy().into_owned());
             }
             let text = shipped.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
             let _ = std::fs::create_dir_all(&dir);
@@ -1263,39 +1275,113 @@ impl CanvasSession {
                 log::error!("{e}");
             }
         }
-        if loaded && let Ok(choices) = std::fs::read_to_string(dir.join(CHOICES_FILE)) {
+        if loaded && let Ok(choices) = std::fs::read_to_string(choices) {
             self.load_brush_choices(choices);
         }
         if loaded {
             // only with the library back can it be told which grains' and pictures' files nothing
-            // uses any more
-            let st = self.shared.lock();
-            st.grain_store.forget_all_but(&st.grains_held(), &dir.join(LIBRARY_FILE));
-            drop(st);
-            // (under the library's lock: one being kept meanwhile names its pictures first)
+            // uses any more: those none of the libraries' files names (under their lock: one being
+            // kept meanwhile names its pictures first)
             let _writing = library_writes();
-            crate::brush_pictures::forget_unnamed(&dir.join(crate::brush_pictures::FOLDER), &dir.join(LIBRARY_FILE));
+            let libraries = self.library_files(&dir);
+            let st = self.shared.lock();
+            st.grain_store.forget_all_but(&st.grains_held(), &libraries);
+            drop(st);
+            crate::brush_pictures::forget_unnamed(&dir.join(crate::brush_pictures::FOLDER), &libraries);
         }
         loaded
     }
+}
 
-    /// Keeps the library, the tools' brushes, the sets' choices and the brushes' sliders in folder
-    /// `dir`, for [`Self::open_brushes`]. False if they couldn't all be written.
-    pub fn keep_brushes(&self, dir: String) -> bool {
-        let library =
-            self.save_brush_library_file(std::path::Path::new(&dir).join(LIBRARY_FILE).to_string_lossy().into_owned());
-        self.keep_brush_choices(dir) && library
+impl CanvasSession {
+    /// [`Self::save_brush_library_file`], holding [`library_writes`]: what the file holds now (see
+    /// [`Images::Told`]), or none if it couldn't be written.
+    pub(crate) fn save_library_at(&self, path: &std::path::Path) -> Option<u64> {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+            self.shared.lock().grain_store.use_folder(dir);
+        }
+        let pictures = std::cell::RefCell::new(Vec::new());
+        let (told, json, library) = {
+            let st = self.shared.lock();
+            let told = st.library_told();
+            if path.is_file() && st.library_kept.as_ref().is_some_and(|(at, was)| at == path && *was == told) {
+                return Some(told);
+            }
+            let json = serde_json::to_string(&st.saved_sets(Images::Filed(&pictures))).unwrap_or_default();
+            (told, json, st.library.clone())
+        };
+        if !keep_library_text(path, &json, &pictures.into_inner()) {
+            return None;
+        }
+        remember(&LAST_LIBRARY, path, told, library);
+        self.shared.lock().library_kept = Some((path.to_path_buf(), told));
+        Some(told)
     }
 
-    /// Keeps only the tools' brushes, the sets' choices and the brushes' sliders in folder `dir`
-    /// (as [`Self::keep_brushes`] does with the library): for a brush chosen, the library as it
-    /// was. False if they couldn't be written.
-    pub fn keep_brush_choices(&self, dir: String) -> bool {
-        let _writing = library_writes();
-        let dir = std::path::PathBuf::from(dir);
-        let choices = self.saved_brush_choices();
-        let _ = std::fs::create_dir_all(&dir);
-        let written = crate::project::write_atomically(&dir.join(CHOICES_FILE), |p| {
+    /// `sets` (not the library in use) kept as a library's file at `path`, as
+    /// [`Self::save_library_at`] keeps that; false if it couldn't be written.
+    pub(crate) fn write_library_file(&self, path: &std::path::Path, sets: &[LibrarySet]) -> bool {
+        let pictures = std::cell::RefCell::new(Vec::new());
+        let json =
+            serde_json::to_string(&self.shared.lock().sets_saved(sets, Images::Filed(&pictures))).unwrap_or_default();
+        keep_library_text(path, &json, &pictures.into_inner())
+    }
+
+    /// Puts back the library kept in the file at `path` (see [`Self::library_at`]); false, changing
+    /// nothing, if it can't be.
+    pub(crate) fn load_library_file(&self, path: &std::path::Path, empty: bool) -> bool {
+        let Some((library, told)) = self.library_at(path, empty) else { return false };
+        let mut st = self.shared.lock();
+        st.put_library(library);
+        st.library_kept = Some((path.to_path_buf(), told));
+        true
+    }
+
+    /// The library kept in the file at `path`, and what it holds (see [`Images::Told`]): as last
+    /// kept or read in this run while the file is as it was then, else read from it (the pictures
+    /// it names from beside it) and held for next time. None if it can't be read, or holds no set
+    /// and `empty` doesn't allow that.
+    pub(crate) fn library_at(&self, path: &std::path::Path, empty: bool) -> Option<(Vec<LibrarySet>, u64)> {
+        if let Some(dir) = path.parent() {
+            self.shared.lock().grain_store.use_folder(dir);
+        }
+        if let Some((library, told)) = remembered(&LAST_LIBRARY, path) {
+            return (empty || !library.is_empty()).then_some((library, told));
+        }
+        let json = std::fs::read_to_string(path).ok()?;
+        let folder = path.parent().map(|dir| dir.join(crate::brush_pictures::FOLDER));
+        let library = read_library(self, &json, folder.as_deref(), empty)?;
+        // the file holds this (or more, of what couldn't be read back): kept again once it changes
+        let told = self.shared.lock().told_of(&library);
+        remember(&LAST_LIBRARY, path, told, library.clone());
+        Some((library, told))
+    }
+
+    /// Holds `library`, as the file at `path` holds it (`told`), for the next artwork to take.
+    pub(crate) fn remember_library(path: &std::path::Path, told: u64, library: Vec<LibrarySet>) {
+        remember(&LAST_LIBRARY, path, told, library);
+    }
+
+    /// Whether the library in use holds `told` and its choices are `choices` (as
+    /// [`Self::saved_brush_choices`] gives them): nothing changed since they were kept.
+    pub(crate) fn library_is(st: &State, told: u64, choices: &str) -> bool {
+        st.library_told() == told && st.choices_saved() == choices
+    }
+
+    /// A library's choices as kept, its tools' brushes (paint, erase, smudge) at `tools` and nothing
+    /// else chosen yet (JSON).
+    pub(crate) fn library_choices(tools: [(usize, usize); 3]) -> String {
+        serde_json::to_string(&SavedChoices { tools, ..SavedChoices::default() }).unwrap_or_default()
+    }
+
+    /// `choices` (as [`Self::saved_brush_choices`] gives them) kept in the file at `path`, replaced
+    /// whole; false if they couldn't be written.
+    pub(crate) fn write_choices(path: &std::path::Path, choices: &str) -> bool {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let written = crate::project::write_atomically(path, |p| {
             std::fs::write(p, choices.as_bytes()).map_err(|e| crate::project::file_error("keeping the brushes", e))
         });
         if let Err(e) = &written {
@@ -1303,24 +1389,48 @@ impl CanvasSession {
         }
         written.is_ok()
     }
+}
+
+/// A library's text `json` kept in the file at `path`, replaced whole, after the `pictures` it names
+/// in files of their own beside it (see [`crate::brush_pictures`]); false if it couldn't be.
+fn keep_library_text(path: &std::path::Path, json: &str, pictures: &[(String, crate::brush_pictures::Held)]) -> bool {
+    // the pictures first: the library names none that isn't kept
+    let folder = path.parent().unwrap_or(std::path::Path::new(".")).join(crate::brush_pictures::FOLDER);
+    if !crate::brush_pictures::keep(&folder, pictures) {
+        return false;
+    }
+    let written = crate::project::write_atomically(path, |p| {
+        std::fs::write(p, json.as_bytes()).map_err(|e| crate::project::file_error("keeping the brushes", e))
+    });
+    if let Err(e) = &written {
+        log::error!("{e}");
+    }
+    written.is_ok()
+}
+
+#[uniffi::export]
+impl CanvasSession {
+    /// Keeps the library in use, the tools' brushes, the sets' choices and the brushes' sliders in
+    /// folder `dir`, in that library's own files, for [`Self::open_brushes`]. False if they couldn't
+    /// all be written.
+    pub fn keep_brushes(&self, dir: String) -> bool {
+        let _writing = library_writes();
+        self.keep_library_in_use(std::path::Path::new(&dir))
+    }
+
+    /// Keeps only the tools' brushes, the sets' choices and the brushes' sliders in folder `dir`
+    /// (as [`Self::keep_brushes`] does with the library): for a brush chosen, the library as it
+    /// was. False if they couldn't be written.
+    pub fn keep_brush_choices(&self, dir: String) -> bool {
+        let _writing = library_writes();
+        let file = self.files_in_use(std::path::Path::new(&dir)).1;
+        Self::write_choices(&file, &self.saved_brush_choices())
+    }
 
     /// The tools' brushes, the sets' last choices and each brush's sliders, as kept between
     /// sessions (JSON); kept with the library as it is now.
     pub fn saved_brush_choices(&self) -> String {
-        let st = self.shared.lock();
-        let tool_index = |tool| TOOLS.iter().position(|&t| t == tool).unwrap_or(0) as u8;
-        let mut sliders: Vec<_> =
-            st.sliders.iter().map(|(&(tool, s, i), v)| (tool_index(tool), s, i, v.size, v.opacity)).collect();
-        sliders.sort_by_key(|&(t, s, i, ..)| (t, s, i));
-        let choices = SavedChoices {
-            tools: TOOLS.map(|tool| st.brush_ref(tool)),
-            sets: st.set_choices.clone(),
-            sliders,
-            recents: st.recent_brushes.clone(),
-            pinned: st.pinned_brushes.clone(),
-            quick: st.quick_brushes.iter().map(|&(key, (s, i))| (key, s, i)).collect(),
-        };
-        serde_json::to_string(&choices).unwrap_or_default()
+        self.shared.lock().choices_saved()
     }
 
     /// Puts back what [`Self::saved_brush_choices`] kept, after the library it was kept with;

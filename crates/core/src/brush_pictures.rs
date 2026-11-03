@@ -164,11 +164,12 @@ pub(crate) fn source_of(
     }
 }
 
-/// Takes the files of pictures the library kept at `library` no longer names out of `folder`, as
-/// a brush that was deleted leaves its own behind, and writes of them a crash cut short; one kept
-/// lately stays, and all do if the library can't be read. Files that aren't pictures' stay. Call it
-/// holding the library's own lock, so that a library being kept meanwhile can't name one it takes.
-pub(crate) fn forget_unnamed(folder: &Path, library: &Path) {
+/// Takes the files of pictures none of the libraries kept at `libraries` names any more out of
+/// `folder` (they share it), as a brush that was deleted leaves its own behind, and writes of them a
+/// crash cut short; one kept lately stays, and all do if one of the libraries can't be read. Files
+/// that aren't pictures' stay. Call it holding the libraries' own lock, so that a library being kept
+/// meanwhile can't name one it takes.
+pub(crate) fn forget_unnamed(folder: &Path, libraries: &[std::path::PathBuf]) {
     let Ok(entries) = fs::read_dir(folder) else { return };
     let old: Vec<(String, std::path::PathBuf)> = entries
         .flatten()
@@ -181,8 +182,8 @@ pub(crate) fn forget_unnamed(folder: &Path, library: &Path) {
     if old.is_empty() {
         return;
     }
-    let Ok(kept) = fs::read_to_string(library) else { return };
-    let named = named(&kept);
+    let Ok(kept) = libraries.iter().map(fs::read_to_string).collect::<Result<Vec<String>, _>>() else { return };
+    let named: HashSet<&str> = kept.iter().flat_map(|text| named(text)).collect();
     for (name, path) in old {
         if !named.contains(name.as_str())
             && let Err(e) = fs::remove_file(&path)
@@ -246,7 +247,7 @@ mod tests {
         fs::File::options().write(true).open(dir.join(&name)).unwrap().set_modified(long_ago).unwrap();
         let library = dir.join("library.json");
         fs::write(&library, format!("[{{\"thumbnail\":\"{MARK}{name}\"}}]")).unwrap();
-        forget_unnamed(&dir, &library);
+        forget_unnamed(&dir, &[library]);
         assert!(!leftover.exists() && dir.join(&name).exists());
         assert!(!is_leftover("0123456789abcdef.picture") && !is_leftover("../x.1.tmp"));
         let _ = fs::remove_dir_all(&dir);

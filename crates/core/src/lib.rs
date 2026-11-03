@@ -17,6 +17,7 @@ mod adjust_menu;
 mod adjusting;
 mod animation;
 mod brush_files;
+mod brush_libraries;
 mod brush_library;
 mod brush_pictures;
 mod brushes;
@@ -116,6 +117,7 @@ pub use animation::{
     export_fps_label, frame_rate,
 };
 pub use brush_files::{BrushesRead, OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip, read_any_brushes, read_brushes};
+pub use brush_libraries::BrushLibraryInfo;
 pub use brush_library::prepare_brushes;
 pub use brushes::{BrushInfo, BrushSetInfo, RecentBrush};
 pub use colour::{
@@ -472,8 +474,9 @@ pub(crate) struct State {
     pub(crate) reduce_motion: bool,
     /// Recolor, while it is on.
     pub(crate) recolor: Option<recolor::Recolor>,
-    /// The library as the user has it, and as it ships.
+    /// The library in use as the user has it, and as it ships; the libraries.
     library: Vec<brush_library::LibrarySet>,
+    pub(crate) libraries: brush_libraries::Libraries,
     shipped: Vec<BrushSet>,
     /// When the library is empty (never, but never panic).
     fallback: Brush,
@@ -1449,6 +1452,7 @@ impl CanvasSession {
             input: procraft_engine::stroke::InputSettings::default(),
             crop_redo: None,
             library: shelf,
+            libraries: brush_libraries::Libraries::default(),
             shipped,
             fallback: Brush::round_pen(),
             paint_brush,

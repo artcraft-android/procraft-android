@@ -5558,6 +5558,201 @@ fn the_brushes_are_kept_in_their_folder_and_an_earlier_version_s_taken_in() {
 }
 
 #[test]
+fn brush_libraries_come_and_go_each_kept_in_its_own_files() {
+    let dir = std::env::temp_dir().join(format!("procraft-libraries-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = dir.to_string_lossy().into_owned();
+    let names = |s: &CanvasSession| s.brush_libraries().into_iter().map(|l| (l.name, l.current)).collect::<Vec<_>>();
+    let s = CanvasSession::new(64, 64);
+    // before the folder is known, there is nowhere to keep another
+    assert_eq!(s.new_brush_library(), None);
+    assert!(!s.open_brushes(d.clone()));
+    assert_eq!(names(&s), vec![("Brush library".to_owned(), true)]);
+    let shipped = s.brush_library().len();
+    assert!(s.select_brush(0, 3));
+    // a new one, empty, brought into use and renamed
+    assert_eq!(s.new_brush_library(), Some(1));
+    assert!(s.open_brush_library(1));
+    assert!(s.brush_library().is_empty());
+    assert!(s.rename_brush_library(1, " Mine ".to_owned()));
+    assert!(!s.rename_brush_library(1, "  ".to_owned()));
+    assert_eq!(names(&s), vec![("Brush library".to_owned(), false), ("Mine".to_owned(), true)]);
+    // what is done in it stays with it
+    s.new_brush_set();
+    assert_eq!(s.brush_library().len(), 1);
+    assert!(s.open_brush_library(0));
+    assert_eq!(s.brush_library().len(), shipped);
+    assert_eq!((s.current_brush().set, s.current_brush().index), (0, 3));
+    // the card of the one not in use shows its sets
+    assert_eq!(s.brush_libraries()[1].sets.len(), 1);
+    // kept and opened again in a new session: the same libraries, the same one in use
+    assert!(s.keep_brushes(d.clone()));
+    let t = CanvasSession::new(64, 64);
+    assert!(t.open_brushes(d.clone()));
+    assert_eq!(names(&t), vec![("Brush library".to_owned(), true), ("Mine".to_owned(), false)]);
+    assert!(t.open_brush_library(1));
+    assert_eq!(t.brush_library().len(), 1);
+    assert!(t.keep_brushes(d.clone()));
+    let u = CanvasSession::new(64, 64);
+    assert!(u.open_brushes(d.clone()));
+    assert_eq!(names(&u), vec![("Brush library".to_owned(), false), ("Mine".to_owned(), true)]);
+    assert_eq!(u.brush_library().len(), 1);
+    // a copy just after it, numbered after its name; deleted, its files go
+    assert_eq!(u.duplicate_brush_library(0), Some(1));
+    assert_eq!(u.brush_libraries()[1].name, "Brush library 2");
+    assert_eq!(u.brush_libraries()[1].sets.len(), shipped);
+    assert!(dir.join("lib-2.json").exists());
+    assert!(u.delete_brush_library(1));
+    assert!(!dir.join("lib-2.json").exists());
+    // the one in use deleted: the next (else the one before it) comes into use; the last stays
+    assert!(u.delete_brush_library(1));
+    assert_eq!(names(&u), vec![("Brush library".to_owned(), true)]);
+    assert_eq!(u.brush_library().len(), shipped);
+    assert!(!u.delete_brush_library(0));
+    // the library as it ships comes back beside it, numbered; shipped brushes keep joining the first
+    assert_eq!(u.restore_stock_brush_library(), Some(1));
+    assert_eq!(u.brush_libraries()[1].name, "Brush library 2");
+    assert!(u.open_brush_library(1));
+    assert_eq!(u.brush_library().len(), shipped);
+    assert!(!u.shared.lock().libraries.stock());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_single_library_folder_opens_as_before_as_the_first_library_and_its_pictures_stay() {
+    use procraft_engine::brush::Source;
+    use procraft_engine::textures::TEXTURE_SIZE;
+    let dir = std::env::temp_dir().join(format!("procraft-libraries-upgrade-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = dir.to_string_lossy().into_owned();
+    let pictures = dir.join("pictures");
+    // a folder as a single library keeps it today: its pictures apart, no index
+    let s = CanvasSession::new(64, 64);
+    assert!(!s.open_brushes(d.clone()));
+    assert!(s.duplicate_brush(0, 0).is_some());
+    let shape = Source::new((0..TEXTURE_SIZE * TEXTURE_SIZE).map(|i| (i % 241) as u8).collect()).unwrap();
+    {
+        let mut st = s.shared.lock();
+        let b = &mut st.library[0].brushes[0];
+        b.name = "Own shape".into();
+        b.shape.source = Some(shape.clone());
+    }
+    assert!(s.select_brush(1, 2));
+    assert!(s.keep_brushes(d.clone()));
+    assert!(!dir.join("libraries.json").exists(), "a single library's folder stays as it was");
+    let library_before = std::fs::read(dir.join("library.json")).unwrap();
+    assert_eq!(std::fs::read_dir(&pictures).unwrap().count(), 1);
+
+    // the next version opens it: one library, in use, as it was
+    let t = CanvasSession::new(64, 64);
+    assert!(t.open_brushes(d.clone()));
+    let libraries = t.brush_libraries();
+    assert_eq!(libraries.len(), 1);
+    assert_eq!((libraries[0].name.as_str(), libraries[0].current), ("Brush library", true));
+    assert_eq!(t.saved_brush_library(), s.saved_brush_library());
+    assert_eq!((t.current_brush().set, t.current_brush().index), (1, 2));
+    assert_eq!(t.shared.lock().library[0].brushes[0].shape.source.as_ref().map(|s| s.id), Some(shape.id));
+    assert!(t.keep_brushes(d.clone()));
+    assert_eq!(std::fs::read(dir.join("library.json")).unwrap(), library_before, "nothing changed: not written");
+
+    // another library brought into use: the first's files hold it as it was, its pictures too, even
+    // once they are old and the library in use names none of them
+    assert_eq!(t.new_brush_library(), Some(1));
+    assert!(t.open_brush_library(1));
+    assert!(t.keep_brushes(d.clone()));
+    assert_eq!(std::fs::read(dir.join("library.json")).unwrap(), library_before);
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 60 * 60);
+    for entry in std::fs::read_dir(&pictures).unwrap().flatten() {
+        std::fs::File::options().write(true).open(entry.path()).unwrap().set_modified(long_ago).unwrap();
+    }
+    let u = CanvasSession::new(64, 64);
+    assert!(u.open_brushes(d.clone()));
+    assert!(u.brush_library().is_empty(), "the new one, in use");
+    assert_eq!(std::fs::read_dir(&pictures).unwrap().count(), 1, "named by a library not in use: kept");
+    assert!(u.open_brush_library(0));
+    assert_eq!(u.shared.lock().library[0].brushes[0].shape.source.as_ref().map(|s| s.id), Some(shape.id));
+    assert_eq!((u.current_brush().set, u.current_brush().index), (1, 2));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn bringing_another_library_into_use_keeps_a_change_not_yet_kept() {
+    let dir = std::env::temp_dir().join(format!("procraft-libraries-unkept-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = dir.to_string_lossy().into_owned();
+    let s = CanvasSession::new(64, 64);
+    assert!(!s.open_brushes(d.clone()));
+    assert!(s.keep_brushes(d.clone()));
+    assert_eq!(s.new_brush_library(), Some(1));
+    // changed after it was last kept: a set renamed, a brush added, another chosen, a Recent brush
+    assert!(s.rename_brush_set(0, "Changed".to_owned()));
+    assert!(s.duplicate_brush(0, 0).is_some());
+    assert!(s.select_brush(2, 1));
+    s.shared.lock().note_recent((3, 0));
+    let (library, choices) = (s.saved_brush_library(), s.saved_brush_choices());
+    assert!(s.open_brush_library(1));
+    assert!(s.brush_library().is_empty());
+    assert!(s.recent_brushes().is_empty(), "the Recent set is the library's own");
+    // back: as it was left
+    assert!(s.open_brush_library(0));
+    assert_eq!(s.saved_brush_library(), library);
+    assert_eq!(s.saved_brush_choices(), choices);
+    // and in its files, for the next start, though nothing kept it since
+    assert!(s.open_brush_library(1));
+    let t = CanvasSession::new(64, 64);
+    assert!(t.open_brushes(d.clone()));
+    assert!(t.open_brush_library(0));
+    assert_eq!(t.saved_brush_library(), library);
+    assert_eq!(t.saved_brush_choices(), choices);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_quickmenu_key_from_one_library_picks_no_brush_in_another() {
+    let dir = std::env::temp_dir().join(format!("procraft-libraries-quick-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let s = CanvasSession::new(64, 64);
+    assert!(!s.open_brushes(dir.to_string_lossy().into_owned()));
+    let first = s.quick_brush_key(0, 0);
+    assert_eq!(first, 1, "the first library's keys as they always were");
+    assert_eq!(s.restore_stock_brush_library(), Some(1));
+    assert!(s.open_brush_library(1));
+    assert!(s.quick_brush(first).is_none());
+    let other = s.quick_brush_key(0, 0);
+    assert_ne!(other, first);
+    assert!(s.open_brush_library(0));
+    assert_eq!(s.quick_brush(first).map(|b| (b.set, b.index)), Some((0, 0)));
+    assert!(s.quick_brush(other).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_lost_index_leaves_no_library_behind_and_a_bad_one_names_no_other_file() {
+    let dir = std::env::temp_dir().join(format!("procraft-libraries-index-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = dir.to_string_lossy().into_owned();
+    let s = CanvasSession::new(64, 64);
+    assert!(!s.open_brushes(d.clone()));
+    assert!(s.keep_brushes(d.clone()));
+    assert_eq!(s.new_brush_library(), Some(1));
+    assert_eq!(s.restore_stock_brush_library(), Some(2));
+    // the index gone: every library whose files are there is found again
+    std::fs::remove_file(dir.join("libraries.json")).unwrap();
+    let t = CanvasSession::new(64, 64);
+    assert!(t.open_brushes(d.clone()));
+    assert_eq!(t.brush_libraries().len(), 3);
+    assert!(t.brush_libraries()[0].current);
+    // an index naming files outside the folder, or none at all: those are left out
+    let bad = r#"{"libraries":[{"id":"../x","name":"Out"},{"id":"main","name":"Mine"},{"id":"lib-2","name":7}],"current":"../x"}"#;
+    std::fs::write(dir.join("libraries.json"), bad).unwrap();
+    let u = CanvasSession::new(64, 64);
+    assert!(u.open_brushes(d.clone()));
+    let names: Vec<(String, bool)> = u.brush_libraries().into_iter().map(|l| (l.name, l.current)).collect();
+    assert_eq!(names, [("Mine".to_owned(), true), ("Untitled library".to_owned(), false)]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_brush_keeps_its_maker_and_a_reset_point() {
     use procraft_engine::brush::Brush;
     use procraft_engine::brushfile::{self, Pictures};
