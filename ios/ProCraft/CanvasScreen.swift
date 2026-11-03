@@ -45,6 +45,16 @@ private struct PanelHost: View {
             BrushLibrary(model: model, arrowX: place.arrowX)
                 .frame(height: screen.height - Pc.barHeight - 25)
                 .offset(x: place.left, y: Pc.barHeight)
+        case .layers:
+            let buttonX = screen.width - Pc.toolCentreFromRight(1, barWidth: screen.width)
+            let place = popoverPlace(width: layersPanelWidth, buttonCentreX: buttonX, screenWidth: screen.width, minLeft: clear)
+            LayersPanel(model: model, arrowX: place.arrowX, maxHeight: screen.height - Pc.barHeight - Pc.popoverGap)
+                .offset(x: place.left, y: Pc.barHeight)
+        case .color:
+            let buttonX = screen.width - Pc.toolCentreFromRight(0, barWidth: screen.width)
+            let place = popoverPlace(width: colorPanelWidth, buttonCentreX: buttonX, screenWidth: screen.width, minLeft: clear)
+            ColorPanel(model: model, arrowX: place.arrowX)
+                .offset(x: place.left, y: Pc.barHeight)
         default:
             EmptyView()
         }

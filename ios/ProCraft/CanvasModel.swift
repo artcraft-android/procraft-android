@@ -38,6 +38,11 @@ final class CanvasModel {
     private(set) var tool: ToolKind = .paint
     private(set) var size: Float = 0
     private(set) var opacity: Float = 1
+    /// The colour panel's mode.
+    var colorMode: ColorMode = .disc
+    /// The second colour (0xRRGGBB), beside the current one in the colour panel: swapped with it,
+    /// and mixed in by brushes whose colour dynamics say so.
+    private(set) var secondaryRgb: UInt32 = 0xFFFFFF
     /// The paint colour as hue (0..1), saturation and brightness.
     private(set) var hue: Float = 0
     private(set) var saturation: Float = 0
@@ -79,6 +84,15 @@ final class CanvasModel {
     private(set) var adjusting = false
     private(set) var recoloring = false
 
+    // the layers, top first, the background under them, and their thumbnails
+    private(set) var layers: [LayerInfo] = []
+    private(set) var background = BackgroundInfo(r: 1, g: 1, b: 1, visible: true)
+    private(set) var thumbnails: [UInt64: UIImage] = [:]
+    /// The pixels' version each thumbnail was read at: read again only once its layer's is new.
+    @ObservationIgnored private var thumbnailVersions: [UInt64: UInt64] = [:]
+    /// The blend modes, for the letters on the layers' rows.
+    @ObservationIgnored let blendModeList = blendModes()
+
     // the brush library
     private(set) var brushSets: [BrushSetInfo] = []
     /// The set the library shows.
@@ -109,7 +123,8 @@ final class CanvasModel {
             shownSet = Int(current.set)
         }
         readSliders()
-        refreshFlags()
+        refresh()
+        pushSecondary()
     }
 
     /// Where the brush library and the brushes in use are kept.
@@ -288,6 +303,9 @@ final class CanvasModel {
     func toggle(_ p: Panel) {
         _ = switchModes(.panel(colour: p == .color))
         panel = panel == p ? .none : p
+        if panel == .layers {
+            refreshThumbnails()
+        }
     }
 
     func closePanels() {
@@ -430,6 +448,90 @@ final class CanvasModel {
     /// Reads again what the core may have changed (a stroke, an undo).
     func refresh() {
         refreshFlags()
+        layers = session.layers()
+        background = session.background()
+        if panel == .layers {
+            refreshThumbnails()
+        }
+    }
+
+    // MARK: the layers
+
+    /// The side the layers' thumbnails are read at, in pixels.
+    static let thumbSide: UInt32 = 192
+
+    func addLayer() {
+        if session.addLayer() == 0 {
+            let info = session.info()
+            showNotice("This canvas holds at most \(layersFor(width: max(info.width, 1), height: max(info.height, 1))) layers.", warning: true)
+        }
+        refresh()
+    }
+
+    func selectLayer(_ id: UInt64) {
+        _ = session.selectLayer(id: id)
+        refresh()
+    }
+
+    /// Shows or hides `l`, saying so in the notice band as measured ("Hide layer").
+    func toggleVisible(_ l: LayerInfo) {
+        if session.setLayerVisible(id: l.id, visible: !l.visible) {
+            showNotice(l.visible ? "Hide layer" : "Show layer")
+        }
+        refresh()
+    }
+
+    func toggleBackground() {
+        _ = session.setBackgroundVisible(visible: !background.visible)
+        refresh()
+    }
+
+    /// Opens or closes a group's rows.
+    func toggleCollapsed(_ l: LayerInfo) {
+        _ = session.setGroupCollapsed(id: l.id, collapsed: !l.collapsed)
+        refresh()
+    }
+
+    /// Whether a closed group hides `l`'s row.
+    func hidden(_ l: LayerInfo) -> Bool {
+        let byId = Dictionary(layers.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        // from a mask, its layer's place
+        var at = l.kind == .mask ? byId[l.parent ?? 0]?.parent : l.parent
+        for _ in 0 ..< layers.count {
+            guard let id = at, let group = byId[id] else { return false }
+            if group.kind == .group, group.collapsed {
+                return true
+            }
+            at = group.parent
+        }
+        return false
+    }
+
+    /// Whether `l` has a mask (the row under it is its mask).
+    func hasMask(_ l: LayerInfo) -> Bool {
+        layers.contains { $0.kind == .mask && $0.parent == l.id }
+    }
+
+    /// Reads again the thumbnails of the layers whose pixels changed since theirs was read (or have
+    /// none), off the main thread.
+    func refreshThumbnails() {
+        let session = session
+        let known = thumbnailVersions
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var read: [(UInt64, UInt64, UIImage)] = []
+            for v in session.layerVersions() where known[v.id] != v.version {
+                if let t = session.layerThumbnail(id: v.id, maxSide: Self.thumbSide), let image = Self.image(t) {
+                    read.append((v.id, v.version, image))
+                }
+            }
+            guard !read.isEmpty else { return }
+            DispatchQueue.main.async {
+                for (id, version, image) in read {
+                    self?.thumbnails[id] = image
+                    self?.thumbnailVersions[id] = version
+                }
+            }
+        }
     }
 
     private func refreshFlags() {
@@ -459,6 +561,20 @@ final class CanvasModel {
         saturation = s
         brightness = v
         applyColor()
+    }
+
+    /// The current and second colours trade places.
+    func swapColors() {
+        let current = colorRgb()
+        setRgb(secondaryRgb)
+        secondaryRgb = current
+        pushSecondary()
+    }
+
+    private func pushSecondary() {
+        let c = secondaryRgb
+        let channel = { (shift: UInt32) in Float((c >> shift) & 0xFF) / 255 }
+        session.setSecondaryColor(r: channel(16), g: channel(8), b: channel(0))
     }
 
     private func applyColor() {
