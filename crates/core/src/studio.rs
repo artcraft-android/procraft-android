@@ -799,6 +799,7 @@ fn pad_scribble(w: f32, h: f32, scale: f32) -> Vec<crate::PenSample> {
                 tilt: 0.0,
                 orientation: 0.0,
                 time_ms: f64::from(along(&SCRIBBLE_PACE, t)) * SCRIBBLE_SECONDS * 1000.0,
+                roll: 0.0,
             }
         })
         .collect()

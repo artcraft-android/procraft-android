@@ -4,7 +4,9 @@ import UIKit
 /// The canvas: a Metal layer the core's render thread draws into, and every touch on it handed to
 /// the core's touches (`crates/core/src/touch.rs`, the same as the Android app's), which paint,
 /// move the canvas and say what the app should do. A touch carries each sample the system
-/// coalesced since the last, in pixels, with the Pencil's force and angles.
+/// coalesced since the last, in pixels, with the Pencil's force, angles and barrel roll. The
+/// Pencil's hover, double-tap and squeeze go to the core's pen gestures (`touch/pen.rs`), with
+/// the system's own Apple Pencil settings for them.
 final class CanvasView: UIView {
     override class var layerClass: AnyClass { CAMetalLayer.self }
 
@@ -18,10 +20,13 @@ final class CanvasView: UIView {
     private var nextId: UInt64 = 1
     /// The touch whose stroke is drawn ahead to where the system predicts it goes.
     private var strokeTouch: ObjectIdentifier?
-    /// Where the Pencil last was on the canvas (its double tap acts there).
+    /// Where the Pencil last was over or on the canvas (its double-tap acts there).
     private var pencilAt: CGPoint?
     /// The touches' next wait (a hold, a repeat) running out.
     private var tick: Timer?
+    /// The brush's outline where the Pencil or the pointer hovers (shown while hovering only, as
+    /// Brush cursor starts).
+    private let cursor = BrushCursorView()
 
     init(session: CanvasSession) {
         self.session = session
@@ -29,6 +34,16 @@ final class CanvasView: UIView {
         isMultipleTouchEnabled = true
         isOpaque = true
         backgroundColor = .black
+        cursor.frame = bounds
+        cursor.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(cursor)
+        // the Pencil held over the glass, and a trackpad's or mouse's pointer, each on its own
+        let pencilHover = UIHoverGestureRecognizer(target: self, action: #selector(pencilHovered(_:)))
+        pencilHover.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+        addGestureRecognizer(pencilHover)
+        let pointerHover = UIHoverGestureRecognizer(target: self, action: #selector(pointerHovered(_:)))
+        pointerHover.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+        addGestureRecognizer(pointerHover)
     }
 
     @available(*, unavailable)
@@ -96,6 +111,8 @@ final class CanvasView: UIView {
     // MARK: touches
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        // painting, the outline goes (Brush cursor shows it while hovering)
+        cursor.hide()
         var out: [TouchCommand] = []
         for touch in touches {
             let key = ObjectIdentifier(touch)
@@ -151,10 +168,109 @@ final class CanvasView: UIView {
         obey(out)
     }
 
-    /// The Pencil's double tap: what Gesture controls set it to do, where the Pencil last was.
-    func pencilTapped() {
-        let at = pencilAt ?? CGPoint(x: bounds.midX, y: bounds.midY)
-        obey(session.touchPenButton(second: false, x: Float(at.x * scale), y: Float(at.y * scale)))
+    // MARK: the Pencil's own gestures
+
+    /// The Pencil held over the canvas: the core follows it (the brush's outline, Hover's touch, a
+    /// squeeze held meanwhile), and the outline shows as strongly as the core says.
+    @objc private func pencilHovered(_ hover: UIHoverGestureRecognizer) {
+        switch hover.state {
+        case .began, .changed:
+            let at = hover.location(in: self)
+            pencilAt = at
+            obey(session.touchPenHover(hover: penHover(at, height: hover.zOffset, seconds: CACurrentMediaTime())))
+            showHoverCursor()
+        default:
+            obey(session.touchPenHover(hover: nil))
+            cursor.hide()
+        }
+    }
+
+    /// A trackpad's or mouse's pointer over the canvas: the brush's outline follows it (it isn't
+    /// the Pencil's hover, which sets the brush with a finger).
+    @objc private func pointerHovered(_ hover: UIHoverGestureRecognizer) {
+        switch hover.state {
+        case .began, .changed:
+            // a pointer has no height over the glass: one that has is the Pencil, followed above
+            guard hover.zOffset == 0 else { return }
+            cursor.show(at: hover.location(in: self), alpha: 1, session: session, pixels: scale)
+        default:
+            cursor.hide()
+        }
+    }
+
+    /// The outline under the hovering Pencil, as the core has it.
+    private func showHoverCursor() {
+        guard let shown = session.penHoverCursor() else {
+            cursor.hide()
+            return
+        }
+        let at = CGPoint(x: CGFloat(shown.x) / scale, y: CGFloat(shown.y) / scale)
+        cursor.show(at: at, alpha: CGFloat(shown.alpha), session: session, pixels: scale)
+    }
+
+    /// The Pencil's double-tap, where it hovers (`hovering`, else where it last was): what Gesture
+    /// controls set it to do, else what the system's own setting for it asks (`action`); that set
+    /// to off, nothing.
+    func pencilDoubleTapped(at hovering: CGPoint?, action: UIPencilPreferredAction) {
+        if let hovering {
+            pencilAt = hovering
+        }
+        let at = hovering ?? pencilAt ?? CGPoint(x: bounds.midX, y: bounds.midY)
+        obey(session.touchPenDoubleTap(preferred: penPreferred(action), x: Float(at.x * scale), y: Float(at.y * scale)))
+    }
+
+    /// The Pencil squeezed (Apple Pencil Pro): what Gesture controls set it to do, held (the
+    /// eyedropper's loupe and Layer Select follow the hovering Pencil), else what the system's own
+    /// setting for a squeeze asks (`action`).
+    @available(iOS 17.5, *)
+    func pencilSqueezed(_ squeeze: UIPencilInteraction.Squeeze, action: UIPencilPreferredAction) {
+        let phase: SqueezePhase
+        switch squeeze.phase {
+        case .began:
+            phase = .began
+        case .changed:
+            phase = .changed
+        case .ended:
+            phase = .ended
+        case .cancelled:
+            phase = .cancelled
+        @unknown default:
+            phase = .cancelled
+        }
+        var hover: PenHover?
+        if let pose = squeeze.hoverPose {
+            pencilAt = pose.location
+            hover = penHover(pose.location, height: pose.zOffset, seconds: squeeze.timestamp)
+        }
+        obey(session.touchPenSqueeze(phase: phase, preferred: penPreferred(action), hover: hover, timeMs: squeeze.timestamp * 1000))
+        // the eyedropper's loupe stands in for the outline while it shows
+        showHoverCursor()
+    }
+
+    /// The Pencil over the canvas as the core takes it: pixels, its height (0..1 of how high it is
+    /// sensed), and the time in milliseconds of the clock the touches run on.
+    private func penHover(_ at: CGPoint, height: CGFloat, seconds: TimeInterval) -> PenHover {
+        PenHover(x: Float(at.x * scale), y: Float(at.y * scale), height: Float(height), timeMs: seconds * 1000)
+    }
+
+    /// The system's own setting for a Pencil gesture (Settings, Apple Pencil), as the core takes it.
+    private func penPreferred(_ action: UIPencilPreferredAction) -> PenPreferred {
+        switch action {
+        case .ignore:
+            return .ignore
+        case .switchEraser:
+            return .switchEraser
+        case .switchPrevious:
+            return .switchPrevious
+        case .showColorPalette:
+            return .showColours
+        case .showInkAttributes:
+            return .showInkAttributes
+        default:
+            // the newer choices (iPadOS 17.5) by number: a palette where the Pencil is, and a
+            // shortcut the system runs itself; one still newer is the system's own too
+            return action.rawValue == 5 ? .showContextualPalette : .runSystemShortcut
+        }
     }
 
     private func kind(of touch: UITouch) -> PointerKind {
@@ -178,7 +294,8 @@ final class CanvasView: UIView {
     /// One sample, as the core takes it: pixels; pressure 0..1 (the force against the most the
     /// device senses; a touch with none presses fully); the lean from upright and the direction
     /// the Pencil's top leans, clockwise from up (its azimuth is from the view's x axis); the time
-    /// in milliseconds of the clock the core's waits run on (`CACurrentMediaTime`'s).
+    /// in milliseconds of the clock the core's waits run on (`CACurrentMediaTime`'s); and how far
+    /// the barrel is turned (Apple Pencil Pro, iPadOS 17.5; 0 for the others).
     private func sample(_ touch: UITouch) -> PenSample {
         let at = touch.preciseLocation(in: self)
         let pencil = touch.type == .pencil
@@ -192,13 +309,18 @@ final class CanvasView: UIView {
         if lean < 0 {
             lean += 2 * Double.pi
         }
+        var roll: Float = 0
+        if #available(iOS 17.5, *), pencil {
+            roll = Float(touch.rollAngle)
+        }
         return PenSample(
             x: Float(at.x * scale),
             y: Float(at.y * scale),
             pressure: Float(min(max(force, 0), 1)),
             tilt: Float(tilt),
             orientation: Float(lean),
-            timeMs: touch.timestamp * 1000
+            timeMs: touch.timestamp * 1000,
+            roll: roll
         )
     }
 

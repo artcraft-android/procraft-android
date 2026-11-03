@@ -168,7 +168,15 @@ impl Input {
     /// A sample of pointer `id` at `(x, y)`: a pen's with its lean, if the system gave one.
     fn sample(&self, id: u64, (x, y): (f32, f32), pressure: f32) -> Vec<PenSample> {
         let (tilt, orientation) = crate::pen::lean(id).unwrap_or((0.0, 0.0));
-        vec![PenSample { x, y, pressure: pressure.clamp(0.0, 1.0), tilt, orientation, time_ms: self.now_ms() }]
+        vec![PenSample {
+            x,
+            y,
+            pressure: pressure.clamp(0.0, 1.0),
+            tilt,
+            orientation,
+            time_ms: self.now_ms(),
+            roll: 0.0,
+        }]
     }
 
     fn pressed(&mut self, session: &CanvasSession, id: u64, kind: PointerKind, at: (f32, f32), pressure: f32) {

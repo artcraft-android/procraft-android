@@ -30,13 +30,15 @@ pub struct Sample {
     pub tilt: f32,
     /// Direction the pen leans towards, radians clockwise from screen-up.
     pub azimuth: f32,
+    /// How far the pen's barrel is turned, radians (0 for a pen that doesn't say).
+    pub roll: f32,
     /// Milliseconds on a monotonic clock.
     pub time_ms: f64,
 }
 
 impl Sample {
     pub fn at(pos: Vec2, pressure: f32, time_ms: f64) -> Sample {
-        Sample { pos, pressure, tilt: 0.0, azimuth: 0.0, time_ms }
+        Sample { pos, pressure, tilt: 0.0, azimuth: 0.0, roll: 0.0, time_ms }
     }
 
     pub fn is_finite(&self) -> bool {

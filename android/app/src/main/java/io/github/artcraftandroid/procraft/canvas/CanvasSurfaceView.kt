@@ -227,6 +227,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             // an adjustment's amount, liquify, the clone source and the like changed; a tap opens its menu
             TouchCommand.AdjustChanged -> vm.adjustTouched()
             is TouchCommand.AdjustMenu -> if (!closedAdjustMenu) vm.adjustMenuAt = Offset(c.x, c.y)
+            // what a pen's own settings ask its double-tap or squeeze to show
+            TouchCommand.ShowColours -> vm.toggle(Panel.COLOR)
+            TouchCommand.ShowBrushes -> vm.toggle(Panel.BRUSHES)
         }
     }
 

@@ -2577,6 +2577,7 @@ fn window_samples(samples: &[PenSample]) -> Vec<Sample> {
             pressure: s.pressure,
             tilt: s.tilt,
             azimuth: s.orientation,
+            roll: s.roll,
             time_ms: s.time_ms,
         })
         .collect()
@@ -2743,7 +2744,7 @@ mod tests {
                         f 1/1 2/2 6/3 5/4\nf 2/1 3/2 7/3 6/4\nf 1/1 5/2 8/3 4/4\n";
 
     fn sample(x: f32, y: f32, t: f64) -> PenSample {
-        PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: t }
+        PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: t, roll: 0.0 }
     }
 
     /// Draws a frame of the model into a `side` square texture.

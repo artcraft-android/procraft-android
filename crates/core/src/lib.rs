@@ -147,8 +147,8 @@ pub use timelapse::{
     time_lapse_side,
 };
 pub use touch::{
-    COMPANION_ZOOM_DISTANCE, CompanionMode, Fill, GestureAction, SelectKind, SelectTouch, TouchCommand, TouchSettings,
-    TransformTouch,
+    COMPANION_ZOOM_DISTANCE, CompanionMode, Fill, GestureAction, HoverCursor, PenHover, PenPreferred, SelectKind,
+    SelectTouch, SqueezePhase, TouchCommand, TouchSettings, TransformTouch,
 };
 pub use transform::{
     GuideSettings, Interpolation, ScreenBox, TransformAction, TransformBox, TransformHandle, TransformKind, handle_at,
@@ -208,6 +208,10 @@ pub struct PenSample {
     pub orientation: f32,
     /// Milliseconds, the platform's event clock.
     pub time_ms: f64,
+    /// Radians the pen's barrel is turned (a brush set to azimuth and barrel roll turns with it);
+    /// 0 for a pen that doesn't say.
+    #[uniffi(default = 0.0)]
+    pub roll: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -353,6 +357,8 @@ pub(crate) struct State {
     pub(crate) window_size: (u32, u32),
     pub(crate) reconfigure: bool,
     tool: ToolKind,
+    /// The tool chosen before this one (not one a stroke only borrowed).
+    previous_tool: Option<ToolKind>,
     /// The app's own smoothing and pressure, on top of every brush's.
     pub(crate) input: procraft_engine::stroke::InputSettings,
     /// Selection mask visibility, 0..1: how strongly what is not selected is banded.
@@ -791,6 +797,7 @@ impl State {
                 pressure: s.pressure,
                 tilt: s.tilt,
                 azimuth: s.orientation,
+                roll: s.roll,
                 time_ms: s.time_ms,
             })
             .collect()
@@ -1104,6 +1111,7 @@ impl CanvasSession {
             window_size: (1, 1),
             reconfigure: false,
             tool: ToolKind::Paint,
+            previous_tool: None,
             text_edit: None,
             text_drawn: None,
             text_steps: Vec::new(),
@@ -1643,8 +1651,19 @@ impl CanvasSession {
         self.shared.lock().saved_view = None;
     }
 
+    /// The tool chosen; the one it replaces is kept as the last used (a pen's "switch to the
+    /// previous tool" goes back to it).
     pub fn set_tool(&self, tool: ToolKind) {
-        self.shared.lock().tool = tool;
+        let mut st = self.shared.lock();
+        if st.tool != tool {
+            st.previous_tool = Some(st.tool);
+        }
+        st.tool = tool;
+    }
+
+    /// The paint colour, sRGB 0..1 (red, green, blue).
+    pub fn color(&self) -> Vec<f32> {
+        self.shared.lock().color.to_vec()
     }
 
     /// The current tool's size slider, 0..1.

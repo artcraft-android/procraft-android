@@ -78,7 +78,8 @@ mod tests {
         // a canvas given it adds a paint stroke's colour as the stroke ends; erasing adds none
         let s = CanvasSession::new(64, 64);
         s.use_colour_history(h.clone());
-        let at = |ms| vec![PenSample { x: 1.0, y: 1.0, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: ms }];
+        let at =
+            |ms| vec![PenSample { x: 1.0, y: 1.0, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: ms, roll: 0.0 }];
         s.set_color(1.0, 0.0, 0.0);
         s.stroke_end(at(0.0));
         assert_eq!(h.colours(), vec![0xFF0000]);

@@ -19,6 +19,8 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
     private let onClose: () -> Void
     private let canvas: CanvasView
     private var observers: [NSObjectProtocol] = []
+    /// The colour under the eyedropper while it is open (0xRRGGBB).
+    private var picked: UInt32?
 
     init(artwork: OpenArtwork, onClose: @escaping () -> Void) {
         self.artwork = artwork
@@ -73,6 +75,20 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 _ = artwork.session.redo()
             case .fit:
                 artwork.session.settleToFit()
+            // the eyedropper (a hold, a squeeze): the colour under it, taken as it lets go (its
+            // loupe is still to come)
+            case let .pick(x, y):
+                if let rgb = artwork.session.pick(x: x, y: y, side: 1)?.rgb {
+                    picked = rgb
+                }
+            case .pickDone:
+                if let rgb = picked {
+                    let channel = { (shift: UInt32) in Float((rgb >> shift) & 0xFF) / 255 }
+                    artwork.session.setColor(r: channel(16), g: channel(8), b: channel(0))
+                }
+                picked = nil
+            case .pickCancel:
+                picked = nil
             default:
                 break
             }
@@ -111,7 +127,21 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
 
     // MARK: UIPencilInteractionDelegate
 
+    /// The double-tap before iPadOS 17.5 (from then on it comes with where the Pencil hovers, below).
     func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
-        canvas.pencilTapped()
+        if #available(iOS 17.5, *) {
+            return
+        }
+        canvas.pencilDoubleTapped(at: nil, action: UIPencilInteraction.preferredTapAction)
+    }
+
+    @available(iOS 17.5, *)
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
+        canvas.pencilDoubleTapped(at: tap.hoverPose?.location, action: UIPencilInteraction.preferredTapAction)
+    }
+
+    @available(iOS 17.5, *)
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
+        canvas.pencilSqueezed(squeeze, action: UIPencilInteraction.preferredSqueezeAction)
     }
 }

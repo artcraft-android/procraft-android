@@ -14,6 +14,10 @@
 
 use std::sync::Mutex;
 
+mod pen;
+
+pub use pen::{HoverCursor, PenHover, PenPreferred, SqueezePhase};
+
 use crate::adjust_menu::Adjustment;
 use crate::adjusting::{CLONE_PUCK_RADIUS, CLONE_PUCK_SLOP};
 use crate::{CanvasSession, PenSample, PointerKind, ToolKind};
@@ -282,6 +286,10 @@ pub enum TouchCommand {
         x: f32,
         y: f32,
     },
+    /// The colour panel opens (or closes); the brush library: what the pen's own settings on the
+    /// platform ask its double-tap or squeeze to show ([`crate::PenPreferred`]).
+    ShowColours,
+    ShowBrushes,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -415,6 +423,8 @@ pub(crate) struct Touches {
     pen_hovering: bool,
     hover_x: f32,
     hover_spread: f32,
+    /// The pen's own gestures: where it hovers, and a squeeze held.
+    pen: pen::PenState,
     /// Window pixels a point.
     scale: f32,
 }
@@ -484,6 +494,7 @@ impl Default for Touches {
             pen_hovering: false,
             hover_x: 0.0,
             hover_spread: 0.0,
+            pen: pen::PenState::default(),
             scale: 1.0,
         }
     }
@@ -524,6 +535,11 @@ fn is_pen(kind: PointerKind) -> bool {
 impl CanvasSession {
     fn touches(&self) -> std::sync::MutexGuard<'_, Touches> {
         self.shared.touches.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The tool a stroke borrows (or the one it gives back): not counted as one chosen.
+    fn put_tool(&self, tool: ToolKind) {
+        self.shared.lock().tool = tool;
     }
 }
 
@@ -961,37 +977,6 @@ impl CanvasSession {
         self.lifted(id, samples, false)
     }
 
-    /// The pen's button pressed (its `second`), hovering or touching at (`x`, `y`): what Gesture
-    /// controls set it to do. Set to nothing, the first switches between the current tool and the
-    /// eraser, and back, as a pen's double-tap does by default.
-    pub fn touch_pen_button(&self, second: bool, x: f32, y: f32) -> Vec<TouchCommand> {
-        let mut out = Vec::new();
-        let mut t = self.touches();
-        match if second { t.settings.pen_second_button } else { t.settings.pen_button } {
-            // the next touch picks a colour
-            Some(GestureAction::Eyedropper) => t.pick_next = true,
-            Some(GestureAction::Assisted) => {
-                drop(t);
-                let on = self.guide().assisted;
-                self.set_guide_assisted(!on);
-            }
-            Some(action) => Self::act(action, (x, y), &mut out),
-            None if !second => {
-                let tool = self.shared.lock().tool;
-                let next = if tool == ToolKind::Erase {
-                    t.tool_before_eraser.take().unwrap_or(ToolKind::Paint)
-                } else {
-                    t.tool_before_eraser = Some(tool);
-                    ToolKind::Erase
-                };
-                drop(t);
-                self.set_tool(next);
-            }
-            None => {}
-        }
-        out
-    }
-
     /// The platform took back one pointer (it was a hand resting on the screen): what it alone
     /// was doing is taken back, and the touch it was part of is no tap.
     pub fn touch_cancel_one(&self, id: u64) -> Vec<TouchCommand> {
@@ -1053,7 +1038,7 @@ impl CanvasSession {
                     out.push(TouchCommand::CursorGone);
                 }
                 if let Some(before) = tool {
-                    self.set_tool(before);
+                    self.put_tool(before);
                 }
                 Self::act(purpose, at, &mut out);
                 t = self.touches();
@@ -1100,8 +1085,9 @@ impl CanvasSession {
         t.tap_pointers = 1;
         t.tap_moved = 0.0;
         let id = t.down.first().map_or(0, |d| d.id);
-        if t.pick_next {
-            // the modify button was tapped: this touch picks a colour
+        // the modify button was tapped (or the pen is squeezed for the eyedropper, and touches):
+        // this touch picks a colour
+        if t.pick_next || (is_pen(kind) && t.pen.squeeze_takes_touch()) {
             t.mode = Mode::Pick;
             out.push(TouchCommand::Pick { x: at.0, y: at.1 });
             return;
@@ -1416,7 +1402,7 @@ impl CanvasSession {
                     }
                     self.set_stroke_assist(false);
                     if let Some(before) = self.touches().tool_before.take() {
-                        self.set_tool(before);
+                        self.put_tool(before);
                     }
                     out.push(TouchCommand::StrokeEnded);
                 }
@@ -1623,17 +1609,18 @@ impl CanvasSession {
     /// The tool and drawing assist as they were before a stroke that used others.
     fn end_stroke_tools(&self, t: &mut Touches) {
         if let Some(before) = t.tool_before.take() {
-            self.set_tool(before);
+            self.put_tool(before);
         }
         if std::mem::take(&mut t.assisted) {
             self.set_stroke_assist(false);
         }
     }
 
-    /// Paints with `tool` for a stroke; returns the tool chosen before, to put back after.
+    /// Paints with `tool` for a stroke; returns the tool chosen before, to put back after (as for
+    /// the stroke only, neither counts as the tool chosen last).
     fn swap_tool(&self, tool: ToolKind) -> ToolKind {
         let before = self.shared.lock().tool;
-        self.set_tool(tool);
+        self.put_tool(tool);
         before
     }
 
@@ -1913,7 +1900,7 @@ mod tests {
     use super::*;
 
     fn at(x: f32, y: f32, ms: f64) -> Vec<PenSample> {
-        vec![PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: ms }]
+        vec![PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: ms, roll: 0.0 }]
     }
 
     fn session() -> std::sync::Arc<CanvasSession> {
@@ -1935,6 +1922,7 @@ mod tests {
                 tilt: 0.4,
                 orientation: 1.0,
                 time_ms: ms,
+                roll: 0.0,
             }
         };
         s.touch_down(1, PointerKind::Stylus, vec![sample(0, 0.0)]);

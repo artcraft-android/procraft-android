@@ -1005,6 +1005,9 @@ impl Interface {
                 TouchCommand::CopyPaste => self.copy_paste = true,
                 TouchCommand::LayerSelect { x, y } => self.layer_select(ctx, session, x, y),
                 TouchCommand::QuickMenu { x, y } => self.quick_menu.toggle(egui::pos2(x, y) / ctx.pixels_per_point()),
+                // what a pen's own settings ask its button to show
+                TouchCommand::ShowColours => self.toggle(session, Popover::Colour),
+                TouchCommand::ShowBrushes => self.toggle(session, Popover::Brushes),
                 // a stroke or a fill on a text layer: it takes them once rasterized
                 TouchCommand::TextLayer => self.text.ask_rasterize(),
                 // (the pen's hover, which sets the brush with a finger, isn't the desktop's)
