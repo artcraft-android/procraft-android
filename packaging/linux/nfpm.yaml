@@ -36,6 +36,11 @@ depends:
 recommends:
   - mesa-vulkan-drivers
   - xdg-desktop-portal
+  # run when used: videos (time-lapse, animation exports, a video opened as frames), PDFs opened,
+  # and Feedback Sounds' click; without them those say what to install, or stay silent
+  - ffmpeg
+  - poppler-utils
+  - pipewire-bin | pulseaudio-utils | alsa-utils
 
 contents:
   - src: ${STAGE}/usr/bin/procraft
