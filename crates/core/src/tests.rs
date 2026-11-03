@@ -393,6 +393,21 @@ fn operation_cost() {
         s.stroke_begin(PointerKind::Finger, vec![sample(300.0, 300.0, 0.0)]);
         s.stroke_end(vec![]);
         timed("save after a stroke", &|| s.save(dir.clone()).unwrap());
+        // what drawing waits for while a save is made beside it: the longest the lock was held
+        s.stroke_begin(PointerKind::Finger, vec![sample(900.0, 300.0, 0.0)]);
+        s.stroke_end(vec![]);
+        let longest = std::thread::scope(|scope| {
+            let saving = scope.spawn(|| s.save(dir.clone()).unwrap());
+            let mut longest = 0.0f64;
+            while !saving.is_finished() {
+                let t = std::time::Instant::now();
+                drop(s.shared.lock());
+                longest = longest.max(ms(t));
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            longest
+        });
+        println!("a save beside drawing: the lock waited at most {longest:.1} ms");
         // opened again: read, then its canvas made (as the window does on its thread)
         let t = std::time::Instant::now();
         let opened = CanvasSession::open(dir.clone()).unwrap();
