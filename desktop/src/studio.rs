@@ -1367,7 +1367,15 @@ impl Studio {
         let ms = self.started.map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0);
         let sample = |p: Pos2| {
             let local = (p - area.min) * ppp;
-            vec![PenSample { x: local.x, y: local.y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: ms }]
+            vec![PenSample {
+                x: local.x,
+                y: local.y,
+                pressure: 1.0,
+                tilt: 0.0,
+                orientation: 0.0,
+                time_ms: ms,
+                roll: 0.0,
+            }]
         };
         let Some(p) = response.interact_pointer_pos() else { return };
         if response.drag_started() {

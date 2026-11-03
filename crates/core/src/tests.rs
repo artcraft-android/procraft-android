@@ -6,7 +6,7 @@ use procraft_gpu::Gpu;
 use crate::{CanvasSession, PenSample, PointerKind, ToolKind};
 
 fn sample(x: f32, y: f32, t: f64) -> PenSample {
-    PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: t }
+    PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, roll: 0.0, time_ms: t }
 }
 
 /// A session on a headless GPU with a `window` × `window` "screen", or `None` without a GPU.
@@ -62,6 +62,7 @@ fn stroke_cost() {
             pressure: 0.3 + 0.6 * (t * 40.0).sin().abs(),
             tilt: 0.0,
             orientation: 0.0,
+            roll: 0.0,
             time_ms: k as f64 * 4.17,
         }
     };
@@ -6993,6 +6994,7 @@ fn brushes_set_anyhow_paint_smudge_and_erase_without_errors() {
             pressure,
             tilt,
             orientation: k as f32 * 0.2,
+            roll: 0.0,
             time_ms: f64::from(k) * 8.0,
         };
         s.stroke_begin(kind, vec![at(0, 0.0, 0.0)]);

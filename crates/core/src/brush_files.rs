@@ -695,6 +695,9 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
                 // a plain image: the stamp's whole square (nothing, inverted)
                 let fill = if *inverted { 0 } else { 255 };
                 (None, Source::new(vec![fill; TEXTURE_SIZE * TEXTURE_SIZE]), None)
+            } else if has(&["oval"]) && has(&["slim", "thin", "narrow"]) {
+                // a flat oval, not the round tip
+                (Some(shape::SLIM_OVAL), None, None)
             } else if has(&["medium-hard", "medium hard", "mediumhard"]) {
                 (None, None, Some(0.75))
             } else if has(&["hard", "pen", "solid", "oval", "round"]) && !has(&["soft", "ink"]) {
@@ -1001,6 +1004,10 @@ mod tests {
             (None, None, Some(0.95))
         );
         assert_eq!(shape_for(&Texture::Stock { name: "Soft.png".into(), inverted: false }).0, Some(shape::SOFT_ROUND));
+        assert_eq!(
+            shape_for(&Texture::Stock { name: "Brush-Preset-Slim-Oval.png".into(), inverted: false }),
+            (Some(shape::SLIM_OVAL), None, None)
+        );
         assert_eq!(shape_for(&Texture::Stock { name: "Spray-Fine.jpg".into(), inverted: false }).0, Some(shape::SPRAY));
         assert_eq!(grain_for(&Texture::Stock { name: "Blank.png".into(), inverted: false }, None), (None, None));
         assert_eq!(

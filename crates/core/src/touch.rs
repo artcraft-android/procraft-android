@@ -1913,7 +1913,7 @@ mod tests {
     use super::*;
 
     fn at(x: f32, y: f32, ms: f64) -> Vec<PenSample> {
-        vec![PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: ms }]
+        vec![PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, roll: 0.0, time_ms: ms }]
     }
 
     fn session() -> std::sync::Arc<CanvasSession> {
@@ -1934,6 +1934,7 @@ mod tests {
                 pressure: 0.3 + 0.6 * (u * 0.01).sin().abs(),
                 tilt: 0.4,
                 orientation: 1.0,
+                roll: 0.0,
                 time_ms: ms,
             }
         };

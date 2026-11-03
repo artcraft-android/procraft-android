@@ -276,6 +276,7 @@ impl Brush {
                 // touch only, azimuth, or azimuth and barrel roll (which turns with the azimuth)
                 let style = value.round().clamp(0.0, 2.0);
                 self.shape.follow_azimuth = style >= 1.0;
+                self.shape.follow_roll = style >= 2.0;
                 self.extra.insert(key.to_owned(), style);
             }
             // how far the stamp turns with the stroke (its fixed angle is the shape's own)

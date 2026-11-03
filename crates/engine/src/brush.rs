@@ -292,6 +292,8 @@ pub struct Shape {
     pub follow: f32,
     /// Turn with the direction the pen leans.
     pub follow_azimuth: bool,
+    /// Turn as the pen is turned about its length (barrel roll), as well.
+    pub follow_roll: bool,
     /// A random rotation, the same for every stamp of a stroke.
     pub randomise: bool,
     /// 1 = as drawn; lower squashes the stamp across its rotation.
@@ -317,6 +319,7 @@ impl Default for Shape {
             rotation: 0.0,
             follow: 0.0,
             follow_azimuth: false,
+            follow_roll: false,
             randomise: false,
             roundness: 1.0,
             scatter: 0.0,

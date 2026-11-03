@@ -201,6 +201,10 @@ pub struct PenSample {
     pub orientation: f32,
     /// Milliseconds, the platform's event clock.
     pub time_ms: f64,
+    /// Radians clockwise, how far the pen is turned about its length (barrel roll); 0 for pens
+    /// that don't say. Last, so that callers who don't give it can leave it out.
+    #[uniffi(default = 0.0)]
+    pub roll: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -782,6 +786,7 @@ impl State {
                 pressure: s.pressure,
                 tilt: s.tilt,
                 azimuth: s.orientation,
+                roll: s.roll,
                 time_ms: s.time_ms,
             })
             .collect()
