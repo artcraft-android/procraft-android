@@ -1268,7 +1268,8 @@ impl CanvasSession {
                 _ => {}
             }
         }
-        if !pen && does.is_none() && !t.settings.finger_paint {
+        // a finger set not to paint (a mouse, a desktop's drawing tool, paints as the pen does)
+        if kind == PointerKind::Finger && does.is_none() && !t.settings.finger_paint {
             t.mode = Mode::Idle;
             // set to move the canvas: it does once it moves past a tap's slop
             if t.settings.one_finger_pan {
@@ -2388,10 +2389,12 @@ mod tests {
         s.touch_down(2, PointerKind::Finger, at(200.0, 100.0, 2010.0));
         s.touch_up(1, at(100.0, 100.0, 2050.0));
         assert!(s.touch_up(2, at(200.0, 100.0, 2060.0)).contains(&TouchCommand::Undo));
-        // the pen paints
-        s.touch_down(3, PointerKind::Stylus, at(10.0, 10.0, 3000.0));
-        s.touch_move(3, at(60.0, 10.0, 3020.0));
-        assert!(s.touch_up(3, at(60.0, 10.0, 3040.0)).contains(&TouchCommand::StrokeEnded));
+        // the pen paints, and so does a mouse (a desktop's drawing tool)
+        for kind in [PointerKind::Stylus, PointerKind::Mouse] {
+            s.touch_down(3, kind, at(10.0, 10.0, 3000.0));
+            s.touch_move(3, at(60.0, 10.0, 3020.0));
+            assert!(s.touch_up(3, at(60.0, 10.0, 3040.0)).contains(&TouchCommand::StrokeEnded), "{kind:?}");
+        }
         // painting with a finger back on: the finger paints again
         assert_eq!(
             g.set(crate::gestures::GesturePurpose::General, "FINGER_PAINT".into(), true).get("GENERAL.ONE_FINGER_PAN"),
