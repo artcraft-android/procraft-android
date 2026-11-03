@@ -5,8 +5,10 @@
 //! (`host.rs`).
 //!
 //! On Android the window crosses over through two small JNI functions (`window.rs`, the crate's
-//! only unsafe code): Kotlin hands its `Surface` to `NativeWindows.acquire` and passes the id it
-//! returns to [`CanvasSession::attach_window`].
+//! only unsafe code with `layer.rs`): Kotlin hands its `Surface` to `NativeWindows.acquire` and
+//! passes the id it returns to [`CanvasSession::attach_window`]. The iPad app (UniFFI's Swift
+//! bindings) hands its canvas view's `CAMetalLayer` to `acquire_layer` (`layer.rs`) the same way,
+//! and the same render thread draws into it.
 
 uniffi::setup_scaffolding!();
 
@@ -31,6 +33,8 @@ mod history;
 mod host;
 mod hues;
 mod keys;
+#[cfg(target_os = "ios")]
+mod layer;
 mod layer_ops;
 mod layers;
 mod modes;
@@ -45,7 +49,7 @@ mod quick_menu;
 mod quickshape;
 mod recolor;
 mod reference_view;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 mod render;
 mod scene3d;
 mod selection;
@@ -59,6 +63,9 @@ mod touch;
 mod transform;
 #[cfg(target_os = "android")]
 mod window;
+// the iPad app's window is its layer: taken and drawn into as Android's is
+#[cfg(target_os = "ios")]
+use layer as window;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -1207,11 +1214,12 @@ impl CanvasSession {
 
 #[uniffi::export]
 impl CanvasSession {
-    /// Starts drawing into the window `window` (an id from `NativeWindows.acquire`), `width` ×
-    /// `height` pixels. The session owns the window from here on.
+    /// Starts drawing into the window `window` (an id from `NativeWindows.acquire`, or on iPadOS
+    /// from `acquire_layer`), `width` × `height` pixels. The session owns the window from
+    /// here on.
     pub fn attach_window(&self, window: u64, width: u32, height: u32) -> Result<(), MobileError> {
         self.detach_window();
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let native =
                 window::take(window).ok_or_else(|| MobileError::Window { reason: format!("no window {window}") })?;
@@ -1231,10 +1239,10 @@ impl CanvasSession {
             *self.shared.thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
             Ok(())
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             let _ = (width, height);
-            Err(MobileError::Window { reason: format!("windows are Android-only (asked for {window})") })
+            Err(MobileError::Window { reason: format!("windows are the tablet apps' only (asked for {window})") })
         }
     }
 

@@ -1,7 +1,7 @@
 //! Frames as an MP4 video through the system's own encoder, as the Android app's VideoWriter does
 //! with MediaCodec: H.264 or HEVC, at a frame rate, the bit rate four bits a pixel a second (at
-//! least a megabit). On Windows that is Media Foundation; elsewhere the system's ffmpeg, the
-//! frames piped to it raw (and read back from it the same way).
+//! least a megabit). On Windows that is Media Foundation; on a Mac AVFoundation; elsewhere the
+//! system's ffmpeg, the frames piped to it raw (and read back from it the same way).
 
 use std::path::Path;
 
@@ -214,14 +214,314 @@ mod system {
     }
 }
 
+/// AVFoundation's writer and reader on a Mac (its encoders and decoders VideoToolbox's), in the
+/// shape of the Media Foundation module's: unsafe as the system's calls are.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod system {
+    use std::path::Path;
+    use std::ptr::NonNull;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2_av_foundation::{
+        AVAssetReader, AVAssetReaderStatus, AVAssetReaderTrackOutput, AVAssetTrack, AVAssetWriter, AVAssetWriterInput,
+        AVAssetWriterInputPixelBufferAdaptor, AVAssetWriterStatus, AVFileTypeMPEG4, AVMediaTypeVideo, AVURLAsset,
+        AVVideoAverageBitRateKey, AVVideoCodecKey, AVVideoCodecTypeH264, AVVideoCodecTypeHEVC,
+        AVVideoColorPrimaries_ITU_R_709_2, AVVideoColorPrimariesKey, AVVideoColorPropertiesKey,
+        AVVideoCompressionPropertiesKey, AVVideoHeightKey, AVVideoTransferFunction_ITU_R_709_2,
+        AVVideoTransferFunctionKey, AVVideoWidthKey, AVVideoYCbCrMatrix_ITU_R_709_2, AVVideoYCbCrMatrixKey,
+    };
+    use objc2_core_foundation::{CFRetained, CFString};
+    use objc2_core_media::CMTime;
+    use objc2_core_video::{
+        CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
+        CVPixelBufferGetDataSize, CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+        CVPixelBufferLockFlags, CVPixelBufferPool, CVPixelBufferUnlockBaseAddress, kCVPixelBufferHeightKey,
+        kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey, kCVPixelFormatType_32BGRA, kCVReturnSuccess,
+    };
+    use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSString, NSURL};
+
+    /// How long the encoder may take to want the next frame, or to finish the file; and the
+    /// video's tracks to be found.
+    const WAIT: Duration = Duration::from_secs(30);
+
+    /// What went wrong, as the system says it, else `what`.
+    fn said(error: Option<Retained<NSError>>, what: &str) -> String {
+        error.map_or_else(|| what.to_owned(), |e| e.localizedDescription().to_string())
+    }
+
+    /// One of the system's names (a setting's key, a codec's), which an old system may lack.
+    fn name(known: Option<&'static NSString>) -> Result<&'static NSString, String> {
+        known.ok_or_else(|| "this system lacks a video setting".to_owned())
+    }
+
+    /// A Core Foundation string as the Foundation one it is the same as.
+    fn bridged(s: &'static CFString) -> &'static NSString {
+        // SAFETY: the two are one type to the system (toll-free bridged)
+        unsafe { &*(s as *const CFString).cast::<NSString>() }
+    }
+
+    fn file_url(path: &Path) -> Result<Retained<NSURL>, String> {
+        NSURL::from_file_path(path).ok_or_else(|| format!("{} isn't a file's path", path.display()))
+    }
+
+    /// Pixel buffers of 32-bit BGRA, `width` × `height` if given.
+    fn bgra(size: Option<(u32, u32)>) -> Retained<NSDictionary<NSString, AnyObject>> {
+        // SAFETY: the system's own constant keys, there for as long as the app runs
+        let (format, width, height) =
+            unsafe { (kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey, kCVPixelBufferHeightKey) };
+        let mut keys = vec![bridged(format)];
+        let mut values = vec![NSNumber::new_u32(kCVPixelFormatType_32BGRA)];
+        if let Some((w, h)) = size {
+            keys.extend([bridged(width), bridged(height)]);
+            values.extend([NSNumber::new_u32(w), NSNumber::new_u32(h)]);
+        }
+        let values: Vec<&AnyObject> = values.iter().map(|v| v.as_ref()).collect();
+        NSDictionary::from_slices(&keys, &values)
+    }
+
+    /// A writer whose encoder takes `width` × `height` frames, its input and the adaptor its
+    /// frames go in through.
+    pub struct Writer {
+        writer: Retained<AVAssetWriter>,
+        input: Retained<AVAssetWriterInput>,
+        adaptor: Retained<AVAssetWriterInputPixelBufferAdaptor>,
+        width: u32,
+        height: u32,
+        fps: i32,
+        written: i64,
+    }
+
+    impl Writer {
+        pub fn new(out: &Path, width: u32, height: u32, fps: u32, hevc: bool, bits: u32) -> Result<Writer, String> {
+            // the writer won't write over a file
+            let _ = std::fs::remove_file(out);
+            let url = file_url(out)?;
+            let fps = i32::try_from(fps.max(1)).map_err(|e| e.to_string())?;
+            // SAFETY: the system's constant names; the settings are what a compressed video's are
+            // (checked before the input is made, which would throw on ones it can't apply)
+            unsafe {
+                let (file, video) = (name(AVFileTypeMPEG4)?, name(AVMediaTypeVideo)?);
+                let writer =
+                    AVAssetWriter::assetWriterWithURL_fileType_error(&url, file).map_err(|e| said(Some(e), ""))?;
+                // its index at the front, as players streaming it want
+                writer.setShouldOptimizeForNetworkUse(true);
+                let rate = NSNumber::new_u32(super::bit_rate(width, height, bits));
+                let compression = NSDictionary::<NSString, AnyObject>::from_slices(
+                    &[name(AVVideoAverageBitRateKey)?],
+                    &[rate.as_ref()],
+                );
+                // HD video's colours (BT.709), as players take an untagged one
+                let colours = NSDictionary::from_slices(
+                    &[name(AVVideoColorPrimariesKey)?, name(AVVideoTransferFunctionKey)?, name(AVVideoYCbCrMatrixKey)?],
+                    &[
+                        name(AVVideoColorPrimaries_ITU_R_709_2)?,
+                        name(AVVideoTransferFunction_ITU_R_709_2)?,
+                        name(AVVideoYCbCrMatrix_ITU_R_709_2)?,
+                    ],
+                );
+                let codec = name(if hevc { AVVideoCodecTypeHEVC } else { AVVideoCodecTypeH264 })?;
+                let (w, h) = (NSNumber::new_u32(width), NSNumber::new_u32(height));
+                let settings = NSDictionary::<NSString, AnyObject>::from_slices(
+                    &[
+                        name(AVVideoCodecKey)?,
+                        name(AVVideoWidthKey)?,
+                        name(AVVideoHeightKey)?,
+                        name(AVVideoCompressionPropertiesKey)?,
+                        name(AVVideoColorPropertiesKey)?,
+                    ],
+                    &[codec.as_ref(), w.as_ref(), h.as_ref(), compression.as_ref(), colours.as_ref()],
+                );
+                if !writer.canApplyOutputSettings_forMediaType(Some(&settings), video) {
+                    return Err("the system's encoder doesn't take this video".into());
+                }
+                let input = AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(video, Some(&settings));
+                input.setExpectsMediaDataInRealTime(false);
+                let adaptor = AVAssetWriterInputPixelBufferAdaptor::assetWriterInputPixelBufferAdaptorWithAssetWriterInput_sourcePixelBufferAttributes(
+                    &input,
+                    Some(&bgra(Some((width, height)))),
+                );
+                if !writer.canAddInput(&input) {
+                    return Err(said(writer.error(), "the writer takes no such video"));
+                }
+                writer.addInput(&input);
+                if !writer.startWriting() {
+                    return Err(said(writer.error(), "the writer didn't start"));
+                }
+                writer.startSessionAtSourceTime(CMTime::new(0, fps));
+                Ok(Writer { writer, input, adaptor, width, height, fps, written: 0 })
+            }
+        }
+
+        /// A pixel buffer for the next frame: one of the adaptor's, else a new one.
+        fn buffer(&self) -> Result<CFRetained<CVPixelBuffer>, String> {
+            let mut made: *mut CVPixelBuffer = std::ptr::null_mut();
+            // SAFETY: `made` is where the buffer made goes, owned by the caller from then on
+            let done = unsafe {
+                match self.adaptor.pixelBufferPool() {
+                    Some(pool) => CVPixelBufferPool::create_pixel_buffer(None, &pool, NonNull::from(&mut made)),
+                    None => CVPixelBufferCreate(
+                        None,
+                        self.width as usize,
+                        self.height as usize,
+                        kCVPixelFormatType_32BGRA,
+                        None,
+                        NonNull::from(&mut made),
+                    ),
+                }
+            };
+            let made = NonNull::new(made).filter(|_| done == kCVReturnSuccess).ok_or("no pixel buffer for a frame")?;
+            // SAFETY: made for this call, which owns it
+            Ok(unsafe { CFRetained::from_raw(made) })
+        }
+
+        /// The next frame, `bgrx` rows top first (`width` × `height` × 4 bytes).
+        pub fn frame(&mut self, bgrx: &[u8]) -> Result<(), String> {
+            let started = Instant::now();
+            // SAFETY: the writer and its input are this one's own
+            while !unsafe { self.input.isReadyForMoreMediaData() } {
+                if unsafe { self.writer.status() } != AVAssetWriterStatus::Writing {
+                    return Err(said(unsafe { self.writer.error() }, "the writer stopped"));
+                }
+                if started.elapsed() > WAIT {
+                    return Err("the encoder stopped taking frames".into());
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let buffer = self.buffer()?;
+            // SAFETY: the buffer is locked while its rows are written, each within its row's bytes
+            unsafe {
+                if CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags::empty()) != kCVReturnSuccess {
+                    return Err("a frame's pixel buffer can't be written".into());
+                }
+                let base = CVPixelBufferGetBaseAddress(&buffer).cast::<u8>();
+                let stride = CVPixelBufferGetBytesPerRow(&buffer);
+                let row = (self.width as usize * 4).min(CVPixelBufferGetWidth(&buffer) * 4).min(stride);
+                let rows = (self.height as usize).min(CVPixelBufferGetHeight(&buffer));
+                if !base.is_null() {
+                    for (y, src) in bgrx.chunks(self.width as usize * 4).take(rows).enumerate() {
+                        std::ptr::copy_nonoverlapping(src.as_ptr(), base.add(y * stride), row.min(src.len()));
+                    }
+                }
+                CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::empty());
+                let at = CMTime::new(self.written, self.fps);
+                if !self.adaptor.appendPixelBuffer_withPresentationTime(&buffer, at) {
+                    return Err(said(self.writer.error(), "a frame wasn't written"));
+                }
+            }
+            self.written += 1;
+            Ok(())
+        }
+
+        pub fn finish(self) -> Result<(), String> {
+            let (done, finished) = mpsc::channel();
+            let handler = RcBlock::new(move || {
+                let _ = done.send(());
+            });
+            // SAFETY: every frame's append has returned; the handler only says it is done
+            unsafe {
+                self.input.markAsFinished();
+                self.writer.finishWritingWithCompletionHandler(&handler);
+            }
+            finished.recv_timeout(WAIT).map_err(|_| "the video wasn't finished in time")?;
+            if unsafe { self.writer.status() } != AVAssetWriterStatus::Completed {
+                return Err(said(unsafe { self.writer.error() }, "the video wasn't finished"));
+            }
+            Ok(())
+        }
+    }
+
+    /// What a completion hands back from the thread it runs on: the system's tracks and errors
+    /// may be read on any.
+    struct Handed<T>(T);
+
+    // SAFETY: see above
+    unsafe impl<T> Send for Handed<T> {}
+
+    /// The first video track of `asset`, as the system loads its tracks.
+    fn video_track(asset: &AVURLAsset) -> Result<Retained<AVAssetTrack>, String> {
+        let (sent, got) = mpsc::channel();
+        let handler = RcBlock::new(move |tracks: *mut NSArray<AVAssetTrack>, error: *mut NSError| {
+            // SAFETY: the system hands the tracks or an error, each null or alive
+            let (tracks, error) = unsafe { (Retained::retain(tracks), Retained::retain(error)) };
+            let _ = sent.send(Handed(tracks.ok_or_else(|| said(error, "the video's tracks can't be read"))));
+        });
+        // SAFETY: the system's constant name; the handler only hands on what it is given
+        unsafe { asset.loadTracksWithMediaType_completionHandler(name(AVMediaTypeVideo)?, &handler) };
+        let Handed(tracks) = got.recv_timeout(WAIT).map_err(|_| "the video's tracks weren't found in time")?;
+        tracks?.firstObject().ok_or_else(|| "the file has no video".to_owned())
+    }
+
+    /// A decoded frame's pixels as straight RGBA rows, its width and height.
+    fn rgba_of(image: &CVPixelBuffer) -> Option<(Vec<u8>, u32, u32)> {
+        // SAFETY: the buffer is locked while it is read, within its own bytes
+        unsafe {
+            if CVPixelBufferLockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) != kCVReturnSuccess {
+                return None;
+            }
+            let (w, h, stride) =
+                (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image), CVPixelBufferGetBytesPerRow(image));
+            let base = CVPixelBufferGetBaseAddress(image).cast::<u8>().cast_const();
+            let rgba = (!base.is_null()).then(|| {
+                let bytes = std::slice::from_raw_parts(base, CVPixelBufferGetDataSize(image).min(stride * h));
+                let mut rgba = Vec::with_capacity(w * h * 4);
+                for row in bytes.chunks(stride.max(1)).take(h) {
+                    let pixels = row.get(..w * 4).unwrap_or(row);
+                    rgba.extend(pixels.as_chunks::<4>().0.iter().flat_map(|&[b, g, r, _]| [r, g, b, 255]));
+                }
+                rgba
+            });
+            CVPixelBufferUnlockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly);
+            let rgba = rgba.filter(|p| p.len() == w * h * 4)?;
+            Some((rgba, u32::try_from(w).ok()?, u32::try_from(h).ok()?))
+        }
+    }
+
+    /// The frames of the video at `path`, each as straight RGBA rows to `each` with when it
+    /// shows (seconds); how many.
+    pub fn read(path: &Path, each: &mut dyn FnMut(Vec<u8>, u32, u32, f64)) -> Result<u32, String> {
+        let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&*file_url(path)?, None) };
+        let track = video_track(&asset)?;
+        // SAFETY: the asset and its track as the system made them; the output's settings are a
+        // pixel buffer's
+        unsafe {
+            let reader = AVAssetReader::assetReaderWithAsset_error(&asset).map_err(|e| said(Some(e), ""))?;
+            let output =
+                AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(&track, Some(&bgra(None)));
+            output.setAlwaysCopiesSampleData(false);
+            if !reader.canAddOutput(&output) {
+                return Err("the video's frames can't be read".into());
+            }
+            reader.addOutput(&output);
+            if !reader.startReading() {
+                return Err(said(reader.error(), "the video can't be read"));
+            }
+            let mut frames = 0;
+            while let Some(sample) = output.copyNextSampleBuffer() {
+                let Some((rgba, w, h)) = sample.image_buffer().and_then(|image| rgba_of(&image)) else { continue };
+                each(rgba, w, h, sample.presentation_time_stamp().seconds());
+                frames += 1;
+            }
+            if reader.status() == AVAssetReaderStatus::Failed {
+                return Err(said(reader.error(), "the video can't be read"));
+            }
+            Ok(frames)
+        }
+    }
+}
+
 /// The frames of the video at `path`, each as straight RGBA rows (`width`, `height`) to `each`
 /// with when it shows (seconds); how many there were.
 pub fn read_frames(path: &Path, mut each: impl FnMut(Vec<u8>, u32, u32, f64)) -> Result<u32, String> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         system::read(path, &mut each).map_err(|e| e.to_string())
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         ffmpeg::read(path, &mut each)
     }
@@ -242,7 +542,7 @@ pub fn write_mp4(
     count: usize,
     frame: impl Fn(usize, u32, u32) -> Option<Vec<u8>>,
 ) -> Result<(u32, u32), String> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         let _ = std::fs::remove_file(out);
         // the largest size the encoder takes
@@ -268,7 +568,7 @@ pub fn write_mp4(
         writer.finish().map_err(|e| e.to_string())?;
         Ok((w, h))
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let (w, h) = fit(width, height, max_side, |_, _| true).ok_or("no size fits")?;
         ffmpeg::write(out, w, h, fps, hevc, bit_rate(w, h, bits_per_pixel), count, frame)?;
@@ -278,7 +578,7 @@ pub fn write_mp4(
 
 /// The system's ffmpeg, where the system has no encoder of its own to call: frames piped to it as
 /// raw RGBA, and read back from it the same way.
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 mod ffmpeg {
     use std::io::{ErrorKind, Read, Write};
     use std::path::Path;

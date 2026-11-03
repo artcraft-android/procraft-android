@@ -22,6 +22,8 @@ mod curve;
 mod custom_canvas;
 mod export_card;
 mod files;
+#[cfg(target_os = "macos")]
+mod finder;
 mod gallery;
 mod gesture_controls;
 mod gradient_map;
@@ -165,6 +167,9 @@ fn main() {
         }
     };
     event_loop.set_control_flow(ControlFlow::Wait);
+    // a Mac hands the files opened from the Finder to the app as it runs, not in its arguments
+    #[cfg(target_os = "macos")]
+    finder::watch();
     // the colour profiles imported before
     procraft_core::set_profile_folder(files::app_dir().join("profiles").to_string_lossy().into_owned());
     let mut app = App {
@@ -381,6 +386,17 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // files opened from the Finder meanwhile come in as files dropped on the window do
+        #[cfg(target_os = "macos")]
+        {
+            let opened = finder::take();
+            if !opened.is_empty() {
+                self.dropped.extend(opened);
+                if let Some(screen) = &self.screen {
+                    screen.window.request_redraw();
+                }
+            }
+        }
         if self.screen.as_ref().is_some_and(|s| s.gpu.is_lost()) {
             self.gpu_lost(event_loop);
             return;

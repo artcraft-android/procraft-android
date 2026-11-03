@@ -3,14 +3,19 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ndk::native_window::NativeWindow;
 use procraft_engine::profile::Profile;
 use procraft_gpu::{Gpu, wgpu};
 
 use crate::Shared;
 use crate::frame::{configure, screen_profile};
 
-pub(crate) fn run(shared: Arc<Shared>, window: NativeWindow) {
+/// The window drawn into: Android's native window, or the iPad app's `CAMetalLayer`.
+#[cfg(target_os = "android")]
+type Window = ndk::native_window::NativeWindow;
+#[cfg(target_os = "ios")]
+type Window = crate::layer::Layer;
+
+pub(crate) fn run(shared: Arc<Shared>, window: Window) {
     let own = shared.lock().gpu.as_ref().map(|g| g.instance.clone());
     // the app's device (waited for while it is being made), else one made for this window and
     // kept for every artwork after
@@ -142,7 +147,7 @@ const PROJECTION_POLL: Duration = Duration::from_millis(8);
 
 /// Project canvas's thread: the whole canvas fitted and centred on black on a second display,
 /// drawn again after each frame of the main window.
-pub(crate) fn project(shared: Arc<Shared>, window: NativeWindow) {
+pub(crate) fn project(shared: Arc<Shared>, window: Window) {
     // the device comes with the main window
     let instance = loop {
         {

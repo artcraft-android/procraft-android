@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ProCraft.app's Info.plist, its two versions filled in by package.sh: the release's as numbers
+  alone (a beta's suffix left out, as the MSI's) and the build, procraft.versionCode.
+  The files the Finder may open with it: ProCraft's own artworks (its type, declared here), and
+  the pictures, PSDs, PDFs, brushes and palettes the gallery's Import takes, as another app's.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>ProCraft</string>
+	<key>CFBundleExecutable</key>
+	<string>procraft</string>
+	<key>CFBundleIconFile</key>
+	<string>procraft</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.artcraftandroid.procraft</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>ProCraft</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@BUILD@</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.graphics-design</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>ProCraft Artwork</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>CFBundleTypeIconFile</key>
+			<string>procraft</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>io.github.artcraftandroid.procraft.artwork</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Picture</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.png</string>
+				<string>public.jpeg</string>
+				<string>public.tiff</string>
+				<string>com.compuserve.gif</string>
+				<string>com.microsoft.bmp</string>
+				<string>org.webmproject.webp</string>
+				<string>com.adobe.photoshop-image</string>
+				<string>com.adobe.pdf</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Brushes and Palettes</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>brush</string>
+				<string>brushset</string>
+				<string>abr</string>
+				<string>gbr</string>
+				<string>gih</string>
+				<string>vbr</string>
+				<string>kpp</string>
+				<string>sut</string>
+				<string>swatches</string>
+				<string>ase</string>
+				<string>aco</string>
+			</array>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>io.github.artcraftandroid.procraft.artwork</string>
+			<key>UTTypeDescription</key>
+			<string>ProCraft Artwork</string>
+			<key>UTTypeIconFile</key>
+			<string>procraft</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.composite-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>procraft</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+</dict>
+</plist>

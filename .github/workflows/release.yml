@@ -8,7 +8,14 @@
 #   procraft-<version>-linux-x86_64.AppImage      any distro (packaging/linux)
 #   procraft-<version>-linux-x86_64.deb           Debian, Ubuntu and the like
 #   procraft-<version>-linux-x86_64.tar.gz        the plain tree
+#   procraft-<version>-macos-universal.dmg        Apple silicon and Intel Macs, ad hoc signed
+#                                                 (packaging/macos)
+#   procraft-<version>-ipados-unsigned.ipa        the iPad app, signed by whoever installs it (ios/)
 #   SHA256SUMS.txt                                each file's SHA-256
+#
+# The Mac and iPad files are built on the public repository alone: a private one pays for macOS
+# runners' minutes, ten times Linux's. While they are new, one failing leaves its file out rather
+# than holding up the release.
 #
 # A manual run (Actions › Release › Run workflow) is a dry run: it builds them at the version in
 # gradle.properties and keeps them as the run's artifacts, and releases nothing.
@@ -201,10 +208,94 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  macos:
+    name: Desktop (macos-universal)
+    if: ${{ !github.event.repository.private }}
+    continue-on-error: true
+    runs-on: macos-15
+    env:
+      DIST: ${{ github.workspace }}/dist
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: v
+        name: Resolve version
+        run: |
+          listed="$(sed -n 's/^procraft\.version=//p' android/gradle.properties | tr -d '\r')"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="$listed"; fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-desktop-macos-universal
+
+      - name: Package for macOS
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: bash packaging/macos/package.sh
+
+      - name: Files
+        run: ls -l dist >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-desktop-macos-universal
+          path: dist/*
+          if-no-files-found: error
+
+  ipados:
+    name: iPadOS (unsigned IPA)
+    if: ${{ !github.event.repository.private }}
+    continue-on-error: true
+    runs-on: macos-15
+    env:
+      DIST: ${{ github.workspace }}/dist
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: v
+        name: Resolve version
+        run: |
+          listed="$(sed -n 's/^procraft\.version=//p' android/gradle.properties | tr -d '\r')"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="$listed"; fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-ipados
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build the IPA
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: bash ios/build-ipa.sh
+
+      - name: Files
+        run: ls -l dist >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-ipados
+          path: dist/*
+          if-no-files-found: error
+
   release:
     name: GitHub Release
-    needs: [apk, desktop]
-    if: github.ref_type == 'tag'
+    needs: [apk, desktop, macos, ipados]
+    # the Mac and iPad jobs may have been skipped (a private repository) or left out their files
+    if: ${{ github.ref_type == 'tag' && !cancelled() && needs.apk.result == 'success' && needs.desktop.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write

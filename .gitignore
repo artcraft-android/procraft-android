@@ -5,3 +5,8 @@
 # JVM crash reports
 hs_err_pid*.log
 replay_pid*.log
+
+# the iPad app's generated files: the core and its bindings (ios/build-rust.sh), the Xcode project
+# (XcodeGen)
+/ios/Generated/
+/ios/ProCraft.xcodeproj/

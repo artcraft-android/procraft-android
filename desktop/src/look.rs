@@ -216,9 +216,69 @@ fn fonts(system: Vec<(String, egui::FontData)>) -> egui::FontDefinitions {
     fonts
 }
 
+/// A Mac's fonts for the scripts Inter and egui's own lack (as the other systems' below), found by
+/// their families through Core Text (where the files are differs from one release to the next):
+/// `(name, font)` each, a collection's own face of the family.
+#[cfg(target_os = "macos")]
+fn system_fonts() -> Vec<(String, egui::FontData)> {
+    const FAMILIES: [&str; 5] =
+        ["PingFang SC", "Hiragino Sans GB", "Apple SD Gothic Neo", "Arial Unicode MS", "Apple Symbols"];
+    let mut read: Vec<(std::path::PathBuf, String)> = Vec::new();
+    FAMILIES
+        .iter()
+        .filter_map(|family| {
+            let (file, face) = core_text::font_file(family)?;
+            // two families in one face are read once
+            if read.contains(&(file.clone(), face.clone())) {
+                return None;
+            }
+            let bytes = std::fs::read(&file).ok()?;
+            // its face in a collection, by its PostScript name
+            let index = swash::FontDataRef::new(&bytes)
+                .and_then(|data| {
+                    data.fonts().position(|font| {
+                        let name = font.localized_strings().find_by_id(swash::StringId::PostScript, None);
+                        name.is_some_and(|name| name.to_string() == face)
+                    })
+                })
+                .and_then(|i| u32::try_from(i).ok())
+                .unwrap_or(0);
+            read.push((file, face));
+            let mut font = egui::FontData::from_owned(bytes);
+            font.index = index;
+            Some((format!("system {family}"), font))
+        })
+        .collect()
+}
+
+/// Core Text's calls for the fonts' files, unsafe as the system's are.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod core_text {
+    use std::path::PathBuf;
+
+    use objc2_core_foundation::{CFString, CFURL};
+    use objc2_core_text::{CTFont, kCTFontURLAttribute};
+
+    /// The file of the font family `family` and the PostScript name of its face, if the system
+    /// has it (asked for one it lacks, Core Text gives another family).
+    pub fn font_file(family: &str) -> Option<(PathBuf, String)> {
+        // SAFETY: no matrix (the font as it is); the attribute asked of it is its file's URL
+        unsafe {
+            let font = CTFont::with_name(&CFString::from_str(family), 12.0, std::ptr::null());
+            if font.family_name().to_string() != family {
+                return None;
+            }
+            let url = font.attribute(kCTFontURLAttribute)?.downcast::<CFURL>().ok()?;
+            Some((url.to_file_path()?, font.post_script_name().to_string()))
+        }
+    }
+}
+
 /// The system's fonts for the scripts Inter and egui's own lack (Chinese, Japanese, Korean,
 /// Arabic, Hebrew, Indic, Thai, ...), those of them it has: names (a brush's from another app,
 /// an artwork's typed in any language) shown as written. `(name, font)` each.
+#[cfg(not(target_os = "macos"))]
 fn system_fonts() -> Vec<(String, egui::FontData)> {
     #[cfg(windows)]
     let (dir, files): (std::path::PathBuf, &[&str]) = (
@@ -234,18 +294,7 @@ fn system_fonts() -> Vec<(String, egui::FontData)> {
             "seguisym.ttf",
         ],
     );
-    #[cfg(target_os = "macos")]
-    let (dir, files): (std::path::PathBuf, &[&str]) = (
-        std::path::PathBuf::from("/System/Library/Fonts"),
-        &[
-            "PingFang.ttc",
-            "Hiragino Sans GB.ttc",
-            "AppleSDGothicNeo.ttc",
-            "Supplemental/Arial Unicode.ttf",
-            "Apple Symbols.ttf",
-        ],
-    );
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(unix)]
     let (dir, files): (std::path::PathBuf, &[&str]) = (
         std::path::PathBuf::from("/usr/share/fonts"),
         &[

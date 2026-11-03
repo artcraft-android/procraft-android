@@ -1,0 +1,83 @@
+# The iPad app's Xcode project, made by XcodeGen (https://github.com/yonaskolb/XcodeGen):
+#
+#   ios/build-rust.sh && (cd ios && xcodegen generate) && open ios/ProCraft.xcodeproj
+#
+# iPad only (phones get an app of their own). The core is linked as a static library and called
+# through its UniFFI Swift bindings, both made by build-rust.sh before each build into Generated/
+# (not kept in git, nor is the project). To run it on an iPad, pick a team under Signing &
+# Capabilities; build-ipa.sh makes an unsigned .ipa instead.
+name: ProCraft
+options:
+  bundleIdPrefix: io.github.artcraftandroid
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    # build-ipa.sh sets these from android/gradle.properties
+    MARKETING_VERSION: "0.0.3"
+    CURRENT_PROJECT_VERSION: "301"
+targets:
+  ProCraft:
+    type: application
+    platform: iOS
+    sources:
+      - path: ProCraft
+      - path: Generated/ProCraftCore.swift
+        optional: true
+      - path: Generated/Assets.xcassets
+        optional: true
+    preBuildScripts:
+      - name: The core and its bindings (Rust)
+        script: bash "$PROJECT_DIR/build-rust.sh"
+        basedOnDependencyAnalysis: false
+    info:
+      path: Generated/Info.plist
+      properties:
+        CFBundleDisplayName: ProCraft
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ITSAppUsesNonExemptEncryption: false
+        LSRequiresIPhoneOS: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        # a mouse's or trackpad's clicks come as a pointer's, not as fingers
+        UIApplicationSupportsIndirectInputEvents: true
+        UILaunchScreen: {}
+        UIRequiresFullScreen: false
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.artcraftandroid.procraft
+        PRODUCT_NAME: ProCraft
+        TARGETED_DEVICE_FAMILY: "2"
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+        SWIFT_VERSION: "5.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        # the build script writes outside what Xcode's sandbox for scripts allows (cargo's folders)
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        # the bindings' C half, and the core for the platform built for
+        SWIFT_INCLUDE_PATHS: $(PROJECT_DIR)/Generated/include
+        LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/Generated/lib/$(PLATFORM_NAME)
+        # the core, and what it links as `rustc --print native-static-libs` lists it (libSystem,
+        # libobjc, libc and libm come with any app)
+        OTHER_LDFLAGS:
+          - -lprocraft_core
+          - -liconv
+          - -framework
+          - CoreFoundation
+          - -framework
+          - Foundation
+          - -framework
+          - CoreGraphics
+          - -framework
+          - QuartzCore
+          - -framework
+          - Metal

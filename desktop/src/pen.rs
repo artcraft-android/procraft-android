@@ -1,8 +1,8 @@
 //! A pen's lean, its buttons and its eraser end, which winit leaves out of its touches: on Windows
 //! read from the system's pointer messages as they reach the window (before winit makes its
-//! touches of them), kept by pointer for the touches to carry. Under X11 winit gives a tablet's pen
-//! as the mouse: its pressure, lean and eraser end are read from its own XInput 2 events instead,
-//! for the mouse's samples to carry.
+//! touches of them), kept by pointer for the touches to carry. Under X11 and on a Mac winit gives a
+//! tablet's pen as the mouse: its pressure, lean and eraser end are read from its own events
+//! instead (XInput 2's; AppKit's tablet events), for the mouse's samples to carry.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -24,8 +24,8 @@ static PRESSES: AtomicUsize = AtomicUsize::new(0);
 /// Each pointer the system has said is a pen (true) or a finger (false).
 static KINDS: Mutex<Option<HashMap<u64, bool>>> = Mutex::new(None);
 
-/// A tablet's pen moving the mouse pointer (X11 gives it as the mouse): its pressure (0..1) and
-/// whether its eraser end is the one on the screen.
+/// A tablet's pen moving the mouse pointer (X11 and a Mac give it as the mouse): its pressure
+/// (0..1) and whether its eraser end is the one on the screen.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MousePen {
     pub pressure: f32,
@@ -38,7 +38,7 @@ static MOUSE_PEN: Mutex<Option<MousePen>> = Mutex::new(None);
 /// The mouse pointer's id among the touches (`input.rs`): a pen moving it keeps its lean there.
 const MOUSE: u64 = u64::MAX;
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 const FLAG_BARREL: u32 = 0x1;
 const FLAG_INVERTED: u32 = 0x2;
 const FLAG_ERASER: u32 = 0x4;
@@ -97,7 +97,7 @@ pub fn mouse_pen() -> Option<MousePen> {
 }
 
 /// What moves the mouse pointer now: a tablet's pen with its lean, or (none) something else.
-#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+#[cfg_attr(not(unix), allow(dead_code))]
 fn set_mouse_pen(pen: Option<(MousePen, (f32, f32))>) {
     if let Ok(mut p) = MOUSE_PEN.lock() {
         *p = pen.map(|(p, _)| p);
@@ -178,7 +178,7 @@ fn pen_reading(axes: &PenAxes, values: &[(u16, f64)], last: PenReading) -> PenRe
 }
 
 /// Pointer `id`'s pen flags as they now are: a press of its barrel button counted.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn pen_flags(id: u64, flags: u32) {
     let Ok(mut all) = FLAGS.lock() else { return };
     let before = all.get_or_insert_with(Default::default).insert(id, flags).unwrap_or(0);
@@ -209,8 +209,93 @@ pub fn watch(window: &winit::window::Window) {
     tablet::watch(window);
 }
 
-#[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+/// Starts reading a tablet pen's pressure, lean and eraser end from the system's tablet events, on
+/// a Mac.
+#[cfg(target_os = "macos")]
+pub fn watch(_window: &winit::window::Window) {
+    tablet_events::watch();
+}
+
+#[cfg(not(any(windows, unix)))]
 pub fn watch(_window: &winit::window::Window) {}
+
+/// A Mac tablet's tilt (each −1..1, towards the right and up the tablet) as degrees towards the
+/// right and towards the user, spread over ±60 as the X11 tilts in a raw range are.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn tablet_tilt((x, y): (f64, f64)) -> (f32, f32) {
+    ((x.clamp(-1.0, 1.0) * 60.0) as f32, (-y.clamp(-1.0, 1.0) * 60.0) as f32)
+}
+
+/// A Mac tablet's pen, which winit gives as the mouse: each mouse event a pen makes carries its
+/// tablet point (pressure, tilt, buttons), read by a monitor of the app's events that sees it
+/// before winit does; which end is near the tablet comes with its proximity. Unsafe as the
+/// system's calls are.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod tablet_events {
+    use std::cell::Cell;
+    use std::ptr::NonNull;
+
+    use block2::RcBlock;
+    use objc2_app_kit::{NSEvent, NSEventButtonMask, NSEventMask, NSEventSubtype, NSEventType, NSPointingDeviceType};
+
+    use super::{FLAG_BARREL, MOUSE, MousePen};
+
+    pub fn watch() {
+        let mask = NSEventMask::LeftMouseDown
+            | NSEventMask::LeftMouseUp
+            | NSEventMask::LeftMouseDragged
+            | NSEventMask::RightMouseDown
+            | NSEventMask::RightMouseUp
+            | NSEventMask::RightMouseDragged
+            | NSEventMask::OtherMouseDown
+            | NSEventMask::OtherMouseUp
+            | NSEventMask::OtherMouseDragged
+            | NSEventMask::MouseMoved
+            | NSEventMask::TabletPoint
+            | NSEventMask::TabletProximity;
+        // the pen's end near the tablet is its eraser (as its proximity said)
+        let eraser = Cell::new(false);
+        let monitor = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+            // SAFETY: the system hands the monitor a live event, for as long as it runs
+            read(unsafe { event.as_ref() }, &eraser);
+            event.as_ptr()
+        });
+        // SAFETY: the monitor gives back the event it was given, for winit to take as ever
+        match unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &monitor) } {
+            // it watches for as long as the app runs
+            Some(watching) => std::mem::forget(watching),
+            None => log::warn!("a tablet's pen isn't read: no monitor of the app's events"),
+        }
+    }
+
+    /// A mouse or tablet event: the pen it comes from kept as what moves the mouse pointer, or
+    /// none (the mouse's own event, or the pen gone from the tablet).
+    fn read(event: &NSEvent, eraser: &Cell<bool>) {
+        let kind = event.r#type();
+        // a subtype is only asked of a mouse's event (a tablet's own has none)
+        let subtype =
+            (kind != NSEventType::TabletPoint && kind != NSEventType::TabletProximity).then(|| event.subtype());
+        if kind == NSEventType::TabletProximity || subtype == Some(NSEventSubtype::TabletProximity) {
+            let near = event.isEnteringProximity();
+            eraser.set(near && event.pointingDeviceType() == NSPointingDeviceType::Eraser);
+            if !near {
+                super::set_mouse_pen(None);
+            }
+        } else if kind == NSEventType::TabletPoint || subtype == Some(NSEventSubtype::TabletPoint) {
+            let tilt = event.tilt();
+            let (x, y) = super::tablet_tilt((tilt.x, tilt.y));
+            let pen = MousePen { pressure: event.pressure().clamp(0.0, 1.0), eraser: eraser.get() };
+            super::set_mouse_pen(Some((pen, super::lean_of(x, y))));
+            // a side button held is the barrel's
+            let sides = NSEventButtonMask::PenLowerSide | NSEventButtonMask::PenUpperSide;
+            super::pen_flags(MOUSE, if event.buttonMask().intersects(sides) { FLAG_BARREL } else { 0 });
+        } else {
+            // the mouse or the trackpad moves the pointer
+            super::set_mouse_pen(None);
+        }
+    }
+}
 
 /// A tablet's pen under X11: its devices found by their pressure axis, their XInput 2 events read
 /// on a connection of our own, on a thread of its own.
@@ -453,6 +538,18 @@ mod tests {
         // tilts in a raw range are spread over ±60 degrees
         let raw = PenAxes { tilt_x: Some((3, 0.0, 1000.0)), ..axes };
         assert_eq!(pen_reading(&raw, &[(3, 1000.0)], now).tilt_x, 60.0);
+    }
+
+    #[test]
+    fn a_mac_tablets_tilt_becomes_degrees_towards_the_right_and_the_user() {
+        assert_eq!(tablet_tilt((0.0, 0.0)), (0.0, 0.0));
+        // full tilt right and up the tablet (away from the user); past full is full
+        assert_eq!(tablet_tilt((1.0, 1.0)), (60.0, -60.0));
+        assert_eq!(tablet_tilt((-0.5, -2.0)), (-30.0, 60.0));
+        // tilted towards the user, its top leans down the screen
+        let (x, y) = tablet_tilt((0.0, -0.5));
+        let (tilt, towards) = lean_of(x, y);
+        assert!((tilt - 30f32.to_radians()).abs() < 1e-4 && (towards - std::f32::consts::PI).abs() < 1e-4);
     }
 
     #[test]

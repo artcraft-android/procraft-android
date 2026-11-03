@@ -29,10 +29,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-darwin, aarch64-apple-ios
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # the code only Apple's systems build (the Mac's pen, Finder, video, PDF and fonts; the iPad
+      # app's layer and render thread), checked without linking: no Mac needed
+      - name: Clippy for macOS and iPadOS
+        run: |
+          cargo clippy --target aarch64-apple-darwin -p procraft-desktop -- -D warnings
+          cargo clippy --target aarch64-apple-ios -p procraft-core --lib -- -D warnings
       # the GPU tests skip themselves: the runner has no GPU
       - run: cargo test --workspace
 

@@ -1,5 +1,6 @@
-//! A PDF's pages drawn by the system (Windows' own PDF renderer; elsewhere poppler's pdftoppm), to
-//! bring one in as an artwork: each page a PNG on white, fitted into the first page's size.
+//! A PDF's pages drawn by the system (Windows' own PDF renderer, a Mac's Core Graphics; elsewhere
+//! poppler's pdftoppm), to bring one in as an artwork: each page a PNG on white, fitted into the
+//! first page's size.
 
 use std::path::Path;
 
@@ -44,7 +45,7 @@ fn save_on_white(
 
 /// Each page's size in points from pdfinfo's listing of them (`Page    1 size: 612 x 792 pts`),
 /// a page turned a quarter (`Page    1 rot:  90`) taken as drawn, its sides swapped.
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn page_sizes(listing: &str) -> Vec<(f32, f32)> {
     let mut sizes: Vec<(f32, f32)> = Vec::new();
     for line in listing.lines() {
@@ -116,9 +117,100 @@ pub fn draw_pages(path: &Path, pages: &Path) -> Result<(u32, u32, u32), Box<dyn 
     Ok((count, w, h))
 }
 
+/// As Windows' does, by a Mac's own PDF renderer (Core Graphics).
+#[cfg(target_os = "macos")]
+pub fn draw_pages(path: &Path, pages: &Path) -> Result<(u32, u32, u32), Box<dyn std::error::Error>> {
+    system::draw_pages(path, pages)
+}
+
+/// Core Graphics' calls, unsafe as the system's are where they take pointers.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod system {
+    use std::error::Error;
+    use std::path::Path;
+    use std::ptr::NonNull;
+
+    use objc2_core_foundation::{CFURL, CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo, CGInterpolationQuality,
+        CGPDFBox, CGPDFDocument, CGPDFPage, kCGColorSpaceSRGB,
+    };
+
+    pub fn draw_pages(path: &Path, pages: &Path) -> Result<(u32, u32, u32), Box<dyn Error>> {
+        let url = CFURL::from_file_path(path).ok_or("not a file's path")?;
+        let pdf = CGPDFDocument::with_url(Some(&url)).ok_or("not a PDF")?;
+        // one locked only against printing or copying opens with no password
+        // SAFETY: the password is an empty string, ended as the call wants
+        let unlocked = CGPDFDocument::is_unlocked(Some(&pdf))
+            || unsafe { CGPDFDocument::unlock_with_password(Some(&pdf), NonNull::from(c"").cast()) };
+        if !unlocked {
+            return Err("the PDF is locked with a password".into());
+        }
+        let count = u32::try_from(CGPDFDocument::number_of_pages(Some(&pdf)))?;
+        let page = |n: u32| CGPDFDocument::page(Some(&pdf), n as usize).ok_or("a page is missing");
+        let (w, h) = super::canvas_size(points(&*page(1)?));
+        // more pages than a canvas this size holds as layers: none drawn, as none will be taken
+        if count > procraft_core::layers_for(w, h) {
+            return Ok((count, w, h));
+        }
+        for n in 1..=count {
+            let page = page(n)?;
+            let size = super::fitted(points(&page), w, h);
+            let drawn = draw(&page, size)?;
+            super::save_on_white(drawn, size, w, h, &pages.join(format!("page-{n}.png")))?;
+        }
+        Ok((count, w, h))
+    }
+
+    /// A page's size in points as it shows: its crop box, turned as the page says.
+    fn points(page: &CGPDFPage) -> (f32, f32) {
+        let crop = CGPDFPage::box_rect(Some(page), CGPDFBox::CropBox);
+        let (w, h) = (crop.size.width.abs() as f32, crop.size.height.abs() as f32);
+        if CGPDFPage::rotation_angle(Some(page)).rem_euclid(180) == 90 { (h, w) } else { (w, h) }
+    }
+
+    /// `page` drawn at `dw` × `dh` on white.
+    fn draw(page: &CGPDFPage, (dw, dh): (u32, u32)) -> Result<image::RgbaImage, Box<dyn Error>> {
+        let mut pixels = vec![0u8; dw as usize * dh as usize * 4];
+        // SAFETY: the system's constant name
+        let srgb = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).ok_or("no sRGB colour space")?;
+        // RGBA in that order, each a byte
+        let layout = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
+        // SAFETY: the context draws into `pixels` (`dw` × `dh`, 4 bytes each), which outlive it
+        let context = unsafe {
+            CGBitmapContextCreate(
+                pixels.as_mut_ptr().cast(),
+                dw as usize,
+                dh as usize,
+                8,
+                dw as usize * 4,
+                Some(&srgb),
+                layout,
+            )
+        }
+        .ok_or("no bitmap to draw the page into")?;
+        let c = Some(&*context);
+        let whole = CGRect::new(CGPoint::ZERO, CGSize::new(f64::from(dw), f64::from(dh)));
+        CGContext::set_rgb_fill_color(c, 1.0, 1.0, 1.0, 1.0);
+        CGContext::fill_rect(c, whole);
+        CGContext::set_interpolation_quality(c, CGInterpolationQuality::High);
+        // the page turned as it says and placed at its own size (the system's transform doesn't
+        // scale up), then scaled to the bitmap
+        let (pw, ph) = points(page);
+        CGContext::scale_ctm(c, f64::from(dw) / f64::from(pw.max(1.0)), f64::from(dh) / f64::from(ph.max(1.0)));
+        let shown = CGRect::new(CGPoint::ZERO, CGSize::new(f64::from(pw), f64::from(ph)));
+        CGContext::concat_ctm(c, CGPDFPage::drawing_transform(Some(page), CGPDFBox::CropBox, shown, 0, true));
+        CGContext::draw_pdf_page(c, Some(page));
+        drop(context);
+        // drawn over white throughout: as straight as it is premultiplied
+        image::RgbaImage::from_raw(dw, dh, pixels).ok_or_else(|| "the page's pixels came out short".into())
+    }
+}
+
 /// As Windows' does, by poppler's tools: `pdfinfo` for the pages and their sizes, `pdftoppm` to
 /// draw each.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn draw_pages(path: &Path, pages: &Path) -> Result<(u32, u32, u32), Box<dyn std::error::Error>> {
     use std::process::Command;
     let run = |command: &mut Command| -> Result<std::process::Output, Box<dyn std::error::Error>> {
@@ -180,7 +272,7 @@ mod sizing_tests {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "macos")))]
 mod tests {
     #[test]
     fn a_pdf_s_pages_are_drawn_on_white_at_its_size() {

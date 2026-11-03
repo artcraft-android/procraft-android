@@ -5,11 +5,11 @@ use crate::{CanvasSession, MobileError};
 #[uniffi::export]
 impl CanvasSession {
     /// Shows the canvas fitted and centred on black in the window `window` (an id from
-    /// `NativeWindows.acquire`), `width` × `height` pixels, on a second display. The session
-    /// owns the window from here on.
+    /// `NativeWindows.acquire`, or on iPadOS `acquire_layer`), `width` × `height` pixels, on a
+    /// second display. The session owns the window from here on.
     pub fn attach_projection(&self, window: u64, width: u32, height: u32) -> Result<(), MobileError> {
         self.detach_projection();
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let native = crate::window::take(window)
                 .ok_or_else(|| MobileError::Window { reason: format!("no window {window}") })?;
@@ -26,10 +26,10 @@ impl CanvasSession {
             *self.shared.projection.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
             Ok(())
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             let _ = (width, height);
-            Err(MobileError::Window { reason: format!("windows are Android-only (asked for {window})") })
+            Err(MobileError::Window { reason: format!("windows are the tablet apps' only (asked for {window})") })
         }
     }
 

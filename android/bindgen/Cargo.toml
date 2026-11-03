@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "uniffi-bindgen for procraft-core: generates its Kotlin bindings from the built library (the Android build runs it)"
+description = "uniffi-bindgen for procraft-core: generates its Kotlin and Swift bindings from the built library (the Android and iPad builds run it)"
 
 [[bin]]
 name = "uniffi-bindgen"

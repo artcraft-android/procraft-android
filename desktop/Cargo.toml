@@ -36,6 +36,81 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }
+# A tablet's pen on a Mac, which winit gives as the mouse: its pressure, tilt and eraser end from
+# the system's tablet events; files opened from the Finder (AppKit, through the bindings winit and
+# rfd already bring in)
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "NSApplication",
+    "NSEvent",
+    "NSResponder",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSError",
+    "NSObject",
+    "NSString",
+    "NSURL",
+    "NSValue",
+] }
+# Animated MP4 and HEVC, and videos opened as frames, through the system's own encoders and
+# decoders (AVFoundation)
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-core-media",
+    "objc2-core-video",
+    "AVAsset",
+    "AVAssetReader",
+    "AVAssetReaderOutput",
+    "AVAssetTrack",
+    "AVAssetWriter",
+    "AVAssetWriterInput",
+    "AVMediaFormat",
+    "AVVideoSettings",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFCGTypes",
+    "CFString",
+    "CFURL",
+] }
+# The fonts for other scripts found by family (Core Text), and their faces in a collection
+objc2-core-text = { version = "0.3", default-features = false, features = ["std", "CTFont", "CTFontDescriptor"] }
+swash = "0.2"
+# A PDF's pages drawn by the system's renderer (Core Graphics)
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+    "CGPDFDocument",
+    "CGPDFPage",
+] }
+objc2-core-media = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-video",
+    "CMBase",
+    "CMFormatDescription",
+    "CMSampleBuffer",
+    "CMTime",
+] }
+objc2-core-video = { version = "0.3", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVPixelBufferPool",
+    "CVReturn",
+] }
 
 # An artwork dragged out of the gallery, handed to the system as a file
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
