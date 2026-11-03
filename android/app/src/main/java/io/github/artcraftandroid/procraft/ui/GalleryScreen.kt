@@ -74,6 +74,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.StrokeCap
@@ -100,6 +101,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
@@ -825,6 +827,7 @@ private fun RenameArtwork(a: Artwork, version: Int, from: androidx.compose.ui.ge
                         img,
                         dstOffset = IntOffset(at.left.toInt(), at.top.toInt()),
                         dstSize = IntSize(at.width.toInt().coerceAtLeast(1), at.height.toInt().coerceAtLeast(1)),
+                        filterQuality = thumbnailFilter(img, at.width, density.density),
                     )
                 }
             }
@@ -1265,7 +1268,7 @@ private fun ArtworkPreview(list: List<Artwork>, version: Int, onClose: () -> Uni
         val image by produceState<ImageBitmap?>(null, a.dir.path, version) {
             value = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(a.thumbnail.path)?.asImageBitmap() }
         }
-        image?.let { Image(it, contentDescription = a.name, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
+        image?.let { ThumbnailImage(it, a.name, ContentScale.Fit) }
         androidx.compose.animation.AnimatedVisibility(controls, Modifier.fillMaxSize(), enter = androidx.compose.animation.fadeIn(), exit = androidx.compose.animation.fadeOut()) {
             Box(Modifier.fillMaxSize()) {
                 // a light disc with a black cross, 41 in from the top right
@@ -1313,6 +1316,32 @@ private fun PreviewArrow(left: Boolean, modifier: Modifier, onClick: () -> Unit)
 }
 
 /**
+ * How a thumbnail drawn [shown] pixels wide is filtered: at 100% or more (each of its pixels a
+ * point or larger) a square of its own colour, as the canvas shows them; smaller, smoothed.
+ */
+private fun thumbnailFilter(image: ImageBitmap, shown: Float, density: Float) =
+    if (shown >= image.width * density * 0.999f) FilterQuality.None else FilterQuality.Low
+
+/** An artwork's thumbnail fitted in its box (or filling it, by [scale]), filtered by [thumbnailFilter]. */
+@Composable
+private fun ThumbnailImage(image: ImageBitmap, name: String, scale: ContentScale) {
+    val density = LocalDensity.current.density
+    var shown by remember { mutableFloatStateOf(0f) }
+    // made again when the filter changes (Image(bitmap) keeps its first)
+    val filter = thumbnailFilter(image, shown, density)
+    val painter = remember(image, filter) { androidx.compose.ui.graphics.painter.BitmapPainter(image, filterQuality = filter) }
+    Image(
+        painter,
+        contentDescription = name,
+        contentScale = scale,
+        modifier = Modifier.fillMaxSize().onSizeChanged {
+            // fitted, as wide as the box lets its height
+            shown = minOf(it.width.toFloat(), it.height * image.width / image.height.coerceAtLeast(1).toFloat())
+        },
+    )
+}
+
+/**
  * An artwork's thumbnail, as large as fits in its cell's box, with a soft shadow; while selecting,
  * a circle at its top right ([chosen]: filled blue with a tick).
  */
@@ -1340,7 +1369,7 @@ private fun Thumbnail(a: Artwork, version: Int, chosen: Boolean? = null, wash: B
             .clip(RoundedCornerShape(8.dp))
             .background(Color.White),
     ) {
-        image?.let { Image(it, contentDescription = a.name, contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize()) }
+        image?.let { ThumbnailImage(it, a.name, ContentScale.FillBounds) }
         // blue while an artwork dragged over it would be stacked with it
         if (wash) Box(Modifier.matchParentSize().background(DropWash))
         // the marks fade in as Select starts, and out as it ends

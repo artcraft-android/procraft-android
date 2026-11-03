@@ -1544,9 +1544,12 @@ impl Gallery {
             match reader.read.try_recv() {
                 Ok((dir, when, image)) => {
                     self.reading.remove(&(dir.clone(), when));
-                    let texture = image.map(|pixels| {
-                        ctx.load_texture(format!("thumbnail {dir}"), pixels, egui::TextureOptions::LINEAR)
-                    });
+                    // enlarged, each of its pixels a square of its own colour, as the canvas shows them
+                    let crisp = egui::TextureOptions {
+                        magnification: egui::TextureFilter::Nearest,
+                        ..egui::TextureOptions::LINEAR
+                    };
+                    let texture = image.map(|pixels| ctx.load_texture(format!("thumbnail {dir}"), pixels, crisp));
                     self.thumbs.insert(dir, (when, texture));
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,

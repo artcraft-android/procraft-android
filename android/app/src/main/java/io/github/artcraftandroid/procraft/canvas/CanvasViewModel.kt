@@ -1073,7 +1073,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { pictureArtwork(uri) }
     }
 
-    private suspend fun pictureArtwork(uri: android.net.Uri) {
+    /** [newFromPicture], the artwork called [title] (an imported file's name). */
+    private suspend fun pictureArtwork(uri: android.net.Uri, title: String = "Untitled Artwork") {
         // in Display P3 if the picture is, else in sRGB
         val p3 = withContext(Dispatchers.IO) { pictureIsP3(uri) }
         val image = withContext(Dispatchers.IO) { decodePicture(uri, p3) }
@@ -1082,7 +1083,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val s = withContext(Dispatchers.IO) {
-            CanvasSession.fromImage(image, "Untitled Artwork").also {
+            CanvasSession.fromImage(image, title).also {
                 if (p3) it.setNewProfile(io.github.artcraftandroid.procraft.gallery.CanvasPreset.P3)
                 loadBrushes(it)
             }
@@ -1507,7 +1508,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             }
             if (ok) refreshGallery() else message = "This file can't be opened."
         } else {
-            pictureArtwork(uri)
+            // named after its file, as a picture opened on the computer is
+            pictureArtwork(uri, name?.substringBeforeLast('.')?.trim()?.ifBlank { null } ?: "Untitled Artwork")
         }
     }
 

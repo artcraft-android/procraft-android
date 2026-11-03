@@ -2769,6 +2769,19 @@ fn an_artwork_from_a_picture() {
 }
 
 #[test]
+fn a_picture_saved_before_it_is_shown_has_its_thumbnail() {
+    use crate::layers::ThumbnailImage;
+    let dir = std::env::temp_dir().join(format!("procraft-unshown-thumbnail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let rgba = [0u8, 0, 255, 255].repeat(6 * 4);
+    let s = CanvasSession::from_image(ThumbnailImage { width: 6, height: 4, rgba }, "Blue".to_owned());
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let thumb = crate::project::read_png(&dir.join("thumbnail.png"), 6, 4).unwrap();
+    assert_eq!(&thumb[..4], &[0, 0, 255, 255]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_picture_larger_than_a_canvas_may_be_is_scaled_down_to_fit() {
     use crate::layers::ThumbnailImage;
     let most = procraft_engine::document::canvas_edge_most();

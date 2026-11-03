@@ -142,6 +142,9 @@ pub(crate) struct SaveSnapshot {
     /// Layers still the PNG files they were opened from (not shown yet), written as they are.
     files: Vec<(LayerId, Vec<u8>)>,
     composite: Option<procraft_gpu::Readback>,
+    /// Not shown yet, with no thumbnail in the folder: one made from its top picture, for the
+    /// gallery until the canvas draws its own.
+    unshown: Option<(u32, u32, Vec<u8>)>,
     model: Option<crate::scene3d::ModelSnapshot>,
     /// The device read from, to tell whether it was lost meanwhile.
     gpu: Option<procraft_gpu::Gpu>,
@@ -254,6 +257,7 @@ impl crate::State {
         let mut reading = Vec::new();
         let mut files = Vec::new();
         let mut composite = None;
+        let mut unshown = None;
         let mut changed_ids = Vec::new();
         // shown but its canvas still being made (on another thread): made now, so the save has its
         // picture for the gallery
@@ -303,9 +307,18 @@ impl crate::State {
                     Opened::Pixels(rgba) => layers.extend(changed(*id, rgba.clone())),
                 }
             }
+            // a picture made into an artwork and saved before it is shown (the app may be closed
+            // before it is): the gallery shows the picture
+            if !dir.join("thumbnail.png").exists() {
+                let (w, h) = (self.doc.width(), self.doc.height());
+                unshown = self.pending_pixels.iter().rev().find_map(|(_, layer)| match layer {
+                    Opened::Pixels(rgba) => Some(thumbnail(rgba, w, h, THUMBNAIL_SIDE)),
+                    Opened::Png(_) => None,
+                });
+            }
         }
         let gpu = self.gpu.clone();
-        Ok(SaveSnapshot { changed: changed_ids, file, layers, reading, files, composite, model, gpu })
+        Ok(SaveSnapshot { changed: changed_ids, file, layers, reading, files, composite, unshown, model, gpu })
     }
 }
 
@@ -348,7 +361,7 @@ impl CanvasSession {
 /// Writes a save into `dir` (made if missing): the layers that changed since the last save there,
 /// the thumbnail and the document.
 fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Result<(), MobileError> {
-    let SaveSnapshot { file, mut layers, reading, files, composite, model, gpu, .. } = snapshot;
+    let SaveSnapshot { file, mut layers, reading, files, composite, unshown, model, gpu, .. } = snapshot;
     // what was still on its way back: those unchanged since the last save there are let go
     for (id, read) in reading {
         let rgba = read.pixels().map_err(|e| file_error("reading a layer", e))?;
@@ -413,8 +426,9 @@ fn write_artwork(saved: &mut Saved, dir: &Path, snapshot: SaveSnapshot) -> Resul
         if let Some((pw, ph, rgba)) = model.and_then(|m| m.picture) {
             let (tw, th, small) = thumbnail(&rgba, pw, ph, THUMBNAIL_SIDE);
             stage(write_beside(&thumb, |p| write_png(p, tw, th, &small, &[])), thumb, &mut staged)?;
-        } else if let Some(rgba) = composite {
-            let (tw, th, mut small) = thumbnail(&rgba, w, h, THUMBNAIL_SIDE);
+        } else if let Some((tw, th, mut small)) =
+            composite.map(|rgba| thumbnail(&rgba, w, h, THUMBNAIL_SIDE)).or(unshown)
+        {
             // the gallery shows it in the artwork's colours (a CMYK canvas's: as its press prints them)
             if let Some(table) = proof_table(&file.document) {
                 table.apply_rgba(&mut small, false);
