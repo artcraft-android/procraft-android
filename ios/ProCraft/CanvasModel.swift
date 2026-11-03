@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 
 /// Which panel hangs from the top bar.
 enum Panel {
@@ -78,10 +79,23 @@ final class CanvasModel {
     private(set) var adjusting = false
     private(set) var recoloring = false
 
+    // the brush library
+    private(set) var brushSets: [BrushSetInfo] = []
+    /// The set the library shows.
+    private(set) var shownSet = 0
+    /// Each set's last chosen brush (its place in the set).
+    private(set) var setChoice: [Int: Int] = [:]
+    /// The brushes' sample strokes, by `brushKey`, and those whose stroke runs under its name.
+    private(set) var previews: [String: UIImage] = [:]
+    private(set) var shadedNames: [String: Bool] = [:]
+    @ObservationIgnored private var previewsAsked: Set<String> = []
+
     init(session: CanvasSession, dir: String) {
         self.session = session
         self.dir = dir
         _ = session.openBrushes(dir: Self.brushesDir)
+        brushSets = session.brushLibrary()
+        readSetChoices()
         let c = session.color()
         if c.count >= 3 {
             let (h, s, v) = Self.hsv(c[0], c[1], c[2])
@@ -91,6 +105,9 @@ final class CanvasModel {
         }
         tool = session.info().tool
         currentBrush = session.currentBrush()
+        if let current = currentBrush {
+            shownSet = Int(current.set)
+        }
         readSliders()
         refreshFlags()
     }
@@ -114,6 +131,9 @@ final class CanvasModel {
             return
         }
         if tool == pressed {
+            if let current = currentBrush {
+                shownSet = Int(current.set)
+            }
             toggle(.brushes)
         } else {
             select(pressed)
@@ -149,6 +169,120 @@ final class CanvasModel {
         tool = next
         readSliders()
         currentBrush = session.currentBrush()
+    }
+
+    // MARK: the brush library
+
+    /// A brush's key among the previews: its set and place.
+    static func brushKey(_ b: BrushInfo) -> String {
+        "\(b.set)-\(b.index)"
+    }
+
+    /// The icon a set shows.
+    func setIcon(_ set: BrushSetInfo) -> PcIcon {
+        let i = Int(set.icon)
+        return PcIcons.setIcons.indices.contains(i) ? PcIcons.setIcons[i] : PcIcons.brushSet
+    }
+
+    /// Whether the library lights `b`: the current brush, or the brush last chosen in its set.
+    func highlighted(_ b: BrushInfo) -> Bool {
+        if let c = currentBrush, c.set == b.set {
+            return c.index == b.index
+        }
+        return setChoice[Int(b.set)] == Int(b.index)
+    }
+
+    /// Shows set `index`; its last chosen brush becomes the current one, as choosing it again
+    /// would.
+    func showSet(_ index: Int) {
+        shownSet = index
+        guard let choice = setChoice[index], brushSets.indices.contains(index) else { return }
+        let brushes = brushSets[index].brushes
+        if brushes.indices.contains(choice) {
+            chooseBrush(brushes[choice])
+        }
+    }
+
+    func chooseBrush(_ b: BrushInfo) {
+        let before = currentBrush
+        guard session.selectBrush(set: b.set, index: b.index) else { return }
+        // the set left behind keeps showing the brush it had
+        if let before {
+            setChoice[Int(before.set)] = Int(before.index)
+        }
+        currentBrush = session.currentBrush()
+        setChoice[Int(b.set)] = Int(b.index)
+        readSliders()
+        keepChoices()
+    }
+
+    /// Each set's last choice, as the library read last has it.
+    private func readSetChoices() {
+        var choices: [Int: Int] = [:]
+        for (i, set) in brushSets.enumerated() {
+            if let chosen = set.chosen {
+                choices[i] = Int(chosen)
+            }
+        }
+        setChoice = choices
+    }
+
+    /// Keeps the tools' brushes, the sets' choices and each brush's sliders for the next session.
+    private func keepChoices() {
+        let session = session
+        let dir = Self.brushesDir
+        DispatchQueue.global(qos: .utility).async {
+            _ = session.keepBrushChoices(dir: dir)
+        }
+    }
+
+    /// Draws `b`'s sample stroke off the main thread (half its own canvas: the cell shows it across
+    /// its width), and whether it runs under the brush's name.
+    func loadPreview(_ b: BrushInfo) {
+        let key = Self.brushKey(b)
+        guard previews[key] == nil, !previewsAsked.contains(key) else { return }
+        previewsAsked.insert(key)
+        let session = session
+        let name = b.name
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let t = session.brushPreview(set: b.set, index: b.index, width: 530, height: 162),
+                  let image = Self.image(t) else { return }
+            // the name's box (19.5 in, 14 to 26 down, about 7.7 a letter wide, in a cell the
+            // picture fills 80 high) covered more than 2/255 on average
+            let k: Float = 162 / 80
+            let x0 = Int((19.5 + 6.85) * k)
+            let x1 = min(Int((19.5 + 6.85 + 7.7 * Float(name.count)) * k), Int(t.width))
+            let y0 = Int(14 * k)
+            let y1 = Int(26 * k)
+            var cover = 0
+            if x1 > x0 {
+                for y in y0 ..< y1 {
+                    for x in x0 ..< x1 {
+                        cover += Int(t.rgba[(y * Int(t.width) + x) * 4 + 3])
+                    }
+                }
+            }
+            let under = x1 > x0 && cover > 2 * (x1 - x0) * (y1 - y0)
+            DispatchQueue.main.async {
+                self?.previews[key] = image
+                self?.shadedNames[key] = under
+            }
+        }
+    }
+
+    /// A picture the core made (premultiplied RGBA rows).
+    static func image(_ t: ThumbnailImage) -> UIImage? {
+        let width = Int(t.width)
+        let height = Int(t.height)
+        guard width > 0, height > 0, t.rgba.count >= width * height * 4,
+              let provider = CGDataProvider(data: Data(t.rgba) as CFData),
+              let image = CGImage(
+                  width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent
+              ) else { return nil }
+        return UIImage(cgImage: image)
     }
 
     func toggle(_ p: Panel) {

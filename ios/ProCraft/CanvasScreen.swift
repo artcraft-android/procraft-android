@@ -11,12 +11,43 @@ struct CanvasScreen: View {
         GeometryReader { screen in
             ZStack(alignment: .topLeading) {
                 CanvasHost(model: model)
+                if model.panel != .none {
+                    // a touch on the canvas while a panel is open closes it and goes no further
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { model.closePanels() }
+                }
                 TopBar(model: model)
                 SideBar(model: model)
                     .offset(y: screen.size.height * Pc.sideBarCentre - Pc.sideBarHeight / 2)
+                if model.panel != .none {
+                    PanelHost(model: model, screen: screen.size)
+                }
             }
         }
         .ignoresSafeArea()
+    }
+}
+
+/// The open panel, hanging from its button under the bar, clear of the side bar.
+private struct PanelHost: View {
+    let model: CanvasModel
+    let screen: CGSize
+
+    var body: some View {
+        // panels keep clear of the side bar
+        let clear = Pc.sideBarWidth + Pc.popoverGap
+        switch model.panel {
+        case .brushes:
+            let buttonX = screen.width - Pc.toolCentreFromRight(libraryButton(model.tool), barWidth: screen.width)
+            let place = popoverPlace(width: brushLibraryWidth, buttonCentreX: buttonX, screenWidth: screen.width, minLeft: clear)
+            // ending 25 above the screen's edge, as measured
+            BrushLibrary(model: model, arrowX: place.arrowX)
+                .frame(height: screen.height - Pc.barHeight - 25)
+                .offset(x: place.left, y: Pc.barHeight)
+        default:
+            EmptyView()
+        }
     }
 }
 
