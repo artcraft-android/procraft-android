@@ -269,8 +269,9 @@ impl Input {
         // a pen with its pressure, or a finger: as the system says which (a touch screen may give
         // its fingers a pressure too), else a pressure means a pen
         let force = touch.force.map(|f| f.normalized() as f32);
+        // (a pen landing or lifting has no force, its pressure being nothing: its own is taken)
         let pen = match crate::pen::is_pen(touch.id) {
-            Some(true) => Some(force.unwrap_or(1.0)),
+            Some(true) => Some(force.or_else(|| crate::pen::pressure(touch.id)).unwrap_or(1.0)),
             Some(false) => None,
             None => force,
         };

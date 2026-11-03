@@ -12,6 +12,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// clockwise from screen-up), as the strokes take them.
 static LEANS: Mutex<Option<HashMap<u64, (f32, f32)>>> = Mutex::new(None);
 
+/// Each pen pointer's last pressure (0..1), for a pen that gives one.
+static PRESSURES: Mutex<Option<HashMap<u64, f32>>> = Mutex::new(None);
+
 /// Each pen pointer's last flags (its barrel button held, its eraser end down).
 static FLAGS: Mutex<Option<HashMap<u64, u32>>> = Mutex::new(None);
 
@@ -43,6 +46,23 @@ const FLAG_ERASER: u32 = 0x4;
 /// The lean of the pen that is pointer `id` (a touch's id), if it is a pen that gives one.
 pub fn lean(id: u64) -> Option<(f32, f32)> {
     LEANS.lock().ok()?.as_ref()?.get(&id).copied()
+}
+
+/// The pressure (0..1) of the pen that is pointer `id`, if it gives one: a touch's own force
+/// leaves out no pressure at all (as a pen has as it lands and as it lifts).
+pub fn pressure(id: u64) -> Option<f32> {
+    PRESSURES.lock().ok()?.as_ref()?.get(&id).copied()
+}
+
+/// Pointer `id`'s pen pressure as it now is (none: it gives none).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pen_pressure(id: u64, pressure: Option<f32>) {
+    let Ok(mut all) = PRESSURES.lock() else { return };
+    let all = all.get_or_insert_with(Default::default);
+    match pressure {
+        Some(p) => all.insert(id, p.clamp(0.0, 1.0)),
+        None => all.remove(&id),
+    };
 }
 
 /// Whether the pen that is pointer `id` is turned over, its eraser end on the screen.
@@ -310,11 +330,12 @@ mod system {
     use windows::Win32::UI::Input::Pointer::{GetPointerPenInfo, GetPointerType, POINTER_PEN_INFO};
     use windows::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, SetWindowLongPtrW,
-        WM_POINTERDOWN, WM_POINTERUPDATE, WNDPROC,
+        WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
     };
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    /// What the pen info's tilts are given in (`penMask`).
+    /// What the pen info gives (`penMask`): its pressure, out of 1024, and its tilts.
+    const PEN_MASK_PRESSURE: u32 = 0x1;
     const PEN_MASK_TILT_X: u32 = 0x4;
     const PEN_MASK_TILT_Y: u32 = 0x8;
     /// A pointer message's flags (its `wparam`'s high word): the pointer touches the screen.
@@ -334,11 +355,11 @@ mod system {
         WINIT.store(winit, Ordering::Relaxed);
     }
 
-    /// A pen's pointer message: its tilt kept by pointer, then the message on to winit (a hovering
-    /// pen's to the system, as the mouse's).
+    /// A pen's pointer message: its pressure and tilt kept by pointer, then the message on to
+    /// winit (a hovering pen's to the system, as the mouse's).
     unsafe extern "system" fn pointer_messages(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         let mut hovering = false;
-        if msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE {
+        if msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE || msg == WM_POINTERUP {
             // the pointer's id is the low word of `wparam`
             let id = (wparam.0 & 0xFFFF) as u32;
             // a pen or a finger, as the system knows it (a touch screen's fingers may have a pressure)
@@ -359,6 +380,8 @@ mod system {
                     leans.get_or_insert_with(Default::default).insert(u64::from(id), lean);
                 }
                 super::pen_flags(u64::from(id), info.penFlags);
+                let pressed = info.penMask & PEN_MASK_PRESSURE != 0;
+                super::pen_pressure(u64::from(id), pressed.then(|| info.pressure as f32 / 1024.0));
             }
         }
         // a hovering pen's moves to the system's own handling, which makes them the mouse's, so the
@@ -390,6 +413,17 @@ mod tests {
         assert!(!eraser_end(901));
         pen_flags(902, FLAG_INVERTED);
         assert!(eraser_end(902));
+    }
+
+    #[test]
+    fn a_pens_pressure_is_kept_as_it_last_was_none_being_kept_too() {
+        assert_eq!(pressure(921), None);
+        pen_pressure(921, Some(0.0));
+        assert_eq!(pressure(921), Some(0.0));
+        pen_pressure(921, Some(1.5));
+        assert_eq!(pressure(921), Some(1.0));
+        pen_pressure(921, None);
+        assert_eq!(pressure(921), None);
     }
 
     #[test]
