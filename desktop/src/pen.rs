@@ -18,6 +18,9 @@ static FLAGS: Mutex<Option<HashMap<u64, u32>>> = Mutex::new(None);
 /// How many times a pen's barrel button went down since the app last asked.
 static PRESSES: AtomicUsize = AtomicUsize::new(0);
 
+/// Each pointer the system has said is a pen (true) or a finger (false).
+static KINDS: Mutex<Option<HashMap<u64, bool>>> = Mutex::new(None);
+
 /// A tablet's pen moving the mouse pointer (X11 gives it as the mouse): its pressure (0..1) and
 /// whether its eraser end is the one on the screen.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,6 +49,20 @@ pub fn lean(id: u64) -> Option<(f32, f32)> {
 pub fn eraser_end(id: u64) -> bool {
     let flags = FLAGS.lock().ok().and_then(|f| f.as_ref()?.get(&id).copied()).unwrap_or(0);
     flags & (FLAG_INVERTED | FLAG_ERASER) != 0
+}
+
+/// Whether pointer `id` is a pen (true) or a finger (false), if the system said which: a touch
+/// screen may give its fingers a pressure too, so a pressure alone doesn't make a pen.
+pub fn is_pen(id: u64) -> Option<bool> {
+    KINDS.lock().ok()?.as_ref()?.get(&id).copied()
+}
+
+/// The system said pointer `id` is a pen (`pen`) or a finger.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pointer_kind(id: u64, pen: bool) {
+    if let Ok(mut kinds) = KINDS.lock() {
+        kinds.get_or_insert_with(Default::default).insert(id, pen);
+    }
 }
 
 /// How many times a pen's barrel button was pressed since the last call.
@@ -290,9 +307,10 @@ mod system {
     use std::sync::atomic::{AtomicIsize, Ordering};
 
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::UI::Input::Pointer::{GetPointerPenInfo, POINTER_PEN_INFO};
+    use windows::Win32::UI::Input::Pointer::{GetPointerPenInfo, GetPointerType, POINTER_PEN_INFO};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, GWLP_WNDPROC, SetWindowLongPtrW, WM_POINTERDOWN, WM_POINTERUPDATE, WNDPROC,
+        CallWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, SetWindowLongPtrW, WM_POINTERDOWN,
+        WM_POINTERUPDATE, WNDPROC,
     };
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -319,6 +337,12 @@ mod system {
         if msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE {
             // the pointer's id is the low word of `wparam`
             let id = (wparam.0 & 0xFFFF) as u32;
+            // a pen or a finger, as the system knows it (a touch screen's fingers may have a pressure)
+            let mut kind = POINTER_INPUT_TYPE::default();
+            // SAFETY: `kind` is a type to fill for this pointer
+            if unsafe { GetPointerType(id, &mut kind) }.is_ok() && (kind == PT_PEN || kind == PT_TOUCH) {
+                super::pointer_kind(u64::from(id), kind == PT_PEN);
+            }
             let mut info = POINTER_PEN_INFO::default();
             // SAFETY: `info` is a pen info to fill; a pointer that isn't a pen fails and is left
             if unsafe { GetPointerPenInfo(id, &mut info) }.is_ok() {
@@ -352,6 +376,14 @@ mod tests {
         assert!(!eraser_end(901));
         pen_flags(902, FLAG_INVERTED);
         assert!(eraser_end(902));
+    }
+
+    #[test]
+    fn a_pointer_is_a_pen_or_a_finger_as_the_system_said() {
+        assert_eq!(is_pen(911), None);
+        pointer_kind(911, false);
+        pointer_kind(912, true);
+        assert_eq!((is_pen(911), is_pen(912)), (Some(false), Some(true)));
     }
 
     #[test]

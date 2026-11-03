@@ -261,8 +261,14 @@ impl Input {
 
     fn on_touch(&mut self, session: &CanvasSession, touch: &Touch, over: &impl Fn((f32, f32)) -> bool) -> bool {
         let p = (touch.location.x as f32, touch.location.y as f32);
-        // the platform gives a pen's pressure, and none for a finger
-        let pen = touch.force.map(|f| f.normalized() as f32);
+        // a pen with its pressure, or a finger: as the system says which (a touch screen may give
+        // its fingers a pressure too), else a pressure means a pen
+        let force = touch.force.map(|f| f.normalized() as f32);
+        let pen = match crate::pen::is_pen(touch.id) {
+            Some(true) => Some(force.unwrap_or(1.0)),
+            Some(false) => None,
+            None => force,
+        };
         // a pen turned over rubs out with its eraser end
         let kind = match pen {
             Some(_) if crate::pen::eraser_end(touch.id) => PointerKind::StylusEraser,
