@@ -452,9 +452,9 @@ impl App {
         let Some(screen) = self.screen.as_mut() else { return false };
         let studio = &mut self.ui.studio;
         if !studio.open {
-            if studio.pad_texture.take().is_some() {
-                screen.drop_pad();
-            }
+            // closing the studio lets its texture go first: the picture goes whether or not
+            studio.pad_texture = None;
+            screen.drop_pad();
             return false;
         }
         let ppp = screen.egui.egui_ctx().pixels_per_point();
@@ -464,6 +464,10 @@ impl App {
             return true;
         }
         if studio.pad.is_none() {
+            // a new pad is shown afresh: the picture an earlier one was shown in (the studio closed
+            // without it being let go) would be drawn into without the new pad ever being told its
+            // size and view, and the pad would take no strokes
+            screen.drop_pad();
             let pad = CanvasSession::new(size.0, size.1);
             pad.use_gpu(screen.gpu.clone());
             pad.set_display_scale(ppp);
