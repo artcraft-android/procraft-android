@@ -540,9 +540,12 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     if let Some(mode) = RENDERING.iter().position(|&r| r == switches) {
         set("rendering_mode", mode as f32);
     }
-    // the classic taper is the old one
+    // the classic taper is the old one; a file from before there was another, its taper set but
+    // no version said, has the old one
     if let Some(v) = f.num("taperVersion") {
         set("classic_taper", if v < 0.5 { 1.0 } else { 0.0 });
+    } else if f.num("taperStartLength").is_some() || f.num("taperEndLength").is_some() {
+        set("classic_taper", 1.0);
     }
     for (control, on, mode) in [
         ("shape_filtering", "shapeFilter", "shapeFilterMode"),
@@ -1216,6 +1219,30 @@ mod tests {
         assert_eq!(get("touch_taper_start"), Some(0.4));
         // its own key wins
         assert_eq!(get("pen_taper_end"), Some(0.2));
+        // its taper set with no version: from before there was more than the classic one
+        assert_eq!(get("classic_taper"), Some(1.0));
+    }
+
+    #[test]
+    fn a_file_says_which_taper_it_has_or_has_none() {
+        let read_with = |fields: Vec<(&str, Value)>| {
+            let mut b = Builder::new();
+            let root = b.reserve();
+            let name = b.string("Brush");
+            let mut all = vec![("name", name)];
+            all.extend(fields);
+            b.fill(&root, &["SilicaBrush", "ValkyrieBrush", "NSObject"], all);
+            let mut zip = ZipWriter::new();
+            zip.add("Brush.archive", &b.finish(root));
+            let back = read(&zip.finish()).unwrap();
+            back.settings.iter().rev().find(|(key, _)| key == "classic_taper").map(|(_, v)| *v)
+        };
+        let taper = || ("taperEndLength", Value::Real(1.0));
+        assert_eq!(read_with(vec![taper(), ("taperVersion", Value::Int(1))]), Some(0.0));
+        assert_eq!(read_with(vec![taper(), ("taperVersion", Value::Int(0))]), Some(1.0));
+        assert_eq!(read_with(vec![taper()]), Some(1.0));
+        // no taper set at all: left as the brush it starts from has it
+        assert_eq!(read_with(vec![]), None);
     }
 
     #[test]
