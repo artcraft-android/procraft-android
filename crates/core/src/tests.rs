@@ -5574,6 +5574,13 @@ fn brush_libraries_come_and_go_each_kept_in_its_own_files() {
     assert_eq!(s.new_brush_library(), Some(1));
     assert!(s.open_brush_library(1));
     assert!(s.brush_library().is_empty());
+    // with no brushes, the tools paint with the fallback, and nothing asks for a brush that isn't
+    let _ = s.current_brush();
+    let _ = s.brush_outline();
+    s.set_brush_size(0.5);
+    s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 10.0, 0.0)]);
+    s.stroke_end(vec![sample(30.0, 30.0, 40.0)]);
+    assert_eq!(s.brush_preview(0, 0, 100, 40), None);
     assert!(s.rename_brush_library(1, " Mine ".to_owned()));
     assert!(!s.rename_brush_library(1, "  ".to_owned()));
     assert_eq!(names(&s), vec![("Brush library".to_owned(), false), ("Mine".to_owned(), true)]);
