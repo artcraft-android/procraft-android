@@ -40,6 +40,8 @@ impl Screen {
         let format = config.as_ref().map_or(wgpu::TextureFormat::Bgra8Unorm, |c| c.format);
         let renderer = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
         let ctx = egui::Context::default();
+        // Ctrl (⌘) with + - 0 zoom the canvas (the interface's shortcuts), not the whole interface
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let egui = egui_winit::State::new(
             ctx,
             egui::ViewportId::ROOT,

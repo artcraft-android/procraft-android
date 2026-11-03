@@ -1957,6 +1957,18 @@ impl Interface {
                 ctx.input_mut(|i| i.consume_key(modifiers, key));
                 continue;
             }
+            // Ctrl (⌘) with + or = zooms in about the window's middle, with - out, with 0 fits the
+            // canvas (the desktop's own, as the R key's turn)
+            if modifiers.command && matches!(key, Key::Plus | Key::Equals | Key::Minus | Key::Num0) {
+                let middle = ctx.content_rect().center() * ctx.pixels_per_point();
+                match key {
+                    Key::Num0 => session.settle_to_fit(),
+                    Key::Minus => session.view_gesture(middle.x, middle.y, 0.0, 0.0, 1.0 / KEY_ZOOM, 0.0),
+                    _ => session.view_gesture(middle.x, middle.y, 0.0, 0.0, KEY_ZOOM, 0.0),
+                }
+                ctx.input_mut(|i| i.consume_key(modifiers, key));
+                continue;
+            }
             let Some(name) = key_name(key) else { continue };
             let transforming = self.transform.on;
             let Some(shortcut) = procraft_core::key_shortcut(
@@ -2011,6 +2023,8 @@ impl Interface {
 
 /// How far R turns the canvas (radians, 15°).
 const KEY_TURN: f32 = 15.0 * std::f32::consts::PI / 180.0;
+/// How far Ctrl with + or - zooms the canvas each time.
+const KEY_ZOOM: f32 = 1.25;
 
 /// The name the core's shortcuts know `key` by (keys.rs), if it has one.
 fn key_name(key: Key) -> Option<&'static str> {
