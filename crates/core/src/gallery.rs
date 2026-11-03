@@ -396,9 +396,78 @@ impl ArtworkStore {
     }
 }
 
+/// What a zip file holds, told from its names alone (read from the file's end, so a big artwork
+/// isn't read to find out): how Import takes it.
+#[derive(uniffi::Enum, Debug, PartialEq, Eq)]
+pub enum ZipKind {
+    /// Not an archive that can be read.
+    NotZip,
+    Brushes,
+    Swatches,
+    /// A model, at `name` in the zip, its files beside it.
+    Model {
+        name: String,
+    },
+    /// An artwork file of ours, a layered package, or anything else.
+    Other,
+}
+
+#[uniffi::export]
+pub fn zip_file_kind(path: String) -> ZipKind {
+    let Some(names) = procraft_engine::zip::names_in_file(Path::new(&path)) else { return ZipKind::NotZip };
+    let names = || names.iter().map(String::as_str);
+    if crate::brush_files::brush_names(names()) {
+        ZipKind::Brushes
+    } else if names().any(|n| n.rsplit('/').next() == Some(procraft_engine::palette::SWATCHES_ENTRY)) {
+        ZipKind::Swatches
+    } else if let Some(name) = crate::scene3d::model_name_among(names()) {
+        ZipKind::Model { name }
+    } else {
+        ZipKind::Other
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_zip_file_is_told_by_its_names() {
+        let dir = std::env::temp_dir().join(format!("procraft-zip-kind-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let zip = |file: &str, entries: &[&str]| {
+            let mut w = procraft_engine::zip::ZipWriter::new();
+            for e in entries {
+                w.add(e, b"x");
+            }
+            let path = dir.join(file);
+            fs::write(&path, w.finish()).unwrap();
+            zip_file_kind(path.to_string_lossy().into_owned())
+        };
+        let kinds = [
+            zip("set.zip", &["brushset.plist", "a/Brush.archive"]),
+            zip("one.zip", &["b/Brush.archive", "b/Shape.png"]),
+            zip("colours.zip", &["Swatches.json"]),
+            zip("model.zip", &["__MACOSX/._chair.obj", "chair/chair.obj", "chair/chair.mtl"]),
+            zip("art.zip", &["Document.archive", "chair.obj", "QuickLook/Thumbnail.png"]),
+            zip("other.zip", &["notes.txt"]),
+        ];
+        fs::write(dir.join("plain.zip"), b"PK not really").unwrap();
+        let plain = zip_file_kind(dir.join("plain.zip").to_string_lossy().into_owned());
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(
+            kinds,
+            [
+                ZipKind::Brushes,
+                ZipKind::Brushes,
+                ZipKind::Swatches,
+                ZipKind::Model { name: "chair/chair.obj".to_owned() },
+                ZipKind::Other,
+                ZipKind::Other,
+            ]
+        );
+        assert_eq!(plain, ZipKind::NotZip);
+    }
 
     fn names(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()

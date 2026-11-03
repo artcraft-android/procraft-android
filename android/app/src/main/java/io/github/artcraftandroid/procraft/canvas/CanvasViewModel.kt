@@ -1453,35 +1453,52 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // another program's palette
         val foreign = head != null && String(head, Charsets.US_ASCII) == "ASEF" || name?.endsWith(".aco", ignoreCase = true) == true
         val zip = head != null && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()
-        val zipBytes = if (zip) withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() } else null
-        // a zip of brushes
-        val brushes = zipBytes?.takeIf(::isBrushFile)
-        // a model zipped with its material file and images (as a folder of them)
-        val zippedModel = if (brushes == null && name?.let(::isModelName) != true) zipBytes?.let { io.github.artcraftandroid.procraft.core.zipModelName(it) } else null
-        // a zip: brushes, a palette, an artwork file of ours, or a layered package
-        if (brushes != null) {
-            if (!addBrushes(brushes)) message = "This file has no brushes in it."
-        } else if (head != null && (foreign || zip) && importSwatches(uri)) {
+        // a zip is copied once and told by the names it holds, read from its end: a big artwork
+        // isn't read into memory to find out what it is
+        val zipFile = if (zip) withContext(Dispatchers.IO) { cacheCopy(uri) } else null
+        if (zip && zipFile == null) {
+            message = "This file can't be opened."
+            return
+        }
+        try {
+            importOne(uri, head, name, foreign, zipFile)
+        } finally {
+            zipFile?.delete()
+        }
+    }
+
+    /** [importOne] past the file's first bytes: [zipFile], a copy of a zip, read as what it holds. */
+    private suspend fun importOne(uri: android.net.Uri, head: ByteArray?, name: String?, foreign: Boolean, zipFile: File?) {
+        val resolver = getApplication<Application>().contentResolver
+        val kind = zipFile?.let { f -> withContext(Dispatchers.IO) { io.github.artcraftandroid.procraft.core.zipFileKind(f.path) } }
+        // the zip whole, read only for what needs all of it (brushes and a model's files)
+        suspend fun zipBytes() = zipFile?.let { f -> withContext(Dispatchers.IO) { runCatching { f.readBytes() }.getOrNull() } }
+        if (kind == io.github.artcraftandroid.procraft.core.ZipKind.Brushes) {
+            val bytes = zipBytes()
+            if (bytes == null || !addBrushes(bytes)) message = "This file has no brushes in it."
+        } else if ((foreign || kind == io.github.artcraftandroid.procraft.core.ZipKind.Swatches) && importSwatches(uri)) {
             message = "Palette added."
         } else if (foreign) {
             message = "This palette can't be read."
         } else if (name != null && isModelName(name)) {
             newFromModel(uri, name)
-        } else if (zippedModel != null && zipBytes != null) {
-            val title = zippedModel.substringAfterLast('/').substringBeforeLast('.')
-            newFromModel(uri, if (name?.endsWith(".zip", ignoreCase = true) == true) name else "${name ?: "model"}.zip", bytes = zipBytes, title = title)
+        } else if (kind is io.github.artcraftandroid.procraft.core.ZipKind.Model) {
+            // a model zipped with its material file and images (as a folder of them)
+            val title = kind.name.substringAfterLast('/').substringBeforeLast('.')
+            newFromModel(uri, if (name?.endsWith(".zip", ignoreCase = true) == true) name else "${name ?: "model"}.zip", bytes = zipBytes(), title = title)
         } else if (name != null && isOtherBrushFile(name)) {
-            val bytes = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }
+            val bytes = zipBytes() ?: withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull() }
             if (bytes == null || !addOtherBrushes(bytes, name)) message = "This file has no brushes in it."
         } else if (head != null && String(head, Charsets.ISO_8859_1) == "8BPS") {
             importPsd(uri, name)
         } else if (head != null && String(head, Charsets.ISO_8859_1) == "%PDF") {
             importPdf(uri, name)
-        } else if (head != null && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()) {
+        } else if (zipFile != null) {
+            // an artwork file of ours, or a layered package
             val ok = withContext(Dispatchers.IO) {
                 val dir = store.newFolder(galleryDir)
-                val ours = runCatching { resolver.openInputStream(uri)?.use { io.github.artcraftandroid.procraft.gallery.ArtworkFile.read(it, dir) } }.getOrNull() == true
-                (ours || importPackage(uri, dir)).also { if (!it) dir.deleteRecursively() }
+                val ours = runCatching { zipFile.inputStream().use { io.github.artcraftandroid.procraft.gallery.ArtworkFile.read(it, dir) } }.getOrNull() == true
+                (ours || importPackage(zipFile, dir)).also { if (!it) dir.deleteRecursively() }
             }
             if (ok) refreshGallery() else message = "This file can't be opened."
         } else {
@@ -1572,26 +1589,36 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * A layered package from [uri] made into the artwork folder [dir]: its layers, settings and
-     * preview (as the gallery's thumbnail until it is opened); false if it isn't one.
-     */
-    private fun importPackage(uri: android.net.Uri, dir: File): Boolean {
-        val resolver = getApplication<Application>().contentResolver
+    /** The file at [uri] copied whole into the cache (streamed through, never held in memory), or none. */
+    private fun cacheCopy(uri: android.net.Uri): File? {
         val temp = File(getApplication<Application>().cacheDir, "import-${System.nanoTime()}.zip")
+        return runCatching {
+            getApplication<Application>().contentResolver.openInputStream(uri)?.use { input -> temp.outputStream().use { input.copyTo(it) } } ?: error("nothing to read")
+            temp
+        }.getOrElse {
+            android.util.Log.e("ProCraft", "copying a file in", it)
+            temp.delete()
+            null
+        }
+    }
+
+    /**
+     * The layered package in [source] (a copy in the cache) made into the artwork folder [dir]: its
+     * layers, settings and preview (as the gallery's thumbnail until it is opened); false if it isn't one.
+     */
+    private fun importPackage(source: File, dir: File): Boolean {
         return try {
-            resolver.openInputStream(uri)?.use { input -> temp.outputStream().use { input.copyTo(it) } } ?: return false
-            val s = runCatching { CanvasSession.openPackage(temp.path) }.getOrNull() ?: return false
+            val s = runCatching { CanvasSession.openPackage(source.path) }.getOrNull() ?: return false
             s.save(dir.path)
             // its time-lapse: the settings, and the video as frames
             val segments = File(getApplication<Application>().cacheDir, "segments-${System.nanoTime()}")
             try {
-                runCatching { io.github.artcraftandroid.procraft.core.packageTimeLapse(temp.path, segments.path) }
+                runCatching { io.github.artcraftandroid.procraft.core.packageTimeLapse(source.path, segments.path) }
                     .getOrNull()?.let { TimeLapse(dir).take(it) }
             } finally {
                 segments.deleteRecursively()
             }
-            java.util.zip.ZipFile(temp).use { zip ->
+            java.util.zip.ZipFile(source).use { zip ->
                 zip.getEntry("QuickLook/Thumbnail.png")?.let { e ->
                     zip.getInputStream(e).use { input -> File(dir, "thumbnail.png").outputStream().use { input.copyTo(it) } }
                 }
@@ -1600,8 +1627,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         } catch (e: Exception) {
             android.util.Log.e("ProCraft", "importing a package", e)
             false
-        } finally {
-            temp.delete()
         }
     }
 

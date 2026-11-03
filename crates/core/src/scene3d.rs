@@ -227,8 +227,12 @@ fn is_model_name(name: &str) -> bool {
 /// package of another kind (an artwork or brushes). Folders, and the hidden files another system
 /// adds when it zips (`__MACOSX/`, `._` files), are passed over.
 fn zipped_model_name(zip: &procraft_engine::zip::ZipReader<'_>) -> Option<String> {
-    let files: Vec<&str> = zip
-        .names()
+    model_name_among(zip.names())
+}
+
+/// The model a zip holding `names` holds (see [`zipped_model_name`]).
+pub(crate) fn model_name_among<'n>(names: impl Iterator<Item = &'n str>) -> Option<String> {
+    let files: Vec<&str> = names
         .filter(|n| {
             let last = n.rsplit('/').next().unwrap_or(n);
             !n.ends_with('/') && !n.starts_with("__MACOSX/") && !last.starts_with("._") && !last.is_empty()

@@ -25,31 +25,11 @@ const MAX_ENTRY: usize = 1 << 30;
 impl<'a> ZipReader<'a> {
     /// The archive in `bytes`, if it is one.
     pub fn new(bytes: &'a [u8]) -> Option<ZipReader<'a>> {
-        // the end record is in the last 64 KiB (its comment can be that long)
-        let from = bytes.len().saturating_sub(22 + 0xFFFF);
-        let tail = bytes.get(from..)?;
-        let end =
-            (0..tail.len().checked_sub(21)?).rev().find(|&i| tail.get(i..i + 4) == Some(&[0x50, 0x4B, 0x05, 0x06]))?
-                + from;
+        let from = bytes.len().saturating_sub(TAIL);
+        let end = end_record(bytes.get(from..)?)? + from;
         let count = usize::from(u16le(bytes, end + 10)?);
-        let mut at = usize::try_from(u32le(bytes, end + 16)?).ok()?;
-        let mut entries = Vec::with_capacity(count.min(65_536));
-        for _ in 0..count {
-            if u32le(bytes, at)? != 0x0201_4B50 {
-                return None;
-            }
-            let method = u16le(bytes, at + 10)?;
-            let crc = u32le(bytes, at + 16)?;
-            let compressed = usize::try_from(u32le(bytes, at + 20)?).ok()?;
-            let size = usize::try_from(u32le(bytes, at + 24)?).ok()?;
-            let name_len = usize::from(u16le(bytes, at + 28)?);
-            let extra = usize::from(u16le(bytes, at + 30)?);
-            let comment = usize::from(u16le(bytes, at + 32)?);
-            let local = usize::try_from(u32le(bytes, at + 42)?).ok()?;
-            let name = String::from_utf8_lossy(bytes.get(at + 46..at + 46 + name_len)?).into_owned();
-            entries.push(Entry { name, method, compressed, size, crc, local });
-            at += 46 + name_len + extra + comment;
-        }
+        let at = usize::try_from(u32le(bytes, end + 16)?).ok()?;
+        let entries = central_entries(bytes, at, count)?;
         let mut by_name = std::collections::HashMap::with_capacity(entries.len());
         for (i, e) in entries.iter().enumerate() {
             by_name.entry(e.name.clone()).or_insert(i);
@@ -88,6 +68,59 @@ impl<'a> ZipReader<'a> {
         };
         (data.len() == e.size && crc32(&data) == e.crc).then_some(data)
     }
+}
+
+/// The end record is in the last 64 KiB of an archive (its comment can be that long).
+const TAIL: usize = 22 + 0xFFFF;
+
+/// Where the end record is in `tail`, the archive's last [`TAIL`] bytes (or all of it).
+fn end_record(tail: &[u8]) -> Option<usize> {
+    (0..tail.len().checked_sub(21)?).rev().find(|&i| tail.get(i..i + 4) == Some(&[0x50, 0x4B, 0x05, 0x06]))
+}
+
+/// The `count` entries the central directory at `at` in `bytes` lists.
+fn central_entries(bytes: &[u8], mut at: usize, count: usize) -> Option<Vec<Entry>> {
+    let mut entries = Vec::with_capacity(count.min(65_536));
+    for _ in 0..count {
+        if u32le(bytes, at)? != 0x0201_4B50 {
+            return None;
+        }
+        let method = u16le(bytes, at + 10)?;
+        let crc = u32le(bytes, at + 16)?;
+        let compressed = usize::try_from(u32le(bytes, at + 20)?).ok()?;
+        let size = usize::try_from(u32le(bytes, at + 24)?).ok()?;
+        let name_len = usize::from(u16le(bytes, at + 28)?);
+        let extra = usize::from(u16le(bytes, at + 30)?);
+        let comment = usize::from(u16le(bytes, at + 32)?);
+        let local = usize::try_from(u32le(bytes, at + 42)?).ok()?;
+        let name = String::from_utf8_lossy(bytes.get(at + 46..at + 46 + name_len)?).into_owned();
+        entries.push(Entry { name, method, compressed, size, crc, local });
+        at += 46 + name_len + extra + comment;
+    }
+    Some(entries)
+}
+
+/// The names in the archive at `path`, read from its end (the central directory) alone: a big
+/// archive is told by what it holds without reading all of it.
+pub fn names_in_file(path: &std::path::Path) -> Option<Vec<String>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let tail_len = len.min(TAIL as u64);
+    file.seek(SeekFrom::Start(len - tail_len)).ok()?;
+    let mut tail = vec![0; usize::try_from(tail_len).ok()?];
+    file.read_exact(&mut tail).ok()?;
+    let end = end_record(&tail)?;
+    let count = usize::from(u16le(&tail, end + 10)?);
+    let size = usize::try_from(u32le(&tail, end + 12)?).ok()?;
+    let at = u64::from(u32le(&tail, end + 16)?);
+    if size > MAX_ENTRY {
+        return None;
+    }
+    let mut directory = vec![0; size];
+    file.seek(SeekFrom::Start(at)).ok()?;
+    file.read_exact(&mut directory).ok()?;
+    Some(central_entries(&directory, 0, count)?.into_iter().map(|e| e.name).collect())
 }
 
 fn u16le(b: &[u8], at: usize) -> Option<u16> {
@@ -259,6 +292,27 @@ mod tests {
         assert_eq!(r.read("QuickLook/Thumbnail.png").as_deref(), Some(&[][..]));
         assert_eq!(r.read("missing"), None);
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+    }
+
+    #[test]
+    fn a_files_names_are_read_from_its_end() {
+        let dir = std::env::temp_dir().join(format!("procraft-zip-names-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut w = ZipWriter::new();
+        // a big entry the names are read past
+        let big: Vec<u8> = (0..300_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+        w.add("Document.archive", b"bplist00");
+        w.add("layer/0~0.chunk", &big);
+        w.add("QuickLook/Thumbnail.png", &[]);
+        let zip = dir.join("a.zip");
+        std::fs::write(&zip, w.finish()).unwrap();
+        let other = dir.join("b.txt");
+        std::fs::write(&other, b"PK but no archive").unwrap();
+        let names = names_in_file(&zip);
+        let none = (names_in_file(&other), names_in_file(&dir.join("missing")));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(names.unwrap(), ["Document.archive", "layer/0~0.chunk", "QuickLook/Thumbnail.png"]);
+        assert_eq!(none, (None, None));
     }
 
     #[test]

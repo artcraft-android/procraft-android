@@ -11,7 +11,8 @@ use crate::zip::{ZipReader, ZipWriter};
 pub const SLOTS: usize = 30;
 /// A swatches file's extension, and the entry it keeps the palette in.
 pub const SWATCHES_EXTENSION: &str = "swatches";
-const SWATCHES_ENTRY: &str = "Swatches.json";
+/// The entry a swatches file keeps its palette in.
+pub const SWATCHES_ENTRY: &str = "Swatches.json";
 
 /// A named set of [`SLOTS`] swatches, empty slots none.
 #[derive(Clone, Debug, PartialEq, Eq)]

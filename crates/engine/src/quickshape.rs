@@ -341,15 +341,18 @@ pub fn recognise(stroke: &[Vec2]) -> Vec<Shape> {
     }
     if chord > CLOSED * length {
         // open: corners make a polyline; an even bend an arc
-        let corners = simplify(&pts, CORNER_TOLERANCE * size(&pts));
+        let polyline = Shape { kind: ShapeKind::Polyline, nodes: simplify(&pts, CORNER_TOLERANCE * size(&pts)) };
         let arc = fit_arc(&pts);
         let arc_error = arc.as_ref().map_or(f32::MAX, |a| arc_error(a, &pts));
-        if corners.len() >= 3 && (sharp_corner(&pts, &corners) || arc_error > 0.04) {
-            return vec![Shape { kind: ShapeKind::Polyline, nodes: corners }, line_of(&pts)];
+        // a sharp corner counts only where the corners fit clearly better than an even bend: a
+        // hand's wobble along an arc can turn as sharply between a few points, but is no corner
+        let cornered = || sharp_corner(&pts, &polyline.nodes) && arc_error > 2.0 * outline_error(&polyline, &pts);
+        if polyline.nodes.len() >= 3 && (arc_error > 0.04 || cornered()) {
+            return vec![polyline, line_of(&pts)];
         }
         return match arc {
             Some(a) => vec![a, line_of(&pts)],
-            None => vec![Shape { kind: ShapeKind::Polyline, nodes: corners }],
+            None => vec![polyline],
         };
     }
     // closed: an ellipse against the polygon the corners make
@@ -787,6 +790,26 @@ mod tests {
             })
             .collect();
         assert_eq!(recognise(&arc)[0].kind, ShapeKind::Arc);
+        // drawn by an unsteady hand (each point up to 9 off the bend): still an arc
+        let wobbly: Vec<Vec2> = (0..=60)
+            .map(|i| {
+                let t = i as f32 / 60.0 * 2.1;
+                let r = 300.0 + 9.0 * (((i * 37 % 11) as f32 / 5.0) - 1.0);
+                Vec2::new(500.0 + r * t.cos(), 400.0 + r * t.sin())
+            })
+            .collect();
+        assert_eq!(recognise(&wobbly)[0].kind, ShapeKind::Arc);
+        // a corner of 50 degrees, wobbling the same: a polyline
+        let bent = [Vec2::new(0.0, 0.0), Vec2::new(200.0, 0.0), Vec2::new(200.0 + 200.0 * 0.643, 200.0 * 0.766)];
+        let mut path = Vec::new();
+        for w in bent.windows(2) {
+            for k in 0..30 {
+                let p = w[0].lerp(w[1], k as f32 / 30.0);
+                path.push(Vec2::new(p.x, p.y + 4.0 * (((k * 37 % 11) as f32 / 5.0) - 1.0)));
+            }
+        }
+        path.push(bent[2]);
+        assert_eq!(recognise(&path)[0].kind, ShapeKind::Polyline);
         let zig = [Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0), Vec2::new(100.0, 100.0), Vec2::new(200.0, 100.0)];
         let mut path = Vec::new();
         for w in zig.windows(2) {

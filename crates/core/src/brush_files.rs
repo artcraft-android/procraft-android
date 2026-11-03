@@ -101,9 +101,12 @@ pub const OTHER_BRUSH_EXTENSIONS: [&str; 7] = ["abr", "gbr", "gih", "vbr", "kpp"
 /// file is called: a brush or set file sent on as a plain zip.
 #[uniffi::export]
 pub fn is_brush_zip(bytes: Vec<u8>) -> bool {
-    procraft_engine::zip::ZipReader::new(&bytes).is_some_and(|zip| {
-        zip.names().any(|n| n == "Brush.archive" || n == "brushset.plist" || n.ends_with("/Brush.archive"))
-    })
+    procraft_engine::zip::ZipReader::new(&bytes).is_some_and(|zip| brush_names(zip.names()))
+}
+
+/// Whether a zip holding `names` holds brushes.
+pub(crate) fn brush_names<'n>(mut names: impl Iterator<Item = &'n str>) -> bool {
+    names.any(|n| n == "Brush.archive" || n == "brushset.plist" || n.ends_with("/Brush.archive"))
 }
 
 /// Brushes read from a file, not yet in the library: reading another app's takes a while, so it
