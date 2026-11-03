@@ -2752,6 +2752,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readSliders()
         refresh()
         brushSets = s.brushLibrary()
+        readLibraries()
         readSetChoices()
         currentBrush = s.currentBrush()
         screen = Screen.CANVAS
@@ -4476,6 +4477,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         pickedBrushes.clear()
         previewRound++
         brushSets = s.brushLibrary()
+        readLibraries()
         currentBrush = s.currentBrush()
         readSetChoices()
         if (shownSet != RECENT_SET) shownSet = shownSet.coerceIn(0, (brushSets.size - 1).coerceAtLeast(0))
@@ -4484,18 +4486,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         previews.clear()
         shadedNames.clear()
         keepBrushLibrary(s)
-    }
-
-    /** The brushes the app comes with that were deleted, back where they ship; said how many. */
-    fun restoreShippedBrushes() {
-        val s = session ?: return
-        val back = s.restoreShippedBrushes().toInt()
-        if (back > 0) libraryChanged()
-        message = when (back) {
-            0 -> "Every brush ProCraft comes with is in the library."
-            1 -> "1 brush is back."
-            else -> "$back brushes are back."
-        }
     }
 
     fun duplicateBrush(b: BrushInfo) {
@@ -4564,6 +4554,70 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         studioNew = true
         openStudio()
     }
+
+    /** Every brush library, the one in use among them: for the libraries' cards and the title. */
+    var brushLibraries by mutableStateOf<List<io.github.artcraftandroid.procraft.core.BrushLibraryInfo>>(emptyList())
+        private set
+
+    /** The library popover shows every library's card rather than the one in use. */
+    var showingLibraries by mutableStateOf(false)
+
+    /** The library whose name is being edited (its place), if one is. */
+    var renamingLibrary by mutableStateOf<Int?>(null)
+
+    /** The library to delete (its place), once that is confirmed. */
+    var deletingLibrary by mutableStateOf<Int?>(null)
+
+    /** The library in use's name, and its place. */
+    val libraryName: String get() = brushLibraries.firstOrNull { it.current }?.name ?: "Brush library"
+    val libraryPlace: Int get() = brushLibraries.indexOfFirst { it.current }.coerceAtLeast(0)
+
+    private fun readLibraries() {
+        brushLibraries = session?.brushLibraries().orEmpty()
+    }
+
+    /**
+     * Runs [work] on the libraries off the main thread (it reads and writes their files), then
+     * reads them again; [changed]: the library in use may be another, so everything shown of it
+     * is read again. Tells [failure] if it didn't work.
+     */
+    private fun libraryWork(changed: Boolean, failure: String, work: (CanvasSession) -> Boolean) {
+        val s = session ?: return
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { brushLibraryWrites.withLock { runCatching { work(s) }.getOrDefault(false) } }
+            if (!ok) message = failure
+            if (ok && changed) {
+                libraryChanged()
+                shownSet = currentBrush?.set?.toInt()?.coerceIn(0, (brushSets.size - 1).coerceAtLeast(0)) ?: 0
+            }
+            readLibraries()
+        }
+    }
+
+    /** Brings library [i] into use and shows it. */
+    fun openLibrary(i: Int) {
+        showingLibraries = false
+        if (brushLibraries.getOrNull(i)?.current == true) return
+        libraryWork(true, "This library can't be opened.") { it.openBrushLibrary(i.toUInt()) }
+    }
+
+    fun renameLibrary(i: Int, name: String) {
+        renamingLibrary = null
+        if (name.isBlank() || brushLibraries.getOrNull(i)?.name == name.trim()) return
+        libraryWork(false, "The library couldn't be renamed.") { it.renameBrushLibrary(i.toUInt(), name) }
+    }
+
+    fun newLibrary() = libraryWork(false, "A new library couldn't be made.") { it.newBrushLibrary() != null }
+
+    fun duplicateLibrary(i: Int) = libraryWork(false, "The library couldn't be copied.") { it.duplicateBrushLibrary(i.toUInt()) != null }
+
+    fun deleteLibrary(i: Int) {
+        deletingLibrary = null
+        libraryWork(brushLibraries.getOrNull(i)?.current == true, "The library couldn't be deleted.") { it.deleteBrushLibrary(i.toUInt()) }
+    }
+
+    /** The library as it ships, back beside the others. */
+    fun restoreLibraries() = libraryWork(false, "The library couldn't be put back.") { it.restoreStockBrushLibrary() != null }
 
     /** A new set at the top of the library, shown, with its name ready to edit. */
     fun newBrushSet() {
