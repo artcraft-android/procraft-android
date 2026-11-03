@@ -221,11 +221,28 @@ fn blend(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
         return b + s * (1.0 - b.a);
     }
     if (mode == 30u) {
-      return select(b, s, s.a >= b.a);
+      return blend_greater(b, s);
     }
     let cb = unpremultiply(b);
     let cs = unpremultiply(s);
     let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(1.0));
     let rgb = s.a * (1.0 - b.a) * cs + s.a * b.a * mixed + (1.0 - s.a) * b.rgb;
     return vec4<f32>(rgb, s.a + b.a * (1.0 - s.a));
+}
+
+fn blend_greater(b: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
+    let dA = b.a;
+    let sa = s.a;
+    if (dA >= 1.0 || sa <= 0.0) {
+        return b;
+    }
+    let w = 1.0 / (1.0 + exp(-40.0 * (dA - sa)));
+    var a = dA * w + sa * (1.0 - w);
+    a = clamp(a, 0.0, 1.0);
+    a = max(a, dA); // the backdrop's opacity never falls
+    // the source-over opacity that would have raised dA to a
+    let fake = 1.0 - (1.0 - a) / max(1.0 - dA, 1e-6);
+    // b.rgb is already premultiplied; the source enters at `fake`, not at its own alpha
+    let cs = unpremultiply(s);
+    return vec4<f32>(mix(b.rgb, cs, fake), a);
 }
