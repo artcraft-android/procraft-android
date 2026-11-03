@@ -150,7 +150,7 @@ impl State {
                 SymmetryKind::Radial => SymmetryType::Radial,
             },
             rotational: g.rotational,
-            assisted: self.doc.layer(self.doc.current()).is_some_and(|l| l.assisted),
+            assisted: self.doc.is_assisted(self.doc.current()),
             centre: point(c).to_vec(),
             handle: point(c + up).to_vec(),
             vanishing: g.vanishing.iter().flat_map(|v| point(Vec2::new(v[0], v[1]))).collect(),
@@ -216,12 +216,26 @@ impl CanvasSession {
         self.shared.lock().force_assist = on;
     }
 
-    /// Drawing assist on the current layer: strokes on it follow the guide.
+    /// Drawing assist on the current layer (a mask's layer, for a mask): strokes on it follow the
+    /// guide. One step, named as measured ("Undo Drawing Assist on").
     pub fn set_guide_assisted(&self, assisted: bool) -> GuideInfo {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let current = st.doc.current();
-        st.doc.set_assisted(current, assisted);
+        let owner = match st.doc.layer(current) {
+            Some(l) if l.kind == procraft_engine::document::LayerKind::Mask => l.parent.unwrap_or(current),
+            _ => current,
+        };
+        if st.doc.layer(owner).is_some_and(|l| l.assisted != assisted) {
+            st.finish_stroke();
+            st.settle();
+            let before = st.doc.clone();
+            st.doc.set_assisted(owner, assisted);
+            if let Some(canvas) = st.canvas.as_mut() {
+                canvas.name_next_step(if assisted { "Drawing Assist on" } else { "Drawing Assist off" });
+                canvas.record_document(before);
+            }
+        }
         st.revision += 1;
         self.shared.frame(st);
         st.guide_info()

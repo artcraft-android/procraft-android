@@ -192,7 +192,8 @@ impl CanvasSession {
         true
     }
 
-    /// Makes layer `id` the reference layer, or (not `on`) leaves none.
+    /// Makes layer `id` the reference layer, or (not `on`) leaves none: one step, named as
+    /// measured ("Undo reference layer on").
     pub fn set_layer_reference(&self, id: u64, on: bool) -> bool {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
@@ -201,6 +202,7 @@ impl CanvasSession {
             return false;
         }
         if let Some(canvas) = st.canvas.as_mut() {
+            canvas.name_next_step(if on { "reference layer on" } else { "reference layer off" });
             canvas.record_document(before);
         }
         st.revision += 1;

@@ -5861,7 +5861,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     // no layer's pixels change, so the thumbnails stay (an artwork's hundreds would load again)
     fun selectLayer(id: ULong) = layerChange(thumbs = false) { it.selectLayer(id) }
 
-    fun toggleVisible(l: LayerInfo) = layerChange { it.setLayerVisible(l.id, !l.visible) }
+    /** Shows or hides [l], saying so in the notice band as measured ("Hide layer"). */
+    fun toggleVisible(l: LayerInfo) {
+        var done = false
+        layerChange { done = it.setLayerVisible(l.id, !l.visible) }
+        if (done) showNotice(if (l.visible) "Hide layer" else "Show layer")
+    }
 
     fun setLayerOpacity(l: LayerInfo, value: Float, done: Boolean) = layerChange(thumbs = false) { it.setLayerOpacity(l.id, value, done) }
 
@@ -5928,17 +5933,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun toggleClipped(l: LayerInfo) = layerChange(thumbs = false) { it.setLayerClipped(l.id, !l.clipped) }
 
-    /** Locks or unlocks [l], saying so in the notice band as measured ("Lock layer", "Unlock Layer Group"). */
+    /** Locks or unlocks [l], saying so in the notice band as the core words it ("Lock layer", "Unlock Layer Group"). */
     fun toggleLocked(l: LayerInfo) {
         val on = !l.locked
+        val said = session?.lockSaid(l.id, on) ?: return
         var done = false
         layerChange(thumbs = false) { done = it.setLayerLocked(l.id, on) }
-        if (done) showNotice(lockSaid(on, l.kind == LayerType.GROUP))
-    }
-
-    private fun lockSaid(on: Boolean, group: Boolean) = when {
-        group -> if (on) "Lock Layer Group" else "Unlock Layer Group"
-        else -> if (on) "Lock layer" else "Unlock layer"
+        if (done) showNotice(said)
     }
 
     fun duplicate(l: LayerInfo) = layerChange { if (it.duplicateLayer(l.id) == null) message = noRoom() }

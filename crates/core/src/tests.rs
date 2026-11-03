@@ -2414,15 +2414,31 @@ fn a_group_s_lock_shows_on_its_layers_and_their_unlock_takes_it_off() {
     assert!(s.set_layer_locked(group, false));
     assert!(!locked(lower) && locked(upper));
     assert_eq!(s.why_blocked(), None);
-    // locked by its group alone, a layer's Unlock unlocks the group: one undo step
+    // locked by its group alone, a layer's Unlock unlocks the group: one undo step, called so
     assert!(s.set_layer_locked(group, true));
+    assert_eq!(s.lock_said(lower, false), "Unlock Layer Group");
+    assert_eq!(s.lock_said(upper, false), "Unlock layer");
     assert!(s.set_layer_locked(lower, false));
     assert!(!locked(group) && !locked(lower) && locked(upper));
-    assert_eq!(s.undo().as_deref(), Some("unlock layer"));
+    assert_eq!(s.undo().as_deref(), Some("unlock Layer Group"));
     assert!(locked(group) && locked(lower));
     // a group's step is named as measured ("Undo unlock Layer Group")
     assert!(s.set_layer_locked(group, false));
     assert_eq!(s.undo().as_deref(), Some("unlock Layer Group"));
+}
+
+#[test]
+fn drawing_assist_is_a_step_and_a_mask_follows_its_layer() {
+    let Some(s) = session(64, 64) else { return };
+    let layer = s.layers()[0].id;
+    let mask = s.add_mask(layer).unwrap();
+    let assisted = |id| s.layers().iter().find(|l| l.id == id).unwrap().assisted;
+    // as measured: the mask shows its layer's, and the change is a named step
+    assert!(s.select_layer(layer));
+    s.set_guide_assisted(true);
+    assert!(assisted(layer) && assisted(mask));
+    assert_eq!(s.undo().as_deref(), Some("Drawing Assist on"));
+    assert!(!assisted(layer) && !assisted(mask));
 }
 
 #[test]
@@ -4002,7 +4018,11 @@ fn undo_and_redo_tell_what_they_undid() {
     s.set_layer_opacity(id, 0.4, true);
     assert_eq!(s.undo().as_deref(), Some("layer opacity"));
     s.set_layer_visible(id, false);
-    assert_eq!(s.undo().as_deref(), Some("hide layer"));
+    assert_eq!(s.undo().as_deref(), Some("Toggle visibility"));
+    assert!(s.set_layer_alpha_lock(id, true));
+    assert_eq!(s.undo().as_deref(), Some("Alpha Lock on"));
+    assert!(s.set_layer_reference(id, true));
+    assert_eq!(s.undo().as_deref(), Some("reference layer on"));
     // selections
     use crate::selection::SelectionJoin;
     s.select_shape(false, 10.0, 10.0, 40.0, 40.0, SelectionJoin::Add);

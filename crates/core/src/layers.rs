@@ -109,6 +109,18 @@ pub struct LayerOptionRow {
     pub switch_on: Option<bool>,
 }
 
+/// What locking (`on`) or unlocking layer `id` is called (see [`CanvasSession::lock_said`]).
+fn lock_name(d: &Document, id: LayerId, on: bool) -> &'static str {
+    let by_group = |l: &procraft_engine::document::Layer| !on && !l.locked && !d.locked_groups(id).is_empty();
+    let group = d.layer(id).is_some_and(|l| l.kind == LayerKind::Group || by_group(l));
+    match (on, group) {
+        (true, false) => "Lock layer",
+        (false, false) => "Unlock layer",
+        (true, true) => "Lock Layer Group",
+        (false, true) => "Unlock Layer Group",
+    }
+}
+
 /// The rows of layer `l`'s options menu (`masked`: it has a mask; `guided`: the drawing guide is
 /// on or has been), in order: what doesn't apply to it left out. Locked, as measured, it offers
 /// only what leaves its pixels, name and place as they are (a locked group or mask: nothing).
@@ -342,7 +354,7 @@ impl CanvasSession {
                 picked: st.doc.is_picked(l.id),
                 reference: l.reference,
                 private: l.private,
-                assisted: l.assisted,
+                assisted: st.doc.is_assisted(l.id),
                 kind: match l.kind {
                     LayerKind::Paint => LayerType::Paint,
                     LayerKind::Group => LayerType::Group,
@@ -664,8 +676,9 @@ impl CanvasSession {
         true
     }
 
+    /// Shows or hides layer `id`: one step, named as measured ("Undo Toggle visibility").
     pub fn set_layer_visible(&self, id: u64, visible: bool) -> bool {
-        self.change(if visible { "show layer" } else { "hide layer" }, |d| {
+        self.change("Toggle visibility", |d| {
             changed(d, id, |l| l.visible != visible)
                 .then(|| d.set_visible(LayerId(id), visible))
                 .filter(|ok| *ok)
@@ -712,8 +725,9 @@ impl CanvasSession {
         .is_some()
     }
 
+    /// Turns layer `id`'s alpha lock on or off: one step, named as measured ("Undo Alpha Lock on").
     pub fn set_layer_alpha_lock(&self, id: u64, on: bool) -> bool {
-        self.change("alpha lock", |d| {
+        self.change(if on { "Alpha Lock on" } else { "Alpha Lock off" }, |d| {
             changed(d, id, |l| l.alpha_lock != on)
                 .then(|| d.set_alpha_lock(LayerId(id), on))
                 .filter(|ok| *ok)
@@ -729,18 +743,21 @@ impl CanvasSession {
         .is_some()
     }
 
+    /// What locking (`on`) or unlocking layer `id` is called in the notice band, as measured:
+    /// "Lock layer", or "Lock Layer Group" for a group; a layer locked by its group alone unlocks
+    /// the group, so "Unlock Layer Group".
+    pub fn lock_said(&self, id: u64, on: bool) -> String {
+        lock_name(&self.shared.lock().doc, LayerId(id), on).to_owned()
+    }
+
     /// Locks layer `id`, or unlocks it: as measured, a layer locked by its group shows locked and
-    /// its Unlock unlocks the group (its own lock, if any, too). The step is named as measured
-    /// (undo says "Undo lock layer", "Undo lock Layer Group").
+    /// its Unlock unlocks the group (its own lock, if any, too). The step is named as
+    /// [`CanvasSession::lock_said`] says, its first letter lowered (undo says "Undo lock layer",
+    /// "Undo lock Layer Group").
     pub fn set_layer_locked(&self, id: u64, on: bool) -> bool {
-        let group = self.shared.lock().doc.layer(LayerId(id)).is_some_and(|l| l.kind == LayerKind::Group);
-        let name = match (on, group) {
-            (true, false) => "lock layer",
-            (false, false) => "unlock layer",
-            (true, true) => "lock Layer Group",
-            (false, true) => "unlock Layer Group",
-        };
-        self.change(name, |d| {
+        let said = lock_name(&self.shared.lock().doc, LayerId(id), on);
+        let name = said[..1].to_lowercase() + &said[1..];
+        self.change(&name, |d| {
             let id = LayerId(id);
             let differs = if on { d.layer(id).is_some_and(|l| !l.locked) } else { d.is_locked(id) };
             (differs && d.set_locked(id, on)).then_some(())

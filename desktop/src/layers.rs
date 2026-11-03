@@ -63,16 +63,6 @@ const THUMBS_A_FRAME: usize = 4;
 /// from the window's top.
 const OPTIONS_LEFT: f32 = -183.0;
 const OPTIONS_WIDTH: f32 = 194.0;
-/// What the notice band says as a row is locked or unlocked, as measured.
-fn lock_said(on: bool, group: bool) -> &'static str {
-    match (on, group) {
-        (true, false) => "Lock layer",
-        (false, false) => "Unlock layer",
-        (true, true) => "Lock Layer Group",
-        (false, true) => "Unlock Layer Group",
-    }
-}
-
 /// Delete on a locked layer's row says this.
 const LOCKED_DELETE: &str = "A locked layer can’t be deleted. Unlock it first.";
 const OPTIONS_TOP: f32 = 57.0;
@@ -794,8 +784,9 @@ impl Layers {
             if ui.interact(rect, ui.scope_id().with(("swipe", l.id, label)), Sense::click()).clicked() {
                 match label {
                     "Lock" | "Unlock" => {
+                        let said = session.lock_said(l.id, !l.locked);
                         if session.set_layer_locked(l.id, !l.locked) {
-                            self.notice = Some((lock_said(!l.locked, l.kind == LayerType::Group).to_owned(), false));
+                            self.notice = Some((said, false));
                         }
                     }
                     "Duplicate" => _ = session.duplicate_layer(l.id),
@@ -1003,8 +994,9 @@ impl Layers {
             }
         }
         let held = self.box_press.is_some_and(|(id, _, done)| id == l.id && done);
-        if response.clicked() && !held {
-            session.set_layer_visible(l.id, !l.visible);
+        // as measured, the notice band says so
+        if response.clicked() && !held && session.set_layer_visible(l.id, !l.visible) {
+            self.notice = Some((if l.visible { "Hide layer" } else { "Show layer" }.to_owned(), false));
         }
         if !response.is_pointer_button_down_on() && self.box_press.is_some_and(|(id, _, _)| id == l.id) {
             self.box_press = None;

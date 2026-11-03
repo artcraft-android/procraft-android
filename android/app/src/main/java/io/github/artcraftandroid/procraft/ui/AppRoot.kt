@@ -388,8 +388,12 @@ private fun NoticeBand(vm: CanvasViewModel) {
     }
     if (shown.value <= 0f && n == null) return
     Box(Modifier.offset(y = Pc.BarHeight).fillMaxWidth().height(24.dp).clipToBounds()) {
+        // frosted over the canvas, as measured (a thin line under it doesn't show through); moved
+        // as it is placed, so the frost follows it
         Box(
-            Modifier.fillMaxSize().graphicsLayer { translationY = -(1f - shown.value) * size.height }.background(NoticeFill),
+            Modifier.fillMaxSize()
+                .offset { androidx.compose.ui.unit.IntOffset(0, kotlin.math.round(-(1f - shown.value) * 24.dp.toPx()).toInt()) }
+                .then(rememberFrost(0.dp)).background(NoticeFill),
             contentAlignment = Alignment.Center,
         ) {
             Text(text, color = NoticeInk, fontSize = 13.sp, maxLines = 1)

@@ -597,6 +597,12 @@ impl Interface {
         if let Some(kind) = self.overlays.show(ui, &mut self.look, colour, true) {
             self.overlays.shape = session.quickshape_choose(kind).or(self.overlays.shape.take());
         }
+        // the notice band frosts the canvas under it
+        if let Some(r) = self.overlays.frost.take() {
+            let ppp = ctx.pixels_per_point();
+            backdrops.extend([r.left(), r.top(), r.right(), r.bottom(), 0.0].map(|v| v * ppp));
+            backdrops.push(1.0);
+        }
         // its bar tapped, the snapped shape's handles show and take drags
         session.set_shape_editing(self.overlays.shape_editing);
         let tool_button = match info.tool {

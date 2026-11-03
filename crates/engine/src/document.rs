@@ -1417,10 +1417,19 @@ impl Document {
         self.layer_mut(id).map(|l| l.assisted = on).is_some()
     }
 
+    /// Whether strokes on `id` follow the drawing guide: its Drawing Assist, or for a mask its
+    /// layer's (as measured, a mask shows "Assisted" with its layer).
+    pub fn is_assisted(&self, id: LayerId) -> bool {
+        self.layer(id).is_some_and(|l| {
+            l.assisted
+                || (l.kind == LayerKind::Mask && l.parent.and_then(|p| self.layer(p)).is_some_and(|o| o.assisted))
+        })
+    }
+
     /// The drawing guide as strokes on the current layer follow it: assisted when that layer
     /// has drawing assist.
     pub fn stroke_guide(&self) -> std::borrow::Cow<'_, crate::guide::Guide> {
-        let assisted = self.layer(self.current).is_some_and(|l| l.assisted);
+        let assisted = self.is_assisted(self.current);
         if self.guide.assisted == assisted {
             std::borrow::Cow::Borrowed(&self.guide)
         } else {

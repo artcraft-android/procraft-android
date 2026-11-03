@@ -44,6 +44,8 @@ pub struct Picking {
 
 pub struct Overlays {
     notice: Option<Notice>,
+    /// Where the notice band shows this frame, to frost the canvas under it (as measured).
+    pub frost: Option<Rect>,
     pub picking: Option<Picking>,
     /// The loupe's picture as the eyedropper let go, kept a frame (it may have been drawn in this
     /// one, and a texture let go of is gone before the frame is).
@@ -65,6 +67,7 @@ impl Default for Overlays {
     fn default() -> Overlays {
         Overlays {
             notice: None,
+            frost: None,
             picking: None,
             spent: None,
             shape: None,
@@ -155,6 +158,7 @@ impl Overlays {
         let under_bar = window.top() + if bar_shown { pc::BAR_HEIGHT } else { 0.0 };
         let mut chosen = None;
         self.spent = None;
+        self.frost = None;
         let shown = egui::Area::new(egui::Id::unique("canvas overlays"))
             .fixed_pos(window.min)
             .order(egui::Order::Middle)
@@ -263,7 +267,9 @@ impl Overlays {
             return;
         }
         let band = Rect::from_min_size(pos2(window.left(), top - (1.0 - shown) * 24.0), vec2(window.width(), 24.0));
-        let painter = ui.painter().with_clip_rect(Rect::from_min_max(pos2(window.left(), top), window.max));
+        let below = Rect::from_min_max(pos2(window.left(), top), window.max);
+        self.frost = Some(band.intersect(below)).filter(|r| r.height() > 0.0);
+        let painter = ui.painter().with_clip_rect(below);
         painter.rect_filled(band, 0, argb(NOTICE_FILL));
         text(&painter, band.center(), Align2::CENTER_CENTER, &n.text, 13.0, Weight::Regular, argb(NOTICE_INK));
     }
