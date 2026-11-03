@@ -799,7 +799,7 @@ impl Interface {
             self.adjustments.showing_filters = false;
         }
         if let Some(open) = self.open {
-            self.popover(&ctx, session, open, anchor(open), info.tool, &mut backdrops);
+            self.popover(&ctx, session, open, anchor(open), &mut backdrops);
         }
         // the background's colour is kept, however its panel closed
         if self.open != Some(Popover::Layers) {
@@ -2303,7 +2303,6 @@ impl Interface {
         session: &Arc<CanvasSession>,
         which: Popover,
         button: Option<Rect>,
-        tool: ToolKind,
         backdrops: &mut Vec<f32>,
     ) {
         let Some(button) = button else {
@@ -2314,7 +2313,7 @@ impl Interface {
         let modal = self.modal(which);
         let shown = match which {
             Popover::Brushes => {
-                let shown = self.library.show(ctx, &mut self.look, session, tool, button, backdrops);
+                let shown = self.library.show(ctx, &mut self.look, session, button, backdrops);
                 // what was done in the library is kept
                 self.keep_brushes |= std::mem::take(&mut self.library.changed);
                 shown

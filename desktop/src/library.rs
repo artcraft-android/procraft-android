@@ -12,13 +12,15 @@ use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat, TextWrapping};
 use egui::{
     Align2, Color32, Pos2, Rect, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, pos2, vec2,
 };
-use procraft_core::{BrushInfo, BrushSetInfo, CanvasSession, ReadBrushes, ToolKind, read_any_brushes};
+use procraft_core::{BrushInfo, BrushSetInfo, CanvasSession, ReadBrushes, read_any_brushes};
 
 use crate::alert::{Alert, Answer};
 use crate::icons;
 use crate::look::{Look, Shade, Themed, Weight, argb, pc, text};
 use crate::menu::{self, Entry, Menu};
 use crate::panel::{self, PANEL_GLYPH, PANEL_TITLE};
+
+mod libraries;
 
 const LIBRARY_WIDTH: f32 = 440.0;
 const SETS_WIDTH: f32 = 168.0;
@@ -157,6 +159,7 @@ enum Deleting {
     Set(u32),
     Brush(u32, u32),
     Picked,
+    Library(u32),
 }
 
 #[derive(Default)]
@@ -174,9 +177,6 @@ pub struct Library {
     wanted: Vec<((u32, u32), String)>,
     drawing: Option<std::sync::mpsc::Receiver<DrawnPreview>>,
     plus_menu: Menu,
-    /// The title's menu (the brushes the app comes with, back), and what it says it did.
-    title_menu: Menu,
-    told: Alert,
     /// The shown set's menu, and which set it is for.
     set_menu: Menu,
     set_menu_for: Option<usize>,
@@ -188,6 +188,16 @@ pub struct Library {
     renaming_set: Option<(usize, String, bool)>,
     deleting: Alert,
     delete_what: Option<Deleting>,
+    /// Every library's card shows rather than the one in use; the title's menu; the plus's menu
+    /// over the cards; a card's menu and for which; a library renamed in place (its place, the
+    /// name as typed, and whether it has been focused); where the cards were last drawn.
+    showing_libraries: bool,
+    title_menu: Menu,
+    libraries_plus: Menu,
+    card_menu: Menu,
+    card_menu_for: Option<usize>,
+    renaming_library: Option<(usize, String, bool)>,
+    card_rects: Vec<(usize, Rect)>,
     press: Option<Press>,
     set_press: Option<SetPress>,
     /// How far each brush is slid (points, left negative), and the brush slid open.
@@ -227,12 +237,13 @@ impl Library {
     /// A menu or question of the library's is up: a press elsewhere only closes it.
     pub fn modal(&self) -> bool {
         self.plus_menu.is_open()
-            || self.title_menu.is_open()
-            || self.told.is_open()
             || self.set_menu.is_open()
             || self.recent_menu.is_open()
             || self.icon_picker.is_open()
             || self.deleting.is_open()
+            || self.title_menu.is_open()
+            || self.libraries_plus.is_open()
+            || self.card_menu.is_open()
     }
 
     /// Brush files' `(bytes, name)` read on a thread of their own, their brushes added to the
@@ -319,7 +330,6 @@ impl Library {
         ctx: &egui::Context,
         look: &mut Look,
         session: &Arc<CanvasSession>,
-        tool: ToolKind,
         button: Rect,
         backdrops: &mut Vec<f32>,
     ) -> Rect {
@@ -336,6 +346,10 @@ impl Library {
         }
         self.wanted.clear();
         let library = session.brush_library();
+        let libraries = session.brush_libraries();
+        let place = libraries.iter().position(|l| l.current).unwrap_or(0);
+        // every library's card, or the one in use with no sets yet, in place of the lists
+        let cards = self.showing_libraries || library.is_empty();
         let current = session.current_brush();
         // with the Recent set shown, the current brush's set takes new brushes
         let shown = self
@@ -376,29 +390,43 @@ impl Library {
                 ui.allocate_rect(rect, Sense::click());
                 panel::frame(ui, look, "library frame", rect, arrow_x, backdrops);
                 let body = panel::body(rect);
-                let title = match tool {
-                    ToolKind::Erase => "Erase library",
-                    ToolKind::Smudge => "Smudge library",
-                    ToolKind::Paint => "Brush library",
+                // the library in use's name (typed over while it is renamed), or every library's
+                let name = libraries.get(place).map_or("Brush library", |l| l.name.as_str());
+                let renaming = !self.showing_libraries && self.renaming_library.as_ref().is_some_and(|r| r.0 == place);
+                let heading = match (self.showing_libraries, renaming) {
+                    (true, _) => "Brush libraries",
+                    (false, true) => "",
+                    (false, false) => name,
                 };
-                let (title_tapped, row) =
-                    panel::header_title(ui, look, body, title, 20.0, true, self.title_menu.is_open());
-                title_row = row;
-                if title_tapped {
+                let (tapped, at) = panel::header_title(ui, look, body, heading, 20.0, true, self.title_menu.is_open());
+                title_row = at;
+                if tapped {
                     self.title_menu.open();
                 }
-                // the plus: new brushes and sets, and importing
+                if renaming {
+                    let field = Rect::from_min_size(pos2(body.left() + 20.0, body.top() + 17.0), vec2(300.0, 30.0));
+                    self.rename_field(ui, session, place, field, 24.0);
+                }
+                // the plus: new brushes and sets, and importing; over the cards, a new library
                 plus = Rect::from_min_size(pos2(body.right() - 12.0 - 41.0, body.top() + 12.0), vec2(41.0, 40.0));
-                if self.picked.is_empty() {
+                if self.picked.is_empty() || self.showing_libraries {
                     look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(PANEL_GLYPH));
                     if ui.interact(plus, ui.scope_id().with("plus"), Sense::click()).clicked() {
-                        self.plus_menu.open();
+                        if self.showing_libraries {
+                            self.libraries_plus.open();
+                        } else {
+                            self.plus_menu.open();
+                        }
                     }
                 } else {
                     self.picked_actions(ui, session, plus);
                 }
 
                 lists = Rect::from_min_max(pos2(body.left(), body.top() + HEADER_HEIGHT), body.max);
+                if cards {
+                    self.libraries_body(ui, look, session, &libraries, lists, shown);
+                    return;
+                }
                 // the search: out of sight at first, it comes down as a list is scrolled up past
                 // its top, and goes as they scroll down again (unless it is in use)
                 let in_use = self.searching || !self.query.is_empty();
@@ -662,12 +690,13 @@ impl Library {
             }
         }
         self.plus_menu(ctx, look, session, plus, shown, backdrops);
-        self.title_menu(ctx, look, session, title_row, backdrops);
-        self.told.show(ctx, look);
         self.set_menu(ctx, look, session, &library, backdrops);
+        self.title_menu(ctx, look, session, title_row, &libraries, backdrops);
         if let Some(row) = recent_row {
             self.recent_menu(ctx, look, session, row, backdrops);
         }
+        self.libraries_plus_menu(ctx, look, session, plus, backdrops);
+        self.card_menu(ctx, look, session, &libraries, backdrops);
         if self.deleting.show(ctx, look) == Some(Answer::Action) {
             match self.delete_what.take() {
                 Some(Deleting::Set(i)) => {
@@ -686,7 +715,12 @@ impl Library {
                     }
                     self.library_changed();
                 }
-                Some(Deleting::Brush(..)) | None => {}
+                Some(Deleting::Library(i)) if session.delete_brush_library(i) => {
+                    // the one in use may be another now
+                    self.shown_set = None;
+                    self.library_changed();
+                }
+                Some(Deleting::Brush(..) | Deleting::Library(_)) | None => {}
             }
         }
         rect
@@ -728,6 +762,7 @@ impl Library {
             Deleting::Set(_) => "Delete this set and its brushes?",
             Deleting::Brush(..) => "Delete this brush?",
             Deleting::Picked => "Delete these brushes?",
+            Deleting::Library(_) => "Delete this library?",
         };
         self.delete_what = Some(what);
         self.deleting.open(title, "It can't be brought back.", "Delete", Some(&icons::TRASH));
@@ -736,48 +771,6 @@ impl Library {
     /// The plus's menu, hanging below it, their right edges in line: a new brush, a new set, or
     /// brushes from a file.
     #[allow(clippy::too_many_arguments)]
-    /// The title's menu, hanging under it: Restore default brushes.
-    fn title_menu(
-        &mut self,
-        ctx: &egui::Context,
-        look: &mut Look,
-        session: &Arc<CanvasSession>,
-        title: Rect,
-        backdrops: &mut Vec<f32>,
-    ) {
-        let entries = [Entry::Item(&icons::MENU_RESTORE, "Restore default brushes", menu::INK)];
-        let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
-        let screen = ctx.content_rect();
-        let left = (title.center().x - size.x / 2.0).clamp(screen.left(), (screen.right() - size.x).max(screen.left()));
-        let rect = Rect::from_min_size(pos2(left, title.bottom()), size);
-        let mut tapped = None;
-        self.title_menu.show(
-            ctx,
-            "library title menu",
-            rect,
-            pos2(rect.center().x, rect.top()),
-            menu::OVER_A_PANEL,
-            backdrops,
-            |ui| {
-                tapped = menu::entries(ui, look, rect, &entries);
-            },
-        );
-        if tapped.is_none() {
-            return;
-        }
-        self.title_menu.close();
-        let back = session.restore_shipped_brushes();
-        if back > 0 {
-            self.library_changed();
-        }
-        let said = match back {
-            0 => "Every brush ProCraft comes with is in the library.".to_owned(),
-            1 => "1 brush is back.".to_owned(),
-            n => format!("{n} brushes are back."),
-        };
-        self.told.tell("Restore default brushes", &said, Some(&icons::MENU_RESTORE));
-    }
-
     fn plus_menu(
         &mut self,
         ctx: &egui::Context,
@@ -1598,7 +1591,7 @@ mod tests {
             let Finger { ctx, look, library, session, .. } = self;
             let mut output = ctx.clone().run_ui(raw, |ui| {
                 let button = Rect::from_min_size(pos2(600.0, 10.0), vec2(40.0, 40.0));
-                library.show(ui.ctx(), look, session, ToolKind::Paint, button, &mut Vec::new());
+                library.show(ui.ctx(), look, session, button, &mut Vec::new());
             });
             output.textures_delta.clear();
         }
