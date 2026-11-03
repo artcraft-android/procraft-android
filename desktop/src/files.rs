@@ -104,8 +104,9 @@ pub fn is_brush_file(path: &Path) -> bool {
     let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     ["brush", "brushset"].contains(&extension.as_str())
         || procraft_core::OTHER_BRUSH_EXTENSIONS.contains(&extension.as_str())
-        // a brush or a set sent on as a plain zip
-        || (extension == "zip" && std::fs::read(path).is_ok_and(procraft_core::is_brush_zip))
+        // a brush or a set sent on as a plain zip (told by its names, not read whole)
+        || (extension == "zip"
+            && procraft_core::zip_file_kind(path.to_string_lossy().into_owned()) == procraft_core::ZipKind::Brushes)
 }
 
 /// Where brush files given while no canvas is open wait for one.
