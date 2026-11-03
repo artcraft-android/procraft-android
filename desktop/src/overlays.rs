@@ -57,6 +57,9 @@ pub struct Overlays {
     /// The brush's own shape for it, loops of x, y in brush diameters (none: the round tip's
     /// circle).
     cursor_shape: Vec<Vec<f32>>,
+    /// How much more the shape is turned on the screen than its own rotation, radians clockwise,
+    /// as the stamps are: with the canvas, and as a pen that the brush follows leans and rolls.
+    cursor_turn: f32,
     /// How the cursor is drawn (Advanced cursor settings).
     pub cursor_style: CursorStyle,
 }
@@ -71,6 +74,7 @@ impl Default for Overlays {
             shape_editing: false,
             cursor: None,
             cursor_shape: Vec::new(),
+            cursor_turn: 0.0,
             cursor_style: CursorStyle::Brush,
         }
     }
@@ -89,6 +93,8 @@ impl Overlays {
         if self.cursor.is_none() && at.is_some() {
             self.cursor_shape = session.brush_outline();
         }
+        // turned as the pen turns, through the stroke
+        self.cursor_turn = cursor_turn(session);
         self.cursor = at.map(|(x, y)| {
             let (r, outline) = self.cursor.map(|(_, r, o)| (r, o)).unwrap_or_else(|| {
                 let info = session.info();
@@ -107,6 +113,7 @@ impl Overlays {
         if at.is_some() {
             // the core keeps the brush's outline: asked again, it is handed back as it was
             self.cursor_shape = session.brush_outline();
+            self.cursor_turn = cursor_turn(session);
         }
         self.cursor = at.map(|at| {
             let outline = session.current_brush_setting("cursor_outline".into()).round() as i32;
@@ -209,13 +216,14 @@ impl Overlays {
                         if self.cursor_shape.is_empty() {
                             ui.painter().circle_stroke(at, r, stroke);
                         }
-                        // the brush's own shape, across its diameter
+                        // the brush's own shape, across its diameter, turned as the stamps are
+                        let (sin, cos) = self.cursor_turn.sin_cos();
                         for ring in &self.cursor_shape {
                             let points: Vec<Pos2> = ring
                                 .as_chunks::<2>()
                                 .0
                                 .iter()
-                                .map(|&[x, y]| at + egui::vec2(x, y) * (2.0 * r))
+                                .map(|&[x, y]| at + egui::vec2(x * cos - y * sin, x * sin + y * cos) * (2.0 * r))
                                 .collect();
                             ui.painter().add(egui::Shape::closed_line(points, stroke));
                         }
@@ -478,4 +486,21 @@ fn icon(kind: QuickShapeKind) -> &'static icons::Icon {
         QuickShapeKind::Rectangle => &icons::SHAPE_RECT,
         QuickShapeKind::Square => &icons::SHAPE_SQUARE,
     }
+}
+
+/// How much more the brush's stamps turn on the screen than its own rotation (radians clockwise),
+/// as the strokes turn them: with the canvas, unless the brush is oriented to the screen; and, for a
+/// brush that follows the pen, as the pen near the window leans (its azimuth) and rolls.
+fn cursor_turn(session: &CanvasSession) -> f32 {
+    let setting = |key: &str| session.current_brush_setting(key.into());
+    let mut turn = 0.0;
+    if setting("orient_to_screen") < 0.5 {
+        let v = session.view_matrix();
+        turn += v.get(1).copied().unwrap_or(0.0).atan2(v.first().copied().unwrap_or(1.0));
+    }
+    let style = setting("input_style").round();
+    if let Some((azimuth, roll)) = crate::pen::pose().filter(|_| style >= 1.0) {
+        turn += azimuth + if style >= 2.0 { roll } else { 0.0 };
+    }
+    turn
 }
