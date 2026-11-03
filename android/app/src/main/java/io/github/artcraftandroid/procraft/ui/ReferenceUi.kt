@@ -4,15 +4,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.getValue
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.Canvas
@@ -132,12 +128,15 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
                 CanvasViewModel.ReferenceMode.FACE -> null
             }
             val view = if (vm.referenceMode == CanvasViewModel.ReferenceMode.IMAGE) vm.referenceImageView else vm.referenceCanvasView
-            var origin by remember { mutableStateOf(Offset.Zero) }
+            // where the picture's area is, read when a finger picks (kept as the layout itself, so a
+            // window dragged since is never read where it was)
+            val area = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
+            val toScreen = { p: Offset -> area[0]?.takeIf { it.isAttached }?.localToRoot(p) ?: p }
             Box(
                 Modifier.fillMaxWidth().height(picture.height).clipToBounds()
-                    .onGloballyPositioned { origin = it.positionInRoot() }
+                    .onGloballyPositioned { area[0] = it }
                     .pointerInput(shown) {
-                        if (shown != null) pictureGestures(vm, shown) { origin } else awaitEachGesture { awaitFirstDown(requireUnconsumed = false) }
+                        if (shown != null) pictureGestures(vm, shown, toScreen) else awaitEachGesture { awaitFirstDown(requireUnconsumed = false) }
                     },
                 contentAlignment = Alignment.Center,
             ) {
@@ -210,10 +209,10 @@ private fun pictureSizes(width: Float, height: Float, picture: ImageBitmap) =
 
 /**
  * Touches on the window's [picture]: a finger held still for the eyedropper's delay picks a colour
- * from it, following the finger until it lets go; two fingers zoom and move it. [origin] is where
- * the picture's area is in the window, for the loupe.
+ * from it, following the finger until it lets go; two fingers zoom and move it. [toScreen] turns a
+ * point in the picture's area into one in the window, for the loupe.
  */
-private suspend fun PointerInputScope.pictureGestures(vm: CanvasViewModel, picture: ImageBitmap, origin: () -> Offset) {
+private suspend fun PointerInputScope.pictureGestures(vm: CanvasViewModel, picture: ImageBitmap, toScreen: (Offset) -> Offset) {
     awaitEachGesture {
         val first = awaitFirstDown(requireUnconsumed = false)
         first.consume()
@@ -236,7 +235,7 @@ private suspend fun PointerInputScope.pictureGestures(vm: CanvasViewModel, pictu
             fun pickAt(p: Offset) {
                 val view = if (vm.referenceMode == CanvasViewModel.ReferenceMode.IMAGE) vm.referenceImageView else vm.referenceCanvasView
                 val at = io.github.artcraftandroid.procraft.core.referencePicturePoint(view, sizes, p.x, p.y) ?: return
-                vm.pickReference(picture, at[0], at[1], at[2], origin() + p)
+                vm.pickReference(picture, at[0], at[1], at[2], toScreen(p))
             }
             pickAt(first.position)
             while (true) {
