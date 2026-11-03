@@ -357,6 +357,7 @@ fn read_previews(udid: String, files: Vec<IpadFile>, at: PathBuf) -> Receiver<(S
             }
         }
         let _ = run(unmount, &["-uz", &at.to_string_lossy()]);
+        let _ = std::fs::remove_dir(&at);
     });
     if let Err(e) = started {
         log::warn!("no iPad previews: {e}");
@@ -393,9 +394,20 @@ pub struct Browser {
     chosen: HashSet<String>,
     previews: HashMap<String, TextureHandle>,
     previews_coming: Option<Receiver<(String, Vec<u8>)>>,
-    /// Where copies come to, and where the previews' mount is.
+    /// Where copies come to, and where the previews' mounts are (one for each look, so a look
+    /// before still letting its mount go never lets go of the next one's).
     copies: PathBuf,
     mount: PathBuf,
+    looks: u32,
+}
+
+/// The iPad, and what it holds of `kind`, looked for on a thread of its own.
+fn look(kind: Kind) -> Receiver<Result<(String, Vec<IpadFile>), String>> {
+    let (tx, rx) = channel();
+    let _ = std::thread::Builder::new().name("ipad list".into()).spawn(move || {
+        let _ = tx.send(ready().and_then(|udid| list(&udid, kind).map(|files| (udid, files))));
+    });
+    rx
 }
 
 impl Browser {
@@ -405,13 +417,9 @@ impl Browser {
         let copies = base.join("from-ipad");
         // what an earlier import copied over was taken in since
         let _ = std::fs::remove_dir_all(&copies);
-        let (tx, rx) = channel();
-        let _ = std::thread::Builder::new().name("ipad list".into()).spawn(move || {
-            let _ = tx.send(ready().and_then(|udid| list(&udid, kind).map(|files| (udid, files))));
-        });
         Browser {
             kind,
-            stage: Stage::Looking(rx),
+            stage: Stage::Looking(look(kind)),
             udid: String::new(),
             files: Vec::new(),
             chosen: HashSet::new(),
@@ -419,7 +427,16 @@ impl Browser {
             previews_coming: None,
             copies,
             mount: base.join("ipad-mount"),
+            looks: 0,
         }
+    }
+
+    /// Looks at the iPad again: what it holds now listed (those chosen still there kept chosen,
+    /// the previews shown kept), the problem said before tried again.
+    fn refresh(&mut self) {
+        // the previews still coming stop
+        self.previews_coming = None;
+        self.stage = Stage::Looking(look(self.kind));
     }
 
     /// Shows it over the gallery; what it asks, once it has its answer.
@@ -504,8 +521,24 @@ impl Browser {
                         text(ui.painter(), body.center(), Align2::CENTER_CENTER, &said, 16.0, Weight::Regular, ink);
                     }
                 }
-                // Cancel, and Import with how many are chosen
+                // Refresh on the left; Cancel, and Import with how many are chosen
                 let bottom = rect.bottom() - 40.0;
+                let refresh = Rect::from_center_size(pos2(rect.left() + 79.0, bottom), vec2(110.0, 40.0));
+                let can_refresh = !matches!(self.stage, Stage::Looking(_) | Stage::Copying(..));
+                let refresh_ink = if can_refresh { ink } else { argb(0xFF6A6A6A) };
+                ui.painter().rect_filled(refresh, 20, argb(0xFF3A3A3A));
+                text(
+                    ui.painter(),
+                    refresh.center(),
+                    Align2::CENTER_CENTER,
+                    "Refresh",
+                    16.0,
+                    Weight::Regular,
+                    refresh_ink,
+                );
+                if can_refresh && ui.interact(refresh, ui.scope_id().with("ipad refresh"), Sense::click()).clicked() {
+                    self.refresh();
+                }
                 let cancel = Rect::from_center_size(pos2(rect.right() - 230.0, bottom), vec2(110.0, 40.0));
                 let import = Rect::from_center_size(pos2(rect.right() - 90.0, bottom), vec2(140.0, 40.0));
                 let copying = matches!(self.stage, Stage::Copying(..));
@@ -631,7 +664,14 @@ impl Browser {
         {
             match found {
                 Ok((udid, files)) => {
-                    self.previews_coming = Some(read_previews(udid.clone(), files.clone(), self.mount.clone()));
+                    // the previews not shown yet, through a mount of this look's own
+                    let unseen: Vec<IpadFile> =
+                        files.iter().filter(|f| !self.previews.contains_key(&f.name)).cloned().collect();
+                    self.looks += 1;
+                    let mount = self.mount.with_file_name(format!("ipad-mount-{}", self.looks));
+                    self.previews_coming = Some(read_previews(udid.clone(), unseen, mount));
+                    // those chosen and still there stay chosen
+                    self.chosen.retain(|name| files.iter().any(|f| &f.name == name));
                     self.udid = udid;
                     self.files = files;
                     self.stage = Stage::Choosing;
@@ -661,7 +701,7 @@ impl Browser {
         }
         // the iPad unplugged while its files show: said, not waited on
         if matches!(self.stage, Stage::Choosing) && !connected() && !self.udid.is_empty() {
-            self.stage = Stage::Problem("The iPad was disconnected. Plug it in again and reopen Import.".into());
+            self.stage = Stage::Problem("The iPad was disconnected. Plug it in again and press Refresh.".into());
         }
         if let Stage::Copying(rx, got, _, copies) = &mut self.stage {
             while let Ok(result) = rx.try_recv() {
