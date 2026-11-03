@@ -118,13 +118,12 @@ fn cs_carry(@builtin(global_invocation_id) id: vec3<u32>) {
     let off = abs(c - vec2<i32>(middle()));
     let paint = vec4<f32>(st.paint.rgb, 1.0);
     if (st.mode == 1u) {
-        // wet: the brush comes loaded with its paint; it picks up what is under it as far as there
-        // is paint there (bare paper doesn't thin it), and fresh paint mixes in
+        // wet: the brush comes loaded with its paint; it picks up what is under it, alpha and all
+        // (bare paper thins what it carries, as the pull lets it), and fresh paint mixes in
         if (max(off.x, off.y) > st.kept) {
             carry[k] = paint;
-        } else if (under.a > 0.0) {
-            let picked = vec4<f32>(under.rgb / under.a, 1.0);
-            carry[k] = mix(carry[k], picked, (1.0 - st.pull) * under.a);
+        } else {
+            carry[k] = mix(under, carry[k], st.pull);
         }
         carry[k] = mix(carry[k], paint, st.mixture);
     } else if (max(off.x, off.y) > st.kept) {

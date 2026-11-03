@@ -706,14 +706,20 @@ const SMUDGE_GRID: u32 = 256;
 const SMUDGE_REACH: i32 = SMUDGE_GRID as i32 / 2 - 1;
 const SMUDGE_UNIFORM_SIZE: u64 = std::mem::size_of::<SmudgeUniform>() as u64;
 
+/// Wet paint: at each stamp the brush takes in this share of what its pull leaves to what is
+/// under it (bare paper too, which thins what it carries), the rest of what it carries kept. As
+/// measured, crossing a band of another colour at a pull of 0, 50% and 96%: the lower the pull,
+/// the less of the band's colour is dragged on and the sooner the stroke thins over bare paper.
+const WET_PICKUP: f32 = 0.1;
+
 /// A wet stamp's (mixture, final mixture, pull) once the stroke has gone `length` canvas pixels,
 /// as measured: the fresh paint the brush mixes into what it carries is what its dilution leaves
 /// (by 2.4, as far as the fall off has not run it out), times `jitter`; what it lays down of what
 /// it carries is that paint and its charge (running out by the cube root of the length), at least
 /// its attack (the stamp's `attack` share of it: its pressure), by the grade (0 all of it, -1 half,
-/// 1 half again); the pull is the share of what it carries kept at each stamp, the rest picked up
-/// from what is under it. The stamp's pressure scales the dilution and the charge by
-/// `dilution_by` and `charge_by` (their curves).
+/// 1 half again); the pull is how much of what it carries the brush keeps (see [`WET_PICKUP`]).
+/// The stamp's pressure scales the dilution and the charge by `dilution_by` and `charge_by` (their
+/// curves).
 fn wet_mixture(
     style: &StrokeStyle,
     length: f32,
@@ -4061,7 +4067,7 @@ impl Canvas {
             let (mixture, final_mixture, wet_pull) = if wet_paint {
                 let (mixture, laid, pull) =
                     wet_mixture(&stamp_style, smudge.length, jitter, s.more[3], dilution_by, charge_by);
-                (mixture, laid, pull * wet_pull_by)
+                (mixture, laid, 1.0 - (1.0 - pull * wet_pull_by) * WET_PICKUP)
             } else {
                 (0.0, 1.0, style.pull.clamp(0.0, 1.0) * smudge_pull_by)
             };

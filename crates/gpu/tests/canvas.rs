@@ -1437,6 +1437,37 @@ fn wet_attack_puts_more_paint_over_what_is_there() {
 }
 
 #[test]
+fn wet_paint_thins_over_bare_paper_as_far_as_its_pull_lets_it() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a wet stroke across bare paper: how covered it is near its start and at its far end
+    let stroke = |pull: f32| {
+        let mut doc = Document::new(128, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let wet = StrokeStyle {
+            wet_pull: Some(pull),
+            dilution: 0.84,
+            load: 0.46,
+            ..StrokeStyle::new(StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), wet);
+        canvas.add_stamps(
+            &(0..140).map(|i| Stamp::round(Vec2::new(10.0 + i as f32 * 0.7, 32.0), 4.0, 0.5)).collect::<Vec<_>>(),
+        );
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (pixel(&layer, 128, 14, 32)[3], pixel(&layer, 128, 100, 32)[3])
+    };
+    let (dry_start, dry_end) = stroke(0.0);
+    let (kept_start, kept_end) = stroke(0.96);
+    // loaded at the start either way; without pull the brush gives its paint up to the paper
+    assert!(dry_start > 150 && kept_start > 150, "starts: {dry_start} and {kept_start}");
+    assert!(dry_end + 20 < kept_end, "ends: no pull {dry_end}, pull {kept_end}");
+    assert!(dry_end < dry_start, "no pull thins: {dry_start} to {dry_end}");
+}
+
+#[test]
 fn a_stroke_blends_into_its_layer_by_its_mode() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

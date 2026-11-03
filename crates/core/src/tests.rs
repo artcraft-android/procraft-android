@@ -8585,6 +8585,16 @@ fn crossing_strokes_sheet() {
             let (k, v) = kv.split_once('=').unwrap();
             s.set_studio_setting(k.to_owned(), v.parse().unwrap());
         }
+        // `CROSS_TWO`: an orange stroke across white, then a yellow one down through it
+        if std::env::var("CROSS_TWO").is_ok() {
+            s.set_background_color(1.0, 1.0, 1.0, true);
+            s.set_color(237.0 / 255.0, 133.0 / 255.0, 68.0 / 255.0);
+            line(100.0, 150.0, 450.0, 150.0);
+            s.set_color(1.0, 180.0 / 255.0, 40.0 / 255.0);
+            line(275.0, 70.0, 275.0, 250.0);
+            s.export_png(out).unwrap();
+            return;
+        }
         s.set_background_color(0.12, 0.12, 0.12, true);
         s.set_color(1.0, 1.0, 1.0);
         line(100.0, 150.0, 450.0, 150.0);
