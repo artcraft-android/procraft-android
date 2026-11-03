@@ -13,6 +13,7 @@ mod animation;
 mod canvas_info;
 mod chrome;
 mod colour_drop;
+mod colour_models;
 mod colours;
 mod compact_colours;
 mod companion;

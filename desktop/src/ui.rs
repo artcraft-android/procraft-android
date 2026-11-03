@@ -384,6 +384,8 @@ impl Interface {
         // a mask current paints with masks' own colour
         let on_mask = session.layers().iter().any(|l| l.current && l.kind == procraft_core::LayerType::Mask);
         self.colours.follow_mask(session, on_mask);
+        // the eyedropper picks from the current layer or the canvas, as the preferences say
+        session.set_eyedropper_from_layer(self.prefs.eyedropper_layer);
         if self.inserted(session) || brushes_coming {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -647,6 +649,12 @@ impl Interface {
         }
         // the colour panel dragged out by its grabber: a window over the canvas until closed
         self.colours.show_floating(&ctx, &mut self.look, session, &mut backdrops);
+        // the colour model chosen on the panel, kept; the panel works in the one kept
+        if let Some(model) = self.colours.model_chosen.take() {
+            self.prefs.colour_model = model;
+            self.prefs.keep();
+        }
+        self.colours.set_model(self.prefs.colour_model);
         if self.open != Some(Popover::Actions) {
             self.actions_panel.closed();
         }
@@ -1958,6 +1966,7 @@ impl Interface {
                         | Act::RightHanded
                         | Act::BrushCursor
                         | Act::ProjectCanvas
+                        | Act::EyedropperLayer
                         | Act::ResetInput,
                     )
                     | None => {}
@@ -2090,6 +2099,7 @@ impl Interface {
             KeyShortcut::DuplicateLayer => self.duplicate_current(session),
             KeyShortcut::Interface => self.toggle_bars(session),
             KeyShortcut::ClearLayer => self.clear_layer(session),
+            KeyShortcut::GreyView => session.set_grey_view(!session.grey_view()),
             KeyShortcut::BrushSize { by } => session.set_brush_size((info.size + by).clamp(0.0, 1.0)),
             KeyShortcut::Nudge { dx, dy } => self.transform.moved(session.transform_arrow(dx, dy)),
         }

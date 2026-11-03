@@ -269,6 +269,7 @@ fn draws_to_a_target_through_the_view() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let px = read(&gpu, &target, 200, 100);
@@ -317,6 +318,7 @@ fn zoomed_in_to_its_mark_the_canvas_shows_each_pixel_as_a_square() {
                 convert: None,
                 lut: None,
                 crisp_from,
+                grey: false,
             }),
         );
         let px = read(&gpu, &target, 100, 100);
@@ -368,6 +370,7 @@ fn the_surround_grid_is_fixed_to_the_target() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let px = read(&gpu, &target, 100, 100);
@@ -393,6 +396,7 @@ fn the_surround_grid_is_fixed_to_the_target() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let px = read(&gpu, &target, 100, 100);
@@ -443,6 +447,7 @@ fn a_frosted_region_shows_what_is_behind_it_blurred() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let px = read(&gpu, &target, 400, 100);
@@ -496,6 +501,7 @@ fn the_canvas_is_shown_in_the_targets_colour_space() {
             convert,
             lut: None,
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let px = read(&gpu, &target, 10, 10);
@@ -549,6 +555,7 @@ fn a_colour_table_moves_the_canvas_colours() {
             convert: None,
             lut: Some(&lut),
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let px = read(&gpu, &target, 10, 10);
@@ -620,6 +627,7 @@ fn the_predicted_tail_shows_but_never_paints() {
                 convert: None,
                 lut: None,
                 crisp_from: f32::INFINITY,
+                grey: false,
             }),
         );
         read(&gpu, &target, 100, 100)
@@ -806,6 +814,7 @@ fn a_selection_keeps_paint_inside_and_stripes_the_rest() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let shown = read(&gpu, &texture, 64, 64);
@@ -1724,4 +1733,62 @@ fn a_drawn_stroke_takes_its_grain_from_a_picture_of_its_own() {
     canvas.end_stroke();
     canvas.render(&gpu, &mut doc, None);
     assert_eq!(pixel(&canvas.read_layer(&gpu, doc.current()).unwrap(), 32, 8, 8)[3], 255);
+}
+
+#[test]
+fn the_grey_view_shows_each_colour_as_the_grey_of_its_luminance() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    // a background of each sRGB primary, shown in colour and in greys
+    for (colour, grey) in [([1.0, 0.0, 0.0], 0.2126f32), ([0.0, 1.0, 0.0], 0.7152), ([0.0, 0.0, 1.0], 0.0722)] {
+        let mut doc = Document::new(10, 10);
+        doc.background = colour;
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: 10, height: 10, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let to_screen = View::fit((10, 10), (10, 10)).to_screen();
+        let shown = |canvas: &mut Canvas, doc: &mut Document, grey: bool| {
+            canvas.render(
+                &gpu,
+                doc,
+                Some(Target {
+                    view: &view,
+                    format,
+                    size: (10, 10),
+                    to_screen,
+                    surround: [0.0; 3],
+                    grid: None,
+                    selection: None,
+                    backdrop: None,
+                    convert: None,
+                    lut: None,
+                    crisp_from: f32::INFINITY,
+                    grey,
+                }),
+            );
+            pixel(&read(&gpu, &target, 10, 10), 10, 5, 5)
+        };
+        let byte = |c: f32| (c * 255.0).round() as u8;
+        assert_eq!(shown(&mut canvas, &mut doc, false), [byte(colour[0]), byte(colour[1]), byte(colour[2]), 255]);
+        // the grey of the same luminance, through sRGB's tone curve
+        let encoded = if grey <= 0.003_130_8 { grey * 12.92 } else { 1.055 * grey.powf(1.0 / 2.4) - 0.055 };
+        let [r, g, b, a] = shown(&mut canvas, &mut doc, true);
+        assert!(r == g && g == b && a == 255, "{colour:?} shown {r} {g} {b}");
+        assert!(i32::from(r).abs_diff(i32::from(byte(encoded))) <= 1, "{colour:?}: {r}, not {}", byte(encoded));
+        // the composite itself (what's read and recorded) keeps its colour
+        assert_eq!(
+            pixel(&canvas.read_composite(&gpu).unwrap(), 10, 5, 5)[..3],
+            [byte(colour[0]), byte(colour[1]), byte(colour[2])]
+        );
+    }
 }

@@ -430,6 +430,10 @@ pub(crate) struct State {
     pub(crate) error: Option<String>,
     /// Window pixels per interface point.
     pub(crate) display_scale: f32,
+    /// The canvas shown in perceptual greys (the window's view only).
+    pub(crate) grey_view: bool,
+    /// The eyedropper picks from the current layer alone, not the canvas as composited.
+    pub(crate) eyedropper_from_layer: bool,
     /// Where the middle of one of the surround grid's lines is, across and down (window pixels);
     /// none given, half a point in from the top-left corner.
     grid_origin: Option<[f32; 2]>,
@@ -1152,6 +1156,8 @@ impl CanvasSession {
             frame_interval_ms: 0.0,
             error: None,
             display_scale: 2.0,
+            grey_view: false,
+            eyedropper_from_layer: false,
             grid_origin: None,
             light: false,
             pending_doc: None,
@@ -1504,6 +1510,30 @@ impl CanvasSession {
             view.gesture(Vec2::new(pivot_x, pivot_y), Vec2::new(pan_x, pan_y), scale, rotation);
             self.shared.frame(&mut st);
         }
+    }
+
+    /// Shows the canvas in perceptual greys (`on`), to judge its values, or in colour: only as
+    /// the window shows it, not as it is exported, recorded or picked from.
+    pub fn set_grey_view(&self, on: bool) {
+        let mut st = self.shared.lock();
+        if st.grey_view != on {
+            st.grey_view = on;
+            self.shared.frame(&mut st);
+        }
+    }
+
+    pub fn grey_view(&self) -> bool {
+        self.shared.lock().grey_view
+    }
+
+    /// The eyedropper picks from the current layer alone (`on`), or from the canvas as it is
+    /// composited (all its layers and the background).
+    pub fn set_eyedropper_from_layer(&self, on: bool) {
+        self.shared.lock().eyedropper_from_layer = on;
+    }
+
+    pub fn eyedropper_from_layer(&self) -> bool {
+        self.shared.lock().eyedropper_from_layer
     }
 
     /// How many window pixels make one interface point (the screen's density).

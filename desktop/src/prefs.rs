@@ -39,6 +39,8 @@ pub struct Prefs {
     pub brush_cursor: bool,
     pub cursor_shows: CursorShows,
     pub cursor_style: CursorStyle,
+    /// The colour model the Colors panel's disc and Value sliders work in.
+    pub colour_model: crate::colour_models::ColourModel,
     /// How long two fingers are held before undo repeats, seconds.
     pub rapid_undo_delay: f32,
     /// How strongly what isn't selected is banded, 0..1.
@@ -57,6 +59,8 @@ pub struct Prefs {
     pub pad_3d: bool,
     /// The canvas shown on a second display too.
     pub project_canvas: bool,
+    /// The eyedropper picks from the current layer alone, not the canvas as composited.
+    pub eyedropper_layer: bool,
     /// Advanced settings: an artwork opens as it was left; fitting the canvas keeps it clear of
     /// the top bar and the side bar; new artworks don't record their time-lapse; strokes made in
     /// an adjustment undo together; how far the pen moves before it counts as fast (0.25..1); the
@@ -92,6 +96,7 @@ impl Default for Prefs {
             brush_cursor: true,
             cursor_shows: CursorShows::Hovering,
             cursor_style: CursorStyle::Brush,
+            colour_model: crate::colour_models::ColourModel::Hsb,
             rapid_undo_delay: 0.65,
             selection_visibility: 0.25,
             fill_gap: 0,
@@ -103,6 +108,7 @@ impl Default for Prefs {
             actions_tab: 0,
             pad_3d: false,
             project_canvas: false,
+            eyedropper_layer: false,
             orientation_memory: true,
             fit_inside: false,
             no_time_lapse: false,
@@ -145,6 +151,9 @@ impl Prefs {
                 "brush_cursor" => p.brush_cursor = on,
                 "cursor_shows" => p.cursor_shows = pick(&SHOWS, value).unwrap_or(p.cursor_shows),
                 "cursor_style" => p.cursor_style = pick(&STYLES, value).unwrap_or(p.cursor_style),
+                "colour_model" => {
+                    p.colour_model = crate::colour_models::ColourModel::of_key(value).unwrap_or(p.colour_model);
+                }
                 "rapid_undo_delay" => {
                     if let Some(v) = number {
                         p.rapid_undo_delay = v.clamp(RAPID_UNDO_MIN_S, RAPID_UNDO_MAX_S);
@@ -162,6 +171,7 @@ impl Prefs {
                 "pressure_smoothing" => p.pressure_smoothing = unit.unwrap_or(0.0),
                 "pad_3d" => p.pad_3d = on,
                 "project_canvas" => p.project_canvas = on,
+                "eyedropper_layer" => p.eyedropper_layer = on,
                 "orientation_memory" => p.orientation_memory = on,
                 "fit_inside" => p.fit_inside = on,
                 "no_time_lapse" => p.no_time_lapse = on,
@@ -202,6 +212,7 @@ impl Prefs {
             format!("brush_cursor {}", self.brush_cursor),
             format!("cursor_shows {}", place(&SHOWS, self.cursor_shows)),
             format!("cursor_style {}", place(&STYLES, self.cursor_style)),
+            format!("colour_model {}", self.colour_model.key()),
             format!("rapid_undo_delay {}", self.rapid_undo_delay),
             format!("selection_visibility {}", self.selection_visibility),
             format!("fill_gap {}", self.fill_gap),
@@ -213,6 +224,7 @@ impl Prefs {
             format!("actions_tab {}", self.actions_tab),
             format!("pad_3d {}", self.pad_3d),
             format!("project_canvas {}", self.project_canvas),
+            format!("eyedropper_layer {}", self.eyedropper_layer),
             format!("orientation_memory {}", self.orientation_memory),
             format!("fit_inside {}", self.fit_inside),
             format!("no_time_lapse {}", self.no_time_lapse),

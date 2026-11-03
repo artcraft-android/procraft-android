@@ -100,6 +100,8 @@ pub enum Act {
     RightHanded,
     BrushCursor,
     ProjectCanvas,
+    /// The eyedropper picks from the current layer, or the canvas as composited.
+    EyedropperLayer,
     ResetInput,
 }
 
@@ -339,6 +341,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                     ),
                     Switch("Project canvas", prefs.project_canvas, Some(Act::ProjectCanvas)),
                     Switch("Brush cursor", prefs.brush_cursor, Some(Act::BrushCursor)),
+                    Switch("Eyedropper picks from layer", prefs.eyedropper_layer, Some(Act::EyedropperLayer)),
                     Button("Advanced cursor settings", None, Some(Act::Page(Page::Cursor))),
                 ],
                 vec![
@@ -603,6 +606,10 @@ impl Actions {
             }
             Some(Tapped::Act(Act::ProjectCanvas)) => {
                 prefs.project_canvas = !prefs.project_canvas;
+                Some(Act::Prefs)
+            }
+            Some(Tapped::Act(Act::EyedropperLayer)) => {
+                prefs.eyedropper_layer = !prefs.eyedropper_layer;
                 Some(Act::Prefs)
             }
             Some(Tapped::Act(Act::ResetInput)) => {

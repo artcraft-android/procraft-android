@@ -2346,6 +2346,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             KeyShortcut.DuplicateLayer -> duplicateCurrent()
             KeyShortcut.Interface -> toggleBars()
             KeyShortcut.ClearLayer -> clearCurrentLayer()
+            KeyShortcut.GreyView -> session?.let { it.setGreyView(!it.greyView()) }
             is KeyShortcut.BrushSize -> changeSize((size + shortcut.by).coerceIn(0f, 1f))
             is KeyShortcut.Nudge -> session?.transformArrow(shortcut.dx, shortcut.dy)?.let { transformMoved(it) }
         }

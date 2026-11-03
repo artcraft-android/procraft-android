@@ -15,6 +15,9 @@ This product bundles third-party material under its own licenses, listed below.
   See android/app/src/main/assets/icons/LICENSE-lucide.txt.
 - Light panoramas for the 3D view (android/app/src/main/assets/environments/*.hdr),
   from Poly Haven (https://polyhaven.com) — CC0 1.0. Authors per file in the folder's README.md.
+- The Okhsl colour model's code in desktop/src/colour_models.rs, after Björn Ottosson's reference
+  implementation (https://bottosson.github.io/posts/colorpicker/) — MIT License, Copyright (c) 2021
+  Björn Ottosson; the notice is in the file.
 
 Libraries
 
