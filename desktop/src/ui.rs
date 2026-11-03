@@ -903,7 +903,9 @@ impl Interface {
                 TouchCommand::Cursor { x, y } if self.prefs.cursor_shown(false) => {
                     self.overlays.cursor(ctx, session, Some((x, y)));
                 }
-                TouchCommand::Cursor { .. } => {}
+                // not shown while painting: the outline hovering where the stroke began goes away
+                // (else it stays there, left behind)
+                TouchCommand::Cursor { .. } => self.overlays.cursor(ctx, session, None),
                 TouchCommand::CursorGone => self.overlays.cursor(ctx, session, None),
                 TouchCommand::FillThreshold { threshold } => {
                     self.drop.slid(threshold);
