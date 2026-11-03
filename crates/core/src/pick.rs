@@ -57,6 +57,7 @@ impl CanvasSession {
                 backdrop: None,
                 convert: None,
                 lut: None,
+                crisp_from: st.display_scale,
             }),
         );
         let pixels = read_texture(gpu, &texture, side, side).ok()?;

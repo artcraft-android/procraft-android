@@ -3307,6 +3307,36 @@ fn a_shaped_brush_outlines_its_shape_and_the_round_tip_none() {
 }
 
 #[test]
+fn an_old_brush_file_without_grain_depth_has_its_grain_at_full_depth_moving() {
+    use procraft_engine::plist::Value;
+    // a file from before grain depth and behaviour were kept: a named grain, its movement only
+    let file = |extra: Vec<(&str, Value)>| {
+        let mut b = procraft_engine::keyed::Builder::new();
+        let root = b.reserve();
+        let name = b.string("Old Canvas");
+        let grain = b.string("Brush-Preset-Canvas.jpg");
+        let mut fields = vec![("name", name), ("bundledGrainPath", grain), ("textureMovement", Value::Real(0.4))];
+        fields.extend(extra);
+        b.fill(&root, &["SilicaBrush", "ValkyrieBrush", "NSObject"], fields);
+        let mut zip = procraft_engine::zip::ZipWriter::new();
+        zip.add("Brush.archive", &b.finish(root));
+        zip.finish()
+    };
+    let s = CanvasSession::new(64, 64);
+    let grain_of = |bytes: Vec<u8>| {
+        let set = s.import_brushes(bytes).unwrap() as usize;
+        let st = s.shared.lock();
+        let g = &st.library[set].brushes[0].grain;
+        (g.depth, g.mode)
+    };
+    use procraft_engine::brush::GrainMode;
+    assert_eq!(grain_of(file(vec![])), (1.0, GrainMode::Moving));
+    // a file that names them keeps its own
+    let kept = grain_of(file(vec![("grainDepth", Value::Real(0.3)), ("textureApplication", Value::Int(1))]));
+    assert!((kept.0 - 0.3).abs() < 1e-6 && kept.1 == GrainMode::Texturized, "{kept:?}");
+}
+
+#[test]
 fn a_set_moves_with_its_brushes_and_the_tools_keep_theirs() {
     let s = CanvasSession::new(64, 64);
     let names = |s: &CanvasSession| s.brush_library().into_iter().map(|set| set.name).collect::<Vec<_>>();

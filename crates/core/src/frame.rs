@@ -46,6 +46,8 @@ impl State {
                 backdrop: None,
                 convert,
                 lut,
+                // the second display's own density isn't known: crisp once a pixel covers more
+                crisp_from: 1.0,
             }),
         );
     }
@@ -122,6 +124,7 @@ impl State {
                     backdrop,
                     convert,
                     lut,
+                    crisp_from: self.display_scale,
                 }),
             );
             // caches still being remade: another frame soon, and the artwork isn't shown yet

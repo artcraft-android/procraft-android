@@ -268,12 +268,68 @@ fn draws_to_a_target_through_the_view() {
             backdrop: None,
             convert: None,
             lut: None,
+            crisp_from: f32::INFINITY,
         }),
     );
     let px = read(&gpu, &target, 200, 100);
     assert_eq!(pixel(&px, 200, 10, 50), [51, 51, 51, 255], "surround");
     assert_eq!(pixel(&px, 200, 75, 25), [0, 0, 0, 255], "the dot");
     assert_eq!(pixel(&px, 200, 125, 75), [255, 255, 255, 255], "canvas");
+}
+
+#[test]
+fn zoomed_in_to_its_mark_the_canvas_shows_each_pixel_as_a_square() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(4, 4);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    // the top row: two pixels painted, one partly, one not
+    canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(0.0, 0.0), 2.5)]);
+    canvas.end_stroke();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d { width: 100, height: 100, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    // 25 target pixels to a canvas pixel
+    let to_screen = View::fit((4, 4), (100, 100)).to_screen();
+    let mut row = |crisp_from: f32| {
+        canvas.render(
+            &gpu,
+            &mut doc,
+            Some(Target {
+                view: &view,
+                format,
+                size: (100, 100),
+                to_screen,
+                surround: [0.2, 0.2, 0.2],
+                grid: None,
+                selection: None,
+                backdrop: None,
+                convert: None,
+                lut: None,
+                crisp_from,
+            }),
+        );
+        let px = read(&gpu, &target, 100, 100);
+        (0..100).map(|x| pixel(&px, 100, x, 12)).collect::<Vec<_>>()
+    };
+    let crisp = row(25.0);
+    for square in crisp.chunks(25) {
+        assert!(square.iter().all(|p| Some(p) == square.first()), "{square:?}");
+    }
+    assert_ne!(crisp.first(), crisp.last());
+    // short of the mark, smoothed between them
+    let smooth = row(26.0);
+    assert!(smooth.chunks(25).any(|square| square.iter().any(|p| Some(p) != square.first())), "{smooth:?}");
 }
 
 #[test]
@@ -311,6 +367,7 @@ fn the_surround_grid_is_fixed_to_the_target() {
             backdrop: None,
             convert: None,
             lut: None,
+            crisp_from: f32::INFINITY,
         }),
     );
     let px = read(&gpu, &target, 100, 100);
@@ -335,6 +392,7 @@ fn the_surround_grid_is_fixed_to_the_target() {
             backdrop: None,
             convert: None,
             lut: None,
+            crisp_from: f32::INFINITY,
         }),
     );
     let px = read(&gpu, &target, 100, 100);
@@ -384,6 +442,7 @@ fn a_frosted_region_shows_what_is_behind_it_blurred() {
             backdrop: Some(Backdrop { regions: &regions, sigma: 24.0 }),
             convert: None,
             lut: None,
+            crisp_from: f32::INFINITY,
         }),
     );
     let px = read(&gpu, &target, 400, 100);
@@ -436,6 +495,7 @@ fn the_canvas_is_shown_in_the_targets_colour_space() {
             backdrop: None,
             convert,
             lut: None,
+            crisp_from: f32::INFINITY,
         }),
     );
     let px = read(&gpu, &target, 10, 10);
@@ -488,6 +548,7 @@ fn a_colour_table_moves_the_canvas_colours() {
             backdrop: None,
             convert: None,
             lut: Some(&lut),
+            crisp_from: f32::INFINITY,
         }),
     );
     let px = read(&gpu, &target, 10, 10);
@@ -558,6 +619,7 @@ fn the_predicted_tail_shows_but_never_paints() {
                 backdrop: None,
                 convert: None,
                 lut: None,
+                crisp_from: f32::INFINITY,
             }),
         );
         read(&gpu, &target, 100, 100)
@@ -743,6 +805,7 @@ fn a_selection_keeps_paint_inside_and_stripes_the_rest() {
             backdrop: None,
             convert: None,
             lut: None,
+            crisp_from: f32::INFINITY,
         }),
     );
     let shown = read(&gpu, &texture, 64, 64);

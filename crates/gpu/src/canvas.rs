@@ -294,6 +294,10 @@ pub struct Target<'a> {
     /// Or a table taking the canvas's colours to the target's (made by [`Canvas::display_lut`]),
     /// in place of the matrix.
     pub lut: Option<&'a DisplayLut>,
+    /// Zoomed in to this many target pixels to a canvas pixel or more, each canvas pixel shows as
+    /// a square of its own colour; less, smoothed between them. The screen's pixels per point
+    /// makes them crisp from 100%; infinity keeps them smoothed.
+    pub crisp_from: f32,
 }
 
 /// A colour table on the GPU for [`Target::lut`].
@@ -1322,7 +1326,9 @@ pub struct Canvas {
     brush_bind: wgpu::BindGroup,
     /// Every texture slot bound to the stroke texture: for draws that only read the stroke.
     stroke_bind: wgpu::BindGroup,
+    /// The picture as shown: smoothed between its pixels, or each a square ([`Target::crisp_from`]).
     display_bind: wgpu::BindGroup,
+    crisp_bind: wgpu::BindGroup,
     /// The table that leaves colours as they are, bound when a target has none.
     identity_lut: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
@@ -1562,6 +1568,13 @@ impl Canvas {
             ..Default::default()
         });
         let display_bind = sampled_bind(device, &pipelines.sampled_layout, &composite_view, &sampler);
+        let crisp_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("crisp"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let crisp_bind = sampled_bind(device, &pipelines.sampled_layout, &composite_view, &crisp_sampler);
         // two points on a side: each corner its own colour
         let corners: Vec<u8> = (0..8u8).flat_map(|i| [(i >> 2) & 1, (i >> 1) & 1, i & 1, 1].map(|c| c * 255)).collect();
         let identity_lut = lut_bind(gpu, &pipelines.lut_layout, 2, &corners);
@@ -1604,6 +1617,7 @@ impl Canvas {
             brush_bind,
             stroke_bind,
             display_bind,
+            crisp_bind,
             identity_lut,
             uniform_buffer,
             uniform_bind,
@@ -5639,7 +5653,9 @@ impl Canvas {
             pass.draw(0..3, 0..1);
         }
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &self.display_bind, &[]);
+        // a little short of the mark still counts, for a zoom that lands just under it
+        let crisp = target.to_screen.scale_factor() >= target.crisp_from * 0.999;
+        pass.set_bind_group(0, if crisp { &self.crisp_bind } else { &self.display_bind }, &[]);
         pass.set_bind_group(1, &self.uniform_bind, &[offset]);
         pass.set_bind_group(2, target.lut.map_or(&self.identity_lut, |l| &l.bind), &[]);
         pass.draw(0..6, 0..1);
@@ -5792,6 +5808,7 @@ impl Canvas {
             backdrop: None,
             convert: None,
             lut: None,
+            crisp_from: f32::INFINITY,
         };
         self.frost(&gpu.device, &mut encoder, &mut uniforms, &target, backdrop, Some(scene));
         self.write_uniforms(gpu, &uniforms);

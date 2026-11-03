@@ -2,7 +2,7 @@
 //! library, and written from it. A brush's shape and grain images go with it; an image a file only
 //! names (one that came with the app that made it) is stood in for by the nearest of ours.
 
-use procraft_engine::brush::{Author, Brush, MaterialSource, Source, StockImage, StockImages};
+use procraft_engine::brush::{Author, Brush, GrainMode, MaterialSource, Source, StockImage, StockImages};
 use procraft_engine::brushfile::{self, BrushFile, Pictures, Texture};
 use procraft_engine::curve::Curve;
 use procraft_engine::textures::{self, TEXTURE_SIZE, grain, shape};
@@ -602,6 +602,16 @@ fn brush_from(file: &BrushFile) -> Brush {
     }
     for (key, value) in &file.settings {
         b.set_setting(key, *value);
+    }
+    // a file from before a control was kept doesn't name it: it draws as such a brush did then,
+    // not as our own pen starts: its grain at full depth, travelling with each stamp (as far as
+    // its movement says)
+    let names = |key: &str| file.settings.iter().any(|(k, _)| k == key);
+    if !names("grain_depth") {
+        b.grain.depth = 1.0;
+    }
+    if !names("grain_behavior") && names("grain_movement") {
+        b.grain.mode = GrainMode::Moving;
     }
     brushfile::set_sizes(&mut b, file.max_size, file.min_size);
     b.shape.rotation = file.shape_angle;
