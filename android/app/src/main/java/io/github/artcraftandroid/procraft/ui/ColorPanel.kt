@@ -986,13 +986,13 @@ private fun PaletteTiles(vm: CanvasViewModel, c: ColorPick, index: Int, p: Palet
                         ),
                         contentAlignment = Alignment.BottomStart,
                     ) {
-                        // dark lettering on bright colours
+                        // dark lettering on bright colours, its baseline 11.5 above the bottom as measured
                         Text(
                             colourName(rgb),
                             color = if (hsv[2] >= 0.85f) Color.Black else Color.White,
                             fontSize = 15.sp,
                             lineHeight = 17.sp,
-                            modifier = Modifier.padding(start = 8.dp, end = 8.dp, bottom = 10.dp),
+                            modifier = Modifier.padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
                         )
                     }
                 }

@@ -1319,7 +1319,8 @@ impl Colours {
                 );
                 job.wrap.max_width = PALETTE_TILE - 16.0;
                 let galley = painter.layout_job(job);
-                painter.galley(pos2(tile.left() + 8.0, tile.bottom() - 10.0 - galley.size().y), galley, lettering);
+                // its baseline 11.5 above the bottom, as measured
+                painter.galley(pos2(tile.left() + 8.0, tile.bottom() - 8.0 - galley.size().y), galley, lettering);
                 self.swatch_touch(ui, session, tile, i, slot, Some(rgb));
             }
         } else {
