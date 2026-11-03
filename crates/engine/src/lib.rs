@@ -43,6 +43,7 @@ pub mod psd;
 pub mod quickshape;
 pub mod selection;
 pub mod sqlite;
+mod stock_tones;
 pub mod stroke;
 pub mod studio;
 pub mod textures;

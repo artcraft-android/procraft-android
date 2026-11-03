@@ -378,7 +378,8 @@ impl State {
                     .collect()
             }),
             shape_source: brush.shape.source.as_ref().map(Source::to_text),
-            grain_source: brush.grain.source.as_ref().map(Source::to_text),
+            // a stock grain's is made again from its name when the brush comes back
+            grain_source: brush.grain.source.as_ref().filter(|_| brush.stock.grain.is_none()).map(Source::to_text),
             shape_image: image(brush.shape.image, base.shape.image),
             grain_image: image(brush.grain.image, base.grain.image),
             thumbnail: brush.thumbnail.as_deref().map(procraft_engine::base64::encode),
@@ -452,7 +453,8 @@ impl State {
         }
         if let Some(s) = &brush.stock.grain {
             let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };
-            brush.grain.image = crate::brush_files::grain_for(&texture, brush.thumbnail.as_deref()).0;
+            (brush.grain.image, brush.grain.source) =
+                crate::brush_files::grain_for(&texture, brush.thumbnail.as_deref());
         }
         for (stock, material) in
             [(&brush.stock.metallic, &mut brush.metallic), (&brush.stock.roughness, &mut brush.roughness)]

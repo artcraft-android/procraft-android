@@ -130,6 +130,36 @@ pub fn grains() -> Vec<GrayImage> {
     GRAINS.get_or_init(make_grains).clone()
 }
 
+/// The shares of a grain at which [`stock_grain_tones`] gives its values: none, 5%, 10%, a
+/// quarter, half, three quarters, 90%, 95% and all of it.
+pub const TONE_SHARES: [f32; 9] = [0.0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0];
+
+/// The tones of the stock grain a brush file names `name` (its path or file name) instead of
+/// carrying it, as measured: its values at [`TONE_SHARES`], if it is one we know.
+pub fn stock_grain_tones(name: &str) -> Option<[u8; 9]> {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).to_lowercase();
+    // FNV-1a, as the table's keys are
+    let key = base.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    let table = crate::stock_tones::STOCK_GRAIN_TONES;
+    table.binary_search_by_key(&key, |&(k, _)| k).ok().and_then(|i| table.get(i)).map(|&(_, t)| t)
+}
+
+/// `pixels`, a grain, with its values moved onto `tones` (values at [`TONE_SHARES`]) keeping
+/// their order: a stand-in pattern with a stock grain's lights and darks. Equal values are
+/// ordered at random, so a flat part takes a spread of values, not a ramp across the image.
+pub fn retoned(pixels: &[u8], tones: &[u8; 9]) -> Vec<u8> {
+    let raw: Vec<f32> = pixels
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let h = (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40;
+            f32::from(v) + (h as f32 / (1u64 << 24) as f32) * 0.999
+        })
+        .collect();
+    let spread: Vec<(f32, f32)> = tones.iter().zip(TONE_SHARES).map(|(&t, s)| (f32::from(t) / 255.0, s)).collect();
+    ranked(&raw, &spread)
+}
+
 /// Makes the shapes and grains now, so the first canvas doesn't wait for them (slow: off the main
 /// thread).
 pub fn prepare() {
@@ -1773,6 +1803,26 @@ fn sample_wrapped(img: &[f32], n: usize, u: f32, v: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_retoned_grain_takes_the_tones_it_is_given_in_its_own_order() {
+        let tones = [10, 40, 60, 90, 140, 190, 220, 235, 250];
+        for g in grains() {
+            let out = retoned(&g.pixels, &tones);
+            let mut sorted = out.clone();
+            sorted.sort_unstable();
+            for (share, want) in TONE_SHARES.iter().zip(tones) {
+                let got = sorted[((sorted.len() - 1) as f32 * share) as usize];
+                assert!(got.abs_diff(want) <= 3, "{}: at {share} {got} for {want}", g.name);
+            }
+            // a lighter pixel of the pattern stays at least as light
+            let (a, b) = (g.pixels.iter().position(|&v| v == 0), g.pixels.iter().position(|&v| v == 255));
+            if let (Some(a), Some(b)) = (a, b) {
+                assert!(out[a] <= out[b], "{}", g.name);
+            }
+        }
+        assert_eq!(stock_grain_tones("no such grain.png"), None);
+    }
 
     #[test]
     fn images_have_the_right_size_and_content() {

@@ -841,7 +841,7 @@ pub(crate) fn grain_for(t: &Texture, preview: Option<&[u8]>) -> (Option<u32>, Op
             Some(s) => (None, Some(s)),
             None => (Some(grain::PAPER), None),
         },
-        Texture::Stock { name, .. } => {
+        Texture::Stock { name, inverted } => {
             let n = name.to_lowercase();
             if n.contains("blank") {
                 return (None, None);
@@ -852,7 +852,17 @@ pub(crate) fn grain_for(t: &Texture, preview: Option<&[u8]>) -> (Option<u32>, Op
                 Some(PreviewLook::Even) => None,
                 _ => Some(grain::MOTTLED),
             };
-            (named_grain(&n).map_or_else(unknown, Some), None)
+            let image = named_grain(&n).map_or_else(unknown, Some);
+            // our pattern with the stock grain's own lights and darks, where they were measured
+            let source = image.zip(textures::stock_grain_tones(name)).and_then(|(i, tones)| {
+                let pattern = textures::grains().into_iter().nth(i as usize)?;
+                let mut pixels = textures::retoned(&pattern.pixels, &tones);
+                if *inverted {
+                    pixels.iter_mut().for_each(|v| *v = 255 - *v);
+                }
+                Source::new(pixels)
+            });
+            (image, source)
         }
     }
 }
