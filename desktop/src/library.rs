@@ -49,7 +49,7 @@ const MENU_TOP: f32 = 57.0;
 const SET_MENU_GAP: f32 = 6.0;
 /// The set's menu: frosted glass over the canvas, edged.
 const SET_MENU_GLASS: menu::Glass =
-    menu::Glass { fill: menu::GLASS, edge: Some(menu::EDGE), frost: true, corner: menu::LIBRARY_CORNER };
+    menu::Glass { fill: menu::GLASS, edge: Some(menu::EDGE), frost: true, corner: menu::LIBRARY_CORNER, shadow: false };
 /// A brush slid left shows three buttons filling its place, this far apart.
 const SWIPE_GAP: f32 = 5.5;
 const SWIPE_FILL: u32 = 0xFF3F3F3F;
@@ -63,8 +63,13 @@ const PICKER: (f32, f32) = (250.0, 325.0);
 const PICKER_CELL: f32 = 48.0;
 const PICKER_INSET: f32 = 11.0;
 const PICKER_MARGIN: f32 = 25.0;
-const PICKER_GLASS: menu::Glass =
-    menu::Glass { fill: Themed(0xFA303335, 0xFA303335), edge: Some(menu::EDGE), frost: false, corner: 26.0 };
+const PICKER_GLASS: menu::Glass = menu::Glass {
+    fill: Themed(0xFA303335, 0xFA303335),
+    edge: Some(menu::EDGE),
+    frost: false,
+    corner: 26.0,
+    shadow: false,
+};
 /// A press moved this far (points) slides or scrolls; held still this long, it drags the brush.
 const SLOP: f32 = 8.0;
 const HOLD: Duration = Duration::from_millis(400);

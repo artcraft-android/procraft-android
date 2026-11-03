@@ -162,7 +162,7 @@ impl CanvasSession {
         let layer = match id {
             Some(id) => {
                 let id = LayerId(id);
-                st.doc.layer(id).filter(|l| l.text.is_some() && !l.locked)?;
+                st.doc.layer(id).filter(|l| l.text.is_some() && !st.doc.is_locked(id))?;
                 st.doc.set_current(id);
                 id
             }
@@ -257,7 +257,7 @@ impl CanvasSession {
         }
         let step = st.canvas.as_ref()?.undo_step()?;
         let layer = st.text_steps.iter().rev().find(|(s, _)| *s == step)?.1;
-        st.doc.layer(layer).filter(|l| l.text.is_some() && !l.locked).map(|_| layer.0)
+        st.doc.layer(layer).filter(|l| l.text.is_some() && !st.doc.is_locked(layer)).map(|_| layer.0)
     }
 
     /// The text layer the next redo brings back, when that step is a finished text edit: after

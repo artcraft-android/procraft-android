@@ -998,7 +998,8 @@ impl Layers {
         backdrops: &mut Vec<f32>,
     ) {
         let rows: Vec<LayerOptionRow> = session.layer_options(l.id);
-        let height = 7.0 * 2.0 + menu::OPTION_HEIGHT * rows.len() as f32;
+        // as measured, an empty one (a locked group's or mask's) is a pill 64 tall
+        let height = (7.0 * 2.0 + menu::OPTION_HEIGHT * rows.len() as f32).max(64.0);
         let screen = ctx.content_rect();
         let lowest = (screen.bottom() - height).max(screen.top() + OPTIONS_TOP);
         let top = (row_y - height / 2.0).clamp(screen.top() + OPTIONS_TOP, lowest);
@@ -1009,7 +1010,12 @@ impl Layers {
             "layer options",
             rect,
             pos2(rect.right(), rect.center().y),
-            menu::Glass { corner: OPTIONS_CORNER, ..menu::FROSTED },
+            // empty, as measured, the frost alone, untinted
+            menu::Glass {
+                corner: OPTIONS_CORNER,
+                fill: if rows.is_empty() { Themed(0, 0) } else { menu::FROSTED.fill },
+                ..menu::FROSTED
+            },
             backdrops,
             |ui| {
                 let places = menu::option_rows(rect.left(), rect.top() + 7.0, rect.width(), rows.len());

@@ -30,7 +30,7 @@ const SLIDE_TRACK: Themed = Themed(0xFF414141, 0xFFBEBEBE);
 const CURSOR_HEADING: Themed = Themed(0xFFB5B5B5, 0xFF404040);
 /// Brush scaling's menu: its fill and rim, a radio's ring.
 const CHOICE_MENU: Glass =
-    Glass { fill: Themed(0xFF5A5C5B, 0xFFF0F0F0), edge: Some(0x33FFFFFF), frost: false, corner: 26.0 };
+    Glass { fill: Themed(0xFF5A5C5B, 0xFFF0F0F0), edge: Some(0x33FFFFFF), frost: false, corner: 26.0, shadow: false };
 const RADIO_RING: Themed = Themed(0xFF606060, 0xFFB0B0B0);
 const ROW_HEIGHT: f32 = 44.0;
 const CHOICE_HEIGHT: f32 = 42.0;

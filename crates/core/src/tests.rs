@@ -2389,6 +2389,35 @@ fn the_drawing_guide_mirrors_and_assists_strokes() {
 }
 
 #[test]
+fn a_group_s_lock_shows_on_its_layers_and_their_unlock_takes_it_off() {
+    use crate::layers::{Blocked, LayerOption as O};
+    let Some(s) = session(64, 64) else { return };
+    let lower = s.layers()[0].id;
+    let upper = s.add_layer();
+    assert!(s.pick_layer(lower));
+    let group = s.group_picked();
+    assert_ne!(group, 0);
+    let locked = |id| s.layers().iter().find(|l| l.id == id).unwrap().locked;
+    // as measured: its layers show locked, offer the locked menu and take no paint
+    assert!(s.set_layer_locked(upper, true));
+    assert!(s.set_layer_locked(group, true));
+    assert!(locked(lower) && locked(upper));
+    assert!(!s.layer_options(lower).iter().any(|r| r.option == O::Rename));
+    assert!(s.select_layer(lower));
+    assert_eq!(s.why_blocked(), Some(Blocked::Locked));
+    // unlocking the group leaves a layer's own lock
+    assert!(s.set_layer_locked(group, false));
+    assert!(!locked(lower) && locked(upper));
+    assert_eq!(s.why_blocked(), None);
+    // locked by its group alone, a layer's Unlock unlocks the group: one undo step
+    assert!(s.set_layer_locked(group, true));
+    assert!(s.set_layer_locked(lower, false));
+    assert!(!locked(group) && !locked(lower) && locked(upper));
+    assert_eq!(s.undo().as_deref(), Some("unlock layer"));
+    assert!(locked(group) && locked(lower));
+}
+
+#[test]
 fn a_layer_s_options_follow_what_it_is() {
     use crate::layers::{LayerOption as O, LayerOptionRow, LayerType};
     let s = CanvasSession::new(64, 64);
@@ -2421,17 +2450,22 @@ fn a_layer_s_options_follow_what_it_is() {
     );
     // the bottom one has nothing to merge into or clip to
     assert!(!options(bottom).contains(&O::MergeDown) && !options(bottom).contains(&O::ClippingMask));
-    // switches say whether they are on; a lock greys what would change its pixels
+    // switches say whether they are on
     assert!(s.set_layer_alpha_lock(top, true));
     assert_eq!(row(top, O::AlphaLock).switch_on, Some(true));
     assert_eq!(row(top, O::Fill).switch_on, None);
+    // locked, as measured: only what leaves its pixels, name and place as they are
     assert!(s.set_layer_locked(top, true));
-    assert!(!row(top, O::Fill).enabled && !row(top, O::MergeDown).enabled && row(top, O::Select).enabled);
+    assert_eq!(options(top), [O::Select, O::Copy, O::Mask, O::ClippingMask, O::DrawingAssist, O::Reference]);
     // with a mask, no second one: Merge Mask last instead; the mask's own menu is short
     let mask = s.add_mask(bottom).unwrap();
     let with_mask = options(bottom);
     assert!(!with_mask.contains(&O::Mask) && with_mask.last() == Some(&O::MergeMask));
     assert_eq!(options(mask), [O::Rename, O::Select, O::Fill, O::Clear, O::Invert]);
+    // a locked mask's menu is empty, as measured
+    assert!(s.set_layer_locked(mask, true));
+    assert!(options(mask).is_empty());
+    assert!(s.set_layer_locked(mask, false));
     // chosen, the mask goes into its layer; with none left, Mask is back
     assert!(s.merge_mask(bottom));
     assert!(s.layers().iter().all(|l| l.kind != LayerType::Mask));

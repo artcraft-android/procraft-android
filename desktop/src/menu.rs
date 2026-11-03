@@ -32,20 +32,76 @@ pub const RULE: u32 = 0xFF3F4347;
 pub const DANGER: Themed = Themed(0xFFE84F51, 0xFFD93A3D);
 pub const ITEM_HEIGHT: f32 = 40.0;
 
-/// How a menu looks: its fill, an edge round it, whether the canvas is frosted behind it, and how
-/// round it is.
+/// How a menu looks: its fill, an edge round it, whether the canvas is frosted behind it, how
+/// round it is, and whether it casts a shadow.
 #[derive(Clone, Copy)]
 pub struct Glass {
     pub fill: Themed,
     pub edge: Option<u32>,
     pub frost: bool,
     pub corner: f32,
+    pub shadow: bool,
 }
 
-/// The glass over the canvas, as the layer options have it.
-pub const FROSTED: Glass = Glass { fill: GLASS, edge: None, frost: true, corner: 24.0 };
+/// The glass over the canvas, as the layer options have it, with their shadow.
+pub const FROSTED: Glass = Glass { fill: GLASS, edge: None, frost: true, corner: 24.0, shadow: true };
 /// Over a panel: nearly solid, edged.
-pub const OVER_A_PANEL: Glass = Glass { fill: OVER_PANEL, edge: Some(EDGE), frost: false, corner: LIBRARY_CORNER };
+pub const OVER_A_PANEL: Glass =
+    Glass { fill: OVER_PANEL, edge: Some(EDGE), frost: false, corner: LIBRARY_CORNER, shadow: false };
+
+/// A menu's shadow, as measured under the layer options: black at 14%, a Gaussian blur of sigma 15
+/// and 6 lower.
+const SHADOW_ALPHA: f32 = 0.14;
+const SHADOW_SIGMA: f32 = 15.0;
+const SHADOW_DROP: f32 = 6.0;
+
+/// The shadow a menu over `rect` (rounded by `corner`) casts, drawn round it only: none of it
+/// under the menu, which may be see-through. Rings of vertices out from its outline, each as dark
+/// as the blurred, lowered rectangle is there.
+fn shadow(painter: &egui::Painter, rect: Rect, corner: f32) {
+    // the standard normal's distribution, near enough (a logistic fit)
+    let below = |x: f32| 1.0 / (1.0 + (1.702 * x).exp());
+    let cast = rect.translate(vec2(0.0, SHADOW_DROP));
+    let half = cast.size() / 2.0 - vec2(corner, corner);
+    // how far a point is outside the cast rectangle's rounded outline (inside: negative)
+    let outside = |p: Pos2| {
+        let q = (p - cast.center()).abs() - half;
+        q.max(vec2(0.0, 0.0)).length() + q.x.max(q.y).min(0.0) - corner
+    };
+    // the outline, each point with its outward direction: a quarter turn per corner
+    const PER_CORNER: usize = 12;
+    let inner = rect.shrink(corner);
+    let mut outline = Vec::with_capacity(PER_CORNER * 4);
+    for (k, centre) in
+        [inner.right_bottom(), inner.left_bottom(), inner.left_top(), inner.right_top()].into_iter().enumerate()
+    {
+        for i in 0..PER_CORNER {
+            let a = (k as f32 + i as f32 / (PER_CORNER - 1) as f32) * std::f32::consts::FRAC_PI_2;
+            let out = vec2(a.cos(), a.sin());
+            outline.push((centre + out * corner, out));
+        }
+    }
+    const RINGS: usize = 10;
+    let reach = 3.0 * SHADOW_SIGMA + SHADOW_DROP;
+    let mut mesh = egui::Mesh::default();
+    for r in 0..=RINGS {
+        let t = reach * r as f32 / RINGS as f32;
+        for &(p, out) in &outline {
+            let at = p + out * t;
+            let a = SHADOW_ALPHA * below(outside(at) / SHADOW_SIGMA);
+            mesh.colored_vertex(at, egui::Color32::from_black_alpha((a * 255.0).round() as u8));
+        }
+    }
+    let n = outline.len() as u32;
+    for r in 0..RINGS as u32 {
+        for i in 0..n {
+            let (a, b) = (r * n + i, r * n + (i + 1) % n);
+            mesh.add_triangle(a, b, a + n);
+            mesh.add_triangle(b, b + n, a + n);
+        }
+    }
+    painter.add(mesh);
+}
 
 /// A menu's coming and going.
 #[derive(Default)]
@@ -132,6 +188,9 @@ impl Menu {
         egui::Area::new(area).fixed_pos(rect.min).order(Order::Tooltip).interactable(self.open).show(ctx, |ui| {
             ui.multiply_opacity(alpha);
             ui.allocate_rect(rect, Sense::click());
+            if glass.shadow {
+                shadow(ui.painter(), rect, corner);
+            }
             ui.painter().rect_filled(rect, corner, argb(glass.fill));
             if let Some(edge) = glass.edge {
                 ui.painter().rect_stroke(rect, corner, egui::Stroke::new(1.0, argb(edge)), egui::StrokeKind::Inside);

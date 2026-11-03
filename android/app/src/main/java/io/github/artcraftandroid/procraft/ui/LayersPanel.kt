@@ -1,5 +1,6 @@
 package io.github.artcraftandroid.procraft.ui
 
+import android.graphics.BlurMaskFilter
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
@@ -52,13 +54,18 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -884,14 +891,26 @@ internal fun OpacitySlider(value: Float, onChange: (Float) -> Unit, onDone: () -
 private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY: Float, onRename: () -> Unit, onDone: () -> Unit) {
     val density = LocalDensity.current
     val place = remember(rowY, density) {
-        OptionsPlace(with(density) { (-183).dp.roundToPx() }, rowY, with(density) { OptionsTop.roundToPx() })
+        with(density) { OptionsPlace((-183).dp.roundToPx(), rowY, OptionsTop.roundToPx(), OptionsShadowRoom.roundToPx()) }
     }
     MenuPresence(open, androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f)) { look ->
         PcPopup(textScale = MATCHED_POPUP_TEXT, popupPositionProvider = place, onDismissRequest = onDone, properties = PopupProperties(focusable = true)) {
-            // frosted over the canvas, as the library's menus are
-            Column(look.width(194.dp).clip(RoundedCornerShape(24.dp)).then(rememberFrost(24.dp)).background(Pc.GlassMenu).padding(vertical = 7.dp)) {
+            // frosted over the canvas, as the library's menus are; empty (a locked group's or
+            // mask's), as measured, a pill 64 tall with the frost alone, untinted
+            val rows = vm.layerOptions(l)
+            val tint = if (rows.isEmpty()) Color.Transparent else Pc.GlassMenu
+            val room = with(density) { OptionsShadowRoom.toPx() }
+            // the room round it for its shadow: a tap there closes it, as one further out does
+            Box(
+                look.pointerInput(Unit) {
+                    detectTapGestures { p ->
+                        if (p.x < room || p.y < room || p.x > size.width - room || p.y > size.height - room) onDone()
+                    }
+                }.padding(OptionsShadowRoom).drawBehind { optionsShadow() },
+            ) {
+            Column(Modifier.width(194.dp).heightIn(min = 64.dp).clip(RoundedCornerShape(24.dp)).then(rememberFrost(24.dp)).background(tint).padding(vertical = 7.dp)) {
                 // the core's rows: each closes the menu, a switch's too (it shows ticked next time)
-                for (r in vm.layerOptions(l)) {
+                for (r in rows) {
                     val act: () -> Unit = when (r.option) {
                         LayerOption.RENAME -> onRename
                         LayerOption.UNGROUP -> { { vm.ungroup(l) } }
@@ -915,16 +934,48 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
                     Option(r.label, checked = r.switchOn, enabled = r.enabled, onClick = { act(); onDone() })
                 }
             }
+            }
         }
     }
 }
 
-/** Puts the options left of the panel, centred on the row tapped and kept below the top bar. */
-private class OptionsPlace(private val left: Int, private val rowY: Float, private val top: Int) : PopupPositionProvider {
+/** Room round the options for their shadow, which has faded out by then. */
+private val OptionsShadowRoom = 52.dp
+
+/**
+ * The options' shadow round this (their size), as measured: black at 14%, blurred by 15 (its
+ * sigma) and 6 lower. None of it under them: they show the frost alone when empty.
+ */
+private fun DrawScope.optionsShadow() {
+    val outline = Path().apply {
+        addRoundRect(RoundRect(0f, 0f, size.width, size.height, CornerRadius(24.dp.toPx())))
+    }
+    val shadow = Path().apply {
+        addRoundRect(RoundRect(0f, 6.dp.toPx(), size.width, size.height + 6.dp.toPx(), CornerRadius(24.dp.toPx())))
+    }
+    // the blur's radius for that sigma, as the platform's blur takes it
+    val radius = (15.dp.toPx() - 0.5f) / 0.57735f
+    drawIntoCanvas { canvas ->
+        val paint = androidx.compose.ui.graphics.Paint().apply {
+            color = Color.Black.copy(alpha = 0.14f)
+            asFrameworkPaint().maskFilter = BlurMaskFilter(radius, BlurMaskFilter.Blur.NORMAL)
+        }
+        canvas.save()
+        canvas.clipPath(outline, ClipOp.Difference)
+        canvas.drawPath(shadow, paint)
+        canvas.restore()
+    }
+}
+
+/**
+ * Puts the options left of the panel, centred on the row tapped and kept below the top bar; the
+ * popup is [room] bigger all round for their shadow.
+ */
+private class OptionsPlace(private val left: Int, private val rowY: Float, private val top: Int, private val room: Int) : PopupPositionProvider {
     override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
-        val bottom = (windowSize.height - popupContentSize.height).coerceAtLeast(top)
-        val y = (rowY - popupContentSize.height / 2f).roundToInt().coerceIn(top, bottom)
-        return IntOffset(anchorBounds.left + left, y)
+        val bottom = (windowSize.height - popupContentSize.height + room).coerceAtLeast(top - room)
+        val y = (rowY - popupContentSize.height / 2f).roundToInt().coerceIn(top - room, bottom)
+        return IntOffset(anchorBounds.left + left - room, y)
     }
 }
 

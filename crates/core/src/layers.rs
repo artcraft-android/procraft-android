@@ -110,67 +110,78 @@ pub struct LayerOptionRow {
 }
 
 /// The rows of layer `l`'s options menu (`masked`: it has a mask; `guided`: the drawing guide is
-/// on or has been), in order: what doesn't apply to it left out, what its lock forbids greyed.
+/// on or has been), in order: what doesn't apply to it left out. Locked, as measured, it offers
+/// only what leaves its pixels, name and place as they are (a locked group or mask: nothing).
 /// Lock, duplicate and delete are on its row's swipe.
 fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRow> {
     use LayerOption as O;
     let unlocked = !l.locked;
     let mut rows = Vec::new();
-    let mut row = |option, label: &str, enabled: bool, switch_on: Option<bool>| {
-        rows.push(LayerOptionRow { option, label: label.to_owned(), enabled, switch_on });
+    let mut row = |option, label: &str, switch_on: Option<bool>| {
+        rows.push(LayerOptionRow { option, label: label.to_owned(), enabled: true, switch_on });
     };
-    row(O::Rename, "Rename", true, None);
+    if unlocked {
+        row(O::Rename, "Rename", None);
+    }
     match l.kind {
         LayerType::Group => {
-            row(O::Ungroup, "Ungroup", true, None);
-            row(O::Flatten, "Flatten", true, None);
+            if unlocked {
+                row(O::Ungroup, "Ungroup", None);
+                row(O::Flatten, "Flatten", None);
+            }
         }
         LayerType::Mask => {
-            row(O::Select, "Select", true, None);
-            row(O::Fill, "Fill Layer", unlocked, None);
-            row(O::Clear, "Clear", unlocked, None);
-            row(O::Invert, "Invert", unlocked, None);
+            if unlocked {
+                row(O::Select, "Select", None);
+                row(O::Fill, "Fill Layer", None);
+                row(O::Clear, "Clear", None);
+                row(O::Invert, "Invert", None);
+            }
         }
         LayerType::Paint => {
-            row(O::Select, "Select", true, None);
-            row(O::Copy, "Copy", true, None);
+            row(O::Select, "Select", None);
+            row(O::Copy, "Copy", None);
             // a text layer's pixels come from its text: nothing to fill, clear, lock or invert
-            if !l.text {
-                row(O::Fill, "Fill Layer", unlocked, None);
-                row(O::Clear, "Clear", unlocked, None);
-                row(O::AlphaLock, "Alpha Lock", true, Some(l.alpha_lock));
+            if !l.text && unlocked {
+                row(O::Fill, "Fill Layer", None);
+                row(O::Clear, "Clear", None);
+                row(O::AlphaLock, "Alpha Lock", Some(l.alpha_lock));
             }
             // one mask each: with one, its Merge Mask comes last instead
             if !masked {
-                row(O::Mask, "Mask", true, None);
+                row(O::Mask, "Mask", None);
             }
             if l.can_clip {
-                row(O::ClippingMask, "Clipping Mask", true, Some(l.clipped));
+                row(O::ClippingMask, "Clipping Mask", Some(l.clipped));
             }
             if l.text {
-                row(O::EditText, "Edit Text", unlocked, None);
-                row(O::Rasterize, "Rasterize", unlocked, None);
+                if unlocked {
+                    row(O::EditText, "Edit Text", None);
+                    row(O::Rasterize, "Rasterize", None);
+                }
             } else {
                 // offered once the canvas's drawing guide has been on (on or off since), or while
                 // the layer has it
                 if guided || l.assisted {
-                    row(O::DrawingAssist, "Drawing Assist", true, Some(l.assisted));
+                    row(O::DrawingAssist, "Drawing Assist", Some(l.assisted));
                 }
-                row(O::Invert, "Invert", unlocked, None);
+                if unlocked {
+                    row(O::Invert, "Invert", None);
+                }
             }
-            row(O::Reference, "Reference", true, Some(l.reference));
+            row(O::Reference, "Reference", Some(l.reference));
         }
     }
-    if l.kind != LayerType::Mask {
+    if l.kind != LayerType::Mask && unlocked {
         if l.can_merge {
-            row(O::MergeDown, "Merge Down", unlocked, None);
+            row(O::MergeDown, "Merge Down", None);
         }
         if l.can_combine {
-            row(O::CombineDown, "Combine Down", true, None);
+            row(O::CombineDown, "Combine Down", None);
         }
     }
-    if masked {
-        row(O::MergeMask, "Merge Mask", unlocked, None);
+    if masked && unlocked {
+        row(O::MergeMask, "Merge Mask", None);
     }
     rows
 }
@@ -323,7 +334,7 @@ impl CanvasSession {
                 blend: l.blend.id(),
                 alpha_lock: l.alpha_lock,
                 clipped: l.clipped,
-                locked: l.locked,
+                locked: st.doc.is_locked(l.id),
                 current: l.id == current,
                 picked: st.doc.is_picked(l.id),
                 reference: l.reference,
@@ -453,7 +464,7 @@ impl CanvasSession {
 
     pub fn delete_layer(&self, id: u64) -> bool {
         self.change("delete layer", |d| {
-            let unlocked = d.layer(LayerId(id)).is_some_and(|l| !l.locked);
+            let unlocked = d.layer(LayerId(id)).is_some() && !d.is_locked(LayerId(id));
             (unlocked && d.delete_layer(LayerId(id))).then_some(())
         })
         .is_some()
@@ -622,7 +633,7 @@ impl CanvasSession {
             st.doc.merge_target(id).map(|lower| (id, lower))
         };
         let Some((upper, lower)) = pair else { return false };
-        if [id, upper, lower].iter().any(|l| st.doc.layer(*l).is_none_or(|l| l.locked)) {
+        if [id, upper, lower].iter().any(|l| st.doc.layer(*l).is_none() || st.doc.is_locked(*l)) {
             return false;
         }
         let before = st.doc.clone();
@@ -708,9 +719,13 @@ impl CanvasSession {
         .is_some()
     }
 
+    /// Locks layer `id`, or unlocks it: as measured, a layer locked by its group shows locked and
+    /// its Unlock unlocks the group (its own lock, if any, too).
     pub fn set_layer_locked(&self, id: u64, on: bool) -> bool {
         self.change(if on { "lock layer" } else { "unlock layer" }, |d| {
-            changed(d, id, |l| l.locked != on).then(|| d.set_locked(LayerId(id), on)).filter(|ok| *ok).map(|_| ())
+            let id = LayerId(id);
+            let differs = if on { d.layer(id).is_some_and(|l| !l.locked) } else { d.is_locked(id) };
+            (differs && d.set_locked(id, on)).then_some(())
         })
         .is_some()
     }
@@ -802,7 +817,7 @@ impl CanvasSession {
             };
             let mask = if mask_of(a, b) { Some((a, b)) } else { mask_of(b, a).then_some((b, a)) };
             if let Some((mask, layer)) = mask {
-                if [mask, layer].iter().any(|l| st.doc.layer(*l).is_none_or(|l| l.locked)) {
+                if [mask, layer].iter().any(|l| st.doc.layer(*l).is_none() || st.doc.is_locked(*l)) {
                     return false;
                 }
                 let before = st.doc.clone();

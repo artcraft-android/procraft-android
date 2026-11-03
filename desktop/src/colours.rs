@@ -639,6 +639,7 @@ impl Colours {
             edge: Some(SHORT_MENU_EDGE),
             frost: false,
             corner: SHORT_MENU_CORNER,
+            shadow: false,
         };
         let mut chosen = None;
         self.short_menu.show(ctx, "short colour menu", rect, rect.right_top(), glass, backdrops, |ui| {
@@ -913,7 +914,8 @@ impl Colours {
 
     /// Harmony's kinds as a menu at `rect`, the kind shown ticked.
     fn harmony_menu_in(&mut self, ctx: &egui::Context, look: &mut Look, rect: Rect, backdrops: &mut Vec<f32>) {
-        let glass = crate::menu::Glass { fill: HARMONY_MENU_FILL, edge: None, frost: false, corner: 24.0 };
+        let glass =
+            crate::menu::Glass { fill: HARMONY_MENU_FILL, edge: None, frost: false, corner: 24.0, shadow: false };
         let current = self.harmony;
         let mut chosen = None;
         self.harmony_menu.show(ctx, "harmony kinds", rect, rect.right_top(), glass, backdrops, |ui| {

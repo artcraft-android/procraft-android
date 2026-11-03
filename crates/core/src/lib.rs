@@ -1297,9 +1297,12 @@ impl CanvasSession {
         st.finish_stroke();
         st.settle();
         // locked and hidden layers, groups and text layers take no paint
-        if st.doc.layer(current).is_none_or(|l| {
-            l.locked || !l.visible || l.kind == procraft_engine::document::LayerKind::Group || l.text.is_some()
-        }) {
+        if st.doc.is_locked(current)
+            || st
+                .doc
+                .layer(current)
+                .is_none_or(|l| !l.visible || l.kind == procraft_engine::document::LayerKind::Group || l.text.is_some())
+        {
             return;
         }
         let tool = if pointer == PointerKind::StylusEraser { ToolKind::Erase } else { st.tool };
@@ -1730,7 +1733,7 @@ impl CanvasSession {
         let current = st.doc.current();
         st.finish_stroke();
         st.settle();
-        if st.doc.layer(current).is_none_or(|l| l.locked || l.text.is_some()) {
+        if st.doc.is_locked(current) || st.doc.layer(current).is_none_or(|l| l.text.is_some()) {
             return;
         }
         // with a selection, only what is selected is cleared

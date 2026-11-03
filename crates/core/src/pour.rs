@@ -194,7 +194,7 @@ impl CanvasSession {
         let (w, h) = (st.doc.width(), st.doc.height());
         let current = st.doc.current();
         let Some(layer) = st.doc.layer(current).cloned() else { return false };
-        if layer.locked || layer.text.is_some() {
+        if st.doc.is_locked(current) || layer.text.is_some() {
             return false;
         }
         let Some(before) = st.current_pixels() else { return false };

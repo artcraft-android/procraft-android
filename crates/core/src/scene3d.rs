@@ -2092,7 +2092,7 @@ impl State {
         if self
             .doc
             .layer(current)
-            .is_none_or(|l| l.locked || !l.visible || l.kind == LayerKind::Group || l.text.is_some())
+            .is_none_or(|l| self.doc.is_locked(l.id) || !l.visible || l.kind == LayerKind::Group || l.text.is_some())
         {
             return;
         }

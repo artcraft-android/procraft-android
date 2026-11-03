@@ -308,7 +308,7 @@ impl CanvasSession {
         st.finish_stroke();
         st.settle();
         let current = st.doc.current();
-        if st.doc.layer(current).is_none_or(|l| l.locked || !l.visible || l.text.is_some()) {
+        if st.doc.is_locked(current) || st.doc.layer(current).is_none_or(|l| !l.visible || l.text.is_some()) {
             return false;
         }
         let Some(canvas) = st.canvas.as_mut() else { return false };

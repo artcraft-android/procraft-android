@@ -290,7 +290,7 @@ impl CanvasSession {
         st.finish_stroke();
         st.settle();
         let current = st.doc.current();
-        let movable = |l: &Layer| !l.locked && l.visible && l.text.is_none();
+        let movable = |l: &Layer| !st.doc.is_locked(l.id) && l.visible && l.text.is_none();
         // with layers picked, every paint layer chosen (those in a chosen group too) moves
         let chosen = st.doc.chosen();
         let targets: Vec<LayerId> = if chosen.len() > 1 {

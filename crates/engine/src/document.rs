@@ -868,7 +868,7 @@ impl Document {
     pub fn delete_chosen(&mut self) -> bool {
         let mut any = false;
         for id in self.chosen().into_iter().rev() {
-            if self.layer(id).is_some_and(|l| !l.locked) {
+            if self.layer(id).is_some() && !self.is_locked(id) {
                 any |= self.delete_layer(id);
             }
         }
@@ -882,7 +882,7 @@ impl Document {
     /// is locked.
     pub fn merge_chosen_plan(&self) -> Option<(LayerId, Vec<LayerId>)> {
         let items = self.chosen_items();
-        if items.iter().any(|id| self.layer(*id).is_some_and(|l| l.locked)) {
+        if items.iter().any(|id| self.is_locked(*id)) {
             return None;
         }
         let at = items.iter().position(|id| self.layer(*id).is_some_and(|l| l.kind == LayerKind::Paint))?;
@@ -996,6 +996,25 @@ impl Document {
             _ => l,
         };
         l.parent.filter(|p| *p != l.id && self.layer(*p).is_some_and(|g| g.kind == LayerKind::Group))
+    }
+
+    /// Whether `id` takes no change: it is locked, or a group it is inside is.
+    pub fn is_locked(&self, id: LayerId) -> bool {
+        self.layer(id).is_some_and(|l| l.locked) || !self.locked_groups(id).is_empty()
+    }
+
+    /// The locked groups `id` is inside, innermost first.
+    pub fn locked_groups(&self, id: LayerId) -> Vec<LayerId> {
+        let mut groups = Vec::new();
+        let mut at = self.group_of(id);
+        for _ in 0..self.layers.len() {
+            let Some(g) = at else { break };
+            if self.layer(g).is_some_and(|l| l.locked) {
+                groups.push(g);
+            }
+            at = self.group_of(g);
+        }
+        groups
     }
 
     /// How many groups `id` is inside.
@@ -1412,7 +1431,16 @@ impl Document {
         self.layer_mut(id).map(|l| l.alpha_lock = on).is_some()
     }
 
+    /// Locks `id`, or unlocks it: its own lock and those of the groups it is in (its row shows
+    /// theirs, and its Unlock takes them off).
     pub fn set_locked(&mut self, id: LayerId, on: bool) -> bool {
+        if !on {
+            for g in self.locked_groups(id) {
+                if let Some(l) = self.layer_mut(g) {
+                    l.locked = false;
+                }
+            }
+        }
         self.layer_mut(id).map(|l| l.locked = on).is_some()
     }
 
