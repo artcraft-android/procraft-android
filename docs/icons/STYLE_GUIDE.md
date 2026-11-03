@@ -162,6 +162,8 @@ Lucide set beside them.
 | Statistics | a pie chart with one slice pulled out |
 | New brush | the Paint brush with a plus beside it |
 | New set | a folder with a plus cut out of it |
+| Libraries | three volumes on a shelf, the last leaning |
+| New library | two volumes on a shelf, a plus beside them |
 | Share (menus) | the Actions tab's tray and rising arrow |
 | Open / disclose | a chevron, right / down |
 | Done | a tick |

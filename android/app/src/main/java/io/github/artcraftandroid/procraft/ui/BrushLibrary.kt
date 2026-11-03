@@ -853,7 +853,7 @@ private fun LibraryTitleMenu(vm: CanvasViewModel, open: Boolean, onDismiss: () -
             vm.renamingLibrary = vm.libraryPlace
         }
         MenuDivider(11.dp)
-        MenuItem(PcIcons.MenuGrid, "Back to libraries") {
+        MenuItem(PcIcons.MenuLibraries, "Back to libraries") {
             onDismiss()
             vm.showingLibraries = true
         }
@@ -909,7 +909,7 @@ private fun LibrariesPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier) 
                 Icon(PcIcons.PlusMedium, contentDescription = "Add", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
                 LibraryMenu(adding, androidx.compose.ui.graphics.TransformOrigin(1f, 0f), MenuPlace { a, size -> IntOffset(a.right - size.width, a.bottom) }, onDismiss = { adding = false }, overPanel = true) {
                     if (showing) {
-                        MenuItem(PcIcons.MenuNewSet, "Create new library") {
+                        MenuItem(PcIcons.MenuNewLibrary, "Create new library") {
                             adding = false
                             vm.newLibrary()
                         }

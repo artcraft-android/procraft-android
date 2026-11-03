@@ -236,7 +236,7 @@ impl Library {
             vec![
                 Entry::Item(&icons::MENU_RENAME, "Rename", ink),
                 Entry::Rule(11.0),
-                Entry::Item(&icons::MENU_GROUP, "Back to libraries", ink),
+                Entry::Item(&icons::MENU_LIBRARIES, "Back to libraries", ink),
             ]
         };
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
@@ -272,7 +272,7 @@ impl Library {
         plus: Rect,
         backdrops: &mut Vec<f32>,
     ) {
-        let entries = [Entry::Item(&icons::MENU_NEW_SET, "Create new library", menu::INK)];
+        let entries = [Entry::Item(&icons::MENU_NEW_LIBRARY, "Create new library", menu::INK)];
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
         let rect = Rect::from_min_size(pos2(plus.right() - size.x, plus.bottom()), size);
         let mut tapped = None;
