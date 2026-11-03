@@ -1341,6 +1341,11 @@ private fun ThumbnailImage(image: ImageBitmap, name: String, scale: ContentScale
     )
 }
 
+// as measured: a thumbnail's shadow dropped below it, and the rim round it
+private val ThumbShadowDrop = 5.dp
+private val ThumbShadow get() = if (Pc.light) Color(0x1D000000) else Color(0x45000000)
+private val ThumbRim get() = if (Pc.light) Color(0xFFBEBEBE) else Color(0xFF424242)
+
 /**
  * An artwork's thumbnail, as large as fits in its cell's box, with a soft shadow; while selecting,
  * a circle at its top right ([chosen]: filled blue with a tick).
@@ -1360,14 +1365,18 @@ private fun Thumbnail(a: Artwork, version: Int, chosen: Boolean? = null, wash: B
             .drawBehind {
                 drawIntoCanvas { canvas ->
                     val shadow = Paint().apply {
-                        color = Color(0x80000000)
-                        asFrameworkPaint().maskFilter = BlurMaskFilter(10.dp.toPx(), BlurMaskFilter.Blur.NORMAL)
+                        color = ThumbShadow
+                        // a Gaussian 2 across (the blur's radius as the framework takes it)
+                        asFrameworkPaint().maskFilter = BlurMaskFilter((2.dp.toPx() - 0.5f) / 0.57735f, BlurMaskFilter.Blur.NORMAL)
                     }
-                    canvas.drawRoundRect(0f, 0f, size.width, size.height, 8.dp.toPx(), 8.dp.toPx(), shadow)
+                    val drop = ThumbShadowDrop.toPx()
+                    canvas.drawRoundRect(0f, drop, size.width, size.height + drop, 8.dp.toPx(), 8.dp.toPx(), shadow)
                 }
             }
             .clip(RoundedCornerShape(8.dp))
-            .background(Color.White),
+            // a picture with its background hidden shows the gallery through it (white while it loads)
+            .background(if (image == null) Color.White else Pc.GalleryBackground)
+            .border(1.dp, ThumbRim, RoundedCornerShape(8.dp)),
     ) {
         image?.let { ThumbnailImage(it, a.name, ContentScale.FillBounds) }
         // blue while an artwork dragged over it would be stacked with it

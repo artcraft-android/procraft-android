@@ -27,8 +27,11 @@ const PAGE_INK: Themed = Themed(0xFF797979, 0xFF3E3E3E);
 /// Where a wide window's page starts and ends, beside the card of what gestures can do.
 const WIDE_START: f32 = 358.0;
 const WIDE_END: f32 = 28.0;
-const OPTION_HEIGHT: f32 = 72.0;
-const DELAY_HEIGHT: f32 = 44.0;
+/// An option's row (with the line under it, 72 apart).
+const OPTION_HEIGHT: f32 = 71.0;
+/// A held option's row, closer up, its delay's row under it.
+const HELD_HEIGHT: f32 = 60.0;
+const DELAY_HEIGHT: f32 = 50.0;
 /// The delays' range, seconds (as the core keeps it).
 const MIN_DELAY: f32 = 0.1;
 const MAX_DELAY: f32 = 1.5;
@@ -183,7 +186,7 @@ impl GestureControls {
         let page = self.page;
         let options = gesture_options(page);
         let card_height: f32 =
-            options.iter().map(|o| OPTION_HEIGHT + if o.delayed { DELAY_HEIGHT } else { 0.0 }).sum::<f32>()
+            options.iter().map(|o| if o.delayed { HELD_HEIGHT + DELAY_HEIGHT } else { OPTION_HEIGHT }).sum::<f32>()
                 + options.len().saturating_sub(1) as f32;
         ui.scope_builder(UiBuilder::new().max_rect(content), |ui| {
             ScrollArea::vertical()
@@ -200,13 +203,14 @@ impl GestureControls {
                             ui.painter().rect_filled(line, 0, argb(SCREEN_FILL));
                             y += 1.0;
                         }
-                        let row = Rect::from_min_size(pos2(card.left(), y), vec2(card.width(), OPTION_HEIGHT));
+                        let height = if o.delayed { HELD_HEIGHT } else { OPTION_HEIGHT };
+                        let row = Rect::from_min_size(pos2(card.left(), y), vec2(card.width(), height));
                         let on = settings.is_on(page, o.key.clone());
                         if option_row(ui, o, on, row) {
                             settings.set(page, o.key.clone(), !on);
                             changed = true;
                         }
-                        y += OPTION_HEIGHT;
+                        y += height;
                         if o.delayed {
                             let row = Rect::from_min_size(pos2(card.left(), y), vec2(card.width(), DELAY_HEIGHT));
                             if let Some(s) = delay_row(ui, settings.delay(page), on, row, &o.key) {

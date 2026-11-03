@@ -43,6 +43,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
@@ -163,7 +164,8 @@ fun GestureControls(vm: CanvasViewModel) {
                 val options = GestureOptions[page].orEmpty()
                 options.forEachIndexed { i, o ->
                     if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(ScreenFill))
-                    OptionRow(o, settings.isOn(page, o.key)) { settings.set(page, o.key, it) }
+                    // 72 apart with the line; a held one closer up, its delay under it
+                    OptionRow(o, settings.isOn(page, o.key), if (o.delayed) 60.dp else 71.dp) { settings.set(page, o.key, it) }
                     if (o.delayed) DelayRow(settings.delay(page), enabled = settings.isOn(page, o.key)) { settings.setDelay(page, it) }
                 }
             }
@@ -195,8 +197,8 @@ fun GestureControls(vm: CanvasViewModel) {
 
 /** A way of touching: its name and what it does, and its switch. */
 @Composable
-private fun OptionRow(o: GestureOption, on: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().height(72.dp).clickable { onChange(!on) }.padding(start = 28.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun OptionRow(o: GestureOption, on: Boolean, height: Dp, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().height(height).clickable { onChange(!on) }.padding(start = 28.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(o.label, color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Medium, maxLines = 1)
             Text(o.detail, color = Detail, fontSize = 13.sp, maxLines = 1)
@@ -211,7 +213,7 @@ private fun DelayRow(seconds: Float, enabled: Boolean, onChange: (Float) -> Unit
     val change by rememberUpdatedState(onChange)
     val span = GestureSettings.MAX_DELAY_S - GestureSettings.MIN_DELAY_S
     val fraction = ((seconds - GestureSettings.MIN_DELAY_S) / span).coerceIn(0f, 1f)
-    Row(Modifier.fillMaxWidth().height(44.dp).padding(start = 28.dp, end = 24.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().height(50.dp).padding(start = 28.dp, end = 24.dp), verticalAlignment = Alignment.CenterVertically) {
         Text("Delay", color = Ink, fontSize = 15.sp, modifier = Modifier.width(74.dp))
         Box(
             Modifier.weight(1f).fillMaxHeight()

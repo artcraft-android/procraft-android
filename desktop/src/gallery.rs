@@ -23,6 +23,9 @@ use crate::look::{Look, Themed, Weight, argb, text};
 use crate::panel;
 
 pub const BACKGROUND: Themed = Themed(0xFF212121, 0xFFF0F0F0);
+/// A thumbnail's shadow, dropped below it, and the rim round it.
+const THUMB_SHADOW: Themed = Themed(0x45000000, 0x1D000000);
+const THUMB_RIM: Themed = Themed(0xFF424242, 0xFFBEBEBE);
 const TITLE: Themed = Themed(0xFFF0F0F0, 0xFF3C3C3C);
 const TEXT: Themed = Themed(0xFFAAAAAA, 0xFF595959);
 const SIZE: Themed = Themed(0xFF666666, 0xFF6A6A6A);
@@ -1572,14 +1575,15 @@ impl Gallery {
         let texture = self.texture(a);
         let painter = ui.painter();
         if turn == 0.0 {
-            let shadow =
-                egui::epaint::Shadow { offset: [0, 0], blur: 20, spread: 0, color: Color32::from_black_alpha(0x80) };
+            let shadow = egui::epaint::Shadow { offset: [0, 5], blur: 8, spread: 0, color: argb(THUMB_SHADOW) };
             painter.add(shadow.as_shape(rect, 8));
-            painter.rect_filled(rect, 8, Color32::WHITE);
+            // a picture with its background hidden shows the gallery through it (white while it loads)
+            painter.rect_filled(rect, 8, if texture.is_some() { argb(BACKGROUND) } else { Color32::WHITE });
             if let Some(t) = texture {
                 let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
                 painter.add(egui::epaint::RectShape::filled(rect, 8, Color32::WHITE).with_texture(t, uv));
             }
+            painter.rect_stroke(rect, 8, Stroke::new(1.0, argb(THUMB_RIM)), egui::StrokeKind::Inside);
             return;
         }
         let (sin, cos) = turn.to_radians().sin_cos();
