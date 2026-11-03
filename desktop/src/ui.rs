@@ -2234,6 +2234,7 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
                     full = true;
                 }
             }
+            !full && added < MOST_VIDEO_FRAMES
         });
         return match (added, read) {
             (0, Ok(_)) if full => Inserted::Frames { added: 0, full: true, assist: false },

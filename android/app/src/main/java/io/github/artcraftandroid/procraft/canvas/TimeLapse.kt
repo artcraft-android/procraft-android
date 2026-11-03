@@ -34,6 +34,10 @@ data class TimeLapseSettings(val resolution: Int = 0, val quality: Int = 1, val 
  * frames in the artwork's folder, replayed or made into a video at [FPS] frames a second. The
  * shared core keeps the frames, the settings and a package's videos (crates/core timelapse.rs);
  * this makes and reads the videos with the system's codecs.
+ *
+ * As the artwork file keeps a time-lapse, its frames end up in videos only: a package's come in as they
+ * are ([take]), the frames recorded become one more when the artwork is left or shared
+ * ([forPackage]), their pictures then gone; [frame] reads those from the videos.
  */
 class TimeLapse(artwork: File) {
     private val core = CoreTimeLapse(artwork.path)
@@ -59,7 +63,51 @@ class TimeLapse(artwork: File) {
     /** What the recorded frames take on disk, bytes. */
     fun bytes(): Long = core.bytes().toLong()
 
-    fun frame(i: Int): Bitmap? = core.frameFile(i.toUInt())?.let { runCatching { BitmapFactory.decodeFile(it) }.getOrNull() }
+    /** Frame [i]: its picture, or read from the video it is in. */
+    fun frame(i: Int): Bitmap? {
+        core.frameFile(i.toUInt())?.let { f -> return runCatching { BitmapFactory.decodeFile(f) }.getOrNull() }
+        return clipFrame(i)
+    }
+
+    private val clipLock = Any()
+    /** The videos the frames are in, the one being read, and the frames last read from it (a few at a time, the replay and the export reading them in order): the first one's number and them. */
+    private var clips: List<io.github.artcraftandroid.procraft.core.TimeLapseClip>? = null
+    private var reading: Pair<String, android.media.MediaMetadataRetriever>? = null
+    private var decoded: Pair<Int, List<Bitmap>>? = null
+
+    private fun clipFrame(i: Int): Bitmap? = synchronized(clipLock) {
+        decoded?.let { (first, frames) -> frames.getOrNull(i - first)?.let { return it.copy(Bitmap.Config.ARGB_8888, false) } }
+        val all = clips ?: core.clips().also { clips = it }
+        val clip = all.firstOrNull { i >= it.first.toInt() && i - it.first.toInt() < it.frames.toInt() } ?: return null
+        val retriever = reading?.takeIf { it.first == clip.path }?.second ?: try {
+            reading?.second?.release()
+            reading = null
+            android.media.MediaMetadataRetriever().also { r ->
+                r.setDataSource(clip.path)
+                reading = clip.path to r
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("ProCraft", "a time-lapse's video", e)
+            return null
+        }
+        val at = i - clip.first.toInt()
+        val frames = runCatching { retriever.getFramesAtIndex(at, minOf(CLIP_RUN, clip.frames.toInt() - at)) }.getOrNull() ?: return null
+        decoded?.second?.forEach { it.recycle() }
+        decoded = i to frames
+        frames.firstOrNull()?.copy(Bitmap.Config.ARGB_8888, false)
+    }
+
+    /** The videos read again next time (they changed), and the one being read let go. */
+    private fun forgetClips() = synchronized(clipLock) {
+        clips = null
+        reading?.second?.release()
+        reading = null
+        decoded?.second?.forEach { it.recycle() }
+        decoded = null
+    }
+
+    /** What it holds while reading its videos let go (the artwork is left). */
+    fun close() = forgetClips()
 
     /**
      * The frames as an H.264 MP4 at [out]: all of them, or (with [seconds]) spread evenly over
@@ -69,7 +117,7 @@ class TimeLapse(artwork: File) {
     fun export(out: File, seconds: Int?, going: (Float) -> Boolean = { true }): Boolean {
         // all of it: the videos kept for packages, made where they don't reach yet, put end to end
         if (seconds == null) joined(out, going)?.let { return it }
-        return encode(out, timeLapsePicks(count.toUInt(), seconds?.toUInt()).map { it.toInt() }, null, going) != null
+        return encode(out, timeLapsePicks(count.toUInt(), seconds?.toUInt()).map { it.toInt() }, null, going = going) != null
     }
 
     /**
@@ -87,7 +135,7 @@ class TimeLapse(artwork: File) {
             val before = total - todo
             var stopped = false
             val size = if (plan.width > 0u && plan.height > 0u) plan.width.toInt() to plan.height.toInt() else null
-            val made = encode(File(plan.path), plan.frames.map { it.toInt() }, size) { done ->
+            val made = encode(File(plan.path), plan.frames.map { it.toInt() }, size, plan.hevc) { done ->
                 going((before + done * todo) / total).also { stopped = !it }
             }
             if (stopped) {
@@ -98,19 +146,27 @@ class TimeLapse(artwork: File) {
             plan = core.segmentMade(plan, (made?.first ?: 0).toUInt(), (made?.second ?: 0).toUInt(), made != null)
             if (made == null && plan == null) return null
         }
+        dropClipFrames()
         val parts = core.forPackage().segments.map(::File)
         return if (parts.isNotEmpty() && VideoWriter.join(parts, out, FPS)) true else null
     }
 
     /**
-     * The frames [picks] as a video at [out], each fitted on white into [size] (else into the first
-     * one's, within the settings' side); its size, or null if there are none or the encoder fails.
-     * [going] as for [export]: the frames after it says false are left out.
+     * The frames [picks] as a video at [out], HEVC or H.264 as [hevc] says, each fitted on white
+     * into [size] (else into the first one's, within the settings' side); its size, or null if
+     * there are none or the encoder fails. [going] as for [export]: the frames after it says false
+     * are left out.
      */
-    private fun encode(out: File, picks: List<Int>, size: Pair<Int, Int>?, going: (Float) -> Boolean = { true }): Pair<Int, Int>? {
+    private fun encode(
+        out: File,
+        picks: List<Int>,
+        size: Pair<Int, Int>?,
+        hevc: Boolean = settings.hevc,
+        going: (Float) -> Boolean = { true },
+    ): Pair<Int, Int>? {
         if (picks.isEmpty()) return null
         val video = settings
-        val mime = if (video.hevc) android.media.MediaFormat.MIMETYPE_VIDEO_HEVC else android.media.MediaFormat.MIMETYPE_VIDEO_AVC
+        val mime = if (hevc) android.media.MediaFormat.MIMETYPE_VIDEO_HEVC else android.media.MediaFormat.MIMETYPE_VIDEO_AVC
         val (w, h) = size ?: run {
             val first = frame(picks.first()) ?: return null
             VideoWriter.fit(first.width, first.height, video.side, mime).also { first.recycle() }
@@ -141,24 +197,35 @@ class TimeLapse(artwork: File) {
 
     /**
      * The time-lapse as a package keeps it: its settings, and its frames made into videos (the
-     * ones made before kept, so a share makes only what is new).
+     * ones made before kept, so a share makes only what is new; the pictures they hold then gone,
+     * as the artwork file keeps a time-lapse: only as video). Leaving the artwork does this too.
      */
     fun forPackage(): PackageTimeLapse {
         var plan = core.segmentPlan()
         while (plan != null) {
             val size = if (plan.width > 0u && plan.height > 0u) plan.width.toInt() to plan.height.toInt() else null
-            val made = encode(File(plan.path), plan.frames.map { it.toInt() }, size)
+            val made = encode(File(plan.path), plan.frames.map { it.toInt() }, size, plan.hevc)
             plan = core.segmentMade(plan, (made?.first ?: 0).toUInt(), (made?.second ?: 0).toUInt(), made != null)
         }
+        dropClipFrames()
         return core.forPackage()
     }
 
+    /** The pictures its videos hold too gone (the core checks each video's frames first). */
+    private fun dropClipFrames() {
+        forgetClips()
+        val gone = core.dropClipFrames()
+        if (gone > 0u) android.util.Log.i("ProCraft", "the time-lapse's videos hold $gone frames: their pictures went")
+    }
+
     /**
-     * Takes a package's time-lapse [t]: its settings, and its videos' frames after these. The
-     * videos themselves are kept to go back into a package as they are, when every frame of them
-     * came in and there were no frames before.
+     * Takes a package's time-lapse [t]: as the package keeps it, its videos as they are (nothing
+     * decoded); else (a video whose frames can't be counted) its settings, and its videos' frames
+     * after these, the videos themselves kept to go back into a package as they are when every
+     * frame of them came in and there were no frames before.
      */
     fun take(t: PackageTimeLapse) {
+        if (core.takeClips(t)) return
         core.takeBegin(t)
         for (path in t.segments) {
             var frames = 0
@@ -195,7 +262,8 @@ class TimeLapse(artwork: File) {
 
     companion object {
         val FPS = timeLapseFps().toInt()
-        /** Frames decoded together from a package's video. */
+        /** Frames decoded together from a package's video, and from one the frames are in. */
         private const val DECODE_RUN = 8
+        private const val CLIP_RUN = 15
     }
 }

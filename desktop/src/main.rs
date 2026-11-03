@@ -91,9 +91,25 @@ type ReadingArtwork =
 /// many layers takes seconds), since when, and those still to come.
 struct Importing {
     since: Instant,
-    reading: std::thread::JoinHandle<Option<(Arc<CanvasSession>, Option<std::path::PathBuf>)>>,
+    stage: ImportStage,
     folder: Option<String>,
     rest: std::collections::VecDeque<Vec<std::path::PathBuf>>,
+}
+
+/// An artwork coming in: read, then (a package's) its time-lapse taken into its new folder, both
+/// off the window's thread (a long time-lapse is hundreds of videos, every frame decoded).
+enum ImportStage {
+    Reading(std::thread::JoinHandle<Option<(Arc<CanvasSession>, Option<std::path::PathBuf>)>>),
+    TakingTimeLapse(std::thread::JoinHandle<()>, Arc<CanvasSession>, String),
+}
+
+impl ImportStage {
+    fn is_finished(&self) -> bool {
+        match self {
+            ImportStage::Reading(t) => t.is_finished(),
+            ImportStage::TakingTimeLapse(t, ..) => t.is_finished(),
+        }
+    }
 }
 
 impl Importing {
@@ -105,7 +121,7 @@ impl Importing {
     ) -> Option<Importing> {
         let paths = artworks.pop_front()?;
         let reading = std::thread::spawn(move || files::open_artwork_files(paths));
-        Some(Importing { since: Instant::now(), reading, folder, rest: artworks })
+        Some(Importing { since: Instant::now(), stage: ImportStage::Reading(reading), folder, rest: artworks })
     }
 }
 
@@ -910,22 +926,38 @@ impl App {
 
     /// An artwork read meanwhile, opened (the one open before kept), and the next one read.
     fn imported(&mut self) {
-        let Some(importing) = self.importing.take_if(|i| i.reading.is_finished()) else { return };
-        let Importing { reading, folder, rest, .. } = importing;
-        if let Ok(Some((session, package))) = reading.join() {
-            if self.session.is_some() && !self.leave_artwork() {
-                return;
+        let Some(importing) = self.importing.take_if(|i| i.stage.is_finished()) else { return };
+        let Importing { since, stage, folder, rest } = importing;
+        let (session, dir) = match stage {
+            ImportStage::Reading(reading) => {
+                let Ok(Some((session, package))) = reading.join() else {
+                    self.importing = Importing::next(rest, folder);
+                    return;
+                };
+                if self.session.is_some() && !self.leave_artwork() {
+                    return;
+                }
+                let dir = self.gallery.store.new_folder(folder.clone());
+                // a package's time-lapse taken in on its own thread first, the window veiled
+                if let Some(package) = package {
+                    let into = dir.clone();
+                    let taking = std::thread::spawn(move || timelapse::take_package(&package, &into));
+                    let stage = ImportStage::TakingTimeLapse(taking, session, dir);
+                    self.importing = Some(Importing { since, stage, folder, rest });
+                    return;
+                }
+                (session, dir)
             }
-            let dir = self.gallery.store.new_folder(folder.clone());
-            // a model is a new artwork painting on it
-            let model = session.model_info().is_some();
-            if let Some(package) = package {
-                timelapse::take_package(&package, &dir);
+            ImportStage::TakingTimeLapse(taking, session, dir) => {
+                let _ = taking.join();
+                (session, dir)
             }
-            self.open_artwork(session, dir);
-            if model {
-                self.ui.started_new();
-            }
+        };
+        // a model is a new artwork painting on it
+        let model = session.model_info().is_some();
+        self.open_artwork(session, dir);
+        if model {
+            self.ui.started_new();
         }
         self.importing = Importing::next(rest, folder);
     }

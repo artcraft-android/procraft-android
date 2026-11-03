@@ -1617,7 +1617,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return try {
             val s = runCatching { CanvasSession.openPackage(source.path) }.getOrNull() ?: return false
             s.save(dir.path)
-            // its time-lapse: the settings, and the video as frames
+            // its time-lapse: the settings, and its videos as they are
             val segments = File(getApplication<Application>().cacheDir, "segments-${System.nanoTime()}")
             try {
                 runCatching { io.github.artcraftandroid.procraft.core.packageTimeLapse(source.path, segments.path) }
@@ -1867,6 +1867,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             GalleryZoom(c, canvasRect(s, s.viewMatrix()), opening = false, picture = picture)
         }
         keepColour()
+        val lapse = timeLapse
         session = null
         artworkDir = null
         panel = Panel.NONE
@@ -1878,6 +1879,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 dir?.let { told(runCatching { s.save(it.path) }.map { true }) }
                 // its memory free at once, not when the object is collected
                 s.releaseCanvas()
+                // the frames it recorded made into one more video, their pictures then gone, as
+                // the artwork file keeps a time-lapse
+                lapse?.let { runCatching { it.forPackage() }; it.close() }
             }
             galleryVersion++
             refreshGallery()
