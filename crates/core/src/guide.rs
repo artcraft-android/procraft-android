@@ -331,6 +331,8 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         f(&mut st.doc.guide);
+        // once on, it stays set up
+        st.doc.guide.set_up |= st.doc.guide.on;
         st.revision += 1;
         self.shared.frame(st);
         st.guide_info()

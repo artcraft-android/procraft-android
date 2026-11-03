@@ -49,6 +49,10 @@ pub struct Guide {
     pub assisted: bool,
     /// Perspective's vanishing points (canvas pixels), one to three.
     pub vanishing: Vec<[f32; 2]>,
+    /// The guide has been on at some time: from then on the layers' menus offer Drawing Assist,
+    /// on or off.
+    #[serde(default)]
+    pub set_up: bool,
 }
 
 /// The kinds' looks as a new guide starts.
@@ -97,6 +101,13 @@ pub fn bar_color(t: f32) -> [f32; 3] {
     })
 }
 
+/// The place (0..1) along the guide colour bar whose colour is nearest `rgb` (sRGB 0..1).
+pub fn bar_place(rgb: [f32; 3]) -> f32 {
+    const STEPS: u32 = 1000;
+    let far = |t: f32| bar_color(t).iter().zip(rgb).map(|(a, b)| (a - b).powi(2)).sum::<f32>();
+    (0..=STEPS).map(|i| i as f32 / STEPS as f32).min_by(|a, b| far(*a).total_cmp(&far(*b))).unwrap_or(0.0)
+}
+
 /// The part of the segment `a`–`b` inside `0..w` × `0..h` (Liang–Barsky), if a visible part is.
 fn clip(a: Vec2, b: Vec2, w: f32, h: f32) -> Option<(Vec2, Vec2)> {
     let d = b - a;
@@ -139,6 +150,7 @@ impl Guide {
             rotational: false,
             assisted: false,
             vanishing: Vec::new(),
+            set_up: false,
         }
     }
 

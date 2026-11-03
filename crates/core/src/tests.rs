@@ -2329,7 +2329,11 @@ fn a_layer_s_options_follow_what_it_is() {
     let top = s.add_layer();
     let options = |id| s.layer_options(id).into_iter().map(|r: LayerOptionRow| r.option).collect::<Vec<_>>();
     let row = |id, o| s.layer_options(id).into_iter().find(|r| r.option == o).unwrap();
-    // a paint layer with one under it: everything but the text's and a group's
+    // a paint layer with one under it: everything but the text's and a group's, Drawing Assist
+    // once the guide has been on (still offered with it off again)
+    assert!(!options(top).contains(&O::DrawingAssist));
+    s.set_guide_on(true);
+    s.set_guide_on(false);
     assert_eq!(
         options(top),
         [

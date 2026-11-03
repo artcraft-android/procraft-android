@@ -108,9 +108,10 @@ pub struct LayerOptionRow {
     pub switch_on: Option<bool>,
 }
 
-/// The rows of layer `l`'s options menu (`masked`: it has a mask), in order: what doesn't apply to
-/// it left out, what its lock forbids greyed. Lock, duplicate and delete are on its row's swipe.
-fn layer_options(l: &LayerInfo, masked: bool) -> Vec<LayerOptionRow> {
+/// The rows of layer `l`'s options menu (`masked`: it has a mask; `guided`: the drawing guide is
+/// on or has been), in order: what doesn't apply to it left out, what its lock forbids greyed.
+/// Lock, duplicate and delete are on its row's swipe.
+fn layer_options(l: &LayerInfo, masked: bool, guided: bool) -> Vec<LayerOptionRow> {
     use LayerOption as O;
     let unlocked = !l.locked;
     let mut rows = Vec::new();
@@ -146,8 +147,11 @@ fn layer_options(l: &LayerInfo, masked: bool) -> Vec<LayerOptionRow> {
                 row(O::EditText, "Edit Text", unlocked, None);
                 row(O::Rasterize, "Rasterize", unlocked, None);
             } else {
-                // offered with the drawing guide on or off
-                row(O::DrawingAssist, "Drawing Assist", true, Some(l.assisted));
+                // offered once the canvas's drawing guide has been on (on or off since), or while
+                // the layer has it
+                if guided || l.assisted {
+                    row(O::DrawingAssist, "Drawing Assist", true, Some(l.assisted));
+                }
                 row(O::Invert, "Invert", unlocked, None);
             }
             row(O::Reference, "Reference", true, Some(l.reference));
@@ -289,7 +293,11 @@ impl CanvasSession {
         let layers = self.layers();
         let Some(l) = layers.iter().find(|l| l.id == id) else { return Vec::new() };
         let masked = layers.iter().any(|m| m.kind == LayerType::Mask && m.parent == Some(id));
-        layer_options(l, masked)
+        let guided = {
+            let g = &self.shared.lock().doc.guide;
+            g.on || g.set_up
+        };
+        layer_options(l, masked, guided)
     }
 
     /// Top layer first, as the panel lists them.

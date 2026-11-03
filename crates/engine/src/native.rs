@@ -15,6 +15,7 @@ use std::sync::Arc;
 use crate::applz4;
 use crate::cms::{CanvasIcc, IccProfile, Space};
 use crate::document::{BlendMode, Document, Layer, LayerId, LayerKind, LayerText, TextAlign};
+use crate::guide::{Guide, GuideKind, SymmetryKind};
 use crate::keyed::{Archive, Builder, Object};
 use crate::plist::Value;
 use crate::profile::Profile;
@@ -148,6 +149,10 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
         document.background = [c[0], c[1], c[2]].map(|v| v.clamp(0.0, 1.0));
     }
     document.background_visible = !root.bool("backgroundHidden").unwrap_or(false);
+    // a drawing guide kept means it has been on: the layers' menus offer Drawing Assist
+    if let Some(g) = root.object("drawingguide") {
+        read_guide(&g, &canvas, &mut document.guide);
+    }
     if let Some(dpi) = root.real("SilicaDocumentArchiveDPIKey").filter(|d| d.is_finite() && *d > 0.0) {
         document.dpi = dpi as f32;
     }
@@ -214,6 +219,131 @@ fn parse_size(s: &str) -> Option<(u32, u32)> {
     let w = a.trim().parse::<f64>().ok()?;
     let h = b.trim().parse::<f64>().ok()?;
     (w.is_finite() && h.is_finite() && w >= 0.0 && h >= 0.0).then_some((w.round() as u32, h.round() as u32))
+}
+
+/// A point kept as "{x, y}".
+fn parse_point(s: &str) -> Option<[f64; 2]> {
+    let inner = s.trim().strip_prefix('{')?.strip_suffix('}')?;
+    let (a, b) = inner.split_once(',')?;
+    let p = [a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?];
+    p.iter().all(|v| v.is_finite()).then_some(p)
+}
+
+/// The kinds of guide in the archive's numbering (and the looks' order).
+const GUIDE_KINDS: [GuideKind; 4] =
+    [GuideKind::Grid, GuideKind::Isometric, GuideKind::Perspective, GuideKind::Symmetry];
+const SYMMETRIES: [SymmetryKind; 4] =
+    [SymmetryKind::Vertical, SymmetryKind::Horizontal, SymmetryKind::Quadrant, SymmetryKind::Radial];
+/// The vanishing points' colours, as kept with every kind.
+const NODE_COLOURS: [[f32; 4]; 3] =
+    [[0.106, 0.816, 0.698, 1.0], [0.969, 0.490, 0.999, 1.0], [0.088, 0.669, 0.778, 1.0]];
+
+/// The document's drawing guide as the archive keeps it (`drawingguide`, there once the guide has
+/// been on), into `guide`: on or not, which kind, each kind's look (its grid's size a share of the
+/// canvas's longer side), the symmetry, the centre and turn (the shown kind's, else the grid's:
+/// a centre and a handle straight up from it unturned), perspective's vanishing points. Its points
+/// are kept y up on the canvas as stored, placed here where they show.
+fn read_guide(g: &Object<'_>, canvas: &Canvas<'_>, guide: &mut Guide) {
+    guide.set_up = true;
+    guide.on = g.bool("active").unwrap_or(false);
+    let pick = |n: Option<i64>| usize::try_from(n.unwrap_or(0)).ok().filter(|n| *n < 4).unwrap_or(0);
+    let kind = pick(g.int("type"));
+    guide.kind = GUIDE_KINDS.get(kind).copied().unwrap_or_default();
+    guide.symmetry = SYMMETRIES.get(pick(g.int("symmetryType"))).copied().unwrap_or_default();
+    guide.rotational = !g.bool("mirrored").unwrap_or(true);
+    let long = f64::from(canvas.w.max(canvas.h));
+    for (k, look) in guide.looks.iter_mut().enumerate() {
+        if let Some(o) = g.real(&format!("opacity{k}")) {
+            look.opacity = (o as f32).clamp(0.0, 1.0);
+        }
+        if let Some(t) = g.real(&format!("thickness{k}")) {
+            look.thickness = (t as f32).clamp(0.0, 1.0);
+        }
+        if let Some(z) = g.real(&format!("zoom{k}")).filter(|z| z.is_finite() && *z > 0.0) {
+            look.size = (z * long) as f32;
+        }
+        if let Some(c) = g.data(&format!("color{k}")).and_then(floats4) {
+            look.color = crate::guide::bar_place([c[0], c[1], c[2]]);
+        }
+    }
+    let h = f64::from(canvas.h);
+    let points = |k: usize| -> Vec<[f32; 2]> {
+        g.array(&format!("nodes{k}"))
+            .iter()
+            .filter_map(|n| parse_point(&n.string("NS.pointval")?))
+            .map(|[x, y]| canvas.shown([x, h - y]).map(|v| v as f32))
+            .collect()
+    };
+    let shown = if guide.kind == GuideKind::Symmetry { points(3) } else { points(0) };
+    let centred = if shown.len() >= 2 { shown } else { points(0) };
+    if let [centre, handle, ..] = centred[..] {
+        guide.centre = centre;
+        let turned = (handle[1] - centre[1]).atan2(handle[0] - centre[0]) + std::f32::consts::FRAC_PI_2;
+        guide.angle = (turned + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+    }
+    let vanishing = points(2);
+    if !vanishing.is_empty() {
+        guide.vanishing = vanishing.into_iter().take(3).collect();
+    }
+}
+
+/// The drawing guide as the archive keeps it (see [`read_guide`]), on a canvas `w` × `h` kept
+/// upright: points y up, the handle half the shorter side straight up from the centre, turned.
+fn guide_object(b: &mut Builder, g: &Guide, w: u32, h: u32) -> Value {
+    let (wf, hf) = (f64::from(w), f64::from(h));
+    let long = wf.max(hf);
+    let kind = GUIDE_KINDS.iter().position(|k| *k == g.kind).unwrap_or(0);
+    let symmetry = SYMMETRIES.iter().position(|s| *s == g.symmetry).unwrap_or(0);
+    let point = |b: &mut Builder, [x, y]: [f64; 2]| {
+        let at = b.string(&format!("{{{x}, {}}}", hf - y));
+        b.object(&["NSValue", "NSObject"], vec![("NS.pointval", at), ("NS.special", Value::Int(1))])
+    };
+    let [cx, cy] = g.centre.map(f64::from);
+    let reach = wf.min(hf) / 2.0;
+    let (sin, cos) = f64::from(g.angle).sin_cos();
+    let handle = [cx + reach * sin, cy - reach * cos];
+    let size = b.string(&format!("{{{w}, {h}}}"));
+    let mut fields: Vec<(String, Value)> = vec![
+        ("active".into(), Value::Bool(g.on)),
+        ("type".into(), Value::Int(kind as i64)),
+        ("symmetryType".into(), Value::Int(symmetry as i64)),
+        ("mirrored".into(), Value::Bool(!g.rotational)),
+        ("horizonAngle".into(), Value::Real(0.0)),
+        ("portrait".into(), Value::Bool(false)),
+        ("size".into(), size),
+    ];
+    for (k, look) in g.looks.iter().enumerate() {
+        let [r, gr, bl] = crate::guide::bar_color(look.color);
+        let colour: Vec<u8> = [r, gr, bl, 1.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let colour = b.add(Value::Data(colour));
+        // the grids' sizes; the others have none
+        let zoom = if k < 2 && long > 0.0 { f64::from(look.size) / long } else { 0.0 };
+        let nodes: Vec<Value> = match GUIDE_KINDS.get(k) {
+            Some(GuideKind::Grid | GuideKind::Symmetry) => vec![point(b, [cx, cy]), point(b, handle)],
+            Some(GuideKind::Perspective) => g.vanishing.iter().map(|v| point(b, v.map(f64::from))).collect(),
+            _ => Vec::new(),
+        };
+        let nodes = b.array(nodes, false);
+        let node_colours: Vec<Value> = NODE_COLOURS
+            .iter()
+            .map(|c| {
+                let bytes: Vec<u8> = c.iter().flat_map(|v| v.to_le_bytes()).collect();
+                b.add(Value::Data(bytes))
+            })
+            .collect();
+        let node_colours = b.array(node_colours, false);
+        fields.extend([
+            (format!("color{k}"), colour),
+            (format!("opacity{k}"), Value::Real(f64::from(look.opacity))),
+            (format!("thickness{k}"), Value::Real(f64::from(look.thickness))),
+            (format!("zoom{k}"), Value::Real(zoom)),
+            (format!("unit{k}"), Value::Int(0)),
+            (format!("nodes{k}"), nodes),
+            (format!("nodeColors{k}"), node_colours),
+        ]);
+    }
+    let fields: Vec<(&str, Value)> = fields.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+    b.object(&["ValkyrieDrawingGuide", "NSObject"], fields)
 }
 
 /// Four little-endian floats.
@@ -656,6 +786,8 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
     let reference_kind = b.string("{0, 0}");
     let reference_size = b.string("{350, 532}");
     let video = write_time_lapse(&mut b, &mut zip, e.time_lapse);
+    // the drawing guide, once it has been on
+    let guide = if doc.guide.set_up || doc.guide.on { guide_object(&mut b, &doc.guide, w, h) } else { Builder::null() };
     let mut fields = vec![
         ("SilicaDocumentArchiveDPIKey", Value::Real(f64::from(doc.dpi))),
         ("SilicaDocumentArchiveUnitKey", Value::Int(0)),
@@ -668,6 +800,7 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
         ("backgroundHidden", Value::Bool(!doc.background_visible)),
         ("colorProfile", profile),
         ("composite", composite),
+        ("drawingguide", guide),
         ("faceBackgroundHidden", Value::Bool(false)),
         ("featureSet", Value::Int(1)),
         ("flippedHorizontally", Value::Bool(false)),
@@ -1590,6 +1723,56 @@ mod tests {
         assert!(t.color.iter().zip(text.color).all(|(a, b)| (a - b).abs() < 1e-3), "{:?}", t.color);
         assert_eq!(LayerText { color: text.color, ..t.clone() }, text);
         assert_eq!(layer.name, "Two");
+    }
+
+    #[test]
+    fn a_drawing_guide_is_kept_once_it_has_been_on() {
+        use crate::guide::{Guide, GuideKind, SymmetryKind};
+        let pack = |guide: Guide| {
+            let mut doc = Document::new(400, 300);
+            doc.guide = guide;
+            let pixels = HashMap::new();
+            let composite = vec![255u8; 400 * 300 * 4];
+            read(&write(&Export {
+                document: &doc,
+                pixels: &pixels,
+                composite: &composite,
+                thumbnail_png: &[],
+                name: "Guide",
+                author: "",
+                strokes: 0,
+                tracked_seconds: 0.0,
+                seed: 3,
+                time_lapse: None,
+            }))
+            .unwrap()
+            .document
+            .guide
+        };
+        // never on: none kept, none read
+        assert!(!pack(Guide::new(400, 300)).set_up);
+        // turned, symmetrical, with vanishing points and a look of its own: back as it went
+        let mut g = Guide::new(400, 300);
+        g.on = true;
+        g.set_up = true;
+        g.kind = GuideKind::Symmetry;
+        g.symmetry = SymmetryKind::Quadrant;
+        g.rotational = true;
+        g.centre = [150.0, 120.0];
+        g.angle = 0.3;
+        g.vanishing = vec![[20.0, 40.0], [380.0, 60.0]];
+        g.looks[0].size = 52.0;
+        g.looks[0].opacity = 0.5;
+        g.looks[2].color = 0.25;
+        let back = pack(g.clone());
+        assert!((back.angle - g.angle).abs() < 1e-4 && (back.looks[2].color - 0.25).abs() < 0.002, "{back:?}");
+        assert!((back.looks[0].size - 52.0).abs() < 1e-3);
+        let close = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3;
+        assert!(close(back.centre, g.centre) && back.vanishing.iter().zip(&g.vanishing).all(|(a, b)| close(*a, *b)));
+        assert_eq!(
+            Guide { angle: g.angle, centre: g.centre, vanishing: g.vanishing.clone(), looks: g.looks, ..back },
+            g
+        );
     }
 
     #[test]
