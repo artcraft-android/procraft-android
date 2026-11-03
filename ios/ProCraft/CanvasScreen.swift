@@ -18,6 +18,7 @@ struct CanvasScreen: View {
                         .onTapGesture { model.closePanels() }
                 }
                 TopBar(model: model)
+                NoticeBand(model: model)
                 SideBar(model: model)
                     .offset(y: screen.size.height * Pc.sideBarCentre - Pc.sideBarHeight / 2)
                 if model.panel != .none {

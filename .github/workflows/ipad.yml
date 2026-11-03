@@ -51,3 +51,55 @@ jobs:
           name: ipados-work-in-progress
           path: dist/*
           if-no-files-found: error
+
+  # the app on the iPad mini simulator (the reference's model), each screen captured, to compare
+  screens:
+    name: iPad screens (simulator)
+    if: ${{ !github.event.repository.private }}
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ipad-simulator
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build for the simulator
+        run: |
+          bash ios/build-rust.sh iphonesimulator
+          (cd ios && xcodegen generate --spec project.yml)
+          xcodebuild -project ios/ProCraft.xcodeproj -scheme ProCraft -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath build/simulator build CODE_SIGNING_ALLOWED=NO \
+            | grep -E "error|warning: unre|BUILD" || true
+          test -d "$(find build/simulator -name ProCraft.app -path '*iphonesimulator*' | head -1)"
+
+      - name: Capture the screens
+        run: |
+          uuid_of() { grep -m1 -o '[0-9A-F]\{8\}-[0-9A-F]\{4\}-[0-9A-F]\{4\}-[0-9A-F]\{4\}-[0-9A-F]\{12\}'; }
+          device=$(xcrun simctl list devices available | grep 'iPad mini (A17 Pro)' | uuid_of)
+          [ -n "$device" ] || device=$(xcrun simctl list devices available | grep 'iPad' | uuid_of)
+          xcrun simctl list devices available | grep iPad | head -5 >>"$GITHUB_STEP_SUMMARY"
+          xcrun simctl boot "$device"
+          xcrun simctl bootstatus "$device" -b
+          xcrun simctl install "$device" "$(find build/simulator -name ProCraft.app -path '*iphonesimulator*' | head -1)"
+          mkdir -p screens
+          for screen in gallery canvas brushes layers colors; do
+            xcrun simctl launch --terminate-running-process "$device" io.github.artcraftandroid.procraft -screen "$screen"
+            sleep 10
+            xcrun simctl io "$device" screenshot "screens/$screen.png"
+          done
+          ls -l screens >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipad-screens
+          path: screens/*
+          if-no-files-found: error
