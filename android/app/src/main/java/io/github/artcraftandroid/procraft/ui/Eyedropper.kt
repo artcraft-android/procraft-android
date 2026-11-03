@@ -12,6 +12,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -48,12 +49,12 @@ fun PickingBar(modifier: Modifier = Modifier, fromReference: Boolean = false) {
  * under the finger and bottom half the current colour, around what is shown there at twice the size.
  */
 @Composable
-fun Loupe(pick: PickState, current: Color) {
+fun Loupe(pick: PickState, current: Color, modifier: Modifier) {
     val density = LocalDensity.current
     val side = with(density) { (LoupeOuter * 2 + 12.dp).roundToPx() }
     val cx = pick.x.roundToInt()
     val cy = pick.y.roundToInt() - with(density) { LoupeLift.roundToPx() }
-    Canvas(Modifier.offset { IntOffset(cx - side / 2, cy - side / 2) }.size(with(density) { side.toDp() })) {
+    Canvas(modifier.offset { IntOffset(cx - side / 2, cy - side / 2) }.size(with(density) { side.toDp() })) {
         val c = center
         val outer = LoupeOuter.toPx()
         val inner = LoupeInner.toPx()
