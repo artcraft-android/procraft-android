@@ -705,6 +705,9 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
                 // a plain image: the stamp's whole square (nothing, inverted)
                 let fill = if *inverted { 0 } else { 255 };
                 (None, Source::new(vec![fill; TEXTURE_SIZE * TEXTURE_SIZE]), None)
+            } else if has(&["dots"]) {
+                // dots scattered over the stamp, whatever outline they fill
+                (Some(stock_shape(&n)), None, None)
             } else if has(&["medium-hard", "medium hard", "mediumhard"]) {
                 (None, None, Some(0.75))
             } else if has(&["hard", "pen", "solid", "oval", "round"]) && !has(&["soft", "ink"]) {
@@ -723,16 +726,24 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
 /// Our shape nearest a stock shape's name.
 fn stock_shape(n: &str) -> u32 {
     let table: &[(&[&str], u32)] = &[
+        (&["square-dots", "square dots", "squaredots"], shape::STOCK_SQUARE_DOTS),
+        (&["dots"], shape::STOCK_DOTS),
         (&["brick"], shape::BLOCK),
         (&["spray", "mist", "aero", "speckle"], shape::SPRAY),
         (&["splat", "flick", "spatter", "drip"], shape::SPLATTER),
         (&["bristle", "fan", "hair", "fur"], shape::BRISTLES),
+        // a flat brush's whole stroke, its bristles' streaks in it
+        (&["flat-brush", "flat brush", "flatbrush"], shape::STOCK_FLAT_STROKE),
         (&["flat", "chisel", "square brush"], shape::FLAT),
         (&["dry", "streak", "scrape"], shape::DRY),
         (&["chalk", "pastel", "crayon", "charcoal", "conte", "graphite", "pencil"], shape::STOCK_PASTEL),
         (&["stamp", "dash", "impress"], shape::STOCK_DAB),
         (&["dab", "paint", "acrylic", "oil", "gouache", "chunk", "rough"], shape::STOCK_CHUNK),
-        (&["blot", "blob", "water", "wash", "stain", "bleed", "ink", "mess", "sponge"], shape::BLOT),
+        // a dried drop, its edge darker; a thick smear; a dab full of holes
+        (&["bleed"], shape::STOCK_BLEED),
+        (&["mess"], shape::STOCK_MESS),
+        (&["sponge"], shape::SPONGE),
+        (&["blot", "blob", "water", "wash", "stain", "ink"], shape::BLOT),
         (&["leaf", "foliage", "tree"], shape::LEAF),
         (&["grass", "reed"], shape::GRASS),
         (&["cloud", "fog", "smoke"], shape::CLOUD),
@@ -861,17 +872,24 @@ pub(crate) fn material_for(t: &Texture) -> (Option<u32>, Option<Source>) {
 fn named_grain(n: &str) -> Option<u32> {
     let table: &[(&[&str], u32)] = &[
         (&["recycled"], grain::RECYCLED),
-        (&["canvas", "weave", "burlap", "cloth", "fabric"], grain::WEAVE),
+        // a canvas painted on: rough, its weave showing through patches of paint
+        (&["canvas"], grain::ROUGH_CANVAS),
+        (&["weave", "burlap", "cloth", "fabric"], grain::WEAVE),
         (&["linen"], grain::LINEN),
         (&["denim", "twill"], grain::TWILL),
         (&["wood"], grain::WOOD),
-        (&["brick"], grain::BRICK),
-        (&["concrete", "stone", "rock", "wall", "asphalt"], grain::CONCRETE),
+        // a wall's rough, pitted face (no joints between bricks, which would cut a stroke into
+        // pieces along them)
+        (&["concrete", "stone", "rock", "wall", "asphalt", "brick"], grain::CONCRETE),
         (&["halftone", "dot"], grain::HALFTONE),
         (&["hatch"], grain::HATCHING),
         (&["crumple", "crease", "fold"], grain::CRUMPLED),
         (&["stipple"], grain::STIPPLE),
         (&["wash", "water", "wet"], grain::WASH),
+        // ink dried in patches, most of it bare
+        (&["dry"], grain::DRY_PATCHES),
+        // light, flecked with fine spray
+        (&["spray"], grain::SPRAYED),
         (&["marble"], grain::MARBLE),
         (&["cell", "organic"], grain::CELLS),
         (&["scale"], grain::SCALES),
@@ -882,7 +900,9 @@ fn named_grain(n: &str) -> Option<u32> {
         (&["scratch"], grain::SCRATCHES),
         // a sheet of paper: a worn, light one, or crumpled
         (&["dirty-paper", "dirty paper", "worn-paper", "worn paper"], grain::WORN),
-        (&["paper"], grain::SHEET),
+        // cardboard as it is pressed in (turned over, its ridges dark): as fine and as dark as
+        // the sheet
+        (&["paper", "cardboard"], grain::SHEET),
         (&["grunge", "dirt", "dust", "dirty"], grain::GRUNGE),
         (&["fibre", "fiber", "hair", "straw"], grain::FIBRE),
         (&["sand", "grit"], grain::SAND),
@@ -1012,10 +1032,25 @@ mod tests {
         );
         assert_eq!(shape_for(&Texture::Stock { name: "Soft.png".into(), inverted: false }).0, Some(shape::SOFT_ROUND));
         assert_eq!(shape_for(&Texture::Stock { name: "Spray-Fine.jpg".into(), inverted: false }).0, Some(shape::SPRAY));
+        // a flat brush's stroke, streaked; dots, not the round or square they fill
+        let shape = |name: &str| shape_for(&Texture::Stock { name: name.into(), inverted: false }).0;
+        assert_eq!(shape("Old-Flat-Brush.jpg"), Some(shape::STOCK_FLAT_STROKE));
+        assert_eq!(shape("Flat-Marker.jpg"), Some(shape::FLAT));
+        assert_eq!(shape("Fine-Round-Dots.png"), Some(shape::STOCK_DOTS));
+        assert_eq!(shape("Old-Square-Dots.jpg"), Some(shape::STOCK_SQUARE_DOTS));
         assert_eq!(grain_for(&Texture::Stock { name: "Blank.png".into(), inverted: false }, None), (None, None));
         assert_eq!(
             grain_for(&Texture::Stock { name: "Old-Canvas.jpg".into(), inverted: false }, None).0,
+            Some(grain::ROUGH_CANVAS)
+        );
+        assert_eq!(
+            grain_for(&Texture::Stock { name: "Old-Weave.jpg".into(), inverted: false }, None).0,
             Some(grain::WEAVE)
+        );
+        // a brick wall's face, not the joints between its bricks
+        assert_eq!(
+            grain_for(&Texture::Stock { name: "Old-Brick.jpg".into(), inverted: false }, None).0,
+            Some(grain::CONCRETE)
         );
         // a name we don't know: a light mottle, a dark speckle if the brush's preview is faint, or
         // none if its middle is even

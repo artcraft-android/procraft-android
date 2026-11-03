@@ -62,6 +62,11 @@ pub mod shape {
     pub const STOCK_CHUNK: u32 = 44;
     pub const STOCK_PASTEL: u32 = 45;
     pub const STOCK_DAB: u32 = 46;
+    pub const STOCK_FLAT_STROKE: u32 = 47;
+    pub const STOCK_DOTS: u32 = 48;
+    pub const STOCK_SQUARE_DOTS: u32 = 49;
+    pub const STOCK_BLEED: u32 = 50;
+    pub const STOCK_MESS: u32 = 51;
 }
 
 /// Grains, by index.
@@ -102,6 +107,9 @@ pub mod grain {
     pub const FINE_NOISE: u32 = 33;
     pub const SPECKLED: u32 = 34;
     pub const MOTTLED: u32 = 35;
+    pub const ROUGH_CANVAS: u32 = 36;
+    pub const SPRAYED: u32 = 37;
+    pub const DRY_PATCHES: u32 = 38;
 }
 
 /// The Coarse grain's tooth: below this the fibres darken it, by this much a unit.
@@ -715,7 +723,105 @@ fn make_shapes() -> Vec<GrayImage> {
     let dab = more.get(1).map(|c| c.pixels.iter().map(|&v| (f32::from(v) * DAB_GAIN).min(255.0) as u8).collect());
     shapes.extend(more);
     shapes.push(GrayImage { name: "Solid dab", pixels: dab.unwrap_or_default() });
+    shapes.extend(stock_strokes());
     shapes
+}
+
+/// Stand-ins for stock shapes our others don't come near: a flat brush's stroke and two scatters
+/// of dots (stamped close along a stroke, each part of them draws a line, so the stroke comes out
+/// streaked along its length as a bristle brush's does), a dried drop and a thick smear.
+fn stock_strokes() -> [GrayImage; 5] {
+    let flat = field(|x, y| {
+        // laid along x (the way a stroke that turns its shape with it runs): the bristles' streaks
+        // run its length, with fine gaps between them and broader bands thin in paint, its top and
+        // bottom ragged and its far end breaking up where the paint runs out
+        let (u, v) = centred(x, y);
+        let top = -0.7 + 0.08 * (value_noise_xy(x * 9.0, 0.0, (9, 1), 2111) - 0.5);
+        let bottom = 0.74 + 0.08 * (value_noise_xy(x * 9.0, 0.0, (9, 1), 2113) - 0.5);
+        let start = -0.88 + 0.1 * value_noise_xy(0.0, y * 40.0, (1, 40), 2117);
+        let end = 0.92 - 0.25 * value_noise_xy(0.0, y * 20.0, (1, 20), 2119);
+        let body = smooth((v - top) * 40.0)
+            * smooth((bottom - v) * 40.0)
+            * smooth((u - start) * 30.0)
+            * smooth((end - u) * 12.0);
+        // the streaks hold all the way along, so a stroke keeps them however it builds up: fine
+        // gaps between hairs, streaks thick and thin in paint, broad bands (the streaks wide enough
+        // to show on a small stamp, the gaps for a big one)
+        let gaps = smooth((value_noise_xy(0.0, y * 96.0, (1, 96), 2129) - 0.15) * 5.0);
+        let streaks = 0.55 + 0.45 * smooth((value_noise_xy(0.0, y * 28.0, (1, 28), 2131) - 0.25) * 2.5);
+        let bands = 0.7 + 0.3 * value_noise_xy(0.0, y * 7.0, (1, 7), 2133);
+        let dry = smooth((value_noise_xy(x * 8.0, y * 60.0, (8, 60), 2137) - (u - 0.15) * 0.7) * 4.0);
+        body * gaps * streaks * bands * dry
+    });
+    // dots of every size, some crisp and some blurred, through a disc
+    let round: Vec<(f32, f32, f32, f32)> = (0..380)
+        .map(|i| {
+            let a = hash(i, 1, 2141) * TAU;
+            let d = hash(i, 2, 2141).sqrt() * 0.43;
+            let r = 0.005 + 0.026 * hash(i, 3, 2141).powi(2);
+            (0.5 + a.cos() * d, 0.5 + a.sin() * d, r, 0.8 * hash(i, 4, 2141).powi(2))
+        })
+        .collect();
+    // soft dots through a square, crowding along its edges
+    let square: Vec<(f32, f32, f32, f32)> = (0..230)
+        .map(|i| {
+            let (mut cx, mut cy) = (0.07 + 0.86 * hash(i, 1, 2143), 0.07 + 0.86 * hash(i, 2, 2143));
+            if i % 3 == 0 {
+                // pushed out to the nearest edge
+                let (dx, dy) = (cx - 0.5, cy - 0.5);
+                if dx.abs() > dy.abs() {
+                    cx = 0.5 + dx.signum() * (0.38 + 0.05 * hash(i, 5, 2143));
+                } else {
+                    cy = 0.5 + dy.signum() * (0.38 + 0.05 * hash(i, 5, 2143));
+                }
+            }
+            (cx, cy, 0.008 + 0.022 * hash(i, 3, 2143).powf(1.5), 0.4 + 0.6 * hash(i, 4, 2143))
+        })
+        .collect();
+    [
+        GrayImage { name: "Flat stroke", pixels: flat },
+        GrayImage { name: "Dots", pixels: field(move |x, y| dots(&round, x, y)) },
+        GrayImage { name: "Square dots", pixels: field(move |x, y| dots(&square, x, y)) },
+        GrayImage {
+            name: "Bleed",
+            pixels: field(|x, y| {
+                // a drop of watery paint dried: a ragged edge where the pigment gathered, paler and
+                // grainy inside, palest in the middle
+                let n = fbm(x * 5.0, y * 5.0, 5, 4, 2153);
+                let fringe = fbm(x * 32.0, y * 32.0, 32, 2, 2161);
+                let r = radius(x, y) + (n - 0.5) * 0.3 + (fringe - 0.5) * 0.06;
+                let inside = 0.86 - r;
+                let rim = smooth(1.0 - inside / 0.13);
+                let middle = 0.55 + 0.3 * smooth(1.0 - r / 0.55);
+                let grain = 0.7 + 0.3 * value_noise(x * 96.0, y * 96.0, 96, 2167);
+                smooth(inside * 60.0) * rim.max(middle * grain)
+            }),
+        },
+        GrayImage {
+            name: "Mess",
+            pixels: field(|x, y| {
+                // a thick dab smeared out: solid nearly to its rough edge, which frays into bits
+                let n = fbm(x * 4.0, y * 4.0, 4, 4, 2171);
+                let fray = fbm(x * 24.0, y * 24.0, 24, 3, 2179);
+                let r = radius(x, y) + (n - 0.5) * 0.35 + (fray - 0.5) * 0.25;
+                smooth((0.84 - r) * 14.0) * (0.88 + 0.12 * fbm(x * 48.0, y * 48.0, 48, 2, 2183))
+            }),
+        },
+    ]
+}
+
+/// The brightest of `dots` (centre x, centre y, radius, blur 0..1) at (`x`, `y`): a crisp dot full
+/// out to its edge, a blurred one spread wider and paler.
+fn dots(dots: &[(f32, f32, f32, f32)], x: f32, y: f32) -> f32 {
+    dots.iter().fold(0.0f32, |acc, &(cx, cy, r, blur)| {
+        let reach = r * (1.0 + 1.5 * blur);
+        let (dx, dy) = (x - cx, y - cy);
+        if dx.abs() > reach || dy.abs() > reach {
+            return acc;
+        }
+        let d = (dx * dx + dy * dy).sqrt() / reach;
+        acc.max(smooth((1.0 - d) * (6.0 - 4.5 * blur)) * (1.0 - 0.35 * blur))
+    })
 }
 
 /// How much the solid dab raises the small chunk's values.
@@ -1065,7 +1171,77 @@ fn make_grains() -> Vec<GrayImage> {
     grains.push(GrayImage { name: "Fine noise", pixels: fine_noise });
     grains.push(GrayImage { name: "Speckled", pixels: speckled });
     grains.push(GrayImage { name: "Mottled", pixels: ranked(&soft_noise(4001, 0.4), &MOTTLED_SPREAD) });
+    grains.push(GrayImage { name: "Rough canvas", pixels: rough_canvas() });
+    grains.push(GrayImage { name: "Sprayed", pixels: ranked(&soft_noise(4201, 0.4), &SPRAYED_SPREAD) });
+    grains.push(GrayImage { name: "Dry patches", pixels: dry_patches() });
     grains
+}
+
+/// The sprayed grain's values: light, half over 0.78, hardly any under 0.45 (as measured from a
+/// stock spray grain).
+const SPRAYED_SPREAD: [(f32, f32); 9] = [
+    (0.3, 0.0),
+    (0.45, 0.01),
+    (0.53, 0.05),
+    (0.58, 0.1),
+    (0.67, 0.25),
+    (0.78, 0.5),
+    (0.86, 0.75),
+    (0.95, 0.95),
+    (1.0, 1.0),
+];
+
+/// The dry patches' values: three quarters of it about black, nearly all the rest light (as
+/// measured from a stock grain of ink dried in patches).
+const DRY_PATCHES_SPREAD: [(f32, f32); 7] =
+    [(0.0, 0.0), (0.0, 0.5), (0.06, 0.75), (0.5, 0.8), (0.91, 0.9), (0.96, 0.95), (1.0, 1.0)];
+
+/// Ink dried in patches: rounded islands of every size with holes in them, its values ranked onto
+/// [`DRY_PATCHES_SPREAD`].
+fn dry_patches() -> Vec<u8> {
+    let n = TEXTURE_SIZE;
+    let raw: Vec<f32> = (0..n * n)
+        .map(|k| {
+            let (x, y) = (((k % n) as f32 + 0.5) / n as f32, ((k / n) as f32 + 0.5) / n as f32);
+            let (near, _) = cells(x, y, 24, 4211);
+            fbm(x * 32.0, y * 32.0, 32, 3, 4217) - 0.35 * near + 0.1 * value_noise(x * 128.0, y * 128.0, 128, 4219)
+        })
+        .collect();
+    ranked(&raw, &DRY_PATCHES_SPREAD)
+}
+
+/// The rough canvas's values: a quarter dark, under 0.14, the rest spread up to the weave's light
+/// tops at about 0.8 (as measured from a stock canvas grain).
+const ROUGH_CANVAS_SPREAD: [(f32, f32); 10] = [
+    (0.0, 0.0),
+    (0.03, 0.01),
+    (0.07, 0.05),
+    (0.09, 0.1),
+    (0.14, 0.25),
+    (0.32, 0.5),
+    (0.75, 0.75),
+    (0.81, 0.9),
+    (0.84, 0.99),
+    (1.0, 1.0),
+];
+
+/// A painted canvas: the weave's crossings raised in rows, some threads thicker than others,
+/// under a coat dragged on across it that lies dark in patches and catches the light in others,
+/// its values ranked onto [`ROUGH_CANVAS_SPREAD`].
+fn rough_canvas() -> Vec<u8> {
+    let n = TEXTURE_SIZE;
+    let raw: Vec<f32> = (0..n * n)
+        .map(|k| {
+            let (x, y) = (((k % n) as f32 + 0.5) / n as f32, ((k / n) as f32 + 0.5) / n as f32);
+            let crossings = ((0.5 - 0.5 * (x * TAU * 64.0).cos()) * (0.5 - 0.5 * (y * TAU * 64.0).cos())).sqrt();
+            let threads = 0.5 * value_noise_xy(x * 2.0, y * 64.0, (2, 64), 4101)
+                + 0.5 * value_noise_xy(x * 64.0, y * 2.0, (64, 2), 4103);
+            let coat = fbm(x * 12.0, y * 12.0, 12, 4, 4107);
+            let dragged = value_noise_xy(x * 4.0, y * 48.0, (4, 48), 4109);
+            crossings * (0.4 + 0.6 * threads) + 1.2 * coat + 0.3 * dragged
+        })
+        .collect();
+    ranked(&raw, &ROUGH_CANVAS_SPREAD)
 }
 
 /// The charcoal grain's values: most of it from 0.19 to 0.41, a fifth the bright tops of the tooth

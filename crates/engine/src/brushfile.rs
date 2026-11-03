@@ -535,8 +535,32 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     if f.num("plotSpacingVersion").is_none() {
         set("spacing_version", if f.num("dualBlendMode").is_some() { 0.0 } else { 1.0 });
     }
-    let switches =
+    let mut switches =
         (f.flag("renderingRecursiveMixing"), f.flag("renderingMaxTransfer"), f.flag("renderingModulatedTransfer"));
+    // a file from before the rendering modes numbers how it glazes (or only says whether it
+    // does): the mode it drew in, its wet mix kept only by the fourth kind and by a brush that
+    // doesn't glaze
+    match f.num("dynamicsRenderType").or_else(|| f.num("dynamicsGlazeType")).map(|t| t.round() as i64) {
+        Some(kind @ 0..=3) => {
+            switches = match kind {
+                1 => (false, false, false),
+                2 => (false, true, false),
+                _ => (true, false, false),
+            };
+            if kind < 3 {
+                set("wet_dilution", 0.0);
+            }
+        }
+        Some(_) => {}
+        None => {
+            if let Some(glazed) = f.num("dynamicsGlaze").map(|g| g >= 0.5) {
+                switches = if glazed { (false, false, false) } else { (true, false, false) };
+                if glazed {
+                    set("wet_dilution", 0.0);
+                }
+            }
+        }
+    }
     if let Some(mode) = RENDERING.iter().position(|&r| r == switches) {
         set("rendering_mode", mode as f32);
     }
@@ -1243,6 +1267,36 @@ mod tests {
         assert_eq!(read_with(vec![taper()]), Some(1.0));
         // no taper set at all: left as the brush it starts from has it
         assert_eq!(read_with(vec![]), None);
+    }
+
+    #[test]
+    fn an_old_files_glaze_type_picks_its_rendering_mode() {
+        let mode_and_dilution = |extra: Vec<(&str, Value)>| {
+            let mut b = Builder::new();
+            let root = b.reserve();
+            let name = b.string("Old");
+            let mut fields = vec![("name", name), ("dynamicsMix", Value::Real(0.8))];
+            fields.extend(extra);
+            b.fill(&root, &["SilicaBrush", "NSObject"], fields);
+            let mut zip = ZipWriter::new();
+            zip.add("Brush.archive", &b.finish(root));
+            let back = read(&zip.finish()).unwrap();
+            let get = |k: &str| back.settings.iter().rev().find(|(key, _)| key == k).map(|(_, v)| *v);
+            (get("rendering_mode"), get("wet_dilution"))
+        };
+        // light glaze, intense glaze and intense blending, the paint's mixing cleared but for the
+        // last kind
+        assert_eq!(mode_and_dilution(vec![("dynamicsGlazeType", Value::Int(2))]), (Some(0.0), Some(0.0)));
+        assert_eq!(mode_and_dilution(vec![("dynamicsGlazeType", Value::Int(1))]), (Some(2.0), Some(0.0)));
+        assert_eq!(mode_and_dilution(vec![("dynamicsGlazeType", Value::Int(0))]), (Some(5.0), Some(0.0)));
+        assert_eq!(mode_and_dilution(vec![("dynamicsGlazeType", Value::Int(3))]), (Some(5.0), Some(0.8)));
+        // the render type before the glaze type; a switch alone
+        let both = vec![("dynamicsRenderType", Value::Int(2)), ("dynamicsGlazeType", Value::Int(1))];
+        assert_eq!(mode_and_dilution(both).0, Some(0.0));
+        assert_eq!(mode_and_dilution(vec![("dynamicsGlaze", Value::Bool(false))]), (Some(5.0), Some(0.8)));
+        assert_eq!(mode_and_dilution(vec![("dynamicsGlaze", Value::Bool(true))]), (Some(2.0), Some(0.0)));
+        // none of them: as its switches say
+        assert_eq!(mode_and_dilution(Vec::new()), (Some(2.0), Some(0.8)));
     }
 
     #[test]
