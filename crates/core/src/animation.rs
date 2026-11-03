@@ -73,6 +73,8 @@ impl CanvasSession {
         let units = sequence(&self.shared.lock().doc);
         let delay = (100.0 / fps.clamp(0.1, 100.0)).round() as u16;
         let mut gif: Option<GifWriter> = None;
+        // the frames made take it to 0.95, the file written to 1
+        self.exported(0.0);
         // drawn a few at a time (a frame to a core, as many as fit in GIF_BATCH_BYTES), each few
         // made into the GIF's frames side by side, then added in order
         let mut next = 0;
@@ -99,9 +101,12 @@ impl CanvasSession {
                 let frame = frame.unwrap_or_else(|| writer.encoded_frame(rgba, delay.max(1), dither));
                 writer.add_encoded(&frame);
             }
+            self.exported(0.95 * next as f32 / units.len() as f32);
         }
         let bytes = gif.ok_or_else(|| file_error("saving", "there are no frames"))?.finish();
-        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))
+        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
+        self.exported(1.0);
+        Ok(())
     }
 
     /// The animation as a looping animated PNG at `path`, `fps` frames a second, scaled to fit
@@ -112,6 +117,9 @@ impl CanvasSession {
         let Some((&first, rest)) = units.split_first() else {
             return Err(file_error("saving", "there are no frames"));
         };
+        // as the GIF's: the frames to 0.95, the file to 1
+        self.exported(0.0);
+        let made = |k: usize| self.exported(0.95 * k as f32 / count.max(1) as f32);
         let (w, h, rgba) = self.render_frame(first, transparent, max_side)?;
         // a frame lasts 1/fps seconds, in thousandths
         let delay = (1000.0 / fps.clamp(0.1, 1000.0)).round().clamp(1.0, 65535.0) as u16;
@@ -125,15 +133,19 @@ impl CanvasSession {
             encoder.set_frame_delay(delay, 1000).map_err(|e| file_error("saving", e))?;
             let mut writer = encoder.write_header().map_err(|e| file_error("saving", e))?;
             writer.write_image_data(&rgba).map_err(|e| file_error("saving", e))?;
-            for &unit in rest {
+            made(1);
+            for (k, &unit) in rest.iter().enumerate() {
                 let (fw, fh, frame) = self.render_frame(unit, transparent, max_side)?;
                 if (fw, fh) != (w, h) {
                     return Err(file_error("saving", "the frames differ in size"));
                 }
                 writer.write_image_data(&frame).map_err(|e| file_error("saving", e))?;
+                made(k + 2);
             }
             writer.finish().map_err(|e| file_error("saving", e))
-        })
+        })?;
+        self.exported(1.0);
+        Ok(())
     }
 }
 

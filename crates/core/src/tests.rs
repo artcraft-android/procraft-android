@@ -956,6 +956,13 @@ fn an_export_tells_how_far_it_has_come() {
     assert_eq!(s.export_progress(), 1.0);
     assert!(!s.export_layer_pngs(path("layers")).unwrap().is_empty());
     assert_eq!(s.export_progress(), 1.0);
+    // the animated ones too, from wherever the last left it
+    s.reset_export_progress();
+    s.export_gif(path("a.gif"), 0, 15.0, true, false).unwrap();
+    assert_eq!(s.export_progress(), 1.0);
+    s.reset_export_progress();
+    s.export_apng(path("a.png"), 0, 15.0, false).unwrap();
+    assert_eq!(s.export_progress(), 1.0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -27,7 +27,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -96,13 +95,12 @@ fun AnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
         onDone = {
             exporting = true
             scope.launch {
-                val file = vm.exportAnimation(format, webReady, dither, transparent)
+                // the export card shows how far it has come, and says if it couldn't be made
+                val file = vm.shareAnimation(format, webReady, dither, transparent)
                 exporting = false
                 if (file != null) {
                     vm.endAnimatedExport()
                     shareFile(context, file, format.mime)
-                } else {
-                    vm.message = "The animation could not be exported."
                 }
             }
         },
@@ -192,8 +190,8 @@ private fun ExportScreen(
                 Modifier.size(44.dp, 45.dp).clip(CircleShape).background(DoneBlue).clickable(enabled = !exporting, onClick = onDone),
                 contentAlignment = Alignment.Center,
             ) {
-                if (exporting) CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(24.dp))
-                else Icon(PcIcons.DoneTick, contentDescription = "Export", tint = Color.White, modifier = Modifier.requiredSize(40.dp))
+                // while it exports the card over the screen shows how far it has come
+                Icon(PcIcons.DoneTick, contentDescription = "Export", tint = Color.White, modifier = Modifier.requiredSize(40.dp))
             }
         }
         if (wide || settingsOpen) {
@@ -233,13 +231,11 @@ fun ModelAnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
         onDone = {
             exporting = true
             scope.launch {
-                val file = vm.exportModelAnimation(format)
+                val file = vm.shareModelAnimation(format)
                 exporting = false
                 if (file != null) {
                     vm.modelAnimatedExport = null
                     shareFile(context, file, format.mime)
-                } else {
-                    vm.message = "The animation could not be exported."
                 }
             }
         },

@@ -1246,6 +1246,8 @@ impl CanvasSession {
         let count = turntable_frames(turntable, fps);
         let delay = (100.0 / fps.clamp(1.0, 100.0)).round() as u16;
         let mut gif: Option<procraft_engine::formats::GifWriter> = None;
+        // the frames made take it to 0.95, the file written to 1
+        self.exported(0.0);
         for i in 0..count {
             let t = self
                 .model_turntable_picture(i, count, turntable, width, height, false)
@@ -1255,9 +1257,12 @@ impl CanvasSession {
                 delay.max(1),
                 true,
             );
+            self.exported(0.95 * (i + 1) as f32 / count as f32);
         }
         let bytes = gif.ok_or_else(|| file_error("saving", "there are no frames"))?.finish();
-        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))
+        write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
+        self.exported(1.0);
+        Ok(())
     }
 
     /// The model's turntable as a looping animated PNG at `path` (as for GIF).
@@ -1272,6 +1277,7 @@ impl CanvasSession {
         let count = turntable_frames(turntable, fps);
         let delay = (1000.0 / fps.clamp(1.0, 1000.0)).round().clamp(1.0, 65535.0) as u16;
         let (w, h) = (width.max(1), height.max(1));
+        self.exported(0.0);
         write_atomically(Path::new(&path), |f| {
             let out = fs::File::create(f).map_err(|e| file_error("saving", e))?;
             let mut encoder = png::Encoder::new(std::io::BufWriter::new(out), w, h);
@@ -1286,9 +1292,12 @@ impl CanvasSession {
                     .model_turntable_picture(i, count, turntable, w, h, false)
                     .ok_or_else(|| file_error("saving", "the model is not shown yet"))?;
                 writer.write_image_data(&t.rgba).map_err(|e| file_error("saving", e))?;
+                self.exported(0.95 * (i + 1) as f32 / count as f32);
             }
             writer.finish().map_err(|e| file_error("saving", e))
-        })
+        })?;
+        self.exported(1.0);
+        Ok(())
     }
 }
 

@@ -4323,8 +4323,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** The model's turntable written as [format] into the cache, to share; null if it can't be made. */
-    suspend fun exportModelAnimation(format: Animated): File? {
+    /** [exportModelAnimation] with the export card, how far it has come shown; Cancel stops a video. */
+    suspend fun shareModelAnimation(format: Animated): File? {
+        val s = session ?: return null
+        s.resetExportProgress()
+        videoDone = 0f
+        return withCard("The animation could not be exported.", { if (format.video) videoDone else s.exportProgress() }) {
+            exportModelAnimation(format) { exportCancelled }
+        }
+    }
+
+    /** How far a video being made for the export card has come (its frames written, 0..1). */
+    @Volatile private var videoDone = 0f
+
+    /** The model's turntable written as [format] into the cache, to share; null if it can't be made (or [cancelled] said to stop). */
+    suspend fun exportModelAnimation(format: Animated, cancelled: () -> Boolean = { false }): File? {
         val s = session ?: return null
         val t = turntable
         val (w, h) = turntablePixels()
@@ -4341,6 +4354,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                         val (vw, vh) = VideoWriter.fit(w, h, maxOf(w, h), mime) ?: return@withContext null
                         val count = (t.seconds * TURNTABLE_FPS).roundToInt().coerceAtLeast(1)
                         val ok = VideoWriter.write(file, vw, vh, TURNTABLE_FPS, count, mime) { i, pixels ->
+                            if (cancelled()) return@write false
+                            videoDone = i.toFloat() / count
                             val p = s.modelTurntablePicture(i.toUInt(), count.toUInt(), t, vw.toUInt(), vh.toUInt(), true) ?: return@write false
                             // already ARGB, little-endian
                             ByteBuffer.wrap(p.rgba).order(java.nio.ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(pixels, 0, vw * vh)
@@ -4363,6 +4378,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         PNG("Animated PNG", "png", "image/png"),
         MP4("Animated MP4", "mp4", "video/mp4"),
         HEVC("Animated HEVC", "mp4", "video/mp4"),
+        ;
+
+        /** Made by the system's encoder a frame at a time (its progress counted here), not by the core. */
+        val video get() = this == MP4 || this == HEVC
     }
 
     /** The animated export being set up, if any. */
@@ -4404,7 +4423,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * The animation written as [format] into the cache, to share: Web Ready fits 480 pixels, else
      * the canvas size (a video as large as the encoder takes, up to 4096).
      */
-    suspend fun exportAnimation(format: Animated, webReady: Boolean, dither: Boolean, transparent: Boolean): File? {
+    suspend fun exportAnimation(format: Animated, webReady: Boolean, dither: Boolean, transparent: Boolean, cancelled: () -> Boolean = { false }): File? {
         val s = session ?: return null
         return animationExports.withLock { withContext(Dispatchers.IO) {
             val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
@@ -4426,6 +4445,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                         val ok = try {
                             val order = s.animationSequence()
                             VideoWriter.write(file, w, h, fps, order.size, mime) { i, pixels ->
+                                if (cancelled()) return@write false
+                                videoDone = i.toFloat() / order.size
                                 val picture = animationFrame(order[i].toInt(), maxOf(w, h), false) ?: return@write false
                                 android.graphics.Canvas(frame).drawBitmap(picture, null, android.graphics.Rect(0, 0, w, h), paint)
                                 picture.recycle()
@@ -4444,6 +4465,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 null
             }
         } }
+    }
+
+    /** [exportAnimation] with the export card (as every export has), how far it has come shown; Cancel stops a video. */
+    suspend fun shareAnimation(format: Animated, webReady: Boolean, dither: Boolean, transparent: Boolean): File? {
+        val s = session ?: return null
+        s.resetExportProgress()
+        videoDone = 0f
+        return withCard("The animation could not be exported.", { if (format.video) videoDone else s.exportProgress() }) {
+            exportAnimation(format, webReady, dither, transparent) { exportCancelled }
+        }
     }
 
     /** The flattened picture as a JPEG or PNG in the cache, to share, with the export card. */

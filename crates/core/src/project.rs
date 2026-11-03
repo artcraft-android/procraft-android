@@ -697,7 +697,7 @@ impl CanvasSession {
         self.exported(0.0);
     }
 
-    fn exported(&self, done: f32) {
+    pub(crate) fn exported(&self, done: f32) {
         self.shared.export_progress.store(done.clamp(0.0, 1.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
     }
 

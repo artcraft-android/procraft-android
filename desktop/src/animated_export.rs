@@ -3,10 +3,12 @@
 //! Cancel, and the round Done that saves the file. The file is made as the settings change, to
 //! show its size; it and the preview's frames are made off the window's thread. On a model, its
 //! turntable in place of the layers: its size, rotate or swing, its duration, zoom and ease, and
-//! the environment behind it; its file made once Done is pressed.
+//! the environment behind it; its file made once Done is pressed. While Done waits for the file,
+//! the export card shows how far it has come.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
@@ -96,8 +98,12 @@ pub struct AnimatedExport {
     reading: Option<Reading>,
     shown: usize,
     stepped: Instant,
-    /// Done tapped: the file is saved once it is made.
+    /// Done tapped: the file is saved once it is made, the export card up meanwhile.
     saving: bool,
+    card: crate::export_card::ExportCard,
+    exporting: Option<crate::export_card::Exporting>,
+    /// How far a video being made has come: its frames written, 0..1 (as `f32` bits).
+    video_done: Arc<AtomicU32>,
     /// Upright, the settings panel is open.
     settings_open: bool,
     /// On a model: its turntable and size (which of [`TURNTABLE_SIZES`]), in place of the
@@ -130,6 +136,9 @@ impl AnimatedExport {
             shown: 0,
             stepped: Instant::now(),
             saving: false,
+            card: crate::export_card::ExportCard::default(),
+            exporting: None,
+            video_done: Arc::new(AtomicU32::new(0)),
             settings_open: false,
             turntable: None,
             held: None,
@@ -177,6 +186,8 @@ impl AnimatedExport {
         let session = Arc::clone(session);
         let format = self.format;
         let (web_ready, dither, transparent, turntable) = wanted;
+        let video_done = Arc::clone(&self.video_done);
+        video_done.store(0, Ordering::Relaxed);
         // among the files being written (the app waits for them as it ends; the panel over the
         // canvas keeps presses off it meanwhile)
         crate::files::write_meanwhile(false, move || {
@@ -189,7 +200,7 @@ impl AnimatedExport {
             let file = path.to_string_lossy().into_owned();
             let made = std::fs::create_dir_all(&dir).map_err(|e| e.to_string());
             let made = made.and_then(|()| match turntable {
-                Some((t, size)) => turntable_file(&session, format, &path, t, size),
+                Some((t, size)) => turntable_file(&session, format, &path, t, size, &video_done),
                 None => Ok(()),
             });
             let made = made.and_then(|()| match format {
@@ -211,6 +222,7 @@ impl AnimatedExport {
                         4,
                         order.len(),
                         |i, w, h| {
+                            video_done.store((i as f32 / order.len() as f32).to_bits(), Ordering::Relaxed);
                             let t = session.animation_frame(*order.get(i)?, false, w.max(h))?;
                             let picture = image::RgbaImage::from_raw(t.width, t.height, t.rgba)?;
                             let picture = if picture.dimensions() == (w, h) {
@@ -370,13 +382,9 @@ impl AnimatedExport {
             ui.painter().galley(capsule.center() - galley.size() / 2.0, galley, argb(CANCEL_INK));
             cancel = ui.interact(capsule, ui.scope_id().with("cancel"), Sense::click()).clicked();
             ui.painter().circle_filled(done_rect.center(), 22.0, argb(DONE_BLUE));
-            if self.saving {
-                egui::Spinner::new()
-                    .size(24.0)
-                    .color(Color32::WHITE)
-                    .paint_at(ui, Rect::from_center_size(done_rect.center(), vec2(24.0, 24.0)));
-            } else {
-                look.icon(ui, &icons::DONE_TICK, done_rect.center(), 40.0, Color32::WHITE);
+            // while it is made the export card over the screen shows how far it has come
+            look.icon(ui, &icons::DONE_TICK, done_rect.center(), 40.0, Color32::WHITE);
+            if !self.saving && !self.card.busy() {
                 done = ui.interact(done_rect, ui.scope_id().with("done"), Sense::click()).clicked();
             }
             if wide || self.settings_open {
@@ -439,25 +447,46 @@ impl AnimatedExport {
                 }
             }
         });
-        if cancel || ui_escape(ctx) {
+        if cancel || (ui_escape(ctx) && !self.card.busy()) {
             return Some(Ended::Closed);
         }
         if done {
             self.saving = true;
+            // the card follows the file being made: a video by its frames, else as the core tells
+            let video = matches!(self.format, Animated::Mp4 | Animated::Hevc);
+            // from the start, not where the last export left it
+            session.reset_export_progress();
+            let (following, video_done) = (Arc::clone(session), Arc::clone(&self.video_done));
+            self.exporting = Some(self.card.start(move || {
+                if video { f32::from_bits(video_done.load(Ordering::Relaxed)) } else { following.export_progress() }
+            }));
+        }
+        // Cancel on the card: the file isn't saved (its card goes by itself)
+        if self.exporting.as_ref().is_some_and(crate::export_card::Exporting::cancelled) {
+            self.saving = false;
+            self.exporting = None;
         }
         if self.saving && self.failed == Some(self.settings()) {
             self.saving = false;
+            if let Some(exporting) = self.exporting.take() {
+                exporting.ended(false);
+            }
             return Some(Ended::Failed);
         }
-        // Done: once the file for the settings is made, it is saved where asked
-        if self.saving
+        // Done: once the file for the settings is made, the card shows its check
+        if self.saving && self.made.as_ref().is_some_and(|(settings, _, _)| *settings == self.settings()) {
+            self.saving = false;
+            if let Some(exporting) = self.exporting.take() {
+                exporting.ended(true);
+            }
+        }
+        // and as it goes, the file is saved where asked
+        if self.card.show(ctx, look) == Some(crate::export_card::Ended::Made)
             && let Some((settings, path, _)) = &self.made
             && *settings == self.settings()
+            && save_as(path, self.format)
         {
-            self.saving = false;
-            if save_as(path, self.format) {
-                return Some(Ended::Closed);
-            }
+            return Some(Ended::Closed);
         }
         None
     }
@@ -595,6 +624,7 @@ fn turntable_file(
     path: &std::path::Path,
     t: Turntable,
     size: usize,
+    video_done: &AtomicU32,
 ) -> Result<(), String> {
     let (w, h, _) = TURNTABLE_SIZES.get(size).copied().unwrap_or((1280, 720, "720p"));
     let file = path.to_string_lossy().into_owned();
@@ -605,6 +635,7 @@ fn turntable_file(
             let count = ((t.seconds * TURNTABLE_FPS).round() as u32).max(1);
             let hevc = format == Animated::Hevc;
             crate::video::write_mp4(path, w, h, w.max(h), TURNTABLE_FPS as u32, hevc, 4, count as usize, |i, vw, vh| {
+                video_done.store((i as f32 / count as f32).to_bits(), Ordering::Relaxed);
                 session.model_turntable_picture(i as u32, count, t, vw, vh, false).map(|p| p.rgba)
             })
             .map(|_| ())
