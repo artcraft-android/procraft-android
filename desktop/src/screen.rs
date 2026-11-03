@@ -29,6 +29,11 @@ struct Pad {
     id: egui::TextureId,
 }
 
+/// Whether the window's surface may be wide colour: no, as egui draws the interface in sRGB onto
+/// it as it is (a Mac's screen, which takes Display P3, would show it over-saturated); the canvas
+/// is shown in sRGB there, as on screens without wide colour.
+const INTERFACE_WIDE: bool = false;
+
 impl Screen {
     /// The window's surface, and a device that can show it.
     pub fn new(window: Arc<Window>) -> Result<Screen, String> {
@@ -36,7 +41,7 @@ impl Screen {
         let surface = instance.create_surface(Arc::clone(&window)).map_err(|e| e.to_string())?;
         let gpu = Gpu::for_surface(instance, &surface).map_err(|e| e.to_string())?;
         let size = window.inner_size();
-        let config = configure(&gpu, &surface, (size.width, size.height));
+        let config = configure(&gpu, &surface, (size.width, size.height), INTERFACE_WIDE);
         let format = config.as_ref().map_or(wgpu::TextureFormat::Bgra8Unorm, |c| c.format);
         let renderer = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
         let ctx = egui::Context::default();
@@ -60,7 +65,7 @@ impl Screen {
             self.config = None;
             return;
         }
-        self.config = configure(&self.gpu, &self.surface, (width, height));
+        self.config = configure(&self.gpu, &self.surface, (width, height), INTERFACE_WIDE);
         if let Some(format) = self.config.as_ref().map(|c| c.format).filter(|f| *f != self.format) {
             self.format = format;
             self.renderer = egui_wgpu::Renderer::new(&self.gpu.device, format, egui_wgpu::RendererOptions::default());

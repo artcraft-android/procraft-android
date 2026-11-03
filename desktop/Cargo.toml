@@ -37,6 +37,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }
 
+# An artwork dragged out of the gallery, handed to the system as a file
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+drag = "2.1"
+
 # Animated MP4 and HEVC through the system's own encoders (Media Foundation); Feedback Sounds'
 # click played by the system (PlaySound); a PDF's pages drawn by the system's renderer; a pen's
 # lean from the pointer messages
@@ -51,8 +55,6 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_Pointer",
     "Win32_UI_WindowsAndMessaging",
 ] }
-# An artwork dragged out of the gallery, handed to the system as a file
-drag = "2.1"
 
 # A tablet's pen under X11, which winit gives as the mouse: its pressure, lean and eraser end from
 # its own XInput 2 events

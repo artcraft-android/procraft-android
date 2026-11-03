@@ -190,6 +190,7 @@ fn main() {
         // the gallery does
         dropped: std::env::args_os().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_file()).collect(),
         tap_held: None,
+        closed: false,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         log::error!("event loop: {e}");
@@ -234,6 +235,8 @@ struct App {
     dropped: Vec<std::path::PathBuf>,
     /// Tap Assistance: a lone finger's touch, where it landed and when, while it is held there.
     tap_held: Option<(u64, winit::dpi::PhysicalPosition<f64>, Instant)>,
+    /// The window was closed (the artwork open kept): the app's end needs nothing more.
+    closed: bool,
 }
 
 /// The app's icon, for the window's title bar and the task bar.
@@ -327,6 +330,7 @@ impl ApplicationHandler for App {
                 if self.leave_artwork() {
                     files::finish_writing();
                     files::tell_what_was_told();
+                    self.closed = true;
                     event_loop.exit();
                 }
             }
@@ -362,6 +366,18 @@ impl ApplicationHandler for App {
                 }
             }
         }
+    }
+
+    /// The app ending without its window closed first (a Mac's Quit, from the app menu or
+    /// Cmd+Q, ends it with no close asked): the artwork open kept as closing the window keeps it.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if std::mem::replace(&mut self.closed, true) {
+            return;
+        }
+        if !self.leave_artwork() {
+            log::error!("the artwork open couldn't be kept as the app ended");
+        }
+        files::finish_writing();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -882,7 +898,7 @@ impl App {
 
     /// An artwork dragged out of the window: written as Drag and Drop export's file format says,
     /// then dragged on as that file, for wherever it is let go (the system's drag carries it).
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     fn drag_out(&mut self, artwork: &procraft_core::GalleryArtwork) {
         let format = self.ui.drag_format();
         let Some(screen) = self.screen.as_mut() else { return };
@@ -898,7 +914,8 @@ impl App {
         if let Err(e) = drag::start_drag(&*screen.window, item, image, |_, _| {}, drag::Options::default()) {
             log::warn!("dragging an artwork out: {e}");
         }
-        // the button was let go inside the system's drag, which egui never heard
+        // the button is let go inside the system's drag (on Windows once it is over; a Mac's
+        // goes on by itself), which egui never hears
         let pos = screen.egui.egui_ctx().input(|i| i.pointer.latest_pos()).unwrap_or(egui::Pos2::ZERO);
         screen.egui.egui_input_mut().events.push(egui::Event::PointerButton {
             pos,
@@ -909,7 +926,7 @@ impl App {
         screen.window.request_redraw();
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     fn drag_out(&mut self, _artwork: &procraft_core::GalleryArtwork) {}
 
     /// The graphics device was lost (its driver reset or stopped), and all it held: nothing is

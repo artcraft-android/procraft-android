@@ -151,8 +151,15 @@ pub(crate) fn colours_to(from: Profile, to: Profile) -> Option<[[f32; 3]; 3]> {
 }
 
 /// Configures the surface for `size`: a format that doesn't re-encode sRGB, the lowest-latency
-/// present mode on offer, and one frame in flight. None if it can't be (yet).
-pub fn configure(gpu: &Gpu, surface: &wgpu::Surface<'_>, size: (u32, u32)) -> Option<wgpu::SurfaceConfiguration> {
+/// present mode on offer, one frame in flight, and (if `wide`) Display P3 where the screen takes
+/// it. A surface an sRGB interface is drawn on as it is (egui's) asks for no wide colour, or the
+/// interface would show over-saturated. None if it can't be (yet).
+pub fn configure(
+    gpu: &Gpu,
+    surface: &wgpu::Surface<'_>,
+    size: (u32, u32),
+    wide: bool,
+) -> Option<wgpu::SurfaceConfiguration> {
     let caps = surface.get_capabilities(&gpu.adapter);
     let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).or_else(|| caps.formats.first().copied())?;
 
@@ -168,10 +175,11 @@ pub fn configure(gpu: &Gpu, surface: &wgpu::Surface<'_>, size: (u32, u32)) -> Op
         config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
     }
     // wide colour where the screen takes it: the canvas is shown in Display P3
-    let p3 = caps
-        .format_capabilities
-        .iter()
-        .any(|f| f.format == format && f.color_spaces.contains(wgpu::SurfaceColorSpaces::DISPLAY_P3));
+    let p3 = wide
+        && caps
+            .format_capabilities
+            .iter()
+            .any(|f| f.format == format && f.color_spaces.contains(wgpu::SurfaceColorSpaces::DISPLAY_P3));
     if p3 {
         config.color_space = wgpu::SurfaceColorSpace::DisplayP3;
     }

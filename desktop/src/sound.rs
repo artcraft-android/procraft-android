@@ -1,6 +1,6 @@
 //! Feedback Sounds' click, as the Android app plays the system's key click: a few milliseconds of
 //! our own, played by the system (PlaySound on Windows, from memory; elsewhere the system's own
-//! player of sounds, from a file).
+//! player of sounds, from a file: a Mac's afplay, Linux's PipeWire, PulseAudio or ALSA player).
 
 /// The click's sample rate, how long it lasts and how fast it dies away (a second's worth).
 const RATE: u32 = 44_100;
@@ -57,8 +57,13 @@ pub fn click() {
 }
 
 /// The players of sounds tried in turn (PipeWire's, PulseAudio's, ALSA's), with what quiets each.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 const PLAYERS: [(&str, &[&str]); 3] = [("pw-play", &[]), ("paplay", &[]), ("aplay", &["-q"])];
+
+/// A Mac's own player of sounds, by its whole path (an app opened from the Finder isn't given a
+/// shell's search path).
+#[cfg(target_os = "macos")]
+const PLAYERS: [(&str, &[&str]); 1] = [("/usr/bin/afplay", &[])];
 
 /// The first of [`PLAYERS`] there is, handed the click written once to a file (in the user's own
 /// runtime folder where there is one); with none of them the click is silent.
