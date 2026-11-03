@@ -34,6 +34,10 @@ pub struct Input {
     pub commands: Vec<TouchCommand>,
     /// The pointers down on the canvas.
     down: Vec<u64>,
+    /// Pointers down that the canvas didn't take (pressed on the interface, or on the canvas
+    /// while a popover was open, which that press only closes): while one is, no brush outline
+    /// hovers (it would stay where the pen went down, as the pen moves on).
+    ignored: Vec<u64>,
     /// The mouse: where it is, whether it is over the window, and whether it (or space) moves the
     /// view.
     cursor: Option<(f32, f32)>,
@@ -68,6 +72,7 @@ impl Default for Input {
             clock: Instant::now(),
             commands: Vec::new(),
             down: Vec::new(),
+            ignored: Vec::new(),
             cursor: None,
             inside: false,
             panning: false,
@@ -101,7 +106,7 @@ impl Input {
     }
 
     pub fn hovering(&self) -> Option<(f32, f32)> {
-        self.cursor.filter(|_| self.inside && self.down.is_empty() && !self.moving_view())
+        self.cursor.filter(|_| self.inside && self.down.is_empty() && self.ignored.is_empty() && !self.moving_view())
     }
 
     /// Nothing is pressed on the canvas and the view isn't moving.
@@ -253,7 +258,7 @@ impl Input {
                 true
             }
             WindowEvent::Focused(false) => {
-                // keys let go elsewhere never come back up here
+                // keys let go elsewhere never come back up here (nor, perhaps, a press's lift)
                 self.space = false;
                 self.r_key = None;
                 self.command_key = false;
@@ -261,6 +266,7 @@ impl Input {
                 self.alt = false;
                 self.shift = false;
                 self.end_key_drag(session);
+                self.ignored.clear();
                 false
             }
             WindowEvent::CursorEntered { .. } | WindowEvent::CursorLeft { .. } => {
@@ -419,9 +425,12 @@ impl Input {
         let known = self.down.contains(&touch.id);
         match touch.phase {
             TouchPhase::Started => {
-                // the first touch must land on the canvas; more may land anywhere
+                // the first touch must land on the canvas; more may land anywhere (one that didn't
+                // is kept, so no outline hovers while it is down)
                 if self.down.is_empty() && over(p) {
-                    return false;
+                    self.ignored.retain(|i| *i != touch.id);
+                    self.ignored.push(touch.id);
+                    return true;
                 }
                 self.pressed(session, touch.id, kind, p, pressure);
                 true
@@ -436,6 +445,10 @@ impl Input {
             }
             TouchPhase::Cancelled if known => {
                 self.lifted(session, touch.id, p, pressure, true);
+                true
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled if self.ignored.contains(&touch.id) => {
+                self.ignored.retain(|i| *i != touch.id);
                 true
             }
             _ => false,
