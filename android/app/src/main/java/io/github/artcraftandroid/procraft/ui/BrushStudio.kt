@@ -338,18 +338,18 @@ private fun gap(above: Any, below: Any): Dp {
     return when {
         above == Edge.TOP -> 8.dp
         above == Edge.TITLE -> when {
-            line(below) -> 7.5.dp
-            below == StudioControl.PressureCurve -> 29.dp
-            below == StudioControl.TiltAngle -> 28.dp
-            below == StudioControl.About -> 29.dp
-            below is StudioControl.Disclosure -> 41.dp
-            else -> 23.dp
+            line(below) -> 6.dp
+            below == StudioControl.PressureCurve -> 27.5.dp
+            below == StudioControl.TiltAngle -> 26.5.dp
+            below == StudioControl.About -> 27.5.dp
+            below is StudioControl.Disclosure -> 39.5.dp
+            else -> 21.5.dp
         }
         below == Edge.TITLE -> when {
-            line(above) -> 50.5.dp
-            above is StudioControl.Slider -> 46.5.dp
-            above == StudioControl.PreviewCard -> 48.dp
-            else -> 47.dp
+            line(above) -> 49.5.dp
+            above is StudioControl.Slider -> 45.5.dp
+            above == StudioControl.PreviewCard -> 47.dp
+            else -> 46.dp
         }
         line(above) -> if (line(below)) 4.dp else 19.5.dp
         above is StudioControl.Slider || above is StudioControl.Choice -> if (line(below)) 0.dp else 15.5.dp
@@ -555,7 +555,7 @@ private fun StudioPagesCard(vm: CanvasViewModel) {
         Modifier.padding(start = 10.dp, top = 10.dp, bottom = 10.dp).width(320.dp).fillMaxHeight().clip(shape).background(StudioTabs)
             .border(1.dp, StudioCardEdge, shape),
     ) {
-        Text("Brush Studio", color = StudioCardTitle, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 24.dp, top = 19.dp))
+        Text("Brush Studio", color = StudioCardTitle, fontSize = 23.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 24.dp, top = 19.dp))
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 8.dp, end = 8.dp, top = 17.dp, bottom = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -569,7 +569,7 @@ private fun StudioPagesCard(vm: CanvasViewModel) {
                     Box(Modifier.width(52.dp), contentAlignment = Alignment.Center) {
                         Icon(tab.icon, contentDescription = null, tint = if (on) Color.White else StudioTabIcon, modifier = Modifier.requiredSize(tab.iconSize))
                     }
-                    Text(tab.name, color = if (on) Color.White else StudioPageInk, fontSize = 17.sp, maxLines = 1)
+                    Text(tab.name, color = if (on) Color.White else StudioPageInk, fontSize = 15.5.sp, maxLines = 1)
                 }
             }
         }
@@ -622,7 +622,7 @@ private fun StudioSettings(vm: CanvasViewModel, modifier: Modifier) {
             val title = section.title ?: vm.studioName.takeIf { section.controls.firstOrNull() == StudioControl.About }
             title?.let {
                 Spacer(Modifier.height(if (k == 0) 25.dp else gap(above, Edge.TITLE)))
-                Text(it, color = StudioHeader, fontSize = 19.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 8.dp))
+                Text(it, color = StudioHeader, fontSize = 21.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 8.dp))
                 above = Edge.TITLE
             }
             for (control in section.controls) {
@@ -706,7 +706,7 @@ private fun StudioControlView(vm: CanvasViewModel, c: StudioControl) {
                 .tap { vm.sourceEditing = c.kind }.padding(start = 16.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(c.label, color = StudioHeader, fontSize = 19.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
+            Text(c.label, color = StudioHeader, fontSize = 21.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
             // the image it uses: the shape white on the row (the round tip a white disc), the grain as its greys, a
             // material's amount all over as white
             val image = vm.studioSources[c.kind]
@@ -838,7 +838,7 @@ private fun SourceBox(vm: CanvasViewModel, c: StudioControl.Source) {
     Column(Modifier.fillMaxWidth()) {
         Box(Modifier.fillMaxWidth().padding(top = 8.5.dp).height(45.dp)) {
             // where a section's title sits
-            Text(c.label, color = StudioHeader, fontSize = 19.sp, fontWeight = FontWeight.Bold, maxLines = 1,
+            Text(c.label, color = StudioHeader, fontSize = 21.sp, fontWeight = FontWeight.Bold, maxLines = 1,
                 modifier = Modifier.align(Alignment.TopStart).padding(start = 8.dp, top = 9.5.dp))
             Box(Modifier.align(Alignment.CenterEnd).offset(x = 4.dp).size(54.dp, 45.dp).clip(CircleShape).background(StudioButton).tap { open() },
                 contentAlignment = Alignment.Center) {

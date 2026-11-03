@@ -911,7 +911,7 @@ impl Studio {
         ui.painter().rect_filled(card, 20, argb(TABS_FILL));
         ui.painter().rect_stroke(card, 20, Stroke::new(1.0, argb(CARD_EDGE)), egui::StrokeKind::Inside);
         let at = pos2(card.left() + 24.0, card.top() + 19.0);
-        text(ui.painter(), at, Align2::LEFT_TOP, "Brush Studio", 24.0, Weight::Bold, argb(CARD_TITLE));
+        text(ui.painter(), at, Align2::LEFT_TOP, "Brush Studio", 23.0, Weight::Bold, argb(CARD_TITLE));
         let mut y = card.top() + 19.0 + 29.0 + 17.0;
         for (i, page) in PAGES.iter().enumerate() {
             let row = Rect::from_min_size(pos2(card.left() + 8.0, y), vec2(card.width() - 16.0, 44.0));
@@ -923,7 +923,7 @@ impl Studio {
             look.icon(ui, page.icon, pos2(row.left() + 26.0, row.center().y), page.icon_size, ink);
             let ink = if on { Color32::WHITE } else { argb(PAGE_INK) };
             let at = pos2(row.left() + 52.0, row.center().y);
-            text(ui.painter(), at, Align2::LEFT_CENTER, page.name, 17.0, Weight::Regular, ink);
+            text(ui.painter(), at, Align2::LEFT_CENTER, page.name, 15.5, Weight::Regular, ink);
             if ui.interact(row, ui.scope_id().with(("page", i)), Sense::click()).clicked() {
                 self.tab = i;
             }
@@ -971,7 +971,7 @@ impl Studio {
                             ui.add_space(if k == 0 { 25.0 } else { gap(above, None) });
                             let (row, _) = ui.allocate_exact_size(vec2(width, 23.0), Sense::hover());
                             let at = pos2(row.left() + 8.0, row.center().y);
-                            text(ui.painter(), at, Align2::LEFT_CENTER, &title, 19.0, Weight::Bold, argb(HEADER));
+                            text(ui.painter(), at, Align2::LEFT_CENTER, &title, 21.0, Weight::Bold, argb(HEADER));
                             above = Edge::Title;
                         }
                         for control in section.controls {
@@ -1114,7 +1114,7 @@ impl Studio {
                     // a title with an Edit button over a square of its image as wide as the rows
                     let (head, _) = ui.allocate_exact_size(vec2(width, 8.5 + 45.0), Sense::hover());
                     let at = pos2(head.left() + 8.0, head.top() + 8.5 + 9.5);
-                    text(ui.painter(), at, Align2::LEFT_TOP, label, 19.0, Weight::Bold, argb(HEADER));
+                    text(ui.painter(), at, Align2::LEFT_TOP, label, 21.0, Weight::Bold, argb(HEADER));
                     let edit = Rect::from_min_size(pos2(head.right() + 4.0 - 54.0, head.top() + 8.5), vec2(54.0, 45.0));
                     let mut open =
                         ui.interact(edit, ui.scope_id().with(("edit source", label)), Sense::click()).clicked();
@@ -1152,7 +1152,7 @@ impl Studio {
                     }
                     ui.painter().rect_filled(row, 12, argb(CARD));
                     let at = pos2(row.left() + 16.0, row.center().y);
-                    text(ui.painter(), at, Align2::LEFT_CENTER, label, 19.0, Weight::Bold, argb(HEADER));
+                    text(ui.painter(), at, Align2::LEFT_CENTER, label, 21.0, Weight::Bold, argb(HEADER));
                     let picture =
                         Rect::from_min_size(pos2(row.right() - 8.0 - 44.0, row.center().y - 22.0), vec2(44.0, 44.0));
                     match image {
