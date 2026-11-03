@@ -5,6 +5,8 @@
 #   procraft-<version>-android-arm64.apk          64-bit ARM tablets, signed with the release key
 #   procraft-<version>-windows-x64.msi            the desktop app's installer (packaging/windows)
 #   procraft-<version>-windows-x64-portable.zip   the desktop app to run from anywhere
+#   procraft-<version>-windows-arm64.msi          the same for Windows on ARM (Snapdragon PCs)
+#   procraft-<version>-windows-arm64-portable.zip
 #   procraft-<version>-linux-x86_64.AppImage      any distro (packaging/linux)
 #   procraft-<version>-linux-x86_64.deb           Debian, Ubuntu and the like
 #   procraft-<version>-linux-x86_64.tar.gz        the plain tree
@@ -15,7 +17,7 @@
 #
 # The Mac and iPad files are built on the public repository alone: a private one pays for macOS
 # runners' minutes, ten times Linux's. While they are new, one failing leaves its file out rather
-# than holding up the release.
+# than holding up the release; so does Windows on ARM's.
 #
 # A manual run (Actions › Release › Run workflow) is a dry run: it builds them at the version in
 # gradle.properties and keeps them as the run's artifacts, and releases nothing.
@@ -291,10 +293,62 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Windows on ARM: cross-built on the x64 runner, which has Visual Studio's ARM64 build tools
+  windows-arm64:
+    name: Desktop (windows-arm64)
+    runs-on: windows-2025
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      DIST: ${{ github.workspace }}/dist
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: v
+        name: Resolve version
+        run: |
+          listed="$(sed -n 's/^procraft\.version=//p' android/gradle.properties | tr -d '\r')"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="$listed"; fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-desktop-windows-arm64
+
+      - name: Install WiX v5
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          echo "$USERPROFILE/.dotnet/tools" >>"$GITHUB_PATH"
+          "$USERPROFILE/.dotnet/tools/wix" extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
+
+      - name: Package for Windows on ARM
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          ARCH: arm64
+        run: ./packaging/windows/package.ps1
+
+      - name: Files
+        run: ls -l dist >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-desktop-windows-arm64
+          path: dist/*
+          if-no-files-found: error
+
   release:
     name: GitHub Release
-    needs: [apk, desktop, macos, ipados]
-    # the Mac and iPad jobs may have been skipped (a private repository) or left out their files
+    needs: [apk, desktop, windows-arm64, macos, ipados]
+    # the Mac, iPad and Windows on ARM jobs may have been skipped (a private repository) or left
+    # out their files
     if: ${{ github.ref_type == 'tag' && !cancelled() && needs.apk.result == 'success' && needs.desktop.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
