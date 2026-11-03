@@ -213,6 +213,7 @@ blend-color-burn	26	26	7.56	4.8	21.47	20.5
 blend-linear-burn	26	26	9.7	4.85	19.04	19.74
 blend-darker-color	26	26	5.77	4.85	21.77	20.85
 blend-normal	26	26	5.72	4.7	21.92	20.9
+blend-greater	26	26	5.72	4.7	21.92	20.9
 blend-lighten	26	26	4.07	2.81	23.67	22.91
 blend-screen	26	26	5.82	4.6	22.02	20.8
 blend-color-dodge	26	26	5.96	4.95	21.64	20.59

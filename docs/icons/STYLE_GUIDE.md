@@ -255,4 +255,5 @@ Screen a disc ringed with dots; Color Dodge a sparkle; Add a plus in a ring; Sof
 Hard Light a spotlight, Vivid Light a bolt, Linear Light a torch, Pin Light a thumbtack; Hard Mix
 four squares; Subtract a minus, Divide a division sign; Hue the colour wheel, Saturation a drop
 filled halfway, Color three overlapping circles, Luminosity a disc half solid on the slant; Behind
-a solid sheet behind an outline; Height an arrow standing on a base, Linear Height a ramp.
+a solid sheet behind an outline; Height an arrow standing on a base, Linear Height a ramp. Greater
+a solid disc in front of a ring.
