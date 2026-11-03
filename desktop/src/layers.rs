@@ -63,6 +63,8 @@ const THUMBS_A_FRAME: usize = 4;
 /// from the window's top.
 const OPTIONS_LEFT: f32 = -183.0;
 const OPTIONS_WIDTH: f32 = 194.0;
+/// Delete on a locked layer's row says this.
+const LOCKED_DELETE: &str = "A locked layer can’t be deleted. Unlock it first.";
 const OPTIONS_TOP: f32 = 57.0;
 const OPTIONS_CORNER: f32 = 24.0;
 /// The blend editor under a row: the opacity and its slider, then the list of modes (nine rows
@@ -132,6 +134,8 @@ pub struct Layers {
     /// The title's menu, and Delete's question.
     title_menu: Menu,
     deleting: Alert,
+    /// Delete on a locked layer's row: why not.
+    locked: Alert,
     /// A layer renamed in place: which, the name as typed, and whether it has been focused.
     renaming: Option<(u64, String, bool)>,
     blend: Option<Blend>,
@@ -242,7 +246,7 @@ impl Layers {
 
     /// A menu of the panel's is open: a press elsewhere only closes it.
     pub fn modal(&self) -> bool {
-        self.options_menu.is_open() || self.title_menu.is_open() || self.deleting.is_open()
+        self.options_menu.is_open() || self.title_menu.is_open() || self.deleting.is_open() || self.locked.is_open()
     }
 
     /// Shows the panel hanging from `button`; returns where it is (points).
@@ -521,9 +525,15 @@ impl Layers {
         }
         self.title_menu(ctx, look, session, title, any_picked, backdrops);
         // the title menu's Delete asks first
+        // asked first; then, as measured, a locked one among them stops it, said why
         if self.deleting.show(ctx, look) == Some(Answer::Action) {
-            session.delete_picked();
+            if session.chosen_locked() {
+                self.locked.tell("Locked layer selection", LOCKED_DELETE, Some(&icons::PAGE_LOCKED));
+            } else {
+                session.delete_picked();
+            }
         }
+        self.locked.show(ctx, look);
         rect
     }
 
@@ -778,6 +788,10 @@ impl Layers {
                     "Clear" => {
                         session.select_layer(l.id);
                         session.clear_layer();
+                    }
+                    // as measured, a locked one is told about, not deleted
+                    _ if l.locked => {
+                        self.locked.tell("Locked layer selection", LOCKED_DELETE, Some(&icons::PAGE_LOCKED))
                     }
                     _ => _ = session.delete_layer(l.id),
                 }

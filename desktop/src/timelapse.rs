@@ -114,6 +114,7 @@ impl TimeLapseUi {
             destructive: false,
             extra: None,
             first: Some("Full length".into()),
+            alone: false,
         });
     }
 

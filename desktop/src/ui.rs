@@ -1571,6 +1571,7 @@ impl Interface {
             destructive: false,
             extra: extra.map(Into::into),
             first: None,
+            alone: false,
         });
         false
     }

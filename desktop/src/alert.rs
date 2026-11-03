@@ -12,6 +12,10 @@ use crate::icons::{Icon, Part};
 use crate::look::{Look, Themed, Weight, argb, cubic_bezier, pc, text};
 
 const BUTTON_WIDTH: f32 = 192.0;
+/// As measured, the panel is this much wider each side than its message's widest line (or its
+/// title's), its buttons sharing it; never narrower than they need, nor wider than three.
+const TEXT_SIDE: f32 = 27.5;
+const MOST_WIDTH: f32 = BUTTON_WIDTH * 3.0 + BUTTON_GAP * 2.0 + SIDE * 2.0;
 const BUTTON_GAP: f32 = 12.0;
 const BUTTON_HEIGHT: f32 = 48.0;
 const SIDE: f32 = 15.0;
@@ -46,6 +50,7 @@ pub fn pdf_quality() -> Asking {
         destructive: false,
         extra: Some("Better".into()),
         first: Some("Good".into()),
+        alone: false,
     }
 }
 
@@ -74,6 +79,8 @@ pub struct Asking {
     /// The first button's label in place of Cancel: it answers [`Answer::First`], and only a tap
     /// beside the panel cancels.
     pub first: Option<String>,
+    /// Only the action, across the panel: a notice, no Cancel.
+    pub alone: bool,
 }
 
 /// How an alert was answered.
@@ -103,6 +110,21 @@ impl Alert {
             destructive: true,
             extra: None,
             first: None,
+            alone: false,
+        });
+    }
+
+    /// Tells `title` (after `icon`), saying `message`, with OK alone.
+    pub fn tell(&mut self, title: &str, message: &str, icon: Option<&'static Icon>) {
+        self.ask(Asking {
+            title: title.into(),
+            message: message.into(),
+            action: "OK".into(),
+            icon,
+            destructive: false,
+            extra: None,
+            first: None,
+            alone: true,
         });
     }
 
@@ -143,10 +165,25 @@ impl Alert {
             ctx.request_repaint();
         }
         let screen = ctx.content_rect();
-        let buttons = if asking.extra.is_some() { 3.0 } else { 2.0 };
-        let width = BUTTON_WIDTH * buttons + BUTTON_GAP * (buttons - 1.0) + SIDE * 2.0;
-        // the message wrapped inside the panel, its lines centred and 20 apart
+        let buttons = if asking.alone {
+            1.0
+        } else if asking.extra.is_some() {
+            3.0
+        } else {
+            2.0
+        };
         let measure = ctx.layer_painter(LayerId::background());
+        let need = BUTTON_WIDTH * buttons + BUTTON_GAP * (buttons - 1.0) + SIDE * 2.0;
+        let widest = |s: &str, size: f32, weight: Weight| {
+            s.lines()
+                .map(|l| measure.layout_no_wrap(l.to_owned(), weight.font(size), argb(INK)).size().x)
+                .fold(0.0, f32::max)
+        };
+        let title = widest(&asking.title, 26.0, Weight::Bold) + if asking.icon.is_some() { 24.0 + 8.0 } else { 0.0 };
+        let words = widest(&asking.message, 16.0, Weight::Regular).max(title);
+        let width = (words + TEXT_SIDE * 2.0).clamp(need, MOST_WIDTH.max(need));
+        let button_width = (width - SIDE * 2.0 - BUTTON_GAP * (buttons - 1.0)) / buttons;
+        // the message wrapped inside the panel, its lines centred and 20 apart
         let inner = width - SIDE * 2.0;
         let wrapped =
             crate::look::wrapped_centred(&measure, &asking.message, 16.0, Weight::Regular, argb(INK), inner, 20.0);
@@ -198,6 +235,7 @@ impl Alert {
             let top = panel.bottom() - 16.0 - BUTTON_HEIGHT;
             let action_fill = if asking.destructive { DESTROY_FILL } else { pc::ACCENT.into() };
             let mut choices = match &asking.first {
+                _ if asking.alone => vec![],
                 Some(first) => vec![(first.as_str(), CANCEL_FILL, Answer::First)],
                 None => vec![("Cancel", CANCEL_FILL, Answer::Cancel)],
             };
@@ -206,8 +244,8 @@ impl Alert {
             }
             choices.push((asking.action.as_str(), action_fill, Answer::Action));
             for (i, (label, fill, which)) in choices.into_iter().enumerate() {
-                let left = panel.left() + SIDE + (BUTTON_WIDTH + BUTTON_GAP) * i as f32;
-                let rect = Rect::from_min_size(pos2(left, top), vec2(BUTTON_WIDTH, BUTTON_HEIGHT));
+                let left = panel.left() + SIDE + (button_width + BUTTON_GAP) * i as f32;
+                let rect = Rect::from_min_size(pos2(left, top), vec2(button_width, BUTTON_HEIGHT));
                 ui.painter().rect_filled(rect, BUTTON_HEIGHT / 2.0, argb(fill));
                 text(ui.painter(), rect.center(), Align2::CENTER_CENTER, label, 17.0, Weight::Medium, Color32::WHITE);
                 if ui.interact(rect, ui.scope_id().with(("button", i)), Sense::click()).clicked() {

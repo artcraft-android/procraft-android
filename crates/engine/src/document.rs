@@ -870,12 +870,24 @@ impl Document {
         true
     }
 
-    /// Removes what is chosen and unlocked as [`Document::delete_layer`] does (the last paint
-    /// layer stays); the picks are cleared. False if nothing went.
+    /// Whether what is chosen (and what is in a chosen group) holds a locked layer.
+    pub fn chosen_locked(&self) -> bool {
+        let chosen = self.chosen();
+        self.layers.iter().any(|l| {
+            (chosen.contains(&l.id) || chosen.iter().any(|c| self.is_inside(l.id, *c))) && self.is_locked(l.id)
+        })
+    }
+
+    /// Removes what is chosen as [`Document::delete_layer`] does (the last paint layer stays); the
+    /// picks are cleared. As measured, nothing goes while any of it is locked. False if nothing
+    /// went.
     pub fn delete_chosen(&mut self) -> bool {
+        if self.chosen_locked() {
+            return false;
+        }
         let mut any = false;
         for id in self.chosen().into_iter().rev() {
-            if self.layer(id).is_some() && !self.is_locked(id) {
+            if self.layer(id).is_some() {
                 any |= self.delete_layer(id);
             }
         }
@@ -2149,10 +2161,19 @@ mod tests {
         d.toggle_pick(two);
         d.set_locked(four, true);
         d.toggle_pick(four);
-        // a locked layer stops a merge, and stays when the rest is deleted
+        // a locked layer stops a merge, and a delete: nothing goes
         assert_eq!(d.merge_chosen_plan(), None);
-        assert!(d.delete_chosen());
-        assert_eq!(names(&d), ["4"]);
+        assert!(d.chosen_locked());
+        assert!(!d.delete_chosen());
+        assert_eq!(names(&d), ["1", "2", "4"]);
+        // a locked layer in a chosen group stops it too
+        d.set_locked(four, false);
+        let group = d.group_chosen().unwrap();
+        d.set_current(group);
+        d.set_locked(two, true);
+        assert!(d.chosen_locked() && !d.delete_chosen());
+        d.set_locked(two, false);
+        assert!(!d.chosen_locked());
     }
 
     #[test]

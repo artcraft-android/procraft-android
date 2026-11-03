@@ -445,7 +445,13 @@ impl CanvasSession {
         true
     }
 
-    /// Removes the current and picked layers that aren't locked (the last layer stays).
+    /// Whether the current and picked layers (and what their groups hold) include a locked one:
+    /// as measured, Delete then removes nothing and says why.
+    pub fn chosen_locked(&self) -> bool {
+        self.shared.lock().doc.chosen_locked()
+    }
+
+    /// Removes the current and picked layers (the last layer stays); nothing while one is locked.
     pub fn delete_picked(&self) -> bool {
         self.change("delete layers", |d| d.delete_chosen().then_some(())).is_some()
     }

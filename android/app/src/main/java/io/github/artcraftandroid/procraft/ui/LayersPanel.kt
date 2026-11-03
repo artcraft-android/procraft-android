@@ -375,6 +375,18 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
             }
         }
     }
+    // Delete on a locked layer's row: why not, OK alone
+    Alert(
+        if (vm.lockedDeleteTold) Unit else null,
+        title = { "Locked layer selection" },
+        message = { "A locked layer can’t be deleted. Unlock it first." },
+        action = "OK",
+        icon = PcIcons.PageLocked,
+        destructive = false,
+        alone = true,
+        onCancel = { vm.lockedDeleteTold = false },
+        onAction = { vm.lockedDeleteTold = false },
+    )
     // the title menu's Delete asks first
     Alert(
         if (deletingChosen) Unit else null,
@@ -384,7 +396,8 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
         icon = PcIcons.Trash,
         onCancel = { deletingChosen = false },
         onAction = {
-            vm.deletePicked()
+            // as measured, a locked one among them stops it, said why
+            if (vm.chosenLocked()) vm.lockedDeleteTold = true else vm.deletePicked()
             deletingChosen = false
         },
     )

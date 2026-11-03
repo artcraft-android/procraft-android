@@ -5932,7 +5932,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun duplicate(l: LayerInfo) = layerChange { if (it.duplicateLayer(l.id) == null) message = noRoom() }
 
-    fun delete(l: LayerInfo) = layerChange { it.deleteLayer(l.id) }
+    /** Delete on a locked layer's row, told about rather than done (as measured). */
+    var lockedDeleteTold by mutableStateOf(false)
+
+    fun delete(l: LayerInfo) {
+        if (l.locked) {
+            lockedDeleteTold = true
+            return
+        }
+        layerChange { it.deleteLayer(l.id) }
+    }
 
     fun mergeDown(l: LayerInfo) = layerChange { it.mergeDown(l.id) }
 
@@ -5956,6 +5965,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun duplicatePicked() = layerChange { if (!it.duplicatePicked()) message = noRoom() }
 
     fun deletePicked() = layerChange { it.deletePicked() }
+
+    /** Whether the chosen layers include a locked one (Delete then removes nothing). */
+    fun chosenLocked(): Boolean = session?.chosenLocked() == true
 
     /** The current and picked layers each as a PNG in the cache, to share. */
     suspend fun chosenLayerFiles(): List<File> {

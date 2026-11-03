@@ -247,6 +247,7 @@ impl CanvasInfo {
                         destructive: false,
                         extra: None,
                         first: Some("Don't change".into()),
+                        alone: false,
                     });
                 } else {
                     ended = Some(Ended::Done(changed));

@@ -41,9 +41,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 
-// buttons keep their width and the panel grows with them: 426 across for two, 630 for three
+// buttons at least this wide, the panel growing with them (426 across for two, 630 for three) or
+// with a longer message
 private val AlertButtonWidth = 192.dp
 private val AlertButtonGap = 12.dp
+// as measured, the panel is this much wider each side than its message's widest line (or its
+// title's), its buttons sharing it; never narrower than they need, nor wider than three
+private val AlertTextSide = 27.5.dp
+private val AlertMostWidth get() = AlertButtonWidth * 3 + AlertButtonGap * 2 + AlertSide * 2
 private val AlertSide = 15.dp
 // dark glass, or light with the light interface
 private val AlertFill get() = if (Pc.light) Color(0xF2E3E3E3) else Color(0xF21E1E1E)
@@ -75,6 +80,7 @@ fun <T : Any> Alert(
     extra: String? = null,
     onExtra: (T) -> Unit = {},
     first: ((T) -> Unit)? = null,
+    alone: Boolean = false,
 ) {
     val last = remember { arrayOfNulls<Any>(1) }
     if (value != null) last[0] = value
@@ -104,9 +110,19 @@ fun <T : Any> Alert(
                 },
             contentAlignment = Alignment.Center,
         ) {
-            val buttons = if (extra != null) 3 else 2
+            val buttons = if (alone) 1 else if (extra != null) 3 else 2
+            val need = AlertButtonWidth * buttons + AlertButtonGap * (buttons - 1) + AlertSide * 2
+            val measurer = androidx.compose.ui.text.rememberTextMeasurer()
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            val said = message(kept)
+            val words = with(density) {
+                val m = if (said.isEmpty()) 0 else measurer.measure(said, androidx.compose.ui.text.TextStyle(fontSize = 16.sp, lineHeight = 20.sp)).size.width
+                val t = measurer.measure(title(kept), androidx.compose.ui.text.TextStyle(fontSize = 26.sp, fontWeight = FontWeight.Bold)).size.width
+                maxOf(m.toDp(), t.toDp() + if (icon != null) 32.dp else 0.dp)
+            }
+            val width = (words + AlertTextSide * 2).coerceIn(need, maxOf(AlertMostWidth, need))
             Column(
-                Modifier.width(AlertButtonWidth * buttons + AlertButtonGap * (buttons - 1) + AlertSide * 2).graphicsLayer {
+                Modifier.width(width).graphicsLayer {
                     alpha = shown
                     val k = ALERT_START_SCALE + (1f - ALERT_START_SCALE) * shown
                     scaleX = k
@@ -125,11 +141,14 @@ fun <T : Any> Alert(
                     Text(title(kept), color = AlertInk, fontSize = 26.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                 }
                 Spacer(Modifier.height(13.dp))
-                message(kept).takeIf { it.isNotEmpty() }?.let { Text(it, color = AlertInk, fontSize = 16.sp, lineHeight = 20.sp, textAlign = TextAlign.Center) }
+                said.takeIf { it.isNotEmpty() }?.let { Text(it, color = AlertInk, fontSize = 16.sp, lineHeight = 20.sp, textAlign = TextAlign.Center) }
                 Spacer(Modifier.height(27.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(AlertButtonGap)) {
-                    // a first choice of three, blue too (a tap outside still cancels), or Cancel
-                    if (first != null) {
+                    // a first choice of three, blue too (a tap outside still cancels), or Cancel; a
+                    // notice has its action alone
+                    if (alone) {
+                        // nothing before it
+                    } else if (first != null) {
                         AlertButton(cancel, Pc.Accent, Color.White, Modifier.weight(1f)) { if (value != null) first(kept) }
                     } else {
                         AlertButton(cancel, AlertCancelFill, AlertCancelInk, Modifier.weight(1f)) { if (value != null) onCancel() }

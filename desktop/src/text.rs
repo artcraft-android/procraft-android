@@ -352,6 +352,7 @@ impl TextEditor {
             destructive: false,
             extra: None,
             first: None,
+            alone: false,
         });
     }
 
