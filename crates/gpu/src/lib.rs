@@ -22,6 +22,28 @@ pub use scene::{GrainLook, Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, Su
 pub use sphere::{SphereLook, SpherePreview, preview_environment};
 pub use wgpu;
 
+/// The canvas's textures are made so the GPU keeps them uncompressed: on Mali GPUs (Vulkan), whose
+/// block compression (AFBC) can lose blocks of a picture redrawn a part at a time (a stroke's
+/// live picture showed holes in a grid on a Mali-G68).
+static UNCOMPRESSED: AtomicBool = AtomicBool::new(false);
+
+/// Keeps the canvas's textures made from now on uncompressed (`on`), as on a GPU that needs it:
+/// for tests on other GPUs.
+#[doc(hidden)]
+pub fn keep_textures_uncompressed(on: bool) {
+    UNCOMPRESSED.store(on, Ordering::Relaxed);
+}
+
+/// Whether the canvas's textures are to be kept uncompressed (see [`UNCOMPRESSED`]).
+pub(crate) fn textures_uncompressed() -> bool {
+    UNCOMPRESSED.load(Ordering::Relaxed)
+}
+
+/// Whether a GPU named `name` on `backend` needs its canvas textures uncompressed.
+fn keeps_textures_uncompressed(name: &str, backend: wgpu::Backend) -> bool {
+    backend == wgpu::Backend::Vulkan && name.to_ascii_lowercase().contains("mali")
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GpuError {
     #[error("no suitable GPU: {0}")]
@@ -140,6 +162,10 @@ impl Gpu {
         .map_err(|e| GpuError::NoAdapter(e.to_string()))?;
         let info = adapter.get_info();
         log::info!("GPU: {} ({:?}, driver {})", info.name, info.backend, info.driver_info);
+        if keeps_textures_uncompressed(&info.name, info.backend) {
+            UNCOMPRESSED.store(true, Ordering::Relaxed);
+            log::info!("the canvas's textures kept uncompressed on this GPU");
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("procraft"),
             // where the GPU has it, for strokes that build up only to their transfer
@@ -249,6 +275,14 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mali_gpus_on_vulkan_keep_their_canvas_textures_uncompressed() {
+        use wgpu::Backend;
+        assert!(super::keeps_textures_uncompressed("Mali-G68 MC4", Backend::Vulkan));
+        assert!(!super::keeps_textures_uncompressed("Mali-G68 MC4", Backend::Gl));
+        assert!(!super::keeps_textures_uncompressed("Adreno (TM) 750", Backend::Vulkan));
+    }
+
     use super::*;
 
     #[test]

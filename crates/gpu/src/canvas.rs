@@ -7282,6 +7282,9 @@ fn cropped(pixels: &[u8], width: u32, rect: IRect) -> Vec<u8> {
 }
 
 fn texture(device: &wgpu::Device, label: &str, width: u32, height: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
+    // where the GPU's block compression loses parts of a picture redrawn a part at a time (Mali),
+    // a texture that can be a storage one is kept uncompressed
+    let uncompressed = crate::textures_uncompressed() && format == wgpu::TextureFormat::Rgba8Unorm;
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: extent(width, height),
@@ -7292,7 +7295,8 @@ fn texture(device: &wgpu::Device, label: &str, width: u32, height: u32, format: 
         usage: wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::COPY_SRC
-            | wgpu::TextureUsages::COPY_DST,
+            | wgpu::TextureUsages::COPY_DST
+            | if uncompressed { wgpu::TextureUsages::STORAGE_BINDING } else { wgpu::TextureUsages::empty() },
         view_formats: &[],
     })
 }
