@@ -890,7 +890,7 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
         PcPopup(textScale = MATCHED_POPUP_TEXT, popupPositionProvider = place, onDismissRequest = onDone, properties = PopupProperties(focusable = true)) {
             // frosted over the canvas, as the library's menus are
             Column(look.width(194.dp).clip(RoundedCornerShape(24.dp)).then(rememberFrost(24.dp)).background(Pc.GlassMenu).padding(vertical = 7.dp)) {
-                // the core's rows: a switch leaves the menu open, the others close it
+                // the core's rows: each closes the menu, a switch's too (it shows ticked next time)
                 for (r in vm.layerOptions(l)) {
                     val act: () -> Unit = when (r.option) {
                         LayerOption.RENAME -> onRename
@@ -912,7 +912,7 @@ private fun LayerOptions(open: Boolean, vm: CanvasViewModel, l: LayerInfo, rowY:
                         LayerOption.COMBINE_DOWN -> { { vm.combineDown(l) } }
                         LayerOption.MERGE_MASK -> { { vm.mergeMask(l) } }
                     }
-                    Option(r.label, checked = r.switchOn, enabled = r.enabled, onClick = if (r.switchOn != null) act else { { act(); onDone() } })
+                    Option(r.label, checked = r.switchOn, enabled = r.enabled, onClick = { act(); onDone() })
                 }
             }
         }

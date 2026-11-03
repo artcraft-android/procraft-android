@@ -910,6 +910,10 @@ impl Document {
             }
         }
         self.layers.retain(|l| Some(l.id) != mask);
+        // merged, it shows at full: its opacity went into its pixels (a hidden one's were let go)
+        if let Some(l) = self.layer_mut(lower) {
+            (l.visible, l.opacity) = (true, 1.0);
+        }
         self.current = lower;
         self.picked.clear();
         self.rasterize(lower);
@@ -1331,6 +1335,10 @@ impl Document {
         let mask = self.mask_of(lower);
         self.layers.drain(unit);
         self.layers.retain(|l| Some(l.id) != mask);
+        // merged, it shows at full: its opacity went into its pixels (a hidden one's were let go)
+        if let Some(l) = self.layer_mut(lower) {
+            (l.visible, l.opacity) = (true, 1.0);
+        }
         self.current = current;
         // merged into, a text layer's pixels are no longer just its text
         self.rasterize(lower);

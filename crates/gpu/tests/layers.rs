@@ -226,7 +226,7 @@ fn merge_down_applies_each_mask_first() {
     let at = [(1, 8), (5, 8), (11, 8), (15, 8)];
     let shown: Vec<[u8; 4]> = at.iter().map(|&(x, y)| composite_at(&gpu, &mut doc, &mut canvas, x, y)).collect();
     let before = doc.clone();
-    canvas.merge_down_with_masks(upper, lower, vec![(upper, upper_mask), (lower, lower_mask)], before, None);
+    canvas.merge_down_with_masks(upper, lower, vec![(upper, upper_mask), (lower, lower_mask)], false, before, None);
     assert!(doc.finish_merge_down(upper));
     assert_eq!(doc.layers().len(), 1, "both masks gone with it");
     // the layer as the two showed: nothing, red, blue, red
@@ -269,7 +269,14 @@ fn merging_picked_layers_applies_each_mask_first() {
     let at = [(1, 8), (5, 8), (11, 8), (15, 8)];
     let shown: Vec<[u8; 4]> = at.iter().map(|&(x, y)| composite_at(&gpu, &mut doc, &mut canvas, x, y)).collect();
     let before = doc.clone();
-    canvas.merge_layers_with_masks(vec![upper], lower, vec![(lower, lower_mask), (upper, upper_mask)], before, None);
+    canvas.merge_layers_with_masks(
+        vec![upper],
+        lower,
+        vec![(lower, lower_mask), (upper, upper_mask)],
+        false,
+        before,
+        None,
+    );
     assert!(doc.finish_merge_chosen(lower, &[upper]));
     assert_eq!(doc.layers().len(), 1, "both masks gone with them");
     assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 1, 8)[3], 0);
@@ -284,6 +291,79 @@ fn merging_picked_layers_applies_each_mask_first() {
     canvas.redo();
     assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 11, 8), [0, 0, 200, 255]);
     assert_eq!(doc.layers().len(), 1);
+}
+
+#[test]
+fn merging_onto_a_hidden_layer_keeps_only_what_showed() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    // red all over, hidden; blue at the right above it
+    let lower = doc.current();
+    fill(&mut canvas, &doc, lower, [200, 0, 0]);
+    assert!(doc.set_visible(lower, false));
+    let upper = doc.add_layer();
+    paint(&mut canvas, &doc, upper, [0, 0, 200], Vec2::new(12.0, 8.0), 4.0, StrokeTool::Paint);
+    let shown = [(1, 8), (12, 8)].map(|(x, y)| composite_at(&gpu, &mut doc, &mut canvas, x, y));
+    let before = doc.clone();
+    canvas.merge_down_with_masks(upper, lower, Vec::new(), true, before, None);
+    assert!(doc.finish_merge_down(upper));
+    // it shows now, holding only the blue: the picture as it was
+    assert!(doc.layer(lower).unwrap().visible);
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 1, 8)[3], 0);
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 12, 8), [0, 0, 200, 255]);
+    assert_eq!([(1, 8), (12, 8)].map(|(x, y)| composite_at(&gpu, &mut doc, &mut canvas, x, y)), shown);
+    // undone: the red back, hidden
+    canvas.undo();
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 1, 8), [200, 0, 0, 255]);
+    assert!(!doc.layer(lower).unwrap().visible);
+}
+
+#[test]
+fn merging_onto_a_faded_layer_keeps_its_look() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    // red all over at half; blue at the right, full, above it
+    let lower = doc.current();
+    fill(&mut canvas, &doc, lower, [200, 0, 0]);
+    assert!(doc.set_opacity(lower, 0.5));
+    let upper = doc.add_layer();
+    paint(&mut canvas, &doc, upper, [0, 0, 200], Vec2::new(12.0, 8.0), 4.0, StrokeTool::Paint);
+    let shown = [(1, 8), (12, 8)].map(|(x, y)| composite_at(&gpu, &mut doc, &mut canvas, x, y));
+    let before = doc.clone();
+    canvas.merge_down(upper, lower, before, None);
+    assert!(doc.finish_merge_down(upper));
+    // at full now, the half in its pixels: the blue as strong as it was
+    assert!((doc.layer(lower).unwrap().opacity - 1.0).abs() < 1e-6);
+    let near = |a: [u8; 4], b: [u8; 4]| a.iter().zip(b).all(|(p, q)| p.abs_diff(q) <= 1);
+    for ((x, y), was) in [(1, 8), (12, 8)].into_iter().zip(shown) {
+        let now = composite_at(&gpu, &mut doc, &mut canvas, x, y);
+        assert!(near(now, was), "at {x}, {y}: {now:?} was {was:?}");
+    }
+    // undone: the red whole again, at half
+    canvas.undo();
+    assert_eq!(layer_at(&gpu, &mut doc, &mut canvas, lower, 1, 8)[3], 255);
+    assert!((doc.layer(lower).unwrap().opacity - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn a_clipped_layer_follows_its_base_s_mask() {
+    let Some((gpu, mut doc, mut canvas)) = setup() else { return };
+    // red all over, its mask hiding the left
+    let base = doc.current();
+    fill(&mut canvas, &doc, base, [200, 0, 0]);
+    let mask = doc.add_mask(base).unwrap();
+    fill(&mut canvas, &doc, mask, [255, 255, 255]);
+    paint(&mut canvas, &doc, mask, [0, 0, 0], Vec2::new(1.0, 8.0), 3.0, StrokeTool::Paint);
+    // blue all over, clipped to it
+    assert!(doc.set_current(base));
+    let top = doc.add_layer();
+    fill(&mut canvas, &doc, top, [0, 0, 200]);
+    assert!(doc.set_clipped(top, true));
+    canvas.invalidate();
+    assert_eq!(composite_at(&gpu, &mut doc, &mut canvas, 13, 8)[..3], [0, 0, 200]);
+    let left = composite_at(&gpu, &mut doc, &mut canvas, 1, 8);
+    // where the mask hides the base, the clipped layer shows nothing either
+    assert!(doc.set_visible(top, false));
+    canvas.invalidate();
+    assert_eq!(composite_at(&gpu, &mut doc, &mut canvas, 1, 8), left);
 }
 
 #[test]

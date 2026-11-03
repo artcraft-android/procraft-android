@@ -1015,16 +1015,14 @@ impl Layers {
                 let places = menu::option_rows(rect.left(), rect.top() + 7.0, rect.width(), rows.len());
                 for (row, r) in places.zip(&rows) {
                     if menu::option(ui, look, row, &r.label, r.switch_on.unwrap_or(false), r.enabled, false) {
-                        // a switch leaves the menu open
-                        chosen = Some((r.option, r.switch_on.is_none()));
+                        chosen = Some(r.option);
                     }
                 }
             },
         );
-        let Some((does, closes)) = chosen else { return };
-        if closes {
-            self.options_menu.close();
-        }
+        // every row closes the menu, a switch's too (it shows ticked next time)
+        let Some(does) = chosen else { return };
+        self.options_menu.close();
         match does {
             LayerOption::Rename => self.renaming = Some((l.id, l.name.clone(), false)),
             LayerOption::Ungroup => _ = session.ungroup(l.id),

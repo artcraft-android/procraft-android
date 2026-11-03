@@ -100,7 +100,7 @@ pub enum LayerOption {
 }
 
 /// A row of a layer's options menu: what it does, its label, whether it can be chosen, and for a
-/// switch whether it is on (a switch leaves the menu open; the other rows close it).
+/// switch whether it is on (a tick beside it). Every row closes the menu, a switch's too.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct LayerOptionRow {
     pub option: LayerOption,
@@ -630,10 +630,12 @@ impl CanvasSession {
         // (none at all for an empty one), not a copy of the whole of it
         let within = st.painted_box(upper).unwrap_or(procraft_engine::geom::IRect::new(0, 0, 0, 0));
         if let Some(canvas) = st.canvas.as_mut() {
-            // each mask applied to its layer first, as one step
+            // each mask applied to its layer first, as one step; a hidden layer below gives up
+            // what it holds (the merge keeps what showed)
             let masks = [upper, lower].into_iter().filter_map(|l| st.doc.mask_of(l).map(|m| (l, m))).collect();
+            let drop_lower = st.doc.layer(lower).is_some_and(|l| !l.visible);
             canvas.name_next_step("merge down");
-            canvas.merge_down_with_masks(upper, lower, masks, before, Some(within));
+            canvas.merge_down_with_masks(upper, lower, masks, drop_lower, before, Some(within));
         }
         st.doc.finish_merge_down(id);
         st.revision += 1;
@@ -851,9 +853,10 @@ impl CanvasSession {
             .chain(uppers.iter().copied())
             .filter_map(|l| st.doc.mask_of(l).map(|m| (l, m)))
             .collect();
+        let drop_lower = st.doc.layer(lower).is_some_and(|l| !l.visible);
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.name_next_step("merge layers");
-            canvas.merge_layers_with_masks(uppers.clone(), lower, masks, before, within);
+            canvas.merge_layers_with_masks(uppers.clone(), lower, masks, drop_lower, before, within);
         }
         st.doc.finish_merge_chosen(lower, &uppers);
         st.revision += 1;

@@ -43,6 +43,8 @@ struct LayerUniform {
     // blend mode's number + 1; 0: none), and where it is cut first (negative: not cut)
     dual: u32,
     dual_threshold: f32,
+    // 1: the clip base shows through its own mask (clip_mask_tex), which clipping follows
+    clip_masked: f32,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -56,6 +58,7 @@ const STROKE_LUMINANCE: u32 = 256u;
 @group(0) @binding(5) var grain_smp: sampler;
 @group(0) @binding(6) var mask_tex: texture_2d<f32>;
 @group(0) @binding(7) var second_tex: texture_2d<f32>;
+@group(0) @binding(8) var clip_mask_tex: texture_2d<f32>;
 @group(1) @binding(0) var<uniform> lu: LayerUniform;
 
 // one triangle covering the target
@@ -201,7 +204,12 @@ fn layer_color(p: vec2<i32>) -> vec4<f32> {
         c = c * clamp(dot(m.rgb, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.0);
     }
     if (lu.clipped != 0u) {
-        c = c * textureLoad(clip_tex, p, 0).a;
+        var base = textureLoad(clip_tex, p, 0).a;
+        if (lu.clip_masked > 0.5) {
+            // the base as its mask shows it
+            base = base * clamp(dot(textureLoad(clip_mask_tex, p, 0).rgb, vec3<f32>(0.299, 0.587, 0.114)), 0.0, 1.0);
+        }
+        c = c * base;
     }
     if (lu.tint.a > 0.0) {
         // screen, premultiplied: black leaves the layer as it is

@@ -546,7 +546,9 @@ struct LayerUniform {
     /// number + 1; 0: no second), and where it is cut first (0..1; negative: not cut).
     dual: u32,
     dual_threshold: f32,
-    _dual_pad: [u32; 2],
+    /// 1 when the clip base shows through its own mask, which clipping then follows.
+    clip_masked: f32,
+    _dual_pad: u32,
 }
 
 impl Default for LayerUniform {
@@ -576,7 +578,8 @@ impl Default for LayerUniform {
             grain_sharp: 0.0,
             dual: 0,
             dual_threshold: -1.0,
-            _dual_pad: [0; 2],
+            clip_masked: 0.0,
+            _dual_pad: 0,
         }
     }
 }
@@ -893,17 +896,19 @@ enum Op {
     },
     /// `upper` is blended into `lower` and removed from the document; `within` (where `upper` is
     /// painted, if known) is all of `lower` that can change, and all its undo step keeps. Each
-    /// of `masks` (a layer, its mask) is applied to its layer first, in the same step.
+    /// of `masks` (a layer, its mask) is applied to its layer first, in the same step; with
+    /// `drop_lower` (it was hidden), `lower`'s own pixels go first.
     MergeDown {
         upper: LayerId,
         lower: LayerId,
         before: Box<Document>,
         within: Option<IRect>,
         masks: Vec<(LayerId, LayerId)>,
+        drop_lower: bool,
     },
     /// `uppers` (bottom first; groups drawn first) are blended into `lower` in turn, as one step,
     /// and removed from the document; each of `masks` (a layer, its mask) applied to its layer
-    /// first.
+    /// first, and with `drop_lower` (it was hidden) `lower`'s own pixels let go first.
     MergeMany {
         /// Where they are painted, if known: all of `lower` that can change, all the step keeps.
         within: Option<IRect>,
@@ -911,6 +916,7 @@ enum Op {
         lower: LayerId,
         before: Box<Document>,
         masks: Vec<(LayerId, LayerId)>,
+        drop_lower: bool,
     },
     /// Layer `layer` multiplied by its mask `mask` in place; the caller removes the mask once
     /// this is queued (`before` is the document with it).
@@ -1562,7 +1568,7 @@ impl Canvas {
             [&shapes_view, &grains_view, &everything],
             [&shape_sampler, &grain_sampler],
         );
-        let stroke_bind = quad_bind(device, &pipelines.quad_layout, [&stroke_view; 6], &grains_view, &grain_sampler);
+        let stroke_bind = quad_bind(device, &pipelines.quad_layout, [&stroke_view; 7], &grains_view, &grain_sampler);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -1784,7 +1790,7 @@ impl Canvas {
         self.stroke_bind = quad_bind(
             device,
             &self.pipelines.quad_layout,
-            [&self.stroke_view; 6],
+            [&self.stroke_view; 7],
             self.grain_view(),
             &self.grain_sampler,
         );
@@ -2355,21 +2361,23 @@ impl Canvas {
     /// queued (`before` is the document with it). `within`: where `upper` is painted, if known
     /// (the undo step keeps only that much of `lower`).
     pub fn merge_down(&mut self, upper: LayerId, lower: LayerId, before: Document, within: Option<IRect>) {
-        self.merge_down_with_masks(upper, lower, Vec::new(), before, within);
+        self.merge_down_with_masks(upper, lower, Vec::new(), false, before, within);
     }
 
     /// [`Canvas::merge_down`], each of `masks` (`upper` or `lower`, and its mask) applied to its
-    /// layer first in the same undo step; the caller removes the masks with `upper`.
+    /// layer first in the same undo step, and with `drop_lower` (it is hidden: only what shows is
+    /// kept) `lower`'s own pixels let go first; the caller removes the masks with `upper`.
     pub fn merge_down_with_masks(
         &mut self,
         upper: LayerId,
         lower: LayerId,
         masks: Vec<(LayerId, LayerId)>,
+        drop_lower: bool,
         before: Document,
         within: Option<IRect>,
     ) {
         self.end_stroke();
-        self.ops.push(Op::MergeDown { upper, lower, before: Box::new(before), within, masks });
+        self.ops.push(Op::MergeDown { upper, lower, before: Box::new(before), within, masks, drop_lower });
         self.invalidate();
     }
 
@@ -2386,21 +2394,23 @@ impl Canvas {
     /// the document with them).
     /// `within`: where they are painted, if known (the undo step keeps only that much of `lower`).
     pub fn merge_layers(&mut self, uppers: Vec<LayerId>, lower: LayerId, before: Document, within: Option<IRect>) {
-        self.merge_layers_with_masks(uppers, lower, Vec::new(), before, within);
+        self.merge_layers_with_masks(uppers, lower, Vec::new(), false, before, within);
     }
 
     /// [`Canvas::merge_layers`], each of `masks` (`lower` or one of `uppers`, and its mask)
-    /// applied to its layer first in the same undo step; the caller removes the masks too.
+    /// applied to its layer first in the same undo step, and with `drop_lower` (it is hidden)
+    /// `lower`'s own pixels let go first; the caller removes the masks too.
     pub fn merge_layers_with_masks(
         &mut self,
         uppers: Vec<LayerId>,
         lower: LayerId,
         masks: Vec<(LayerId, LayerId)>,
+        drop_lower: bool,
         before: Document,
         within: Option<IRect>,
     ) {
         self.end_stroke();
-        self.ops.push(Op::MergeMany { uppers, lower, before: Box::new(before), within, masks });
+        self.ops.push(Op::MergeMany { uppers, lower, before: Box::new(before), within, masks, drop_lower });
         self.invalidate();
     }
 
@@ -2629,7 +2639,7 @@ impl Canvas {
         let mut keep = match (&self.caches, self.shown_frames(doc)) {
             (Some(c), _) => {
                 let mut keep = c.live_layers.clone();
-                keep.extend(c.live.first().and_then(|first| doc.clip_base(*first)));
+                keep.extend(c.live.first().into_iter().flat_map(|first| clip_base_and_mask(doc, *first)));
                 keep
             }
             // the frames shown, while Animation Assist is on
@@ -3727,20 +3737,18 @@ impl Canvas {
                     self.dirty = self.full();
                     history_changed = true;
                 }
-                Op::MergeDown { upper, lower, before, within, masks } => {
-                    // the masks first, each layer kept whole as it was
-                    let mut pixels: Vec<Snapshot> = masks
-                        .iter()
-                        .filter_map(|&(layer, mask)| {
-                            self.masked_in_place(device, &mut encoder, &mut uniforms, layer, mask)
-                        })
-                        .collect();
-                    if masks.iter().any(|&(layer, _)| layer == lower) {
-                        // the lower layer already kept: a second copy would put back the masked one
-                        self.blend_layer_into(device, &mut encoder, &mut uniforms, &before, upper, lower);
-                    } else {
-                        pixels.extend(self.merge(device, &mut encoder, &mut uniforms, &before, upper, lower, within));
-                    }
+                Op::MergeDown { upper, lower, before, within, masks, drop_lower } => {
+                    let opacity = before.layer(lower).map_or(1.0, |l| l.opacity);
+                    let pixels = self.before_merge(
+                        device,
+                        &mut encoder,
+                        &mut uniforms,
+                        (lower, opacity),
+                        &masks,
+                        drop_lower,
+                        within,
+                    );
+                    self.blend_layer_into(device, &mut encoder, &mut uniforms, &before, upper, lower);
                     self.push_step(Step {
                         made: 0,
                         name: None,
@@ -3752,18 +3760,17 @@ impl Canvas {
                     self.dirty = self.full();
                     history_changed = true;
                 }
-                Op::MergeMany { uppers, lower, before, within, masks } => {
-                    // the masks first, each layer kept whole as it was; the lower one, if not
-                    // among them, kept where it can change
-                    let mut pixels: Vec<Snapshot> = masks
-                        .iter()
-                        .filter_map(|&(layer, mask)| {
-                            self.masked_in_place(device, &mut encoder, &mut uniforms, layer, mask)
-                        })
-                        .collect();
-                    if !masks.iter().any(|&(layer, _)| layer == lower) {
-                        pixels.extend(self.snapshot(device, &mut encoder, lower, within.unwrap_or(self.full())));
-                    }
+                Op::MergeMany { uppers, lower, before, within, masks, drop_lower } => {
+                    let opacity = before.layer(lower).map_or(1.0, |l| l.opacity);
+                    let pixels = self.before_merge(
+                        device,
+                        &mut encoder,
+                        &mut uniforms,
+                        (lower, opacity),
+                        &masks,
+                        drop_lower,
+                        within,
+                    );
                     for upper in uppers {
                         if before.layer(upper).is_some_and(|l| l.kind == LayerKind::Group) {
                             self.draw_group_onto(device, &mut encoder, &mut uniforms, &before, upper, lower);
@@ -4210,7 +4217,7 @@ impl Canvas {
             let second = if stroke.second.is_some() { self.second_stroke.get(device).1 } else { &self.stroke_view };
             let stroke_view = &self.stroke_view;
             let quad = |layer: &wgpu::TextureView| {
-                let views = [layer, stroke_view, stroke_view, stroke_view, stroke_view, second];
+                let views = [layer, stroke_view, stroke_view, stroke_view, stroke_view, second, stroke_view];
                 quad_bind(device, &self.pipelines.quad_layout, views, self.grain_view(), &self.grain_sampler)
             };
             match (stroke.style.tool, locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
@@ -4269,22 +4276,43 @@ impl Canvas {
         self.dirty = self.dirty.union(rect);
     }
 
-    /// Blends `upper` into `lower` with its mode, opacity and clipping (as `doc` has them).
-    /// Returns `lower`'s previous pixels.
-    fn merge(
-        &mut self,
+    /// Before layers are blended into `lower` (the layer, and its opacity): each of `masks`
+    /// applied to its layer, and `lower` made as it showed: through its mask and at its opacity,
+    /// or, with `drop_lower` (it was hidden), its pixels let go. Returns what the step keeps: each
+    /// layer changed so whole as it was (once each: a second copy would put back a changed one),
+    /// else `lower` where the merge can change it (`within`; nothing for an empty box).
+    #[allow(clippy::too_many_arguments)]
+    fn before_merge(
+        &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &mut UniformData,
-        doc: &Document,
-        upper: LayerId,
-        lower: LayerId,
+        (lower, opacity): (LayerId, f32),
+        masks: &[(LayerId, LayerId)],
+        drop_lower: bool,
         within: Option<IRect>,
-    ) -> Option<Snapshot> {
-        // nothing painted on it: nothing to keep (an empty box), nor anything that changes
-        let snapshot = self.snapshot(device, encoder, lower, within.unwrap_or(self.full()));
-        self.blend_layer_into(device, encoder, uniforms, doc, upper, lower)?;
-        snapshot
+    ) -> Vec<Snapshot> {
+        let mut pixels: Vec<Snapshot> = masks
+            .iter()
+            .filter(|&&(layer, _)| layer != lower)
+            .filter_map(|&(layer, mask)| self.masked_in_place(device, encoder, uniforms, layer, mask))
+            .collect();
+        let lower_mask = masks.iter().find(|&&(layer, _)| layer == lower).map(|&(_, mask)| mask);
+        let opacity = opacity.clamp(0.0, 1.0);
+        if drop_lower || lower_mask.is_some() || opacity < 1.0 {
+            pixels.extend(self.snapshot(device, encoder, lower, self.full()));
+            if drop_lower {
+                if let Some(layer) = self.layers.get(&lower) {
+                    let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
+                    drop(render_pass(encoder, "hidden let go", &layer.view, clear));
+                }
+            } else {
+                self.redraw_in_place(device, encoder, uniforms, lower, lower_mask, opacity);
+            }
+        } else {
+            pixels.extend(self.snapshot(device, encoder, lower, within.unwrap_or(self.full())));
+        }
+        pixels
     }
 
     /// Layer `upper` of `doc` blended into layer `lower` with its opacity, mode and clipping.
@@ -4351,13 +4379,32 @@ impl Canvas {
         mask: LayerId,
     ) -> Option<Snapshot> {
         let snapshot = self.snapshot(device, encoder, layer, self.full());
+        self.redraw_in_place(device, encoder, uniforms, layer, Some(mask), 1.0)?;
+        snapshot
+    }
+
+    /// Layer `layer` drawn again in place through `mask` (its brightness), if any, and at
+    /// `opacity`, by way of the scratch texture.
+    fn redraw_in_place(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        layer: LayerId,
+        mask: Option<LayerId>,
+        opacity: f32,
+    ) -> Option<()> {
         let target = self.layers.get(&layer)?;
-        let mask_view = &self.layers.get(&mask)?.view;
-        let offset = uniforms.push(&LayerUniform { opacity: 1.0, masked: 1.0, ..Default::default() });
         let none = &self.stroke_view;
-        let bind = self.quad_masked(device, [&target.view, none, none, none], mask_view);
+        let mask_view = match mask {
+            Some(m) => Some(&self.layers.get(&m)?.view),
+            None => None,
+        };
+        let masked = if mask_view.is_some() { 1.0 } else { 0.0 };
+        let offset = uniforms.push(&LayerUniform { opacity, masked, ..Default::default() });
+        let bind = self.quad_masked(device, [&target.view, none, none, none], mask_view.unwrap_or(none), none);
         let (scratch, scratch_view) = self.scratch.get(device);
-        let mut pass = render_pass(encoder, "apply mask", scratch_view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+        let mut pass = render_pass(encoder, "redraw", scratch_view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
         pass.set_pipeline(&self.pipelines.layer);
         pass.set_bind_group(0, &bind, &[]);
         pass.set_bind_group(1, &self.uniform_bind, &[offset]);
@@ -4368,7 +4415,7 @@ impl Canvas {
             copy_at(&target.texture, 0, 0),
             extent(self.width, self.height),
         );
-        snapshot
+        Some(())
     }
 
     /// Group `group` of `doc` composited and copied into layer `into` (a new layer).
@@ -4990,7 +5037,7 @@ impl Canvas {
         // to), and what is cached when it is made again
         let mut needed: Vec<LayerId> =
             tops.get(live.clone()).unwrap_or_default().iter().flat_map(|t| item_layers(doc, *t)).collect();
-        needed.extend(tops.get(live.start).and_then(|first| doc.clip_base(*first)));
+        needed.extend(tops.get(live.start).into_iter().flat_map(|first| clip_base_and_mask(doc, *first)));
         if remake_below {
             needed.extend(below_items.iter().flat_map(|t| item_layers(doc, *t)));
         }
@@ -5004,7 +5051,7 @@ impl Canvas {
             // go before the next comes back; the composite waits for it
             let mut keep: HashSet<LayerId> =
                 tops.get(live.clone()).unwrap_or_default().iter().flat_map(|t| item_layers(doc, *t)).collect();
-            keep.extend(tops.get(live.start).and_then(|first| doc.clip_base(*first)));
+            keep.extend(tops.get(live.start).into_iter().flat_map(|first| clip_base_and_mask(doc, *first)));
             keep.extend(self.active.map(|a| a.layer));
             keep.extend(self.held.as_ref().map(|h| h.layer));
             self.restore_all(gpu, keep.iter().copied().collect::<Vec<_>>(), false);
@@ -5192,7 +5239,7 @@ impl Canvas {
             let mut staged = 0;
             while let Some(&item) = items.get(at) {
                 let mut more = item_layers(doc, item);
-                more.extend(doc.clip_base(item));
+                more.extend(clip_base_and_mask(doc, item));
                 // the time counts bringing layers back, not the compositing after: the count
                 // keeps a part whose layers come back quickly from compositing too long
                 let late = std::time::Instant::now() >= deadline;
@@ -5535,6 +5582,12 @@ impl Canvas {
         }
         let Some(gpu_layer) = self.layers.get(&layer.id) else { return };
         let clip_view = clip.and_then(|id| self.layers.get(&id)).map_or(&self.stroke_view, |c| &c.view);
+        // clipping follows the base as its mask shows it
+        let clip_mask_view = clip
+            .and_then(|b| doc.mask_of(b))
+            .filter(|m| doc.layer(*m).is_some_and(|l| l.visible))
+            .and_then(|m| self.layers.get(&m))
+            .map(|m| &m.view);
         let mask = doc.mask_of(layer.id).filter(|m| doc.layer(*m).is_some_and(|l| l.visible));
         let mask_view = mask.and_then(|m| self.layers.get(&m)).map(|m| &m.view);
         // the stroke being drawn shows on its layer, or through the mask it is painting
@@ -5555,6 +5608,7 @@ impl Canvas {
             stroke_opacity: stroke.map_or(0.0, |s| s.style.opacity.clamp(0.0, 1.0)),
             blend: layer.blend.id(),
             clipped: u32::from(clip.is_some()),
+            clip_masked: if clip_mask_view.is_some() { 1.0 } else { 0.0 },
             masked: if mask_view.is_some() { 1.0 } else { 0.0 },
             stroke_on_mask: if stroke.is_some_and(|s| Some(s.layer) == mask) { 1.0 } else { 0.0 },
             ..Default::default()
@@ -5568,7 +5622,7 @@ impl Canvas {
             uniforms,
             rect,
             &gpu_layer.view,
-            Some(clip_view),
+            Some((clip_view, clip_mask_view.unwrap_or(&self.stroke_view))),
             mask_view,
             uniform,
             layer.blend,
@@ -5587,7 +5641,7 @@ impl Canvas {
         uniforms: &mut UniformData,
         rect: IRect,
         view: &wgpu::TextureView,
-        clip: Option<&wgpu::TextureView>,
+        clip: Option<(&wgpu::TextureView, &wgpu::TextureView)>,
         mask: &wgpu::TextureView,
         uniform: LayerUniform,
         blend: BlendMode,
@@ -5595,10 +5649,11 @@ impl Canvas {
         current: &mut usize,
     ) {
         let offset = uniforms.push(&uniform);
-        let clip = clip.unwrap_or(&self.stroke_view);
+        // the base clipped to and its mask
+        let (clip, clip_mask) = clip.unwrap_or((&self.stroke_view, &self.stroke_view));
         let first = stack.first.1;
         if blend == BlendMode::Normal {
-            let bind = self.quad_masked(device, [view, &self.stroke_view, clip, &self.stroke_view], mask);
+            let bind = self.quad_masked(device, [view, &self.stroke_view, clip, &self.stroke_view], mask, clip_mask);
             let target = if *current == 0 { first } else { stack.second().1 };
             let mut pass = render_pass(encoder, "layer", target, wgpu::LoadOp::Load);
             scissor(&mut pass, rect);
@@ -5609,7 +5664,7 @@ impl Canvas {
         } else {
             let second = stack.second().1;
             let (backdrop, target) = if *current == 0 { (first, second) } else { (second, first) };
-            let bind = self.quad_masked(device, [view, &self.stroke_view, clip, backdrop], mask);
+            let bind = self.quad_masked(device, [view, &self.stroke_view, clip, backdrop], mask, clip_mask);
             let mut pass = render_pass(encoder, "blend", target, wgpu::LoadOp::Load);
             scissor(&mut pass, rect);
             pass.set_pipeline(&self.pipelines.blend);
@@ -6580,21 +6635,22 @@ impl Canvas {
     /// A bind group of four textures (layer, stroke, clip base, backdrop) plus the grains.
     fn quad(&self, device: &wgpu::Device, views: [&wgpu::TextureView; 4]) -> wgpu::BindGroup {
         let [a, b, c, d] = views;
-        self.quad_masked(device, [a, b, c, d], &self.stroke_view)
+        self.quad_masked(device, [a, b, c, d], &self.stroke_view, &self.stroke_view)
     }
 
-    /// As [`Self::quad`], with the layer's mask.
+    /// As [`Self::quad`], with the layer's mask and the mask of the base it is clipped to.
     fn quad_masked(
         &self,
         device: &wgpu::Device,
         views: [&wgpu::TextureView; 4],
         mask: &wgpu::TextureView,
+        clip_mask: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         let [a, b, c, d] = views;
         quad_bind(
             device,
             &self.pipelines.quad_layout,
-            [a, b, c, d, mask, self.second_view(device)],
+            [a, b, c, d, mask, self.second_view(device), clip_mask],
             self.grain_view(),
             &self.grain_sampler,
         )
@@ -6709,6 +6765,7 @@ impl Pipelines {
                 sampler_entry(5),
                 tex_entry(6),
                 tex_entry(7),
+                tex_entry(8),
             ],
         });
         let brush_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -7776,11 +7833,11 @@ impl<'a> Stack<'a> {
 fn quad_bind(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    views: [&wgpu::TextureView; 6],
+    views: [&wgpu::TextureView; 7],
     grains: &wgpu::TextureView,
     grain_sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
-    let [a, b, c, d, mask, second] = views;
+    let [a, b, c, d, mask, second, clip_mask] = views;
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("layer, stroke, clip, backdrop, grains"),
         layout,
@@ -7793,8 +7850,15 @@ fn quad_bind(
             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(grain_sampler) },
             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(mask) },
             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(second) },
+            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(clip_mask) },
         ],
     })
+}
+
+/// The layer `first` is clipped to, and that layer's mask: what compositing it reads.
+fn clip_base_and_mask(doc: &Document, first: LayerId) -> impl Iterator<Item = LayerId> {
+    let base = doc.clip_base(first);
+    base.into_iter().chain(base.and_then(|b| doc.mask_of(b)))
 }
 
 /// How many images of the user's own each of the shape and grain arrays holds at once.
