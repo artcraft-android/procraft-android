@@ -3017,7 +3017,7 @@ fn library_work_keeps_the_tool_on_a_brush_and_comes_back_saved() {
             let sets = library.len() as u32;
             let set = next(sets);
             let n = library.get(set as usize).map_or(0, |x| x.brushes.len() as u32);
-            let op = next(9);
+            let op = next(10);
             done.push(op);
             match op {
                 0 => _ = s.duplicate_brush(set, next(n)),
@@ -3038,6 +3038,7 @@ fn library_work_keeps_the_tool_on_a_brush_and_comes_back_saved() {
                 5 => _ = s.swap_dual_brush(set, next(n)),
                 6 => _ = s.select_brush(set, next(n)),
                 7 => s.set_tool([ToolKind::Paint, ToolKind::Erase, ToolKind::Smudge][next(3) as usize]),
+                8 => _ = s.move_brush_set(set, next(sets)),
                 _ => _ = s.new_brush(set),
             }
             // the tool is on a brush there is
@@ -3269,6 +3270,42 @@ fn a_brush_moves_to_another_set_and_the_tool_keeps_it() {
     // nowhere to go, or nothing there: refused
     assert!(!s.move_brush(99, 0, 0, 0));
     assert!(!s.move_brush(0, 0, 99, 0));
+}
+
+#[test]
+fn a_set_moves_with_its_brushes_and_the_tools_keep_theirs() {
+    let s = CanvasSession::new(64, 64);
+    let names = |s: &CanvasSession| s.brush_library().into_iter().map(|set| set.name).collect::<Vec<_>>();
+    let before = names(&s);
+    assert!(before.len() >= 4);
+    // the paint brush in the second set, the eraser in the fourth
+    assert!(s.select_brush(1, 2));
+    let painting = s.current_brush().name;
+    s.set_tool(ToolKind::Erase);
+    assert!(s.select_brush(3, 0));
+    let erasing = s.current_brush().name;
+    // the first set down to the third place: the two under it move up one
+    assert!(s.move_brush_set(0, 2));
+    let after = names(&s);
+    assert_eq!(after[..4], [before[1].clone(), before[2].clone(), before[0].clone(), before[3].clone()]);
+    let c = s.current_brush();
+    assert_eq!((c.set, c.index, c.name), (3, 0, erasing));
+    s.set_tool(ToolKind::Paint);
+    let c = s.current_brush();
+    assert_eq!((c.set, c.index, c.name), (0, 2, painting.clone()));
+    // the set a tool is on, up to the top, and past the end: to the bottom
+    assert!(s.move_brush_set(0, 0));
+    assert_eq!(names(&s), after);
+    let last = after.len() as u32 - 1;
+    let brushes: Vec<String> = s.brush_library()[0].brushes.iter().map(|b| b.name.clone()).collect();
+    assert!(s.move_brush_set(0, 99));
+    assert_eq!(names(&s)[last as usize], after[0]);
+    let c = s.current_brush();
+    assert_eq!((c.set, c.name), (last, painting));
+    // its brushes went with it; nothing there, nothing moves
+    let moved: Vec<String> = s.brush_library()[last as usize].brushes.iter().map(|b| b.name.clone()).collect();
+    assert_eq!(moved, brushes);
+    assert!(!s.move_brush_set(99, 0));
 }
 
 #[test]

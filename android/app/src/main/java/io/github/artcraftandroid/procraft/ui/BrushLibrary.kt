@@ -245,13 +245,15 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     // a brush held and dragged: which, where the finger is and where on the brush it took hold
     // (window pixels); and where the sets, the brushes and the lists are on the screen
     var dragged by remember { mutableStateOf<BrushInfo?>(null) }
+    // or a set held and dragged (its place)
+    var draggedSet by remember { mutableStateOf<Int?>(null) }
     var dragAt by remember { mutableStateOf(Offset.Zero) }
     var grab by remember { mutableStateOf(Offset.Zero) }
     val setBounds = remember { mutableStateMapOf<Int, Rect>() }
     val brushBounds = remember { mutableStateMapOf<String, Rect>() }
     var listBounds by remember { mutableStateOf(Rect.Zero) }
-    // the set the dragged brush is over, if any
-    val overSet = dragged?.let { setBounds.entries.firstOrNull { it.value.contains(dragAt) }?.key }
+    // the set the dragged brush or set is over, if any
+    val overSet = if (dragged == null && draggedSet == null) null else setBounds.entries.firstOrNull { it.value.contains(dragAt) }?.key?.takeIf { it != draggedSet }
     fun drop() {
         val b = dragged ?: return
         dragged = null
@@ -263,6 +265,12 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         }
         val target = shown.brushes.firstOrNull { brushBounds["${it.set}-${it.index}"]?.contains(dragAt) == true } ?: return
         vm.moveBrush(b, target.set.toInt(), target.index.toInt())
+    }
+    // a set dropped onto another takes its place
+    fun dropSet() {
+        val from = draggedSet ?: return
+        draggedSet = null
+        setBounds.entries.firstOrNull { it.value.contains(dragAt) }?.key?.let { vm.moveBrushSet(from, it) }
     }
     fun share(b: BrushInfo?) {
         scope.launch { vm.brushFileToShare(b)?.let { shareFile(context, it, "application/octet-stream") } }
@@ -351,7 +359,26 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                             Modifier.fillMaxWidth().height(50.dp).onGloballyPositioned {
                                 setBounds[i] = it.boundsInWindow()
                                 if (selected) setScreenTop = it.positionOnScreen().y
-                            }.clip(RoundedCornerShape(12.dp))
+                            }
+                                // held, it lifts and goes where it is dragged; faint where it was
+                                .alpha(if (draggedSet == i) 0.3f else 1f)
+                                .pointerInput(i) {
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = { at ->
+                                            setMenu = null
+                                            grab = at
+                                            dragAt = (setBounds[i]?.topLeft ?: Offset.Zero) + at
+                                            draggedSet = i
+                                        },
+                                        onDrag = { change, by ->
+                                            change.consume()
+                                            dragAt += by
+                                        },
+                                        onDragEnd = { dropSet() },
+                                        onDragCancel = { draggedSet = null },
+                                    )
+                                }
+                                .clip(RoundedCornerShape(12.dp))
                                 .background(if (overSet == i) Pc.Accent else if (selected) Pc.RowSelected else Pc.SetCell)
                                 .clickable { if (selected) setMenu = i else vm.showSet(i) },
                             verticalAlignment = Alignment.CenterVertically,
@@ -537,6 +564,29 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                         Image(it, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                     }
                     Text(d.name, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(start = 18.dp, top = 11.dp))
+                }
+            }
+            // and the dragged set
+            draggedSet?.let { i ->
+                val set = sets.getOrNull(i) ?: return@let
+                val at = dragAt - grab - listBounds.topLeft
+                Row(
+                    Modifier.offset { IntOffset(at.x.roundToInt(), at.y.roundToInt()) }
+                        .size(with(density) { (setBounds[i]?.width ?: 0f).toDp() }, 50.dp)
+                        .clip(RoundedCornerShape(12.dp)).background(Pc.RowSelected.copy(alpha = 0.9f)),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(PcIcons.SetIcons.getOrElse(set.icon.toInt()) { PcIcons.BrushSet }, contentDescription = null, tint = Color.White, modifier = Modifier.padding(start = 4.dp).requiredSize(40.dp))
+                    Text(
+                        set.name,
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        lineHeight = 16.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = 1.dp, end = 8.dp),
+                    )
                 }
             }
         }

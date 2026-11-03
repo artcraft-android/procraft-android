@@ -3428,6 +3428,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (session?.setBrushSetIcon(i.toUInt(), icon.toUInt()) == true) libraryChanged()
     }
 
+    /** Moves set [from] to place [to] (a set held and dragged onto another); the shown set stays shown. */
+    fun moveBrushSet(from: Int, to: Int) {
+        if (from == to || session?.moveBrushSet(from.toUInt(), to.toUInt()) != true) return
+        shownSet = when {
+            shownSet == from -> to
+            shownSet in (from + 1)..to -> shownSet - 1
+            shownSet in to until from -> shownSet + 1
+            else -> shownSet
+        }
+        libraryChanged()
+    }
+
     fun duplicateBrushSet(i: Int) {
         shownSet = session?.duplicateBrushSet(i.toUInt())?.toInt() ?: return
         libraryChanged()

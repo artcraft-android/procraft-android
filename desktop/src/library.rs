@@ -101,6 +101,20 @@ struct Press {
     last: Pos2,
 }
 
+/// A press on a set, followed until let go: which, where and when it went down, where on it the
+/// press took hold, where the pointer is now, whether it was held still long enough to lift the set,
+/// and whether it moved first (then it is the list's, to scroll).
+#[derive(Clone, Copy)]
+struct SetPress {
+    set: usize,
+    origin: Pos2,
+    since: Instant,
+    grab: Vec2,
+    last: Pos2,
+    lifted: bool,
+    spent: bool,
+}
+
 /// What Delete asks about.
 #[derive(Clone, Copy)]
 enum Deleting {
@@ -126,6 +140,7 @@ pub struct Library {
     deleting: Alert,
     delete_what: Option<Deleting>,
     press: Option<Press>,
+    set_press: Option<SetPress>,
     /// How far each brush is slid (points, left negative), and the brush slid open.
     slid: HashMap<(u32, u32), f32>,
     swiped: Option<(u32, u32)>,
@@ -263,9 +278,14 @@ impl Library {
         let current = session.current_brush();
         let shown = self.shown_set.unwrap_or(current.set as usize).min(library.len().saturating_sub(1));
         self.settle_slides(ctx);
-        // the set a dragged brush is over
+        // the set a dragged brush or set is over
         let dragging = self.press.filter(|p| p.way == Way::Drag);
-        let over_set = dragging.and_then(|p| self.set_rects.iter().find(|(_, r)| r.contains(p.last)).map(|(i, _)| *i));
+        let lifted = self.set_press.filter(|p| p.lifted);
+        let over_set = dragging
+            .map(|p| p.last)
+            .or(lifted.map(|p| p.last))
+            .and_then(|at| self.set_rects.iter().find(|(_, r)| r.contains(at)).map(|(i, _)| *i))
+            .filter(|i| lifted.is_none_or(|p| p.set != *i));
         let mut set_rects = Vec::new();
         let mut brush_rects = Vec::new();
         let mut plus = Rect::NOTHING;
@@ -334,12 +354,42 @@ impl Library {
                         ScrollArea::vertical()
                             .id_salt("library sets")
                             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                            // a lifted set is dragged, not the list
+                            .scroll_source(if lifted.is_some() {
+                                egui::scroll_area::ScrollSource::NONE
+                            } else {
+                                egui::scroll_area::ScrollSource::default()
+                            })
                             .show(ui, |ui| {
                                 ui.add_space(12.0);
                                 for (i, set) in library.iter().enumerate() {
                                     let fill = if over_set == Some(i) { Some(argb(pc::ACCENT)) } else { None };
-                                    let (response, at) = self.set_row(ui, look, session, i, set, i == shown, fill);
+                                    // a lifted set is faint where it was
+                                    let faint = lifted.is_some_and(|p| p.set == i);
+                                    let (response, at) = ui
+                                        .scope(|ui| {
+                                            if faint {
+                                                ui.multiply_opacity(0.3);
+                                            }
+                                            self.set_row(ui, look, session, i, set, i == shown, fill)
+                                        })
+                                        .inner;
                                     set_rects.push((i, at));
+                                    if self.set_press.is_none()
+                                        && self.press.is_none()
+                                        && response.is_pointer_button_down_on()
+                                        && let Some(p) = response.interact_pointer_pos()
+                                    {
+                                        self.set_press = Some(SetPress {
+                                            set: i,
+                                            origin: p,
+                                            since: Instant::now(),
+                                            grab: p - at.min,
+                                            last: p,
+                                            lifted: false,
+                                            spent: false,
+                                        });
+                                    }
                                     if response.clicked() {
                                         set_tapped = Some(i);
                                     }
@@ -401,11 +451,34 @@ impl Library {
                     painter.galley(at.min + vec2(18.0, 11.0), name, Color32::WHITE);
                     ctx.request_repaint();
                 }
+                // and the lifted set
+                if let Some(p) = lifted
+                    && let Some(set) = library.get(p.set)
+                {
+                    let size = self
+                        .set_rects
+                        .iter()
+                        .find(|(s, _)| *s == p.set)
+                        .map_or(vec2(SETS_WIDTH - 24.0, SET_HEIGHT), |(_, r)| r.size());
+                    let at = Rect::from_min_size(p.last - p.grab, size);
+                    let painter = ui.painter_at(lists);
+                    painter.rect_filled(at, 12, argb(pc::ACCENT).gamma_multiply(0.9));
+                    let icon = icons::SET_ICONS.get(set.icon as usize).unwrap_or(&icons::BRUSH_SET);
+                    look.icon(ui, icon, pos2(at.left() + 24.0, at.center().y), 40.0, Color32::WHITE);
+                    let left = at.left() + 4.0 + 40.0 + 1.0;
+                    let name = one_line(ui, &set.name, 14.0, Weight::SemiBold, Color32::WHITE, at.right() - 8.0 - left);
+                    painter.galley(pos2(left, at.center().y - name.size().y / 2.0), name, Color32::WHITE);
+                    ctx.request_repaint();
+                }
             },
         );
         self.set_rects = set_rects;
         self.brush_rects = brush_rects;
         self.follow_press(ctx, session);
+        // a set let go after it was lifted was dragged, not tapped
+        if self.follow_set_press(ctx, session, shown) {
+            set_tapped = None;
+        }
 
         if let Some(i) = set_tapped {
             if i == shown {
@@ -702,6 +775,50 @@ impl Library {
             }
             Way::Undecided | Way::Scroll => {}
         }
+    }
+
+    /// Follows the press on a set: moved first, it is left to the list; held still, the set lifts
+    /// and follows the pointer and, let go over another set, takes its place (the set shown stays
+    /// shown). True when a lifted set was let go.
+    fn follow_set_press(&mut self, ctx: &egui::Context, session: &CanvasSession, shown: usize) -> bool {
+        let Some(mut p) = self.set_press else { return false };
+        let (at, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
+        let at = at.unwrap_or(p.last);
+        if down {
+            if p.lifted {
+                ctx.request_repaint();
+            } else if !p.spent {
+                if (at - p.origin).length() > SLOP {
+                    p.spent = true;
+                } else if p.since.elapsed() >= HOLD {
+                    p.lifted = true;
+                    ctx.request_repaint();
+                } else {
+                    ctx.request_repaint_after(HOLD.saturating_sub(p.since.elapsed()));
+                }
+            }
+            p.last = at;
+            self.set_press = Some(p);
+            return false;
+        }
+        self.set_press = None;
+        if !p.lifted {
+            return false;
+        }
+        if let Some(&(to, _)) = self.set_rects.iter().find(|(_, r)| r.contains(at))
+            && to != p.set
+            && session.move_brush_set(p.set as u32, to as u32)
+        {
+            let from = p.set;
+            self.shown_set = Some(match shown {
+                s if s == from => to,
+                s if s > from && s <= to => s - 1,
+                s if s >= to && s < from => s + 1,
+                s => s,
+            });
+            self.library_changed();
+        }
+        true
     }
 
     /// A set: its icon and its name (two lines at most), or a field renaming it. Returns its

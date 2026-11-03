@@ -741,6 +741,28 @@ impl CanvasSession {
         true
     }
 
+    /// Moves a set to place `to` (counted without it there), its brushes with it; a tool that used
+    /// one of them keeps it.
+    pub fn move_brush_set(&self, set: u32, to: u32) -> bool {
+        let mut st = self.shared.lock();
+        let (s, len) = (set as usize, st.library.len());
+        if s >= len {
+            return false;
+        }
+        let t = (to as usize).min(len - 1);
+        let entry = st.library.remove(s);
+        st.library.insert(t, entry);
+        st.move_brush_refs(|(rs, ri)| {
+            if rs == s {
+                return Some((t, ri));
+            }
+            // out of its old place, then into the new one
+            let rs = if rs > s { rs - 1 } else { rs };
+            Some((if rs >= t { rs + 1 } else { rs }, ri))
+        });
+        true
+    }
+
     /// The library as kept between sessions (JSON).
     pub fn saved_brush_library(&self) -> String {
         let st = self.shared.lock();
