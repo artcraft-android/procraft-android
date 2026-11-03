@@ -4108,6 +4108,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The brush's diameter on the screen now, window pixels. */
     fun brushScreenDiameter(): Float = session?.info()?.let { it.brushDiameter * it.zoom } ?: 0f
 
+    /** The brush's own shape as loops across its diameter (none: the round tip's circle). */
+    fun brushOutline(): List<List<Float>> = session?.brushOutline() ?: emptyList()
+
     fun changeOpacity(value: Float) {
         opacity = value
         session?.setBrushOpacity(value)
