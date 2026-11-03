@@ -517,12 +517,14 @@ impl Interface {
         // the drawing guide's editor: the canvas, the guide and the editor alone
         if self.guide_editor.open {
             self.canvas_rect = Rect::EVERYTHING;
-            guide_lines(&ctx, session);
+            guide_lines(ui.painter(), session);
             self.guide_editor.show(&ctx, &mut self.look, session);
             session.set_backdrops(Vec::new());
             self.popover_open = false;
             return;
         }
+        // the drawing guide over the canvas, under the bars (and shown full screen too)
+        guide_lines(ui.painter(), session);
         if self.bars_hidden {
             // full screen: the canvas alone (the overlays still show)
             self.canvas_rect = Rect::EVERYTHING;
@@ -671,7 +673,6 @@ impl Interface {
         ) {
             self.adjustment_asked(session, asked);
         }
-        guide_lines(&ctx, session);
         let hold = std::time::Duration::from_secs_f32(self.gestures.delay(GesturePurpose::Eyedropper).max(0.0));
         match self.reference.show(&ctx, &mut self.look, session, hold) {
             Some(crate::reference::Picked::Moving { at, side, rgba, rgb }) => {
@@ -2167,16 +2168,17 @@ fn toggle_guide_kind(session: &CanvasSession, kind: procraft_core::GuideType) {
     session.set_guide_kind(kind);
 }
 
-fn guide_lines(ctx: &egui::Context, session: &CanvasSession) {
+/// The drawing guide's lines, painted on `painter`: the main panel's own, before the top bar is, so
+/// that the bar (and everything over the canvas) shows above them, as the canvas under it does.
+fn guide_lines(painter: &egui::Painter, session: &CanvasSession) {
     let g = session.guide();
     if !g.on {
         return;
     }
-    let ppp = ctx.pixels_per_point();
+    let ppp = painter.ctx().pixels_per_point();
     let [r, gr, b] = [0, 1, 2].map(|k| (g.color.get(k).copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8);
     let colour = Color32::from_rgba_unmultiplied(r, gr, b, (g.opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
     let stroke = Stroke::new(0.25 + 1.5 * g.thickness, colour);
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::unique("drawing guide")));
     for &[x0, y0, x1, y1] in g.lines.as_chunks::<4>().0 {
         painter.line_segment([egui::pos2(x0, y0) / ppp, egui::pos2(x1, y1) / ppp], stroke);
     }
