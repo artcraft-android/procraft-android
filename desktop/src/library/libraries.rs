@@ -218,8 +218,8 @@ impl Library {
         true
     }
 
-    /// The title's menu, hanging under it: in a library, Rename it or go back to every library;
-    /// with every library shown, put the shipped one back.
+    /// The title's menu, hanging under it: in a library, Rename it, Share it or go back to every
+    /// library; with every library shown, put the shipped one back.
     pub(super) fn title_menu(
         &mut self,
         ctx: &egui::Context,
@@ -235,6 +235,7 @@ impl Library {
         } else {
             vec![
                 Entry::Item(&icons::MENU_RENAME, "Rename", ink),
+                Entry::Item(&icons::MENU_SHARE, "Share", ink),
                 Entry::Rule(11.0),
                 Entry::Item(&icons::MENU_LIBRARIES, "Back to libraries", ink),
             ]
@@ -253,6 +254,13 @@ impl Library {
                 let name = libraries.get(place).map(|l| l.name.clone()).unwrap_or_default();
                 self.renaming_library = Some((place, name, false));
             }
+            "Share" => {
+                let name = libraries.iter().find(|l| l.current).map_or("Brushes", |l| l.name.as_str());
+                match session.brush_library_as_file() {
+                    Some(bytes) => crate::files::save_file(&bytes, name, "brushlibrary", "Brush library"),
+                    None => crate::files::say("This library has no brushes to share."),
+                }
+            }
             "Back to libraries" => self.showing_libraries = true,
             _ => {
                 self.card_previews.clear();
@@ -263,7 +271,7 @@ impl Library {
         }
     }
 
-    /// The plus's menu with every library shown: a new library.
+    /// The plus's menu with every library shown: a new library, or one from a file.
     pub(super) fn libraries_plus_menu(
         &mut self,
         ctx: &egui::Context,
@@ -272,7 +280,10 @@ impl Library {
         plus: Rect,
         backdrops: &mut Vec<f32>,
     ) {
-        let entries = [Entry::Item(&icons::MENU_NEW_LIBRARY, "Create new library", menu::INK)];
+        let entries = [
+            Entry::Item(&icons::MENU_NEW_LIBRARY, "Create new library", menu::INK),
+            Entry::Item(&icons::MENU_FOLDER, "Import from Files", menu::INK),
+        ];
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
         let rect = Rect::from_min_size(pos2(plus.right() - size.x, plus.bottom()), size);
         let mut tapped = None;
@@ -287,12 +298,16 @@ impl Library {
                 tapped = menu::entries(ui, look, rect, &entries);
             },
         );
-        if tapped.is_some() {
-            self.libraries_plus.close();
-            self.card_previews.clear();
+        let Some(tapped) = tapped else { return };
+        self.libraries_plus.close();
+        self.card_previews.clear();
+        if tapped == 0 {
             if session.new_brush_library().is_none() {
                 log::error!("a new brush library couldn't be made");
             }
+        } else if let Some(file) = crate::files::pick_file("Import a brush library") {
+            // read on a thread of its own, then added as a library and brought into use
+            self.add_brushes(vec![file], true);
         }
     }
 

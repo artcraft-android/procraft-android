@@ -278,6 +278,16 @@ pub fn read_brushes(bytes: Vec<u8>, file_name: Option<String>) -> Option<std::sy
 }
 
 #[uniffi::export]
+impl BrushesRead {
+    /// Whether they are a library of their own: added, it is brought into use, which reads and
+    /// writes its files (best off the interface's thread). False once added.
+    pub fn is_library(&self) -> bool {
+        let read = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(*read, Some(ReadBrushes::Library { .. }))
+    }
+}
+
+#[uniffi::export]
 impl CanvasSession {
     /// Adds brushes read meanwhile ([`read_brushes`]) to the library, as
     /// [`CanvasSession::add_read_brushes`] does (one of ours from before into set `shown`).

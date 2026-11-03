@@ -844,13 +844,19 @@ internal class MenuPlace(private val top: Int = 0, private val place: (IntRect, 
     }
 }
 
-/** A library's title menu: rename it, or go back to every library's card. */
+/** A library's title menu: rename it, share it, or go back to every library's card. */
 @Composable
 private fun LibraryTitleMenu(vm: CanvasViewModel, open: Boolean, onDismiss: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     LibraryMenu(open, androidx.compose.ui.graphics.TransformOrigin(0f, 0f), MenuPlace { a, _ -> IntOffset(a.left, a.bottom) }, onDismiss = onDismiss, overPanel = true) {
         MenuItem(PcIcons.MenuRename, "Rename") {
             onDismiss()
             vm.renamingLibrary = vm.libraryPlace
+        }
+        MenuItem(PcIcons.MenuShare, "Share") {
+            onDismiss()
+            scope.launch { vm.libraryFileToShare()?.let { shareFile(context, it, "application/octet-stream") } }
         }
         MenuDivider(11.dp)
         MenuItem(PcIcons.MenuLibraries, "Back to libraries") {
@@ -868,8 +874,8 @@ private val CardBrushHeight = 30.dp
 
 /**
  * The library popover showing every library's card (tapped, that library is brought into use;
- * held, its menu), with "+" for a new one and the title's menu to put the shipped one back; or a
- * library with no sets yet, with "+" to make one.
+ * held, its menu), with "+" for a new one or one from a file and the title's menu to put the
+ * shipped one back; or a library with no sets yet, with "+" to make one.
  */
 @Composable
 private fun LibrariesPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier) {
@@ -912,6 +918,10 @@ private fun LibrariesPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier) 
                         MenuItem(PcIcons.MenuNewLibrary, "Create new library") {
                             adding = false
                             vm.newLibrary()
+                        }
+                        MenuItem(PcIcons.MenuFolder, "Import from Files") {
+                            adding = false
+                            pick.launch(arrayOf("*/*"))
                         }
                     } else {
                         MenuItem(PcIcons.MenuNewSet, "Create new set") {

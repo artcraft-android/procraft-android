@@ -4714,9 +4714,29 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return file
     }
 
+    /** The library in use written to a library file to share; none (and told) if it has no brushes. */
+    suspend fun libraryFileToShare(): File? {
+        val s = session ?: return null
+        val name = libraryName
+        val file = withContext(Dispatchers.IO) {
+            // put together in memory: running out of it, or a write that fails, is told
+            runCatching {
+                val bytes = s.brushLibraryAsFile() ?: return@runCatching null
+                // in a folder of its own, so another of the same name can't write over it while
+                // it is being shared
+                val dir = File(getApplication<Application>().cacheDir, "exports/${System.nanoTime()}").apply { mkdirs() }
+                val safe = name.replace(Regex("[^A-Za-z0-9 _-]"), "_").ifBlank { "Brushes" }
+                File(dir, "$safe.$BRUSH_LIBRARY_EXTENSION").apply { writeBytes(bytes) }
+            }.getOrNull()
+        }
+        if (file == null) showNotice("This library couldn't be shared.", warning = true)
+        return file
+    }
+
     /**
-     * A brush or set file from elsewhere, with the import card: it joins the library and its set
-     * is shown (not if the card's Cancel was tapped meanwhile).
+     * A brush, set or library file from elsewhere, with the import card: it joins the library and
+     * its set is shown, or comes in as a library of its own, in use (not if the card's Cancel was
+     * tapped meanwhile).
      */
     fun importBrushes(uri: android.net.Uri) {
         viewModelScope.launch {
@@ -4776,6 +4796,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (studioOpen || brushQuestionOpen || brushesRead.isEmpty()) return
         if (shownSet == RECENT_SET) shownSet = currentBrush?.set?.toInt() ?: 0
         for (read in brushesRead.toList()) {
+            // a library of its own is brought into use off the main thread (its files written)
+            if (read.isLibrary()) {
+                libraryWork(true, "This library couldn't be added.") { it.addBrushesRead(read, 0u) != null }
+                continue
+            }
             s.addBrushesRead(read, shownSet.toUInt())?.let { shownSet = it.toInt() }
         }
         brushesRead.clear()
@@ -7966,6 +7991,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         /** Brush and brush set files, as other painting apps share them. */
         const val BRUSH_EXTENSION = "brush"
         const val BRUSH_SET_EXTENSION = "brushset"
+        const val BRUSH_LIBRARY_EXTENSION = "brushlibrary"
         /** Other apps' brush files: Photoshop's, GIMP's brushes, pipes and generated brushes, Krita's presets and bundles, Clip Studio's sub tools and their groups. */
         val OTHER_BRUSH_EXTENSIONS = listOf("abr", "gbr", "gih", "vbr", "kpp", "bundle", "sut", "sutg")
         val PACKAGE_LABEL = PACKAGE_EXTENSION.replaceFirstChar(Char::titlecase)

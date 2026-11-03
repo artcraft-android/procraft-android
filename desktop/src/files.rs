@@ -103,11 +103,11 @@ pub fn say(text: &str) {
     MessageDialog::new().set_level(MessageLevel::Info).set_title("ProCraft").set_description(text).show();
 }
 
-/// Whether the file at `path` holds brushes, by its name (a zip by what it holds): ours (a brush
-/// or a set) or another app's.
+/// Whether the file at `path` holds brushes, by its name (a zip by what it holds): ours (a brush,
+/// a set or a library) or another app's.
 pub fn is_brush_file(path: &Path) -> bool {
     let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    ["brush", "brushset"].contains(&extension.as_str())
+    ["brush", "brushset", "brushlibrary"].contains(&extension.as_str())
         || procraft_core::OTHER_BRUSH_EXTENSIONS.contains(&extension.as_str())
         // a brush or a set sent on as a plain zip (told by its names, not read whole)
         || (extension == "zip"
@@ -486,7 +486,8 @@ pub fn is_palette_file(path: &Path) -> bool {
 /// The files the gallery's Import brings in, as the user picks them: an artwork or a model (as
 /// [`pick_artwork`] takes), palettes and brushes.
 pub fn pick_import() -> Option<Vec<PathBuf>> {
-    let brushes: Vec<&str> = ["brush", "brushset"].into_iter().chain(procraft_core::OTHER_BRUSH_EXTENSIONS).collect();
+    let brushes: Vec<&str> =
+        ["brush", "brushset", "brushlibrary"].into_iter().chain(procraft_core::OTHER_BRUSH_EXTENSIONS).collect();
     let more: Vec<&str> = PALETTE_EXTENSIONS.into_iter().chain(brushes).collect();
     pick_artwork_files(&more)
 }
