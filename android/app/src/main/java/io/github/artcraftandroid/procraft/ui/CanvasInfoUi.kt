@@ -252,7 +252,7 @@ fun CanvasInfo(vm: CanvasViewModel) {
                     Spacer(Modifier.height(21.dp))
                     Rows(listOf("Layers used" to "${l.used}", "Layers available" to "${(l.maximum.toInt() - l.used.toInt()).coerceAtLeast(0)}"))
                     Spacer(Modifier.height(21.dp))
-                    Rows(listOf("Assisted layers" to "0", "Clipping layers" to "${l.clipping}", "Layer masks" to "${l.masks}", "Layer groups" to "${l.groups}"))
+                    Rows(listOf("Assisted layers" to "${l.assisted}", "Clipping layers" to "${l.clipping}", "Layer masks" to "${l.masks}", "Layer groups" to "${l.groups}"))
                 }
                 3 -> {
                     Rows(listOf("Current color profile" to session.profile()), tall = 44)

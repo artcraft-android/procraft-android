@@ -321,7 +321,7 @@ impl CanvasInfo {
                 );
                 ui.add_space(21.0);
                 let kinds = [
-                    ("Assisted layers", "0".to_owned()),
+                    ("Assisted layers", l.assisted.to_string()),
                     ("Clipping layers", l.clipping.to_string()),
                     ("Layer masks", l.masks.to_string()),
                     ("Layer groups", l.groups.to_string()),

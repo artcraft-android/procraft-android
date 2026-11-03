@@ -220,6 +220,8 @@ pub struct LayerStats {
     pub maximum: u32,
     /// Layers with pixels it has.
     pub used: u32,
+    /// Layers drawn with the drawing guide's help (Drawing Assist on).
+    pub assisted: u32,
     pub clipping: u32,
     pub masks: u32,
     pub groups: u32,
@@ -300,6 +302,7 @@ impl CanvasSession {
         LayerStats {
             maximum: count(d.layer_cap()),
             used: count(d.pixel_layer_ids().count()),
+            assisted: count(d.layers().iter().filter(|l| l.assisted).count()),
             clipping: count(d.layers().iter().filter(|l| l.clipped).count()),
             masks: kind(LayerKind::Mask),
             groups: kind(LayerKind::Group),

@@ -1061,6 +1061,10 @@ fn artworks_save_and_open() {
     let stats = s.layer_stats();
     assert_eq!((stats.used, stats.masks, stats.groups), (2, 0, 0));
     assert!(stats.maximum >= stats.used);
+    // a layer with Drawing Assist on counts as assisted
+    assert_eq!(stats.assisted, 0);
+    s.set_guide_assisted(true);
+    assert_eq!(s.layer_stats().assisted, 1);
     let dir = std::env::temp_dir().join(format!("procraft-save-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     s.save(dir.to_string_lossy().into_owned()).unwrap();
