@@ -350,9 +350,11 @@ impl ApplicationHandler for App {
             }
             event => {
                 let Some(session) = session else { return };
-                // with a popover open, a press on the canvas only closes it; while the artwork is
-                // being exported none reaches it (nothing the export would end is started)
-                let blocked = self.ui.popover_open || files::exporting_since().is_some();
+                // with a popover open, a press on the canvas only closes it (a brush library alone
+                // closes and paints); while the artwork is being exported none reaches it
+                // (nothing the export would end is started)
+                let blocked =
+                    (self.ui.popover_open && !self.ui.library_lets_paint) || files::exporting_since().is_some();
                 let canvas = self.ui.canvas_rect;
                 let over = |p: (f32, f32)| blocked || screen.over_interface(p, canvas);
                 if self.input.on_event(&session, &event, response.consumed, over) {

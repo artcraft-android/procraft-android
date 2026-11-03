@@ -55,6 +55,18 @@ pub struct Selection {
     pictures: HashMap<u32, TextureHandle>,
 }
 
+impl Selection {
+    /// The icon of how it selects now, for the pointer over the canvas.
+    pub fn kind_icon(&self) -> &'static icons::Icon {
+        match self.kind {
+            SelectKind::Automatic => &icons::AUTOMATIC,
+            SelectKind::Freehand => &icons::FREEHAND,
+            SelectKind::Rectangle => &icons::RECTANGLE_SHAPE,
+            SelectKind::Ellipse => &icons::ELLIPSE_SHAPE,
+        }
+    }
+}
+
 impl Default for Selection {
     fn default() -> Selection {
         Selection {

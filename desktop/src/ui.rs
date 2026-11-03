@@ -62,6 +62,9 @@ pub struct Interface {
     pub canvas_rect: Rect,
     /// A popover is open: a press on the canvas only closes it.
     pub popover_open: bool,
+    /// Only a brush library is open (none of its menus): a press on the canvas closes it and
+    /// paints, as a mouse is used (on the tablet such a tap only closes it).
+    pub library_lets_paint: bool,
     /// The file the artwork was last saved to (or opened from, if it saves back there).
     pub path: Option<PathBuf>,
     /// The artwork's edits when it was last saved: anything else is unsaved.
@@ -169,6 +172,7 @@ impl Default for Interface {
             actions: Vec::new(),
             canvas_rect: Rect::EVERYTHING,
             popover_open: false,
+            library_lets_paint: false,
             path: None,
             saved_edits: 0,
             saving: None,
@@ -572,6 +576,7 @@ impl Interface {
             session.set_pick_next(!session.pick_next());
         }
         self.hover_cursor(&ctx, session, &info, input);
+        self.selection_pointer(&ctx, input);
         if let Some(kind) = self.overlays.show(ui, &mut self.look, colour, true) {
             self.overlays.shape = session.quickshape_choose(kind).or(self.overlays.shape.take());
         }
@@ -679,6 +684,8 @@ impl Interface {
             ctx.set_cursor_icon(egui::CursorIcon::Grab);
         }
         self.popover_open = self.open.is_some() || self.settings || self.text.editing();
+        self.library_lets_paint =
+            self.open == Some(Popover::Brushes) && !self.settings && !self.text.editing() && !self.library.modal();
     }
 
     /// The touch companion, with its switch on in Advanced settings.
@@ -843,6 +850,43 @@ impl Interface {
         if !self.text.add(ctx, session, self.colours.rgb()) {
             crate::files::no_room(session);
         }
+    }
+
+    /// While selecting, the pointer over the canvas shows how: a fine cross where it points and
+    /// the selection's kind beside it (wand, lasso, rectangle, ellipse), in place of the system's
+    /// pointer. The desktop's own, as a mouse is used (the tablet shows none).
+    fn selection_pointer(&mut self, ctx: &egui::Context, input: &Input) {
+        if !self.selection.on || self.popover_open || !input.inside() {
+            return;
+        }
+        let ppp = ctx.pixels_per_point();
+        let Some(at) = input.cursor().map(|(x, y)| egui::pos2(x, y) / ppp) else { return };
+        if !self.canvas_rect.contains(at) || ctx.layer_id_at(at).is_some_and(|l| l.order != egui::Order::Background) {
+            return;
+        }
+        ctx.set_cursor_icon(egui::CursorIcon::None);
+        let icon = self.selection.kind_icon();
+        let look = &mut self.look;
+        egui::Area::new(egui::Id::unique("selection pointer"))
+            .order(egui::Order::Tooltip)
+            .interactable(false)
+            .fixed_pos(at)
+            .show(ctx, |ui| {
+                let painter = ui.painter();
+                // a fine cross, dark on a light edge
+                for (width, colour) in [(3.0, Color32::WHITE), (1.0, Color32::BLACK)] {
+                    let stroke = egui::Stroke::new(width, colour);
+                    painter.line_segment([at - egui::vec2(7.0, 0.0), at + egui::vec2(7.0, 0.0)], stroke);
+                    painter.line_segment([at - egui::vec2(0.0, 7.0), at + egui::vec2(0.0, 7.0)], stroke);
+                }
+                // the kind below right of it, dark in a light halo (seen on any colour)
+                let beside = at + egui::vec2(20.0, 20.0);
+                for nudge in [(-1.5, 0.0), (1.5, 0.0), (0.0, -1.5), (0.0, 1.5)] {
+                    look.icon(ui, icon, beside + egui::vec2(nudge.0, nudge.1), 26.0, Color32::WHITE);
+                }
+                look.icon(ui, icon, beside, 26.0, Color32::from_gray(0x20));
+            });
+        ctx.request_repaint();
     }
 
     /// The brush's outline where the mouse hovers over the canvas, as the pen's hover shows it,

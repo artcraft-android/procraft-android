@@ -70,6 +70,11 @@ impl Input {
         self.cursor
     }
 
+    /// Whether the mouse is over the window.
+    pub fn inside(&self) -> bool {
+        self.inside
+    }
+
     pub fn hovering(&self) -> Option<(f32, f32)> {
         self.cursor.filter(|_| self.inside && self.down.is_empty() && !self.panning && !self.space)
     }
