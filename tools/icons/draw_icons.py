@@ -158,6 +158,15 @@ def plus():
     return unary_union([capsule((12, 4), (12, 20), 1.3), capsule((4, 12), (20, 12), 1.3)])
 
 
+def text_layer():
+    """A text layer's thumbnail: a capital A whose right side stands upright and whose left leans."""
+    return unary_union([
+        capsule((16, 4), (16, 20), 1.25),
+        capsule((16, 4), (-3, 20), 1.25),
+        capsule((5, 14.4), (16, 14.4), 1.1),
+    ])
+
+
 def canvas_tab():
     """Canvas: a canvas's frame with a stroke across it."""
     return unary_union([frame(3, 4, 21, 20, 2.2, 2.0), capsule((7.5, 15.5), (16.5, 8.5), 1.3)])
@@ -1530,7 +1539,7 @@ DRAWINGS = {
     'halftonescreen': halftone_screen, 'halftonenews': newspaper, 'chromaperspective': outward_arrows,
     'chromadisplace': displaced, 'glitchartifact': blocky, 'glitchwave': square_wave, 'glitchsignal': static_screen,
     'glitchdiverge': fork, 'grainmoving': moving_grain, 'graintexturized': grain_tile, 'brushpaintedon': painted_on,
-    'swipe-share': share_tab, 'swipe-duplicate': duplicate,
+    'swipe-share': share_tab, 'swipe-duplicate': duplicate, 'textlayer': text_layer,
 }
 DRAWINGS.update({f'set-{k}': draw for k, draw in enumerate(SET_ICONS)})
 DRAWINGS.update({f'blend-{k}': draw for k, draw in BLENDS.items()})

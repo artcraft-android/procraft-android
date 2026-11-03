@@ -132,27 +132,26 @@ fn layer_options(l: &LayerInfo, masked: bool) -> Vec<LayerOptionRow> {
         LayerType::Paint => {
             row(O::Select, "Select", true, None);
             row(O::Copy, "Copy", true, None);
-            // a text layer's pixels come from its text
+            // a text layer's pixels come from its text: nothing to fill, clear, lock or invert
             if !l.text {
                 row(O::Fill, "Fill Layer", unlocked, None);
                 row(O::Clear, "Clear", unlocked, None);
+                row(O::AlphaLock, "Alpha Lock", true, Some(l.alpha_lock));
             }
-            row(O::AlphaLock, "Alpha Lock", true, Some(l.alpha_lock));
             row(O::Mask, "Mask", !masked, None);
             if l.can_clip {
                 row(O::ClippingMask, "Clipping Mask", true, Some(l.clipped));
             }
-            // offered with the drawing guide on or off
-            row(O::DrawingAssist, "Drawing Assist", true, Some(l.assisted));
-            if !l.text {
+            if l.text {
+                row(O::EditText, "Edit Text", unlocked, None);
+                row(O::Rasterize, "Rasterize", unlocked, None);
+            } else {
+                // offered with the drawing guide on or off
+                row(O::DrawingAssist, "Drawing Assist", true, Some(l.assisted));
                 row(O::Invert, "Invert", unlocked, None);
             }
             row(O::Reference, "Reference", true, Some(l.reference));
         }
-    }
-    if l.text {
-        row(O::EditText, "Edit Text", unlocked, None);
-        row(O::Rasterize, "Rasterize", unlocked, None);
     }
     if l.kind != LayerType::Mask {
         if l.can_merge {

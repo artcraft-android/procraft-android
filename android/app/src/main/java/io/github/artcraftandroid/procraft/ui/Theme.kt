@@ -67,6 +67,8 @@ object Pc {
     val BackgroundRow: Color get() = pick(0x0DFFFFFF, 0xFFD8D8D8)
     val CheckFill: Color get() = pick(0xFFC7C7C7, 0xFF575757)
     val ThumbBackground: Color get() = pick(0xFF4F4F4F, 0xFFC8C8C8)
+    /** A text layer's glyph on its thumbnail. */
+    val TextLayerGlyph: Color get() = pick(0xFFB8B8B8, 0xFF000000)
     // the brush library is glass like the other panels: the sets on the panel's own frost, the
     // brushes a shade darker, the set cells a little lighter (measured over white and over the
     // dark surround: 58 / 31, 52 / 26, 64 / 42)

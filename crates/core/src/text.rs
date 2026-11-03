@@ -109,6 +109,39 @@ impl From<TextInfo> for LayerText {
 /// How many finished text edits are remembered for undo and redo to edit again.
 const TEXT_STEPS_KEPT: usize = 256;
 
+/// New text as it looks on screen whatever the zoom (as measured): letters this many points
+/// tall, its box this many points wide, centred across the window this far down it.
+const NEW_TEXT_POINTS: f32 = 64.0;
+const NEW_TEXT_BOX_POINTS: f32 = 488.448;
+const NEW_TEXT_DOWN: f32 = 0.25;
+
+#[uniffi::export]
+impl CanvasSession {
+    /// `base` (its words and look) placed as new text in a window `width` × `height` pixels,
+    /// `density` pixels a point: its letters and box sized so they look the same at any zoom,
+    /// the box centred across the window, its middle a quarter of the way down, kept on the
+    /// canvas.
+    pub fn new_text_placed(&self, base: TextInfo, width: f32, height: f32, density: f32) -> TextInfo {
+        let m = self.view_matrix();
+        let [a, b, c, d, e, f] =
+            <[f32; 6]>::try_from(m.get(..6).unwrap_or_default()).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        // canvas pixels a window point, at the view's zoom (turned or not)
+        let shown = a.hypot(b).max(1e-6);
+        let per_point = density.max(0.1) / shown;
+        // the window point the box is centred on, on the canvas
+        let det = a * d - b * c;
+        let (x, y) = (width / 2.0 - e, height * NEW_TEXT_DOWN - f);
+        let (cx, cy) = if det.abs() < 1e-9 { (0.0, 0.0) } else { ((d * x - c * y) / det, (a * y - b * x) / det) };
+        let size = NEW_TEXT_POINTS * per_point;
+        let box_width = NEW_TEXT_BOX_POINTS * per_point;
+        let mut info = TextInfo { size, width: box_width, x: cx - box_width / 2.0, y: 0.0, ..base };
+        let tall = crate::text_draw::text_box(info.clone()).get(3).copied().unwrap_or(size);
+        let canvas_height = self.shared.lock().doc.height() as f32;
+        info.y = (cy - tall / 2.0).clamp(0.0, (canvas_height - tall).max(0.0));
+        info
+    }
+}
+
 #[uniffi::export]
 impl CanvasSession {
     /// Starts editing text: a new text layer above the current one with `info` (`id` none), or

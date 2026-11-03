@@ -36,11 +36,6 @@ const DESIGN_TICK: Themed = Themed(0xFF8A8A8A, 0xFFC8C8C8);
 /// The sheet's words: white, black on the light interface.
 const SHEET_INK: Themed = Themed(0xFFFFFFFF, 0xFF000000);
 
-/// New text: a medium sans this much of the canvas's width tall, in a box as wide as the canvas
-/// times this, centred this far down the window.
-const TEXT_SIZE_OF_WIDTH: f32 = 0.13;
-const TEXT_BOX_OF_WIDTH: f32 = 1.0;
-const TEXT_SCREEN_Y: f32 = 0.24;
 /// From this width the sheet shows its four cards side by side; narrower, in two pages.
 const WIDE_SHEET: f32 = 900.0;
 /// How tall the bar along the bottom is, and the sheet, wide and narrow (its cards wide end 33
@@ -250,14 +245,12 @@ impl TextEditor {
     /// colour `rgb`; false if the canvas has no room for another layer.
     pub fn add(&mut self, ctx: &egui::Context, session: &CanvasSession, rgb: [f32; 3]) -> bool {
         fonts_ready();
-        let c = session.info();
-        let (w, h) = (c.width as f32, c.height as f32);
         let [r, g, b] = rgb;
-        let mut info = TextInfo {
+        let info = TextInfo {
             text: "Text".to_owned(),
             font: "sans-serif".to_owned(),
             style: "Medium".to_owned(),
-            size: w * TEXT_SIZE_OF_WIDTH,
+            size: 0.0,
             kerning: 0.0,
             tracking: 0.0,
             leading: 0.0,
@@ -271,15 +264,13 @@ impl TextEditor {
             r,
             g,
             b,
-            x: w * (1.0 - TEXT_BOX_OF_WIDTH) / 2.0,
+            x: 0.0,
             y: 0.0,
-            width: w * TEXT_BOX_OF_WIDTH,
+            width: 0.0,
         };
-        let tall = procraft_core::text_box(info.clone()).get(3).copied().unwrap_or(0.0);
-        let screen = ctx.content_rect();
-        let at = pos2(screen.center().x, screen.top() + screen.height() * TEXT_SCREEN_Y);
-        let middle = to_canvas(matrix(session), ctx.pixels_per_point(), at).map_or(h / 4.0, |p| p.1);
-        info.y = (middle - tall / 2.0).clamp(0.0, (h - tall).max(0.0));
+        // a medium sans, sized and placed as new text looks on screen
+        let (screen, ppp) = (ctx.content_rect(), ctx.pixels_per_point());
+        let info = session.new_text_placed(info, screen.width() * ppp, screen.height() * ppp, ppp);
         if session.text_begin(None, info.clone()).is_none() {
             return false;
         }

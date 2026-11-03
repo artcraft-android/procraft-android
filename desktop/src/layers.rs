@@ -43,6 +43,8 @@ const LAYER_ROW: Themed = Themed(0x0DFFFFFF, 0xFFD8D8D8);
 const BACKGROUND_ROW: Themed = Themed(0x0DFFFFFF, 0xFFD8D8D8);
 const CHECK_FILL: Themed = Themed(0xFFC7C7C7, 0xFF575757);
 const THUMB_BACKGROUND: Themed = Themed(0xFF4F4F4F, 0xFFC8C8C8);
+/// A text layer's glyph on its thumbnail.
+const TEXT_GLYPH: Themed = Themed(0xFFB8B8B8, 0xFF000000);
 const THUMB: (f32, f32) = (93.0, 61.0);
 /// On a model: a texture set's name heading its meshes (16 under the set before it), an open
 /// mesh's row, a mesh's picture's tile; a layer's channels under it, each a tile.
@@ -1189,7 +1191,7 @@ impl Layers {
         };
         let thumb =
             Rect::from_center_size(pos2(x + 4.0 + THUMB.0 / 2.0, row.center().y + shift), vec2(THUMB.0, THUMB.1));
-        self.thumbnail(ui, session, l, thumb, version, read);
+        self.thumbnail(ui, look, session, l, thumb, version, read);
         let name_left = thumb.right();
         let blend =
             Rect::from_min_size(pos2(row.right() - 8.0 - 44.0 - 44.0 + 8.0, row.center().y - 23.5), vec2(44.0, 47.0));
@@ -1323,10 +1325,13 @@ impl Layers {
     }
 
     /// A layer's thumbnail, read again when its pixels' version is new: what is drawn, fitted on
-    /// its grey (a mask's on white, an alpha-locked layer's on a checkerboard).
+    /// its grey (a mask's on white, an alpha-locked layer's on a checkerboard); a text layer's is
+    /// its glyph.
+    #[allow(clippy::too_many_arguments)]
     fn thumbnail(
         &mut self,
         ui: &Ui,
+        look: &mut Look,
         session: &CanvasSession,
         l: &LayerInfo,
         rect: Rect,
@@ -1352,6 +1357,10 @@ impl Layers {
             painter.rect_filled(rect, corner, Color32::WHITE);
         } else {
             painter.rect_filled(rect, corner, argb(THUMB_BACKGROUND));
+        }
+        if l.text {
+            look.icon_in(ui, &icons::TEXT_LAYER, rect, argb(TEXT_GLYPH));
+            return;
         }
         let stale = version.is_some_and(|v| self.thumbnails.get(&l.id).is_none_or(|(at, _)| *at != v));
         if stale && ui.is_rect_visible(rect) {

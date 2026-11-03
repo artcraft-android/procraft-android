@@ -3253,23 +3253,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun addText() {
         val s = session ?: return
         closePanels()
-        val c = s.info()
         val rgb = colorRgb()
-        // a medium sans about an eighth of the canvas's width, in a box as wide as the canvas,
-        // centred where the canvas shows above the keyboard (about a quarter of the way down)
-        val w = c.width.toFloat()
+        // a medium sans, sized and placed as new text looks on screen (above the keyboard, about
+        // a quarter of the way down)
         var info = TextInfo(
             text = "Text", font = "sans-serif", style = "Medium",
-            size = w * TEXT_SIZE_OF_WIDTH,
+            size = 0f,
             kerning = 0f, tracking = 0f, leading = 0f, baseline = 0f, opacity = 1f,
             align = TextAlignment.CENTER, underline = false, outline = false, vertical = false, allCaps = false,
             r = ((rgb shr 16) and 255) / 255f, g = ((rgb shr 8) and 255) / 255f, b = (rgb and 255) / 255f,
-            x = w * (1f - TEXT_BOX_OF_WIDTH) / 2f, y = 0f, width = w * TEXT_BOX_OF_WIDTH,
+            x = 0f, y = 0f, width = 0f,
         )
-        val box = TextRenderer.bounds(info)
-        val h = c.height.toFloat()
-        val middle = windowToCanvas(Offset(windowSize.x / 2f, windowSize.y * TEXT_SCREEN_Y))?.y ?: (h / 4f)
-        info = info.copy(y = (middle - box.height() / 2f).coerceIn(0f, (h - box.height()).coerceAtLeast(0f)))
+        info = s.newTextPlaced(info, windowSize.x, windowSize.y, density)
         if (s.textBegin(null, info) == null) {
             message = noRoom()
             return
@@ -6167,11 +6162,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
         /** The window the eyedropper shows (magnified twice), dp across. */
         const val PICK_WINDOW_DP = 54f
-        /** New text's size: the canvas's shorter side over this. */
-        /** New text's size and its box's width, as fractions of the canvas width. */
-        const val TEXT_SIZE_OF_WIDTH = 0.13f
-        const val TEXT_SCREEN_Y = 0.24f
-        const val TEXT_BOX_OF_WIDTH = 1f
         const val RIGHT_HANDED = "right_handed"
         const val COLOR_MODE = "color_mode"
 

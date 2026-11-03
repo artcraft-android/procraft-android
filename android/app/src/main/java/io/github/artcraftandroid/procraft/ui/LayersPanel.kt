@@ -740,9 +740,14 @@ private fun Thumb(vm: CanvasViewModel, l: LayerInfo, shape: Shape) {
             ),
         contentAlignment = Alignment.Center,
     ) {
-        // the thumbnail is what is drawn, fitted; small drawings show their pixels
-        vm.thumbnails[l.id]?.let {
-            Image(it, contentDescription = null, contentScale = ContentScale.Fit, filterQuality = FilterQuality.None, modifier = Modifier.fillMaxSize())
+        // the thumbnail is what is drawn, fitted; small drawings show their pixels; a text layer's
+        // is its glyph
+        if (l.text) {
+            Icon(PcIcons.TextLayer, contentDescription = null, tint = Pc.TextLayerGlyph, modifier = Modifier.fillMaxSize())
+        } else {
+            vm.thumbnails[l.id]?.let {
+                Image(it, contentDescription = null, contentScale = ContentScale.Fit, filterQuality = FilterQuality.None, modifier = Modifier.fillMaxSize())
+            }
         }
     }
 }

@@ -2360,6 +2360,24 @@ fn a_layer_s_options_follow_what_it_is() {
     let mask = s.add_mask(bottom).unwrap();
     assert!(!row(bottom, O::Mask).enabled);
     assert_eq!(options(mask), [O::Rename, O::Select, O::Fill, O::Clear, O::Invert]);
+    // a text layer: its own two before Reference, nothing that would paint into it
+    assert!(s.set_layer_locked(top, false) && s.select_layer(top));
+    let text = s.text_begin(None, text_info("Hi")).unwrap();
+    assert_eq!(
+        options(text),
+        [
+            O::Rename,
+            O::Select,
+            O::Copy,
+            O::Mask,
+            O::ClippingMask,
+            O::EditText,
+            O::Rasterize,
+            O::Reference,
+            O::MergeDown,
+            O::CombineDown
+        ]
+    );
     assert!(s.layer_options(9999).is_empty());
 }
 
@@ -8368,4 +8386,20 @@ fn leaving_with_liquify_or_crop_open_keeps_the_work() {
     assert!(reopened(&dir.join("b")) == before, "Crop and Resize lost the work on leaving");
     s.crop_end(false);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn new_text_is_sized_and_placed_as_it_looks_on_screen() {
+    // a canvas shown a pixel a window pixel, two pixels a point (as the reference's Screen Size
+    // canvas shows): letters 128 pixels, a box 976.9 wide, centred across, its middle a quarter
+    // of the way down, as measured there
+    let s = CanvasSession::new(2266, 1488);
+    let t = s.new_text_placed(text_info("Text"), 2266.0, 1488.0, 2.0);
+    assert!((t.size - 128.0).abs() < 1e-3 && (t.width - 976.896).abs() < 1e-3, "{} {}", t.size, t.width);
+    assert!((t.x - 644.552).abs() < 1e-3, "{}", t.x);
+    let tall = crate::text_draw::text_box(t.clone()).get(3).copied().unwrap();
+    assert!((t.y + tall / 2.0 - 372.0).abs() < 1e-3, "{} {tall}", t.y);
+    // a point of half the pixels: half as big on the canvas, the same on screen
+    let half = s.new_text_placed(text_info("Text"), 2266.0, 1488.0, 1.0);
+    assert!((half.size - 64.0).abs() < 1e-3 && (half.width - 488.448).abs() < 1e-3);
 }

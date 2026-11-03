@@ -341,9 +341,10 @@ fn layer_text(canvas: &Canvas<'_>, item: &Object<'_>) -> Option<LayerText> {
     if !near(right, [origin[0] + 1.0, origin[1]]) || !near(down, [origin[0], origin[1] + 1.0]) {
         return None;
     }
-    // the typeface by its PostScript name: "HelveticaNeue-Medium" is Helvetica Neue, Medium
+    // the typeface by its PostScript name: "HelveticaNeue-Medium" is Helvetica Neue, Medium (the
+    // style after the last hyphen)
     let postscript = attrs.entry("_CFN").and_then(|e| e.string()).unwrap_or_default();
-    let (family, style) = postscript.split_once('-').unwrap_or((&postscript, ""));
+    let (family, style) = postscript.rsplit_once('-').unwrap_or((&postscript, ""));
     let spaced = |name: &str| {
         let mut out = String::new();
         let mut before: Option<char> = None;
@@ -889,6 +890,7 @@ fn write_item(
             private: false,
             held: 0,
             assisted: false,
+            text: None,
         };
         Some(layer_record(b, doc_ref, &mask_uuid, None, rec, w, h))
     });
@@ -905,6 +907,7 @@ fn write_item(
         private: l.private,
         held: held(doc, id),
         assisted: l.assisted,
+        text: l.text.as_ref().map(|t| (t, doc.profile)),
     };
     let r = layer_record(b, doc_ref, &uuid, mask, rec, w, h);
     if id == doc.current() {
@@ -937,6 +940,8 @@ struct LayerRecord<'a> {
     held: i64,
     /// Drawing assist on.
     assisted: bool,
+    /// A text layer's text, its colour in the canvas's profile.
+    text: Option<(&'a LayerText, Profile)>,
 }
 
 /// How many more frames Animation Assist holds layer `id` for (0 without a hold).
@@ -959,6 +964,7 @@ impl LayerRecord<'_> {
             private: false,
             held: 0,
             assisted: false,
+            text: None,
         }
     }
 }
@@ -983,7 +989,15 @@ fn layer_record(
         .flat_map(|v| v.to_le_bytes())
         .collect();
     let transform = b.add(Value::Data(identity));
-    let pdf_transform = b.string("[0, 0, 0, 0, 0, 0]");
+    // a text layer's text, its box as wide as it wraps (or as what is painted, unwrapped)
+    let text = match r.text {
+        Some((t, profile)) => {
+            let painted = r.bounds.map_or(0.0, |[_, _, width, _]| width);
+            text_object(b, t, profile, h, if t.width > 0.0 { f64::from(t.width) } else { painted })
+        }
+        None => Builder::null(),
+    };
+    let pdf_transform = b.string(if r.text.is_some() { "[1, 0, 0, 1, 0, 0]" } else { "[0, 0, 0, 0, 0, 0]" });
     let time_keys: Vec<Value> = ["flags", "value", "timescale", "epoch"].iter().map(|k| b.string(k)).collect();
     let zeros: Vec<Value> = (0..4).map(|_| b.add(Value::Int(0))).collect();
     let video_time = b.object(
@@ -1015,7 +1029,7 @@ fn layer_record(
             ("private", Value::Bool(r.private)),
             ("sizeHeight", Value::Int(i64::from(h))),
             ("sizeWidth", Value::Int(i64::from(w))),
-            ("text", Builder::null()),
+            ("text", text),
             ("textPDF", Builder::null()),
             ("textPDFTransform", pdf_transform),
             ("textureSet", Builder::null()),
@@ -1024,6 +1038,70 @@ fn layer_record(
             ("version", Value::Int(4)),
             ("videoTime", video_time),
         ],
+    )
+}
+
+/// A text layer's text as the archive keeps it (see [`layer_text`]): the words with one run of
+/// attributes (alignment, typeface by its PostScript name, size, colour in sRGB, upright or
+/// vertical), the box `width` wide, its top left placed on a canvas `h` high as kept, y up.
+fn text_object(b: &mut Builder, t: &LayerText, profile: Profile, h: u32, width: f64) -> Value {
+    let words =
+        b.object(&["NSMutableString", "NSString", "NSObject"], vec![("NS.string", Value::String(t.text.clone()))]);
+    let alignment = match t.align {
+        TextAlign::Left => 0,
+        TextAlign::Right => 1,
+        TextAlign::Center => 2,
+        TextAlign::Justify => 3,
+    };
+    let paragraph = b.object(
+        &["NSMutableParagraphStyle", "NSParagraphStyle", "NSObject"],
+        vec![("NSTabStops", Builder::null()), ("NSAlignment", Value::Int(alignment))],
+    );
+    // the family and style run together, as PostScript names are: Helvetica Neue, Medium is
+    // "HelveticaNeue-Medium"
+    let joined = |s: &str| s.split_whitespace().collect::<String>();
+    let style = if t.style.trim().is_empty() { "Regular".to_owned() } else { joined(&t.style) };
+    let family = if t.font.trim().is_empty() { "HelveticaNeue".to_owned() } else { joined(&t.font) };
+    let font = b.string(&format!("{family}-{style}"));
+    // in sRGB, past its range for a colour outside it
+    let linear = crate::profile::apply(profile.matrix_to(Profile::Srgb), t.color.map(crate::profile::decode));
+    let [red, green, blue] = linear.map(crate::profile::encode).map(f64::from);
+    let rgb = b.add(Value::Data(format!("{red:.3} {green:.3} {blue:.3}").into_bytes()));
+    let colour = b.object(
+        &["UIColor", "NSObject"],
+        vec![
+            ("UIColorComponentCount", Value::Int(4)),
+            ("UIRed", Value::Real(red)),
+            ("UIGreen", Value::Real(green)),
+            ("UIBlue", Value::Real(blue)),
+            ("UIAlpha", Value::Real(f64::from(t.opacity))),
+            ("NSRGB", rgb),
+            ("NSColorSpace", Value::Int(2)),
+        ],
+    );
+    // a collection's numbers are objects of their own, referred to, as every value in one is
+    let left_to_right = b.add(Value::Int(0));
+    let direction = b.array(vec![left_to_right], false);
+    let keys: Vec<Value> = ["NSParagraphStyle", "CTVerticalForms", "_CFN", "NSColor", "_CFZ", "NSWritingDirection"]
+        .iter()
+        .map(|k| b.string(k))
+        .collect();
+    let vertical = b.add(Value::Int(i64::from(t.vertical)));
+    let size = b.add(Value::Real(f64::from(t.size)));
+    let values = vec![paragraph, vertical, font, colour, size, direction];
+    let attributes = b.object(
+        &["NSDictionary", "NSObject"],
+        vec![("NS.keys", Value::Array(keys)), ("NS.objects", Value::Array(values))],
+    );
+    let attributed = b.object(
+        &["NSMutableAttributedString", "NSAttributedString", "NSObject"],
+        vec![("NSString", words), ("NSAttributes", attributes)],
+    );
+    let [x, y] = t.origin.map(f64::from);
+    let transform = b.string(&format!("[1, 0, 0, 1, {x}, {}]", f64::from(h) - y));
+    b.object(
+        &["ValkyrieText", "NSObject"],
+        vec![("attributedString", attributed), ("width", Value::Real(width)), ("transform", transform)],
     )
 }
 
@@ -1418,11 +1496,12 @@ mod tests {
         );
         let keys = ["NSParagraphStyle", "_CFN", "NSColor", "_CFZ"].map(|k| b.string(k)).to_vec();
         let font = b.string("HelveticaNeue-Medium");
+        let font_size = b.add(Value::Real(176.0));
         let attributes = b.object(
             &["NSDictionary", "NSObject"],
             vec![
                 ("NS.keys", Value::Array(keys)),
-                ("NS.objects", Value::Array(vec![paragraph, font, colour, Value::Real(176.0)])),
+                ("NS.objects", Value::Array(vec![paragraph, font, colour, font_size])),
             ],
         );
         let attributed = b.object(
@@ -1464,6 +1543,53 @@ mod tests {
         // turned on the canvas: kept as its pixels alone
         let back = read(&text_package("[0, 1, -1, 0, 1000, 1000]", 1, 2048)).unwrap();
         assert!(back.document.layers().iter().all(|l| l.text.is_none()));
+    }
+
+    #[test]
+    fn a_text_layer_written_reads_back_as_the_same_text() {
+        let mut doc = Document::new(400, 300);
+        let text = LayerText {
+            text: "Two\nlines".to_owned(),
+            font: "sans-serif-smallcaps".to_owned(),
+            style: "Bold Italic".to_owned(),
+            size: 48.0,
+            align: TextAlign::Right,
+            vertical: true,
+            color: [0.25, 0.5, 1.0],
+            opacity: 0.75,
+            origin: [12.5, 40.0],
+            width: 220.0,
+            ..LayerText::default()
+        };
+        let id = doc.add_text_layer(text.clone());
+        let mut pixels = HashMap::new();
+        pixels.insert(
+            id,
+            painted(
+                400,
+                300,
+                |x, y| if (20..60).contains(&x) && (50..90).contains(&y) { [9, 9, 9, 255] } else { [0; 4] },
+            ),
+        );
+        let composite = vec![255u8; 400 * 300 * 4];
+        let export = Export {
+            document: &doc,
+            pixels: &pixels,
+            composite: &composite,
+            thumbnail_png: &[],
+            name: "Text",
+            author: "",
+            strokes: 0,
+            tracked_seconds: 0.0,
+            seed: 7,
+            time_lapse: None,
+        };
+        let back = read(&write(&export)).unwrap();
+        let layer = back.document.layers().iter().find(|l| l.text.is_some()).unwrap();
+        let t = layer.text.as_ref().unwrap();
+        assert!(t.color.iter().zip(text.color).all(|(a, b)| (a - b).abs() < 1e-3), "{:?}", t.color);
+        assert_eq!(LayerText { color: text.color, ..t.clone() }, text);
+        assert_eq!(layer.name, "Two");
     }
 
     #[test]
