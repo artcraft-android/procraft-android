@@ -171,8 +171,8 @@ fun CanvasInfo(vm: CanvasViewModel) {
         vm.canvasInfoOpen = false
     }
     fun done(asked: Boolean = false) {
-        // a time-lapse recorded so far is in the old profile: asked first
-        if (!asked && profile != session.profile() && vm.timeLapseInfo().first > 0) {
+        // another profile is asked about first, as measured (a time-lapse recorded or not)
+        if (!asked && profile != session.profile()) {
             askProfile = true
             return
         }
@@ -290,7 +290,7 @@ fun CanvasInfo(vm: CanvasViewModel) {
         Alert(
             if (askProfile) Unit else null,
             title = { "Change color profile?" },
-            message = { "The time-lapse recorded so far was made in the old profile's colours." },
+            message = { "Its colours keep their values and look as the new profile shows them, in the time-lapse recording too." },
             action = "Change",
             destructive = false,
             cancel = "Don't change",

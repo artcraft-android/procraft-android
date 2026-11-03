@@ -111,63 +111,16 @@ impl CanvasSession {
         true
     }
 
-    /// Puts the canvas in the colour profile named `name`, as one undo step: every layer's colours
-    /// and the background are turned into it, so they look the same where it can show them. False
-    /// if no profile has that name, the canvas is in it already or isn't shown yet.
+    /// Puts the canvas in the colour profile named `name`, as one undo step. As measured, nothing
+    /// is turned: its colours (the layers', the background's, the text's) keep their numbers and
+    /// take the new profile's look. False if no profile has that name or the canvas is in it.
     pub fn change_profile(&self, name: String) -> bool {
         let Some((to, icc)) = crate::colour::resolve(&name) else { return false };
         self.text_end(true);
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let from = st.doc.profile;
-        if st.doc.profile_name() == name {
-            return false;
-        }
-        // the pixels move between the RGB profiles they are in (a CMYK canvas's: Display P3)
-        let mut next = procraft_engine::document::Document::new(1, 1);
-        next.change_to(to, icc.clone());
-        let (old_rgb, new_rgb) = (st.doc.rgb_profile(), next.rgb_profile());
-        let table = (st.doc.icc.is_some() || icc.is_some())
-            .then(|| (old_rgb != new_rgb).then(|| procraft_engine::cms::Lut::build(&old_rgb, &new_rgb, None, 33)))
-            .flatten();
-        st.finish_stroke();
-        st.settle();
-        st.flush();
-        let ids: Vec<_> = st.doc.colour_layer_ids().collect();
-        let full = procraft_engine::geom::IRect::from_size(st.doc.width(), st.doc.height());
-        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return false };
-        // only where each layer is painted is read and turned (clear pixels stay clear); a layer
-        // painted nowhere is left as it is, one the GPU can't tell about read whole
-        let painted = canvas.painted_boxes_or_why(gpu, &ids);
-        let mut layers = Vec::new();
-        for (id, painted) in ids.into_iter().zip(painted) {
-            let rect = match painted {
-                Ok(Some(rect)) => rect,
-                Ok(None) => continue,
-                Err(_) => full,
-            };
-            match canvas.read_layer_part(gpu, id, rect) {
-                Ok(mut pixels) => {
-                    match &table {
-                        Some(t) => t.apply_rgba(&mut pixels, true),
-                        None if icc.is_none() && st.doc.icc.is_none() => from.convert_pixels(&mut pixels, to),
-                        None => {}
-                    }
-                    layers.push((id, rect, pixels));
-                }
-                Err(e) => {
-                    log::error!("changing the colour profile: {e}");
-                    return false;
-                }
-            }
-        }
-        let before = st.doc.clone();
-        st.doc.change_to(to, icc);
-        canvas.name_next_step(&format!("Set color profile \"{name}\""));
-        canvas.write_layer_parts_and_document(layers, before);
-        st.revision += 1;
-        self.shared.frame(st);
-        true
+        self.change(&format!("Set color profile \"{name}\""), |d| {
+            (d.profile_name() != name).then(|| d.assign_profile(to, icc))
+        })
+        .is_some()
     }
 
     /// The canvas's dots per inch (1 to 9999), as an undo step.

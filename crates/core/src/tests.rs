@@ -3842,7 +3842,7 @@ fn a_cmyk_canvas_keeps_rgb_pixels_and_prints_its_inks() {
 }
 
 #[test]
-fn changing_the_profile_turns_the_colours_and_undoes() {
+fn changing_the_profile_keeps_the_numbers_and_undoes() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.4);
     s.set_color(1.0, 0.0, 0.0);
@@ -3852,16 +3852,15 @@ fn changing_the_profile_turns_the_colours_and_undoes() {
     assert!(!s.change_profile("Adobe RGB".to_owned()));
     assert!(s.change_profile("Display P3".to_owned()));
     assert_eq!(s.profile(), "Display P3");
-    // the red in P3's numbers; white stays white
-    assert_eq!(pixel(&s, 20, 50), [0xEA, 0x33, 0x23, 255]);
+    // as measured, the numbers kept: the red is P3's red now
+    assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
     assert_eq!(pixel(&s, 80, 80), [255, 255, 255, 255]);
-    // one undo step puts the numbers and the profile back
-    s.undo();
+    // one undo step puts the profile back
+    assert_eq!(s.undo().as_deref(), Some("Set color profile \"Display P3\""));
     assert_eq!(s.profile(), "sRGB IEC61966-2.1");
     assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
     s.redo();
     assert_eq!(s.profile(), "Display P3");
-    assert_eq!(pixel(&s, 20, 50), [0xEA, 0x33, 0x23, 255]);
 }
 
 #[test]

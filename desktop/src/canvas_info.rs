@@ -71,7 +71,7 @@ pub struct CanvasInfo {
     signature: Vec<Vec<f32>>,
     /// The time-lapse recorded so far: its frames and what they take on disk (bytes).
     lapse: (u32, u64),
-    /// Done with another profile picked while a time-lapse was recorded asks first.
+    /// Done with another profile picked asks first.
     asking: crate::alert::Alert,
     /// What couldn't be kept on Done, for the window to tell.
     failure: Option<&'static str>,
@@ -237,11 +237,11 @@ impl CanvasInfo {
             if ui.interact(done, ui.scope_id().with("done"), Sense::click()).clicked() {
                 self.keep(session);
                 let changed = (self.profile != session.profile()).then(|| self.profile.clone());
-                // a time-lapse recorded so far is in the old profile: asked first
-                if changed.is_some() && self.lapse.0 > 0 {
+                // another profile is asked about first, as measured (a time-lapse recorded or not)
+                if changed.is_some() {
                     self.asking.ask(crate::alert::Asking {
                         title: "Change color profile?".into(),
-                        message: "The time-lapse recorded so far was made in the old profile's colours.".into(),
+                        message: "Its colours keep their values and look as the new profile shows them, in the time-lapse recording too.".into(),
                         action: "Change".into(),
                         icon: None,
                         destructive: false,

@@ -557,6 +557,13 @@ impl Document {
         self.height
     }
 
+    /// Puts the document in built-in profile `profile` with profile `icc` of its own (see
+    /// [`Document::icc`]), nothing turned: its colours keep their numbers in it.
+    pub fn assign_profile(&mut self, profile: crate::profile::Profile, icc: Option<crate::cms::CanvasIcc>) {
+        self.profile = profile;
+        self.icc = icc;
+    }
+
     /// Puts the document in profile `to`, its background and text colours turned into it so they
     /// look the same (the layers' pixels are the renderer's).
     pub fn change_profile(&mut self, to: crate::profile::Profile) {
