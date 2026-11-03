@@ -70,6 +70,9 @@ pub struct Reference {
     size: Vec2,
     /// The canvas as last read (and its edits then, and when), and the picture imported.
     canvas: Option<TextureHandle>,
+    /// The same picture shown magnified, its pixels crisp as on the canvas: when it is the canvas
+    /// at its own size (not made smaller).
+    canvas_crisp: Option<TextureHandle>,
     canvas_edits: Option<u64>,
     read_at: Option<Instant>,
     image: Option<TextureHandle>,
@@ -91,6 +94,7 @@ impl Default for Reference {
             at: None,
             size: START,
             canvas: None,
+            canvas_crisp: None,
             canvas_edits: None,
             read_at: None,
             image: None,
@@ -118,6 +122,10 @@ impl Reference {
         }
         if let Some(t) = session.canvas_thumbnail(CANVAS_PIXELS) {
             let image = egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
+            let crisp =
+                egui::TextureOptions { magnification: egui::TextureFilter::Nearest, ..egui::TextureOptions::LINEAR };
+            self.canvas_crisp = (t.width == session.info().width)
+                .then(|| ctx.load_texture("reference canvas crisp", image.clone(), crisp));
             self.canvas = Some(ctx.load_texture("reference canvas", image, egui::TextureOptions::LINEAR));
             self.canvas_pixels = Some(Pixels { width: t.width as usize, height: t.height as usize, rgba: t.rgba });
             self.canvas_edits = Some(edits);
@@ -256,7 +264,14 @@ impl Reference {
                 if let [x, y, w, h] = r[..] {
                     let picture = Rect::from_min_size(area.min + vec2(x, y), vec2(w, h));
                     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                    ui.painter().with_clip_rect(area).image(t.id(), picture, uv, Color32::WHITE);
+                    // the canvas's pixels crisp from 100%, as on the canvas
+                    // each canvas pixel a point or more
+                    let crisp = self
+                        .canvas_crisp
+                        .as_ref()
+                        .filter(|_| self.mode == Mode::Canvas && picture.width() >= t.size()[0] as f32 * 0.999);
+                    let id = crisp.map_or(t.id(), TextureHandle::id);
+                    ui.painter().with_clip_rect(area).image(id, picture, uv, Color32::WHITE);
                 }
                 let touched = ui.interact(area, ui.scope_id().with("picture"), Sense::click_and_drag());
                 picked = self.picture_touches(ui, &touched, area, sizes, hold);

@@ -4,7 +4,8 @@
 //!
 //! Tiles are `tileSize` squares (smaller along the right and top edges), rows stored bottom-up,
 //! pixels premultiplied RGBA (masks: one grey byte). A missing tile is empty. The canvas is stored
-//! unturned; `orientation` (1 to 4) says how many quarter turns it is shown at.
+//! as the screen held upright stores it; `orientation` (1 to 4) says which way the screen was
+//! turned when it was made, so how it is turned to be shown (see `shown_turns`).
 //!
 //! The time-lapse is kept as numbered video segments (`video/segments/segment-N.mp4`, played in
 //! order), described by the archive's segment info and its document's video settings.
@@ -99,13 +100,7 @@ pub fn read(bytes: &[u8]) -> Result<Imported, ReadError> {
     }
     let tile =
         root.int("tileSize").and_then(|t| u32::try_from(t).ok()).filter(|t| (16..=4096).contains(t)).unwrap_or(TILE);
-    let orientation = root.int("orientation").filter(|o| (1..=4).contains(o)).unwrap_or(1);
-    let turns = match orientation {
-        2 => 3,
-        3 => 2,
-        4 => 1,
-        _ => 0,
-    };
+    let turns = shown_turns(root.int("orientation").unwrap_or(1));
     let flip_x = root.bool("flippedHorizontally").unwrap_or(false);
     let flip_y = root.bool("flippedVertically").unwrap_or(false);
     let (dw, dh) = if turns % 2 == 1 { (h, w) } else { (w, h) };
@@ -286,6 +281,18 @@ impl Canvas<'_> {
             }
         }
         Ok(orient(out, w, h, bpp, self.turns, self.flip_x, self.flip_y))
+    }
+}
+
+/// The quarter turns clockwise a canvas made with the screen at `orientation` is shown at: 1
+/// upright, 2 upside down, 3 and 4 on its side one way and the other (as measured on files made
+/// each way: a mark at the top left of a canvas made at 3 is stored at the top right).
+fn shown_turns(orientation: i64) -> u32 {
+    match orientation {
+        2 => 2,
+        3 => 3,
+        4 => 1,
+        _ => 0,
     }
 }
 
@@ -1305,6 +1312,11 @@ mod tests {
         assert_eq!(orient(src.clone(), 3, 2, 1, 2, false, false), [5, 4, 3, 2, 1, 0]);
         assert_eq!(orient(src.clone(), 3, 2, 1, 3, false, false), [2, 5, 1, 4, 0, 3]);
         assert_eq!(orient(src.clone(), 3, 2, 1, 0, true, false), [2, 1, 0, 5, 4, 3]);
+        // made upside down it is shown half turned; made on its side, the top left stored at
+        // the top right
+        assert_eq!([1, 2, 3, 4, 0, 9].map(shown_turns), [0, 2, 3, 1, 0, 0]);
+        let corner = orient(vec![0, 0, 1, 0, 0, 0], 3, 2, 1, shown_turns(3), false, false);
+        assert_eq!(corner, [1, 0, 0, 0, 0, 0]);
         assert_eq!(parse_size("{1488, 2266}"), Some((1488, 2266)));
         assert_eq!(parse_size("1488x2266"), None);
     }

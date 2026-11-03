@@ -144,7 +144,14 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
                 if (shown != null) {
                     Canvas(Modifier.fillMaxSize()) {
                         val r = io.github.artcraftandroid.procraft.core.referencePictureRect(view, pictureSizes(size.width, size.height, shown))
-                        drawImage(shown, dstOffset = IntOffset(r[0].roundToInt(), r[1].roundToInt()), dstSize = IntSize(r[2].roundToInt(), r[3].roundToInt()))
+                        // the canvas's pixels crisp from 100%, as on the canvas
+                        val crisp = vm.referenceMode == CanvasViewModel.ReferenceMode.CANVAS && vm.referenceCanvasWhole && r[2] >= shown.width * this.density * 0.999f
+                        drawImage(
+                            shown,
+                            dstOffset = IntOffset(r[0].roundToInt(), r[1].roundToInt()),
+                            dstSize = IntSize(r[2].roundToInt(), r[3].roundToInt()),
+                            filterQuality = if (crisp) androidx.compose.ui.graphics.FilterQuality.None else androidx.compose.ui.graphics.FilterQuality.Low,
+                        )
                     }
                 }
                 when (vm.referenceMode) {

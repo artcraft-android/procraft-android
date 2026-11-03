@@ -372,7 +372,7 @@ private fun FloatingClose(modifier: Modifier, onClose: () -> Unit) {
     )
 }
 
-/** Palettes floating: Compact or Cards, then each palette as a card of swatches six to a row. */
+/** Palettes floating: Compact or Cards, then each palette as a card of swatches six to a row, or as named tiles two to a row. */
 @Composable
 private fun FloatingPalettes(vm: CanvasViewModel, c: ColorPick) {
     Row(Modifier.padding(start = 10.dp, end = 10.dp, top = 4.dp).fillMaxWidth().height(36.dp).clip(RoundedCornerShape(9.dp)).background(FloatingGroup)) {
@@ -409,7 +409,10 @@ private fun FloatingPalettes(vm: CanvasViewModel, c: ColorPick) {
                     )
                     PaletteMenu(vm, i)
                 }
-                for (row in 0 until (p.colors.size + 5) / 6) {
+                if (vm.paletteCards) {
+                    // as measured: the tiles' block with its top corners rounded
+                    PaletteTiles(vm, c, i, p, across = 2, modifier = Modifier.clip(RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp)))
+                } else for (row in 0 until (p.colors.size + 5) / 6) {
                     Row {
                         for (col in 0 until 6) {
                             val rgb = p.colors.getOrNull(row * 6 + col)
@@ -964,15 +967,15 @@ private fun SwatchGrid(vm: CanvasViewModel, c: ColorPick, index: Int, p: Palette
 }
 
 /**
- * A palette's colours as named tiles, three across, 120 square: a tap takes the colour, a hold
- * takes it out of the palette.
+ * A palette's colours as named tiles, [across] to a row (three docked, two floating), 120 square:
+ * a tap takes the colour, a hold takes it out of the palette.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PaletteTiles(vm: CanvasViewModel, c: ColorPick, index: Int, p: Palette) {
+private fun PaletteTiles(vm: CanvasViewModel, c: ColorPick, index: Int, p: Palette, across: Int = 3, modifier: Modifier = Modifier) {
     val filled = p.colors.withIndex().mapNotNull { (slot, rgb) -> rgb?.let { slot to it } }
-    Column {
-        for (row in filled.chunked(3)) {
+    Column(modifier) {
+        for (row in filled.chunked(across)) {
             Row {
                 for ((slot, rgb) in row) {
                     val hsv = FloatArray(3).also { android.graphics.Color.colorToHSV(rgb, it) }

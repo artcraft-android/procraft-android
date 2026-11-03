@@ -1732,6 +1732,23 @@ fn liquify_moves_paint_as_one_undo_step() {
 }
 
 #[test]
+fn liquify_moves_a_small_canvas_shown_large() {
+    use crate::adjust::{LiquifyBrush, LiquifyKind};
+    // a 16 px canvas in an 800 px window: a canvas pixel 50 across, a drag of 300 just 6 of them
+    let Some(s) = session(16, 800) else { return };
+    s.set_brush_size(0.1);
+    s.stroke_begin(PointerKind::Finger, vec![sample(300.0, 400.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let row = |s: &CanvasSession| (0..16).map(|x| pixel(s, x, 8)).collect::<Vec<_>>();
+    let before = row(&s);
+    assert!(s.liquify_begin());
+    let brush = LiquifyBrush { kind: LiquifyKind::Push, size: 0.5, pressure: 1.0, distortion: 0.0 };
+    s.liquify_stroke((0..=30).flat_map(|i| [300.0 + i as f32 * 10.0, 400.0, 1.0]).collect(), true, brush);
+    assert_ne!(row(&s), before, "the push moved nothing");
+    s.adjust_end(false);
+}
+
+#[test]
 fn an_adjustment_painted_on_and_clone() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.4);

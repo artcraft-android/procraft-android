@@ -159,6 +159,16 @@ const BLOOM_THRESHOLD: f32 = 0.5;
 /// How long (milliseconds) the liquify brush carries on at its lifting speed, at full momentum
 /// (it covers that distance while slowing to a stop), and the most stamps it adds doing so.
 const LIQUIFY_COAST_MS: f32 = 300.0;
+/// Liquify stamps fall a tenth of the brush apart, and at most this many window pixels: on a small
+/// canvas or zoomed in, a drag shorter than a tenth of the brush still moves the paint.
+const LIQUIFY_WINDOW_STEP: f32 = 6.0;
+
+/// How far apart liquify stamps of `radius` (canvas pixels) fall, the view `zoom` (window pixels a
+/// canvas pixel).
+fn liquify_step(radius: f32, zoom: f32) -> f32 {
+    let most = if zoom.is_finite() && zoom > 0.0 { LIQUIFY_WINDOW_STEP / zoom } else { f32::INFINITY };
+    (radius * 0.1).min(most).max(0.01)
+}
 const LIQUIFY_COAST_STAMPS: usize = 400;
 /// The (set, brush) cloning paints with: the soft airbrush.
 const CLONE_BRUSH: (usize, usize) = (3, 0);
@@ -504,7 +514,7 @@ impl CanvasSession {
     }
 
     /// The liquify brush along window points `points` (x, y, pressure 0..1 each); `start` begins a
-    /// new stroke. Stamps fall a tenth of the brush apart.
+    /// new stroke. Stamps fall a tenth of the brush apart, or a few window pixels if that is less.
     pub fn liquify_stroke(&self, points: Vec<f32>, start: bool, brush: LiquifyBrush) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
@@ -512,7 +522,7 @@ impl CanvasSession {
         let size = brush.size.clamp(0.0, 1.0);
         let radius = 4.0 + 1596.0 * size.powf(2.2);
         let strength = 0.01 + 0.99 * brush.pressure.clamp(0.0, 1.0);
-        let step = (radius * 0.1).max(1.0);
+        let step = liquify_step(radius, view.zoom());
         if start {
             st.liquify_last = None;
         }
@@ -568,7 +578,7 @@ impl CanvasSession {
         let momentum = if momentum.is_finite() { momentum.clamp(0.0, 1.0) } else { 0.0 };
         let reach = velocity.length() * momentum * LIQUIFY_COAST_MS;
         let radius = 4.0 + 1596.0 * brush.size.clamp(0.0, 1.0).powf(2.2);
-        let step = (radius * 0.1).max(1.0);
+        let step = liquify_step(radius, view.zoom());
         if !reach.is_finite() || reach < step {
             return;
         }

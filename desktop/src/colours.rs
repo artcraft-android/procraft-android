@@ -111,7 +111,7 @@ impl Shape {
         }
     }
 }
-const PALETTE_TILE: f32 = 120.0;
+pub(super) const PALETTE_TILE: f32 = 120.0;
 /// A swatch held this long is taken out of its palette.
 const SWATCH_HOLD: std::time::Duration = std::time::Duration::from_millis(400);
 

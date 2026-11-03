@@ -6,7 +6,10 @@
 use egui::{Align2, Color32, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 use procraft_core::CanvasSession;
 
-use super::{Colours, EMPTY_SLOT, GRABBER, HarmonyKind, Mode, colours_in_p3, hex_pad, hue_slider, srgb, take_rgb};
+use super::{
+    Colours, EMPTY_SLOT, GRABBER, HarmonyKind, Mode, PALETTE_TILE, colours_in_p3, hex_pad, hue_slider, of_hex,
+    rgb_to_hsv, srgb, take_rgb,
+};
 use crate::compact_colours::{tabs_row, value_view};
 use crate::icons;
 use crate::look::{Look, Weight, argb, pc, text};
@@ -22,9 +25,10 @@ const FIELD: u32 = 0x0FFFFFFF;
 /// Close: a disc of white over the window with its cross cut out of it (drawn darker).
 const CLOSE_DISC: u32 = 0x26FFFFFF;
 const CLOSE_CROSS: u32 = 0x4D000000;
-/// A palette's swatches: six to a row, 40 square.
+/// A palette's swatches: six to a row, 40 square; or, as cards, named tiles two to a row.
 const SWATCH: f32 = 40.0;
 const ACROSS: usize = 6;
+const TILES_ACROSS: usize = 2;
 
 impl Colours {
     /// The panel floats from `at` (the window's top-left), the pointer holding its grabber.
@@ -158,7 +162,8 @@ impl Colours {
     }
 
     /// Palettes floating: Compact or Cards, then each palette as a card (the default one ticked, a
-    /// tick choosing it) of swatches six to a row, a tap taking a colour.
+    /// tick choosing it) of swatches six to a row, or of named tiles two to a row, a tap taking a
+    /// colour.
     fn floating_palettes(&mut self, ui: &mut Ui, look: &mut Look, session: &CanvasSession, rect: Rect) {
         let switch = Rect::from_min_size(pos2(rect.left() + 10.0, rect.top() + 48.0), vec2(240.0, 36.0));
         ui.painter().rect_filled(switch, 9, argb(GROUP));
@@ -184,9 +189,15 @@ impl Colours {
             ScrollArea::vertical().id_salt("floating palettes").show(ui, |ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 10.0);
                 for (n, p) in palettes.iter().enumerate() {
+                    let filled: Vec<(usize, u32)> =
+                        p.colors.iter().enumerate().filter_map(|(slot, c)| c.map(|c| (slot, c))).collect();
+                    let body = if self.palette_cards {
+                        filled.len().div_ceil(TILES_ACROSS) as f32 * PALETTE_TILE
+                    } else {
+                        SWATCH * p.colors.len().div_ceil(ACROSS).max(1) as f32
+                    };
                     let rows = p.colors.len().div_ceil(ACROSS).max(1);
-                    let (line, _) =
-                        ui.allocate_exact_size(vec2(list.width(), 44.0 + SWATCH * rows as f32), Sense::hover());
+                    let (line, _) = ui.allocate_exact_size(vec2(list.width(), 44.0 + body), Sense::hover());
                     let card = Rect::from_min_max(
                         pos2(line.left() + 10.0, line.top()),
                         pos2(line.right() - 10.0, line.bottom()),
@@ -205,6 +216,13 @@ impl Colours {
                     look.icon(ui, &icons::MORE, more.center(), 20.0, ink);
                     if ui.interact(more, ui.scope_id().with(("floating palette more", n)), Sense::click()).clicked() {
                         menu = Some((n as u32, more));
+                    }
+                    if self.palette_cards {
+                        let tiles = Rect::from_min_size(pos2(card.left(), card.top() + 44.0), vec2(card.width(), body));
+                        if let Some(c) = floating_tiles(ui, n, &filled, tiles) {
+                            taken = Some(c);
+                        }
+                        continue;
                     }
                     for (slot, rgb) in p.colors.iter().enumerate() {
                         let (row, col) = (slot / ACROSS, slot % ACROSS);
@@ -258,4 +276,47 @@ fn close_button(ui: &Ui, rect: Rect) {
     for (a, b) in [(vec2(-3.2, -3.2), vec2(3.2, 3.2)), (vec2(3.2, -3.2), vec2(-3.2, 3.2))] {
         ui.painter().line_segment([c + a, c + b], stroke);
     }
+}
+
+/// A palette's colours as named tiles two to a row at `at`, 120 square, the block's corners
+/// rounded (as measured); dark lettering on bright colours. The colour tapped, if one was.
+fn floating_tiles(ui: &Ui, n: usize, filled: &[(usize, u32)], at: Rect) -> Option<u32> {
+    let mut taken = None;
+    let rows = filled.len().div_ceil(TILES_ACROSS);
+    for (k, &(slot, rgb)) in filled.iter().enumerate() {
+        let (row, col) = (k / TILES_ACROSS, k % TILES_ACROSS);
+        let tile = Rect::from_min_size(
+            at.min + vec2(PALETTE_TILE * col as f32, PALETTE_TILE * row as f32),
+            vec2(PALETTE_TILE, PALETTE_TILE),
+        );
+        let (first, last) = (row == 0, row + 1 == rows);
+        let (left, right) = (col == 0, col + 1 == TILES_ACROSS || k + 1 == filled.len());
+        let round = |on: bool| if on { 10 } else { 0 };
+        let corners = egui::CornerRadius {
+            nw: round(first && left),
+            ne: round(first && right),
+            sw: round(last && left),
+            se: round(last && right),
+        };
+        ui.painter().rect_filled(tile, corners, srgb(of_hex(rgb)));
+        let lettering = if rgb_to_hsv(of_hex(rgb))[2] >= 0.85 { Color32::BLACK } else { Color32::WHITE };
+        let mut job = egui::text::LayoutJob::default();
+        job.append(
+            &procraft_core::colour_name(rgb),
+            0.0,
+            egui::TextFormat {
+                font_id: Weight::Regular.font(15.0),
+                color: lettering,
+                line_height: Some(17.0),
+                ..Default::default()
+            },
+        );
+        job.wrap.max_width = PALETTE_TILE - 16.0;
+        let galley = ui.painter().layout_job(job);
+        ui.painter().galley(pos2(tile.left() + 8.0, tile.bottom() - 10.0 - galley.size().y), galley, lettering);
+        if ui.interact(tile, ui.scope_id().with(("floating tile", n, slot)), Sense::click()).clicked() {
+            taken = Some(rgb);
+        }
+    }
+    taken
 }

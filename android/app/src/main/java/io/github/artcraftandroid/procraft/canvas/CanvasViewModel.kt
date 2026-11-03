@@ -3042,6 +3042,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The whole canvas as it is, kept up to date while the window shows it. */
     var referenceCanvas by mutableStateOf<ImageBitmap?>(null)
+
+    /** [referenceCanvas] is the canvas at its own size (not made smaller): its pixels are the canvas's. */
+    var referenceCanvasWhole by mutableStateOf(false)
         private set
     var referenceImage by mutableStateOf<ImageBitmap?>(null)
         private set
@@ -3154,13 +3157,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         referenceJob = viewModelScope.launch {
             do {
                 referenceStale = false
-                val image = withContext(Dispatchers.Default) {
+                val made = withContext(Dispatchers.Default) {
                     val t = s.canvasThumbnail(REFERENCE_PIXELS.toUInt()) ?: return@withContext null
                     val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
                     bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
-                    bitmap.asImageBitmap()
+                    bitmap.asImageBitmap() to (t.width == s.info().width)
                 }
-                if (image != null) referenceCanvas = image
+                if (made != null) {
+                    referenceCanvas = made.first
+                    referenceCanvasWhole = made.second
+                }
                 kotlinx.coroutines.delay(REFERENCE_INTERVAL_MS)
             } while (referenceStale)
         }
