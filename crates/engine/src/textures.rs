@@ -154,6 +154,45 @@ pub fn stock_shape_tones(name: &str) -> Option<[u8; 17]> {
     stock_tones(crate::stock_tones::STOCK_SHAPE_TONES, name)
 }
 
+/// How much ink each of 64 bands of the stock shape `name`'s rows holds, top to bottom, as shares
+/// of its fullest (0..255), as measured, if it is one we know.
+pub fn stock_shape_rows(name: &str) -> Option<[u8; 64]> {
+    stock_tones(crate::stock_tones::STOCK_SHAPE_ROWS, name)
+}
+
+/// `pixels`, a shape, its rows weighted so that how much ink each band of them holds goes as
+/// `rows` says (a stock shape's: 64 bands, top to bottom), between band middles smoothly: a
+/// stand-in takes the stock shape's streaks and gaps across a stroke.
+pub fn striped(pixels: &[u8], rows: &[u8; 64]) -> Vec<u8> {
+    let n = TEXTURE_SIZE;
+    let per = n / rows.len();
+    let mut ours = [0.0f32; 64];
+    for (i, &v) in pixels.iter().enumerate() {
+        if let Some(band) = ours.get_mut(i / n / per) {
+            *band += f32::from(v);
+        }
+    }
+    let top = ours.iter().copied().fold(0.0, f32::max).max(1.0);
+    // each band's weight: what it should hold over what it holds (none where it holds next to
+    // nothing, which no weight can fill)
+    let weights: Vec<f32> = ours
+        .iter()
+        .zip(rows)
+        .map(|(&have, &want)| {
+            let have = have / top;
+            if have > 0.02 { (f32::from(want) / 255.0 / have).min(8.0) } else { 0.0 }
+        })
+        .collect();
+    let at = |y: usize| {
+        let place = ((y as f32 + 0.5) / per as f32 - 0.5).clamp(0.0, (rows.len() - 1) as f32);
+        let (low, f) = (place.floor() as usize, place.fract());
+        let w = |b: usize| weights.get(b.min(rows.len() - 1)).copied().unwrap_or(0.0);
+        w(low) * (1.0 - f) + w(low + 1) * f
+    };
+    let most = (0..n).map(at).fold(0.0, f32::max).max(1e-6);
+    pixels.iter().enumerate().map(|(i, &v)| (f32::from(v) * at(i / n) / most).round().clamp(0.0, 255.0) as u8).collect()
+}
+
 fn stock_tones<const N: usize>(table: &[(u64, [u8; N])], name: &str) -> Option<[u8; N]> {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name).to_lowercase();
     // FNV-1a, as the table's keys are
@@ -1904,6 +1943,21 @@ mod tests {
             assert!(got.abs_diff(want) <= 3, "at {share} {got} for {want}");
         }
         assert_eq!(stock_shape_tones("no such shape.png"), None);
+    }
+
+    #[test]
+    fn a_striped_shape_takes_its_rows_share_of_the_ink() {
+        // the soft round given bands that hold nothing in the middle eighth and full elsewhere
+        // where it has ink: its middle rows emptied, the rows above and below kept
+        let soft = shapes().into_iter().next().unwrap();
+        let mut rows = [255u8; 64];
+        rows[28..36].fill(0);
+        let out = striped(&soft.pixels, &rows);
+        let n = TEXTURE_SIZE;
+        let row = |y: usize| out[y * n..(y + 1) * n].iter().map(|&v| u32::from(v)).sum::<u32>();
+        assert_eq!(row(n / 2), 0);
+        assert!(row(n / 2 - 40) > 1000 && row(n / 2 + 40) > 1000, "{} {}", row(n / 2 - 40), row(n / 2 + 40));
+        assert_eq!(stock_shape_rows("no such shape.png"), None);
     }
 
     #[test]

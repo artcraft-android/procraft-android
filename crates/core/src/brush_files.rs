@@ -700,11 +700,15 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
         },
         Texture::Stock { name, inverted } => {
             let (image, source, hardness) = stock_stand_in(name, *inverted);
-            // our shape with the stock one's own lights and darks, where they were measured
+            // our shape with the stock one's own lights and darks and its rows' share of the ink,
+            // where they were measured
             let retoned =
                 image.filter(|_| source.is_none()).zip(textures::stock_shape_tones(name)).and_then(|(i, tones)| {
                     let shape = textures::shapes().into_iter().nth(i as usize)?;
-                    let mut pixels = textures::retoned_shape(&shape.pixels, &tones, &textures::SHAPE_TONE_SHARES);
+                    // its streaks and gaps across the stroke first, where they were measured
+                    let striped = textures::stock_shape_rows(name).map(|rows| textures::striped(&shape.pixels, &rows));
+                    let pixels = striped.as_deref().unwrap_or(&shape.pixels);
+                    let mut pixels = textures::retoned_shape(pixels, &tones, &textures::SHAPE_TONE_SHARES);
                     if *inverted {
                         pixels.iter_mut().for_each(|v| *v = 255 - *v);
                     }
