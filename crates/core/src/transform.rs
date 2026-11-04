@@ -129,6 +129,9 @@ pub struct TransformBox {
     pub width: f32,
     pub height: f32,
     pub angle: f32,
+    /// The lines the box held in a move has snapped onto, as guides across the canvas: segments
+    /// (x0, y0, x1, y1 in turn, canvas pixels); none while it isn't snapped.
+    pub snap_lines: Vec<f32>,
 }
 
 /// How finely a warp's lines are sampled for drawing, and its triangles for rendering.
@@ -247,6 +250,11 @@ impl State {
             width: t.size().0,
             height: t.size().1,
             angle: t.angle().to_degrees(),
+            snap_lines: {
+                let (w, h) = (self.doc.width() as f32, self.doc.height() as f32);
+                let [x, y] = t.snapped();
+                x.map(|x| [x, 0.0, x, h]).into_iter().chain(y.map(|y| [0.0, y, w, y])).flatten().collect()
+            },
         })
     }
 

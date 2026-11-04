@@ -27,6 +27,8 @@ pub(crate) const DASH: u32 = 0xE6000000;
 pub(crate) const DASH_GAP: u32 = 0xE6FFFFFF;
 const NODE_SHADOW: u32 = 0x1F000000;
 const MESH_LINE: u32 = 0xFF8B8B8B;
+/// The lines a moved box snapped onto, across the canvas (dark and light interface).
+const SNAP_GUIDE: Themed = Themed(0xFFFF9F0A, 0xFFFF9500);
 /// A held node is drawn this much larger; a let-go rotate or box-turning node springs back over
 /// this long.
 const HELD_SCALE: f32 = 1.5;
@@ -276,6 +278,13 @@ impl Transform {
                 }
             }
             return;
+        }
+        // the lines the box snapped onto, across the canvas, while it is held (under the box)
+        let [va, vb, vc, vd, ve, vf] =
+            view.get(..6).and_then(|v| <[f32; 6]>::try_from(v).ok()).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let point = |x: f32, y: f32| pos2(va * x + vc * y + ve, vb * x + vd * y + vf) / ppp;
+        for &[x0, y0, x1, y1] in b.snap_lines.as_chunks::<4>().0 {
+            painter.line_segment([point(x0, y0), point(x1, y1)], Stroke::new(1.0, argb(SNAP_GUIDE)));
         }
         let Some(s) = procraft_core::screen_box(b.corners, view, ppp) else { return };
         let at = |v: &[f32], i: usize| match (v.get(2 * i), v.get(2 * i + 1)) {

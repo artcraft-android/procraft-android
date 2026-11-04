@@ -82,6 +82,9 @@ private val NodeBlue = Color(0xFF0171EA)
 private val RotateGreen = Color(0xFF00E607)
 private val RotateLine = Color(0xFF00E400)
 private val TurnOrange = Color(0xFFFEB800)
+
+/** The lines a moved box snapped onto, across the canvas. */
+private val SnapGuide get() = if (Pc.light) Color(0xFFFF9500) else Color(0xFFFF9F0A)
 private val TurnLine = Color(0xFFFEBF00)
 internal val Dash = Color(0xE6000000)
 internal val DashGap = Color(0xE6FFFFFF)
@@ -156,7 +159,13 @@ fun TransformOverlay(vm: CanvasViewModel) {
     val rotate = placed(TransformHandle.Rotate, shown.rotate)
     val turn = placed(TransformHandle.TurnBox, shown.turn)
     fun scale(handle: TransformHandle) = if (held?.first == handle) HELD_SCALE else 1f
+    val m = vm.viewMatrix
     Canvas(Modifier.fillMaxSize()) {
+        // the lines the box snapped onto, across the canvas, while it is held (under the box)
+        val snaps = box.snapLines
+        for (i in 0 until snaps.size / 4) {
+            drawLine(SnapGuide, toScreen(snaps[4 * i], snaps[4 * i + 1], m), toScreen(snaps[4 * i + 2], snaps[4 * i + 3], m), 1.dp.toPx())
+        }
         val c = shown.corners
         val edge = Path().apply {
             moveTo(c[0].x, c[0].y)

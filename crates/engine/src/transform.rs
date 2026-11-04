@@ -65,6 +65,8 @@ pub struct Transform {
     /// Lines a moved box snaps onto besides the canvas's own (canvas pixels): other layers'
     /// edges and middles, across (x) and down (y).
     snap_lines: (Vec<f32>, Vec<f32>),
+    /// The lines (an x and a y, canvas pixels) the box held in a move has snapped onto now.
+    snapped: [Option<f32>; 2],
 }
 
 /// What a drag is pulled towards.
@@ -94,7 +96,15 @@ impl Transform {
         let source =
             [Vec2::new(x, y), Vec2::new(x + width, y), Vec2::new(x + width, y + height), Vec2::new(x, y + height)];
         let now = Placement { content: source, frame: source, warp: None };
-        Transform { source, hull, now, history: Vec::new(), drag: None, snap_lines: (Vec::new(), Vec::new()) }
+        Transform {
+            source,
+            hull,
+            now,
+            history: Vec::new(),
+            drag: None,
+            snap_lines: (Vec::new(), Vec::new()),
+            snapped: [None; 2],
+        }
     }
 
     /// Other things a moved box snaps onto: their bounds (`x`, `y`, `width`, `height`, canvas
@@ -155,11 +165,23 @@ impl Transform {
         let next = self.dragged(handle, mode, from, to, start, guides).unwrap_or(start);
         let moved = next != self.now;
         self.now = next;
+        // a moved box sitting on a line it snaps to shows that line while held
+        self.snapped = match (handle, guides.snap) {
+            (Handle::Move, Some(_)) => lines_under(next.frame, guides.canvas, &self.snap_lines),
+            _ => [None; 2],
+        };
         moved
+    }
+
+    /// The lines (x across, y down, canvas pixels) the box held in a move has snapped onto: shown
+    /// as guides until it is let go.
+    pub fn snapped(&self) -> [Option<f32>; 2] {
+        self.snapped
     }
 
     /// The drag ends; a change is kept as an undo step.
     pub fn release(&mut self) {
+        self.snapped = [None; 2];
         if let Some((_, _, start)) = self.drag.take()
             && start != self.now
         {
@@ -169,6 +191,7 @@ impl Transform {
 
     /// The drag is abandoned (a second finger came down): the box goes back.
     pub fn cancel_drag(&mut self) {
+        self.snapped = [None; 2];
         if let Some((_, _, start)) = self.drag.take() {
             self.now = start;
         }
@@ -488,6 +511,17 @@ fn snap_offset(frame: Quad, canvas: Vec2, others: &(Vec<f32>, Vec<f32>), reach: 
     Vec2::new(axis(frame.map(|p| p.x), canvas.x, &others.0), axis(frame.map(|p| p.y), canvas.y, &others.1))
 }
 
+/// The snapping lines (the canvas's edges and middle, then `others`) a box's edges or centre lie
+/// on, across (x) and down (y).
+fn lines_under(frame: Quad, canvas: Vec2, others: &(Vec<f32>, Vec<f32>)) -> [Option<f32>; 2] {
+    let axis = |values: [f32; 4], size: f32, others: &[f32]| {
+        let (lo, hi) = values.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        let lines = [0.0, size / 2.0, size];
+        lines.iter().chain(others).copied().find(|&l| [lo, (lo + hi) / 2.0, hi].iter().any(|f| (l - f).abs() < 0.01))
+    };
+    [axis(frame.map(|p| p.x), canvas.x, &others.0), axis(frame.map(|p| p.y), canvas.y, &others.1)]
+}
+
 fn at(q: Quad, i: usize) -> Vec2 {
     q.get(i % 4).copied().unwrap_or_default()
 }
@@ -776,13 +810,21 @@ mod tests {
         t.drag(TransformMode::Uniform, Vec2::new(56.0, 504.0), &snap);
         let [a, ..] = t.content();
         assert!(close(a, Vec2::new(0.0, 400.0)), "{a:?}");
-        // out of reach: free
+        // the lines it snapped onto show while it is held: the canvas's left edge and its middle
+        // (the box's middle, 400 + 100, on it)
+        assert_eq!(t.snapped(), [Some(0.0), Some(500.0)]);
+        // out of reach: free, no lines
         t.drag(TransformMode::Uniform, Vec2::new(80.0, 470.0), &snap);
         assert!(close(t.content()[0], Vec2::new(30.0, 370.0)));
+        assert_eq!(t.snapped(), [None, None]);
         // another layer's right edge at 333 takes the box's left edge, 3 off
         t.set_snap_targets(&[[233.0, 700.0, 100.0, 100.0]]);
         t.drag(TransformMode::Uniform, Vec2::new(380.0, 470.0), &snap);
         assert!(close(t.content()[0], Vec2::new(333.0, 370.0)), "{:?}", t.content()[0]);
+        assert_eq!(t.snapped(), [Some(333.0), None]);
+        // let go, the lines go
+        t.release();
+        assert_eq!(t.snapped(), [None, None]);
     }
 
     #[test]
