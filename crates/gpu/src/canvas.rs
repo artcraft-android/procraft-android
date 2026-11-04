@@ -770,10 +770,13 @@ fn smudge_bind(
             uniform(0, params, SMUDGE_UNIFORM_SIZE),
             wgpu::BindGroupEntry { binding: 1, resource: smudge.work.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 2, resource: smudge.carry.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: smudge.raw.as_ref().unwrap_or(&spare[0]).as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: smudge.grained.as_ref().unwrap_or(&spare[0]).as_entire_binding(),
+            },
             wgpu::BindGroupEntry {
                 binding: 4,
-                resource: smudge.orig.as_ref().unwrap_or(&spare[1]).as_entire_binding(),
+                resource: smudge.amount.as_ref().unwrap_or(&spare[1]).as_entire_binding(),
             },
             uniform(5, wet, WET_PASS_SIZE),
         ],
@@ -829,6 +832,8 @@ fn smudge_uniform(
         plot: 0,
         index: 0,
         carried: 0,
+        modulated: 0,
+        spare: [0; 3],
     }
 }
 
@@ -892,6 +897,9 @@ struct SmudgeUniform {
     plot: u32,
     index: u32,
     carried: u32,
+    /// 1 when wet paint builds up by what is left at each pixel (the modulated mode).
+    modulated: u32,
+    spare: [u32; 3],
 }
 
 /// Wet paint is laid a display frame's stamps at a time, the frames this long (ms).
@@ -930,10 +938,12 @@ struct Smudge {
     /// was: wet paint runs out with it.
     length: f32,
     last: Option<[f32; 2]>,
-    /// Wet paint with a texturized grain: the stroke without the grain, and the layer as it was,
+    /// Wet paint with a texturized grain: the stroke without the grain, then the layer as it was,
     /// the grain laid over the change once (see `grain_once`).
-    raw: Option<wgpu::Buffer>,
-    orig: Option<wgpu::Buffer>,
+    grained: Option<wgpu::Buffer>,
+    /// Wet paint that builds up by what is left (the modulated mode): how much each pixel has taken
+    /// so far, 0..1.
+    amount: Option<wgpu::Buffer>,
     /// Wet paint: stamps waiting for the rest of their display frame (with their wet-mix scaling
     /// and input time), the passes laid so far, and the texels a side of the last pass's plots.
     pending: Vec<(StampInstance, [f32; 8], f64)>,
@@ -4068,7 +4078,10 @@ impl Canvas {
             smudge.pending.clear();
             smudge.passes = 0;
             smudge.plot = 0;
-            if let Some(raw) = &smudge.raw {
+            if let Some(amount) = &smudge.amount {
+                encoder.clear_buffer(amount, 0, None);
+            }
+            if let Some(raw) = &smudge.grained {
                 encoder.copy_texture_to_buffer(
                     copy_at(&smudge.before, 0, 0),
                     wgpu::TexelCopyBufferInfo {
@@ -4123,33 +4136,40 @@ impl Canvas {
                 },
                 extent(self.width, self.height),
             );
-            // wet paint with a texturized grain keeps the stroke without it, and the layer as it was
-            let (raw, orig) = if grain_once(style) {
-                let mut copy = |label| {
-                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(label),
-                        size: u64::from(row) * u64::from(self.height),
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
+            // wet paint with a texturized grain keeps the stroke without it, then the layer as it was
+            let layer_bytes = u64::from(row) * u64::from(self.height);
+            let grained = grain_once(style).then(|| {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("smudge grained"),
+                    size: 2 * layer_bytes,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                for offset in [0, layer_bytes] {
                     encoder.copy_texture_to_buffer(
                         copy_at(&layer.texture, 0, 0),
                         wgpu::TexelCopyBufferInfo {
                             buffer: &buffer,
                             layout: wgpu::TexelCopyBufferLayout {
-                                offset: 0,
+                                offset,
                                 bytes_per_row: Some(row),
                                 rows_per_image: Some(self.height),
                             },
                         },
                         extent(self.width, self.height),
                     );
-                    buffer
-                };
-                (Some(copy("smudge raw")), Some(copy("smudge orig")))
-            } else {
-                (None, None)
-            };
+                }
+                buffer
+            });
+            // and builds up by what is left in the modulated mode
+            let amount = (wet_paint && style.rendering == Rendering::Gradual).then(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("smudge amount"),
+                    size: layer_bytes,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
             self.smudge = Some(Smudge {
                 layer: target,
                 work,
@@ -4161,8 +4181,8 @@ impl Canvas {
                 stamps: 0,
                 length: 0.0,
                 last: None,
-                raw,
-                orig,
+                grained,
+                amount,
                 pending: Vec::new(),
                 passes: 0,
                 plot: 0,
@@ -4292,7 +4312,8 @@ impl Canvas {
             &self.smudge_spare,
             smudge,
         );
-        let grain_once = if smudge.raw.is_some() { 1.0 } else { 0.0 };
+        let grain_once = if smudge.grained.is_some() { 1.0 } else { 0.0 };
+        let modulated = u32::from(smudge.amount.is_some());
         let mut changed = IRect::EMPTY;
         let mut pass =
             encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("wet"), timestamp_writes: None });
@@ -4345,6 +4366,7 @@ impl Canvas {
             let turn = smudge.passes % 2;
             let wet = |s: &StampInstance, bbox: IRect, index: u32| SmudgeUniform {
                 mode: 1,
+                modulated,
                 kept: if first { -1 } else { 0 },
                 grain_once,
                 count: u32::try_from(n).unwrap_or(0),
@@ -7284,16 +7306,7 @@ impl Pipelines {
                 storage(1),
                 storage(2),
                 storage(3),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
+                storage(4),
                 // a pass of wet paint's stamps
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,

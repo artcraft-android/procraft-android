@@ -69,6 +69,11 @@ struct SmudgeStamp {
     plot: u32,
     index: u32,
     carried: u32,
+    // 1: wet paint builds up by what is left at each pixel (the modulated mode; see `amount`)
+    modulated: u32,
+    spare0: u32,
+    spare1: u32,
+    spare2: u32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -85,8 +90,10 @@ struct WetPass {
 @group(0) @binding(0) var<uniform> st: SmudgeStamp;
 @group(0) @binding(1) var<storage, read_write> work: array<u32>;
 @group(0) @binding(2) var<storage, read_write> carry: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read_write> raw: array<u32>;
-@group(0) @binding(4) var<storage, read> orig: array<u32>;
+// wet paint with a texturized grain: the stroke without it, then the layer as it was
+@group(0) @binding(3) var<storage, read_write> grained: array<u32>;
+// wet paint in the modulated mode: how much each pixel has taken so far
+@group(0) @binding(4) var<storage, read_write> amount: array<f32>;
 @group(0) @binding(5) var<uniform> wet_pass: WetPass;
 @group(1) @binding(0) var shapes: texture_2d_array<f32>;
 @group(1) @binding(1) var grains: texture_2d_array<f32>;
@@ -99,7 +106,7 @@ fn pixel(x: i32, y: i32) -> vec4<f32> {
     let k = u32(cy) * st.stride + u32(cx);
     // the brush picks up the stroke as it is without the grain laid over it
     if (st.grain_once > 0.5) {
-        return unpack4x8unorm(raw[k]);
+        return unpack4x8unorm(grained[k]);
     }
     return unpack4x8unorm(work[k]);
 }
@@ -308,14 +315,21 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     let g = select(grain_at(vec2<f32>(p) + 0.5), 1.0, once);
     let m = shape * st.alpha;
     let k = u32(p.y) * st.stride + u32(p.x);
-    let w = select(unpack4x8unorm(work[k]), unpack4x8unorm(raw[k]), once);
+    let w = select(unpack4x8unorm(work[k]), unpack4x8unorm(grained[k]), once);
     // smudging: the grain lets less of what is carried through
     var out = mix(w, carried(p), m * g);
     if (st.mode == 1u) {
         // wet: the stamp's plot mixed in, alpha and all (a stamp can lay bare paper), as far as
         // its weight there
         let laid = plot_at(2u * CARRIED + st.index * st.plot * st.plot, st.plot, t);
-        out = mix(w, laid, wet_weight(vec2<f32>(p) + 0.5, t));
+        var weight = wet_weight(vec2<f32>(p) + 0.5, t);
+        if (st.modulated == 1u) {
+            // only as far as the pixel has room left, which fills as it takes paint
+            let held = amount[k];
+            weight = weight * (1.0 - held);
+            amount[k] = held + weight * (1.0 - held);
+        }
+        out = mix(w, laid, weight);
     }
     if (st.preserve_alpha == 1u) {
         out = out * (w.a / max(out.a, 1e-6));
@@ -325,8 +339,8 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     let h = dither(u32(p.x), u32(p.y), bitcast<u32>(st.center.x) ^ (bitcast<u32>(st.center.y) * 2654435761u));
     if (once) {
         // the stroke kept without the grain; shown with the grain over its change to the layer
-        raw[k] = pack4x8unorm(clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));
-        let was = unpack4x8unorm(orig[k]);
+        grained[k] = pack4x8unorm(clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));
+        let was = unpack4x8unorm(grained[st.stride * st.size.y + k]);
         let shown = was + (out - was) * grain_at(vec2<f32>(p) + 0.5);
         work[k] = pack4x8unorm(clamp(shown + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));
         return;

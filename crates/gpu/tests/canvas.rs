@@ -1343,6 +1343,44 @@ fn a_wet_stamps_bleed_lays_its_strong_parts_whole_and_its_faint_ones_not_at_all(
 }
 
 #[test]
+fn modulated_wet_paint_lays_a_pixel_once() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a long wet stroke whose charge runs out: building up, its later stamps keep laying the
+    // paint they drag along over pixels already painted; building up by what is left (the
+    // modulated mode), a pixel takes paint only from the first stamps to reach it, so the stroke
+    // falls away towards its fresh paint
+    let late = |rendering: Rendering| {
+        let mut doc = Document::new(400, 32);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let wet = StrokeStyle {
+            wet_pull: Some(0.8),
+            dilution: 0.8,
+            load: 0.45,
+            grade: 1.0,
+            rendering,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), wet);
+        canvas.add_stamps(
+            &(0..760)
+                .map(|i| Stamp {
+                    time_ms: f64::from(i),
+                    ..Stamp::round(Vec2::new(10.0 + i as f32 * 0.5, 16.0), 10.0, 1.0)
+                })
+                .collect::<Vec<_>>(),
+        );
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (pixel(&layer, 400, 20, 16)[3], pixel(&layer, 400, 350, 16)[3])
+    };
+    let (built, kept) = (late(Rendering::BuildUp), late(Rendering::Gradual));
+    assert!(built.0 > 100 && kept.0 > 100, "{built:?} {kept:?}");
+    assert!(u16::from(kept.1) + 20 < u16::from(built.1), "{built:?} {kept:?}");
+}
+
+#[test]
 fn the_wet_mix_blur_softens_what_a_smudge_lays_down() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
