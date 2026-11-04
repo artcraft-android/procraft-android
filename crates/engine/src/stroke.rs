@@ -902,6 +902,10 @@ impl StrokeBuilder {
         }
         self.ran_on = Some(run_on);
         let length = self.length;
+        // a tap, which never went anywhere, lays one stamp whatever the brush's count, as a dot
+        if length <= 0.0 && run_on <= 0.0 {
+            self.placed.truncate(1);
+        }
         let (start, end) = (self.start_span(), self.end_span(run_on));
         let stamps: Vec<Stamp> = self.placed.iter().map(|p| self.finish_stamp(p, start, Some((length, end)))).collect();
         self.bounds = stamps.iter().fold(IRect::EMPTY, |b, s| b.union(s.bounds()));
@@ -2081,6 +2085,18 @@ mod tests {
         let one = angles(1);
         assert!(one.iter().all(|&a| a == one[0]), "{one:?}");
         assert_ne!(angles(2)[0], one[0]);
+    }
+
+    #[test]
+    fn a_tap_lays_one_stamp_whatever_the_brush_s_count() {
+        let brush = Brush { shape: Shape { count: 7, ..Shape::default() }, ..plain() };
+        let mut tap = StrokeBuilder::new(brush.clone(), 10.0, Pointer::Stylus);
+        tap.add(&[Sample::at(Vec2::new(50.0, 50.0), 1.0, 0.0), Sample::at(Vec2::new(50.0, 50.0), 1.0, 80.0)]);
+        assert_eq!(tap.finish().len(), 1);
+        // a stroke lays all of each place's
+        let mut stroke = StrokeBuilder::new(brush, 10.0, Pointer::Stylus);
+        stroke.add(&line(10, 100.0));
+        assert!(stroke.finish().len() >= 14);
     }
 
     #[test]
