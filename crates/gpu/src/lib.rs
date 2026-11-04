@@ -39,6 +39,11 @@ pub(crate) fn textures_uncompressed() -> bool {
     UNCOMPRESSED.load(Ordering::Relaxed)
 }
 
+/// What a panic said (its message, when it gave one as text).
+pub fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic.downcast_ref::<&str>().copied().or_else(|| panic.downcast_ref::<String>().map(String::as_str)).unwrap_or("")
+}
+
 /// Whether a GPU named `name` on `backend` needs its canvas textures uncompressed.
 fn keeps_textures_uncompressed(name: &str, backend: wgpu::Backend) -> bool {
     backend == wgpu::Backend::Vulkan && name.to_ascii_lowercase().contains("mali")
@@ -125,14 +130,21 @@ impl Gpu {
 
     /// A device for offscreen work (tests, exports), from the first instance that makes one.
     pub fn headless() -> Result<Gpu, GpuError> {
-        Gpu::first_that(|_| true)
+        Gpu::first_that(0, |_| {}, |_| true).map(|(gpu, _)| gpu)
     }
 
     /// The app's device, the canvases' pipelines made: from the first instance that makes one
     /// and builds them without an error or losing it (a driver that fails on them gives way to
     /// the next backend; the last is kept as it is).
     pub fn for_canvases() -> Result<Gpu, GpuError> {
-        Gpu::first_that(|gpu| {
+        Gpu::for_canvases_from(0, |_| {}).map(|(gpu, _)| gpu)
+    }
+
+    /// [`Gpu::for_canvases`] from backend `from` on (round to those before it), `trying` told
+    /// each backend's index before it is tried (a driver that takes the app down leaves no error
+    /// to see); the device, and its backend's index.
+    pub fn for_canvases_from(from: usize, trying: impl FnMut(usize)) -> Result<(Gpu, usize), GpuError> {
+        Gpu::first_that(from, trying, |gpu| {
             gpu.prepare_canvases();
             let fine = gpu.errors() == 0 && !gpu.is_lost();
             if !fine {
@@ -142,17 +154,32 @@ impl Gpu {
         })
     }
 
-    /// A device from the first instance that makes one `fine` takes, or the last's.
-    fn first_that(fine: impl Fn(&Gpu) -> bool) -> Result<Gpu, GpuError> {
-        let count = Gpu::backends().len();
+    /// A device from the first instance, from backend `from` on, that makes one `fine` takes, or
+    /// the last's; a backend whose driver panics making it or in `fine` fails as if it had said
+    /// so.
+    fn first_that(
+        from: usize,
+        mut trying: impl FnMut(usize),
+        fine: impl Fn(&Gpu) -> bool,
+    ) -> Result<(Gpu, usize), GpuError> {
+        let count = Gpu::backends().len().max(1);
         let mut tries = 0;
         loop {
-            let Some(instance) = Gpu::instance_after(tries) else {
+            let backend = (from + tries) % count;
+            let Some(instance) = Gpu::instance_after(backend) else {
                 return Err(GpuError::NoAdapter("no backend".to_owned()));
             };
             let last = tries + 1 >= count;
-            match Gpu::create(instance, None) {
-                Ok(gpu) if last || fine(&gpu) => return Ok(gpu),
+            trying(backend);
+            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Gpu::create(instance, None).map(|gpu| {
+                    let taken = last || fine(&gpu);
+                    (gpu, taken)
+                })
+            }))
+            .unwrap_or_else(|panic| Err(GpuError::Device(format!("panicked: {}", panic_message(panic.as_ref())))));
+            match made {
+                Ok((gpu, true)) => return Ok((gpu, backend)),
                 Ok(_) => log::warn!("trying the next backend"),
                 Err(e) if !last => log::warn!("{e}; trying the next backend"),
                 Err(e) => return Err(e),
@@ -317,6 +344,21 @@ mod tests {
         // another device makes its own
         if let Ok(other) = Gpu::headless() {
             assert!(!Arc::ptr_eq(&first, &other.canvas_pipelines()));
+        }
+    }
+
+    #[test]
+    fn a_backend_whose_driver_panics_gives_way_to_the_next() {
+        let count = Gpu::backend_count();
+        let mut tried = Vec::new();
+        // every backend but the last panics as its device is checked; the last is kept as it is
+        let made = Gpu::first_that(1, |b| tried.push(b), |_| panic!("a driver's wrapper panicking"));
+        // tried from the one asked for, round to those before it
+        let order: Vec<usize> = (0..count).map(|t| (1 + t) % count).collect();
+        assert!(order.starts_with(&tried), "{tried:?} of {order:?}");
+        match made {
+            Ok((_, backend)) => assert_eq!(Some(&backend), tried.last()),
+            Err(e) => eprintln!("skipped: {e}"),
         }
     }
 }

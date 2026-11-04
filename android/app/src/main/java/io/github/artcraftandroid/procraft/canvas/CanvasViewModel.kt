@@ -2283,6 +2283,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 s.takeSaveFailure()?.let { told(Result.failure(Exception(it))) }
             }
         }
+        // a canvas the device's graphics can't draw says so (one opened from its cell, by the zoom)
+        if (galleryZoom == null) viewModelScope.launch { awaitCanvasDrawn() }
     }
 
     fun select(tool: ToolKind) {

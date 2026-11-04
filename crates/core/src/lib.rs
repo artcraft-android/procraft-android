@@ -1117,10 +1117,7 @@ impl CanvasSession {
         name: String,
         pixels: Vec<(procraft_engine::document::LayerId, Vec<u8>)>,
     ) -> Arc<CanvasSession> {
-        #[cfg(target_os = "android")]
-        android_logger::init_once(
-            android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("procraft"),
-        );
+        device::start_log();
         let shipped = library();
         let shelf = brush_library::LibrarySet::shipped(&shipped);
         // the round pen to paint, the soft airbrush to erase, the round brush to smudge
@@ -1272,7 +1269,18 @@ impl CanvasSession {
             let shared = Arc::clone(&self.shared);
             let handle = std::thread::Builder::new()
                 .name("procraft-render".to_owned())
-                .spawn(move || render::run(shared, native))
+                .spawn(move || {
+                    // a panic (in a driver's wrapper, say) leaves the canvas saying it can't draw
+                    // rather than waiting on a thread that is gone
+                    let run = Arc::clone(&shared);
+                    if let Err(panic) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || render::run(run, native)))
+                    {
+                        let reason = format!("the renderer stopped: {}", procraft_gpu::panic_message(panic.as_ref()));
+                        log::error!("render thread: {reason}");
+                        shared.lock().error = Some(reason);
+                    }
+                })
                 .map_err(|e| MobileError::Window { reason: e.to_string() })?;
             *self.shared.thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
             Ok(())

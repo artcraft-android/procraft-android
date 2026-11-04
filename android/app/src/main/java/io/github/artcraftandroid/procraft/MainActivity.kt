@@ -45,6 +45,9 @@ class MainActivity : ComponentActivity() {
         // wide colour, so a Display P3 canvas's colours show as they are around it too
         if (resources.configuration.isScreenWideColorGamut) window.colorMode = android.content.pm.ActivityInfo.COLOR_MODE_WIDE_COLOR_GAMUT
         hideSystemBars()
+        // which graphics backend the app is trying, kept before the model makes the GPU device: a
+        // driver that crashes the app then sends the next start to the next backend
+        io.github.artcraftandroid.procraft.core.setGpuRecordFolder(filesDir.path)
         // made here, not inside the flow's read-only snapshot, where its setup can't write state
         val model = vm
         setContent { AppRoot(model) }
