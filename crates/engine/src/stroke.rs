@@ -199,6 +199,13 @@ const SAMPLE_FRAMES: f32 = 0.25;
 const PEN_RATE: f64 = 240.0;
 const FINGER_RATE: f64 = 120.0;
 
+/// What a speed control of `amount` leaves of a size or opacity at `speed` (0..1): faster input
+/// takes away as far as the amount says; an amount below 0, slower input does (as measured).
+fn by_speed(amount: f32, speed: f32) -> f32 {
+    let speed = speed.clamp(0.0, 1.0);
+    if amount >= 0.0 { 1.0 - amount * speed } else { 1.0 + amount * (1.0 - speed) }
+}
+
 /// The pressure a finger's wet mix takes (its dilution, pull, attack and their curves): with no
 /// pressure of its own, each input's is drawn towards full from the one before, settling here at
 /// a finger's input rate.
@@ -1203,8 +1210,8 @@ impl StrokeBuilder {
     /// The stamp diameter at a point of the path, before jitter and taper.
     fn diameter_at(&self, p: PathPoint) -> f32 {
         let (pressure, _) = self.pressed(p);
-        // faster input thins the stroke (or, the other way, widens it)
-        let speed = (1.0 - self.extras.speed_size * p.speed).max(0.05);
+        // faster input thins the stroke (an amount below 0: slower input does)
+        let speed = by_speed(self.extras.speed_size, p.speed).max(0.05);
         let drawn = self.diameter * pressure * speed;
         // leaning adds to it, up to the most the brush may be
         let most = (self.brush.biggest() * self.scale).max(drawn);
@@ -1337,7 +1344,7 @@ impl StrokeBuilder {
         // leaning fades the stamp by the square root of how far it has gone
         let fade = self.leaning(p, x.tilt_angles.opacity).sqrt() * self.brush.tilt.opacity;
         let tilt_alpha = if fade >= 0.0 { 1.0 - fade } else { 1.0 - (fade + self.brush.tilt.opacity) };
-        let speed_alpha = (1.0 - x.speed_opacity * p.speed).clamp(0.0, 1.0);
+        let speed_alpha = by_speed(x.speed_opacity, p.speed).clamp(0.0, 1.0);
         // the fall off fades the stroke out by the cube root of how far it has gone
         let falloff = 1.0 - run_out(x.falloff, distance);
         use PressureCurve as PC;
@@ -1740,6 +1747,15 @@ mod tests {
         let mut many = StrokeBuilder::new(plain(), 10.0, Pointer::Stylus);
         many.add(&line(97, 100.0));
         assert_eq!(few.finish().len(), many.finish().len());
+    }
+
+    #[test]
+    fn a_speed_amount_below_zero_thins_slow_input() {
+        // above 0 faster input takes away; below, slower input does
+        assert_eq!(by_speed(0.5, 0.0), 1.0);
+        assert_eq!(by_speed(0.5, 1.0), 0.5);
+        assert_eq!(by_speed(-0.5, 0.0), 0.5);
+        assert_eq!(by_speed(-0.5, 1.0), 1.0);
     }
 
     #[test]
