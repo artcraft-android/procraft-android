@@ -269,7 +269,12 @@ impl Gpu {
     /// The fewest layers a texture viewed as an array has: two on OpenGL (ES), which makes a
     /// texture of one a plain 2D one that an array view reads nothing from; else one.
     pub fn array_layers_least(&self) -> u32 {
-        if self.adapter.get_info().backend == wgpu::Backend::Gl { 2 } else { 1 }
+        if self.is_gl() { 2 } else { 1 }
+    }
+
+    /// Whether the device is OpenGL (ES)'s.
+    pub fn is_gl(&self) -> bool {
+        self.adapter.get_info().backend == wgpu::Backend::Gl
     }
 }
 

@@ -3319,9 +3319,31 @@ impl Canvas {
         let mut uploaded: Vec<wgpu::Buffer> = Vec::new();
         // what is worked on, for the caches: other work drops them
         let live = self.caches.as_ref().or(self.remake.as_ref().map(|r| &r.caches)).map(|c| c.live_layers.clone());
-        for op in ops {
+        // the layers a stroke was put into in this render's work so far, and whether the rest of
+        // the work waits for a render of its own
+        let mut committed: Vec<LayerId> = Vec::new();
+        let mut deferred = false;
+        let mut ops = ops.into_iter();
+        while let Some(op) = ops.next() {
             if live.as_ref().is_some_and(|live| !self.keeps_caches(&op, live)) {
                 self.let_go_caches(true);
+            }
+            // on OpenGL (ES) a stroke painting in place, which starts by copying its layer, waits
+            // for a render of its own when a stroke went into that layer in this one: some
+            // drivers' copy reads the layer as it was before (wet paint then picks up nothing)
+            if gpu.is_gl()
+                && let Op::Stamps { style, layer, .. } = &op
+                && style.in_place()
+                && self.smudge.as_ref().is_none_or(|s| s.layer != *layer)
+                && committed.contains(layer)
+            {
+                let rest: Vec<Op> = std::iter::once(op).chain(ops.by_ref()).collect();
+                self.ops.splice(0..0, rest);
+                deferred = true;
+                break;
+            }
+            if let Op::Commit(stroke) = &op {
+                committed.push(stroke.layer);
             }
             match op {
                 Op::Stamps { instances, wet, times, style, layer, clear, .. } if style.in_place() => {
@@ -4037,6 +4059,10 @@ impl Canvas {
         }
         self.renders = self.renders.wrapping_add(1);
         self.park_extra(gpu, doc);
+        // the work held back, in a submission after this one's
+        if deferred {
+            self.render(gpu, doc, None);
+        }
     }
 
     /// Bytes per row of a layer copied into a buffer (rows are 256-byte aligned for copies).
