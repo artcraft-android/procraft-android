@@ -82,14 +82,28 @@ impl Gpu {
             .unwrap_or_else(|| wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle()))
     }
 
-    /// The backends a device is made from, best first: on Android Vulkan, then OpenGL ES (for
-    /// a device whose Vulkan is missing or fails); elsewhere the native API alone.
-    fn backends() -> &'static [wgpu::Backends] {
-        if cfg!(target_os = "android") {
-            &[wgpu::Backends::VULKAN, wgpu::Backends::GL]
-        } else {
-            &[wgpu::Backends::PRIMARY]
+    /// The backends a device is made from, best first: those `WGPU_BACKEND` names if it is set
+    /// (to try another when a driver fails); on Android Vulkan, then OpenGL ES (for a device
+    /// whose Vulkan is missing or fails); on Windows Vulkan and Direct3D 12, Direct3D 12 first on
+    /// ARM (the Snapdragon X's Vulkan driver fails as a canvas opens); elsewhere the native API.
+    fn backends() -> Vec<wgpu::Backends> {
+        if let Some(chosen) = wgpu::Backends::from_env().filter(|b| !b.is_empty()) {
+            return vec![chosen];
         }
+        if cfg!(target_os = "android") {
+            vec![wgpu::Backends::VULKAN, wgpu::Backends::GL]
+        } else if cfg!(all(windows, target_arch = "aarch64")) {
+            vec![wgpu::Backends::DX12, wgpu::Backends::VULKAN]
+        } else if cfg!(windows) {
+            vec![wgpu::Backends::VULKAN, wgpu::Backends::DX12]
+        } else {
+            vec![wgpu::Backends::PRIMARY]
+        }
+    }
+
+    /// How many backends there are to make a device from (see [`Gpu::instance_after`]).
+    pub fn backend_count() -> usize {
+        Gpu::backends().len()
     }
 
     /// The instance to try after `tries` failed to make a device (see [`Gpu::backends`]); None

@@ -53,6 +53,7 @@ mod selection;
 mod settings;
 mod shortcuts;
 mod sound;
+mod startup;
 mod source_editor;
 mod studio;
 mod text;
@@ -169,10 +170,8 @@ fn veil(ctx: &egui::Context, what: &str) {
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        // a system font it can't read is left out; one line for each says nothing to act on
-        .filter_module("fontdb", log::LevelFilter::Error)
-        .init();
+    // the log, to the app folder's file too, and a crash's message into it
+    startup::init();
     // the layers' textures may take what the layers themselves may (the engine's budget): none is
     // ever kept off the GPU, but the composite is made around the layers not being worked on, so
     // a frame composites only those (as the tablet's)
@@ -308,8 +307,12 @@ impl ApplicationHandler for App {
         };
         // a pen's lean, which winit's touches leave out (on Wayland the whole pen)
         pen::watch(&window, self.wake.clone());
-        let screen = match Screen::new(window) {
-            Ok(s) => s,
+        // from the backend the last run used, or the next if that run never ended
+        let screen = match Screen::new(window, startup::gpu_start(procraft_gpu::Gpu::backend_count())) {
+            Ok((s, backend)) => {
+                startup::gpu_running(backend);
+                s
+            }
             Err(e) => {
                 log::error!("no GPU for the window: {e}");
                 files::tell("ProCraft can't draw", &format!("No GPU device for the window: {e}"));
@@ -405,6 +408,8 @@ impl ApplicationHandler for App {
     /// The app ending without its window closed first (a Mac's Quit, from the app menu or
     /// Cmd+Q, ends it with no close asked): the artwork open kept as closing the window keeps it.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // the backend did its run: the next starts on it again
+        startup::gpu_ended();
         // before winit closes the connection the pen is read on
         pen::stop();
         if std::mem::replace(&mut self.closed, true) {
