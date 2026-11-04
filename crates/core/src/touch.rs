@@ -1755,13 +1755,16 @@ impl CanvasSession {
     /// What a transform's touch at `at` takes: a warp's shown control point, or the box's nearest
     /// node, else the content.
     fn transform_handle_at(&self, at: (f32, f32), how: TransformTouch) -> crate::TransformHandle {
-        let (shown, view, density) = {
+        let (shown, view, density, warping) = {
             let st = self.shared.lock();
-            (st.transform_box(), st.view.map(|v| v.to_screen()), st.display_scale)
+            let warping = st.transform_mode == procraft_engine::transform::TransformMode::Warp;
+            (st.transform_box(), st.view.map(|v| v.to_screen()), st.display_scale, warping)
         };
         let (Some(b), Some(m)) = (shown, view) else { return crate::TransformHandle::Move };
         let view = vec![m.a, m.b, m.c, m.d, m.e, m.f];
-        if !b.mesh.is_empty() {
+        // a warp's mesh stays with the content after it, but only a warp shows its points: the
+        // other kinds take the box's nodes
+        if warping && !b.mesh.is_empty() {
             return crate::mesh_handle_at(b.mesh, view, at.0, at.1, density, how.advanced_mesh);
         }
         crate::screen_box(b.corners, view, density)
@@ -2331,6 +2334,32 @@ mod tests {
         s.set_touch_transforming(None);
         let out = s.touch_down(1, PointerKind::Stylus, at(20.0, 20.0, 100.0));
         assert!(!out.contains(&TouchCommand::TransformTouched));
+    }
+
+    #[test]
+    fn after_a_warp_the_other_kinds_drag_the_box_s_nodes() {
+        use procraft_engine::transform::{Transform, TransformMode};
+        let s = session();
+        {
+            let mut st = s.shared.lock();
+            st.view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+            let mut t = Transform::new(100.0, 100.0, 200.0, 100.0, Vec::new());
+            t.start_warp();
+            st.transform = Some(t);
+            st.transform_mode = TransformMode::Distort;
+        }
+        s.set_touch_transforming(Some(TransformTouch { advanced_mesh: false }));
+        let corner = |s: &CanvasSession| {
+            let b = s.shared.lock().transform_box().map(|b| b.corners).unwrap_or_default();
+            (b.first().copied(), b.get(1).copied())
+        };
+        // the top left corner dragged up and left goes with the touch from where the drag began
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
+        s.touch_move(1, at(70.0, 80.0, 16.0));
+        s.touch_move(1, at(50.0, 60.0, 32.0));
+        s.touch_up(1, at(50.0, 60.0, 48.0));
+        assert_eq!(corner(&s), (Some(80.0), Some(80.0)));
+        s.set_touch_transforming(None);
     }
 
     #[test]
