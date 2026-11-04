@@ -284,4 +284,3 @@ fn stroke_into(b: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
     let full = vec4<f32>((1.0 - b.a) * cs + b.a * mixed, 1.0);
     return unsquared(mix(squared(b), squared(full), s.a));
 }
-
