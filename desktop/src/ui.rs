@@ -302,7 +302,7 @@ impl Interface {
     }
 
     /// A new artwork just started: without time-lapse if that is turned off.
-    pub fn started_new(&self) {
+    pub fn started_new(&mut self) {
         if self.prefs.no_time_lapse {
             self.time_lapse.set_recording(false);
         }
@@ -1876,6 +1876,7 @@ impl Interface {
                     animation: assist.as_ref().is_some_and(|a| !a.pages),
                     pages: assist.as_ref().is_some_and(|a| a.pages),
                     time_lapse: self.time_lapse.recording(),
+                    time_lapse_recorded: self.time_lapse.recorded(),
                     reference: self.reference.on,
                     guide: session.guide().on,
                     side_bar: self.side_bar_shown,
@@ -1974,6 +1975,7 @@ impl Interface {
                             session,
                             self.artwork_dir.clone(),
                             self.time_lapse.info(),
+                            self.time_lapse.settings(),
                         ));
                     }
                     Some(Act::Cut) => self.cut_layer(session),

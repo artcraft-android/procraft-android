@@ -322,7 +322,13 @@ fn paper(image: u32, scale: f32, depth: f32) -> Grain {
 /// A grain that travels with each stamp, its tile `tile` canvas pixels (cropped, as the brushes
 /// here keep it).
 fn moving(image: u32, tile: f32, depth: f32) -> Grain {
-    Grain { image: Some(image), mode: GrainMode::Moving, scale: Grain::scale_for_cropped_tile(tile), depth, source: None }
+    Grain {
+        image: Some(image),
+        mode: GrainMode::Moving,
+        scale: Grain::scale_for_cropped_tile(tile),
+        depth,
+        source: None,
+    }
 }
 
 /// A pressure curve that rises fast: a light touch already gives most of the line.

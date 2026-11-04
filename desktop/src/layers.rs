@@ -860,7 +860,8 @@ impl Layers {
                         && a == b
                         && session.layers().iter().any(|l| l.id == a && l.kind == LayerType::Paint)
                     {
-                        self.twin = Some(Twin { id: a, since: Instant::now(), from: middle, moved: false, done: false });
+                        self.twin =
+                            Some(Twin { id: a, since: Instant::now(), from: middle, moved: false, done: false });
                         // not a one-finger press on it any more
                         self.press = None;
                     }

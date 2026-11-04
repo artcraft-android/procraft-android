@@ -407,7 +407,8 @@ impl Canvas<'_> {
                     Some(at) => (at, false),
                     None => (rest.strip_suffix(".chunk")?, true),
                 };
-                let (tx, ty) = at.split_once('~').and_then(|(x, y)| Some((x.parse::<usize>().ok()?, y.parse::<usize>().ok()?)))?;
+                let (tx, ty) =
+                    at.split_once('~').and_then(|(x, y)| Some((x.parse::<usize>().ok()?, y.parse::<usize>().ok()?)))?;
                 (tx * t < w && ty * t < h).then(|| (name.to_owned(), tx, ty, lzo))
             })
             .collect();
@@ -417,8 +418,9 @@ impl Canvas<'_> {
         let unpack = |(name, tx, ty, lzo): &(String, usize, usize, bool)| -> Result<Vec<u8>, ReadError> {
             let (tw, th) = (t.min(w - tx * t), t.min(h - ty * t));
             let packed = self.zip.read(name).ok_or(ReadError::Damaged("tile"))?;
-            let raw = if *lzo { crate::lzo::decode(&packed, tw * th * bpp) } else { applz4::decode(&packed, tw * th * bpp) }
-                .ok_or(ReadError::Damaged("tile"))?;
+            let raw =
+                if *lzo { crate::lzo::decode(&packed, tw * th * bpp) } else { applz4::decode(&packed, tw * th * bpp) }
+                    .ok_or(ReadError::Damaged("tile"))?;
             if raw.len() != tw * th * bpp {
                 return Err(ReadError::Damaged("tile size"));
             }

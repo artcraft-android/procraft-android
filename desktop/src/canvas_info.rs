@@ -69,8 +69,10 @@ pub struct CanvasInfo {
     profile: String,
     /// The signature's strokes, x, y of each point across its box (0..1).
     signature: Vec<Vec<f32>>,
-    /// The time-lapse recorded so far: its frames and what they take on disk (bytes).
+    /// The time-lapse recorded so far: its frames and what they take on disk (bytes), and its
+    /// settings' names (quality, resolution, codec).
     lapse: (u32, u64),
+    video: Vec<String>,
     /// Done with another profile picked asks first.
     asking: crate::alert::Alert,
     /// What couldn't be kept on Done, for the window to tell.
@@ -78,7 +80,12 @@ pub struct CanvasInfo {
 }
 
 impl CanvasInfo {
-    pub fn new(session: &CanvasSession, dir: Option<String>, lapse: (u32, u64)) -> CanvasInfo {
+    pub fn new(
+        session: &CanvasSession,
+        dir: Option<String>,
+        lapse: (u32, u64),
+        video: procraft_core::TimeLapseSettings,
+    ) -> CanvasInfo {
         let info = session.artwork_info();
         CanvasInfo {
             page: 0,
@@ -92,6 +99,7 @@ impl CanvasInfo {
             new_photo: None,
             profile: session.profile(),
             lapse,
+            video: procraft_core::time_lapse_setting_names(video),
             asking: crate::alert::Alert::default(),
             failure: None,
         }
@@ -388,10 +396,10 @@ impl CanvasInfo {
                 let seconds = frames / procraft_core::TIME_LAPSE_FPS;
                 let video = [
                     ("Video length", format!("{:02}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)),
-                    ("Video quality", "Good".to_owned()),
-                    ("Video resolution", "720p".to_owned()),
+                    ("Video quality", self.video.first().cloned().unwrap_or_default()),
+                    ("Video resolution", self.video.get(1).cloned().unwrap_or_default()),
                     ("Video file size", megabytes(bytes)),
-                    ("Video codec", "H.264".to_owned()),
+                    ("Video codec", self.video.get(2).cloned().unwrap_or_default()),
                 ];
                 rows(ui, width, &video, 50.0);
             }

@@ -25,6 +25,8 @@ struct StampUniform {
     secondary: vec4<f32>,
     // 1: the shape read unfiltered (sharp)
     shape_sharp: u32,
+    // the coarsest mip level the shape is read from: a small stamp's thin shape keeps its strength
+    shape_lod_cap: f32,
 }
 
 @group(0) @binding(0) var<uniform> su: StampUniform;
@@ -164,7 +166,7 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         // reaches past the stamp), which shows on a stamp a few pixels across
         let uv = i.q * (r / (r + 0.5)) * i.flip * 0.5 + 0.5;
         // the mip level that matches the stamp's size on the canvas
-        let lod = max(log2(256.0 / max(2.0 * r + 1.0, 1.0)), 0.0);
+        let lod = clamp(log2(256.0 / max(2.0 * r + 1.0, 1.0)), 0.0, su.shape_lod_cap);
         let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
         var s = textureSampleLevel(shapes, shape_smp, uv, su.shape, lod).r;
         if (su.shape_sharp == 1u) {

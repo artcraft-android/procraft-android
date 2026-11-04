@@ -8777,8 +8777,12 @@ fn a_pad_is_drawn_again_off_the_caller_s_thread_the_newest_ask_last() {
 fn the_recent_set_keeps_the_last_eight_brushes_painted_with_and_the_pinned_ones() {
     let Some(s) = session(200, 200) else { return };
     // every brush of the library, by place
-    let places: Vec<(u32, u32)> =
-        s.brush_library().iter().enumerate().flat_map(|(i, set)| set.brushes.iter().map(move |b| (i as u32, b.index))).collect();
+    let places: Vec<(u32, u32)> = s
+        .brush_library()
+        .iter()
+        .enumerate()
+        .flat_map(|(i, set)| set.brushes.iter().map(move |b| (i as u32, b.index)))
+        .collect();
     assert!(places.len() >= 10);
     let paint = |(set, index): (u32, u32)| {
         assert!(s.select_brush(set, index));

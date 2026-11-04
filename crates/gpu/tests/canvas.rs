@@ -2025,3 +2025,29 @@ fn the_grey_view_shows_each_colour_as_the_grey_of_its_luminance() {
         );
     }
 }
+
+#[test]
+fn a_small_stamp_s_thin_shape_keeps_its_strength() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(64, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    // a shape that is an upright line, a sixteenth of its width across
+    let n = procraft_engine::textures::TEXTURE_SIZE;
+    let pixels = (0..n * n).map(|i| if (i % n).abs_diff(n / 2) < n / 32 { 255 } else { 0 }).collect();
+    let mut brush = Brush::round_pen();
+    brush.shape.source = procraft_engine::brush::Source::new(pixels);
+    let mut s = StrokeStyle { rendering: Rendering::Strongest, ..style(StrokeTool::Paint, 1.0) };
+    canvas.use_sources(&gpu, &mut s, &brush);
+    canvas.begin_stroke(doc.current(), s);
+    // stamps 9 px across, a fifth of a pixel apart: each lays its line where it passes. Read no
+    // coarser than the cap, the line keeps nearly its full strength; at the level the size alone
+    // would pick it is averaged to a faint grey, which the strongest stamp can't build past
+    let stamps: Vec<Stamp> = (0..100).map(|k| dot(Vec2::new(22.0 + k as f32 * 0.2, 32.0), 4.5)).collect();
+    canvas.add_stamps(&stamps);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    let laid: Vec<u8> = (26..38).map(|x| pixel(&layer, 64, x, 32)[3]).collect();
+    assert!(laid.iter().all(|&a| a > 200), "{laid:?}");
+}

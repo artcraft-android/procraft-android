@@ -1478,6 +1478,19 @@ def broom():
     return unary_union([along_diagonal(unary_union([head, band, stick]), (5.5, 18.5)), *dust])
 
 
+def question_disc():
+    """A question (an alert's): a disc with a question mark cut out of it."""
+    c = (12.0, 9.2)
+    ring = Point(c).buffer(3.4, quad_segs=24).difference(Point(c).buffer(1.2, quad_segs=24))
+    # the hook: the ring from the left over the top to below the right, its open end rounded
+    turn = [(c[0] + 9 * math.cos(math.radians(a)), c[1] - 9 * math.sin(math.radians(a))) for a in range(200, -71, -10)]
+    hook = ring.intersection(Polygon([c] + turn))
+    end = Point(c[0] + 2.3 * math.cos(math.radians(200)), c[1] - 2.3 * math.sin(math.radians(200))).buffer(1.1, quad_segs=12)
+    stem = unary_union([capsule((12.0, 11.5), (12.0, 13.6), 1.1), capsule((13.6, 11.6), (12.0, 12.4), 1.1)])
+    dot = Point(12.0, 17.0).buffer(1.35, quad_segs=12)
+    return Point(12, 12).buffer(10.0, quad_segs=32).difference(unary_union([hook, end, stem, dot]))
+
+
 def four_squares():
     """Hard Mix: four squares."""
     return unary_union([soft(box(x, y, x + 8.0, y + 8.0), 1.0) for x in (3.0, 13.0) for y in (3.0, 13.0)])
@@ -1582,7 +1595,7 @@ DRAWINGS = {
     'glitchdiverge': fork, 'grainmoving': moving_grain, 'graintexturized': grain_tile, 'brushpaintedon': painted_on,
     'swipe-share': share_tab, 'swipe-duplicate': duplicate, 'textlayer': text_layer,
     'recentset': hourglass, 'swipe-find': target, 'swipe-pin': upright_tack, 'swipe-unpin': struck_tack,
-    'swipe-clear': broom, 'menuclear': broom, 'pinmark': upright_tack,
+    'swipe-clear': broom, 'menuclear': broom, 'pinmark': upright_tack, 'alertquestion': question_disc,
 }
 DRAWINGS.update({f'set-{k}': draw for k, draw in enumerate(SET_ICONS)})
 DRAWINGS.update({f'blend-{k}': draw for k, draw in BLENDS.items()})

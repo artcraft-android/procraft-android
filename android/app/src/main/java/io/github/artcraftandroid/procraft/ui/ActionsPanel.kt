@@ -260,14 +260,18 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         )
         3 -> listOf(
             listOf(
-                Act("Time-lapse Replay") {
-                    // the panel fades away as the replay takes the screen
-                    vm.fadePanels()
-                    vm.timeLapseReplaying = true
-                },
+                // Replay and Export wait for something recorded
+                Act(
+                    "Time-lapse Replay",
+                    onClick = {
+                        // the panel fades away as the replay takes the screen
+                        vm.fadePanels()
+                        vm.timeLapseReplaying = true
+                    }.takeIf { vm.timeLapseRecorded },
+                ),
                 Toggle("Time-lapse Recording", vm.timeLapseRecording) { vm.changeTimeLapseRecording(it) },
             ),
-            listOf(Act("Export time-lapse video") { exportingVideo = true }),
+            listOf(Act("Export time-lapse video", onClick = { exportingVideo = true }.takeIf { vm.timeLapseRecorded })),
         )
         4 -> listOf(
             listOf(
@@ -410,6 +414,17 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         destructive = false,
         cancel = "Full length",
         first = { shareVideo(null) },
+    )
+    // recording turned off with something recorded: deleted, or kept (a tap beside it keeps it)
+    Alert(
+        if (vm.purgeAsking) Unit else null,
+        title = { "Purge Video?" },
+        message = { "The video recorded so far will be deleted.\nIt can't be brought back." },
+        action = "Purge",
+        onCancel = { vm.answerPurge(false) },
+        onAction = { vm.answerPurge(true) },
+        icon = PcIcons.AlertQuestion,
+        cancel = "Don't Purge",
     )
     PdfQualityAlert(pdfAsking != null, onCancel = { pdfAsking = null }) { quality ->
         pdfAsking?.let { share(it, quality.jpeg) }

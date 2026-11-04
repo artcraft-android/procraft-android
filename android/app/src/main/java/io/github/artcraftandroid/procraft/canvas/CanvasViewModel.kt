@@ -2001,6 +2001,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun timeLapseInfo(): Pair<Int, Long> = timeLapse?.let { it.count to it.bytes() } ?: (0 to 0L)
 
+    /** The time-lapse's video settings, kept with the artwork. */
+    fun timeLapseSettings(): TimeLapseSettings = timeLapse?.settings ?: TimeLapseSettings()
+
     /** Renames the artwork and sets its author, from Canvas information. */
     fun changeArtworkInfo(name: String, author: String) {
         val s = session ?: return
@@ -2096,7 +2099,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (!orientationMemory) s.forgetSavedView()
         s.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputCurve.flatMap { listOf(it.x, it.y) })
         applyAppSettings(s)
-        timeLapse = TimeLapse(dir).also { timeLapseRecording = it.recording }
+        timeLapse = TimeLapse(dir).also {
+            timeLapseRecording = it.recording
+            timeLapseRecorded = it.count > 0
+        }
         if (!brushesLoaded) loadBrushes(s)
         s.useColourHistory(colourHistory)
         session = s
@@ -2833,6 +2839,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The replay shows over everything. */
     var timeLapseReplaying by mutableStateOf(false)
 
+    /** Something has been recorded (Replay and Export need it). */
+    var timeLapseRecorded by mutableStateOf(false)
+        private set
+
+    /** Recording was turned off with something recorded: whether to delete it is asked. */
+    var purgeAsking by mutableStateOf(false)
+        private set
+
     /** Frames recorded, for the replay. */
     fun timeLapseFrames() = timeLapse?.count ?: 0
 
@@ -2841,6 +2855,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun changeTimeLapseRecording(on: Boolean) {
         timeLapse?.recording = on
         timeLapseRecording = on
+        // the switch goes off at once; then what was recorded may be deleted
+        if (!on && timeLapseFrames() > 0) purgeAsking = true
+    }
+
+    /** The answer to [purgeAsking]: what was recorded deleted, or kept. */
+    fun answerPurge(purge: Boolean) {
+        purgeAsking = false
+        if (purge) timeLapse?.purge()
+        timeLapseRecorded = timeLapseFrames() > 0
     }
 
     private var frameJob: Job? = null
@@ -2864,6 +2887,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                     t.record(shot.rgba, shot.width.toInt(), shot.height.toInt())
                 }
             } while (frameStale)
+            timeLapseRecorded = t.count > 0
         }
     }
 

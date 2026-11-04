@@ -233,6 +233,7 @@ Lucide set beside them.
 | Recent set | an hourglass, its sand run down |
 | Recent swipe: Find / Pin / Unpin / Clear | a target / a thumbtack standing on its point / the tack struck through / a broom sweeping two specks |
 | A pinned brush's mark | the standing thumbtack |
+| An alert's question | a disc with a question mark cut out |
 
 ## Brush set icons
 

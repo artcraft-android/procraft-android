@@ -120,6 +120,9 @@ pub struct StrokeStyle {
     /// Wet mix: how much of the colour under the brush mixes into its paint, 0..1; none paints
     /// plainly.
     pub wet_pull: Option<f32>,
+    /// Wet paint mixes with the layer as it was before the stroke (a glaze), not with the stroke
+    /// as it goes (a blending mode).
+    pub wet_from_before: bool,
     /// Wet mix: how many stamps' worth of paint the brush holds; none never runs out.
     pub load: f32,
     /// Wet mix: water in the paint, 0..1: it goes on thinner.
@@ -149,6 +152,9 @@ pub struct StrokeStyle {
     pub grain_sharp: bool,
     /// No shape filtering: the shape image read pixel by pixel, its edges and specks hard.
     pub shape_sharp: bool,
+    /// The coarsest mip level a small stamp reads its shape from, so a thin shape keeps its
+    /// strength however small the stamp.
+    pub shape_lod_cap: f32,
     /// The secondary colour (sRGB, 0..1), mixed in as far as each stamp says.
     pub secondary: [f32; 3],
     /// Drawn as a brush preview (the studio's drawing pad, the library's strokes), which draws
@@ -201,6 +207,7 @@ impl StrokeStyle {
             grain_brightness: 0.0,
             grain_contrast: 0.0,
             wet_pull: None,
+            wet_from_before: false,
             load: 0.0,
             dilution: 0.0,
             falloff: 0.0,
@@ -215,6 +222,7 @@ impl StrokeStyle {
             grain_rotation: 0.0,
             grain_sharp: false,
             shape_sharp: false,
+            shape_lod_cap: SHAPE_LOD_CAP,
             secondary: [1.0, 1.0, 1.0],
             preview: false,
             luminance: false,
@@ -255,6 +263,7 @@ impl StrokeStyle {
             grain_contrast: brush.setting("grain_contrast").clamp(-1.0, 1.0),
             // wet mix once any of its settings is set
             wet_pull: wet.then(|| brush.setting("wet_pull").clamp(0.0, 1.0)),
+            wet_from_before: wet && !brush.mixes_with_stroke(),
             load: if wet { brush.setting("wet_charge").clamp(0.0, 1.0) } else { 0.0 },
             dilution: if wet { brush.setting("wet_dilution").clamp(0.0, 1.0) } else { 0.0 },
             falloff: brush.setting("falloff").clamp(0.0, 1.0),
@@ -270,6 +279,7 @@ impl StrokeStyle {
             grain_rotation: brush.setting("grain_rotation").clamp(-1.0, 1.0) * std::f32::consts::PI,
             grain_sharp: brush.setting("grain_filtering") < 0.5,
             shape_sharp: brush.setting("shape_filtering") < 0.5,
+            shape_lod_cap: SHAPE_LOD_CAP,
             secondary: [1.0, 1.0, 1.0],
             preview: false,
             luminance: brush.setting("luminance_blending") >= 0.5,
@@ -528,7 +538,9 @@ struct StampUniform {
     secondary: [f32; 4],
     /// 1 when the shape is read unfiltered (sharp).
     shape_sharp: u32,
-    _pad: [u32; 3],
+    /// The coarsest mip level the shape is read from.
+    shape_lod_cap: f32,
+    _pad: [u32; 2],
 }
 
 #[repr(C)]
@@ -846,6 +858,7 @@ fn smudge_uniform(
         grain_rotation: style.grain_rotation,
         grain_sharp: if style.grain_sharp { 1.0 } else { 0.0 },
         shape_sharp: if style.shape_sharp { 1.0 } else { 0.0 },
+        shape_lod_cap: style.shape_lod_cap,
         grain_press: s.more[0],
         grain_bleed: s.more[1],
         grain_once: 0.0,
@@ -861,7 +874,8 @@ fn smudge_uniform(
         dual: 0,
         dual_threshold: -1.0,
         laid_apart: 0,
-        spare: [0; 3],
+        source_before: u32::from(style.wet_from_before),
+        spare: 0,
     }
 }
 
@@ -935,8 +949,17 @@ struct SmudgeUniform {
     dual_threshold: f32,
     /// 1 when the stamp only adds to the paint laid so far, which `cs_synthesize` lays down.
     laid_apart: u32,
-    spare: [u32; 3],
+    /// The coarsest mip level the shape is read from.
+    shape_lod_cap: f32,
+    /// 1 when wet paint mixes with the layer as it was before the stroke (a glaze).
+    source_before: u32,
+    spare: u32,
 }
+
+/// The coarsest mip level of our brush images (256 texels a side) a small stamp reads its shape
+/// from: 32 texels a side. The reference caps the level at 4 or 3 (by the shape filtering's mode)
+/// on its own images, whose sizes vary; on ours, level 3 matches its strokes for either mode.
+const SHAPE_LOD_CAP: f32 = 3.0;
 
 /// Wet paint is laid a display frame's stamps at a time, the frames this long (ms).
 const WET_FRAME_MS: f64 = 1000.0 / 60.0;
@@ -3430,7 +3453,8 @@ impl Canvas {
                         grain_blend: style.grain_blend,
                         grain_sharp: u32::from(style.grain_sharp),
                         shape_sharp: u32::from(style.shape_sharp),
-                        _pad: [0; 3],
+                        shape_lod_cap: style.shape_lod_cap,
+                        _pad: [0; 2],
                         secondary: [style.secondary[0], style.secondary[1], style.secondary[2], 1.0],
                     });
                     let load = if clear { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load };
@@ -4319,8 +4343,8 @@ impl Canvas {
         pass.set_bind_group(1, &self.brush_bind, &[]);
         for (k, s) in instances.iter().enumerate() {
             let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
-            let bbox =
-                IRect::around(center, (s.radius + 0.5) * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
+            let bbox = IRect::around(center, (s.radius + 0.5) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
+                .intersect(full);
             if bbox.is_empty() || s.radius <= 0.0 {
                 continue;
             }
@@ -4474,8 +4498,8 @@ impl Canvas {
             // dry paint laid in place: each stamp lays the paint itself, no pass of plots
             for (s, _, _) in stamps {
                 let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
-                let bbox =
-                    IRect::around(center, (s.radius + 0.5) * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
+                let bbox = IRect::around(center, (s.radius + 0.5) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
+                    .intersect(full);
                 if bbox.is_empty() || s.radius <= 0.0 {
                     continue;
                 }
@@ -4567,8 +4591,8 @@ impl Canvas {
             // then each stamp laid from its plot
             for (k, (s, _, _)) in group.iter().enumerate() {
                 let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
-                let bbox =
-                    IRect::around(center, (s.radius + 0.5) * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
+                let bbox = IRect::around(center, (s.radius + 0.5) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
+                    .intersect(full);
                 if bbox.is_empty() || s.radius <= 0.0 {
                     continue;
                 }

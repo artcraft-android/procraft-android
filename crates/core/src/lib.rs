@@ -146,7 +146,7 @@ pub use text_draw::{
 };
 pub use timelapse::{
     SegmentPlan, TIME_LAPSE_FPS, TimeLapse, TimeLapseSettings, time_lapse_bits_per_pixel, time_lapse_picks,
-    time_lapse_side,
+    time_lapse_setting_names, time_lapse_side,
 };
 pub use touch::{
     COMPANION_ZOOM_DISTANCE, CompanionMode, Fill, GestureAction, HoverCursor, PenHover, PenPreferred, SelectKind,

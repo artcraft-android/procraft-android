@@ -50,7 +50,11 @@ impl Screen {
                 // a driver that fails on the canvases' pipelines gives way to the next backend
                 gpu.prepare_canvases();
                 if !last && (gpu.errors() > 0 || gpu.is_lost()) {
-                    return Err(format!("the canvases' pipelines: {} GPU errors, lost {}", gpu.errors(), gpu.is_lost()));
+                    return Err(format!(
+                        "the canvases' pipelines: {} GPU errors, lost {}",
+                        gpu.errors(),
+                        gpu.is_lost()
+                    ));
                 }
                 Ok((surface, gpu))
             });

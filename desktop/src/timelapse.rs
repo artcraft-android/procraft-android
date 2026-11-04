@@ -33,6 +33,8 @@ pub struct TimeLapseUi {
     recording: Option<Receiver<()>>,
     replay: Option<Replay>,
     length: Alert,
+    /// Recording turned off with something recorded: whether to delete it.
+    purge: Alert,
     /// The video being made, to save once made, as its card shows it; made, it waits for the card
     /// to go before it is saved.
     exporting: Option<(Receiver<Result<PathBuf, String>>, crate::export_card::Exporting)>,
@@ -71,15 +73,40 @@ impl TimeLapseUi {
         self.lapse.as_ref().map_or((0, 0), |(_, t)| (t.count(), t.bytes()))
     }
 
+    /// The video's size, quality and codec, kept with the artwork.
+    pub fn settings(&self) -> procraft_core::TimeLapseSettings {
+        self.lapse.as_ref().map(|(_, t)| t.settings()).unwrap_or_default()
+    }
+
     /// Whether it records changes (the Video tab's switch).
     pub fn recording(&self) -> bool {
         self.lapse.as_ref().is_none_or(|(_, t)| t.recording())
     }
 
-    pub fn set_recording(&self, on: bool) {
-        if let Some((_, t)) = &self.lapse {
-            t.set_recording(on);
+    /// The switch goes at once; turned off with something recorded, whether to delete that is
+    /// asked.
+    pub fn set_recording(&mut self, on: bool) {
+        let Some((_, t)) = &self.lapse else { return };
+        t.set_recording(on);
+        if !on && t.count() > 0 {
+            self.purge.ask(Asking {
+                title: "Purge Video?".into(),
+                message: "The video recorded so far will be deleted.
+It can't be brought back."
+                    .into(),
+                action: "Purge".into(),
+                icon: Some(&icons::ALERT_QUESTION),
+                destructive: true,
+                extra: None,
+                first: Some("Don't Purge".into()),
+                alone: false,
+            });
         }
+    }
+
+    /// Something has been recorded (Replay and Export need it).
+    pub fn recorded(&self) -> bool {
+        self.lapse.as_ref().is_some_and(|(_, t)| t.count() > 0)
     }
 
     /// The artwork changed since the last frame (and nothing is pressed on it): a picture of it
@@ -146,6 +173,13 @@ impl TimeLapseUi {
             if replay.show(ctx, look, lapse) {
                 self.replay = None;
             }
+        }
+        // Purge deletes what was recorded; Don't Purge, or a tap beside it, keeps it
+        if self.purge.show(ctx, look) == Some(Answer::Action)
+            && let Some((_, t)) = &self.lapse
+        {
+            t.purge();
+            self.recorded = None;
         }
         let mut said = None;
         match self.length.show(ctx, look) {

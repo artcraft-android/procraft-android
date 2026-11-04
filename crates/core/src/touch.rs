@@ -39,6 +39,8 @@ pub enum CompanionMode {
 }
 /// Two (three) fingers held still go on undoing (redoing) every this often.
 const RAPID_REPEAT_MS: f64 = 120.0;
+/// A pen held over the canvas and not heard from for this long (seconds) has gone.
+const PEN_HOVER_STALE_S: f32 = 0.5;
 /// A pinch in this quick, to under this scale, fits the canvas.
 const QUICK_PINCH_MS: f64 = 400.0;
 const QUICK_PINCH_SCALE: f32 = 0.75;
@@ -418,9 +420,9 @@ pub(crate) struct Touches {
     /// a tap's slop (it moves the canvas from then on).
     pan_last: Option<(f32, f32)>,
     panned: bool,
-    /// The pen held over the canvas, and Hover's touch: where its finger last was (window x) and
-    /// how far apart two fingers last were.
-    pen_hovering: bool,
+    /// When the pen was last told held over the canvas (none: it has left), and Hover's touch:
+    /// where its finger last was (window x) and how far apart two fingers last were.
+    pen_hovering: Option<std::time::Instant>,
     hover_x: f32,
     hover_spread: f32,
     /// The pen's own gestures: where it hovers, and a squeeze held.
@@ -491,7 +493,7 @@ impl Default for Touches {
             turn_last: (0.0, 0.0),
             pan_last: None,
             panned: false,
-            pen_hovering: false,
+            pen_hovering: None,
             hover_x: 0.0,
             hover_spread: 0.0,
             pen: pen::PenState::default(),
@@ -651,9 +653,10 @@ impl CanvasSession {
     }
 
     /// The pen is held over the canvas (or not): with Hover's touch on, a finger then sets the
-    /// brush rather than painting.
+    /// brush rather than painting. Told again with each of the pen's moves: a pen not heard from
+    /// for [`PEN_HOVER_STALE_S`] has gone (a system may not say when it leaves).
     pub fn set_touch_pen_hovering(&self, hovering: bool) {
-        self.touches().pen_hovering = hovering;
+        self.touches().pen_hovering = hovering.then(std::time::Instant::now);
     }
 
     /// The single touch companion's Zoom or Move on (a lone press dragged on the canvas zooms or
@@ -1093,8 +1096,8 @@ impl CanvasSession {
             return;
         }
         // Hover: with the pen held over the canvas, a finger drags the opacity and a pinch the size
-        if kind == PointerKind::Finger && t.pen_hovering && t.settings.hover_touch && self.shared.lock().shape.is_none()
-        {
+        let hovering = t.pen_hovering.is_some_and(|at| at.elapsed().as_secs_f32() < PEN_HOVER_STALE_S);
+        if kind == PointerKind::Finger && hovering && t.settings.hover_touch && self.shared.lock().shape.is_none() {
             t.stroke_pointer = id;
             t.hover_x = at.0;
             t.hover_spread = 0.0;
@@ -2289,6 +2292,12 @@ mod tests {
         s.touch_down(1, PointerKind::Finger, at(10.0, 10.0, 100.0));
         s.touch_move(1, at(60.0, 10.0, 120.0));
         assert!(s.touch_up(1, at(60.0, 10.0, 140.0)).contains(&TouchCommand::StrokeEnded));
+        // and when it went without a word (not heard from for a while)
+        s.set_touch_pen_hovering(true);
+        s.touches().pen_hovering = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(1));
+        s.touch_down(1, PointerKind::Finger, at(10.0, 30.0, 200.0));
+        s.touch_move(1, at(60.0, 30.0, 220.0));
+        assert!(s.touch_up(1, at(60.0, 30.0, 240.0)).contains(&TouchCommand::StrokeEnded));
     }
 
     #[test]

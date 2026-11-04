@@ -241,6 +241,8 @@ pub struct Showing {
     pub animation: bool,
     pub pages: bool,
     pub time_lapse: bool,
+    /// Something has been recorded (Replay and Export need it).
+    pub time_lapse_recorded: bool,
     pub reference: bool,
     pub guide: bool,
     pub side_bar: bool,
@@ -323,10 +325,10 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
         ],
         3 => vec![
             vec![
-                Button("Time-lapse Replay", None, Some(Act::TimeLapseReplay)),
+                Button("Time-lapse Replay", None, showing.time_lapse_recorded.then_some(Act::TimeLapseReplay)),
                 Switch("Time-lapse Recording", showing.time_lapse, Some(Act::TimeLapseRecording)),
             ],
-            vec![Button("Export time-lapse video", None, Some(Act::ExportTimeLapse))],
+            vec![Button("Export time-lapse video", None, showing.time_lapse_recorded.then_some(Act::ExportTimeLapse))],
         ],
         4 => {
             let delay = prefs.rapid_undo_delay;

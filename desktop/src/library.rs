@@ -294,8 +294,11 @@ impl Library {
         let library = session.brush_library();
         let current = session.current_brush();
         // with the Recent set shown, the current brush's set takes new brushes
-        let shown =
-            self.shown_set.filter(|_| !self.recent).unwrap_or(current.set as usize).min(library.len().saturating_sub(1));
+        let shown = self
+            .shown_set
+            .filter(|_| !self.recent)
+            .unwrap_or(current.set as usize)
+            .min(library.len().saturating_sub(1));
         let recent = self.recent;
         let recents = if recent { session.recent_brushes() } else { Vec::new() };
         self.settle_slides(ctx);
@@ -446,7 +449,10 @@ impl Library {
                                         })
                                         .collect()
                                 } else {
-                                    library.get(shown).map(|set| set.brushes.iter().map(|b| (b, None)).collect()).unwrap_or_default()
+                                    library
+                                        .get(shown)
+                                        .map(|set| set.brushes.iter().map(|b| (b, None)).collect())
+                                        .unwrap_or_default()
                                 };
                                 let chosen = library.get(shown).and_then(|set| set.chosen);
                                 let mut made = 0;
@@ -455,7 +461,8 @@ impl Library {
                                     // Recent set the current brush alone)
                                     let selected = (b.set, b.index) == (current.set, current.index)
                                         || (!recent && chosen == Some(b.index));
-                                    let (response, cell) = self.brush_row(ui, look, session, b, selected, pinned, &mut made);
+                                    let (response, cell) =
+                                        self.brush_row(ui, look, session, b, selected, pinned, &mut made);
                                     // a brush found from the Recent set is scrolled to in its own
                                     if self.found == Some((b.set, b.index)) {
                                         self.found = None;

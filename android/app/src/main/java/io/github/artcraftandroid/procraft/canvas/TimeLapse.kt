@@ -60,6 +60,12 @@ class TimeLapse(artwork: File) {
         core.record(rgba, width.toUInt(), height.toUInt())
     }
 
+    /** Deletes what has been recorded; the settings, and whether it records, stay. */
+    fun purge() {
+        core.purge()
+        forgetClips()
+    }
+
     /** What the recorded frames take on disk, bytes. */
     fun bytes(): Long = core.bytes().toLong()
 

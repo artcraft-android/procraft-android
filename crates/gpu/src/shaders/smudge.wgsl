@@ -80,8 +80,10 @@ struct SmudgeStamp {
     // 1: the stamp only adds to the paint laid so far (`amount`'s second half), which
     // cs_synthesize lays over the layer as it was
     laid_apart: u32,
-    spare1: u32,
-    spare2: u32,
+    // the coarsest mip level the shape is read from
+    shape_lod_cap: f32,
+    // 1: wet paint mixes with the layer as it was before the stroke (a glaze), not as it goes
+    source_before: u32,
     spare3: u32,
 }
 
@@ -115,6 +117,10 @@ struct WetPass {
 fn pixel(x: i32, y: i32) -> vec4<f32> {
     let cx = clamp(x, 0, i32(st.size.x) - 1);
     let cy = clamp(y, 0, i32(st.size.y) - 1);
+    // a glaze picks up the layer as it was before the stroke
+    if (st.source_before == 1u) {
+        return textureLoad(before_tex, vec2<i32>(cx, cy), 0);
+    }
     let k = u32(cy) * st.stride + u32(cx);
     // the brush picks up the stroke as it is without the grain laid over it
     if (st.grain_once > 0.5) {
@@ -253,7 +259,7 @@ fn mask(t: vec2<f32>) -> f32 {
         let at = clamp(vec2<i32>(floor(uv * vec2<f32>(size))), vec2<i32>(0), size - 1);
         return textureLoad(shapes, at, st.shape, 0).r;
     }
-    let lod = max(log2(256.0 / max(2.0 * st.radius + 1.0, 1.0)), 0.0);
+    let lod = clamp(log2(256.0 / max(2.0 * st.radius + 1.0, 1.0)), 0.0, st.shape_lod_cap);
     return textureSampleLevel(shapes, shape_smp, uv, st.shape, lod).r;
 }
 

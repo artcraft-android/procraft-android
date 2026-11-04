@@ -71,6 +71,16 @@ pub fn time_lapse_bits_per_pixel(s: TimeLapseSettings) -> u32 {
     }
 }
 
+/// How Canvas information names a time-lapse's settings: its quality, its resolution and its
+/// codec (Good, 1080p, H.264).
+#[uniffi::export]
+pub fn time_lapse_setting_names(s: TimeLapseSettings) -> Vec<String> {
+    let quality = ["Low", "Good", "Studio", "Lossless"].get(s.quality as usize).copied().unwrap_or("Good");
+    let resolution = ["1080p", "2K", "4K"].get(s.resolution as usize).copied().unwrap_or("1080p");
+    let codec = if s.hevc { "HEVC" } else { "H.264" };
+    vec![quality.to_owned(), resolution.to_owned(), codec.to_owned()]
+}
+
 /// The frames a video `seconds` long takes out of `frames`, spread evenly; all of them when it
 /// is none, or they wouldn't fill it.
 #[uniffi::export]
@@ -176,6 +186,27 @@ impl TimeLapse {
     /// Frames recorded so far.
     pub fn count(&self) -> u32 {
         self.state.lock().count
+    }
+
+    /// Deletes what has been recorded (its pictures and videos), as asked when recording is
+    /// turned off; the settings, and whether it records, stay.
+    pub fn purge(&self) {
+        let mut st = self.state.lock();
+        for f in frame_files(&self.dir) {
+            let _ = fs::remove_file(f);
+        }
+        let _ = fs::remove_file(self.dir.join("segments.json"));
+        if let Ok(entries) = fs::read_dir(&self.dir) {
+            for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with("segment-") && name.ends_with(".mp4") {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+        st.count = 0;
+        st.last = None;
+        st.taking = None;
     }
 
     /// What the recorded frames take on disk (pictures and videos), bytes.
@@ -800,6 +831,39 @@ mod tests {
         t.set_settings(s);
         assert_eq!(t.settings(), s);
         assert_eq!((time_lapse_side(s), time_lapse_bits_per_pixel(s)), (3840, 16));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn canvas_information_names_the_settings_as_the_canvas_sheet_picks_them() {
+        let names =
+            |resolution, quality, hevc| time_lapse_setting_names(TimeLapseSettings { resolution, quality, hevc });
+        assert_eq!(names(0, 1, false), ["Good", "1080p", "H.264"]);
+        assert_eq!(names(2, 3, true), ["Lossless", "4K", "HEVC"]);
+        assert_eq!(names(1, 0, false), ["Low", "2K", "H.264"]);
+        assert_eq!(names(1, 2, false)[0], "Studio");
+    }
+
+    #[test]
+    fn purging_deletes_what_was_recorded_and_keeps_the_settings_and_the_switch() {
+        let dir = std::env::temp_dir().join(format!("procraft-purge-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let t = TimeLapse::new(dir.to_string_lossy().into_owned());
+        let s = TimeLapseSettings { resolution: 1, quality: 2, hevc: false };
+        t.set_settings(s);
+        assert!(t.record(vec![0u8; 4 * 4 * 4], 4, 4));
+        assert!(t.record([255u8, 0, 0, 255].repeat(16), 4, 4));
+        t.set_recording(false);
+        t.purge();
+        assert_eq!(t.count(), 0);
+        assert!(t.frame(0).is_none() && t.clips().is_empty());
+        assert_eq!(TimeLapse::new(dir.to_string_lossy().into_owned()).count(), 0);
+        assert_eq!(t.settings(), s);
+        assert!(!t.recording());
+        // recording again starts afresh, the first picture kept even if it was the last before
+        t.set_recording(true);
+        assert!(t.record([255u8, 0, 0, 255].repeat(16), 4, 4));
+        assert_eq!(t.count(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 

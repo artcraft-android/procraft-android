@@ -144,7 +144,7 @@ impl CanvasSession {
         let hover = hover.filter(PenHover::sound);
         let points = self.shared.lock().display_scale.max(1e-3);
         let mut t = self.touches();
-        t.pen_hovering = hover.is_some();
+        t.pen_hovering = hover.is_some().then(std::time::Instant::now);
         match (hover, t.pen.hover) {
             (Some(h), Some(last)) => {
                 let seconds = ((h.time_ms - last.time_ms) / 1000.0).max(0.0) as f32;
@@ -481,9 +481,9 @@ mod tests {
         let s = session();
         s.set_touch_settings(TouchSettings { hover_touch: true, ..TouchSettings::default() });
         s.touch_pen_hover(over(20.0, 20.0, 0.3, 0.0));
-        assert!(s.touches().pen_hovering);
+        assert!(s.touches().pen_hovering.is_some());
         s.touch_pen_hover(None);
-        assert!(!s.touches().pen_hovering);
+        assert!(s.touches().pen_hovering.is_none());
     }
 
     #[test]
