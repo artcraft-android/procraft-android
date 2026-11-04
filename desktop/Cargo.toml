@@ -118,15 +118,19 @@ drag = "2.1"
 
 # Animated MP4 and HEVC through the system's own encoders (Media Foundation); Feedback Sounds'
 # click played by the system (PlaySound); a PDF's pages drawn by the system's renderer; a pen's
-# lean from the pointer messages
+# lean from the pointer messages; a crash in a driver's code logged with its file
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Data_Pdf",
     "Storage_Streams",
     "UI",
+    "Win32_Foundation",
     "Win32_Media_Audio",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
     "Win32_UI_Input_Pointer",
     "Win32_UI_WindowsAndMessaging",
 ] }

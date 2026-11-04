@@ -44,6 +44,18 @@ pub fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
     panic.downcast_ref::<&str>().copied().or_else(|| panic.downcast_ref::<String>().map(String::as_str)).unwrap_or("")
 }
 
+/// The graphics APIs in `backends` by name ("Vulkan", "Direct3D 12", "OpenGL", ...).
+fn backends_name(backends: wgpu::Backends) -> String {
+    let named = [
+        (wgpu::Backends::VULKAN, "Vulkan"),
+        (wgpu::Backends::DX12, "Direct3D 12"),
+        (wgpu::Backends::METAL, "Metal"),
+        (wgpu::Backends::GL, "OpenGL"),
+    ];
+    let names: Vec<&str> = named.iter().filter(|(b, _)| backends.contains(*b)).map(|(_, name)| *name).collect();
+    if names.is_empty() { format!("{backends:?}") } else { names.join(" or ") }
+}
+
 /// Whether a GPU named `name` on `backend` needs its canvas textures uncompressed.
 fn keeps_textures_uncompressed(name: &str, backend: wgpu::Backend) -> bool {
     backend == wgpu::Backend::Vulkan && name.to_ascii_lowercase().contains("mali")
@@ -90,7 +102,8 @@ impl Gpu {
     /// The backends a device is made from, best first: those `WGPU_BACKEND` names if it is set
     /// (to try another when a driver fails); on Android Vulkan, then OpenGL ES (for a device
     /// whose Vulkan is missing or fails); on Windows Vulkan and Direct3D 12, Direct3D 12 first on
-    /// ARM (the Snapdragon X's Vulkan driver fails as a canvas opens); elsewhere the native API.
+    /// ARM (the Snapdragon X's Vulkan driver fails as a canvas opens), then OpenGL (a GPU or
+    /// driver too old for either); elsewhere the native API.
     fn backends() -> Vec<wgpu::Backends> {
         if let Some(chosen) = wgpu::Backends::from_env().filter(|b| !b.is_empty()) {
             return vec![chosen];
@@ -98,9 +111,9 @@ impl Gpu {
         if cfg!(target_os = "android") {
             vec![wgpu::Backends::VULKAN, wgpu::Backends::GL]
         } else if cfg!(all(windows, target_arch = "aarch64")) {
-            vec![wgpu::Backends::DX12, wgpu::Backends::VULKAN]
+            vec![wgpu::Backends::DX12, wgpu::Backends::VULKAN, wgpu::Backends::GL]
         } else if cfg!(windows) {
-            vec![wgpu::Backends::VULKAN, wgpu::Backends::DX12]
+            vec![wgpu::Backends::VULKAN, wgpu::Backends::DX12, wgpu::Backends::GL]
         } else {
             vec![wgpu::Backends::PRIMARY]
         }
@@ -109,6 +122,11 @@ impl Gpu {
     /// How many backends there are to make a device from (see [`Gpu::instance_after`]).
     pub fn backend_count() -> usize {
         Gpu::backends().len()
+    }
+
+    /// Backend `index`'s name, for the log and messages (see [`Gpu::instance_after`]).
+    pub fn backend_name(index: usize) -> String {
+        Gpu::backends().get(index).map_or_else(|| format!("backend {index}"), |b| backends_name(*b))
     }
 
     /// The instance to try after `tries` failed to make a device (see [`Gpu::backends`]); None
@@ -194,6 +212,18 @@ impl Gpu {
     }
 
     fn create(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<Gpu, GpuError> {
+        // every GPU the backend sees, for the log (a laptop's two, a driver's own name and version)
+        for adapter in pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())) {
+            let info = adapter.get_info();
+            log::info!(
+                "GPU seen: {} ({:?}, {:?}, driver {} {})",
+                info.name,
+                info.backend,
+                info.device_type,
+                info.driver,
+                info.driver_info
+            );
+        }
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
@@ -321,6 +351,14 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backends_are_named_for_the_log() {
+        use wgpu::Backends;
+        assert_eq!(super::backends_name(Backends::DX12), "Direct3D 12");
+        assert_eq!(super::backends_name(Backends::VULKAN | Backends::GL), "Vulkan or OpenGL");
+        assert_eq!(super::Gpu::backend_name(99), "backend 99");
+    }
+
     #[test]
     fn mali_gpus_on_vulkan_keep_their_canvas_textures_uncompressed() {
         use wgpu::Backend;
