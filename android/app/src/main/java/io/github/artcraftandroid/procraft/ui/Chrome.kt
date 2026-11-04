@@ -291,8 +291,11 @@ private fun SliderPanel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel,
             maxLines = 1,
             modifier = Modifier.offset(16.dp, 6.dp).height(32.dp).wrapContentHeight(Alignment.CenterVertically),
         )
-        val onNotch = vm.notchAt(size, value) != null
-        if (onNotch || vm.canSaveNotch(size)) {
+        // read again as the notches change, so a value saved or taken away shows at once
+        val notches = if (size) vm.sizeNotches else vm.opacityNotches
+        val onNotch = androidx.compose.runtime.remember(notches, value) { vm.notchAt(size, value) != null }
+        val canSave = androidx.compose.runtime.remember(notches, value) { vm.canSaveNotch(size) }
+        if (onNotch || canSave) {
             Box(Modifier.offset(150.dp, 6.dp).size(32.dp).tap { vm.toggleNotch(size) }, contentAlignment = Alignment.Center) {
                 Icon(
                     if (onNotch) PcIcons.NotchRemove else PcIcons.NotchAdd,
@@ -341,12 +344,20 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                     var last = down.position.y
                     var moved = false
                     var lifted = false
+                    // the system took the touch back (the pen coming near takes the screen from a
+                    // finger): it wasn't lifted, so the panel stays up for the pen to tap its +
+                    var taken = false
                     // where the finger has taken it, before a notch pulls it in
                     var raw = current
-                    // follows the finger; false once it is lifted
+                    // follows the finger; false once it is lifted. Another pointer's event (the
+                    // pen hovering in) isn't this touch's.
                     suspend fun AwaitPointerEventScope.follow(): Boolean {
-                        val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id }
-                        if (c == null || !c.pressed) return false
+                        val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: return true
+                        if (!c.pressed) {
+                            // a cancelled touch ends already consumed; a lift doesn't
+                            taken = c.isConsumed
+                            return false
+                        }
                         val dy = c.position.y - last
                         if (dy != 0f) {
                             if (!moved) hooks?.show(false)
@@ -363,13 +374,13 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                     }
                     if (!lifted && !moved) hooks?.show(true)
                     // a tap on a notch's mark goes to it
-                    if (lifted && !moved) {
+                    if (lifted && !moved && !taken) {
                         val inset = Pc.ThumbInset.toPx()
                         val at = 1f - (down.position.y - inset - Pc.ThumbHeight.toPx() / 2f) / travel
                         near(at, Pc.ThumbHeight.toPx() / 2f / travel)?.let { change(it) }
                     }
                     while (!lifted) lifted = !follow()
-                    if (moved) hooks?.hide()
+                    if (taken) hooks?.show(true) else if (moved) hooks?.hide()
                 }
             }
             .drawBehind {
