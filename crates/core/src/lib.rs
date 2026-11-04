@@ -415,6 +415,10 @@ pub(crate) struct State {
     pub(crate) gpu: Option<Gpu>,
     pub(crate) canvas: Option<Canvas>,
     pub(crate) needs_frame: bool,
+    /// Frames wait (the canvas is being redrawn a stroke at a time, as the brush studio's pad is
+    /// when its brush changes), and one was asked for meanwhile.
+    pub(crate) holding_frames: bool,
+    pub(crate) frame_held: bool,
     pub(crate) stop: bool,
     /// Project canvas: the second display's size, and that its thread should end.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -886,6 +890,9 @@ pub(crate) struct Shared {
     pub(crate) save_failure: Mutex<(Option<String>, bool)>,
     /// The canvas's touches (they call into the session, so they keep their own lock).
     pub(crate) touches: touch::TouchState,
+    /// The brush studio's pad being drawn again off the caller's thread (see
+    /// [`CanvasSession::sync_pad`]).
+    pub(crate) pad_sync: Mutex<studio::PadSync>,
 }
 
 impl Shared {
@@ -928,6 +935,10 @@ impl Shared {
     }
 
     fn frame(&self, st: &mut State) {
+        if st.holding_frames {
+            st.frame_held = true;
+            return;
+        }
         st.needs_frame = true;
         self.wake.notify_all();
     }
@@ -1148,6 +1159,8 @@ impl CanvasSession {
             canvas: None,
             scene: None,
             needs_frame: false,
+            holding_frames: false,
+            frame_held: false,
             stop: false,
             projection_size: (1, 1),
             projection_stop: false,
@@ -1223,6 +1236,7 @@ impl CanvasSession {
                 export_progress: std::sync::atomic::AtomicU32::new(0),
                 save_failure: Mutex::new((None, false)),
                 touches: Mutex::new(touch::Touches::default()),
+                pad_sync: Mutex::new(studio::PadSync::default()),
             }),
         })
     }

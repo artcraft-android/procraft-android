@@ -793,8 +793,8 @@ impl Studio {
         let Some(pad) = &self.pad else { return };
         let c = PAD_COLOURS.get(self.pad_colour).copied().unwrap_or(0xFFFFFF);
         let unit = |shift: u32| ((c >> shift) & 0xFF) as f32 / 255.0;
-        pad.paint_like(Arc::clone(session), unit(16), unit(8), unit(0));
-        pad.replay_strokes();
+        // drawn again on the core's own thread: a slider dragged doesn't wait for it
+        Arc::clone(pad).sync_pad(Arc::clone(session), unit(16), unit(8), unit(0));
     }
 
     /// Closes the studio: `keep` keeps the edits, otherwise the brush goes back to how it opened

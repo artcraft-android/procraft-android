@@ -435,6 +435,50 @@ impl CanvasSession {
         }
     }
 
+    /// This canvas (the brush studio's pad) paints like `studio`'s brush being edited, in colour
+    /// (`r`, `g`, `b`), and its kept strokes are drawn again that way, on a thread of its own:
+    /// asked again meanwhile, the newest ask is done next and those between are skipped. Frames
+    /// wait while the strokes are drawn, so the pad never shows them half redrawn.
+    pub fn sync_pad(self: std::sync::Arc<Self>, studio: std::sync::Arc<CanvasSession>, r: f32, g: f32, b: f32) {
+        {
+            let mut sync = self.shared.pad_sync.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            sync.next = Some((studio, [r, g, b]));
+            if sync.running {
+                return;
+            }
+            sync.running = true;
+        }
+        let pad = std::sync::Arc::clone(&self);
+        std::thread::spawn(move || {
+            loop {
+                let next = {
+                    let mut sync = pad.shared.pad_sync.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match sync.next.take() {
+                        Some(next) => next,
+                        None => {
+                            sync.running = false;
+                            break;
+                        }
+                    }
+                };
+                let (studio, [r, g, b]) = next;
+                pad.paint_like(studio, r, g, b);
+                pad.shared.lock().holding_frames = true;
+                pad.replay_strokes();
+                let mut guard = pad.shared.lock();
+                let st = &mut *guard;
+                st.holding_frames = false;
+                st.frame_held = false;
+                pad.shared.frame(st);
+            }
+        });
+    }
+
+    /// Whether the pad is still being drawn again (see [`CanvasSession::sync_pad`]).
+    pub fn pad_syncing(&self) -> bool {
+        self.shared.pad_sync.lock().unwrap_or_else(std::sync::PoisonError::into_inner).running
+    }
+
     /// Forgets the kept strokes (the pad cleared).
     pub fn forget_strokes(&self) {
         let mut st = self.shared.lock();
@@ -880,4 +924,12 @@ fn evenly(path: &[Vec2], steps: usize) -> Vec<Vec2> {
             Some(a.lerp(b, if lb > la { (want - la) / (lb - la) } else { 0.0 }))
         })
         .collect()
+}
+
+/// The brush studio's pad's next redraw: whether one is under way, and the newest ask (the canvas
+/// whose studio brush it paints like, and the colour).
+#[derive(Default)]
+pub(crate) struct PadSync {
+    pub(crate) running: bool,
+    pub(crate) next: Option<(std::sync::Arc<CanvasSession>, [f32; 3])>,
 }

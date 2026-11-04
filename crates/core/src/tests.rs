@@ -8735,3 +8735,32 @@ fn a_snapped_ellipse_stays_open_where_its_stroke_did_not_close() {
     let (gx, gy) = (100.0 + 60.0 * gap.cos(), 100.0 + 60.0 * gap.sin());
     assert!(!dark(gx.round() as u32, gy.round() as u32), "the gap at {gx},{gy} was closed");
 }
+
+#[test]
+fn a_pad_is_drawn_again_off_the_caller_s_thread_the_newest_ask_last() {
+    let Some(pad) = session(200, 200) else { return };
+    let studio = CanvasSession::new(64, 64);
+    pad.keep_strokes();
+    pad.begin_own_stroke();
+    pad.stroke_begin(PointerKind::Finger, vec![sample(10.0, 60.0, 0.0)]);
+    pad.stroke_end(vec![sample(190.0, 60.0, 32.0)]);
+    // asked many times quickly: each returns at once; the last colour is the one it paints in
+    for k in 0..20 {
+        std::sync::Arc::clone(&pad).sync_pad(std::sync::Arc::clone(&studio), k as f32 / 19.0, 0.0, 0.0);
+    }
+    for _ in 0..500 {
+        if !pad.pad_syncing() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!pad.pad_syncing());
+    {
+        let st = pad.shared.lock();
+        assert!(!st.holding_frames, "frames go on once it is drawn");
+        assert_eq!(st.pad_strokes.as_ref().map(Vec::len), Some(1), "the stroke is kept again");
+        assert_eq!(st.color, [1.0, 0.0, 0.0]);
+    }
+    // the stroke is there again, in the last colour asked for
+    assert_eq!(pixel(&pad, 100, 60)[..3], [255, 0, 0]);
+}

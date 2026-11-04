@@ -3963,8 +3963,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val p = pad ?: return
         val s = session ?: return
         val c = PAD_COLORS.getOrElse(padColor) { 0xFFFFFF }
-        p.paintLike(s, ((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f)
-        p.replayStrokes()
+        // drawn again on the core's own thread: a slider dragged doesn't wait for it
+        p.syncPad(s, ((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f)
     }
 
     fun choosePadColor(i: Int) {
