@@ -10,8 +10,9 @@
 #   procraft-<version>-linux-x86_64.AppImage      any distro (packaging/linux)
 #   procraft-<version>-linux-x86_64.deb           Debian, Ubuntu and the like
 #   procraft-<version>-linux-x86_64.tar.gz        the plain tree
-#   procraft-<version>-macos-universal.dmg        Apple silicon and Intel Macs, ad hoc signed
-#                                                 (packaging/macos)
+#   procraft-<version>-macos-universal.dmg        Apple silicon and Intel Macs (packaging/macos):
+#                                                 signed with a Developer ID and notarized when
+#                                                 the APPLE_* secrets exist, else ad hoc
 #   SHA256SUMS.txt                                each file's SHA-256
 #
 # The Mac file is built on the public repository alone: a private one pays for macOS runners'
@@ -236,10 +237,24 @@ jobs:
         with:
           key: release-desktop-macos-universal
 
+      - name: Set up Developer ID signing and notarization
+        # without the secrets (forks, dry runs) the app stays signed ad hoc, not notarized
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: bash packaging/macos/signing.sh --setup
+
       - name: Package for macOS
         env:
           VERSION: ${{ steps.v.outputs.version }}
         run: bash packaging/macos/package.sh
+
+      - name: Remove the signing keychain and key
+        if: always()
+        run: bash packaging/macos/signing.sh --cleanup
 
       - name: Files
         run: ls -l dist >>"$GITHUB_STEP_SUMMARY"
