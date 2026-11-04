@@ -295,8 +295,8 @@ pub struct Layer {
     /// A text layer's text, until its pixels are changed some other way.
     #[serde(default)]
     pub text: Option<LayerText>,
-    /// Left out of the gallery's thumbnail and the file's preview (put in by a private insert or
-    /// paste).
+    /// Left out of the gallery's thumbnail, the file's preview and the time-lapse's frames (put
+    /// in by a private insert or paste).
     #[serde(default)]
     pub private: bool,
     /// Strokes on it follow the drawing guide (drawing assist).
@@ -1441,7 +1441,7 @@ impl Document {
         self.layer_mut(id).map(|l| l.private = private).is_some()
     }
 
-    /// The layers the gallery's thumbnail leaves out (see [`Layer::private`]).
+    /// The layers the gallery's thumbnail and the time-lapse leave out (see [`Layer::private`]).
     pub fn private_layers(&self) -> Vec<LayerId> {
         self.layers.iter().filter(|l| l.private).map(|l| l.id).collect()
     }

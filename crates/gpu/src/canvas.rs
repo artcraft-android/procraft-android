@@ -6211,6 +6211,34 @@ impl Canvas {
         self.sample_view(gpu, &self.composite_view, self.full(), max_side)
     }
 
+    /// [`Canvas::composite_thumbnail`] without the layers `left_out` (a time-lapse frame leaves
+    /// private layers out), as [`Canvas::read_composite_without`] makes the picture; the canvas's
+    /// own composite is made again after, whole (a frame is taken after every change: left to
+    /// later renders, a large canvas would show without those layers for a moment each time).
+    pub fn composite_thumbnail_without(
+        &mut self,
+        gpu: &Gpu,
+        doc: &mut Document,
+        max_side: u32,
+        left_out: &[LayerId],
+    ) -> Result<Thumbnail, GpuError> {
+        if left_out.is_empty() {
+            return self.composite_thumbnail(gpu, doc, max_side);
+        }
+        // the work queued done first, as it may change `doc`
+        self.render(gpu, doc, None);
+        let mut shown = doc.clone();
+        for &id in left_out {
+            shown.set_visible(id, false);
+        }
+        self.invalidate();
+        self.render_finished(gpu, &mut shown);
+        let thumbnail = self.sample_view(gpu, &self.composite_view, self.full(), max_side);
+        self.invalidate();
+        self.render_finished(gpu, doc);
+        thumbnail
+    }
+
     /// `rect` of a texture box-filtered to fit `max_side` pixels (never enlarged), read back.
     fn sample_view(
         &self,

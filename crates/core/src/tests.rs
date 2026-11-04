@@ -2328,6 +2328,53 @@ fn a_private_picture_shows_on_the_canvas_but_not_in_the_thumbnail() {
 }
 
 #[test]
+fn a_private_picture_stays_out_of_the_time_lapse() {
+    let Some(s) = session(100, 100) else { return };
+    let dir = std::env::temp_dir().join(format!("procraft-private-lapse-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let artwork = dir.to_string_lossy().into_owned();
+    let lapse = crate::TimeLapse::new(artwork.clone());
+    // a frame as the apps record one after each change, as large as the video
+    let record = |s: &CanvasSession| {
+        let shot = s.time_lapse_frame(crate::time_lapse_side(lapse.settings())).unwrap();
+        lapse.record(shot.rgba, shot.width, shot.height)
+    };
+    // what the replay (and the video made of the frames) shows at (x, y) of frame `i`
+    let shown = |i: u32, x: u32, y: u32| {
+        let f = lapse.frame(i).unwrap();
+        let at = ((y * f.width + x) * 4) as usize;
+        [f.rgba[at], f.rgba[at + 1], f.rgba[at + 2]]
+    };
+    let white = |c: [u8; 3]| c.iter().all(|&v| v > 235);
+    let photo = crate::layers::ThumbnailImage { width: 100, height: 100, rgba: [255, 0, 0, 255].repeat(100 * 100) };
+    let id = s.insert_image(photo, true).unwrap();
+    assert!(record(&s));
+    assert!(white(shown(0, 50, 50)), "the picture is recorded: {:?}", shown(0, 50, 50));
+    // a stroke on a layer over it is recorded as ever, the picture under it still left out
+    s.add_layer();
+    s.set_color(0.0, 0.0, 1.0);
+    s.set_brush_size(0.3);
+    s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 20.0, 0.0)]);
+    s.stroke_add(vec![sample(90.0, 20.0, 40.0)]);
+    s.stroke_end(vec![]);
+    assert_eq!((pixel(&s, 50, 20), pixel(&s, 50, 50)), ([0, 0, 255, 255], [255, 0, 0, 255]), "the canvas shows both");
+    assert!(record(&s));
+    let [r, g, b] = shown(1, 50, 20);
+    assert!(b > 200 && r < 60 && g < 60, "the stroke: {:?}", [r, g, b]);
+    assert!(white(shown(1, 50, 50)), "the picture is recorded: {:?}", shown(1, 50, 50));
+    // kept private in the artwork's file: opened again, its frames still leave it out
+    s.save(artwork.clone()).unwrap();
+    let opened = CanvasSession::open(artwork).unwrap();
+    let Some(gpu) = s.shared.lock().gpu.clone() else { return };
+    opened.use_gpu(gpu);
+    assert!(opened.layers().iter().any(|l| l.id == id && l.private));
+    let frame = opened.time_lapse_frame(crate::time_lapse_side(lapse.settings())).unwrap();
+    let middle = ((50 * frame.width + 50) * 4) as usize;
+    assert_eq!(&frame.rgba[middle..middle + 4], &[255, 255, 255, 255]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn the_drawing_guide_mirrors_and_assists_strokes() {
     use crate::guide::{GuideType, SymmetryType};
     let Some(s) = session(100, 100) else { return };

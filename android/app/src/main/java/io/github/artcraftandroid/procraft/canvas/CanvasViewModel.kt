@@ -2844,8 +2844,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             do {
                 frameStale = false
                 withContext(Dispatchers.Default) {
-                    // frames as large as the video they make
-                    val shot = s.canvasThumbnail(t.settings.side.toUInt()) ?: return@withContext
+                    // frames as large as the video they make, private layers left out
+                    val shot = s.timeLapseFrame(t.settings.side.toUInt()) ?: return@withContext
                     t.record(shot.rgba, shot.width.toInt(), shot.height.toInt())
                 }
             } while (frameStale)

@@ -184,9 +184,10 @@ impl TimeLapse {
         frame_files(&self.dir).into_iter().chain(videos).filter_map(|f| fs::metadata(f).ok()).map(|m| m.len()).sum()
     }
 
-    /// Keeps a picture of the canvas (premultiplied RGBA, `width` × `height`) as the next frame,
-    /// on white (as the canvas shows a hidden background) and at most 1280 on its long side;
-    /// unless it isn't recording, or the picture is the same as the last. True when kept.
+    /// Keeps a picture of the canvas (premultiplied RGBA, `width` × `height`, as
+    /// [`crate::CanvasSession::time_lapse_frame`] makes it) as the next frame, on white (as the
+    /// canvas shows a hidden background) and at most 1280 on its long side; unless it isn't
+    /// recording, or the picture is the same as the last. True when kept.
     pub fn record(&self, rgba: Vec<u8>, width: u32, height: u32) -> bool {
         let len = (width as usize).saturating_mul(height as usize).saturating_mul(4);
         if !self.recording() || width == 0 || height == 0 || rgba.len() < len {

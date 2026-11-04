@@ -103,9 +103,9 @@ impl TimeLapseUi {
         let (tx, rx) = channel();
         let (session, lapse) = (Arc::clone(session), Arc::clone(lapse));
         std::thread::spawn(move || {
-            // frames as large as the video they make
+            // frames as large as the video they make, private layers left out
             let side = time_lapse_side(lapse.settings());
-            if let Some(shot) = session.canvas_thumbnail(side) {
+            if let Some(shot) = session.time_lapse_frame(side) {
                 lapse.record(shot.rgba, shot.width, shot.height);
             }
             let _ = tx.send(());
