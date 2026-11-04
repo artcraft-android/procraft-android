@@ -699,32 +699,49 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
             None => (Some(shape::GRAINY_DISC), None, None),
         },
         Texture::Stock { name, inverted } => {
-            let n = name.to_lowercase();
-            let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
-            if has(&["blank"]) {
-                // a plain image: the stamp's whole square (nothing, inverted)
-                let fill = if *inverted { 0 } else { 255 };
-                (None, Source::new(vec![fill; TEXTURE_SIZE * TEXTURE_SIZE]), None)
-            } else if has(&["dots"]) {
-                // dots scattered over the stamp, whatever outline they fill
-                (Some(stock_shape(&n)), None, None)
-            } else if has(&["oval"]) && has(&["slim", "thin", "narrow"]) {
-                // a flat oval, not the round tip
-                (Some(shape::SLIM_OVAL), None, None)
-            } else if has(&["medium-hard", "medium hard", "mediumhard"]) {
-                (None, None, Some(0.75))
-            } else if has(&["hard", "pen", "solid", "oval", "round"]) && !has(&["soft", "ink"]) {
-                (None, None, Some(0.95))
-            } else if has(&["medium"]) {
-                (None, None, Some(0.5))
-            } else if has(&["ultra-soft", "ultra soft", "ultrasoft"]) {
-                (Some(shape::ULTRA_SOFT_ROUND), None, None)
-            } else if has(&["soft", "air", "blur", "glow"]) {
-                (Some(shape::SOFT_ROUND), None, None)
-            } else {
-                (Some(stock_shape(&n)), None, None)
-            }
+            let (image, source, hardness) = stock_stand_in(name, *inverted);
+            // our shape with the stock one's own lights and darks, where they were measured
+            let retoned =
+                image.filter(|_| source.is_none()).zip(textures::stock_shape_tones(name)).and_then(|(i, tones)| {
+                    let shape = textures::shapes().into_iter().nth(i as usize)?;
+                    let mut pixels = textures::retoned(&shape.pixels, &tones, &textures::SHAPE_TONE_SHARES);
+                    if *inverted {
+                        pixels.iter_mut().for_each(|v| *v = 255 - *v);
+                    }
+                    Source::new(pixels)
+                });
+            (image, retoned.or(source), hardness)
         }
+    }
+}
+
+/// Our stand-in for the stock shape `name`: our nearest shape, or the round tip at a hardness, or
+/// (blank) the whole square.
+fn stock_stand_in(name: &str, inverted: bool) -> (Option<u32>, Option<Source>, Option<f32>) {
+    let n = name.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    if has(&["blank"]) {
+        // a plain image: the stamp's whole square (nothing, inverted)
+        let fill = if inverted { 0 } else { 255 };
+        (None, Source::new(vec![fill; TEXTURE_SIZE * TEXTURE_SIZE]), None)
+    } else if has(&["dots"]) {
+        // dots scattered over the stamp, whatever outline they fill
+        (Some(stock_shape(&n)), None, None)
+    } else if has(&["oval"]) && has(&["slim", "thin", "narrow"]) {
+        // a flat oval, not the round tip
+        (Some(shape::SLIM_OVAL), None, None)
+    } else if has(&["medium-hard", "medium hard", "mediumhard"]) {
+        (None, None, Some(0.75))
+    } else if has(&["hard", "pen", "solid", "oval", "round"]) && !has(&["soft", "ink"]) {
+        (None, None, Some(0.95))
+    } else if has(&["medium"]) {
+        (None, None, Some(0.5))
+    } else if has(&["ultra-soft", "ultra soft", "ultrasoft"]) {
+        (Some(shape::ULTRA_SOFT_ROUND), None, None)
+    } else if has(&["soft", "air", "blur", "glow"]) {
+        (Some(shape::SOFT_ROUND), None, None)
+    } else {
+        (Some(stock_shape(&n)), None, None)
     }
 }
 
@@ -858,7 +875,7 @@ pub(crate) fn grain_for(t: &Texture, preview: Option<&[u8]>) -> (Option<u32>, Op
             // our pattern with the stock grain's own lights and darks, where they were measured
             let source = image.zip(textures::stock_grain_tones(name)).and_then(|(i, tones)| {
                 let pattern = textures::grains().into_iter().nth(i as usize)?;
-                let mut pixels = textures::retoned(&pattern.pixels, &tones);
+                let mut pixels = textures::retoned(&pattern.pixels, &tones, &textures::TONE_SHARES);
                 if *inverted {
                     pixels.iter_mut().for_each(|v| *v = 255 - *v);
                 }

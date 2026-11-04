@@ -377,7 +377,8 @@ impl State {
                     .map(|(k, c)| (brushfile::pressure_curve_key(k).to_owned(), points(c)))
                     .collect()
             }),
-            shape_source: brush.shape.source.as_ref().map(Source::to_text),
+            // a stock shape's is made again from its name when the brush comes back
+            shape_source: brush.shape.source.as_ref().filter(|_| brush.stock.shape.is_none()).map(Source::to_text),
             // a stock grain's is made again from its name when the brush comes back
             grain_source: brush.grain.source.as_ref().filter(|_| brush.stock.grain.is_none()).map(Source::to_text),
             shape_image: image(brush.shape.image, base.shape.image),
@@ -449,7 +450,7 @@ impl State {
         brush.thumbnail = png(&b.thumbnail);
         if let Some(s) = &brush.stock.shape {
             let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };
-            brush.shape.image = crate::brush_files::shape_for(&texture).0;
+            (brush.shape.image, brush.shape.source, _) = crate::brush_files::shape_for(&texture);
         }
         if let Some(s) = &brush.stock.grain {
             let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };

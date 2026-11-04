@@ -1,8 +1,9 @@
-"""Writes the engine's table of stock grain tones (crates/engine/src/stock_tones.rs): for each grain
-image another app's brush files name instead of carrying it, the values at nine shares of it
-(none, 5%, 10%, a quarter, half, three quarters, 90%, 95%, all), measured as the engine reads an
-image (its luminance times its alpha, averaged down to 256 square). Each is keyed by a hash of
-its file's name, so the table holds measurements only: neither the images nor their names.
+"""Writes the engine's tables of stock grain and shape tones (crates/engine/src/stock_tones.rs): for
+each grain image another app's brush files name instead of carrying it, the values at nine shares
+of it (none, 5%, 10%, a quarter, half, three quarters, 90%, 95%, all); for each shape image, at
+every sixteenth. Measured as the engine reads an image (its luminance times its alpha, averaged
+down to 256 square). Each is keyed by a hash of its file's name, so the tables hold measurements
+only: neither the images nor their names.
 
 usage: python -I tools/brushes/grain_tones.py <that app's bundle folder>
 """
@@ -16,6 +17,7 @@ from PIL import Image
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT = os.path.join(ROOT, "crates/engine/src/stock_tones.rs")
 SHARES = (0.0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0)
+SHAPE_SHARES = tuple(i / 16 for i in range(17))
 SIDE = 256
 
 
@@ -27,8 +29,8 @@ def fnv1a(text):
     return h
 
 
-def named_grains(bundle):
-    """The grain images the bundle's brush files name, each once."""
+def named_images(bundle, key):
+    """The images the bundle's brush files name under `key`, each once."""
     names = set()
     for folder, _, files in os.walk(bundle):
         for f in files:
@@ -44,7 +46,7 @@ def named_grains(bundle):
             top = next((o for o in objects if isinstance(o, dict) and "plotSpacing" in o), None)
             if top is None:
                 continue
-            v = top.get("bundledGrainPath")
+            v = top.get(key)
             if isinstance(v, plistlib.UID):
                 v = objects[v.data]
             if isinstance(v, str) and v and v != "$null":
@@ -62,8 +64,8 @@ def images_by_name(bundle):
     return found
 
 
-def tones(path):
-    """The image's values at the shares, as the engine reads it."""
+def tones(path, shares):
+    """The image's values at `shares`, as the engine reads it."""
     im = Image.open(path)
     if im.mode in ("LA", "RGBA", "PA") or "transparency" in im.info:
         rgba = im.convert("RGBA")
@@ -75,32 +77,43 @@ def tones(path):
     # each of the engine's pixels the average of the image's it covers
     values = values.resize((SIDE, SIDE), Image.Resampling.BOX)
     px = sorted(values.tobytes())
-    return [px[round(s * (len(px) - 1))] for s in SHARES]
+    return [px[round(s * (len(px) - 1))] for s in shares]
+
+
+def table(bundle, images, key, shares):
+    """One table's rows: each image the brush files name under `key`, its hash and tones."""
+    rows = []
+    for name in sorted(named_images(bundle, key)):
+        base = name.replace("\\", "/").split("/")[-1].lower()
+        path = images.get(base)
+        if path is None:
+            continue
+        rows.append((fnv1a(base), tones(path, shares)))
+    rows.sort()
+    return rows
+
+
+def body(rows):
+    return "\n".join(f"    (0x{h:016x}, [{', '.join(str(v) for v in t)}])," for h, t in rows)
 
 
 def main():
     bundle = sys.argv[1]
     images = images_by_name(bundle)
-    rows = []
-    for name in sorted(named_grains(bundle)):
-        base = name.replace("\\", "/").split("/")[-1].lower()
-        path = images.get(base)
-        if path is None:
-            continue
-        t = tones(path)
-        rows.append((fnv1a(base), t))
-    rows.sort()
-    body = "\n".join(f"    (0x{h:016x}, [{', '.join(str(v) for v in t)}])," for h, t in rows)
+    grains = table(bundle, images, "bundledGrainPath", SHARES)
+    shapes = table(bundle, images, "bundledShapePath", SHAPE_SHARES)
     header = """//! Written by tools/brushes/grain_tones.py (don't edit by hand): the tones of the stock grains
-//! other apps' brush files name instead of carrying (see [`stock_grain_tones`]), each the values
-//! at [`TONE_SHARES`] of it, keyed by a hash of its file's name.
+//! and shapes other apps' brush files name instead of carrying (see [`stock_grain_tones`] and
+//! [`stock_shape_tones`]), each the values at [`TONE_SHARES`] or [`SHAPE_TONE_SHARES`] of it,
+//! keyed by a hash of its file's name.
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 
 """
     with open(OUT, "w", encoding="utf-8", newline="\n") as f:
-        f.write(header + f"pub(crate) const STOCK_GRAIN_TONES: &[(u64, [u8; 9])] = &[\n{body}\n];\n")
-    print(f"{len(rows)} grains measured")
+        f.write(header + f"pub(crate) const STOCK_GRAIN_TONES: &[(u64, [u8; 9])] = &[\n{body(grains)}\n];\n")
+        f.write(f"\npub(crate) const STOCK_SHAPE_TONES: &[(u64, [u8; 17])] = &[\n{body(shapes)}\n];\n")
+    print(f"{len(grains)} grains, {len(shapes)} shapes measured")
 
 
 if __name__ == "__main__":

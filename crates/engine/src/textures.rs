@@ -136,20 +136,35 @@ pub fn grains() -> Vec<GrayImage> {
 /// quarter, half, three quarters, 90%, 95% and all of it.
 pub const TONE_SHARES: [f32; 9] = [0.0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0];
 
+/// The shares of a shape at which [`stock_shape_tones`] gives its values: every sixteenth.
+pub const SHAPE_TONE_SHARES: [f32; 17] = [
+    0.0, 0.0625, 0.125, 0.1875, 0.25, 0.3125, 0.375, 0.4375, 0.5, 0.5625, 0.625, 0.6875, 0.75, 0.8125, 0.875, 0.9375,
+    1.0,
+];
+
 /// The tones of the stock grain a brush file names `name` (its path or file name) instead of
 /// carrying it, as measured: its values at [`TONE_SHARES`], if it is one we know.
 pub fn stock_grain_tones(name: &str) -> Option<[u8; 9]> {
+    stock_tones(crate::stock_tones::STOCK_GRAIN_TONES, name)
+}
+
+/// The tones of the stock shape a brush file names `name`, as measured: its values at
+/// [`SHAPE_TONE_SHARES`], if it is one we know.
+pub fn stock_shape_tones(name: &str) -> Option<[u8; 17]> {
+    stock_tones(crate::stock_tones::STOCK_SHAPE_TONES, name)
+}
+
+fn stock_tones<const N: usize>(table: &[(u64, [u8; N])], name: &str) -> Option<[u8; N]> {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name).to_lowercase();
     // FNV-1a, as the table's keys are
     let key = base.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
-    let table = crate::stock_tones::STOCK_GRAIN_TONES;
     table.binary_search_by_key(&key, |&(k, _)| k).ok().and_then(|i| table.get(i)).map(|&(_, t)| t)
 }
 
-/// `pixels`, a grain, with its values moved onto `tones` (values at [`TONE_SHARES`]) keeping
-/// their order: a stand-in pattern with a stock grain's lights and darks. Equal values are
-/// ordered at random, so a flat part takes a spread of values, not a ramp across the image.
-pub fn retoned(pixels: &[u8], tones: &[u8; 9]) -> Vec<u8> {
+/// `pixels`, a grain or shape, with its values moved onto `tones` (its values at `shares`)
+/// keeping their order: a stand-in pattern with a stock image's lights and darks. Equal values
+/// are ordered at random, so a flat part takes a spread of values, not a ramp across the image.
+pub fn retoned(pixels: &[u8], tones: &[u8], shares: &[f32]) -> Vec<u8> {
     let raw: Vec<f32> = pixels
         .iter()
         .enumerate()
@@ -158,7 +173,7 @@ pub fn retoned(pixels: &[u8], tones: &[u8; 9]) -> Vec<u8> {
             f32::from(v) + (h as f32 / (1u64 << 24) as f32) * 0.999
         })
         .collect();
-    let spread: Vec<(f32, f32)> = tones.iter().zip(TONE_SHARES).map(|(&t, s)| (f32::from(t) / 255.0, s)).collect();
+    let spread: Vec<(f32, f32)> = tones.iter().zip(shares).map(|(&t, &s)| (f32::from(t) / 255.0, s)).collect();
     ranked(&raw, &spread)
 }
 
@@ -1838,7 +1853,7 @@ mod tests {
     fn a_retoned_grain_takes_the_tones_it_is_given_in_its_own_order() {
         let tones = [10, 40, 60, 90, 140, 190, 220, 235, 250];
         for g in grains() {
-            let out = retoned(&g.pixels, &tones);
+            let out = retoned(&g.pixels, &tones, &TONE_SHARES);
             let mut sorted = out.clone();
             sorted.sort_unstable();
             for (share, want) in TONE_SHARES.iter().zip(tones) {
@@ -1852,6 +1867,24 @@ mod tests {
             }
         }
         assert_eq!(stock_grain_tones("no such grain.png"), None);
+    }
+
+    #[test]
+    fn a_retoned_shape_takes_a_round_tips_falloff_from_its_tones() {
+        // the soft round moved onto a stock tip's tones keeps its middle the lightest and takes
+        // the tones it is given, an empty half to a dim middle
+        let tones: [u8; 17] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 20, 30, 45, 60, 75, 90, 110];
+        let soft = shapes().into_iter().next().unwrap();
+        let out = retoned(&soft.pixels, &tones, &SHAPE_TONE_SHARES);
+        let middle = (TEXTURE_SIZE / 2) * TEXTURE_SIZE + TEXTURE_SIZE / 2;
+        assert!(out[middle] >= 105 && out[0] == 0, "{} {}", out[middle], out[0]);
+        let mut sorted = out.clone();
+        sorted.sort_unstable();
+        for (share, want) in SHAPE_TONE_SHARES.iter().zip(tones) {
+            let got = sorted[((sorted.len() - 1) as f32 * share) as usize];
+            assert!(got.abs_diff(want) <= 3, "at {share} {got} for {want}");
+        }
+        assert_eq!(stock_shape_tones("no such shape.png"), None);
     }
 
     #[test]
