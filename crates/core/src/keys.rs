@@ -330,7 +330,7 @@ const SHORTCUTS: &[(&str, &[Entry])] = &[
             entry(&[command("g")], "Grey view, to check values"),
             desktop(&[command("="), command("-")], "Zoom in or out"),
             desktop(&[command("0")], "Fit the canvas"),
-            drag("{command} Space and drag", "Zoom"),
+            drag("{command}Space and drag", "Zoom"),
             desktop(&[alone("r"), (false, true, false, "r")], "Turn the canvas 15° (with Shift, back)"),
             drag("R and drag", "Turn the canvas (with Shift, in 15° steps)"),
             desktop(&[alone("escape")], "Close what is open, or set the canvas upright"),
@@ -395,7 +395,7 @@ pub fn key_shortcut_list(desktop: bool, mac: bool) -> Vec<ShortcutGroup> {
                 .filter(|e| desktop || !e.desktop)
                 .map(|e| {
                     let keys = if e.presses.is_empty() {
-                        e.drag.replace("{command}", if mac { "⌘" } else { "Ctrl" })
+                        e.drag.replace("{command}", if mac { "⌘" } else { "Ctrl+" })
                     } else {
                         e.presses.iter().map(|p| press_label(p, mac)).collect::<Vec<_>>().join("  ")
                     };
@@ -457,7 +457,7 @@ mod tests {
         assert_eq!(row("Redo").keys, "⇧⌘Z");
         assert_eq!(row("By 10%").keys, "⌥[  ⌥]");
         assert_eq!(row("Save as").keys, "⇧⌘S");
-        assert_eq!(row("Zoom").keys, "⌘ Space and drag");
+        assert_eq!(row("Zoom").keys, "⌘Space and drag");
         assert!(row("Zoom").combos.is_empty());
     }
 
