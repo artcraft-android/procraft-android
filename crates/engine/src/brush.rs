@@ -346,10 +346,38 @@ pub struct Grain {
     /// An image of the user's own, in place of `image`.
     pub source: Option<Source>,
     pub mode: GrainMode,
-    /// Size of one grain tile on the canvas, pixels.
+    /// Size of one grain tile on the canvas, pixels (a moving grain's is
+    /// [`Grain::moving_tile`]).
     pub scale: f32,
     /// How strongly the grain shows, 0..1.
     pub depth: f32,
+}
+
+/// A moving grain's tile, cropped (not following the stamp's size), for each of the scale as
+/// brush files keep it: 128 canvas pixels over the half diagonal.
+const CROPPED_GRAIN_TILE: f32 = 128.0 / std::f32::consts::FRAC_1_SQRT_2;
+
+impl Grain {
+    /// The scale as brush files keep it (`textureScale`): the studio's control squared, times 16.
+    pub fn file_scale(&self) -> f32 {
+        16.0 * (self.scale / crate::studio::MAX_GRAIN_SCALE).powi(2)
+    }
+
+    /// A moving grain's tile on the canvas (pixels) under a stamp `diameter` pixels across, its
+    /// zoom `zoom` (0 follows the stamp's size, 1 crops) and its scale times `scale_by` (the
+    /// scale's pressure curve): following the size, the stamp's diagonal times the file's scale;
+    /// cropped, [`CROPPED_GRAIN_TILE`] times it; in between in proportion.
+    pub fn moving_tile(&self, diameter: f32, zoom: f32, scale_by: f32) -> f32 {
+        let scale = (self.file_scale() * scale_by).max(1.0 / 32.0);
+        let zoom = zoom.clamp(0.0, 1.0);
+        let follow = diameter.max(0.0) / std::f32::consts::FRAC_1_SQRT_2;
+        (scale * (follow * (1.0 - zoom) + CROPPED_GRAIN_TILE * zoom)).max(1.0)
+    }
+
+    /// The scale for a moving grain whose cropped tile is `tile` canvas pixels.
+    pub fn scale_for_cropped_tile(tile: f32) -> f32 {
+        crate::studio::MAX_GRAIN_SCALE * (tile.max(0.0) / (16.0 * CROPPED_GRAIN_TILE)).sqrt()
+    }
 }
 
 /// What leaning the pen does.
@@ -662,6 +690,22 @@ impl Brush {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_moving_grain_s_tile_follows_the_stamp_or_is_cropped_by_its_file_scale() {
+        // a file scale of 1: following the size, the stamp's diagonal; cropped, 128 over the half
+        // diagonal; half way, between them
+        let grain = Grain { scale: crate::studio::MAX_GRAIN_SCALE / 4.0, ..Grain::default() };
+        assert!((grain.file_scale() - 1.0).abs() < 1e-5);
+        let diagonal = 100.0 * std::f32::consts::SQRT_2;
+        assert!((grain.moving_tile(100.0, 0.0, 1.0) - diagonal).abs() < 1e-3);
+        assert!((grain.moving_tile(100.0, 1.0, 1.0) - 181.019).abs() < 1e-2);
+        assert!((grain.moving_tile(100.0, 0.5, 1.0) - (diagonal + 181.019) / 2.0).abs() < 1e-2);
+        // the scale's pressure curve scales it; a cropped tile asked for gives its scale back
+        assert!((grain.moving_tile(100.0, 1.0, 0.5) - 90.51).abs() < 1e-2);
+        let wanted = Grain { scale: Grain::scale_for_cropped_tile(90.0), ..Grain::default() };
+        assert!((wanted.moving_tile(30.0, 1.0, 1.0) - 90.0).abs() < 1e-3);
+    }
 
     #[test]
     fn a_taper_thins_and_fades_its_tips_as_far_as_it_has_grown() {

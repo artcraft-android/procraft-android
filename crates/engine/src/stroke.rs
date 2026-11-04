@@ -1550,9 +1550,10 @@ impl StrokeBuilder {
             let tilted = if sw.grain_depth.is_some() { self.switched(p, sw.grain_depth) } else { 0.0 };
             let depth = (least + (base - least) * (1.0 - jitter) * depth_by * (1.0 - tilted)).clamp(0.0, 1.0);
             let grain_press = p.soft[2].clamp(0.0, 1.0);
-            // sized with the stamp, against the stroke's size, unless cropped
-            let grain_size = (1.0 + (diameter * size / self.diameter.max(1e-3) - 1.0) * (1.0 - x.grain_zoom * zoom_by))
-                * grain_scale_by;
+            // its tile under this stamp (following the stamp's size, or cropped), as a multiple of
+            // the grain's own scale, which the renderer takes it times
+            let tile = self.brush.grain.moving_tile(diameter * size, x.grain_zoom * zoom_by, grain_scale_by);
+            let grain_size = tile / self.brush.grain.scale.max(1.0);
             let placed = Placed {
                 center,
                 distance,
@@ -1564,7 +1565,7 @@ impl StrokeBuilder {
                 tint,
                 secondary,
                 grain_depth: depth / base,
-                grain_size: grain_size.max(0.05),
+                grain_size: grain_size.max(1e-3),
                 grain_press,
                 bleed_lean: (x.tilt_bleed * self.leaning(p, x.tilt_angles.bleed)).clamp(0.0, 1.0),
                 grain_movement: x.grain_movement * movement_by,
@@ -2495,17 +2496,24 @@ mod tests {
         let jittered = stroke(&[("grain_depth_jitter", 1.0), ("grain_depth_min", 0.4)], 1.0, Taper::NONE);
         assert!(jittered.iter().all(|s| s.grain_depth >= 0.8 - 1e-4));
         assert!(jittered.iter().any(|s| s.grain_depth > 0.81 && s.grain_depth < 0.99));
-        // sized with the stamp when it follows the size: a lighter, smaller stamp, a smaller grain
-        let pressured = |zoom: f32| {
+        // its tile: cropped, the same whatever the stamp's size; following the size, sized with
+        // the stamp (a lighter, smaller stamp, a smaller grain)
+        let tile = |zoom: f32, pressure: f32| {
             let mut b = plain();
             b.pressure_size = 1.0;
             b.set_setting("grain_zoom", zoom);
+            // a file's scale of 1
+            b.grain.scale = crate::studio::MAX_GRAIN_SCALE / 4.0;
+            let scale = b.grain.scale;
             let mut s = StrokeBuilder::new(b, 10.0, Pointer::Stylus);
-            s.add(&[Sample::at(Vec2::new(0.0, 0.0), 0.5, 0.0)]);
-            s.finish()[0].grain_size
+            s.add(&[Sample::at(Vec2::new(0.0, 0.0), pressure, 0.0)]);
+            let stamp = s.finish()[0];
+            (stamp.grain_size * scale, stamp.radius)
         };
-        assert!((pressured(1.0) - 1.0).abs() < 1e-5);
-        assert!(pressured(0.0) < 0.8);
+        let ((cropped_light, _), (cropped_hard, _)) = (tile(1.0, 0.5), tile(1.0, 1.0));
+        assert!((cropped_light - cropped_hard).abs() < 1e-3, "{cropped_light} {cropped_hard}");
+        let ((light, light_r), (hard, hard_r)) = (tile(0.0, 0.5), tile(0.0, 1.0));
+        assert!(light < hard * 0.8 && (light / hard - light_r / hard_r).abs() < 0.02, "{light} {hard}");
         // the brush's own motion filtering smooths as the app's does
         let zigzag: Vec<Sample> = (0..60)
             .map(|i| Sample::at(Vec2::new(i as f32 * 2.0, if i % 2 == 0 { 0.0 } else { 20.0 }), 1.0, i as f64 * 8.0))

@@ -840,7 +840,7 @@ fn smudge_uniform(
         blur: 0.0,
         grain: style.grain.map_or(-1, |g| g as i32),
         // a moving grain sized and as deep as this stamp says
-        grain_scale: if moving { -style.grain_scale * s.look[1].max(0.05) } else { style.grain_scale },
+        grain_scale: if moving { -(style.grain_scale * s.look[1]).max(1.0) } else { style.grain_scale },
         grain_depth: if moving { (style.grain_depth * s.look[0]).clamp(0.0, 1.0) } else { style.grain_depth },
         grain_offset: s.grain_offset,
         grain_rotation: style.grain_rotation,
@@ -2271,7 +2271,7 @@ impl Canvas {
                     tint: stamp_extras(s).1,
                     brightness_add: stamp_extras(s).2,
                     look: [s.grain_depth, s.grain_size, s.secondary, s.gradation]
-                        .map(|v| if v.is_finite() { v.clamp(0.0, 64.0) } else { 0.0 }),
+                        .map(|v| if v.is_finite() { v.clamp(0.0, 4096.0) } else { 0.0 }),
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
@@ -2328,7 +2328,7 @@ impl Canvas {
                     tint: stamp_extras(s).1,
                     brightness_add: stamp_extras(s).2,
                     look: [s.grain_depth, s.grain_size, s.secondary, s.gradation]
-                        .map(|v| if v.is_finite() { v.clamp(0.0, 64.0) } else { 0.0 }),
+                        .map(|v| if v.is_finite() { v.clamp(0.0, 4096.0) } else { 0.0 }),
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
                     more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
                         .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
