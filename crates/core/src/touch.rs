@@ -41,9 +41,11 @@ pub enum CompanionMode {
 const RAPID_REPEAT_MS: f64 = 120.0;
 /// A pen held over the canvas and not heard from for this long (seconds) has gone.
 const PEN_HOVER_STALE_S: f32 = 0.5;
-/// A pinch in this quick, to under this scale, fits the canvas.
-const QUICK_PINCH_MS: f64 = 400.0;
-const QUICK_PINCH_SCALE: f32 = 0.75;
+/// Two fingers parting while they close faster than this (their spread, as a part of where it
+/// started, a second) fit the canvas if it is pinched smaller than it fits; the speed is taken
+/// over this long (milliseconds) before they part.
+const QUICK_PINCH_SPEED: f32 = -2.5;
+const QUICK_PINCH_WINDOW_MS: f64 = 40.0;
 /// Three fingers turning back and forth this often clear the layer, each leg this far (points).
 const SCRUB_TURNS: i32 = 3;
 const SCRUB_STEP: f32 = 24.0;
@@ -352,8 +354,10 @@ pub(crate) struct Touches {
     tap_start: f64,
     tap_pointers: usize,
     tap_moved: f32,
-    gesture_start: f64,
+    /// The two fingers' spread as a part of where it started, and its recent values with their
+    /// times (the first at or before the speed's window).
     gesture_scale: f32,
+    pinch: Vec<(f64, f32)>,
     gesture_pair: Option<(u64, u64)>,
     last: (f32, f32, f32, f32),
     scrub_x: f32,
@@ -445,8 +449,8 @@ impl Default for Touches {
             tap_start: 0.0,
             tap_pointers: 0,
             tap_moved: 0.0,
-            gesture_start: 0.0,
             gesture_scale: 1.0,
+            pinch: Vec::new(),
             gesture_pair: None,
             last: (0.0, 0.0, 0.0, 0.0),
             scrub_x: 0.0,
@@ -944,7 +948,7 @@ impl CanvasSession {
             Mode::Gesture => {
                 if t.down.len() >= 3 {
                     Self::scrub(&mut t, &mut out);
-                } else if self.move_gesture(&mut t) {
+                } else if self.move_gesture(&mut t, last.time_ms) {
                     out.push(TouchCommand::ViewMoved);
                 }
             }
@@ -1360,8 +1364,9 @@ impl CanvasSession {
             t.mode,
             Mode::Finger | Mode::Idle | Mode::Pour | Mode::Transform | Mode::Select | Mode::Recolor | Mode::Turn
         ) {
-            t.gesture_start = now;
             t.gesture_scale = 1.0;
+            t.pinch.clear();
+            t.pinch.push((now, 1.0));
         }
         t.mode = Mode::Gesture;
         t.tap_pointers = t.tap_pointers.max(t.down.len());
@@ -1429,7 +1434,17 @@ impl CanvasSession {
                 }
             }
             if t.mode == Mode::Gesture {
+                let parted = t.gesture_pair.is_some_and(|(a, b)| a == id || b == id);
                 Self::follow_fingers(&mut t);
+                // two fingers parting as they close fast fit a canvas pinched smaller than it
+                // fits, settling into place (a tap's fingers aren't a pinch)
+                let tap = now - t.tap_start <= TAP_MS && t.tap_moved <= TAP_SLOP * t.scale;
+                if parted && !cancelled && !tap && t.tap_pointers == 2 && t.gesture_pair.is_none() {
+                    let flicked = Self::pinch_speed(&t, now) < QUICK_PINCH_SPEED;
+                    if flicked && self.pinched_smaller_than_fit() {
+                        out.push(TouchCommand::Fit);
+                    }
+                }
             }
             // the last finger other than the stroke's lifted from a held snapped shape
             let stroke = t.stroke_pointer;
@@ -1476,12 +1491,6 @@ impl CanvasSession {
                         }
                         _ => {}
                     }
-                } else if t.tap_pointers == 2
-                    && now - t.gesture_start <= QUICK_PINCH_MS
-                    && t.gesture_scale < QUICK_PINCH_SCALE
-                {
-                    // a quick pinch in fits the canvas to the screen, settling into place
-                    out.push(TouchCommand::Fit);
                 }
             }
             Mode::Pick => {
@@ -1813,8 +1822,26 @@ impl CanvasSession {
         }
     }
 
-    /// One step of two fingers: the view follows them. True if it moved.
-    fn move_gesture(&self, t: &mut Touches) -> bool {
+    /// How fast two fingers' spread changed (a part of where it started, a second) over the
+    /// [`QUICK_PINCH_WINDOW_MS`] before `now`: nothing heard meanwhile counts as still.
+    fn pinch_speed(t: &Touches, now: f64) -> f32 {
+        let Some(&(_, scale)) = t.pinch.last() else { return 0.0 };
+        let from = now - QUICK_PINCH_WINDOW_MS;
+        let before = t.pinch.iter().rev().find(|(ms, _)| *ms <= from).or(t.pinch.first());
+        match before {
+            Some(&(ms, was)) if now - ms > 0.5 => (scale - was) / ((now - ms) / 1000.0) as f32,
+            _ => 0.0,
+        }
+    }
+
+    /// The canvas as pinched is smaller on the screen than it is fitted.
+    fn pinched_smaller_than_fit(&self) -> bool {
+        let st = self.shared.lock();
+        st.view.is_some_and(|v| v.zoom() < st.fitted_view().zoom())
+    }
+
+    /// One step of two fingers at `ms`: the view follows them. True if it moved.
+    fn move_gesture(&self, t: &mut Touches, ms: f64) -> bool {
         let Some((a, b)) = t.gesture_pair else { return false };
         let at = |id: u64| t.down.iter().find(|d| d.id == id).map(|d| d.at);
         let (Some(a), Some(b)) = (at(a), at(b)) else { return false };
@@ -1833,6 +1860,15 @@ impl CanvasSession {
         }
         t.tap_moved += (x - lx).hypot(y - ly) + (d - ld).abs();
         t.gesture_scale *= scale;
+        // the spread's recent values, one a moment, and the last from before the speed's window
+        let spread = t.gesture_scale;
+        match t.pinch.last_mut() {
+            Some(last) if last.0 >= ms => last.1 = spread,
+            _ => t.pinch.push((ms, spread)),
+        }
+        let from = ms - QUICK_PINCH_WINDOW_MS;
+        let old = t.pinch.iter().skip(1).take_while(|(at, _)| *at <= from).count();
+        t.pinch.drain(..old);
         t.last = (x, y, d, angle);
         self.view_gesture(lx, ly, x - lx, y - ly, scale, turn);
         true
@@ -1901,6 +1937,7 @@ pub(crate) type TouchState = Mutex<Touches>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use procraft_engine::geom::Vec2;
 
     fn at(x: f32, y: f32, ms: f64) -> Vec<PenSample> {
         vec![PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: ms, roll: 0.0 }]
@@ -2045,19 +2082,78 @@ mod tests {
         assert_eq!(s.touch_tick(780.0), vec![TouchCommand::Undo]);
     }
 
+    /// A 400 x 300 canvas in an 800 x 600 window, shown `zoom` times as big as it fits.
+    fn shown(zoom: f32) -> std::sync::Arc<CanvasSession> {
+        let s = CanvasSession::new(400, 300);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (800, 600);
+            let mut view = st.fitted_view();
+            view.gesture(Vec2::new(400.0, 300.0), Vec2::new(0.0, 0.0), zoom, 0.0);
+            st.view = Some(view);
+        }
+        s
+    }
+
+    /// Two fingers 600 apart pinched at `speed` (their spread, a part of where it began, a
+    /// second) for `ms` at 200 Hz, then held still for `still` before they lift: what the lifts
+    /// gave.
+    fn pinch(s: &CanvasSession, speed: f32, ms: f64, still: f64) -> Vec<TouchCommand> {
+        s.touch_down(1, PointerKind::Finger, at(100.0, 300.0, 0.0));
+        s.touch_down(2, PointerKind::Finger, at(700.0, 300.0, 0.0));
+        let (mut t, mut half) = (0.0, 300.0);
+        while t + 5.0 <= ms {
+            t += 5.0;
+            half = 300.0 * (1.0 + speed * t as f32 / 1000.0);
+            s.touch_move(1, at(400.0 - half, 300.0, t));
+            s.touch_move(2, at(400.0 + half, 300.0, t));
+        }
+        let mut out = s.touch_up(2, at(400.0 + half, 300.0, t + still));
+        out.extend(s.touch_up(1, at(400.0 - half, 300.0, t + still + 8.0)));
+        out
+    }
+
+    fn zoom(s: &CanvasSession) -> f32 {
+        s.shared.lock().view.map_or(0.0, |v| v.zoom())
+    }
+
     #[test]
     fn a_quick_pinch_in_fits_the_canvas() {
-        let s = session();
-        s.touch_down(1, PointerKind::Finger, at(100.0, 300.0, 0.0));
-        s.touch_down(2, PointerKind::Finger, at(700.0, 300.0, 5.0));
-        for k in 1..=10 {
-            let d = 30.0 * k as f32;
-            s.touch_move(1, at(100.0 + d, 300.0, 5.0 + 20.0 * f64::from(k)));
-            s.touch_move(2, at(700.0 - d, 300.0, 5.0 + 20.0 * f64::from(k)));
-        }
-        s.touch_up(2, at(400.0, 300.0, 260.0));
-        let out = s.touch_up(1, at(400.0, 300.0, 270.0));
+        let s = shown(1.0);
+        let fitted = zoom(&s);
+        let out = pinch(&s, -5.0, 120.0, 0.0);
+        assert!(zoom(&s) < fitted * 0.5);
         assert!(out.contains(&TouchCommand::Fit), "{out:?}");
+        // from fitted, a small flick in fits it again
+        let s = shown(1.0);
+        let out = pinch(&s, -6.9, 32.0, 0.0);
+        assert!(out.contains(&TouchCommand::Fit), "{out:?}");
+        // closing a little faster than 2.5 a second fits, a little slower doesn't
+        assert!(pinch(&shown(1.0), -2.8, 150.0, 0.0).contains(&TouchCommand::Fit));
+        assert!(!pinch(&shown(1.0), -2.2, 150.0, 0.0).contains(&TouchCommand::Fit));
+    }
+
+    #[test]
+    fn a_pinch_that_stops_before_lifting_doesn_t_fit() {
+        // however quick and far it went, fingers still as they lift aren't a flick
+        for (speed, ms, still) in [(-5.0, 100.0, 60.0), (-3.3, 150.0, 45.0)] {
+            let out = pinch(&shown(1.0), speed, ms, still);
+            assert!(!out.contains(&TouchCommand::Fit), "{speed}: {out:?}");
+        }
+        // and a slow zoom out to well under the fit never is
+        for (speed, ms) in [(-1.5, 300.0), (-1.0, 450.0), (-0.6, 800.0)] {
+            let out = pinch(&shown(1.0), speed, ms, 0.0);
+            assert!(!out.contains(&TouchCommand::Fit), "{speed}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn a_flick_that_leaves_the_canvas_bigger_than_it_fits_doesn_t_fit() {
+        let s = shown(3.0);
+        let fitted = zoom(&shown(1.0));
+        let out = pinch(&s, -6.9, 70.0, 0.0);
+        assert!(zoom(&s) > fitted * 1.3, "{} {fitted}", zoom(&s));
+        assert!(!out.contains(&TouchCommand::Fit), "{out:?}");
     }
 
     #[test]
