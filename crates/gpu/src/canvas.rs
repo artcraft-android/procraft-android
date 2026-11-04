@@ -843,7 +843,8 @@ fn smudge_uniform(
         index: 0,
         carried: 0,
         modulated: 0,
-        spare: [0; 3],
+        grain_blend: style.grain_blend,
+        spare: [0; 2],
     }
 }
 
@@ -909,7 +910,9 @@ struct SmudgeUniform {
     carried: u32,
     /// 1 when wet paint builds up by what is left at each pixel (the modulated mode).
     modulated: u32,
-    spare: [u32; 3],
+    /// How the moving grain combines with the shape (a blend mode), for paint laid in place.
+    grain_blend: u32,
+    spare: [u32; 2],
 }
 
 /// Wet paint is laid a display frame's stamps at a time, the frames this long (ms).

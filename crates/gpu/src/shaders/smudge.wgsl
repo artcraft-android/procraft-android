@@ -71,7 +71,8 @@ struct SmudgeStamp {
     carried: u32,
     // 1: wet paint builds up by what is left at each pixel (the modulated mode; see `amount`)
     modulated: u32,
-    spare0: u32,
+    // how the moving grain combines with the shape (a blend mode), for paint laid in place
+    grain_blend: u32,
     spare1: u32,
     spare2: u32,
 }
@@ -277,13 +278,15 @@ fn grain_plain(p: vec2<f32>) -> f32 {
     return g;
 }
 
-// how much a wet stamp lays at canvas point `p` (stamp frame point `t`): its shape through its
-// grain (unless the grain is laid over the stroke once), then the bleed as a contrast on that
-// (none of the faint parts, all of the strong ones, more of both the harder the pressure's
-// bleed), times the stamp's alpha
+// how much a wet stamp lays at canvas point `p` (stamp frame point `t`): its shape and its grain
+// combined by the grain's blend mode (unless the grain is laid over the stroke once), then the
+// bleed as a contrast on that (none of the faint parts, all of the strong ones, more of both the
+// harder the pressure's bleed), times the stamp's alpha
 fn wet_weight(p: vec2<f32>, t: vec2<f32>) -> f32 {
-    let g = select(mix(1.0, grain_plain(p), st.grain_depth), 1.0, st.grain_once > 0.5);
-    let through = mask(t) * g;
+    var through = mask(t);
+    if (st.grain >= 0 && st.grain_once <= 0.5) {
+        through = grain_combine(through, grain_plain(p), st.grain_depth, st.grain_blend);
+    }
     let b = 8.0 * st.grain_bleed;
     let bled = (1.0 + b) * through - b / sqrt(max(b * st.grain_press, 1e-4));
     return clamp(bled, 0.0, 1.0) * st.alpha;
