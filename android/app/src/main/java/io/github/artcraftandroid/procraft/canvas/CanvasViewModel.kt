@@ -1429,9 +1429,104 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.loadModelTextures()
     }
 
-    /** A file from elsewhere into the gallery: an artwork file, or a picture as a new artwork. */
+    /**
+     * A file from elsewhere into the gallery, with the import card: an artwork file (opened once
+     * in, as the gallery's Import does), or a picture as a new artwork.
+     */
     fun importFile(uri: android.net.Uri) {
-        viewModelScope.launch { importOne(uri) }
+        viewModelScope.launch { importWithCard(uri, open = true) }
+    }
+
+    /**
+     * [uri] brought in with the import card showing its name; the one artwork it made opened if
+     * [open]. Cancel throws away what it made.
+     */
+    private suspend fun importWithCard(uri: android.net.Uri, open: Boolean) {
+        if (importBusy || exportShown != null) return
+        val name = withContext(Dispatchers.IO) { fileName(uri) } ?: "Untitled"
+        val made = withImportCard(name) { importOne(uri) } ?: return
+        if (open && session == null && made.size == 1) openImported(made.first())
+    }
+
+    /** An import under way as its card shows it: the file's [name], how far it has come (0..1), and once [done]. */
+    data class ImportShown(val name: String, val progress: Float, val done: Boolean = false)
+
+    /** The import card, while a file is brought in (null without one). */
+    var importShown by mutableStateOf<ImportShown?>(null)
+        private set
+
+    @Volatile
+    private var importCancelled = false
+
+    /** An import is under way (its card may have gone with Cancel while what it made is thrown away). */
+    private var importBusy = false
+
+    /** The gallery folders the import under way has made. */
+    private val importMade = java.util.Collections.synchronizedList(mutableListOf<File>())
+
+    /** A new gallery folder for an artwork being imported, kept as the import's. */
+    private fun importFolder(): File = store.newFolder(galleryDir).also { importMade += it }
+
+    /** How far the import has come as its work tells it (the copy in), 0..1. */
+    @Volatile
+    private var importStep = 0f
+
+    /** The import card's Cancel: the card goes at once, and what the import makes is thrown away. */
+    fun cancelImport() {
+        importCancelled = true
+        importShown = null
+    }
+
+    /**
+     * Runs [work], bringing in the file [name], with the import card: its pie follows the copy in,
+     * creeps on while the file is read, and is full with a check once done (none if the work told
+     * why it couldn't: its message says so). The artwork folders it made in the gallery, or null
+     * if Cancel was tapped (they are thrown away; a picture or model opened as a new canvas
+     * meanwhile stays).
+     */
+    private suspend fun withImportCard(name: String, work: suspend () -> Unit): List<File>? {
+        importCancelled = false
+        importBusy = true
+        importMade.clear()
+        importStep = 0f
+        importShown = ImportShown(name, 0f)
+        val told = message
+        val following = viewModelScope.launch {
+            var creep = 0f
+            while (true) {
+                creep += (IMPORT_CREEP_TO - creep) * IMPORT_CREEP
+                if (!importCancelled) importShown = ImportShown(name, maxOf(importStep, creep))
+                kotlinx.coroutines.delay(EXPORT_POLL_MS)
+            }
+        }
+        try {
+            work()
+            following.cancel()
+            val made = withContext(Dispatchers.IO) { importMade.toList().filter { it.isDirectory } }
+            if (importCancelled) {
+                withContext(Dispatchers.IO) { made.forEach { it.deleteRecursively() } }
+                refreshGallery()
+                return null
+            }
+            // full, then the check drawn in it before the card goes
+            if (message == told) {
+                importShown = ImportShown(name, 1f, done = true)
+                kotlinx.coroutines.delay(EXPORT_DONE_MS)
+            }
+            return made
+        } finally {
+            following.cancel()
+            importShown = null
+            importBusy = false
+        }
+    }
+
+    /** The artwork just imported into [dir] opened, the gallery zooming into its cell. */
+    private suspend fun openImported(dir: File) {
+        val entries = withContext(Dispatchers.IO) { store.list(galleryDir) }
+        galleryEntries = entries
+        artworks = entries.filterIsInstance<Artwork>()
+        artworks.firstOrNull { it.dir.name == dir.name }?.let { openArtwork(it) }
     }
 
     /**
@@ -1447,7 +1542,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             if (models.isEmpty()) {
                 for (uri in uris) {
                     if (session != null) closeArtwork()
-                    importOne(uri)
+                    importWithCard(uri, open = uris.size == 1)
                 }
                 return@launch
             }
@@ -1465,6 +1560,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val resolver = getApplication<Application>().contentResolver
         val head = withContext(Dispatchers.IO) { runCatching { resolver.openInputStream(uri)?.use { s -> ByteArray(4).also { s.read(it) } } }.getOrNull() }
         val name = withContext(Dispatchers.IO) { fileName(uri) }
+        // a file that can't be read at all (one the app isn't allowed to) is no picture either
+        if (head == null) {
+            message = "This file can't be opened."
+            return
+        }
         // another program's palette
         val foreign = head != null && String(head, Charsets.US_ASCII) == "ASEF" || name?.endsWith(".aco", ignoreCase = true) == true
         val zip = head != null && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()
@@ -1472,7 +1572,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // isn't read into memory to find out what it is
         val zipFile = if (zip) withContext(Dispatchers.IO) { cacheCopy(uri) } else null
         if (zip && zipFile == null) {
-            message = "This file can't be opened."
+            if (!importCancelled) message = "This file can't be opened."
             return
         }
         try {
@@ -1511,7 +1611,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         } else if (zipFile != null) {
             // an artwork file of ours, or a layered package
             val ok = withContext(Dispatchers.IO) {
-                val dir = store.newFolder(galleryDir)
+                val dir = importFolder()
                 val ours = runCatching { zipFile.inputStream().use { io.github.artcraftandroid.procraft.gallery.ArtworkFile.read(it, dir) } }.getOrNull() == true
                 (ours || importPackage(zipFile, dir)).also { if (!it) dir.deleteRecursively() }
             }
@@ -1531,7 +1631,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val app = getApplication<Application>()
         val outcome = withContext(Dispatchers.IO) {
             val pages = File(app.cacheDir, "pdf-${System.nanoTime()}").apply { mkdirs() }
-            val dir = store.newFolder(galleryDir)
+            val dir = importFolder()
             try {
                 app.contentResolver.openFileDescriptor(uri, "r")?.use { fd ->
                     android.graphics.pdf.PdfRenderer(fd).use { pdf ->
@@ -1585,7 +1685,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val app = getApplication<Application>()
         val outcome = withContext(Dispatchers.IO) {
             val temp = File(app.cacheDir, "import-${System.nanoTime()}.psd")
-            val dir = store.newFolder(galleryDir)
+            val dir = importFolder()
             try {
                 app.contentResolver.openInputStream(uri)?.use { input -> temp.outputStream().use { input.copyTo(it) } }
                 io.github.artcraftandroid.procraft.core.importPsd(temp.path, dir.path, name?.substringBeforeLast('.')?.trim().orEmpty())
@@ -1605,14 +1705,32 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** The file at [uri] copied whole into the cache (streamed through, never held in memory), or none. */
+    /**
+     * The file at [uri] copied whole into the cache (streamed through, never held in memory), or
+     * none; the import card's pie follows it, and its Cancel stops it.
+     */
     private fun cacheCopy(uri: android.net.Uri): File? {
         val temp = File(getApplication<Application>().cacheDir, "import-${System.nanoTime()}.zip")
+        val resolver = getApplication<Application>().contentResolver
+        val size = runCatching { resolver.openFileDescriptor(uri, "r")?.use { it.statSize } }.getOrNull() ?: -1L
         return runCatching {
-            getApplication<Application>().contentResolver.openInputStream(uri)?.use { input -> temp.outputStream().use { input.copyTo(it) } } ?: error("nothing to read")
+            resolver.openInputStream(uri)?.use { input ->
+                temp.outputStream().use { out ->
+                    val buffer = ByteArray(1 shl 16)
+                    var copied = 0L
+                    while (true) {
+                        if (importCancelled) error("cancelled")
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        out.write(buffer, 0, n)
+                        copied += n
+                        if (size > 0) importStep = IMPORT_COPY_SHARE * copied / size
+                    }
+                }
+            } ?: error("nothing to read")
             temp
         }.getOrElse {
-            android.util.Log.e("ProCraft", "copying a file in", it)
+            if (!importCancelled) android.util.Log.e("ProCraft", "copying a file in", it)
             temp.delete()
             null
         }
@@ -3546,35 +3664,46 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }.getOrNull()
     }
 
-    /** A brush or set file from elsewhere: it joins the library and its set is shown. */
+    /**
+     * A brush or set file from elsewhere, with the import card: it joins the library and its set
+     * is shown (not if the card's Cancel was tapped meanwhile).
+     */
     fun importBrushes(uri: android.net.Uri) {
         viewModelScope.launch {
-            val read = withContext(Dispatchers.IO) { runCatching { readAll(uri) } }
-            val bytes = read.getOrNull()
-            if (bytes == null) {
-                message = if (read.exceptionOrNull() is OutOfMemoryError) "This file is too large to import." else "This file could not be read."
-                return@launch
-            }
+            if (importBusy || exportShown != null) return@launch
             val name = withContext(Dispatchers.IO) { fileName(uri) }
-            // the name says which kind, when it has one we know; else our own kinds first, then
-            // the other apps' (each told apart by its contents)
-            val added = session?.let {
-                // the shared core tells the kinds apart and makes them brushes off the main
-                // thread; they join the library here, once nothing holds a place in it
-                val read = withContext(Dispatchers.Default) {
-                    io.github.artcraftandroid.procraft.core.readBrushes(bytes, name)
-                }
-                read?.let {
-                    brushesRead += it
-                    addBrushesRead()
-                } != null
-            } ?: if (name != null && isOtherBrushFile(name)) {
-                addOtherBrushes(bytes, name)
-            } else {
-                addBrushes(bytes) || addOtherBrushes(bytes, name ?: "Imported")
-            }
-            if (!added) message = "This file has no brushes in it."
+            withImportCard(name ?: "Untitled") { importBrushesFrom(uri, name) }
         }
+    }
+
+    private suspend fun importBrushesFrom(uri: android.net.Uri, name: String?) {
+        val read = withContext(Dispatchers.IO) { runCatching { readAll(uri) } }
+        val bytes = read.getOrNull()
+        if (bytes == null) {
+            message = if (read.exceptionOrNull() is OutOfMemoryError) "This file is too large to import." else "This file could not be read."
+            return
+        }
+        // the name says which kind, when it has one we know; else our own kinds first, then
+        // the other apps' (each told apart by its contents)
+        val added = session?.let {
+            // the shared core tells the kinds apart and makes them brushes off the main
+            // thread; they join the library here, once nothing holds a place in it
+            val read = withContext(Dispatchers.Default) {
+                io.github.artcraftandroid.procraft.core.readBrushes(bytes, name)
+            }
+            if (importCancelled) return
+            read?.let {
+                brushesRead += it
+                addBrushesRead()
+            } != null
+        } ?: if (importCancelled) {
+            return
+        } else if (name != null && isOtherBrushFile(name)) {
+            addOtherBrushes(bytes, name)
+        } else {
+            addBrushes(bytes) || addOtherBrushes(bytes, name ?: "Imported")
+        }
+        if (!added) message = "This file has no brushes in it."
     }
 
     /** Brushes read from files, waiting to join the library. */
@@ -6300,6 +6429,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
         /** How often the export card asks the core how far an export has come (ms). */
         private const val EXPORT_POLL_MS = 50L
+
+        /**
+         * The import card's pie: the copy in fills this share of it; while the file is read it
+         * creeps on towards [IMPORT_CREEP_TO], this share of the way left each poll.
+         */
+        private const val IMPORT_COPY_SHARE = 0.6f
+        private const val IMPORT_CREEP_TO = 0.95f
+        private const val IMPORT_CREEP = 0.03f
 
         /** A model's turntable: its frame rate, and its sizes (720p, 1080p, 4K, Square). */
         const val TURNTABLE_FPS = 30

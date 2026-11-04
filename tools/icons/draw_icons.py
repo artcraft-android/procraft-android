@@ -180,6 +180,14 @@ def share_tab():
     return unary_union([tray, shaft, head])
 
 
+def import_tab():
+    """Import: a narrow tray with an arrow coming down into it."""
+    tray = LineString([(6, 12.5), (6, 20), (18, 20), (18, 12.5)]).buffer(1.2, join_style='round')
+    shaft = capsule((12, 3.6), (12, 14.1), 1.2)
+    head = soft(Polygon([(12, 16.2), (15.6, 12.3), (8.4, 12.3)]), 0.4)
+    return unary_union([tray, shaft, head])
+
+
 def video_tab():
     """Video: a camera, its body and its lens."""
     body = soft(box(2.5, 6.5, 15.5, 17.5), 2.0)
@@ -1552,7 +1560,7 @@ DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
     'undo': lambda: turning_arrow(False), 'redo': lambda: turning_arrow(True),
-    'tabadd': plus, 'tabcanvas': canvas_tab, 'tabshare': share_tab, 'tabvideo': video_tab,
+    'tabadd': plus, 'tabcanvas': canvas_tab, 'tabshare': share_tab, 'tabimport': import_tab, 'tabvideo': video_tab,
     'tabprefs': prefs_tab, 'tabhelp': help_tab,
     'automatic': wand, 'freehand': lasso, 'rectangleshape': rectangle_tool, 'ellipseshape': ellipse_tool,
     'selectadd': lambda: sign_in_disc(False), 'selectremove': lambda: sign_in_disc(True), 'invert': invert,
