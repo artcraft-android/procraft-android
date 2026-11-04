@@ -157,6 +157,10 @@ fun GalleryScreen(vm: CanvasViewModel) {
     var pdfFor by remember { mutableStateOf<List<Artwork>?>(null) }
     var deletingSelected by remember { mutableStateOf(false) }
     var previewing by remember { mutableStateOf<List<Artwork>?>(null) }
+    // which of them Preview starts on
+    var previewFrom by remember { mutableIntStateOf(0) }
+    // an artwork two fingers are spreading open into Preview
+    var opening by remember { mutableStateOf<PinchOpening?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     fun picked() = vm.artworks.filter { it.dir.name in selected }
@@ -341,11 +345,13 @@ fun GalleryScreen(vm: CanvasViewModel) {
                                 // across the whole column, so the thumbnail sits in its middle as a stack's does
                                 Column(
                                     Modifier.fillMaxWidth().height(cell.pitch).onGloballyPositioned { cellAt[0] = it.positionInWindow() }.graphicsLayer {
-                                        alpha = (1f - SWIPED_FADE * open.coerceIn(0f, 1f)) * faint.value
+                                        alpha = (1f - SWIPED_FADE * open.coerceIn(0f, 1f)) * faint.value *
+                                            (if (opening?.artwork?.dir?.name == a.dir.name) 0f else 1f)
                                     }.pointerInput(a, selecting, chosen) {
                                         // a tap opens it (or picks it), and on its name renames it; swiped left, its
                                         // actions show (right, they go); held and moved, it is dragged: within the
-                                        // gallery to move it or stack it, or out to other apps
+                                        // gallery to move it or stack it, or out to other apps; two fingers spread
+                                        // on it open it in Preview
                                         awaitEachGesture {
                                             val down = awaitFirstDown()
                                             // a moment held before it shrinks, so a scroll starting on it leaves it be
@@ -356,14 +362,44 @@ fun GalleryScreen(vm: CanvasViewModel) {
                                             try {
                                                 var up: androidx.compose.ui.input.pointer.PointerInputChange? = null
                                                 var moved: Offset? = null
+                                                var pinched = false
                                                 val held = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
                                                     while (up == null && moved == null) {
-                                                        val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                                                        val e = awaitPointerEvent()
+                                                        if (e.changes.count { it.pressed } >= 2) {
+                                                            pinched = true
+                                                            break
+                                                        }
+                                                        val c = e.changes.firstOrNull { it.id == down.id } ?: break
                                                         val d = c.position - down.position
                                                         if (!c.pressed) up = c else if (d.getDistance() > viewConfiguration.touchSlop) moved = d
                                                     }
                                                     false
                                                 } ?: true
+                                                if (pinched) {
+                                                    // the picture comes out of its place and follows the fingers, the
+                                                    // gallery darkening behind it; let go, it opens or goes back
+                                                    press.cancel()
+                                                    val shown = vm.thumbAt[a.dir.name]
+                                                    if (selecting || shown == null) return@awaitEachGesture
+                                                    val o = PinchOpening(a, shown).also { opening = it }
+                                                    var from: Float? = null
+                                                    var middle: Offset? = null
+                                                    while (true) {
+                                                        val e = awaitPointerEvent()
+                                                        val fingers = e.changes.filter { it.pressed }
+                                                        if (fingers.size < 2) break
+                                                        e.changes.forEach { it.consume() }
+                                                        val apart = (fingers[0].position - fingers[1].position).getDistance()
+                                                        val between = (fingers[0].position + fingers[1].position) / 2f
+                                                        val start = from ?: apart.also { from = it }
+                                                        val first = middle ?: between.also { middle = it }
+                                                        o.scale = (apart / start.coerceAtLeast(1f)).coerceAtLeast(PINCH_LEAST)
+                                                        o.moved = between - first
+                                                    }
+                                                    o.letGo = true
+                                                    return@awaitEachGesture
+                                                }
                                                 val d = moved
                                                 if (d != null) {
                                                     if (!selecting && kotlin.math.abs(d.x) > kotlin.math.abs(d.y)) swiped = if (d.x < 0f) a.dir.name else null
@@ -494,6 +530,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                 },
                 onPreview = {
                     moreOpen = false
+                    previewFrom = 0
                     previewing = picked()
                 },
                 onDuplicate = {
@@ -537,7 +574,17 @@ fun GalleryScreen(vm: CanvasViewModel) {
                 vm.shareFromGallery(list, "PDF", quality.jpeg)?.let { (files, mime) -> runCatching { shareFiles(context, files, mime) } }
             }
         }
-        previewing?.let { list -> ArtworkPreview(list, vm.galleryVersion) { previewing = null } }
+        opening?.let { o ->
+            PinchOpeningOverlay(o, vm.galleryVersion) { opened ->
+                if (opened) {
+                    val all = vm.artworks
+                    previewFrom = all.indexOfFirst { it.dir.name == o.artwork.dir.name }.coerceAtLeast(0)
+                    previewing = all
+                }
+                opening = null
+            }
+        }
+        previewing?.let { list -> ArtworkPreview(list, vm.galleryVersion, previewFrom) { previewing = null } }
         // a sheet sliding up over the gallery, and back down
         androidx.compose.animation.AnimatedVisibility(
             vm.customCanvasOpen,
@@ -1242,10 +1289,78 @@ private fun StackCell(
     }
 }
 
-/** The picked artworks one at a time over the whole screen; swiped through, tapped to close. */
+/**
+ * An artwork two fingers are spreading open: its thumbnail where it showed (window pixels), how far
+ * the fingers have spread it and moved, and whether they have let go.
+ */
+private class PinchOpening(val artwork: Artwork, val from: androidx.compose.ui.geometry.Rect) {
+    var scale by mutableFloatStateOf(1f)
+    var moved by mutableStateOf(Offset.Zero)
+    var letGo by mutableStateOf(false)
+}
+
+/** Pinched in, an artwork being spread open shrinks no further than this. */
+private const val PINCH_LEAST = 0.6f
+
+/**
+ * An artwork spread open by two fingers ([o]): its picture follows them out of its thumbnail's
+ * place, the gallery darkening behind it as it nears the whole screen; let go, it settles fitted
+ * over black and [done] is told true (Preview takes over), or, spread too little, back into its
+ * place and [done] is told false.
+ */
 @Composable
-private fun ArtworkPreview(list: List<Artwork>, version: Int, onClose: () -> Unit) {
-    var index by remember { mutableIntStateOf(0) }
+private fun PinchOpeningOverlay(o: PinchOpening, version: Int, done: (Boolean) -> Unit) {
+    val image by produceState<ImageBitmap?>(null, o.artwork.dir.path, version) {
+        value = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(o.artwork.thumbnail.path)?.asImageBitmap() }
+    }
+    // after the fingers let go: from where they left it (0) to where it settles (1)
+    val settle = remember { androidx.compose.animation.core.Animatable(0f) }
+    var held by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
+    var opens by remember { mutableStateOf(false) }
+    val density = LocalDensity.current
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val screen = with(density) { androidx.compose.ui.geometry.Size(maxWidth.toPx(), maxHeight.toPx()) }
+        val from = o.from
+        // fitted to the screen, as Preview shows it
+        val fit = minOf(screen.width / from.width, screen.height / from.height)
+        val full = androidx.compose.ui.geometry.Rect(
+            Offset((screen.width - from.width * fit) / 2f, (screen.height - from.height * fit) / 2f),
+            androidx.compose.ui.geometry.Size(from.width * fit, from.height * fit),
+        )
+        // following the fingers: grown about the thumbnail's middle and moved with them
+        val following = androidx.compose.ui.geometry.Rect(
+            from.center + o.moved - Offset(from.width * o.scale / 2f, from.height * o.scale / 2f),
+            androidx.compose.ui.geometry.Size(from.width * o.scale, from.height * o.scale),
+        )
+        LaunchedEffect(o.letGo) {
+            if (!o.letGo) return@LaunchedEffect
+            held = following
+            opens = o.scale >= Motion.ARTWORK_PINCH_OPEN
+            settle.animateTo(1f, Motion.pinchSettle())
+            done(opens)
+        }
+        val rect = held?.let { start -> androidx.compose.ui.geometry.lerp(start, if (opens) full else from, settle.value) } ?: following
+        // how near the whole screen it is: the gallery darkens as far
+        val near = ((rect.width - from.width) / (full.width - from.width).coerceAtLeast(1f)).coerceIn(0f, 1f)
+        Box(Modifier.fillMaxSize().graphicsLayer { alpha = near }.background(Color.Black))
+        Box(
+            Modifier.offset { IntOffset(rect.left.roundToInt(), rect.top.roundToInt()) }
+                .size(with(density) { rect.width.toDp() }, with(density) { rect.height.toDp() })
+                .clip(RoundedCornerShape(8.dp * (1f - near))),
+        ) {
+            image?.let { ThumbnailImage(it, o.artwork.name, ContentScale.FillBounds) }
+        }
+    }
+}
+
+/**
+ * Artworks one at a time over the whole screen, from the one at [start]: the picked ones, or the
+ * gallery's from a thumbnail spread open; swiped through, closed by its cross (pinching in doesn't
+ * close it, as measured).
+ */
+@Composable
+private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, onClose: () -> Unit) {
+    var index by remember(list, start) { mutableIntStateOf(start) }
     // a tap shows (or hides) the close button and the arrows to the other picked artworks
     var controls by remember { mutableStateOf(false) }
     val a = list.getOrNull(index) ?: return onClose()
