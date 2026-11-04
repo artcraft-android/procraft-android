@@ -169,6 +169,12 @@ impl StrokeStyle {
         self.tool == StrokeTool::Smudge || self.paints_in_place()
     }
 
+    /// Whether a dual brush's second can go with the stroke: not with a smudge or wet paint (the
+    /// paint laid in place by a dry brush is put together with it, see `cs_synthesize`).
+    pub fn takes_second(&self) -> bool {
+        !self.in_place() || (self.tool == StrokeTool::Paint && self.laid_in_place && self.wet_pull.is_none())
+    }
+
     /// Whether the stroke paints its layer as it goes: wet paint, or dry paint laid in place.
     fn paints_in_place(&self) -> bool {
         self.tool == StrokeTool::Paint && (self.wet_pull.is_some() || self.laid_in_place)
@@ -768,11 +774,13 @@ fn smudge_bind(
     (params, wet): (&wgpu::Buffer, &wgpu::Buffer),
     spare: &[wgpu::Buffer; 2],
     smudge: &Smudge,
+    second: Option<&wgpu::TextureView>,
 ) -> wgpu::BindGroup {
     let uniform = |binding, buffer, size| wgpu::BindGroupEntry {
         binding,
         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer, offset: 0, size: NonZeroU64::new(size) }),
     };
+    let before = smudge.before.create_view(&wgpu::TextureViewDescriptor::default());
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("smudge"),
         layout,
@@ -789,6 +797,12 @@ fn smudge_bind(
                 resource: smudge.amount.as_ref().unwrap_or(&spare[1]).as_entire_binding(),
             },
             uniform(5, wet, WET_PASS_SIZE),
+            // a dual brush's second (else anything: not read)
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(second.unwrap_or(&before)),
+            },
+            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&before) },
         ],
     })
 }
@@ -844,7 +858,10 @@ fn smudge_uniform(
         carried: 0,
         modulated: 0,
         grain_blend: style.grain_blend,
-        spare: [0; 2],
+        dual: 0,
+        dual_threshold: -1.0,
+        laid_apart: 0,
+        spare: [0; 3],
     }
 }
 
@@ -912,7 +929,13 @@ struct SmudgeUniform {
     modulated: u32,
     /// How the moving grain combines with the shape (a blend mode), for paint laid in place.
     grain_blend: u32,
-    spare: [u32; 2],
+    /// A dual brush's paint laid in place (see `cs_synthesize`): its dual mode + 1 (0: none) and
+    /// its second's threshold (negative: none).
+    dual: u32,
+    dual_threshold: f32,
+    /// 1 when the stamp only adds to the paint laid so far, which `cs_synthesize` lays down.
+    laid_apart: u32,
+    spare: [u32; 3],
 }
 
 /// Wet paint is laid a display frame's stamps at a time, the frames this long (ms).
@@ -955,8 +978,12 @@ struct Smudge {
     /// the grain laid over the change once (see `grain_once`).
     grained: Option<wgpu::Buffer>,
     /// Wet paint that builds up by what is left (the modulated mode): how much each pixel has taken
-    /// so far, 0..1.
+    /// so far, 0..1; for paint laid apart, then how much of the paint shows at each pixel.
     amount: Option<wgpu::Buffer>,
+    /// A dual brush's dry paint laid in place: laid apart (into `amount`'s second half) and put
+    /// together with its second where either goes (`cs_synthesize`), with the stroke's look and
+    /// its second's dual mode + 1 and threshold (the mode 0 once the second is dropped).
+    apart: Option<(StrokeStyle, u32, f32)>,
     /// Wet paint: stamps waiting for the rest of their display frame (with their wet-mix scaling
     /// and input time), the passes laid so far, and the texels a side of the last pass's plots.
     pending: Vec<(StampInstance, [f32; 8], f64)>,
@@ -996,8 +1023,10 @@ pub struct SecondStroke {
 }
 
 enum Op {
-    /// The open stroke's second cleared (a dual brush's stroke begins).
-    ClearSecond,
+    /// The open stroke's second cleared (a dual brush's stroke begins, with this second).
+    ClearSecond(SecondStroke),
+    /// The open stroke goes on without its second.
+    DropSecond,
     /// Stamps added to the stroke (`clear`: the stroke is redrawn from scratch).
     Stamps {
         /// Into the stroke's second (a dual brush's).
@@ -1391,6 +1420,7 @@ pub(crate) struct Pipelines {
     smudge_blur_down: wgpu::ComputePipeline,
     smudge_blur_across: wgpu::ComputePipeline,
     smudge_deposit: wgpu::ComputePipeline,
+    smudge_synthesize: wgpu::ComputePipeline,
     smudge_wet_plots: wgpu::ComputePipeline,
     display_module: wgpu::ShaderModule,
     display_pipeline_layout: wgpu::PipelineLayout,
@@ -1440,6 +1470,9 @@ pub struct Canvas {
     scratch: OnDemand,
     /// A dual brush's second stroke (see [`SecondStroke`]), made when one is first drawn.
     second_stroke: OnDemand,
+    /// The second of the stroke being drawn from the ops (told by [`Op::ClearSecond`]), until it
+    /// ends.
+    queued_second: Option<SecondStroke>,
     /// A blur's working textures by size and part, kept from one step of an adjustment to the
     /// next (made each step, those the canvas's size were most of a narrow blur's cost on a
     /// tablet); let go when the adjustment ends.
@@ -1759,6 +1792,7 @@ impl Canvas {
             play_frame: None,
             scratch: OnDemand::new("scratch", width, height, LAYER_FORMAT),
             second_stroke: OnDemand::new("second stroke", width, height, STROKE_FORMAT),
+            queued_second: None,
             blur_textures: Mutex::new(HashMap::new()),
             spare_before: None,
             spares: Mutex::new(Vec::new()),
@@ -1874,7 +1908,7 @@ impl Canvas {
         // a dual brush's second stroke's, unless one is open (or queued)
         let dual = self.active.is_some_and(|a| a.second.is_some())
             || self.ops.iter().any(|op| match op {
-                Op::ClearSecond | Op::Stamps { second: true, .. } => true,
+                Op::ClearSecond(_) | Op::DropSecond | Op::Stamps { second: true, .. } => true,
                 Op::Commit(stroke) => stroke.second.is_some(),
                 _ => false,
             });
@@ -2094,7 +2128,7 @@ impl Canvas {
         if let Some(active) = self.active.as_mut() {
             active.second = Some(second);
         }
-        self.ops.push(Op::ClearSecond);
+        self.ops.push(Op::ClearSecond(second));
     }
 
     /// Draws more of the open stroke's second.
@@ -2113,6 +2147,7 @@ impl Canvas {
             && active.second.take().is_some()
         {
             self.dirty = self.dirty.union(active.bounds);
+            self.ops.push(Op::DropSecond);
         }
     }
 
@@ -3345,14 +3380,26 @@ impl Canvas {
             if let Op::Commit(stroke) = &op {
                 committed.push(stroke.layer);
             }
+            // a stroke ends: the next has a second only if it says so
+            if matches!(op, Op::Commit(_) | Op::Cancel) {
+                self.queued_second = None;
+            }
             match op {
-                Op::Stamps { instances, wet, times, style, layer, clear, .. } if style.in_place() => {
+                Op::Stamps { instances, wet, times, style, layer, clear, second: false, .. } if style.in_place() => {
                     next_instance = next_instance.saturating_add(u32::try_from(instances.len()).unwrap_or(u32::MAX));
                     let stamps = (instances.as_slice(), wet.as_slice(), times.as_slice());
                     let uniforms = (&mut smudge_uniforms, &mut wet_uniforms);
                     self.smudge_stamps(device, &mut encoder, uniforms, stamps, &style, layer, clear);
                 }
-                Op::ClearSecond => {
+                Op::DropSecond => {
+                    self.queued_second = None;
+                    // paint laid apart is laid alone from here
+                    if let Some(apart) = self.smudge.as_mut().and_then(|s| s.apart.as_mut()) {
+                        apart.1 = 0;
+                    }
+                }
+                Op::ClearSecond(second) => {
+                    self.queued_second = Some(second);
                     let (_, view) = self.second_stroke.get(device);
                     drop(render_pass(
                         &mut encoder,
@@ -3403,6 +3450,15 @@ impl Canvas {
                         let end = u64::from(next_instance) * size_of::<StampInstance>() as u64;
                         pass.set_vertex_buffer(0, self.stamp_buffer.slice(start..end));
                         pass.draw(0..6, 0..count);
+                    }
+                    drop(pass);
+                    // a dual brush's paint laid in place: put together again where the second went
+                    if second && self.smudge.as_ref().is_some_and(|s| s.apart.is_some()) {
+                        let rect = instances.iter().fold(IRect::EMPTY, |r, s| {
+                            let at = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
+                            r.union(IRect::around(at, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2))
+                        });
+                        self.synthesize(device, &mut encoder, &mut smudge_uniforms, rect);
                     }
                 }
                 Op::Commit(stroke) if stroke.style.in_place() => {
@@ -4199,11 +4255,17 @@ impl Canvas {
                 }
                 buffer
             });
-            // and builds up by what is left in the modulated mode
-            let amount = (wet_paint && style.rendering == Rendering::Gradual).then(|| {
+            // a dual brush's dry paint laid in place is laid apart, put together with its second
+            let apart = (style.laid_in_place && style.wet_pull.is_none())
+                .then_some(self.queued_second)
+                .flatten()
+                .map(|d| (*style, d.mode + 1, d.threshold));
+            // and builds up by what is left in the modulated mode (and keeps how much shows, laid
+            // apart)
+            let amount = (wet_paint && style.rendering == Rendering::Gradual || apart.is_some()).then(|| {
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("smudge amount"),
-                    size: layer_bytes,
+                    size: layer_bytes * if apart.is_some() { 2 } else { 1 },
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 })
@@ -4221,6 +4283,7 @@ impl Canvas {
                 last: None,
                 grained,
                 amount,
+                apart,
                 pending: Vec::new(),
                 passes: 0,
                 plot: 0,
@@ -4242,6 +4305,7 @@ impl Canvas {
             (&self.smudge_params, &self.wet_params),
             &self.smudge_spare,
             smudge,
+            None,
         );
         let full = IRect::from_size(self.width, self.height);
         let mut changed = IRect::EMPTY;
@@ -4325,6 +4389,48 @@ impl Canvas {
         self.dirty = self.dirty.union(changed);
     }
 
+    /// A dual brush's paint laid in place put together with its second over `rect` (see
+    /// `cs_synthesize`), and shown.
+    fn synthesize(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        params: &mut UniformData,
+        rect: IRect,
+    ) {
+        let rect = rect.intersect(IRect::from_size(self.width, self.height));
+        let Some(&(style, dual, dual_threshold)) = self.smudge.as_ref().and_then(|s| s.apart.as_ref()) else { return };
+        if rect.is_empty() {
+            return;
+        }
+        let size = (self.width, self.height, self.row_bytes());
+        let second = (dual != 0).then(|| self.second_stroke.get(device).1);
+        let Some(smudge) = self.smudge.as_ref() else { return };
+        let bind = smudge_bind(
+            device,
+            &self.pipelines.smudge_layout,
+            (&self.smudge_params, &self.wet_params),
+            &self.smudge_spare,
+            smudge,
+            second,
+        );
+        let offset = params.push(&SmudgeUniform {
+            mode: 1,
+            dual,
+            dual_threshold,
+            grain_once: if smudge.grained.is_some() { 1.0 } else { 0.0 },
+            ..smudge_uniform(&bytemuck::Zeroable::zeroed(), &style, rect, size)
+        });
+        let mut pass = encoder
+            .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("synthesize"), timestamp_writes: None });
+        pass.set_bind_group(0, &bind, &[offset, 0]);
+        pass.set_bind_group(1, &self.brush_bind, &[]);
+        pass.set_pipeline(&self.pipelines.smudge_synthesize);
+        pass.dispatch_workgroups(rect.width().div_ceil(8), rect.height().div_ceil(8), 1);
+        drop(pass);
+        self.smudged(encoder, rect);
+    }
+
     /// Lays wet paint, a pass a display frame (at most [`WET_PASS_MOST`] stamps): `stamps` in
     /// order, with their wet-mix scaling and input times. Each pass works out what each of its
     /// stamps lays down from the layer as the pass finds it (see the shader's `cs_wet_plots`), then
@@ -4342,6 +4448,7 @@ impl Canvas {
         }
         let size = (self.width, self.height, self.row_bytes());
         let full = IRect::from_size(self.width, self.height);
+        let second = self.smudge.as_ref().is_some_and(|s| s.apart.is_some()).then(|| self.second_stroke.get(device).1);
         let Some(smudge) = self.smudge.as_mut() else { return };
         let bind = smudge_bind(
             device,
@@ -4349,9 +4456,11 @@ impl Canvas {
             (&self.smudge_params, &self.wet_params),
             &self.smudge_spare,
             smudge,
+            second,
         );
         let grain_once = if smudge.grained.is_some() { 1.0 } else { 0.0 };
         let modulated = u32::from(smudge.amount.is_some());
+        let laid_apart = u32::from(smudge.apart.is_some());
         let mut changed = IRect::EMPTY;
         let mut pass =
             encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("wet"), timestamp_writes: None });
@@ -4371,6 +4480,7 @@ impl Canvas {
                     modulated,
                     grain_once,
                     count: 0,
+                    laid_apart,
                     ..smudge_uniform(s, style, bbox, size)
                 });
                 pass.set_bind_group(0, &bind, &[offset, 0]);
@@ -4378,7 +4488,11 @@ impl Canvas {
                 pass.dispatch_workgroups(bbox.width().div_ceil(8), bbox.height().div_ceil(8), 1);
             }
             drop(pass);
-            self.smudged(encoder, changed);
+            if laid_apart == 1 {
+                self.synthesize(device, encoder, params, changed);
+            } else {
+                self.smudged(encoder, changed);
+            }
             return;
         }
         let mut from = 0;
@@ -7353,6 +7467,16 @@ impl Pipelines {
             },
             count: None,
         };
+        let compute_texture = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
         let smudge_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("smudge"),
             entries: &[
@@ -7381,6 +7505,9 @@ impl Pipelines {
                     },
                     count: None,
                 },
+                // a dual brush's second, and the layer as it was (its paint laid in place)
+                compute_texture(6),
+                compute_texture(7),
             ],
         });
         let smudge_module =
@@ -7400,6 +7527,7 @@ impl Pipelines {
         let smudge_blur_down = compute("smudge blur down", "cs_blur_down");
         let smudge_blur_across = compute("smudge blur across", "cs_blur_across");
         let smudge_deposit = compute("smudge deposit", "cs_deposit");
+        let smudge_synthesize = compute("smudge synthesize", "cs_synthesize");
         let smudge_wet_plots = compute("smudge wet plots", "cs_wet_plots");
 
         let overlay_module = module("overlay", include_str!("shaders/overlay.wgsl"));
@@ -7592,6 +7720,7 @@ impl Pipelines {
             smudge_blur_down,
             smudge_blur_across,
             smudge_deposit,
+            smudge_synthesize,
             smudge_wet_plots,
             lut_layout,
             display_lut_layout,

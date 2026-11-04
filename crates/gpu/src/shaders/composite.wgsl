@@ -132,13 +132,7 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         if (lu.dual_threshold >= 0.0) {
             b = select(0.0, 1.0, b > lu.dual_threshold);
         }
-        let mode = lu.dual - 1u;
-        var a = s.a + (1.0 - s.a) * b;
-        if (mode == DUAL_HEIGHT || mode == DUAL_LINEAR_HEIGHT) {
-            a = dual_height(s.a, b);
-        } else if (mode != 0u) {
-            a = clamp(blend_rgb(vec3<f32>(s.a), vec3<f32>(b), mode).x, 0.0, 1.0);
-        }
+        let a = dual_combine(s.a, b, lu.dual - 1u);
         // the first's colour where it is, else the second's (drawn in the stroke's colour too)
         let colour = select(t.rgb / max(t.a, 1e-6), s.rgb / max(s.a, 1e-6), s.a > 0.0);
         s = vec4<f32>(colour * a, a);
@@ -259,19 +253,6 @@ fn unpremultiply(c: vec4<f32>) -> vec3<f32> {
         return vec3<f32>(0.0);
     }
     return clamp(c.rgb / c.a, vec3<f32>(0.0), vec3<f32>(1.0));
-}
-
-// a dual brush's two strokes' own modes (the grain's numbers)
-const DUAL_HEIGHT: u32 = 27u;
-const DUAL_LINEAR_HEIGHT: u32 = 28u;
-
-// the first stroke's amount `a` cut by the second's `b` as a height: where the second is thin
-// (under 0.2) the first rises (most where it is near none or full), and the second's coverage
-// lifts what the first has
-fn dual_height(a: f32, b: f32) -> f32 {
-    let mid = 2.0 * (0.5 - abs(a - 0.5));
-    let rise = 40.0 * max(0.2 - b, 0.0) * (pow(a, 6.0) + pow(mid, 6.0));
-    return clamp(max(rise + 0.5 * a, (rise - a) * b + 2.0 * a), 0.0, 1.0);
 }
 
 // premultiplied colour squared (nearer to light), and back

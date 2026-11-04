@@ -1397,6 +1397,44 @@ fn dry_paint_laid_in_place_builds_up_by_what_is_left() {
 }
 
 #[test]
+fn a_dual_brush_s_paint_laid_in_place_is_cut_by_its_second() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a dry brush laid in place on the right, its second on the left: by Multiply the paint shows
+    // only where both went; by Normal the second shows on its own too; and undo takes it all back
+    let laid = |mode: u32| {
+        let mut doc = Document::new(64, 32);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let first = StrokeStyle {
+            rendering: Rendering::Gradual,
+            laid_in_place: true,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        let second = procraft_gpu::SecondStroke {
+            style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0),
+            mode,
+            threshold: -1.0,
+        };
+        canvas.begin_dual_stroke(doc.current(), first, second);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(40.0, 16.0), 12.0, 1.0)]);
+        canvas.add_second_stamps(&[Stamp::round(Vec2::new(24.0, 16.0), 12.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        let shown = [16, 32, 48].map(|x| pixel(&layer, 64, x, 16)[3]);
+        canvas.undo();
+        canvas.render(&gpu, &mut doc, None);
+        let undone = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (shown, [16, 32, 48].map(|x| pixel(&undone, 64, x, 16)[3]))
+    };
+    let (multiply, undone) = laid(1);
+    assert!(multiply[0] == 0 && multiply[1] > 240 && multiply[2] == 0, "{multiply:?}");
+    assert_eq!(undone, [0, 0, 0]);
+    let (normal, _) = laid(0);
+    assert!(normal.iter().all(|&a| a > 240), "{normal:?}");
+}
+
+#[test]
 fn modulated_wet_paint_lays_a_pixel_once() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

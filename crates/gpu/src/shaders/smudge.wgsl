@@ -73,8 +73,16 @@ struct SmudgeStamp {
     modulated: u32,
     // how the moving grain combines with the shape (a blend mode), for paint laid in place
     grain_blend: u32,
+    // a dual brush's paint laid in place: the dual mode + 1 (0: none, the paint laid alone) and
+    // the second's threshold (negative: none), for cs_synthesize
+    dual: u32,
+    dual_threshold: f32,
+    // 1: the stamp only adds to the paint laid so far (`amount`'s second half), which
+    // cs_synthesize lays over the layer as it was
+    laid_apart: u32,
     spare1: u32,
     spare2: u32,
+    spare3: u32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -96,6 +104,9 @@ struct WetPass {
 // wet paint in the modulated mode: how much each pixel has taken so far
 @group(0) @binding(4) var<storage, read_write> amount: array<f32>;
 @group(0) @binding(5) var<uniform> wet_pass: WetPass;
+// a dual brush's paint laid in place: its second's coverage, and the layer as it was
+@group(0) @binding(6) var second_tex: texture_2d<f32>;
+@group(0) @binding(7) var before_tex: texture_2d<f32>;
 @group(1) @binding(0) var shapes: texture_2d_array<f32>;
 @group(1) @binding(1) var grains: texture_2d_array<f32>;
 @group(1) @binding(2) var shape_smp: sampler;
@@ -336,6 +347,12 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
             weight = weight * (1.0 - held);
             amount[k] = held + weight * (1.0 - held);
         }
+        if (st.laid_apart == 1u) {
+            // how much of the paint shows there so far, put together with the rest later
+            let l = st.stride * st.size.y + k;
+            amount[l] = amount[l] + weight * (1.0 - amount[l]);
+            return;
+        }
         out = mix(w, laid, weight);
     }
     if (st.preserve_alpha == 1u) {
@@ -352,6 +369,37 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
         work[k] = pack4x8unorm(clamp(shown + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));
         return;
     }
+    work[k] = pack4x8unorm(clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));
+}
+
+// A dual brush's paint laid in place, put together where its stamps or its second's went: the
+// paint over the layer as it was, as far as how much of it was laid and the second's coverage
+// (cut at its threshold) combine by the dual mode (with a texturized grain laid over it once).
+@compute @workgroup_size(8, 8)
+fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
+    let p = st.bbox.xy + vec2<i32>(id.xy);
+    if (p.x >= st.bbox.z || p.y >= st.bbox.w || p.x < 0 || p.y < 0 || p.x >= i32(st.size.x) || p.y >= i32(st.size.y)) {
+        return;
+    }
+    let k = u32(p.y) * st.stride + u32(p.x);
+    var a = amount[st.stride * st.size.y + k];
+    if (st.dual != 0u) {
+        var b = textureLoad(second_tex, p, 0).a;
+        if (st.dual_threshold >= 0.0) {
+            b = select(0.0, 1.0, b > st.dual_threshold);
+        }
+        a = dual_combine(a, b, st.dual - 1u);
+    }
+    if (st.grain_once > 0.5) {
+        a = a * grain_at(vec2<f32>(p) + 0.5);
+    }
+    let was = textureLoad(before_tex, p, 0);
+    var out = mix(was, vec4<f32>(st.paint.rgb, 1.0), a);
+    if (st.preserve_alpha == 1u) {
+        out = out * (was.a / max(out.a, 1e-6));
+    }
+    // dithered the same each time it is put together again
+    let h = dither(u32(p.x), u32(p.y), 0u);
     work[k] = pack4x8unorm(clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));
 }
 

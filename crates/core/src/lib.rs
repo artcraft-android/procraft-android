@@ -669,7 +669,7 @@ impl State {
     /// A dual brush's second for a stroke of `tool` on `layer` with `first` (as
     /// [`State::stroke_brush`] gave it, with `first_style`): its brush, how it is drawn and
     /// combines, and its diameter at the size slider (before the brush scale). None for a brush
-    /// without one, or a stroke drawn in place (a smudge, wet paint).
+    /// without one, or a smudge or wet paint (drawn in place).
     pub(crate) fn second_brush(
         &mut self,
         tool: ToolKind,
@@ -678,7 +678,7 @@ impl State {
         first_style: &StrokeStyle,
     ) -> Option<(Brush, SecondStroke, f32)> {
         let mut second = first.secondary.as_deref()?.clone();
-        if first_style.in_place() || !matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) {
+        if !first_style.takes_second() || !matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) {
             return None;
         }
         let sliders = self.sliders(tool);
@@ -691,6 +691,8 @@ impl State {
         let diameter = second.diameter(sliders.size);
         let alpha_lock = self.doc.layer(layer).is_some_and(|l| l.alpha_lock);
         let mut style = StrokeStyle::for_brush(&second, tool.stroke_tool(), self.color, opacity, alpha_lock);
+        // the second is only coverage, drawn apart into its own texture
+        style.laid_in_place = false;
         if style.in_place() {
             return None;
         }
