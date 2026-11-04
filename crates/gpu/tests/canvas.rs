@@ -1240,6 +1240,32 @@ fn burnt_edges_burn_only_the_paint_under_a_thin_stroke() {
 }
 
 #[test]
+fn a_dual_brush_s_burnt_edges_burn_where_its_second_took_paint_away() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let orange = StrokeStyle::new(StrokeTool::Paint, [0.86, 0.6, 0.42], 1.0);
+    // a soft dot over an orange band, burnt edges on, as a dual brush whose second (by Normal)
+    // went elsewhere: the second took nothing away there, so its soft rim isn't burnt
+    let draw = |burnt_edges: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), orange);
+        canvas.add_stamps(&(0..64).map(|y| dot(Vec2::new(32.0, y as f32), 8.0)).collect::<Vec<_>>());
+        canvas.end_stroke();
+        let second = procraft_gpu::SecondStroke { style: orange, mode: 0, threshold: -1.0 };
+        canvas.begin_dual_stroke(doc.current(), StrokeStyle { hardness: 0.3, burnt_edges, ..orange }, second);
+        canvas.add_stamps(&[dot(Vec2::new(32.0, 32.0), 20.0)]);
+        canvas.add_second_stamps(&[dot(Vec2::new(4.0, 4.0), 2.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.read_layer(&gpu, doc.current()).unwrap()
+    };
+    let (base, burnt) = (draw(0.0), draw(1.0));
+    let (b, p) = (pixel(&burnt, 64, 32, 47), pixel(&base, 64, 32, 47));
+    assert!(b.iter().zip(p).all(|(b, p)| b.abs_diff(p) <= 1), "{b:?} {p:?}");
+}
+
+#[test]
 fn wet_paint_mixes_with_what_is_under_it() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
@@ -1401,8 +1427,9 @@ fn a_dual_brush_s_paint_laid_in_place_is_cut_by_its_second() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
     // a dry brush laid in place on the right, its second on the left: by Multiply the paint shows
-    // only where both went; by Normal the second shows on its own too; and undo takes it all back
-    let laid = |mode: u32| {
+    // only where both went; by Normal the second shows on its own too, also when its stamps come
+    // first; and undo takes it all back
+    let laid = |mode: u32, second_first: bool| {
         let mut doc = Document::new(64, 32);
         let mut canvas = Canvas::new(&gpu, &doc).unwrap();
         let first = StrokeStyle {
@@ -1416,8 +1443,14 @@ fn a_dual_brush_s_paint_laid_in_place_is_cut_by_its_second() {
             threshold: -1.0,
         };
         canvas.begin_dual_stroke(doc.current(), first, second);
+        if second_first {
+            canvas.add_second_stamps(&[Stamp::round(Vec2::new(24.0, 16.0), 12.0, 1.0)]);
+            canvas.render(&gpu, &mut doc, None);
+        }
         canvas.add_stamps(&[Stamp::round(Vec2::new(40.0, 16.0), 12.0, 1.0)]);
-        canvas.add_second_stamps(&[Stamp::round(Vec2::new(24.0, 16.0), 12.0, 1.0)]);
+        if !second_first {
+            canvas.add_second_stamps(&[Stamp::round(Vec2::new(24.0, 16.0), 12.0, 1.0)]);
+        }
         canvas.end_stroke();
         canvas.render(&gpu, &mut doc, None);
         let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
@@ -1427,11 +1460,13 @@ fn a_dual_brush_s_paint_laid_in_place_is_cut_by_its_second() {
         let undone = canvas.read_layer(&gpu, doc.current()).unwrap();
         (shown, [16, 32, 48].map(|x| pixel(&undone, 64, x, 16)[3]))
     };
-    let (multiply, undone) = laid(1);
+    let (multiply, undone) = laid(1, false);
     assert!(multiply[0] == 0 && multiply[1] > 240 && multiply[2] == 0, "{multiply:?}");
     assert_eq!(undone, [0, 0, 0]);
-    let (normal, _) = laid(0);
-    assert!(normal.iter().all(|&a| a > 240), "{normal:?}");
+    for second_first in [false, true] {
+        let (normal, _) = laid(0, second_first);
+        assert!(normal.iter().all(|&a| a > 240), "{normal:?} {second_first}");
+    }
 }
 
 #[test]

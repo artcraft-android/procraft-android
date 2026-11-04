@@ -28,8 +28,10 @@ pub struct Stamp {
     /// move over it; a static one moves along with each stamp.
     pub grain_offset: Vec2,
     /// How hard the pen presses the paint into a grain (the pressure, 0..1), and how much that
-    /// counts (the brush's pressure bleed, 0..1): pressed harder, the paint takes on more of the
-    /// stamp and grain, its strongest parts first.
+    /// counts (the brush's pressure bleed and its tilt bleed as far as the pen leans, 0..2):
+    /// pressed harder, the paint takes on more of the stamp and grain, its strongest parts first.
+    /// The lean's share counts in full whatever the pressure, so the press is what the pressure
+    /// keeps of the whole.
     pub grain_press: f32,
     pub grain_bleed: f32,
     /// The shape mirrored across its own vertical and horizontal axes.
@@ -138,6 +140,8 @@ struct Placed {
     grain_depth: f32,
     grain_size: f32,
     grain_press: f32,
+    /// The tilt bleed as far as the pen leans (it adds to the pressure bleed).
+    bleed_lean: f32,
     /// How far its moving grain rolls along with the stroke (see [`Extras::grain_movement`]).
     grain_movement: f32,
     gradation: f32,
@@ -1533,23 +1537,19 @@ impl StrokeBuilder {
                 + x.pressure_secondary * color_by[3]
                 + x.tilt_secondary * self.leaning(p, x.tilt_angles.secondary))
             .clamp(0.0, 1.0);
-            // a moving grain: deeper (or shallower) from stamp to stamp, never under its least;
-            // leaning lets more of it through
+            // a moving grain: from its least to its depth, as far as the pressure's curve, the
+            // jitter (shallower from stamp to stamp) and the depth tilt (leaning takes it down to
+            // its least) leave it
             let base = self.brush.grain.depth.max(1e-3);
             let jitter = if x.grain_depth_jitter > 0.0 {
                 x.grain_depth_jitter * depth_jitter_by * self.random.next()
             } else {
                 0.0
             };
-            let mut depth = base * (1.0 - jitter) * depth_by;
-            depth += (1.0 - depth) * (x.tilt_bleed * self.leaning(p, x.tilt_angles.bleed)).clamp(0.0, 1.0);
+            let least = x.grain_depth_min.clamp(0.0, base);
+            let tilted = if sw.grain_depth.is_some() { self.switched(p, sw.grain_depth) } else { 0.0 };
+            let depth = (least + (base - least) * (1.0 - jitter) * depth_by * (1.0 - tilted)).clamp(0.0, 1.0);
             let grain_press = p.soft[2].clamp(0.0, 1.0);
-            let mut depth = depth.max(x.grain_depth_min).clamp(0.0, 1.0);
-            // the depth tilt: leaning takes the depth down to its least
-            if sw.grain_depth.is_some() {
-                let least = x.grain_depth_min.min(depth);
-                depth = least + (depth - least) * (1.0 - self.switched(p, sw.grain_depth));
-            }
             // sized with the stamp, against the stroke's size, unless cropped
             let grain_size = (1.0 + (diameter * size / self.diameter.max(1e-3) - 1.0) * (1.0 - x.grain_zoom * zoom_by))
                 * grain_scale_by;
@@ -1566,6 +1566,7 @@ impl StrokeBuilder {
                 grain_depth: depth / base,
                 grain_size: grain_size.max(0.05),
                 grain_press,
+                bleed_lean: (x.tilt_bleed * self.leaning(p, x.tilt_angles.bleed)).clamp(0.0, 1.0),
                 grain_movement: x.grain_movement * movement_by,
                 gradation: (x.tilt_gradation * self.leaning(p, x.tilt_angles.gradation)).max(0.0).sqrt().min(1.0),
                 transfer,
@@ -1634,6 +1635,12 @@ impl StrokeBuilder {
                 roundness = (roundness * r1 / r0).clamp(0.05, MOST_ROUNDNESS);
             }
         }
+        // the bleed: the pressure's, through the pressure, and the lean's, whatever the pressure
+        let pressed_bleed = self.extras.pressure_bleed.clamp(0.0, 1.0);
+        let grain_bleed = pressed_bleed + p.bleed_lean;
+        if grain_bleed > 0.0 {
+            grain_press = (pressed_bleed * grain_press + p.bleed_lean) / grain_bleed;
+        }
         Stamp {
             center: p.center,
             radius: (p.diameter * size * 0.5).max(0.25),
@@ -1642,7 +1649,7 @@ impl StrokeBuilder {
             roundness,
             grain_offset: self.grain_offset(p),
             grain_press,
-            grain_bleed: self.extras.pressure_bleed.clamp(0.0, 1.0),
+            grain_bleed,
             flip: p.flip,
             tint: p.tint,
             secondary: p.secondary,
@@ -2249,6 +2256,27 @@ mod tests {
     }
 
     #[test]
+    fn a_leaning_pen_adds_its_tilt_bleed_in_full_whatever_the_pressure() {
+        let bleed = |tilt: f32| {
+            let mut b = Brush { pressure_size: 0.0, ..plain() };
+            b.set_setting("pressure_bleed", 1.0);
+            b.set_setting("tilt_bleed", 1.0);
+            let mut s = Sample::at(Vec2::new(10.0, 10.0), 0.3, 0.0);
+            s.tilt = tilt;
+            let stamp = StrokeBuilder::new(b, 10.0, Pointer::Stylus).preview(&[s])[0];
+            (stamp.grain_bleed, stamp.grain_press)
+        };
+        // upright: the pressure bleed alone (a lean's least is 2^-10), through the pressure
+        let (upright, press) = bleed(0.0);
+        assert!((upright - 1.0).abs() < 2e-3 && (press - 0.3).abs() < 0.05, "{upright} {press}");
+        // leaning flat: the tilt bleed adds to it, and counts whatever the pressure
+        let (flat, press) = bleed(crate::brush::FLAT_TILT);
+        let lean = flat - 1.0;
+        assert!(lean > 0.5, "{flat}");
+        assert!((press - (0.3 + lean) / (1.0 + lean)).abs() < 0.05, "{press} {lean}");
+    }
+
+    #[test]
     fn tilt_switches_hold_their_controls_back_until_the_pen_leans() {
         let make = |tilt: f32, switches: bool| {
             let mut b = Brush { pressure_size: 0.0, ..plain() };
@@ -2463,11 +2491,10 @@ mod tests {
         assert!((light.grain_press - 0.3).abs() < 0.05 && (hard.grain_press - 0.9).abs() < 0.05);
         assert!((hard.grain_depth - 1.0).abs() < 1e-5 && (hard.grain_bleed - 1.0).abs() < 1e-5);
         assert_eq!(mid(&stroke(&[], 0.9, Taper::NONE)).grain_bleed, 0.0);
-        assert!(
-            stroke(&[("grain_depth_jitter", 1.0), ("grain_depth_min", 0.4)], 1.0, Taper::NONE)
-                .iter()
-                .all(|s| s.grain_depth >= 0.8 - 1e-4)
-        );
+        // jittered between its least and its depth (0.4 to 0.5: 0.8 to 1 of it), not floored
+        let jittered = stroke(&[("grain_depth_jitter", 1.0), ("grain_depth_min", 0.4)], 1.0, Taper::NONE);
+        assert!(jittered.iter().all(|s| s.grain_depth >= 0.8 - 1e-4));
+        assert!(jittered.iter().any(|s| s.grain_depth > 0.81 && s.grain_depth < 0.99));
         // sized with the stamp when it follows the size: a lighter, smaller stamp, a smaller grain
         let pressured = |zoom: f32| {
             let mut b = plain();

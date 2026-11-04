@@ -8646,6 +8646,12 @@ fn crossing_strokes_sheet() {
             let n = ((ms / 1000.0 * 120.0).round() as usize).max(2);
             let at = |i: usize| sample(100.0 + 400.0 * i as f32 / n as f32, 150.0, i as f64 * ms / n as f64);
             s.stroke_begin(PointerKind::Finger, vec![at(0)]);
+            // `CROSS_TAP`: a tap where the stroke would start instead (held 80 ms)
+            if std::env::var("CROSS_TAP").is_ok() {
+                s.stroke_end(vec![sample(100.0, 150.0, 80.0)]);
+                s.export_png(out).unwrap();
+                return;
+            }
             for i in 1..n {
                 s.stroke_add(vec![at(i)]);
             }

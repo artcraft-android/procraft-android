@@ -137,11 +137,11 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         let colour = select(t.rgb / max(t.a, 1e-6), s.rgb / max(s.a, 1e-6), s.a > 0.0);
         s = vec4<f32>(colour * a, a);
     }
-    // burnt edges show where the stroke is thin: where its paper grain took paint away, or
-    // without one wherever it is less than full
+    // burnt edges show where the stroke is thin: where its paper grain or its second took paint
+    // away, or without either wherever it is less than full
     var burn = 0.0;
     if (lu.burnt > 0.0 && built > 0.0) {
-        burn = lu.burnt * select(1.0 - s.a, abs(built - s.a), lu.grain >= 0);
+        burn = lu.burnt * select(1.0 - s.a, abs(built - s.a), lu.grain >= 0 || lu.dual != 0u);
     }
     if (lu.threshold >= 0.0 && s.a > 0.0) {
         let on = select(0.0, 1.0, s.a > lu.threshold);

@@ -1115,11 +1115,13 @@ fn a_canvas_makes_its_scratch_and_second_composite_only_once_wanted() {
     );
     let small = 256 * 4 + 1;
     assert_eq!(canvas.texture_bytes(), per * (4 + 4 + 8) + images + small);
-    // the allocator agrees, give or take its rounding of the small ones and the buffers
+    // the allocator agrees, give or take its rounding of the small ones and the buffers (2 MB, or
+    // a tenth where a driver rounds more: Adreno's comes to 2.2 MB over 26 MB)
     if let (Some(a), Some(b)) = (before, allocated(&gpu)) {
         let made = b.saturating_sub(a);
+        let allowed = (2 << 20).max(canvas.texture_bytes() / 10);
         assert!(
-            made.abs_diff(canvas.texture_bytes()) < 2 << 20,
+            made.abs_diff(canvas.texture_bytes()) < allowed,
             "allocated {made}, counted {}",
             canvas.texture_bytes()
         );

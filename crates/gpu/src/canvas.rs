@@ -2272,8 +2272,9 @@ impl Canvas {
                     brightness_add: stamp_extras(s).2,
                     look: [s.grain_depth, s.grain_size, s.secondary, s.gradation]
                         .map(|v| if v.is_finite() { v.clamp(0.0, 64.0) } else { 0.0 }),
-                    more: [s.grain_press, s.grain_bleed, transfer, s.attack]
-                        .map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }),
+                    // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
+                    more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
+                        .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
                 }
             })
             .collect();
@@ -2328,8 +2329,9 @@ impl Canvas {
                     brightness_add: stamp_extras(s).2,
                     look: [s.grain_depth, s.grain_size, s.secondary, s.gradation]
                         .map(|v| if v.is_finite() { v.clamp(0.0, 64.0) } else { 0.0 }),
-                    more: [s.grain_press, s.grain_bleed, transfer, s.attack]
-                        .map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }),
+                    // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
+                    more: [(s.grain_press, 1.0), (s.grain_bleed, 2.0), (transfer, 1.0), (s.attack, 1.0)]
+                        .map(|(v, most)| if v.is_finite() { v.clamp(0.0, most) } else { 0.0 }),
                 }
             }),
         );
@@ -3467,6 +3469,9 @@ impl Canvas {
                     let held = self.smudge.as_mut().map(|s| std::mem::take(&mut s.pending)).unwrap_or_default();
                     let uniforms = (&mut smudge_uniforms, &mut wet_uniforms);
                     self.lay_wet(device, &mut encoder, uniforms, &held, &stroke.style);
+                    // a dual brush's paint laid apart, put together over the whole stroke once more
+                    // (its second's first stamps may have come before the paint laid apart began)
+                    self.synthesize(device, &mut encoder, &mut smudge_uniforms, stroke.bounds);
                     self.finish_smudge(device, &mut encoder, stroke.bounds, false);
                     history_changed = true;
                 }

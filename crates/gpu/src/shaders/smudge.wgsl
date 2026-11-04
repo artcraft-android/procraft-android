@@ -261,7 +261,7 @@ fn grain_at(p: vec2<f32>) -> f32 {
     let g = grain_plain(p);
     if (st.grain_bleed > 0.0) {
         // pressed in as far as the pressure's bleed says
-        return mix(1.0, mix(g, pressed_in(g, st.grain_press), st.grain_bleed), st.grain_depth);
+        return mix(1.0, mix(g, pressed_in(g, st.grain_press), min(st.grain_bleed, 1.0)), st.grain_depth);
     }
     return mix(1.0, g, st.grain_depth);
 }
