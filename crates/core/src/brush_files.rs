@@ -704,7 +704,7 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
             let retoned =
                 image.filter(|_| source.is_none()).zip(textures::stock_shape_tones(name)).and_then(|(i, tones)| {
                     let shape = textures::shapes().into_iter().nth(i as usize)?;
-                    let mut pixels = textures::retoned(&shape.pixels, &tones, &textures::SHAPE_TONE_SHARES);
+                    let mut pixels = textures::retoned_shape(&shape.pixels, &tones, &textures::SHAPE_TONE_SHARES);
                     if *inverted {
                         pixels.iter_mut().for_each(|v| *v = 255 - *v);
                     }
@@ -727,12 +727,12 @@ fn stock_stand_in(name: &str, inverted: bool) -> (Option<u32>, Option<Source>, O
     } else if has(&["dots"]) {
         // dots scattered over the stamp, whatever outline they fill
         (Some(stock_shape(&n)), None, None)
-    } else if has(&["oval"]) && has(&["slim", "thin", "narrow"]) {
-        // a flat oval, not the round tip
+    } else if has(&["oval"]) {
+        // a flat oval, not the round tip (as wide as its tones say, where they were measured)
         (Some(shape::SLIM_OVAL), None, None)
     } else if has(&["medium-hard", "medium hard", "mediumhard"]) {
         (None, None, Some(0.75))
-    } else if has(&["hard", "pen", "solid", "oval", "round"]) && !has(&["soft", "ink"]) {
+    } else if has(&["hard", "pen", "solid", "round"]) && !has(&["soft", "ink"]) {
         (None, None, Some(0.95))
     } else if has(&["medium"]) {
         (None, None, Some(0.5))

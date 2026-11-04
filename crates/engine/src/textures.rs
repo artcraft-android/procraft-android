@@ -161,6 +161,25 @@ fn stock_tones<const N: usize>(table: &[(u64, [u8; N])], name: &str) -> Option<[
     table.binary_search_by_key(&key, |&(k, _)| k).ok().and_then(|i| table.get(i)).map(|&(_, t)| t)
 }
 
+/// `pixels`, a shape, with its values moved onto `tones` (its values at `shares`) keeping their
+/// order, equal values ordered by how deep in the shape they lie (blurs of it, near to far, so
+/// even a wide solid middle grades towards its centre): moved onto a stock shape's tones it grows
+/// or shrinks at its rim, rather than taking holes in a solid middle or specks round it.
+pub fn retoned_shape(pixels: &[u8], tones: &[u8], shares: &[f32]) -> Vec<u8> {
+    let img: Vec<f32> = pixels.iter().map(|&v| f32::from(v) / 255.0).collect();
+    let depths = [6, 24, 64].map(|r| blurred(&img, r));
+    let raw: Vec<f32> = pixels
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let deep = depths.iter().map(|d| d.get(i).copied().unwrap_or(0.0)).sum::<f32>() / 3.0;
+            f32::from(v) + deep.clamp(0.0, 1.0) * 0.999
+        })
+        .collect();
+    let spread: Vec<(f32, f32)> = tones.iter().zip(shares).map(|(&t, &s)| (f32::from(t) / 255.0, s)).collect();
+    ranked(&raw, &spread)
+}
+
 /// `pixels`, a grain or shape, with its values moved onto `tones` (its values at `shares`)
 /// keeping their order: a stand-in pattern with a stock image's lights and darks. Equal values
 /// are ordered at random, so a flat part takes a spread of values, not a ramp across the image.
@@ -1885,6 +1904,29 @@ mod tests {
             assert!(got.abs_diff(want) <= 3, "at {share} {got} for {want}");
         }
         assert_eq!(stock_shape_tones("no such shape.png"), None);
+    }
+
+    #[test]
+    fn a_retoned_solid_shape_shrinks_at_its_rim_without_holes_or_specks() {
+        // a solid disc over most of the square, moved onto tones that leave four fifths empty
+        let n = TEXTURE_SIZE;
+        let disc: Vec<u8> = (0..n * n)
+            .map(|i| {
+                let (x, y) = ((i % n) as f32 / n as f32, (i / n) as f32 / n as f32);
+                if radius(x, y) < 0.9 { 255 } else { 0 }
+            })
+            .collect();
+        let mut tones = [0u8; 17];
+        tones[14..].copy_from_slice(&[255, 255, 255]);
+        let out = retoned_shape(&disc, &tones, &SHAPE_TONE_SHARES);
+        let at = |x: f32, y: f32| out[(y * n as f32) as usize * n + (x * n as f32) as usize];
+        // whole in the middle, empty well inside the old rim and outside it
+        for r in [0.0f32, 0.1, 0.2] {
+            assert_eq!(at(0.5 + r / 2.0, 0.5), 255, "{r}");
+        }
+        for r in [0.7f32, 0.85, 0.95] {
+            assert_eq!(at(0.5 + r / 2.0, 0.5), 0, "{r}");
+        }
     }
 
     #[test]
