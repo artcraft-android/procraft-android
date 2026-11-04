@@ -8585,6 +8585,23 @@ fn crossing_strokes_sheet() {
             let (k, v) = kv.split_once('=').unwrap();
             s.set_studio_setting(k.to_owned(), v.parse().unwrap());
         }
+        // `CROSS_ONE`: one orange stroke across white, at the opacity `CROSS_OPACITY` (else full),
+        // 800 canvas px long (400 on the half-size window) in 700 ms
+        if std::env::var("CROSS_ONE").is_ok() {
+            let opacity: f32 = std::env::var("CROSS_OPACITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            s.set_brush_opacity(opacity);
+            s.set_background_color(1.0, 1.0, 1.0, true);
+            s.set_color(237.0 / 255.0, 133.0 / 255.0, 68.0 / 255.0);
+            let n = 84;
+            let at = |i: usize| sample(100.0 + 400.0 * i as f32 / n as f32, 150.0, i as f64 * 700.0 / n as f64);
+            s.stroke_begin(PointerKind::Finger, vec![at(0)]);
+            for i in 1..n {
+                s.stroke_add(vec![at(i)]);
+            }
+            s.stroke_end(vec![at(n)]);
+            s.export_png(out).unwrap();
+            return;
+        }
         // `CROSS_TWO`: an orange stroke across white, then a yellow one down through it
         if std::env::var("CROSS_TWO").is_ok() {
             s.set_background_color(1.0, 1.0, 1.0, true);
