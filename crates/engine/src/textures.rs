@@ -69,6 +69,7 @@ pub mod shape {
     pub const STOCK_MESS: u32 = 51;
     pub const SLIM_OVAL: u32 = 52;
     pub const ULTRA_SOFT_ROUND: u32 = 53;
+    pub const STOCK_BLOT: u32 = 54;
 }
 
 /// Grains, by index.
@@ -231,25 +232,8 @@ fn make_shapes() -> Vec<GrayImage> {
                 edge * contrast(fbm(x * 24.0, y * 24.0, 24, 3, 37), 1.8).max(0.25)
             }),
         },
-        GrayImage {
-            name: "Blot",
-            pixels: {
-                let drops = scatter_points(53, 9);
-                field(move |x, y| {
-                    // spread over two thirds of the square, as a stock ink blot's mass
-                    let (x, y) = (0.5 + (x - 0.5) / 1.22, 0.5 + (y - 0.5) / 1.22);
-                    let n = fbm(x * 3.0, y * 3.0, 3, 3, 41);
-                    let body = smooth(((0.62 - radius(x, y) - (n - 0.5) * 0.5) * 9.0).clamp(0.0, 1.0));
-                    let spots = drops.iter().fold(0.0f32, |acc, &(cx, cy, r)| {
-                        // pushed out towards the edge
-                        let (dx, dy) = ((cx - 0.5) * 2.2 + 0.5, (cy - 0.5) * 2.2 + 0.5);
-                        let d = ((x - dx).powi(2) + (y - dy).powi(2)).sqrt() / (r * 0.6);
-                        acc.max(smooth(((1.0 - d) * 4.0).clamp(0.0, 1.0)))
-                    });
-                    body.max(spots) * (1.0 - 0.05 * radius(x, y))
-                })
-            },
-        },
+        // its drops pushed out towards the square's edge
+        GrayImage { name: "Blot", pixels: blot(|cx, cy| ((cx - 0.5) * 2.2 + 0.5, (cy - 0.5) * 2.2 + 0.5)) },
         GrayImage {
             name: "Leaf",
             pixels: field(|x, y| {
@@ -772,8 +756,44 @@ fn make_shapes() -> Vec<GrayImage> {
         name: "Ultra soft round",
         pixels: field(|x, y| ULTRA_SOFT_PEAK * smooth(1.0 - radius(x, y))),
     });
+    // a stock ink blot: the blot with its drops just off its body's edge, as stock blots' specks
+    // lie (within about 0.9 to 1.3 of the body's radius from the middle); pushed far out, they
+    // would each draw a line of their own along a stroke whose stamps don't turn
+    shapes.push(GrayImage {
+        name: "Stock blot",
+        pixels: blot(|cx, cy| {
+            let (dx, dy) = (cx - 0.5, cy - 0.5);
+            let d = dx.hypot(dy).max(1e-6);
+            let out = BLOT_BODY * (0.9 + 0.4 * d / SCATTER_REACH) / d;
+            (0.5 + dx * out, 0.5 + dy * out)
+        }),
+    });
     shapes
 }
+
+/// An ink blot spread over two thirds of the square, as a stock ink blot's mass, and drops about
+/// it: `place` moves each drop's middle from where it was scattered (within [`SCATTER_REACH`] of
+/// the square's middle).
+fn blot(place: fn(f32, f32) -> (f32, f32)) -> Vec<u8> {
+    let drops = scatter_points(53, 9);
+    field(move |x, y| {
+        let (x, y) = (0.5 + (x - 0.5) / 1.22, 0.5 + (y - 0.5) / 1.22);
+        let n = fbm(x * 3.0, y * 3.0, 3, 3, 41);
+        let body = smooth(((2.0 * BLOT_BODY - radius(x, y) - (n - 0.5) * 0.5) * 9.0).clamp(0.0, 1.0));
+        let spots = drops.iter().fold(0.0f32, |acc, &(cx, cy, r)| {
+            let (dx, dy) = place(cx, cy);
+            let d = ((x - dx).powi(2) + (y - dy).powi(2)).sqrt() / (r * 0.6);
+            acc.max(smooth(((1.0 - d) * 4.0).clamp(0.0, 1.0)))
+        });
+        body.max(spots) * (1.0 - 0.05 * radius(x, y))
+    })
+}
+
+/// The blot's body's radius (before its noisy edge), a share of the square it is drawn in.
+const BLOT_BODY: f32 = 0.31;
+
+/// How far from the square's middle [`scatter_points`] scatters, a share of the square.
+const SCATTER_REACH: f32 = 0.38;
 
 /// Stand-ins for stock shapes our others don't come near: a flat brush's stroke and two scatters
 /// of dots (stamped close along a stroke, each part of them draws a line, so the stroke comes out
@@ -1673,7 +1693,7 @@ fn scatter_points(seed: u32, count: i32) -> Vec<(f32, f32, f32)> {
     (0..count)
         .map(|i| {
             let a = hash(i, 1, seed) * std::f32::consts::TAU;
-            let d = hash(i, 2, seed).sqrt() * 0.38;
+            let d = hash(i, 2, seed).sqrt() * SCATTER_REACH;
             (0.5 + a.cos() * d, 0.5 + a.sin() * d, 0.02 + 0.07 * hash(i, 3, seed).powi(2))
         })
         .collect()

@@ -748,7 +748,7 @@ fn stock_shape(n: &str) -> u32 {
         (&["bleed"], shape::STOCK_BLEED),
         (&["mess"], shape::STOCK_MESS),
         (&["sponge"], shape::SPONGE),
-        (&["blot", "blob", "water", "wash", "stain", "ink"], shape::BLOT),
+        (&["blot", "blob", "water", "wash", "stain", "ink"], shape::STOCK_BLOT),
         (&["leaf", "foliage", "tree"], shape::LEAF),
         (&["grass", "reed"], shape::GRASS),
         (&["cloud", "fog", "smoke"], shape::CLOUD),
@@ -1059,6 +1059,8 @@ mod tests {
         assert_eq!(shape("Flat-Marker.jpg"), Some(shape::FLAT));
         assert_eq!(shape("Fine-Round-Dots.png"), Some(shape::STOCK_DOTS));
         assert_eq!(shape("Old-Square-Dots.jpg"), Some(shape::STOCK_SQUARE_DOTS));
+        // a stock blot keeps its drops close, not ours that are pushed out for stamps that turn
+        assert_eq!(shape("Old-Ink-Blot.jpg"), Some(shape::STOCK_BLOT));
         assert_eq!(grain_for(&Texture::Stock { name: "Blank.png".into(), inverted: false }, None), (None, None));
         assert_eq!(
             grain_for(&Texture::Stock { name: "Old-Canvas.jpg".into(), inverted: false }, None).0,
