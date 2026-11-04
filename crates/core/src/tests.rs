@@ -3548,7 +3548,7 @@ fn an_old_brush_file_without_grain_depth_has_its_grain_at_full_depth_moving() {
         let mut b = procraft_engine::keyed::Builder::new();
         let root = b.reserve();
         let name = b.string("Old Canvas");
-        let grain = b.string("Brush-Preset-Canvas.jpg");
+        let grain = b.string("Canvas.jpg");
         let mut fields = vec![("name", name), ("bundledGrainPath", grain), ("textureMovement", Value::Real(0.4))];
         fields.extend(extra);
         b.fill(&root, &["SilicaBrush", "ValkyrieBrush", "NSObject"], fields);
