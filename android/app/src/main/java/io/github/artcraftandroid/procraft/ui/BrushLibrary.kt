@@ -326,9 +326,12 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Icon(PcIcons.PlusMedium, contentDescription = "Add", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
                 // hangs below the plus, their right edges in line
                 LibraryMenu(adding, androidx.compose.ui.graphics.TransformOrigin(1f, 0f), MenuPlace { a, size -> IntOffset(a.right - size.width, a.bottom) }, onDismiss = { adding = false }, overPanel = true) {
-                    MenuItem(PcIcons.MenuNewBrush, "Create new brush") {
-                        adding = false
-                        vm.newBrush()
+                    // the Recent set holds no brushes of its own to add one to
+                    if (!recent) {
+                        MenuItem(PcIcons.MenuNewBrush, "Create new brush") {
+                            adding = false
+                            vm.newBrush()
+                        }
                     }
                     MenuItem(PcIcons.MenuNewSet, "Create new set") {
                         adding = false

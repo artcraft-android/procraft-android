@@ -634,32 +634,37 @@ impl Library {
         backdrops: &mut Vec<f32>,
     ) {
         let ink = menu::INK;
-        let entries = [
+        // the Recent set holds no brushes of its own to add one to
+        let mut entries = vec![
             Entry::Item(&icons::MENU_NEW_BRUSH, "Create new brush", ink),
             Entry::Item(&icons::MENU_NEW_SET, "Create new set", ink),
             Entry::Rule(11.0),
             Entry::Item(&icons::MENU_FOLDER, "Import from Files", ink),
         ];
+        if self.recent {
+            entries.remove(0);
+        }
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
         let rect = Rect::from_min_size(pos2(plus.right() - size.x, plus.bottom()), size);
         let mut tapped = None;
         self.plus_menu.show(ctx, "library plus menu", rect, rect.right_top(), menu::OVER_A_PANEL, backdrops, |ui| {
             tapped = menu::entries(ui, look, rect, &entries);
         });
-        let Some(i) = tapped else { return };
+        let Some(Entry::Item(_, label, _)) = tapped.and_then(|t| entries.get(t)) else { return };
         self.plus_menu.close();
-        match i {
+        match *label {
             // a new brush, opened in the studio
-            0 => {
+            "Create new brush" => {
                 if let Some(index) = session.new_brush(shown as u32) {
                     session.select_brush(shown as u32, index);
                     self.library_changed();
                     self.studio = Some(Some((shown as u32, index)));
                 }
             }
-            1 => {
+            "Create new set" => {
                 let set = session.new_brush_set() as usize;
                 self.shown_set = Some(set);
+                self.recent = false;
                 let name = session.brush_library().get(set).map(|s| s.name.clone()).unwrap_or_default();
                 self.renaming_set = Some((set, name, false));
                 self.library_changed();
