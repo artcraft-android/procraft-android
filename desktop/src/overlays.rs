@@ -124,6 +124,24 @@ impl Overlays {
         });
     }
 
+    /// The brush's outline as it shows this frame: where, its radius, and how it is drawn (1
+    /// contrasting rings, 2 the colour); none without one, or with one too small to see.
+    fn outline(&self) -> Option<(Pos2, f32, i32)> {
+        let (at, r, outline) = self.cursor.filter(|(_, r, _)| *r >= 2.0)?;
+        // the style chosen, or as the brush says: none, contrasting rings, or the colour
+        let outline = match self.cursor_style {
+            CursorStyle::Contrast => 1,
+            CursorStyle::Colour => 2,
+            CursorStyle::Brush => outline,
+        };
+        (outline != 0).then_some((at, r, outline))
+    }
+
+    /// Whether the brush's outline shows this frame (in place of the system's pointer).
+    pub fn outline_shown(&self) -> bool {
+        self.outline().is_some()
+    }
+
     /// The eyedropper lets go: the colour it picks, if it read one.
     pub fn finish_pick(&mut self) -> Option<u32> {
         let p = self.picking.take()?;
@@ -194,29 +212,14 @@ impl Overlays {
                 self.notice_band(ui, under_bar, window);
                 // the brush's outline where the pen paints: a thin dark ring with a light edge, or
                 // the colour, as the brush says
-                if let Some((at, r, outline)) = self.cursor.filter(|(_, r, _)| *r >= 2.0) {
-                    // the style chosen, or as the brush says: none, contrasting rings, or the colour
-                    let outline = match self.cursor_style {
-                        CursorStyle::Contrast => 1,
-                        CursorStyle::Colour => 2,
-                        CursorStyle::Brush => outline,
-                    };
-                    // shown, it stands in for the system's pointer (none drawn over it); without one
-                    // the pointer stays
-                    if outline != 0 {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-                    }
+                if let Some((at, r, outline)) = self.outline() {
+                    // it stands in for the system's pointer (none drawn over it)
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::None);
                     let (under, over) = match outline {
-                        0 => (None, None),
-                        2 => (
-                            Some(egui::Stroke::new(3.0, Color32::from_white_alpha(0x99))),
-                            Some(egui::Stroke::new(1.5, current)),
-                        ),
-                        _ => {
-                            (Some(egui::Stroke::new(3.0, Color32::WHITE)), Some(egui::Stroke::new(1.0, Color32::BLACK)))
-                        }
+                        2 => (egui::Stroke::new(3.0, Color32::from_white_alpha(0x99)), egui::Stroke::new(1.5, current)),
+                        _ => (egui::Stroke::new(3.0, Color32::WHITE), egui::Stroke::new(1.0, Color32::BLACK)),
                     };
-                    for stroke in [under, over].into_iter().flatten() {
+                    for stroke in [under, over] {
                         if self.cursor_shape.is_empty() {
                             ui.painter().circle_stroke(at, r, stroke);
                         }

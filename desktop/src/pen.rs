@@ -6,7 +6,7 @@
 //! reads no pen at all (the compositor makes a mouse of it, without pressure), so the whole pen is
 //! read from the tablet protocol and handed on as the touches and hovering a pen makes on Windows.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -43,6 +43,14 @@ pub struct MousePen {
 
 /// The pen moving the mouse pointer now, while a tablet's pen is what moves it.
 static MOUSE_PEN: Mutex<Option<MousePen>> = Mutex::new(None);
+
+/// The pen's latest readings under X11, each with where it put the mouse pointer (window pixels),
+/// newest last: the mouse's moves come apart from them (winit's own, on another connection), and
+/// each takes the reading made where it is, not the latest, which may be ahead of it or behind.
+static MOUSE_PEN_TRAIL: Mutex<VecDeque<((f32, f32), MousePen)>> = Mutex::new(VecDeque::new());
+/// How many readings the trail keeps: more than come in while a slow frame is drawn.
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+const TRAIL: usize = 64;
 
 /// The mouse pointer's id among the touches (`input.rs`): a pen moving it keeps its lean there.
 const MOUSE: u64 = u64::MAX;
@@ -153,11 +161,37 @@ pub fn mouse_pen() -> Option<MousePen> {
     MOUSE_PEN.lock().ok().and_then(|p| *p)
 }
 
+/// The tablet pen moving the mouse pointer, as it was read with the pointer at `at` (window
+/// pixels) if it was lately, else as last read; none while it isn't a pen that moves it.
+pub fn mouse_pen_at(at: (f32, f32)) -> Option<MousePen> {
+    let latest = mouse_pen()?;
+    let near = |p: (f32, f32)| (p.0 - at.0).abs() < 1e-3 && (p.1 - at.1).abs() < 1e-3;
+    let there = MOUSE_PEN_TRAIL.lock().ok().and_then(|t| t.iter().rev().find(|(p, _)| near(*p)).map(|(_, pen)| *pen));
+    Some(there.unwrap_or(latest))
+}
+
+/// The pen moving the mouse pointer was read with the pointer at `at`, window pixels.
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+fn keep_mouse_pen_at(at: (f32, f32), pen: MousePen) {
+    if let Ok(mut trail) = MOUSE_PEN_TRAIL.lock() {
+        if trail.len() >= TRAIL {
+            trail.pop_front();
+        }
+        trail.push_back((at, pen));
+    }
+}
+
 /// What moves the mouse pointer now: a tablet's pen with its lean, or (none) something else.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn set_mouse_pen(pen: Option<(MousePen, (f32, f32))>) {
     if let Ok(mut p) = MOUSE_PEN.lock() {
         *p = pen.map(|(p, _)| p);
+    }
+    // another pointer moving it: the pen's readings are past
+    if pen.is_none()
+        && let Ok(mut trail) = MOUSE_PEN_TRAIL.lock()
+    {
+        trail.clear();
     }
     if let Ok(mut leans) = LEANS.lock() {
         let leans = leans.get_or_insert_with(Default::default);
@@ -512,6 +546,9 @@ mod tablet {
                     last.insert(e.deviceid, now);
                     let pen = MousePen { pressure: now.pressure, eraser: axes.eraser };
                     super::set_mouse_pen(Some((pen, super::lean_of(now.tilt_x, now.tilt_y))));
+                    // where it put the pointer, as winit has it (fixed point, 16 bits of fraction)
+                    let at = |v: xinput::Fp1616| (f64::from(v) / 65536.0) as f32;
+                    super::keep_mouse_pen_at((at(e.event_x), at(e.event_y)), pen);
                 }
                 _ => {}
             }
@@ -665,6 +702,31 @@ mod tests {
         assert_eq!(pressure(921), Some(1.0));
         pen_pressure(921, None);
         assert_eq!(pressure(921), None);
+    }
+
+    #[test]
+    fn the_mouse_pointer_takes_the_pens_reading_made_where_it_is() {
+        let pen = |pressure| MousePen { pressure, eraser: false };
+        set_mouse_pen(None);
+        keep_mouse_pen_at((10.0, 20.0), pen(0.2));
+        assert_eq!(mouse_pen_at((10.0, 20.0)), None, "the mouse moves it");
+        set_mouse_pen(Some((pen(0.2), (0.0, 0.0))));
+        keep_mouse_pen_at((10.0, 20.0), pen(0.2));
+        // read on ahead of the mouse's moves: each move takes the reading where it is
+        for (x, pressure) in [(11.0, 0.3), (12.5, 0.5), (14.0, 0.7)] {
+            let read = pen(pressure);
+            set_mouse_pen(Some((read, (0.0, 0.0))));
+            keep_mouse_pen_at((x, 20.0), read);
+        }
+        assert_eq!(mouse_pen_at((10.0, 20.0)), Some(pen(0.2)));
+        assert_eq!(mouse_pen_at((12.5, 20.0)), Some(pen(0.5)));
+        // held still as it presses harder: the latest there
+        keep_mouse_pen_at((10.0, 20.0), pen(0.9));
+        assert_eq!(mouse_pen_at((10.0, 20.0)), Some(pen(0.9)));
+        // somewhere not yet read: as last read
+        assert_eq!(mouse_pen_at((30.0, 20.0)), Some(pen(0.7)));
+        set_mouse_pen(None);
+        assert_eq!(mouse_pen_at((12.5, 20.0)), None);
     }
 
     #[test]

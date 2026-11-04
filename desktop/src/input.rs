@@ -47,6 +47,9 @@ pub struct Input {
     key_drag: Option<KeyDrag>,
     /// The pen moving the view (pressed with space held), as the mouse does.
     pen_panning: Option<u64>,
+    /// A tablet's pen pressed the mouse pointer (X11, a Mac): its pressure as last read, for the
+    /// stroke's moves while it goes unread a moment (another pointer heard from in between).
+    pen_pressure: Option<f32>,
     /// The brush cursor follows the mouse hovering, so its moves draw a frame.
     pub hover_shown: bool,
     space: bool,
@@ -78,6 +81,7 @@ impl Default for Input {
             panning: false,
             key_drag: None,
             pen_panning: None,
+            pen_pressure: None,
             hover_shown: false,
             space: false,
             r_key: None,
@@ -112,6 +116,11 @@ impl Input {
     /// Nothing is pressed on the canvas and the view isn't moving.
     pub fn idle(&self) -> bool {
         self.down.is_empty() && !self.panning && self.key_drag.is_none()
+    }
+
+    /// Something is pressed on the canvas (a pen, the mouse, a finger), and not to move the view.
+    pub fn pressing(&self) -> bool {
+        !self.down.is_empty() && !self.moving_view()
     }
 
     /// Space or R is held, or the mouse moves the view.
@@ -164,13 +173,23 @@ impl Input {
         any
     }
 
-    /// What the mouse pointer is now: a tablet's pen moving it (X11 gives a pen as the mouse), as
-    /// a pen or its eraser end with its pressure; else the mouse.
-    fn mouse_kind() -> (PointerKind, f32) {
-        match crate::pen::mouse_pen() {
+    /// What the mouse pointer is now, at `at`: a tablet's pen moving it (X11 gives a pen as the
+    /// mouse), as a pen or its eraser end with its pressure there; else the mouse.
+    fn mouse_kind(at: (f32, f32)) -> (PointerKind, f32) {
+        match crate::pen::mouse_pen_at(at) {
             Some(pen) => (if pen.eraser { PointerKind::StylusEraser } else { PointerKind::Stylus }, pen.pressure),
             None => (PointerKind::Mouse, 1.0),
         }
+    }
+
+    /// The pressure of the mouse pointer's sample at `at`: a stroke a pen began keeps the pen's
+    /// last pressure through a moment it goes unread, rather than jumping to full as the mouse's.
+    fn mouse_pressure(&mut self, at: (f32, f32)) -> f32 {
+        let read = crate::pen::mouse_pen_at(at).map(|pen| pen.pressure);
+        if self.pen_pressure.is_some() && read.is_some() {
+            self.pen_pressure = read;
+        }
+        read.or(self.pen_pressure).unwrap_or(1.0)
     }
 
     /// A sample of pointer `id` at `(x, y)`: a pen's with its lean, if the system gave one.
@@ -285,7 +304,8 @@ impl Input {
                     return true;
                 }
                 if self.down.contains(&MOUSE) {
-                    self.moved(session, MOUSE, p, Self::mouse_kind().1);
+                    let pressure = self.mouse_pressure(p);
+                    self.moved(session, MOUSE, p, pressure);
                     return true;
                 }
                 self.hover_shown
@@ -316,12 +336,15 @@ impl Input {
                         false
                     }
                     (MouseButton::Left, ElementState::Pressed) if !self.panning && !over(p) => {
-                        let (kind, pressure) = Self::mouse_kind();
+                        let (kind, pressure) = Self::mouse_kind(p);
+                        self.pen_pressure = (kind != PointerKind::Mouse).then_some(pressure);
                         self.pressed(session, MOUSE, kind, p, pressure);
                         true
                     }
                     (MouseButton::Left, ElementState::Released) if self.down.contains(&MOUSE) => {
-                        self.lifted(session, MOUSE, p, Self::mouse_kind().1, false);
+                        let pressure = self.mouse_pressure(p);
+                        self.pen_pressure = None;
+                        self.lifted(session, MOUSE, p, pressure, false);
                         true
                     }
                     (MouseButton::Left | MouseButton::Middle, ElementState::Released) => {

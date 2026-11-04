@@ -935,13 +935,7 @@ impl Interface {
             .interactable(false)
             .fixed_pos(at)
             .show(ctx, |ui| {
-                let painter = ui.painter();
-                // a fine cross, dark on a light edge
-                for (width, colour) in [(3.0, Color32::WHITE), (1.0, Color32::BLACK)] {
-                    let stroke = egui::Stroke::new(width, colour);
-                    painter.line_segment([at - egui::vec2(7.0, 0.0), at + egui::vec2(7.0, 0.0)], stroke);
-                    painter.line_segment([at - egui::vec2(0.0, 7.0), at + egui::vec2(0.0, 7.0)], stroke);
-                }
+                fine_cross(ui.painter(), at);
                 // the kind below right of it, dark in a light halo (seen on any colour)
                 let beside = at + egui::vec2(20.0, 20.0);
                 for nudge in [(-1.5, 0.0), (1.5, 0.0), (0.0, -1.5), (0.0, 1.5)] {
@@ -953,18 +947,34 @@ impl Interface {
     }
 
     /// The brush's outline where the mouse hovers over the canvas, as the pen's hover shows it,
-    /// while nothing is pressed (and while it would paint there).
+    /// while nothing is pressed (and while it would paint there). Where the canvas would paint, the
+    /// system's pointer gives way to the outline; where none shows (the brush too small to see,
+    /// its outline none, or the brush cursor off) to a fine cross; and while a stroke is drawn to
+    /// nothing, the stroke showing where the pen is (with the outline, if Prefs show it then).
     fn hover_cursor(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo, input: &mut Input) {
+        let painting = session.adjustment_shown().adjustment.is_none() && !self.selection.on && !self.transform.on;
+        let on_canvas = |at: egui::Pos2| {
+            self.canvas_rect.contains(at) && ctx.layer_id_at(at).is_none_or(|l| l.order == egui::Order::Background)
+        };
         if !input.idle() {
+            if painting && input.pressing() && ctx.pointer_latest_pos().is_some_and(on_canvas) {
+                ctx.set_cursor_icon(egui::CursorIcon::None);
+            }
             return;
         }
-        let painting = session.adjustment_shown().adjustment.is_none() && !self.selection.on && !self.transform.on;
-        input.hover_shown = painting && self.prefs.cursor_shown(true);
+        // the outline or the cross follows the pointer, so its moves draw a frame
+        input.hover_shown = painting;
         let ppp = ctx.pixels_per_point();
-        let at = input.hovering().filter(|_| input.hover_shown).map(|(x, y)| egui::pos2(x, y) / ppp).filter(|at| {
-            self.canvas_rect.contains(*at) && ctx.layer_id_at(*at).is_none_or(|l| l.order == egui::Order::Background)
-        });
-        self.overlays.hover(session, info, ppp, at);
+        let at = input.hovering().filter(|_| painting).map(|(x, y)| egui::pos2(x, y) / ppp).filter(|at| on_canvas(*at));
+        self.overlays.hover(session, info, ppp, at.filter(|_| self.prefs.cursor_shown(true)));
+        if let Some(at) = at.filter(|_| !self.overlays.outline_shown()) {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+            egui::Area::new(egui::Id::unique("hover cross"))
+                .order(egui::Order::Tooltip)
+                .interactable(false)
+                .fixed_pos(at)
+                .show(ctx, |ui| fine_cross(ui.painter(), at));
+        }
     }
 
     /// The modify button tapped: what Tap □ is set to do, as the Android app does it.
@@ -2193,6 +2203,16 @@ fn guide_lines(painter: &egui::Painter, session: &CanvasSession) {
     let stroke = Stroke::new(0.25 + 1.5 * g.thickness, colour);
     for &[x0, y0, x1, y1] in g.lines.as_chunks::<4>().0 {
         painter.line_segment([egui::pos2(x0, y0) / ppp, egui::pos2(x1, y1) / ppp], stroke);
+    }
+}
+
+/// The desktop's pointer over the canvas where no outline shows: a fine cross at `at` (points),
+/// dark on a light edge, seen on any colour.
+fn fine_cross(painter: &egui::Painter, at: egui::Pos2) {
+    for (width, colour) in [(3.0, Color32::WHITE), (1.0, Color32::BLACK)] {
+        let stroke = Stroke::new(width, colour);
+        painter.line_segment([at - vec2(7.0, 0.0), at + vec2(7.0, 0.0)], stroke);
+        painter.line_segment([at - vec2(0.0, 7.0), at + vec2(0.0, 7.0)], stroke);
     }
 }
 
