@@ -8704,3 +8704,34 @@ fn the_size_preview_shows_the_brush_s_stamp_soft_where_it_is_soft() {
     assert!(at(&hard, 52, 32) > 200, "{}", at(&hard, 52, 32));
     assert_eq!(at(&hard, 1, 1), 0);
 }
+
+#[test]
+fn a_snapped_ellipse_stays_open_where_its_stroke_did_not_close() {
+    use crate::quickshape::QuickShapeKind;
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.2);
+    // a circle drawn from the top round to a twelfth short of where it began, held (closed enough
+    // to be an ellipse)
+    let pts: Vec<PenSample> = (0..=60)
+        .map(|i| {
+            let t = -std::f32::consts::FRAC_PI_2 + i as f32 / 60.0 * std::f32::consts::TAU * (11.0 / 12.0);
+            sample(100.0 + 60.0 * t.cos(), 100.0 + 60.0 * t.sin(), f64::from(i) * 8.0)
+        })
+        .collect();
+    s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+    s.stroke_add(pts[1..].to_vec());
+    let info = s.quickshape_hold().expect("a shape");
+    assert_eq!(info.kind, QuickShapeKind::Ellipse);
+    s.stroke_end(vec![]);
+    s.quickshape_done();
+    // painted where it went (its right, bottom and left), not across the gap it left (up and to
+    // the left of the top)
+    // dark anywhere within 4 pixels
+    let dark = |x: u32, y: u32| {
+        (x.saturating_sub(4)..=x + 4).any(|x| (y.saturating_sub(4)..=y + 4).any(|y| pixel(&s, x, y)[0] < 128))
+    };
+    assert!(dark(160, 100) && dark(100, 160) && dark(40, 100));
+    let gap = (-std::f32::consts::FRAC_PI_2) - std::f32::consts::TAU / 24.0;
+    let (gx, gy) = (100.0 + 60.0 * gap.cos(), 100.0 + 60.0 * gap.sin());
+    assert!(!dark(gx.round() as u32, gy.round() as u32), "the gap at {gx},{gy} was closed");
+}
