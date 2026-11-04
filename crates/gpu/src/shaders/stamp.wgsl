@@ -182,13 +182,15 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         if (sharp) {
             raw = sharp_grain(raw, g_uv);
         }
-        var g = clamp((raw - 0.5) * (1.0 + su.grain_contrast) + 0.5 + su.grain_brightness, 0.0, 1.0);
-        if (i.grain_bleed > 0.0) {
-            // pressed in as far as the pressure's bleed says
-            g = mix(g, pressed_in(g, i.grain_press), i.grain_bleed);
-        }
+        let g = clamp((raw - 0.5) * (1.0 + su.grain_contrast) + 0.5 + su.grain_brightness, 0.0, 1.0);
         // combined with the shape by the grain's blend mode, as deep as it says, inside the shape
         a = grain_combine(a, g, clamp(su.grain_depth * i.look.x, 0.0, 1.0), su.grain_blend);
+    }
+    // the pressure's bleed, a contrast on the shape and its grain: none of the faint parts, all
+    // of the strong ones, and more of both the harder the pen presses
+    if (i.grain_bleed > 0.0) {
+        let b = 8.0 * i.grain_bleed;
+        a = clamp((1.0 + b) * a - b / sqrt(max(b * i.grain_press, 1e-4)), 0.0, 1.0);
     }
     // a leaning pen shades it across its width, strongest at its leading edge
     if (i.look.w > 0.0) {
