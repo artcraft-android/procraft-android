@@ -21,6 +21,7 @@ mod brush_library;
 mod brushes;
 mod clipboard;
 mod colour;
+mod colour_drag;
 mod crop;
 mod crop_edit;
 mod device;
@@ -92,6 +93,7 @@ pub use brushes::{BrushInfo, BrushSetInfo};
 pub use colour::{
     cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,
 };
+pub use colour_drag::{ColourDrag, DragStep};
 pub use crop_edit::CropShown;
 pub use frame::{configure, screen_profile};
 pub use gallery::{ArtworkStore, GalleryArtwork, GalleryEntry, ZipKind, zip_file_kind};

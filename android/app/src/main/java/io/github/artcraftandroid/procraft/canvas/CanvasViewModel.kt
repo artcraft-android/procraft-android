@@ -5241,21 +5241,74 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private var dropSwatch: Int? = null
     private var dropBandTimer: kotlinx.coroutines.Job? = null
 
-    /** A colour starts being dragged from the colour button, or [swatch] from the palette. */
-    fun dropDragStart(at: Offset, swatch: Int? = null) {
+    /** The colour being dragged: where it is and whether it has come to rest (the core's rules). */
+    private var colourDrag: io.github.artcraftandroid.procraft.core.ColourDrag? = null
+
+    /** The dragged colour came to rest and its slid threshold has begun filling (or tried to, and couldn't). */
+    private var dropPoured = false
+    private var dropPourRefused = false
+
+    /**
+     * A colour starts being dragged from the colour button, or [swatch] from the palette, at
+     * uptime [ms], by a pen or not ([pen]).
+     */
+    fun dropDragStart(at: Offset, swatch: Int? = null, pen: Boolean = false, ms: Long = android.os.SystemClock.uptimeMillis()) {
         if (swatch == null) closePanels()
         dropBandTimer?.cancel()
         dropSwatch = swatch
         dropDot = at to (swatch ?: colorRgb())
         dropBand = DropBand.DRAGGING
+        dropPoured = false
+        dropPourRefused = false
+        colourDrag = io.github.artcraftandroid.procraft.core.ColourDrag(at.x / density, at.y / density, ms.toDouble(), pen, dropThreshold)
     }
 
-    fun dropDragMove(at: Offset) {
-        dropDot = dropDot?.let { at to it.second }
+    /** The dragged colour's pointer moved to [at] at uptime [ms]: the dot follows, or, resting, the threshold slides. */
+    fun dropDragMove(at: Offset, ms: Long = android.os.SystemClock.uptimeMillis()) {
+        val drag = colourDrag ?: return
+        val step = drag.moved(at.x / density, at.y / density, ms.toDouble())
+        val dot = Offset(step.dotX * density, step.dotY * density)
+        dropDot = dropDot?.let { dot to it.second }
+        if (!step.slid) return
+        if (dropPoured) {
+            pourThreshold(step.threshold)
+        } else if (!dropPourRefused) {
+            dropThreshold = step.threshold
+            dropSliding = true
+            dropPoured = pourBegin(dot)
+            dropPourRefused = !dropPoured
+        }
+    }
+
+    /** When (uptime ms) the dragged colour comes to rest if its pointer stays; null once it has. */
+    fun dropRestDue(): Long? = colourDrag?.restDue()?.toLong()
+
+    /** The time is uptime [ms]: the dragged colour comes to rest if it is due, where a drop is taken. */
+    fun dropDragRest(ms: Long) {
+        val drag = colourDrag ?: return
+        val step = drag.now()
+        val dot = Offset(step.dotX * density, step.dotY * density)
+        drag.rest(ms.toDouble(), dot.y > io.github.artcraftandroid.procraft.ui.Pc.BarHeight.value * density && dropAvoid?.contains(dot) != true)
     }
 
     /** The dragged colour let go at [at] (null: somewhere it doesn't fill, like the top bar). */
     fun dropDragEnd(at: Offset?) {
+        val step = colourDrag?.now()
+        colourDrag = null
+        // come to rest, it fills where it rests (already, if its threshold was slid)
+        val rested = step?.takeIf { it.resting }?.let { Offset(it.dotX * density, it.dotY * density) }
+        if (dropPoured) {
+            dropPoured = false
+            dropDot = null
+            pourEnd(keep = true)
+            dropBand = DropBand.DROPPED
+            dropBandTimer = viewModelScope.launch {
+                kotlinx.coroutines.delay(DROP_BAND_MS)
+                if (dropBand == DropBand.DROPPED) dropBand = DropBand.NONE
+            }
+            return
+        }
+        val at = if (at != null) rested ?: at else null
         dropDot = null
         if (at != null && dropAvoid?.contains(at) != true && pourBegin(at)) {
             pourEnd(keep = true)

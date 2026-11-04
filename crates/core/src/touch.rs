@@ -54,7 +54,7 @@ const QUICKSHAPE_GRAB: f32 = 22.0;
 /// A fill's touch slid past this (points) changes its threshold, this much more gently than a
 /// selection's.
 const POUR_SLOP: f32 = 15.0;
-const POUR_SLIDE_GENTLER: f32 = 2.7;
+pub(crate) const POUR_SLIDE_GENTLER: f32 = 2.7;
 
 /// A transform's touch moved this far (points) drags what it took (a selection's too).
 const TRANSFORM_SLOP: f32 = 15.0;
@@ -517,7 +517,7 @@ fn pair(a: (f32, f32), b: (f32, f32)) -> (f32, f32, f32, f32) {
 /// How much an amount dragged across the screen changes for a step of `dx` points over `ms`: more
 /// for faster drags (the speed taken per 60 Hz frame), 200 points at a steady pace moving it most
 /// of the way.
-fn drag_step(dx: f32, ms: f64) -> f32 {
+pub(crate) fn drag_step(dx: f32, ms: f64) -> f32 {
     let frames = (ms.max(1.0) / 1000.0 * 60.0).max(0.06) as f32;
     let speed = dx.abs() / frames;
     (speed / 30.0).powf(0.86) * dx / 200.0
