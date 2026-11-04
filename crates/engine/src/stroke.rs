@@ -1180,9 +1180,15 @@ impl StrokeBuilder {
         self.head = Some(to);
     }
 
+    /// The (size, opacity) multipliers the pressure gives a point: none for a finger, which has
+    /// no pressure (a brush that thins as it is pressed keeps its full size under a finger).
+    fn pressed(&self, p: PathPoint) -> (f32, f32) {
+        if self.pointer.has_pressure() { self.brush.factors(p.soft[0], p.soft[1]) } else { (1.0, 1.0) }
+    }
+
     /// The stamp diameter at a point of the path, before jitter and taper.
     fn diameter_at(&self, p: PathPoint) -> f32 {
-        let (pressure, _) = self.brush.factors(p.soft[0], p.soft[1]);
+        let (pressure, _) = self.pressed(p);
         // faster input thins the stroke (or, the other way, widens it)
         let speed = (1.0 - self.extras.speed_size * p.speed).max(0.05);
         let drawn = self.diameter * pressure * speed;
@@ -1313,7 +1319,7 @@ impl StrokeBuilder {
         let start_span = self.start_span();
         let sw = x.tilt_switches;
         let diameter = self.diameter_at(p);
-        let (_, pressure_alpha) = self.brush.factors(p.soft[0], p.soft[1]);
+        let (_, pressure_alpha) = self.pressed(p);
         // leaning fades the stamp by the square root of how far it has gone
         let fade = self.leaning(p, x.tilt_angles.opacity).sqrt() * self.brush.tilt.opacity;
         let tilt_alpha = if fade >= 0.0 { 1.0 - fade } else { 1.0 - (fade + self.brush.tilt.opacity) };
@@ -1726,6 +1732,14 @@ mod tests {
         let mut finger = StrokeBuilder::new(plain(), 10.0, Pointer::Finger);
         let touch = finger.add(&samples);
         assert!(light[0].radius < touch[0].radius);
+        assert_eq!(touch[0].radius, 5.0);
+        // a brush that thins as it is pressed: a finger leaves it whole too
+        let thinning = Brush { pressure_size: -0.75, pressure_opacity: -0.5, ..plain() };
+        let mut pen = StrokeBuilder::new(thinning.clone(), 10.0, Pointer::Stylus);
+        let pressed = pen.add(&[Sample::at(Vec2::new(0.0, 0.0), 1.0, 0.0)]);
+        let mut finger = StrokeBuilder::new(thinning, 10.0, Pointer::Finger);
+        let touch = finger.add(&samples);
+        assert!(pressed[0].radius < touch[0].radius && pressed[0].alpha < touch[0].alpha);
         assert_eq!(touch[0].radius, 5.0);
     }
 
