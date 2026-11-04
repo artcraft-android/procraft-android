@@ -1315,6 +1315,34 @@ fn a_slower_wet_stroke_runs_out_sooner() {
 }
 
 #[test]
+fn a_wet_stamps_bleed_lays_its_strong_parts_whole_and_its_faint_ones_not_at_all() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // one soft wet stamp, fully charged, without and with the pressure's bleed at its most
+    let laid = |bleed: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let wet = StrokeStyle {
+            wet_pull: Some(0.5),
+            dilution: 0.5,
+            load: 1.0,
+            hardness: 0.0,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), wet);
+        canvas.add_stamps(&[Stamp { grain_bleed: bleed, ..Stamp::round(Vec2::new(32.0, 32.0), 24.0, 1.0) }]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (pixel(&layer, 64, 33, 32)[3], pixel(&layer, 64, 50, 32)[3])
+    };
+    let (plain, bled) = (laid(0.0), laid(1.0));
+    // the middle laid whole either way; the faint rim only without the bleed
+    assert!(plain.0 > 240 && bled.0 > 240, "{plain:?} {bled:?}");
+    assert!(plain.1 > 20 && bled.1 == 0, "{plain:?} {bled:?}");
+}
+
+#[test]
 fn the_wet_mix_blur_softens_what_a_smudge_lays_down() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

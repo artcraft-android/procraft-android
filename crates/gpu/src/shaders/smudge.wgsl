@@ -237,8 +237,18 @@ fn mask(t: vec2<f32>) -> f32 {
     return textureSampleLevel(shapes, shape_smp, uv, st.shape, lod).r;
 }
 
-// how much of the stamp the grain lets through at canvas point `p` (stamp frame point `t`)
+// how much of the stamp the grain lets through at canvas point `p`
 fn grain_at(p: vec2<f32>) -> f32 {
+    let g = grain_plain(p);
+    if (st.grain_bleed > 0.0) {
+        // pressed in as far as the pressure's bleed says
+        return mix(1.0, mix(g, pressed_in(g, st.grain_press), st.grain_bleed), st.grain_depth);
+    }
+    return mix(1.0, g, st.grain_depth);
+}
+
+// the grain at canvas point `p` as it is, before its depth and bleed
+fn grain_plain(p: vec2<f32>) -> f32 {
     if (st.grain < 0) {
         return 1.0;
     }
@@ -257,11 +267,19 @@ fn grain_at(p: vec2<f32>) -> f32 {
     if (sharp) {
         g = sharp_grain(g, uv);
     }
-    if (st.grain_bleed > 0.0) {
-        // pressed in as far as the pressure's bleed says
-        g = mix(g, pressed_in(g, st.grain_press), st.grain_bleed);
-    }
-    return mix(1.0, g, st.grain_depth);
+    return g;
+}
+
+// how much a wet stamp lays at canvas point `p` (stamp frame point `t`): its shape through its
+// grain (unless the grain is laid over the stroke once), then the bleed as a contrast on that
+// (none of the faint parts, all of the strong ones, more of both the harder the pressure's
+// bleed), times the stamp's alpha
+fn wet_weight(p: vec2<f32>, t: vec2<f32>) -> f32 {
+    let g = select(mix(1.0, grain_plain(p), st.grain_depth), 1.0, st.grain_once > 0.5);
+    let through = mask(t) * g;
+    let b = 8.0 * st.grain_bleed;
+    let bled = (1.0 + b) * through - b / sqrt(max(b * st.grain_press, 1e-4));
+    return clamp(bled, 0.0, 1.0) * st.alpha;
 }
 
 @compute @workgroup_size(8, 8)
@@ -295,8 +313,9 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     var out = mix(w, carried(p), m * g);
     if (st.mode == 1u) {
         // wet: the stamp's plot mixed in, alpha and all (a stamp can lay bare paper), as far as
-        // the shape and grain let it
-        out = mix(w, plot_at(2u * CARRIED + st.index * st.plot * st.plot, st.plot, t), m * g);
+        // its weight there
+        let laid = plot_at(2u * CARRIED + st.index * st.plot * st.plot, st.plot, t);
+        out = mix(w, laid, wet_weight(vec2<f32>(p) + 0.5, t));
     }
     if (st.preserve_alpha == 1u) {
         out = out * (w.a / max(out.a, 1e-6));
