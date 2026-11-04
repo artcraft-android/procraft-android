@@ -717,6 +717,8 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
                 (None, None, Some(0.95))
             } else if has(&["medium"]) {
                 (None, None, Some(0.5))
+            } else if has(&["ultra-soft", "ultra soft", "ultrasoft"]) {
+                (Some(shape::ULTRA_SOFT_ROUND), None, None)
             } else if has(&["soft", "air", "blur", "glow"]) {
                 (Some(shape::SOFT_ROUND), None, None)
             } else {
@@ -1044,6 +1046,8 @@ mod tests {
             (None, None, Some(0.95))
         );
         assert_eq!(shape_for(&Texture::Stock { name: "Soft.png".into(), inverted: false }).0, Some(shape::SOFT_ROUND));
+        let ultra = Texture::Stock { name: "Ultra-Soft.jpg".into(), inverted: false };
+        assert_eq!(shape_for(&ultra).0, Some(shape::ULTRA_SOFT_ROUND));
         assert_eq!(
             shape_for(&Texture::Stock { name: "Slim-Oval.png".into(), inverted: false }),
             (Some(shape::SLIM_OVAL), None, None)

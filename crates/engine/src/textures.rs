@@ -68,6 +68,7 @@ pub mod shape {
     pub const STOCK_BLEED: u32 = 50;
     pub const STOCK_MESS: u32 = 51;
     pub const SLIM_OVAL: u32 = 52;
+    pub const ULTRA_SOFT_ROUND: u32 = 53;
 }
 
 /// Grains, by index.
@@ -765,6 +766,12 @@ fn make_shapes() -> Vec<GrayImage> {
             smooth((1.0 - r) * SLIM_OVAL_HALF.1 * TEXTURE_SIZE as f32 + 0.5)
         }),
     });
+    // a faint round falling away from its middle (the stock ultra soft tip's falloff: dim, and
+    // gone just inside its square's edge), so stamped along a stroke it builds up rounded
+    shapes.push(GrayImage {
+        name: "Ultra soft round",
+        pixels: field(|x, y| ULTRA_SOFT_PEAK * smooth(1.0 - radius(x, y))),
+    });
     shapes
 }
 
@@ -867,6 +874,9 @@ fn dots(dots: &[(f32, f32, f32, f32)], x: f32, y: f32) -> f32 {
 
 /// The slim oval's half width and half height, shares of its square.
 const SLIM_OVAL_HALF: (f32, f32) = (0.432, 0.102);
+
+/// The ultra soft round's middle, as measured.
+const ULTRA_SOFT_PEAK: f32 = 0.43;
 
 /// How much the solid dab raises the small chunk's values.
 const DAB_GAIN: f32 = 1.4;
