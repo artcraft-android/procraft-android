@@ -134,6 +134,8 @@ pub struct Interface {
     prefs: crate::prefs::Prefs,
     side_bar_shown: bool,
     licences: bool,
+    /// The keyboard shortcuts' list, from Help or while Ctrl (⌘) is held.
+    shortcut_list: crate::shortcuts::Shortcuts,
     /// Animation Assist's bar, while it is on, and sharing the layers as an animation.
     animation: crate::animation::AnimationBar,
     animated_export: Option<crate::animated_export::AnimatedExport>,
@@ -221,6 +223,7 @@ impl Default for Interface {
             prefs: crate::prefs::Prefs::kept(),
             side_bar_shown: true,
             licences: false,
+            shortcut_list: Default::default(),
             animation: crate::animation::AnimationBar::default(),
             animated_export: None,
             ended_export: None,
@@ -734,6 +737,8 @@ impl Interface {
         if self.licences && crate::licences::show(&ctx) {
             self.licences = false;
         }
+        let keys_to_canvas = self.canvas_shown() && !ctx.egui_wants_keyboard_input() && !self.keys_taken();
+        self.shortcut_list.show(&ctx, keys_to_canvas);
         self.name_colour(&ctx);
         self.place_canvas(session, ctx.pixels_per_point());
         session.set_backdrops(backdrops);
@@ -1898,6 +1903,10 @@ impl Interface {
                         }
                     }
                     Some(Act::Licences) => self.licences = true,
+                    Some(Act::Shortcuts) => {
+                        self.open = None;
+                        self.shortcut_list.open = true;
+                    }
                     Some(Act::ModelFlat) => session.set_model_flat(!session.model_flat()),
                     Some(Act::ModelAnimated(format)) => {
                         self.open = None;

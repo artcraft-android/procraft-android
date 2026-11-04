@@ -153,6 +153,42 @@ class MainActivity : ComponentActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
+    /** The keyboard shortcuts for the system's list of them (Meta+/, or Help's Keyboard shortcuts): the core's. */
+    override fun onProvideKeyboardShortcuts(
+        data: MutableList<android.view.KeyboardShortcutGroup>,
+        menu: android.view.Menu?,
+        deviceId: Int,
+    ) {
+        super.onProvideKeyboardShortcuts(data, menu, deviceId)
+        for (group in io.github.artcraftandroid.procraft.core.keyShortcutList(false, false)) {
+            val items = group.rows.flatMap { row ->
+                row.combos.mapNotNull { c ->
+                    val code = keyCodeNamed(c.key) ?: return@mapNotNull null
+                    val modifiers = (if (c.command) android.view.KeyEvent.META_CTRL_ON else 0) or
+                        (if (c.shift) android.view.KeyEvent.META_SHIFT_ON else 0) or
+                        (if (c.alt) android.view.KeyEvent.META_ALT_ON else 0)
+                    android.view.KeyboardShortcutInfo(row.does, code, modifiers)
+                }
+            }
+            if (items.isNotEmpty()) data.add(android.view.KeyboardShortcutGroup(group.heading, items))
+        }
+    }
+
+    /** The key code of a key as the core's shortcuts name it ("z", "[", "delete", "left"). */
+    private fun keyCodeNamed(name: String): Int? = when {
+        name.length == 1 && name[0] in 'a'..'z' -> android.view.KeyEvent.KEYCODE_A + (name[0] - 'a')
+        name.length == 1 && name[0] in '0'..'9' -> android.view.KeyEvent.KEYCODE_0 + (name[0] - '0')
+        name == "[" -> android.view.KeyEvent.KEYCODE_LEFT_BRACKET
+        name == "]" -> android.view.KeyEvent.KEYCODE_RIGHT_BRACKET
+        name == "delete" -> android.view.KeyEvent.KEYCODE_FORWARD_DEL
+        name == "backspace" -> android.view.KeyEvent.KEYCODE_DEL
+        name == "left" -> android.view.KeyEvent.KEYCODE_DPAD_LEFT
+        name == "right" -> android.view.KeyEvent.KEYCODE_DPAD_RIGHT
+        name == "up" -> android.view.KeyEvent.KEYCODE_DPAD_UP
+        name == "down" -> android.view.KeyEvent.KEYCODE_DPAD_DOWN
+        else -> null
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) hideSystemBars()

@@ -51,6 +51,7 @@ mod reference;
 mod screen;
 mod selection;
 mod settings;
+mod shortcuts;
 mod sound;
 mod source_editor;
 mod studio;

@@ -221,6 +221,197 @@ impl CanvasSession {
     }
 }
 
+/// A key pressed with modifiers, as [`key_shortcut`] names it: the key's name ("z", "[",
+/// "delete", "left") and whether the command key (Ctrl, ⌘), Shift and Alt (⌥) are held.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct KeyCombo {
+    pub key: String,
+    pub command: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+/// A row of the keyboard shortcuts' list: its keys written out for the platform (`keys`), the
+/// presses that do it (`combos`, none for a drag), and what it does.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct ShortcutRow {
+    pub keys: String,
+    pub combos: Vec<KeyCombo>,
+    pub does: String,
+}
+
+/// A group of the keyboard shortcuts' list, under its heading.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct ShortcutGroup {
+    pub heading: String,
+    pub rows: Vec<ShortcutRow>,
+}
+
+/// One press in the list's table: modifiers (command, shift, alt) and the key's name.
+type Press = (bool, bool, bool, &'static str);
+
+const fn alone(key: &'static str) -> Press {
+    (false, false, false, key)
+}
+
+const fn command(key: &'static str) -> Press {
+    (true, false, false, key)
+}
+
+/// A row of the list's table: the presses (none for a drag, written as `drag`), what they do, and
+/// whether only the desktop has them.
+struct Entry {
+    presses: &'static [Press],
+    drag: &'static str,
+    does: &'static str,
+    desktop: bool,
+}
+
+const fn entry(presses: &'static [Press], does: &'static str) -> Entry {
+    Entry { presses, drag: "", does, desktop: false }
+}
+
+const fn desktop(presses: &'static [Press], does: &'static str) -> Entry {
+    Entry { presses, drag: "", does, desktop: true }
+}
+
+const fn drag(keys: &'static str, does: &'static str) -> Entry {
+    Entry { presses: &[], drag: keys, does, desktop: true }
+}
+
+/// The list, by group ("{command}" in a drag's keys: the platform's command key).
+const SHORTCUTS: &[(&str, &[Entry])] = &[
+    (
+        "Edit",
+        &[
+            entry(&[command("z")], "Undo"),
+            entry(&[(true, true, false, "z")], "Redo"),
+            entry(&[command("c")], "Copy the layer"),
+            entry(&[command("x")], "Cut the layer"),
+            entry(&[command("v")], "Paste"),
+            entry(&[alone("j")], "Duplicate the layer"),
+            entry(&[alone("delete"), alone("backspace")], "Clear the layer"),
+            entry(&[alone("d"), command("d")], "Deselect"),
+        ],
+    ),
+    (
+        "Tools",
+        &[
+            entry(&[alone("b")], "Paint"),
+            entry(&[alone("e")], "Erase"),
+            entry(&[alone("m")], "Eyedropper: the next touch picks a colour"),
+            entry(&[alone("s")], "Selection"),
+            entry(&[alone("v")], "Transform"),
+            entry(&[alone("u")], "Hue, Saturation, Brightness"),
+            entry(&[alone("x")], "Swap the colours"),
+            entry(&[alone("left"), alone("right"), alone("up"), alone("down")], "Transforming: move it a pixel"),
+        ],
+    ),
+    (
+        "Panels",
+        &[
+            entry(&[alone("c")], "Colours"),
+            entry(&[alone("k")], "Actions"),
+            entry(&[alone("l")], "Layers"),
+            entry(&[alone("0")], "Hide or show the interface"),
+        ],
+    ),
+    (
+        "Brush size",
+        &[
+            entry(&[alone("["), alone("]")], "Smaller or bigger by 1%"),
+            entry(&[(false, true, false, "["), (false, true, false, "]")], "By 5%"),
+            entry(&[(false, false, true, "["), (false, false, true, "]")], "By 10%"),
+        ],
+    ),
+    (
+        "View",
+        &[
+            entry(&[command("g")], "Grey view, to check values"),
+            desktop(&[command("="), command("-")], "Zoom in or out"),
+            desktop(&[command("0")], "Fit the canvas"),
+            drag("{command} Space and drag", "Zoom"),
+            desktop(&[alone("r"), (false, true, false, "r")], "Turn the canvas 15° (with Shift, back)"),
+            drag("R and drag", "Turn the canvas (with Shift, in 15° steps)"),
+            desktop(&[alone("escape")], "Close what is open, or set the canvas upright"),
+        ],
+    ),
+    (
+        "Files",
+        &[
+            desktop(&[command("n")], "New canvas"),
+            desktop(&[command("o")], "Open or import"),
+            desktop(&[command("s")], "Save"),
+            desktop(&[(true, true, false, "s")], "Save as"),
+        ],
+    ),
+];
+
+/// How `key` (a name as [`key_shortcut`] takes it) is written: a Mac's symbols if `mac`.
+fn key_label(key: &str, mac: bool) -> String {
+    match (key, mac) {
+        ("delete", false) => "Delete".into(),
+        ("delete", true) => "⌦".into(),
+        ("backspace", false) => "Backspace".into(),
+        ("backspace", true) => "⌫".into(),
+        ("escape", false) => "Esc".into(),
+        ("escape", true) => "⎋".into(),
+        ("left", _) => "←".into(),
+        ("right", _) => "→".into(),
+        ("up", _) => "↑".into(),
+        ("down", _) => "↓".into(),
+        ("=", _) => "+".into(),
+        ("-", _) => "−".into(),
+        _ => key.to_uppercase(),
+    }
+}
+
+/// A press written out: "Ctrl+Shift+Z", or on a Mac "⇧⌘Z" (its modifiers in its own order).
+fn press_label(&(command, shift, alt, key): &Press, mac: bool) -> String {
+    let key = key_label(key, mac);
+    if mac {
+        let mods = [(alt, "⌥"), (shift, "⇧"), (command, "⌘")];
+        let mut s: String = mods.iter().filter(|(on, _)| *on).map(|(_, m)| *m).collect();
+        s.push_str(&key);
+        s
+    } else {
+        let mods = [(command, "Ctrl"), (alt, "Alt"), (shift, "Shift")];
+        let mut parts: Vec<&str> = mods.iter().filter(|(on, _)| *on).map(|(_, m)| *m).collect();
+        parts.push(&key);
+        parts.join("+")
+    }
+}
+
+/// The keyboard shortcuts, grouped, as a list to show: the canvas's (as [`key_shortcut`] has
+/// them), with the desktop's own too (its files, zooming and turning the view) if `desktop`; the
+/// keys written as a Mac's (⌘, ⇧, ⌥) if `mac`, else "Ctrl+", "Shift+", "Alt+".
+#[uniffi::export]
+pub fn key_shortcut_list(desktop: bool, mac: bool) -> Vec<ShortcutGroup> {
+    SHORTCUTS
+        .iter()
+        .filter_map(|(heading, entries)| {
+            let rows: Vec<ShortcutRow> = entries
+                .iter()
+                .filter(|e| desktop || !e.desktop)
+                .map(|e| {
+                    let keys = if e.presses.is_empty() {
+                        e.drag.replace("{command}", if mac { "⌘" } else { "Ctrl" })
+                    } else {
+                        e.presses.iter().map(|p| press_label(p, mac)).collect::<Vec<_>>().join("  ")
+                    };
+                    let combos = e
+                        .presses
+                        .iter()
+                        .map(|&(command, shift, alt, key)| KeyCombo { key: key.into(), command, shift, alt })
+                        .collect();
+                    ShortcutRow { keys, combos, does: e.does.into() }
+                })
+                .collect();
+            (!rows.is_empty()).then(|| ShortcutGroup { heading: (*heading).into(), rows })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::KeyShortcut::*;
@@ -243,6 +434,31 @@ mod tests {
         assert_eq!(key("0", false, false, false), Some(Interface));
         assert_eq!(key("backspace", false, false, false), Some(ClearLayer));
         assert_eq!(key("q", false, false, false), None);
+    }
+
+    #[test]
+    fn the_list_shows_each_canvas_shortcut_as_the_keys_do_it() {
+        let list = key_shortcut_list(false, false);
+        let rows: Vec<&ShortcutRow> = list.iter().flat_map(|g| &g.rows).collect();
+        // each press the list shows is one the canvas takes (the arrows while transforming)
+        for row in &rows {
+            assert!(!row.combos.is_empty(), "{}", row.does);
+            for c in &row.combos {
+                assert!(key_shortcut(c.key.clone(), c.command, c.shift, c.alt, true).is_some(), "{c:?}");
+            }
+        }
+        let keys = |does: &str| rows.iter().find(|r| r.does == does).map(|r| r.keys.clone());
+        assert_eq!(keys("Redo").as_deref(), Some("Ctrl+Shift+Z"));
+        assert_eq!(keys("Clear the layer").as_deref(), Some("Delete  Backspace"));
+        // the desktop's own only on the desktop, a Mac's keys as its symbols
+        assert_eq!(keys("Save"), None);
+        let mac = key_shortcut_list(true, true);
+        let row = |does: &str| mac.iter().flat_map(|g| &g.rows).find(|r| r.does == does).cloned().unwrap();
+        assert_eq!(row("Redo").keys, "⇧⌘Z");
+        assert_eq!(row("By 10%").keys, "⌥[  ⌥]");
+        assert_eq!(row("Save as").keys, "⇧⌘S");
+        assert_eq!(row("Zoom").keys, "⌘ Space and drag");
+        assert!(row("Zoom").combos.is_empty());
     }
 
     #[test]

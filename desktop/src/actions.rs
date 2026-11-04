@@ -77,6 +77,8 @@ pub enum Act {
     About,
     Licences,
     AdvancedSettings,
+    /// The keyboard shortcuts' list.
+    Shortcuts,
     GestureControls,
     CanvasInfo,
     AnimationAssist,
@@ -376,7 +378,10 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
         }
         _ => vec![
             vec![Button("About ProCraft", None, Some(Act::About)), Button("Licences", None, Some(Act::Licences))],
-            vec![Button("Advanced settings", None, Some(Act::AdvancedSettings))],
+            vec![
+                Button("Keyboard shortcuts", None, Some(Act::Shortcuts)),
+                Button("Advanced settings", None, Some(Act::AdvancedSettings)),
+            ],
         ],
     }
 }

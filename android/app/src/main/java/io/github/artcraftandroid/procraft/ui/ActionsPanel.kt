@@ -304,6 +304,12 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Act("Licences") { dialog = "Licences" to licences(context) },
             ),
             listOf(
+                Act("Keyboard shortcuts") {
+                    // the system's list of them, which the app fills in (MainActivity)
+                    var c = context
+                    while (c is android.content.ContextWrapper && c !is android.app.Activity) c = c.baseContext
+                    (c as? android.app.Activity)?.requestShowKeyboardShortcuts()
+                },
                 Act("Advanced settings") {
                     // the app's own settings page, apart from the canvas
                     runCatching { context.startActivity(Intent(context, io.github.artcraftandroid.procraft.SettingsActivity::class.java)) }
