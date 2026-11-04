@@ -314,7 +314,8 @@ impl Brush {
                 let known = id <= BlendMode::MAX_ID as f32 || id == BRUSH_BEHIND as f32;
                 self.extra.insert(key.to_owned(), if known { id } else { 0.0 });
             }
-            "grain_blend" => {
+            // the grain's and a dual brush's second's: a layer mode or the grain's own heights
+            "grain_blend" | "dual_blend" => {
                 self.extra.insert(key.to_owned(), value.round().clamp(0.0, GRAIN_LINEAR_HEIGHT as f32));
             }
             "flow" => self.flow = unit.powf(FLOW_POWER),
