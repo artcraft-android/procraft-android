@@ -1,10 +1,12 @@
 package io.github.artcraftandroid.procraft.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -25,7 +27,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -34,10 +39,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.core.GuideType
+import io.github.artcraftandroid.procraft.core.GuideUnit
 import io.github.artcraftandroid.procraft.core.SymmetryType
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -52,6 +60,35 @@ private val GuideNote get() = if (Pc.light) Color(0xFFB5B5B5) else Color(0xFF4A4
 private val GuideLabel get() = if (Pc.light) Color(0xFF414141) else Color(0xFFD0D0D0)
 private val GuideNodeCentre = Color(0xFF0A84FF)
 private val GuideNodeTurn = Color(0xFF30D158)
+
+/**
+ * The grid size's keypad, frosted as measured: the sheet and its keys let a little of what is
+ * under them through (dark over the dark editor: the sheet #1B1B1B, the side keys #2B2B2B, the
+ * digits #525252; over the white canvas #2E2E30, #38383A, #59595B). Light, as Custom Canvas's.
+ */
+private val SheetFill get() = if (Pc.light) Color(0xFFD1D3D8) else Color(0xE91A1A1A)
+private val SheetKey get() = if (Pc.light) Color(0xFFABB2BB) else Color(0x514E4E4E)
+private val SheetDigit get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0x9A757575)
+private val SheetUnit get() = if (Pc.light) Color(0xFF818C96) else Color(0xFFA0A0A1)
+private val SheetUnitInk get() = if (Pc.light) Color.White else Color(0xFF141414)
+private val SheetInk get() = if (Pc.light) Color(0xFF3E3E3E) else Color(0xFFAAAAAA)
+
+/** The keypad's keys, 79.5 tall, 9 apart; 30 between the units, the digits and the right-hand keys. */
+private val KeyHeight = 79.5.dp
+private val KeyGap = 9.dp
+private val KeyGroups = 30.dp
+/** The sheet: the keys from 51 below its top to 38 above the screen's foot. */
+private val SheetHeight = 51.dp + KeyHeight * 4 + KeyGap * 3 + 38.dp
+
+private val KEYPAD_UNITS = listOf(
+    GuideUnit.MILLIMETERS to "Millimeters",
+    GuideUnit.CENTIMETERS to "Centimeters",
+    GuideUnit.INCHES to "Inches",
+    GuideUnit.PIXELS to "Pixels",
+)
+
+/** The grid size's keypad while it is up: what is typed (the size as it was, to start with) and in which unit. */
+private data class SizeKeypad(val typed: String, val unit: GuideUnit)
 
 /** The colour bar's stops, as the engine's (dark through blue, green, orange, red, pink, white). */
 private val BAR = listOf(
@@ -94,12 +131,16 @@ fun GuideOverlay(vm: CanvasViewModel) {
 /**
  * The guide editor over the canvas: its title with Cancel and Done, the colour bar, the canvas
  * fitted between them and the toolbar (kinds, look and assisted drawing), the guide's handles
- * dragged on the canvas.
+ * dragged on the canvas, and the grid size typed on a keypad from its chip.
  */
 @Composable
 fun GuideEditor(vm: CanvasViewModel) {
     if (!vm.guideEditing) return
     val g = vm.guide ?: return
+    var keypad by remember { mutableStateOf<SizeKeypad?>(null) }
+    // up while the kind has a grid
+    val open = keypad?.takeIf { g.kind == GuideType.GRID || g.kind == GuideType.ISOMETRIC }
+    BackHandler(open != null) { keypad = null }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         // the canvas: handles dragged, perspective points added; nothing paints
         Box(Modifier.fillMaxSize().pointerInput(Unit) {
@@ -134,8 +175,81 @@ fun GuideEditor(vm: CanvasViewModel) {
                 Text("Tap to create vanishing points", color = GuideTitle, fontSize = 12.sp, maxLines = 1)
             }
         }
-        GuideToolbar(vm, Modifier.align(Alignment.BottomCenter))
+        GuideToolbar(vm, Modifier.align(Alignment.BottomCenter)) { keypad = SizeKeypad(g.sizeText, g.unit) }
         SymmetryOptions(vm, maxWidth, maxHeight)
+        open?.let { k ->
+            // each key changes the size at once; a unit chosen clears what was typed
+            fun type(typed: String) {
+                keypad = k.copy(typed = typed)
+                vm.setGuideLength(typed, k.unit)
+            }
+            GridSizeKeypad(
+                k, maxWidth, Modifier.align(Alignment.BottomCenter),
+                onUnit = {
+                    keypad = SizeKeypad("", it)
+                    vm.setGuideLength("", it)
+                },
+                onKey = { key ->
+                    val t = k.typed
+                    when {
+                        key == '⌫' -> if (t.isNotEmpty()) type(t.dropLast(1))
+                        key == '.' -> if ('.' !in t && t.length < 7) type("$t.")
+                        t.length < 7 -> type(t + key)
+                    }
+                },
+                onDone = { keypad = null },
+            )
+        }
+    }
+}
+
+/**
+ * The grid size's keypad, as measured: a sheet over the editor's foot, the whole width, rounded 30
+ * at its top; "Length" and what is typed in a 250 wide title centred 24 below its top; then the
+ * units, the digits (three across, 0 two wide) and Backspace over Done, in keys 150 x 79.5 from 51
+ * below its top. Where the screen is too narrow for them, the keys are narrower.
+ */
+@Composable
+private fun GridSizeKeypad(k: SizeKeypad, screenWidth: Dp, modifier: Modifier, onUnit: (GuideUnit) -> Unit, onKey: (Char) -> Unit, onDone: () -> Unit) {
+    val w = ((screenWidth - 16.dp - KeyGroups * 2 - KeyGap * 2) / 5).coerceIn(40.dp, 150.dp)
+    Box(
+        modifier.fillMaxWidth().height(SheetHeight).clip(RoundedCornerShape(topStart = 30.dp, topEnd = 30.dp)).background(SheetFill)
+            .pointerInput(Unit) { detectTapGestures { } },
+    ) {
+        Box(Modifier.align(Alignment.TopCenter).padding(top = 8.dp).size(250.dp, 32.dp)) {
+            Text("Length", color = SheetInk, fontSize = 12.sp, maxLines = 1, modifier = Modifier.align(Alignment.CenterStart).padding(start = 16.dp))
+            Text(k.typed, color = SheetInk, fontSize = 12.sp, maxLines = 1, modifier = Modifier.align(Alignment.CenterStart).padding(start = 160.dp))
+        }
+        Row(Modifier.align(Alignment.TopCenter).padding(top = 51.dp), horizontalArrangement = Arrangement.spacedBy(KeyGroups)) {
+            Column(verticalArrangement = Arrangement.spacedBy(KeyGap)) {
+                for ((unit, label) in KEYPAD_UNITS) {
+                    val chosen = unit == k.unit
+                    PadKey(label, if (chosen) SheetUnit else SheetKey, if (chosen) SheetUnitInk else SheetInk, 16.sp, w, KeyHeight) { onUnit(unit) }
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(KeyGap)) {
+                for (row in listOf("789", "456", "123")) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(KeyGap)) {
+                        for (d in row) PadKey(d.toString(), SheetDigit, SheetInk, 23.sp, w, KeyHeight) { onKey(d) }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(KeyGap)) {
+                    PadKey("0", SheetDigit, SheetInk, 23.sp, w * 2 + KeyGap, KeyHeight) { onKey('0') }
+                    PadKey(".", SheetDigit, SheetInk, 23.sp, w, KeyHeight) { onKey('.') }
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(KeyGap)) {
+                PadKey("Backspace", SheetKey, SheetInk, 16.sp, w, KeyHeight) { onKey('⌫') }
+                PadKey("Done", SheetKey, SheetInk, 16.sp, w, KeyHeight * 3 + KeyGap * 2) { onDone() }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PadKey(label: String, fill: Color, ink: Color, size: TextUnit, width: Dp, height: Dp, onClick: () -> Unit) {
+    Box(Modifier.size(width, height).clip(RoundedCornerShape(8.dp)).background(fill).tap(onClick), contentAlignment = Alignment.Center) {
+        Text(label, color = ink, fontSize = size, maxLines = 1)
     }
 }
 
@@ -186,7 +300,7 @@ private fun GuideType.icon() = when (this) {
  * screen the whole width less 8 each side, the sliders in one row and the switch at the end).
  */
 @Composable
-private fun GuideToolbar(vm: CanvasViewModel, modifier: Modifier) {
+private fun GuideToolbar(vm: CanvasViewModel, modifier: Modifier, onChip: () -> Unit) {
     val g = vm.guide ?: return
     val screen = androidx.compose.ui.platform.LocalConfiguration.current
     if (screen.screenWidthDp > screen.screenHeightDp) {
@@ -200,7 +314,7 @@ private fun GuideToolbar(vm: CanvasViewModel, modifier: Modifier) {
                 OptionSlider("Thickness", g.thickness, shown(g.thickness, max = true), 257.dp) { vm.setGuideLook(thickness = it) }
                 when (g.kind) {
                     GuideType.GRID, GuideType.ISOMETRIC ->
-                        OptionSlider("Grid size", sizeToSlider(g.size), "${g.size.roundToInt()}px", 257.dp, chip = true) { vm.setGuideLook(size = sliderToSize(it)) }
+                        OptionSlider("Grid size", sizeToSlider(g.size), g.sizeLabel, 257.dp, chip = true, onChip = onChip) { vm.setGuideLook(size = sliderToSize(it)) }
                     GuideType.SYMMETRY -> Box(
                         Modifier.size(257.dp, 40.dp).clip(RoundedCornerShape(20.dp)).background(Color(0xFF303030)).tap { vm.symmetryOptionsOpen = !vm.symmetryOptionsOpen },
                         contentAlignment = Alignment.Center,
@@ -229,7 +343,7 @@ private fun GuideToolbar(vm: CanvasViewModel, modifier: Modifier) {
         Row(Modifier.width(620.dp).height(54.dp), horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
             when (g.kind) {
                 GuideType.GRID, GuideType.ISOMETRIC -> {
-                    OptionSlider("Grid size", sizeToSlider(g.size), "${g.size.roundToInt()}px", 300.dp, chip = true) { vm.setGuideLook(size = sliderToSize(it)) }
+                    OptionSlider("Grid size", sizeToSlider(g.size), g.sizeLabel, 300.dp, chip = true, onChip = onChip) { vm.setGuideLook(size = sliderToSize(it)) }
                     AssistedSwitch(vm, g.assisted)
                 }
                 GuideType.PERSPECTIVE -> AssistedSwitch(vm, g.assisted)

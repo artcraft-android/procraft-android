@@ -157,6 +157,8 @@ halftonescreen	50	50	8.2	7.1	42.1	40.9
 halftonenews	50	50	9.85	11.0	36.5	39.02
 chromaperspective	50	50	15.5	14.3	34.5	35.7
 chromadisplace	50	50	11.0	11.0	39.0	39.01
+perspectivepositional	50	50	11.67	13.33	35.0	36.67
+perspectivedirectional	50	50	11.67	13.33	35.0	36.67
 guidegrid	50	50	11.5	14.0	40.5	34.0
 guideisometric	50	50	15.5	14.3	34.5	35.7
 guidesymmetry	50	50	9.98	14.0	39.0	35.0

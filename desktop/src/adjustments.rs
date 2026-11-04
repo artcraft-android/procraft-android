@@ -5,7 +5,9 @@
 //! (adjusting.rs); the touches swipe its amount.
 
 use egui::{Align2, Color32, Id, LayerId, Order, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
-use procraft_core::{AdjustShown, Adjustment, CLONE_PUCK_RADIUS, CanvasSession, adjustment_groups, adjustment_label};
+use procraft_core::{
+    AdjustShown, Adjustment, CLONE_PUCK_RADIUS, CanvasSession, PerspectiveKind, adjustment_groups, adjustment_label,
+};
 
 use crate::icons::{self, Icon};
 use crate::look::{Look, Themed, Weight, argb, pc, text};
@@ -158,6 +160,10 @@ impl Adjustments {
         if let Some(&[x, y]) = shown.clone_puck.as_deref() {
             clone_puck(ctx, pos2(x, y) / ctx.pixels_per_point());
         }
+        if let Some(&[x, y, tx, ty]) = shown.perspective_puck.as_deref() {
+            let at = pos2(x, y) / ctx.pixels_per_point();
+            perspective_puck(ctx, shown.perspective_kind, at, (ty - y).atan2(tx - x));
+        }
         // the bar takes its touches: a tap anywhere on it opens Layer or Pencil under it, a swipe
         // from it adjusts nothing
         let band = bar(ctx, look, &shown, a, bar_top);
@@ -245,6 +251,76 @@ fn clone_puck(ctx: &egui::Context, at: Pos2) {
     let painter = ctx.layer_painter(LayerId::new(Order::Middle, Id::unique("clone puck")));
     painter.circle_stroke(at, CLONE_PUCK_RADIUS, Stroke::new(4.0, Color32::WHITE));
     painter.circle_stroke(at, CLONE_PUCK_RADIUS, Stroke::new(2.0, Color32::BLACK));
+}
+
+/// Perspective blur's puck (points, as measured): positional's radius, its fill (a dark veil) and
+/// its shadow (as dark as this at its edge, gone this far out); directional's the same, with a
+/// white rim, and round its arrow a dark band between two radii, a right angle wide, holding a
+/// light triangle that points the arrow's way. Both have a white dot in the middle.
+const POSITIONAL_PUCK: (f32, u32, f32, f32) = (38.75, 0xAC222222, 0.314, 19.0);
+const DIRECTIONAL_PUCK: (f32, u32, f32, f32) = (78.25, 0xB61F1F1F, 0.208, 45.0);
+const PUCK_RIM: f32 = 1.0;
+const PUCK_BAND: (f32, f32, u32) = (41.5, 76.5, 0x80000000);
+const PUCK_ARROW: (f32, f32, f32, u32) = (56.0, 63.0, 4.5, 0xFFACACAC);
+const PUCK_DOT: f32 = 2.0;
+
+/// Perspective blur's puck at `at`, its arrow (directional) pointing at `arrow` (radians).
+fn perspective_puck(ctx: &egui::Context, kind: PerspectiveKind, at: Pos2, arrow: f32) {
+    let painter = ctx.layer_painter(LayerId::new(Order::Middle, Id::unique("perspective puck")));
+    let directional = kind == PerspectiveKind::Directional;
+    let (radius, fill, dark, reach) = if directional { DIRECTIONAL_PUCK } else { POSITIONAL_PUCK };
+    painter.add(shadow(at, radius, dark, reach, 0.5 / ctx.pixels_per_point()));
+    painter.circle_filled(at, radius, argb(fill));
+    if directional {
+        painter.circle_stroke(at, radius - PUCK_RIM / 2.0, Stroke::new(PUCK_RIM, Color32::WHITE));
+        let way = |a: f32, r: f32| at + vec2(a.cos(), a.sin()) * r;
+        // the band: an arc as wide as the band, its ends square to it
+        let (inner, outer, band) = PUCK_BAND;
+        let quarter = std::f32::consts::FRAC_PI_4;
+        let arc: Vec<Pos2> =
+            (0..=24).map(|i| way(arrow - quarter + 2.0 * quarter * i as f32 / 24.0, (inner + outer) / 2.0)).collect();
+        painter.add(egui::Shape::line(arc, Stroke::new(outer - inner, argb(band))));
+        let (base, tip, half, ink) = PUCK_ARROW;
+        let side = vec2(-arrow.sin(), arrow.cos()) * half;
+        let foot = way(arrow, base);
+        painter.add(egui::Shape::convex_polygon(
+            vec![way(arrow, tip), foot + side, foot - side],
+            argb(ink),
+            Stroke::NONE,
+        ));
+    }
+    painter.circle_filled(at, PUCK_DOT, Color32::WHITE);
+}
+
+/// A round shadow round a disc of `radius` at `at`: as dark as `dark` (0..1) at its edge, fading
+/// out over `reach` (points). It starts `inset` (half a pixel) inside the disc's edge, where the
+/// disc is drawn half across a pixel, so neither a light seam nor a dark ring shows there.
+fn shadow(at: Pos2, radius: f32, dark: f32, reach: f32, inset: f32) -> egui::Mesh {
+    const TURNS: u32 = 96;
+    const RINGS: u32 = 16;
+    let mut mesh = egui::Mesh::default();
+    let mut ring = |r: f32, t: f32| {
+        let alpha = dark * (1.0 - t).clamp(0.0, 1.0).powi(2);
+        let colour = Color32::from_black_alpha((alpha * 255.0).round() as u8);
+        for i in 0..TURNS {
+            let a = std::f32::consts::TAU * i as f32 / TURNS as f32;
+            mesh.colored_vertex(at + vec2(a.cos(), a.sin()) * r, colour);
+        }
+    };
+    ring(radius - inset, 0.0);
+    for k in 0..=RINGS {
+        let t = k as f32 / RINGS as f32;
+        ring(radius + reach * t, t);
+    }
+    for k in 0..=RINGS {
+        let (inner, outer) = (k * TURNS, (k + 1) * TURNS);
+        for i in 0..TURNS {
+            let j = (i + 1) % TURNS;
+            mesh.add_triangle(inner + i, outer + i, outer + j);
+            mesh.add_triangle(inner + i, outer + j, inner + j);
+        }
+    }
+    mesh
 }
 
 /// The bar under the top bar: the adjustment's icon and name, its amount when it has one, the

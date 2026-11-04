@@ -64,6 +64,7 @@ import io.github.artcraftandroid.procraft.core.ChromaticKind
 import io.github.artcraftandroid.procraft.core.GlitchKind
 import io.github.artcraftandroid.procraft.core.HalftoneKind
 import io.github.artcraftandroid.procraft.core.NoiseKind
+import io.github.artcraftandroid.procraft.core.PerspectiveKind
 import io.github.artcraftandroid.procraft.core.QuickShapeKind
 import io.github.artcraftandroid.procraft.core.LiquifyKind
 import kotlin.math.roundToInt
@@ -952,6 +953,70 @@ fun ClonePuck(vm: CanvasViewModel) {
     }
 }
 
+/**
+ * Perspective blur's puck (dp, as measured): its radius, fill (a dark veil) and shadow (as dark as
+ * this at its edge, gone this far out). Directional's is bigger, with a white rim and, round its
+ * arrow, a dark band between two radii a right angle wide holding a light triangle that points the
+ * arrow's way. Both have a white dot in the middle.
+ */
+private class PuckLook(val radius: Float, val fill: Color, val dark: Float, val reach: Float)
+private val PositionalPuck = PuckLook(38.75f, Color(0xAC222222), 0.314f, 19f)
+private val DirectionalPuck = PuckLook(78.25f, Color(0xB61F1F1F), 0.208f, 45f)
+private const val PUCK_RIM = 1f
+private const val BAND_INNER = 41.5f
+private const val BAND_OUTER = 76.5f
+private val BandFill = Color(0x80000000)
+private const val ARROW_BASE = 56f
+private const val ARROW_TIP = 63f
+private const val ARROW_HALF = 4.5f
+private val ArrowInk = Color(0xFFACACAC)
+
+@Composable
+fun PerspectivePuck(vm: CanvasViewModel) {
+    val (origin, ahead) = vm.perspectivePuck ?: return
+    val directional = vm.perspectiveKind == PerspectiveKind.DIRECTIONAL
+    val at = vm.canvasToWindow(origin)
+    val way = vm.canvasToWindow(ahead) - at
+    val arrow = kotlin.math.atan2(way.y, way.x)
+    val look = if (directional) DirectionalPuck else PositionalPuck
+    androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+        val r = look.radius.dp.toPx()
+        val outside = r + look.reach.dp.toPx()
+        // the shadow fades out from the edge, starting where the puck's own edge is drawn half
+        // across a pixel, so neither a light seam nor a dark ring shows there
+        val under = r - 0.5f
+        val stops = mutableListOf(0f to Color.Transparent, under / outside to Color.Transparent, (under + 0.01f) / outside to Color.Black.copy(alpha = look.dark))
+        for (k in 0..8) {
+            val t = k / 8f
+            stops += (r + t * (outside - r)) / outside to Color.Black.copy(alpha = look.dark * (1f - t) * (1f - t))
+        }
+        drawCircle(Brush.radialGradient(*stops.toTypedArray(), center = at, radius = outside), outside, at)
+        drawCircle(look.fill, r, at)
+        if (directional) {
+            val rim = PUCK_RIM.dp.toPx()
+            drawCircle(Color.White, r - rim / 2f, at, style = androidx.compose.ui.graphics.drawscope.Stroke(rim))
+            val (inner, outer) = BAND_INNER.dp.toPx() to BAND_OUTER.dp.toPx()
+            val mid = (inner + outer) / 2f
+            drawArc(
+                BandFill, Math.toDegrees(arrow.toDouble()).toFloat() - 45f, 90f, false,
+                topLeft = Offset(at.x - mid, at.y - mid), size = Size(2f * mid, 2f * mid),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(outer - inner),
+            )
+            val dir = Offset(kotlin.math.cos(arrow), kotlin.math.sin(arrow))
+            val side = Offset(-dir.y, dir.x) * ARROW_HALF.dp.toPx()
+            val foot = at + dir * ARROW_BASE.dp.toPx()
+            val tip = at + dir * ARROW_TIP.dp.toPx()
+            drawPath(androidx.compose.ui.graphics.Path().apply {
+                moveTo(tip.x, tip.y)
+                lineTo(foot.x + side.x, foot.y + side.y)
+                lineTo(foot.x - side.x, foot.y - side.y)
+                close()
+            }, ArrowInk)
+        }
+        drawCircle(Color.White, 2.dp.toPx(), at)
+    }
+}
+
 private val KindsFill get() = if (Pc.light) Color(0xFFFFFFFF) else Color(0xFF535353)
 private val KindsEdge get() = if (Pc.light) Color(0xFFFAFAFA) else Color(0xFF747474)
 private val GlitchTrack get() = if (Pc.light) Color(0xFFDDDDDD) else Color(0xFF2E2E2E)
@@ -1052,16 +1117,17 @@ internal fun shown(v: Float, max: Boolean = false) = when {
 
 /**
  * A labelled toolbar slider [width] wide: [both] ways runs −1..1 with its fill from the middle, else
- * 0..1. A [chip] value sits on a rounded chip (one that can be typed).
+ * 0..1. A [chip] value sits on a rounded chip (one that can be typed: [onChip] opens its keypad).
  */
 @Composable
-internal fun OptionSlider(label: String, value: Float, shown: String, width: Dp, both: Boolean = false, labelColor: Color = HsbLabel, chip: Boolean = false, onChange: (Float) -> Unit) {
+internal fun OptionSlider(label: String, value: Float, shown: String, width: Dp, both: Boolean = false, labelColor: Color = HsbLabel, chip: Boolean = false, onChip: (() -> Unit)? = null, onChange: (Float) -> Unit) {
     val change by rememberUpdatedState(onChange)
     Column(Modifier.width(width).height(54.dp)) {
         Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 15.dp, top = 6.dp)) {
             Text(label, color = labelColor, fontSize = 16.sp, maxLines = 1, modifier = Modifier.weight(1f))
             if (chip) {
-                Box(Modifier.offset(x = 8.dp, y = (-4).dp).clip(RoundedCornerShape(14.dp)).background(ValueChip).padding(horizontal = 12.dp, vertical = 3.dp)) {
+                val typed = if (onChip != null) Modifier.tap(onChip) else Modifier
+                Box(Modifier.offset(x = 8.dp, y = (-4).dp).clip(RoundedCornerShape(14.dp)).background(ValueChip).then(typed).padding(horizontal = 12.dp, vertical = 3.dp)) {
                     Text(shown, color = HsbValue, fontSize = 16.sp, maxLines = 1)
                 }
             } else {
@@ -1266,6 +1332,17 @@ fun HalftonePanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
         val kinds = listOf(HalftoneKind.FULL_COLOR, HalftoneKind.SCREEN_PRINT, HalftoneKind.NEWSPAPER)
         KindsSwitch(475.dp, listOf(Kind(PcIcons.HalftoneFull, "Full Color", 140.dp), Kind(PcIcons.HalftoneScreen, "Screen Print", 157.dp), Kind(PcIcons.HalftoneNews, "Newspaper", 151.dp)), kinds.indexOf(vm.halftoneKind)) {
             vm.chooseHalftoneKind(kinds[it])
+        }
+    }
+}
+
+/** The perspective blur toolbar: positional or directional. */
+@Composable
+fun PerspectivePanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
+    OptionsPanel(492.dp, 66.dp, modifier, 16.dp) {
+        val kinds = listOf(PerspectiveKind.POSITIONAL, PerspectiveKind.DIRECTIONAL)
+        KindsSwitch(460.dp, listOf(Kind(PcIcons.PerspectivePositional, "Positional", 205.dp), Kind(PcIcons.PerspectiveDirectional, "Directional", 211.5.dp)), kinds.indexOf(vm.perspectiveKind)) {
+            vm.choosePerspectiveKind(kinds[it])
         }
     }
 }

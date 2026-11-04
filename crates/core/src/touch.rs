@@ -18,8 +18,9 @@ mod pen;
 
 pub use pen::{HoverCursor, PenHover, PenPreferred, SqueezePhase};
 
+use crate::adjust::PerspectiveKind;
 use crate::adjust_menu::Adjustment;
-use crate::adjusting::{CLONE_PUCK_RADIUS, CLONE_PUCK_SLOP};
+use crate::adjusting::{CLONE_PUCK_RADIUS, CLONE_PUCK_SLOP, DIRECTIONAL_INNER, DIRECTIONAL_REACH, POSITIONAL_GRAB};
 use crate::{CanvasSession, PenSample, PointerKind, ToolKind};
 
 /// A tap: down and up within this, moving no further than [`TAP_SLOP`] points.
@@ -62,6 +63,8 @@ pub(crate) const POUR_SLIDE_GENTLER: f32 = 2.7;
 
 /// A transform's touch moved this far (points) drags what it took (a selection's too).
 const TRANSFORM_SLOP: f32 = 15.0;
+/// A touch on perspective blur's puck moved this far (points) drags it.
+const PUCK_SLOP: f32 = 10.0;
 /// A tap this near a freehand selection's first point closes it; its points are added this far
 /// apart (points).
 const FREEHAND_CLOSE: f32 = 22.0;
@@ -333,6 +336,14 @@ enum Mode {
     Hover,
 }
 
+/// A drag on perspective blur's puck: it moves the puck (held this far from its centre, window
+/// pixels) or turns its arrow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PuckDrag {
+    Move(f32, f32),
+    Turn,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Down {
     id: u64,
@@ -400,6 +411,9 @@ pub(crate) struct Touches {
     liquify_pen: bool,
     /// Where on the clone source it was taken (window pixels from its centre).
     puck_grab: (f32, f32),
+    /// What the touch does to perspective blur's puck, and whether it has started.
+    puck_drag: Option<PuckDrag>,
+    puck_dragging: bool,
     select_threshold: f32,
     freehand: Vec<(f32, f32)>,
     /// A transform is open; what its touch took, and whether it has started dragging it.
@@ -481,6 +495,8 @@ impl Default for Touches {
             liquify_velocity: (0.0, 0.0),
             liquify_pen: false,
             puck_grab: (0.0, 0.0),
+            puck_drag: None,
+            puck_dragging: false,
             select_threshold: 0.5,
             freehand: Vec::new(),
             transforming: None,
@@ -874,6 +890,27 @@ impl CanvasSession {
                 if dist(at, t.down_at) > TAP_SLOP * t.scale {
                     t.adjust_moved = true;
                 }
+                // a drag on perspective blur's puck moves it or turns its arrow, once past the slop
+                if let Some(drag) = t.puck_drag {
+                    let begins = !t.puck_dragging && dist(at, t.down_at) > PUCK_SLOP * t.scale;
+                    if begins {
+                        t.puck_dragging = true;
+                        t.adjust_moved = true;
+                    }
+                    let dragging = t.puck_dragging;
+                    drop(t);
+                    if begins {
+                        self.perspective_grabbed();
+                    }
+                    if dragging {
+                        match drag {
+                            PuckDrag::Move(gx, gy) => self.perspective_move(at.0 - gx, at.1 - gy),
+                            PuckDrag::Turn => self.perspective_turn(at.0, at.1),
+                        }
+                        out.push(TouchCommand::AdjustChanged);
+                    }
+                    return out;
+                }
                 let (from, (last_x, last_ms)) = (t.down_at, t.pour_last);
                 t.pour_last = (at.0, last.time_ms);
                 let start = !std::mem::replace(&mut t.adjust_displacing, true);
@@ -1069,6 +1106,28 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
+    /// What a drag from window point `at` does to perspective blur's puck, if it takes it at all
+    /// (`scale`: window pixels a point).
+    fn perspective_drag_at(&self, at: (f32, f32), scale: f32) -> Option<PuckDrag> {
+        let (kind, puck, arrow) = self.perspective_puck_at()?;
+        let (dx, dy) = (at.0 - puck.0, at.1 - puck.1);
+        let far = dx.hypot(dy) / scale.max(1e-6);
+        let moves = Some(PuckDrag::Move(dx, dy));
+        match kind {
+            PerspectiveKind::Positional => moves.filter(|_| far < POSITIONAL_GRAB),
+            PerspectiveKind::Directional if far <= DIRECTIONAL_INNER => moves,
+            // the arrow's side (within a right angle of it) turns it
+            PerspectiveKind::Directional if far <= DIRECTIONAL_REACH => {
+                if dx * arrow.cos() + dy * arrow.sin() > 0.0 {
+                    Some(PuckDrag::Turn)
+                } else {
+                    moves
+                }
+            }
+            PerspectiveKind::Directional => None,
+        }
+    }
+
     /// Layer Opacity's touch lifted (or another came down): what it dragged is one undo step.
     fn opacity_lifted(&self, t: &mut Touches) {
         if let Some((layer, opacity)) = t.layer_opacity.filter(|_| std::mem::take(&mut t.opacity_moved)) {
@@ -1186,6 +1245,9 @@ impl CanvasSession {
             t.adjust_displacing = false;
             t.pour_last = (at.0, now);
             t.mode = Mode::Adjust;
+            // perspective blur: a touch on its puck moves the puck or turns its arrow
+            t.puck_drag = self.perspective_drag_at(at, t.scale);
+            t.puck_dragging = false;
             if open == Adjustment::Liquify {
                 t.liquify_at = at;
                 t.liquify_ms = now;
@@ -2294,6 +2356,84 @@ mod tests {
         s.touch_down(1, PointerKind::Finger, at(30.0, 30.0, 300.0));
         let out = s.touch_up(1, at(31.0, 30.0, 350.0));
         assert!(out.contains(&TouchCommand::AdjustMenu { x: 31.0, y: 30.0 }), "{out:?}");
+    }
+
+    /// A session with perspective blur open on a 1000 × 800 canvas seen one to one, its puck in
+    /// the middle (two window pixels a point).
+    fn perspective_session(kind: PerspectiveKind) -> std::sync::Arc<CanvasSession> {
+        let s = CanvasSession::new(1000, 800);
+        {
+            let mut st = s.shared.lock();
+            st.view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+            st.adjust = crate::adjusting::Adjusting::opened(Adjustment::PerspectiveBlur);
+        }
+        s.adjustment_perspective_kind(kind);
+        s
+    }
+
+    /// Perspective blur's puck and the point along its arrow, in the window.
+    fn puck(s: &CanvasSession) -> Vec<f32> {
+        s.adjustment_shown().perspective_puck.unwrap_or_default().iter().map(|v| (v * 100.0).round() / 100.0).collect()
+    }
+
+    #[test]
+    fn perspective_blurs_puck_is_dragged_about_and_undo_steps_it_back() {
+        let s = perspective_session(PerspectiveKind::Positional);
+        assert_eq!(puck(&s), [500.0, 400.0, 500.0, 300.0]);
+        // a touch on the puck: it waits for the slop, then the puck follows where it was held
+        s.touch_down(1, PointerKind::Finger, at(520.0, 400.0, 0.0));
+        let out = s.touch_move(1, at(525.0, 402.0, 10.0));
+        assert!(!out.contains(&TouchCommand::AdjustChanged), "{out:?}");
+        let out = s.touch_move(1, at(620.0, 450.0, 40.0));
+        assert!(out.contains(&TouchCommand::AdjustChanged), "{out:?}");
+        let out = s.touch_up(1, at(620.0, 450.0, 60.0));
+        assert!(!out.iter().any(|c| matches!(c, TouchCommand::AdjustMenu { .. })), "{out:?}");
+        assert_eq!(puck(&s), [600.0, 450.0, 600.0, 350.0]);
+        assert_eq!(s.adjustment_shown().amount, 0.0);
+        // away from it the amount is swiped, the puck staying
+        s.touch_down(1, PointerKind::Finger, at(900.0, 400.0, 100.0));
+        s.touch_move(1, at(980.0, 400.0, 130.0));
+        s.touch_up(1, at(980.0, 400.0, 140.0));
+        let amount = s.adjustment_shown().amount;
+        assert!(amount > 0.0);
+        assert_eq!(puck(&s), [600.0, 450.0, 600.0, 350.0]);
+        // undo puts the puck back, the amount staying; redo moves it again
+        assert_eq!(s.undo().as_deref(), Some("Perspective Blur"));
+        assert_eq!(puck(&s), [500.0, 400.0, 500.0, 300.0]);
+        assert_eq!(s.adjustment_shown().amount, amount);
+        s.redo();
+        assert_eq!(puck(&s), [600.0, 450.0, 600.0, 350.0]);
+    }
+
+    #[test]
+    fn directional_perspective_blurs_arrow_turns_from_its_side_and_the_puck_moves_from_the_other() {
+        let s = perspective_session(PerspectiveKind::Directional);
+        assert_eq!(s.adjustment_shown().perspective_kind, PerspectiveKind::Directional);
+        // a tap on it asks for the menu
+        s.touch_down(1, PointerKind::Finger, at(505.0, 400.0, 0.0));
+        let out = s.touch_up(1, at(505.0, 400.0, 50.0));
+        assert!(out.contains(&TouchCommand::AdjustMenu { x: 505.0, y: 400.0 }), "{out:?}");
+        // from the arrow's side (60 points up) a drag turns the arrow to point at it
+        s.touch_down(1, PointerKind::Finger, at(500.0, 280.0, 100.0));
+        s.touch_move(1, at(650.0, 400.0, 130.0));
+        s.touch_up(1, at(650.0, 400.0, 140.0));
+        assert_eq!(puck(&s), [500.0, 400.0, 600.0, 400.0]);
+        // from behind it a drag moves the puck, the arrow keeping its way
+        s.touch_down(1, PointerKind::Finger, at(380.0, 400.0, 200.0));
+        s.touch_move(1, at(410.0, 440.0, 230.0));
+        s.touch_up(1, at(410.0, 440.0, 240.0));
+        assert_eq!(puck(&s), [530.0, 440.0, 630.0, 440.0]);
+        // beyond its reach (150 points) the amount is swiped
+        s.touch_down(1, PointerKind::Finger, at(530.0, 140.0, 300.0));
+        s.touch_move(1, at(600.0, 140.0, 330.0));
+        s.touch_up(1, at(600.0, 140.0, 340.0));
+        assert!(s.adjustment_shown().amount > 0.0);
+        assert_eq!(puck(&s), [530.0, 440.0, 630.0, 440.0]);
+        // undo steps back the move, then the turn
+        s.undo();
+        assert_eq!(puck(&s), [500.0, 400.0, 600.0, 400.0]);
+        s.undo();
+        assert_eq!(puck(&s), [500.0, 400.0, 500.0, 300.0]);
     }
 
     #[test]

@@ -24,14 +24,49 @@ pub enum SymmetryKind {
     Radial,
 }
 
+/// The unit a grid's size is typed and shown in; the size itself is kept in canvas pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LengthUnit {
+    #[default]
+    Pixels,
+    Millimetres,
+    Centimetres,
+    Inches,
+}
+
+impl LengthUnit {
+    /// How many of it make an inch; none for pixels.
+    pub fn per_inch(self) -> Option<f32> {
+        match self {
+            LengthUnit::Pixels => None,
+            LengthUnit::Millimetres => Some(25.4),
+            LengthUnit::Centimetres => Some(2.54),
+            LengthUnit::Inches => Some(1.0),
+        }
+    }
+
+    /// `v` of it in pixels, `dpi` to the inch.
+    pub fn to_pixels(self, v: f32, dpi: f32) -> f32 {
+        self.per_inch().map_or(v, |k| v / k * dpi)
+    }
+
+    /// `px` pixels in it, `dpi` to the inch.
+    pub fn from_pixels(self, px: f32, dpi: f32) -> f32 {
+        self.per_inch().map_or(px, |k| px / dpi * k)
+    }
+}
+
 /// One kind of guide's look: its opacity and line thickness (0..1), its grid's size (canvas
-/// pixels), and its colour (0..1 along the colour bar, see [`bar_color`]).
+/// pixels) and the unit it is shown in, and its colour (0..1 along the colour bar, see
+/// [`bar_color`]).
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GuideLook {
     pub opacity: f32,
     pub thickness: f32,
     pub size: f32,
     pub color: f32,
+    #[serde(default, deserialize_with = "crate::document::or_default")]
+    pub unit: LengthUnit,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -57,10 +92,10 @@ pub struct Guide {
 
 /// The kinds' looks as a new guide starts.
 pub const STARTS: [GuideLook; 4] = [
-    GuideLook { opacity: 0.36, thickness: 0.64, size: 71.0, color: 0.0 },
-    GuideLook { opacity: 0.30, thickness: 0.60, size: 82.0, color: 0.0 },
-    GuideLook { opacity: 1.0, thickness: 0.70, size: 71.0, color: 0.33 },
-    GuideLook { opacity: 0.41, thickness: 0.60, size: 71.0, color: 0.0 },
+    GuideLook { opacity: 0.36, thickness: 0.64, size: 71.0, color: 0.0, unit: LengthUnit::Pixels },
+    GuideLook { opacity: 0.30, thickness: 0.60, size: 82.0, color: 0.0, unit: LengthUnit::Pixels },
+    GuideLook { opacity: 1.0, thickness: 0.70, size: 71.0, color: 0.33, unit: LengthUnit::Pixels },
+    GuideLook { opacity: 0.41, thickness: 0.60, size: 71.0, color: 0.0, unit: LengthUnit::Pixels },
 ];
 
 /// The guide colour bar: dark through blue, green, orange, red and pink to white, as stops.
@@ -391,6 +426,30 @@ mod tests {
 
     fn on(kind: GuideKind) -> Guide {
         Guide { on: true, kind, assisted: true, ..Guide::new(200, 100) }
+    }
+
+    #[test]
+    fn lengths_go_to_pixels_and_back_by_the_dpi() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        // 10 cm at 132 dpi is the 520 px grid measured; 8 mm about 41.6 px
+        assert!(near(LengthUnit::Centimetres.to_pixels(10.0, 132.0), 519.685));
+        assert!(near(LengthUnit::Millimetres.to_pixels(8.0, 132.0), 41.575));
+        assert!(near(LengthUnit::Inches.to_pixels(1.0, 300.0), 300.0));
+        assert!(near(LengthUnit::Pixels.to_pixels(71.0, 300.0), 71.0));
+        for unit in [LengthUnit::Pixels, LengthUnit::Millimetres, LengthUnit::Centimetres, LengthUnit::Inches] {
+            assert!(near(unit.from_pixels(unit.to_pixels(3.5, 72.0), 72.0), 3.5), "{unit:?}");
+        }
+    }
+
+    #[test]
+    fn a_look_without_a_unit_or_with_one_unknown_is_in_pixels() {
+        let old = r#"{"opacity":0.5,"thickness":0.5,"size":40.0,"color":0.0}"#;
+        assert_eq!(serde_json::from_str::<GuideLook>(old).unwrap().unit, LengthUnit::Pixels);
+        let odd = r#"{"opacity":0.5,"thickness":0.5,"size":40.0,"color":0.0,"unit":"Furlongs"}"#;
+        let look = serde_json::from_str::<GuideLook>(odd).unwrap();
+        assert_eq!((look.unit, look.size), (LengthUnit::Pixels, 40.0));
+        let mm = GuideLook { unit: LengthUnit::Millimetres, ..STARTS[0] };
+        assert_eq!(serde_json::from_str::<GuideLook>(&serde_json::to_string(&mm).unwrap()).unwrap(), mm);
     }
 
     #[test]

@@ -226,6 +226,7 @@ Lucide set beside them.
 | Clouds / Billows / Ridges (Noise) | wisps of mist / two rows of rounded humps / a range of sharp peaks |
 | Full colour / Screen / Newspaper (Halftone) | big and small dots in a checker / dots set out in a diamond / a page with a picture and columns |
 | Perspective / Displace (Chromatic Aberration) | four arrows out from a centre / a disc with its outline copy shifted off it |
+| Positional / Directional (Perspective Blur) | a dot with rays streaming out of it all round / the same rays fanning out one way only |
 | Artifact / Wave / Signal / Diverge (Glitch) | a mosaic of blocks / a square wave / a screen with broken lines / a line that splits in two |
 | Moving / Texturized (grain) | rows of grain with an arrow along under them / the pitted Grain tile |
 | Paint, painting an adjustment on | the Paint brush with an adjustment ring |

@@ -2,7 +2,8 @@
 //! as its bar and panels show them, and how each change redraws it (the filters themselves are in
 //! adjust.rs). The app opens and ends it and shows its values; the touches drag its amount.
 //! Noise, bloom, halftone, chromatic aberration and glitch keep their settings from one adjustment
-//! to the next; the amount, HSB, colour balance and curves start afresh.
+//! to the next; the amount, HSB, colour balance and curves start afresh, and perspective blur
+//! positional, its puck in the canvas's middle and its arrow up.
 
 use std::sync::Arc;
 
@@ -11,7 +12,8 @@ use procraft_engine::view::View;
 
 use crate::CanvasSession;
 use crate::adjust::{
-    ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, MOTION_DRAG_PT, NoiseKind, SwipeAdjustment,
+    ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, MOTION_DRAG_PT, NoiseKind, PerspectiveKind,
+    SwipeAdjustment,
 };
 use crate::adjust_menu::{Adjustment, adjustment_paintable, adjustment_pencil_amount};
 use crate::gradients::Gradients;
@@ -24,6 +26,16 @@ const CURVE_GAP: f32 = 0.01;
 /// The clone source's ring (points from its centre), and how far off it a touch still takes it.
 pub const CLONE_PUCK_RADIUS: f32 = 30.0;
 pub(crate) const CLONE_PUCK_SLOP: f32 = 8.0;
+/// Perspective blur's puck takes a drag that starts this near it (points): positional's moves it;
+/// directional's within the inner ring moves it, and out to the reach turns the arrow when the drag
+/// starts on the arrow's side (within a right angle of it) and moves the puck otherwise.
+pub(crate) const POSITIONAL_GRAB: f32 = 50.0;
+pub(crate) const DIRECTIONAL_INNER: f32 = 40.0;
+pub(crate) const DIRECTIONAL_REACH: f32 = 110.0;
+/// Perspective blur's arrow at first: up the window. The point along it given for drawing lies
+/// this far from the puck (canvas pixels).
+const ARROW_UP: f32 = -std::f32::consts::FRAC_PI_2;
+const ARROW_TIP: f32 = 100.0;
 
 /// Each glitch kind's sliders as they start (the last its zoom).
 fn glitch_defaults() -> [Vec<f32>; 4] {
@@ -77,6 +89,10 @@ pub struct AdjustShown {
     pub liquified: bool,
     /// Cloning: where the source is in the window (x, y; none when not cloning or off the view).
     pub clone_puck: Option<Vec<f32>>,
+    /// Perspective blur: all round or towards its arrow, and (on the layer, not painted on) its
+    /// puck in the window and a point along its arrow there (x, y, then x, y; window pixels).
+    pub perspective_kind: PerspectiveKind,
+    pub perspective_puck: Option<Vec<f32>>,
     /// Anything was changed since it opened (or was last kept).
     pub changed: bool,
 }
@@ -119,6 +135,26 @@ pub(crate) struct Adjusting {
     puck_offset: Option<Vec2>,
     puck_before: Vec<Vec2>,
     puck_after: Vec<Vec2>,
+    /// Perspective blur: its way, its puck and arrow, and where they were before each drag on the
+    /// puck and each undone (for undo and redo).
+    perspective_kind: PerspectiveKind,
+    perspective: Perspective,
+    perspective_before: Vec<Perspective>,
+    perspective_after: Vec<Perspective>,
+}
+
+/// Perspective blur's puck: where it is (canvas pixels; none for the canvas's middle), and the way
+/// its arrow points (a canvas angle, radians).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Perspective {
+    origin: Option<Vec2>,
+    arrow: f32,
+}
+
+impl Default for Perspective {
+    fn default() -> Perspective {
+        Perspective { origin: None, arrow: ARROW_UP }
+    }
 }
 
 impl Default for Adjusting {
@@ -156,6 +192,10 @@ impl Default for Adjusting {
             puck_offset: None,
             puck_before: Vec::new(),
             puck_after: Vec::new(),
+            perspective_kind: PerspectiveKind::Positional,
+            perspective: Perspective::default(),
+            perspective_before: Vec::new(),
+            perspective_after: Vec::new(),
         }
     }
 }
@@ -198,6 +238,22 @@ impl Adjusting {
         }
     }
 
+    /// Perspective blur, undo puts its puck and arrow back as they were before the last drag on it,
+    /// and redo as that drag left them. Returns whether there was one to step.
+    fn perspective_step(&mut self, undo: bool) -> bool {
+        if self.open != Some(Adjustment::PerspectiveBlur) {
+            return false;
+        }
+        let (from, to) = if undo {
+            (&mut self.perspective_before, &mut self.perspective_after)
+        } else {
+            (&mut self.perspective_after, &mut self.perspective_before)
+        };
+        let Some(p) = from.pop() else { return false };
+        to.push(std::mem::replace(&mut self.perspective, p));
+        true
+    }
+
     /// Chromatic aberration displacing: a drag moves the fringes.
     pub(crate) fn displacing(&self) -> bool {
         self.open == Some(Adjustment::ChromaticAberration) && self.chroma_kind == ChromaticKind::Displace
@@ -214,11 +270,12 @@ impl Adjusting {
             Some(Adjustment::ColorBalance) => self.balance.iter().any(|&v| v != 0.5),
             Some(Adjustment::Curves) => self.curves.iter().any(|c| *c != straight()),
             Some(Adjustment::GradientMap) => true,
+            Some(Adjustment::PerspectiveBlur) => self.amount > 0.0 || !self.perspective_before.is_empty(),
             _ => self.amount > 0.0,
         }
     }
 
-    fn shown(&self, view: Option<View>) -> AdjustShown {
+    fn shown(&self, view: Option<View>, middle: Vec2) -> AdjustShown {
         AdjustShown {
             adjustment: self.open,
             amount: self.amount,
@@ -248,8 +305,20 @@ impl Adjusting {
                 let at = v.to_screen().apply(p);
                 vec![at.x, at.y]
             }),
+            perspective_kind: self.perspective_kind,
+            perspective_puck: self.perspective_puck(view, middle),
             changed: self.changed(),
         }
+    }
+
+    /// Perspective blur on the layer (not painted on): its puck and a point along its arrow in the
+    /// window, its puck in the canvas's `middle` until moved.
+    fn perspective_puck(&self, view: Option<View>, middle: Vec2) -> Option<Vec<f32>> {
+        let v = view.filter(|_| self.open == Some(Adjustment::PerspectiveBlur) && !self.pencil)?;
+        let origin = self.perspective.origin.unwrap_or(middle);
+        let arrow = Vec2::new(self.perspective.arrow.cos(), self.perspective.arrow.sin());
+        let (at, tip) = (v.to_screen().apply(origin), v.to_screen().apply(origin + arrow * ARROW_TIP));
+        Some(vec![at.x, at.y, tip.x, tip.y])
     }
 }
 
@@ -267,6 +336,7 @@ enum Redraw {
     Halftone(HalftoneKind, f32),
     Chroma(ChromaticKind, f32, (f32, f32), [f32; 2]),
     Glitch(GlitchKind, f32, Vec<f32>),
+    Perspective(PerspectiveKind, f32, Option<[f32; 2]>, f32),
 }
 
 impl Adjusting {
@@ -276,7 +346,12 @@ impl Adjusting {
         match self.open {
             Some(Adjustment::GaussianBlur) => Redraw::Swipe(SwipeAdjustment::GaussianBlur, a),
             Some(Adjustment::Sharpen) => Redraw::Swipe(SwipeAdjustment::Sharpen, a),
-            Some(Adjustment::PerspectiveBlur) => Redraw::Swipe(SwipeAdjustment::PerspectiveBlur, a),
+            Some(Adjustment::PerspectiveBlur) => Redraw::Perspective(
+                self.perspective_kind,
+                a,
+                self.perspective.origin.map(|o| [o.x, o.y]),
+                self.perspective.arrow,
+            ),
             Some(Adjustment::Hsb) => Redraw::Hsb(self.hsb),
             Some(Adjustment::ColorBalance) => Redraw::Balance(self.balance),
             Some(Adjustment::Curves) => {
@@ -324,17 +399,44 @@ impl CanvasSession {
         if self.shared.lock().pencil {
             return None;
         }
+        // perspective blur's puck steps back (or on) a drag at a time
+        if self.perspective_step(undo) {
+            return Some(Some(crate::adjust_menu::adjustment_label(open)));
+        }
         if touched {
             if !undo {
                 return Some(None);
             }
-            self.adjustment_reset();
+            self.adjustment_again(open, false);
             return Some(Some(crate::adjust_menu::adjustment_label(open)));
         }
+        let kept = self.adjusting(|a, _| (a.perspective_kind, a.perspective));
         self.adjustment_end(false);
         let name = step(self);
         self.adjustment_start(open);
+        self.adjusting(|a, _| (a.perspective_kind, a.perspective) = kept);
         Some(name)
+    }
+
+    /// Perspective blur's puck and arrow stepped back (`undo`) or on a drag, and the blur redrawn.
+    /// Returns whether there was one to step.
+    fn perspective_step(&self, undo: bool) -> bool {
+        let redraw = self.adjusting(|a, _| a.perspective_step(undo).then(|| a.redraw()));
+        redraw.map(|r| self.redraw_adjustment(r)).is_some()
+    }
+
+    /// Opens the adjustment open again from nothing, or (`commit`) keeping what it did as one undo
+    /// step. Perspective blur keeps its way, and committed, its puck and arrow.
+    fn adjustment_again(&self, open: Adjustment, commit: bool) {
+        let (kind, puck) = self.adjusting(|a, _| (a.perspective_kind, a.perspective));
+        self.adjustment_end(commit);
+        self.adjustment_start(open);
+        self.adjusting(|a, _| {
+            a.perspective_kind = kind;
+            if commit {
+                a.perspective = puck;
+            }
+        });
     }
 
     fn adjusting<R>(&self, f: impl FnOnce(&mut Adjusting, (u32, u32)) -> R) -> R {
@@ -365,6 +467,7 @@ impl CanvasSession {
                 let zoom = values.pop().unwrap_or(1.0);
                 self.adjust_glitch(kind, amount, values, zoom);
             }
+            Redraw::Perspective(kind, amount, origin, arrow) => self.adjust_perspective(kind, amount, origin, arrow),
         }
     }
 
@@ -402,6 +505,7 @@ impl CanvasSession {
         if !begun {
             return false;
         }
+        let up = self.shared.lock().canvas_angle(ARROW_UP);
         let redraw = self.adjusting(|a, _| {
             a.open = Some(adjustment);
             a.amount = if adjustment == Adjustment::GradientMap { 1.0 } else { 0.0 };
@@ -418,6 +522,10 @@ impl CanvasSession {
             a.puck_offset = None;
             a.puck_before.clear();
             a.puck_after.clear();
+            a.perspective_kind = PerspectiveKind::Positional;
+            a.perspective = Perspective { origin: None, arrow: up };
+            a.perspective_before.clear();
+            a.perspective_after.clear();
             // a gradient map and a glitch show at once
             if matches!(adjustment, Adjustment::GradientMap | Adjustment::Glitch) { a.redraw() } else { Redraw::None }
         });
@@ -448,7 +556,7 @@ impl CanvasSession {
     /// What the open adjustment shows.
     pub fn adjustment_shown(&self) -> AdjustShown {
         let st = self.shared.lock();
-        st.adjust.shown(st.view)
+        st.adjust.shown(st.view, Vec2::new(st.doc.width() as f32 / 2.0, st.doc.height() as f32 / 2.0))
     }
 
     /// The amount moved by `step` (a swipe's), within 0..1.
@@ -632,21 +740,26 @@ impl CanvasSession {
     /// Keeps what the adjustment did as one undo step and starts it again from there.
     pub fn adjustment_apply(&self) {
         if let Some(open) = self.adjusting(|a, _| a.open) {
-            self.adjustment_end(true);
-            self.adjustment_start(open);
+            self.adjustment_again(open, true);
         }
     }
 
-    /// Takes back the adjustment's changes, or with none, the last one kept.
+    /// Takes back the adjustment's changes (perspective blur's puck a drag at a time), or with
+    /// none, the last one kept.
     pub fn adjustment_undo(&self) {
         let Some((open, changed)) = self.adjusting(|a, _| a.open.map(|o| (o, a.changed()))) else { return };
-        if changed {
-            self.adjustment_reset();
+        if self.perspective_step(true) {
             return;
         }
+        if changed {
+            self.adjustment_again(open, false);
+            return;
+        }
+        let kept = self.adjusting(|a, _| (a.perspective_kind, a.perspective));
         self.adjustment_end(false);
         self.undo();
         self.adjustment_start(open);
+        self.adjusting(|a, _| (a.perspective_kind, a.perspective) = kept);
     }
 
     /// Layer or Pencil: painting the adjustment on starts it at its own amount, and only where the
@@ -676,6 +789,18 @@ impl CanvasSession {
         } else {
             self.change_adjustment(|a, _| a.amount = amount);
         }
+    }
+
+    /// Perspective blur all round its puck, or only towards its arrow.
+    pub fn adjustment_perspective_kind(&self, kind: PerspectiveKind) {
+        let redraw = self.adjusting(|a, _| {
+            if a.open != Some(Adjustment::PerspectiveBlur) {
+                return Redraw::None;
+            }
+            a.perspective_kind = kind;
+            a.redraw()
+        });
+        self.redraw_adjustment(redraw);
     }
 
     /// Liquify's way.
@@ -766,6 +891,54 @@ impl CanvasSession {
         let at = st.view?.to_screen().apply(st.adjust.puck?);
         Some((at.x, at.y))
     }
+
+    /// Perspective blur on the layer (not painted on): its way, where its puck is in the window,
+    /// and the way its arrow points there (radians).
+    pub(crate) fn perspective_puck_at(&self) -> Option<(PerspectiveKind, (f32, f32), f32)> {
+        let shown = self.adjustment_shown();
+        let &[x, y, tx, ty] = shown.perspective_puck.as_deref()? else { return None };
+        Some((shown.perspective_kind, (x, y), (ty - y).atan2(tx - x)))
+    }
+
+    /// A drag on perspective blur's puck begins: undo puts it back as it is now.
+    pub(crate) fn perspective_grabbed(&self) {
+        self.adjusting(|a, _| {
+            if a.open == Some(Adjustment::PerspectiveBlur) {
+                a.perspective_before.push(a.perspective);
+                a.perspective_after.clear();
+            }
+        });
+    }
+
+    /// Perspective blur's puck dragged to window point (`x`, `y`).
+    pub(crate) fn perspective_move(&self, x: f32, y: f32) {
+        let Some(at) = self.shared.lock().window_to_canvas(x, y) else { return };
+        self.change_adjustment(|a, _| a.perspective.origin = Some(at));
+    }
+
+    /// Perspective blur's arrow turned to point from its puck at window point (`x`, `y`).
+    pub(crate) fn perspective_turn(&self, x: f32, y: f32) {
+        let away = {
+            let st = self.shared.lock();
+            let middle = Vec2::new(st.doc.width() as f32 / 2.0, st.doc.height() as f32 / 2.0);
+            st.window_to_canvas(x, y).map(|at| at - st.adjust.perspective.origin.unwrap_or(middle))
+        };
+        if let Some(away) = away.filter(|d| d.length() > 0.0) {
+            self.change_adjustment(|a, _| a.perspective.arrow = away.y.atan2(away.x));
+        }
+    }
+}
+
+impl crate::State {
+    /// The canvas angle (radians) of the way that points at `angle` in the window.
+    fn canvas_angle(&self, angle: f32) -> f32 {
+        let way = Vec2::new(angle.cos(), angle.sin());
+        self.view
+            .and_then(|v| v.to_screen().inverse())
+            .map(|inv| inv.apply(way) - inv.apply(Vec2::new(0.0, 0.0)))
+            .filter(|d| d.is_finite() && d.length() > 0.0)
+            .map_or(angle, |d| d.y.atan2(d.x))
+    }
 }
 
 #[cfg(test)]
@@ -775,7 +948,7 @@ mod tests {
     #[test]
     fn values_start_as_the_app_ships_them() {
         let a = Adjusting::default();
-        let shown = a.shown(None);
+        let shown = a.shown(None, Vec2::new(32.0, 32.0));
         assert_eq!(shown.adjustment, None);
         assert_eq!(shown.noise, vec![0.0, 0.0, 0.7]);
         assert_eq!(shown.bloom, vec![1.0, 0.3, 0.35]);

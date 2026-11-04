@@ -29,6 +29,7 @@ import io.github.artcraftandroid.procraft.core.CanvasSession
 import io.github.artcraftandroid.procraft.core.ModelFile
 import io.github.artcraftandroid.procraft.core.SourceKind
 import io.github.artcraftandroid.procraft.core.ChromaticKind
+import io.github.artcraftandroid.procraft.core.PerspectiveKind
 import io.github.artcraftandroid.procraft.core.GlitchKind
 import io.github.artcraftandroid.procraft.core.GuideInfo
 import io.github.artcraftandroid.procraft.core.KeyShortcut
@@ -36,6 +37,7 @@ import io.github.artcraftandroid.procraft.core.ModeButton
 import io.github.artcraftandroid.procraft.core.Modes
 import io.github.artcraftandroid.procraft.core.modeSwitch
 import io.github.artcraftandroid.procraft.core.GuideType
+import io.github.artcraftandroid.procraft.core.GuideUnit
 import io.github.artcraftandroid.procraft.core.SymmetryType
 import io.github.artcraftandroid.procraft.core.HalftoneKind
 import io.github.artcraftandroid.procraft.core.NoiseKind
@@ -678,6 +680,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var chromaKind by mutableStateOf(ChromaticKind.PERSPECTIVE)
         private set
     var chromaValues by mutableStateOf(mapOf(ChromaticKind.PERSPECTIVE to listOf(0f, 0f), ChromaticKind.DISPLACE to listOf(0f, 0f)))
+        private set
+    /** Perspective blur: positional or directional, and (on the layer) its puck and a point along its arrow (canvas pixels). */
+    var perspectiveKind by mutableStateOf(PerspectiveKind.POSITIONAL)
+        private set
+    var perspectivePuck by mutableStateOf<Pair<Offset, Offset>?>(null)
         private set
 
     /** The node held on the transform box and where the touch is (window pixels), while a drag lasts. */
@@ -2335,6 +2342,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         guide = session?.setGuideLook(opacity ?: g.opacity, thickness ?: g.thickness, size ?: g.size, hue ?: g.hue)
     }
 
+    /** The shown grid's size typed on its keypad: [typed] so far, in [unit]. It changes at once. */
+    fun setGuideLength(typed: String, unit: GuideUnit) {
+        guide = session?.setGuideLength(typed, unit)
+    }
+
     fun setGuideSymmetry(kind: SymmetryType, rotational: Boolean) {
         guide = session?.setGuideSymmetry(kind, rotational)
     }
@@ -2434,15 +2446,60 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The QuickMenu, open around this window point. */
     var quickMenuAt by mutableStateOf<Offset?>(null)
 
-    /** The QuickMenu's actions, in order round from the top. */
-    /** The QuickMenu's buttons, clockwise from the top: each set to an action (a hold changes it). */
-    var quickMenuSlots by mutableStateOf(io.github.artcraftandroid.procraft.core.quickMenuSlots(interfacePrefs.getString(QUICK_MENU, null)))
+    /** The QuickMenu's menus, oldest first: each a name and six buttons, clockwise from the top, each set to an action (a hold changes it). */
+    var quickMenus by mutableStateOf(
+        io.github.artcraftandroid.procraft.core.quickMenus(interfacePrefs.getString(QUICK_MENUS, null), interfacePrefs.getString(QUICK_MENU, null)),
+    )
         private set
 
+    /** The menu kept as the active one. */
+    var quickMenuActive by mutableStateOf(interfacePrefs.getInt(QUICK_MENU_ACTIVE, 0).coerceIn(0, quickMenus.size - 1))
+        private set
+
+    /** The menu the ring shows this time: a menu just added shows without becoming the active one. */
+    var quickMenuShown by mutableStateOf(quickMenuActive)
+        private set
+
+    /** The buttons the ring shows. */
+    val quickMenuSlots: List<QuickAction> get() = quickMenus.getOrNull(quickMenuShown)?.slots.orEmpty()
+
     fun setQuickSlot(i: Int, a: QuickAction) {
-        if (i !in quickMenuSlots.indices) return
-        quickMenuSlots = quickMenuSlots.toMutableList().also { it[i] = a }
-        interfacePrefs.edit().putString(QUICK_MENU, io.github.artcraftandroid.procraft.core.quickMenuSaved(quickMenuSlots)).apply()
+        val menu = quickMenus.getOrNull(quickMenuShown) ?: return
+        if (i !in menu.slots.indices) return
+        quickMenus = quickMenus.toMutableList().also { it[quickMenuShown] = menu.copy(slots = menu.slots.toMutableList().also { s -> s[i] = a }) }
+        keepQuickMenus()
+    }
+
+    /** Adds a menu ("QuickMenu N", every button No Action) and shows it; the active one stays until a menu is chosen. Returns its index. */
+    fun addQuickMenu(): Int {
+        quickMenus = io.github.artcraftandroid.procraft.core.quickMenuAdded(quickMenus)
+        quickMenuShown = quickMenus.size - 1
+        keepQuickMenus()
+        return quickMenuShown
+    }
+
+    /** Makes menu [i] the active one and shows it. */
+    fun chooseQuickMenu(i: Int) {
+        if (i !in quickMenus.indices) return
+        quickMenuActive = i
+        quickMenuShown = i
+        keepQuickMenus()
+    }
+
+    /** Deletes menu [i] (never the last one left); the ring shows the one before it if it showed it. */
+    fun deleteQuickMenu(i: Int) {
+        if (quickMenus.size < 2 || i !in quickMenus.indices) return
+        quickMenus = quickMenus.toMutableList().also { it.removeAt(i) }
+        quickMenuActive = io.github.artcraftandroid.procraft.core.quickMenuActiveAfter(quickMenuActive.toUInt(), i.toUInt()).toInt()
+        quickMenuShown = io.github.artcraftandroid.procraft.core.quickMenuActiveAfter(quickMenuShown.toUInt(), i.toUInt()).toInt()
+        keepQuickMenus()
+    }
+
+    private fun keepQuickMenus() {
+        interfacePrefs.edit()
+            .putString(QUICK_MENUS, io.github.artcraftandroid.procraft.core.quickMenusSaved(quickMenus))
+            .putInt(QUICK_MENU_ACTIVE, quickMenuActive)
+            .apply()
     }
 
     /**
@@ -2642,6 +2699,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Does what a gesture set to the QuickMenu does: opens it at [at], or closes it if open. */
     fun toggleQuickMenu(at: Offset) {
+        if (quickMenuAt == null) quickMenuShown = quickMenuActive
         quickMenuAt = if (quickMenuAt == null) at else null
     }
 
@@ -5035,6 +5093,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         liquifyAmount = a.liquifyAmount
         liquified = a.liquified
         clonePuck = a.clonePuck?.let { windowToCanvas(Offset(it[0], it[1])) }
+        perspectiveKind = a.perspectiveKind
+        perspectivePuck = a.perspectivePuck?.takeIf { it.size == 4 }?.let { p ->
+            val origin = windowToCanvas(Offset(p[0], p[1]))
+            val ahead = windowToCanvas(Offset(p[2], p[3]))
+            if (origin != null && ahead != null) origin to ahead else null
+        }
     }
 
     /** Opens adjustment [a] on the current layer (keeping one already open). */
@@ -5066,6 +5130,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readAdjust()
         adjustment = null
         clonePuck = null
+        perspectivePuck = null
         if (painted) readSliders()
         refresh()
         if (panel == Panel.LAYERS) refreshThumbnails()
@@ -5243,6 +5308,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun chooseChromaKind(kind: ChromaticKind) {
         session?.adjustmentChromaKind(kind)
+        readAdjust()
+    }
+
+    /** Perspective blur all round its puck, or only towards its arrow. */
+    fun choosePerspectiveKind(kind: PerspectiveKind) {
+        session?.adjustmentPerspectiveKind(kind)
         readAdjust()
     }
 
@@ -6561,7 +6632,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val DRAG_IMAGE_FORMAT = "drag_image_format"
         val DRAG_FORMATS = listOf(OWN_LABEL, "PSD", "JPEG", "PNG", "TIFF")
         val DRAG_IMAGE_FORMATS = listOf("JPEG", "PNG", "TIFF")
+        /** The QuickMenu's buttons as kept before there were several menus (read once, into the first). */
         const val QUICK_MENU = "quick_menu"
+        const val QUICK_MENUS = "quick_menus"
+        const val QUICK_MENU_ACTIVE = "quick_menu_active"
         /** A press of □ this short, used by nothing, is a tap. */
         const val MODIFY_TAP_MS = 500L
         const val PRESETS = "presets"

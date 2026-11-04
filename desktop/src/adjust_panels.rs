@@ -1,10 +1,10 @@
 //! The effect adjustments' toolbars, as the Android app's (ui/AdjustmentsUi.kt): Glitch, Noise,
-//! Bloom, Halftone and Chromatic Aberration, floating 25 above the window's foot; side by side where
-//! the window is wide, stacked where it is narrow. Their kinds switch along the top; their sliders
-//! change the adjustment at once (adjusting.rs).
+//! Bloom, Halftone, Chromatic Aberration and Perspective Blur, floating 25 above the window's foot;
+//! side by side where the window is wide, stacked where it is narrow. Their kinds switch along the
+//! top; their sliders change the adjustment at once (adjusting.rs).
 
 use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
-use procraft_core::{AdjustShown, CanvasSession, ChromaticKind, GlitchKind, HalftoneKind, NoiseKind};
+use procraft_core::{AdjustShown, CanvasSession, ChromaticKind, GlitchKind, HalftoneKind, NoiseKind, PerspectiveKind};
 
 use crate::icons::{self, Icon};
 use crate::look::{Look, Shade, Themed, Weight, argb, pc, text};
@@ -60,6 +60,10 @@ const HALFTONE_KINDS: [(HalftoneKind, &str, f32, &Icon); 3] = [
 const CHROMA_KINDS: [(ChromaticKind, &str, f32, &Icon); 2] = [
     (ChromaticKind::Perspective, "Perspective", 204.0, &icons::CHROMA_PERSPECTIVE),
     (ChromaticKind::Displace, "Displace", 204.0, &icons::CHROMA_DISPLACE),
+];
+const PERSPECTIVE_KINDS: [(PerspectiveKind, &str, f32, &Icon); 2] = [
+    (PerspectiveKind::Positional, "Positional", 205.0, &icons::PERSPECTIVE_POSITIONAL),
+    (PerspectiveKind::Directional, "Directional", 211.5, &icons::PERSPECTIVE_DIRECTIONAL),
 ];
 
 /// A slider's value as shown: None at nothing, Max at all (`max`), else a percentage.
@@ -218,6 +222,7 @@ impl Toolbars {
             Some(procraft_core::Adjustment::Bloom) => bloom(ctx, session, shown, screen, wide),
             Some(procraft_core::Adjustment::Halftone) => halftone(ctx, look, session, shown, screen),
             Some(procraft_core::Adjustment::ChromaticAberration) => chromatic(ctx, look, session, shown, screen),
+            Some(procraft_core::Adjustment::PerspectiveBlur) => perspective(ctx, look, session, shown, screen),
             Some(procraft_core::Adjustment::ColorBalance) => self.balance(ctx, look, session, shown, screen, wide),
             Some(procraft_core::Adjustment::Curves) => self.curves(ctx, session, shown, screen),
             Some(procraft_core::Adjustment::Liquify) => self.liquify.show(ctx, look, session, shown),
@@ -741,6 +746,18 @@ fn chromatic(ctx: &egui::Context, look: &mut Look, session: &CanvasSession, show
             if let Some(v) = option_slider(ui, at, 300.0, name, v, &self::shown(v, true), false, LABEL) {
                 session.adjustment_chroma_value(k as u32, v);
             }
+        }
+    });
+}
+
+/// The perspective blur toolbar: positional or directional.
+fn perspective(ctx: &egui::Context, look: &mut Look, session: &CanvasSession, shown: &AdjustShown, screen: Rect) {
+    let rect = panel_rect(screen, 492.0, 66.0);
+    panel(ctx, "perspective toolbar", rect, |ui| {
+        let kinds: Vec<(&str, f32, &Icon)> = PERSPECTIVE_KINDS.iter().map(|k| (k.1, k.2, k.3)).collect();
+        let chosen = PERSPECTIVE_KINDS.iter().position(|k| k.0 == shown.perspective_kind).unwrap_or(0);
+        if let Some(i) = kinds_switch(ui, look, pos2(rect.center().x, rect.top() + 16.0), 460.0, &kinds, chosen) {
+            session.adjustment_perspective_kind(PERSPECTIVE_KINDS.get(i).map_or(PerspectiveKind::Positional, |k| k.0));
         }
     });
 }

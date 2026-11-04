@@ -81,7 +81,9 @@ use procraft_engine::stroke::StrokeBuilder;
 use procraft_engine::view::View;
 use procraft_gpu::{Canvas, Gpu, SecondStroke, StrokeStyle, StrokeTool};
 
-pub use adjust::{ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, SwipeAdjustment};
+pub use adjust::{
+    ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, PerspectiveKind, SwipeAdjustment,
+};
 pub use adjust_menu::{
     Adjustment, adjustment_groups, adjustment_label, adjustment_paintable, adjustment_pencil_amount, adjustment_swiped,
     quick_action_adjustment,
@@ -102,7 +104,7 @@ pub use gestures::{
     gesture_purpose_heading, gesture_purpose_title, gesture_purposes, gesture_trigger_label,
 };
 pub use gradients::{GradientInfo, GradientStop, Gradients};
-pub use guide::{GuideInfo, GuideType, SymmetryType};
+pub use guide::{GuideInfo, GuideType, GuideUnit, SymmetryType};
 pub use history::ColourHistory;
 pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_stops};
 pub use keys::{KeyCombo, KeyDrag, KeyShortcut, ShortcutGroup, ShortcutRow, key_shortcut, key_shortcut_list};
@@ -125,8 +127,9 @@ pub use project::{ArtworkInfo, export_file_name, read_signature, save_failure_sa
 pub use project::{PackageTimeLapse, package_time_lapse};
 pub use project::{PagesOutcome, PsdOutcome, import_pages, import_psd};
 pub use quick_menu::{
-    QuickAction, quick_action_adjusts, quick_action_label, quick_actions_listed, quick_adjustments_listed,
-    quick_menu_saved, quick_menu_slots,
+    QuickAction, QuickMenuSet, quick_action_adjusts, quick_action_label, quick_actions_listed,
+    quick_adjustments_listed, quick_menu_active_after, quick_menu_added, quick_menu_saved, quick_menu_slots,
+    quick_menus, quick_menus_saved,
 };
 pub use quickshape::{QuickShapeInfo, QuickShapeKind};
 pub use reference_view::{

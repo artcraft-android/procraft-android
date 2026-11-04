@@ -1681,6 +1681,55 @@ fn a_transform_with_a_selection_moves_only_what_it_takes() {
 }
 
 #[test]
+fn perspective_blur_opens_positional_and_directional_blurs_only_ahead_of_its_arrow() {
+    use crate::{Adjustment, PerspectiveKind};
+    let Some(s) = session(128, 128) else { return };
+    let composite = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+        canvas.read_composite(gpu).unwrap()
+    };
+    s.set_brush_size(0.2);
+    s.set_color(0.0, 0.0, 0.0);
+    // a dot above the middle and one below it
+    for y in [28.0, 100.0] {
+        s.stroke_begin(PointerKind::Finger, vec![sample(64.0, y, 0.0)]);
+        s.stroke_end(vec![]);
+    }
+    let before = composite(&s);
+    assert_ne!(pixel(&s, 64, 28), [255; 4]);
+    assert!(s.adjustment_start(Adjustment::PerspectiveBlur));
+    // it opens positional, its puck in the middle and its arrow up
+    let shown = s.adjustment_shown();
+    assert_eq!(shown.perspective_kind, PerspectiveKind::Positional);
+    let &[x, y, tx, ty] = shown.perspective_puck.as_deref().unwrap() else { panic!("{shown:?}") };
+    assert!((tx - x).abs() < 1e-3 && ty < y, "{shown:?}");
+    // directional, all of it: below the middle nothing changes, above it the dot streaks
+    s.adjustment_perspective_kind(PerspectiveKind::Directional);
+    s.adjustment_amount_by(1.0);
+    let half = (64 * 128 * 4) as usize;
+    let one_way = composite(&s);
+    assert_eq!(one_way[half..], before[half..]);
+    assert_ne!(one_way[..half], before[..half]);
+    // positional, the dot below streaks too
+    s.adjustment_perspective_kind(PerspectiveKind::Positional);
+    assert_ne!(composite(&s)[half..], before[half..]);
+    // kept, its undo step has no name
+    s.adjustment_end(true);
+    assert_ne!(composite(&s), before);
+    assert_eq!(s.undo(), None);
+    assert_eq!(composite(&s), before);
+    // a new one starts positional again
+    assert!(s.adjustment_start(Adjustment::PerspectiveBlur));
+    assert_eq!(s.adjustment_shown().perspective_kind, PerspectiveKind::Positional);
+    s.adjustment_end(false);
+    assert_eq!(composite(&s), before);
+}
+
+#[test]
 fn adjustments_change_the_layer_as_one_undo_step() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.4);

@@ -1,10 +1,11 @@
 //! The drawing guide's editor, as the Android app's (ui/GuideUi.kt): its title with Cancel and
 //! Done, the colour bar, the canvas fitted between them and the toolbar (the four kinds, the
 //! kind's look and assisted drawing), the guide's handles dragged on the canvas (a perspective
-//! guide's points added by a tap). The guide itself is the core's (guide.rs).
+//! guide's points added by a tap), the grid size typed on a keypad from its chip. The guide itself
+//! is the core's (guide.rs).
 
 use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, pos2, vec2};
-use procraft_core::{CanvasSession, GuideInfo, GuideType, SymmetryType};
+use procraft_core::{CanvasSession, GuideInfo, GuideType, GuideUnit, SymmetryType};
 
 use crate::adjust_panels::{kinds_switch, option_slider, options_choices, options_menu, panel, panel_rect, shown};
 use crate::icons;
@@ -20,6 +21,34 @@ const LABEL: Themed = Themed(0xFFD0D0D0, 0xFF414141);
 const OPTIONS: u32 = 0xFF303030;
 const NODE_CENTRE: u32 = 0xFF0A84FF;
 const NODE_TURN: u32 = 0xFF30D158;
+/// The grid size's chip, as the Android app's slider chip.
+const CHIP: Themed = Themed(0xFF2A2A2A, 0xFFFFFFFF);
+const CHIP_INK: Themed = Themed(0xFFEDEDED, 0xFF363636);
+/// The grid size's keypad, frosted as measured: the sheet and its keys let a little of what is
+/// under them through (dark over the dark editor: the sheet #1B1B1B, the side keys #2B2B2B, the
+/// digits #525252; over the white canvas #2E2E30, #38383A, #59595B). Light, as Custom Canvas's.
+const SHEET: Themed = Themed(0xE91A1A1A, 0xFFD1D3D8);
+const SHEET_KEY: Themed = Themed(0x514E4E4E, 0xFFABB2BB);
+const SHEET_DIGIT: Themed = Themed(0x9A757575, 0xFFFFFFFF);
+const SHEET_UNIT: Themed = Themed(0xFFA0A0A1, 0xFF818C96);
+const SHEET_UNIT_INK: Themed = Themed(0xFF141414, 0xFFFFFFFF);
+const SHEET_INK: Themed = Themed(0xFFAAAAAA, 0xFF3E3E3E);
+/// Its keys (150 x 79.5, 9 apart, rounded 8; narrower in a narrow window) from 51 below the sheet's top to 38 above the
+/// window's foot; 30 between the units, the digits and the right-hand keys; the sheet rounded 30
+/// at its top, "Length" and the size typed centred 24 below it.
+const KEY_W: f32 = 150.0;
+const KEY_H: f32 = 79.5;
+const KEY_GAP: f32 = 9.0;
+const KEY_GROUPS: f32 = 30.0;
+const KEYS_TOP: f32 = 51.0;
+const KEYS_FOOT: f32 = 38.0;
+const SHEET_HEIGHT: f32 = KEYS_TOP + KEY_H * 4.0 + KEY_GAP * 3.0 + KEYS_FOOT;
+const KEYPAD_UNITS: [(GuideUnit, &str); 4] = [
+    (GuideUnit::Millimeters, "Millimeters"),
+    (GuideUnit::Centimeters, "Centimeters"),
+    (GuideUnit::Inches, "Inches"),
+    (GuideUnit::Pixels, "Pixels"),
+];
 /// The canvas fitted between a fifth of the window's height above and below, 40 in from the sides;
 /// a press within 30 of a handle takes it.
 const FIT_BAND: f32 = 0.2;
@@ -63,6 +92,119 @@ pub struct GuideEditor {
     pub open: bool,
     grab: Option<Grab>,
     symmetry_open: bool,
+    /// The grid size's keypad, while it is up.
+    keypad: Option<SizeKeypad>,
+}
+
+/// The grid size's keypad: what is typed (the size as it was to start with) and in which unit.
+/// Each key changes the size at once; Done puts the keypad away.
+struct SizeKeypad {
+    typed: String,
+    unit: GuideUnit,
+}
+
+impl SizeKeypad {
+    /// A digit, the point, or Backspace (as the character it types, 8).
+    fn key(&mut self, session: &CanvasSession, k: char) {
+        match k {
+            '\u{8}' => {
+                if self.typed.pop().is_none() {
+                    return;
+                }
+            }
+            '.' if !self.typed.contains('.') && self.typed.len() < 7 => self.typed.push('.'),
+            d if d.is_ascii_digit() && self.typed.len() < 7 => self.typed.push(d),
+            _ => return,
+        }
+        session.set_guide_length(self.typed.clone(), self.unit);
+    }
+
+    /// A unit chosen: what was typed goes.
+    fn choose(&mut self, session: &CanvasSession, unit: GuideUnit) {
+        self.unit = unit;
+        self.typed.clear();
+        session.set_guide_length(String::new(), unit);
+    }
+
+    /// Shows it over the editor's foot, the whole width; returns true once Done (or the keyboard's
+    /// Enter or Escape) puts it away. The keyboard types into it too.
+    fn show(&mut self, ctx: &egui::Context, session: &CanvasSession) -> bool {
+        let screen = ctx.content_rect();
+        let sheet = Rect::from_min_max(pos2(screen.left(), screen.bottom() - SHEET_HEIGHT), screen.max);
+        let mut done = crate::ui::escape(ctx);
+        let mut keys = Vec::new();
+        ctx.input(|i| {
+            for e in &i.events {
+                match e {
+                    egui::Event::Text(t) => keys.extend(t.chars().filter(|c| c.is_ascii_digit() || *c == '.')),
+                    egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => keys.push('\u{8}'),
+                    egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => done = true,
+                    _ => {}
+                }
+            }
+        });
+        for k in keys {
+            self.key(session, k);
+        }
+        egui::Area::new(Id::unique("guide size keypad")).fixed_pos(sheet.min).order(Order::Tooltip).show(ctx, |ui| {
+            // the sheet takes its own presses
+            ui.allocate_rect(sheet, Sense::click());
+            let corners = egui::CornerRadius { nw: 30, ne: 30, sw: 0, se: 0 };
+            ui.painter().rect_filled(sheet, corners, argb(SHEET));
+            let ink = argb(SHEET_INK);
+            // "Length" 16 into a 250 wide title centred over the sheet, the size from 144 on
+            let title = pos2(sheet.center().x - 125.0 + 16.0, sheet.top() + 24.0);
+            text(ui.painter(), title, Align2::LEFT_CENTER, "Length", 12.0, Weight::Regular, ink);
+            let typed = title + vec2(144.0, 0.0);
+            text(ui.painter(), typed, Align2::LEFT_CENTER, &self.typed, 12.0, Weight::Regular, ink);
+            // narrower keys where the window is too narrow for them
+            let w = KEY_W.min((sheet.width() - 16.0 - KEY_GROUPS * 2.0 - KEY_GAP * 2.0) / 5.0).max(40.0);
+            let block = w * 5.0 + KEY_GAP * 2.0 + KEY_GROUPS * 2.0;
+            let left = sheet.center().x - block / 2.0;
+            let top = sheet.top() + KEYS_TOP;
+            let at = |column: f32, row: f32| pos2(column, top + (KEY_H + KEY_GAP) * row);
+            let key = |label: &str, rect: Rect, fill: Themed, ink: Color32, size: f32, id: (&str, usize)| {
+                ui.painter().rect_filled(rect, 8.0, argb(fill));
+                text(ui.painter(), rect.center(), Align2::CENTER_CENTER, label, size, Weight::Regular, ink);
+                ui.interact(rect, ui.scope_id().with(id), Sense::click()).clicked()
+            };
+            for (i, (unit, label)) in KEYPAD_UNITS.into_iter().enumerate() {
+                let rect = Rect::from_min_size(at(left, i as f32), vec2(w, KEY_H));
+                let (fill, colour) =
+                    if unit == self.unit { (SHEET_UNIT, argb(SHEET_UNIT_INK)) } else { (SHEET_KEY, ink) };
+                if key(label, rect, fill, colour, 16.0, ("unit", i)) {
+                    self.choose(session, unit);
+                }
+            }
+            let digits = left + w + KEY_GROUPS;
+            for (r, row) in ["789", "456", "123"].into_iter().enumerate() {
+                for (c, d) in row.chars().enumerate() {
+                    let rect = Rect::from_min_size(at(digits + (w + KEY_GAP) * c as f32, r as f32), vec2(w, KEY_H));
+                    if key(&d.to_string(), rect, SHEET_DIGIT, ink, 23.0, ("digit", r * 3 + c)) {
+                        self.key(session, d);
+                    }
+                }
+            }
+            let zero = Rect::from_min_size(at(digits, 3.0), vec2(w * 2.0 + KEY_GAP, KEY_H));
+            if key("0", zero, SHEET_DIGIT, ink, 23.0, ("digit", 10)) {
+                self.key(session, '0');
+            }
+            let point = Rect::from_min_size(at(digits + (w + KEY_GAP) * 2.0, 3.0), vec2(w, KEY_H));
+            if key(".", point, SHEET_DIGIT, ink, 23.0, ("digit", 11)) {
+                self.key(session, '.');
+            }
+            let right = digits + w * 3.0 + KEY_GAP * 2.0 + KEY_GROUPS;
+            if key("Backspace", Rect::from_min_size(at(right, 0.0), vec2(w, KEY_H)), SHEET_KEY, ink, 16.0, ("side", 0))
+            {
+                self.key(session, '\u{8}');
+            }
+            let finish = Rect::from_min_size(at(right, 1.0), vec2(w, KEY_H * 3.0 + KEY_GAP * 2.0));
+            if key("Done", finish, SHEET_KEY, ink, 16.0, ("side", 1)) {
+                done = true;
+            }
+        });
+        done
+    }
 }
 
 impl GuideEditor {
@@ -78,12 +220,14 @@ impl GuideEditor {
         session.guide_edit_begin(FIT_SIDE * ppp, band, w - FIT_SIDE * ppp, h - band);
         self.open = true;
         self.symmetry_open = false;
+        self.keypad = None;
     }
 
     fn end(&mut self, session: &CanvasSession, keep: bool) {
         session.guide_edit_end(keep);
         self.open = false;
         self.symmetry_open = false;
+        self.keypad = None;
     }
 
     /// What a press at window pixel `p` takes.
@@ -202,6 +346,15 @@ impl GuideEditor {
             }
         });
         self.toolbar(ctx, look, session, &g, screen);
+        // the grid size's keypad over the toolbar, while the kind has a grid
+        if !matches!(g.kind, GuideType::Grid | GuideType::Isometric) {
+            self.keypad = None;
+        }
+        if let Some(keypad) = self.keypad.as_mut()
+            && keypad.show(ctx, session)
+        {
+            self.keypad = None;
+        }
         if let Some(keep) = ended {
             self.end(session, keep);
             return true;
@@ -259,18 +412,21 @@ impl GuideEditor {
                 if wide { (left + (slider_w + gap) * 2.0, row_top) } else { (left, row_top + 54.0 + 8.0) };
             match g.kind {
                 GuideType::Grid | GuideType::Isometric => {
-                    let size = format!("{}px", g.size.round() as i32);
+                    // the size on a chip that opens its keypad
                     if let Some(v) = option_slider(
                         ui,
                         pos2(third, third_top),
                         slider_w,
                         "Grid size",
                         size_to_slider(g.size),
-                        &size,
+                        "",
                         false,
                         LABEL,
                     ) {
                         set_look(g.opacity, g.thickness, slider_to_size(v));
+                    }
+                    if size_chip(ui, pos2(third, third_top), slider_w, &g.size_label) {
+                        self.keypad = Some(SizeKeypad { typed: g.size_text.clone(), unit: g.unit });
                     }
                 }
                 GuideType::Symmetry => {
@@ -361,6 +517,19 @@ impl GuideEditor {
             self.symmetry_open = false;
         }
     }
+}
+
+/// The grid size on its chip at the end of the slider at `at` (`width` wide), as the Android app's
+/// slider chip: 12 either side of the words and 3 above and below, 8 right of and 4 above where a
+/// plain value sits. Returns whether it was tapped.
+fn size_chip(ui: &egui::Ui, at: Pos2, width: f32, label: &str) -> bool {
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), Weight::Regular.font(16.0), argb(CHIP_INK));
+    let right = at.x + width - 15.0 + 8.0;
+    let top = at.y + 6.0 - 4.0;
+    let chip = Rect::from_min_max(pos2(right - galley.size().x - 24.0, top), pos2(right, top + galley.size().y + 6.0));
+    ui.painter().rect_filled(chip, 14.0, argb(CHIP));
+    ui.painter().galley(pos2(chip.left() + 12.0, chip.top() + 3.0), galley, argb(CHIP_INK));
+    ui.interact(chip, ui.scope_id().with("grid size chip"), Sense::click()).clicked()
 }
 
 /// The colour bar: its gradient, and a knob where the guide's colour sits.

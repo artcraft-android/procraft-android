@@ -250,6 +250,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 // the gallery zooming into the artwork as it opens, over everything
                 ZoomingGallery(vm, overlay = true)
                 if (vm.adjustment == Adjustment.CLONE) ClonePuck(vm)
+                if (vm.adjustment == Adjustment.PERSPECTIVE_BLUR) PerspectivePuck(vm)
                 if (vm.recoloring) RecolorReticle(vm)
                 QuickShapeHandles(vm)
                 // a full-screen page covers the timeline, as it covers the canvas
@@ -287,6 +288,7 @@ fun AppRoot(vm: CanvasViewModel) {
                             Adjustment.BLOOM -> BloomPanel(vm, Modifier)
                             Adjustment.HALFTONE -> HalftonePanel(vm, Modifier)
                             Adjustment.CHROMATIC_ABERRATION -> ChromaticPanel(vm, Modifier)
+                            Adjustment.PERSPECTIVE_BLUR -> PerspectivePanel(vm, Modifier)
                             Adjustment.LIQUIFY -> LiquifyPanel(vm, maxWidth, maxHeight, Modifier)
                             else -> Unit
                         }
@@ -364,7 +366,7 @@ private fun BlockedDialog(vm: CanvasViewModel) {
 /** The adjustments whose controls are a panel at the bottom of the screen. */
 private val BottomPanels = setOf(
     Adjustment.HSB, Adjustment.COLOR_BALANCE, Adjustment.CURVES, Adjustment.GRADIENT_MAP, Adjustment.GLITCH, Adjustment.NOISE,
-    Adjustment.BLOOM, Adjustment.HALFTONE, Adjustment.CHROMATIC_ABERRATION, Adjustment.LIQUIFY,
+    Adjustment.BLOOM, Adjustment.HALFTONE, Adjustment.CHROMATIC_ABERRATION, Adjustment.PERSPECTIVE_BLUR, Adjustment.LIQUIFY,
 )
 
 /**

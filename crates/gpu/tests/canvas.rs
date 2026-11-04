@@ -961,7 +961,8 @@ fn every_adjustment_draws_and_changes_the_layer() {
         Filter::Noise { amount: 1.0, frequency: 0.2, octaves: 2, turbulence: 0.2, kind: 1, multi: true, added: false },
         Filter::Noise { amount: 1.0, frequency: 0.2, octaves: 1, turbulence: 0.2, kind: 2, multi: false, added: true },
         Filter::Motion { along: [20.0, 0.0] },
-        Filter::Zoom { centre: [0.0, 0.0], amount: 0.3 },
+        Filter::Zoom { centre: [0.0, 0.0], amount: 0.3, toward: [0.0, 0.0] },
+        Filter::Zoom { centre: [32.0, 64.0], amount: 0.3, toward: [0.0, -1.0] },
         Filter::Chromatic {
             centre: [0.0, 0.0],
             amount: 0.2,
@@ -999,6 +1000,48 @@ fn every_adjustment_draws_and_changes_the_layer() {
         canvas.render(&gpu, &mut doc, None);
         assert_eq!(canvas.read_layer(&gpu, layer).unwrap(), original, "{f:?} was not put back");
     }
+}
+
+#[test]
+fn a_zoom_blur_with_an_arrow_streaks_only_what_lies_ahead_of_its_centre() {
+    use procraft_gpu::Filter;
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(128, 128);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let layer = doc.current();
+    let mut ink = StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0);
+    ink.hardness = 1.0;
+    canvas.begin_stroke(layer, ink);
+    // a dot ahead of the centre (64, 64) as the arrow points (up), one behind it, one to the side
+    let (ahead, behind, side) = (Vec2::new(64.0, 24.0), Vec2::new(64.0, 104.0), Vec2::new(104.0, 62.0));
+    canvas.add_stamps(&[dot(ahead, 5.0), dot(behind, 5.0), dot(side, 5.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let original = canvas.read_layer(&gpu, layer).unwrap();
+    let alpha = |px: &[u8], x: u32, y: u32| pixel(px, 128, x, y)[3];
+    let mut blurred = |toward: [f32; 2]| {
+        canvas.begin_transform(layer);
+        canvas.set_filter(Filter::Zoom { centre: [64.0, 64.0], amount: 0.5, toward });
+        canvas.render(&gpu, &mut doc, None);
+        let px = canvas.read_layer(&gpu, layer).unwrap();
+        canvas.end_transform(false);
+        canvas.render(&gpu, &mut doc, None);
+        px
+    };
+    let one_way = blurred([0.0, -1.0]);
+    // behind the centre and square to the arrow nothing moves
+    let half = (64 * 128 * 4) as usize;
+    assert_eq!(one_way[half..], original[half..], "behind the centre changed");
+    assert!(alpha(&one_way, 104, 62).abs_diff(alpha(&original, 104, 62)) <= 16, "the side dot moved");
+    // ahead, the dot is drawn out along its ray: thinner where it was, out beyond it
+    assert_eq!(alpha(&original, 64, 10), 0);
+    assert!(alpha(&one_way, 64, 10) > 40, "nothing streaked ahead: {}", alpha(&one_way, 64, 10));
+    assert!(alpha(&one_way, 64, 24) < 200, "the dot ahead stayed: {}", alpha(&one_way, 64, 24));
+    // all round, the dot behind streaks too
+    let all_round = blurred([0.0, 0.0]);
+    assert_eq!(alpha(&original, 64, 118), 0);
+    assert!(alpha(&all_round, 64, 118) > 40, "nothing streaked all round: {}", alpha(&all_round, 64, 118));
 }
 
 #[test]

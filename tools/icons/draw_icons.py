@@ -989,6 +989,28 @@ def displaced():
     return unary_union([front, ring(14.6, 10.4, 6.4, 1.6).difference(front.buffer(1.2))])
 
 
+def ray_burst():
+    """Positional (perspective blur): a dot with rays streaming out of it all round."""
+    parts = [Point(12, 12).buffer(1.9, quad_segs=16)]
+    for i in range(8):
+        a = math.radians(45 * i)
+        reach = 8.6 if i % 2 == 0 else 7.4
+        parts.append(capsule((12 + 4.6 * math.cos(a), 12 + 4.6 * math.sin(a)),
+                             (12 + reach * math.cos(a), 12 + reach * math.sin(a)), 1.2))
+    return unary_union(parts)
+
+
+def ray_fan():
+    """Directional (perspective blur): the same rays fanning out of the dot one way only, up."""
+    cx, cy = 12.0, 16.0
+    parts = [Point(cx, cy).buffer(1.9, quad_segs=16)]
+    for deg, reach in ((-72, 8.8), (-36, 10.2), (0, 11.4), (36, 10.2), (72, 8.8)):
+        a = math.radians(deg - 90)
+        parts.append(capsule((cx + 5.6 * math.cos(a), cy + 5.6 * math.sin(a)),
+                             (cx + reach * math.cos(a), cy + reach * math.sin(a)), 1.2))
+    return unary_union(parts)
+
+
 def blocky():
     """Artifact: a mosaic of blocks of all sizes."""
     blocks = [(2.5, 4.0, 9.0, 10.5), (10.2, 4.0, 14.0, 7.8), (15.2, 4.0, 21.5, 8.5), (10.2, 9.0, 14.0, 13.0),
@@ -1599,7 +1621,8 @@ DRAWINGS = {
     'shapesquare': lambda: solid_rect(True), 'guidegrid': grid_guide, 'guideisometric': iso_cube, 'guidesymmetry': symmetry,
     'noiseclouds': wisps, 'noisebillows': billows, 'noiseridges': ridges, 'halftonefull': halftone_full,
     'halftonescreen': halftone_screen, 'halftonenews': newspaper, 'chromaperspective': outward_arrows,
-    'chromadisplace': displaced, 'glitchartifact': blocky, 'glitchwave': square_wave, 'glitchsignal': static_screen,
+    'chromadisplace': displaced, 'perspectivepositional': ray_burst, 'perspectivedirectional': ray_fan,
+    'glitchartifact': blocky, 'glitchwave': square_wave, 'glitchsignal': static_screen,
     'glitchdiverge': fork, 'grainmoving': moving_grain, 'graintexturized': grain_tile, 'brushpaintedon': painted_on,
     'swipe-share': share_tab, 'swipe-duplicate': duplicate, 'textlayer': text_layer,
     'recentset': hourglass, 'swipe-find': target, 'swipe-pin': upright_tack, 'swipe-unpin': struck_tack,

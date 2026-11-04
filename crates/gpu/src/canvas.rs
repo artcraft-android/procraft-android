@@ -1230,8 +1230,10 @@ pub enum Filter {
     Noise { amount: f32, frequency: f32, octaves: u32, turbulence: f32, kind: u32, multi: bool, added: bool },
     /// Each pixel the mean along `along` (canvas pixels), centred on it.
     Motion { along: [f32; 2] },
-    /// Each pixel streaked towards `centre` (canvas pixels) by `amount` of the way.
-    Zoom { centre: [f32; 2], amount: f32 },
+    /// Each pixel streaked towards `centre` (canvas pixels) by `amount` of the way. With `toward`
+    /// (a unit vector; zero for all round) only the side it points to: all of it straight along,
+    /// less the further a pixel's way from the centre turns from it, none from square to it on.
+    Zoom { centre: [f32; 2], amount: f32, toward: [f32; 2] },
     /// Red and blue pulled apart: from `centre` (canvas pixels) by `amount` of the distance, less
     /// within `falloff` (0..1 of the half diagonal) of it; or else (`displace`) by `offset` (canvas
     /// pixels) everywhere. `blur` (0..1) smears the fringes along the pull; `transparency` (0..1)
@@ -5105,7 +5107,9 @@ impl Canvas {
                 let count = (x.hypot(y)).clamp(1.0, 128.0);
                 ("fs_streak", values([x, y, count, 1.0], [0.0; 4]))
             }
-            Filter::Zoom { centre: [x, y], amount } => ("fs_zoom", values([amount, 0.0, 0.0, 0.0], [x, y, 0.0, 0.0])),
+            Filter::Zoom { centre: [x, y], amount, toward: [tx, ty] } => {
+                ("fs_zoom", values([amount, 0.0, 0.0, 0.0], [x, y, tx, ty]))
+            }
             Filter::Chromatic { centre: [x, y], amount, displace, offset: [ox, oy], blur, falloff, transparency } => {
                 // displaced, the centre's place carries the offset and the amount says so
                 let (b, a) = if displace { ([ox, oy, -1.0, 0.0], 0.0) } else { ([x, y, 0.0, 0.0], amount) };

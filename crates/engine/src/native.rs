@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::applz4;
 use crate::cms::{CanvasIcc, IccProfile, Space};
 use crate::document::{BlendMode, Document, Layer, LayerId, LayerKind, LayerText, TextAlign};
-use crate::guide::{Guide, GuideKind, SymmetryKind};
+use crate::guide::{Guide, GuideKind, LengthUnit, SymmetryKind};
 use crate::keyed::{Archive, Builder, Object};
 use crate::plist::Value;
 use crate::profile::Profile;
@@ -238,13 +238,16 @@ const GUIDE_KINDS: [GuideKind; 4] =
     [GuideKind::Grid, GuideKind::Isometric, GuideKind::Perspective, GuideKind::Symmetry];
 const SYMMETRIES: [SymmetryKind; 4] =
     [SymmetryKind::Vertical, SymmetryKind::Horizontal, SymmetryKind::Quadrant, SymmetryKind::Radial];
+/// The units a grid's size is shown in, in the archive's numbering.
+const UNITS: [LengthUnit; 4] =
+    [LengthUnit::Pixels, LengthUnit::Inches, LengthUnit::Centimetres, LengthUnit::Millimetres];
 /// The vanishing points' colours, as kept with every kind.
 const NODE_COLOURS: [[f32; 4]; 3] =
     [[0.106, 0.816, 0.698, 1.0], [0.969, 0.490, 0.999, 1.0], [0.088, 0.669, 0.778, 1.0]];
 
 /// The document's drawing guide as the archive keeps it (`drawingguide`, there once the guide has
 /// been on), into `guide`: on or not, which kind, each kind's look (its grid's size a share of the
-/// canvas's longer side), the symmetry, the centre and turn (the shown kind's, else the grid's:
+/// canvas's longer side, and the unit it is shown in), the symmetry, the centre and turn (the shown kind's, else the grid's:
 /// a centre and a handle straight up from it unturned), perspective's vanishing points. Its points
 /// are kept y up on the canvas as stored, placed here where they show.
 fn read_guide(g: &Object<'_>, canvas: &Canvas<'_>, guide: &mut Guide) {
@@ -268,6 +271,10 @@ fn read_guide(g: &Object<'_>, canvas: &Canvas<'_>, guide: &mut Guide) {
         }
         if let Some(c) = g.data(&format!("color{k}")).and_then(floats4) {
             look.color = crate::guide::bar_place([c[0], c[1], c[2]]);
+        }
+        if let Some(unit) = g.int(&format!("unit{k}")).and_then(|u| usize::try_from(u).ok()).and_then(|u| UNITS.get(u))
+        {
+            look.unit = *unit;
         }
     }
     let h = f64::from(canvas.h);
@@ -341,7 +348,7 @@ fn guide_object(b: &mut Builder, g: &Guide, w: u32, h: u32) -> Value {
             (format!("opacity{k}"), Value::Real(f64::from(look.opacity))),
             (format!("thickness{k}"), Value::Real(f64::from(look.thickness))),
             (format!("zoom{k}"), Value::Real(zoom)),
-            (format!("unit{k}"), Value::Int(0)),
+            (format!("unit{k}"), Value::Int(UNITS.iter().position(|u| *u == look.unit).unwrap_or(0) as i64)),
             (format!("nodes{k}"), nodes),
             (format!("nodeColors{k}"), node_colours),
         ]);
@@ -1853,7 +1860,7 @@ mod tests {
 
     #[test]
     fn a_drawing_guide_is_kept_once_it_has_been_on() {
-        use crate::guide::{Guide, GuideKind, SymmetryKind};
+        use crate::guide::{Guide, GuideKind, LengthUnit, SymmetryKind};
         let pack = |guide: Guide| {
             let mut doc = Document::new(400, 300);
             doc.guide = guide;
@@ -1889,10 +1896,13 @@ mod tests {
         g.vanishing = vec![[20.0, 40.0], [380.0, 60.0]];
         g.looks[0].size = 52.0;
         g.looks[0].opacity = 0.5;
+        g.looks[0].unit = LengthUnit::Millimetres;
+        g.looks[1].unit = LengthUnit::Inches;
         g.looks[2].color = 0.25;
         let back = pack(g.clone());
         assert!((back.angle - g.angle).abs() < 1e-4 && (back.looks[2].color - 0.25).abs() < 0.002, "{back:?}");
         assert!((back.looks[0].size - 52.0).abs() < 1e-3);
+        assert_eq!(back.looks.map(|l| l.unit), g.looks.map(|l| l.unit));
         let close = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3;
         assert!(close(back.centre, g.centre) && back.vanishing.iter().zip(&g.vanishing).all(|(a, b)| close(*a, *b)));
         assert_eq!(
