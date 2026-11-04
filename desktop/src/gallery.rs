@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
-    Align2, Color32, Id, Order, Pos2, Rect, ScrollArea, Sense, Stroke, TextureHandle, Ui, UiBuilder, pos2, vec2,
+    Align2, Color32, Id, Order, Pos2, Rect, ScrollArea, Sense, Stroke, TextureHandle, Ui, UiBuilder, Vec2, pos2, vec2,
 };
 use procraft_core::{
     ArtworkStore, CanvasPreset, GalleryArtwork, GalleryEntry, P3, preset_label, presets_from_json, profile_chip,
@@ -204,6 +204,8 @@ pub struct Gallery {
     picked: Vec<String>,
     more_open: bool,
     preview: Option<(Vec<GalleryArtwork>, usize, bool, f32)>,
+    /// An artwork two fingers are spreading open into Preview.
+    spreading: Option<Spread>,
     alert: crate::alert::Alert,
     /// Share's PDF asks how well it keeps its pictures first (for these artworks).
     pdf_alert: crate::alert::Alert,
@@ -266,6 +268,29 @@ struct LeavingStack {
 /// back from 0.8 of its size, fading in) as it is left (seconds, on springs); leaving, its name
 /// fading out and the gallery's in.
 const STACK_OPEN_S: f32 = 0.45;
+
+/// Two fingers spread on an artwork: let go spread this much or more, it opens in Preview; it
+/// shrinks no further than the least; let go, it settles in this long, seconds.
+const SPREAD_OPEN: f32 = 1.35;
+const SPREAD_LEAST: f32 = 0.6;
+const SPREAD_SETTLE_S: f32 = 0.3;
+
+/// An artwork two fingers are spreading open: its picture where it showed, how far the fingers
+/// have spread and moved it, and once they let go, since when, from where, and whether it opens.
+struct Spread {
+    artwork: GalleryArtwork,
+    from: Rect,
+    scale: f32,
+    moved: Vec2,
+    let_go: Option<(Instant, Rect, bool)>,
+}
+
+impl Spread {
+    /// Where the fingers have it: grown about its middle and moved with them.
+    fn following(&self) -> Rect {
+        Rect::from_center_size(self.from.center() + self.moved, self.from.size() * self.scale)
+    }
+}
 /// Select's marks fading in and out (seconds).
 const SELECT_FADE_S: f32 = 0.15;
 const STACK_LEAVE_S: f32 = 0.3;
@@ -318,6 +343,7 @@ impl Gallery {
             picked: Vec::new(),
             more_open: false,
             preview: None,
+            spreading: None,
             alert: crate::alert::Alert::default(),
             pdf_alert: crate::alert::Alert::default(),
             pdf_for: None,
@@ -498,6 +524,9 @@ impl Gallery {
         }
         if self.about {
             self.about(ctx, screen);
+        }
+        if self.spreading.is_some() || ctx.input(|i| i.multi_touch().is_some()) {
+            self.spread(ctx, screen);
         }
         if self.preview.is_some() {
             self.preview(ctx, look, screen);
@@ -882,6 +911,78 @@ impl Gallery {
 
     /// The picked artworks one at a time over the whole window, on black: a drag across goes to
     /// the next or the last, a tap shows (or hides) the close button and the arrows.
+    /// Two fingers spread on an artwork (a touch screen's): its picture follows them out of its
+    /// place as the gallery darkens; let go, it settles fitted over black and opens in Preview
+    /// among the gallery's artworks or, spread too little, goes back into its place (as the
+    /// tablet's).
+    fn spread(&mut self, ctx: &egui::Context, screen: Rect) {
+        let touch = ctx.input(|i| i.multi_touch());
+        if self.spreading.is_none() {
+            let Some(t) = touch.filter(|t| t.num_touches == 2) else { return };
+            if self.selecting || self.preview.is_some() || self.lifted.is_some() {
+                return;
+            }
+            let found = self.entries.iter().find_map(|e| match e {
+                GalleryEntry::Artwork { artwork } => {
+                    self.pictures.get(&artwork.dir).filter(|r| r.contains(t.start_pos)).map(|r| (artwork.clone(), *r))
+                }
+                _ => None,
+            });
+            let Some((artwork, from)) = found else { return };
+            self.spreading = Some(Spread { artwork, from, scale: 1.0, moved: Vec2::ZERO, let_go: None });
+        }
+        let Some(s) = self.spreading.as_mut() else { return };
+        match (touch, s.let_go) {
+            (Some(t), None) => {
+                s.scale = (s.scale * t.zoom_delta).max(SPREAD_LEAST);
+                s.moved += t.translation_delta;
+            }
+            (None, None) => s.let_go = Some((Instant::now(), s.following(), s.scale >= SPREAD_OPEN)),
+            _ => {}
+        }
+        // fitted to the screen, as Preview shows it
+        let fitted = Self::fitted(screen, &s.artwork);
+        let full = fitted.translate(vec2(0.0, screen.center().y - fitted.center().y));
+        let (rect, settled) = match s.let_go {
+            None => (s.following(), None),
+            Some((since, held, opens)) => {
+                let t = (since.elapsed().as_secs_f32() / SPREAD_SETTLE_S).min(1.0);
+                let e = crate::look::cubic_bezier(0.0, 0.0, 0.58, 1.0, t);
+                let to = if opens { full } else { s.from };
+                (Rect::from_min_max(held.min.lerp(to.min, e), held.max.lerp(to.max, e)), (t >= 1.0).then_some(opens))
+            }
+        };
+        let from = s.from;
+        let artwork = s.artwork.clone();
+        // how near the whole screen it is: the gallery darkens as far
+        let near = ((rect.width() - from.width()) / (full.width() - from.width()).max(1.0)).clamp(0.0, 1.0);
+        let texture = self.texture(&artwork);
+        egui::Area::new(Id::unique("gallery spread")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
+            ui.painter().rect_filled(screen, 0, Color32::BLACK.gamma_multiply(near));
+            if let Some(t) = texture {
+                egui::Image::new(egui::load::SizedTexture::new(t, rect.size()))
+                    .corner_radius(8.0 * (1.0 - near))
+                    .paint_at(ui, rect);
+            }
+        });
+        ctx.request_repaint();
+        if let Some(opens) = settled {
+            self.spreading = None;
+            if opens {
+                let all: Vec<GalleryArtwork> = self
+                    .entries
+                    .iter()
+                    .filter_map(|e| match e {
+                        GalleryEntry::Artwork { artwork } => Some(artwork.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let index = all.iter().position(|a| a.dir == artwork.dir).unwrap_or(0);
+                self.preview = Some((all, index, false, 0.0));
+            }
+        }
+    }
+
     fn preview(&mut self, ctx: &egui::Context, look: &mut Look, screen: Rect) {
         let Some((list, index, controls, moved)) = self.preview.take() else { return };
         let Some(a) = list.get(index).cloned() else { return };
@@ -1070,6 +1171,7 @@ impl Gallery {
                     cells.push((i, cell));
                     // held still, it lifts; a lift let go where it was is no tap
                     if self.lifted.is_none()
+                        && self.spreading.is_none()
                         && !self.selecting
                         && response.is_pointer_button_down_on()
                         && !response.dragged()
@@ -1618,9 +1720,12 @@ impl Gallery {
         let frame = Self::thumb_box(cell);
         let picture = Self::fitted(frame, a);
         self.pictures.insert(a.dir.clone(), picture);
-        // shrunk or grown about its middle as it is pressed or lifted
+        // shrunk or grown about its middle as it is pressed or lifted; spread open, it is drawn
+        // where the fingers have it instead
         let picture = Rect::from_center_size(picture.center(), picture.size() * scale);
-        self.thumbnail(ui, picture, a, 0.0);
+        if self.spreading.as_ref().is_none_or(|s| s.artwork.dir != a.dir) {
+            self.thumbnail(ui, picture, a, 0.0);
+        }
         let chosen = self.picked.contains(&a.dir);
         // the marks fade in as Select starts, and out as it ends
         let marks = ui.ctx().animate_bool_with_time_and_easing(

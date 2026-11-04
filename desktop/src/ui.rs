@@ -1834,6 +1834,9 @@ impl Interface {
                     self.open = None;
                     self.text.edit(session, id);
                 }
+                if std::mem::take(&mut self.layers.layer_opacity) {
+                    self.start_layer_opacity(session);
+                }
                 shown
             }
             Popover::Colour => {

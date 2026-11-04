@@ -225,11 +225,17 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                             translationY = if (dragging) dragOffset else squeeze?.offset(l.id) ?: 0f
                             alpha = if (blendAt in 0 until index) belowShown else 1f
                         }
-                        .twoFingerTap(l.kind == LayerType.PAINT) {
-                            // two fingers tapped on a layer (not a group or mask): its opacity, dragged across the canvas
-                            vm.selectLayer(l.id)
-                            vm.startLayerOpacity()
-                        }
+                        .twoFingers(
+                            l.kind == LayerType.PAINT,
+                            onTap = {
+                                // two fingers tapped on a layer (not a group or mask): its opacity, dragged across the canvas
+                                vm.selectLayer(l.id)
+                                vm.startLayerOpacity()
+                            },
+                            // swiped right, its Alpha Lock on or off; held, its contents selected
+                            onSwipeRight = { vm.toggleAlphaLock(l) },
+                            onHold = { vm.selectLayerContents(l) },
+                        )
                         .pointerInput(l.id) {
                             if (l.kind == LayerType.MASK) return@pointerInput
                             detectDragGesturesAfterLongPress(
@@ -1072,26 +1078,67 @@ private fun BackgroundRow(vm: CanvasViewModel) {
 private fun Modifier.visibilityTouch(vm: CanvasViewModel, l: LayerInfo): Modifier =
     pointerInput(l) { detectTapGestures(onTap = { vm.toggleVisible(l) }, onLongPress = { vm.toggleSolo(l) }) }
 
-/** Two fingers tapping (down and up together, still) do [onTap]; the touches go on to the rest as they are. */
-private fun Modifier.twoFingerTap(enabled: Boolean, onTap: () -> Unit): Modifier = if (!enabled) this else pointerInput(Unit) {
-    awaitEachGesture {
-        val first = awaitFirstDown(requireUnconsumed = false, pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial)
-        var two = false
-        var moved = false
-        while (true) {
-            val e = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
-            if (e.changes.count { it.pressed } >= 2) two = true
-            e.changes.firstOrNull { it.id == first.id }?.let { if ((it.position - first.position).getDistance() > viewConfiguration.touchSlop) moved = true }
-            if (e.changes.none { it.pressed }) {
-                if (two && !moved && (e.changes.maxOfOrNull { it.uptimeMillis } ?: 0L) - first.uptimeMillis <= TWO_FINGER_TAP_MS) onTap()
-                break
+/**
+ * Two fingers on a row: tapping (down and up together, still) do [onTap], swiped right together do
+ * [onSwipeRight], held still do [onHold]. One finger's touches go on to the rest as they are; once
+ * a second is down they are the two fingers' alone.
+ */
+private fun Modifier.twoFingers(enabled: Boolean, onTap: () -> Unit, onSwipeRight: () -> Unit, onHold: () -> Unit): Modifier =
+    if (!enabled) this else pointerInput(Unit) {
+        awaitEachGesture {
+            val first = awaitFirstDown(requireUnconsumed = false, pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+            var two: Long? = null
+            var middle: Offset? = null
+            var moved = false
+            var done = false
+            while (true) {
+                val e = withTimeoutOrNull(TWO_FINGER_HOLD_MS / 4) {
+                    awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                }
+                // the touches' clock (uptime), also while no event comes
+                val now = e?.changes?.maxOfOrNull { it.uptimeMillis } ?: android.os.SystemClock.uptimeMillis()
+                if (e != null) {
+                    val fingers = e.changes.filter { it.pressed }
+                    if (fingers.size >= 2) {
+                        val between = (fingers[0].position + fingers[1].position) / 2f
+                        val start = middle ?: between.also { middle = it }
+                        if (two == null) two = now
+                        e.changes.forEach { it.consume() }
+                        val d = between - start
+                        if (d.getDistance() > viewConfiguration.touchSlop) moved = true
+                        if (!done && d.x > TWO_FINGER_SWIPE.toPx() && d.x > 2f * kotlin.math.abs(d.y)) {
+                            done = true
+                            onSwipeRight()
+                        }
+                    } else if (two == null) {
+                        e.changes.firstOrNull { it.id == first.id }?.let {
+                            if ((it.position - first.position).getDistance() > viewConfiguration.touchSlop) moved = true
+                        }
+                    }
+                    if (e.changes.none { it.pressed }) {
+                        val since = two
+                        if (!done && since != null && !moved && now - first.uptimeMillis <= TWO_FINGER_TAP_MS) onTap()
+                        break
+                    }
+                }
+                // two fingers kept still long enough: held
+                val since = two
+                if (!done && !moved && since != null && now - since >= TWO_FINGER_HOLD_MS) {
+                    done = true
+                    onHold()
+                }
             }
         }
     }
-}
 
 /** How long two fingers may stay down and still tap, milliseconds. */
 private const val TWO_FINGER_TAP_MS = 400L
+
+/** How long two fingers kept still on a row hold it, milliseconds. */
+private const val TWO_FINGER_HOLD_MS = 500L
+
+/** How far two fingers go right together to swipe a row. */
+private val TWO_FINGER_SWIPE = 40.dp
 
 /** Two rows being pinched: each moved a share of its finger's way ([SQUEEZE_FOLLOW]), the upper on top. */
 private class Squeeze(val upper: ULong, val lower: ULong, val upperBy: Float, val lowerBy: Float) {
