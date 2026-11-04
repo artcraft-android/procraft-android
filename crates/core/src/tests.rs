@@ -8673,3 +8673,34 @@ fn crossing_strokes_sheet() {
     line(275.0, 70.0, 275.0, 250.0);
     s.export_png(out).unwrap();
 }
+
+#[test]
+fn the_size_preview_shows_the_brush_s_stamp_soft_where_it_is_soft() {
+    let s = CanvasSession::new(64, 64);
+    let pick = |name: &str| {
+        let found = s
+            .brush_library()
+            .iter()
+            .enumerate()
+            .find_map(|(i, set)| set.brushes.iter().position(|b| b.name == name).map(|j| (i as u32, j as u32)));
+        if let Some((set, index)) = found {
+            s.select_brush(set, index);
+        }
+        found.is_some()
+    };
+    assert!(pick("Soft Airbrush"));
+    let side = 64usize;
+    let soft = s.brush_stamp(side as u32);
+    assert_eq!(soft.len(), side * side);
+    let at = |p: &[u8], x: usize, y: usize| p[y * side + x];
+    // strongest in the middle, fading smoothly out, nothing in the corners
+    assert!(at(&soft, 32, 32) > 200, "{}", at(&soft, 32, 32));
+    let mid = at(&soft, 48, 32);
+    assert!(mid > 10 && mid < 200, "half way out: {mid}");
+    assert_eq!(at(&soft, 1, 1), 0);
+    // a hard round tip is solid to near its edge
+    assert!(pick("Hard Airbrush"));
+    let hard = s.brush_stamp(side as u32);
+    assert!(at(&hard, 52, 32) > 200, "{}", at(&hard, 52, 32));
+    assert_eq!(at(&hard, 1, 1), 0);
+}

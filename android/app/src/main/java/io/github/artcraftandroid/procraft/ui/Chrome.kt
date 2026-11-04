@@ -258,15 +258,19 @@ private val SliderPanelDot get() = if (Pc.light) Color.Black else Color.White
 
 /**
  * A slider's panel: its name and value ("Size 8%"), a button saving the value as a notch on the
- * slider ("+"; "-" takes away the notch it is on), and in the middle the brush's shape (a dot for
- * a round tip) as it would paint now, its size on the screen (and at its opacity).
+ * slider ("+"; "-" takes away the notch it is on), and in the middle the brush's stamp as it would
+ * paint now (soft where it is soft), its size on the screen (and at its opacity).
  */
 @Composable
 private fun SliderPanel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel, modifier: Modifier) {
     val size = which == CanvasViewModel.SliderPanel.SIZE
     val value = if (size) vm.size else vm.opacity
     val diameter = androidx.compose.runtime.remember(vm.size) { vm.brushScreenDiameter() }
-    val shape = androidx.compose.runtime.remember(vm.size) { vm.brushOutline() }
+    // the brush's stamp as it paints (soft where it is soft), as many pixels across as it shows
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val radius = with(density) { (diameter / 2f).coerceIn(1.5f, SliderPanelSide.toPx() / 2f - 8.dp.toPx()) }
+    val side = (radius * 2f).roundToInt().coerceAtLeast(2)
+    val stamp = androidx.compose.runtime.remember(vm.size, side) { vm.brushStamp(side) }
     // its own size, past the bar's edge (the bar's width would otherwise squeeze it)
     Box(
         modifier.wrapContentSize(Alignment.TopStart, unbounded = true).size(SliderPanelSide)
@@ -299,24 +303,15 @@ private fun SliderPanel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel,
             }
         }
         androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
-            val r = (diameter / 2f).coerceIn(1.5f, this.size.minDimension / 2f - 8.dp.toPx())
             val ink = SliderPanelDot.copy(alpha = if (size) 1f else value.coerceIn(0.02f, 1f))
-            if (shape.isEmpty()) {
-                drawCircle(ink, r, center)
+            if (stamp == null) {
+                drawCircle(ink, radius, center)
             } else {
-                // its loops across the diameter, a hole where one lies inside another
-                val path = Path().apply {
-                    fillType = androidx.compose.ui.graphics.PathFillType.EvenOdd
-                    for (ring in shape) {
-                        for (i in 0 until ring.size / 2) {
-                            val x = center.x + ring[i * 2] * r * 2f
-                            val y = center.y + ring[i * 2 + 1] * r * 2f
-                            if (i == 0) moveTo(x, y) else lineTo(x, y)
-                        }
-                        close()
-                    }
-                }
-                drawPath(path, ink)
+                drawImage(
+                    stamp,
+                    topLeft = androidx.compose.ui.geometry.Offset(center.x - side / 2f, center.y - side / 2f),
+                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(ink),
+                )
             }
         }
     }

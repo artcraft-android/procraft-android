@@ -4117,6 +4117,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The brush's own shape as loops across its diameter (none: the round tip's circle). */
     fun brushOutline(): List<List<Float>> = session?.brushOutline() ?: emptyList()
 
+    /** The brush's stamp as it paints, [side] pixels square, as a coverage mask (null without a canvas). */
+    fun brushStamp(side: Int): androidx.compose.ui.graphics.ImageBitmap? {
+        val s = session ?: return null
+        val n = side.coerceIn(1, 1024)
+        val alpha = s.brushStamp(n.toUInt())
+        if (alpha.size < n * n) return null
+        // white with the coverage as its alpha (the panel tints it)
+        val colors = IntArray(n * n) { i -> (alpha[i].toInt() and 0xFF shl 24) or 0xFFFFFF }
+        val bitmap = android.graphics.Bitmap.createBitmap(colors, n, n, android.graphics.Bitmap.Config.ARGB_8888)
+        return bitmap.asImageBitmap()
+    }
+
     fun changeOpacity(value: Float) {
         opacity = value
         session?.setBrushOpacity(value)
