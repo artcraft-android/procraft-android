@@ -56,6 +56,9 @@ pub struct Stamp {
     /// grade, blur, blur jitter, wetness jitter and charge (1 each without a curve), its
     /// dilution, wet pull and smudge pull (the pressure as it is without one).
     pub wet: [f32; 8],
+    /// When the input that placed it came (ms, the newest sample's time): wet paint is laid a
+    /// display frame's stamps at a time.
+    pub time_ms: f64,
 }
 
 impl Stamp {
@@ -80,6 +83,7 @@ impl Stamp {
             transfer: 1.0,
             attack: 1.0,
             wet: [1.0; 8],
+            time_ms: 0.0,
         }
     }
 
@@ -140,6 +144,7 @@ struct Placed {
     transfer: f32,
     attack: f32,
     wet: [f32; 8],
+    time_ms: f64,
     /// The pressure as the size, opacity, bleed and roundness took it (and the stamp's own).
     pressed: [f32; 5],
     /// How much of the stamp's roundness is the drawn shape's, which the pressure squeezes (the
@@ -193,6 +198,11 @@ const SAMPLE_FRAMES: f32 = 0.25;
 /// counts for the time it covers, so they feel the same however fast the input comes.
 const PEN_RATE: f64 = 240.0;
 const FINGER_RATE: f64 = 120.0;
+
+/// The pressure a finger's wet mix takes (its dilution, pull, attack and their curves): with no
+/// pressure of its own, each input's is drawn towards full from the one before, settling here at
+/// a finger's input rate.
+pub const FINGER_WET_PRESSURE: f32 = 0.8;
 /// Stabilisation averages the latest points: at full strength this many samples' worth (at the
 /// rate above), fewer as the strength to this power falls.
 const MOST_AVERAGED: f32 = 120.0;
@@ -475,6 +485,8 @@ pub struct StrokeBuilder {
     pressure: Option<f32>,
     smoothed: Option<PathPoint>,
     last_sample: Option<Sample>,
+    /// The time of the sample being added (see [`Stamp::time_ms`]).
+    now_ms: f64,
     head: Option<PathPoint>,
     /// The path point before the head, and the newest one not yet walked to: the path curves
     /// through them, each stretch walked once the point after it is known.
@@ -658,6 +670,7 @@ impl StrokeBuilder {
             pressure: None,
             smoothed: None,
             last_sample: None,
+            now_ms: 0.0,
             head: None,
             direction: 0.0,
             heading: Vec2::ZERO,
@@ -885,6 +898,7 @@ impl StrokeBuilder {
     }
 
     fn push(&mut self, s: Sample, out: &mut Vec<Stamp>) {
+        self.now_ms = s.time_ms;
         let pen = self.pointer.has_pressure();
         // the samples at the tuned rate this one stands for (one if it came with the last's time)
         let interval = 1000.0 / if pen { PEN_RATE } else { FINGER_RATE };
@@ -1376,14 +1390,16 @@ impl StrokeBuilder {
         ]
         .map(by);
         let along = |k: PressureCurve| curves.through(k, pressure);
+        // the wet mix takes a finger's pressure as it settles (see [`FINGER_WET_PRESSURE`])
+        let wetted = if self.pointer.has_pressure() { pressure } else { FINGER_WET_PRESSURE };
         let wet = [
-            by(PC::WetGrade),
-            by(PC::WetBlur),
-            by(PC::WetBlurJitter),
-            by(PC::WetnessJitter),
-            by(PC::Charge),
-            along(PC::Dilution),
-            along(PC::WetPull),
+            curves.at(PC::WetGrade, wetted),
+            curves.at(PC::WetBlur, wetted),
+            curves.at(PC::WetBlurJitter, wetted),
+            curves.at(PC::WetnessJitter, wetted),
+            curves.at(PC::Charge, wetted),
+            curves.through(PC::Dilution, wetted),
+            curves.through(PC::WetPull, wetted),
             along(PC::SmudgePull),
         ];
         let color_jitter_by =
@@ -1438,7 +1454,7 @@ impl StrokeBuilder {
             Some(theta) if self.pointer.has_pressure() => Tilt::reach(p.tilt, theta),
             Some(theta) => Tilt::reach(std::f32::consts::FRAC_PI_2, theta),
         };
-        let attack = (p.soft[1].clamp(0.0, 1.0) * attack_tilt * curves.through(PC::Attack, pressure)).clamp(0.0, 1.0);
+        let attack = (p.soft[1].clamp(0.0, 1.0) * attack_tilt * curves.through(PC::Attack, wetted)).clamp(0.0, 1.0);
         let [hue_by, saturation_by, lightness_by, darkness_by, secondary_by] = color_first;
         let [hue_more, saturation_more, lightness_more, darkness_more, secondary_more] = color_more;
         // a pen turns the stamp as it is held (its azimuth, and roll), in place of following the
@@ -1547,6 +1563,7 @@ impl StrokeBuilder {
                 transfer,
                 attack,
                 wet,
+                time_ms: self.now_ms,
                 pressed: p.soft,
                 drawn_share,
             };
@@ -1628,6 +1645,7 @@ impl StrokeBuilder {
             transfer: p.transfer,
             attack: p.attack,
             wet: p.wet,
+            time_ms: p.time_ms,
         }
     }
 }
@@ -2204,11 +2222,12 @@ mod tests {
         assert!((attack(1.0, 0.0, false, Pointer::Stylus) - 1.0).abs() < 1e-4);
         // the pressure counts twice: as the opacity takes it, and through the attack's own curve
         assert!((attack(0.4, 0.0, false, Pointer::Stylus) - 0.16).abs() < 0.03);
-        // switched on: an upright pen next to none, a leaning one more, a finger as a flat pen
+        // switched on: an upright pen next to none, a leaning one more
         assert!(attack(1.0, 0.0, true, Pointer::Stylus) < 0.01);
         let flat = Tilt::reach(crate::brush::FLAT_TILT, 0.0);
         assert!((attack(1.0, crate::brush::FLAT_TILT, true, Pointer::Stylus) - flat).abs() < 1e-3);
-        let finger = Tilt::reach(std::f32::consts::FRAC_PI_2, 0.0);
+        // a finger as a flat pen, at the pressure its wet mix takes
+        let finger = Tilt::reach(std::f32::consts::FRAC_PI_2, 0.0) * FINGER_WET_PRESSURE;
         assert!((attack(1.0, 0.0, true, Pointer::Finger) - finger).abs() < 1e-3);
     }
 

@@ -1249,16 +1249,20 @@ fn wet_paint_mixes_with_what_is_under_it() {
     canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.5, 0.5, 0.5], 1.0));
     canvas.add_stamps(&(0..64).map(|y| dot(Vec2::new(32.0, y as f32), 8.0)).collect::<Vec<_>>());
     canvas.end_stroke();
-    // white across it, wet (half water) with a strong pull: over the grey it mixes, and off it
-    // the watery paint it carries goes on thin
+    // white across it, wet (half water, a little charge) with a strong pull, half a pixel a
+    // millisecond (laid a display frame at a time): over the grey it mixes, and past it the grey
+    // it picked up goes on with it
     let wet = StrokeStyle {
         wet_pull: Some(0.85),
         dilution: 0.5,
+        load: 0.1,
         ..StrokeStyle::new(StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0)
     };
     canvas.begin_stroke(doc.current(), wet);
     canvas.add_stamps(
-        &(0..120).map(|i| Stamp::round(Vec2::new(4.0 + i as f32 * 0.5, 32.0), 4.0, 0.5)).collect::<Vec<_>>(),
+        &(0..120)
+            .map(|i| Stamp { time_ms: f64::from(i), ..Stamp::round(Vec2::new(4.0 + i as f32 * 0.5, 32.0), 4.0, 0.5) })
+            .collect::<Vec<_>>(),
     );
     canvas.end_stroke();
     canvas.render(&gpu, &mut doc, None);
@@ -1266,12 +1270,48 @@ fn wet_paint_mixes_with_what_is_under_it() {
     let over = pixel(&layer, 64, 32, 32);
     assert!(over[0] > 135 && over[0] < 250, "mixed over the band: {over:?}");
     let past = pixel(&layer, 64, 50, 32);
-    assert!(past[3] > 10 && past[3] < 220, "thin past the band: {past:?}");
+    assert!(past[3] > 128 && past[0] < 250 && past[0] >= over[0], "past the band: {past:?}");
     // as one undo step
     canvas.undo();
     canvas.render(&gpu, &mut doc, None);
     let back = pixel(&canvas.read_layer(&gpu, doc.current()).unwrap(), 64, 32, 32);
     assert!((126..=130).contains(&back[0]), "{back:?}");
+}
+
+#[test]
+fn a_slower_wet_stroke_runs_out_sooner() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // the same oily stroke drawn quickly and four times as slowly: laid a display frame at a
+    // time, the slower one lays over what was under each frame's first stamp more often, so
+    // once its charge has gone it thins sooner
+    let laid = |ms_a_stamp: f64| {
+        let mut doc = Document::new(400, 32);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let oily = StrokeStyle {
+            wet_pull: Some(0.96),
+            dilution: 0.85,
+            load: 0.46,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), oily);
+        canvas.add_stamps(
+            &(0..720)
+                .map(|i| Stamp {
+                    time_ms: f64::from(i) * ms_a_stamp,
+                    ..Stamp::round(Vec2::new(4.0 + i as f32 * 0.5, 16.0), 6.0, 1.0)
+                })
+                .collect::<Vec<_>>(),
+        );
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (pixel(&layer, 400, 60, 16)[3], pixel(&layer, 400, 340, 16)[3])
+    };
+    let (quick, slow) = (laid(0.5), laid(2.0));
+    // both loaded early on; long after the charge has gone, the slow one has less left
+    assert!(quick.0 > 150 && slow.0 > 150, "{quick:?} {slow:?}");
+    assert!(slow.1 + 20 < quick.1, "{quick:?} {slow:?}");
 }
 
 #[test]
