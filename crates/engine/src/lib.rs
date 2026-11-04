@@ -30,6 +30,7 @@ pub mod jpeg;
 pub mod keyed;
 pub mod krita;
 pub mod library;
+pub mod lzo;
 pub mod mesh;
 pub mod motion;
 pub mod native;

@@ -391,36 +391,41 @@ impl Canvas<'_> {
     }
 
     /// A layer's pixels, `bpp` bytes each, top row first, turned as the canvas is shown; where no
-    /// tile was stored, every byte is `blank`.
+    /// tile was stored, every byte is `blank`. Tiles are LZ4 (`.lz4`) or, in packages from the
+    /// older app (and their layers not saved since), LZO (`.chunk`); where both are, the LZ4 one.
     fn pixels(&self, uuid: &str, bpp: usize, blank: u8) -> Result<Vec<u8>, ReadError> {
         let (w, h, t) = (self.w as usize, self.h as usize, self.tile as usize);
         let mut out = vec![blank; w * h * bpp];
         let prefix = format!("{uuid}/");
-        let names: Vec<String> =
-            self.zip.names().filter(|n| n.starts_with(&prefix) && n.ends_with(".lz4")).map(str::to_owned).collect();
-        // the tiles on the canvas, where they go
-        let tiles: Vec<(String, usize, usize)> = names
-            .into_iter()
+        // the tiles on the canvas, where they go, and whether each is LZO
+        let mut tiles: Vec<(String, usize, usize, bool)> = self
+            .zip
+            .names()
             .filter_map(|name| {
-                let (tx, ty) = name
-                    .get(prefix.len()..name.len() - 4)
-                    .and_then(|s| s.split_once('~'))
-                    .and_then(|(x, y)| Some((x.parse::<usize>().ok()?, y.parse::<usize>().ok()?)))?;
-                (tx * t < w && ty * t < h).then_some((name, tx, ty))
+                let rest = name.strip_prefix(&prefix)?;
+                let (at, lzo) = match rest.strip_suffix(".lz4") {
+                    Some(at) => (at, false),
+                    None => (rest.strip_suffix(".chunk")?, true),
+                };
+                let (tx, ty) = at.split_once('~').and_then(|(x, y)| Some((x.parse::<usize>().ok()?, y.parse::<usize>().ok()?)))?;
+                (tx * t < w && ty * t < h).then(|| (name.to_owned(), tx, ty, lzo))
             })
             .collect();
+        tiles.sort_by_key(|&(_, tx, ty, lzo)| (tx, ty, lzo));
+        tiles.dedup_by_key(|&mut (_, tx, ty, _)| (tx, ty));
         // unpacked side by side, then put in place
-        let unpack = |(name, tx, ty): &(String, usize, usize)| -> Result<Vec<u8>, ReadError> {
+        let unpack = |(name, tx, ty, lzo): &(String, usize, usize, bool)| -> Result<Vec<u8>, ReadError> {
             let (tw, th) = (t.min(w - tx * t), t.min(h - ty * t));
             let packed = self.zip.read(name).ok_or(ReadError::Damaged("tile"))?;
-            let raw = applz4::decode(&packed, tw * th * bpp).ok_or(ReadError::Damaged("tile"))?;
+            let raw = if *lzo { crate::lzo::decode(&packed, tw * th * bpp) } else { applz4::decode(&packed, tw * th * bpp) }
+                .ok_or(ReadError::Damaged("tile"))?;
             if raw.len() != tw * th * bpp {
                 return Err(ReadError::Damaged("tile size"));
             }
             Ok(raw)
         };
         let unpacked = crate::par::side_by_side(&tiles, unpack);
-        for ((_, tx, ty), raw) in tiles.iter().zip(unpacked) {
+        for ((_, tx, ty, _), raw) in tiles.iter().zip(unpacked) {
             let raw = raw.ok_or(ReadError::Damaged("tile"))??;
             let (tx, ty) = (*tx, *ty);
             let (tw, th) = (t.min(w - tx * t), t.min(h - ty * t));
@@ -1518,6 +1523,60 @@ mod tests {
         let m = back.document.layers().iter().find(|l| l.kind == LayerKind::Mask).unwrap();
         assert_eq!(back.pixels.iter().find(|(id, _)| *id == m.id).unwrap().1, grey);
         assert_eq!(bounds(&grey, w, h, 4, 255), [10.0, 496.0, 10.0, 4.0]);
+    }
+
+    #[test]
+    fn tiles_in_the_older_format_are_read_too() {
+        // a layer's tiles as the older app kept them: LZO (here stored as one run of literals)
+        // under `.chunk`, beside a tile kept in both forms
+        let lzo = |raw: &[u8]| {
+            let mut out = vec![0u8];
+            let mut rest = raw.len() - 3 - 15;
+            while rest > 255 {
+                out.push(0);
+                rest -= 255;
+            }
+            out.push(rest as u8);
+            out.extend_from_slice(raw);
+            out.extend_from_slice(&[0x11, 0, 0]);
+            out
+        };
+        let (w, h) = (300, 200);
+        let doc = Document::new(w, h);
+        let layer = doc.current();
+        let picture = painted(w, h, |x, y| [(x % 256) as u8, (y % 256) as u8, 7, 255]);
+        let mut pixels = HashMap::new();
+        pixels.insert(layer, picture.clone());
+        let bytes = write(&Export {
+            document: &doc,
+            pixels: &pixels,
+            composite: &picture,
+            thumbnail_png: &[],
+            name: "",
+            author: "",
+            strokes: 0,
+            tracked_seconds: 0.0,
+            seed: 5,
+            time_lapse: None,
+        });
+        let zip = ZipReader::new(&bytes).unwrap();
+        let mut older = ZipWriter::new();
+        for name in zip.names() {
+            let data = zip.read(name).unwrap();
+            match name.strip_suffix(".lz4") {
+                Some(at) => {
+                    let raw = applz4::decode(&data, 1 << 24).unwrap();
+                    older.add(&format!("{at}.chunk"), &lzo(&raw));
+                    // one tile in both forms: the LZ4 one is read
+                    if at.ends_with("0~0") {
+                        older.add(name, &data);
+                    }
+                }
+                None => older.add(name, &data),
+            }
+        }
+        let back = read(&older.finish()).unwrap();
+        assert_eq!(back.pixels.iter().find(|(id, _)| *id == layer).map(|(_, p)| p), Some(&picture));
     }
 
     #[test]
