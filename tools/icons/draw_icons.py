@@ -1437,6 +1437,47 @@ def thumbtack():
     return rotate(tack, -30, origin=(12, 12))
 
 
+def hourglass():
+    """Recent: an hourglass, its sand run down."""
+    caps = unary_union([soft(box(5.0, 2.0, 19.0, 4.6), 1.0), soft(box(5.0, 19.4, 19.0, 22.0), 1.0)])
+    glass = soft(Polygon([(6.6, 4.0), (17.4, 4.0), (17.4, 6.6), (13.4, 12.0), (17.4, 17.4), (17.4, 20.0), (6.6, 20.0),
+                          (6.6, 17.4), (10.6, 12.0), (6.6, 6.6)]), 0.5)
+    # the upper bulb empty but for its rim; the lower one full
+    empty = soft(Polygon([(8.8, 5.8), (15.2, 5.8), (15.2, 6.2), (12.0, 10.4), (8.8, 6.2)]), 0.3)
+    return unary_union([caps, glass.difference(empty)])
+
+
+def target():
+    """Find: a target's ring with four ticks and a dot in the middle."""
+    ring = Point(12, 12).buffer(6.6, quad_segs=24).difference(Point(12, 12).buffer(4.2, quad_segs=24))
+    ticks = [capsule((12 + dx * 6.0, 12 + dy * 6.0), (12 + dx * 8.8, 12 + dy * 8.8), 1.2)
+             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))]
+    return unary_union([ring, *ticks, Point(12, 12).buffer(1.6, quad_segs=12)])
+
+
+def upright_tack():
+    """Pin: a thumbtack standing on its point."""
+    return unary_union([soft(box(6.6, 2.0, 17.4, 5.0), 1.0), box(9.2, 4.6, 14.8, 12.4), soft(box(5.1, 12.0, 18.9, 14.8), 0.8),
+                        capsule((12.0, 14.8), (12.0, 22.0), 0.8)])
+
+
+def struck_tack():
+    """Unpin: the standing thumbtack struck through."""
+    a, b = (4.6, 3.4), (19.4, 21.4)
+    return unary_union([upright_tack().difference(capsule(a, b, 0.9 + GAP)), capsule(a, b, 0.9)])
+
+
+def broom():
+    """Clear: a broom sweeping two specks of dust."""
+    head = soft(Polygon([(0.0, -3.6), (7.0, -2.2), (7.0, 2.2), (0.0, 3.6)]), 0.6)
+    for side in (-1, 1):
+        head = head.difference(capsule((-1.0, side * 1.2), (3.2, side * 0.9), 0.5))
+    band = soft(box(7.6, -2.0, 9.6, 2.0), 0.4)
+    stick = capsule((9.6, 0.0), (17.5, 0.0), 1.2)
+    dust = [Point(14.6, 20.6).buffer(1.1, quad_segs=10), Point(20.6, 20.4).buffer(0.8, quad_segs=10)]
+    return unary_union([along_diagonal(unary_union([head, band, stick]), (5.5, 18.5)), *dust])
+
+
 def four_squares():
     """Hard Mix: four squares."""
     return unary_union([soft(box(x, y, x + 8.0, y + 8.0), 1.0) for x in (3.0, 13.0) for y in (3.0, 13.0)])
@@ -1540,6 +1581,8 @@ DRAWINGS = {
     'chromadisplace': displaced, 'glitchartifact': blocky, 'glitchwave': square_wave, 'glitchsignal': static_screen,
     'glitchdiverge': fork, 'grainmoving': moving_grain, 'graintexturized': grain_tile, 'brushpaintedon': painted_on,
     'swipe-share': share_tab, 'swipe-duplicate': duplicate, 'textlayer': text_layer,
+    'recentset': hourglass, 'swipe-find': target, 'swipe-pin': upright_tack, 'swipe-unpin': struck_tack,
+    'swipe-clear': broom, 'menuclear': broom, 'pinmark': upright_tack,
 }
 DRAWINGS.update({f'set-{k}': draw for k, draw in enumerate(SET_ICONS)})
 DRAWINGS.update({f'blend-{k}': draw for k, draw in BLENDS.items()})

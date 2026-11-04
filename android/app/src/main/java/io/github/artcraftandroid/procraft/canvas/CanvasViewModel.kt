@@ -24,6 +24,7 @@ import io.github.artcraftandroid.procraft.core.BlendModeInfo
 import io.github.artcraftandroid.procraft.ui.GradientPreset
 import io.github.artcraftandroid.procraft.core.BrushInfo
 import io.github.artcraftandroid.procraft.core.BrushSetInfo
+import io.github.artcraftandroid.procraft.core.RecentBrush
 import io.github.artcraftandroid.procraft.core.CanvasSession
 import io.github.artcraftandroid.procraft.core.ModelFile
 import io.github.artcraftandroid.procraft.core.SourceKind
@@ -85,6 +86,9 @@ import java.nio.ByteBuffer
 
 /** Which panel is open over the canvas. */
 private const val TAG = "ProCraft"
+
+/** [CanvasViewModel.shownSet] while the library shows the Recent set. */
+const val RECENT_SET = -1
 
 enum class Panel { NONE, LAYERS, COLOR, BRUSHES, ACTIONS, ADJUSTMENTS }
 
@@ -778,6 +782,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var shownSet by mutableStateOf(0)
         private set
+    /** The Recent set: the pinned brushes, then those last painted with, the latest first. */
+    var recentBrushes by mutableStateOf<List<RecentBrush>>(emptyList())
+        private set
+    /** A brush found from the Recent set ("set-index"), which its own set scrolls to. */
+    var foundBrush by mutableStateOf<String?>(null)
     val previews = mutableStateMapOf<String, ImageBitmap>()
 
     /** Previews whose stroke runs under the brush's name: the name then sits on a dark pill. */
@@ -2768,7 +2777,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         if (this.tool == tool) {
-            currentBrush?.let { shownSet = it.set.toInt() }
+            // the library opens on the current brush's set, or on the Recent set if it was shown
+            if (shownSet != RECENT_SET) currentBrush?.let { shownSet = it.set.toInt() }
+            readRecentBrushes()
             toggle(Panel.BRUSHES)
         } else {
             select(tool)
@@ -2804,6 +2815,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun showSet(index: Int) {
         shownSet = index
+        if (index == RECENT_SET) {
+            readRecentBrushes()
+            return
+        }
         // the set's last chosen brush becomes the current one, as choosing it again would
         val choice = setChoice[index] ?: return
         brushSets.getOrNull(index)?.brushes?.getOrNull(choice)?.let { chooseBrush(it) }
@@ -3418,7 +3433,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         brushSets = s.brushLibrary()
         currentBrush = s.currentBrush()
         readSetChoices()
-        shownSet = shownSet.coerceIn(0, (brushSets.size - 1).coerceAtLeast(0))
+        if (shownSet != RECENT_SET) shownSet = shownSet.coerceIn(0, (brushSets.size - 1).coerceAtLeast(0))
+        recentBrushes = s.recentBrushes()
         readSliders()
         previews.clear()
         shadedNames.clear()
@@ -3443,6 +3459,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** A new brush at the top of the shown set, opened in the studio. */
     fun newBrush() {
         val s = session ?: return
+        if (shownSet == RECENT_SET) shownSet = currentBrush?.set?.toInt() ?: 0
         s.newBrush(shownSet.toUInt()) ?: return
         libraryChanged()
         studioNew = true
@@ -3554,6 +3571,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun addBrushesRead() {
         val s = session ?: return
         if (studioOpen || brushQuestionOpen || brushesRead.isEmpty()) return
+        if (shownSet == RECENT_SET) shownSet = currentBrush?.set?.toInt() ?: 0
         for (read in brushesRead.toList()) {
             s.addBrushesRead(read, shownSet.toUInt())?.let { shownSet = it.toInt() }
         }
@@ -3626,7 +3644,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
         val set = s.importBrushes(bytes)
             // files of ours, from before
-            ?: runCatching { s.importBrushFile(shownSet.toUInt(), bytes.decodeToString()) }.getOrNull()
+            ?: runCatching { s.importBrushFile(shownSet.coerceAtLeast(0).toUInt(), bytes.decodeToString()) }.getOrNull()
             ?: return false
         shownSet = set.toInt()
         libraryChanged()
@@ -3672,6 +3690,42 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             readSliders()
             keepChoices(s)
         }
+    }
+
+    /** Reads the Recent set again: painting adds to it. */
+    fun readRecentBrushes() {
+        recentBrushes = session?.recentBrushes().orEmpty()
+    }
+
+    /** Pins a brush of the Recent set there, or unpins it. */
+    fun pinRecentBrush(b: BrushInfo, pinned: Boolean) {
+        val s = session ?: return
+        if (!s.pinRecentBrush(b.set, b.index, pinned)) return
+        recentBrushes = s.recentBrushes()
+        keepChoices(s)
+    }
+
+    /** Takes a brush out of the Recent set. */
+    fun clearRecentBrush(b: BrushInfo) {
+        val s = session ?: return
+        if (!s.clearRecentBrush(b.set, b.index)) return
+        recentBrushes = s.recentBrushes()
+        keepChoices(s)
+    }
+
+    /** Empties the Recent set, its pinned brushes too. */
+    fun clearRecentBrushes() {
+        val s = session ?: return
+        s.clearRecentBrushes()
+        recentBrushes = emptyList()
+        keepChoices(s)
+    }
+
+    /** A brush of the Recent set shown in its own set, chosen there. */
+    fun findBrush(b: BrushInfo) {
+        shownSet = b.set.toInt()
+        chooseBrush(b)
+        foundBrush = "${b.set}-${b.index}"
     }
 
     /** The brush chosen before the current one (set, place in it), for Previous brush. */

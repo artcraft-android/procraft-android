@@ -236,3 +236,10 @@ blend-linear-height	26	26	5.72	4.2	21.92	20.4
 swipe-share	24	24	5.5	3.8	18.5	21.0
 swipe-duplicate	24	24	4.0	4.0	20.0	20.0
 textlayer	93	61	29	17.5	58	42.5
+recentset	40	40	14	12	26	28
+swipe-find	24	24	3.8	2.54	20.2	18.94
+swipe-pin	24	24	5.05	0.64	18.95	20.84
+swipe-unpin	24	24	3.75	0.64	20.85	20.84
+swipe-clear	24	24	3.15	1.89	22.05	18.94
+menuclear	40	40	9	10	30	29
+pinmark	16	16	4	2	12	14

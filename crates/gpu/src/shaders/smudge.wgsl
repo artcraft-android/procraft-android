@@ -245,14 +245,15 @@ fn mask(t: vec2<f32>) -> f32 {
         let soft = 1.0 - smoothstep(min(st.hardness, 0.999) * st.radius, st.radius + 0.5, d);
         return min(rim, soft);
     }
-    let uv = t * 0.5 + 0.5;
+    // the shape fills the stamp and half a pixel round it, as a brush stamp's does
+    let uv = t * (st.radius / (st.radius + 0.5)) * 0.5 + 0.5;
     if (st.shape_sharp > 0.5) {
         // unfiltered: the texel under it
         let size = vec2<i32>(textureDimensions(shapes));
         let at = clamp(vec2<i32>(floor(uv * vec2<f32>(size))), vec2<i32>(0), size - 1);
         return textureLoad(shapes, at, st.shape, 0).r;
     }
-    let lod = max(log2(256.0 / max(2.0 * st.radius, 1.0)), 0.0);
+    let lod = max(log2(256.0 / max(2.0 * st.radius + 1.0, 1.0)), 0.0);
     return textureSampleLevel(shapes, shape_smp, uv, st.shape, lod).r;
 }
 
@@ -315,7 +316,9 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     let s = sin(st.angle);
     let local = vec2<f32>(d.x * c + d.y * s, -d.x * s + d.y * c);
     let t = vec2<f32>(local.x / st.radius, local.y / (st.radius * st.roundness));
-    if (abs(t.x) > 1.0 || abs(t.y) > 1.0) {
+    // the stamp and half a pixel round it
+    let reach = (st.radius + 0.5) / st.radius;
+    if (abs(t.x) > reach || abs(t.y) > reach) {
         return;
     }
     let shape = mask(t);

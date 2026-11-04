@@ -160,9 +160,11 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         let soft = 1.0 - smoothstep(min(su.hardness, 0.999) * r, r + 0.5, d);
         a = min(rim, soft);
     } else {
-        let uv = i.q * i.flip * 0.5 + 0.5;
+        // the shape fills its stamp and half a pixel round it (as far as the quad it is drawn on
+        // reaches past the stamp), which shows on a stamp a few pixels across
+        let uv = i.q * (r / (r + 0.5)) * i.flip * 0.5 + 0.5;
         // the mip level that matches the stamp's size on the canvas
-        let lod = max(log2(256.0 / max(2.0 * r, 1.0)), 0.0);
+        let lod = max(log2(256.0 / max(2.0 * r + 1.0, 1.0)), 0.0);
         let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
         var s = textureSampleLevel(shapes, shape_smp, uv, su.shape, lod).r;
         if (su.shape_sharp == 1u) {

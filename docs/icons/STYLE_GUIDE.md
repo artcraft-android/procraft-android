@@ -230,6 +230,9 @@ Lucide set beside them.
 | Moving / Texturized (grain) | rows of grain with an arrow along under them / the pitted Grain tile |
 | Paint, painting an adjustment on | the Paint brush with an adjustment ring |
 | Brush swipe: Share / Duplicate | the tray and rising arrow / the Duplicate sheets |
+| Recent set | an hourglass, its sand run down |
+| Recent swipe: Find / Pin / Unpin / Clear | a target / a thumbtack standing on its point / the tack struck through / a broom sweeping two specks |
+| A pinned brush's mark | the standing thumbtack |
 
 ## Brush set icons
 

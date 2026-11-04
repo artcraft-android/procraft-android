@@ -8772,3 +8772,53 @@ fn a_pad_is_drawn_again_off_the_caller_s_thread_the_newest_ask_last() {
     // the stroke is there again, in the last colour asked for
     assert_eq!(pixel(&pad, 100, 60)[..3], [255, 0, 0]);
 }
+
+#[test]
+fn the_recent_set_keeps_the_last_eight_brushes_painted_with_and_the_pinned_ones() {
+    let Some(s) = session(200, 200) else { return };
+    // every brush of the library, by place
+    let places: Vec<(u32, u32)> =
+        s.brush_library().iter().enumerate().flat_map(|(i, set)| set.brushes.iter().map(move |b| (i as u32, b.index))).collect();
+    assert!(places.len() >= 10);
+    let paint = |(set, index): (u32, u32)| {
+        assert!(s.select_brush(set, index));
+        s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 20.0, 0.0)]);
+        s.stroke_end(vec![sample(60.0, 20.0, 40.0)]);
+    };
+    let shown = || s.recent_brushes().iter().map(|r| ((r.set, r.index), r.pinned)).collect::<Vec<_>>();
+    // chosen alone it isn't one; painted with, it is
+    assert!(s.select_brush(places[0].0, places[0].1));
+    assert!(shown().is_empty());
+    for &p in &places[..10] {
+        paint(p);
+    }
+    // the last eight, the latest first
+    let want: Vec<_> = places[2..10].iter().rev().map(|&p| (p, false)).collect();
+    assert_eq!(shown(), want);
+    // painted with again, it comes first
+    paint(places[5]);
+    assert_eq!(shown()[0], (places[5], false));
+    assert_eq!(shown().len(), 8);
+    // pinned, it stays apart, first; painting doesn't move it; unpinned it is the latest again
+    assert!(s.pin_recent_brush(places[3].0, places[3].1, true));
+    assert_eq!(shown()[0], (places[3], true));
+    assert_eq!(shown().iter().filter(|e| e.0 == places[3]).count(), 1);
+    paint(places[3]);
+    assert_eq!(shown()[0], (places[3], true));
+    // kept between sessions
+    let kept = s.saved_brush_choices();
+    s.clear_recent_brushes();
+    assert!(shown().is_empty());
+    assert!(s.load_brush_choices(kept));
+    assert_eq!(shown()[0], (places[3], true));
+    assert!(s.pin_recent_brush(places[3].0, places[3].1, false));
+    assert_eq!(shown()[0], (places[3], false));
+    // cleared, it goes
+    assert!(s.clear_recent_brush(places[3].0, places[3].1));
+    assert!(!shown().iter().any(|e| e.0 == places[3]));
+    // a brush deleted leaves it, and those after it in its set move up
+    let (set, index) = places[9];
+    let after = s.brush_library()[set as usize].brushes.len() as u32 > index + 1;
+    assert!(s.delete_brush(set, index));
+    assert!(!shown().iter().any(|e| e.0 == (set, index)) || after);
+}

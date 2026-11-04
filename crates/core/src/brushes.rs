@@ -33,6 +33,15 @@ pub struct BrushInfo {
     pub name: String,
 }
 
+/// A brush in the Recent set: where it is in the library, and whether it is pinned there.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct RecentBrush {
+    pub set: u32,
+    pub index: u32,
+    pub name: String,
+    pub pinned: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct BrushSetInfo {
     pub name: String,

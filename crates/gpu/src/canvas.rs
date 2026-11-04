@@ -4320,7 +4320,7 @@ impl Canvas {
         for (k, s) in instances.iter().enumerate() {
             let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
             let bbox =
-                IRect::around(center, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
+                IRect::around(center, (s.radius + 0.5) * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
             if bbox.is_empty() || s.radius <= 0.0 {
                 continue;
             }
@@ -4475,7 +4475,7 @@ impl Canvas {
             for (s, _, _) in stamps {
                 let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
                 let bbox =
-                    IRect::around(center, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
+                    IRect::around(center, (s.radius + 0.5) * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
                 if bbox.is_empty() || s.radius <= 0.0 {
                     continue;
                 }
@@ -4568,7 +4568,7 @@ impl Canvas {
             for (k, (s, _, _)) in group.iter().enumerate() {
                 let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
                 let bbox =
-                    IRect::around(center, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
+                    IRect::around(center, (s.radius + 0.5) * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
                 if bbox.is_empty() || s.radius <= 0.0 {
                     continue;
                 }

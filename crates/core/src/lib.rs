@@ -89,7 +89,7 @@ pub use adjust_menu::{
 pub use adjusting::{AdjustShown, CLONE_PUCK_RADIUS};
 pub use animation::{AnimationPlayback, AnimationSettings, PlayStep, animation_next_step};
 pub use brush_files::{BrushesRead, OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip, read_any_brushes, read_brushes};
-pub use brushes::{BrushInfo, BrushSetInfo};
+pub use brushes::{BrushInfo, BrushSetInfo, RecentBrush};
 pub use colour::{
     cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,
 };
@@ -397,6 +397,10 @@ pub(crate) struct State {
     smudge_brush: (usize, usize),
     /// Each set's last chosen brush, (set, brush) in the library, the latest choice last.
     set_choices: Vec<(usize, usize)>,
+    /// The Recent set: the brushes last painted with (at most [`RECENT_BRUSHES`], the latest
+    /// last) and those pinned there (in the order they were pinned), by place in the library.
+    recent_brushes: Vec<(usize, usize)>,
+    pinned_brushes: Vec<(usize, usize)>,
     /// Each brush's sliders, per tool.
     sliders: HashMap<(ToolKind, usize, usize), Sliders>,
     /// Strokes started, to seed each one's randomness.
@@ -1149,6 +1153,8 @@ impl CanvasSession {
             erase_brush,
             smudge_brush,
             set_choices: Vec::new(),
+            recent_brushes: Vec::new(),
+            pinned_brushes: Vec::new(),
             sliders: HashMap::new(),
             strokes: 0,
             preview: None,
@@ -1342,6 +1348,8 @@ impl CanvasSession {
         let second = st.second_brush(tool, current, &brush, &style);
         let diameter = diameter * st.brush_scale();
         st.strokes = st.strokes.wrapping_add(1);
+        // the tool's brush is one of the Recent set's now (unless pinned there)
+        st.note_recent(st.brush_ref(tool));
         st.info.strokes = st.info.strokes.saturating_add(1);
         let seed = st.strokes.wrapping_mul(0x9e37_79b9);
         let make = |st: &State, brush: Brush, diameter: f32, seed: u32| {
