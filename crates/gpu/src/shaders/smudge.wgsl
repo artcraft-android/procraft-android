@@ -321,7 +321,11 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     if (st.mode == 1u) {
         // wet: the stamp's plot mixed in, alpha and all (a stamp can lay bare paper), as far as
         // its weight there
-        let laid = plot_at(2u * CARRIED + st.index * st.plot * st.plot, st.plot, t);
+        // the stamp's plot, or (dry paint laid in place, no plots) the paint itself
+        var laid = vec4<f32>(st.paint.rgb, 1.0);
+        if (st.count > 0u) {
+            laid = plot_at(2u * CARRIED + st.index * st.plot * st.plot, st.plot, t);
+        }
         var weight = wet_weight(vec2<f32>(p) + 0.5, t);
         if (st.modulated == 1u) {
             // only as far as the pixel has room left, which fills as it takes paint

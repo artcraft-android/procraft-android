@@ -1371,8 +1371,9 @@ impl StrokeBuilder {
         let transfer = pressure_flow;
         let through = if self.brush.rendering == Rendering::Capped { 1.0 } else { pressure_flow };
         let mut alpha = ranged.powf(FLOW_POWER) * through * falloff;
-        // (wet paint is laid stamp by stamp as it is mixed, not built up gradually)
-        if self.brush.rendering == Rendering::Gradual && !self.brush.mixes_wet() {
+        // (wet paint is laid stamp by stamp as it is mixed, and a stroke laid in place takes the
+        // rule pixel by pixel, not built up gradually)
+        if self.brush.rendering == Rendering::Gradual && !self.brush.mixes_wet() && !self.brush.laid_in_place() {
             alpha = StrokeBuilder::gradual(alpha, diameter / self.step(p));
         }
         let shape = self.brush.shape.clone();

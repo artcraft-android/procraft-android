@@ -131,6 +131,13 @@ impl Brush {
         self.setting("wet_dilution") > 0.0 && self.setting("rendering_mode") >= 3.5
     }
 
+    /// Whether the brush's strokes are laid in place, each pixel taking paint only as far as it has
+    /// room left: a dry brush in Uniform Blending (blending, building up by what is left) and the
+    /// Normal blend mode. Stamps drawn "over" can't follow that rule pixel by pixel.
+    pub fn laid_in_place(&self) -> bool {
+        self.setting("rendering_mode").round() == 4.0 && !self.mixes_wet() && self.setting("blend_mode").round() == 0.0
+    }
+
     /// Whether the brush blends (Uniform or Intense Blending, mixing as it goes): its opacity
     /// slider lightens each stamp instead of capping the stroke.
     pub fn blends(&self) -> bool {

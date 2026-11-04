@@ -157,13 +157,21 @@ pub struct StrokeStyle {
     /// Luminance blending: the stroke mixed into its layer by its coverage in squared colour
     /// (nearer to light), not as the colour's numbers are.
     pub luminance: bool,
+    /// Dry paint laid in place, each pixel taking paint only as far as it has room left (see
+    /// `Brush::laid_in_place`).
+    pub laid_in_place: bool,
 }
 
 impl StrokeStyle {
     /// Whether the stroke changes its layer as it goes (smudging, painting wet) rather than
     /// building up in the stroke texture.
     pub fn in_place(&self) -> bool {
-        self.tool == StrokeTool::Smudge || (self.tool == StrokeTool::Paint && self.wet_pull.is_some())
+        self.tool == StrokeTool::Smudge || self.paints_in_place()
+    }
+
+    /// Whether the stroke paints its layer as it goes: wet paint, or dry paint laid in place.
+    fn paints_in_place(&self) -> bool {
+        self.tool == StrokeTool::Paint && (self.wet_pull.is_some() || self.laid_in_place)
     }
 
     /// A plain hard round stroke.
@@ -204,6 +212,7 @@ impl StrokeStyle {
             secondary: [1.0, 1.0, 1.0],
             preview: false,
             luminance: false,
+            laid_in_place: false,
         }
     }
 
@@ -258,6 +267,7 @@ impl StrokeStyle {
             secondary: [1.0, 1.0, 1.0],
             preview: false,
             luminance: brush.setting("luminance_blending") >= 0.5,
+            laid_in_place: tool == StrokeTool::Paint && brush.laid_in_place(),
         }
     }
 
@@ -954,8 +964,7 @@ struct Smudge {
 /// Whether a stroke's texturized grain is laid over its wet paint once, as it ends up, rather
 /// than stamp by stamp (where it would wash out as the stamps build up).
 fn grain_once(style: &StrokeStyle) -> bool {
-    style.wet_pull.is_some()
-        && style.tool == StrokeTool::Paint
+    style.paints_in_place()
         && style.grain.is_some()
         && style.grain_mode == GrainMode::Texturized
         && style.grain_depth > 0.0
@@ -4105,7 +4114,7 @@ impl Canvas {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let wet_paint = style.wet_pull.is_some() && style.tool == StrokeTool::Paint;
+            let wet_paint = style.paints_in_place();
             let carry = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("smudge carry"),
                 // the carry, and the blur's two passes over it (see the shader's cs_blur_down); or
@@ -4188,7 +4197,7 @@ impl Canvas {
                 plot: 0,
             });
         }
-        if style.wet_pull.is_some() && style.tool == StrokeTool::Paint {
+        if style.paints_in_place() {
             let Some(smudge) = self.smudge.as_mut() else { return };
             smudge.pending.extend(instances.iter().zip(wet).zip(times).map(|((s, w), t)| (*s, *w, *t)));
             let newest = smudge.pending.last().map(|s| wet_frame(s.2));
@@ -4318,6 +4327,31 @@ impl Canvas {
         let mut pass =
             encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("wet"), timestamp_writes: None });
         pass.set_bind_group(1, &self.brush_bind, &[]);
+        if style.wet_pull.is_none() {
+            // dry paint laid in place: each stamp lays the paint itself, no pass of plots
+            for (s, _, _) in stamps {
+                let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
+                let bbox =
+                    IRect::around(center, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
+                if bbox.is_empty() || s.radius <= 0.0 {
+                    continue;
+                }
+                changed = changed.union(bbox);
+                let offset = params.push(&SmudgeUniform {
+                    mode: 1,
+                    modulated,
+                    grain_once,
+                    count: 0,
+                    ..smudge_uniform(s, style, bbox, size)
+                });
+                pass.set_bind_group(0, &bind, &[offset, 0]);
+                pass.set_pipeline(&self.pipelines.smudge_deposit);
+                pass.dispatch_workgroups(bbox.width().div_ceil(8), bbox.height().div_ceil(8), 1);
+            }
+            drop(pass);
+            self.smudged(encoder, changed);
+            return;
+        }
         let mut from = 0;
         while let Some(head) = stamps.get(from) {
             let frame = wet_frame(head.2);

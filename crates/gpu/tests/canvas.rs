@@ -1366,6 +1366,37 @@ fn a_wet_stamps_bleed_lays_its_strong_parts_whole_and_its_faint_ones_not_at_all(
 }
 
 #[test]
+fn dry_paint_laid_in_place_builds_up_by_what_is_left() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // twenty stamps a quarter strong on one spot, each in a frame of its own: laid in place, each
+    // adds a quarter of what is left, squared, as the rule says (drawn over, they would reach
+    // 1 - 0.75^20)
+    let mut doc = Document::new(32, 32);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let style = StrokeStyle {
+        rendering: Rendering::Gradual,
+        laid_in_place: true,
+        ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+    };
+    canvas.begin_stroke(doc.current(), style);
+    canvas.add_stamps(
+        &(0..20)
+            .map(|i| Stamp { time_ms: f64::from(i) * 20.0, ..Stamp::round(Vec2::new(16.0, 16.0), 8.0, 0.25) })
+            .collect::<Vec<_>>(),
+    );
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let laid = f32::from(pixel(&canvas.read_layer(&gpu, doc.current()).unwrap(), 32, 16, 16)[3]) / 255.0;
+    let mut built = 0.0f32;
+    for _ in 0..20 {
+        built += 0.25 * (1.0 - built) * (1.0 - built);
+    }
+    assert!((laid - built).abs() < 0.03, "{laid} for {built}");
+    assert!(laid < 0.95);
+}
+
+#[test]
 fn modulated_wet_paint_lays_a_pixel_once() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
