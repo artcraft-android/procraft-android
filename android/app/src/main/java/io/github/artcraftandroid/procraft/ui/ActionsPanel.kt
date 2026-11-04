@@ -778,12 +778,23 @@ internal fun shareFiles(context: Context, files: List<File>, mime: String) {
     if (files.size == 1) return shareFile(context, files[0], mime)
     val uris = ArrayList(files.map { FileProvider.getUriForFile(context, context.packageName + ".files", it) })
     val send = Intent(Intent.ACTION_SEND_MULTIPLE).setType(mime).putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    context.startActivity(Intent.createChooser(send, null))
+    context.startActivity(shareSheet(context, send, files, mime))
 }
 
 /** Offers [file] to other apps through the share sheet. */
 internal fun shareFile(context: Context, file: File, mime: String) {
     val uri = FileProvider.getUriForFile(context, context.packageName + ".files", file)
     val send = Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    context.startActivity(Intent.createChooser(send, null))
+    context.startActivity(shareSheet(context, send, listOf(file), mime))
+}
+
+/** The share sheet for [send], with saving [files] to the device always among its choices. */
+private fun shareSheet(context: Context, send: Intent, files: List<File>, mime: String): Intent {
+    val save = android.content.pm.LabeledIntent(
+        io.github.artcraftandroid.procraft.SaveToDeviceActivity.intent(context, files, mime),
+        context.packageName,
+        "Save to device",
+        io.github.artcraftandroid.procraft.R.mipmap.ic_launcher,
+    )
+    return Intent.createChooser(send, null).putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf<android.os.Parcelable>(save))
 }

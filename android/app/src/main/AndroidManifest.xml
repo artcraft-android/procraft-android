@@ -46,6 +46,13 @@
             </intent-filter>
         </activity>
 
+        <!-- the share sheet's Save to device: the system's picker over a see-through window -->
+        <activity
+            android:name=".SaveToDeviceActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- the home screen's Recent artwork widget -->
         <receiver
             android:name=".gallery.RecentArtworkWidget"
