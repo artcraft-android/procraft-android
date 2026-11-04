@@ -5289,18 +5289,35 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             dropSliding = true
             dropPoured = pourBegin(dot)
             dropPourRefused = !dropPoured
+            if (dropPoured) dropDot = null
         }
     }
 
-    /** When (uptime ms) the dragged colour comes to rest if its pointer stays; null once it has. */
+    /**
+     * When (uptime ms) the dragged colour comes to rest if its pointer stays; null once it has, or
+     * while it waits for a move after a rest off the artwork.
+     */
     fun dropRestDue(): Long? = colourDrag?.restDue()?.toLong()
 
-    /** The time is uptime [ms]: the dragged colour comes to rest if it is due, where a drop is taken. */
+    /**
+     * The time is uptime [ms]: the dragged colour comes to rest if it is due, on the artwork off
+     * the bars, and fills there at once, the fill showing instead of the dot (a slide then sets
+     * the threshold).
+     */
     fun dropDragRest(ms: Long) {
         val drag = colourDrag ?: return
         val step = drag.now()
         val dot = Offset(step.dotX * density, step.dotY * density)
-        drag.rest(ms.toDouble(), dot.y > io.github.artcraftandroid.procraft.ui.Pc.BarHeight.value * density && dropAvoid?.contains(dot) != true)
+        val rests = drag.rest(
+            ms.toDouble(),
+            dot.y > io.github.artcraftandroid.procraft.ui.Pc.BarHeight.value * density &&
+                dropAvoid?.contains(dot) != true &&
+                session?.pourLands(dot.x, dot.y) == true,
+        )
+        if (!rests || dropPoured || dropPourRefused) return
+        dropPoured = pourBegin(dot)
+        dropPourRefused = !dropPoured
+        if (dropPoured) dropDot = null
     }
 
     /** The dragged colour let go at [at] (null: somewhere it doesn't fill, like the top bar). */

@@ -151,15 +151,27 @@ impl ColourDrop {
                 |d| d.moved(at.x, at.y, ms),
             );
             let dot = pos2(step.dot_x, step.dot_y);
-            // held still a moment where a drop is taken, it comes to rest
+            // held still a moment on the artwork, off the bars, it comes to rest and fills there at
+            // once (a slide then sets the threshold)
+            let mut rested = false;
             if let Some((drag, due)) = drag.as_ref().and_then(|d| Some((d, d.rest_due()?))) {
                 if ms >= due {
-                    drag.rest(ms, dot.y > pc::BAR_HEIGHT && !avoid.is_some_and(|a| a.contains(dot)));
+                    let ppp = ctx.pixels_per_point();
+                    rested = drag.rest(
+                        ms,
+                        dot.y > pc::BAR_HEIGHT
+                            && !avoid.is_some_and(|a| a.contains(dot))
+                            && session.pour_lands(dot.x * ppp, dot.y * ppp),
+                    );
                 } else {
                     ctx.request_repaint_after(Duration::from_secs_f64((due - ms) / 1000.0));
                 }
             }
-            self.dot = Some((dot, rgb));
+            if rested {
+                self.pour(ctx, session, dot, rgb, self.threshold);
+            }
+            // poured, the fill shows instead of the dot
+            self.dot = (!self.poured).then_some((dot, rgb));
             if step.slid {
                 self.slide(ctx, session, step, rgb);
             }
@@ -222,19 +234,27 @@ impl ColourDrop {
         }
     }
 
-    /// The dragged colour, at rest, slid its threshold: the fill shown with it (begun the first
-    /// time, where it rests).
+    /// The dragged colour, at rest, slid its threshold: the fill shown with it.
     fn slide(&mut self, ctx: &egui::Context, session: &CanvasSession, step: DragStep, rgb: u32) {
         self.threshold = step.threshold;
         self.sliding = true;
         if self.poured {
             session.pour_threshold(step.threshold);
-        } else if !self.refused {
-            let ppp = ctx.pixels_per_point();
-            let [r, g, b] = of_hex(rgb);
-            self.poured = session.pour_begin(step.dot_x * ppp, step.dot_y * ppp, r, g, b, step.threshold);
-            self.refused = !self.poured;
+        } else {
+            self.pour(ctx, session, pos2(step.dot_x, step.dot_y), rgb, step.threshold);
         }
+    }
+
+    /// The dragged colour fills where it rests, at `at` (points), unless that was refused already
+    /// (a locked layer, text).
+    fn pour(&mut self, ctx: &egui::Context, session: &CanvasSession, at: Pos2, rgb: u32, threshold: f32) {
+        if self.refused {
+            return;
+        }
+        let ppp = ctx.pixels_per_point();
+        let [r, g, b] = of_hex(rgb);
+        self.poured = session.pour_begin(at.x * ppp, at.y * ppp, r, g, b, threshold);
+        self.refused = !self.poured;
     }
 
     /// Continue filling's touch slid the threshold to `threshold`.

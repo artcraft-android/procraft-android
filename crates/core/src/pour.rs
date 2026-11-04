@@ -182,6 +182,11 @@ impl CanvasSession {
         self.shared.lock().fill_gap = pixels.min(fill::MOST_GAP);
     }
 
+    /// Whether window point (`x`, `y`) is on the artwork, where a dragged colour can come to rest.
+    pub fn pour_lands(&self, x: f32, y: f32) -> bool {
+        seed_at(&self.shared.lock(), x, y).is_some()
+    }
+
     /// Pours colour (`r`, `g`, `b`, 0..1) at window point (`x`, `y`) with `threshold` (0..1) on
     /// the current layer, within the selection if there is one. False if nothing was poured (off
     /// the canvas, or the layer locked or text). The pour stays open for

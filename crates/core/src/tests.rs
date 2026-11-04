@@ -4858,8 +4858,10 @@ fn a_dropped_colour_fills_up_to_lines_and_is_one_undo_step() {
     s.stroke_add((1..30).map(|i| sample(50.0, -10.0 + i as f32 * 4.0, i as f64 * 8.0)).collect());
     s.stroke_end(vec![sample(50.0, 110.0, 250.0)]);
     let layer = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
-    // off the canvas nothing is poured
+    // off the canvas nothing is poured, and a dragged colour doesn't rest there
+    assert!(!s.pour_lands(-5.0, 50.0));
     assert!(!s.pour_begin(-5.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    assert!(s.pour_lands(20.0, 50.0));
     // red on the left half only
     assert!(s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
     assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);

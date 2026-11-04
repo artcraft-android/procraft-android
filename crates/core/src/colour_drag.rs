@@ -1,7 +1,7 @@
 //! A colour dragged out to be dropped (ColorDrop), as the apps' colour button and swatches see
 //! its pointer: it follows the pointer until the pointer rests a moment where a drop is taken; then
-//! it stays there and sliding sets the threshold, the fill redone as it goes. Let go, it fills
-//! where it is (the apps pour; this only says when and with what).
+//! it stays there, fills at once, and sliding sets the threshold, the fill redone as it goes. Let
+//! go, it fills where it is (the apps pour; this only says when and with what).
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -34,6 +34,8 @@ struct Drag {
     /// Since when the pointer has rested, and how far it has moved since (points).
     rest_since: f64,
     moved: f32,
+    /// It came to rest where no drop is taken: it waits for a move before resting again.
+    refused: bool,
     resting: bool,
     threshold: f32,
 }
@@ -57,6 +59,7 @@ impl ColourDrag {
                 last: (x, y, ms),
                 rest_since: ms,
                 moved: 0.0,
+                refused: false,
                 resting: false,
                 threshold: threshold.clamp(0.0, 1.0),
             }),
@@ -83,22 +86,29 @@ impl ColourDrag {
             if d.moved > if d.pen { PEN_REST } else { FINGER_REST } {
                 d.rest_since = ms;
                 d.moved = 0.0;
+                d.refused = false;
             }
         }
         d.step(slid)
     }
 
-    /// When (ms) the pointer, if it stays, comes to rest; none once it has.
+    /// When (ms) the pointer, if it stays, comes to rest; none once it has, or while it waits for
+    /// a move after resting where no drop is taken.
     pub fn rest_due(&self) -> Option<f64> {
         let d = self.lock();
-        (!d.resting).then_some(d.rest_since + REST_MS)
+        (!d.resting && !d.refused).then_some(d.rest_since + REST_MS)
     }
 
     /// The time is `ms`, the dot where a drop is taken or not (`droppable`): whether it now
-    /// rests (from here on sliding sets the threshold).
+    /// rests (from here on sliding sets the threshold). Where no drop is taken it isn't asked
+    /// again until the pointer has moved.
     pub fn rest(&self, ms: f64, droppable: bool) -> bool {
         let mut d = self.lock();
-        if d.resting || !droppable || ms < d.rest_since + REST_MS {
+        if d.resting || d.refused || ms < d.rest_since + REST_MS {
+            return false;
+        }
+        if !droppable {
+            d.refused = true;
             return false;
         }
         d.resting = true;
@@ -135,20 +145,27 @@ mod tests {
         assert_eq!((s.dot_x, s.dot_y, s.resting, s.slid), (200.0, 300.0, false, false));
         assert_eq!(drag.rest_due(), Some(400.0));
         assert!(!drag.rest(399.0, true));
-        // a pen's small wobble still counts as resting; somewhere a drop isn't taken, it doesn't
+        // a pen's small wobble still counts as resting; somewhere a drop isn't taken, it doesn't,
+        // and it isn't due again until the pen moves
         drag.moved(201.0, 301.0, 200.0);
         assert!(!drag.rest(400.0, false));
-        assert!(drag.rest(400.0, true));
+        assert_eq!(drag.rest_due(), None);
+        assert!(!drag.rest(450.0, true));
+        drag.moved(202.0, 301.0, 460.0);
+        assert_eq!(drag.rest_due(), None, "a wobble isn't a move");
+        drag.moved(206.0, 301.0, 470.0);
+        assert_eq!(drag.rest_due(), Some(770.0));
+        assert!(drag.rest(770.0, true));
         assert_eq!(drag.rest_due(), None);
         // resting, the dot stays and a slide right raises the threshold, left lowers it
-        let s = drag.moved(260.0, 320.0, 500.0);
-        assert_eq!((s.dot_x, s.dot_y, s.resting), (201.0, 301.0, true));
+        let s = drag.moved(260.0, 320.0, 800.0);
+        assert_eq!((s.dot_x, s.dot_y, s.resting), (206.0, 301.0, true));
         assert!(s.slid && s.threshold > 0.5);
         let up = s.threshold;
-        let s = drag.moved(150.0, 320.0, 800.0);
+        let s = drag.moved(150.0, 320.0, 1100.0);
         assert!(s.slid && s.threshold < up);
         // straight down changes nothing
-        assert!(!drag.moved(150.0, 400.0, 900.0).slid);
+        assert!(!drag.moved(150.0, 400.0, 1200.0).slid);
     }
 
     #[test]
