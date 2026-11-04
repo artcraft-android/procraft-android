@@ -77,14 +77,15 @@ fun AnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
     val scope = rememberCoroutineScope()
     var webReady by remember { mutableStateOf(false) }
     var dither by remember { mutableStateOf(true) }
+    var perFramePalette by remember { mutableStateOf(false) }
     var transparent by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     val canTransparent = format == CanvasViewModel.Animated.GIF || format == CanvasViewModel.Animated.PNG
     // the file as the settings make it, for its size
     var bytes by remember { mutableStateOf<Long?>(null) }
-    LaunchedEffect(webReady, dither, transparent) {
+    LaunchedEffect(webReady, dither, perFramePalette, transparent) {
         bytes = null
-        bytes = vm.exportAnimation(format, webReady, dither, transparent)?.length()
+        bytes = vm.exportAnimation(format, webReady, dither, perFramePalette, transparent)?.length()
     }
     ExportScreen(
         title = format.title,
@@ -96,7 +97,7 @@ fun AnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
             exporting = true
             scope.launch {
                 // the export card shows how far it has come, and says if it couldn't be made
-                val file = vm.shareAnimation(format, webReady, dither, transparent)
+                val file = vm.shareAnimation(format, webReady, dither, perFramePalette, transparent)
                 exporting = false
                 if (file != null) {
                     vm.endAnimatedExport()
@@ -124,7 +125,10 @@ fun AnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
     ) {
         Segments(listOf("Max Resolution", "Web Ready"), if (webReady) 1 else 0) { webReady = it == 1 }
         Spacer(Modifier.height(6.5.dp))
-        if (format == CanvasViewModel.Animated.GIF) SettingRow("Dithering", dither) { dither = it }
+        if (format == CanvasViewModel.Animated.GIF) {
+            SettingRow("Dithering", dither) { dither = it }
+            SettingRow("Per frame color palette", perFramePalette) { perFramePalette = it }
+        }
         if (canTransparent) SettingRow("Transparent background", transparent) { transparent = it }
     }
 }

@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Id, Order, Pos2, Rect, ScrollArea, Sense, Shape, Stroke, UiBuilder, pos2, vec2};
 use procraft_core::{
-    QuickAction, QuickMenuSet, quick_action_label, quick_actions_listed, quick_adjustments_listed,
-    quick_menu_active_after, quick_menu_added, quick_menus, quick_menus_saved,
+    BrushInfo, CanvasSession, QuickAction, QuickMenuSet, quick_action_label, quick_actions_listed,
+    quick_adjustments_listed, quick_menu_active_after, quick_menu_added, quick_menus, quick_menus_saved,
 };
 
 use crate::icons;
@@ -52,6 +52,30 @@ const ROW_FILL: u32 = 0xFF2E2E2E;
 const ROW_INK: u32 = 0xFFC5C5C5;
 const PICKER_TITLE_INK: u32 = 0xFFC4C4C4;
 
+/// A page of a held button's picker: the actions, the adjustments, the brush sets, a set's brushes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Page {
+    Actions,
+    Adjustments,
+    BrushSets,
+    Brushes(usize),
+}
+
+/// What a picker's row tapped does: opens a list, or sets the button.
+#[derive(Clone, Copy)]
+enum Tap {
+    Go(Page),
+    Action(QuickAction),
+    Brush(u32, u32),
+}
+
+/// What a tapped button does: its action (the menu opened at the point), or its brush given to the
+/// current tool.
+pub enum Ran {
+    Action(QuickAction, Pos2),
+    Brush(BrushInfo),
+}
+
 pub struct QuickMenu {
     /// Where it was opened (points; kept while it draws back in), whether it is open, and since
     /// when it has been opening or closing (from how far open).
@@ -59,10 +83,10 @@ pub struct QuickMenu {
     open: bool,
     since: Instant,
     from: f32,
-    /// The button whose action is being chosen, whether the picker shows the adjustments, and
-    /// whether its list is still to be scrolled to the chosen row.
+    /// The button whose action is being chosen, the picker's page, and whether its list is still
+    /// to be scrolled to the chosen row.
     choosing: Option<usize>,
-    adjustments: bool,
+    page: Page,
     scroll_to: bool,
     /// A button pressed and when (held long enough, it opens the picker and is not tapped).
     press: Option<(usize, Instant, bool)>,
@@ -90,7 +114,7 @@ impl Default for QuickMenu {
             since: Instant::now(),
             from: 0.0,
             choosing: None,
-            adjustments: false,
+            page: Page::Actions,
             scroll_to: false,
             press: None,
             menus,
@@ -154,8 +178,15 @@ impl QuickMenu {
         }
     }
 
-    /// Draws it while it shows. Returns an action tapped, and where the menu was opened.
-    pub fn show(&mut self, ctx: &egui::Context, look: &mut Look) -> Option<(QuickAction, Pos2)> {
+    /// Draws it while it shows. Returns what a button tapped does. A button set to a brush asks the
+    /// library to be kept (`keep_brushes`), as it keeps the brush's key.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        look: &mut Look,
+        session: &CanvasSession,
+        keep_brushes: &mut bool,
+    ) -> Option<Ran> {
         let at = self.at?;
         let shown = self.shown();
         if !self.open && shown <= 0.0 {
@@ -215,13 +246,15 @@ impl QuickMenu {
                 }
             }
             let slots = self.slots().to_vec();
+            let brushes: Vec<Option<BrushInfo>> = (0..slots.len()).map(|i| self.slot_brush(session, i)).collect();
             for (i, (&(dx, dy), &action)) in SLOTS.iter().zip(&slots).enumerate() {
                 let centre = c + vec2(dx, dy) * shown;
                 let button = Rect::from_center_size(centre, vec2(BUTTON.0, BUTTON.1));
                 ui.painter().rect_filled(button, BUTTON.1 / 2.0, fade(BUTTON_FILL));
                 let edge = Stroke::new(1.0, fade(BUTTON_EDGE));
                 ui.painter().rect_stroke(button, BUTTON.1 / 2.0, edge, egui::StrokeKind::Inside);
-                let label = quick_action_label(action);
+                let brush = brushes.get(i).cloned().flatten();
+                let label = brush.as_ref().map_or_else(|| quick_action_label(action), |b| b.name.clone());
                 // on one line, cut by the pill where it is too long (from its left)
                 let painter = ui.painter().with_clip_rect(button.intersect(ui.clip_rect()));
                 let (at, align) = if crate::look::text_width(&painter, &label, 16.0, Weight::SemiBold) > button.width()
@@ -241,7 +274,8 @@ impl QuickMenu {
                     if !*held && since.elapsed() >= HOLD {
                         *held = true;
                         self.choosing = Some(i);
-                        self.adjustments = slots.get(i).copied().is_some_and(procraft_core::quick_action_adjusts);
+                        let adjusts = slots.get(i).copied().is_some_and(procraft_core::quick_action_adjusts);
+                        self.page = if adjusts { Page::Adjustments } else { Page::Actions };
                         self.scroll_to = true;
                     } else if !*held {
                         ctx.request_repaint_after(HOLD.saturating_sub(since.elapsed()));
@@ -249,7 +283,7 @@ impl QuickMenu {
                 }
                 let held = self.press.is_some_and(|(p, _, held)| p == i && held);
                 if response.clicked() && !held && self.choosing.is_none() && !self.menus_open {
-                    ran = Some((action, at));
+                    ran = Some(brush.map_or(Ran::Action(action, at), Ran::Brush));
                 }
                 if !response.is_pointer_button_down_on() && self.press.is_some_and(|(p, _, _)| p == i) {
                     self.press = None;
@@ -260,9 +294,24 @@ impl QuickMenu {
             let (dx, dy) = SLOTS.get(i).copied().unwrap_or_default();
             let centre_x = c.x + dx;
             let top = c.y + dy - BUTTON.1 / 2.0;
-            if let Some(action) = self.picker(ctx, look, i, centre_x, top, top + BUTTON.1, screen) {
-                if let Some(slot) = self.menus.get_mut(self.shown_menu).and_then(|m| m.slots.get_mut(i)) {
-                    *slot = action;
+            let brush = self.slot_brush(session, i);
+            let picked = self.picker(ctx, look, session, i, brush, (centre_x, top, top + BUTTON.1), screen);
+            let set = match picked {
+                Some(Tap::Action(a)) => Some((a, 0)),
+                Some(Tap::Brush(set, index)) => {
+                    let key = session.quick_brush_key(set, index);
+                    *keep_brushes |= key != 0;
+                    (key != 0).then_some((QuickAction::Brushes, key))
+                }
+                _ => None,
+            };
+            if let Some((action, key)) = set {
+                if let Some(menu) = self.menus.get_mut(self.shown_menu) {
+                    menu.brushes.resize(menu.slots.len(), 0);
+                    if let (Some(slot), Some(brush)) = (menu.slots.get_mut(i), menu.brushes.get_mut(i)) {
+                        *slot = action;
+                        *brush = key;
+                    }
                 }
                 self.keep();
                 self.choosing = None;
@@ -277,26 +326,76 @@ impl QuickMenu {
         ran
     }
 
+    /// The brush button `i` of the ring gives the current tool, if it is set to one still in the
+    /// library.
+    fn slot_brush(&self, session: &CanvasSession, i: usize) -> Option<BrushInfo> {
+        let menu = self.menus.get(self.shown_menu)?;
+        let key = menu.brushes.get(i).copied().unwrap_or(0);
+        if menu.slots.get(i) != Some(&QuickAction::Brushes) || key == 0 {
+            return None;
+        }
+        session.quick_brush(key)
+    }
+
     /// A held button's picker, hung from the button by an arrow (above it when there is no room
-    /// below): every action by name, the button's own blue, scrolled to it; Adjustments opens their
-    /// own list. Returns the action a row tapped sets the button to.
+    /// below; `button` its centre, top and bottom): every action by name, the button's own blue,
+    /// scrolled to it. Adjustments opens their own list; Select brush the brush sets, then a set's
+    /// brushes. Returns what a row tapped sets the button to.
     #[allow(clippy::too_many_arguments)]
     fn picker(
         &mut self,
         ctx: &egui::Context,
         look: &mut Look,
+        session: &CanvasSession,
         slot: usize,
-        centre_x: f32,
-        button_top: f32,
-        button_bottom: f32,
+        brush: Option<BrushInfo>,
+        button: (f32, f32, f32),
         screen: Rect,
-    ) -> Option<QuickAction> {
+    ) -> Option<Tap> {
+        let (centre_x, button_top, button_bottom) = button;
         let current = self.slots().get(slot).copied().unwrap_or(QuickAction::None);
         let below = button_bottom + PICKER_ARROW + PICKER_HEIGHT <= screen.bottom() - PICKER_MARGIN;
         let left = (centre_x - PICKER_WIDTH / 2.0)
             .clamp(screen.left() + PICKER_MARGIN, (screen.right() - PICKER_WIDTH - PICKER_MARGIN).max(PICKER_MARGIN));
         let top = if below { button_bottom + PICKER_ARROW } else { button_top - PICKER_ARROW - PICKER_HEIGHT };
         let panel = Rect::from_min_size(pos2(left, top), vec2(PICKER_WIDTH, PICKER_HEIGHT));
+        // the page's title, where its way back goes, its rows (what each says, whether it opens a
+        // list, what a tap does) and the one blue (in a list of its own, the button's, else the first)
+        let sets =
+            if matches!(self.page, Page::BrushSets | Page::Brushes(_)) { session.brush_library() } else { Vec::new() };
+        let (title, back) = match self.page {
+            Page::Actions => ("Set Action", None),
+            Page::Adjustments => ("Adjustments", Some(Page::Actions)),
+            Page::BrushSets => ("Brush Set", Some(Page::Actions)),
+            Page::Brushes(_) => ("Brushes", Some(Page::BrushSets)),
+        };
+        let rows: Vec<(String, bool, Tap)> = match self.page {
+            Page::Actions => quick_actions_listed()
+                .into_iter()
+                .map(|row| match row {
+                    None => ("Adjustments".to_owned(), true, Tap::Go(Page::Adjustments)),
+                    Some(QuickAction::Brushes) => {
+                        (quick_action_label(QuickAction::Brushes), true, Tap::Go(Page::BrushSets))
+                    }
+                    Some(a) => (quick_action_label(a), false, Tap::Action(a)),
+                })
+                .collect(),
+            Page::Adjustments => {
+                quick_adjustments_listed().into_iter().map(|a| (quick_action_label(a), false, Tap::Action(a))).collect()
+            }
+            Page::BrushSets => {
+                sets.iter().enumerate().map(|(s, set)| (set.name.clone(), true, Tap::Go(Page::Brushes(s)))).collect()
+            }
+            Page::Brushes(s) => sets.get(s).map_or_else(Vec::new, |set| {
+                set.brushes.iter().map(|b| (b.name.clone(), false, Tap::Brush(b.set, b.index))).collect()
+            }),
+        };
+        let chosen = match self.page {
+            Page::Actions => quick_actions_listed().iter().position(|&r| r == Some(current)),
+            Page::Adjustments => Some(quick_adjustments_listed().iter().position(|&a| a == current).unwrap_or(0)),
+            Page::BrushSets => Some(brush.as_ref().map_or(0, |b| b.set as usize)),
+            Page::Brushes(s) => Some(brush.as_ref().filter(|b| b.set as usize == s).map_or(0, |b| b.index as usize)),
+        };
         let mut picked = None;
         egui::Area::new(Id::unique("quick picker")).fixed_pos(screen.min).order(Order::Tooltip).show(ctx, |ui| {
             // the arrow, its point on the button
@@ -310,38 +409,25 @@ impl QuickMenu {
             ui.painter().add(shadow.as_shape(panel, PICKER_CORNER));
             ui.painter().rect_filled(panel, PICKER_CORNER, argb(PICKER_FILL));
             ui.allocate_rect(panel, Sense::click());
-            // the title; in Adjustments a way back
+            // the title; in a list of its own a way back
             let header = Rect::from_min_size(panel.min, vec2(PICKER_WIDTH, PICKER_HEADER));
             let ink = argb(PICKER_TITLE_INK);
-            if self.adjustments {
-                look.icon(
-                    ui,
-                    &icons::CHEVRON_LEFT,
-                    pos2(header.left() + 13.0 + 12.0, header.top() + 15.0 + 12.0),
-                    24.0,
-                    ink,
-                );
+            if let Some(back) = back {
+                let at = pos2(header.left() + 13.0 + 12.0, header.top() + 15.0 + 12.0);
+                look.icon(ui, &icons::CHEVRON_LEFT, at, 24.0, ink);
                 let at = pos2(header.left() + 13.0 + 24.0 + 4.0, header.top() + 15.0);
-                text(ui.painter(), at, Align2::LEFT_TOP, "Adjustments", 19.3, Weight::Bold, ink);
+                text(ui.painter(), at, Align2::LEFT_TOP, title, 19.3, Weight::Bold, ink);
                 if ui.interact(header, ui.scope_id().with("picker back"), Sense::click()).clicked() {
-                    self.adjustments = false;
-                    self.scroll_to = true;
+                    picked = Some(Tap::Go(back));
                 }
             } else {
                 let at = pos2(header.left() + 21.0, header.top() + 15.0);
-                text(ui.painter(), at, Align2::LEFT_TOP, "Set Action", 19.3, Weight::Bold, ink);
+                text(ui.painter(), at, Align2::LEFT_TOP, title, 19.3, Weight::Bold, ink);
             }
-            let rows: Vec<Option<QuickAction>> = if self.adjustments {
-                quick_adjustments_listed().into_iter().map(Some).collect()
-            } else {
-                quick_actions_listed()
-            };
-            // the button's own action blue (in Adjustments, the first when it is none of them)
-            let chosen = rows.iter().position(|&r| r == Some(current)).or(self.adjustments.then_some(0));
             // the rows end where the panel's corners start to turn, so none shows past them
             let list = Rect::from_min_max(pos2(panel.left(), header.bottom()), panel.max - vec2(0.0, CORNER_CLEAR));
             let mut area = ScrollArea::vertical()
-                .id_salt(("quick picker list", self.adjustments))
+                .id_salt(("quick picker list", self.page))
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
             if std::mem::take(&mut self.scroll_to) {
                 // the chosen row a little below the list's top
@@ -352,46 +438,43 @@ impl QuickMenu {
             ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
                 area.show(ui, |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, ROW_GAP);
-                    for (k, &row) in rows.iter().enumerate() {
+                    for (k, (label, more, tap)) in rows.iter().enumerate() {
                         let (outer, response) = ui.allocate_exact_size(vec2(list.width(), ROW_HEIGHT), Sense::click());
                         let r = outer.shrink2(vec2(PICKER_INSET, 0.0));
                         let on = Some(k) == chosen;
-                        ui.painter().rect_filled(
-                            r,
-                            ROW_HEIGHT / 2.0,
-                            if on { argb(pc::ACCENT) } else { argb(ROW_FILL) },
-                        );
-                        let label = row.map_or_else(|| "Adjustments".to_owned(), quick_action_label);
+                        let fill = if on { argb(pc::ACCENT) } else { argb(ROW_FILL) };
+                        ui.painter().rect_filled(r, ROW_HEIGHT / 2.0, fill);
                         let weight = if on { Weight::SemiBold } else { Weight::Regular };
                         let colour = if on { Color32::WHITE } else { argb(ROW_INK) };
+                        let at = pos2(r.left() + 16.0, r.center().y + ROW_TEXT_DROP);
                         text_tracked(
                             ui.painter(),
-                            pos2(r.left() + 16.0, r.center().y + ROW_TEXT_DROP),
+                            at,
                             Align2::LEFT_CENTER,
-                            &label,
+                            label,
                             ROW_TEXT,
                             weight,
                             colour,
                             ROW_TRACKING,
                         );
-                        if row.is_none() {
+                        if *more {
                             let at = pos2(r.right() - 16.0 - 9.0, r.center().y);
-                            look.icon(ui, &icons::CHEVRON_RIGHT, at, 18.0, argb(ROW_INK));
+                            look.icon(ui, &icons::CHEVRON_RIGHT, at, 18.0, colour);
                         }
                         if response.clicked() {
-                            match row {
-                                None => {
-                                    self.adjustments = true;
-                                    self.scroll_to = true;
-                                }
-                                Some(a) => picked = Some(a),
-                            }
+                            picked = Some(*tap);
                         }
                     }
                     ui.add_space(6.0);
                 });
             });
         });
+        // a list opened shows in its place
+        if let Some(Tap::Go(page)) = picked {
+            self.page = page;
+            self.scroll_to = true;
+            return None;
+        }
         picked
     }
 }

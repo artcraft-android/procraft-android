@@ -230,9 +230,13 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
 
 @Composable
 private fun SideButton(icon: ImageVector, label: String, enabled: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    // turning on or off (a stroke kept, the last step undone) fades over 0.15 s either way, linear,
+    // as measured: the lit glyph over the unlit one
+    val lit = androidx.compose.animation.core.animateFloatAsState(if (enabled) 1f else 0f, Motion.highlightOff(), label = "enabled").value
     Box(modifier.size(40.dp, 41.dp).tap(enabled, onClick), contentAlignment = Alignment.Center) {
         // a 50 frame shown 36 across
-        Icon(icon, contentDescription = label, tint = if (enabled) Pc.SideGlyph else Pc.SideGlyphDisabled, modifier = Modifier.requiredSize(36.dp))
+        if (lit < 1f) Icon(icon, contentDescription = label.takeIf { lit <= 0f }, tint = Pc.SideGlyphDisabled, modifier = Modifier.requiredSize(36.dp))
+        if (lit > 0f) Icon(icon, contentDescription = label, tint = Pc.SideGlyph.copy(alpha = Pc.SideGlyph.alpha * lit), modifier = Modifier.requiredSize(36.dp))
     }
 }
 

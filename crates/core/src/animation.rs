@@ -16,6 +16,8 @@ use crate::{CanvasSession, MobileError};
 /// How much of an animated GIF's frames is drawn at once (a frame to a core), so a big canvas's
 /// export doesn't hold many full-size frames.
 const GIF_BATCH_BYTES: usize = 256 << 20;
+/// How many pixels, from all the frames, a shared GIF palette is made from.
+const GIF_PALETTE_SAMPLES: usize = 1 << 18;
 
 /// The frames: the visible top-level layers and groups, bottom first.
 fn frames(doc: &Document) -> Vec<LayerId> {
@@ -60,21 +62,29 @@ impl CanvasSession {
     }
 
     /// The animation as a looping GIF at `path`, `fps` frames a second, scaled to fit
-    /// `max_side` (0: full size); `dither` spreads the palette's error, `transparent` leaves
-    /// the background out.
+    /// `max_side` (0: full size); `dither` spreads the palette's error, `per_frame_palette`
+    /// gives each frame a palette of its own (else they share one made from them all),
+    /// `transparent` leaves the background out.
+    #[allow(clippy::too_many_arguments)]
     pub fn export_gif(
         &self,
         path: String,
         max_side: u32,
         fps: f32,
         dither: bool,
+        per_frame_palette: bool,
         transparent: bool,
     ) -> Result<(), MobileError> {
         let units = sequence(&self.shared.lock().doc);
         let delay = (100.0 / fps.clamp(0.1, 100.0)).round() as u16;
-        let mut gif: Option<GifWriter> = None;
-        // the frames made take it to 0.95, the file written to 1
+        // the frames made take it to 0.95 (sharing a palette, its look at them to 0.45 first), the
+        // file written to 1
         self.exported(0.0);
+        let (mut gif, start): (Option<GifWriter>, f32) = if per_frame_palette {
+            (None, 0.0)
+        } else {
+            (self.shared_palette_gif(&units, transparent, max_side)?, 0.45)
+        };
         // drawn a few at a time (a frame to a core, as many as fit in GIF_BATCH_BYTES), each few
         // made into the GIF's frames side by side, then added in order
         let mut next = 0;
@@ -101,7 +111,7 @@ impl CanvasSession {
                 let frame = frame.unwrap_or_else(|| writer.encoded_frame(rgba, delay.max(1), dither));
                 writer.add_encoded(&frame);
             }
-            self.exported(0.95 * next as f32 / units.len() as f32);
+            self.exported(start + (0.95 - start) * next as f32 / units.len() as f32);
         }
         let bytes = gif.ok_or_else(|| file_error("saving", "there are no frames"))?.finish();
         write_atomically(Path::new(&path), |f| fs::write(f, &bytes).map_err(|e| file_error("saving", e)))?;
@@ -150,6 +160,29 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
+    /// A GIF writer whose frames share one palette, made from a sample of every frame's pixels
+    /// (each drawn once for it); none when there are no frames.
+    fn shared_palette_gif(
+        &self,
+        units: &[LayerId],
+        transparent: bool,
+        max_side: u32,
+    ) -> Result<Option<GifWriter>, MobileError> {
+        // about as many sampled pixels in all as a single frame's palette looks at
+        let per_frame = (GIF_PALETTE_SAMPLES / units.len().max(1)).max(256);
+        let mut samples: Vec<[u8; 4]> = Vec::new();
+        let mut size = None;
+        for (k, &unit) in units.iter().enumerate() {
+            let (w, h, rgba) = self.render_frame(unit, transparent, max_side)?;
+            size.get_or_insert((w, h));
+            let pixels = rgba.as_chunks::<4>().0;
+            let step = (pixels.len() / per_frame).max(1);
+            samples.extend(pixels.iter().step_by(step).filter(|p| p[3] >= 128));
+            self.exported(0.45 * (k + 1) as f32 / units.len() as f32);
+        }
+        Ok(size.map(|(w, h)| GifWriter::shared(w, h, &samples)))
+    }
+
     /// `unit` alone (the background too unless `transparent`), straight alpha, scaled to fit
     /// `max_side` (0: full size). The canvas shows the whole picture again afterwards.
     fn render_frame(

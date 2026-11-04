@@ -71,9 +71,9 @@ impl Animated {
     }
 }
 
-/// The settings a file is made with: Web Ready, dithering, a transparent background; on a model,
-/// how its turntable goes and its size.
-type Settings = (bool, bool, bool, Option<(Turntable, usize)>);
+/// The settings a file is made with: Web Ready, dithering, a palette per frame, a transparent
+/// background; on a model, how its turntable goes and its size.
+type Settings = (bool, bool, bool, bool, Option<(Turntable, usize)>);
 /// A file being made: its settings, and where it went and how big it is, once made.
 type Making = (Settings, Receiver<Option<(PathBuf, u64)>>);
 /// What the preview's frames are read for: a transparent background or not, what side, and on a
@@ -86,6 +86,7 @@ pub struct AnimatedExport {
     format: Animated,
     web_ready: bool,
     dither: bool,
+    per_frame_palette: bool,
     transparent: bool,
     /// The file made, the settings it was made with and its size; the one being made.
     made: Option<(Settings, PathBuf, u64)>,
@@ -126,6 +127,7 @@ impl AnimatedExport {
             format,
             web_ready: false,
             dither: true,
+            per_frame_palette: false,
             transparent: false,
             made: None,
             making: None,
@@ -157,7 +159,7 @@ impl AnimatedExport {
     }
 
     fn settings(&self) -> Settings {
-        (self.web_ready, self.dither, self.transparent, self.turntable)
+        (self.web_ready, self.dither, self.per_frame_palette, self.transparent, self.turntable)
     }
 
     /// The file made for the settings now, made again (off the window's thread) when they
@@ -179,13 +181,13 @@ impl AnimatedExport {
             return;
         }
         // a model's turntable is made once Done is pressed
-        if wanted.3.is_some() && !self.saving {
+        if wanted.4.is_some() && !self.saving {
             return;
         }
         let (tx, rx) = channel();
         let session = Arc::clone(session);
         let format = self.format;
-        let (web_ready, dither, transparent, turntable) = wanted;
+        let (web_ready, dither, per_frame_palette, transparent, turntable) = wanted;
         let video_done = Arc::clone(&self.video_done);
         video_done.store(0, Ordering::Relaxed);
         // among the files being written (the app waits for them as it ends; the panel over the
@@ -205,7 +207,9 @@ impl AnimatedExport {
             });
             let made = made.and_then(|()| match format {
                 _ if turntable.is_some() => Ok(()),
-                Animated::Gif => session.export_gif(file, side, fps, dither, transparent).map_err(|e| e.to_string()),
+                Animated::Gif => session
+                    .export_gif(file, side, fps, dither, per_frame_palette, transparent)
+                    .map_err(|e| e.to_string()),
                 Animated::Png => session.export_apng(file, side, fps, transparent).map_err(|e| e.to_string()),
                 Animated::Mp4 | Animated::Hevc => {
                     let info = session.info();
@@ -427,6 +431,7 @@ impl AnimatedExport {
                 let mut rows = Vec::new();
                 if self.format == Animated::Gif {
                     rows.push(("Dithering", self.dither));
+                    rows.push(("Per frame color palette", self.per_frame_palette));
                 }
                 if self.can_transparent() {
                     rows.push(("Transparent background", self.transparent));
@@ -437,10 +442,10 @@ impl AnimatedExport {
                     text(ui.painter(), at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(ROW_INK));
                     crate::transform::switch(ui, pos2(row.left() + 16.0 + 307.0, row.center().y - 14.0), on, label);
                     if ui.interact(row, ui.scope_id().with(label), Sense::click()).clicked() {
-                        if label == "Dithering" {
-                            self.dither = !self.dither;
-                        } else {
-                            self.transparent = !self.transparent;
+                        match label {
+                            "Dithering" => self.dither = !self.dither,
+                            "Per frame color palette" => self.per_frame_palette = !self.per_frame_palette,
+                            _ => self.transparent = !self.transparent,
                         }
                     }
                     y += 52.0;

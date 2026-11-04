@@ -276,9 +276,16 @@ impl SideBar {
                         taps.redo = true;
                     }
                 }
-                // a 50 frame shown 36 across
-                let tint = if enabled { argb(pc::SIDE_GLYPH) } else { argb(pc::SIDE_GLYPH_DISABLED) };
-                look.icon(ui, icon, rect.center(), 36.0, tint);
+                // a 50 frame shown 36 across; turning on or off (a stroke kept, the last step
+                // undone) fades over 0.15 s either way, linear, as measured: the lit glyph over
+                // the unlit one
+                let lit = ui.ctx().animate_bool_with_time(ui.scope_id().with(("side lit", undo)), enabled, 0.15);
+                if lit < 1.0 {
+                    look.icon(ui, icon, rect.center(), 36.0, argb(pc::SIDE_GLYPH_DISABLED));
+                }
+                if lit > 0.0 {
+                    look.icon(ui, icon, rect.center(), 36.0, argb(pc::SIDE_GLYPH).gamma_multiply(lit));
+                }
             }
         });
         if let Some((which, kept)) = self.panel {

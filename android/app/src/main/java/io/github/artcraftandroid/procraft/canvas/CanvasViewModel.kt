@@ -2463,11 +2463,45 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The buttons the ring shows. */
     val quickMenuSlots: List<QuickAction> get() = quickMenus.getOrNull(quickMenuShown)?.slots.orEmpty()
 
-    fun setQuickSlot(i: Int, a: QuickAction) {
+    fun setQuickSlot(i: Int, a: QuickAction) = setQuickSlot(i, a, 0uL)
+
+    /** Sets button [i] of the ring to give brush [b] to the current tool. */
+    fun setQuickSlotBrush(i: Int, b: BrushInfo) {
+        val s = session ?: return
+        val key = s.quickBrushKey(b.set, b.index)
+        if (key == 0uL) return
+        setQuickSlot(i, QuickAction.BRUSHES, key)
+        // the library keeps the brush's key, following it about
+        keepChoices(s)
+    }
+
+    private fun setQuickSlot(i: Int, a: QuickAction, brush: ULong) {
         val menu = quickMenus.getOrNull(quickMenuShown) ?: return
         if (i !in menu.slots.indices) return
-        quickMenus = quickMenus.toMutableList().also { it[quickMenuShown] = menu.copy(slots = menu.slots.toMutableList().also { s -> s[i] = a }) }
+        val brushes = MutableList(menu.slots.size) { menu.brushes.getOrElse(it) { 0uL } }.also { it[i] = brush }
+        val slots = menu.slots.toMutableList().also { it[i] = a }
+        quickMenus = quickMenus.toMutableList().also { it[quickMenuShown] = menu.copy(slots = slots, brushes = brushes) }
         keepQuickMenus()
+    }
+
+    /** The brush button [i] of the ring gives the current tool, if it is set to one still in the library. */
+    fun quickSlotBrush(i: Int): BrushInfo? {
+        val menu = quickMenus.getOrNull(quickMenuShown) ?: return null
+        val key = menu.brushes.getOrElse(i) { 0uL }
+        if (menu.slots.getOrNull(i) != QuickAction.BRUSHES || key == 0uL) return null
+        return session?.quickBrush(key)
+    }
+
+    /** What button [i] of the ring says: the brush's name when it is set to one. */
+    fun quickSlotLabel(i: Int): String = quickSlotBrush(i)?.name ?: quickMenuSlots.getOrNull(i)?.button.orEmpty()
+
+    /** Runs button [i] of the ring: its brush given to the current tool, else its action. */
+    fun runQuickSlot(i: Int, at: Offset) {
+        quickSlotBrush(i)?.let {
+            chooseBrush(it)
+            return
+        }
+        quickMenuSlots.getOrNull(i)?.let { runQuickAction(it, at) }
     }
 
     /** Adds a menu ("QuickMenu N", every button No Action) and shows it; the active one stays until a menu is chosen. Returns its index. */
@@ -4718,7 +4752,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      * The animation written as [format] into the cache, to share: Web Ready fits 480 pixels, else
      * the canvas size (a video as large as the encoder takes, up to 4096).
      */
-    suspend fun exportAnimation(format: Animated, webReady: Boolean, dither: Boolean, transparent: Boolean, cancelled: () -> Boolean = { false }): File? {
+    suspend fun exportAnimation(
+        format: Animated,
+        webReady: Boolean,
+        dither: Boolean,
+        perFramePalette: Boolean,
+        transparent: Boolean,
+        cancelled: () -> Boolean = { false },
+    ): File? {
         val s = session ?: return null
         return animationExports.withLock { withContext(Dispatchers.IO) {
             val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
@@ -4729,7 +4770,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             val fps = s.animationSettings()?.fps?.toInt() ?: ANIMATION_FPS
             try {
                 when (format) {
-                    Animated.GIF -> s.exportGif(file.path, side.toUInt(), fps.toFloat(), dither, transparent)
+                    Animated.GIF -> s.exportGif(file.path, side.toUInt(), fps.toFloat(), dither, perFramePalette, transparent)
                     Animated.PNG -> s.exportApng(file.path, side.toUInt(), fps.toFloat(), transparent)
                     Animated.MP4, Animated.HEVC -> {
                         val mime = if (format == Animated.HEVC) android.media.MediaFormat.MIMETYPE_VIDEO_HEVC else android.media.MediaFormat.MIMETYPE_VIDEO_AVC
@@ -4763,12 +4804,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** [exportAnimation] with the export card (as every export has), how far it has come shown; Cancel stops a video. */
-    suspend fun shareAnimation(format: Animated, webReady: Boolean, dither: Boolean, transparent: Boolean): File? {
+    suspend fun shareAnimation(format: Animated, webReady: Boolean, dither: Boolean, perFramePalette: Boolean, transparent: Boolean): File? {
         val s = session ?: return null
         s.resetExportProgress()
         videoDone = 0f
         return withCard("The animation could not be exported.", { if (format.video) videoDone else s.exportProgress() }) {
-            exportAnimation(format, webReady, dither, transparent) { exportCancelled }
+            exportAnimation(format, webReady, dither, perFramePalette, transparent) { exportCancelled }
         }
     }
 

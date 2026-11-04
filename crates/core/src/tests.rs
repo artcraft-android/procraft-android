@@ -889,6 +889,29 @@ fn prediction_is_drawn_but_never_kept() {
 }
 
 #[test]
+fn a_finger_strokes_head_is_drawn_in_its_layer_under_those_above() {
+    let Some(s) = session(100, 100) else { return };
+    let below = s.layers()[0].id;
+    // an opaque blue layer over the half y < 50
+    let above = s.add_layer();
+    s.set_color(0.0, 0.0, 1.0);
+    s.select_shape(false, 0.0, 0.0, 100.0, 50.0, crate::SelectionJoin::Add);
+    s.fill_layer(above);
+    s.select_none();
+    s.select_layer(below);
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_brush_size(0.4);
+    s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 70.0, 0.0)]);
+    // the head runs ahead, up under the blue layer and out past it
+    s.stroke_predict(vec![sample(60.0, 20.0, 16.0), sample(90.0, 90.0, 32.0)]);
+    let [r, _, b, _] = pixel(&s, 78, 64);
+    assert!(r > 200 && b < 50, "the head shows ahead: {r} {b}");
+    assert_eq!(pixel(&s, 60, 20), [0, 0, 255, 255], "under the layer above");
+    s.stroke_end(vec![]);
+    assert_eq!(pixel(&s, 78, 64), [255, 255, 255, 255], "never kept");
+}
+
+#[test]
 fn an_open_artwork_is_kept_saved_until_that_stops() {
     let Some(s) = session(64, 64) else { return };
     let dir = std::env::temp_dir().join(format!("procraft-autosave-{}", std::process::id()));
@@ -974,7 +997,10 @@ fn an_export_tells_how_far_it_has_come() {
     assert_eq!(s.export_progress(), 1.0);
     // the animated ones too, from wherever the last left it
     s.reset_export_progress();
-    s.export_gif(path("a.gif"), 0, 15.0, true, false).unwrap();
+    s.export_gif(path("a.gif"), 0, 15.0, true, true, false).unwrap();
+    assert_eq!(s.export_progress(), 1.0);
+    s.reset_export_progress();
+    s.export_gif(path("b.gif"), 0, 15.0, true, false, false).unwrap();
     assert_eq!(s.export_progress(), 1.0);
     s.reset_export_progress();
     s.export_apng(path("a.png"), 0, 15.0, false).unwrap();
@@ -3109,10 +3135,23 @@ fn layers_export_as_animations() {
     let dir = std::env::temp_dir().join(format!("procraft-animation-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
-    s.export_gif(path("a.gif"), 0, 15.0, true, false).unwrap();
+    s.export_gif(path("a.gif"), 0, 15.0, true, true, false).unwrap();
     let gif = std::fs::read(dir.join("a.gif")).unwrap();
     assert_eq!(&gif[..6], b"GIF89a");
     assert_eq!(gif.windows(3).filter(|w| w == &[0x21, 0xF9, 4]).count(), 2);
+    // the frames sharing one palette: a table for the whole file, each frame reading back in
+    // its colours
+    s.export_gif(path("b.gif"), 0, 15.0, false, false, false).unwrap();
+    let shared = std::fs::read(dir.join("b.gif")).unwrap();
+    assert_eq!(shared[10] & 0x80, 0x80);
+    let mut frames: Vec<Vec<u8>> = Vec::new();
+    procraft_engine::gif::frames(&shared, |canvas, _| {
+        frames.push(canvas.to_vec());
+        true
+    });
+    assert_eq!(frames.len(), 2);
+    assert!(frames[0].chunks(4).any(|p| p[0] > 200 && p[2] < 50));
+    assert!(frames[1].chunks(4).any(|p| p[2] > 200 && p[0] < 50));
     s.export_apng(path("a.png"), 0, 15.0, false).unwrap();
     let png = std::fs::read(dir.join("a.png")).unwrap();
     assert!(png.windows(4).any(|w| w == b"acTL") && png.windows(4).any(|w| w == b"fdAT"));
@@ -8874,4 +8913,28 @@ fn the_recent_set_keeps_the_last_eight_brushes_painted_with_and_the_pinned_ones(
     let after = s.brush_library()[set as usize].brushes.len() as u32 > index + 1;
     assert!(s.delete_brush(set, index));
     assert!(!shown().iter().any(|e| e.0 == (set, index)) || after);
+}
+
+#[test]
+fn a_quick_menu_brush_follows_its_brush_about_the_library_and_goes_with_it() {
+    let Some(s) = session(200, 200) else { return };
+    let library = s.brush_library();
+    let set = library.iter().position(|set| set.brushes.len() >= 3).expect("a set of three") as u32;
+    let name = library[set as usize].brushes[2].name.clone();
+    let key = s.quick_brush_key(set, 2);
+    assert_ne!(key, 0);
+    // the same brush, the same key; no brush there, none
+    assert_eq!(s.quick_brush_key(set, 2), key);
+    assert_eq!(s.quick_brush_key(set, 9999), 0);
+    assert_eq!(s.quick_brush(key).map(|b| (b.index, b.name)), Some((2, name.clone())));
+    // moved to the front of its set, it is found there
+    assert!(s.move_brush(set, 2, set, 0));
+    assert_eq!(s.quick_brush(key).map(|b| (b.index, b.name)), Some((0, name.clone())));
+    // kept between sessions
+    let kept = s.saved_brush_choices();
+    assert!(s.load_brush_choices(kept));
+    assert_eq!(s.quick_brush(key).map(|b| b.name), Some(name));
+    // deleted, the key stands for nothing
+    assert!(s.delete_brush(set, 0));
+    assert_eq!(s.quick_brush(key), None);
 }

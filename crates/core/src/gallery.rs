@@ -14,6 +14,8 @@ const STACK_FILE: &str = "stack.json";
 const ORDER_FILE: &str = "order.txt";
 const UNTITLED: &str = "Untitled Artwork";
 const STACK: &str = "Stack";
+/// The stack the gallery's recovery puts what it finds in.
+const RECOVERED: &str = "Recovered Artworks";
 
 /// A saved artwork: its folder, its name and size, and when it was last changed (milliseconds
 /// since 1970).
@@ -138,6 +140,40 @@ fn read_artwork(dir: &Path) -> Option<GalleryArtwork> {
         height: side("height"),
         modified_ms: modified(&file),
     })
+}
+
+/// Mends an artwork folder whose artwork file is gone or unreadable from a whole copy a save cut
+/// short left beside it (`artwork.<n>.tmp`, the newest that reads), the unreadable one kept as
+/// `artwork.json.damaged`. True if it reads now.
+fn mend_artwork(dir: &Path) -> bool {
+    if read_artwork(dir).is_some() {
+        return true;
+    }
+    let whole = |p: &Path| {
+        fs::read(p)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .is_some_and(|j| j.get("document").is_some())
+    };
+    let left: Option<PathBuf> = fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| {
+                    let name = name_of(p);
+                    name.starts_with("artwork.") && name.ends_with(".tmp") && p.is_file() && whole(p)
+                })
+                .max_by_key(|p| modified(p))
+        })
+        .ok()
+        .flatten();
+    let Some(left) = left else { return false };
+    let file = dir.join(ARTWORK_FILE);
+    if file.exists() {
+        let _ = fs::rename(&file, dir.join(format!("{ARTWORK_FILE}.damaged")));
+    }
+    fs::rename(&left, &file).is_ok() && read_artwork(dir).is_some()
 }
 
 fn write_order(at: &Path, order: &[String]) {
@@ -394,6 +430,48 @@ impl ArtworkStore {
     pub fn rename_stack(&self, dir: String, name: String) {
         write_stack_name(Path::new(&dir), &name);
     }
+
+    /// Looks for artworks the gallery can't show and puts them in a new stack, "Recovered
+    /// Artworks", first in the gallery: artworks in a folder that is neither an artwork nor a
+    /// stack (a stack that lost its name file) or kept deeper than the gallery looks, and
+    /// artworks whose file is gone or unreadable but which keep a whole one from a save cut short.
+    /// Returns how many it found.
+    pub fn recover_lost_artworks(&self) -> u32 {
+        let shown: Vec<PathBuf> = self
+            .list(None)
+            .iter()
+            .flat_map(|e| match e {
+                GalleryEntry::Artwork { artwork } => vec![PathBuf::from(&artwork.dir)],
+                GalleryEntry::Stack { artworks, .. } => artworks.iter().map(|a| PathBuf::from(&a.dir)).collect(),
+            })
+            .collect();
+        // every folder down to three deep: one not shown that holds an artwork (mended if it can
+        // be) is lost; the others are looked into
+        let mut lost: Vec<PathBuf> = Vec::new();
+        let mut look = vec![(self.root.clone(), 0)];
+        while let Some((at, depth)) = look.pop() {
+            for dir in folders(&at) {
+                if !shown.contains(&dir) && mend_artwork(&dir) {
+                    lost.push(dir);
+                } else if depth < 2 {
+                    look.push((dir, depth + 1));
+                }
+            }
+        }
+        if lost.is_empty() {
+            return 0;
+        }
+        let stack = self.root.join(fresh_name());
+        if fs::create_dir_all(&stack).is_err() {
+            return 0;
+        }
+        write_stack_name(&stack, RECOVERED);
+        let moved = lost.iter().filter(|a| fs::rename(a, stack.join(name_of(a))).is_ok()).count();
+        // first in the gallery
+        let order: Vec<String> = std::iter::once(name_of(&stack)).chain(self.order(&self.root)).collect();
+        write_order(&self.root, &order);
+        moved as u32
+    }
 }
 
 /// What a zip file holds, told from its names alone (read from the file's end, so a big artwork
@@ -532,6 +610,44 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn recovery_stacks_artworks_the_gallery_cannot_show() {
+        let root = std::env::temp_dir().join(format!("procraft-recover-{}-{}", std::process::id(), fresh_name()));
+        let store = ArtworkStore::open(root.to_string_lossy().into_owned());
+        artwork(&store, "Shown", None);
+        // nothing lost: nothing done
+        assert_eq!(store.recover_lost_artworks(), 0);
+        assert_eq!(shown(&store, None), ["Shown"]);
+        // a stack that lost its name file
+        let stack = store.stack(vec![artwork(&store, "A", None), artwork(&store, "B", None)]);
+        fs::remove_file(Path::new(&stack).join(STACK_FILE)).unwrap();
+        // one kept inside a stack's artwork, too deep to be shown
+        let kept = store.stack(vec![artwork(&store, "Outer", None)]);
+        let outer = store.list(Some(kept.clone()))[0].dir().to_owned();
+        artwork(&store, "Deep", Some(outer));
+        // a first save cut short: no artwork file, a whole one left beside it
+        let cut = store.new_folder(None);
+        let json = serde_json::json!({ "name": "Cut", "document": { "width": 8, "height": 8 } });
+        fs::write(Path::new(&cut).join("artwork.3.tmp"), json.to_string()).unwrap();
+        // a save cut short mid-write leaves a part of one: nothing to mend
+        let torn = store.new_folder(None);
+        fs::write(Path::new(&torn).join("artwork.4.tmp"), "{\"name\": \"Tor").unwrap();
+        let mut before = shown(&store, None);
+        before.sort();
+        assert_eq!(before, ["Shown", "Stack[Outer]"]);
+        assert_eq!(store.recover_lost_artworks(), 4);
+        let after = shown(&store, None);
+        assert_eq!(after.len(), 3);
+        // the stack first, holding them all
+        assert!(after[0].starts_with("Recovered Artworks["), "{after:?}");
+        let mut found: Vec<&str> =
+            after[0].trim_start_matches("Recovered Artworks[").trim_end_matches(']').split(',').collect();
+        found.sort_unstable();
+        assert_eq!(found, ["A", "B", "Cut", "Deep"]);
+        assert!(Path::new(&torn).join("artwork.4.tmp").exists());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -1170,13 +1170,18 @@ impl Interface {
 
     /// The QuickMenu, while it shows: what a button does is done.
     fn quick_menu(&mut self, ctx: &egui::Context, session: &CanvasSession) {
-        if let Some((action, at)) = self.quick_menu.show(ctx, &mut self.look) {
-            self.run_quick(ctx, session, action, at);
+        match self.quick_menu.show(ctx, &mut self.look, session, &mut self.keep_brushes) {
+            Some(crate::quick_menu::Ran::Action(action, at)) => self.run_quick(ctx, session, action, at),
+            // a button set to a brush gives it to the current tool
+            Some(crate::quick_menu::Ran::Brush(b)) if session.select_brush(b.set, b.index) => {
+                self.keep_brushes = true;
+                self.library.library_changed();
+            }
+            _ => {}
         }
     }
 
-    /// A QuickMenu button's action, the menu opened at `at` (points). Adding text does nothing
-    /// yet (the desktop doesn't edit text).
+    /// A QuickMenu button's action, the menu opened at `at` (points).
     fn run_quick(&mut self, ctx: &egui::Context, session: &CanvasSession, action: QuickAction, at: egui::Pos2) {
         let current = session.layers().into_iter().find(|l| l.current);
         let id = current.as_ref().map(|l| l.id);

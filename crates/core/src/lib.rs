@@ -404,6 +404,8 @@ pub(crate) struct State {
     /// last) and those pinned there (in the order they were pinned), by place in the library.
     recent_brushes: Vec<(usize, usize)>,
     pinned_brushes: Vec<(usize, usize)>,
+    /// The brushes QuickMenu buttons are set to, each by a key the button keeps (never 0).
+    quick_brushes: Vec<(u64, (usize, usize))>,
     /// Each brush's sliders, per tool.
     sliders: HashMap<(ToolKind, usize, usize), Sliders>,
     /// Strokes started, to seed each one's randomness.
@@ -847,8 +849,19 @@ fn draw_samples(
     canvas.add_stamps(&stamps);
     // the stretch to the newest point waits for the point after it to curve by: shown meanwhile
     // (as predicted input is, until the next)
-    canvas.set_prediction(&guide::mirrored(guide, &builder.preview(&[])));
+    show_ahead(canvas, &guide::mirrored(guide, &builder.preview(&[])));
     !stamps.is_empty()
+}
+
+/// Shows `stamps` ahead of the open stroke until the next input: as its tip where the canvas
+/// takes one, so they look as the stroke will (its grain, build-up and colour, under the layers
+/// above it and in its layer's blend), else drawn over the canvas.
+fn show_ahead(canvas: &mut Canvas, stamps: &[procraft_engine::stroke::Stamp]) {
+    if canvas.shows_tip() {
+        canvas.set_tip(stamps);
+    } else {
+        canvas.set_prediction(stamps);
+    }
 }
 
 /// Ends the canvas's open stroke with `builder`'s final stamps: a painted or erased stroke is
@@ -1155,6 +1168,7 @@ impl CanvasSession {
             set_choices: Vec::new(),
             recent_brushes: Vec::new(),
             pinned_brushes: Vec::new(),
+            quick_brushes: Vec::new(),
             sliders: HashMap::new(),
             strokes: 0,
             preview: None,
@@ -1463,7 +1477,7 @@ impl CanvasSession {
         if canvas.shows_tip() && builder.shows_tip() {
             canvas.set_tip(&guide::mirrored(&guide, &builder.preview_tip(&canvas_samples)));
         } else {
-            canvas.set_prediction(&guide::mirrored(&guide, &builder.preview(&canvas_samples)));
+            show_ahead(canvas, &guide::mirrored(&guide, &builder.preview(&canvas_samples)));
         }
         self.shared.frame(st);
     }

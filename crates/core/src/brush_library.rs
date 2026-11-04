@@ -293,7 +293,13 @@ struct SavedChoices {
     recents: Vec<(usize, usize)>,
     #[serde(default)]
     pinned: Vec<(usize, usize)>,
+    /// The brushes QuickMenu buttons are set to, by their keys.
+    #[serde(default)]
+    quick: Vec<(u64, usize, usize)>,
 }
+
+/// How many brushes QuickMenu buttons can be set to at once (the oldest given up past it).
+const QUICK_BRUSHES: usize = 64;
 
 /// How many brushes the Recent set keeps besides the pinned ones (as the reference: the oldest
 /// gives way to a ninth).
@@ -568,6 +574,11 @@ impl State {
         let holds = |&(s, i): &(usize, usize)| library.get(s).is_some_and(|set| i < set.brushes.len());
         self.recent_brushes.retain(holds);
         self.pinned_brushes.retain(holds);
+        // a QuickMenu button's brush follows it, a brush gone leaving its button with none
+        self.quick_brushes = std::mem::take(&mut self.quick_brushes)
+            .into_iter()
+            .filter_map(|(key, place)| f(place).filter(|p| holds(p)).map(|p| (key, p)))
+            .collect();
         // a set's choice follows its brush: a set it leaves has none, and a set it joins keeps the
         // later choice
         for place in std::mem::take(&mut self.set_choices).into_iter().filter_map(&f) {
@@ -632,6 +643,37 @@ impl CanvasSession {
         st.recent_brushes.retain(|&p| p != place);
         st.pinned_brushes.retain(|&p| p != place);
         st.recent_brushes.len() + st.pinned_brushes.len() < before
+    }
+
+    /// The key a QuickMenu button keeps for the brush at `set`, `index` (the same for the same
+    /// brush), which then follows the brush about the library; 0 if there is no brush there.
+    pub fn quick_brush_key(&self, set: u32, index: u32) -> u64 {
+        let place = (set as usize, index as usize);
+        let mut st = self.shared.lock();
+        if !st.holds(place) {
+            return 0;
+        }
+        if let Some(&(key, _)) = st.quick_brushes.iter().find(|q| q.1 == place) {
+            return key;
+        }
+        let key = st.quick_brushes.iter().map(|q| q.0).max().unwrap_or(0) + 1;
+        if st.quick_brushes.len() >= QUICK_BRUSHES {
+            st.quick_brushes.remove(0);
+        }
+        st.quick_brushes.push((key, place));
+        key
+    }
+
+    /// The brush a QuickMenu button's key stands for, where it is now; none if it is gone.
+    pub fn quick_brush(&self, key: u64) -> Option<crate::brushes::BrushInfo> {
+        let st = self.shared.lock();
+        let &(_, (s, i)) = st.quick_brushes.iter().find(|q| q.0 == key)?;
+        let brush = st.library.get(s)?.brushes.get(i)?;
+        Some(crate::brushes::BrushInfo {
+            set: u32::try_from(s).ok()?,
+            index: u32::try_from(i).ok()?,
+            name: brush.name.clone(),
+        })
     }
 
     /// Empties the Recent set, the pinned brushes too.
@@ -700,6 +742,8 @@ impl CanvasSession {
             entry.origins.remove(i);
         }
         let left = entry.brushes.len();
+        // a QuickMenu button set to it is left with none (a tool takes the brush in its place)
+        st.quick_brushes.retain(|q| q.1 != (s, i));
         st.move_brush_refs(|(rs, ri)| match (rs == s, ri.cmp(&i)) {
             (true, std::cmp::Ordering::Greater) => Some((rs, ri - 1)),
             // the brush below moves up into its place, or the one above when it was last
@@ -989,6 +1033,7 @@ impl CanvasSession {
             sliders,
             recents: st.recent_brushes.clone(),
             pinned: st.pinned_brushes.clone(),
+            quick: st.quick_brushes.iter().map(|&(key, (s, i))| (key, s, i)).collect(),
         };
         serde_json::to_string(&choices).unwrap_or_default()
     }
@@ -1007,6 +1052,7 @@ impl CanvasSession {
         let sliders: Vec<(u8, usize, usize, f32, f32)> = each(&saved, "sliders").into_iter().flatten().collect();
         let recents: Vec<(usize, usize)> = each(&saved, "recents").into_iter().flatten().collect();
         let pinned: Vec<(usize, usize)> = each(&saved, "pinned").into_iter().flatten().collect();
+        let quick: Vec<(u64, usize, usize)> = each(&saved, "quick").into_iter().flatten().collect();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         for (tool, place) in TOOLS.into_iter().zip(tools) {
@@ -1033,6 +1079,12 @@ impl CanvasSession {
         for place in recents {
             if st.holds(place) {
                 st.note_recent(place);
+            }
+        }
+        st.quick_brushes.clear();
+        for (key, s, i) in quick {
+            if key != 0 && st.holds((s, i)) && !st.quick_brushes.iter().any(|q| q.0 == key) {
+                st.quick_brushes.push((key, (s, i)));
             }
         }
         for (tool, s, i, size, opacity) in sliders {
