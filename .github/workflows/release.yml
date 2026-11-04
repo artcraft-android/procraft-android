@@ -15,9 +15,10 @@
 #                                                 the APPLE_* secrets exist, else ad hoc
 #   SHA256SUMS.txt                                each file's SHA-256
 #
-# The Mac file is built on the public repository alone: a private one pays for macOS runners'
-# minutes, ten times Linux's. While it is new, its failing leaves its file out rather than holding
-# up the release; so does Windows on ARM's.
+# The Mac file is built on the public repository alone (a private one pays for macOS runners'
+# minutes, ten times Linux's), and only once the repository's variable RELEASE_MAC is true. While
+# it is new, its failing leaves its file out rather than holding up the release; so does Windows
+# on ARM's.
 #
 # A manual run (Actions › Release › Run workflow) is a dry run: it builds them at the version in
 # gradle.properties and keeps them as the run's artifacts, and releases nothing. It also builds
@@ -213,7 +214,8 @@ jobs:
 
   macos:
     name: Desktop (macos-universal)
-    if: ${{ !github.event.repository.private }}
+    # only once the Mac app is to ship: the repository's variable RELEASE_MAC set to true
+    if: ${{ !github.event.repository.private && vars.RELEASE_MAC == 'true' }}
     continue-on-error: true
     runs-on: macos-15
     env:
