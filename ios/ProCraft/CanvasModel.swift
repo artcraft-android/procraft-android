@@ -723,6 +723,15 @@ final class CanvasModel {
         swipedBrush = nil
     }
 
+    /// Something is about to show over the canvas: all that hangs over it goes first.
+    func closePopovers() {
+        closePanels()
+        sliderPanel = nil
+        sliderPanelKept = false
+        layerChoice = nil
+        copyPasteOpen = false
+    }
+
     /// A tap outside the open panel closes it; with a brush swiped open, only the swipe.
     func tapOutsidePanel() {
         if panel == .brushes, swipedBrush != nil {

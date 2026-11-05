@@ -448,6 +448,13 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
 
     @available(iOS 17.5, *)
     func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
-        canvas.pencilSqueezed(squeeze, action: UIPencilInteraction.preferredSqueezeAction)
+        let action = UIPencilInteraction.preferredSqueezeAction
+        // what a squeeze opens over the canvas clears the way, as does the system's own palette
+        let purpose = Gestures.shared.purposeOf(.penSqueeze)
+        let opens = purpose == .eyedropper || purpose == .quickmenu || purpose == .layerSelect
+        if squeeze.phase == .began, opens || action == .showContextualPalette {
+            model.closePopovers()
+        }
+        canvas.pencilSqueezed(squeeze, action: action)
     }
 }
