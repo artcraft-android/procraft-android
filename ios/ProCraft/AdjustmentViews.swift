@@ -343,7 +343,7 @@ struct LiquifyPanel: View {
         .background(RoundedRectangle(cornerRadius: 33, style: .circular).fill(panelFill))
     }
 
-    private func popover<Content: View>(_ title: String, centre: CGFloat, buttonsTop: CGFloat, @ViewBuilder content: () -> Content) -> some View {
+    private func popover<Content: View>(_ title: String, centre: CGFloat, buttonsTop: CGFloat, @ViewBuilder content: @escaping () -> Content) -> some View {
         let left = min(max(centre - 130, 0), max(screen.width - 260, 0))
         return Popover(width: 260, arrowX: centre - left, fill: menuFill, corner: 26, side: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
