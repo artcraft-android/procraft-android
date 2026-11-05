@@ -34,6 +34,7 @@ mod guide;
 mod history;
 mod host;
 mod hues;
+mod interface_size;
 mod keys;
 #[cfg(target_os = "ios")]
 mod layer;
@@ -112,6 +113,7 @@ pub use gradients::{GradientInfo, GradientStop, Gradients};
 pub use guide::{GuideInfo, GuideType, GuideUnit, SymmetryType};
 pub use history::ColourHistory;
 pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_stops};
+pub use interface_size::{interface_size_along, interface_size_at, interface_size_fitted, interface_size_kept};
 pub use keys::{KeyCombo, KeyDrag, KeyShortcut, ShortcutGroup, ShortcutRow, key_shortcut, key_shortcut_list};
 pub use layers::{
     BlendModeInfo, Blocked, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
@@ -451,8 +453,10 @@ pub(crate) struct State {
     pub(crate) sphere: Option<crate::studio::SpherePad>,
     pub(crate) frame_interval_ms: f32,
     pub(crate) error: Option<String>,
-    /// Window pixels per interface point.
+    /// Window pixels per point at the screen's density: the canvas and gestures go by it.
     pub(crate) display_scale: f32,
+    /// How big the interface shows beside that (1: as measured).
+    pub(crate) interface_size: f32,
     /// The canvas shown in perceptual greys (the window's view only).
     pub(crate) grey_view: bool,
     /// The eyedropper picks from the current layer alone, not the canvas as composited.
@@ -560,6 +564,11 @@ pub(crate) struct State {
 }
 
 impl State {
+    /// Window pixels per point of what the interface draws, its handles over the canvas too.
+    pub(crate) fn interface_scale(&self) -> f32 {
+        self.display_scale * self.interface_size
+    }
+
     /// The surround's grid in window pixels, shifted by `by` (where the window's corner lands on
     /// the target).
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -569,7 +578,7 @@ impl State {
         procraft_gpu::SurroundGrid {
             spacing: GRID_SPACING_PT * s,
             origin: [x + by.x, y + by.y],
-            top: GRID_TOP_PT * s + by.y,
+            top: GRID_TOP_PT * self.interface_scale() + by.y,
             width: GRID_WIDTH_PT * s,
             color: if self.light { GRID_LINE_LIGHT } else { GRID_LINE },
         }
@@ -1241,6 +1250,7 @@ impl CanvasSession {
             frame_interval_ms: 0.0,
             error: None,
             display_scale: 2.0,
+            interface_size: 1.0,
             grey_view: false,
             eyedropper_from_layer: false,
             grid_origin: None,
@@ -1655,6 +1665,19 @@ impl CanvasSession {
             let mut st = self.shared.lock();
             st.display_scale = pixels_per_point;
             self.shared.frame(&mut st);
+        }
+    }
+
+    /// How big the interface shows beside the screen's density (1: as measured). The canvas, its
+    /// brushes and how far a gesture goes stay as they are: only the handles the interface draws
+    /// over the canvas take touches where they show.
+    pub fn set_interface_size(&self, size: f32) {
+        if size.is_finite() && size > 0.0 {
+            let mut st = self.shared.lock();
+            if st.interface_size != size {
+                st.interface_size = size;
+                self.shared.frame(&mut st);
+            }
         }
     }
 

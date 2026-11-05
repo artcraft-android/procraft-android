@@ -2491,7 +2491,11 @@ fn a_nodes_drag_by_touch_is_one_step_of_undo_and_a_tap_on_it_none() {
     s.touch_up(7, vec![]);
     drag(40.0, 2000.0);
     let moved = s.quickshape_info().unwrap();
-    assert!((moved.handles[3] - info.handles[3] - 40.0).abs() < 1.0, "{:?}", moved.handles);
+    // it stayed for the first ten points of the way (two pixels each here), then went as the
+    // finger did, behind it
+    let lag = 40.0 - (moved.handles[3] - info.handles[3]);
+    assert!((20.0..=28.0).contains(&lag), "{lag}");
+    assert!((moved.handles[2] - info.handles[2]).abs() < 1.0, "{:?}", moved.handles);
     // five moves, one step: one undo has it all back, the shape still open
     s.undo();
     assert_eq!(s.quickshape_info().unwrap().handles, info.handles);

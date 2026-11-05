@@ -70,6 +70,9 @@ const SWIPE_DOWN: f32 = 70.0;
 const QUICKSHAPE_STILL: f32 = 6.0;
 /// A snapped shape being edited: a handle within this takes a drag, and its outline within this.
 const QUICKSHAPE_GRAB: f32 = 22.0;
+/// A shape's node stays where it is until the finger has gone this far (points), and then goes as
+/// it does, that far behind it.
+const NODE_SLOP: f32 = 10.0;
 /// A fill's touch slid past this (points) changes its threshold, this much more gently than a
 /// selection's.
 const POUR_SLOP: f32 = 15.0;
@@ -499,8 +502,10 @@ pub(crate) struct Touches {
     /// A panel is open over the canvas, and the touch waiting for it to go.
     panel_open: bool,
     held: Option<Held>,
-    /// Window pixels a point.
+    /// Window pixels a point: how far a touch has to go.
     scale: f32,
+    /// Window pixels a point of the interface: how near a touch has to be to a handle it draws.
+    handle_scale: f32,
 }
 
 impl Default for Touches {
@@ -581,6 +586,7 @@ impl Default for Touches {
             panel_open: false,
             held: None,
             scale: 1.0,
+            handle_scale: 1.0,
         }
     }
 }
@@ -778,7 +784,10 @@ impl CanvasSession {
         let Some(first) = last_of(&samples).copied() else { return Vec::new() };
         let mut out = Vec::new();
         let mut t = self.touches();
-        t.scale = self.shared.lock().display_scale;
+        (t.scale, t.handle_scale) = {
+            let st = self.shared.lock();
+            (st.display_scale, st.interface_scale())
+        };
         let at = (first.x, first.y);
         t.down.retain(|d| d.id != id);
         t.down.push(Down { id, at, from: at });
@@ -1096,13 +1105,21 @@ impl CanvasSession {
                 }
             }
             Mode::Shape(i) => {
-                let began = !std::mem::replace(&mut t.shape_dragged, true);
-                drop(t);
+                let began = !t.shape_dragged && dist(at, t.down_at) > NODE_SLOP * t.scale;
                 if began {
-                    self.quickshape_step();
+                    // from here on, the node's way from the finger
+                    t.shape_dragged = true;
+                    t.shape_last = (t.shape_last.0 - at.0, t.shape_last.1 - at.1);
                 }
-                self.quickshape_move_handle(i, at.0, at.1);
-                out.push(TouchCommand::ShapeChanged);
+                if t.shape_dragged {
+                    let grip = t.shape_last;
+                    drop(t);
+                    if began {
+                        self.quickshape_step();
+                    }
+                    self.quickshape_move_handle(i, at.0 + grip.0, at.1 + grip.1);
+                    out.push(TouchCommand::ShapeChanged);
+                }
             }
             Mode::ShapePin | Mode::ShapeMove if id == t.stroke_pointer => {
                 // only a drag past a tap's slop moves it, then from where it began
@@ -1356,7 +1373,7 @@ impl CanvasSession {
         // a snapped shape's handle is dragged; while it is edited, a drag on its outline turns and
         // resizes it, one elsewhere moves it (a tap ends the editing); anything else keeps the
         // shape and draws on
-        let grab = QUICKSHAPE_GRAB * t.scale;
+        let grab = QUICKSHAPE_GRAB * t.handle_scale;
         if t.shape_editing
             && let Some(info) = self.quickshape_info()
         {
@@ -1366,12 +1383,13 @@ impl CanvasSession {
                 .0
                 .iter()
                 .enumerate()
-                .map(|(i, &[x, y])| (i, dist((x, y), at)))
-                .filter(|(_, d)| *d <= grab)
-                .min_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((i, _)) = handle {
+                .map(|(i, &[x, y])| (i, (x, y), dist((x, y), at)))
+                .filter(|(.., d)| *d <= grab)
+                .min_by(|a, b| a.2.total_cmp(&b.2));
+            if let Some((i, node, _)) = handle {
                 t.mode = Mode::Shape(i as u32);
                 t.shape_dragged = false;
+                t.shape_last = node;
                 return;
             }
             t.stroke_pointer = id;
@@ -1394,7 +1412,7 @@ impl CanvasSession {
         {
             t.stroke_pointer = id;
             if let Some(puck) = self.clone_puck_at()
-                && dist(puck, at) <= (CLONE_PUCK_RADIUS + CLONE_PUCK_SLOP) * t.scale
+                && dist(puck, at) <= (CLONE_PUCK_RADIUS + CLONE_PUCK_SLOP) * t.handle_scale
             {
                 // the clone source is dragged
                 t.puck_grab = (at.0 - puck.0, at.1 - puck.1);
@@ -1417,7 +1435,7 @@ impl CanvasSession {
             t.pour_last = (at.0, now);
             t.mode = Mode::Adjust;
             // perspective blur: a touch on its puck moves the puck or turns its arrow
-            t.puck_drag = self.perspective_drag_at(at, t.scale);
+            t.puck_drag = self.perspective_drag_at(at, t.handle_scale);
             t.puck_dragging = false;
             if open == Adjustment::Liquify {
                 t.liquify_at = at;
@@ -2021,7 +2039,7 @@ impl CanvasSession {
         let (shown, view, density, warping) = {
             let st = self.shared.lock();
             let warping = st.transform_mode == procraft_engine::transform::TransformMode::Warp;
-            (st.transform_box(), st.view.map(|v| v.to_screen()), st.display_scale, warping)
+            (st.transform_box(), st.view.map(|v| v.to_screen()), st.interface_scale(), warping)
         };
         let (Some(b), Some(m)) = (shown, view) else { return crate::TransformHandle::Move };
         let view = vec![m.a, m.b, m.c, m.d, m.e, m.f];
@@ -2038,7 +2056,7 @@ impl CanvasSession {
     fn numeric_at(&self, handle: crate::TransformHandle) -> Option<TouchCommand> {
         let (b, m, density) = {
             let st = self.shared.lock();
-            (st.transform_box()?, st.view?.to_screen(), st.display_scale)
+            (st.transform_box()?, st.view?.to_screen(), st.interface_scale())
         };
         let s = crate::screen_box(b.corners, vec![m.a, m.b, m.c, m.d, m.e, m.f], density)?;
         let point = |v: &[f32], i: usize| Some((*v.get(2 * i)?, *v.get(2 * i + 1)?));
