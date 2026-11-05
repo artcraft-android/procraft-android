@@ -848,7 +848,11 @@ impl CanvasSession {
     /// once, never by a spread that only some of them have got to.
     pub fn touch_moves(&self, moves: Vec<TouchMove>) -> Vec<TouchCommand> {
         let mut out = Vec::new();
-        let last = moves.len().saturating_sub(1);
+        // the last that counts: a resting finger the pen put aside moves in the event too
+        let last = {
+            let t = self.touches();
+            moves.iter().rposition(|m| t.down.iter().any(|d| d.id == m.id)).unwrap_or(0)
+        };
         for (i, step) in moves.into_iter().enumerate() {
             self.touches().more_to_come = i < last;
             out.extend(self.touch_move(step.id, step.samples));
@@ -2631,6 +2635,11 @@ mod tests {
             assert!((zoom(&s) / before - 1.0).abs() < 1e-5, "{} at {i}", zoom(&s));
         }
         assert!(!s.touches().more_to_come);
+        // an event's last pointer may be one no longer followed: the view still goes by the others
+        let zoomed = zoom(&s);
+        let step = |id: u64, x: f32, ms: f64| TouchMove { id, samples: at(x, 300.0, ms) };
+        s.touch_moves(vec![step(1, 200.0, 700.0), step(2, 520.0, 700.0), step(9, 0.0, 700.0)]);
+        assert!(zoom(&s) > zoomed * 1.1, "{} from {zoomed}", zoom(&s));
     }
 
     #[test]

@@ -112,12 +112,12 @@ class PadSurfaceView(context: Context, private val vm: CanvasViewModel) : Surfac
                 e.getHistoricalX(i, h),
                 e.getHistoricalY(i, h),
                 e.getHistoricalPressure(i, h),
-                e.getHistoricalAxisValue(MotionEvent.AXIS_TILT, i, h),
+                penLean(e.getHistoricalAxisValue(MotionEvent.AXIS_TILT, i, h), e.getHistoricalOrientation(i, h)),
                 e.getHistoricalOrientation(i, h),
                 e.getHistoricalEventTime(h).toDouble(),
             )
         }
-        out += PenSample(e.getX(i), e.getY(i), e.getPressure(i), e.getAxisValue(MotionEvent.AXIS_TILT, i), e.getOrientation(i), e.eventTime.toDouble())
+        out += PenSample(e.getX(i), e.getY(i), e.getPressure(i), penLean(e.getAxisValue(MotionEvent.AXIS_TILT, i), e.getOrientation(i)), e.getOrientation(i), e.eventTime.toDouble())
         return out
     }
 }
