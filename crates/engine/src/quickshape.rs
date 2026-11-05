@@ -996,6 +996,44 @@ mod tests {
     }
 
     #[test]
+    fn a_hook_drawn_by_hand_is_a_curve_not_a_polyline() {
+        // a hand's hook: over the top, down the right side and away, far from a circle's bend
+        let knots = [
+            (270.0, 595.0),
+            (285.0, 550.0),
+            (330.0, 535.0),
+            (380.0, 545.0),
+            (400.0, 610.0),
+            (385.0, 700.0),
+            (340.0, 770.0),
+            (275.0, 820.0),
+        ];
+        let at = |i: usize| {
+            let (x, y) = knots[i.min(knots.len() - 1)];
+            Vec2::new(x, y)
+        };
+        // through the knots, as a hand goes
+        let hook: Vec<Vec2> = (0..knots.len() - 1)
+            .flat_map(|i| {
+                let (a, b, c, d) = (at(i.saturating_sub(1)), at(i), at(i + 1), at(i + 2));
+                (0..12).map(move |k| {
+                    let t = k as f32 / 12.0;
+                    let (t2, t3) = (t * t, t * t * t);
+                    let spline = |p: f32, q: f32, r: f32, s: f32| {
+                        0.5 * (2.0 * q
+                            + (r - p) * t
+                            + (2.0 * p - 5.0 * q + 4.0 * r - s) * t2
+                            + (3.0 * q - p - 3.0 * r + s) * t3)
+                    };
+                    Vec2::new(spline(a.x, b.x, c.x, d.x), spline(a.y, b.y, c.y, d.y))
+                })
+            })
+            .collect();
+        let shape = &recognise(&hook)[0];
+        assert_eq!(shape.kind, ShapeKind::Arc);
+    }
+
+    #[test]
     fn an_arc_goes_with_its_ends_and_bends_by_its_middle() {
         let arc = recognise(&flat_bow())[0].clone();
         let (start, middle, end) = (arc.nodes[0], arc.nodes[1], arc.nodes[2]);
