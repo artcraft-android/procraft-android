@@ -23,10 +23,13 @@ static BACKEND: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// process, so the system can't tell who to stop when it runs out, and stops everything else first.
 const LEFT_FREE: u64 = 512 << 20;
 
+/// Less than this, bytes, is never what leaves the system short.
+const SMALL_ASK: u64 = 32 << 20;
+
 /// Whether `bytes` more of the GPU's memory would leave the system short. Only where the system
 /// says what it has free (Android, whose GPU memory is the same memory as everything else's).
 pub(crate) fn short_of_memory(bytes: u64) -> bool {
-    memory_free().is_some_and(|free| bytes.saturating_add(LEFT_FREE) > free)
+    bytes >= SMALL_ASK && memory_free().is_some_and(|free| bytes.saturating_add(LEFT_FREE) > free)
 }
 
 #[cfg(test)]

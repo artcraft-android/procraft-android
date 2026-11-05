@@ -469,6 +469,8 @@ pub(crate) struct State {
     pub(crate) info: project::ArtworkInfo,
     /// Saved layer pixels waiting for the canvas (an opened artwork before it is shown).
     pub(crate) pending_pixels: Vec<(procraft_engine::document::LayerId, project::Opened)>,
+    /// The canvas couldn't be made from these pixels (a failure elsewhere doesn't stop the next try).
+    pub(crate) canvas_failed: bool,
     /// Let go of (see [`CanvasSession::release_canvas`]): no canvas is made again.
     pub(crate) closed: bool,
     /// A model open to paint on, in place of the flat canvas (the document is its current
@@ -791,7 +793,7 @@ impl State {
     #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
     pub(crate) fn ensure_canvas(&mut self) {
         // one that couldn't be made isn't made again: what was opened stays, and a save writes it
-        if self.canvas.is_some() || self.closed || self.error.is_some() {
+        if self.canvas.is_some() || self.closed || self.canvas_failed {
             return;
         }
         let Some(gpu) = self.gpu.as_ref() else { return };
@@ -805,10 +807,7 @@ impl State {
             c.set_resident_budget(crate::layers::resident_budget());
             for (id, pixels) in &pixels {
                 // past what fits, kept compressed until needed
-                let opened = if c.has_room() { c.upload_layer(gpu, *id, pixels) } else { c.park_pixels(*id, pixels) };
-                if let Err(e) = opened {
-                    log::error!("opening a layer: {e}");
-                }
+                if c.has_room() { c.upload_layer(gpu, *id, pixels) } else { c.park_pixels(*id, pixels) }?;
             }
             c.fill_rest(gpu, doc);
             // as read: not changed
@@ -820,6 +819,7 @@ impl State {
             Err(e) => {
                 log::error!("canvas: {e}");
                 self.error = Some(e.to_string());
+                self.canvas_failed = true;
                 self.pending_pixels = pixels.into_iter().map(|(id, px)| (id, project::Opened::Pixels(px))).collect();
             }
         }
@@ -1075,7 +1075,7 @@ impl Shared {
                                 if let Ok(mut saved) = self.saving.lock() {
                                     saved.read(*id, hash);
                                 }
-                                let opened = match layer {
+                                match layer {
                                     Read::Upload(px, painted, Some(copy))
                                         if copy.bytes() * 4 <= px.len()
                                             && copies + copy.bytes() as u64 <= copy_room =>
@@ -1088,10 +1088,7 @@ impl Shared {
                                         c.park_ready(*id, ready);
                                         Ok(())
                                     }
-                                };
-                                if let Err(e) = opened {
-                                    log::error!("opening a layer: {e}");
-                                }
+                                }?;
                             }
                             Some(Err(e)) => log::error!("layer {id:?}: {e}"),
                         }
@@ -1124,6 +1121,7 @@ impl Shared {
             Err(e) => {
                 log::error!("canvas: {e}");
                 st.error = Some(e.to_string());
+                st.canvas_failed = true;
             }
         }
     }
@@ -1271,6 +1269,7 @@ impl CanvasSession {
             guide_before: None,
             name,
             pending_pixels: project::opened(pixels),
+            canvas_failed: false,
             closed: false,
             fit_insets: [0.0; 4],
             backdrops: Vec::new(),

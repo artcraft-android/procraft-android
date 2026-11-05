@@ -180,6 +180,9 @@ impl CanvasSession {
         transparent: bool,
         max_side: u32,
     ) -> Result<Option<GifWriter>, MobileError> {
+        // a held frame is drawn once, however many places it holds
+        let mut seen = std::collections::HashSet::new();
+        let units: Vec<LayerId> = units.iter().copied().filter(|u| seen.insert(*u)).collect();
         // about as many sampled pixels in all as a single frame's palette looks at
         let per_frame = (GIF_PALETTE_SAMPLES / units.len().max(1)).max(256);
         let mut samples: Vec<[u8; 4]> = Vec::new();

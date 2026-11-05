@@ -421,16 +421,34 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_elsewhere_doesnt_stop_the_canvas_being_made() {
+        let Some(s) = painted(120) else { return };
+        let dir = std::env::temp_dir().join(format!("procraft-open-after-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.to_string_lossy().into_owned();
+        s.save(path.clone()).unwrap();
+        let opened = CanvasSession::open(path).unwrap();
+        // a window's surface that couldn't be made, as the app came back
+        opened.shared.lock().error = Some("no surface".to_owned());
+        let Some(gpu) = s.shared.lock().gpu.clone() else { return };
+        opened.use_gpu(gpu);
+        let mut st = opened.shared.lock();
+        st.ensure_canvas();
+        assert!(st.canvas.is_some());
+        drop(st);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_crop_past_the_memory_free_is_refused_and_says_so() {
         let Some(s) = painted(120) else { return };
         let before = contents(&s);
         // nothing like enough left beside what the system keeps
         crate::device::MEMORY_FREE.with(|f| f.set(Some(100 << 20)));
-        assert!(!s.crop_canvas(10.0, 10.0, 60.0, 50.0, 0.0, false, 0, 0));
+        assert!(!s.crop_canvas(10.0, 10.0, 60.0, 50.0, 0.0, true, 4000, 4000));
         assert!(s.take_failure().is_some_and(|why| why.contains("memory")));
         assert_eq!(contents(&s), before);
-        // with room, cropped
-        crate::device::MEMORY_FREE.with(|f| f.set(Some(600 << 20)));
+        // a small canvas needs next to nothing, and is the way out of being short
         assert!(s.crop_canvas(10.0, 10.0, 60.0, 50.0, 0.0, false, 0, 0));
         crate::device::MEMORY_FREE.with(|f| f.set(None));
         assert_eq!(contents(&s).1, (60, 50));

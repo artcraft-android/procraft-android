@@ -3735,6 +3735,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** After a change to the library: read it again, keep it, and draw previews again (they go by place). */
     private fun libraryChanged() {
         val s = session ?: return
+        // picks go by place, which may hold another brush now
+        pickedBrushes.clear()
         brushSets = s.brushLibrary()
         currentBrush = s.currentBrush()
         readSetChoices()

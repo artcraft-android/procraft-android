@@ -46,11 +46,13 @@ fn turned(v: vec2<f32>, a: f32) -> vec2<f32> {
 }
 
 // how far from the centre (a part of the radius) what `a` of drawing in has brought to `d` came
-// from (drawing out, below zero): the brush's falloff followed back in small steps
+// from (drawing out, below zero): the brush's falloff followed back in small steps, none past 1,
+// where they would overshoot the centre and fold the picture, however long it has been held
 fn traced(d: f32, a: f32) -> f32 {
     var x = d;
-    let h = a / 16.0;
-    for (var i = 0; i < 16; i += 1) {
+    let steps = i32(clamp(ceil(abs(a)), 16.0, 64.0));
+    let h = clamp(a, -64.0, 64.0) / f32(steps);
+    for (var i = 0; i < steps; i += 1) {
         let k = max(1.0 - x * x, 0.0);
         x += h * x * k * k;
     }

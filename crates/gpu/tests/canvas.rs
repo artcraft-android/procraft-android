@@ -666,6 +666,17 @@ fn paint_laid_in_place_shows_no_predicted_tail_over_the_canvas() {
 }
 
 #[test]
+fn a_dual_brush_shows_no_tip_its_second_hasnt_reached() {
+    let Some(gpu) = gpu() else { return };
+    let doc = Document::new(100, 100);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let paint = style(StrokeTool::Paint, 1.0);
+    canvas.begin_dual_stroke(doc.current(), paint, procraft_gpu::SecondStroke { style: paint, mode: 0, threshold: -1.0 });
+    assert!(!canvas.shows_tip());
+    canvas.end_stroke();
+}
+
+#[test]
 fn a_stroke_tip_shows_until_the_next_one_replaces_it() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
@@ -1143,6 +1154,42 @@ fn liquify_pushes_paint_along_and_reconstructs() {
 }
 
 #[test]
+fn liquify_expand_held_long_goes_on_growing_and_doesnt_fold() {
+    use procraft_gpu::{Filter, LiquifyMode, LiquifyStamp};
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(64, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let layer = doc.current();
+    canvas.begin_stroke(layer, style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(32.0, 32.0), 6.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    canvas.begin_transform(layer);
+    canvas.begin_liquify();
+    let held = |from: f32| LiquifyStamp {
+        centre: [32.0, 32.0],
+        moved: [from, from + 1.0],
+        radius: 24.0,
+        pressure: 1.0,
+        distortion: 0.0,
+        seed: 0.0,
+        mode: LiquifyMode::Expand,
+    };
+    canvas.liquify_stamps(&(0..40).map(|i| held(i as f32)).collect::<Vec<_>>());
+    canvas.set_filter(Filter::Liquify { amount: 1.0 });
+    canvas.render(&gpu, &mut doc, None);
+    let px = canvas.read_layer(&gpu, layer).unwrap();
+    // all of it from the dot's middle: none from past the dot, as steps overshooting it would be
+    for x in [32, 36, 40, 44] {
+        assert!(pixel(&px, 64, x, 32)[3] > 200, "{x}: {:?}", pixel(&px, 64, x, 32));
+    }
+    canvas.liquify_clear();
+    canvas.end_transform(true);
+    canvas.render(&gpu, &mut doc, None);
+}
+
+#[test]
 fn an_adjustment_painted_on_shows_only_where_painted_and_clone_copies() {
     use procraft_gpu::Filter;
     let Some(gpu) = gpu() else { return };
@@ -1561,6 +1608,44 @@ fn a_dual_brush_s_paint_laid_in_place_is_cut_by_its_second() {
     for second_first in [false, true] {
         let (normal, _) = laid(0, second_first);
         assert!(normal.iter().all(|&a| a > 240), "{normal:?} {second_first}");
+    }
+}
+
+#[test]
+fn a_texturized_grain_on_paint_laid_in_place_goes_by_its_blend_mode() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a dot through a grain fixed to the canvas: multiplied it is thinned, and a grain taken as a
+    // height, which the full dot stands well above, leaves it whole; wet or dry
+    let cover = |grain_blend: u32, wet_pull: Option<f32>| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let style = StrokeStyle {
+            wet_pull,
+            laid_in_place: wet_pull.is_none(),
+            rendering: Rendering::Gradual,
+            grain: Some(0),
+            grain_mode: procraft_engine::brush::GrainMode::Texturized,
+            grain_depth: 1.0,
+            grain_scale: 64.0,
+            grain_blend,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        let shown = (24..40).map(|x| u32::from(pixel(&layer, 64, x, 32)[3])).sum::<u32>();
+        canvas.undo();
+        canvas.render(&gpu, &mut doc, None);
+        let undone = canvas.read_layer(&gpu, doc.current()).unwrap();
+        assert_eq!(pixel(&undone, 64, 32, 32)[3], 0);
+        shown
+    };
+    for wet_pull in [Some(0.5), None] {
+        let (multiply, height) = (cover(1, wet_pull), cover(27, wet_pull));
+        assert!(height > 16 * 240 && multiply + 16 * 20 < height, "{wet_pull:?}: {multiply} {height}");
     }
 }
 

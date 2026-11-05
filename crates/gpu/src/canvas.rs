@@ -2267,9 +2267,10 @@ impl Canvas {
     }
 
     /// Whether the open stroke can show a tip (see [`Canvas::set_tip`]): one built up in the
-    /// stroke texture, not painted in place or onto an adjustment.
+    /// stroke texture, not painted in place or onto an adjustment, nor a dual brush's: its second
+    /// isn't there yet to cut it.
     pub fn shows_tip(&self) -> bool {
-        self.active.is_some_and(|a| !a.pencil && !a.style.in_place())
+        self.active.is_some_and(|a| !a.pencil && !a.style.in_place() && a.second.is_none())
     }
 
     /// The open stroke's tip, drawn over it until the next stamps or tip: its last stamps as
@@ -4293,11 +4294,15 @@ impl Canvas {
             let Some(layer) = self.layers.get(&target) else { return };
             let wet_paint = style.paints_in_place();
             let layer_bytes = u64::from(row) * u64::from(self.height);
-            // a dual brush's paint laid in place is laid apart, put together with its second
-            let apart = wet_paint.then_some(self.queued_second).flatten().map(|d| (*style, d.mode + 1, d.threshold));
-            // wet paint with a texturized grain or a second keeps the stroke without it, then the
-            // layer as it was
-            let grain = grain_once(style) || (apart.is_some() && style.wet_pull.is_some());
+            // paint laid in place with a second or a texturized grain is laid apart, and put
+            // together with them
+            let second = self.queued_second.map(|d| (d.mode + 1, d.threshold));
+            let apart = second
+                .or(grain_once(style).then_some((0, -1.0)))
+                .filter(|_| wet_paint)
+                .map(|(mode, threshold)| (*style, mode, threshold));
+            // and wet paint keeps the stroke as it was laid, to go on mixing with
+            let grain = apart.is_some() && style.wet_pull.is_some();
             // and builds up by what is left in the modulated mode (and keeps how much shows, laid
             // apart)
             let amount_bytes = (wet_paint && style.rendering == Rendering::Gradual || apart.is_some())
@@ -4329,7 +4334,7 @@ impl Canvas {
             let grained = grain.then(|| {
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("smudge grained"),
-                    size: 2 * layer_bytes,
+                    size: layer_bytes,
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 })
@@ -4375,7 +4380,6 @@ impl Canvas {
             copy_into(encoder, &work, 0);
             if let Some(buffer) = &grained {
                 copy_into(encoder, buffer, 0);
-                copy_into(encoder, buffer, layer_bytes);
             }
             self.smudge = Some(Smudge {
                 layer: target,
@@ -4556,7 +4560,8 @@ impl Canvas {
         }
         let size = (self.width, self.height, self.row_bytes());
         let full = IRect::from_size(self.width, self.height);
-        let second = self.smudge.as_ref().is_some_and(|s| s.apart.is_some()).then(|| self.second_stroke.get(device).1);
+        let dual = self.smudge.as_ref().and_then(|s| s.apart.as_ref()).is_some_and(|a| a.1 != 0);
+        let second = dual.then(|| self.second_stroke.get(device).1);
         let Some(smudge) = self.smudge.as_mut() else { return };
         let bind = smudge_bind(
             device,

@@ -188,6 +188,11 @@ const LIQUIFY_COAST_MS: f32 = 300.0;
 /// canvas or zoomed in, a drag shorter than a tenth of the brush still moves the paint.
 const LIQUIFY_WINDOW_STEP: f32 = 6.0;
 
+/// The liquify brush's radius, canvas pixels, from its size slider (0..1).
+fn liquify_radius(size: f32) -> f32 {
+    4.0 + 1596.0 * size.clamp(0.0, 1.0).powf(2.2)
+}
+
 /// How far apart liquify stamps of `radius` (canvas pixels) fall, the view `zoom` (window pixels a
 /// canvas pixel).
 fn liquify_step(radius: f32, zoom: f32) -> f32 {
@@ -567,8 +572,7 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let Some(view) = st.view else { return };
-        let size = brush.size.clamp(0.0, 1.0);
-        let radius = 4.0 + 1596.0 * size.powf(2.2);
+        let radius = liquify_radius(brush.size);
         let strength = 0.01 + 0.99 * brush.pressure.clamp(0.0, 1.0);
         let step = liquify_step(radius, view.zoom());
         if start {
@@ -631,7 +635,7 @@ impl CanvasSession {
         let stamp = LiquifyStamp {
             centre: [p.x, p.y],
             moved: [from * rate, to * rate],
-            radius: 4.0 + 1596.0 * brush.size.clamp(0.0, 1.0).powf(2.2),
+            radius: liquify_radius(brush.size),
             pressure: 0.01 + 0.99 * brush.pressure.clamp(0.0, 1.0),
             distortion: brush.distortion.clamp(0.0, 1.0),
             seed: (st.strokes % 997) as f32,
@@ -658,7 +662,7 @@ impl CanvasSession {
         let velocity = inv.apply(Vec2::new(vx, vy)) - inv.apply(Vec2::new(0.0, 0.0));
         let momentum = if momentum.is_finite() { momentum.clamp(0.0, 1.0) } else { 0.0 };
         let reach = velocity.length() * momentum * LIQUIFY_COAST_MS;
-        let radius = 4.0 + 1596.0 * brush.size.clamp(0.0, 1.0).powf(2.2);
+        let radius = liquify_radius(brush.size);
         let step = liquify_step(radius, view.zoom());
         if !reach.is_finite() || reach < step {
             return;

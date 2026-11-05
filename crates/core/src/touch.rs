@@ -2299,6 +2299,8 @@ mod tests {
         assert!(!wobbling_tap(&s, 0.0, 8.0, 30.0, 380.0, 400.0));
         // the first lift decides: one finger left down long after the other is a tap still
         assert!(wobbling_tap(&s, 0.0, 8.0, 30.0, 150.0, 1000.0));
+        // nor does it matter how long one was down before the other, as measured
+        assert!(wobbling_tap(&s, 0.0, 8.0, 5000.0, 5100.0, 5110.0));
     }
 
     #[test]
