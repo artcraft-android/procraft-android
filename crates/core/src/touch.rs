@@ -15,6 +15,7 @@
 
 use std::sync::Mutex;
 
+mod box_pinch;
 mod pen;
 
 pub use pen::{HoverCursor, PenHover, PenPreferred, SqueezePhase};
@@ -471,6 +472,9 @@ pub(crate) struct Touches {
     transforming: Option<TransformTouch>,
     transform_handle: crate::TransformHandle,
     transform_grabbed: bool,
+    /// Two fingers came down with one on the box: what it holds is theirs, once they've gone a
+    /// little way (until then they may yet be a tap); then where they took it.
+    box_pinch: Option<Option<[(f32, f32); 2]>>,
     pour_moved: bool,
     pour_last: (f32, f64),
     /// Layer Opacity is on: the layer a drag changes and its opacity as dragged; whether the
@@ -564,6 +568,7 @@ impl Default for Touches {
             transforming: None,
             transform_handle: crate::TransformHandle::Move,
             transform_grabbed: false,
+            box_pinch: None,
             pour_moved: false,
             pour_last: (0.0, 0.0),
             layer_opacity: None,
@@ -1096,6 +1101,8 @@ impl CanvasSession {
                 Self::note_fingers_moved(&mut t);
                 if t.down.len() >= 3 {
                     Self::scrub(&mut t, &mut out);
+                } else if t.box_pinch.is_some() {
+                    self.pinch_box(&mut t, &mut out);
                 } else if self.move_gesture(&mut t, last.time_ms) {
                     out.push(TouchCommand::ViewMoved);
                 }
@@ -1582,8 +1589,9 @@ impl CanvasSession {
             return;
         }
         t.held = None;
-        // a second finger takes back the fill the first one made, and a transform's drag; it keeps
-        // the opacity dragged so far
+        // a second finger takes back the fill the first one made, and a transform's drag (a move
+        // of what the box holds is kept when the fingers go on to take it); it keeps the opacity
+        // dragged so far
         if t.mode == Mode::Pour {
             self.pour_end(false, None);
         }
@@ -1606,11 +1614,7 @@ impl CanvasSession {
                 }
             }
         }
-        if t.mode == Mode::Transform && t.transform_grabbed {
-            t.transform_grabbed = false;
-            let transform = self.transform_cancel_drag();
-            out.push(TouchCommand::TransformMoved { transform });
-        }
+        self.second_finger_on_box(t, out);
         out.push(TouchCommand::CursorGone);
         if t.mode == Mode::Finger {
             self.stroke_cancel();
@@ -1708,11 +1712,12 @@ impl CanvasSession {
             if t.mode == Mode::Gesture {
                 t.tap_lifted.get_or_insert(now);
                 let parted = t.gesture_pair.is_some_and(|(a, b)| a == id || b == id);
+                let pinched = parted && self.end_box_pinch(&mut t, cancelled, &mut out);
                 Self::follow_fingers(&mut t);
                 // two fingers parting as they close fast fit a canvas pinched smaller than it
                 // fits, settling into place (a tap's fingers aren't a pinch)
                 let tap = Self::fingers_tapped(&t, now);
-                if parted && !cancelled && !tap && t.tap_pointers == 2 && t.gesture_pair.is_none() {
+                if parted && !pinched && !cancelled && !tap && t.tap_pointers == 2 && t.gesture_pair.is_none() {
                     let flicked = Self::pinch_speed(&t, now) < QUICK_PINCH_SPEED;
                     if flicked && self.pinched_smaller_than_fit() {
                         out.push(TouchCommand::Fit);
