@@ -135,11 +135,7 @@ pub mod pc {
             (26.0, 14.0)
         };
         let needs = |(tool, action): (f32, f32)| {
-            BAR_MARGIN * 2.0
-                + GALLERY_WIDTH
-                + (BAR_BUTTON_WIDTH + action) * 4.0
-                + BAR_BUTTON_WIDTH * 5.0
-                + tool * 4.0
+            BAR_MARGIN * 2.0 + GALLERY_WIDTH + (BAR_BUTTON_WIDTH + action) * 4.0 + BAR_BUTTON_WIDTH * 5.0 + tool * 4.0
         };
         [measured, (8.0, 14.0)].into_iter().find(|&gaps| needs(gaps) <= width).unwrap_or((2.0, 4.0))
     }

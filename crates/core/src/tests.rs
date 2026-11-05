@@ -3132,7 +3132,8 @@ fn a_group_frame_shows_the_layers_showing_in_it() {
     s.pick_layer(first);
     let group = s.group_picked();
     assert_ne!(group, 0);
-    let ink = |t: &crate::layers::ThumbnailImage, c: usize| t.rgba.chunks(4).filter(|p| p[c] > 100 && p[3] > 100).count();
+    let ink =
+        |t: &crate::layers::ThumbnailImage, c: usize| t.rgba.chunks(4).filter(|p| p[c] > 100 && p[3] > 100).count();
     let both = s.frame_thumbnail(group, 40).expect("a page's picture");
     assert_eq!((both.width, both.height), (40, 40));
     assert!(ink(&both, 0) > 0 && ink(&both, 2) > 0, "both layers' paint");

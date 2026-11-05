@@ -561,9 +561,7 @@ mod tests {
         let drawn = circle(1.0, 1000.0 / 120.0);
         st.remember_input(&drawn);
         let end = drawn[drawn.len() - 1];
-        let held: Vec<Sample> = (1..80)
-            .map(|i| Sample { time_ms: end.time_ms + f64::from(i) * 8.0, ..end })
-            .collect();
+        let held: Vec<Sample> = (1..80).map(|i| Sample { time_ms: end.time_ms + f64::from(i) * 8.0, ..end }).collect();
         st.remember_input(&held);
         // about 1270 pixels round in a second
         let pace = st.pace();

@@ -3163,7 +3163,11 @@ mod tests {
             .map(|i| {
                 let u = i as f32 / n as f32;
                 let a = std::f32::consts::PI * (0.15 + 0.8 * u * u * (3.0 - 2.0 * u));
-                Sample::at(Vec2::new(600.0 - 420.0 * a.sin(), 400.0 - 320.0 * a.cos()), 0.7, f64::from(i as u32) * 25.0 / 3.0)
+                Sample::at(
+                    Vec2::new(600.0 - 420.0 * a.sin(), 400.0 - 320.0 * a.cos()),
+                    0.7,
+                    f64::from(i as u32) * 25.0 / 3.0,
+                )
             })
             .collect()
     }

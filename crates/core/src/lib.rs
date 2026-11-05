@@ -100,6 +100,7 @@ pub use colour::{
 };
 pub use colour_drag::{ColourDrag, DragStep};
 pub use crop_edit::CropShown;
+pub use device::keep_device;
 pub use frame::{configure, screen_profile};
 pub use gallery::{ArtworkStore, GalleryArtwork, GalleryEntry, ZipKind, zip_file_kind};
 pub use gestures::{
@@ -127,7 +128,6 @@ pub use presets::{
     presets_json, profile_chip, standard_presets,
 };
 pub use project::{ArtworkInfo, export_file_name, read_signature, save_failure_said, write_photo, write_signature};
-pub use device::keep_device;
 pub use project::{PackageTimeLapse, artwork_plays, package_time_lapse};
 pub use project::{PagesOutcome, PsdOutcome, import_pages, import_psd};
 pub use quick_menu::{

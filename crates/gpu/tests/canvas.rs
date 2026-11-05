@@ -671,7 +671,11 @@ fn a_dual_brush_shows_no_tip_its_second_hasnt_reached() {
     let doc = Document::new(100, 100);
     let mut canvas = Canvas::new(&gpu, &doc).unwrap();
     let paint = style(StrokeTool::Paint, 1.0);
-    canvas.begin_dual_stroke(doc.current(), paint, procraft_gpu::SecondStroke { style: paint, mode: 0, threshold: -1.0 });
+    canvas.begin_dual_stroke(
+        doc.current(),
+        paint,
+        procraft_gpu::SecondStroke { style: paint, mode: 0, threshold: -1.0 },
+    );
     assert!(!canvas.shows_tip());
     canvas.end_stroke();
 }
@@ -2209,7 +2213,9 @@ fn a_turned_grain_rolling_along_a_stroke_smears_along_it() {
         canvas.end_stroke();
         canvas.render(&gpu, &mut doc, None);
         let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
-        (120..280).map(|x| i32::from(pixel(&layer, 400, x, 48)[3]).abs_diff(i32::from(pixel(&layer, 400, x + 1, 48)[3]))).sum::<u32>()
+        (120..280)
+            .map(|x| i32::from(pixel(&layer, 400, x, 48)[3]).abs_diff(i32::from(pixel(&layer, 400, x + 1, 48)[3])))
+            .sum::<u32>()
     };
     // unturned the grain stays put on the canvas, crisp under every stamp; turned half way round
     // each stamp reads it running the other way, so it blurs out along the stroke
