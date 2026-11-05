@@ -73,9 +73,13 @@ pub struct QuickShapeInfo {
 pub(crate) struct ShapeEdit {
     shape: Shape,
     choices: Vec<ShapeKind>,
-    /// The stroke as drawn (canvas points), which other kinds are fitted to.
+    /// The stroke as drawn (canvas points), which other kinds are fitted to, and the pressure the
+    /// pen had at each of those points.
     drawn: Vec<Vec2>,
-    pressure: f32,
+    pressures: Vec<f32>,
+    /// When each of those points came (milliseconds): the tapers are measured in time, so a shape
+    /// redrawn without it loses them.
+    times: Vec<f64>,
     /// How fast it was drawn (canvas pixels a millisecond).
     pace: f32,
     /// While the pen that drew it is still down.
@@ -102,9 +106,10 @@ pub(crate) struct LastStroke {
     pub(crate) brush: Brush,
     pub(crate) diameter: f32,
     pub(crate) pointer: PointerKind,
-    /// What it drew (canvas points), its mean pressure and how fast it went.
+    /// What it drew (canvas points), the pressure it had at each of them, and how fast it went.
     pub(crate) drawn: Vec<Vec2>,
-    pub(crate) pressure: f32,
+    pub(crate) pressures: Vec<f32>,
+    pub(crate) times: Vec<f64>,
     pub(crate) pace: f32,
     /// The canvas's undo steps once it was kept: anything done since changes them.
     pub(crate) steps: u64,
@@ -129,7 +134,8 @@ impl State {
             }
             self.drawn_at = s.time_ms;
             self.drawn.push(s.pos);
-            self.drawn_pressure += s.pressure.clamp(0.0, 1.0);
+            self.drawn_pressures.push(s.pressure.clamp(0.0, 1.0));
+            self.drawn_times.push(s.time_ms);
         }
     }
 
@@ -148,7 +154,8 @@ impl State {
             }
             _ => edit.shape.outline(),
         };
-        let samples = resample(&outline, edit.pressure, edit.pace);
+        let along = StrokeAlong::of(&edit.drawn, &edit.pressures, &edit.times, edit.pace);
+        let samples = resample(&outline, &along);
         builder.add(&samples);
         let stamps = builder.finish();
         if let Some(canvas) = self.canvas.as_mut() {
@@ -202,7 +209,8 @@ impl State {
         self.flush();
         let Some(canvas) = self.canvas.as_ref() else { return };
         last.drawn = self.drawn.clone();
-        last.pressure = self.mean_pressure();
+        last.pressures = self.drawn_pressures.clone();
+        last.times = self.drawn_times.clone();
         last.pace = self.pace();
         last.steps = canvas.steps_made();
         self.last_stroke = Some(last);
@@ -212,11 +220,6 @@ impl State {
     fn pace(&self) -> f32 {
         let way: f32 = self.drawn.windows(2).filter_map(|w| Some(w.first()?.distance(*w.get(1)?))).sum();
         if self.drawn_moving > 0.0 && way > 0.0 { way / self.drawn_moving as f32 } else { SAMPLE_PACE }
-    }
-
-    fn mean_pressure(&self) -> f32 {
-        let p = if self.drawn.is_empty() { 1.0 } else { self.drawn_pressure / self.drawn.len() as f32 };
-        p.max(0.05)
     }
 
     fn shape_info(&self) -> Option<QuickShapeInfo> {
@@ -280,20 +283,86 @@ fn along_ellipse(nodes: &[Vec2], drawn: &[Vec2]) -> Option<Vec<Vec2>> {
 /// Steps once round an ellipse followed from one of the stroke's points to the next.
 const ELLIPSE_STEPS: f32 = 128.0;
 
-/// Points [`SAMPLE_STEP`] apart along `outline`, as stroke samples at `pressure`, going `pace`
-/// canvas pixels a millisecond.
-fn resample(outline: &[Vec2], pressure: f32, pace: f32) -> Vec<Sample> {
+/// What the pen was doing along a stroke, so the shape it is redrawn as carries the same: the
+/// pressure it pressed with and how fast it was moving, at any fraction of the way through. Both
+/// matter - the pressure shades the stroke, and the tapers are measured against the pace.
+struct StrokeAlong {
+    /// Where each sample sits along the stroke, as a share of its whole length.
+    at: Vec<f32>,
+    pressures: Vec<f32>,
+    /// How fast the pen was moving there, canvas pixels a millisecond.
+    paces: Vec<f32>,
+}
+
+impl StrokeAlong {
+    fn of(drawn: &[Vec2], pressures: &[f32], times: &[f64], fallback: f32) -> StrokeAlong {
+        let fallback = if fallback.is_finite() && fallback > 1e-3 { fallback } else { SAMPLE_PACE };
+        let mut at = Vec::with_capacity(drawn.len());
+        let mut paces = Vec::with_capacity(drawn.len());
+        at.push(0.0);
+        paces.push(fallback);
+        let mut total = 0.0f32;
+        for (i, w) in drawn.windows(2).enumerate() {
+            let (Some(&a), Some(&b)) = (w.first(), w.get(1)) else { continue };
+            let step = a.distance(b);
+            total += step;
+            at.push(total);
+            // how long that step took, where the stroke kept the time it was made at
+            let took = times.get(i + 1).copied().zip(times.get(i).copied()).map_or(0.0, |(now, was)| now - was);
+            let pace = if step > 0.0 && took > 0.0 { step / took as f32 } else { fallback };
+            paces.push(pace.clamp(1e-3, 100.0));
+        }
+        if total > 0.0 {
+            for share in &mut at {
+                *share /= total;
+            }
+        }
+        StrokeAlong { at, pressures: pressures.to_vec(), paces }
+    }
+
+    /// `values` read `way` through the stroke, between the samples either side of it.
+    fn read(&self, values: &[f32], way: f32, when_none: f32) -> f32 {
+        let Some(&first) = values.first() else { return when_none };
+        let at = way.clamp(0.0, 1.0);
+        let mut i = 0;
+        while i + 2 < self.at.len() && self.at.get(i + 1).is_some_and(|&next| next < at) {
+            i += 1;
+        }
+        let (Some(&lo), Some(&hi)) = (self.at.get(i), self.at.get(i + 1)) else { return first };
+        let span = hi - lo;
+        let into = if span > 0.0 { ((at - lo) / span).clamp(0.0, 1.0) } else { 0.0 };
+        let a = values.get(i).copied().unwrap_or(first);
+        let b = values.get(i + 1).copied().unwrap_or(a);
+        a + (b - a) * into
+    }
+
+    fn pressure_at(&self, way: f32) -> f32 {
+        self.read(&self.pressures, way, 1.0)
+    }
+
+    fn pace_at(&self, way: f32) -> f32 {
+        self.read(&self.paces, way, SAMPLE_PACE)
+    }
+}
+
+/// Points [`SAMPLE_STEP`] apart along `outline`, as stroke samples carrying the pressure the pen had
+/// at that point of the way round and taking as long as it did there.
+fn resample(outline: &[Vec2], along: &StrokeAlong) -> Vec<Sample> {
     let Some(&first) = outline.first() else { return Vec::new() };
-    let mut out = vec![Sample::at(first, pressure, 0.0)];
-    let mut t = 0.0f64;
+    let total: f32 = outline.windows(2).filter_map(|w| Some(w.first()?.distance(*w.get(1)?))).sum();
+    let mut out = vec![Sample::at(first, along.pressure_at(0.0), 0.0)];
+    let (mut t, mut gone) = (0.0f64, 0.0f32);
     for w in outline.windows(2) {
         let [a, b] = w else { continue };
-        let n = (a.distance(*b) / SAMPLE_STEP).ceil().max(1.0) as usize;
-        let ms = f64::from(a.distance(*b) / n as f32 / pace.max(1e-3));
+        let step = a.distance(*b);
+        let n = (step / SAMPLE_STEP).ceil().max(1.0) as usize;
         for k in 1..=n {
-            t += ms;
-            out.push(Sample::at(a.lerp(*b, k as f32 / n as f32), pressure, t));
+            let into = k as f32 / n as f32;
+            let way = (gone + step * into) / total.max(1e-6);
+            t += f64::from(step / n as f32 / along.pace_at(way).max(1e-3));
+            out.push(Sample::at(a.lerp(*b, into), along.pressure_at(way), t));
         }
+        gone += step;
     }
     out
 }
@@ -320,8 +389,9 @@ impl CanvasSession {
         let first = found.first()?.clone();
         let choices = found.iter().map(|s| s.kind).collect();
         let held = st.drawn.last().map(|&at| Held { snapped: first.clone(), from: at, at, finger: false });
-        let (drawn, pressure, pace) = (st.drawn.clone(), st.mean_pressure(), st.pace());
-        st.shape = Some(ShapeEdit { shape: first, choices, drawn, pressure, pace, held });
+        let (drawn, pressures, times, pace) =
+            (st.drawn.clone(), st.drawn_pressures.clone(), st.drawn_times.clone(), st.pace());
+        st.shape = Some(ShapeEdit { shape: first, choices, drawn, pressures, times, pace, held });
         st.began = None;
         st.draw_shape();
         self.shared.frame(st);
@@ -352,8 +422,8 @@ impl CanvasSession {
         st.stroke =
             Some(StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), 0x5eed_1234).scaled(scale));
         st.second = None;
-        let (drawn, pressure, pace) = (last.drawn, last.pressure, last.pace);
-        st.shape = Some(ShapeEdit { shape: first, choices, drawn, pressure, pace, held: None });
+        let (drawn, pressures, times, pace) = (last.drawn, last.pressures, last.times, last.pace);
+        st.shape = Some(ShapeEdit { shape: first, choices, drawn, pressures, times, pace, held: None });
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()
@@ -570,8 +640,38 @@ mod tests {
         let pace = st.pace();
         assert!((pace - 1.27).abs() < 0.05, "{pace}");
         // and the outline takes as long
-        let outline = resample(&positions(&drawn), 1.0, pace);
+        let along = StrokeAlong { at: vec![0.0, 1.0], pressures: vec![1.0, 1.0], paces: vec![pace, pace] };
+        let outline = resample(&positions(&drawn), &along);
         let took = outline[outline.len() - 1].time_ms;
         assert!((took - 1000.0).abs() < 30.0, "{took}");
+    }
+
+    #[test]
+    fn a_shape_carries_the_pressure_the_stroke_had_along_it() {
+        // a stroke drawn with the pen pressed harder and harder
+        let drawn: Vec<Vec2> = (0..=10).map(|i| Vec2::new(100.0 * i as f32, 0.0)).collect();
+        let pressures: Vec<f32> = (0..=10).map(|i| 0.2 + 0.8 * i as f32 / 10.0).collect();
+        let along = StrokeAlong::of(&drawn, &pressures, &[], 1.0);
+        assert!((along.pressure_at(0.0) - 0.2).abs() < 0.05, "{}", along.pressure_at(0.0));
+        assert!((along.pressure_at(1.0) - 1.0).abs() < 0.05, "{}", along.pressure_at(1.0));
+        let half = along.pressure_at(0.5);
+        assert!((0.5..0.7).contains(&half), "{half}");
+        // and a shape redrawn from it goes the same way, rather than flat
+        let outline: Vec<Vec2> = (0..=20).map(|i| Vec2::new(i as f32 * 5.0, 0.0)).collect();
+        let samples = resample(&outline, &along);
+        let (first, last) = (samples.first().map_or(1.0, |s| s.pressure), samples.last().map_or(1.0, |s| s.pressure));
+        assert!(last > first + 0.6, "{first} to {last}");
+    }
+
+    #[test]
+    fn a_shape_keeps_the_pace_the_stroke_was_made_at() {
+        // the same ground covered slowly at first and quickly at the end, as a hand does
+        let drawn: Vec<Vec2> = (0..=10).map(|i| Vec2::new(100.0 * i as f32, 0.0)).collect();
+        let times: Vec<f64> =
+            (0..=10).map(|i| if i <= 5 { i as f64 * 20.0 } else { 100.0 + (i - 5) as f64 * 4.0 }).collect();
+        let pressures = vec![0.5; 11];
+        let along = StrokeAlong::of(&drawn, &pressures, &times, 1.0);
+        let (slow, quick) = (along.pace_at(0.1), along.pace_at(0.9));
+        assert!(quick > slow * 3.0, "moving {slow} then {quick}");
     }
 }

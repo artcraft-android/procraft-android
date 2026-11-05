@@ -532,10 +532,13 @@ pub(crate) struct State {
     feather_base: Option<(procraft_engine::selection::Mask, Vec<f32>)>,
     /// The last drag step on the box (window point, when), for its speed.
     last_drag: Option<(Vec2, std::time::Instant)>,
-    /// The stroke being drawn as input (canvas points) and its pressures summed, for QuickShape,
-    /// and the shape it snapped to while that is shown.
+    /// The stroke being drawn as input (canvas points) and the pressure under the pen at each of
+    /// those points, for QuickShape, and the shape it snapped to while that is shown.
     drawn: Vec<Vec2>,
-    drawn_pressure: f32,
+    drawn_pressures: Vec<f32>,
+    /// When each of those points came (milliseconds), so a shape redrawn from them keeps the pace
+    /// the stroke was made at, which the tapers are measured against.
+    drawn_times: Vec<f64>,
     /// How long it was on the move, and when it was last heard from (milliseconds).
     drawn_moving: f64,
     drawn_at: f64,
@@ -1272,7 +1275,8 @@ impl CanvasSession {
             clone_offset: None,
             last_drag: None,
             drawn: Vec::new(),
-            drawn_pressure: 0.0,
+            drawn_pressures: Vec::new(),
+            drawn_times: Vec::new(),
             drawn_moving: 0.0,
             drawn_at: 0.0,
             shape: None,
@@ -1447,7 +1451,8 @@ impl CanvasSession {
         st.assist_angle = None;
         let canvas_samples = st.assisted(canvas_samples);
         st.drawn.clear();
-        st.drawn_pressure = 0.0;
+        st.drawn_pressures.clear();
+        st.drawn_times.clear();
         st.drawn_moving = 0.0;
         st.remember_input(&canvas_samples);
         // painted and erased strokes can be made shapes once they end
@@ -1460,7 +1465,8 @@ impl CanvasSession {
                 diameter,
                 pointer,
                 drawn: Vec::new(),
-                pressure: 1.0,
+                pressures: Vec::new(),
+                times: Vec::new(),
                 pace: quickshape::SAMPLE_PACE,
                 steps: 0,
             });
