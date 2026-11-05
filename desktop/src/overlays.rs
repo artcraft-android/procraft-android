@@ -241,8 +241,22 @@ impl Overlays {
                 {
                     // the snapped shape's handles: blue dots ringed in white
                     let ppp = ctx.pixels_per_point();
-                    for &[x, y] in info.handles.as_chunks::<2>().0 {
-                        let at = pos2(x, y) / ppp;
+                    let points: Vec<Pos2> =
+                        info.handles.as_chunks::<2>().0.iter().map(|&[x, y]| pos2(x, y) / ppp).collect();
+                    // a curve's controls show what they pull on: a line each back to its anchor
+                    if info.kind == QuickShapeKind::Curve {
+                        for (i, &at) in points.iter().enumerate() {
+                            let about = match i % 3 {
+                                1 => i.checked_sub(1),
+                                2 => i.checked_add(1),
+                                _ => None,
+                            };
+                            if let Some(anchor) = about.and_then(|a| points.get(a)) {
+                                ui.painter().line_segment([*anchor, at], egui::Stroke::new(1.0, argb(pc::ACCENT)));
+                            }
+                        }
+                    }
+                    for at in points {
                         ui.painter().circle_filled(at, 6.5, Color32::WHITE);
                         ui.painter().circle_filled(at, 5.0, argb(pc::ACCENT));
                     }
@@ -478,6 +492,7 @@ pub fn label(kind: QuickShapeKind) -> &'static str {
         QuickShapeKind::Line => "Line",
         QuickShapeKind::Polyline => "Polyline",
         QuickShapeKind::Arc => "Arc",
+        QuickShapeKind::Curve => "Curve",
         QuickShapeKind::Ellipse => "Ellipse",
         QuickShapeKind::Circle => "Circle",
         QuickShapeKind::Triangle => "Triangle",
@@ -494,6 +509,7 @@ pub fn snapped_to(kind: QuickShapeKind) -> String {
         QuickShapeKind::Line => "a line",
         QuickShapeKind::Polyline => "a polyline",
         QuickShapeKind::Arc => "an arc",
+        QuickShapeKind::Curve => "a curve",
         QuickShapeKind::Ellipse => "an ellipse",
         QuickShapeKind::Circle => "a circle",
         QuickShapeKind::Triangle => "a triangle",
@@ -510,6 +526,8 @@ fn icon(kind: QuickShapeKind) -> &'static icons::Icon {
         QuickShapeKind::Line => &icons::SHAPE_LINE,
         QuickShapeKind::Polyline => &icons::SHAPE_POLYLINE,
         QuickShapeKind::Arc => &icons::SHAPE_ARC,
+        // no curve glyph drawn yet: a bend reads close enough for the pill
+        QuickShapeKind::Curve => &icons::SHAPE_ARC,
         QuickShapeKind::Ellipse => &icons::SHAPE_ELLIPSE,
         QuickShapeKind::Circle => &icons::SHAPE_CIRCLE,
         QuickShapeKind::Triangle => &icons::SHAPE_TRIANGLE,

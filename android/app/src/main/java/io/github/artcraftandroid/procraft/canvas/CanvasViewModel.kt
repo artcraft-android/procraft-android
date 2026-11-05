@@ -3334,6 +3334,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         QuickShapeKind.LINE -> "a line"
         QuickShapeKind.POLYLINE -> "a polyline"
         QuickShapeKind.ARC -> "an arc"
+        QuickShapeKind.CURVE -> "a curve"
         QuickShapeKind.ELLIPSE -> "an ellipse"
         QuickShapeKind.CIRCLE -> "a circle"
         QuickShapeKind.TRIANGLE -> "a triangle"
