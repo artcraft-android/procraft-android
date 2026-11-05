@@ -1316,7 +1316,8 @@ impl StrokeBuilder {
 
     /// How far back from the end the end taper starts (0: none): the classic one over the run-on
     /// (`run_on` canvas pixels) up to its length; the newer one over the input since the last
-    /// point before its time.
+    /// point before its time, counted back from the last move: held still, then lifted, the end
+    /// keeps the taper it showed.
     fn end_span(&self, run_on: f32) -> f32 {
         let taper = self.taper();
         if taper.end <= 0.0 {
@@ -1325,9 +1326,10 @@ impl StrokeBuilder {
         if self.classic() {
             return run_on.min(taper.end * CLASSIC_TAPER_SPAN);
         }
-        let Some(&(last, total)) = self.history.last() else { return 0.0 };
+        let Some(&(_, total)) = self.history.last() else { return 0.0 };
+        let moved = self.history.iter().find(|(_, l)| *l >= total).map_or(0.0, |&(t, _)| t);
         let time = f64::from(taper.end) * TAPER_TIME_MS;
-        let first = self.history.iter().position(|(t, _)| *t >= last - time).unwrap_or(0);
+        let first = self.history.iter().position(|(t, _)| *t >= moved - time).unwrap_or(0);
         let before = first.checked_sub(1).and_then(|i| self.history.get(i)).map_or(0.0, |&(_, l)| l);
         self.on_path(total - before)
     }
@@ -2156,6 +2158,29 @@ mod tests {
         assert!(at(5.0) < 3.0, "{}", at(5.0));
         assert!((at(30.0) - 5.0).abs() < 1.0, "{}", at(30.0));
         assert_eq!(at(80.0), 10.0);
+    }
+
+    #[test]
+    fn held_still_then_lifted_the_end_keeps_the_taper_it_showed() {
+        let taper = Taper { start: 0.0, end: 0.5, size: 1.0, opacity: 0.0 };
+        let brush = Brush { touch_taper: taper, ..plain() };
+        let samples: Vec<Sample> =
+            (0..=60).map(|i| Sample::at(Vec2::new(i as f32 * 10.0, 50.0), 1.0, i as f64 * 8.0)).collect();
+        let radii = |lift_ms: Option<f64>| {
+            let mut b = StrokeBuilder::new(brush.clone(), 20.0, Pointer::Finger);
+            let (_, tip) = b.add_tipped(&samples);
+            // the lift, where it last was, after the wait
+            if let Some(ms) = lift_ms {
+                b.add(&[Sample::at(Vec2::new(600.0, 50.0), 1.0, 480.0 + ms)]);
+            }
+            let all = b.finish();
+            (tip.last().unwrap().radius, all.iter().rev().take(6).map(|s| s.radius).collect::<Vec<f32>>())
+        };
+        let (shown, straight_away) = radii(None);
+        let (_, after_a_hold) = radii(Some(1500.0));
+        assert!(shown < 3.0, "{shown}");
+        assert!(straight_away[0] < 3.0, "{straight_away:?}");
+        assert_eq!(straight_away, after_a_hold);
     }
 
     #[test]
