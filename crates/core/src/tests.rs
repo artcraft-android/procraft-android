@@ -29,6 +29,13 @@ fn session(canvas: u32, window: u32) -> Option<std::sync::Arc<CanvasSession>> {
     Some(s)
 }
 
+/// The current brush draws just where the input goes.
+fn no_streamline(s: &CanvasSession) {
+    s.studio_begin();
+    s.set_studio_setting("streamline".to_owned(), 0.0);
+    s.studio_end(true);
+}
+
 /// Renders what is queued and returns the composite's pixel at canvas (x, y).
 fn pixel(s: &CanvasSession, x: u32, y: u32) -> [u8; 4] {
     let mut guard = s.shared.lock();
@@ -901,14 +908,15 @@ fn a_finger_strokes_head_is_drawn_in_its_layer_under_those_above() {
     s.select_layer(below);
     s.set_color(1.0, 0.0, 0.0);
     s.set_brush_size(0.4);
+    no_streamline(&s);
     s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 70.0, 0.0)]);
     // the head runs ahead, up under the blue layer and out past it
     s.stroke_predict(vec![sample(60.0, 20.0, 16.0), sample(90.0, 90.0, 32.0)]);
-    let [r, _, b, _] = pixel(&s, 78, 64);
-    assert!(r > 200 && b < 50, "the head shows ahead: {r} {b}");
+    let red = |p: [u8; 4]| p[0] > 200 && p[2] < 50;
+    let ahead = (60..100).find(|x| red(pixel(&s, *x, 64))).expect("the head shows ahead");
     assert_eq!(pixel(&s, 60, 20), [0, 0, 255, 255], "under the layer above");
     s.stroke_end(vec![]);
-    assert_eq!(pixel(&s, 78, 64), [255, 255, 255, 255], "never kept");
+    assert_eq!(pixel(&s, ahead, 64), [255, 255, 255, 255], "never kept");
 }
 
 #[test]
@@ -3363,6 +3371,7 @@ fn the_last_stroke_snaps_to_a_shape_until_something_else_is_done() {
     use crate::quickshape::QuickShapeKind;
     let Some(s) = session(200, 200) else { return };
     s.set_brush_size(0.02);
+    no_streamline(&s);
     // a wavy line, drawn and lifted: it dips to y 64 at x 40 and rises to y 54 at x 76
     let line: Vec<PenSample> = (0..=40)
         .map(|i| sample(20.0 + 4.0 * i as f32, 60.0 + 5.0 * (i as f32 / 3.0).sin(), f64::from(i) * 8.0))

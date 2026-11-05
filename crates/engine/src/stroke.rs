@@ -203,6 +203,18 @@ const SAMPLE_FRAMES: f32 = 0.25;
 const PEN_RATE: f64 = 240.0;
 const FINGER_RATE: f64 = 120.0;
 
+/// How much of where it was the path keeps at each point at the rates above, for an `amount` of
+/// streamline: strong from the first, as measured (a corner at 600 points a second is cut 18 at
+/// 60%, 52 at the most).
+fn streamline_keep(amount: f32) -> f32 {
+    0.96 * amount.clamp(0.0, 1.0).powf(0.125)
+}
+
+/// The same for the pressure, `amount` of its streamline.
+fn pressure_keep(amount: f32) -> f32 {
+    0.999 * amount.clamp(0.0, 1.0).powf(0.0625)
+}
+
 /// What a speed control of `amount` leaves of a size or opacity at `speed` (0..1): faster input
 /// takes away as far as the amount says; an amount below 0, slower input does (as measured).
 fn by_speed(amount: f32, speed: f32) -> f32 {
@@ -1066,7 +1078,7 @@ impl StrokeBuilder {
         let since = self.last_sample.map_or(0.0, |last| (s.time_ms - last.time_ms).abs());
         let steps = if since > 0.0 { (since / interval).min(MOST_STEPS) as f32 } else { 1.0 };
         let raw = if pen { self.input.pressure_curve.eval(s.pressure.clamp(0.0, 1.0)).clamp(0.0, 1.0) } else { 1.0 };
-        let smoothing = together(self.brush.pressure_smoothing, self.input.pressure_smoothing).min(0.95);
+        let smoothing = pressure_keep(together(self.brush.pressure_smoothing, self.input.pressure_smoothing));
         let pressure = match self.pressure {
             None => raw,
             Some(p) => p + (raw - p) * (1.0 - smoothing.powf(steps)),
@@ -1140,7 +1152,8 @@ impl StrokeBuilder {
     fn go_on(&mut self, target: PathPoint, dt: Option<f64>, out: &mut Vec<Stamp>) {
         let smoothed = match (self.smoothed, dt) {
             (Some(prev), Some(dt)) if !self.exact => {
-                let keep = (self.brush.streamline.clamp(0.0, 1.0) * 0.92).powf((dt / REFERENCE_INTERVAL_MS) as f32);
+                let interval = 1000.0 / if self.pointer.has_pressure() { PEN_RATE } else { FINGER_RATE };
+                let keep = streamline_keep(self.brush.streamline).powf((dt / interval) as f32);
                 PathPoint { pos: prev.pos.lerp(target.pos, 1.0 - keep), ..target }
             }
             _ => target,
@@ -2008,6 +2021,29 @@ mod tests {
         let touch = finger.add(&samples);
         assert!(pressed[0].radius < touch[0].radius && pressed[0].alpha < touch[0].alpha);
         assert_eq!(touch[0].radius, 5.0);
+    }
+
+    #[test]
+    fn streamline_is_strong_from_the_first_and_none_at_none() {
+        assert_eq!(streamline_keep(0.0), 0.0);
+        assert!((streamline_keep(0.5) - 0.8803).abs() < 1e-3);
+        assert!((streamline_keep(1.0) - 0.96).abs() < 1e-6);
+        // a corner taken at a steady 600 a second rounds more the more there is, a good way off it
+        // at the top
+        let cut = |streamline: f32| {
+            let brush = Brush { streamline, ..plain() };
+            let mut b = StrokeBuilder::new(brush, 4.0, Pointer::Finger);
+            let n = 60;
+            let at = |x: f32, y: f32, i: usize| Sample::at(Vec2::new(x, y), 1.0, i as f64 * 1000.0 / 120.0);
+            let mut samples: Vec<Sample> = (0..=n).map(|i| at(i as f32 * 5.0, 0.0, i)).collect();
+            samples.extend((1..=n).map(|i| at(300.0, i as f32 * 5.0, n + i)));
+            b.add(&samples);
+            let corner = Vec2::new(300.0, 0.0);
+            b.finish().iter().map(|s| s.center.distance(corner)).fold(f32::MAX, f32::min)
+        };
+        assert!(cut(0.0) < 1.0);
+        assert!(cut(0.6) > 15.0 && cut(0.6) < 35.0, "{}", cut(0.6));
+        assert!(cut(1.0) > 45.0, "{}", cut(1.0));
     }
 
     #[test]
@@ -3001,7 +3037,7 @@ mod tests {
     fn the_smoothed_path_catches_up_with_the_pen_along_the_curve() {
         let drawn = |input: InputSettings| {
             let mut s =
-                StrokeBuilder::new(Brush { streamline: 0.35, ..plain() }, 6.0, Pointer::Stylus).with_input(input);
+                StrokeBuilder::new(Brush { streamline: 0.015, ..plain() }, 6.0, Pointer::Stylus).with_input(input);
             s.add(&half_circle());
             s.finish()
         };
@@ -3162,7 +3198,7 @@ mod tests {
         // the half circle, as it is and with a pen's streamline: the first 6 px head down the
         // circle's tangent (the chord that far along is 1.2° off it; the first stretch walked as
         // if its first point came twice headed 4° to 6° off)
-        for streamline in [0.0, 0.35] {
+        for streamline in [0.0, 0.015] {
             let mut s = StrokeBuilder::new(Brush { streamline, ..plain() }, 6.0, Pointer::Stylus);
             s.add(&half_circle());
             let stamps = s.finish();
