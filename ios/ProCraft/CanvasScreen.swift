@@ -176,6 +176,10 @@ struct CanvasScreen: View {
                         .transition(.move(edge: .bottom))
                     NoticeBand(model: model)
                 }
+                if model.canvasInfoOpen {
+                    CanvasInfo(model: model, screen: screen.size)
+                        .transition(.move(edge: .bottom))
+                }
                 if model.gestureControlsOpen {
                     GestureControls(model: model)
                         .transition(.move(edge: .bottom))

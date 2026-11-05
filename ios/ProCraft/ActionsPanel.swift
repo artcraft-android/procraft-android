@@ -171,7 +171,10 @@ struct ActionsPanel: View {
                     .act("Flip horizontal", action: { model.flipCanvas(horizontal: true) }),
                     .act("Flip vertical", action: { model.flipCanvas(horizontal: false) }),
                 ],
-                [.act("Canvas information", action: nil)],
+                [.act("Canvas information", action: {
+                    model.closePanels()
+                    withAnimation(Motion.studioIn) { model.canvasInfoOpen = true }
+                })],
             ]
         case 2:
             return [
