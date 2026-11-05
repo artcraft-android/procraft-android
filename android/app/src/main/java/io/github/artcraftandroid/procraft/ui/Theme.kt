@@ -116,12 +116,15 @@ object Pc {
     val SwitchFixedKnob: Color get() = pick(0xFF525252, 0xFFE9E9E9)
 
     /** The centre of tool button [index] (0 is the colour button, counting leftwards), from the bar's right edge. */
-    fun toolCentreFromRight(index: Int, barWidth: Dp): Dp = BarMargin + BarButtonWidth / 2 + (BarButtonWidth + barGaps(barWidth).first) * index
+    fun toolCentreFromRight(index: Int, barWidth: Dp): Dp {
+        val fit = barFit(barWidth)
+        return fit.margin + fit.button / 2 + (fit.button + fit.toolGap) * index
+    }
 
     /** The centre of action button [index] (0 is actions, counting rightwards), from the bar's left edge. */
     fun actionCentre(index: Int, barWidth: Dp): Dp {
-        val gap = barGaps(barWidth).second
-        return BarMargin + GalleryWidth + gap + BarButtonWidth / 2 + (BarButtonWidth + gap) * index
+        val fit = barFit(barWidth)
+        return fit.margin + GalleryWidth + fit.actionGap + fit.button / 2 + (fit.button + fit.actionGap) * index
     }
 
     // the gallery; light, near white with dark grey inks and a frosted white capsule
@@ -155,6 +158,9 @@ object Pc {
     val SideBarCorner = 20.dp
     /** Where the side bar's centre sits, as a fraction of the screen height. */
     const val SIDE_BAR_CENTRE = 0.5234f
+    /** Left under the side bar in a window too short for its measured tracks, and how short they go. */
+    private val ShortSideBarFoot = 17.dp
+    private val ShortestTrack = 44.dp
     val SliderWidth = 40.dp
     val SliderHeight = 170.dp
     val SliderCorner = 13.dp
@@ -169,7 +175,7 @@ object Pc {
      * The gaps between the tool buttons and between the action buttons for a bar [width] wide:
      * the room left after both margins picks one of five steps.
      */
-    fun barGaps(width: Dp): Pair<Dp, Dp> {
+    private fun barGaps(width: Dp): Pair<Dp, Dp> {
         val room = width - BarMargin * 2
         return when {
             room < 435.dp -> 2.dp to 4.dp
@@ -178,6 +184,48 @@ object Pc {
             room < 730.dp -> 8.dp to 14.dp
             else -> 26.dp to 14.dp
         }
+    }
+
+    /** The top bar's spacing: its margins, the gaps between its tool and action buttons, and how wide those are. */
+    data class BarFit(val margin: Dp, val toolGap: Dp, val actionGap: Dp, val button: Dp) {
+        /** The width it takes for the bar's two ends not to meet: Gallery and four actions, five tools. */
+        val needs: Dp get() = margin * 2 + GalleryWidth + (button + actionGap) * 4 + button * 5 + toolGap * 4
+    }
+
+    /** Tighter and tighter, for windows too narrow for the measured steps. */
+    private val NarrowBars = listOf(
+        BarFit(BarMargin, 8.dp, 14.dp, BarButtonWidth),
+        BarFit(BarMargin, 2.dp, 4.dp, BarButtonWidth),
+        BarFit(16.dp, 2.dp, 4.dp, BarButtonWidth),
+        BarFit(8.dp, 0.dp, 0.dp, BarButtonWidth),
+        BarFit(8.dp, 0.dp, 0.dp, 36.dp),
+        BarFit(4.dp, 0.dp, 0.dp, 32.dp),
+    )
+
+    /**
+     * The spacing of a top bar [width] wide: the measured step for that width, or where its two
+     * ends would run into each other (a narrow window, as in split screen) the first of
+     * [NarrowBars] that keeps them apart.
+     */
+    fun barFit(width: Dp): BarFit {
+        val (tool, action) = barGaps(width)
+        val measured = BarFit(BarMargin, tool, action, BarButtonWidth)
+        return if (measured.needs <= width) measured else NarrowBars.firstOrNull { it.needs <= width } ?: NarrowBars.last()
+    }
+
+    /** Where the side bar goes: its top, and how long each of its two tracks is. */
+    data class SideBarFit(val top: Dp, val track: Dp)
+
+    /**
+     * The side bar in a window [height] tall: at [SIDE_BAR_CENTRE] with its measured tracks wherever
+     * that clears the top bar; in a shorter window (split screen) just under the top bar, its tracks
+     * giving up what it is short of, so that all of it can be reached.
+     */
+    fun sideBarFit(height: Dp): SideBarFit {
+        val top = height * SIDE_BAR_CENTRE - SideBarHeight / 2
+        if (top >= BarHeight) return SideBarFit(top, SliderHeight)
+        val rest = SideBarHeight - SliderHeight * 2
+        return SideBarFit(BarHeight, ((height - BarHeight - ShortSideBarFoot - rest) / 2).coerceIn(ShortestTrack, SliderHeight))
     }
 }
 

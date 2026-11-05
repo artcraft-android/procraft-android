@@ -200,10 +200,12 @@ data class PopoverPlace(val left: Dp, val arrowX: Dp)
 /**
  * A popover is centred on its button (the tip sits [Pc.ArrowShift] right of the button's centre)
  * and kept [Pc.PopoverGap] inside the screen, and at least [minLeft] from its left edge (clear of
- * the side bar).
+ * the side bar). In a window too narrow for all that (split screen) it goes in the window's middle
+ * and over the side bar: what runs off the edge can't be reached.
  */
 fun popoverPlace(width: Dp, buttonCentreX: Dp, screenWidth: Dp, minLeft: Dp = Pc.PopoverGap, minRight: Dp = Pc.PopoverGap): PopoverPlace {
     val tip = buttonCentreX + Pc.ArrowShift
-    val left = (tip - width / 2).coerceIn(minLeft, (screenWidth - minRight - width).coerceAtLeast(minLeft))
+    val furthest = screenWidth - minRight - width
+    val left = if (furthest >= minLeft) (tip - width / 2).coerceIn(minLeft, furthest) else ((screenWidth - width) / 2).coerceAtLeast(0.dp)
     return PopoverPlace(left, tip - left)
 }

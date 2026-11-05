@@ -135,16 +135,17 @@ fun AppRoot(vm: CanvasViewModel) {
                     val up = Modifier.graphicsLayer { translationY = -size.height * (1f - barsShown) }
                     val aside = Modifier.graphicsLayer { translationX = size.width * (1f - barsShown) * if (vm.rightHanded) 1f else -1f }
                     TopBar(vm, Modifier.align(Alignment.TopCenter).then(up).then(fade))
+                    val sideBar = Pc.sideBarFit(maxHeight)
                     // a mode taking the screen slides it off its edge, and back when it ends
                     androidx.compose.animation.AnimatedVisibility(
                         vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
                             vm.opacityLayer == null &&
                             (vm.adjustment == null || vm.adjustPencil),
-                        Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = maxHeight * Pc.SIDE_BAR_CENTRE - Pc.SideBarHeight / 2),
+                        Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = sideBar.top),
                         enter = Motion.sideBarIn(vm.rightHanded),
                         exit = Motion.sideBarOut(vm.rightHanded),
                     ) {
-                        SideBar(vm, aside.then(fade), right = vm.rightHanded)
+                        SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track)
                     }
                 }
                 NoticeBand(vm)

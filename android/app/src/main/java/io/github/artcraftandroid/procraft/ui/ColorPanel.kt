@@ -240,7 +240,7 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
             if (vm.colorMode == ColorMode.HARMONY) HarmonyKindButton(vm)
         }
         if (vm.colorMode == ColorMode.PALETTES) {
-            Palettes(vm, c, (screenHeight - PalettesRest).coerceIn(120.dp, if (short) 458.dp else 577.dp))
+            Palettes(vm, c, (screenHeight - PalettesRest).coerceIn(40.dp, if (short) 458.dp else 577.dp))
         } else Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
             // on a screen too short for it all the picker scrolls, the tabs staying
             when (vm.colorMode) {
