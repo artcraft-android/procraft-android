@@ -1119,8 +1119,8 @@ impl StrokeBuilder {
     }
 
     /// How far along the path the start taper grows to full (0: none): the classic one over its
-    /// length in canvas pixels; the newer one over the input up to the first point past its time,
-    /// as far as the path had come then (see [`StrokeBuilder::settle_start`]).
+    /// length in canvas pixels; the newer one over the input up to the first point past its time
+    /// (see [`StrokeBuilder::settle_start`]).
     fn start_span(&self) -> f32 {
         if let Some(span) = self.start_settled {
             return span;
@@ -1132,10 +1132,14 @@ impl StrokeBuilder {
         if self.classic() {
             return taper.start * CLASSIC_TAPER_SPAN;
         }
+        self.on_path(self.start_input())
+    }
+
+    /// How far the input had come at the first point past the newer start taper's time.
+    fn start_input(&self) -> f32 {
         let Some(&(t0, _)) = self.history.first() else { return 0.0 };
-        let time = f64::from(taper.start) * TAPER_TIME_MS;
-        let input = self.history.iter().find(|(t, _)| t - t0 > time).map_or(self.input_length, |&(_, l)| l);
-        self.on_path(input)
+        let time = f64::from(self.taper().start) * TAPER_TIME_MS;
+        self.history.iter().find(|(t, _)| t - t0 > time).map_or(self.input_length, |&(_, l)| l)
     }
 
     /// Whether the start taper's reach is known: none, the classic one's (a length), or the input
@@ -1149,12 +1153,15 @@ impl StrokeBuilder {
         matches!((self.history.first(), self.history.last()), (Some(&(t0, _)), Some(&(t, _))) if t - t0 > time)
     }
 
-    /// Fixes the start taper's reach as the input passes its time, as far as the path has come
-    /// then: later input doesn't move it, so the stroke's start drawn for good stays as it is.
+    /// Fixes the start taper's reach as the input passes its time, at how far the input had come
+    /// (the path, waiting a point behind it, may not have got there yet): later input doesn't
+    /// move it, so the stroke's start drawn for good stays as it is.
     fn settle_start(&mut self) {
-        if self.start_settled.is_none() && self.start_known() {
-            self.start_settled = Some(self.start_span());
+        if self.start_settled.is_some() || !self.start_known() {
+            return;
         }
+        let timed = self.taper().start > 0.0 && !self.classic();
+        self.start_settled = Some(if timed { self.start_input() } else { self.start_span() });
     }
 
     /// Whether the end taper shows while the stroke is drawn: a finger's always, a pen's with the
@@ -1988,6 +1995,27 @@ mod tests {
             assert!(k.center.distance(a.center) < 1e-3 && (k.radius - a.radius).abs() < 1e-3, "{i}: {k:?} {a:?}");
         }
         assert!(all[0].radius < 2.0 && all.last().unwrap().radius < 2.0);
+    }
+
+    #[test]
+    fn a_start_taper_reaches_what_the_input_covered_though_the_path_waits_a_point_behind() {
+        let taper = Taper { start: 0.5, end: 0.0, size: 1.0, opacity: 0.0 };
+        let brush = Brush { touch_taper: taper, ..plain() };
+        // the first move comes after the taper's 42 ms, 60 px on: the path hasn't walked any of it
+        let mut samples =
+            vec![Sample::at(Vec2::new(0.0, 50.0), 1.0, 0.0), Sample::at(Vec2::new(60.0, 50.0), 1.0, 100.0)];
+        samples.extend(
+            (1..40).map(|i| Sample::at(Vec2::new(60.0 + i as f32 * 10.0, 50.0), 1.0, 100.0 + f64::from(i) * 8.0)),
+        );
+        let mut b = StrokeBuilder::new(brush, 20.0, Pointer::Finger);
+        b.add(&samples);
+        let all = b.finish();
+        let at = |x: f32| {
+            all.iter().min_by(|a, b| (a.center.x - x).abs().total_cmp(&(b.center.x - x).abs())).unwrap().radius
+        };
+        assert!(at(5.0) < 3.0, "{}", at(5.0));
+        assert!((at(30.0) - 5.0).abs() < 1.0, "{}", at(30.0));
+        assert_eq!(at(80.0), 10.0);
     }
 
     #[test]
