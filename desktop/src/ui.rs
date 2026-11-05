@@ -421,9 +421,11 @@ impl Interface {
         }
         // the pen's barrel buttons: what Gesture controls set Pen button and Pen second button to
         // do (the first, set to nothing, the eraser and back), where the pointer is; one set to
-        // the eyedropper picks while it is held, where the pen hovers, and lets go to take it
-        let presses = crate::pen::take_button_presses();
-        let held = crate::pen::buttons_held();
+        // the eyedropper picks while it is held, where the pen hovers, and lets go to take it;
+        // with the canvas out of sight they do nothing, then or later: the tool would change unseen
+        let covered = self.studio.open || self.time_lapse.replaying();
+        let presses = crate::pen::take_button_presses().map(|n| if covered { 0 } else { n });
+        let held = crate::pen::buttons_held().map(|h| h && !covered);
         let purposes = [Trigger::PenDoubleTap, Trigger::PenSqueeze].map(|t| self.gestures.purpose_of(t));
         let (x, y) = input.cursor().unwrap_or_default();
         for (button, (&pressed, &is_held)) in presses.iter().zip(&held).enumerate() {

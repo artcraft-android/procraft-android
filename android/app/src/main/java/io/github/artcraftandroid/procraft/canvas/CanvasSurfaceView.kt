@@ -326,6 +326,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         penButtons = held
         val own = e.actionMasked == MotionEvent.ACTION_BUTTON_PRESS || e.actionMasked == MotionEvent.ACTION_BUTTON_RELEASE
         if (pressed == 0) return own && (e.actionButton and PEN_BUTTONS) != 0
+        // under the brush studio the tool would change unseen
+        if (vm.studioOpen) return own
         val s = session ?: return own
         penPressed(s, pressed and MotionEvent.BUTTON_STYLUS_PRIMARY == 0, e.x, e.y)
         return own

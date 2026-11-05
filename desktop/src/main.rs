@@ -664,6 +664,8 @@ impl App {
                 None => zoom::Zoom::end(ui.ctx()),
             }
             asked = gallery.show(ui.ctx(), &mut interface.look, &interface.colours);
+            // a pen's buttons do nothing here, and nothing in the artwork opened next either
+            crate::pen::take_button_presses();
             // a share from the gallery shows its card there
             interface.export_card.show(ui.ctx(), &mut interface.look);
             if reading == Some(true) {
