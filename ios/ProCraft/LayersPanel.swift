@@ -1120,6 +1120,8 @@ private struct BackgroundRow: View {
                     .padding(.leading, 14)
                 Spacer(minLength: 0)
             }
+            .contentShape(Rectangle())
+            .onTapGesture { model.pickBackground() }
             CheckBox(checked: bg.visible, fill: Pc.checkFill)
                 .frame(width: 44, height: 41)
                 .contentShape(Rectangle())

@@ -177,9 +177,17 @@ private struct PanelHost: View {
                 .offset(x: place.left, y: Pc.barHeight)
         case .layers:
             let buttonX = screen.width - Pc.toolCentreFromRight(1, barWidth: screen.width)
-            let place = place(layersPanelWidth, buttonX)
-            LayersPanel(model: model, arrowX: place.arrowX, maxHeight: screen.height - Pc.barHeight - Pc.popoverGap)
-                .offset(x: place.left, y: Pc.barHeight)
+            if let held = model.backgroundPick {
+                let place = place(colorPanelWidth, buttonX)
+                ColorPanel(model: model, arrowX: place.arrowX, screenHeight: screen.height, background: held)
+                    .offset(x: place.left, y: Pc.barHeight)
+                    // closed any way at all, the colour is kept
+                    .onDisappear { model.endBackgroundPick() }
+            } else {
+                let place = place(layersPanelWidth, buttonX)
+                LayersPanel(model: model, arrowX: place.arrowX, maxHeight: screen.height - Pc.barHeight - Pc.popoverGap)
+                    .offset(x: place.left, y: Pc.barHeight)
+            }
         case .actions:
             let buttonX = Pc.actionCentre(0, barWidth: screen.width)
             let place = place(actionsPanelWidth, buttonX)
@@ -196,7 +204,7 @@ private struct PanelHost: View {
         case .color:
             let buttonX = screen.width - Pc.toolCentreFromRight(0, barWidth: screen.width)
             let place = place(colorPanelWidth, buttonX)
-            ColorPanel(model: model, arrowX: place.arrowX)
+            ColorPanel(model: model, arrowX: place.arrowX, screenHeight: screen.height)
                 .offset(x: place.left, y: Pc.barHeight)
         default:
             EmptyView()

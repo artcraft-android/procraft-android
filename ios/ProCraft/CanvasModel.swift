@@ -202,6 +202,19 @@ final class CanvasModel {
     @ObservationIgnored private(set) lazy var studio = StudioModel(model: self)
     /// Delete on a locked layer: why not, OK alone.
     var lockedDeleteTold = false
+    /// The palettes, kept by the shared core across artworks.
+    static let paletteStore: Palettes = {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        return Palettes.open(path: support.appendingPathComponent("palettes.json").path)
+    }()
+    private(set) var palettes: [PaletteInfo] = []
+    /// The palette shown under the history in the other colour modes.
+    private(set) var defaultPalette = 0
+    var harmonyKind = HarmonyKind.complementary
+    /// The background's colour being picked, instead of the layers.
+    var backgroundPick: HeldColor?
     /// A question open over everything.
     var question: Question? {
         didSet {
@@ -227,6 +240,7 @@ final class CanvasModel {
         applyInput()
         session.useColourHistory(history: Self.colourHistory)
         history = Self.colourHistory.colours()
+        refreshPalettes()
         // the colour as it was last left
         hue = settings.brushColor[0]
         saturation = settings.brushColor[1]
@@ -905,6 +919,17 @@ final class CanvasModel {
 
     /// The side the layers' thumbnails are read at, in pixels.
     static let thumbSide: UInt32 = 192
+
+    /// Reads the background alone: a picker moving changes nothing else.
+    func readBackground() {
+        background = session.background()
+    }
+
+    /// The palettes as the store has them now.
+    func setPalettes(_ list: [PaletteInfo], defaultPalette: Int) {
+        palettes = list
+        self.defaultPalette = defaultPalette
+    }
 
     func addLayer() {
         if session.addLayer() == 0 {

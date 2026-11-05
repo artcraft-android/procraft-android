@@ -45,6 +45,7 @@ targets:
         UIApplicationSupportsIndirectInputEvents: true
         UILaunchScreen: {}
         UIRequiresFullScreen: false
+        NSCameraUsageDescription: A photo you take can become a palette of its colours.
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationPortraitUpsideDown

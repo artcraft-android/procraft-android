@@ -71,8 +71,9 @@ enum ScreenCapture {
     /// What the source editor opens over itself, and what the brush library opens.
     static var sourceShows: String?
     static var libraryShows: String?
-    /// What the layers panel opens.
+    /// What the layers panel opens, and the colour panel.
     static var layersShows: String?
+    static var colorsShows: String?
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
 
@@ -117,6 +118,13 @@ enum ScreenCapture {
             model.pickLayer(other)
         }
         model.toggle(.layers)
+    }
+
+    /// The colour panel in `mode`, what `shows` opens open.
+    private static func colors(_ model: CanvasModel, _ mode: ColorMode, shows: String? = nil) {
+        colorsShows = shows
+        model.colorMode = mode
+        model.toggle(.color)
     }
 
     private static func library(_ model: CanvasModel, shows: String) {
@@ -174,6 +182,25 @@ enum ScreenCapture {
         case "source-landscape":
             sideways = true
             source(model, .grain)
+        case "colors-classic":
+            colors(model, .classic)
+        case "colors-harmony":
+            colors(model, .harmony)
+        case "colors-harmony-menu":
+            colors(model, .harmony, shows: "harmony-menu")
+        case "colors-value":
+            colors(model, .value)
+        case "colors-hex":
+            colors(model, .value, shows: "hex")
+        case "colors-palettes":
+            colors(model, .palettes)
+        case "colors-add":
+            colors(model, .palettes, shows: "add")
+        case "colors-palette-menu":
+            colors(model, .palettes, shows: "palette-menu")
+        case "colors-background":
+            model.toggle(.layers)
+            model.pickBackground()
         case "layers-many":
             layers(model, shows: "")
         case "layers-swipe":
