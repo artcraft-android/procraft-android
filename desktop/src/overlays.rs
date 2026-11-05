@@ -236,9 +236,6 @@ impl Overlays {
                         }
                     }
                 }
-                if let (Some(info), true, true) = (&self.shape, bar_shown, self.picking.is_none()) {
-                    chosen = self.shape_bar(ui, look, info.clone(), under_bar, window);
-                }
                 if self.shape_editing
                     && let Some(info) = &self.shape
                 {
@@ -251,6 +248,9 @@ impl Overlays {
                     }
                 }
             });
+        if let (Some(info), true, true) = (self.shape.clone(), bar_shown, self.picking.is_none()) {
+            chosen = self.shape_bar(&ctx, look, info, under_bar, window);
+        }
         if self.notice.is_some() || self.picking.is_some() {
             ctx.request_repaint();
         }
@@ -287,51 +287,55 @@ impl Overlays {
 
     /// The bar a snapped stroke shows: the shape's name (and, while its handles show, "Editing"
     /// and the kind in grey); a tap shows the handles, and the kinds it can be shown as below.
+    /// Each is an area of its own, as big as it shows: a press there is the interface's, where it
+    /// would otherwise reach the canvas, which lets the shape go.
     fn shape_bar(
         &mut self,
-        ui: &Ui,
+        ctx: &egui::Context,
         look: &mut Look,
         info: QuickShapeInfo,
         top: f32,
         window: Rect,
     ) -> Option<QuickShapeKind> {
         let bar = Rect::from_min_size(pos2(window.left(), top), vec2(window.width(), 32.0));
-        ui.painter().rect_filled(bar, 0, argb(MODE_BAR));
-        if ui.interact(bar, ui.scope_id().with("shape bar"), Sense::click()).clicked() {
-            self.shape_editing = true;
-        }
-        let ink = argb(MODE_TEXT);
         let several = info.choices.len() > 1;
-        let name = if self.shape_editing { "Editing" } else { label(info.kind) };
-        // laid out from the middle: the icon, the name, the kind in grey and the disclosure
-        let painter = ui.painter();
-        let measure = |s: &str, size: f32, w: Weight| painter.layout_no_wrap(s.into(), w.font(size), ink).size().x;
-        let mut width = 29.0 + measure(name, 17.0, Weight::Bold);
-        if self.shape_editing && several {
-            width += 3.0 + measure(label(info.kind), 15.0, Weight::Regular);
-        }
-        if several {
-            width += 33.0;
-        }
-        let mut x = bar.center().x - width / 2.0;
-        look.icon(ui, icon(info.kind), pos2(x + 14.5, bar.center().y), 28.0, ink);
-        x += 29.0;
-        x = text(ui.painter(), pos2(x, bar.center().y), Align2::LEFT_CENTER, name, 17.0, Weight::Bold, ink).right();
-        if self.shape_editing && several {
-            x = text(
-                ui.painter(),
-                pos2(x + 3.0, bar.center().y),
-                Align2::LEFT_CENTER,
-                label(info.kind),
-                15.0,
-                Weight::Regular,
-                Color32::from_gray(0x9A),
-            )
-            .right();
-        }
-        if several {
-            look.icon(ui, &icons::DISCLOSE, pos2(x + 16.5, bar.center().y), 32.0, ink);
-        }
+        strip_area("shape bar", bar, ctx, |ui| {
+            ui.painter().rect_filled(bar, 0, argb(MODE_BAR));
+            if ui.allocate_rect(bar, Sense::click()).clicked() {
+                self.shape_editing = true;
+            }
+            let ink = argb(MODE_TEXT);
+            let name = if self.shape_editing { "Editing" } else { label(info.kind) };
+            // laid out from the middle: the icon, the name, the kind in grey and the disclosure
+            let painter = ui.painter();
+            let measure = |s: &str, size: f32, w: Weight| painter.layout_no_wrap(s.into(), w.font(size), ink).size().x;
+            let mut width = 29.0 + measure(name, 17.0, Weight::Bold);
+            if self.shape_editing && several {
+                width += 3.0 + measure(label(info.kind), 15.0, Weight::Regular);
+            }
+            if several {
+                width += 33.0;
+            }
+            let mut x = bar.center().x - width / 2.0;
+            look.icon(ui, icon(info.kind), pos2(x + 14.5, bar.center().y), 28.0, ink);
+            x += 29.0;
+            x = text(ui.painter(), pos2(x, bar.center().y), Align2::LEFT_CENTER, name, 17.0, Weight::Bold, ink).right();
+            if self.shape_editing && several {
+                x = text(
+                    ui.painter(),
+                    pos2(x + 3.0, bar.center().y),
+                    Align2::LEFT_CENTER,
+                    label(info.kind),
+                    15.0,
+                    Weight::Regular,
+                    Color32::from_gray(0x9A),
+                )
+                .right();
+            }
+            if several {
+                look.icon(ui, &icons::DISCLOSE, pos2(x + 16.5, bar.center().y), 32.0, ink);
+            }
+        });
         if !(self.shape_editing && several) {
             return None;
         }
@@ -339,35 +343,54 @@ impl Overlays {
         let each = if info.choices.len() > 2 { 154.0 } else { 116.0 };
         let row_w = each * info.choices.len() as f32 + 2.0 * (info.choices.len() as f32 + 1.0);
         let row = Rect::from_center_size(pos2(bar.center().x, bar.bottom() + 20.0 + 16.0), vec2(row_w, 32.0));
-        ui.painter().rect_filled(row, 16, argb(MODES_FILL));
         let mut chosen = None;
-        for (i, kind) in info.choices.iter().enumerate() {
-            let cell = Rect::from_min_size(
-                pos2(row.left() + 2.0 + (each + 2.0) * i as f32, row.top() + 2.0),
-                vec2(each, 28.0),
-            );
-            if *kind == info.kind {
-                ui.painter().rect_filled(cell, 14, argb(pc::ACCENT));
+        strip_area("shape kinds", row, ctx, |ui| {
+            ui.allocate_rect(row, Sense::hover());
+            ui.painter().rect_filled(row, 16, argb(MODES_FILL));
+            for (i, kind) in info.choices.iter().enumerate() {
+                let cell = Rect::from_min_size(
+                    pos2(row.left() + 2.0 + (each + 2.0) * i as f32, row.top() + 2.0),
+                    vec2(each, 28.0),
+                );
+                if *kind == info.kind {
+                    ui.painter().rect_filled(cell, 14, argb(pc::ACCENT));
+                }
+                let words = ui
+                    .painter()
+                    .layout_no_wrap(label(*kind).into(), Weight::Regular.font(14.0), Color32::WHITE)
+                    .size()
+                    .x;
+                let start = cell.center().x - (28.0 + 6.0 + words) / 2.0;
+                look.icon(ui, icon(*kind), pos2(start + 14.0, cell.center().y), 28.0, Color32::WHITE);
+                text(
+                    ui.painter(),
+                    pos2(start + 34.0, cell.center().y),
+                    Align2::LEFT_CENTER,
+                    label(*kind),
+                    14.0,
+                    Weight::Regular,
+                    Color32::WHITE,
+                );
+                if ui.interact(cell, ui.scope_id().with(("shape kind", i)), Sense::click()).clicked() {
+                    chosen = Some(*kind);
+                }
             }
-            let words =
-                ui.painter().layout_no_wrap(label(*kind).into(), Weight::Regular.font(14.0), Color32::WHITE).size().x;
-            let start = cell.center().x - (28.0 + 6.0 + words) / 2.0;
-            look.icon(ui, icon(*kind), pos2(start + 14.0, cell.center().y), 28.0, Color32::WHITE);
-            text(
-                ui.painter(),
-                pos2(start + 34.0, cell.center().y),
-                Align2::LEFT_CENTER,
-                label(*kind),
-                14.0,
-                Weight::Regular,
-                Color32::WHITE,
-            );
-            if ui.interact(cell, ui.scope_id().with(("shape kind", i)), Sense::click()).clicked() {
-                chosen = Some(*kind);
-            }
-        }
+        });
         chosen
     }
+}
+
+/// An area over the canvas exactly `rect` big, for the bars that hang under the top bar.
+fn strip_area(name: &'static str, rect: Rect, ctx: &egui::Context, show: impl FnOnce(&mut Ui)) {
+    egui::Area::new(egui::Id::unique(name))
+        .fixed_pos(rect.min)
+        .order(egui::Order::Middle)
+        .constrain(false)
+        .fade_in(false)
+        .show(ctx, |ui| {
+            ui.set_clip_rect(rect);
+            show(ui);
+        });
 }
 
 /// The eyedropper's loupe, centred `LOUPE_LIFT` above the pointer: a ring whose top half is the
@@ -513,4 +536,90 @@ fn cursor_turn(session: &CanvasSession) -> f32 {
         turn += azimuth;
     }
     turn
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Event, Modifiers, PointerButton, RawInput};
+
+    use super::*;
+
+    /// The overlays over a window with a snapped shape, its bar shown.
+    struct Shown {
+        ctx: egui::Context,
+        look: Look,
+        overlays: Overlays,
+        time: f64,
+    }
+
+    impl Shown {
+        fn new() -> Shown {
+            let overlays = Overlays {
+                shape: Some(QuickShapeInfo {
+                    kind: QuickShapeKind::Ellipse,
+                    choices: vec![QuickShapeKind::Ellipse, QuickShapeKind::Circle],
+                    handles: Vec::new(),
+                }),
+                ..Overlays::default()
+            };
+            let mut shown = Shown { ctx: egui::Context::default(), look: Look::default(), overlays, time: 0.0 };
+            shown.frame(Vec::new());
+            shown.frame(Vec::new());
+            shown
+        }
+
+        fn frame(&mut self, events: Vec<Event>) -> Option<QuickShapeKind> {
+            self.time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 700.0))),
+                time: Some(self.time),
+                events,
+                ..RawInput::default()
+            };
+            let Shown { ctx, look, overlays, .. } = self;
+            let mut chosen = None;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                chosen = overlays.show(ui, look, Color32::WHITE, true);
+            });
+            output.textures_delta.clear();
+            chosen
+        }
+
+        /// A press and a lift at `at`, as they reach the interface.
+        fn tap(&mut self, at: Pos2) -> Option<QuickShapeKind> {
+            let button = |pressed| Event::PointerButton {
+                pos: at,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            self.frame(vec![Event::PointerMoved(at)]);
+            self.frame(vec![button(true)]);
+            let chosen = self.frame(vec![button(false)]);
+            self.frame(Vec::new());
+            chosen
+        }
+
+        /// Whether a press at `at` is the interface's, as the window's events go by.
+        fn interface_at(&self, at: Pos2) -> bool {
+            self.ctx.layer_id_at(at).is_some_and(|l| l.order != egui::Order::Background)
+        }
+    }
+
+    #[test]
+    fn a_press_on_a_snapped_shapes_bar_or_kinds_stays_off_the_canvas() {
+        let mut s = Shown::new();
+        let bar = pos2(600.0, pc::BAR_HEIGHT + 16.0);
+        let kinds = pos2(600.0 + 60.0, pc::BAR_HEIGHT + 32.0 + 36.0);
+        assert!(s.interface_at(bar), "a press on the bar reached the canvas, which lets the shape go");
+        assert!(!s.interface_at(kinds), "no kinds yet");
+        s.tap(bar);
+        assert!(s.overlays.shape_editing, "the bar's tap didn't show the handles");
+        assert!(s.interface_at(kinds), "a press on the kinds reached the canvas");
+        // the second kind, right of the middle
+        assert_eq!(s.tap(kinds), Some(QuickShapeKind::Circle));
+        // the canvas around them stays the canvas's
+        assert!(!s.interface_at(pos2(600.0, 400.0)));
+        assert!(!s.interface_at(pos2(100.0, pc::BAR_HEIGHT + 32.0 + 36.0)));
+    }
 }
