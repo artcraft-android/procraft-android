@@ -920,6 +920,7 @@ fn close_stroke(
         canvas.replace_second_stamps(&guide::mirrored(guide, &second.finish()));
     }
     let drawn = builder.stamp_count();
+    let for_good = if canvas.shows_tip() { builder.drawn_for_good() } else { None };
     let all = builder.finish();
     // what undo calls it
     canvas.name_next_step(match canvas.stroke_tool() {
@@ -930,6 +931,9 @@ fn close_stroke(
     });
     if canvas.stroke_tool() == Some(StrokeTool::Smudge) || canvas.is_pencil() {
         canvas.add_stamps(&guide::mirrored(guide, all.get(drawn..).unwrap_or(&[])));
+    } else if let Some(rest) = for_good.and_then(|stamps| all.strip_prefix(stamps.as_slice())) {
+        // nothing laid changes: a long stroke's end needn't lay it all again
+        canvas.add_stamps(&guide::mirrored(guide, rest));
     } else {
         canvas.replace_stamps(&guide::mirrored(guide, &all));
     }
@@ -1570,7 +1574,10 @@ impl CanvasSession {
         }
         let (Some(mut builder), Some(canvas)) = (st.stroke.take(), st.canvas.as_mut()) else { return };
         let stamps = builder.add(&canvas_samples);
-        canvas.add_stamps(&guide::mirrored(&st.doc.stroke_guide(), &stamps));
+        // (a stroke shown with a tip lays them with the rest of it, as it ends)
+        if !(canvas.shows_tip() && builder.shows_tip()) {
+            canvas.add_stamps(&guide::mirrored(&st.doc.stroke_guide(), &stamps));
+        }
         let mut second = st.second.take();
         if let Some(second) = second.as_mut() {
             second.add(&canvas_samples);

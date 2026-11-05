@@ -1168,6 +1168,17 @@ impl StrokeBuilder {
         self.placed.iter().map(|p| self.finish_stamp(p, start, None)).collect()
     }
 
+    /// The stamps drawn for good so far, of a stroke drawn stamp by stamp (with a tip, where it
+    /// shows one) and not yet ended: if ending it leaves them as they are, only the rest are to draw.
+    pub fn drawn_for_good(&self) -> Option<Vec<Stamp>> {
+        if self.ran_on.is_some() {
+            return None;
+        }
+        let start = self.start_span();
+        let drawn = if self.shows_tip() { self.kept } else { self.placed.len() };
+        Some(self.placed.iter().take(drawn).map(|p| self.finish_stamp(p, start, None)).collect())
+    }
+
     /// Ends the stroke: walks on to where the pen lifted and applies the end taper. Returns all of
     /// the stroke's stamps, as they should finally be drawn.
     pub fn finish(&mut self) -> Vec<Stamp> {
@@ -2816,6 +2827,30 @@ mod tests {
         // the same seed replays the same stroke
         let mut again = StrokeBuilder::new(Brush { shape: b.brush().shape.clone(), ..plain() }, 10.0, Pointer::Stylus);
         assert_eq!(again.add(&down), stamps);
+    }
+
+    #[test]
+    fn a_stroke_s_end_leaves_what_no_taper_reaches_as_it_was_drawn() {
+        let ended = |taper: Taper, animated: f32| {
+            let mut brush = plain();
+            brush.pen_taper = taper;
+            brush.set_setting("pen_tip_animation", animated);
+            let mut stroke = StrokeBuilder::new(brush, 10.0, Pointer::Stylus);
+            stroke.add_tipped(&line(40, 400.0));
+            let drawn = stroke.drawn_for_good().unwrap();
+            let all = stroke.finish();
+            assert!(stroke.drawn_for_good().is_none(), "ended, what was drawn is no longer known");
+            (drawn.len(), all.starts_with(&drawn), all.len())
+        };
+        let (drawn, same, all) = ended(Taper::NONE, 1.0);
+        assert!(drawn > 0 && same && all >= drawn, "{drawn} {same} {all}");
+        // an end taper shown as it is drawn is on the tip, past what was kept
+        let thinning = Taper { end: 0.5, size: 1.0, ..Taper::NONE };
+        let (drawn, same, all) = ended(thinning.clone(), 1.0);
+        assert!(drawn > 0 && same && all > drawn, "{drawn} {same} {all}");
+        // one that doesn't show thins what is there already
+        let (drawn, same, _) = ended(thinning, 0.0);
+        assert!(drawn > 0 && !same);
     }
 
     #[test]
