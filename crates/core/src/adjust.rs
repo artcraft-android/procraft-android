@@ -46,6 +46,31 @@ pub enum ChromaticKind {
     Displace,
 }
 
+/// Perspective blur from its puck all round, or only towards its arrow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PerspectiveKind {
+    Positional,
+    Directional,
+}
+
+/// At its whole amount a perspective blur draws each pixel out this much of the way to its puck;
+/// directional, this many times that straight along its arrow (it reads a little stronger).
+const PERSPECTIVE_REACH: f32 = 0.25;
+const DIRECTIONAL_GAIN: f32 = 1.25;
+
+/// Perspective blur of `kind` from `centre` (canvas pixels), `amount` (0..1) of it; directional,
+/// towards `arrow` (a canvas angle, radians).
+pub(crate) fn perspective(centre: [f32; 2], kind: PerspectiveKind, amount: f32, arrow: f32) -> Filter {
+    match kind {
+        PerspectiveKind::Positional => Filter::Zoom { centre, amount: amount * PERSPECTIVE_REACH, toward: [0.0; 2] },
+        PerspectiveKind::Directional => Filter::Zoom {
+            centre,
+            amount: amount * PERSPECTIVE_REACH * DIRECTIONAL_GAIN,
+            toward: if arrow.is_finite() { [arrow.cos(), arrow.sin()] } else { [0.0, -1.0] },
+        },
+    }
+}
+
 /// Noise from its sliders (0..1): the amount reads three times as strong; the scale makes it
 /// coarser, the octaves add finer layers (one to five), the turbulence keeps more of each.
 fn noise(amount: f32, kind: NoiseKind, scale: f32, octaves: f32, turbulence: f32, multi: bool, added: bool) -> Filter {
@@ -268,14 +293,17 @@ impl State {
         if std::mem::take(&mut self.adjusting)
             && let Some(canvas) = self.canvas.as_mut()
         {
-            if commit {
-                canvas.name_next_step(match self.last_filter {
-                    Some(Filter::Hsb { .. }) => "adjust HSB",
-                    Some(Filter::Curves) => "adjust Curves",
-                    Some(Filter::ColorBalance { .. }) => "change Color Balance",
-                    Some(Filter::GradientMap { .. }) => "change Gradient Map",
-                    _ => "adjustment",
-                });
+            // perspective blur's step goes unnamed
+            let name = match self.last_filter {
+                Some(Filter::Hsb { .. }) => Some("adjust HSB"),
+                Some(Filter::Curves) => Some("adjust Curves"),
+                Some(Filter::ColorBalance { .. }) => Some("change Color Balance"),
+                Some(Filter::GradientMap { .. }) => Some("change Gradient Map"),
+                Some(Filter::Zoom { .. }) => None,
+                _ => Some("adjustment"),
+            };
+            if let (true, Some(name)) = (commit, name) {
+                canvas.name_next_step(name);
             }
             // only where it changed is kept
             match within {
@@ -343,7 +371,7 @@ impl CanvasSession {
             SwipeAdjustment::Sharpen => Filter::Sharpen { amount: a },
             // the amount reads three times as strong
             SwipeAdjustment::Noise => noise(a, NoiseKind::Clouds, 0.0, 0.0, NOISE_TURBULENCE, false, true),
-            SwipeAdjustment::PerspectiveBlur => Filter::Zoom { centre, amount: a * 0.25 },
+            SwipeAdjustment::PerspectiveBlur => perspective(centre, PerspectiveKind::Positional, a, 0.0),
             SwipeAdjustment::ChromaticAberration => {
                 chromatic(centre, ChromaticKind::Perspective, a, [0.0; 2], 0.0, 0.0)
             }
@@ -715,5 +743,18 @@ impl CanvasSession {
 
     pub fn is_adjusting(&self) -> bool {
         self.shared.lock().adjusting
+    }
+}
+
+impl CanvasSession {
+    /// Perspective blur of `kind`, `amount` (0..1) of it, from `origin` (canvas pixels; none for
+    /// the canvas's middle); directional, towards `arrow` (a canvas angle, radians).
+    pub(crate) fn adjust_perspective(&self, kind: PerspectiveKind, amount: f32, origin: Option<[f32; 2]>, arrow: f32) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let middle = [st.doc.width() as f32 / 2.0, st.doc.height() as f32 / 2.0];
+        let centre = origin.filter(|o| o.iter().all(|v| v.is_finite())).unwrap_or(middle);
+        st.adjust(perspective(centre, kind, unit(amount), arrow));
+        self.shared.frame(st);
     }
 }

@@ -10,17 +10,19 @@
 #   procraft-<version>-linux-x86_64.AppImage      any distro (packaging/linux)
 #   procraft-<version>-linux-x86_64.deb           Debian, Ubuntu and the like
 #   procraft-<version>-linux-x86_64.tar.gz        the plain tree
-#   procraft-<version>-macos-universal.dmg        Apple silicon and Intel Macs, ad hoc signed
-#                                                 (packaging/macos)
-#   procraft-<version>-ipados-unsigned.ipa        the iPad app, signed by whoever installs it (ios/)
+#   procraft-<version>-macos-universal.dmg        Apple silicon and Intel Macs (packaging/macos):
+#                                                 signed with a Developer ID and notarized when
+#                                                 the APPLE_* secrets exist, else ad hoc
 #   SHA256SUMS.txt                                each file's SHA-256
 #
-# The Mac and iPad files are built on the public repository alone: a private one pays for macOS
-# runners' minutes, ten times Linux's. While they are new, one failing leaves its file out rather
-# than holding up the release; so does Windows on ARM's.
+# The Mac file is built on the public repository alone (a private one pays for macOS runners'
+# minutes, ten times Linux's), and only once the repository's variable RELEASE_MAC is true. While
+# it is new, its failing leaves its file out rather than holding up the release; so does Windows
+# on ARM's.
 #
 # A manual run (Actions › Release › Run workflow) is a dry run: it builds them at the version in
-# gradle.properties and keeps them as the run's artifacts, and releases nothing.
+# gradle.properties and keeps them as the run's artifacts, and releases nothing. It also builds
+# the iPad app's unsigned .ipa (ios/), which stays out of releases until that app is finished.
 name: Release
 
 on:
@@ -212,7 +214,8 @@ jobs:
 
   macos:
     name: Desktop (macos-universal)
-    if: ${{ !github.event.repository.private }}
+    # only once the Mac app is to ship: the repository's variable RELEASE_MAC set to true
+    if: ${{ !github.event.repository.private && vars.RELEASE_MAC == 'true' }}
     continue-on-error: true
     runs-on: macos-15
     env:
@@ -236,10 +239,24 @@ jobs:
         with:
           key: release-desktop-macos-universal
 
+      - name: Set up Developer ID signing and notarization
+        # without the secrets (forks, dry runs) the app stays signed ad hoc, not notarized
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: bash packaging/macos/signing.sh --setup
+
       - name: Package for macOS
         env:
           VERSION: ${{ steps.v.outputs.version }}
         run: bash packaging/macos/package.sh
+
+      - name: Remove the signing keychain and key
+        if: always()
+        run: bash packaging/macos/signing.sh --cleanup
 
       - name: Files
         run: ls -l dist >>"$GITHUB_STEP_SUMMARY"
@@ -250,9 +267,10 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # the iPad app is unfinished: built on manual runs only, never released
   ipados:
     name: iPadOS (unsigned IPA)
-    if: ${{ !github.event.repository.private }}
+    if: ${{ !github.event.repository.private && github.event_name == 'workflow_dispatch' }}
     continue-on-error: true
     runs-on: macos-15
     env:
@@ -289,7 +307,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-ipados
+          name: ipados-unreleased
           path: dist/*
           if-no-files-found: error
 
@@ -347,8 +365,8 @@ jobs:
   release:
     name: GitHub Release
     needs: [apk, desktop, windows-arm64, macos, ipados]
-    # the Mac, iPad and Windows on ARM jobs may have been skipped (a private repository) or left
-    # out their files
+    # the Mac and Windows on ARM jobs may have been skipped (a private repository) or left out
+    # their files; the iPad's is skipped
     if: ${{ github.ref_type == 'tag' && !cancelled() && needs.apk.result == 'success' && needs.desktop.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:

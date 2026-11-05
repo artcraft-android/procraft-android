@@ -24,14 +24,49 @@ pub enum SymmetryKind {
     Radial,
 }
 
+/// The unit a grid's size is typed and shown in; the size itself is kept in canvas pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LengthUnit {
+    #[default]
+    Pixels,
+    Millimetres,
+    Centimetres,
+    Inches,
+}
+
+impl LengthUnit {
+    /// How many of it make an inch; none for pixels.
+    pub fn per_inch(self) -> Option<f32> {
+        match self {
+            LengthUnit::Pixels => None,
+            LengthUnit::Millimetres => Some(25.4),
+            LengthUnit::Centimetres => Some(2.54),
+            LengthUnit::Inches => Some(1.0),
+        }
+    }
+
+    /// `v` of it in pixels, `dpi` to the inch.
+    pub fn to_pixels(self, v: f32, dpi: f32) -> f32 {
+        self.per_inch().map_or(v, |k| v / k * dpi)
+    }
+
+    /// `px` pixels in it, `dpi` to the inch.
+    pub fn from_pixels(self, px: f32, dpi: f32) -> f32 {
+        self.per_inch().map_or(px, |k| px / dpi * k)
+    }
+}
+
 /// One kind of guide's look: its opacity and line thickness (0..1), its grid's size (canvas
-/// pixels), and its colour (0..1 along the colour bar, see [`bar_color`]).
+/// pixels) and the unit it is shown in, and its colour (0..1 along the colour bar, see
+/// [`bar_color`]).
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GuideLook {
     pub opacity: f32,
     pub thickness: f32,
     pub size: f32,
     pub color: f32,
+    #[serde(default, deserialize_with = "crate::document::or_default")]
+    pub unit: LengthUnit,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -57,10 +92,10 @@ pub struct Guide {
 
 /// The kinds' looks as a new guide starts.
 pub const STARTS: [GuideLook; 4] = [
-    GuideLook { opacity: 0.36, thickness: 0.64, size: 71.0, color: 0.0 },
-    GuideLook { opacity: 0.30, thickness: 0.60, size: 82.0, color: 0.0 },
-    GuideLook { opacity: 1.0, thickness: 0.70, size: 71.0, color: 0.33 },
-    GuideLook { opacity: 0.41, thickness: 0.60, size: 71.0, color: 0.0 },
+    GuideLook { opacity: 0.36, thickness: 0.64, size: 71.0, color: 0.0, unit: LengthUnit::Pixels },
+    GuideLook { opacity: 0.30, thickness: 0.60, size: 82.0, color: 0.0, unit: LengthUnit::Pixels },
+    GuideLook { opacity: 1.0, thickness: 0.70, size: 71.0, color: 0.33, unit: LengthUnit::Pixels },
+    GuideLook { opacity: 0.41, thickness: 0.60, size: 71.0, color: 0.0, unit: LengthUnit::Pixels },
 ];
 
 /// The guide colour bar: dark through blue, green, orange, red and pink to white, as stops.
@@ -106,6 +141,46 @@ pub fn bar_place(rgb: [f32; 3]) -> f32 {
     const STEPS: u32 = 1000;
     let far = |t: f32| bar_color(t).iter().zip(rgb).map(|(a, b)| (a - b).powi(2)).sum::<f32>();
     (0..=STEPS).map(|i| i as f32 / STEPS as f32).min_by(|a, b| far(*a).total_cmp(&far(*b))).unwrap_or(0.0)
+}
+
+/// Rays a perspective guide's vanishing point sends out each way from where its fan starts.
+const RAYS_EACH_WAY: usize = 24;
+
+/// Vanishing point `i`'s rays over a `w` × `h` canvas, fanned as the reference fans them: from the
+/// way towards the other point of the horizon (a third point, or a lone one, towards the canvas's
+/// middle), 24 either way. From a point on the canvas they go all the way round, 7.5° apart; from one off it,
+/// they spread over the angle the canvas fills as seen from there, a 24th of it apart (those
+/// that miss the canvas are left out by the clip). Each is long enough to cross the canvas.
+fn perspective_rays(points: &[Vec2], i: usize, w: f32, h: f32) -> Vec<(Vec2, Vec2)> {
+    let Some(&v) = points.get(i) else { return Vec::new() };
+    let mid = Vec2::new(w / 2.0, h / 2.0);
+    let other = match i {
+        0 => points.get(1).copied(),
+        1 => points.first().copied(),
+        _ => None,
+    };
+    let corners = [Vec2::new(0.0, 0.0), Vec2::new(w, 0.0), Vec2::new(w, h), Vec2::new(0.0, h)];
+    let angle = |d: Vec2| d.y.atan2(d.x);
+    let inside = (0.0..=w).contains(&v.x) && (0.0..=h).contains(&v.y);
+    let (start, step) = if inside {
+        // a lone or third point on the canvas starts level, as a guide's horizon does by default
+        (other.map_or(0.0, |o| angle(o - v)), TAU / (2 * RAYS_EACH_WAY) as f32)
+    } else {
+        // the angle the canvas fills, its corners measured about the way to its middle
+        let towards = angle(mid - v);
+        let about = corners.map(|k| (angle(k - v) - towards + PI).rem_euclid(TAU) - PI);
+        let fills = about.iter().copied().fold(f32::MIN, f32::max) - about.iter().copied().fold(f32::MAX, f32::min);
+        (angle(other.unwrap_or(mid) - v), fills / RAYS_EACH_WAY as f32)
+    };
+    // a canvas seen edge on (or a step that is no number) has no fan
+    if step.is_nan() || step <= 0.0 {
+        return Vec::new();
+    }
+    let length = corners.iter().map(|k| v.distance(*k)).fold(0.0, f32::max) + 1.0;
+    (0..RAYS_EACH_WAY)
+        .flat_map(|k| [start + step * k as f32, start - step * (k + 1) as f32])
+        .map(|a| (v, v + Vec2::new(a.cos(), a.sin()) * length))
+        .collect()
 }
 
 /// The part of the segment `a`–`b` inside `0..w` × `0..h` (Liang–Barsky), if a visible part is.
@@ -205,19 +280,24 @@ impl Guide {
                 out
             }
             GuideKind::Perspective => {
-                // rays from each vanishing point, and a horizon through the first two
+                // each vanishing point's rays, and the horizon through the first two (a lone
+                // point's level through it)
+                let points: Vec<Vec2> = self.vanishing.iter().map(|v| Vec2::new(v[0], v[1])).collect();
                 let mut out = Vec::new();
-                for v in &self.vanishing {
-                    let v = Vec2::new(v[0], v[1]);
-                    out.extend((0..36).map(|k| {
-                        let a = k as f32 * TAU / 36.0;
-                        (v, v + Vec2::new(a.cos(), a.sin()) * reach * 2.0)
-                    }));
+                for i in 0..points.len() {
+                    out.extend(perspective_rays(&points, i, w, h));
                 }
-                if let (Some(a), Some(b)) = (self.vanishing.first(), self.vanishing.get(1)) {
-                    let (a, b) = (Vec2::new(a[0], a[1]), Vec2::new(b[0], b[1]));
-                    let d = (b - a).normalized_or(Vec2::new(1.0, 0.0));
-                    out.push((a - d * reach * 2.0, b + d * reach * 2.0));
+                match points.as_slice() {
+                    [a, b, ..] => {
+                        let d = (*b - *a).normalized_or(Vec2::new(1.0, 0.0));
+                        let far = reach + a.distance(c) + b.distance(c);
+                        out.push((*a - d * far, *b + d * far));
+                    }
+                    [a] => {
+                        let far = reach + a.distance(c);
+                        out.push((*a - Vec2::new(far, 0.0), *a + Vec2::new(far, 0.0)));
+                    }
+                    [] => {}
                 }
                 out
             }
@@ -349,6 +429,30 @@ mod tests {
     }
 
     #[test]
+    fn lengths_go_to_pixels_and_back_by_the_dpi() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        // 10 cm at 132 dpi is the 520 px grid measured; 8 mm about 41.6 px
+        assert!(near(LengthUnit::Centimetres.to_pixels(10.0, 132.0), 519.685));
+        assert!(near(LengthUnit::Millimetres.to_pixels(8.0, 132.0), 41.575));
+        assert!(near(LengthUnit::Inches.to_pixels(1.0, 300.0), 300.0));
+        assert!(near(LengthUnit::Pixels.to_pixels(71.0, 300.0), 71.0));
+        for unit in [LengthUnit::Pixels, LengthUnit::Millimetres, LengthUnit::Centimetres, LengthUnit::Inches] {
+            assert!(near(unit.from_pixels(unit.to_pixels(3.5, 72.0), 72.0), 3.5), "{unit:?}");
+        }
+    }
+
+    #[test]
+    fn a_look_without_a_unit_or_with_one_unknown_is_in_pixels() {
+        let old = r#"{"opacity":0.5,"thickness":0.5,"size":40.0,"color":0.0}"#;
+        assert_eq!(serde_json::from_str::<GuideLook>(old).unwrap().unit, LengthUnit::Pixels);
+        let odd = r#"{"opacity":0.5,"thickness":0.5,"size":40.0,"color":0.0,"unit":"Furlongs"}"#;
+        let look = serde_json::from_str::<GuideLook>(odd).unwrap();
+        assert_eq!((look.unit, look.size), (LengthUnit::Pixels, 40.0));
+        let mm = GuideLook { unit: LengthUnit::Millimetres, ..STARTS[0] };
+        assert_eq!(serde_json::from_str::<GuideLook>(&serde_json::to_string(&mm).unwrap()).unwrap(), mm);
+    }
+
+    #[test]
     fn grids_cross_the_canvas_in_their_spacing() {
         let g = on(GuideKind::Grid);
         let lines = g.lines(200, 100);
@@ -361,10 +465,43 @@ mod tests {
         p.vanishing = vec![[0.0, 50.0], [200.0, 50.0]];
         let rays = p.lines(200, 100);
         assert!(rays.len() > 30);
+        // a lone point keeps a level horizon through it
+        p.vanishing = vec![[100.0, 50.0]];
+        assert!(
+            p.lines(200, 100)
+                .iter()
+                .any(|(a, b)| (a.y - 50.0).abs() < 1e-3 && (b.y - 50.0).abs() < 1e-3 && (b.x - a.x).abs() > 199.0)
+        );
+        p.vanishing = vec![[0.0, 50.0], [200.0, 50.0]];
         assert!(
             rays.iter()
                 .all(|(a, b)| [a, b].iter().all(|q| q.x >= -1e-3 && q.x <= 200.001 && q.y >= -1e-3 && q.y <= 100.001))
         );
+    }
+
+    #[test]
+    fn perspective_rays_fan_24_each_way_and_cross_the_canvas() {
+        let (w, h) = (3840.0, 2160.0);
+        let angle = |(a, b): &(Vec2, Vec2)| (b.y - a.y).atan2(b.x - a.x);
+        // on the canvas: 48 rays 7.5° apart, one of them along the horizon to the other point
+        let on_canvas = [Vec2::new(1000.0, 1000.0), Vec2::new(3000.0, 1000.0)];
+        let rays = perspective_rays(&on_canvas, 0, w, h);
+        assert_eq!(rays.len(), 48);
+        assert!(rays.iter().any(|r| angle(r).abs() < 1e-5));
+        let mut a: Vec<f32> = rays.iter().map(|r| angle(r).rem_euclid(TAU)).collect();
+        a.sort_by(f32::total_cmp);
+        assert!(a.windows(2).all(|p| (p[1] - p[0] - TAU / 48.0).abs() < 1e-4));
+        // far off it, even far away: the rays still cross the canvas, a 24th of the angle it fills
+        // apart, fanned from the way to the other point
+        let far = [Vec2::new(-2191.25, 1636.2), Vec2::new(4522.7, 2380.2), Vec2::new(2744.9, -8519.9)];
+        for i in 0..3 {
+            let rays = perspective_rays(&far, i, w, h);
+            assert_eq!(rays.len(), 48);
+            let crossing = rays.iter().filter_map(|(a, b)| clip(*a, *b, w, h)).count();
+            assert!(crossing >= 12, "point {i}: {crossing} cross the canvas");
+        }
+        let g = Guide { vanishing: far.iter().map(|v| [v.x, v.y]).collect(), ..on(GuideKind::Perspective) };
+        assert!(g.lines(3840, 2160).len() > 40);
     }
 
     #[test]

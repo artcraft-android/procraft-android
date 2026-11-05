@@ -1681,6 +1681,55 @@ fn a_transform_with_a_selection_moves_only_what_it_takes() {
 }
 
 #[test]
+fn perspective_blur_opens_positional_and_directional_blurs_only_ahead_of_its_arrow() {
+    use crate::{Adjustment, PerspectiveKind};
+    let Some(s) = session(128, 128) else { return };
+    let composite = |s: &CanvasSession| {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+        assert_eq!(gpu.errors(), 0, "GPU validation errors");
+        canvas.read_composite(gpu).unwrap()
+    };
+    s.set_brush_size(0.2);
+    s.set_color(0.0, 0.0, 0.0);
+    // a dot above the middle and one below it
+    for y in [28.0, 100.0] {
+        s.stroke_begin(PointerKind::Finger, vec![sample(64.0, y, 0.0)]);
+        s.stroke_end(vec![]);
+    }
+    let before = composite(&s);
+    assert_ne!(pixel(&s, 64, 28), [255; 4]);
+    assert!(s.adjustment_start(Adjustment::PerspectiveBlur));
+    // it opens positional, its puck in the middle and its arrow up
+    let shown = s.adjustment_shown();
+    assert_eq!(shown.perspective_kind, PerspectiveKind::Positional);
+    let &[x, y, tx, ty] = shown.perspective_puck.as_deref().unwrap() else { panic!("{shown:?}") };
+    assert!((tx - x).abs() < 1e-3 && ty < y, "{shown:?}");
+    // directional, all of it: below the middle nothing changes, above it the dot streaks
+    s.adjustment_perspective_kind(PerspectiveKind::Directional);
+    s.adjustment_amount_by(1.0);
+    let half = (64 * 128 * 4) as usize;
+    let one_way = composite(&s);
+    assert_eq!(one_way[half..], before[half..]);
+    assert_ne!(one_way[..half], before[..half]);
+    // positional, the dot below streaks too
+    s.adjustment_perspective_kind(PerspectiveKind::Positional);
+    assert_ne!(composite(&s)[half..], before[half..]);
+    // kept, its undo step has no name
+    s.adjustment_end(true);
+    assert_ne!(composite(&s), before);
+    assert_eq!(s.undo(), None);
+    assert_eq!(composite(&s), before);
+    // a new one starts positional again
+    assert!(s.adjustment_start(Adjustment::PerspectiveBlur));
+    assert_eq!(s.adjustment_shown().perspective_kind, PerspectiveKind::Positional);
+    s.adjustment_end(false);
+    assert_eq!(composite(&s), before);
+}
+
+#[test]
 fn adjustments_change_the_layer_as_one_undo_step() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.4);
@@ -2324,6 +2373,53 @@ fn a_private_picture_shows_on_the_canvas_but_not_in_the_thumbnail() {
     assert!(s.layers().iter().any(|l| l.id == pasted && l.private));
     s.undo();
     assert!(s.layers().iter().all(|l| l.id != pasted));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_private_picture_stays_out_of_the_time_lapse() {
+    let Some(s) = session(100, 100) else { return };
+    let dir = std::env::temp_dir().join(format!("procraft-private-lapse-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let artwork = dir.to_string_lossy().into_owned();
+    let lapse = crate::TimeLapse::new(artwork.clone());
+    // a frame as the apps record one after each change, as large as the video
+    let record = |s: &CanvasSession| {
+        let shot = s.time_lapse_frame(crate::time_lapse_side(lapse.settings())).unwrap();
+        lapse.record(shot.rgba, shot.width, shot.height)
+    };
+    // what the replay (and the video made of the frames) shows at (x, y) of frame `i`
+    let shown = |i: u32, x: u32, y: u32| {
+        let f = lapse.frame(i).unwrap();
+        let at = ((y * f.width + x) * 4) as usize;
+        [f.rgba[at], f.rgba[at + 1], f.rgba[at + 2]]
+    };
+    let white = |c: [u8; 3]| c.iter().all(|&v| v > 235);
+    let photo = crate::layers::ThumbnailImage { width: 100, height: 100, rgba: [255, 0, 0, 255].repeat(100 * 100) };
+    let id = s.insert_image(photo, true).unwrap();
+    assert!(record(&s));
+    assert!(white(shown(0, 50, 50)), "the picture is recorded: {:?}", shown(0, 50, 50));
+    // a stroke on a layer over it is recorded as ever, the picture under it still left out
+    s.add_layer();
+    s.set_color(0.0, 0.0, 1.0);
+    s.set_brush_size(0.3);
+    s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 20.0, 0.0)]);
+    s.stroke_add(vec![sample(90.0, 20.0, 40.0)]);
+    s.stroke_end(vec![]);
+    assert_eq!((pixel(&s, 50, 20), pixel(&s, 50, 50)), ([0, 0, 255, 255], [255, 0, 0, 255]), "the canvas shows both");
+    assert!(record(&s));
+    let [r, g, b] = shown(1, 50, 20);
+    assert!(b > 200 && r < 60 && g < 60, "the stroke: {:?}", [r, g, b]);
+    assert!(white(shown(1, 50, 50)), "the picture is recorded: {:?}", shown(1, 50, 50));
+    // kept private in the artwork's file: opened again, its frames still leave it out
+    s.save(artwork.clone()).unwrap();
+    let opened = CanvasSession::open(artwork).unwrap();
+    let Some(gpu) = s.shared.lock().gpu.clone() else { return };
+    opened.use_gpu(gpu);
+    assert!(opened.layers().iter().any(|l| l.id == id && l.private));
+    let frame = opened.time_lapse_frame(crate::time_lapse_side(lapse.settings())).unwrap();
+    let middle = ((50 * frame.width + 50) * 4) as usize;
+    assert_eq!(&frame.rgba[middle..middle + 4], &[255, 255, 255, 255]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3501,7 +3597,7 @@ fn an_old_brush_file_without_grain_depth_has_its_grain_at_full_depth_moving() {
         let mut b = procraft_engine::keyed::Builder::new();
         let root = b.reserve();
         let name = b.string("Old Canvas");
-        let grain = b.string("Brush-Preset-Canvas.jpg");
+        let grain = b.string("Canvas.jpg");
         let mut fields = vec![("name", name), ("bundledGrainPath", grain), ("textureMovement", Value::Real(0.4))];
         fields.extend(extra);
         b.fill(&root, &["SilicaBrush", "ValkyrieBrush", "NSObject"], fields);
@@ -4811,8 +4907,10 @@ fn a_dropped_colour_fills_up_to_lines_and_is_one_undo_step() {
     s.stroke_add((1..30).map(|i| sample(50.0, -10.0 + i as f32 * 4.0, i as f64 * 8.0)).collect());
     s.stroke_end(vec![sample(50.0, 110.0, 250.0)]);
     let layer = s.layers().iter().find(|l| l.current).map(|l| l.id).unwrap();
-    // off the canvas nothing is poured
+    // off the canvas nothing is poured, and a dragged colour doesn't rest there
+    assert!(!s.pour_lands(-5.0, 50.0));
     assert!(!s.pour_begin(-5.0, 50.0, 1.0, 0.0, 0.0, 0.5));
+    assert!(s.pour_lands(20.0, 50.0));
     // red on the left half only
     assert!(s.pour_begin(20.0, 50.0, 1.0, 0.0, 0.0, 0.5));
     assert_eq!(pixel(&s, 20, 50), [255, 0, 0, 255]);
@@ -8585,6 +8683,41 @@ fn crossing_strokes_sheet() {
             let (k, v) = kv.split_once('=').unwrap();
             s.set_studio_setting(k.to_owned(), v.parse().unwrap());
         }
+        // `CROSS_ONE`: one orange stroke across white, at the opacity `CROSS_OPACITY` (else full),
+        // 800 canvas px long (400 on the half-size window) in 700 ms (or `CROSS_MS`)
+        if std::env::var("CROSS_ONE").is_ok() {
+            let opacity: f32 = std::env::var("CROSS_OPACITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+            s.set_brush_opacity(opacity);
+            s.set_background_color(1.0, 1.0, 1.0, true);
+            s.set_color(237.0 / 255.0, 133.0 / 255.0, 68.0 / 255.0);
+            let ms: f64 = std::env::var("CROSS_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(700.0);
+            // input at 120 a second, as a finger's
+            let n = ((ms / 1000.0 * 120.0).round() as usize).max(2);
+            let at = |i: usize| sample(100.0 + 400.0 * i as f32 / n as f32, 150.0, i as f64 * ms / n as f64);
+            s.stroke_begin(PointerKind::Finger, vec![at(0)]);
+            // `CROSS_TAP`: a tap where the stroke would start instead (held 80 ms)
+            if std::env::var("CROSS_TAP").is_ok() {
+                s.stroke_end(vec![sample(100.0, 150.0, 80.0)]);
+                s.export_png(out).unwrap();
+                return;
+            }
+            for i in 1..n {
+                s.stroke_add(vec![at(i)]);
+            }
+            s.stroke_end(vec![at(n)]);
+            s.export_png(out).unwrap();
+            return;
+        }
+        // `CROSS_TWO`: an orange stroke across white, then a yellow one down through it
+        if std::env::var("CROSS_TWO").is_ok() {
+            s.set_background_color(1.0, 1.0, 1.0, true);
+            s.set_color(237.0 / 255.0, 133.0 / 255.0, 68.0 / 255.0);
+            line(100.0, 150.0, 450.0, 150.0);
+            s.set_color(1.0, 180.0 / 255.0, 40.0 / 255.0);
+            line(275.0, 70.0, 275.0, 250.0);
+            s.export_png(out).unwrap();
+            return;
+        }
         s.set_background_color(0.12, 0.12, 0.12, true);
         s.set_color(1.0, 1.0, 1.0);
         line(100.0, 150.0, 450.0, 150.0);
@@ -8596,4 +8729,149 @@ fn crossing_strokes_sheet() {
     s.set_color(68.0 / 255.0, 209.0 / 255.0, 237.0 / 255.0);
     line(275.0, 70.0, 275.0, 250.0);
     s.export_png(out).unwrap();
+}
+
+#[test]
+fn the_size_preview_shows_the_brush_s_stamp_soft_where_it_is_soft() {
+    let s = CanvasSession::new(64, 64);
+    let pick = |name: &str| {
+        let found = s
+            .brush_library()
+            .iter()
+            .enumerate()
+            .find_map(|(i, set)| set.brushes.iter().position(|b| b.name == name).map(|j| (i as u32, j as u32)));
+        if let Some((set, index)) = found {
+            s.select_brush(set, index);
+        }
+        found.is_some()
+    };
+    assert!(pick("Soft Airbrush"));
+    let side = 64usize;
+    let soft = s.brush_stamp(side as u32);
+    assert_eq!(soft.len(), side * side);
+    let at = |p: &[u8], x: usize, y: usize| p[y * side + x];
+    // strongest in the middle, fading smoothly out, nothing in the corners
+    assert!(at(&soft, 32, 32) > 200, "{}", at(&soft, 32, 32));
+    let mid = at(&soft, 48, 32);
+    assert!(mid > 10 && mid < 200, "half way out: {mid}");
+    assert_eq!(at(&soft, 1, 1), 0);
+    // a hard round tip is solid to near its edge
+    assert!(pick("Hard Airbrush"));
+    let hard = s.brush_stamp(side as u32);
+    assert!(at(&hard, 52, 32) > 200, "{}", at(&hard, 52, 32));
+    assert_eq!(at(&hard, 1, 1), 0);
+}
+
+#[test]
+fn a_snapped_ellipse_stays_open_where_its_stroke_did_not_close() {
+    use crate::quickshape::QuickShapeKind;
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.2);
+    // a circle drawn from the top round to a twelfth short of where it began, held (closed enough
+    // to be an ellipse)
+    let pts: Vec<PenSample> = (0..=60)
+        .map(|i| {
+            let t = -std::f32::consts::FRAC_PI_2 + i as f32 / 60.0 * std::f32::consts::TAU * (11.0 / 12.0);
+            sample(100.0 + 60.0 * t.cos(), 100.0 + 60.0 * t.sin(), f64::from(i) * 8.0)
+        })
+        .collect();
+    s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+    s.stroke_add(pts[1..].to_vec());
+    let info = s.quickshape_hold().expect("a shape");
+    assert_eq!(info.kind, QuickShapeKind::Ellipse);
+    s.stroke_end(vec![]);
+    s.quickshape_done();
+    // painted where it went (its right, bottom and left), not across the gap it left (up and to
+    // the left of the top)
+    // dark anywhere within 4 pixels
+    let dark = |x: u32, y: u32| {
+        (x.saturating_sub(4)..=x + 4).any(|x| (y.saturating_sub(4)..=y + 4).any(|y| pixel(&s, x, y)[0] < 128))
+    };
+    assert!(dark(160, 100) && dark(100, 160) && dark(40, 100));
+    let gap = (-std::f32::consts::FRAC_PI_2) - std::f32::consts::TAU / 24.0;
+    let (gx, gy) = (100.0 + 60.0 * gap.cos(), 100.0 + 60.0 * gap.sin());
+    assert!(!dark(gx.round() as u32, gy.round() as u32), "the gap at {gx},{gy} was closed");
+}
+
+#[test]
+fn a_pad_is_drawn_again_off_the_caller_s_thread_the_newest_ask_last() {
+    let Some(pad) = session(200, 200) else { return };
+    let studio = CanvasSession::new(64, 64);
+    pad.keep_strokes();
+    pad.begin_own_stroke();
+    pad.stroke_begin(PointerKind::Finger, vec![sample(10.0, 60.0, 0.0)]);
+    pad.stroke_end(vec![sample(190.0, 60.0, 32.0)]);
+    // asked many times quickly: each returns at once; the last colour is the one it paints in
+    for k in 0..20 {
+        std::sync::Arc::clone(&pad).sync_pad(std::sync::Arc::clone(&studio), k as f32 / 19.0, 0.0, 0.0);
+    }
+    for _ in 0..500 {
+        if !pad.pad_syncing() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!pad.pad_syncing());
+    {
+        let st = pad.shared.lock();
+        assert!(!st.holding_frames, "frames go on once it is drawn");
+        assert_eq!(st.pad_strokes.as_ref().map(Vec::len), Some(1), "the stroke is kept again");
+        assert_eq!(st.color, [1.0, 0.0, 0.0]);
+    }
+    // the stroke is there again, in the last colour asked for
+    assert_eq!(pixel(&pad, 100, 60)[..3], [255, 0, 0]);
+}
+
+#[test]
+fn the_recent_set_keeps_the_last_eight_brushes_painted_with_and_the_pinned_ones() {
+    let Some(s) = session(200, 200) else { return };
+    // every brush of the library, by place
+    let places: Vec<(u32, u32)> = s
+        .brush_library()
+        .iter()
+        .enumerate()
+        .flat_map(|(i, set)| set.brushes.iter().map(move |b| (i as u32, b.index)))
+        .collect();
+    assert!(places.len() >= 10);
+    let paint = |(set, index): (u32, u32)| {
+        assert!(s.select_brush(set, index));
+        s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 20.0, 0.0)]);
+        s.stroke_end(vec![sample(60.0, 20.0, 40.0)]);
+    };
+    let shown = || s.recent_brushes().iter().map(|r| ((r.set, r.index), r.pinned)).collect::<Vec<_>>();
+    // chosen alone it isn't one; painted with, it is
+    assert!(s.select_brush(places[0].0, places[0].1));
+    assert!(shown().is_empty());
+    for &p in &places[..10] {
+        paint(p);
+    }
+    // the last eight, the latest first
+    let want: Vec<_> = places[2..10].iter().rev().map(|&p| (p, false)).collect();
+    assert_eq!(shown(), want);
+    // painted with again, it comes first
+    paint(places[5]);
+    assert_eq!(shown()[0], (places[5], false));
+    assert_eq!(shown().len(), 8);
+    // pinned, it stays apart, first; painting doesn't move it; unpinned it is the latest again
+    assert!(s.pin_recent_brush(places[3].0, places[3].1, true));
+    assert_eq!(shown()[0], (places[3], true));
+    assert_eq!(shown().iter().filter(|e| e.0 == places[3]).count(), 1);
+    paint(places[3]);
+    assert_eq!(shown()[0], (places[3], true));
+    // kept between sessions
+    let kept = s.saved_brush_choices();
+    s.clear_recent_brushes();
+    assert!(shown().is_empty());
+    assert!(s.load_brush_choices(kept));
+    assert_eq!(shown()[0], (places[3], true));
+    assert!(s.pin_recent_brush(places[3].0, places[3].1, false));
+    assert_eq!(shown()[0], (places[3], false));
+    // cleared, it goes
+    assert!(s.clear_recent_brush(places[3].0, places[3].1));
+    assert!(!shown().iter().any(|e| e.0 == places[3]));
+    // a brush deleted leaves it, and those after it in its set move up
+    let (set, index) = places[9];
+    let after = s.brush_library()[set as usize].brushes.len() as u32 > index + 1;
+    assert!(s.delete_brush(set, index));
+    assert!(!shown().iter().any(|e| e.0 == (set, index)) || after);
 }

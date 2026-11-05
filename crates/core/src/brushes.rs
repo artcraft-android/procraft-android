@@ -14,6 +14,12 @@ use crate::layers::ThumbnailImage;
 /// Where a shape's outline is traced: where its paint is a quarter strong.
 const OUTLINE_LEVEL: f32 = 0.25;
 
+/// The last brush stamp pictured, by what it was made from (shape image, own image, hardness,
+/// roundness, rotation, size): the size preview asks each frame.
+#[allow(clippy::type_complexity)]
+static STAMPS: std::sync::Mutex<Option<((Option<u32>, Option<u64>, [u32; 3], usize), Vec<u8>)>> =
+    std::sync::Mutex::new(None);
+
 /// The last brush outline traced, by what it was traced from (shape image, own image, roundness,
 /// rotation): a cursor asks each frame.
 #[allow(clippy::type_complexity)]
@@ -25,6 +31,15 @@ pub struct BrushInfo {
     pub set: u32,
     pub index: u32,
     pub name: String,
+}
+
+/// A brush in the Recent set: where it is in the library, and whether it is pinned there.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct RecentBrush {
+    pub set: u32,
+    pub index: u32,
+    pub name: String,
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
@@ -118,6 +133,79 @@ impl CanvasSession {
             .collect();
         *kept = Some((key, loops.clone()));
         loops
+    }
+
+    /// The current tool's brush's stamp as it paints, `side` x `side` pixels of coverage (0..255):
+    /// its shape image, or the round tip by its hardness, squashed across by its roundness and
+    /// turned by its fixed rotation, filling the square as a stamp fills its diameter. For the
+    /// size slider's preview.
+    pub fn brush_stamp(&self, side: u32) -> Vec<u8> {
+        let side = side.clamp(1, 1024) as usize;
+        let (key, source) = {
+            let st = self.shared.lock();
+            let brush = st.brush(st.tool);
+            let shape = &brush.shape;
+            let key = (
+                shape.image,
+                shape.source.as_ref().map(|s| s.id),
+                [brush.hardness, shape.roundness, shape.rotation].map(f32::to_bits),
+                side,
+            );
+            (key, shape.source.as_ref().map(|s| std::sync::Arc::clone(&s.pixels)))
+        };
+        let mut kept = STAMPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((k, stamp)) = kept.as_ref()
+            && *k == key
+        {
+            return stamp.clone();
+        }
+        let (image, _, [hardness, roundness, turn], _) = key;
+        let (hardness, roundness, turn) = (f32::from_bits(hardness), f32::from_bits(roundness), f32::from_bits(turn));
+        let pixels = match (source, image) {
+            (Some(own), _) => Some(own.to_vec()),
+            (None, Some(i)) => procraft_engine::textures::shapes().get(i as usize).map(|s| s.pixels.clone()),
+            (None, None) => None,
+        };
+        let roundness =
+            if roundness.is_finite() { roundness.clamp(0.05, procraft_engine::stroke::MOST_ROUNDNESS) } else { 1.0 };
+        let (sin, cos) = if turn.is_finite() { turn.sin_cos() } else { (0.0, 1.0) };
+        let size = procraft_engine::textures::TEXTURE_SIZE;
+        // averaged down to about the picture's size first, so a small picture keeps fine detail's
+        // weight rather than catching a few of its pixels
+        let (picture, n) = match &pixels {
+            Some(p) if p.len() >= size * size => {
+                let mut at = (p.clone(), size);
+                while at.1 / 2 >= side.max(1) && at.1 > 1 {
+                    at = (halved(&at.0, at.1), at.1 / 2);
+                }
+                (Some(at.0), at.1)
+            }
+            _ => (None, 0),
+        };
+        let r = side as f32 / 2.0;
+        let mut out = vec![0u8; side * side];
+        for (i, o) in out.iter_mut().enumerate() {
+            let (px, py) = ((i % side) as f32 + 0.5 - r, (i / side) as f32 + 0.5 - r);
+            // back into the stamp's own frame: turned back, then unsquashed across
+            let (x, y) = (px * cos + py * sin, (-px * sin + py * cos) / roundness);
+            let cover = match &picture {
+                Some(pic) => {
+                    let (u, v) = ((x / side as f32 + 0.5) * n as f32 - 0.5, (y / side as f32 + 0.5) * n as f32 - 0.5);
+                    bilinear(pic, n, u, v)
+                }
+                None => {
+                    // the round tip as the stamp shader draws it: a one-pixel rim, softened from
+                    // its hardness outwards
+                    let d = x.hypot(y);
+                    let rim = (r - d + 0.5).clamp(0.0, 1.0);
+                    let t = ((d - hardness.min(0.999) * r) / (r + 0.5 - hardness.min(0.999) * r)).clamp(0.0, 1.0);
+                    rim.min(1.0 - t * t * (3.0 - 2.0 * t))
+                }
+            };
+            *o = (cover.clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+        *kept = Some((key, out.clone()));
+        out
     }
 
     /// The current tool's brush's control `key`, as the studio shows it.
@@ -225,9 +313,10 @@ impl CanvasSession {
         canvas.use_sources(&gpu, &mut style, &brush);
         // a dual brush's second, drawn along the same sample stroke at its size beside the first's
         let stamp_only = brush.setting("preview_stamp") >= 0.5;
-        let second = brush.secondary.as_deref().filter(|_| !stamp_only && !style.in_place()).and_then(|second| {
+        let second = brush.secondary.as_deref().filter(|_| !stamp_only && style.takes_second()).and_then(|second| {
             let mut second_style = StrokeStyle::for_brush(second, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false);
             second_style.preview = true;
+            second_style.laid_in_place = false;
             canvas.use_sources(&gpu, &mut second_style, second);
             let ratio = second.diameter(0.5) / brush.diameter(0.5).max(1e-3);
             let mode = brush.setting("dual_blend").round().max(0.0) as u32;
@@ -268,4 +357,34 @@ impl CanvasSession {
 /// Where a tool's notches are kept on a brush.
 pub(crate) fn notch_tool(tool: crate::ToolKind) -> usize {
     procraft_engine::brush::Notches::tool(tool == crate::ToolKind::Paint, tool == crate::ToolKind::Smudge)
+}
+
+/// A square grey picture `n` pixels a side averaged down to half that.
+fn halved(pixels: &[u8], n: usize) -> Vec<u8> {
+    let h = n / 2;
+    let at = |x: usize, y: usize| u32::from(pixels.get(y * n + x).copied().unwrap_or(0));
+    (0..h * h)
+        .map(|i| {
+            let (x, y) = (i % h * 2, i / h * 2);
+            ((at(x, y) + at(x + 1, y) + at(x, y + 1) + at(x + 1, y + 1) + 2) / 4) as u8
+        })
+        .collect()
+}
+
+/// A square grey picture `n` pixels a side read between its pixels at (`u`, `v`) (pixel centres
+/// on whole numbers), 0..1; nothing outside it.
+fn bilinear(pixels: &[u8], n: usize, u: f32, v: f32) -> f32 {
+    let at = |x: i64, y: i64| {
+        if x < 0 || y < 0 || x >= n as i64 || y >= n as i64 {
+            0.0
+        } else {
+            f32::from(pixels.get(y as usize * n + x as usize).copied().unwrap_or(0)) / 255.0
+        }
+    };
+    let (x0, y0) = (u.floor(), v.floor());
+    let (fx, fy) = (u - x0, v - y0);
+    let (x0, y0) = (x0 as i64, y0 as i64);
+    let top = at(x0, y0) * (1.0 - fx) + at(x0 + 1, y0) * fx;
+    let bottom = at(x0, y0 + 1) * (1.0 - fx) + at(x0 + 1, y0 + 1) * fx;
+    top * (1.0 - fy) + bottom * fy
 }

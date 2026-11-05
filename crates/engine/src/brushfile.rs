@@ -1035,6 +1035,32 @@ mod tests {
     }
 
     #[test]
+    fn a_dual_brush_s_blend_mode_is_kept_whatever_its_number() {
+        // a layer mode past Multiply and the grain's own heights, as the setting and as read
+        for mode in [BlendMode::ColorBurn.id(), BlendMode::Divide.id(), GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT] {
+            let mut brush = Brush::round_pen();
+            brush.set_setting("dual_blend", mode as f32);
+            assert_eq!(brush.setting("dual_blend"), mode as f32);
+            let pictures = Pictures {
+                shape_png: b"s",
+                grain_png: None,
+                metallic_png: None,
+                roughness_png: None,
+                thumbnail_png: b"t",
+                author_png: None,
+                signature_png: None,
+                secondary: None,
+            };
+            let back = read(&write(&brush, "", &pictures)).unwrap();
+            let mut again = Brush::round_pen();
+            for (k, v) in &back.settings {
+                again.set_setting(k, *v);
+            }
+            assert_eq!(again.setting("dual_blend"), mode as f32);
+        }
+    }
+
+    #[test]
     fn grain_blend_modes_survive_a_round_trip() {
         // the grain's own height modes past the layers' as well as a layer mode
         for mode in [GRAIN_HEIGHT, GRAIN_LINEAR_HEIGHT, BlendMode::ColorBurn.id()] {

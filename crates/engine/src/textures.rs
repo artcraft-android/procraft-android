@@ -67,6 +67,9 @@ pub mod shape {
     pub const STOCK_SQUARE_DOTS: u32 = 49;
     pub const STOCK_BLEED: u32 = 50;
     pub const STOCK_MESS: u32 = 51;
+    pub const SLIM_OVAL: u32 = 52;
+    pub const ULTRA_SOFT_ROUND: u32 = 53;
+    pub const STOCK_BLOT: u32 = 54;
 }
 
 /// Grains, by index.
@@ -127,6 +130,109 @@ pub fn shapes() -> Vec<GrayImage> {
 /// The grains, made once.
 pub fn grains() -> Vec<GrayImage> {
     GRAINS.get_or_init(make_grains).clone()
+}
+
+/// The shares of a grain at which [`stock_grain_tones`] gives its values: none, 5%, 10%, a
+/// quarter, half, three quarters, 90%, 95% and all of it.
+pub const TONE_SHARES: [f32; 9] = [0.0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0];
+
+/// The shares of a shape at which [`stock_shape_tones`] gives its values: every sixteenth.
+pub const SHAPE_TONE_SHARES: [f32; 17] = [
+    0.0, 0.0625, 0.125, 0.1875, 0.25, 0.3125, 0.375, 0.4375, 0.5, 0.5625, 0.625, 0.6875, 0.75, 0.8125, 0.875, 0.9375,
+    1.0,
+];
+
+/// The tones of the stock grain a brush file names `name` (its path or file name) instead of
+/// carrying it, as measured: its values at [`TONE_SHARES`], if it is one we know.
+pub fn stock_grain_tones(name: &str) -> Option<[u8; 9]> {
+    stock_tones(crate::stock_tones::STOCK_GRAIN_TONES, name)
+}
+
+/// The tones of the stock shape a brush file names `name`, as measured: its values at
+/// [`SHAPE_TONE_SHARES`], if it is one we know.
+pub fn stock_shape_tones(name: &str) -> Option<[u8; 17]> {
+    stock_tones(crate::stock_tones::STOCK_SHAPE_TONES, name)
+}
+
+/// How much ink each of 64 bands of the stock shape `name`'s rows holds, top to bottom, as shares
+/// of its fullest (0..255), as measured, if it is one we know.
+pub fn stock_shape_rows(name: &str) -> Option<[u8; 64]> {
+    stock_tones(crate::stock_tones::STOCK_SHAPE_ROWS, name)
+}
+
+/// `pixels`, a shape, its rows weighted so that how much ink each band of them holds goes as
+/// `rows` says (a stock shape's: 64 bands, top to bottom), between band middles smoothly: a
+/// stand-in takes the stock shape's streaks and gaps across a stroke.
+pub fn striped(pixels: &[u8], rows: &[u8; 64]) -> Vec<u8> {
+    let n = TEXTURE_SIZE;
+    let per = n / rows.len();
+    let mut ours = [0.0f32; 64];
+    for (i, &v) in pixels.iter().enumerate() {
+        if let Some(band) = ours.get_mut(i / n / per) {
+            *band += f32::from(v);
+        }
+    }
+    let top = ours.iter().copied().fold(0.0, f32::max).max(1.0);
+    // each band's weight: what it should hold over what it holds (none where it holds next to
+    // nothing, which no weight can fill)
+    let weights: Vec<f32> = ours
+        .iter()
+        .zip(rows)
+        .map(|(&have, &want)| {
+            let have = have / top;
+            if have > 0.02 { (f32::from(want) / 255.0 / have).min(8.0) } else { 0.0 }
+        })
+        .collect();
+    let at = |y: usize| {
+        let place = ((y as f32 + 0.5) / per as f32 - 0.5).clamp(0.0, (rows.len() - 1) as f32);
+        let (low, f) = (place.floor() as usize, place.fract());
+        let w = |b: usize| weights.get(b.min(rows.len() - 1)).copied().unwrap_or(0.0);
+        w(low) * (1.0 - f) + w(low + 1) * f
+    };
+    let most = (0..n).map(at).fold(0.0, f32::max).max(1e-6);
+    pixels.iter().enumerate().map(|(i, &v)| (f32::from(v) * at(i / n) / most).round().clamp(0.0, 255.0) as u8).collect()
+}
+
+fn stock_tones<const N: usize>(table: &[(u64, [u8; N])], name: &str) -> Option<[u8; N]> {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).to_lowercase();
+    // FNV-1a, as the table's keys are
+    let key = base.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    table.binary_search_by_key(&key, |&(k, _)| k).ok().and_then(|i| table.get(i)).map(|&(_, t)| t)
+}
+
+/// `pixels`, a shape, with its values moved onto `tones` (its values at `shares`) keeping their
+/// order, equal values ordered by how deep in the shape they lie (blurs of it, near to far, so
+/// even a wide solid middle grades towards its centre): moved onto a stock shape's tones it grows
+/// or shrinks at its rim, rather than taking holes in a solid middle or specks round it.
+pub fn retoned_shape(pixels: &[u8], tones: &[u8], shares: &[f32]) -> Vec<u8> {
+    let img: Vec<f32> = pixels.iter().map(|&v| f32::from(v) / 255.0).collect();
+    let depths = [6, 24, 64].map(|r| blurred(&img, r));
+    let raw: Vec<f32> = pixels
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let deep = depths.iter().map(|d| d.get(i).copied().unwrap_or(0.0)).sum::<f32>() / 3.0;
+            f32::from(v) + deep.clamp(0.0, 1.0) * 0.999
+        })
+        .collect();
+    let spread: Vec<(f32, f32)> = tones.iter().zip(shares).map(|(&t, &s)| (f32::from(t) / 255.0, s)).collect();
+    ranked(&raw, &spread)
+}
+
+/// `pixels`, a grain or shape, with its values moved onto `tones` (its values at `shares`)
+/// keeping their order: a stand-in pattern with a stock image's lights and darks. Equal values
+/// are ordered at random, so a flat part takes a spread of values, not a ramp across the image.
+pub fn retoned(pixels: &[u8], tones: &[u8], shares: &[f32]) -> Vec<u8> {
+    let raw: Vec<f32> = pixels
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let h = (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 40;
+            f32::from(v) + (h as f32 / (1u64 << 24) as f32) * 0.999
+        })
+        .collect();
+    let spread: Vec<(f32, f32)> = tones.iter().zip(shares).map(|(&t, &s)| (f32::from(t) / 255.0, s)).collect();
+    ranked(&raw, &spread)
 }
 
 /// Makes the shapes and grains now, so the first canvas doesn't wait for them (slow: off the main
@@ -199,25 +305,8 @@ fn make_shapes() -> Vec<GrayImage> {
                 edge * contrast(fbm(x * 24.0, y * 24.0, 24, 3, 37), 1.8).max(0.25)
             }),
         },
-        GrayImage {
-            name: "Blot",
-            pixels: {
-                let drops = scatter_points(53, 9);
-                field(move |x, y| {
-                    // spread over two thirds of the square, as a stock ink blot's mass
-                    let (x, y) = (0.5 + (x - 0.5) / 1.22, 0.5 + (y - 0.5) / 1.22);
-                    let n = fbm(x * 3.0, y * 3.0, 3, 3, 41);
-                    let body = smooth(((0.62 - radius(x, y) - (n - 0.5) * 0.5) * 9.0).clamp(0.0, 1.0));
-                    let spots = drops.iter().fold(0.0f32, |acc, &(cx, cy, r)| {
-                        // pushed out towards the edge
-                        let (dx, dy) = ((cx - 0.5) * 2.2 + 0.5, (cy - 0.5) * 2.2 + 0.5);
-                        let d = ((x - dx).powi(2) + (y - dy).powi(2)).sqrt() / (r * 0.6);
-                        acc.max(smooth(((1.0 - d) * 4.0).clamp(0.0, 1.0)))
-                    });
-                    body.max(spots) * (1.0 - 0.05 * radius(x, y))
-                })
-            },
-        },
+        // its drops pushed out towards the square's edge
+        GrayImage { name: "Blot", pixels: blot(|cx, cy| ((cx - 0.5) * 2.2 + 0.5, (cy - 0.5) * 2.2 + 0.5)) },
         GrayImage {
             name: "Leaf",
             pixels: field(|x, y| {
@@ -724,8 +813,60 @@ fn make_shapes() -> Vec<GrayImage> {
     shapes.extend(more);
     shapes.push(GrayImage { name: "Solid dab", pixels: dab.unwrap_or_default() });
     shapes.extend(stock_strokes());
+    // a hard, flat oval lying across its square (the stock slim oval's proportions: as wide as
+    // most of the square, a quarter as tall), for flat brushes that turn with the pen
+    shapes.push(GrayImage {
+        name: "Slim oval",
+        pixels: field(|x, y| {
+            let r = ((x - 0.5) / SLIM_OVAL_HALF.0).hypot((y - 0.5) / SLIM_OVAL_HALF.1);
+            // about a texel of anti-aliasing at the edge
+            smooth((1.0 - r) * SLIM_OVAL_HALF.1 * TEXTURE_SIZE as f32 + 0.5)
+        }),
+    });
+    // a faint round falling away from its middle (the stock ultra soft tip's falloff: dim, and
+    // gone just inside its square's edge), so stamped along a stroke it builds up rounded
+    shapes.push(GrayImage {
+        name: "Ultra soft round",
+        pixels: field(|x, y| ULTRA_SOFT_PEAK * smooth(1.0 - radius(x, y))),
+    });
+    // a stock ink blot: the blot with its drops just off its body's edge, as stock blots' specks
+    // lie (within about 0.9 to 1.3 of the body's radius from the middle); pushed far out, they
+    // would each draw a line of their own along a stroke whose stamps don't turn
+    shapes.push(GrayImage {
+        name: "Stock blot",
+        pixels: blot(|cx, cy| {
+            let (dx, dy) = (cx - 0.5, cy - 0.5);
+            let d = dx.hypot(dy).max(1e-6);
+            let out = BLOT_BODY * (0.9 + 0.4 * d / SCATTER_REACH) / d;
+            (0.5 + dx * out, 0.5 + dy * out)
+        }),
+    });
     shapes
 }
+
+/// An ink blot spread over two thirds of the square, as a stock ink blot's mass, and drops about
+/// it: `place` moves each drop's middle from where it was scattered (within [`SCATTER_REACH`] of
+/// the square's middle).
+fn blot(place: fn(f32, f32) -> (f32, f32)) -> Vec<u8> {
+    let drops = scatter_points(53, 9);
+    field(move |x, y| {
+        let (x, y) = (0.5 + (x - 0.5) / 1.22, 0.5 + (y - 0.5) / 1.22);
+        let n = fbm(x * 3.0, y * 3.0, 3, 3, 41);
+        let body = smooth(((2.0 * BLOT_BODY - radius(x, y) - (n - 0.5) * 0.5) * 9.0).clamp(0.0, 1.0));
+        let spots = drops.iter().fold(0.0f32, |acc, &(cx, cy, r)| {
+            let (dx, dy) = place(cx, cy);
+            let d = ((x - dx).powi(2) + (y - dy).powi(2)).sqrt() / (r * 0.6);
+            acc.max(smooth(((1.0 - d) * 4.0).clamp(0.0, 1.0)))
+        });
+        body.max(spots) * (1.0 - 0.05 * radius(x, y))
+    })
+}
+
+/// The blot's body's radius (before its noisy edge), a share of the square it is drawn in.
+const BLOT_BODY: f32 = 0.31;
+
+/// How far from the square's middle [`scatter_points`] scatters, a share of the square.
+const SCATTER_REACH: f32 = 0.38;
 
 /// Stand-ins for stock shapes our others don't come near: a flat brush's stroke and two scatters
 /// of dots (stamped close along a stroke, each part of them draws a line, so the stroke comes out
@@ -823,6 +964,12 @@ fn dots(dots: &[(f32, f32, f32, f32)], x: f32, y: f32) -> f32 {
         acc.max(smooth((1.0 - d) * (6.0 - 4.5 * blur)) * (1.0 - 0.35 * blur))
     })
 }
+
+/// The slim oval's half width and half height, shares of its square.
+const SLIM_OVAL_HALF: (f32, f32) = (0.432, 0.102);
+
+/// The ultra soft round's middle, as measured.
+const ULTRA_SOFT_PEAK: f32 = 0.43;
 
 /// How much the solid dab raises the small chunk's values.
 const DAB_GAIN: f32 = 1.4;
@@ -1619,7 +1766,7 @@ fn scatter_points(seed: u32, count: i32) -> Vec<(f32, f32, f32)> {
     (0..count)
         .map(|i| {
             let a = hash(i, 1, seed) * std::f32::consts::TAU;
-            let d = hash(i, 2, seed).sqrt() * 0.38;
+            let d = hash(i, 2, seed).sqrt() * SCATTER_REACH;
             (0.5 + a.cos() * d, 0.5 + a.sin() * d, 0.02 + 0.07 * hash(i, 3, seed).powi(2))
         })
         .collect()
@@ -1759,6 +1906,82 @@ fn sample_wrapped(img: &[f32], n: usize, u: f32, v: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_retoned_grain_takes_the_tones_it_is_given_in_its_own_order() {
+        let tones = [10, 40, 60, 90, 140, 190, 220, 235, 250];
+        for g in grains() {
+            let out = retoned(&g.pixels, &tones, &TONE_SHARES);
+            let mut sorted = out.clone();
+            sorted.sort_unstable();
+            for (share, want) in TONE_SHARES.iter().zip(tones) {
+                let got = sorted[((sorted.len() - 1) as f32 * share) as usize];
+                assert!(got.abs_diff(want) <= 3, "{}: at {share} {got} for {want}", g.name);
+            }
+            // a lighter pixel of the pattern stays at least as light
+            let (a, b) = (g.pixels.iter().position(|&v| v == 0), g.pixels.iter().position(|&v| v == 255));
+            if let (Some(a), Some(b)) = (a, b) {
+                assert!(out[a] <= out[b], "{}", g.name);
+            }
+        }
+        assert_eq!(stock_grain_tones("no such grain.png"), None);
+    }
+
+    #[test]
+    fn a_retoned_shape_takes_a_round_tips_falloff_from_its_tones() {
+        // the soft round moved onto a stock tip's tones keeps its middle the lightest and takes
+        // the tones it is given, an empty half to a dim middle
+        let tones: [u8; 17] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 20, 30, 45, 60, 75, 90, 110];
+        let soft = shapes().into_iter().next().unwrap();
+        let out = retoned(&soft.pixels, &tones, &SHAPE_TONE_SHARES);
+        let middle = (TEXTURE_SIZE / 2) * TEXTURE_SIZE + TEXTURE_SIZE / 2;
+        assert!(out[middle] >= 105 && out[0] == 0, "{} {}", out[middle], out[0]);
+        let mut sorted = out.clone();
+        sorted.sort_unstable();
+        for (share, want) in SHAPE_TONE_SHARES.iter().zip(tones) {
+            let got = sorted[((sorted.len() - 1) as f32 * share) as usize];
+            assert!(got.abs_diff(want) <= 3, "at {share} {got} for {want}");
+        }
+        assert_eq!(stock_shape_tones("no such shape.png"), None);
+    }
+
+    #[test]
+    fn a_striped_shape_takes_its_rows_share_of_the_ink() {
+        // the soft round given bands that hold nothing in the middle eighth and full elsewhere
+        // where it has ink: its middle rows emptied, the rows above and below kept
+        let soft = shapes().into_iter().next().unwrap();
+        let mut rows = [255u8; 64];
+        rows[28..36].fill(0);
+        let out = striped(&soft.pixels, &rows);
+        let n = TEXTURE_SIZE;
+        let row = |y: usize| out[y * n..(y + 1) * n].iter().map(|&v| u32::from(v)).sum::<u32>();
+        assert_eq!(row(n / 2), 0);
+        assert!(row(n / 2 - 40) > 1000 && row(n / 2 + 40) > 1000, "{} {}", row(n / 2 - 40), row(n / 2 + 40));
+        assert_eq!(stock_shape_rows("no such shape.png"), None);
+    }
+
+    #[test]
+    fn a_retoned_solid_shape_shrinks_at_its_rim_without_holes_or_specks() {
+        // a solid disc over most of the square, moved onto tones that leave four fifths empty
+        let n = TEXTURE_SIZE;
+        let disc: Vec<u8> = (0..n * n)
+            .map(|i| {
+                let (x, y) = ((i % n) as f32 / n as f32, (i / n) as f32 / n as f32);
+                if radius(x, y) < 0.9 { 255 } else { 0 }
+            })
+            .collect();
+        let mut tones = [0u8; 17];
+        tones[14..].copy_from_slice(&[255, 255, 255]);
+        let out = retoned_shape(&disc, &tones, &SHAPE_TONE_SHARES);
+        let at = |x: f32, y: f32| out[(y * n as f32) as usize * n + (x * n as f32) as usize];
+        // whole in the middle, empty well inside the old rim and outside it
+        for r in [0.0f32, 0.1, 0.2] {
+            assert_eq!(at(0.5 + r / 2.0, 0.5), 255, "{r}");
+        }
+        for r in [0.7f32, 0.85, 0.95] {
+            assert_eq!(at(0.5 + r / 2.0, 0.5), 0, "{r}");
+        }
+    }
 
     #[test]
     fn images_have_the_right_size_and_content() {

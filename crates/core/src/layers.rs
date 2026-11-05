@@ -20,7 +20,8 @@ pub struct LayerInfo {
     /// Picked to act on together with the current layer.
     pub picked: bool,
     pub reference: bool,
-    /// Left out of the gallery's thumbnail (put in by a private insert or paste).
+    /// Left out of the gallery's thumbnail and the time-lapse (put in by a private insert or
+    /// paste).
     pub private: bool,
     /// Strokes on it follow the drawing guide.
     pub assisted: bool,
@@ -800,6 +801,18 @@ impl CanvasSession {
         let st = &mut *guard;
         let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
         let t = canvas.composite_thumbnail(gpu, &mut st.doc, max_side).ok()?;
+        Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
+    }
+
+    /// The picture a time-lapse frame keeps, scaled to fit `max_side` pixels (premultiplied): as
+    /// [`Self::canvas_thumbnail`], but without the private layers, so a private insert or paste
+    /// never shows in the replay or its video. None before the canvas exists.
+    pub fn time_lapse_frame(&self, max_side: u32) -> Option<ThumbnailImage> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
+        let private = st.doc.private_layers();
+        let t = canvas.composite_thumbnail_without(gpu, &mut st.doc, max_side, &private).ok()?;
         Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
     }
 

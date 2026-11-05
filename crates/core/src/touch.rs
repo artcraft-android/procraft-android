@@ -18,8 +18,9 @@ mod pen;
 
 pub use pen::{HoverCursor, PenHover, PenPreferred, SqueezePhase};
 
+use crate::adjust::PerspectiveKind;
 use crate::adjust_menu::Adjustment;
-use crate::adjusting::{CLONE_PUCK_RADIUS, CLONE_PUCK_SLOP};
+use crate::adjusting::{CLONE_PUCK_RADIUS, CLONE_PUCK_SLOP, DIRECTIONAL_INNER, DIRECTIONAL_REACH, POSITIONAL_GRAB};
 use crate::{CanvasSession, PenSample, PointerKind, ToolKind};
 
 /// A tap: down and up within this, moving no further than [`TAP_SLOP`] points.
@@ -39,9 +40,13 @@ pub enum CompanionMode {
 }
 /// Two (three) fingers held still go on undoing (redoing) every this often.
 const RAPID_REPEAT_MS: f64 = 120.0;
-/// A pinch in this quick, to under this scale, fits the canvas.
-const QUICK_PINCH_MS: f64 = 400.0;
-const QUICK_PINCH_SCALE: f32 = 0.75;
+/// A pen held over the canvas and not heard from for this long (seconds) has gone.
+const PEN_HOVER_STALE_S: f32 = 0.5;
+/// Two fingers parting while they close faster than this (their spread, as a part of where it
+/// started, a second) fit the canvas if it is pinched smaller than it fits; the speed is taken
+/// over this long (milliseconds) before they part.
+const QUICK_PINCH_SPEED: f32 = -2.5;
+const QUICK_PINCH_WINDOW_MS: f64 = 40.0;
 /// Three fingers turning back and forth this often clear the layer, each leg this far (points).
 const SCRUB_TURNS: i32 = 3;
 const SCRUB_STEP: f32 = 24.0;
@@ -54,10 +59,12 @@ const QUICKSHAPE_GRAB: f32 = 22.0;
 /// A fill's touch slid past this (points) changes its threshold, this much more gently than a
 /// selection's.
 const POUR_SLOP: f32 = 15.0;
-const POUR_SLIDE_GENTLER: f32 = 2.7;
+pub(crate) const POUR_SLIDE_GENTLER: f32 = 2.7;
 
 /// A transform's touch moved this far (points) drags what it took (a selection's too).
 const TRANSFORM_SLOP: f32 = 15.0;
+/// A touch on perspective blur's puck moved this far (points) drags it.
+const PUCK_SLOP: f32 = 10.0;
 /// A tap this near a freehand selection's first point closes it; its points are added this far
 /// apart (points).
 const FREEHAND_CLOSE: f32 = 22.0;
@@ -329,6 +336,14 @@ enum Mode {
     Hover,
 }
 
+/// A drag on perspective blur's puck: it moves the puck (held this far from its centre, window
+/// pixels) or turns its arrow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PuckDrag {
+    Move(f32, f32),
+    Turn,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Down {
     id: u64,
@@ -350,8 +365,10 @@ pub(crate) struct Touches {
     tap_start: f64,
     tap_pointers: usize,
     tap_moved: f32,
-    gesture_start: f64,
+    /// The two fingers' spread as a part of where it started, and its recent values with their
+    /// times (the first at or before the speed's window).
     gesture_scale: f32,
+    pinch: Vec<(f64, f32)>,
     gesture_pair: Option<(u64, u64)>,
     last: (f32, f32, f32, f32),
     scrub_x: f32,
@@ -394,6 +411,9 @@ pub(crate) struct Touches {
     liquify_pen: bool,
     /// Where on the clone source it was taken (window pixels from its centre).
     puck_grab: (f32, f32),
+    /// What the touch does to perspective blur's puck, and whether it has started.
+    puck_drag: Option<PuckDrag>,
+    puck_dragging: bool,
     select_threshold: f32,
     freehand: Vec<(f32, f32)>,
     /// A transform is open; what its touch took, and whether it has started dragging it.
@@ -418,9 +438,9 @@ pub(crate) struct Touches {
     /// a tap's slop (it moves the canvas from then on).
     pan_last: Option<(f32, f32)>,
     panned: bool,
-    /// The pen held over the canvas, and Hover's touch: where its finger last was (window x) and
-    /// how far apart two fingers last were.
-    pen_hovering: bool,
+    /// When the pen was last told held over the canvas (none: it has left), and Hover's touch:
+    /// where its finger last was (window x) and how far apart two fingers last were.
+    pen_hovering: Option<std::time::Instant>,
     hover_x: f32,
     hover_spread: f32,
     /// The pen's own gestures: where it hovers, and a squeeze held.
@@ -443,8 +463,8 @@ impl Default for Touches {
             tap_start: 0.0,
             tap_pointers: 0,
             tap_moved: 0.0,
-            gesture_start: 0.0,
             gesture_scale: 1.0,
+            pinch: Vec::new(),
             gesture_pair: None,
             last: (0.0, 0.0, 0.0, 0.0),
             scrub_x: 0.0,
@@ -475,6 +495,8 @@ impl Default for Touches {
             liquify_velocity: (0.0, 0.0),
             liquify_pen: false,
             puck_grab: (0.0, 0.0),
+            puck_drag: None,
+            puck_dragging: false,
             select_threshold: 0.5,
             freehand: Vec::new(),
             transforming: None,
@@ -491,7 +513,7 @@ impl Default for Touches {
             turn_last: (0.0, 0.0),
             pan_last: None,
             panned: false,
-            pen_hovering: false,
+            pen_hovering: None,
             hover_x: 0.0,
             hover_spread: 0.0,
             pen: pen::PenState::default(),
@@ -517,7 +539,7 @@ fn pair(a: (f32, f32), b: (f32, f32)) -> (f32, f32, f32, f32) {
 /// How much an amount dragged across the screen changes for a step of `dx` points over `ms`: more
 /// for faster drags (the speed taken per 60 Hz frame), 200 points at a steady pace moving it most
 /// of the way.
-fn drag_step(dx: f32, ms: f64) -> f32 {
+pub(crate) fn drag_step(dx: f32, ms: f64) -> f32 {
     let frames = (ms.max(1.0) / 1000.0 * 60.0).max(0.06) as f32;
     let speed = dx.abs() / frames;
     (speed / 30.0).powf(0.86) * dx / 200.0
@@ -651,9 +673,10 @@ impl CanvasSession {
     }
 
     /// The pen is held over the canvas (or not): with Hover's touch on, a finger then sets the
-    /// brush rather than painting.
+    /// brush rather than painting. Told again with each of the pen's moves: a pen not heard from
+    /// for [`PEN_HOVER_STALE_S`] has gone (a system may not say when it leaves).
     pub fn set_touch_pen_hovering(&self, hovering: bool) {
-        self.touches().pen_hovering = hovering;
+        self.touches().pen_hovering = hovering.then(std::time::Instant::now);
     }
 
     /// The single touch companion's Zoom or Move on (a lone press dragged on the canvas zooms or
@@ -867,6 +890,27 @@ impl CanvasSession {
                 if dist(at, t.down_at) > TAP_SLOP * t.scale {
                     t.adjust_moved = true;
                 }
+                // a drag on perspective blur's puck moves it or turns its arrow, once past the slop
+                if let Some(drag) = t.puck_drag {
+                    let begins = !t.puck_dragging && dist(at, t.down_at) > PUCK_SLOP * t.scale;
+                    if begins {
+                        t.puck_dragging = true;
+                        t.adjust_moved = true;
+                    }
+                    let dragging = t.puck_dragging;
+                    drop(t);
+                    if begins {
+                        self.perspective_grabbed();
+                    }
+                    if dragging {
+                        match drag {
+                            PuckDrag::Move(gx, gy) => self.perspective_move(at.0 - gx, at.1 - gy),
+                            PuckDrag::Turn => self.perspective_turn(at.0, at.1),
+                        }
+                        out.push(TouchCommand::AdjustChanged);
+                    }
+                    return out;
+                }
                 let (from, (last_x, last_ms)) = (t.down_at, t.pour_last);
                 t.pour_last = (at.0, last.time_ms);
                 let start = !std::mem::replace(&mut t.adjust_displacing, true);
@@ -941,7 +985,7 @@ impl CanvasSession {
             Mode::Gesture => {
                 if t.down.len() >= 3 {
                     Self::scrub(&mut t, &mut out);
-                } else if self.move_gesture(&mut t) {
+                } else if self.move_gesture(&mut t, last.time_ms) {
                     out.push(TouchCommand::ViewMoved);
                 }
             }
@@ -1062,6 +1106,28 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
+    /// What a drag from window point `at` does to perspective blur's puck, if it takes it at all
+    /// (`scale`: window pixels a point).
+    fn perspective_drag_at(&self, at: (f32, f32), scale: f32) -> Option<PuckDrag> {
+        let (kind, puck, arrow) = self.perspective_puck_at()?;
+        let (dx, dy) = (at.0 - puck.0, at.1 - puck.1);
+        let far = dx.hypot(dy) / scale.max(1e-6);
+        let moves = Some(PuckDrag::Move(dx, dy));
+        match kind {
+            PerspectiveKind::Positional => moves.filter(|_| far < POSITIONAL_GRAB),
+            PerspectiveKind::Directional if far <= DIRECTIONAL_INNER => moves,
+            // the arrow's side (within a right angle of it) turns it
+            PerspectiveKind::Directional if far <= DIRECTIONAL_REACH => {
+                if dx * arrow.cos() + dy * arrow.sin() > 0.0 {
+                    Some(PuckDrag::Turn)
+                } else {
+                    moves
+                }
+            }
+            PerspectiveKind::Directional => None,
+        }
+    }
+
     /// Layer Opacity's touch lifted (or another came down): what it dragged is one undo step.
     fn opacity_lifted(&self, t: &mut Touches) {
         if let Some((layer, opacity)) = t.layer_opacity.filter(|_| std::mem::take(&mut t.opacity_moved)) {
@@ -1093,8 +1159,8 @@ impl CanvasSession {
             return;
         }
         // Hover: with the pen held over the canvas, a finger drags the opacity and a pinch the size
-        if kind == PointerKind::Finger && t.pen_hovering && t.settings.hover_touch && self.shared.lock().shape.is_none()
-        {
+        let hovering = t.pen_hovering.is_some_and(|at| at.elapsed().as_secs_f32() < PEN_HOVER_STALE_S);
+        if kind == PointerKind::Finger && hovering && t.settings.hover_touch && self.shared.lock().shape.is_none() {
             t.stroke_pointer = id;
             t.hover_x = at.0;
             t.hover_spread = 0.0;
@@ -1179,6 +1245,9 @@ impl CanvasSession {
             t.adjust_displacing = false;
             t.pour_last = (at.0, now);
             t.mode = Mode::Adjust;
+            // perspective blur: a touch on its puck moves the puck or turns its arrow
+            t.puck_drag = self.perspective_drag_at(at, t.scale);
+            t.puck_dragging = false;
             if open == Adjustment::Liquify {
                 t.liquify_at = at;
                 t.liquify_ms = now;
@@ -1357,8 +1426,9 @@ impl CanvasSession {
             t.mode,
             Mode::Finger | Mode::Idle | Mode::Pour | Mode::Transform | Mode::Select | Mode::Recolor | Mode::Turn
         ) {
-            t.gesture_start = now;
             t.gesture_scale = 1.0;
+            t.pinch.clear();
+            t.pinch.push((now, 1.0));
         }
         t.mode = Mode::Gesture;
         t.tap_pointers = t.tap_pointers.max(t.down.len());
@@ -1426,7 +1496,17 @@ impl CanvasSession {
                 }
             }
             if t.mode == Mode::Gesture {
+                let parted = t.gesture_pair.is_some_and(|(a, b)| a == id || b == id);
                 Self::follow_fingers(&mut t);
+                // two fingers parting as they close fast fit a canvas pinched smaller than it
+                // fits, settling into place (a tap's fingers aren't a pinch)
+                let tap = now - t.tap_start <= TAP_MS && t.tap_moved <= TAP_SLOP * t.scale;
+                if parted && !cancelled && !tap && t.tap_pointers == 2 && t.gesture_pair.is_none() {
+                    let flicked = Self::pinch_speed(&t, now) < QUICK_PINCH_SPEED;
+                    if flicked && self.pinched_smaller_than_fit() {
+                        out.push(TouchCommand::Fit);
+                    }
+                }
             }
             // the last finger other than the stroke's lifted from a held snapped shape
             let stroke = t.stroke_pointer;
@@ -1473,12 +1553,6 @@ impl CanvasSession {
                         }
                         _ => {}
                     }
-                } else if t.tap_pointers == 2
-                    && now - t.gesture_start <= QUICK_PINCH_MS
-                    && t.gesture_scale < QUICK_PINCH_SCALE
-                {
-                    // a quick pinch in fits the canvas to the screen, settling into place
-                    out.push(TouchCommand::Fit);
                 }
             }
             Mode::Pick => {
@@ -1743,13 +1817,16 @@ impl CanvasSession {
     /// What a transform's touch at `at` takes: a warp's shown control point, or the box's nearest
     /// node, else the content.
     fn transform_handle_at(&self, at: (f32, f32), how: TransformTouch) -> crate::TransformHandle {
-        let (shown, view, density) = {
+        let (shown, view, density, warping) = {
             let st = self.shared.lock();
-            (st.transform_box(), st.view.map(|v| v.to_screen()), st.display_scale)
+            let warping = st.transform_mode == procraft_engine::transform::TransformMode::Warp;
+            (st.transform_box(), st.view.map(|v| v.to_screen()), st.display_scale, warping)
         };
         let (Some(b), Some(m)) = (shown, view) else { return crate::TransformHandle::Move };
         let view = vec![m.a, m.b, m.c, m.d, m.e, m.f];
-        if !b.mesh.is_empty() {
+        // a warp's mesh stays with the content after it, but only a warp shows its points: the
+        // other kinds take the box's nodes
+        if warping && !b.mesh.is_empty() {
             return crate::mesh_handle_at(b.mesh, view, at.0, at.1, density, how.advanced_mesh);
         }
         crate::screen_box(b.corners, view, density)
@@ -1810,8 +1887,26 @@ impl CanvasSession {
         }
     }
 
-    /// One step of two fingers: the view follows them. True if it moved.
-    fn move_gesture(&self, t: &mut Touches) -> bool {
+    /// How fast two fingers' spread changed (a part of where it started, a second) over the
+    /// [`QUICK_PINCH_WINDOW_MS`] before `now`: nothing heard meanwhile counts as still.
+    fn pinch_speed(t: &Touches, now: f64) -> f32 {
+        let Some(&(_, scale)) = t.pinch.last() else { return 0.0 };
+        let from = now - QUICK_PINCH_WINDOW_MS;
+        let before = t.pinch.iter().rev().find(|(ms, _)| *ms <= from).or(t.pinch.first());
+        match before {
+            Some(&(ms, was)) if now - ms > 0.5 => (scale - was) / ((now - ms) / 1000.0) as f32,
+            _ => 0.0,
+        }
+    }
+
+    /// The canvas as pinched is smaller on the screen than it is fitted.
+    fn pinched_smaller_than_fit(&self) -> bool {
+        let st = self.shared.lock();
+        st.view.is_some_and(|v| v.zoom() < st.fitted_view().zoom())
+    }
+
+    /// One step of two fingers at `ms`: the view follows them. True if it moved.
+    fn move_gesture(&self, t: &mut Touches, ms: f64) -> bool {
         let Some((a, b)) = t.gesture_pair else { return false };
         let at = |id: u64| t.down.iter().find(|d| d.id == id).map(|d| d.at);
         let (Some(a), Some(b)) = (at(a), at(b)) else { return false };
@@ -1830,6 +1925,15 @@ impl CanvasSession {
         }
         t.tap_moved += (x - lx).hypot(y - ly) + (d - ld).abs();
         t.gesture_scale *= scale;
+        // the spread's recent values, one a moment, and the last from before the speed's window
+        let spread = t.gesture_scale;
+        match t.pinch.last_mut() {
+            Some(last) if last.0 >= ms => last.1 = spread,
+            _ => t.pinch.push((ms, spread)),
+        }
+        let from = ms - QUICK_PINCH_WINDOW_MS;
+        let old = t.pinch.iter().skip(1).take_while(|(at, _)| *at <= from).count();
+        t.pinch.drain(..old);
         t.last = (x, y, d, angle);
         self.view_gesture(lx, ly, x - lx, y - ly, scale, turn);
         true
@@ -1898,6 +2002,7 @@ pub(crate) type TouchState = Mutex<Touches>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use procraft_engine::geom::Vec2;
 
     fn at(x: f32, y: f32, ms: f64) -> Vec<PenSample> {
         vec![PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: ms, roll: 0.0 }]
@@ -2042,19 +2147,78 @@ mod tests {
         assert_eq!(s.touch_tick(780.0), vec![TouchCommand::Undo]);
     }
 
+    /// A 400 x 300 canvas in an 800 x 600 window, shown `zoom` times as big as it fits.
+    fn shown(zoom: f32) -> std::sync::Arc<CanvasSession> {
+        let s = CanvasSession::new(400, 300);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (800, 600);
+            let mut view = st.fitted_view();
+            view.gesture(Vec2::new(400.0, 300.0), Vec2::new(0.0, 0.0), zoom, 0.0);
+            st.view = Some(view);
+        }
+        s
+    }
+
+    /// Two fingers 600 apart pinched at `speed` (their spread, a part of where it began, a
+    /// second) for `ms` at 200 Hz, then held still for `still` before they lift: what the lifts
+    /// gave.
+    fn pinch(s: &CanvasSession, speed: f32, ms: f64, still: f64) -> Vec<TouchCommand> {
+        s.touch_down(1, PointerKind::Finger, at(100.0, 300.0, 0.0));
+        s.touch_down(2, PointerKind::Finger, at(700.0, 300.0, 0.0));
+        let (mut t, mut half) = (0.0, 300.0);
+        while t + 5.0 <= ms {
+            t += 5.0;
+            half = 300.0 * (1.0 + speed * t as f32 / 1000.0);
+            s.touch_move(1, at(400.0 - half, 300.0, t));
+            s.touch_move(2, at(400.0 + half, 300.0, t));
+        }
+        let mut out = s.touch_up(2, at(400.0 + half, 300.0, t + still));
+        out.extend(s.touch_up(1, at(400.0 - half, 300.0, t + still + 8.0)));
+        out
+    }
+
+    fn zoom(s: &CanvasSession) -> f32 {
+        s.shared.lock().view.map_or(0.0, |v| v.zoom())
+    }
+
     #[test]
     fn a_quick_pinch_in_fits_the_canvas() {
-        let s = session();
-        s.touch_down(1, PointerKind::Finger, at(100.0, 300.0, 0.0));
-        s.touch_down(2, PointerKind::Finger, at(700.0, 300.0, 5.0));
-        for k in 1..=10 {
-            let d = 30.0 * k as f32;
-            s.touch_move(1, at(100.0 + d, 300.0, 5.0 + 20.0 * f64::from(k)));
-            s.touch_move(2, at(700.0 - d, 300.0, 5.0 + 20.0 * f64::from(k)));
-        }
-        s.touch_up(2, at(400.0, 300.0, 260.0));
-        let out = s.touch_up(1, at(400.0, 300.0, 270.0));
+        let s = shown(1.0);
+        let fitted = zoom(&s);
+        let out = pinch(&s, -5.0, 120.0, 0.0);
+        assert!(zoom(&s) < fitted * 0.5);
         assert!(out.contains(&TouchCommand::Fit), "{out:?}");
+        // from fitted, a small flick in fits it again
+        let s = shown(1.0);
+        let out = pinch(&s, -6.9, 32.0, 0.0);
+        assert!(out.contains(&TouchCommand::Fit), "{out:?}");
+        // closing a little faster than 2.5 a second fits, a little slower doesn't
+        assert!(pinch(&shown(1.0), -2.8, 150.0, 0.0).contains(&TouchCommand::Fit));
+        assert!(!pinch(&shown(1.0), -2.2, 150.0, 0.0).contains(&TouchCommand::Fit));
+    }
+
+    #[test]
+    fn a_pinch_that_stops_before_lifting_doesn_t_fit() {
+        // however quick and far it went, fingers still as they lift aren't a flick
+        for (speed, ms, still) in [(-5.0, 100.0, 60.0), (-3.3, 150.0, 45.0)] {
+            let out = pinch(&shown(1.0), speed, ms, still);
+            assert!(!out.contains(&TouchCommand::Fit), "{speed}: {out:?}");
+        }
+        // and a slow zoom out to well under the fit never is
+        for (speed, ms) in [(-1.5, 300.0), (-1.0, 450.0), (-0.6, 800.0)] {
+            let out = pinch(&shown(1.0), speed, ms, 0.0);
+            assert!(!out.contains(&TouchCommand::Fit), "{speed}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn a_flick_that_leaves_the_canvas_bigger_than_it_fits_doesn_t_fit() {
+        let s = shown(3.0);
+        let fitted = zoom(&shown(1.0));
+        let out = pinch(&s, -6.9, 70.0, 0.0);
+        assert!(zoom(&s) > fitted * 1.3, "{} {fitted}", zoom(&s));
+        assert!(!out.contains(&TouchCommand::Fit), "{out:?}");
     }
 
     #[test]
@@ -2194,6 +2358,84 @@ mod tests {
         assert!(out.contains(&TouchCommand::AdjustMenu { x: 31.0, y: 30.0 }), "{out:?}");
     }
 
+    /// A session with perspective blur open on a 1000 × 800 canvas seen one to one, its puck in
+    /// the middle (two window pixels a point).
+    fn perspective_session(kind: PerspectiveKind) -> std::sync::Arc<CanvasSession> {
+        let s = CanvasSession::new(1000, 800);
+        {
+            let mut st = s.shared.lock();
+            st.view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+            st.adjust = crate::adjusting::Adjusting::opened(Adjustment::PerspectiveBlur);
+        }
+        s.adjustment_perspective_kind(kind);
+        s
+    }
+
+    /// Perspective blur's puck and the point along its arrow, in the window.
+    fn puck(s: &CanvasSession) -> Vec<f32> {
+        s.adjustment_shown().perspective_puck.unwrap_or_default().iter().map(|v| (v * 100.0).round() / 100.0).collect()
+    }
+
+    #[test]
+    fn perspective_blurs_puck_is_dragged_about_and_undo_steps_it_back() {
+        let s = perspective_session(PerspectiveKind::Positional);
+        assert_eq!(puck(&s), [500.0, 400.0, 500.0, 300.0]);
+        // a touch on the puck: it waits for the slop, then the puck follows where it was held
+        s.touch_down(1, PointerKind::Finger, at(520.0, 400.0, 0.0));
+        let out = s.touch_move(1, at(525.0, 402.0, 10.0));
+        assert!(!out.contains(&TouchCommand::AdjustChanged), "{out:?}");
+        let out = s.touch_move(1, at(620.0, 450.0, 40.0));
+        assert!(out.contains(&TouchCommand::AdjustChanged), "{out:?}");
+        let out = s.touch_up(1, at(620.0, 450.0, 60.0));
+        assert!(!out.iter().any(|c| matches!(c, TouchCommand::AdjustMenu { .. })), "{out:?}");
+        assert_eq!(puck(&s), [600.0, 450.0, 600.0, 350.0]);
+        assert_eq!(s.adjustment_shown().amount, 0.0);
+        // away from it the amount is swiped, the puck staying
+        s.touch_down(1, PointerKind::Finger, at(900.0, 400.0, 100.0));
+        s.touch_move(1, at(980.0, 400.0, 130.0));
+        s.touch_up(1, at(980.0, 400.0, 140.0));
+        let amount = s.adjustment_shown().amount;
+        assert!(amount > 0.0);
+        assert_eq!(puck(&s), [600.0, 450.0, 600.0, 350.0]);
+        // undo puts the puck back, the amount staying; redo moves it again
+        assert_eq!(s.undo().as_deref(), Some("Perspective Blur"));
+        assert_eq!(puck(&s), [500.0, 400.0, 500.0, 300.0]);
+        assert_eq!(s.adjustment_shown().amount, amount);
+        s.redo();
+        assert_eq!(puck(&s), [600.0, 450.0, 600.0, 350.0]);
+    }
+
+    #[test]
+    fn directional_perspective_blurs_arrow_turns_from_its_side_and_the_puck_moves_from_the_other() {
+        let s = perspective_session(PerspectiveKind::Directional);
+        assert_eq!(s.adjustment_shown().perspective_kind, PerspectiveKind::Directional);
+        // a tap on it asks for the menu
+        s.touch_down(1, PointerKind::Finger, at(505.0, 400.0, 0.0));
+        let out = s.touch_up(1, at(505.0, 400.0, 50.0));
+        assert!(out.contains(&TouchCommand::AdjustMenu { x: 505.0, y: 400.0 }), "{out:?}");
+        // from the arrow's side (60 points up) a drag turns the arrow to point at it
+        s.touch_down(1, PointerKind::Finger, at(500.0, 280.0, 100.0));
+        s.touch_move(1, at(650.0, 400.0, 130.0));
+        s.touch_up(1, at(650.0, 400.0, 140.0));
+        assert_eq!(puck(&s), [500.0, 400.0, 600.0, 400.0]);
+        // from behind it a drag moves the puck, the arrow keeping its way
+        s.touch_down(1, PointerKind::Finger, at(380.0, 400.0, 200.0));
+        s.touch_move(1, at(410.0, 440.0, 230.0));
+        s.touch_up(1, at(410.0, 440.0, 240.0));
+        assert_eq!(puck(&s), [530.0, 440.0, 630.0, 440.0]);
+        // beyond its reach (150 points) the amount is swiped
+        s.touch_down(1, PointerKind::Finger, at(530.0, 140.0, 300.0));
+        s.touch_move(1, at(600.0, 140.0, 330.0));
+        s.touch_up(1, at(600.0, 140.0, 340.0));
+        assert!(s.adjustment_shown().amount > 0.0);
+        assert_eq!(puck(&s), [530.0, 440.0, 630.0, 440.0]);
+        // undo steps back the move, then the turn
+        s.undo();
+        assert_eq!(puck(&s), [500.0, 400.0, 600.0, 400.0]);
+        s.undo();
+        assert_eq!(puck(&s), [500.0, 400.0, 500.0, 300.0]);
+    }
+
     #[test]
     fn the_selection_tool_drags_out_shapes_and_slides_a_colour_selections_threshold() {
         let s = session();
@@ -2232,6 +2474,32 @@ mod tests {
         s.set_touch_transforming(None);
         let out = s.touch_down(1, PointerKind::Stylus, at(20.0, 20.0, 100.0));
         assert!(!out.contains(&TouchCommand::TransformTouched));
+    }
+
+    #[test]
+    fn after_a_warp_the_other_kinds_drag_the_box_s_nodes() {
+        use procraft_engine::transform::{Transform, TransformMode};
+        let s = session();
+        {
+            let mut st = s.shared.lock();
+            st.view = Some(procraft_engine::view::View::from_affine(procraft_engine::geom::Affine::IDENTITY));
+            let mut t = Transform::new(100.0, 100.0, 200.0, 100.0, Vec::new());
+            t.start_warp();
+            st.transform = Some(t);
+            st.transform_mode = TransformMode::Distort;
+        }
+        s.set_touch_transforming(Some(TransformTouch { advanced_mesh: false }));
+        let corner = |s: &CanvasSession| {
+            let b = s.shared.lock().transform_box().map(|b| b.corners).unwrap_or_default();
+            (b.first().copied(), b.get(1).copied())
+        };
+        // the top left corner dragged up and left goes with the touch from where the drag began
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
+        s.touch_move(1, at(70.0, 80.0, 16.0));
+        s.touch_move(1, at(50.0, 60.0, 32.0));
+        s.touch_up(1, at(50.0, 60.0, 48.0));
+        assert_eq!(corner(&s), (Some(80.0), Some(80.0)));
+        s.set_touch_transforming(None);
     }
 
     #[test]
@@ -2289,6 +2557,12 @@ mod tests {
         s.touch_down(1, PointerKind::Finger, at(10.0, 10.0, 100.0));
         s.touch_move(1, at(60.0, 10.0, 120.0));
         assert!(s.touch_up(1, at(60.0, 10.0, 140.0)).contains(&TouchCommand::StrokeEnded));
+        // and when it went without a word (not heard from for a while)
+        s.set_touch_pen_hovering(true);
+        s.touches().pen_hovering = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(1));
+        s.touch_down(1, PointerKind::Finger, at(10.0, 30.0, 200.0));
+        s.touch_move(1, at(60.0, 30.0, 220.0));
+        assert!(s.touch_up(1, at(60.0, 30.0, 240.0)).contains(&TouchCommand::StrokeEnded));
     }
 
     #[test]

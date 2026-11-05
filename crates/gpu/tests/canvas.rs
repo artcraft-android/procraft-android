@@ -269,6 +269,7 @@ fn draws_to_a_target_through_the_view() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let px = read(&gpu, &target, 200, 100);
@@ -317,6 +318,7 @@ fn zoomed_in_to_its_mark_the_canvas_shows_each_pixel_as_a_square() {
                 convert: None,
                 lut: None,
                 crisp_from,
+                grey: false,
             }),
         );
         let px = read(&gpu, &target, 100, 100);
@@ -368,6 +370,7 @@ fn the_surround_grid_is_fixed_to_the_target() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let px = read(&gpu, &target, 100, 100);
@@ -393,6 +396,7 @@ fn the_surround_grid_is_fixed_to_the_target() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let px = read(&gpu, &target, 100, 100);
@@ -443,6 +447,7 @@ fn a_frosted_region_shows_what_is_behind_it_blurred() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let px = read(&gpu, &target, 400, 100);
@@ -496,6 +501,7 @@ fn the_canvas_is_shown_in_the_targets_colour_space() {
             convert,
             lut: None,
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let px = read(&gpu, &target, 10, 10);
@@ -549,6 +555,7 @@ fn a_colour_table_moves_the_canvas_colours() {
             convert: None,
             lut: Some(&lut),
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let px = read(&gpu, &target, 10, 10);
@@ -620,6 +627,7 @@ fn the_predicted_tail_shows_but_never_paints() {
                 convert: None,
                 lut: None,
                 crisp_from: f32::INFINITY,
+                grey: false,
             }),
         );
         read(&gpu, &target, 100, 100)
@@ -806,6 +814,7 @@ fn a_selection_keeps_paint_inside_and_stripes_the_rest() {
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
+            grey: false,
         }),
     );
     let shown = read(&gpu, &texture, 64, 64);
@@ -952,7 +961,8 @@ fn every_adjustment_draws_and_changes_the_layer() {
         Filter::Noise { amount: 1.0, frequency: 0.2, octaves: 2, turbulence: 0.2, kind: 1, multi: true, added: false },
         Filter::Noise { amount: 1.0, frequency: 0.2, octaves: 1, turbulence: 0.2, kind: 2, multi: false, added: true },
         Filter::Motion { along: [20.0, 0.0] },
-        Filter::Zoom { centre: [0.0, 0.0], amount: 0.3 },
+        Filter::Zoom { centre: [0.0, 0.0], amount: 0.3, toward: [0.0, 0.0] },
+        Filter::Zoom { centre: [32.0, 64.0], amount: 0.3, toward: [0.0, -1.0] },
         Filter::Chromatic {
             centre: [0.0, 0.0],
             amount: 0.2,
@@ -990,6 +1000,48 @@ fn every_adjustment_draws_and_changes_the_layer() {
         canvas.render(&gpu, &mut doc, None);
         assert_eq!(canvas.read_layer(&gpu, layer).unwrap(), original, "{f:?} was not put back");
     }
+}
+
+#[test]
+fn a_zoom_blur_with_an_arrow_streaks_only_what_lies_ahead_of_its_centre() {
+    use procraft_gpu::Filter;
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(128, 128);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let layer = doc.current();
+    let mut ink = StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0);
+    ink.hardness = 1.0;
+    canvas.begin_stroke(layer, ink);
+    // a dot ahead of the centre (64, 64) as the arrow points (up), one behind it, one to the side
+    let (ahead, behind, side) = (Vec2::new(64.0, 24.0), Vec2::new(64.0, 104.0), Vec2::new(104.0, 62.0));
+    canvas.add_stamps(&[dot(ahead, 5.0), dot(behind, 5.0), dot(side, 5.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let original = canvas.read_layer(&gpu, layer).unwrap();
+    let alpha = |px: &[u8], x: u32, y: u32| pixel(px, 128, x, y)[3];
+    let mut blurred = |toward: [f32; 2]| {
+        canvas.begin_transform(layer);
+        canvas.set_filter(Filter::Zoom { centre: [64.0, 64.0], amount: 0.5, toward });
+        canvas.render(&gpu, &mut doc, None);
+        let px = canvas.read_layer(&gpu, layer).unwrap();
+        canvas.end_transform(false);
+        canvas.render(&gpu, &mut doc, None);
+        px
+    };
+    let one_way = blurred([0.0, -1.0]);
+    // behind the centre and square to the arrow nothing moves
+    let half = (64 * 128 * 4) as usize;
+    assert_eq!(one_way[half..], original[half..], "behind the centre changed");
+    assert!(alpha(&one_way, 104, 62).abs_diff(alpha(&original, 104, 62)) <= 16, "the side dot moved");
+    // ahead, the dot is drawn out along its ray: thinner where it was, out beyond it
+    assert_eq!(alpha(&original, 64, 10), 0);
+    assert!(alpha(&one_way, 64, 10) > 40, "nothing streaked ahead: {}", alpha(&one_way, 64, 10));
+    assert!(alpha(&one_way, 64, 24) < 200, "the dot ahead stayed: {}", alpha(&one_way, 64, 24));
+    // all round, the dot behind streaks too
+    let all_round = blurred([0.0, 0.0]);
+    assert_eq!(alpha(&original, 64, 118), 0);
+    assert!(alpha(&all_round, 64, 118) > 40, "nothing streaked all round: {}", alpha(&all_round, 64, 118));
 }
 
 #[test]
@@ -1231,6 +1283,32 @@ fn burnt_edges_burn_only_the_paint_under_a_thin_stroke() {
 }
 
 #[test]
+fn a_dual_brush_s_burnt_edges_burn_where_its_second_took_paint_away() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let orange = StrokeStyle::new(StrokeTool::Paint, [0.86, 0.6, 0.42], 1.0);
+    // a soft dot over an orange band, burnt edges on, as a dual brush whose second (by Normal)
+    // went elsewhere: the second took nothing away there, so its soft rim isn't burnt
+    let draw = |burnt_edges: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), orange);
+        canvas.add_stamps(&(0..64).map(|y| dot(Vec2::new(32.0, y as f32), 8.0)).collect::<Vec<_>>());
+        canvas.end_stroke();
+        let second = procraft_gpu::SecondStroke { style: orange, mode: 0, threshold: -1.0 };
+        canvas.begin_dual_stroke(doc.current(), StrokeStyle { hardness: 0.3, burnt_edges, ..orange }, second);
+        canvas.add_stamps(&[dot(Vec2::new(32.0, 32.0), 20.0)]);
+        canvas.add_second_stamps(&[dot(Vec2::new(4.0, 4.0), 2.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.read_layer(&gpu, doc.current()).unwrap()
+    };
+    let (base, burnt) = (draw(0.0), draw(1.0));
+    let (b, p) = (pixel(&burnt, 64, 32, 47), pixel(&base, 64, 32, 47));
+    assert!(b.iter().zip(p).all(|(b, p)| b.abs_diff(p) <= 1), "{b:?} {p:?}");
+}
+
+#[test]
 fn wet_paint_mixes_with_what_is_under_it() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
@@ -1240,16 +1318,20 @@ fn wet_paint_mixes_with_what_is_under_it() {
     canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.5, 0.5, 0.5], 1.0));
     canvas.add_stamps(&(0..64).map(|y| dot(Vec2::new(32.0, y as f32), 8.0)).collect::<Vec<_>>());
     canvas.end_stroke();
-    // white across it, wet (half water) with a strong pull: over the grey it mixes, and off it
-    // the watery paint it carries goes on thin
+    // white across it, wet (half water, a little charge) with a strong pull, half a pixel a
+    // millisecond (laid a display frame at a time): over the grey it mixes, and past it the grey
+    // it picked up goes on with it
     let wet = StrokeStyle {
         wet_pull: Some(0.85),
         dilution: 0.5,
+        load: 0.1,
         ..StrokeStyle::new(StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0)
     };
     canvas.begin_stroke(doc.current(), wet);
     canvas.add_stamps(
-        &(0..120).map(|i| Stamp::round(Vec2::new(4.0 + i as f32 * 0.5, 32.0), 4.0, 0.5)).collect::<Vec<_>>(),
+        &(0..120)
+            .map(|i| Stamp { time_ms: f64::from(i), ..Stamp::round(Vec2::new(4.0 + i as f32 * 0.5, 32.0), 4.0, 0.5) })
+            .collect::<Vec<_>>(),
     );
     canvas.end_stroke();
     canvas.render(&gpu, &mut doc, None);
@@ -1257,12 +1339,215 @@ fn wet_paint_mixes_with_what_is_under_it() {
     let over = pixel(&layer, 64, 32, 32);
     assert!(over[0] > 135 && over[0] < 250, "mixed over the band: {over:?}");
     let past = pixel(&layer, 64, 50, 32);
-    assert!(past[3] > 10 && past[3] < 220, "thin past the band: {past:?}");
+    assert!(past[3] > 128 && past[0] < 250 && past[0] >= over[0], "past the band: {past:?}");
     // as one undo step
     canvas.undo();
     canvas.render(&gpu, &mut doc, None);
     let back = pixel(&canvas.read_layer(&gpu, doc.current()).unwrap(), 64, 32, 32);
     assert!((126..=130).contains(&back[0]), "{back:?}");
+}
+
+#[test]
+fn a_slower_wet_stroke_runs_out_sooner() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // the same oily stroke drawn quickly and four times as slowly: laid a display frame at a
+    // time, the slower one lays over what was under each frame's first stamp more often, so
+    // once its charge has gone it thins sooner
+    let laid = |ms_a_stamp: f64| {
+        let mut doc = Document::new(400, 32);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let oily = StrokeStyle {
+            wet_pull: Some(0.96),
+            dilution: 0.85,
+            load: 0.46,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), oily);
+        canvas.add_stamps(
+            &(0..720)
+                .map(|i| Stamp {
+                    time_ms: f64::from(i) * ms_a_stamp,
+                    ..Stamp::round(Vec2::new(4.0 + i as f32 * 0.5, 16.0), 6.0, 1.0)
+                })
+                .collect::<Vec<_>>(),
+        );
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (pixel(&layer, 400, 60, 16)[3], pixel(&layer, 400, 340, 16)[3])
+    };
+    let (quick, slow) = (laid(0.5), laid(2.0));
+    // both loaded early on; long after the charge has gone, the slow one has less left
+    assert!(quick.0 > 150 && slow.0 > 150, "{quick:?} {slow:?}");
+    assert!(slow.1 + 20 < quick.1, "{quick:?} {slow:?}");
+}
+
+#[test]
+fn a_stamps_bleed_lays_its_strong_parts_whole_and_its_faint_ones_not_at_all() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // one soft dry stamp, without and with the pressure's bleed at its most
+    let laid = |bleed: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(
+            doc.current(),
+            StrokeStyle { hardness: 0.0, ..StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0) },
+        );
+        canvas.add_stamps(&[Stamp { grain_bleed: bleed, ..dot(Vec2::new(32.0, 32.0), 24.0) }]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (pixel(&layer, 64, 33, 32)[3], pixel(&layer, 64, 50, 32)[3])
+    };
+    let (plain, bled) = (laid(0.0), laid(1.0));
+    assert!(plain.0 > 240 && bled.0 > 240, "{plain:?} {bled:?}");
+    assert!(plain.1 > 20 && bled.1 == 0, "{plain:?} {bled:?}");
+}
+
+#[test]
+fn a_wet_stamps_bleed_lays_its_strong_parts_whole_and_its_faint_ones_not_at_all() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // one soft wet stamp, fully charged, without and with the pressure's bleed at its most
+    let laid = |bleed: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let wet = StrokeStyle {
+            wet_pull: Some(0.5),
+            dilution: 0.5,
+            load: 1.0,
+            hardness: 0.0,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), wet);
+        canvas.add_stamps(&[Stamp { grain_bleed: bleed, ..Stamp::round(Vec2::new(32.0, 32.0), 24.0, 1.0) }]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (pixel(&layer, 64, 33, 32)[3], pixel(&layer, 64, 50, 32)[3])
+    };
+    let (plain, bled) = (laid(0.0), laid(1.0));
+    // the middle laid whole either way; the faint rim only without the bleed
+    assert!(plain.0 > 240 && bled.0 > 240, "{plain:?} {bled:?}");
+    assert!(plain.1 > 20 && bled.1 == 0, "{plain:?} {bled:?}");
+}
+
+#[test]
+fn dry_paint_laid_in_place_builds_up_by_what_is_left() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // twenty stamps a quarter strong on one spot, each in a frame of its own: laid in place, each
+    // adds a quarter of what is left, squared, as the rule says (drawn over, they would reach
+    // 1 - 0.75^20)
+    let mut doc = Document::new(32, 32);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let style = StrokeStyle {
+        rendering: Rendering::Gradual,
+        laid_in_place: true,
+        ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+    };
+    canvas.begin_stroke(doc.current(), style);
+    canvas.add_stamps(
+        &(0..20)
+            .map(|i| Stamp { time_ms: f64::from(i) * 20.0, ..Stamp::round(Vec2::new(16.0, 16.0), 8.0, 0.25) })
+            .collect::<Vec<_>>(),
+    );
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let laid = f32::from(pixel(&canvas.read_layer(&gpu, doc.current()).unwrap(), 32, 16, 16)[3]) / 255.0;
+    let mut built = 0.0f32;
+    for _ in 0..20 {
+        built += 0.25 * (1.0 - built) * (1.0 - built);
+    }
+    assert!((laid - built).abs() < 0.03, "{laid} for {built}");
+    assert!(laid < 0.95);
+}
+
+#[test]
+fn a_dual_brush_s_paint_laid_in_place_is_cut_by_its_second() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a dry brush laid in place on the right, its second on the left: by Multiply the paint shows
+    // only where both went; by Normal the second shows on its own too, also when its stamps come
+    // first; and undo takes it all back
+    let laid = |mode: u32, second_first: bool| {
+        let mut doc = Document::new(64, 32);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let first = StrokeStyle {
+            rendering: Rendering::Gradual,
+            laid_in_place: true,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        let second = procraft_gpu::SecondStroke {
+            style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0),
+            mode,
+            threshold: -1.0,
+        };
+        canvas.begin_dual_stroke(doc.current(), first, second);
+        if second_first {
+            canvas.add_second_stamps(&[Stamp::round(Vec2::new(24.0, 16.0), 12.0, 1.0)]);
+            canvas.render(&gpu, &mut doc, None);
+        }
+        canvas.add_stamps(&[Stamp::round(Vec2::new(40.0, 16.0), 12.0, 1.0)]);
+        if !second_first {
+            canvas.add_second_stamps(&[Stamp::round(Vec2::new(24.0, 16.0), 12.0, 1.0)]);
+        }
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        let shown = [16, 32, 48].map(|x| pixel(&layer, 64, x, 16)[3]);
+        canvas.undo();
+        canvas.render(&gpu, &mut doc, None);
+        let undone = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (shown, [16, 32, 48].map(|x| pixel(&undone, 64, x, 16)[3]))
+    };
+    let (multiply, undone) = laid(1, false);
+    assert!(multiply[0] == 0 && multiply[1] > 240 && multiply[2] == 0, "{multiply:?}");
+    assert_eq!(undone, [0, 0, 0]);
+    for second_first in [false, true] {
+        let (normal, _) = laid(0, second_first);
+        assert!(normal.iter().all(|&a| a > 240), "{normal:?} {second_first}");
+    }
+}
+
+#[test]
+fn modulated_wet_paint_lays_a_pixel_once() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a long wet stroke whose charge runs out: building up, its later stamps keep laying the
+    // paint they drag along over pixels already painted; building up by what is left (the
+    // modulated mode), a pixel takes paint only from the first stamps to reach it, so the stroke
+    // falls away towards its fresh paint
+    let late = |rendering: Rendering| {
+        let mut doc = Document::new(400, 32);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let wet = StrokeStyle {
+            wet_pull: Some(0.8),
+            dilution: 0.8,
+            load: 0.45,
+            grade: 1.0,
+            rendering,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), wet);
+        canvas.add_stamps(
+            &(0..760)
+                .map(|i| Stamp {
+                    time_ms: f64::from(i),
+                    ..Stamp::round(Vec2::new(10.0 + i as f32 * 0.5, 16.0), 10.0, 1.0)
+                })
+                .collect::<Vec<_>>(),
+        );
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (pixel(&layer, 400, 20, 16)[3], pixel(&layer, 400, 350, 16)[3])
+    };
+    let (built, kept) = (late(Rendering::BuildUp), late(Rendering::Gradual));
+    assert!(built.0 > 100 && kept.0 > 100, "{built:?} {kept:?}");
+    assert!(u16::from(kept.1) + 20 < u16::from(built.1), "{built:?} {kept:?}");
 }
 
 #[test]
@@ -1434,6 +1719,37 @@ fn wet_attack_puts_more_paint_over_what_is_there() {
     // nearly the paint, a little of the grey under it picked up on the way
     assert!(hard > soft, "attack {hard} vs none {soft}");
     assert!(hard >= 235, "attack {hard} vs none {soft}");
+}
+
+#[test]
+fn wet_paint_thins_over_bare_paper_as_far_as_its_pull_lets_it() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a wet stroke across bare paper: how covered it is near its start and at its far end
+    let stroke = |pull: f32| {
+        let mut doc = Document::new(128, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let wet = StrokeStyle {
+            wet_pull: Some(pull),
+            dilution: 0.84,
+            load: 0.46,
+            ..StrokeStyle::new(StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), wet);
+        canvas.add_stamps(
+            &(0..140).map(|i| Stamp::round(Vec2::new(10.0 + i as f32 * 0.7, 32.0), 4.0, 0.5)).collect::<Vec<_>>(),
+        );
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (pixel(&layer, 128, 14, 32)[3], pixel(&layer, 128, 100, 32)[3])
+    };
+    let (dry_start, dry_end) = stroke(0.0);
+    let (kept_start, kept_end) = stroke(0.96);
+    // loaded at the start either way; without pull the brush gives its paint up to the paper
+    assert!(dry_start > 150 && kept_start > 150, "starts: {dry_start} and {kept_start}");
+    assert!(dry_end + 20 < kept_end, "ends: no pull {dry_end}, pull {kept_end}");
+    assert!(dry_end < dry_start, "no pull thins: {dry_start} to {dry_end}");
 }
 
 #[test]
@@ -1693,4 +2009,88 @@ fn a_drawn_stroke_takes_its_grain_from_a_picture_of_its_own() {
     canvas.end_stroke();
     canvas.render(&gpu, &mut doc, None);
     assert_eq!(pixel(&canvas.read_layer(&gpu, doc.current()).unwrap(), 32, 8, 8)[3], 255);
+}
+
+#[test]
+fn the_grey_view_shows_each_colour_as_the_grey_of_its_luminance() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    // a background of each sRGB primary, shown in colour and in greys
+    for (colour, grey) in [([1.0, 0.0, 0.0], 0.2126f32), ([0.0, 1.0, 0.0], 0.7152), ([0.0, 0.0, 1.0], 0.0722)] {
+        let mut doc = Document::new(10, 10);
+        doc.background = colour;
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: 10, height: 10, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let to_screen = View::fit((10, 10), (10, 10)).to_screen();
+        let shown = |canvas: &mut Canvas, doc: &mut Document, grey: bool| {
+            canvas.render(
+                &gpu,
+                doc,
+                Some(Target {
+                    view: &view,
+                    format,
+                    size: (10, 10),
+                    to_screen,
+                    surround: [0.0; 3],
+                    grid: None,
+                    selection: None,
+                    backdrop: None,
+                    convert: None,
+                    lut: None,
+                    crisp_from: f32::INFINITY,
+                    grey,
+                }),
+            );
+            pixel(&read(&gpu, &target, 10, 10), 10, 5, 5)
+        };
+        let byte = |c: f32| (c * 255.0).round() as u8;
+        assert_eq!(shown(&mut canvas, &mut doc, false), [byte(colour[0]), byte(colour[1]), byte(colour[2]), 255]);
+        // the grey of the same luminance, through sRGB's tone curve
+        let encoded = if grey <= 0.003_130_8 { grey * 12.92 } else { 1.055 * grey.powf(1.0 / 2.4) - 0.055 };
+        let [r, g, b, a] = shown(&mut canvas, &mut doc, true);
+        assert!(r == g && g == b && a == 255, "{colour:?} shown {r} {g} {b}");
+        assert!(i32::from(r).abs_diff(i32::from(byte(encoded))) <= 1, "{colour:?}: {r}, not {}", byte(encoded));
+        // the composite itself (what's read and recorded) keeps its colour
+        assert_eq!(
+            pixel(&canvas.read_composite(&gpu).unwrap(), 10, 5, 5)[..3],
+            [byte(colour[0]), byte(colour[1]), byte(colour[2])]
+        );
+    }
+}
+
+#[test]
+fn a_small_stamp_s_thin_shape_keeps_its_strength() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(64, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    // a shape that is an upright line, a sixteenth of its width across
+    let n = procraft_engine::textures::TEXTURE_SIZE;
+    let pixels = (0..n * n).map(|i| if (i % n).abs_diff(n / 2) < n / 32 { 255 } else { 0 }).collect();
+    let mut brush = Brush::round_pen();
+    brush.shape.source = procraft_engine::brush::Source::new(pixels);
+    let mut s = StrokeStyle { rendering: Rendering::Strongest, ..style(StrokeTool::Paint, 1.0) };
+    canvas.use_sources(&gpu, &mut s, &brush);
+    canvas.begin_stroke(doc.current(), s);
+    // stamps 9 px across, a fifth of a pixel apart: each lays its line where it passes. Read no
+    // coarser than the cap, the line keeps nearly its full strength; at the level the size alone
+    // would pick it is averaged to a faint grey, which the strongest stamp can't build past
+    let stamps: Vec<Stamp> = (0..100).map(|k| dot(Vec2::new(22.0 + k as f32 * 0.2, 32.0), 4.5)).collect();
+    canvas.add_stamps(&stamps);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    let laid: Vec<u8> = (26..38).map(|x| pixel(&layer, 64, x, 32)[3]).collect();
+    assert!(laid.iter().all(|&a| a > 200), "{laid:?}");
 }

@@ -129,7 +129,15 @@ impl State {
         brush.streamline = 0.0;
         brush.set_setting("stabilization", 0.0);
         let mut builder = StrokeBuilder::with_seed(brush, old.diameter(), old.pointer(), 0x5eed_1234);
-        let samples = resample(&edit.shape.outline(), edit.pressure);
+        // an ellipse goes where the stroke went, each of its points taken onto it: a stroke that
+        // didn't close stays open there, as drawn, rather than meeting itself in a seam
+        let outline = match edit.shape.kind {
+            ShapeKind::Ellipse | ShapeKind::Circle => {
+                along_ellipse(&edit.shape.nodes, &edit.drawn).unwrap_or_else(|| edit.shape.outline())
+            }
+            _ => edit.shape.outline(),
+        };
+        let samples = resample(&outline, edit.pressure);
         builder.add(&samples);
         let stamps = builder.finish();
         if let Some(canvas) = self.canvas.as_mut() {
@@ -212,6 +220,46 @@ impl State {
         })
     }
 }
+
+/// The way along the ellipse `nodes` (its centre, then the ends of its two axes) that the stroke
+/// `drawn` went: each of its points taken onto the ellipse at the same turn about the centre in the
+/// ellipse's own frame, joined along the ellipse, never more than once round. None for a flat
+/// ellipse or no stroke.
+fn along_ellipse(nodes: &[Vec2], drawn: &[Vec2]) -> Option<Vec<Vec2>> {
+    let (c, a, b) = (*nodes.first()?, *nodes.get(1)? - *nodes.first()?, *nodes.get(2)? - *nodes.first()?);
+    let det = a.x * b.y - a.y * b.x;
+    if det.abs() < 1e-6 || drawn.len() < 2 {
+        return None;
+    }
+    // the turn of a point in the ellipse's frame: (cos, sin) are its coordinates along the axes
+    let turn = |p: Vec2| {
+        let d = p - c;
+        let (u, v) = ((d.x * b.y - d.y * b.x) / det, (a.x * d.y - a.y * d.x) / det);
+        v.atan2(u)
+    };
+    let on = |t: f32| c + a * t.cos() + b * t.sin();
+    use std::f32::consts::{PI, TAU};
+    let step = TAU / ELLIPSE_STEPS;
+    let start = turn(*drawn.first()?);
+    let mut t = start;
+    let mut out = vec![on(t)];
+    for p in drawn.iter().skip(1).filter(|p| p.is_finite()) {
+        // the shorter way round, and never past once round either way from the start
+        let d = ((turn(*p) - t + PI).rem_euclid(TAU) - PI).clamp(start - TAU - t, start + TAU - t);
+        let n = (d.abs() / step).ceil().max(1.0) as usize;
+        for k in 1..=n {
+            out.push(on(t + d * k as f32 / n as f32));
+        }
+        t += d;
+        if (t - start).abs() >= TAU {
+            break;
+        }
+    }
+    Some(out)
+}
+
+/// Steps once round an ellipse followed from one of the stroke's points to the next.
+const ELLIPSE_STEPS: f32 = 128.0;
 
 /// Points `step` apart along `outline`, as stroke samples at `pressure`.
 fn resample(outline: &[Vec2], pressure: f32) -> Vec<Sample> {

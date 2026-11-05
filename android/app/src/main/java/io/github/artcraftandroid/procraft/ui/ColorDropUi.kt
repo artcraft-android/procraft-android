@@ -1,5 +1,6 @@
 package io.github.artcraftandroid.procraft.ui
 
+import android.os.SystemClock
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -39,6 +40,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -88,17 +90,28 @@ internal fun Modifier.dropSource(vm: CanvasViewModel, swatch: (() -> Int)? = nul
                 DropTouch.GONE -> Unit
                 DropTouch.DRAG -> {
                     var at = origin + down.position
-                    vm.dropDragStart(at, colour?.invoke())
+                    vm.dropDragStart(at, colour?.invoke(), down.type == PointerType.Stylus || down.type == PointerType.Eraser, down.uptimeMillis)
                     var lifted = false
                     while (true) {
-                        val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                        // held still a moment, the colour comes to rest (a slide then sets the threshold)
+                        val due = vm.dropRestDue()
+                        val event = if (due == null) {
+                            awaitPointerEvent()
+                        } else {
+                            withTimeoutOrNull((due - SystemClock.uptimeMillis()).coerceAtLeast(1L)) { awaitPointerEvent() }
+                        }
+                        if (event == null) {
+                            vm.dropDragRest(SystemClock.uptimeMillis())
+                            continue
+                        }
+                        val c = event.changes.firstOrNull { it.id == down.id } ?: break
                         c.consume()
                         at = origin + c.position
                         if (!c.pressed) {
                             lifted = true
                             break
                         }
-                        vm.dropDragMove(at)
+                        vm.dropDragMove(at, c.uptimeMillis)
                     }
                     // let go on the top bar, it is put back
                     vm.dropDragEnd(at.takeIf { lifted && it.y > Pc.BarHeight.toPx() })

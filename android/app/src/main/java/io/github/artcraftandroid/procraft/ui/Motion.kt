@@ -61,6 +61,8 @@ object Motion {
 
     /** The ease in and out of most timed changes. */
     val EaseInOut: Easing = CubicBezierEasing(0.42f, 0f, 0.58f, 1f)
+    /** Slowing as it arrives. */
+    val EaseOut: Easing = CubicBezierEasing(0f, 0f, 0.58f, 1f)
 
     /**
      * The band under the top bar telling what undo and redo did: down from behind the bar in 0.3 s
@@ -108,6 +110,10 @@ object Motion {
     const val ARTWORK_PRESSED = 0.87f
     const val ARTWORK_PRESS_DELAY_MS = 100L
     const val ARTWORK_LIFTED = 1.07f
+    /** Two fingers spread on an artwork: let go spread this much or more, it opens in Preview. */
+    const val ARTWORK_PINCH_OPEN = 1.35f
+    /** An artwork spread open, let go: settling fitted over the screen (or back into its place). */
+    fun pinchSettle(): AnimationSpec<Float> = tween(300, easing = EaseOut)
     fun artworkPress(): AnimationSpec<Float> = tween(150, easing = EaseInOut)
     fun artworkLift(): AnimationSpec<Float> = tween(250, easing = EaseInOut)
     fun artworkDrop(): AnimationSpec<Float> = tween(250, easing = EaseInOut)

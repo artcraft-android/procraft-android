@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -84,6 +85,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
+import io.github.artcraftandroid.procraft.canvas.RECENT_SET
 import io.github.artcraftandroid.procraft.core.BrushInfo
 import io.github.artcraftandroid.procraft.core.ToolKind
 import kotlinx.coroutines.launch
@@ -227,12 +229,22 @@ private fun SearchResults(vm: CanvasViewModel, query: String) {
 @Composable
 fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) {
     val sets = vm.brushSets
-    val shown = sets.getOrNull(vm.shownSet) ?: return
+    // the Recent set, or one of the library's
+    val recent = vm.shownSet == RECENT_SET
+    val shown = sets.getOrNull(vm.shownSet)
+    if (shown == null && !recent) return
+    // the brushes shown, and whether each is pinned in the Recent set
+    val listed = if (recent) {
+        vm.recentBrushes.mapNotNull { r -> sets.getOrNull(r.set.toInt())?.brushes?.getOrNull(r.index.toInt())?.let { it to r.pinned } }
+    } else {
+        shown?.brushes.orEmpty().map { it to false }
+    }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     var adding by remember { mutableStateOf(false) }
     var setMenu by remember { mutableStateOf<Int?>(null) }
+    var recentMenu by remember { mutableStateOf(false) }
     // the set menu's icon grid is open; where its Customize icon row and the set are on screen
     var iconPicker by remember { mutableStateOf(false) }
     var customizeRow by remember { mutableStateOf<Pair<Float, Float>?>(null) }
@@ -263,7 +275,7 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             if (set != b.set.toInt()) vm.moveBrush(b, set, 0)
             return
         }
-        val target = shown.brushes.firstOrNull { brushBounds["${it.set}-${it.index}"]?.contains(dragAt) == true } ?: return
+        val target = shown?.brushes?.firstOrNull { brushBounds["${it.set}-${it.index}"]?.contains(dragAt) == true } ?: return
         vm.moveBrush(b, target.set.toInt(), target.index.toInt())
     }
     // a set dropped onto another takes its place
@@ -314,9 +326,12 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Icon(PcIcons.PlusMedium, contentDescription = "Add", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
                 // hangs below the plus, their right edges in line
                 LibraryMenu(adding, androidx.compose.ui.graphics.TransformOrigin(1f, 0f), MenuPlace { a, size -> IntOffset(a.right - size.width, a.bottom) }, onDismiss = { adding = false }, overPanel = true) {
-                    MenuItem(PcIcons.MenuNewBrush, "Create new brush") {
-                        adding = false
-                        vm.newBrush()
+                    // the Recent set holds no brushes of its own to add one to
+                    if (!recent) {
+                        MenuItem(PcIcons.MenuNewBrush, "Create new brush") {
+                            adding = false
+                            vm.newBrush()
+                        }
                     }
                     MenuItem(PcIcons.MenuNewSet, "Create new set") {
                         adding = false
@@ -352,6 +367,32 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 contentPadding = PaddingValues(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                // the brushes last painted with, and those pinned there, above the sets
+                item {
+                    Box {
+                        Row(
+                            Modifier.fillMaxWidth().height(50.dp).clip(RoundedCornerShape(12.dp))
+                                .background(if (recent) Pc.RowSelected else Pc.SetCell)
+                                .clickable { if (recent) recentMenu = true else vm.showSet(RECENT_SET) },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            val ink = if (recent) Color.White else Pc.PanelTitle
+                            Icon(PcIcons.RecentSet, contentDescription = null, tint = ink, modifier = Modifier.padding(start = 4.dp).requiredSize(40.dp))
+                            Text("Recent", color = ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(start = 1.dp, end = 8.dp))
+                        }
+                        // as a set's menu, of one item and 65 tall, as measured
+                        val left = with(density) { 6.dp.roundToPx() }
+                        val below = with(density) { MenuTop.roundToPx() }
+                        LibraryMenu(recentMenu, androidx.compose.ui.graphics.TransformOrigin(1f, 0.5f), MenuPlace(below) { a, size -> IntOffset(a.left - size.width - left, a.center.y - size.height / 2) }, onDismiss = { recentMenu = false }) {
+                            Box(Modifier.padding(vertical = 5.5.dp)) {
+                                MenuItem(PcIcons.MenuClear, "Clear") {
+                                    recentMenu = false
+                                    vm.clearRecentBrushes()
+                                }
+                            }
+                        }
+                    }
+                }
                 itemsIndexed(sets) { i, set ->
                     val selected = i == vm.shownSet
                     Box {
@@ -479,15 +520,24 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             }
             // another set's brushes replace these at once (rows fade only as brushes come and go)
             androidx.compose.runtime.key(vm.shownSet) {
+                // a brush found from the Recent set is scrolled to in its own
+                val listState = rememberLazyListState()
+                LaunchedEffect(vm.foundBrush) {
+                    val found = vm.foundBrush ?: return@LaunchedEffect
+                    vm.foundBrush = null
+                    listed.indexOfFirst { (b, _) -> "${b.set}-${b.index}" == found }.takeIf { it >= 0 }?.let { listState.scrollToItem(it) }
+                }
                 LazyColumn(
                     Modifier.weight(1f).fillMaxHeight().background(Pc.BrushColumn),
+                    state = listState,
                     contentPadding = PaddingValues(start = 12.dp, top = 9.75.dp, end = 12.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(BrushGap),
                 ) {
-                    items(shown.brushes, key = { "${it.set}-${it.index}" }) { b ->
+                    items(listed, key = { (b, _) -> "${b.set}-${b.index}" }) { (b, pinned) ->
                         val key = "${b.set}-${b.index}"
-                        // the current brush, or the brush last chosen in this set
-                        val selected = vm.highlighted(b)
+                        // the current brush, or the brush last chosen in this set (in the Recent
+                        // set the current brush alone)
+                        val selected = if (recent) vm.currentBrush?.let { it.set == b.set && it.index == b.index } == true else vm.highlighted(b)
                         // previews go by place, and are dropped when the library changes
                         val preview = vm.previews[key]
                         LaunchedEffect(key, preview == null) { if (preview == null) vm.loadPreview(b) }
@@ -495,14 +545,30 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                             SwipeBrush(
                                 open = vm.swipedBrush == key,
                                 onOpen = { vm.swipedBrush = if (it) key else null },
-                                onShare = { share(b) },
-                                onDuplicate = { vm.duplicateBrush(b) },
-                                onDelete = { deleting = "Delete this brush?" to { vm.deleteBrush(b) } },
+                                actions = if (recent) {
+                                    listOf(
+                                        SwipeAction(PcIcons.SwipeFind, "Find") { vm.findBrush(b) },
+                                        if (pinned) {
+                                            SwipeAction(PcIcons.SwipeUnpin, "Unpin") { vm.pinRecentBrush(b, false) }
+                                        } else {
+                                            SwipeAction(PcIcons.SwipePin, "Pin") { vm.pinRecentBrush(b, true) }
+                                        },
+                                        SwipeAction(PcIcons.SwipeClear, "Clear") { vm.clearRecentBrush(b) },
+                                    )
+                                } else {
+                                    listOf(
+                                        SwipeAction(PcIcons.SwipeShare, "Share") { share(b) },
+                                        SwipeAction(PcIcons.SwipeDuplicate, "Duplicate") { vm.duplicateBrush(b) },
+                                        SwipeAction(PcIcons.SwipeTrash, "Delete", SwipeDelete, Color.White) { deleting = "Delete this brush?" to { vm.deleteBrush(b) } },
+                                    )
+                                },
                             ) {
                                 Box(
                                     Modifier.fillMaxWidth().height(BrushHeight).onGloballyPositioned { brushBounds[key] = it.boundsInWindow() }
                                         .alpha(if (dragged?.let { d -> d.set == b.set && d.index == b.index } == true) 0.3f else 1f)
-                                        .pointerInput(key) {
+                                        .pointerInput(key, recent) {
+                                            // the Recent set's brushes stay where they are
+                                            if (recent) return@pointerInput
                                             detectDragGesturesAfterLongPress(
                                                 onDragStart = { at ->
                                                     vm.swipedBrush = null
@@ -543,6 +609,13 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                                         )
                                     }
                                     BrushName(b.name, selected, vm.shadedNames[key] == true, Modifier.padding(start = 18.dp, top = 11.75.dp))
+                                    // a pinned brush's mark, at the cell's top right
+                                    if (pinned) {
+                                        Icon(
+                                            PcIcons.PinMark, contentDescription = "Pinned", tint = if (selected) Color.White else Pc.PanelTitle,
+                                            modifier = Modifier.align(Alignment.TopEnd).padding(top = 12.5.dp, end = 11.dp).requiredSize(16.dp),
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -610,14 +683,18 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     )
 }
 
-/** A brush that slides away to the left, showing Share, Duplicate and Delete in its place. */
+/** A button a swiped brush shows: its icon and label, its colours, and what it does. */
+private class SwipeAction(val icon: ImageVector, val label: String, val fill: Color = SwipeFill, val ink: Color = SwipeInk, val onClick: () -> Unit)
+
+/**
+ * A brush that slides away to the left, showing its [actions] in its place: Share, Duplicate and
+ * Delete; in the Recent set Find, Pin (or Unpin) and Clear.
+ */
 @Composable
 private fun SwipeBrush(
     open: Boolean,
     onOpen: (Boolean) -> Unit,
-    onShare: () -> Unit,
-    onDuplicate: () -> Unit,
-    onDelete: () -> Unit,
+    actions: List<SwipeAction>,
     content: @Composable () -> Unit,
 ) {
     var width by remember { mutableIntStateOf(0) }
@@ -627,17 +704,11 @@ private fun SwipeBrush(
     Box(Modifier.fillMaxWidth().onSizeChanged { width = it.width }.clipToBounds()) {
         if (offset.value < 0f) {
             Row(Modifier.matchParentSize(), horizontalArrangement = Arrangement.spacedBy(SwipeGap)) {
-                SwipeButton(PcIcons.SwipeShare, "Share", SwipeFill, SwipeInk, Modifier.weight(1f)) {
-                    onOpen(false)
-                    onShare()
-                }
-                SwipeButton(PcIcons.SwipeDuplicate, "Duplicate", SwipeFill, SwipeInk, Modifier.weight(1f)) {
-                    onOpen(false)
-                    onDuplicate()
-                }
-                SwipeButton(PcIcons.SwipeTrash, "Delete", SwipeDelete, Color.White, Modifier.weight(1f)) {
-                    onOpen(false)
-                    onDelete()
+                for (a in actions) {
+                    SwipeButton(a.icon, a.label, a.fill, a.ink, Modifier.weight(1f)) {
+                        onOpen(false)
+                        a.onClick()
+                    }
                 }
             }
         }

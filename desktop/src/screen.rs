@@ -35,11 +35,36 @@ struct Pad {
 const INTERFACE_WIDE: bool = false;
 
 impl Screen {
-    /// The window's surface, and a device that can show it.
-    pub fn new(window: Arc<Window>) -> Result<Screen, String> {
-        let instance = Gpu::instance();
-        let surface = instance.create_surface(Arc::clone(&window)).map_err(|e| e.to_string())?;
-        let gpu = Gpu::for_surface(instance, &surface).map_err(|e| e.to_string())?;
+    /// The window's surface, and a device that can show it, and which backend made them: the
+    /// first from backend `from` on (round to those before it) that makes both and builds the
+    /// canvases' pipelines without an error (see `Gpu::instance_after`).
+    pub fn new(window: Arc<Window>, from: usize) -> Result<(Screen, usize), String> {
+        let count = Gpu::backend_count().max(1);
+        let mut tries = 0;
+        let (surface, gpu, backend) = loop {
+            let backend = (from + tries) % count;
+            let last = tries + 1 >= count;
+            let instance = Gpu::instance_after(backend).ok_or("no graphics backend")?;
+            let made = instance.create_surface(Arc::clone(&window)).map_err(|e| e.to_string()).and_then(|surface| {
+                let gpu = Gpu::for_surface(instance, &surface).map_err(|e| e.to_string())?;
+                // a driver that fails on the canvases' pipelines gives way to the next backend
+                gpu.prepare_canvases();
+                if !last && (gpu.errors() > 0 || gpu.is_lost()) {
+                    return Err(format!(
+                        "the canvases' pipelines: {} GPU errors, lost {}",
+                        gpu.errors(),
+                        gpu.is_lost()
+                    ));
+                }
+                Ok((surface, gpu))
+            });
+            match made {
+                Ok((surface, gpu)) => break (surface, gpu, backend),
+                Err(e) if !last => log::warn!("{e}; trying the next backend"),
+                Err(e) => return Err(e),
+            }
+            tries += 1;
+        };
         let size = window.inner_size();
         let config = configure(&gpu, &surface, (size.width, size.height), INTERFACE_WIDE);
         let format = config.as_ref().map_or(wgpu::TextureFormat::Bgra8Unorm, |c| c.format);
@@ -55,7 +80,7 @@ impl Screen {
             window.theme(),
             usize::try_from(gpu.max_texture_size()).ok(),
         );
-        Ok(Screen { window, surface, config, gpu, egui, renderer, format, pad: None })
+        Ok((Screen { window, surface, config, gpu, egui, renderer, format, pad: None }, backend))
     }
 
     /// The window is `width` × `height` pixels now.
@@ -134,6 +159,8 @@ impl Screen {
     ) -> Option<Duration> {
         let egui::FullOutput { platform_output, mut textures_delta, shapes, pixels_per_point, viewport_output } =
             output;
+        // a pen read by the app itself (on Wayland) has its cursor set apart from the mouse's
+        crate::pen::set_cursor(platform_output.cursor_icon);
         self.egui.handle_platform_output(&self.window, platform_output);
         let interface_after = viewport_output
             .get(&egui::ViewportId::ROOT)

@@ -264,13 +264,15 @@ fun CanvasInfo(vm: CanvasViewModel) {
                 4 -> {
                     val (frames, bytes) = vm.timeLapseInfo()
                     val seconds = frames / TimeLapse.FPS
+                    // the settings the artwork was made with (quality, resolution, codec)
+                    val (quality, resolution, codec) = io.github.artcraftandroid.procraft.core.timeLapseSettingNames(vm.timeLapseSettings().core())
                     Rows(
                         listOf(
                             "Video length" to "%02d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60),
-                            "Video quality" to "Good",
-                            "Video resolution" to "720p",
+                            "Video quality" to quality,
+                            "Video resolution" to resolution,
                             "Video file size" to megabytes(bytes),
-                            "Video codec" to "H.264",
+                            "Video codec" to codec,
                         ),
                     )
                 }

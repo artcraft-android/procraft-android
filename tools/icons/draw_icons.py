@@ -180,6 +180,14 @@ def share_tab():
     return unary_union([tray, shaft, head])
 
 
+def import_tab():
+    """Import: a narrow tray with an arrow coming down into it."""
+    tray = LineString([(6, 12.5), (6, 20), (18, 20), (18, 12.5)]).buffer(1.2, join_style='round')
+    shaft = capsule((12, 3.6), (12, 14.1), 1.2)
+    head = soft(Polygon([(12, 16.2), (15.6, 12.3), (8.4, 12.3)]), 0.4)
+    return unary_union([tray, shaft, head])
+
+
 def video_tab():
     """Video: a camera, its body and its lens."""
     body = soft(box(2.5, 6.5, 15.5, 17.5), 2.0)
@@ -981,6 +989,28 @@ def displaced():
     return unary_union([front, ring(14.6, 10.4, 6.4, 1.6).difference(front.buffer(1.2))])
 
 
+def ray_burst():
+    """Positional (perspective blur): a dot with rays streaming out of it all round."""
+    parts = [Point(12, 12).buffer(1.9, quad_segs=16)]
+    for i in range(8):
+        a = math.radians(45 * i)
+        reach = 8.6 if i % 2 == 0 else 7.4
+        parts.append(capsule((12 + 4.6 * math.cos(a), 12 + 4.6 * math.sin(a)),
+                             (12 + reach * math.cos(a), 12 + reach * math.sin(a)), 1.2))
+    return unary_union(parts)
+
+
+def ray_fan():
+    """Directional (perspective blur): the same rays fanning out of the dot one way only, up."""
+    cx, cy = 12.0, 16.0
+    parts = [Point(cx, cy).buffer(1.9, quad_segs=16)]
+    for deg, reach in ((-72, 8.8), (-36, 10.2), (0, 11.4), (36, 10.2), (72, 8.8)):
+        a = math.radians(deg - 90)
+        parts.append(capsule((cx + 5.6 * math.cos(a), cy + 5.6 * math.sin(a)),
+                             (cx + reach * math.cos(a), cy + reach * math.sin(a)), 1.2))
+    return unary_union(parts)
+
+
 def blocky():
     """Artifact: a mosaic of blocks of all sizes."""
     blocks = [(2.5, 4.0, 9.0, 10.5), (10.2, 4.0, 14.0, 7.8), (15.2, 4.0, 21.5, 8.5), (10.2, 9.0, 14.0, 13.0),
@@ -1437,6 +1467,60 @@ def thumbtack():
     return rotate(tack, -30, origin=(12, 12))
 
 
+def hourglass():
+    """Recent: an hourglass, its sand run down."""
+    caps = unary_union([soft(box(5.0, 2.0, 19.0, 4.6), 1.0), soft(box(5.0, 19.4, 19.0, 22.0), 1.0)])
+    glass = soft(Polygon([(6.6, 4.0), (17.4, 4.0), (17.4, 6.6), (13.4, 12.0), (17.4, 17.4), (17.4, 20.0), (6.6, 20.0),
+                          (6.6, 17.4), (10.6, 12.0), (6.6, 6.6)]), 0.5)
+    # the upper bulb empty but for its rim; the lower one full
+    empty = soft(Polygon([(8.8, 5.8), (15.2, 5.8), (15.2, 6.2), (12.0, 10.4), (8.8, 6.2)]), 0.3)
+    return unary_union([caps, glass.difference(empty)])
+
+
+def target():
+    """Find: a target's ring with four ticks and a dot in the middle."""
+    ring = Point(12, 12).buffer(6.6, quad_segs=24).difference(Point(12, 12).buffer(4.2, quad_segs=24))
+    ticks = [capsule((12 + dx * 6.0, 12 + dy * 6.0), (12 + dx * 8.8, 12 + dy * 8.8), 1.2)
+             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))]
+    return unary_union([ring, *ticks, Point(12, 12).buffer(1.6, quad_segs=12)])
+
+
+def upright_tack():
+    """Pin: a thumbtack standing on its point."""
+    return unary_union([soft(box(6.6, 2.0, 17.4, 5.0), 1.0), box(9.2, 4.6, 14.8, 12.4), soft(box(5.1, 12.0, 18.9, 14.8), 0.8),
+                        capsule((12.0, 14.8), (12.0, 22.0), 0.8)])
+
+
+def struck_tack():
+    """Unpin: the standing thumbtack struck through."""
+    a, b = (4.6, 3.4), (19.4, 21.4)
+    return unary_union([upright_tack().difference(capsule(a, b, 0.9 + GAP)), capsule(a, b, 0.9)])
+
+
+def broom():
+    """Clear: a broom sweeping two specks of dust."""
+    head = soft(Polygon([(0.0, -3.6), (7.0, -2.2), (7.0, 2.2), (0.0, 3.6)]), 0.6)
+    for side in (-1, 1):
+        head = head.difference(capsule((-1.0, side * 1.2), (3.2, side * 0.9), 0.5))
+    band = soft(box(7.6, -2.0, 9.6, 2.0), 0.4)
+    stick = capsule((9.6, 0.0), (17.5, 0.0), 1.2)
+    dust = [Point(14.6, 20.6).buffer(1.1, quad_segs=10), Point(20.6, 20.4).buffer(0.8, quad_segs=10)]
+    return unary_union([along_diagonal(unary_union([head, band, stick]), (5.5, 18.5)), *dust])
+
+
+def question_disc():
+    """A question (an alert's): a disc with a question mark cut out of it."""
+    c = (12.0, 9.2)
+    ring = Point(c).buffer(3.4, quad_segs=24).difference(Point(c).buffer(1.2, quad_segs=24))
+    # the hook: the ring from the left over the top to below the right, its open end rounded
+    turn = [(c[0] + 9 * math.cos(math.radians(a)), c[1] - 9 * math.sin(math.radians(a))) for a in range(200, -71, -10)]
+    hook = ring.intersection(Polygon([c] + turn))
+    end = Point(c[0] + 2.3 * math.cos(math.radians(200)), c[1] - 2.3 * math.sin(math.radians(200))).buffer(1.1, quad_segs=12)
+    stem = unary_union([capsule((12.0, 11.5), (12.0, 13.6), 1.1), capsule((13.6, 11.6), (12.0, 12.4), 1.1)])
+    dot = Point(12.0, 17.0).buffer(1.35, quad_segs=12)
+    return Point(12, 12).buffer(10.0, quad_segs=32).difference(unary_union([hook, end, stem, dot]))
+
+
 def four_squares():
     """Hard Mix: four squares."""
     return unary_union([soft(box(x, y, x + 8.0, y + 8.0), 1.0) for x in (3.0, 13.0) for y in (3.0, 13.0)])
@@ -1498,7 +1582,7 @@ DRAWINGS = {
     'actions': wrench, 'adjustments': wand, 'selection': selection, 'transform': arrow,
     'brush': paintbrush, 'smudge': fingertip, 'erase': eraser, 'layers': layers,
     'undo': lambda: turning_arrow(False), 'redo': lambda: turning_arrow(True),
-    'tabadd': plus, 'tabcanvas': canvas_tab, 'tabshare': share_tab, 'tabvideo': video_tab,
+    'tabadd': plus, 'tabcanvas': canvas_tab, 'tabshare': share_tab, 'tabimport': import_tab, 'tabvideo': video_tab,
     'tabprefs': prefs_tab, 'tabhelp': help_tab,
     'automatic': wand, 'freehand': lasso, 'rectangleshape': rectangle_tool, 'ellipseshape': ellipse_tool,
     'selectadd': lambda: sign_in_disc(False), 'selectremove': lambda: sign_in_disc(True), 'invert': invert,
@@ -1537,9 +1621,12 @@ DRAWINGS = {
     'shapesquare': lambda: solid_rect(True), 'guidegrid': grid_guide, 'guideisometric': iso_cube, 'guidesymmetry': symmetry,
     'noiseclouds': wisps, 'noisebillows': billows, 'noiseridges': ridges, 'halftonefull': halftone_full,
     'halftonescreen': halftone_screen, 'halftonenews': newspaper, 'chromaperspective': outward_arrows,
-    'chromadisplace': displaced, 'glitchartifact': blocky, 'glitchwave': square_wave, 'glitchsignal': static_screen,
+    'chromadisplace': displaced, 'perspectivepositional': ray_burst, 'perspectivedirectional': ray_fan,
+    'glitchartifact': blocky, 'glitchwave': square_wave, 'glitchsignal': static_screen,
     'glitchdiverge': fork, 'grainmoving': moving_grain, 'graintexturized': grain_tile, 'brushpaintedon': painted_on,
     'swipe-share': share_tab, 'swipe-duplicate': duplicate, 'textlayer': text_layer,
+    'recentset': hourglass, 'swipe-find': target, 'swipe-pin': upright_tack, 'swipe-unpin': struck_tack,
+    'swipe-clear': broom, 'menuclear': broom, 'pinmark': upright_tack, 'alertquestion': question_disc,
 }
 DRAWINGS.update({f'set-{k}': draw for k, draw in enumerate(SET_ICONS)})
 DRAWINGS.update({f'blend-{k}': draw for k, draw in BLENDS.items()})

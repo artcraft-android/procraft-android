@@ -8,7 +8,7 @@ use std::time::Instant;
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, Rect, Stroke, Ui, vec2};
 use procraft_core::{
     Blocked, CanvasInfo, CanvasSession, GesturePurpose, KeyShortcut, ModeButton, ModeSwitch, Modes, QuickAction,
-    ToolKind, TouchCommand, mode_switch,
+    ToolKind, TouchCommand, Trigger, mode_switch,
 };
 
 use crate::actions::{Act, Actions};
@@ -109,6 +109,8 @@ pub struct Interface {
     /// The artwork's folder in the gallery.
     pub artwork_dir: Option<String>,
     quick_menu: crate::quick_menu::QuickMenu,
+    /// A pen button set to the eyedropper is held: its loupe follows the pen until it is let go.
+    pen_picking: bool,
     /// An open adjustment's bar, panel and tap menu; Gradient Map's library (kept between runs).
     adjustments: crate::adjustments::Adjustments,
     gradients: std::sync::Arc<procraft_core::Gradients>,
@@ -132,6 +134,8 @@ pub struct Interface {
     prefs: crate::prefs::Prefs,
     side_bar_shown: bool,
     licences: bool,
+    /// The keyboard shortcuts' list, from Help or while Ctrl (⌘) is held.
+    shortcut_list: crate::shortcuts::Shortcuts,
     /// Animation Assist's bar, while it is on, and sharing the layers as an animation.
     animation: crate::animation::AnimationBar,
     animated_export: Option<crate::animated_export::AnimatedExport>,
@@ -202,6 +206,7 @@ impl Default for Interface {
             guide_editor: crate::guide_editor::GuideEditor::default(),
             artwork_dir: None,
             quick_menu: crate::quick_menu::QuickMenu::default(),
+            pen_picking: false,
             adjustments: crate::adjustments::Adjustments::default(),
             gradients: procraft_core::Gradients::open(
                 crate::files::app_dir().join("gradients.json").to_string_lossy().into_owned(),
@@ -218,6 +223,7 @@ impl Default for Interface {
             prefs: crate::prefs::Prefs::kept(),
             side_bar_shown: true,
             licences: false,
+            shortcut_list: Default::default(),
             animation: crate::animation::AnimationBar::default(),
             animated_export: None,
             ended_export: None,
@@ -296,7 +302,7 @@ impl Interface {
     }
 
     /// A new artwork just started: without time-lapse if that is turned off.
-    pub fn started_new(&self) {
+    pub fn started_new(&mut self) {
         if self.prefs.no_time_lapse {
             self.time_lapse.set_recording(false);
         }
@@ -381,15 +387,38 @@ impl Interface {
         // a mask current paints with masks' own colour
         let on_mask = session.layers().iter().any(|l| l.current && l.kind == procraft_core::LayerType::Mask);
         self.colours.follow_mask(session, on_mask);
+        // the eyedropper picks from the current layer or the canvas, as the preferences say
+        session.set_eyedropper_from_layer(self.prefs.eyedropper_layer);
         if self.inserted(session) || brushes_coming {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
-        // the pen's barrel button: what Gesture controls set it to do (else the eraser and back),
-        // where the pointer is
-        for _ in 0..crate::pen::take_button_presses() {
-            let (x, y) = input.cursor().unwrap_or_default();
-            input.commands.extend(session.touch_pen_button(false, x, y));
-            self.library.tool_changed();
+        // the pen's barrel buttons: what Gesture controls set Pen button and Pen second button to
+        // do (the first, set to nothing, the eraser and back), where the pointer is; one set to
+        // the eyedropper picks while it is held, where the pen hovers, and lets go to take it
+        let presses = crate::pen::take_button_presses();
+        let held = crate::pen::buttons_held();
+        let purposes = [Trigger::PenDoubleTap, Trigger::PenSqueeze].map(|t| self.gestures.purpose_of(t));
+        let (x, y) = input.cursor().unwrap_or_default();
+        for (button, (&pressed, &is_held)) in presses.iter().zip(&held).enumerate() {
+            if purposes.get(button).copied().flatten() == Some(GesturePurpose::Eyedropper) {
+                if is_held || pressed > 0 {
+                    self.overlays.pick(&ctx, session, x, y);
+                    self.pen_picking = true;
+                    ctx.request_repaint();
+                }
+                continue;
+            }
+            for _ in 0..pressed {
+                input.commands.extend(session.touch_pen_button(button == 1, x, y));
+                self.library.tool_changed();
+            }
+        }
+        let eyedropper_held = held.iter().zip(&purposes).any(|(h, p)| *h && *p == Some(GesturePurpose::Eyedropper));
+        if self.pen_picking && !eyedropper_held {
+            self.pen_picking = false;
+            if let Some(rgb) = self.overlays.finish_pick() {
+                self.colours.set_rgb(session, rgb);
+            }
         }
         self.commands(&ctx, session, input);
         // the brush library closed: what was done in it is kept
@@ -491,12 +520,14 @@ impl Interface {
         // the drawing guide's editor: the canvas, the guide and the editor alone
         if self.guide_editor.open {
             self.canvas_rect = Rect::EVERYTHING;
-            guide_lines(&ctx, session);
+            guide_lines(ui.painter(), session);
             self.guide_editor.show(&ctx, &mut self.look, session);
             session.set_backdrops(Vec::new());
             self.popover_open = false;
             return;
         }
+        // the drawing guide over the canvas, under the bars (and shown full screen too)
+        guide_lines(ui.painter(), session);
         if self.bars_hidden {
             // full screen: the canvas alone (the overlays still show)
             self.canvas_rect = Rect::EVERYTHING;
@@ -586,11 +617,12 @@ impl Interface {
         if taps.redo {
             self.redo(session);
         }
-        // the modify button tapped opens or closes the eyedropper; held, touches pick meanwhile
-        // (unless one did, its tap then does nothing)
+        // the modify button tapped does what Tap □ is set to (opens or closes the eyedropper at
+        // first); held, touches do what □ + Touch and □ + Pen are set to (unless one did, its tap
+        // then does nothing)
         let used = session.set_modify_held(taps.modify_down);
         if taps.modify_tapped && !used {
-            session.set_pick_next(!session.pick_next());
+            self.tap_modify(&ctx, session);
         }
         self.hover_cursor(&ctx, session, &info, input);
         self.selection_pointer(&ctx, input);
@@ -622,6 +654,12 @@ impl Interface {
         }
         // the colour panel dragged out by its grabber: a window over the canvas until closed
         self.colours.show_floating(&ctx, &mut self.look, session, &mut backdrops);
+        // the colour model chosen on the panel, kept; the panel works in the one kept
+        if let Some(model) = self.colours.model_chosen.take() {
+            self.prefs.colour_model = model;
+            self.prefs.keep();
+        }
+        self.colours.set_model(self.prefs.colour_model);
         if self.open != Some(Popover::Actions) {
             self.actions_panel.closed();
         }
@@ -638,7 +676,6 @@ impl Interface {
         ) {
             self.adjustment_asked(session, asked);
         }
-        guide_lines(&ctx, session);
         let hold = std::time::Duration::from_secs_f32(self.gestures.delay(GesturePurpose::Eyedropper).max(0.0));
         match self.reference.show(&ctx, &mut self.look, session, hold) {
             Some(crate::reference::Picked::Moving { at, side, rgba, rgb }) => {
@@ -700,6 +737,8 @@ impl Interface {
         if self.licences && crate::licences::show(&ctx) {
             self.licences = false;
         }
+        let keys_to_canvas = self.canvas_shown() && !ctx.egui_wants_keyboard_input() && !self.keys_taken();
+        self.shortcut_list.show(&ctx, keys_to_canvas);
         self.name_colour(&ctx);
         self.place_canvas(session, ctx.pixels_per_point());
         session.set_backdrops(backdrops);
@@ -896,13 +935,7 @@ impl Interface {
             .interactable(false)
             .fixed_pos(at)
             .show(ctx, |ui| {
-                let painter = ui.painter();
-                // a fine cross, dark on a light edge
-                for (width, colour) in [(3.0, Color32::WHITE), (1.0, Color32::BLACK)] {
-                    let stroke = egui::Stroke::new(width, colour);
-                    painter.line_segment([at - egui::vec2(7.0, 0.0), at + egui::vec2(7.0, 0.0)], stroke);
-                    painter.line_segment([at - egui::vec2(0.0, 7.0), at + egui::vec2(0.0, 7.0)], stroke);
-                }
+                fine_cross(ui.painter(), at);
                 // the kind below right of it, dark in a light halo (seen on any colour)
                 let beside = at + egui::vec2(20.0, 20.0);
                 for nudge in [(-1.5, 0.0), (1.5, 0.0), (0.0, -1.5), (0.0, 1.5)] {
@@ -914,18 +947,49 @@ impl Interface {
     }
 
     /// The brush's outline where the mouse hovers over the canvas, as the pen's hover shows it,
-    /// while nothing is pressed (and while it would paint there).
+    /// while nothing is pressed (and while it would paint there). Where the canvas would paint, the
+    /// system's pointer gives way to the outline; where none shows (the brush too small to see,
+    /// its outline none, or the brush cursor off) to a fine cross; and while a stroke is drawn to
+    /// nothing, the stroke showing where the pen is (with the outline, if Prefs show it then).
     fn hover_cursor(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo, input: &mut Input) {
+        let painting = session.adjustment_shown().adjustment.is_none() && !self.selection.on && !self.transform.on;
+        let on_canvas = |at: egui::Pos2| {
+            self.canvas_rect.contains(at) && ctx.layer_id_at(at).is_none_or(|l| l.order == egui::Order::Background)
+        };
         if !input.idle() {
+            if painting && input.pressing() && ctx.pointer_latest_pos().is_some_and(on_canvas) {
+                ctx.set_cursor_icon(egui::CursorIcon::None);
+            }
             return;
         }
-        let painting = session.adjustment_shown().adjustment.is_none() && !self.selection.on && !self.transform.on;
-        input.hover_shown = painting && self.prefs.cursor_shown(true);
+        // the outline or the cross follows the pointer, so its moves draw a frame
+        input.hover_shown = painting;
         let ppp = ctx.pixels_per_point();
-        let at = input.hovering().filter(|_| input.hover_shown).map(|(x, y)| egui::pos2(x, y) / ppp).filter(|at| {
-            self.canvas_rect.contains(*at) && ctx.layer_id_at(*at).is_none_or(|l| l.order == egui::Order::Background)
-        });
-        self.overlays.hover(session, info, ppp, at);
+        let at = input.hovering().filter(|_| painting).map(|(x, y)| egui::pos2(x, y) / ppp).filter(|at| on_canvas(*at));
+        self.overlays.hover(session, info, ppp, at.filter(|_| self.prefs.cursor_shown(true)));
+        if let Some(at) = at.filter(|_| !self.overlays.outline_shown()) {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+            egui::Area::new(egui::Id::unique("hover cross"))
+                .order(egui::Order::Tooltip)
+                .interactable(false)
+                .fixed_pos(at)
+                .show(ctx, |ui| fine_cross(ui.painter(), at));
+        }
+    }
+
+    /// The modify button tapped: what Tap □ is set to do, as the Android app does it.
+    fn tap_modify(&mut self, ctx: &egui::Context, session: &CanvasSession) {
+        match self.gestures.purpose_of(Trigger::TapModify) {
+            Some(GesturePurpose::Eyedropper) => session.set_pick_next(!session.pick_next()),
+            Some(GesturePurpose::Quickmenu) => self.quick_menu.toggle(ctx.content_rect().center()),
+            Some(GesturePurpose::CopyPaste) => self.copy_paste = true,
+            Some(GesturePurpose::Quickshape) => {
+                if let Some(info) = session.quickshape_last() {
+                    self.snapped(info);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Does what the touches asked.
@@ -971,7 +1035,9 @@ impl Interface {
                 TouchCommand::Cursor { x, y } if self.prefs.cursor_shown(false) => {
                     self.overlays.cursor(ctx, session, Some((x, y)));
                 }
-                TouchCommand::Cursor { .. } => {}
+                // not shown while painting: the outline hovering where the stroke began goes away
+                // (else it stays there, left behind)
+                TouchCommand::Cursor { .. } => self.overlays.cursor(ctx, session, None),
                 TouchCommand::CursorGone => self.overlays.cursor(ctx, session, None),
                 TouchCommand::FillThreshold { threshold } => {
                     self.drop.slid(threshold);
@@ -1778,6 +1844,9 @@ impl Interface {
                     self.open = None;
                     self.text.edit(session, id);
                 }
+                if std::mem::take(&mut self.layers.layer_opacity) {
+                    self.start_layer_opacity(session);
+                }
                 shown
             }
             Popover::Colour => {
@@ -1807,6 +1876,7 @@ impl Interface {
                     animation: assist.as_ref().is_some_and(|a| !a.pages),
                     pages: assist.as_ref().is_some_and(|a| a.pages),
                     time_lapse: self.time_lapse.recording(),
+                    time_lapse_recorded: self.time_lapse.recorded(),
                     reference: self.reference.on,
                     guide: session.guide().on,
                     side_bar: self.side_bar_shown,
@@ -1847,6 +1917,10 @@ impl Interface {
                         }
                     }
                     Some(Act::Licences) => self.licences = true,
+                    Some(Act::Shortcuts) => {
+                        self.open = None;
+                        self.shortcut_list.open = true;
+                    }
                     Some(Act::ModelFlat) => session.set_model_flat(!session.model_flat()),
                     Some(Act::ModelAnimated(format)) => {
                         self.open = None;
@@ -1901,6 +1975,7 @@ impl Interface {
                             session,
                             self.artwork_dir.clone(),
                             self.time_lapse.info(),
+                            self.time_lapse.settings(),
                         ));
                     }
                     Some(Act::Cut) => self.cut_layer(session),
@@ -1916,6 +1991,7 @@ impl Interface {
                         | Act::RightHanded
                         | Act::BrushCursor
                         | Act::ProjectCanvas
+                        | Act::EyedropperLayer
                         | Act::ResetInput,
                     )
                     | None => {}
@@ -2048,6 +2124,7 @@ impl Interface {
             KeyShortcut::DuplicateLayer => self.duplicate_current(session),
             KeyShortcut::Interface => self.toggle_bars(session),
             KeyShortcut::ClearLayer => self.clear_layer(session),
+            KeyShortcut::GreyView => session.set_grey_view(!session.grey_view()),
             KeyShortcut::BrushSize { by } => session.set_brush_size((info.size + by).clamp(0.0, 1.0)),
             KeyShortcut::Nudge { dx, dy } => self.transform.moved(session.transform_arrow(dx, dy)),
         }
@@ -2115,18 +2192,29 @@ fn toggle_guide_kind(session: &CanvasSession, kind: procraft_core::GuideType) {
     session.set_guide_kind(kind);
 }
 
-fn guide_lines(ctx: &egui::Context, session: &CanvasSession) {
+/// The drawing guide's lines, painted on `painter`: the main panel's own, before the top bar is, so
+/// that the bar (and everything over the canvas) shows above them, as the canvas under it does.
+fn guide_lines(painter: &egui::Painter, session: &CanvasSession) {
     let g = session.guide();
     if !g.on {
         return;
     }
-    let ppp = ctx.pixels_per_point();
+    let ppp = painter.ctx().pixels_per_point();
     let [r, gr, b] = [0, 1, 2].map(|k| (g.color.get(k).copied().unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8);
     let colour = Color32::from_rgba_unmultiplied(r, gr, b, (g.opacity.clamp(0.0, 1.0) * 255.0).round() as u8);
     let stroke = Stroke::new(0.25 + 1.5 * g.thickness, colour);
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::unique("drawing guide")));
     for &[x0, y0, x1, y1] in g.lines.as_chunks::<4>().0 {
         painter.line_segment([egui::pos2(x0, y0) / ppp, egui::pos2(x1, y1) / ppp], stroke);
+    }
+}
+
+/// The desktop's pointer over the canvas where no outline shows: a fine cross at `at` (points),
+/// dark on a light edge, seen on any colour.
+fn fine_cross(painter: &egui::Painter, at: egui::Pos2) {
+    for (width, colour) in [(3.0, Color32::WHITE), (1.0, Color32::BLACK)] {
+        let stroke = Stroke::new(width, colour);
+        painter.line_segment([at - vec2(7.0, 0.0), at + vec2(7.0, 0.0)], stroke);
+        painter.line_segment([at - vec2(0.0, 7.0), at + vec2(0.0, 7.0)], stroke);
     }
 }
 
@@ -2180,6 +2268,7 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
                     full = true;
                 }
             }
+            !full && added < MOST_VIDEO_FRAMES
         });
         return match (added, read) {
             (0, Ok(_)) if full => Inserted::Frames { added: 0, full: true, assist: false },

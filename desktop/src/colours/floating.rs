@@ -91,7 +91,7 @@ impl Colours {
                 match self.mode {
                     Mode::Disc => {
                         let disc = Rect::from_min_size(pos2(at.x + 10.0, at.y + 53.0), vec2(240.0, 240.0));
-                        self.pickers.disc(ui, &mut self.hsv, disc);
+                        self.model_disc(ui, disc);
                     }
                     Mode::Classic => {
                         let square = Rect::from_min_size(pos2(at.x + 6.0, at.y + 50.0), vec2(248.0, 248.0));

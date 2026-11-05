@@ -58,6 +58,13 @@ fn fs_display(i: Out) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0);
     }
     var rgb = c.rgb / c.a;
+    // in perceptual greys, as a soft proof to a grey profile (sRGB's tone curve) shows it: each
+    // colour as the grey of its luminance (Rec. 709 on linear light, as the colour panel's HSY′
+    // luma is, so colours of one Y′ show as one grey), keeping its CIE lightness
+    if (du.m1.w > 0.5) {
+        let y = dot(vec3<f32>(0.2126, 0.7152, 0.0722), srgb_to_linear(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0))));
+        rgb = linear_to_srgb(vec3<f32>(clamp(y, 0.0, 1.0)));
+    }
     // into the target's colour space (another profile's primaries), clipped to it
     if (du.c0.w > 0.5) {
         let lin = srgb_to_linear(rgb);

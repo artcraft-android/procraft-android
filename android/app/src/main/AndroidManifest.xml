@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <application
         android:allowBackup="false"
@@ -32,6 +33,113 @@
                 <data android:mimeType="image/*" />
                 <data android:mimeType="application/x-photoshop" />
                 <data android:mimeType="application/pdf" />
+                <data android:mimeType="application/x-zip-compressed" />
+                <data android:mimeType="application/x-zip" />
+            </intent-filter>
+            <!-- our own kinds of file by their names, whatever type the file manager gives them
+                 (often none known for these), or none at all -->
+            <intent-filter tools:ignore="AppLinkUrlError">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathSuffix=".procreate" />
+                <data android:pathPattern=".*\\.procreate" />
+                <data android:pathPattern=".*\\..*\\.procreate" />
+                <data android:pathSuffix=".procraft" />
+                <data android:pathPattern=".*\\.procraft" />
+                <data android:pathPattern=".*\\..*\\.procraft" />
+                <data android:pathSuffix=".brush" />
+                <data android:pathPattern=".*\\.brush" />
+                <data android:pathPattern=".*\\..*\\.brush" />
+                <data android:pathSuffix=".brushset" />
+                <data android:pathPattern=".*\\.brushset" />
+                <data android:pathPattern=".*\\..*\\.brushset" />
+                <data android:pathSuffix=".swatches" />
+                <data android:pathPattern=".*\\.swatches" />
+                <data android:pathPattern=".*\\..*\\.swatches" />
+                <data android:pathSuffix=".psd" />
+                <data android:pathPattern=".*\\.psd" />
+                <data android:pathPattern=".*\\..*\\.psd" />
+                <data android:pathSuffix=".abr" />
+                <data android:pathPattern=".*\\.abr" />
+                <data android:pathPattern=".*\\..*\\.abr" />
+                <data android:pathSuffix=".sut" />
+                <data android:pathPattern=".*\\.sut" />
+                <data android:pathPattern=".*\\..*\\.sut" />
+                <data android:pathSuffix=".kpp" />
+                <data android:pathPattern=".*\\.kpp" />
+                <data android:pathPattern=".*\\..*\\.kpp" />
+                <data android:pathSuffix=".gbr" />
+                <data android:pathPattern=".*\\.gbr" />
+                <data android:pathPattern=".*\\..*\\.gbr" />
+                <data android:pathSuffix=".gih" />
+                <data android:pathPattern=".*\\.gih" />
+                <data android:pathPattern=".*\\..*\\.gih" />
+                <data android:pathSuffix=".vbr" />
+                <data android:pathPattern=".*\\.vbr" />
+                <data android:pathPattern=".*\\..*\\.vbr" />
+                <data android:pathSuffix=".aco" />
+                <data android:pathPattern=".*\\.aco" />
+                <data android:pathPattern=".*\\..*\\.aco" />
+                <data android:pathSuffix=".ase" />
+                <data android:pathPattern=".*\\.ase" />
+                <data android:pathPattern=".*\\..*\\.ase" />
+                <data android:pathSuffix=".usdz" />
+                <data android:pathPattern=".*\\.usdz" />
+                <data android:pathPattern=".*\\..*\\.usdz" />
+            </intent-filter>
+            <intent-filter tools:ignore="AppLinkUrlError">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:pathSuffix=".procreate" />
+                <data android:pathPattern=".*\\.procreate" />
+                <data android:pathPattern=".*\\..*\\.procreate" />
+                <data android:pathSuffix=".procraft" />
+                <data android:pathPattern=".*\\.procraft" />
+                <data android:pathPattern=".*\\..*\\.procraft" />
+                <data android:pathSuffix=".brush" />
+                <data android:pathPattern=".*\\.brush" />
+                <data android:pathPattern=".*\\..*\\.brush" />
+                <data android:pathSuffix=".brushset" />
+                <data android:pathPattern=".*\\.brushset" />
+                <data android:pathPattern=".*\\..*\\.brushset" />
+                <data android:pathSuffix=".swatches" />
+                <data android:pathPattern=".*\\.swatches" />
+                <data android:pathPattern=".*\\..*\\.swatches" />
+                <data android:pathSuffix=".psd" />
+                <data android:pathPattern=".*\\.psd" />
+                <data android:pathPattern=".*\\..*\\.psd" />
+                <data android:pathSuffix=".abr" />
+                <data android:pathPattern=".*\\.abr" />
+                <data android:pathPattern=".*\\..*\\.abr" />
+                <data android:pathSuffix=".sut" />
+                <data android:pathPattern=".*\\.sut" />
+                <data android:pathPattern=".*\\..*\\.sut" />
+                <data android:pathSuffix=".kpp" />
+                <data android:pathPattern=".*\\.kpp" />
+                <data android:pathPattern=".*\\..*\\.kpp" />
+                <data android:pathSuffix=".gbr" />
+                <data android:pathPattern=".*\\.gbr" />
+                <data android:pathPattern=".*\\..*\\.gbr" />
+                <data android:pathSuffix=".gih" />
+                <data android:pathPattern=".*\\.gih" />
+                <data android:pathPattern=".*\\..*\\.gih" />
+                <data android:pathSuffix=".vbr" />
+                <data android:pathPattern=".*\\.vbr" />
+                <data android:pathPattern=".*\\..*\\.vbr" />
+                <data android:pathSuffix=".aco" />
+                <data android:pathPattern=".*\\.aco" />
+                <data android:pathPattern=".*\\..*\\.aco" />
+                <data android:pathSuffix=".ase" />
+                <data android:pathPattern=".*\\.ase" />
+                <data android:pathPattern=".*\\..*\\.ase" />
+                <data android:pathSuffix=".usdz" />
+                <data android:pathPattern=".*\\.usdz" />
+                <data android:pathPattern=".*\\..*\\.usdz" />
             </intent-filter>
         </activity>
 
@@ -45,6 +153,13 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+        <!-- the share sheet's Save to device: the system's picker over a see-through window -->
+        <activity
+            android:name=".SaveToDeviceActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!-- the home screen's Recent artwork widget -->
         <receiver

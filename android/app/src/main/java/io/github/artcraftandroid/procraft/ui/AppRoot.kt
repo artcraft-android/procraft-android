@@ -48,8 +48,9 @@ fun AppRoot(vm: CanvasViewModel) {
     ProCraftTheme {
         if (vm.screen == Screen.GALLERY) {
             ZoomingGallery(vm, overlay = false)
-            // a share from the gallery shows its card there
+            // a share from the gallery shows its card there, and a file brought in its own
             ExportProgress(vm.exportShown, vm::cancelExport)
+            ImportProgress(vm.importShown, vm::cancelImport)
             return@ProCraftTheme
         }
         // back closes an open panel first, then leaves the artwork for the gallery
@@ -232,6 +233,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 ) { Box(Modifier.fillMaxSize()) { GestureControls(vm) } }
                 BlockedDialog(vm)
                 ExportProgress(vm.exportShown, vm::cancelExport)
+                ImportProgress(vm.importShown, vm::cancelImport)
                 // a passing message goes in the band under the top bar, as what undo and redo did
                 vm.message?.let { text ->
                     androidx.compose.runtime.LaunchedEffect(text) {
@@ -248,6 +250,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 // the gallery zooming into the artwork as it opens, over everything
                 ZoomingGallery(vm, overlay = true)
                 if (vm.adjustment == Adjustment.CLONE) ClonePuck(vm)
+                if (vm.adjustment == Adjustment.PERSPECTIVE_BLUR) PerspectivePuck(vm)
                 if (vm.recoloring) RecolorReticle(vm)
                 QuickShapeHandles(vm)
                 // a full-screen page covers the timeline, as it covers the canvas
@@ -285,6 +288,7 @@ fun AppRoot(vm: CanvasViewModel) {
                             Adjustment.BLOOM -> BloomPanel(vm, Modifier)
                             Adjustment.HALFTONE -> HalftonePanel(vm, Modifier)
                             Adjustment.CHROMATIC_ABERRATION -> ChromaticPanel(vm, Modifier)
+                            Adjustment.PERSPECTIVE_BLUR -> PerspectivePanel(vm, Modifier)
                             Adjustment.LIQUIFY -> LiquifyPanel(vm, maxWidth, maxHeight, Modifier)
                             else -> Unit
                         }
@@ -362,7 +366,7 @@ private fun BlockedDialog(vm: CanvasViewModel) {
 /** The adjustments whose controls are a panel at the bottom of the screen. */
 private val BottomPanels = setOf(
     Adjustment.HSB, Adjustment.COLOR_BALANCE, Adjustment.CURVES, Adjustment.GRADIENT_MAP, Adjustment.GLITCH, Adjustment.NOISE,
-    Adjustment.BLOOM, Adjustment.HALFTONE, Adjustment.CHROMATIC_ABERRATION, Adjustment.LIQUIFY,
+    Adjustment.BLOOM, Adjustment.HALFTONE, Adjustment.CHROMATIC_ABERRATION, Adjustment.PERSPECTIVE_BLUR, Adjustment.LIQUIFY,
 )
 
 /**

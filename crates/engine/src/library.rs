@@ -319,9 +319,16 @@ fn paper(image: u32, scale: f32, depth: f32) -> Grain {
     Grain { image: Some(image), mode: GrainMode::Texturized, scale, depth, source: None }
 }
 
-/// A grain that travels with each stamp.
-fn moving(image: u32, scale: f32, depth: f32) -> Grain {
-    Grain { image: Some(image), mode: GrainMode::Moving, scale, depth, source: None }
+/// A grain that travels with each stamp, its tile `tile` canvas pixels (cropped, as the brushes
+/// here keep it).
+fn moving(image: u32, tile: f32, depth: f32) -> Grain {
+    Grain {
+        image: Some(image),
+        mode: GrainMode::Moving,
+        scale: Grain::scale_for_cropped_tile(tile),
+        depth,
+        source: None,
+    }
 }
 
 /// A pressure curve that rises fast: a light touch already gives most of the line.
@@ -469,7 +476,7 @@ fn flat_brush() -> Brush {
                 roundness: 1.0,
                 ..Shape::default()
             },
-            grain: Grain { image: Some(grain::WEAVE), mode: GrainMode::Moving, scale: 90.0, depth: 0.35, source: None },
+            grain: moving(grain::WEAVE, 90.0, 0.35),
             // aligned stamps that don't build up keep the shape's streaks
             rendering: Rendering::Strongest,
             pen_taper: Taper::NONE,
@@ -489,7 +496,7 @@ fn bristle_brush() -> Brush {
                 rotation: std::f32::consts::FRAC_PI_2,
                 ..Shape::default()
             },
-            grain: Grain { image: Some(grain::FIBRE), mode: GrainMode::Moving, scale: 120.0, depth: 0.6, source: None },
+            grain: moving(grain::FIBRE, 120.0, 0.6),
             flow: 0.9,
             ..flat_brush()
         },

@@ -330,12 +330,43 @@ pub fn text_runs(
     size: f32,
     colour: Color32,
 ) -> Rect {
+    tracked_runs(painter, at, align, runs, size, colour, TRACKING)
+}
+
+/// The tracking (em) that brings the face to the measured widths of rows' labels near 15 points,
+/// where [`TRACKING`] (set over 18-24 point labels) draws them narrower.
+pub const ROW_TRACKING: f32 = -0.024;
+
+/// Text of one weight, its letters `tracking` em apart; see [`text_runs`].
+#[allow(clippy::too_many_arguments)]
+pub fn text_tracked(
+    painter: &Painter,
+    at: Pos2,
+    align: Align2,
+    text: &str,
+    size: f32,
+    weight: Weight,
+    colour: Color32,
+    tracking: f32,
+) -> Rect {
+    tracked_runs(painter, at, align, &[(text, weight)], size, colour, tracking)
+}
+
+fn tracked_runs(
+    painter: &Painter,
+    at: Pos2,
+    align: Align2,
+    runs: &[(&str, Weight)],
+    size: f32,
+    colour: Color32,
+    tracking: f32,
+) -> Rect {
     let mut job = LayoutJob::default();
     for (text, weight) in runs {
         let format = TextFormat {
             font_id: weight.font(size),
             color: colour,
-            extra_letter_spacing: TRACKING * size,
+            extra_letter_spacing: tracking * size,
             ..Default::default()
         };
         job.append(text, 0.0, format);

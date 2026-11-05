@@ -441,28 +441,23 @@ fn slider_panel(
             let diameter = info.brush_diameter * info.zoom / ppp;
             let r = (diameter / 2.0).clamp(1.5, (SLIDER_PANEL_SIDE / 2.0 - 8.0).max(1.5));
             let alpha = if which == Slider::Size { 1.0 } else { info.opacity.clamp(0.02, 1.0) };
-            let loops = session.brush_outline();
-            if loops.is_empty() {
-                painter.circle_filled(rect.center(), r, Color32::WHITE.gamma_multiply(alpha));
-            } else {
-                // the shape filled into a picture its size on the screen, kept while it stays so
-                let side = ((2.0 * r * ppp).ceil() as usize).max(2);
-                let key = outline_key(&loops, side);
-                let id = egui::Id::unique("size preview shape");
-                let kept = ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(id)).filter(|(k, _)| *k == key);
-                let texture = kept.map(|(_, t)| t).unwrap_or_else(|| {
-                    let t = ctx.load_texture(
-                        "size preview shape",
-                        filled_outline(&loops, side),
-                        egui::TextureOptions::LINEAR,
-                    );
-                    ctx.data_mut(|d| d.insert_temp(id, (key, t.clone())));
-                    t
-                });
-                let shown = Rect::from_center_size(rect.center(), vec2(2.0 * r, 2.0 * r));
-                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                painter.image(texture.id(), shown, uv, Color32::WHITE.gamma_multiply(alpha));
-            }
+            // the brush's stamp as it paints (soft where it is soft) in a picture its size on the
+            // screen, kept while it stays so
+            let side = ((2.0 * r * ppp).ceil() as usize).max(2);
+            let stamp = session.brush_stamp(side as u32);
+            let key = stamp_key(&stamp, side);
+            let id = egui::Id::unique("size preview stamp");
+            let kept = ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(id)).filter(|(k, _)| *k == key);
+            let texture = kept.map(|(_, t)| t).unwrap_or_else(|| {
+                let pixels = stamp.iter().map(|&a| Color32::from_white_alpha(a)).collect();
+                let picture = egui::ColorImage { size: [side, side], pixels, ..Default::default() };
+                let t = ctx.load_texture("size preview stamp", picture, egui::TextureOptions::LINEAR);
+                ctx.data_mut(|d| d.insert_temp(id, (key, t.clone())));
+                t
+            });
+            let shown = Rect::from_center_size(rect.center(), vec2(2.0 * r, 2.0 * r));
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+            painter.image(texture.id(), shown, uv, Color32::WHITE.gamma_multiply(alpha));
             let size = which == Slider::Size;
             let value = if size { info.size } else { info.opacity };
             let on_notch = session.slider_notch_at(size, value).is_some();
@@ -480,78 +475,11 @@ fn slider_panel(
     toggled
 }
 
-/// What a filled outline (`loops`, at `side` pixels) is known by, to make its picture once.
-fn outline_key(loops: &[Vec<f32>], side: usize) -> u64 {
+/// What a stamp's picture (`side` pixels square) is known by, to make its texture once.
+fn stamp_key(stamp: &[u8], side: usize) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     side.hash(&mut h);
-    for ring in loops {
-        ring.len().hash(&mut h);
-        for v in ring {
-            v.to_bits().hash(&mut h);
-        }
-    }
+    stamp.hash(&mut h);
     h.finish()
-}
-
-/// A brush's outline (`loops` of x, y across its diameter, about its middle) filled white into a
-/// `side` x `side` picture, a hole where one loop lies inside another, its edges smoothed by four
-/// rows of crossings to a pixel.
-fn filled_outline(loops: &[Vec<f32>], side: usize) -> egui::ColorImage {
-    const SUB: usize = 4;
-    let n = side as f32;
-    let at = |&[x, y]: &[f32; 2]| ((x + 0.5) * n, (y + 0.5) * n);
-    let edges: Vec<((f32, f32), (f32, f32))> = loops
-        .iter()
-        .flat_map(|ring| {
-            let points: Vec<(f32, f32)> = ring.as_chunks::<2>().0.iter().map(at).collect();
-            let next: Vec<(f32, f32)> = points.iter().skip(1).chain(points.first()).copied().collect();
-            points.into_iter().zip(next)
-        })
-        .collect();
-    let mut cover = vec![0.0f32; side * side];
-    for row in 0..side * SUB {
-        let y = (row as f32 + 0.5) / SUB as f32;
-        let mut xs: Vec<f32> = edges
-            .iter()
-            .filter(|((_, y0), (_, y1))| (*y0 <= y) != (*y1 <= y))
-            .map(|((x0, y0), (x1, y1))| x0 + (y - y0) / (y1 - y0) * (x1 - x0))
-            .collect();
-        xs.sort_by(f32::total_cmp);
-        let line = (row / SUB) * side;
-        for &[a, b] in xs.as_chunks::<2>().0 {
-            let (a, b) = (a.max(0.0), b.min(n));
-            let mut x = a.floor() as usize;
-            while (x as f32) < b && x < side {
-                let covered = ((x + 1) as f32).min(b) - (x as f32).max(a);
-                if let Some(c) = cover.get_mut(line + x) {
-                    *c += covered.max(0.0) / SUB as f32;
-                }
-                x += 1;
-            }
-        }
-    }
-    let pixels = cover.iter().map(|&c| Color32::from_white_alpha((c.clamp(0.0, 1.0) * 255.0).round() as u8)).collect();
-    egui::ColorImage { size: [side, side], pixels, ..Default::default() }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_outline_fills_inside_and_leaves_its_hole() {
-        // a square most of the picture, a hole a third across in its middle
-        let outer = vec![-0.4, -0.4, 0.4, -0.4, 0.4, 0.4, -0.4, 0.4];
-        let hole = vec![-0.15, -0.15, 0.15, -0.15, 0.15, 0.15, -0.15, 0.15];
-        let picture = filled_outline(&[outer, hole], 40);
-        let alpha = |x: usize, y: usize| picture.pixels.get(y * 40 + x).map_or(0, |c| c.a());
-        assert_eq!(alpha(1, 1), 0, "outside");
-        assert_eq!(alpha(7, 20), 255, "inside");
-        assert_eq!(alpha(20, 20), 0, "the hole");
-        // an edge half way through a pixel half covers it
-        let edge = filled_outline(&[vec![-0.5, -0.5, 0.0125, -0.5, 0.0125, 0.5, -0.5, 0.5]], 40);
-        let a = edge.pixels.get(20 * 40 + 20).map_or(0, |c| c.a());
-        assert!((100..=155).contains(&a), "{a}");
-    }
 }

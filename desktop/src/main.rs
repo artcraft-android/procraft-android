@@ -13,6 +13,7 @@ mod animation;
 mod canvas_info;
 mod chrome;
 mod colour_drop;
+mod colour_models;
 mod colours;
 mod compact_colours;
 mod companion;
@@ -50,8 +51,10 @@ mod reference;
 mod screen;
 mod selection;
 mod settings;
+mod shortcuts;
 mod sound;
 mod source_editor;
+mod startup;
 mod studio;
 mod text;
 mod timelapse;
@@ -90,9 +93,25 @@ type ReadingArtwork =
 /// many layers takes seconds), since when, and those still to come.
 struct Importing {
     since: Instant,
-    reading: std::thread::JoinHandle<Option<(Arc<CanvasSession>, Option<std::path::PathBuf>)>>,
+    stage: ImportStage,
     folder: Option<String>,
     rest: std::collections::VecDeque<Vec<std::path::PathBuf>>,
+}
+
+/// An artwork coming in: read, then (a package's) its time-lapse taken into its new folder, both
+/// off the window's thread (a long time-lapse is hundreds of videos, every frame decoded).
+enum ImportStage {
+    Reading(std::thread::JoinHandle<Option<(Arc<CanvasSession>, Option<std::path::PathBuf>)>>),
+    TakingTimeLapse(std::thread::JoinHandle<()>, Arc<CanvasSession>, String),
+}
+
+impl ImportStage {
+    fn is_finished(&self) -> bool {
+        match self {
+            ImportStage::Reading(t) => t.is_finished(),
+            ImportStage::TakingTimeLapse(t, ..) => t.is_finished(),
+        }
+    }
 }
 
 impl Importing {
@@ -104,7 +123,7 @@ impl Importing {
     ) -> Option<Importing> {
         let paths = artworks.pop_front()?;
         let reading = std::thread::spawn(move || files::open_artwork_files(paths));
-        Some(Importing { since: Instant::now(), reading, folder, rest: artworks })
+        Some(Importing { since: Instant::now(), stage: ImportStage::Reading(reading), folder, rest: artworks })
     }
 }
 
@@ -151,10 +170,8 @@ fn veil(ctx: &egui::Context, what: &str) {
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        // a system font it can't read is left out; one line for each says nothing to act on
-        .filter_module("fontdb", log::LevelFilter::Error)
-        .init();
+    // the log, to the app folder's file too, and a crash's message into it
+    startup::init();
     // the layers' textures may take what the layers themselves may (the engine's budget): none is
     // ever kept off the GPU, but the composite is made around the layers not being worked on, so
     // a frame composites only those (as the tablet's)
@@ -173,6 +190,7 @@ fn main() {
     // the colour profiles imported before
     procraft_core::set_profile_folder(files::app_dir().join("profiles").to_string_lossy().into_owned());
     let mut app = App {
+        wake: event_loop.create_proxy(),
         started: Instant::now(),
         last_frame: Instant::now(),
         again: None,
@@ -203,6 +221,8 @@ fn main() {
 }
 
 struct App {
+    /// Wakes the loop from other threads (the pen's, on Wayland).
+    wake: winit::event_loop::EventLoopProxy<()>,
     started: Instant,
     /// When the last frame was drawn, and when another is wanted (the canvas or the interface still
     /// moving, or a hold to be timed).
@@ -285,10 +305,14 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        // a pen's lean, which winit's touches leave out
-        pen::watch(&window);
-        let screen = match Screen::new(window) {
-            Ok(s) => s,
+        // a pen's lean, which winit's touches leave out (on Wayland the whole pen)
+        pen::watch(&window, self.wake.clone());
+        // from the backend the last run used, or the next if that run never ended
+        let screen = match Screen::new(window, startup::gpu_start(procraft_gpu::Gpu::backend_count())) {
+            Ok((s, backend)) => {
+                startup::gpu_running(backend);
+                s
+            }
             Err(e) => {
                 log::error!("no GPU for the window: {e}");
                 files::tell("ProCraft can't draw", &format!("No GPU device for the window: {e}"));
@@ -373,9 +397,21 @@ impl ApplicationHandler for App {
         }
     }
 
+    /// A pen read by the app itself moved: its touches and hovering, as winit's would come.
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
+        let Some(window) = self.screen.as_ref().map(|s| (s.window.id(), s.window.scale_factor())) else { return };
+        for event in pen::take_events(window.1) {
+            self.window_event(event_loop, window.0, event);
+        }
+    }
+
     /// The app ending without its window closed first (a Mac's Quit, from the app menu or
     /// Cmd+Q, ends it with no close asked): the artwork open kept as closing the window keeps it.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // the backend did its run: the next starts on it again
+        startup::gpu_ended();
+        // before winit closes the connection the pen is read on
+        pen::stop();
         if std::mem::replace(&mut self.closed, true) {
             return;
         }
@@ -470,9 +506,9 @@ impl App {
         let Some(screen) = self.screen.as_mut() else { return false };
         let studio = &mut self.ui.studio;
         if !studio.open {
-            if studio.pad_texture.take().is_some() {
-                screen.drop_pad();
-            }
+            // closing the studio lets its texture go first: the picture goes whether or not
+            studio.pad_texture = None;
+            screen.drop_pad();
             return false;
         }
         let ppp = screen.egui.egui_ctx().pixels_per_point();
@@ -482,6 +518,10 @@ impl App {
             return true;
         }
         if studio.pad.is_none() {
+            // a new pad is shown afresh: the picture an earlier one was shown in (the studio closed
+            // without it being let go) would be drawn into without the new pad ever being told its
+            // size and view, and the pad would take no strokes
+            screen.drop_pad();
             let pad = CanvasSession::new(size.0, size.1);
             pad.use_gpu(screen.gpu.clone());
             pad.set_display_scale(ppp);
@@ -892,22 +932,38 @@ impl App {
 
     /// An artwork read meanwhile, opened (the one open before kept), and the next one read.
     fn imported(&mut self) {
-        let Some(importing) = self.importing.take_if(|i| i.reading.is_finished()) else { return };
-        let Importing { reading, folder, rest, .. } = importing;
-        if let Ok(Some((session, package))) = reading.join() {
-            if self.session.is_some() && !self.leave_artwork() {
-                return;
+        let Some(importing) = self.importing.take_if(|i| i.stage.is_finished()) else { return };
+        let Importing { since, stage, folder, rest } = importing;
+        let (session, dir) = match stage {
+            ImportStage::Reading(reading) => {
+                let Ok(Some((session, package))) = reading.join() else {
+                    self.importing = Importing::next(rest, folder);
+                    return;
+                };
+                if self.session.is_some() && !self.leave_artwork() {
+                    return;
+                }
+                let dir = self.gallery.store.new_folder(folder.clone());
+                // a package's time-lapse taken in on its own thread first, the window veiled
+                if let Some(package) = package {
+                    let into = dir.clone();
+                    let taking = std::thread::spawn(move || timelapse::take_package(&package, &into));
+                    let stage = ImportStage::TakingTimeLapse(taking, session, dir);
+                    self.importing = Some(Importing { since, stage, folder, rest });
+                    return;
+                }
+                (session, dir)
             }
-            let dir = self.gallery.store.new_folder(folder.clone());
-            // a model is a new artwork painting on it
-            let model = session.model_info().is_some();
-            if let Some(package) = package {
-                timelapse::take_package(&package, &dir);
+            ImportStage::TakingTimeLapse(taking, session, dir) => {
+                let _ = taking.join();
+                (session, dir)
             }
-            self.open_artwork(session, dir);
-            if model {
-                self.ui.started_new();
-            }
+        };
+        // a model is a new artwork painting on it
+        let model = session.model_info().is_some();
+        self.open_artwork(session, dir);
+        if model {
+            self.ui.started_new();
         }
         self.importing = Importing::next(rest, folder);
     }

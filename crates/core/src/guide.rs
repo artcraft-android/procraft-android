@@ -2,7 +2,7 @@
 //! strokes with assisted drawing on (kept to the guide's directions, or mirrored by symmetry).
 
 use procraft_engine::geom::{Affine, Vec2};
-use procraft_engine::guide::{Guide, GuideKind, SymmetryKind, bar_color};
+use procraft_engine::guide::{Guide, GuideKind, LengthUnit, SymmetryKind, bar_color};
 use procraft_engine::input::Sample;
 use procraft_engine::stroke::Stamp;
 use procraft_engine::view::View;
@@ -25,6 +25,19 @@ pub enum SymmetryType {
     Radial,
 }
 
+/// The units a grid's size is typed and shown in, as its keypad lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum GuideUnit {
+    Millimeters,
+    Centimeters,
+    Inches,
+    Pixels,
+}
+
+/// The sizes a grid can have, canvas pixels.
+const SIZE_MIN: f32 = 4.0;
+const SIZE_MAX: f32 = 1000.0;
+
 /// The guide as the editor and the overlay show it. Points are window pixels, x and y in turn;
 /// `lines` are segments (two points each); `color` is sRGB 0..1.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
@@ -33,8 +46,12 @@ pub struct GuideInfo {
     pub kind: GuideType,
     pub opacity: f32,
     pub thickness: f32,
-    /// The grid's size, canvas pixels.
+    /// The grid's size, canvas pixels; the unit it is shown in; and the size in that unit as its
+    /// keypad starts with it ("71", "8", "0.5") and as its pill shows it ("71px", "8mm", "1″").
     pub size: f32,
+    pub unit: GuideUnit,
+    pub size_text: String,
+    pub size_label: String,
     /// Where the colour sits on the colour bar (0..1), and the colour.
     pub hue: f32,
     pub color: Vec<f32>,
@@ -63,6 +80,44 @@ fn type_of(k: GuideKind) -> GuideType {
         GuideKind::Perspective => GuideType::Perspective,
         GuideKind::Symmetry => GuideType::Symmetry,
     }
+}
+
+fn length_unit(u: GuideUnit) -> LengthUnit {
+    match u {
+        GuideUnit::Millimeters => LengthUnit::Millimetres,
+        GuideUnit::Centimeters => LengthUnit::Centimetres,
+        GuideUnit::Inches => LengthUnit::Inches,
+        GuideUnit::Pixels => LengthUnit::Pixels,
+    }
+}
+
+fn guide_unit(u: LengthUnit) -> GuideUnit {
+    match u {
+        LengthUnit::Millimetres => GuideUnit::Millimeters,
+        LengthUnit::Centimetres => GuideUnit::Centimeters,
+        LengthUnit::Inches => GuideUnit::Inches,
+        LengthUnit::Pixels => GuideUnit::Pixels,
+    }
+}
+
+/// `px` canvas pixels in `unit` at `dpi`, as the grid size's keypad and pill show it: pixels
+/// whole, the others to two decimals at most without trailing zeros ("71", "8", "0.31").
+fn length_text(px: f32, unit: LengthUnit, dpi: f32) -> String {
+    match unit {
+        LengthUnit::Pixels => format!("{}", px.round() as i64),
+        _ => crate::presets::preset_number(unit.from_pixels(px, dpi)),
+    }
+}
+
+/// [`length_text`] and the unit's mark, without a space: "71px", "8mm", "10cm", "1″".
+fn length_label(px: f32, unit: LengthUnit, dpi: f32) -> String {
+    let mark = match unit {
+        LengthUnit::Pixels => "px",
+        LengthUnit::Millimetres => "mm",
+        LengthUnit::Centimetres => "cm",
+        LengthUnit::Inches => "\u{2033}",
+    };
+    format!("{}{mark}", length_text(px, unit, dpi))
 }
 
 /// `stamps` and the copies the guide's symmetry draws of them.
@@ -124,9 +179,16 @@ impl State {
         samples
     }
 
+    /// The canvas's dots per inch, the usual where it has none that can be used.
+    fn dpi(&self) -> f32 {
+        let dpi = self.doc.dpi;
+        if dpi.is_finite() && dpi > 0.0 { dpi } else { procraft_engine::formats::DPI as f32 }
+    }
+
     fn guide_info(&self) -> GuideInfo {
         let g = &self.doc.guide;
         let look = g.look();
+        let dpi = self.dpi();
         let to_screen = self.view.map_or(Affine::scale(1.0), |v| v.to_screen());
         let point = |p: Vec2| {
             let w = to_screen.apply(p);
@@ -141,6 +203,9 @@ impl State {
             opacity: look.opacity,
             thickness: look.thickness,
             size: look.size,
+            unit: guide_unit(look.unit),
+            size_text: length_text(look.size, look.unit, dpi),
+            size_label: length_label(look.size, look.unit, dpi),
             hue: look.color,
             color: bar_color(look.color).to_vec(),
             symmetry: match g.symmetry {
@@ -192,7 +257,25 @@ impl CanvasSession {
                 look.thickness = unit(thickness, look.thickness);
                 look.color = unit(hue, look.color);
                 if size.is_finite() {
-                    look.size = size.clamp(4.0, 1000.0);
+                    look.size = size.clamp(SIZE_MIN, SIZE_MAX);
+                }
+            }
+        })
+    }
+
+    /// The shown grid's size typed on its keypad: `typed` (what is typed so far) in `unit`, made
+    /// canvas pixels by the canvas's DPI and kept to the sizes a grid can have. The unit is kept
+    /// for the size's pill even while nothing (or no number above nothing) is typed.
+    pub fn set_guide_length(&self, typed: String, unit: GuideUnit) -> GuideInfo {
+        let dpi = self.shared.lock().dpi();
+        let unit = length_unit(unit);
+        let px = typed.trim().parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.0).map(|v| unit.to_pixels(v, dpi));
+        self.change_guide(|g| {
+            let k = g.kind as usize;
+            if let Some(look) = g.looks.get_mut(k) {
+                look.unit = unit;
+                if let Some(px) = px.filter(|px| px.is_finite()) {
+                    look.size = px.clamp(SIZE_MIN, SIZE_MAX);
                 }
             }
         })
@@ -350,5 +433,73 @@ impl CanvasSession {
         st.revision += 1;
         self.shared.frame(st);
         st.guide_info()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_grid_size_shows_in_its_unit_whole_or_to_two_decimals() {
+        // whole pixels; the lengths as measured, a whole number without decimals
+        assert_eq!(length_label(71.0, LengthUnit::Pixels, 132.0), "71px");
+        assert_eq!(length_label(71.4, LengthUnit::Pixels, 132.0), "71px");
+        assert_eq!(length_label(LengthUnit::Millimetres.to_pixels(8.0, 132.0), LengthUnit::Millimetres, 132.0), "8mm");
+        assert_eq!(
+            length_label(LengthUnit::Centimetres.to_pixels(10.0, 132.0), LengthUnit::Centimetres, 132.0),
+            "10cm"
+        );
+        assert_eq!(length_label(300.0, LengthUnit::Inches, 300.0), "1\u{2033}");
+        // two decimals at most, no trailing zeros
+        assert_eq!(length_text(150.0, LengthUnit::Inches, 300.0), "0.5");
+        assert_eq!(length_text(71.0, LengthUnit::Millimetres, 132.0), "13.66");
+        assert_eq!(length_text(71.0, LengthUnit::Inches, 132.0), "0.54");
+    }
+
+    #[test]
+    fn a_typed_length_becomes_the_grid_size_by_the_dpi_and_cancel_undoes_it() {
+        let s = CanvasSession::new(400, 300);
+        s.shared.lock().doc.dpi = 132.0;
+        s.set_guide_on(true);
+        let before = s.guide_edit_begin(0.0, 0.0, 400.0, 300.0);
+        assert_eq!(
+            (before.unit, before.size_text.as_str(), before.size_label.as_str()),
+            (GuideUnit::Pixels, "71", "71px")
+        );
+        // a unit chosen with nothing typed keeps the size, shown in the unit
+        let g = s.set_guide_length(String::new(), GuideUnit::Millimeters);
+        assert_eq!((g.size, g.size_label.as_str()), (71.0, "13.66mm"));
+        // typed: the size in canvas pixels, the pill in the unit
+        let g = s.set_guide_length("8".into(), GuideUnit::Millimeters);
+        assert!((g.size - 41.575).abs() < 1e-3 && g.size_label == "8mm" && g.size_text == "8", "{g:?}");
+        let g = s.set_guide_length("10".into(), GuideUnit::Centimeters);
+        assert!((g.size - 519.685).abs() < 1e-2 && g.size_label == "10cm", "{g:?}");
+        assert_eq!(s.set_guide_length("1".into(), GuideUnit::Inches).size_label, "1\u{2033}");
+        // what isn't a length above nothing leaves the size as it was
+        for typed in [".", "0", "0.", "1.2.3"] {
+            assert_eq!(s.set_guide_length(typed.into(), GuideUnit::Inches).size, 132.0, "{typed}");
+        }
+        assert_eq!(s.set_guide_length("1.".into(), GuideUnit::Inches).size, 132.0);
+        assert_eq!(s.set_guide_length("0.5".into(), GuideUnit::Inches).size_label, "0.5\u{2033}");
+        // kept to the sizes a grid can have, shown as kept
+        let g = s.set_guide_length("100".into(), GuideUnit::Centimeters);
+        assert_eq!((g.size, g.size_label.as_str()), (SIZE_MAX, "19.24cm"));
+        let g = s.set_guide_length("1".into(), GuideUnit::Pixels);
+        assert_eq!((g.size, g.size_label.as_str()), (SIZE_MIN, "4px"));
+        // the slider keeps the unit
+        assert_eq!(s.set_guide_look(g.opacity, g.thickness, 264.0, g.hue).size_label, "264px");
+        s.set_guide_length("2".into(), GuideUnit::Inches);
+        assert_eq!(s.set_guide_look(g.opacity, g.thickness, 66.0, g.hue).size_label, "0.5\u{2033}");
+        // each kind keeps its own; Cancel puts size and unit back
+        let iso = s.set_guide_kind(GuideType::Isometric);
+        assert_eq!((iso.size, iso.unit), (82.0, GuideUnit::Pixels));
+        s.set_guide_kind(GuideType::Grid);
+        let back = s.guide_edit_end(false);
+        assert_eq!((back.size, back.unit, back.size_label.as_str()), (71.0, GuideUnit::Pixels, "71px"));
+        // Done keeps them
+        s.guide_edit_begin(0.0, 0.0, 400.0, 300.0);
+        s.set_guide_length("3".into(), GuideUnit::Centimeters);
+        assert_eq!(s.guide_edit_end(true).size_label, "3cm");
     }
 }

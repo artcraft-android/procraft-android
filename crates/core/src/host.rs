@@ -35,6 +35,10 @@ impl CanvasSession {
         started: Instant,
     ) -> bool {
         let mut st = self.shared.lock();
+        // being redrawn a stroke at a time: the picture as it was until that is done
+        if st.holding_frames {
+            return false;
+        }
         st.draw_frame(view, format, size, screen, started);
         st.needs_frame
     }

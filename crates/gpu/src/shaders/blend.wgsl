@@ -166,3 +166,29 @@ fn grain_combine(a: f32, g: f32, depth: f32, mode: u32) -> f32 {
 
 // The coverage from which a grain raises it fully (a sixty-fourth, as 1/63.75).
 const GRAIN_RISE_FULL: f32 = 0.015686275;
+
+// a dual brush's two strokes' own modes (the grain's numbers)
+const DUAL_HEIGHT: u32 = 27u;
+const DUAL_LINEAR_HEIGHT: u32 = 28u;
+
+// the first stroke's amount `a` cut by the second's `b` as a height: where the second is thin
+// (under 0.2) the first rises (most where it is near none or full), and the second's coverage
+// lifts what the first has
+fn dual_height(a: f32, b: f32) -> f32 {
+    let mid = 2.0 * (0.5 - abs(a - 0.5));
+    let rise = 40.0 * max(0.2 - b, 0.0) * (pow(a, 6.0) + pow(mid, 6.0));
+    return clamp(max(rise + 0.5 * a, (rise - a) * b + 2.0 * a), 0.0, 1.0);
+}
+
+// a dual brush's first stroke's coverage `a` and its second's `b` combined by the brush's dual
+// mode: Normal shows the second where the first isn't, the heights cut one by the other, the
+// rest blend the two as the layers' modes do
+fn dual_combine(a: f32, b: f32, mode: u32) -> f32 {
+    if (mode == DUAL_HEIGHT || mode == DUAL_LINEAR_HEIGHT) {
+        return dual_height(a, b);
+    }
+    if (mode != 0u) {
+        return clamp(blend_rgb(vec3<f32>(a), vec3<f32>(b), mode).x, 0.0, 1.0);
+    }
+    return a + (1.0 - a) * b;
+}

@@ -2,12 +2,14 @@
 //! (or a palette's swatch) and let go on the canvas fills the area around where it lands. The band
 //! under the top bar then offers, for a moment, to continue filling: each touch on the canvas
 //! fills (the shared touches do that), one slid across the screen changing the threshold, until
-//! the band's tick.
+//! the band's tick. Held still a moment while dragged, the colour comes to rest where it is and a
+//! slide sets the threshold, the fill shown as it goes (the core's `ColourDrag` says when).
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Id, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
-use procraft_core::{CanvasSession, Fill};
+use procraft_core::{CanvasSession, ColourDrag, DragStep, Fill};
 
 use crate::colours::{of_hex, srgb};
 use crate::look::{Themed, Weight, argb, pc, text};
@@ -52,7 +54,7 @@ pub enum Touch {
 
 /// A press on a colour that can be dragged out: where and when it went down, and what it has
 /// turned out to be so far.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 struct Press {
     id: Id,
     origin: Pos2,
@@ -61,6 +63,8 @@ struct Press {
     dragging: bool,
     /// Where it may be let go without filling (the panel it came from).
     avoid: Option<Rect>,
+    /// The colour being dragged out: where it is, and whether it has come to rest.
+    drag: Option<Arc<ColourDrag>>,
 }
 
 pub struct ColourDrop {
@@ -77,6 +81,9 @@ pub struct ColourDrop {
     threshold: f32,
     /// The threshold is being slid: its row shows under the band.
     sliding: bool,
+    /// The dragged colour came to rest and its slid threshold began filling (or was refused).
+    poured: bool,
+    refused: bool,
 }
 
 impl Default for ColourDrop {
@@ -89,6 +96,8 @@ impl Default for ColourDrop {
             swatch: None,
             threshold: 0.5,
             sliding: false,
+            poured: false,
+            refused: false,
         }
     }
 }
@@ -113,19 +122,20 @@ impl ColourDrop {
         let ctx = ui.ctx();
         let (at, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
         // pressed and let go between two frames: a tap never seen down
-        if response.clicked() && self.press.is_none_or(|p| p.id != id) {
+        if response.clicked() && self.press.as_ref().is_none_or(|p| p.id != id) {
             return Some(Touch::Tap);
         }
         if self.press.is_none()
             && response.is_pointer_button_down_on()
             && let Some(origin) = at
         {
-            self.press = Some(Press { id, origin, since: Instant::now(), held: false, dragging: false, avoid });
+            self.press =
+                Some(Press { id, origin, since: Instant::now(), held: false, dragging: false, avoid, drag: None });
         }
         let press = self.press.as_mut().filter(|p| p.id == id)?;
         let at = at.unwrap_or(press.origin);
         if !down {
-            let Press { held, dragging, .. } = *press;
+            let (held, dragging) = (press.held, press.dragging);
             if dragging {
                 self.let_go(ctx, session, Some(at));
             } else {
@@ -134,7 +144,37 @@ impl ColourDrop {
             return (!held && !dragging).then_some(Touch::Tap);
         }
         if press.dragging {
-            self.dot = Some((at, rgb));
+            let (drag, avoid) = (press.drag.clone(), press.avoid);
+            let ms = ctx.input(|i| i.time) * 1000.0;
+            let step = drag.as_ref().map_or(
+                DragStep { dot_x: at.x, dot_y: at.y, resting: false, threshold: self.threshold, slid: false },
+                |d| d.moved(at.x, at.y, ms),
+            );
+            let dot = pos2(step.dot_x, step.dot_y);
+            // held still a moment on the artwork, off the bars, it comes to rest and fills there at
+            // once (a slide then sets the threshold)
+            let mut rested = false;
+            if let Some((drag, due)) = drag.as_ref().and_then(|d| Some((d, d.rest_due()?))) {
+                if ms >= due {
+                    let ppp = ctx.pixels_per_point();
+                    rested = drag.rest(
+                        ms,
+                        dot.y > pc::BAR_HEIGHT
+                            && !avoid.is_some_and(|a| a.contains(dot))
+                            && session.pour_lands(dot.x * ppp, dot.y * ppp),
+                    );
+                } else {
+                    ctx.request_repaint_after(Duration::from_secs_f64((due - ms) / 1000.0));
+                }
+            }
+            if rested {
+                self.pour(ctx, session, dot, rgb, self.threshold);
+            }
+            // poured, the fill shows instead of the dot
+            self.dot = (!self.poured).then_some((dot, rgb));
+            if step.slid {
+                self.slide(ctx, session, step, rgb);
+            }
             return None;
         }
         if press.held {
@@ -142,6 +182,10 @@ impl ColourDrop {
         }
         if at.distance(press.origin) > SLOP {
             press.dragging = true;
+            // a mouse or a pen: a little wobble still rests
+            press.drag = Some(ColourDrag::new(at.x, at.y, ctx.input(|i| i.time) * 1000.0, true, self.threshold));
+            self.poured = false;
+            self.refused = false;
             self.swatch = swatch.then_some(rgb);
             self.dot = Some((at, rgb));
             self.band = Band::Dragging;
@@ -161,9 +205,19 @@ impl ColourDrop {
     /// The dragged colour let go at `at` (points): below the top bar and off the panel it came
     /// from, it fills there and the band offers to go on filling for a moment.
     fn let_go(&mut self, ctx: &egui::Context, session: &CanvasSession, at: Option<Pos2>) {
-        let avoid = self.press.take().and_then(|p| p.avoid);
+        let press = self.press.take();
+        let avoid = press.as_ref().and_then(|p| p.avoid);
+        // come to rest, it fills where it rests (already, if its threshold was slid)
+        let rested = press.and_then(|p| p.drag).map(|d| d.now()).filter(|s| s.resting).map(|s| pos2(s.dot_x, s.dot_y));
         let dot = self.dot.take();
-        let at = at.filter(|p| p.y > pc::BAR_HEIGHT && !avoid.is_some_and(|a| a.contains(*p)));
+        if std::mem::take(&mut self.poured) {
+            session.pour_end(true, None);
+            self.sliding = false;
+            self.band = Band::Dropped(Instant::now());
+            return;
+        }
+        let at =
+            at.map(|a| rested.unwrap_or(a)).filter(|p| p.y > pc::BAR_HEIGHT && !avoid.is_some_and(|a| a.contains(*p)));
         let poured = match (at, dot) {
             (Some(at), Some((_, rgb))) => {
                 let ppp = ctx.pixels_per_point();
@@ -178,6 +232,29 @@ impl ColourDrop {
         } else {
             self.band = Band::None;
         }
+    }
+
+    /// The dragged colour, at rest, slid its threshold: the fill shown with it.
+    fn slide(&mut self, ctx: &egui::Context, session: &CanvasSession, step: DragStep, rgb: u32) {
+        self.threshold = step.threshold;
+        self.sliding = true;
+        if self.poured {
+            session.pour_threshold(step.threshold);
+        } else {
+            self.pour(ctx, session, pos2(step.dot_x, step.dot_y), rgb, step.threshold);
+        }
+    }
+
+    /// The dragged colour fills where it rests, at `at` (points), unless that was refused already
+    /// (a locked layer, text).
+    fn pour(&mut self, ctx: &egui::Context, session: &CanvasSession, at: Pos2, rgb: u32, threshold: f32) {
+        if self.refused {
+            return;
+        }
+        let ppp = ctx.pixels_per_point();
+        let [r, g, b] = of_hex(rgb);
+        self.poured = session.pour_begin(at.x * ppp, at.y * ppp, r, g, b, threshold);
+        self.refused = !self.poured;
     }
 
     /// Continue filling's touch slid the threshold to `threshold`.
@@ -208,7 +285,7 @@ impl ColourDrop {
         // a press whose colour went away (a swatch taken out, a panel closed) ends with the pointer
         if self.press.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
             let at = ctx.input(|i| i.pointer.interact_pos());
-            if self.press.is_some_and(|p| p.dragging) {
+            if self.press.as_ref().is_some_and(|p| p.dragging) {
                 self.let_go(ctx, session, at);
             } else {
                 self.press = None;

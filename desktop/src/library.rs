@@ -47,6 +47,8 @@ const PREVIEWS_A_FRAME: usize = 3;
 /// Menus stay below the top bar; the set's menu sits this far left of it.
 const MENU_TOP: f32 = 57.0;
 const SET_MENU_GAP: f32 = 6.0;
+/// The Recent set's menu, of one item, is this much taller than its item and margins (65 in all).
+const RECENT_MENU_EXTRA: f32 = 11.0;
 /// The set's menu: frosted glass over the canvas, edged.
 const SET_MENU_GLASS: menu::Glass =
     menu::Glass { fill: menu::GLASS, edge: Some(menu::EDGE), frost: true, corner: menu::LIBRARY_CORNER, shadow: false };
@@ -131,6 +133,11 @@ enum Deleting {
 pub struct Library {
     /// The set shown, once one is tapped (else the current brush's).
     shown_set: Option<usize>,
+    /// The Recent set is shown instead (the brushes last painted with, and those pinned there);
+    /// its menu (Clear), and a brush found from it, to scroll to in its own set.
+    recent: bool,
+    recent_menu: Menu,
+    found: Option<(u32, u32)>,
     previews: HashMap<(u32, u32), Option<Preview>>,
     plus_menu: Menu,
     /// The shown set's menu, and which set it is for.
@@ -180,7 +187,11 @@ impl Library {
 
     /// A menu or question of the library's is up: a press elsewhere only closes it.
     pub fn modal(&self) -> bool {
-        self.plus_menu.is_open() || self.set_menu.is_open() || self.icon_picker.is_open() || self.deleting.is_open()
+        self.plus_menu.is_open()
+            || self.set_menu.is_open()
+            || self.recent_menu.is_open()
+            || self.icon_picker.is_open()
+            || self.deleting.is_open()
     }
 
     /// Brush files' `(bytes, name)` read on a thread of their own, their brushes added to the
@@ -224,9 +235,10 @@ impl Library {
     fn add_read(&mut self, session: &CanvasSession, read: Vec<ReadBrushes>) -> bool {
         let mut any = false;
         for brushes in read {
-            let shown = self.shown_set.unwrap_or(session.current_brush().set as usize) as u32;
+            let shown = self.shown_set.filter(|_| !self.recent).unwrap_or(session.current_brush().set as usize) as u32;
             if let Some(set) = session.add_read_brushes(brushes, shown) {
                 self.shown_set = Some(set as usize);
+                self.recent = false;
                 any = true;
             }
         }
@@ -281,7 +293,14 @@ impl Library {
         }
         let library = session.brush_library();
         let current = session.current_brush();
-        let shown = self.shown_set.unwrap_or(current.set as usize).min(library.len().saturating_sub(1));
+        // with the Recent set shown, the current brush's set takes new brushes
+        let shown = self
+            .shown_set
+            .filter(|_| !self.recent)
+            .unwrap_or(current.set as usize)
+            .min(library.len().saturating_sub(1));
+        let recent = self.recent;
+        let recents = if recent { session.recent_brushes() } else { Vec::new() };
         self.settle_slides(ctx);
         // the set a dragged brush or set is over
         let dragging = self.press.filter(|p| p.way == Way::Drag);
@@ -296,6 +315,8 @@ impl Library {
         let mut plus = Rect::NOTHING;
         let mut lists = Rect::NOTHING;
         let mut set_tapped = None;
+        let mut recent_row = None;
+        let mut recent_tapped = false;
         let mut brush_tapped = None;
         let mut swipe_chose = None;
         egui::Area::new(egui::Id::unique("brush library")).fixed_pos(rect.min).order(egui::Order::Foreground).show(
@@ -367,6 +388,11 @@ impl Library {
                             })
                             .show(ui, |ui| {
                                 ui.add_space(12.0);
+                                // the brushes last painted with, and those pinned there, above the sets
+                                let (response, at) = self.recent_row(ui, look, recent);
+                                recent_row = Some(at);
+                                recent_tapped = response.clicked();
+                                ui.add_space(12.0);
                                 for (i, set) in library.iter().enumerate() {
                                     let fill = if over_set == Some(i) { Some(argb(pc::ACCENT)) } else { None };
                                     // a lifted set is faint where it was
@@ -376,7 +402,7 @@ impl Library {
                                             if faint {
                                                 ui.multiply_opacity(0.3);
                                             }
-                                            self.set_row(ui, look, session, i, set, i == shown, fill)
+                                            self.set_row(ui, look, session, i, set, i == shown && !recent, fill)
                                         })
                                         .inner;
                                     set_rects.push((i, at));
@@ -404,7 +430,7 @@ impl Library {
                     });
                     let brushes_out = ui.scope_builder(UiBuilder::new().max_rect(brushes), |ui| {
                         ScrollArea::vertical()
-                            .id_salt(("library brushes", shown))
+                            .id_salt(("library brushes", if recent { usize::MAX } else { shown }))
                             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                             .show(ui, |ui| {
                                 // a press moved up or down on a brush scrolls the list
@@ -413,13 +439,35 @@ impl Library {
                                     ui.scroll_with_delta(vec2(0.0, by));
                                 }
                                 ui.add_space(9.75);
-                                let Some(set) = library.get(shown) else { return };
+                                // the Recent set's brushes (pinned there or not), or the shown set's
+                                let listed: Vec<(&BrushInfo, Option<bool>)> = if recent {
+                                    recents
+                                        .iter()
+                                        .filter_map(|r| {
+                                            let b = library.get(r.set as usize)?.brushes.get(r.index as usize)?;
+                                            Some((b, Some(r.pinned)))
+                                        })
+                                        .collect()
+                                } else {
+                                    library
+                                        .get(shown)
+                                        .map(|set| set.brushes.iter().map(|b| (b, None)).collect())
+                                        .unwrap_or_default()
+                                };
+                                let chosen = library.get(shown).and_then(|set| set.chosen);
                                 let mut made = 0;
-                                for b in &set.brushes {
-                                    // the current brush, or the brush last chosen in this set
-                                    let selected =
-                                        (b.set, b.index) == (current.set, current.index) || set.chosen == Some(b.index);
-                                    let (response, cell) = self.brush_row(ui, look, session, b, selected, &mut made);
+                                for (b, pinned) in listed {
+                                    // the current brush, or the brush last chosen in this set (in the
+                                    // Recent set the current brush alone)
+                                    let selected = (b.set, b.index) == (current.set, current.index)
+                                        || (!recent && chosen == Some(b.index));
+                                    let (response, cell) =
+                                        self.brush_row(ui, look, session, b, selected, pinned, &mut made);
+                                    // a brush found from the Recent set is scrolled to in its own
+                                    if self.found == Some((b.set, b.index)) {
+                                        self.found = None;
+                                        ui.scroll_to_rect(cell, Some(egui::Align::Center));
+                                    }
                                     brush_rects.push(((b.set, b.index), cell));
                                     if let Some(r) = response {
                                         if r.0 {
@@ -486,11 +534,20 @@ impl Library {
         }
 
         if let Some(i) = set_tapped {
-            if i == shown {
+            if i == shown && !recent {
                 self.set_menu_for = Some(i);
                 self.set_menu.open();
             } else {
                 self.shown_set = Some(i);
+                self.recent = false;
+            }
+        }
+        if recent_tapped {
+            if recent {
+                self.recent_menu.open();
+            } else {
+                self.recent = true;
+                self.swiped = None;
             }
         }
         if let Some((key, selected)) = brush_tapped {
@@ -520,10 +577,25 @@ impl Library {
                     }
                 }
                 Swiped::Delete => self.ask_delete(Deleting::Brush(key.0, key.1)),
+                // shown in its own set, chosen there
+                Swiped::Find => {
+                    self.recent = false;
+                    self.shown_set = Some(key.0 as usize);
+                    self.found = Some(key);
+                    session.select_brush(key.0, key.1);
+                    self.changed = true;
+                }
+                Swiped::Pin | Swiped::Unpin => {
+                    self.changed |= session.pin_recent_brush(key.0, key.1, matches!(chose, Swiped::Pin));
+                }
+                Swiped::Clear => self.changed |= session.clear_recent_brush(key.0, key.1),
             }
         }
         self.plus_menu(ctx, look, session, plus, shown, backdrops);
         self.set_menu(ctx, look, session, &library, backdrops);
+        if let Some(row) = recent_row {
+            self.recent_menu(ctx, look, session, row, backdrops);
+        }
         if self.deleting.show(ctx, look) == Some(Answer::Action) {
             match self.delete_what.take() {
                 Some(Deleting::Set(i)) => {
@@ -562,32 +634,37 @@ impl Library {
         backdrops: &mut Vec<f32>,
     ) {
         let ink = menu::INK;
-        let entries = [
+        // the Recent set holds no brushes of its own to add one to
+        let mut entries = vec![
             Entry::Item(&icons::MENU_NEW_BRUSH, "Create new brush", ink),
             Entry::Item(&icons::MENU_NEW_SET, "Create new set", ink),
             Entry::Rule(11.0),
             Entry::Item(&icons::MENU_FOLDER, "Import from Files", ink),
         ];
+        if self.recent {
+            entries.remove(0);
+        }
         let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries));
         let rect = Rect::from_min_size(pos2(plus.right() - size.x, plus.bottom()), size);
         let mut tapped = None;
         self.plus_menu.show(ctx, "library plus menu", rect, rect.right_top(), menu::OVER_A_PANEL, backdrops, |ui| {
             tapped = menu::entries(ui, look, rect, &entries);
         });
-        let Some(i) = tapped else { return };
+        let Some(Entry::Item(_, label, _)) = tapped.and_then(|t| entries.get(t)) else { return };
         self.plus_menu.close();
-        match i {
+        match *label {
             // a new brush, opened in the studio
-            0 => {
+            "Create new brush" => {
                 if let Some(index) = session.new_brush(shown as u32) {
                     session.select_brush(shown as u32, index);
                     self.library_changed();
                     self.studio = Some(Some((shown as u32, index)));
                 }
             }
-            1 => {
+            "Create new set" => {
                 let set = session.new_brush_set() as usize;
                 self.shown_set = Some(set);
+                self.recent = false;
                 let name = session.brush_library().get(set).map(|s| s.name.clone()).unwrap_or_default();
                 self.renaming_set = Some((set, name, false));
                 self.library_changed();
@@ -693,6 +770,32 @@ impl Library {
         }
     }
 
+    /// The Recent set's menu, left of its row and centred on it as a set's: Clear alone.
+    fn recent_menu(
+        &mut self,
+        ctx: &egui::Context,
+        look: &mut Look,
+        session: &CanvasSession,
+        row: Rect,
+        backdrops: &mut Vec<f32>,
+    ) {
+        let entries = [Entry::Item(&icons::MENU_CLEAR, "Clear", menu::INK)];
+        let size = vec2(menu::LIBRARY_WIDTH, menu::entries_height(&entries) + RECENT_MENU_EXTRA);
+        let screen = ctx.content_rect();
+        let top = (row.center().y - size.y / 2.0)
+            .clamp(screen.top() + MENU_TOP, (screen.bottom() - size.y).max(screen.top() + MENU_TOP));
+        let rect = Rect::from_min_size(pos2(row.left() - SET_MENU_GAP - size.x, top), size);
+        let mut tapped = None;
+        self.recent_menu.show(ctx, "library recent menu", rect, rect.right_center(), SET_MENU_GLASS, backdrops, |ui| {
+            tapped = menu::entries(ui, look, rect.shrink2(vec2(0.0, RECENT_MENU_EXTRA / 2.0)), &entries);
+        });
+        if tapped.is_some() {
+            self.recent_menu.close();
+            session.clear_recent_brushes();
+            self.changed = true;
+        }
+    }
+
     /// The brushes not being slid go back, or open to their buttons, as they were left.
     fn settle_slides(&mut self, ctx: &egui::Context) {
         let dt = ctx.input(|i| i.stable_dt).min(0.05);
@@ -736,7 +839,8 @@ impl Library {
                 Way::Undecided => {
                     if d.length() > SLOP {
                         p.way = if d.x.abs() > d.y.abs() { Way::Swipe } else { Way::Scroll };
-                    } else if p.since.elapsed() >= HOLD {
+                    } else if p.since.elapsed() >= HOLD && !self.recent {
+                        // (the Recent set's brushes stay where they are)
                         p.way = Way::Drag;
                         self.swiped = None;
                     } else {
@@ -826,6 +930,21 @@ impl Library {
         true
     }
 
+    /// The Recent set's row, as a set's: its hourglass and its name. Returns its response and where
+    /// it is.
+    fn recent_row(&mut self, ui: &mut Ui, look: &mut Look, selected: bool) -> (egui::Response, Rect) {
+        let width = ui.available_width();
+        let (outer, response) = ui.allocate_exact_size(vec2(width, SET_HEIGHT), Sense::click());
+        let rect = outer.shrink2(vec2(12.0, 0.0));
+        ui.painter().rect_filled(rect, 12, panel::row_fill(selected, SET_CELL));
+        let ink = if selected { Color32::WHITE } else { argb(PANEL_TITLE) };
+        look.icon(ui, &icons::RECENT_SET, pos2(rect.left() + 24.0, rect.center().y), 40.0, ink);
+        let name = one_line(ui, "Recent", 14.0, Weight::SemiBold, ink, rect.width() - 53.0);
+        let left = rect.left() + 4.0 + 40.0 + 1.0;
+        ui.painter().galley(pos2(left, rect.center().y - name.size().y / 2.0), name, ink);
+        (response, rect)
+    }
+
     /// A set: its icon and its name (two lines at most), or a field renaming it. Returns its
     /// response and where it is.
     #[allow(clippy::too_many_arguments)]
@@ -891,8 +1010,10 @@ impl Library {
     }
 
     /// A brush: its sample stroke filling the cell's height (its ends past the cell's sides), under
-    /// its name; slid left, its buttons behind it. Returns whether it was tapped and which of its
-    /// buttons was, and where its cell is.
+    /// its name; slid left, its buttons behind it. `pinned`: in the Recent set, whether it is pinned
+    /// there (marked so). Returns whether it was tapped and which of its buttons was, and where its
+    /// cell is.
+    #[allow(clippy::too_many_arguments)]
     fn brush_row(
         &mut self,
         ui: &mut Ui,
@@ -900,6 +1021,7 @@ impl Library {
         session: &CanvasSession,
         b: &BrushInfo,
         selected: bool,
+        pinned: Option<bool>,
         made: &mut usize,
     ) -> (Option<(bool, Option<Swiped>)>, Rect) {
         let row = ui.available_width();
@@ -910,7 +1032,7 @@ impl Library {
         let at = cell.translate(vec2(slide, 0.0));
         let mut chose = None;
         if slide < 0.0 {
-            chose = swipe_buttons(ui, look, cell, key);
+            chose = swipe_buttons(ui, look, cell, key, pinned);
         }
         let response = ui.interact(at.intersect(cell), ui.scope_id().with(("brush", key)), Sense::click_and_drag());
         if response.is_pointer_button_down_on()
@@ -947,6 +1069,12 @@ impl Library {
             painter.rect_filled(pill, pill.height() / 2.0, argb(NAME_PILL).gamma_multiply(alpha));
         }
         painter.galley(name_at, galley, ink);
+        // a pinned brush's mark, at the cell's top right
+        if pinned == Some(true) {
+            let mut marked = ui.new_child(UiBuilder::new().max_rect(cell));
+            marked.set_clip_rect(cell.intersect(ui.clip_rect()));
+            look.icon(&marked, &icons::PIN_MARK, pos2(at.right() - 11.0 - 8.0, at.top() + 12.5 + 8.0), 16.0, ink);
+        }
         let tapped = response.clicked() && self.press.is_none_or(|p| p.way == Way::Undecided);
         (Some((tapped, chose)), cell)
     }
@@ -1142,16 +1270,32 @@ enum Swiped {
     Share,
     Duplicate,
     Delete,
+    Find,
+    Pin,
+    Unpin,
+    Clear,
 }
 
-/// A slid brush's buttons, filling its cell: Share, Duplicate and Delete. Returns the one tapped.
-fn swipe_buttons(ui: &Ui, look: &mut Look, cell: Rect, key: (u32, u32)) -> Option<Swiped> {
+/// A slid brush's buttons, filling its cell: Share, Duplicate and Delete; in the Recent set
+/// (`pinned` there or not) Find, Pin or Unpin, and Clear. Returns the one tapped.
+fn swipe_buttons(ui: &Ui, look: &mut Look, cell: Rect, key: (u32, u32), pinned: Option<bool>) -> Option<Swiped> {
     let w = (cell.width() - SWIPE_GAP * 2.0) / 3.0;
-    let buttons = [
-        (&icons::SWIPE_SHARE, "Share", SWIPE_FILL, SWIPE_INK, Swiped::Share),
-        (&icons::SWIPE_DUPLICATE, "Duplicate", SWIPE_FILL, SWIPE_INK, Swiped::Duplicate),
-        (&icons::SWIPE_TRASH, "Delete", SWIPE_DELETE, 0xFFFFFFFF, Swiped::Delete),
-    ];
+    let buttons = match pinned {
+        None => [
+            (&icons::SWIPE_SHARE, "Share", SWIPE_FILL, SWIPE_INK, Swiped::Share),
+            (&icons::SWIPE_DUPLICATE, "Duplicate", SWIPE_FILL, SWIPE_INK, Swiped::Duplicate),
+            (&icons::SWIPE_TRASH, "Delete", SWIPE_DELETE, 0xFFFFFFFF, Swiped::Delete),
+        ],
+        Some(pinned) => [
+            (&icons::SWIPE_FIND, "Find", SWIPE_FILL, SWIPE_INK, Swiped::Find),
+            if pinned {
+                (&icons::SWIPE_UNPIN, "Unpin", SWIPE_FILL, SWIPE_INK, Swiped::Unpin)
+            } else {
+                (&icons::SWIPE_PIN, "Pin", SWIPE_FILL, SWIPE_INK, Swiped::Pin)
+            },
+            (&icons::SWIPE_CLEAR, "Clear", SWIPE_FILL, SWIPE_INK, Swiped::Clear),
+        ],
+    };
     let mut chose = None;
     for (i, (icon, label, fill, ink, does)) in buttons.into_iter().enumerate() {
         let rect =

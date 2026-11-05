@@ -260,14 +260,18 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         )
         3 -> listOf(
             listOf(
-                Act("Time-lapse Replay") {
-                    // the panel fades away as the replay takes the screen
-                    vm.fadePanels()
-                    vm.timeLapseReplaying = true
-                },
+                // Replay and Export wait for something recorded
+                Act(
+                    "Time-lapse Replay",
+                    onClick = {
+                        // the panel fades away as the replay takes the screen
+                        vm.fadePanels()
+                        vm.timeLapseReplaying = true
+                    }.takeIf { vm.timeLapseRecorded },
+                ),
                 Toggle("Time-lapse Recording", vm.timeLapseRecording) { vm.changeTimeLapseRecording(it) },
             ),
-            listOf(Act("Export time-lapse video") { exportingVideo = true }),
+            listOf(Act("Export time-lapse video", onClick = { exportingVideo = true }.takeIf { vm.timeLapseRecorded })),
         )
         4 -> listOf(
             listOf(
@@ -304,6 +308,12 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Act("Licences") { dialog = "Licences" to licences(context) },
             ),
             listOf(
+                Act("Keyboard shortcuts") {
+                    // the system's list of them, which the app fills in (MainActivity)
+                    var c = context
+                    while (c is android.content.ContextWrapper && c !is android.app.Activity) c = c.baseContext
+                    (c as? android.app.Activity)?.requestShowKeyboardShortcuts()
+                },
                 Act("Advanced settings") {
                     // the app's own settings page, apart from the canvas
                     runCatching { context.startActivity(Intent(context, io.github.artcraftandroid.procraft.SettingsActivity::class.java)) }
@@ -404,6 +414,17 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
         destructive = false,
         cancel = "Full length",
         first = { shareVideo(null) },
+    )
+    // recording turned off with something recorded: deleted, or kept (a tap beside it keeps it)
+    Alert(
+        if (vm.purgeAsking) Unit else null,
+        title = { "Purge Video?" },
+        message = { "The video recorded so far will be deleted.\nIt can't be brought back." },
+        action = "Purge",
+        onCancel = { vm.answerPurge(false) },
+        onAction = { vm.answerPurge(true) },
+        icon = PcIcons.AlertQuestion,
+        cancel = "Don't Purge",
     )
     PdfQualityAlert(pdfAsking != null, onCancel = { pdfAsking = null }) { quality ->
         pdfAsking?.let { share(it, quality.jpeg) }
@@ -778,12 +799,23 @@ internal fun shareFiles(context: Context, files: List<File>, mime: String) {
     if (files.size == 1) return shareFile(context, files[0], mime)
     val uris = ArrayList(files.map { FileProvider.getUriForFile(context, context.packageName + ".files", it) })
     val send = Intent(Intent.ACTION_SEND_MULTIPLE).setType(mime).putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    context.startActivity(Intent.createChooser(send, null))
+    context.startActivity(shareSheet(context, send, files, mime))
 }
 
 /** Offers [file] to other apps through the share sheet. */
 internal fun shareFile(context: Context, file: File, mime: String) {
     val uri = FileProvider.getUriForFile(context, context.packageName + ".files", file)
     val send = Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    context.startActivity(Intent.createChooser(send, null))
+    context.startActivity(shareSheet(context, send, listOf(file), mime))
+}
+
+/** The share sheet for [send], with saving [files] to the device always among its choices. */
+private fun shareSheet(context: Context, send: Intent, files: List<File>, mime: String): Intent {
+    val save = android.content.pm.LabeledIntent(
+        io.github.artcraftandroid.procraft.SaveToDeviceActivity.intent(context, files, mime),
+        context.packageName,
+        "Save to device",
+        io.github.artcraftandroid.procraft.R.mipmap.ic_launcher,
+    )
+    return Intent.createChooser(send, null).putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf<android.os.Parcelable>(save))
 }

@@ -77,6 +77,8 @@ pub enum Act {
     About,
     Licences,
     AdvancedSettings,
+    /// The keyboard shortcuts' list.
+    Shortcuts,
     GestureControls,
     CanvasInfo,
     AnimationAssist,
@@ -100,6 +102,8 @@ pub enum Act {
     RightHanded,
     BrushCursor,
     ProjectCanvas,
+    /// The eyedropper picks from the current layer, or the canvas as composited.
+    EyedropperLayer,
     ResetInput,
 }
 
@@ -237,6 +241,8 @@ pub struct Showing {
     pub animation: bool,
     pub pages: bool,
     pub time_lapse: bool,
+    /// Something has been recorded (Replay and Export need it).
+    pub time_lapse_recorded: bool,
     pub reference: bool,
     pub guide: bool,
     pub side_bar: bool,
@@ -319,10 +325,10 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
         ],
         3 => vec![
             vec![
-                Button("Time-lapse Replay", None, Some(Act::TimeLapseReplay)),
+                Button("Time-lapse Replay", None, showing.time_lapse_recorded.then_some(Act::TimeLapseReplay)),
                 Switch("Time-lapse Recording", showing.time_lapse, Some(Act::TimeLapseRecording)),
             ],
-            vec![Button("Export time-lapse video", None, Some(Act::ExportTimeLapse))],
+            vec![Button("Export time-lapse video", None, showing.time_lapse_recorded.then_some(Act::ExportTimeLapse))],
         ],
         4 => {
             let delay = prefs.rapid_undo_delay;
@@ -339,6 +345,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                     ),
                     Switch("Project canvas", prefs.project_canvas, Some(Act::ProjectCanvas)),
                     Switch("Brush cursor", prefs.brush_cursor, Some(Act::BrushCursor)),
+                    Switch("Eyedropper picks from layer", prefs.eyedropper_layer, Some(Act::EyedropperLayer)),
                     Button("Advanced cursor settings", None, Some(Act::Page(Page::Cursor))),
                 ],
                 vec![
@@ -373,7 +380,10 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
         }
         _ => vec![
             vec![Button("About ProCraft", None, Some(Act::About)), Button("Licences", None, Some(Act::Licences))],
-            vec![Button("Advanced settings", None, Some(Act::AdvancedSettings))],
+            vec![
+                Button("Keyboard shortcuts", None, Some(Act::Shortcuts)),
+                Button("Advanced settings", None, Some(Act::AdvancedSettings)),
+            ],
         ],
     }
 }
@@ -603,6 +613,10 @@ impl Actions {
             }
             Some(Tapped::Act(Act::ProjectCanvas)) => {
                 prefs.project_canvas = !prefs.project_canvas;
+                Some(Act::Prefs)
+            }
+            Some(Tapped::Act(Act::EyedropperLayer)) => {
+                prefs.eyedropper_layer = !prefs.eyedropper_layer;
                 Some(Act::Prefs)
             }
             Some(Tapped::Act(Act::ResetInput)) => {

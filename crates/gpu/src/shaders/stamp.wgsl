@@ -25,6 +25,8 @@ struct StampUniform {
     secondary: vec4<f32>,
     // 1: the shape read unfiltered (sharp)
     shape_sharp: u32,
+    // the coarsest mip level the shape is read from: a small stamp's thin shape keeps its strength
+    shape_lod_cap: f32,
 }
 
 @group(0) @binding(0) var<uniform> su: StampUniform;
@@ -160,9 +162,11 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         let soft = 1.0 - smoothstep(min(su.hardness, 0.999) * r, r + 0.5, d);
         a = min(rim, soft);
     } else {
-        let uv = i.q * i.flip * 0.5 + 0.5;
+        // the shape fills its stamp and half a pixel round it (as far as the quad it is drawn on
+        // reaches past the stamp), which shows on a stamp a few pixels across
+        let uv = i.q * (r / (r + 0.5)) * i.flip * 0.5 + 0.5;
         // the mip level that matches the stamp's size on the canvas
-        let lod = max(log2(256.0 / max(2.0 * r, 1.0)), 0.0);
+        let lod = clamp(log2(256.0 / max(2.0 * r + 1.0, 1.0)), 0.0, su.shape_lod_cap);
         let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
         var s = textureSampleLevel(shapes, shape_smp, uv, su.shape, lod).r;
         if (su.shape_sharp == 1u) {
@@ -182,13 +186,15 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         if (sharp) {
             raw = sharp_grain(raw, g_uv);
         }
-        var g = clamp((raw - 0.5) * (1.0 + su.grain_contrast) + 0.5 + su.grain_brightness, 0.0, 1.0);
-        if (i.grain_bleed > 0.0) {
-            // pressed in as far as the pressure's bleed says
-            g = mix(g, pressed_in(g, i.grain_press), i.grain_bleed);
-        }
+        let g = clamp((raw - 0.5) * (1.0 + su.grain_contrast) + 0.5 + su.grain_brightness, 0.0, 1.0);
         // combined with the shape by the grain's blend mode, as deep as it says, inside the shape
         a = grain_combine(a, g, clamp(su.grain_depth * i.look.x, 0.0, 1.0), su.grain_blend);
+    }
+    // the pressure's bleed, a contrast on the shape and its grain: none of the faint parts, all
+    // of the strong ones, and more of both the harder the pen presses
+    if (i.grain_bleed > 0.0) {
+        let b = 8.0 * i.grain_bleed;
+        a = clamp((1.0 + b) * a - b / sqrt(max(b * i.grain_press, 1e-4)), 0.0, 1.0);
     }
     // a leaning pen shades it across its width, strongest at its leading edge
     if (i.look.w > 0.0) {

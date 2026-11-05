@@ -34,6 +34,10 @@ pub struct Input {
     pub commands: Vec<TouchCommand>,
     /// The pointers down on the canvas.
     down: Vec<u64>,
+    /// Pointers down that the canvas didn't take (pressed on the interface, or on the canvas
+    /// while a popover was open, which that press only closes): while one is, no brush outline
+    /// hovers (it would stay where the pen went down, as the pen moves on).
+    ignored: Vec<u64>,
     /// The mouse: where it is, whether it is over the window, and whether it (or space) moves the
     /// view.
     cursor: Option<(f32, f32)>,
@@ -41,6 +45,11 @@ pub struct Input {
     panning: bool,
     /// The mouse dragged with a key held, zooming or turning the canvas (the core's key drag).
     key_drag: Option<KeyDrag>,
+    /// The pen moving the view (pressed with space held), as the mouse does.
+    pen_panning: Option<u64>,
+    /// A tablet's pen pressed the mouse pointer (X11, a Mac): its pressure as last read, for the
+    /// stroke's moves while it goes unread a moment (another pointer heard from in between).
+    pen_pressure: Option<f32>,
     /// The brush cursor follows the mouse hovering, so its moves draw a frame.
     pub hover_shown: bool,
     space: bool,
@@ -66,10 +75,13 @@ impl Default for Input {
             clock: Instant::now(),
             commands: Vec::new(),
             down: Vec::new(),
+            ignored: Vec::new(),
             cursor: None,
             inside: false,
             panning: false,
             key_drag: None,
+            pen_panning: None,
+            pen_pressure: None,
             hover_shown: false,
             space: false,
             r_key: None,
@@ -98,12 +110,17 @@ impl Input {
     }
 
     pub fn hovering(&self) -> Option<(f32, f32)> {
-        self.cursor.filter(|_| self.inside && self.down.is_empty() && !self.moving_view())
+        self.cursor.filter(|_| self.inside && self.down.is_empty() && self.ignored.is_empty() && !self.moving_view())
     }
 
     /// Nothing is pressed on the canvas and the view isn't moving.
     pub fn idle(&self) -> bool {
         self.down.is_empty() && !self.panning && self.key_drag.is_none()
+    }
+
+    /// Something is pressed on the canvas (a pen, the mouse, a finger), and not to move the view.
+    pub fn pressing(&self) -> bool {
+        !self.down.is_empty() && !self.moving_view()
     }
 
     /// Space or R is held, or the mouse moves the view.
@@ -156,27 +173,30 @@ impl Input {
         any
     }
 
-    /// What the mouse pointer is now: a tablet's pen moving it (X11 gives a pen as the mouse), as
-    /// a pen or its eraser end with its pressure; else the mouse.
-    fn mouse_kind() -> (PointerKind, f32) {
-        match crate::pen::mouse_pen() {
+    /// What the mouse pointer is now, at `at`: a tablet's pen moving it (X11 gives a pen as the
+    /// mouse), as a pen or its eraser end with its pressure there; else the mouse.
+    fn mouse_kind(at: (f32, f32)) -> (PointerKind, f32) {
+        match crate::pen::mouse_pen_at(at) {
             Some(pen) => (if pen.eraser { PointerKind::StylusEraser } else { PointerKind::Stylus }, pen.pressure),
             None => (PointerKind::Mouse, 1.0),
         }
     }
 
+    /// The pressure of the mouse pointer's sample at `at`: a stroke a pen began keeps the pen's
+    /// last pressure through a moment it goes unread, rather than jumping to full as the mouse's.
+    fn mouse_pressure(&mut self, at: (f32, f32)) -> f32 {
+        let read = crate::pen::mouse_pen_at(at).map(|pen| pen.pressure);
+        if self.pen_pressure.is_some() && read.is_some() {
+            self.pen_pressure = read;
+        }
+        read.or(self.pen_pressure).unwrap_or(1.0)
+    }
+
     /// A sample of pointer `id` at `(x, y)`: a pen's with its lean, if the system gave one.
     fn sample(&self, id: u64, (x, y): (f32, f32), pressure: f32) -> Vec<PenSample> {
         let (tilt, orientation) = crate::pen::lean(id).unwrap_or((0.0, 0.0));
-        vec![PenSample {
-            x,
-            y,
-            pressure: pressure.clamp(0.0, 1.0),
-            tilt,
-            orientation,
-            time_ms: self.now_ms(),
-            roll: 0.0,
-        }]
+        let roll = crate::pen::roll(id).unwrap_or(0.0);
+        vec![PenSample { x, y, pressure: pressure.clamp(0.0, 1.0), tilt, orientation, time_ms: self.now_ms(), roll }]
     }
 
     fn pressed(&mut self, session: &CanvasSession, id: u64, kind: PointerKind, at: (f32, f32), pressure: f32) {
@@ -226,6 +246,7 @@ impl Input {
                 self.space = event.state == ElementState::Pressed && !consumed;
                 if !self.space && self.panning && !self.down.contains(&MOUSE) {
                     self.panning = false;
+                    self.pen_panning = None;
                 }
                 // a zoom ends with it too
                 if !self.space && self.key_drag == Some(KeyDrag::Zoom) {
@@ -256,7 +277,7 @@ impl Input {
                 true
             }
             WindowEvent::Focused(false) => {
-                // keys let go elsewhere never come back up here
+                // keys let go elsewhere never come back up here (nor, perhaps, a press's lift)
                 self.space = false;
                 self.r_key = None;
                 self.command_key = false;
@@ -264,6 +285,7 @@ impl Input {
                 self.alt = false;
                 self.shift = false;
                 self.end_key_drag(session);
+                self.ignored.clear();
                 false
             }
             WindowEvent::CursorEntered { .. } | WindowEvent::CursorLeft { .. } => {
@@ -273,21 +295,17 @@ impl Input {
             WindowEvent::CursorMoved { position, .. } => {
                 let p = (position.x as f32, position.y as f32);
                 self.inside = true;
-                let last = self.cursor.replace(p);
                 if self.key_drag.is_some() {
+                    self.cursor = Some(p);
                     session.key_drag_move(p.0, p.1, self.shift);
                     return true;
                 }
-                if let (true, Some(l)) = (self.panning, last) {
-                    if self.turns_model && !self.shift {
-                        session.turn_model(p.0 - l.0, p.1 - l.1);
-                    } else {
-                        session.view_gesture(p.0, p.1, p.0 - l.0, p.1 - l.1, 1.0, 0.0);
-                    }
+                if self.pan_to(session, p) {
                     return true;
                 }
                 if self.down.contains(&MOUSE) {
-                    self.moved(session, MOUSE, p, Self::mouse_kind().1);
+                    let pressure = self.mouse_pressure(p);
+                    self.moved(session, MOUSE, p, pressure);
                     return true;
                 }
                 self.hover_shown
@@ -318,12 +336,15 @@ impl Input {
                         false
                     }
                     (MouseButton::Left, ElementState::Pressed) if !self.panning && !over(p) => {
-                        let (kind, pressure) = Self::mouse_kind();
+                        let (kind, pressure) = Self::mouse_kind(p);
+                        self.pen_pressure = (kind != PointerKind::Mouse).then_some(pressure);
                         self.pressed(session, MOUSE, kind, p, pressure);
                         true
                     }
                     (MouseButton::Left, ElementState::Released) if self.down.contains(&MOUSE) => {
-                        self.lifted(session, MOUSE, p, Self::mouse_kind().1, false);
+                        let pressure = self.mouse_pressure(p);
+                        self.pen_pressure = None;
+                        self.lifted(session, MOUSE, p, pressure, false);
                         true
                     }
                     (MouseButton::Left | MouseButton::Middle, ElementState::Released) => {
@@ -375,6 +396,18 @@ impl Input {
         }
     }
 
+    /// The pointer at `p`: while the view is being moved, moved by as much. True if it was.
+    fn pan_to(&mut self, session: &CanvasSession, p: (f32, f32)) -> bool {
+        let last = self.cursor.replace(p);
+        let (true, Some(l)) = (self.panning, last) else { return false };
+        if self.turns_model && !self.shift {
+            session.turn_model(p.0 - l.0, p.1 - l.1);
+        } else {
+            session.view_gesture(p.0, p.1, p.0 - l.0, p.1 - l.1, 1.0, 0.0);
+        }
+        true
+    }
+
     fn on_touch(&mut self, session: &CanvasSession, touch: &Touch, over: &impl Fn((f32, f32)) -> bool) -> bool {
         let p = (touch.location.x as f32, touch.location.y as f32);
         // a pen with its pressure, or a finger: as the system says which (a touch screen may give
@@ -393,12 +426,34 @@ impl Input {
             None => PointerKind::Finger,
         };
         let pressure = pen.unwrap_or(1.0);
+        // with space held the pen moves the view, as the mouse does
+        if pen.is_some() {
+            match touch.phase {
+                TouchPhase::Started if self.space && self.down.is_empty() && !self.panning && !over(p) => {
+                    self.panning = true;
+                    self.pen_panning = Some(touch.id);
+                    self.cursor = Some(p);
+                    return false;
+                }
+                _ if self.pen_panning != Some(touch.id) => {}
+                TouchPhase::Moved => return self.pan_to(session, p),
+                TouchPhase::Ended | TouchPhase::Cancelled => {
+                    self.panning = false;
+                    self.pen_panning = None;
+                    return false;
+                }
+                TouchPhase::Started => {}
+            }
+        }
         let known = self.down.contains(&touch.id);
         match touch.phase {
             TouchPhase::Started => {
-                // the first touch must land on the canvas; more may land anywhere
+                // the first touch must land on the canvas; more may land anywhere (one that didn't
+                // is kept, so no outline hovers while it is down)
                 if self.down.is_empty() && over(p) {
-                    return false;
+                    self.ignored.retain(|i| *i != touch.id);
+                    self.ignored.push(touch.id);
+                    return true;
                 }
                 self.pressed(session, touch.id, kind, p, pressure);
                 true
@@ -413,6 +468,10 @@ impl Input {
             }
             TouchPhase::Cancelled if known => {
                 self.lifted(session, touch.id, p, pressure, true);
+                true
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled if self.ignored.contains(&touch.id) => {
+                self.ignored.retain(|i| *i != touch.id);
                 true
             }
             _ => false,

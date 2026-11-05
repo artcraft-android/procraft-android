@@ -145,15 +145,18 @@ pub struct Layers {
     swiped: Option<u64>,
     /// A press on a row's visibility box: whose, since when, and whether holding it has acted.
     box_press: Option<(u64, Instant, bool)>,
-    /// The fingers on a touch screen, and two put on two rows being pinched.
+    /// The fingers on a touch screen, two put on two rows being pinched, and two put on one row.
     touches: HashMap<u64, Pos2>,
     pinch: Option<Pinch>,
+    twin: Option<Twin>,
     /// What the panel asks of the app: a notice to show, a layer's contents copied, the chosen
     /// layers shared, a text layer's text edited.
     pub notice: Option<(String, bool)>,
     pub copied: Option<ThumbnailImage>,
     pub share: bool,
     pub edit_text: Option<u64>,
+    /// Layer Opacity asked for the current layer (two fingers tapped on its row).
+    pub layer_opacity: bool,
     /// On a model: the mesh open (its texture set's layers under it), the layer whose channels
     /// show, the channel whose colour shows, each channel's own colour (hue, saturation,
     /// brightness) kept while another is painted, the meshes' and channels' pictures, and the
@@ -835,8 +838,59 @@ impl Layers {
         }
         let mut fingers: Vec<(u64, Pos2)> = self.touches.iter().map(|(id, p)| (*id, *p)).collect();
         fingers.sort_by(|a, b| a.1.y.total_cmp(&b.1.y));
-        let [(top_id, top), (bottom_id, bottom)] = fingers[..] else { return };
+        let [(top_id, top), (bottom_id, bottom)] = fingers[..] else {
+            // let go: two fingers that tapped a row, still and quick, ask for its Layer Opacity
+            if let Some(t) = self.twin.take()
+                && !t.done
+                && !t.moved
+                && t.since.elapsed().as_secs_f32() <= TWIN_TAP_S
+            {
+                session.select_layer(t.id);
+                self.layer_opacity = true;
+            }
+            return;
+        };
         let row_at = |p: Pos2| rows.iter().find(|(_, r)| r.contains(p)).map(|(id, _)| *id);
+        let middle = pos2((top.x + bottom.x) / 2.0, (top.y + bottom.y) / 2.0);
+        if self.pinch.is_none() {
+            match &mut self.twin {
+                None => {
+                    // both on one paint layer's row
+                    if let (Some(a), Some(b)) = (row_at(top), row_at(bottom))
+                        && a == b
+                        && session.layers().iter().any(|l| l.id == a && l.kind == LayerType::Paint)
+                    {
+                        self.twin =
+                            Some(Twin { id: a, since: Instant::now(), from: middle, moved: false, done: false });
+                        // not a one-finger press on it any more
+                        self.press = None;
+                    }
+                }
+                Some(t) => {
+                    let d = middle - t.from;
+                    if d.length() > TWIN_SLOP {
+                        t.moved = true;
+                    }
+                    if !t.done && d.x > TWIN_SWIPE && d.x > 2.0 * d.y.abs() {
+                        // swiped right: its Alpha Lock on or off
+                        t.done = true;
+                        if let Some(l) = session.layers().into_iter().find(|l| l.id == t.id) {
+                            session.set_layer_alpha_lock(l.id, !l.alpha_lock);
+                        }
+                    } else if !t.done && !t.moved && t.since.elapsed().as_secs_f32() >= TWIN_HOLD_S {
+                        // held: its contents selected
+                        t.done = true;
+                        session.select_layer_contents(t.id);
+                    }
+                    if !t.done {
+                        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    }
+                }
+            }
+            if self.twin.is_some() {
+                return;
+            }
+        }
         match &mut self.pinch {
             None => {
                 if let (Some(upper), Some(lower)) = (row_at(top), row_at(bottom))
@@ -1617,6 +1671,23 @@ fn galley(
 const PINCH_MERGE: f32 = 0.65;
 /// How much of its finger's way a pinched row moves (as measured, about a quarter to a third).
 const SQUEEZE_FOLLOW: f32 = 0.3;
+
+/// Two fingers on one row tap it within this long (seconds), hold it from this long still, move
+/// past this to be no tap or hold, and swipe it this far right (points).
+const TWIN_TAP_S: f32 = 0.4;
+const TWIN_HOLD_S: f32 = 0.5;
+const TWIN_SLOP: f32 = 8.0;
+const TWIN_SWIPE: f32 = 40.0;
+
+/// Two fingers put on one row: its layer, since when, where their middle started, whether they
+/// have moved, and whether they have done what they do.
+struct Twin {
+    id: u64,
+    since: Instant,
+    from: Pos2,
+    moved: bool,
+    done: bool,
+}
 
 /// Two fingers put on two rows: those rows' layers (the upper and the lower), the fingers' ids and
 /// where they went down, how far each has gone since, and whether they came close enough that,

@@ -17,7 +17,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.paddingFromBaseline
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -171,6 +173,19 @@ private val ExportCheck = listOf(-14f to 1f, -4f to 11f, 16f to -10f)
 private val ExportCheckWidth = 6.dp
 private const val EXPORT_CHECK_DRAW_MS = 300
 
+// the import card, as measured: the export card with the file's name (18) under the title, the
+// title's row 4.5 lower and its glyph (16.5 across) 3.5 lower in it, 12 before the title, the
+// name's baseline 35 under that row and the pie 58 under it
+private val ImportTitleDrop = 4.5.dp
+private val ImportGlyphDrop = 3.5.dp
+private val ImportGlyphWidth = 16.5.dp
+private val ImportGlyphGap = 12.dp
+private val ImportNameBlock = 58.dp
+private val ImportNameBaseline = 35.dp
+
+/** A progress card's state: how far it has come (0..1), whether it is [done], and the file it is about. */
+private data class CardShown(val progress: Float, val done: Boolean, val detail: String? = null)
+
 /**
  * The card over everything while an export runs ([shown] not null): "Exporting" after the share
  * glyph, a pie filling clockwise from the top with how far it has come, and Cancel. Once
@@ -178,8 +193,20 @@ private const val EXPORT_CHECK_DRAW_MS = 300
  * as an alert does, the screen dimmed; nothing under it is touched meanwhile.
  */
 @Composable
-fun ExportProgress(shown: io.github.artcraftandroid.procraft.canvas.CanvasViewModel.ExportShown?, onCancel: () -> Unit) {
-    val last = remember { arrayOfNulls<io.github.artcraftandroid.procraft.canvas.CanvasViewModel.ExportShown>(1) }
+fun ExportProgress(shown: io.github.artcraftandroid.procraft.canvas.CanvasViewModel.ExportShown?, onCancel: () -> Unit) =
+    ProgressCard(shown?.let { CardShown(it.progress, it.done) }, "Exporting", PcIcons.TabShare, onCancel)
+
+/**
+ * The card over everything while a file is brought in ([shown] not null): as the export card, with
+ * "Importing" after the import glyph and the file's name under it.
+ */
+@Composable
+fun ImportProgress(shown: io.github.artcraftandroid.procraft.canvas.CanvasViewModel.ImportShown?, onCancel: () -> Unit) =
+    ProgressCard(shown?.let { CardShown(it.progress, it.done, it.name) }, "Importing", PcIcons.TabImport, onCancel)
+
+@Composable
+private fun ProgressCard(shown: CardShown?, title: String, glyph: ImageVector, onCancel: () -> Unit) {
+    val last = remember { arrayOfNulls<CardShown>(1) }
     if (shown != null) last[0] = shown
     val appear by animateFloatAsState(
         if (shown != null) 1f else 0f,
@@ -207,18 +234,36 @@ fun ExportProgress(shown: io.github.artcraftandroid.procraft.canvas.CanvasViewMo
                     scaleX = k
                     scaleY = k
                 }.clip(RoundedCornerShape(24.dp)).background(AlertFill).border(1.dp, Pc.GlassMenuEdge, RoundedCornerShape(24.dp))
-                    .padding(start = 17.dp, end = 17.dp, top = 21.dp, bottom = 15.dp),
+                    .padding(start = 17.dp, end = 17.dp, top = 21.dp + if (kept.detail != null) ImportTitleDrop else 0.dp, bottom = 15.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Row(Modifier.height(31.dp), verticalAlignment = Alignment.CenterVertically) {
                     // the glyph 22 tall (it fills 18.6 of its 50 frame), 13 before the title
-                    Box(Modifier.size(22.dp, 31.dp), contentAlignment = Alignment.Center) {
-                        Icon(PcIcons.TabShare, contentDescription = null, tint = Pc.Accent, modifier = Modifier.requiredSize(59.dp))
+                    val importing = kept.detail != null
+                    Box(
+                        Modifier.size(if (importing) ImportGlyphWidth else 22.dp, 31.dp).offset(y = if (importing) ImportGlyphDrop else 0.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(glyph, contentDescription = null, tint = Pc.Accent, modifier = Modifier.requiredSize(59.dp))
                     }
-                    Spacer(Modifier.width(13.dp))
-                    Text("Exporting", color = AlertInk, fontSize = 26.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    Spacer(Modifier.width(if (importing) ImportGlyphGap else 13.dp))
+                    Text(title, color = AlertInk, fontSize = 26.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                 }
-                Spacer(Modifier.height(40.dp))
+                val detail = kept.detail
+                if (detail == null) {
+                    Spacer(Modifier.height(40.dp))
+                } else {
+                    Box(Modifier.fillMaxWidth().height(ImportNameBlock), contentAlignment = Alignment.TopCenter) {
+                        Text(
+                            detail,
+                            color = AlertInk,
+                            fontSize = 18.sp,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.MiddleEllipsis,
+                            modifier = Modifier.paddingFromBaseline(top = ImportNameBaseline),
+                        )
+                    }
+                }
                 val accent = Pc.Accent
                 androidx.compose.foundation.Canvas(Modifier.size(ExportPie)) {
                     val r = size.minDimension / 2f

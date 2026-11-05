@@ -210,11 +210,19 @@ fn fs_streak(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     return kept(i, sum / f32(count));
 }
 
-// each pixel streaked towards (b.xy, pixels) by a.x of the way there
+// each pixel streaked towards (b.xy, pixels) by a.x of the way there; with an arrow (b.zw, a unit
+// vector) only on its side: all of it straight along the arrow, falling off evenly with the turn of
+// the pixel's way from the centre, none from square to it on
 @fragment
 fn fs_zoom(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let i = vec2<i32>(pos.xy);
-    let towards = (fu.b.xy - pos.xy) * fu.a.x;
+    var share = fu.a.x;
+    let away = pos.xy - fu.b.xy;
+    if (dot(fu.b.zw, fu.b.zw) > 0.0 && dot(away, away) > 0.0) {
+        let turn = acos(clamp(dot(normalize(away), normalize(fu.b.zw)), -1.0, 1.0));
+        share *= max(1.0 - turn / 1.5707964, 0.0);
+    }
+    let towards = -away * share;
     let count = clamp(i32(length(towards)), 1, 96);
     var sum = vec4<f32>(0.0);
     for (var k = 0; k < count; k++) {

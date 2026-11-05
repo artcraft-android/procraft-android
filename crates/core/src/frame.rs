@@ -48,6 +48,7 @@ impl State {
                 lut,
                 // the second display's own density isn't known: crisp once a pixel covers more
                 crisp_from: 1.0,
+                grey: false,
             }),
         );
     }
@@ -125,6 +126,7 @@ impl State {
                     convert,
                     lut,
                     crisp_from: self.display_scale,
+                    grey: self.grey_view,
                 }),
             );
             // caches still being remade: another frame soon, and the artwork isn't shown yet

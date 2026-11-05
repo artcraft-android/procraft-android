@@ -141,8 +141,8 @@ mod system {
     }
 
     /// The frames of the video at `path`, each as straight RGBA rows to `each` with when it
-    /// shows (seconds); how many.
-    pub fn read(path: &Path, each: &mut dyn FnMut(Vec<u8>, u32, u32, f64)) -> windows::core::Result<u32> {
+    /// shows (seconds), until it says to stop (false); how many.
+    pub fn read(path: &Path, each: &mut dyn FnMut(Vec<u8>, u32, u32, f64) -> bool) -> windows::core::Result<u32> {
         let _started = Started::new()?;
         let mut attributes = None;
         unsafe { MFCreateAttributes(&mut attributes, 1)? };
@@ -207,8 +207,10 @@ mod system {
             }
             // its time in 100 ns units
             let at = unsafe { sample.GetSampleTime() }.unwrap_or(0);
-            each(rgba, w, h, at as f64 / 10_000_000.0);
             frames += 1;
+            if !each(rgba, w, h, at as f64 / 10_000_000.0) {
+                break;
+            }
         }
         Ok(frames)
     }
@@ -482,8 +484,8 @@ mod system {
     }
 
     /// The frames of the video at `path`, each as straight RGBA rows to `each` with when it
-    /// shows (seconds); how many.
-    pub fn read(path: &Path, each: &mut dyn FnMut(Vec<u8>, u32, u32, f64)) -> Result<u32, String> {
+    /// shows (seconds), until it says to stop (false); how many.
+    pub fn read(path: &Path, each: &mut dyn FnMut(Vec<u8>, u32, u32, f64) -> bool) -> Result<u32, String> {
         let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&*file_url(path)?, None) };
         let track = video_track(&asset)?;
         // SAFETY: the asset and its track as the system made them; the output's settings are a
@@ -503,8 +505,11 @@ mod system {
             let mut frames = 0;
             while let Some(sample) = output.copyNextSampleBuffer() {
                 let Some((rgba, w, h)) = sample.image_buffer().and_then(|image| rgba_of(&image)) else { continue };
-                each(rgba, w, h, sample.presentation_time_stamp().seconds());
                 frames += 1;
+                if !each(rgba, w, h, sample.presentation_time_stamp().seconds()) {
+                    reader.cancelReading();
+                    return Ok(frames);
+                }
             }
             if reader.status() == AVAssetReaderStatus::Failed {
                 return Err(said(reader.error(), "the video can't be read"));
@@ -515,8 +520,8 @@ mod system {
 }
 
 /// The frames of the video at `path`, each as straight RGBA rows (`width`, `height`) to `each`
-/// with when it shows (seconds); how many there were.
-pub fn read_frames(path: &Path, mut each: impl FnMut(Vec<u8>, u32, u32, f64)) -> Result<u32, String> {
+/// with when it shows (seconds), until `each` says to stop (false); how many it was given.
+pub fn read_frames(path: &Path, mut each: impl FnMut(Vec<u8>, u32, u32, f64) -> bool) -> Result<u32, String> {
     #[cfg(any(windows, target_os = "macos"))]
     {
         system::read(path, &mut each).map_err(|e| e.to_string())
@@ -595,6 +600,61 @@ mod ffmpeg {
         if e.kind() == ErrorKind::NotFound { super::NO_FFMPEG.to_owned() } else { e.to_string() }
     }
 
+    /// An encoder: what goes before the input (a device to open), the encoder, and the filter
+    /// taking the frames onto the GPU.
+    type Encoder = (&'static [&'static str], &'static str, &'static str);
+
+    /// The encoders tried in turn, the GPU's first (NVIDIA's, then VAAPI's for AMD and Intel, then
+    /// Vulkan's), the codec's software one last.
+    fn encoders(hevc: bool) -> Vec<Encoder> {
+        vec![
+            (&[], if hevc { "hevc_nvenc" } else { "h264_nvenc" }, "format=yuv420p"),
+            (
+                &["-vaapi_device", "/dev/dri/renderD128"],
+                if hevc { "hevc_vaapi" } else { "h264_vaapi" },
+                "format=nv12,hwupload",
+            ),
+            (
+                &["-init_hw_device", "vulkan=gpu", "-filter_hw_device", "gpu"],
+                if hevc { "hevc_vulkan" } else { "h264_vulkan" },
+                "format=nv12,hwupload",
+            ),
+            // the codec's first encoder there is (libx264, libx265 or another)
+            (&[], if hevc { "hevc" } else { "h264" }, "format=yuv420p"),
+        ]
+    }
+
+    /// The first of [`encoders`] that makes a video `width` × `height` here (each tried once on a
+    /// moment of test picture, what was found kept for the size).
+    fn encoder(hevc: bool, width: u32, height: u32) -> Encoder {
+        /// The encoder found for a codec (HEVC or not) and size.
+        type Found = ((bool, u32, u32), usize);
+        static FOUND: std::sync::Mutex<Vec<Found>> = std::sync::Mutex::new(Vec::new());
+        let all = encoders(hevc);
+        let software = all.len() - 1;
+        let key = (hevc, width, height);
+        let known = FOUND.lock().ok().and_then(|f| f.iter().find(|(k, _)| *k == key).map(|(_, i)| *i));
+        let i = known.unwrap_or_else(|| {
+            let works = |(device, codec, filter): &Encoder| {
+                run("ffmpeg")
+                    .args(*device)
+                    .args(["-f", "lavfi", "-i", &format!("color=size={width}x{height}:rate=30"), "-frames:v", "2"])
+                    .args(["-vf", filter, "-c:v", codec, "-f", "null", "-"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success())
+            };
+            let i = all.iter().position(works).unwrap_or(software);
+            if let Ok(mut f) = FOUND.lock() {
+                f.push((key, i));
+            }
+            i
+        });
+        all.get(i).or(all.last()).copied().unwrap_or((&[], "h264", "format=yuv420p"))
+    }
+
     /// `count` frames of `width` × `height` (even) as an MP4 at `out`: H.264, or HEVC, at `fps` and
     /// `bit_rate` bits a second; `frame(i, w, h)` gives frame `i` as straight RGBA rows.
     #[allow(clippy::too_many_arguments)]
@@ -609,11 +669,14 @@ mod ffmpeg {
         frame: impl Fn(usize, u32, u32) -> Option<Vec<u8>>,
     ) -> Result<(), String> {
         let _ = std::fs::remove_file(out);
+        // on the GPU where it can be
+        let (device, codec, filter) = encoder(hevc, width, height);
+        log::info!("making a {width} x {height} video with {codec}");
         let mut child = run("ffmpeg")
+            .args(device)
             .args(["-y", "-f", "rawvideo", "-pix_fmt", "rgba"])
             .args(["-s", &format!("{width}x{height}"), "-r", &fps.to_string(), "-i", "-"])
-            // the codec's first encoder there is (libx264, libx265 or another), as players take it
-            .args(["-c:v", if hevc { "hevc" } else { "h264" }, "-pix_fmt", "yuv420p"])
+            .args(["-vf", filter, "-c:v", codec])
             .args(["-b:v", &bit_rate.to_string(), "-movflags", "+faststart"])
             .args(if hevc { &["-tag:v", "hvc1"][..] } else { &[][..] })
             .arg(out)
@@ -640,9 +703,9 @@ mod ffmpeg {
         Ok(())
     }
 
-    /// The video at `path` frame by frame: `each(rgba, width, height, seconds)`, straight RGBA;
-    /// how many frames.
-    pub fn read(path: &Path, each: &mut dyn FnMut(Vec<u8>, u32, u32, f64)) -> Result<u32, String> {
+    /// The video at `path` frame by frame: `each(rgba, width, height, seconds)`, straight RGBA,
+    /// until it says to stop (false); how many frames it was given.
+    pub fn read(path: &Path, each: &mut dyn FnMut(Vec<u8>, u32, u32, f64) -> bool) -> Result<u32, String> {
         let probe = run("ffprobe")
             .args(["-select_streams", "v:0", "-show_entries", "stream=width,height,avg_frame_rate", "-of", "csv=p=0"])
             .arg(path)
@@ -675,8 +738,11 @@ mod ffmpeg {
             let mut rgba = vec![0u8; size];
             match output.read_exact(&mut rgba) {
                 Ok(()) => {
-                    each(rgba, width, height, f64::from(count) / fps);
                     count += 1;
+                    if !each(rgba, width, height, f64::from(count - 1) / fps) {
+                        let _ = child.kill();
+                        break;
+                    }
                 }
                 Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
                 Err(e) => {
@@ -691,6 +757,15 @@ mod ffmpeg {
 
     #[cfg(test)]
     mod tests {
+        /// The encoder picked for a time-lapse video here (the GPU's where there is one).
+        #[test]
+        #[ignore = "says which encoder this machine has"]
+        fn the_gpus_encoder_is_picked_where_there_is_one() {
+            for hevc in [false, true] {
+                eprintln!("{}", super::encoder(hevc, 672, 1102).1);
+            }
+        }
+
         #[test]
         fn frames_made_into_a_video_by_ffmpeg_come_back() {
             let dir = std::env::temp_dir().join(format!("procraft-ffmpeg-{}", std::process::id()));
@@ -706,7 +781,11 @@ mod ffmpeg {
                 other => other.unwrap(),
             }
             let mut frames = Vec::new();
-            let count = super::read(&out, &mut |rgba, w, h, at| frames.push((rgba, w, h, at))).unwrap();
+            let count = super::read(&out, &mut |rgba, w, h, at| {
+                frames.push((rgba, w, h, at));
+                true
+            })
+            .unwrap();
             let _ = std::fs::remove_dir_all(&dir);
             assert_eq!(count, 6);
             for (i, (rgba, w, h, at)) in frames.iter().enumerate() {

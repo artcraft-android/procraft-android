@@ -213,6 +213,65 @@ pub fn quick_menu_saved(slots: Vec<QuickAction>) -> String {
     slots.iter().map(|&a| entry(a).1).collect::<Vec<_>>().join(",")
 }
 
+/// One of the QuickMenu's menus: its name (shown in the middle) and its six buttons.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct QuickMenuSet {
+    pub name: String,
+    pub slots: Vec<QuickAction>,
+}
+
+fn menu_name(n: usize) -> String {
+    format!("QuickMenu {n}")
+}
+
+/// The QuickMenu's menus as kept in `saved` (see [`quick_menus_saved`]), oldest first. With none
+/// kept there is one, "QuickMenu 1", with the buttons kept before there were several (`single`,
+/// see [`quick_menu_slots`]).
+#[uniffi::export]
+pub fn quick_menus(saved: Option<String>, single: Option<String>) -> Vec<QuickMenuSet> {
+    let menus: Vec<QuickMenuSet> = saved
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (name, slots) = line.split_once('\t')?;
+            (!name.trim().is_empty())
+                .then(|| QuickMenuSet { name: name.to_owned(), slots: quick_menu_slots(Some(slots.to_owned())) })
+        })
+        .collect();
+    if menus.is_empty() { vec![QuickMenuSet { name: menu_name(1), slots: quick_menu_slots(single) }] } else { menus }
+}
+
+/// The menus as kept: a line each, the name and the buttons (see [`quick_menu_saved`]) split by a
+/// tab.
+#[uniffi::export]
+pub fn quick_menus_saved(menus: Vec<QuickMenuSet>) -> String {
+    menus
+        .into_iter()
+        .map(|m| format!("{}\t{}", m.name.replace(['\t', '\n', '\r'], " "), quick_menu_saved(m.slots)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The menus with a new one after them: "QuickMenu N", N one more than there are (or the next
+/// not taken), its six buttons No Action.
+#[uniffi::export]
+pub fn quick_menu_added(menus: Vec<QuickMenuSet>) -> Vec<QuickMenuSet> {
+    let mut n = menus.len() + 1;
+    while menus.iter().any(|m| m.name == menu_name(n)) {
+        n += 1;
+    }
+    let mut menus = menus;
+    menus.push(QuickMenuSet { name: menu_name(n), slots: vec![QuickAction::None; DEFAULTS.len()] });
+    menus
+}
+
+/// Which menu is active once menu `removed` has gone, `active` having been: the same one, or the
+/// one before the active one when that went (the first when the first went).
+#[uniffi::export]
+pub fn quick_menu_active_after(active: u32, removed: u32) -> u32 {
+    if removed < active || (removed == active && active > 0) { active - 1 } else { active }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +307,30 @@ mod tests {
         assert_eq!(quick_menu_saved(slots), "UNDO,GUIDE_2D,NONE,GAUSSIAN_BLUR,NONE,REDO");
         // not six: as a menu starts
         assert_eq!(quick_menu_slots(Some("UNDO,REDO".into())), DEFAULTS.to_vec());
+    }
+
+    #[test]
+    fn the_menus_are_kept_by_name_and_the_first_takes_the_buttons_kept_before() {
+        let first = quick_menus(None, Some("UNDO,GUIDE_2D,NONE,GAUSSIAN_BLUR,NONE,REDO".into()));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].name, "QuickMenu 1");
+        assert_eq!(first[0].slots[0], QuickAction::Undo);
+        assert_eq!(quick_menus(None, None)[0].slots, DEFAULTS.to_vec());
+        let two = quick_menu_added(first);
+        assert_eq!(two[1].name, "QuickMenu 2");
+        assert_eq!(two[1].slots, vec![QuickAction::None; 6]);
+        let kept = quick_menus_saved(two.clone());
+        assert_eq!(quick_menus(Some(kept), None), two);
+        // a name taken is skipped
+        let gone = vec![two[1].clone()];
+        assert_eq!(quick_menu_added(gone)[1].name, "QuickMenu 3");
+    }
+
+    #[test]
+    fn deleting_a_menu_keeps_the_active_one_or_takes_the_one_before() {
+        assert_eq!(quick_menu_active_after(1, 1), 0);
+        assert_eq!(quick_menu_active_after(2, 0), 1);
+        assert_eq!(quick_menu_active_after(0, 1), 0);
+        assert_eq!(quick_menu_active_after(0, 0), 0);
     }
 }

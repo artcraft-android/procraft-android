@@ -4,12 +4,14 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, TryRecvError, channel, sync_channel};
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, Id, Order, Rect, Sense, TextureHandle, pos2, vec2};
 use procraft_core::{
-    CanvasSession, TIME_LAPSE_FPS, TimeLapse, time_lapse_bits_per_pixel, time_lapse_picks, time_lapse_side,
+    CanvasSession, TIME_LAPSE_FPS, ThumbnailImage, TimeLapse, time_lapse_bits_per_pixel, time_lapse_picks,
+    time_lapse_side,
 };
 
 use crate::alert::{Alert, Answer, Asking};
@@ -31,6 +33,8 @@ pub struct TimeLapseUi {
     recording: Option<Receiver<()>>,
     replay: Option<Replay>,
     length: Alert,
+    /// Recording turned off with something recorded: whether to delete it.
+    purge: Alert,
     /// The video being made, to save once made, as its card shows it; made, it waits for the card
     /// to go before it is saved.
     exporting: Option<(Receiver<Result<PathBuf, String>>, crate::export_card::Exporting)>,
@@ -41,7 +45,25 @@ pub struct TimeLapseUi {
 impl TimeLapseUi {
     /// The artwork in folder `dir` (none: not kept in the gallery) is open, its edits now `edits`.
     pub fn open(&mut self, dir: Option<&str>, edits: u64) {
+        // the artwork left: the frames it recorded made into one more video (on the GPU where it
+        // can be), off the window's thread, their pictures then gone, as the artwork file
+        // keeps a time-lapse
+        if let Some((left, _)) = self.lapse.take() {
+            std::thread::spawn(move || {
+                let _ = for_package(&left);
+            });
+        }
         self.lapse = dir.map(|d| (d.to_owned(), TimeLapse::new(d.to_owned())));
+        // the pictures its videos hold too go, as the artwork file keeps a time-lapse: only as video
+        if let Some((_, lapse)) = &self.lapse {
+            let lapse = Arc::clone(lapse);
+            std::thread::spawn(move || {
+                let gone = lapse.drop_clip_frames();
+                if gone > 0 {
+                    log::info!("the time-lapse's videos hold {gone} frames: their pictures went");
+                }
+            });
+        }
         self.recorded = Some(edits);
         self.replay = None;
     }
@@ -51,15 +73,40 @@ impl TimeLapseUi {
         self.lapse.as_ref().map_or((0, 0), |(_, t)| (t.count(), t.bytes()))
     }
 
+    /// The video's size, quality and codec, kept with the artwork.
+    pub fn settings(&self) -> procraft_core::TimeLapseSettings {
+        self.lapse.as_ref().map(|(_, t)| t.settings()).unwrap_or_default()
+    }
+
     /// Whether it records changes (the Video tab's switch).
     pub fn recording(&self) -> bool {
         self.lapse.as_ref().is_none_or(|(_, t)| t.recording())
     }
 
-    pub fn set_recording(&self, on: bool) {
-        if let Some((_, t)) = &self.lapse {
-            t.set_recording(on);
+    /// The switch goes at once; turned off with something recorded, whether to delete that is
+    /// asked.
+    pub fn set_recording(&mut self, on: bool) {
+        let Some((_, t)) = &self.lapse else { return };
+        t.set_recording(on);
+        if !on && t.count() > 0 {
+            self.purge.ask(Asking {
+                title: "Purge Video?".into(),
+                message: "The video recorded so far will be deleted.
+It can't be brought back."
+                    .into(),
+                action: "Purge".into(),
+                icon: Some(&icons::ALERT_QUESTION),
+                destructive: true,
+                extra: None,
+                first: Some("Don't Purge".into()),
+                alone: false,
+            });
         }
+    }
+
+    /// Something has been recorded (Replay and Export need it).
+    pub fn recorded(&self) -> bool {
+        self.lapse.as_ref().is_some_and(|(_, t)| t.count() > 0)
     }
 
     /// The artwork changed since the last frame (and nothing is pressed on it): a picture of it
@@ -83,9 +130,9 @@ impl TimeLapseUi {
         let (tx, rx) = channel();
         let (session, lapse) = (Arc::clone(session), Arc::clone(lapse));
         std::thread::spawn(move || {
-            // frames as large as the video they make
+            // frames as large as the video they make, private layers left out
             let side = time_lapse_side(lapse.settings());
-            if let Some(shot) = session.canvas_thumbnail(side) {
+            if let Some(shot) = session.time_lapse_frame(side) {
                 lapse.record(shot.rgba, shot.width, shot.height);
             }
             let _ = tx.send(());
@@ -122,10 +169,17 @@ impl TimeLapseUi {
     /// artwork's `name`); returns a message to show, if any.
     pub fn show(&mut self, ctx: &egui::Context, look: &mut Look, name: &str) -> Option<&'static str> {
         if let Some(replay) = self.replay.as_mut() {
-            let lapse = self.lapse.as_ref().map(|(_, t)| t.as_ref());
+            let lapse = self.lapse.as_ref().map(|(_, t)| t);
             if replay.show(ctx, look, lapse) {
                 self.replay = None;
             }
+        }
+        // Purge deletes what was recorded; Don't Purge, or a tap beside it, keeps it
+        if self.purge.show(ctx, look) == Some(Answer::Action)
+            && let Some((_, t)) = &self.lapse
+        {
+            t.purge();
+            self.recorded = None;
         }
         let mut said = None;
         match self.length.show(ctx, look) {
@@ -185,14 +239,19 @@ impl TimeLapseUi {
         std::thread::spawn(move || {
             let made = (|| {
                 let picks = time_lapse_picks(lapse.count(), seconds);
-                let first = lapse.frame(*picks.first().ok_or("no frames")?).ok_or("the first frame can't be read")?;
+                let stop = Arc::new(AtomicBool::new(false));
+                let _stops = Stops(Arc::clone(&stop));
+                let frames = read_in_order(Arc::clone(&lapse), picks.clone(), Arc::clone(&stop));
+                let (_, first) = frames.recv().map_err(|_| "the first frame can't be read")?;
+                let (width, height) = (first.width, first.height);
+                let last = std::cell::RefCell::new(Some(first));
                 let settings = lapse.settings();
                 let out = std::env::temp_dir().join("procraft-exports").join(format!("{name}.mp4"));
                 std::fs::create_dir_all(out.parent().unwrap_or(&out)).map_err(|e| e.to_string())?;
                 crate::video::write_mp4(
                     &out,
-                    first.width,
-                    first.height,
+                    width,
+                    height,
                     time_lapse_side(settings),
                     TIME_LAPSE_FPS,
                     settings.hevc,
@@ -205,7 +264,13 @@ impl TimeLapseUi {
                         }
                         let progress = n as f32 / picks.len().max(1) as f32;
                         done.store(progress.to_bits(), std::sync::atomic::Ordering::Relaxed);
-                        Some(on_white(&lapse.frame(*picks.get(n)?)?, w, h))
+                        // the first was read already; one that can't be read, the one before again
+                        if n > 0
+                            && let Ok((_, frame)) = frames.recv()
+                        {
+                            *last.borrow_mut() = Some(frame);
+                        }
+                        Some(on_white(last.borrow().as_ref()?, w, h))
                     },
                 )?;
                 Ok(out)
@@ -232,12 +297,74 @@ pub fn for_package(dir: &str) -> procraft_core::PackageTimeLapse {
             }
         };
     }
+    // the pictures now in a video go, as the artwork file keeps a time-lapse: only as video
+    lapse.drop_clip_frames();
     lapse.for_package()
+}
+
+/// Sets its flag once dropped: what it stops, stopped however its holder ends.
+struct Stops(Arc<AtomicBool>);
+
+impl Drop for Stops {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Frames `wanted` (rising) of `lapse`, each with its number, read in order off the window's
+/// thread a few ahead: from its videos (decoded as they come, the artwork file's way of keeping them)
+/// and its pictures. A frame that can't be read is left out. It stops once `stop` is set or
+/// nothing takes them.
+fn read_in_order(lapse: Arc<TimeLapse>, wanted: Vec<u32>, stop: Arc<AtomicBool>) -> Receiver<(u32, ThumbnailImage)> {
+    let (tx, rx) = sync_channel(4);
+    std::thread::spawn(move || {
+        let clips = lapse.clips();
+        let mut next = 0usize;
+        while let Some(&i) = wanted.get(next) {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let Some(clip) = clips.iter().find(|c| i >= c.first && i - c.first < c.frames) else {
+                if let Some(frame) = lapse.frame(i)
+                    && tx.send((i, frame)).is_err()
+                {
+                    return;
+                }
+                next += 1;
+                continue;
+            };
+            let end = clip.first + clip.frames;
+            let (mut at, mut gone) = (clip.first, false);
+            let read = crate::video::read_frames(std::path::Path::new(&clip.path), |rgba, width, height, _| {
+                let here = at;
+                at += 1;
+                if wanted.get(next) == Some(&here) {
+                    next += 1;
+                    if tx.send((here, ThumbnailImage { width, height, rgba })).is_err() {
+                        gone = true;
+                        return false;
+                    }
+                }
+                !stop.load(Ordering::Relaxed) && wanted.get(next).is_some_and(|&n| n < end)
+            });
+            if gone {
+                return;
+            }
+            if let Err(e) = read {
+                log::warn!("a time-lapse video: {e}");
+            }
+            // frames the video didn't hold (fewer than noted): left out
+            while wanted.get(next).is_some_and(|&n| n < end) {
+                next += 1;
+            }
+        }
+    });
+    rx
 }
 
 /// `plan`'s frames as a video, fitted on white; one added to those before comes out their size.
 fn make_segment(lapse: &TimeLapse, plan: &procraft_core::SegmentPlan) -> Result<(u32, u32), String> {
-    let settings = lapse.settings();
+    let settings = procraft_core::TimeLapseSettings { hevc: plan.hevc, ..lapse.settings() };
     let (width, height, side) = if plan.width > 0 && plan.height > 0 {
         (plan.width, plan.height, plan.width.max(plan.height))
     } else {
@@ -276,11 +403,17 @@ pub fn take_package(package: &std::path::Path, dir: &str) {
         }
     };
     let lapse = TimeLapse::new(dir.to_owned());
+    // as the package keeps it: its videos as they are, nothing decoded
+    if lapse.take_clips(t.clone()) {
+        let _ = std::fs::remove_dir_all(&temp);
+        return;
+    }
     let videos = t.segments.clone();
     lapse.take_begin(t);
     for path in videos {
         let read = crate::video::read_frames(std::path::Path::new(&path), |rgba, w, h, _| {
             lapse.keep_frame(rgba, w, h);
+            true
         });
         let frames = read.unwrap_or_else(|e| {
             log::warn!("a package's time-lapse video: {e}");
@@ -329,31 +462,84 @@ struct Replay {
     /// Dragged: where it began and the frame then.
     scrub: Option<(f32, u32)>,
     shown: Option<(u32, TextureHandle)>,
+    /// The frames from one on, read ahead (from its videos, decoded as they come), and when it
+    /// last began again elsewhere.
+    ahead: Option<Ahead>,
+    began: Instant,
+}
+
+/// Frames read ahead from `from`: the next to come, and one come before it was wanted.
+struct Ahead {
+    from: u32,
+    next: u32,
+    frames: Receiver<(u32, ThumbnailImage)>,
+    waiting: Option<(u32, ThumbnailImage)>,
+    _stops: Stops,
 }
 
 impl Replay {
     fn new(count: u32) -> Replay {
-        Replay { count, index: 0, stepped: Instant::now(), scrub: None, shown: None }
+        Replay {
+            count,
+            index: 0,
+            stepped: Instant::now(),
+            scrub: None,
+            shown: None,
+            ahead: None,
+            began: Instant::now(),
+        }
+    }
+
+    /// The frame to show now, once read: frames read ahead from it, again from where it is when
+    /// it jumps back or far ahead (while scrubbing, at most every 0.1 s).
+    fn fetch(&mut self, ctx: &egui::Context, lapse: &Arc<TimeLapse>) {
+        let want = self.index;
+        if self.shown.as_ref().is_some_and(|(i, _)| *i == want) {
+            return;
+        }
+        let off = self.ahead.as_ref().is_none_or(|a| want < a.from || want > a.next + TIME_LAPSE_FPS);
+        if off && (self.scrub.is_none() || self.began.elapsed() >= Duration::from_millis(100)) {
+            let stop = Arc::new(AtomicBool::new(false));
+            let frames = read_in_order(Arc::clone(lapse), (want..self.count).collect(), Arc::clone(&stop));
+            self.ahead = Some(Ahead { from: want, next: want, frames, waiting: None, _stops: Stops(stop) });
+            self.began = Instant::now();
+        }
+        ctx.request_repaint_after(Duration::from_millis(16));
+        let Some(ahead) = self.ahead.as_mut() else { return };
+        while let Some((i, frame)) = ahead.waiting.take().or_else(|| ahead.frames.try_recv().ok()) {
+            ahead.next = i + 1;
+            if i < want {
+                continue;
+            }
+            if i > want && self.scrub.is_some() {
+                ahead.waiting = Some((i, frame));
+                break;
+            }
+            // one left out (unreadable): the next shown in its place
+            self.index = i;
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([frame.width as usize, frame.height as usize], &frame.rgba);
+            self.shown = Some((i, ctx.load_texture("time-lapse", image, egui::TextureOptions::LINEAR)));
+            break;
+        }
     }
 
     /// True when Done was tapped (or Escape).
-    fn show(&mut self, ctx: &egui::Context, look: &mut Look, lapse: Option<&TimeLapse>) -> bool {
+    fn show(&mut self, ctx: &egui::Context, look: &mut Look, lapse: Option<&Arc<TimeLapse>>) -> bool {
         let screen = ctx.content_rect();
-        // play, frame by frame, until the end or a scrub
+        // play, frame by frame, until the end or a scrub: on once it's time and the frame shown
+        // has come
         let step = Duration::from_millis(1000 / u64::from(TIME_LAPSE_FPS));
-        if self.scrub.is_none() && self.index + 1 < self.count {
+        let caught_up = self.shown.as_ref().is_some_and(|(i, _)| *i == self.index);
+        if self.scrub.is_none() && self.index + 1 < self.count && caught_up {
             if self.stepped.elapsed() >= step {
                 self.index += 1;
                 self.stepped = Instant::now();
             }
             ctx.request_repaint_after(step.saturating_sub(self.stepped.elapsed()));
         }
-        if self.shown.as_ref().is_none_or(|(i, _)| *i != self.index)
-            && let Some(frame) = lapse.and_then(|t| t.frame(self.index))
-        {
-            let image =
-                egui::ColorImage::from_rgba_unmultiplied([frame.width as usize, frame.height as usize], &frame.rgba);
-            self.shown = Some((self.index, ctx.load_texture("time-lapse", image, egui::TextureOptions::LINEAR)));
+        if let Some(lapse) = lapse {
+            self.fetch(ctx, lapse);
         }
         egui::Area::new(Id::unique("time-lapse replay")).fixed_pos(screen.min).order(Order::Foreground).show(
             ctx,
@@ -442,5 +628,47 @@ fn surround_grid(ui: &egui::Ui, screen: Rect) {
             ui.painter().rect_filled(line, 0, argb(GRID_LINE));
         }
         y += step;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A real package's time-lapse (its path in PROCRAFT_PACKAGE) taken in as its videos, then
+    /// frames read back from them in order.
+    #[test]
+    #[ignore = "needs a .procreate with a time-lapse, and ffmpeg"]
+    fn a_packages_videos_come_in_as_they_are_and_play_back() {
+        let Ok(package) = std::env::var("PROCRAFT_PACKAGE") else { return };
+        let dir = std::env::temp_dir().join(format!("procraft-take-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let artwork = dir.to_string_lossy().into_owned();
+        let started = Instant::now();
+        take_package(std::path::Path::new(&package), &artwork);
+        let lapse = TimeLapse::new(artwork);
+        let clips = lapse.clips();
+        eprintln!(
+            "{} frames in {} videos, {} MB, in {:?}",
+            lapse.count(),
+            clips.len(),
+            lapse.bytes() >> 20,
+            started.elapsed()
+        );
+        assert!(!clips.is_empty());
+        assert_eq!(lapse.count(), clips.last().map_or(0, |c| c.first + c.frames));
+        // across the first video's end, and one far on
+        let first = clips[0].frames;
+        let wanted = vec![0, first - 1, first, first + 1, lapse.count() - 1];
+        let stop = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+        let got: Vec<(u32, u32, u32)> = read_in_order(Arc::clone(&lapse), wanted.clone(), stop)
+            .iter()
+            .map(|(i, f)| (i, f.width, f.height))
+            .collect();
+        eprintln!("{got:?} in {:?}", started.elapsed());
+        assert_eq!(got.iter().map(|g| g.0).collect::<Vec<_>>(), wanted);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

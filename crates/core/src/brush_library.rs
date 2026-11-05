@@ -288,7 +288,16 @@ struct SavedChoices {
     /// The side sliders' size and opacity per brush and tool (0 paint, 1 erase, 2 smudge).
     #[serde(default)]
     sliders: Vec<(u8, usize, usize, f32, f32)>,
+    /// The Recent set: the brushes last painted with, the latest last, and those pinned there.
+    #[serde(default)]
+    recents: Vec<(usize, usize)>,
+    #[serde(default)]
+    pinned: Vec<(usize, usize)>,
 }
+
+/// How many brushes the Recent set keeps besides the pinned ones (as the reference: the oldest
+/// gives way to a ninth).
+pub(crate) const RECENT_BRUSHES: usize = 8;
 
 /// The tools in the order [`SavedChoices`] keeps them.
 const TOOLS: [crate::ToolKind; 3] = [crate::ToolKind::Paint, crate::ToolKind::Erase, crate::ToolKind::Smudge];
@@ -377,8 +386,10 @@ impl State {
                     .map(|(k, c)| (brushfile::pressure_curve_key(k).to_owned(), points(c)))
                     .collect()
             }),
-            shape_source: brush.shape.source.as_ref().map(Source::to_text),
-            grain_source: brush.grain.source.as_ref().map(Source::to_text),
+            // a stock shape's is made again from its name when the brush comes back
+            shape_source: brush.shape.source.as_ref().filter(|_| brush.stock.shape.is_none()).map(Source::to_text),
+            // a stock grain's is made again from its name when the brush comes back
+            grain_source: brush.grain.source.as_ref().filter(|_| brush.stock.grain.is_none()).map(Source::to_text),
             shape_image: image(brush.shape.image, base.shape.image),
             grain_image: image(brush.grain.image, base.grain.image),
             thumbnail: brush.thumbnail.as_deref().map(procraft_engine::base64::encode),
@@ -448,11 +459,12 @@ impl State {
         brush.thumbnail = png(&b.thumbnail);
         if let Some(s) = &brush.stock.shape {
             let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };
-            brush.shape.image = crate::brush_files::shape_for(&texture).0;
+            (brush.shape.image, brush.shape.source, _) = crate::brush_files::shape_for(&texture);
         }
         if let Some(s) = &brush.stock.grain {
             let texture = Texture::Stock { name: s.name.clone(), inverted: s.inverted };
-            brush.grain.image = crate::brush_files::grain_for(&texture, brush.thumbnail.as_deref()).0;
+            (brush.grain.image, brush.grain.source) =
+                crate::brush_files::grain_for(&texture, brush.thumbnail.as_deref());
         }
         for (stock, material) in
             [(&brush.stock.metallic, &mut brush.metallic), (&brush.stock.roughness, &mut brush.roughness)]
@@ -508,6 +520,19 @@ impl State {
         self.set_choices.iter().find(|c| c.0 == set).map(|c| c.1)
     }
 
+    /// Notes `place` as the brush last painted with, in the Recent set (a pinned one stays where
+    /// it is): to the end if it is there already, else past the others, the oldest giving way.
+    pub(crate) fn note_recent(&mut self, place: (usize, usize)) {
+        if self.pinned_brushes.contains(&place) {
+            return;
+        }
+        self.recent_brushes.retain(|&p| p != place);
+        if self.recent_brushes.len() >= crate::brush_library::RECENT_BRUSHES {
+            self.recent_brushes.remove(0);
+        }
+        self.recent_brushes.push(place);
+    }
+
     /// Notes `place` as its set's last chosen brush.
     pub(crate) fn note_choice(&mut self, place: (usize, usize)) {
         self.set_choices.retain(|c| c.0 != place.0);
@@ -529,6 +554,20 @@ impl State {
             .into_iter()
             .filter_map(|((tool, s, i), v)| f((s, i)).map(|(s, i)| ((tool, s, i), v)))
             .collect();
+        // the Recent set's brushes follow theirs, those gone leaving it
+        for list in [&mut self.recent_brushes, &mut self.pinned_brushes] {
+            let mut moved: Vec<(usize, usize)> = Vec::new();
+            for place in std::mem::take(list).into_iter().filter_map(&f) {
+                if !moved.contains(&place) {
+                    moved.push(place);
+                }
+            }
+            *list = moved;
+        }
+        let library = &self.library;
+        let holds = |&(s, i): &(usize, usize)| library.get(s).is_some_and(|set| i < set.brushes.len());
+        self.recent_brushes.retain(holds);
+        self.pinned_brushes.retain(holds);
         // a set's choice follows its brush: a set it leaves has none, and a set it joins keeps the
         // later choice
         for place in std::mem::take(&mut self.set_choices).into_iter().filter_map(&f) {
@@ -549,6 +588,59 @@ impl State {
 
 #[uniffi::export]
 impl CanvasSession {
+    /// The Recent set: the pinned brushes (as they were pinned), then those last painted with,
+    /// the latest first.
+    pub fn recent_brushes(&self) -> Vec<crate::brushes::RecentBrush> {
+        let st = self.shared.lock();
+        let named = |(s, i): (usize, usize), pinned: bool| {
+            let b = st.library.get(s)?.brushes.get(i)?;
+            Some(crate::brushes::RecentBrush {
+                set: u32::try_from(s).ok()?,
+                index: u32::try_from(i).ok()?,
+                name: b.name.clone(),
+                pinned,
+            })
+        };
+        let pinned = st.pinned_brushes.iter().filter_map(|&p| named(p, true));
+        let recent = st.recent_brushes.iter().rev().filter_map(|&p| named(p, false));
+        pinned.chain(recent).collect()
+    }
+
+    /// Pins a brush of the Recent set there (out of the brushes that give way), or unpins it
+    /// (back among them as the latest). False if it isn't a brush there.
+    pub fn pin_recent_brush(&self, set: u32, index: u32, pinned: bool) -> bool {
+        let place = (set as usize, index as usize);
+        let mut st = self.shared.lock();
+        if !st.holds(place) || pinned == st.pinned_brushes.contains(&place) {
+            return false;
+        }
+        if pinned {
+            st.recent_brushes.retain(|&p| p != place);
+            st.pinned_brushes.push(place);
+        } else {
+            st.pinned_brushes.retain(|&p| p != place);
+            st.note_recent(place);
+        }
+        true
+    }
+
+    /// Takes a brush out of the Recent set, pinned or not. False if it wasn't there.
+    pub fn clear_recent_brush(&self, set: u32, index: u32) -> bool {
+        let place = (set as usize, index as usize);
+        let mut st = self.shared.lock();
+        let before = st.recent_brushes.len() + st.pinned_brushes.len();
+        st.recent_brushes.retain(|&p| p != place);
+        st.pinned_brushes.retain(|&p| p != place);
+        st.recent_brushes.len() + st.pinned_brushes.len() < before
+    }
+
+    /// Empties the Recent set, the pinned brushes too.
+    pub fn clear_recent_brushes(&self) {
+        let mut st = self.shared.lock();
+        st.recent_brushes.clear();
+        st.pinned_brushes.clear();
+    }
+
     /// A copy of a brush just above it in its set; returns the copy's index.
     pub fn duplicate_brush(&self, set: u32, index: u32) -> Option<u32> {
         let mut st = self.shared.lock();
@@ -891,8 +983,13 @@ impl CanvasSession {
         let mut sliders: Vec<_> =
             st.sliders.iter().map(|(&(tool, s, i), v)| (tool_index(tool), s, i, v.size, v.opacity)).collect();
         sliders.sort_by_key(|&(t, s, i, ..)| (t, s, i));
-        let choices =
-            SavedChoices { tools: TOOLS.map(|tool| st.brush_ref(tool)), sets: st.set_choices.clone(), sliders };
+        let choices = SavedChoices {
+            tools: TOOLS.map(|tool| st.brush_ref(tool)),
+            sets: st.set_choices.clone(),
+            sliders,
+            recents: st.recent_brushes.clone(),
+            pinned: st.pinned_brushes.clone(),
+        };
         serde_json::to_string(&choices).unwrap_or_default()
     }
 
@@ -908,6 +1005,8 @@ impl CanvasSession {
         let tools: Vec<Option<(usize, usize)>> = each(&saved, "tools");
         let sets: Vec<(usize, usize)> = each(&saved, "sets").into_iter().flatten().collect();
         let sliders: Vec<(u8, usize, usize, f32, f32)> = each(&saved, "sliders").into_iter().flatten().collect();
+        let recents: Vec<(usize, usize)> = each(&saved, "recents").into_iter().flatten().collect();
+        let pinned: Vec<(usize, usize)> = each(&saved, "pinned").into_iter().flatten().collect();
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         for (tool, place) in TOOLS.into_iter().zip(tools) {
@@ -922,6 +1021,18 @@ impl CanvasSession {
         for place in sets {
             if st.holds(place) {
                 st.note_choice(place);
+            }
+        }
+        st.pinned_brushes.clear();
+        for place in pinned {
+            if st.holds(place) && !st.pinned_brushes.contains(&place) {
+                st.pinned_brushes.push(place);
+            }
+        }
+        st.recent_brushes.clear();
+        for place in recents {
+            if st.holds(place) {
+                st.note_recent(place);
             }
         }
         for (tool, s, i, size, opacity) in sliders {

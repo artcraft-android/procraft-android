@@ -304,8 +304,17 @@ pub fn kept_quick_menu() -> Option<String> {
     std::fs::read_to_string(app_dir().join("quick_menu")).ok().map(|s| s.trim().to_owned())
 }
 
-pub fn keep_quick_menu(saved: &str) {
-    keep_text("quick_menu", saved);
+/// The QuickMenu's menus and which is active, as the core writes them (with none, the one kept
+/// before there were several, by [`kept_quick_menu`]).
+pub fn kept_quick_menus() -> (Option<String>, usize) {
+    let menus = std::fs::read_to_string(app_dir().join("quick_menus")).ok();
+    let active = std::fs::read_to_string(app_dir().join("quick_menu_active")).ok();
+    (menus, active.and_then(|s| s.trim().parse().ok()).unwrap_or(0))
+}
+
+pub fn keep_quick_menus(saved: &str, active: usize) {
+    keep_text("quick_menus", saved);
+    keep_text("quick_menu_active", &active.to_string());
 }
 
 /// A small file of the app's settings written (a failure only logged: the setting holds this run).

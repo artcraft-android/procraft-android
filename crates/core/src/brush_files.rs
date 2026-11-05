@@ -699,27 +699,53 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
             None => (Some(shape::GRAINY_DISC), None, None),
         },
         Texture::Stock { name, inverted } => {
-            let n = name.to_lowercase();
-            let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
-            if has(&["blank"]) {
-                // a plain image: the stamp's whole square (nothing, inverted)
-                let fill = if *inverted { 0 } else { 255 };
-                (None, Source::new(vec![fill; TEXTURE_SIZE * TEXTURE_SIZE]), None)
-            } else if has(&["dots"]) {
-                // dots scattered over the stamp, whatever outline they fill
-                (Some(stock_shape(&n)), None, None)
-            } else if has(&["medium-hard", "medium hard", "mediumhard"]) {
-                (None, None, Some(0.75))
-            } else if has(&["hard", "pen", "solid", "oval", "round"]) && !has(&["soft", "ink"]) {
-                (None, None, Some(0.95))
-            } else if has(&["medium"]) {
-                (None, None, Some(0.5))
-            } else if has(&["soft", "air", "blur", "glow"]) {
-                (Some(shape::SOFT_ROUND), None, None)
-            } else {
-                (Some(stock_shape(&n)), None, None)
-            }
+            let (image, source, hardness) = stock_stand_in(name, *inverted);
+            // our shape with the stock one's own lights and darks and its rows' share of the ink,
+            // where they were measured
+            let retoned =
+                image.filter(|_| source.is_none()).zip(textures::stock_shape_tones(name)).and_then(|(i, tones)| {
+                    let shape = textures::shapes().into_iter().nth(i as usize)?;
+                    // its streaks and gaps across the stroke first, where they were measured
+                    let striped = textures::stock_shape_rows(name).map(|rows| textures::striped(&shape.pixels, &rows));
+                    let pixels = striped.as_deref().unwrap_or(&shape.pixels);
+                    let mut pixels = textures::retoned_shape(pixels, &tones, &textures::SHAPE_TONE_SHARES);
+                    if *inverted {
+                        pixels.iter_mut().for_each(|v| *v = 255 - *v);
+                    }
+                    Source::new(pixels)
+                });
+            (image, retoned.or(source), hardness)
         }
+    }
+}
+
+/// Our stand-in for the stock shape `name`: our nearest shape, or the round tip at a hardness, or
+/// (blank) the whole square.
+fn stock_stand_in(name: &str, inverted: bool) -> (Option<u32>, Option<Source>, Option<f32>) {
+    let n = name.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    if has(&["blank"]) {
+        // a plain image: the stamp's whole square (nothing, inverted)
+        let fill = if inverted { 0 } else { 255 };
+        (None, Source::new(vec![fill; TEXTURE_SIZE * TEXTURE_SIZE]), None)
+    } else if has(&["dots"]) {
+        // dots scattered over the stamp, whatever outline they fill
+        (Some(stock_shape(&n)), None, None)
+    } else if has(&["oval"]) {
+        // a flat oval, not the round tip (as wide as its tones say, where they were measured)
+        (Some(shape::SLIM_OVAL), None, None)
+    } else if has(&["medium-hard", "medium hard", "mediumhard"]) {
+        (None, None, Some(0.75))
+    } else if has(&["hard", "pen", "solid", "round"]) && !has(&["soft", "ink"]) {
+        (None, None, Some(0.95))
+    } else if has(&["medium"]) {
+        (None, None, Some(0.5))
+    } else if has(&["ultra-soft", "ultra soft", "ultrasoft"]) {
+        (Some(shape::ULTRA_SOFT_ROUND), None, None)
+    } else if has(&["soft", "air", "blur", "glow"]) {
+        (Some(shape::SOFT_ROUND), None, None)
+    } else {
+        (Some(stock_shape(&n)), None, None)
     }
 }
 
@@ -743,7 +769,7 @@ fn stock_shape(n: &str) -> u32 {
         (&["bleed"], shape::STOCK_BLEED),
         (&["mess"], shape::STOCK_MESS),
         (&["sponge"], shape::SPONGE),
-        (&["blot", "blob", "water", "wash", "stain", "ink"], shape::BLOT),
+        (&["blot", "blob", "water", "wash", "stain", "ink"], shape::STOCK_BLOT),
         (&["leaf", "foliage", "tree"], shape::LEAF),
         (&["grass", "reed"], shape::GRASS),
         (&["cloud", "fog", "smoke"], shape::CLOUD),
@@ -838,7 +864,7 @@ pub(crate) fn grain_for(t: &Texture, preview: Option<&[u8]>) -> (Option<u32>, Op
             Some(s) => (None, Some(s)),
             None => (Some(grain::PAPER), None),
         },
-        Texture::Stock { name, .. } => {
+        Texture::Stock { name, inverted } => {
             let n = name.to_lowercase();
             if n.contains("blank") {
                 return (None, None);
@@ -849,7 +875,17 @@ pub(crate) fn grain_for(t: &Texture, preview: Option<&[u8]>) -> (Option<u32>, Op
                 Some(PreviewLook::Even) => None,
                 _ => Some(grain::MOTTLED),
             };
-            (named_grain(&n).map_or_else(unknown, Some), None)
+            let image = named_grain(&n).map_or_else(unknown, Some);
+            // our pattern with the stock grain's own lights and darks, where they were measured
+            let source = image.zip(textures::stock_grain_tones(name)).and_then(|(i, tones)| {
+                let pattern = textures::grains().into_iter().nth(i as usize)?;
+                let mut pixels = textures::retoned(&pattern.pixels, &tones, &textures::TONE_SHARES);
+                if *inverted {
+                    pixels.iter_mut().for_each(|v| *v = 255 - *v);
+                }
+                Source::new(pixels)
+            });
+            (image, source)
         }
     }
 }
@@ -1031,6 +1067,12 @@ mod tests {
             (None, None, Some(0.95))
         );
         assert_eq!(shape_for(&Texture::Stock { name: "Soft.png".into(), inverted: false }).0, Some(shape::SOFT_ROUND));
+        let ultra = Texture::Stock { name: "Ultra-Soft.jpg".into(), inverted: false };
+        assert_eq!(shape_for(&ultra).0, Some(shape::ULTRA_SOFT_ROUND));
+        assert_eq!(
+            shape_for(&Texture::Stock { name: "Slim-Oval.png".into(), inverted: false }),
+            (Some(shape::SLIM_OVAL), None, None)
+        );
         assert_eq!(shape_for(&Texture::Stock { name: "Spray-Fine.jpg".into(), inverted: false }).0, Some(shape::SPRAY));
         // a flat brush's stroke, streaked; dots, not the round or square they fill
         let shape = |name: &str| shape_for(&Texture::Stock { name: name.into(), inverted: false }).0;
@@ -1038,6 +1080,8 @@ mod tests {
         assert_eq!(shape("Flat-Marker.jpg"), Some(shape::FLAT));
         assert_eq!(shape("Fine-Round-Dots.png"), Some(shape::STOCK_DOTS));
         assert_eq!(shape("Old-Square-Dots.jpg"), Some(shape::STOCK_SQUARE_DOTS));
+        // a stock blot keeps its drops close, not ours that are pushed out for stamps that turn
+        assert_eq!(shape("Old-Ink-Blot.jpg"), Some(shape::STOCK_BLOT));
         assert_eq!(grain_for(&Texture::Stock { name: "Blank.png".into(), inverted: false }, None), (None, None));
         assert_eq!(
             grain_for(&Texture::Stock { name: "Old-Canvas.jpg".into(), inverted: false }, None).0,

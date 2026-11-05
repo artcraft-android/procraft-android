@@ -21,6 +21,7 @@ mod brush_library;
 mod brushes;
 mod clipboard;
 mod colour;
+mod colour_drag;
 mod crop;
 mod crop_edit;
 mod device;
@@ -80,7 +81,9 @@ use procraft_engine::stroke::StrokeBuilder;
 use procraft_engine::view::View;
 use procraft_gpu::{Canvas, Gpu, SecondStroke, StrokeStyle, StrokeTool};
 
-pub use adjust::{ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, SwipeAdjustment};
+pub use adjust::{
+    ChromaticKind, GlitchKind, HalftoneKind, LiquifyBrush, LiquifyKind, NoiseKind, PerspectiveKind, SwipeAdjustment,
+};
 pub use adjust_menu::{
     Adjustment, adjustment_groups, adjustment_label, adjustment_paintable, adjustment_pencil_amount, adjustment_swiped,
     quick_action_adjustment,
@@ -88,10 +91,11 @@ pub use adjust_menu::{
 pub use adjusting::{AdjustShown, CLONE_PUCK_RADIUS};
 pub use animation::{AnimationPlayback, AnimationSettings, PlayStep, animation_next_step};
 pub use brush_files::{BrushesRead, OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip, read_any_brushes, read_brushes};
-pub use brushes::{BrushInfo, BrushSetInfo};
+pub use brushes::{BrushInfo, BrushSetInfo, RecentBrush};
 pub use colour::{
     cmyk_profiles, color_profiles, colours_in_p3, convert_color, import_profile, is_cmyk_profile, set_profile_folder,
 };
+pub use colour_drag::{ColourDrag, DragStep};
 pub use crop_edit::CropShown;
 pub use frame::{configure, screen_profile};
 pub use gallery::{ArtworkStore, GalleryArtwork, GalleryEntry, ZipKind, zip_file_kind};
@@ -100,10 +104,10 @@ pub use gestures::{
     gesture_purpose_heading, gesture_purpose_title, gesture_purposes, gesture_trigger_label,
 };
 pub use gradients::{GradientInfo, GradientStop, Gradients};
-pub use guide::{GuideInfo, GuideType, SymmetryType};
+pub use guide::{GuideInfo, GuideType, GuideUnit, SymmetryType};
 pub use history::ColourHistory;
 pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_stops};
-pub use keys::{KeyDrag, KeyShortcut, key_shortcut};
+pub use keys::{KeyCombo, KeyDrag, KeyShortcut, ShortcutGroup, ShortcutRow, key_shortcut, key_shortcut_list};
 pub use layers::{
     BlendModeInfo, Blocked, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
     brush_blend_modes, grain_blend_modes, layers_for, set_resident_budget,
@@ -123,8 +127,9 @@ pub use project::{ArtworkInfo, export_file_name, read_signature, save_failure_sa
 pub use project::{PackageTimeLapse, package_time_lapse};
 pub use project::{PagesOutcome, PsdOutcome, import_pages, import_psd};
 pub use quick_menu::{
-    QuickAction, quick_action_adjusts, quick_action_label, quick_actions_listed, quick_adjustments_listed,
-    quick_menu_saved, quick_menu_slots,
+    QuickAction, QuickMenuSet, quick_action_adjusts, quick_action_label, quick_actions_listed,
+    quick_adjustments_listed, quick_menu_active_after, quick_menu_added, quick_menu_saved, quick_menu_slots,
+    quick_menus, quick_menus_saved,
 };
 pub use quickshape::{QuickShapeInfo, QuickShapeKind};
 pub use reference_view::{
@@ -144,7 +149,7 @@ pub use text_draw::{
 };
 pub use timelapse::{
     SegmentPlan, TIME_LAPSE_FPS, TimeLapse, TimeLapseSettings, time_lapse_bits_per_pixel, time_lapse_picks,
-    time_lapse_side,
+    time_lapse_setting_names, time_lapse_side,
 };
 pub use touch::{
     COMPANION_ZOOM_DISTANCE, CompanionMode, Fill, GestureAction, HoverCursor, PenHover, PenPreferred, SelectKind,
@@ -395,6 +400,10 @@ pub(crate) struct State {
     smudge_brush: (usize, usize),
     /// Each set's last chosen brush, (set, brush) in the library, the latest choice last.
     set_choices: Vec<(usize, usize)>,
+    /// The Recent set: the brushes last painted with (at most [`RECENT_BRUSHES`], the latest
+    /// last) and those pinned there (in the order they were pinned), by place in the library.
+    recent_brushes: Vec<(usize, usize)>,
+    pinned_brushes: Vec<(usize, usize)>,
     /// Each brush's sliders, per tool.
     sliders: HashMap<(ToolKind, usize, usize), Sliders>,
     /// Strokes started, to seed each one's randomness.
@@ -413,6 +422,10 @@ pub(crate) struct State {
     pub(crate) gpu: Option<Gpu>,
     pub(crate) canvas: Option<Canvas>,
     pub(crate) needs_frame: bool,
+    /// Frames wait (the canvas is being redrawn a stroke at a time, as the brush studio's pad is
+    /// when its brush changes), and one was asked for meanwhile.
+    pub(crate) holding_frames: bool,
+    pub(crate) frame_held: bool,
     pub(crate) stop: bool,
     /// Project canvas: the second display's size, and that its thread should end.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -430,6 +443,10 @@ pub(crate) struct State {
     pub(crate) error: Option<String>,
     /// Window pixels per interface point.
     pub(crate) display_scale: f32,
+    /// The canvas shown in perceptual greys (the window's view only).
+    pub(crate) grey_view: bool,
+    /// The eyedropper picks from the current layer alone, not the canvas as composited.
+    pub(crate) eyedropper_from_layer: bool,
     /// Where the middle of one of the surround grid's lines is, across and down (window pixels);
     /// none given, half a point in from the top-left corner.
     grid_origin: Option<[f32; 2]>,
@@ -659,7 +676,7 @@ impl State {
     /// A dual brush's second for a stroke of `tool` on `layer` with `first` (as
     /// [`State::stroke_brush`] gave it, with `first_style`): its brush, how it is drawn and
     /// combines, and its diameter at the size slider (before the brush scale). None for a brush
-    /// without one, or a stroke drawn in place (a smudge, wet paint).
+    /// without one, or a smudge or wet paint (drawn in place).
     pub(crate) fn second_brush(
         &mut self,
         tool: ToolKind,
@@ -668,7 +685,7 @@ impl State {
         first_style: &StrokeStyle,
     ) -> Option<(Brush, SecondStroke, f32)> {
         let mut second = first.secondary.as_deref()?.clone();
-        if first_style.in_place() || !matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) {
+        if !first_style.takes_second() || !matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) {
             return None;
         }
         let sliders = self.sliders(tool);
@@ -681,6 +698,8 @@ impl State {
         let diameter = second.diameter(sliders.size);
         let alpha_lock = self.doc.layer(layer).is_some_and(|l| l.alpha_lock);
         let mut style = StrokeStyle::for_brush(&second, tool.stroke_tool(), self.color, opacity, alpha_lock);
+        // the second is only coverage, drawn apart into its own texture
+        style.laid_in_place = false;
         if style.in_place() {
             return None;
         }
@@ -880,6 +899,9 @@ pub(crate) struct Shared {
     pub(crate) save_failure: Mutex<(Option<String>, bool)>,
     /// The canvas's touches (they call into the session, so they keep their own lock).
     pub(crate) touches: touch::TouchState,
+    /// The brush studio's pad being drawn again off the caller's thread (see
+    /// [`CanvasSession::sync_pad`]).
+    pub(crate) pad_sync: Mutex<studio::PadSync>,
 }
 
 impl Shared {
@@ -922,6 +944,10 @@ impl Shared {
     }
 
     fn frame(&self, st: &mut State) {
+        if st.holding_frames {
+            st.frame_held = true;
+            return;
+        }
         st.needs_frame = true;
         self.wake.notify_all();
     }
@@ -1094,10 +1120,7 @@ impl CanvasSession {
         name: String,
         pixels: Vec<(procraft_engine::document::LayerId, Vec<u8>)>,
     ) -> Arc<CanvasSession> {
-        #[cfg(target_os = "android")]
-        android_logger::init_once(
-            android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("procraft"),
-        );
+        device::start_log();
         let shipped = library();
         let shelf = brush_library::LibrarySet::shipped(&shipped);
         // the round pen to paint, the soft airbrush to erase, the round brush to smudge
@@ -1130,6 +1153,8 @@ impl CanvasSession {
             erase_brush,
             smudge_brush,
             set_choices: Vec::new(),
+            recent_brushes: Vec::new(),
+            pinned_brushes: Vec::new(),
             sliders: HashMap::new(),
             strokes: 0,
             preview: None,
@@ -1142,6 +1167,8 @@ impl CanvasSession {
             canvas: None,
             scene: None,
             needs_frame: false,
+            holding_frames: false,
+            frame_held: false,
             stop: false,
             projection_size: (1, 1),
             projection_stop: false,
@@ -1152,6 +1179,8 @@ impl CanvasSession {
             frame_interval_ms: 0.0,
             error: None,
             display_scale: 2.0,
+            grey_view: false,
+            eyedropper_from_layer: false,
             grid_origin: None,
             light: false,
             pending_doc: None,
@@ -1215,6 +1244,7 @@ impl CanvasSession {
                 export_progress: std::sync::atomic::AtomicU32::new(0),
                 save_failure: Mutex::new((None, false)),
                 touches: Mutex::new(touch::Touches::default()),
+                pad_sync: Mutex::new(studio::PadSync::default()),
             }),
         })
     }
@@ -1242,7 +1272,18 @@ impl CanvasSession {
             let shared = Arc::clone(&self.shared);
             let handle = std::thread::Builder::new()
                 .name("procraft-render".to_owned())
-                .spawn(move || render::run(shared, native))
+                .spawn(move || {
+                    // a panic (in a driver's wrapper, say) leaves the canvas saying it can't draw
+                    // rather than waiting on a thread that is gone
+                    let run = Arc::clone(&shared);
+                    if let Err(panic) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || render::run(run, native)))
+                    {
+                        let reason = format!("the renderer stopped: {}", procraft_gpu::panic_message(panic.as_ref()));
+                        log::error!("render thread: {reason}");
+                        shared.lock().error = Some(reason);
+                    }
+                })
                 .map_err(|e| MobileError::Window { reason: e.to_string() })?;
             *self.shared.thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
             Ok(())
@@ -1318,6 +1359,8 @@ impl CanvasSession {
         let second = st.second_brush(tool, current, &brush, &style);
         let diameter = diameter * st.brush_scale();
         st.strokes = st.strokes.wrapping_add(1);
+        // the tool's brush is one of the Recent set's now (unless pinned there)
+        st.note_recent(st.brush_ref(tool));
         st.info.strokes = st.info.strokes.saturating_add(1);
         let seed = st.strokes.wrapping_mul(0x9e37_79b9);
         let make = |st: &State, brush: Brush, diameter: f32, seed: u32| {
@@ -1504,6 +1547,30 @@ impl CanvasSession {
             view.gesture(Vec2::new(pivot_x, pivot_y), Vec2::new(pan_x, pan_y), scale, rotation);
             self.shared.frame(&mut st);
         }
+    }
+
+    /// Shows the canvas in perceptual greys (`on`), to judge its values, or in colour: only as
+    /// the window shows it, not as it is exported, recorded or picked from.
+    pub fn set_grey_view(&self, on: bool) {
+        let mut st = self.shared.lock();
+        if st.grey_view != on {
+            st.grey_view = on;
+            self.shared.frame(&mut st);
+        }
+    }
+
+    pub fn grey_view(&self) -> bool {
+        self.shared.lock().grey_view
+    }
+
+    /// The eyedropper picks from the current layer alone (`on`), or from the canvas as it is
+    /// composited (all its layers and the background).
+    pub fn set_eyedropper_from_layer(&self, on: bool) {
+        self.shared.lock().eyedropper_from_layer = on;
+    }
+
+    pub fn eyedropper_from_layer(&self) -> bool {
+        self.shared.lock().eyedropper_from_layer
     }
 
     /// How many window pixels make one interface point (the screen's density).
