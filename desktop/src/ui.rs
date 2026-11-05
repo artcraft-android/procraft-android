@@ -453,6 +453,11 @@ impl Interface {
         self.keep_brushes |= self.brushes_were_open && !brushes_open;
         self.brushes_were_open = brushes_open;
         let info = session.info();
+        // a snapped shape's handles sit at window points, and the view can move under them from a
+        // zoom, a pan or a turn that comes in through the input layer rather than as a command
+        if self.overlays.shape.is_some() {
+            self.overlays.shape = session.quickshape_info();
+        }
         self.follow_brush(session, info.tool);
         self.shortcuts(&ctx, session, &info);
         self.overlays.cursor_style = self.prefs.cursor_style;
@@ -1125,7 +1130,12 @@ impl Interface {
                 // a stroke or a fill on a text layer: it takes them once rasterized
                 TouchCommand::TextLayer => self.text.ask_rasterize(),
                 // (the pen's hover, which sets the brush with a finger, isn't the desktop's)
-                TouchCommand::ViewMoved | TouchCommand::BrushChanged => {}
+                TouchCommand::ViewMoved | TouchCommand::BrushChanged => {
+                    // handles sit at window points, so a view that moved takes them with it
+                    if self.overlays.shape.is_some() {
+                        self.overlays.shape = session.quickshape_info();
+                    }
+                }
             }
         }
         // a slid threshold redoes the whole fill: once a frame, at the last
@@ -1174,6 +1184,11 @@ impl Interface {
         self.text.end(session, true);
         let could = session.info().can_undo;
         let name = session.undo();
+        // the shape may have gone with it, and its handles go too
+        self.overlays.shape = session.quickshape_info();
+        if self.overlays.shape.is_none() {
+            self.overlays.shape_editing = false;
+        }
         if could || name.is_some() {
             self.overlays.notice(name.map_or("Undo".into(), |n| format!("Undo {n}")), false);
         }

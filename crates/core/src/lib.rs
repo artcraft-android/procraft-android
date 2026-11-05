@@ -1848,6 +1848,8 @@ impl CanvasSession {
         // cloning, the source goes back to where it was before the stroke
         self.shared.lock().adjust.puck_step(true);
         self.edit(Canvas::undo);
+        // undone out from under it, a snapped shape goes and its handles with it
+        self.quickshape_drop();
         self.shared.lock().canvas.as_ref().and_then(Canvas::redo_name)
     }
 

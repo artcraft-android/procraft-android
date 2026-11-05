@@ -468,6 +468,19 @@ impl CanvasSession {
             self.shared.frame(st);
         }
     }
+
+    /// Lets go of a snapped shape without keeping it: undo has taken it off the canvas, so its
+    /// handles go with it rather than hanging about with nothing under them.
+    pub fn quickshape_drop(&self) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        if st.shape.take().is_some() {
+            st.stroke = None;
+            st.second = None;
+            st.began = None;
+            self.shared.frame(st);
+        }
+    }
 }
 
 #[cfg(test)]
