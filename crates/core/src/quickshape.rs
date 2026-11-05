@@ -515,7 +515,24 @@ impl CanvasSession {
         if st.stroke.is_none() || st.shape.is_some() {
             return None;
         }
-        let found = recognise(&st.drawn);
+        // the line the stabilisers and smoothing are drawing, not the movement it came from: a
+        // shape should follow the line being painted rather than the hand's shake
+        let mut path = st.drawn.clone();
+        if let Some(old) = st.stroke.as_ref() {
+            let mut smoothed = old.path_points();
+            // the stamps stop a spacing short of either end, so the stroke's own ends go on: a
+            // stroke that met itself still does
+            if smoothed.len() >= 2
+                && let (Some(&start), Some(&end)) = (st.drawn.first(), st.drawn.last())
+            {
+                smoothed.insert(0, start);
+                smoothed.push(end);
+            }
+            if smoothed.len() >= 2 {
+                path = smoothed;
+            }
+        }
+        let found = recognise(&path);
         let first = found.first()?.clone();
         let choices = found.iter().map(|s| s.kind).collect();
         let held = st.drawn.last().map(|&at| Held { snapped: first.clone(), from: at, at, finger: false });

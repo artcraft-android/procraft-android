@@ -1204,6 +1204,13 @@ impl StrokeBuilder {
         Some(self.placed.iter().take(drawn).map(|p| self.finish_stamp(p, start, None)).collect())
     }
 
+    /// The line the stroke is being drawn along, as the stabilisers and smoothing have it: where
+    /// each stamp was put before any jitter threw it, so it is the path rather than the dabs laid
+    /// along it.
+    pub fn path_points(&self) -> Vec<Vec2> {
+        self.placed.iter().map(|p| p.center - p.thrown).collect()
+    }
+
     /// Ends the stroke: walks on to where the pen lifted and applies the end taper. Returns all of
     /// the stroke's stamps, as they should finally be drawn.
     pub fn finish(&mut self) -> Vec<Stamp> {
