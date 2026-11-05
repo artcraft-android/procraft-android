@@ -71,6 +71,7 @@ import kotlinx.coroutines.launch
 private val WideBarWidth = 657.dp
 private val UprightBarWidth = 446.dp
 private val BarHeight = 96.dp
+private val HeldFrame = Color(0xFFA3A3A3)
 private val BarGap = 25.dp
 private val FrameHeight = 40.dp
 private val BarFill get() = if (Pc.light) Color(0xFFE4E4E4) else Color(0xFF2A2A2A)
@@ -147,15 +148,15 @@ private fun BarText(label: String, modifier: Modifier, onClick: () -> Unit) {
  */
 @Composable
 private fun Timeline(vm: CanvasViewModel, width: Dp, modifier: Modifier) {
-    val frames = vm.animationFrames
-    val focus = vm.playingFrame ?: vm.currentFrame ?: 0
+    val slots = vm.frameSlots
+    val focus = vm.playingSlot ?: vm.currentSlot ?: 0
     val (cw, ch) = vm.canvasSize()
     val aspect = if (cw > 0 && ch > 0) (cw.toFloat() / ch).coerceIn(0.25f, 2f) else 0.66f
     val frameWidth = FrameHeight * aspect + 1.dp
     val pitch = frameWidth + 1.dp
     val pitchPx = with(LocalDensity.current) { pitch.toPx() }
-    val last = (frames.size - 1).coerceAtLeast(0)
-    // the frame in the middle, fractional while the track moves
+    val last = (slots.size - 1).coerceAtLeast(0)
+    // the place in the middle, fractional while the track moves
     var at by remember { mutableFloatStateOf(focus.toFloat()) }
     var dragging by remember { mutableStateOf(false) }
     // the frame shown last while dragging
@@ -167,7 +168,7 @@ private fun Timeline(vm: CanvasViewModel, width: Dp, modifier: Modifier) {
         val i = p.roundToInt()
         if (i != shown) {
             shown = i
-            vm.scrubFrame(i)
+            slots.getOrNull(i)?.let(vm::scrubFrame)
         }
     }
     LaunchedEffect(focus) {
@@ -182,7 +183,7 @@ private fun Timeline(vm: CanvasViewModel, width: Dp, modifier: Modifier) {
             .draggable(
                 drag,
                 Orientation.Horizontal,
-                enabled = frames.size > 1,
+                enabled = slots.size > 1,
                 onDragStarted = {
                     settling?.cancel()
                     if (!dragging) {
@@ -201,14 +202,16 @@ private fun Timeline(vm: CanvasViewModel, width: Dp, modifier: Modifier) {
                 },
             ),
     ) {
-        frames.forEachIndexed { i, id ->
+        slots.forEachIndexed { i, frame ->
+            // a frame's held places: grey cards after it
+            val held = i > 0 && slots[i - 1] == frame
             val x = width / 2 - frameWidth / 2 + pitch * (i - at)
             if (x > -frameWidth && x < width) {
                 Box(
-                    Modifier.offset(x = x, y = 2.dp).size(frameWidth, FrameHeight).clip(RoundedCornerShape(6.dp)).background(Color.White)
+                    Modifier.offset(x = x, y = 2.dp).size(frameWidth, FrameHeight).clip(RoundedCornerShape(6.dp)).background(if (held) HeldFrame else Color.White)
                         .border(1.dp, Color(0xFF9A9A9A), RoundedCornerShape(6.dp)).clickable { vm.tapFrame(i) },
                 ) {
-                    vm.frameThumbnails[id]?.let { Image(it, contentDescription = "Frame ${i + 1}", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(2.dp)) }
+                    if (!held) vm.animationFrames.getOrNull(frame)?.let { vm.frameThumbnails[it] }?.let { Image(it, contentDescription = "Frame ${i + 1}", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(2.dp)) }
                 }
             }
         }
@@ -350,7 +353,7 @@ private fun ColumnScope.FrameOptionsPage(vm: CanvasViewModel) {
     Text(if (a.pages) "Page options" else "Frame options", color = Pc.PanelTitle, fontSize = 23.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 14.dp, top = 11.dp, bottom = 15.dp))
     if (!a.pages) {
         SliderGroup(top = 4.dp) {
-            ValueSlider("Hold duration", if (hold == 0) "None" else "$hold", hold / CanvasViewModel.MAX_HOLD.toFloat()) { v ->
+            ValueSlider("Hold duration", if (hold == 0) "None" else "$hold", hold / CanvasViewModel.MAX_HOLD.toFloat(), onEnd = vm::endFrameHold) { v ->
                 vm.changeFrameHold((v * CanvasViewModel.MAX_HOLD).roundToInt())
             }
         }
@@ -365,8 +368,9 @@ private fun ColumnScope.FrameOptionsPage(vm: CanvasViewModel) {
             Text("Delete", color = Pc.PanelTitle, fontSize = 17.sp)
         }
     }
-    val foreground = !a.pages && index == last
-    val background = index == 0
+    // (a held place has neither)
+    val foreground = !a.pages && index == last && vm.heldPlace == 0
+    val background = index == 0 && vm.heldPlace == 0
     if (foreground || background) {
         Spacer(Modifier.height(10.dp))
         Group {
@@ -410,8 +414,9 @@ private val RowLineFill = Color(0x09FFFFFF)
 
 /** A setting's name and value over a bar dragged or tapped along. */
 @Composable
-private fun ValueSlider(label: String, value: String, fraction: Float, onChange: (Float) -> Unit) {
+private fun ValueSlider(label: String, value: String, fraction: Float, onEnd: () -> Unit = {}, onChange: (Float) -> Unit) {
     val change by rememberUpdatedState(onChange)
+    val end by rememberUpdatedState(onEnd)
     Column(Modifier.fillMaxWidth().height(55.dp).padding(horizontal = 16.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 6.5.dp)) {
             Text(label, color = Pc.SlideLabel, fontSize = 17.sp, modifier = Modifier.weight(1f), maxLines = 1)
@@ -419,9 +424,14 @@ private fun ValueSlider(label: String, value: String, fraction: Float, onChange:
         }
         Box(
             Modifier.fillMaxWidth().height(22.dp)
-                .pointerInput(Unit) { detectTapGestures { change((it.x / size.width).coerceIn(0f, 1f)) } }
                 .pointerInput(Unit) {
-                    detectHorizontalDragGestures(onDragStart = { change((it.x / size.width).coerceIn(0f, 1f)) }) { c, _ ->
+                    detectTapGestures {
+                        change((it.x / size.width).coerceIn(0f, 1f))
+                        end()
+                    }
+                }
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures(onDragStart = { change((it.x / size.width).coerceIn(0f, 1f)) }, onDragEnd = { end() }, onDragCancel = { end() }) { c, _ ->
                         c.consume()
                         change((c.position.x / size.width).coerceIn(0f, 1f))
                     }

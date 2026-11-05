@@ -403,6 +403,44 @@ impl CanvasSession {
         self.shared.lock().doc.animation.as_ref().map_or(0, |a| a.hold(LayerId(id)))
     }
 
+    /// Holds the frame of layer `id` so many more frames as its slider moves; `done` ends the drag
+    /// (one undo step for the whole drag).
+    pub fn change_frame_hold(&self, id: u64, frames: u32, done: bool) -> bool {
+        self.change_live("hold frame length", done, |d| {
+            d.animation.as_mut().is_some_and(|a| {
+                a.set_hold(LayerId(id), frames);
+                true
+            })
+        })
+    }
+
+    /// Delete on a held place: the frame of layer `id` held one frame less.
+    pub fn drop_held_frame(&self, id: u64) -> bool {
+        self.change("hold frame length", |d| {
+            let a = d.animation.as_mut()?;
+            let hold = a.hold(LayerId(id)).checked_sub(1)?;
+            a.set_hold(LayerId(id), hold);
+            Some(())
+        })
+        .is_some()
+    }
+
+    /// Duplicate on a held place: from its `at`th held place (from 1) a copy of the frame of layer
+    /// `id` takes over, held for what was left, and is made current; the frame holds up to there.
+    /// Returns the copy; none past its hold, or with no room.
+    pub fn split_held_frame(&self, id: u64, at: u32) -> Option<u64> {
+        let hold = self.frame_hold(id);
+        if at == 0 || at > hold {
+            return None;
+        }
+        self.duplicated(id, "split held frame", |doc, copy| {
+            if let Some(a) = doc.animation.as_mut() {
+                a.set_hold(LayerId(id), at - 1);
+                a.set_hold(copy, hold - at);
+            }
+        })
+    }
+
     pub fn set_frame_hold(&self, id: u64, frames: u32) {
         if let Some(a) = self.shared.lock().doc.animation.as_mut() {
             a.set_hold(LayerId(id), frames);

@@ -3169,6 +3169,35 @@ fn the_studio_edits_either_part_of_a_dual_brush_and_a_cancel_puts_back_both() {
 }
 
 #[test]
+fn a_held_frame_splits_where_it_is_chosen_and_loses_a_place_on_delete() {
+    let Some(s) = session(40, 40) else { return };
+    s.add_layer();
+    assert!(s.set_animation_assist(true));
+    let first = s.animation_frames()[0];
+    assert!(s.change_frame_hold(first, 2, false));
+    assert!(s.change_frame_hold(first, 3, true));
+    assert_eq!(s.animation_sequence(), vec![0, 0, 0, 0, 1]);
+    // one step for the whole drag
+    s.undo();
+    assert_eq!(s.frame_hold(first), 0);
+    s.redo();
+    assert_eq!(s.frame_hold(first), 3);
+    // the second held place: the frame keeps one, the copy holds the one after, and is current
+    assert!(s.split_held_frame(first, 4).is_none());
+    let copy = s.split_held_frame(first, 2).unwrap();
+    assert_eq!(s.animation_sequence(), vec![0, 0, 1, 1, 2]);
+    assert_eq!((s.frame_hold(first), s.frame_hold(copy)), (1, 1));
+    assert_eq!(s.animation_frames()[1], copy);
+    assert_eq!(s.current_frame(), Some(1));
+    s.undo();
+    assert_eq!(s.animation_sequence(), vec![0, 0, 0, 0, 1]);
+    assert!(s.drop_held_frame(first));
+    assert_eq!(s.animation_sequence(), vec![0, 0, 0, 1]);
+    s.undo();
+    assert_eq!(s.frame_hold(first), 3);
+}
+
+#[test]
 fn layers_export_as_animations() {
     let Some(s) = session(40, 40) else { return };
     s.set_brush_size(0.6);

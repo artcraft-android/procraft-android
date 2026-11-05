@@ -29,6 +29,7 @@ const TRACK_FILL: Themed = Themed(0xFF474747, 0xFFD0D0D0);
 const TRACK_EDGE: Themed = Themed(0xFF5C5C5C, 0xFFBDBDBD);
 const BAR_INK: Themed = Themed(0xFFC5C5C5, 0xFF393939);
 const FRAME_EDGE: u32 = 0xFF9A9A9A;
+const HELD_FRAME: u32 = 0xFFA3A3A3;
 const POPOVER_FILL: Themed = Themed(0xFF383838, 0xFFE6E6E6);
 const GROUP: Themed = Themed(0x420C0C0C, 0xFFE8E8E8);
 const ROW_LINE: u32 = 0x09FFFFFF;
@@ -84,6 +85,17 @@ pub struct AnimationBar {
     /// The frames' pictures, and the edits and time they were read at.
     thumbs: HashMap<u64, TextureHandle>,
     thumbs_read: Option<(u64, usize, Instant)>,
+    /// The frame and how far into its hold the timeline was last left, and its hold's slider held.
+    held: (usize, usize),
+    holding: bool,
+}
+
+/// Where frame `current` is among the timeline's `slots` (each frame's index, again for each frame
+/// it is held), `held` being the frame and held place left on.
+fn slot_of(slots: &[usize], current: usize, held: (usize, usize)) -> Option<usize> {
+    let first = slots.iter().position(|f| *f == current)?;
+    let places = slots.iter().filter(|f| **f == current).count();
+    Some(first + if held.0 == current { held.1.min(places.saturating_sub(1)) } else { 0 })
 }
 
 /// What the bar did that the app shows (a message).
@@ -134,6 +146,7 @@ impl AnimationBar {
         };
         let frames = session.animation_frames();
         let current = session.current_frame().map(|c| c as usize);
+        let slots: Vec<usize> = session.animation_sequence().into_iter().map(|f| f as usize).collect();
         self.play_on(ctx, session, &settings);
         self.read_thumbs(ctx, session, &frames);
         let screen = ctx.content_rect();
@@ -198,7 +211,7 @@ impl AnimationBar {
                 }
             }
             let track = Rect::from_min_size(bar.min + vec2(12.0, 42.0), vec2(width - 24.0, 44.0));
-            self.timeline(ui, session, &frames, current, track);
+            self.timeline(ui, session, &frames, &slots, current, track);
         });
         // Escape closes the onion skins' colours, else the popover (the hex keypad takes it first)
         if (self.settings_open || self.options_open)
@@ -215,7 +228,9 @@ impl AnimationBar {
         } else if self.options_open
             && let Some(index) = current
         {
-            self.options_popover(ctx, session, &settings, &frames, index, bar);
+            let first = slots.iter().position(|f| *f == index);
+            let place = slot_of(&slots, index, self.held).zip(first).map_or(0, |(at, first)| at - first);
+            self.options_popover(ctx, session, &settings, &frames, index, place, bar);
         }
         said
     }
@@ -289,9 +304,18 @@ impl AnimationBar {
     /// Dragged, the track scrolls through the frames, each showing as it passes the middle; let
     /// go, it coasts and settles on a frame, which becomes the current one. A tap on a frame
     /// makes it current (on the current one, its options open).
-    fn timeline(&mut self, ui: &Ui, session: &CanvasSession, frames: &[u64], current: Option<usize>, track: Rect) {
-        let last = frames.len().saturating_sub(1) as f32;
-        let focus = self.playing_frame().or(current).unwrap_or(0);
+    fn timeline(
+        &mut self,
+        ui: &Ui,
+        session: &CanvasSession,
+        frames: &[u64],
+        slots: &[usize],
+        current: Option<usize>,
+        track: Rect,
+    ) {
+        let last = slots.len().saturating_sub(1) as f32;
+        let slot = current.and_then(|c| slot_of(slots, c, self.held));
+        let focus = self.playing.as_ref().map(|p| p.at as usize).or(slot).unwrap_or(0);
         let info = session.info();
         let aspect = if info.width > 0 && info.height > 0 {
             (info.width as f32 / info.height as f32).clamp(0.25, 2.0)
@@ -317,11 +341,11 @@ impl AnimationBar {
             let i = t.at.round() as usize;
             if t.shown != Some(i) {
                 t.shown = Some(i);
-                session.set_play_frame(u32::try_from(i).ok());
+                session.set_play_frame(slots.get(i).and_then(|f| u32::try_from(*f).ok()));
             }
         };
         let mut settled = None;
-        if frames.len() > 1 && response.drag_started() {
+        if slots.len() > 1 && response.drag_started() {
             // playing stops and the frame's options close
             if self.playing.take().is_some() {
                 session.set_play_frame(None);
@@ -364,14 +388,16 @@ impl AnimationBar {
         let painter = ui.painter_at(track);
         painter.rect_filled(track, 18, argb(TRACK_FILL));
         let mut tapped = None;
-        for (i, id) in frames.iter().enumerate() {
+        for (i, frame) in slots.iter().enumerate() {
+            // a frame's held places: grey cards after it
+            let held = i > 0 && slots.get(i - 1) == Some(frame);
             let x = track.left() + track.width() / 2.0 - frame_width / 2.0 + pitch * (i as f32 - t.at);
             if x <= track.left() - frame_width || x >= track.right() {
                 continue;
             }
             let card = Rect::from_min_size(pos2(x, track.top() + 2.0), vec2(frame_width, FRAME_HEIGHT));
-            painter.rect_filled(card, 6, Color32::WHITE);
-            if let Some(texture) = self.thumbs.get(id) {
+            painter.rect_filled(card, 6, if held { argb(HELD_FRAME) } else { Color32::WHITE });
+            if let Some(texture) = frames.get(*frame).and_then(|id| self.thumbs.get(id)).filter(|_| !held) {
                 let [w, h] = texture.size().map(|v| v.max(1) as f32);
                 let room = card.shrink(2.0);
                 let k = (room.width() / w).min(room.height() / h);
@@ -393,11 +419,7 @@ impl AnimationBar {
         ui.painter().rect_filled(line, 1.5, argb(pc::ACCENT));
         if let Some(i) = settled {
             // let go: the frame in the middle becomes the current one
-            if Some(i) != current
-                && let Some(&id) = frames.get(i)
-            {
-                session.select_layer(id);
-            }
+            self.go_to(session, frames, slots, i, current);
             self.track.shown = None;
             session.set_play_frame(None);
         }
@@ -405,15 +427,24 @@ impl AnimationBar {
             if self.playing.take().is_some() {
                 session.set_play_frame(None);
             }
-            if Some(i) == current {
+            if Some(i) == slot {
                 self.options_open = !self.options_open;
                 self.settings_open = false;
             } else {
                 self.options_open = false;
-                if let Some(&id) = frames.get(i) {
-                    session.select_layer(id);
-                }
+                self.go_to(session, frames, slots, i, current);
             }
+        }
+    }
+
+    /// Place `slot` of the timeline comes to the middle, its frame the current one.
+    fn go_to(&mut self, session: &CanvasSession, frames: &[u64], slots: &[usize], slot: usize, current: Option<usize>) {
+        let Some(&frame) = slots.get(slot) else { return };
+        self.held = (frame, slot - slots.iter().position(|f| *f == frame).unwrap_or(slot));
+        if Some(frame) != current
+            && let Some(&id) = frames.get(frame)
+        {
+            session.select_layer(id);
         }
     }
 
@@ -647,11 +678,13 @@ impl AnimationBar {
         a: &AnimationSettings,
         frames: &[u64],
         index: usize,
+        place: usize,
         bar: Rect,
     ) {
         let Some(&id) = frames.get(index) else { return };
-        let foreground = !a.pages && index + 1 == frames.len();
-        let background = index == 0;
+        // (a held place has neither)
+        let foreground = !a.pages && index + 1 == frames.len() && place == 0;
+        let background = index == 0 && place == 0;
         let ends = match (foreground, background) {
             (true, true) => 10.0 + 44.0 * 2.0 + 2.0,
             (false, false) => 0.0,
@@ -687,7 +720,11 @@ impl AnimationBar {
                 if let Some(v) =
                     value_slider(ui, row, "Hold duration", &shown, hold as f32 / MAX_HOLD as f32, ("hold", 0))
                 {
-                    session.set_frame_hold(id, ((v * MAX_HOLD as f32).round() as u32).min(MAX_HOLD));
+                    self.holding = true;
+                    session.change_frame_hold(id, ((v * MAX_HOLD as f32).round() as u32).min(MAX_HOLD), false);
+                } else if std::mem::take(&mut self.holding) {
+                    // let go: the whole drag is one undo step
+                    session.change_frame_hold(id, hold, true);
                 }
                 y += 4.0 + 55.0 + 10.0;
             }
@@ -699,10 +736,12 @@ impl AnimationBar {
                 text(ui.painter(), at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(PANEL_TITLE));
                 if ui.interact(row, ui.scope_id().with(("frame", i)), Sense::click()).clicked() {
                     self.options_open = false;
-                    if i == 0 {
-                        _ = session.duplicate_layer(id);
-                    } else {
-                        _ = session.delete_layer(id);
+                    // on a held place it splits there, or is held one frame less
+                    match (i, place) {
+                        (0, 0) => _ = session.duplicate_layer(id),
+                        (0, _) => _ = session.split_held_frame(id, place as u32),
+                        (_, 0) => _ = session.delete_layer(id),
+                        _ => _ = session.drop_held_frame(id),
                     }
                 }
                 y += 44.0;

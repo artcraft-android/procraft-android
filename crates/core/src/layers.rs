@@ -505,30 +505,7 @@ impl CanvasSession {
     /// A copy just above `id` (a layer with its mask, a group with everything in it), made
     /// current; returns its id.
     pub fn duplicate_layer(&self, id: u64) -> Option<u64> {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        st.finish_stroke();
-        st.settle();
-        let before = st.doc.clone();
-        let unit = st.doc.layer(LayerId(id)).map_or(0, |_| {
-            st.doc
-                .pixel_layer_ids()
-                .filter(|&l| {
-                    l == LayerId(id) || st.doc.is_inside(l, LayerId(id)) || st.doc.mask_of(LayerId(id)) == Some(l)
-                })
-                .count()
-        });
-        if !st.doc.has_room(unit) {
-            return None;
-        }
-        let (copy, pairs) = st.doc.duplicate(LayerId(id))?;
-        if let Some(canvas) = st.canvas.as_mut() {
-            canvas.name_next_step("duplicate layer");
-            canvas.duplicate_layers(pairs, before);
-        }
-        st.revision += 1;
-        self.shared.frame(st);
-        Some(copy.0)
+        self.duplicated(id, "duplicate layer", |_, _| {})
     }
 
     /// Gives paint layer `id` a mask (white: showing all of it), made current; returns its id.
@@ -861,6 +838,36 @@ fn changed(d: &Document, id: u64, differs: impl FnOnce(&procraft_engine::documen
 }
 
 impl CanvasSession {
+    /// A copy of layer `id` above it, and made current: an undo step called `name`, `then` seeing
+    /// to the document with the copy in it. None if there is no room.
+    pub(crate) fn duplicated(&self, id: u64, name: &str, then: impl FnOnce(&mut Document, LayerId)) -> Option<u64> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.finish_stroke();
+        st.settle();
+        let before = st.doc.clone();
+        let unit = st.doc.layer(LayerId(id)).map_or(0, |_| {
+            st.doc
+                .pixel_layer_ids()
+                .filter(|&l| {
+                    l == LayerId(id) || st.doc.is_inside(l, LayerId(id)) || st.doc.mask_of(LayerId(id)) == Some(l)
+                })
+                .count()
+        });
+        if !st.doc.has_room(unit) {
+            return None;
+        }
+        let (copy, pairs) = st.doc.duplicate(LayerId(id))?;
+        then(&mut st.doc, copy);
+        if let Some(canvas) = st.canvas.as_mut() {
+            canvas.name_next_step(name);
+            canvas.duplicate_layers(pairs, before);
+        }
+        st.revision += 1;
+        self.shared.frame(st);
+        Some(copy.0)
+    }
+
     /// Merges what is chosen, or the layers between `between` (chosen first).
     fn merge_chosen(&self, between: Option<(LayerId, LayerId)>) -> bool {
         let mut guard = self.shared.lock();
@@ -956,7 +963,7 @@ impl CanvasSession {
 
     /// A change made continuously, called `name` by undo and redo: shown at once, recorded as one
     /// step when `done`.
-    fn change_live(&self, name: &str, done: bool, f: impl FnOnce(&mut Document) -> bool) -> bool {
+    pub(crate) fn change_live(&self, name: &str, done: bool, f: impl FnOnce(&mut Document) -> bool) -> bool {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.finish_stroke();

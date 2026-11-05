@@ -6275,6 +6275,28 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var currentFrame by mutableStateOf<Int?>(null)
         private set
 
+    /** The timeline's places: each frame's index, again for each frame it is held. */
+    var frameSlots by mutableStateOf<List<Int>>(emptyList())
+        private set
+
+    /** The frame and how far into its hold the timeline was last left. */
+    private var heldAt by mutableStateOf(0 to 0)
+
+    /** How far into its hold the current frame is shown (0: the frame itself). */
+    val heldPlace: Int
+        get() {
+            val f = currentFrame ?: return 0
+            return if (heldAt.first == f) heldAt.second.coerceAtMost(frameSlots.count { it == f } - 1).coerceAtLeast(0) else 0
+        }
+
+    /** The timeline's place in the middle. */
+    val currentSlot: Int?
+        get() = currentFrame?.let { f -> frameSlots.indexOf(f).takeIf { it >= 0 }?.plus(heldPlace) }
+
+    /** Playing: the timeline's place shown. */
+    var playingSlot by mutableStateOf<Int?>(null)
+        private set
+
     /** Each frame's picture for the timeline. */
     val frameThumbnails = mutableStateMapOf<ULong, ImageBitmap>()
 
@@ -6305,12 +6327,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         animation = settings
         if (settings == null) {
             animationFrames = emptyList()
+            frameSlots = emptyList()
             currentFrame = null
             animationSettingsOpen = false
             frameOptionsOpen = false
             return
         }
         animationFrames = s.animationFrames()
+        frameSlots = s.animationSequence().map { it.toInt() }
         currentFrame = s.currentFrame()?.toInt()
         refreshFrameThumbnails()
     }
@@ -6341,16 +6365,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         animation = s.animationSettings()
     }
 
-    /** Frame [i] becomes the one drawn on (a tap on the current one opens its options). */
-    fun tapFrame(i: Int) {
+    /** Place [slot] comes to the middle, its frame the one drawn on (a tap on the current one opens its options). */
+    fun tapFrame(slot: Int) {
         if (playingFrame != null) stopPlaying()
-        if (i == currentFrame) {
+        if (slot == currentSlot) {
             frameOptionsOpen = !frameOptionsOpen
             animationSettingsOpen = false
             return
         }
         frameOptionsOpen = false
-        animationFrames.getOrNull(i)?.let { selectLayer(it) }
+        goToSlot(slot)
+    }
+
+    private fun goToSlot(slot: Int) {
+        val frame = frameSlots.getOrNull(slot) ?: return
+        heldAt = frame to slot - frameSlots.indexOf(frame)
+        if (frame != currentFrame) animationFrames.getOrNull(frame)?.let { selectLayer(it) }
     }
 
     /** The timeline dragged: playing stops and the frame's options close. */
@@ -6365,11 +6395,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * The timeline let go with frame [i] in its middle: it becomes the current frame, as a tap
-     * makes it (null: nothing chosen, the current frame shows again).
+     * The timeline let go with place [slot] in its middle: its frame becomes the current one, as
+     * a tap makes it (null: nothing chosen, the current frame shows again).
      */
-    fun endScrub(i: Int?) {
-        if (i != null && i != currentFrame) animationFrames.getOrNull(i)?.let { selectLayer(it) }
+    fun endScrub(slot: Int?) {
+        if (slot != null) goToSlot(slot)
         session?.setPlayFrame(null)
     }
 
@@ -6381,14 +6411,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun currentFrameLayer(): LayerInfo? = currentFrame?.let { animationFrames.getOrNull(it) }?.let { id -> layers.firstOrNull { it.id == id } }
 
+    /** The frame copied; on a held place it splits there, the copy taking over. */
     fun duplicateFrame() {
         frameOptionsOpen = false
-        currentFrameLayer()?.let(::duplicate)
+        val held = heldPlace
+        val layer = currentFrameLayer() ?: return
+        if (held > 0) layerChange { if (it.splitHeldFrame(layer.id, held.toUInt()) == null) message = noRoom() } else duplicate(layer)
     }
 
+    /** The frame deleted; on a held place it is held one frame less. */
     fun deleteFrame() {
         frameOptionsOpen = false
-        currentFrameLayer()?.let(::delete)
+        val layer = currentFrameLayer() ?: return
+        if (heldPlace > 0) layerChange { it.dropHeldFrame(layer.id) } else delete(layer)
     }
 
     fun frameHold(): Int = currentFrame?.let { animationFrames.getOrNull(it) }?.let { session?.frameHold(it)?.toInt() } ?: 0
@@ -6398,8 +6433,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun changeFrameHold(frames: Int) {
         val id = currentFrame?.let { animationFrames.getOrNull(it) } ?: return
-        session?.setFrameHold(id, frames.coerceIn(0, MAX_HOLD).toUInt())
+        session?.changeFrameHold(id, frames.coerceIn(0, MAX_HOLD).toUInt(), false)
+        frameSlots = session?.animationSequence()?.map { it.toInt() }.orEmpty()
         holdVersion++
+    }
+
+    /** The hold's slider let go: the whole drag is one undo step. */
+    fun endFrameHold() {
+        val id = currentFrame?.let { animationFrames.getOrNull(it) } ?: return
+        session?.changeFrameHold(id, frameHold().toUInt(), true)
+        refresh()
     }
 
     fun togglePlaying() = if (playingFrame != null) stopPlaying() else play()
@@ -6419,6 +6462,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             while (true) {
                 val frame = order[at]
                 playingFrame = frame
+                playingSlot = at
                 s.setPlayFrame(frame.toUInt())
                 kotlinx.coroutines.delay(1000L / (animation?.fps ?: a.fps).toInt().coerceAtLeast(1))
                 // round again, turned back, or (a single pass) done
@@ -6435,6 +6479,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         playJob = null
         if (playingFrame != null) {
             playingFrame = null
+            playingSlot = null
             session?.setPlayFrame(null)
         }
     }
