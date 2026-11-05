@@ -426,7 +426,7 @@ final class CanvasModel {
         }
     }
 
-    /// A new brush at the top of the shown set, opened in the studio.
+    /// A new brush at the top of the shown set. It opens in the studio once the iPad has one.
     func newBrush() {
         if shownSet == Self.recentSet {
             shownSet = currentBrush.map { Int($0.set) } ?? 0
@@ -511,7 +511,8 @@ final class CanvasModel {
         foundBrush = Self.brushKey(b)
     }
 
-    /// Back to the brush chosen before this one (and Previous brush again comes back here).
+    /// Back to the brush chosen before this one (and Previous brush again comes back here). Nothing
+    /// calls this until the gesture controls are on the iPad.
     func previousBrush() {
         guard let last = lastBrush else { return }
         let now = currentBrush
