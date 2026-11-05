@@ -817,4 +817,13 @@ mod tests {
         let (tilt, towards) = lean_of(90.0, 0.0);
         assert!((tilt - std::f32::consts::FRAC_PI_2).abs() < 0.01 && near(towards, std::f32::consts::FRAC_PI_2));
     }
+
+    #[test]
+    fn a_pen_leaning_across_both_axes_takes_its_true_lean() {
+        // 45 degrees from upright towards the bottom right is 35.26 along each axis
+        let each = 0.5f32.sqrt().atan().to_degrees();
+        let (tilt, towards) = lean_of(each, each);
+        assert!((tilt.to_degrees() - 45.0).abs() < 1e-3, "{tilt}");
+        assert!((towards.to_degrees() - 135.0).abs() < 1e-3, "{towards}");
+    }
 }
