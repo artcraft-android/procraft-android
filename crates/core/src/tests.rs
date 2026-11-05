@@ -8744,6 +8744,7 @@ fn crossing_strokes_sheet() {
     let set = s.import_any_brushes(std::fs::read(&file).unwrap(), Some(file.clone()), 0).unwrap();
     assert!(s.select_brush(set, 0));
     s.set_brush_size(size);
+    let main_set = set;
     let line = |x0: f32, y0: f32, x1: f32, y1: f32| {
         let n = 108;
         let at = |i: usize| {
@@ -8771,13 +8772,49 @@ fn crossing_strokes_sheet() {
             s.set_background_color(1.0, 1.0, 1.0, true);
             s.set_color(237.0 / 255.0, 133.0 / 255.0, 68.0 / 255.0);
             let ms: f64 = std::env::var("CROSS_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(700.0);
-            // input at 120 a second, as a finger's
-            let n = ((ms / 1000.0 * 120.0).round() as usize).max(2);
-            let at = |i: usize| sample(100.0 + 400.0 * i as f32 / n as f32, 150.0, i as f64 * ms / n as f64);
+            // input at 120 a second, as a finger's, along y 150 from `x0` to `x1` in `ms`
+            let across = |x0: f32, x1: f32, ms: f64| {
+                let n = ((ms / 1000.0 * 120.0).round() as usize).max(2);
+                (0..=n).map(move |i| sample(x0 + (x1 - x0) * i as f32 / n as f32, 150.0, i as f64 * ms / n as f64))
+            };
+            // `CROSS_FIRST="file|size|x0|x1|ms"`: a stroke with that brush first, the stroke over it
+            if let Ok(first) = std::env::var("CROSS_FIRST") {
+                let f: Vec<&str> = first.split('|').collect();
+                let name = s.brush_library()[main_set as usize].brushes[0].name.clone();
+                let other = s.import_any_brushes(std::fs::read(f[0]).unwrap(), Some(f[0].to_owned()), 0).unwrap();
+                assert!(s.select_brush(other, 0));
+                s.set_brush_size(f[1].parse().unwrap());
+                let mut first: Vec<PenSample> =
+                    across(f[2].parse().unwrap(), f[3].parse().unwrap(), f[4].parse().unwrap()).collect();
+                let last = first.pop().unwrap();
+                s.stroke_begin(PointerKind::Finger, vec![first[0]]);
+                for p in &first[1..] {
+                    s.stroke_add(vec![*p]);
+                }
+                s.stroke_end(vec![last]);
+                // the stroke's own brush again, found by its name (the import moved it)
+                let lib = s.brush_library();
+                let main = lib
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, set)| set.brushes.iter().position(|b| b.name == name).map(|j| (i as u32, j as u32)));
+                let (main_set, main_index) = main.unwrap();
+                assert!(s.select_brush(main_set, main_index));
+                s.set_brush_size(size);
+                s.set_brush_opacity(opacity);
+            }
+            // `CROSS_FROM="x0|x1"`: the stroke from x0 to x1 on the window (else 100 to 500)
+            let (x0, x1) = std::env::var("CROSS_FROM")
+                .ok()
+                .and_then(|v| v.split_once('|').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
+                .unwrap_or((100.0f32, 500.0f32));
+            let path: Vec<PenSample> = across(x0, x1, ms).collect();
+            let n = path.len() - 1;
+            let at = |i: usize| path[i];
             s.stroke_begin(PointerKind::Finger, vec![at(0)]);
             // `CROSS_TAP`: a tap where the stroke would start instead (held 80 ms)
             if std::env::var("CROSS_TAP").is_ok() {
-                s.stroke_end(vec![sample(100.0, 150.0, 80.0)]);
+                s.stroke_end(vec![sample(x0, 150.0, 80.0)]);
                 s.export_png(out).unwrap();
                 return;
             }

@@ -210,11 +210,6 @@ fn by_speed(amount: f32, speed: f32) -> f32 {
     if amount >= 0.0 { 1.0 - amount * speed } else { 1.0 + amount * (1.0 - speed) }
 }
 
-/// The pressure a finger's wet mix takes in paint at (its dilution, charge, attack and blur
-/// curves): with no pressure of its own, each input's is drawn towards full from the one before,
-/// settling here at a finger's input rate. (The pull, grade and wetness jitter follow the stamp's
-/// own pressure, a finger's full.)
-pub const FINGER_WET_PRESSURE: f32 = 0.8;
 /// Stabilisation averages the latest points: at full strength this many samples' worth (at the
 /// rate above), fewer as the strength to this power falls.
 const MOST_AVERAGED: f32 = 120.0;
@@ -1481,19 +1476,15 @@ impl StrokeBuilder {
         ]
         .map(by);
         let along = |k: PressureCurve| curves.through(k, pressure);
-        // the paint the wet mix takes in (its dilution, charge, attack and blur) follows a
-        // finger's pressure as it settles (see [`FINGER_WET_PRESSURE`]); how it is carried and
-        // laid (the pull, the grade and the wetness jitter) follows the stamp's own pressure, a
-        // finger's full
-        let wetted = if self.pointer.has_pressure() { pressure } else { FINGER_WET_PRESSURE };
+        // the wet mix follows the stamp's own pressure, a finger's full
         let wet = [
-            curves.at(PC::WetGrade, pressure),
-            curves.at(PC::WetBlur, wetted),
-            curves.at(PC::WetBlurJitter, wetted),
-            curves.at(PC::WetnessJitter, pressure),
-            curves.at(PC::Charge, wetted),
-            curves.through(PC::Dilution, wetted),
-            curves.through(PC::WetPull, pressure),
+            by(PC::WetGrade),
+            by(PC::WetBlur),
+            by(PC::WetBlurJitter),
+            by(PC::WetnessJitter),
+            by(PC::Charge),
+            along(PC::Dilution),
+            along(PC::WetPull),
             along(PC::SmudgePull),
         ];
         let color_jitter_by =
@@ -1548,7 +1539,7 @@ impl StrokeBuilder {
             Some(theta) if self.pointer.has_pressure() => Tilt::reach(p.tilt, theta),
             Some(theta) => Tilt::reach(std::f32::consts::FRAC_PI_2, theta),
         };
-        let attack = (p.soft[1].clamp(0.0, 1.0) * attack_tilt * curves.through(PC::Attack, wetted)).clamp(0.0, 1.0);
+        let attack = (p.soft[1].clamp(0.0, 1.0) * attack_tilt * curves.through(PC::Attack, pressure)).clamp(0.0, 1.0);
         let [hue_by, saturation_by, lightness_by, darkness_by, secondary_by] = color_first;
         let [hue_more, saturation_more, lightness_more, darkness_more, secondary_more] = color_more;
         // a pen turns the stamp as it is held (its azimuth, and roll), in place of following the
@@ -2456,23 +2447,21 @@ mod tests {
         assert!(attack(1.0, 0.0, true, Pointer::Stylus) < 0.01);
         let flat = Tilt::reach(crate::brush::FLAT_TILT, 0.0);
         assert!((attack(1.0, crate::brush::FLAT_TILT, true, Pointer::Stylus) - flat).abs() < 1e-3);
-        // a finger as a flat pen, at the pressure its wet mix takes
-        let finger = Tilt::reach(std::f32::consts::FRAC_PI_2, 0.0) * FINGER_WET_PRESSURE;
+        // a finger as a flat pen, at full pressure
+        let finger = Tilt::reach(std::f32::consts::FRAC_PI_2, 0.0);
         assert!((attack(1.0, 0.0, true, Pointer::Finger) - finger).abs() < 1e-3);
     }
 
     #[test]
-    fn a_finger_carries_wet_paint_at_full_pressure_and_takes_it_in_at_its_settled_one() {
+    fn a_finger_s_wet_mix_takes_full_pressure_whatever_the_sample_says() {
         let wet = |pointer: Pointer, pressure: f32| {
             let b = Brush { pressure_size: 0.0, ..plain() };
             StrokeBuilder::new(b, 10.0, pointer).preview(&[Sample::at(Vec2::new(10.0, 10.0), pressure, 0.0)])[0].wet
         };
-        // without curves the dilution and the pull follow the pressure: a finger's dilution at
-        // the pressure its wet mix settles at, its pull (as its grade and wetness jitter) at full
-        let finger = wet(Pointer::Finger, 1.0);
-        assert!((finger[5] - FINGER_WET_PRESSURE).abs() < 1e-4, "{finger:?}");
-        assert!((finger[6] - 1.0).abs() < 1e-4, "{finger:?}");
-        // a pen takes both at its own pressure
+        // without curves the dilution and the pull follow the pressure: a finger has none, so full
+        let finger = wet(Pointer::Finger, 0.3);
+        assert!((finger[5] - 1.0).abs() < 1e-4 && (finger[6] - 1.0).abs() < 1e-4, "{finger:?}");
+        // a pen takes them at its own
         let pen = wet(Pointer::Stylus, 0.5);
         assert!((pen[5] - pen[6]).abs() < 1e-4 && pen[6] < 0.9, "{pen:?}");
     }
