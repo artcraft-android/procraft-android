@@ -26,6 +26,9 @@ pub const THUMBNAIL_SIDE: u32 = 512;
 pub(crate) const NOT_SAVED: u64 = u64::MAX;
 /// How often an open artwork kept saved looks for changes to save.
 const AUTOSAVE_EVERY: std::time::Duration = std::time::Duration::from_millis(if cfg!(test) { 50 } else { 3000 });
+/// How soon it looks again when something under way kept it from saving: fast painting leaves
+/// only short gaps between strokes, and what isn't saved is gone if the GPU's device goes.
+const AUTOSAVE_AGAIN: std::time::Duration = std::time::Duration::from_millis(if cfg!(test) { 5 } else { 250 });
 /// A package's preview's longest side, pixels.
 const PACKAGE_PREVIEW_SIDE: u32 = 1024;
 const FORMAT: &str = "procraft-artwork";
@@ -347,6 +350,62 @@ fn write_or_keep_changed(
 }
 
 impl CanvasSession {
+    /// [`CanvasSession::start_autosave`], looking `every` so long, and `again` after that when
+    /// something was under way.
+    pub(crate) fn keep_saved(self: Arc<Self>, dir: String, every: std::time::Duration, again: std::time::Duration) {
+        let mine = {
+            let mut saved = self.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
+            saved.autosave = saved.autosave.wrapping_add(1);
+            saved.autosave
+        };
+        let mut kept = self.edits();
+        let session = Arc::downgrade(&self);
+        let started = std::thread::Builder::new().name("autosave".into()).spawn(move || {
+            let mut wait = every;
+            loop {
+                std::thread::sleep(wait);
+                wait = every;
+                let Some(session) = session.upgrade() else { return };
+                let mut saved = session.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
+                if saved.autosave != mine {
+                    return;
+                }
+                let now = session.edits();
+                if now == kept {
+                    continue;
+                }
+                {
+                    let st = session.shared.lock();
+                    if st.gpu.as_ref().is_some_and(procraft_gpu::Gpu::is_lost) {
+                        return;
+                    }
+                    if !st.idle() {
+                        wait = again;
+                        continue;
+                    }
+                }
+                let result = session.save_if_idle_with(&mut saved, &dir);
+                let mut failure = session.shared.save_failure.lock().unwrap_or_else(|e| e.into_inner());
+                match result {
+                    Ok(true) => {
+                        kept = now;
+                        failure.1 = false;
+                    }
+                    Ok(false) => wait = again,
+                    Err(e) => {
+                        log::error!("keeping the artwork saved: {e}");
+                        if !failure.1 {
+                            *failure = (Some(e.to_string()), true);
+                        }
+                    }
+                }
+            }
+        });
+        if let Err(e) = started {
+            log::error!("keeping the artwork saved: {e}");
+        }
+    }
+
     /// [`CanvasSession::save_if_idle`] with what the last saves wrote (its lock held).
     fn save_if_idle_with(&self, saved: &mut Saved, dir: &str) -> Result<bool, MobileError> {
         let (snapshot, edits) = {
@@ -633,49 +692,12 @@ impl CanvasSession {
     }
 
     /// Keeps the artwork saved into `dir` while it is open, from a thread of its own: every few
-    /// seconds, when it has changed and nothing is under way that saving would cut short (only
-    /// the layers that changed are written). Ends with [`CanvasSession::stop_autosave`], with
-    /// another start, or when the session is let go.
+    /// seconds, when it has changed, as soon as nothing is under way that saving would cut short
+    /// (only the layers that changed are written). Ends with [`CanvasSession::stop_autosave`],
+    /// with another start, when the session is let go, or with the GPU's device: what that held
+    /// can't be read, the last save stands, and [`CanvasSession::take_failure`] tells it.
     pub fn start_autosave(self: Arc<Self>, dir: String) {
-        let mine = {
-            let mut saved = self.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
-            saved.autosave = saved.autosave.wrapping_add(1);
-            saved.autosave
-        };
-        let mut kept = self.edits();
-        let session = Arc::downgrade(&self);
-        let started = std::thread::Builder::new().name("autosave".into()).spawn(move || {
-            loop {
-                std::thread::sleep(AUTOSAVE_EVERY);
-                let Some(session) = session.upgrade() else { return };
-                let mut saved = session.shared.saving.lock().unwrap_or_else(|e| e.into_inner());
-                if saved.autosave != mine {
-                    return;
-                }
-                let now = session.edits();
-                if now == kept {
-                    continue;
-                }
-                let result = session.save_if_idle_with(&mut saved, &dir);
-                let mut failure = session.shared.save_failure.lock().unwrap_or_else(|e| e.into_inner());
-                match result {
-                    Ok(true) => {
-                        kept = now;
-                        failure.1 = false;
-                    }
-                    Ok(false) => {}
-                    Err(e) => {
-                        log::error!("keeping the artwork saved: {e}");
-                        if !failure.1 {
-                            *failure = (Some(e.to_string()), true);
-                        }
-                    }
-                }
-            }
-        });
-        if let Err(e) = started {
-            log::error!("keeping the artwork saved: {e}");
-        }
+        self.keep_saved(dir, AUTOSAVE_EVERY, AUTOSAVE_AGAIN);
     }
 
     /// Ends the autosave started last: a save it is making is finished first, and none follows.
