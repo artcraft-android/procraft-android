@@ -791,7 +791,8 @@ fn gouache() -> Brush {
 
 fn oil_paint() -> Brush {
     with(
-        named("Oil Paint", Brush { flow: 1.0, max_size: 180.0, ..bristle_brush() }),
+        // building up, so its wet mix is laid (the Flat Brush's Light Glaze it comes from never mixes)
+        named("Oil Paint", Brush { flow: 1.0, max_size: 180.0, rendering: Rendering::BuildUp, ..bristle_brush() }),
         &[("wet_dilution", 0.1), ("wet_attack", 0.35), ("wet_pull", 0.6), ("wet_grade", 0.3)],
     )
 }
@@ -812,6 +813,7 @@ fn palette_knife() -> Brush {
                     ..Shape::default()
                 },
                 grain: moving(grain::CRUMPLED, 120.0, 0.35),
+                rendering: Rendering::BuildUp,
                 ..flat_brush()
             },
         ),
@@ -1699,6 +1701,7 @@ fn filbert() -> Brush {
                 hardness: 0.7,
                 shape: Shape { roundness: 0.6, ..along(shape::FLAT) },
                 grain: moving(grain::FIBRE, 120.0, 0.4),
+                rendering: Rendering::BuildUp,
                 ..flat_brush()
             },
         ),
@@ -1775,7 +1778,15 @@ fn impasto() -> Brush {
 
 fn acrylic() -> Brush {
     with(
-        named("Acrylic", Brush { flow: 0.95, grain: moving(grain::WEAVE, 100.0, 0.45), ..bristle_brush() }),
+        named(
+            "Acrylic",
+            Brush {
+                flow: 0.95,
+                grain: moving(grain::WEAVE, 100.0, 0.45),
+                rendering: Rendering::BuildUp,
+                ..bristle_brush()
+            },
+        ),
         &[("wet_dilution", 0.1), ("wet_attack", 0.6), ("wet_pull", 0.35)],
     )
 }
@@ -2754,5 +2765,19 @@ mod tests {
             }
             assert!(width_leaning(b, 60.0) > upright * 1.5, "{}", b.name);
         }
+    }
+
+    #[test]
+    fn a_painting_brush_given_wet_paint_mixes_it() {
+        // a brush with water in its wet mix that keeps the strongest stamp (the Light Glaze) never
+        // mixes: its wet settings would do nothing
+        let dry: Vec<String> = library()
+            .into_iter()
+            .filter(|s| s.name == "Painting")
+            .flat_map(|s| s.brushes)
+            .filter(|b| b.setting("wet_dilution") > 0.0 && !b.mixes_wet())
+            .map(|b| b.name)
+            .collect();
+        assert!(dry.is_empty(), "wet brushes that don't mix: {dry:?}");
     }
 }
