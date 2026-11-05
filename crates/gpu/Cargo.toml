@@ -26,6 +26,10 @@ wgpu = { workspace = true, features = ["gles"] }
 [target.'cfg(windows)'.dependencies]
 wgpu = { workspace = true, features = ["gles"] }
 
+# OpenGL on Linux where Vulkan makes no device (an older GPU or driver)
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { workspace = true, features = ["gles"] }
+
 # Metal on Apple's systems (the iPad app's core, the Mac's desktop app)
 [target.'cfg(target_vendor = "apple")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }

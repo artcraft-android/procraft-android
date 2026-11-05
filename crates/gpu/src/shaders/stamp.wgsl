@@ -53,6 +53,8 @@ struct StampIn {
     @location(9) more: vec4<f32>,
     // the tint's brightness add
     @location(10) brightness_add: f32,
+    // how far the grain's patch under the stamp turns, where it is read from staying put
+    @location(11) grain_turn: f32,
 }
 
 struct StampOut {
@@ -62,7 +64,7 @@ struct StampOut {
     @location(1) radius: f32,
     @location(2) alpha: f32,
     // where a moving grain is read from: the stamp's middle in it, plus the point's place from
-    // there on the canvas (the grain never turns or squashes with the stamp)
+    // there on the canvas, turned as far as the stamp says
     @location(3) grain_at: vec2<f32>,
     @location(4) flip: vec2<f32>,
     // the stamp's colour: the brush's tinted, mixed with the secondary
@@ -94,7 +96,10 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
     o.q = q;
     o.radius = r;
     o.alpha = inst.alpha;
-    o.grain_at = inst.grain_offset + (p - inst.center);
+    let gc = cos(inst.grain_turn);
+    let gs = sin(inst.grain_turn);
+    let from_middle = p - inst.center;
+    o.grain_at = inst.grain_offset + vec2<f32>(from_middle.x * gc - from_middle.y * gs, from_middle.x * gs + from_middle.y * gc);
     o.flip = inst.flip;
     o.color = mix(tinted(su.color.rgb, inst.tint, inst.brightness_add), su.secondary.rgb, inst.look.z);
     o.look = inst.look;
@@ -200,10 +205,14 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
     if (i.look.w > 0.0) {
         a = a * (1.0 - i.look.w * clamp(0.5 - 0.5 * i.q.x, 0.0, 1.0));
     }
-    // a stamp smaller than a pixel covers only part of it
-    let small = min(r * 2.0, 1.0);
+    // the round tip's rim takes a pixel as covered to its middle: a tip under a pixel across
+    // covers only its area of one (a shape's quad reaches past it, which thins it as far)
+    if (su.shape < 0) {
+        let small = min(r * 2.0, 1.0);
+        a = a * small * small;
+    }
     // paint keeps inside the selection
     let inside_selection = textureSampleLevel(selected, shape_smp, i.pos.xy / su.canvas_size, 0.0).r;
-    a = a * small * small * i.alpha * inside_selection;
+    a = a * i.alpha * inside_selection;
     return vec4<f32>(i.color * a, a);
 }

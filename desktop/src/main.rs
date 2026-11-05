@@ -322,7 +322,8 @@ impl ApplicationHandler for App {
         // from the backend the last run used, or the next if that run never ended
         let from = startup::gpu_start(procraft_gpu::Gpu::backend_count());
         let tried = startup::gpu_tried();
-        let screen = match Screen::new(window, from, tried, startup::gpu_trying, self.wake.clone()) {
+        let display = event_loop.owned_display_handle();
+        let screen = match Screen::new(window, &display, from, tried, startup::gpu_trying, self.wake.clone()) {
             Ok((s, backend)) => {
                 startup::gpu_made(backend);
                 s

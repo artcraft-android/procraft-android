@@ -89,9 +89,17 @@ struct SmudgeStamp {
     grain_contrast: f32,
     // how far paint laid in place pools, as cs_synthesize lays it (see the composite shader)
     wet_edges: f32,
-    // wet paint with luminance blending: 1 when its colours mix squared
+    // wet paint with luminance blending: 1 when its colours mix squared, 2 when they do as it goes
+    // over the layer too (paint that mixes only with the layer as it was)
     luminance: u32,
-    spare5: u32,
+    // pixels a side of the image the grain is read from
+    grain_side: f32,
+    // how far paint laid apart burns the paint it goes over, and by what blend mode
+    burnt: f32,
+    burnt_blend: u32,
+    // -1 where the stamp's shape is mirrored on that axis, else 1
+    flip_x: f32,
+    flip_y: f32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -261,7 +269,7 @@ fn mask(t: vec2<f32>) -> f32 {
         return min(rim, soft);
     }
     // the shape fills the stamp and half a pixel round it, as a brush stamp's does
-    let uv = t * (st.radius / (st.radius + 0.5)) * 0.5 + 0.5;
+    let uv = t * vec2<f32>(st.flip_x, st.flip_y) * (st.radius / (st.radius + 0.5)) * 0.5 + 0.5;
     if (st.shape_sharp > 0.5) {
         // unfiltered: the texel under it
         let size = vec2<i32>(textureDimensions(shapes));
@@ -298,9 +306,18 @@ fn grain_plain(p: vec2<f32>) -> f32 {
     let gs = sin(st.grain_rotation);
     let uv = vec2<f32>(at.x * gc - at.y * gs, at.x * gs + at.y * gc) / scale;
     let sharp = st.grain_sharp > 0.5;
-    var g = textureSampleLevel(grains, grain_smp, uv, st.grain, select(max(log2(256.0 / scale), 0.0), 0.0, sharp)).r;
+    // a brush file's own image has the fine detail itself; ours only stands in for it
+    let own = st.grain_side > 256.0;
+    let level = max(log2(st.grain_side / scale), 0.0);
+    var g = textureSampleLevel(grains, grain_smp, uv, st.grain, select(level, 0.0, sharp && !own)).r;
     if (sharp) {
-        g = sharp_grain(g, uv);
+        if (own) {
+            // unfiltered: the texel under it at its level
+            let l = i32(round(level));
+            g = textureLoad(grains, vec2<i32>(fract(uv) * vec2<f32>(textureDimensions(grains, l))), st.grain, l).r;
+        } else {
+            g = sharp_grain(g, uv);
+        }
     }
     return clamp((g - 0.5) * (1.0 + st.grain_contrast) + 0.5 + st.grain_brightness, 0.0, 1.0);
 }
@@ -368,9 +385,6 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
             let l = st.stride * st.size.y + k;
             amount[l] = amount[l] + weight * (1.0 - amount[l]);
         }
-        if (st.laid_apart == 1u) {
-            return;
-        }
         out = from_mix(mix(to_mix(w), to_mix(laid), weight));
     }
     if (st.preserve_alpha == 1u) {
@@ -423,7 +437,16 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     if (st.laid_apart == 2u && laid > 0.0) {
         // what a second adds past that is laid as plain paint, as it is where none was laid at all
         let scale = min(a / laid, LAID_MOST_SCALE);
-        let kept = was + (unpack4x8unorm(grained[k]) - was) * scale;
+        var kept = over_layer(was, unpack4x8unorm(grained[k]), scale);
+        if (st.burnt > 0.0) {
+            // burnt edges show where the stroke is thin: where its grain or its second took paint
+            // away, or without either wherever it is less than full. The paint itself, blended
+            // once more with what was under it (nothing shows where the layer was empty)
+            let full = select(1.0, laid, st.grain_once > 0.5 || st.dual != 0u);
+            let own = clamp(over_layer(was, unpack4x8unorm(grained[k]), 1.0 / laid), vec4<f32>(0.0), vec4<f32>(1.0));
+            let burnt = vec4<f32>(unpremultiply(blend(was, own, st.burnt_blend)) * own.a, own.a);
+            kept = over_layer(was, mix(own, burnt, clamp(st.burnt * abs(full - a), 0.0, 1.0)), laid * scale);
+        }
         out = mix(kept, vec4<f32>(st.paint.rgb, 1.0), max(a - laid * scale, 0.0));
     }
     if (st.preserve_alpha == 1u) {
@@ -469,7 +492,15 @@ fn from_mix(c: vec4<f32>) -> vec4<f32> {
     if (st.luminance == 0u || c.a <= 0.0) {
         return c;
     }
-    return vec4<f32>(sqrt(c.rgb / c.a) * c.a, c.a);
+    return vec4<f32>(sqrt(max(c.rgb, vec3<f32>(0.0)) / c.a) * c.a, c.a);
+}
+
+// what paint laid apart shows over the layer `was`: `t` of the way to `laid`
+fn over_layer(was: vec4<f32>, laid: vec4<f32>, t: f32) -> vec4<f32> {
+    if (st.luminance == 2u) {
+        return from_mix(mix(to_mix(was), to_mix(laid), t));
+    }
+    return was + (laid - was) * t;
 }
 
 // the canvas point under stamp `w` at its point `t` (-1..1 across each way)

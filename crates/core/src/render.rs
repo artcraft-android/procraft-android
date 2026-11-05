@@ -92,7 +92,8 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
     loop {
         let (size, reconfigure) = {
             let mut st = shared.lock();
-            while !st.stop && !st.needs_frame {
+            // a device lost draws nothing again: there is only its stopping to wait for
+            while !st.stop && (!st.needs_frame || st.gpu.as_ref().is_some_and(Gpu::is_lost)) {
                 shared.wake.wait(&mut st);
             }
             if st.stop {

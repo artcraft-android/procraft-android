@@ -70,10 +70,8 @@ class TimeLapse(artwork: File) {
     fun bytes(): Long = core.bytes().toLong()
 
     /** Frame [i]: its picture, or read from the video it is in. */
-    fun frame(i: Int): Bitmap? {
-        core.frameFile(i.toUInt())?.let { f -> return runCatching { BitmapFactory.decodeFile(f) }.getOrNull() }
-        return clipFrame(i)
-    }
+    fun frame(i: Int): Bitmap? =
+        core.frameFile(i.toUInt())?.let { f -> runCatching { BitmapFactory.decodeFile(f) }.getOrNull() } ?: clipFrame(i)
 
     private val clipLock = Any()
     /** The videos the frames are in, the one being read, and the frames last read from it (a few at a time, the replay and the export reading them in order): the first one's number and them. */
@@ -97,11 +95,20 @@ class TimeLapse(artwork: File) {
             return null
         }
         val at = i - clip.first.toInt()
-        val frames = runCatching { retriever.getFramesAtIndex(at, minOf(CLIP_RUN, clip.frames.toInt() - at)) }.getOrNull() ?: return null
+        val frames = runCatching { retriever.getFramesAtIndex(at, minOf(CLIP_RUN, clip.frames.toInt() - at)) }
+            .onFailure { android.util.Log.w("ProCraft", "a time-lapse video's frames by number", it) }.getOrNull().orEmpty()
+        if (frames.isEmpty()) return frameAtTime(retriever, at, clip.frames.toInt())
         decoded?.second?.forEach { it.recycle() }
         decoded = i to frames
-        frames.firstOrNull()?.copy(Bitmap.Config.ARGB_8888, false)
+        frames.first().copy(Bitmap.Config.ARGB_8888, false)
     }
+
+    /** Frame [at] of a video of [frames] by its time: not every device's retriever goes by frame number. */
+    private fun frameAtTime(retriever: android.media.MediaMetadataRetriever, at: Int, frames: Int): Bitmap? = runCatching {
+        val length = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.times(1000)
+            ?: (frames * 1_000_000L / FPS)
+        retriever.getFrameAtTime(at * length / frames, android.media.MediaMetadataRetriever.OPTION_CLOSEST)
+    }.onFailure { android.util.Log.w("ProCraft", "a time-lapse video's frame by time", it) }.getOrNull()
 
     /** The videos read again next time (they changed), and the one being read let go. */
     private fun forgetClips() = synchronized(clipLock) {
@@ -121,9 +128,11 @@ class TimeLapse(artwork: File) {
      * false. False if there are none or the encoder fails.
      */
     fun export(out: File, seconds: Int?, going: (Float) -> Boolean = { true }): Boolean {
-        // all of it: the videos kept for packages, made where they don't reach yet, put end to end
-        if (seconds == null) joined(out, going)?.let { return it }
-        return encode(out, timeLapsePicks(count.toUInt(), seconds?.toUInt()).map { it.toInt() }, null, going = going) != null
+        val picks = timeLapsePicks(count.toUInt(), seconds?.toUInt()).map { it.toInt() }
+        // all of it, as asked or too short to cut: the videos kept for packages, made where they
+        // don't reach yet, put end to end, nothing read back from them
+        if (picks.size == count) joined(out, going)?.let { return it }
+        return encode(out, picks, null, going = going) != null
     }
 
     /**
@@ -217,9 +226,21 @@ class TimeLapse(artwork: File) {
         return core.forPackage()
     }
 
-    /** The pictures its videos hold too gone (the core checks each video's frames first). */
+    /**
+     * The pictures its videos hold too gone (the core checks each video's frames first), once
+     * this device has read those videos back: where it can't, the pictures are all there is to
+     * replay.
+     */
     private fun dropClipFrames() {
         forgetClips()
+        val readable = core.clipsWithPictures().all { clip ->
+            listOf(clip.first, clip.first + clip.frames - 1u).all { f -> clipFrame(f.toInt())?.also { it.recycle() } != null }
+        }
+        forgetClips()
+        if (!readable) {
+            android.util.Log.w("ProCraft", "the time-lapse's videos can't be read here: their pictures stay")
+            return
+        }
         val gone = core.dropClipFrames()
         if (gone > 0u) android.util.Log.i("ProCraft", "the time-lapse's videos hold $gone frames: their pictures went")
     }

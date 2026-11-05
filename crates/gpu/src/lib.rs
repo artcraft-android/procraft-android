@@ -109,7 +109,8 @@ impl Gpu {
     /// (to try another when a driver fails); on Android Vulkan, then OpenGL ES (for a device
     /// whose Vulkan is missing or fails); on Windows Vulkan and Direct3D 12, Direct3D 12 first on
     /// ARM (the Snapdragon X's Vulkan driver fails as a canvas opens), then OpenGL (a GPU or
-    /// driver too old for either); elsewhere the native API.
+    /// driver too old for either); on Linux Vulkan, then OpenGL (the same); elsewhere the native
+    /// API.
     fn backends() -> Vec<wgpu::Backends> {
         if let Some(chosen) = wgpu::Backends::from_env().filter(|b| !b.is_empty()) {
             return vec![chosen];
@@ -120,6 +121,8 @@ impl Gpu {
             vec![wgpu::Backends::DX12, wgpu::Backends::VULKAN, wgpu::Backends::GL]
         } else if cfg!(windows) {
             vec![wgpu::Backends::VULKAN, wgpu::Backends::DX12, wgpu::Backends::GL]
+        } else if cfg!(target_os = "linux") {
+            vec![wgpu::Backends::VULKAN, wgpu::Backends::GL]
         } else {
             vec![wgpu::Backends::PRIMARY]
         }
@@ -139,6 +142,17 @@ impl Gpu {
     /// past the last.
     pub fn instance_after(tries: usize) -> Option<wgpu::Instance> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = *Gpu::backends().get(tries)?;
+        Some(wgpu::Instance::new(desc))
+    }
+
+    /// [`Gpu::instance_after`] for windows on `display`: OpenGL under Wayland and X11 can show
+    /// nothing on a window without it, its surface failing as the window's is set up.
+    pub fn instance_for_display(
+        tries: usize,
+        display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>,
+    ) -> Option<wgpu::Instance> {
+        let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(display);
         desc.backends = *Gpu::backends().get(tries)?;
         Some(wgpu::Instance::new(desc))
     }
@@ -385,6 +399,16 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
+    /// A GPU or driver too old for the rest still draws: without OpenGL behind them the app can't
+    /// open at all.
+    #[test]
+    #[cfg(any(target_os = "linux", windows, target_os = "android"))]
+    fn opengl_is_the_last_backend_tried() {
+        if std::env::var_os("WGPU_BACKEND").is_none() {
+            assert_eq!(super::Gpu::backends().last(), Some(&wgpu::Backends::GL));
+        }
+    }
+
     #[test]
     fn backends_are_named_for_the_log() {
         use wgpu::Backends;

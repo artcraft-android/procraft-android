@@ -946,6 +946,75 @@ fn an_open_artwork_is_kept_saved_until_that_stops() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Fast painting leaves only short gaps between strokes: an autosave that finds one under way
+/// saves in the next gap, not at its next turn.
+#[test]
+fn an_autosave_that_finds_a_stroke_saves_as_it_ends() {
+    let Some(s) = session(64, 64) else { return };
+    let dir = std::env::temp_dir().join(format!("procraft-gap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let every = std::time::Duration::from_millis(1000);
+    let started = std::time::Instant::now();
+    std::sync::Arc::clone(&s).keep_saved(
+        dir.to_string_lossy().into_owned(),
+        every,
+        std::time::Duration::from_millis(5),
+    );
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 20.0, 0.0)]);
+    s.stroke_end(vec![]);
+    let _ = pixel(&s, 0, 0);
+    // a stroke under way when its turn comes
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    std::thread::sleep((every + std::time::Duration::from_millis(100)).saturating_sub(started.elapsed()));
+    assert_eq!(s.edits_saved(), None, "nothing saved with a stroke under way");
+    s.stroke_end(vec![]);
+    let _ = pixel(&s, 0, 0);
+    let edits = s.edits();
+    let saved = (0..400).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        s.edits_saved() == Some(edits)
+    });
+    s.stop_autosave();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(saved, "saved in the gap, before its next turn");
+}
+
+/// A device lost holds nothing to save: the autosave stops and the last save stands, and what
+/// tells of it is the device being lost alone, not a failed save as well on top of it.
+#[test]
+fn an_autosave_ends_with_the_graphics_device() {
+    let Some(s) = session(64, 64) else { return };
+    let dir = std::env::temp_dir().join(format!("procraft-lost-autosave-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 20.0, 0.0)]);
+    s.stroke_end(vec![]);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let layer = |d: &std::path::Path| {
+        let mut files: Vec<_> = std::fs::read_dir(d.join("layers")).unwrap().flatten().map(|f| f.path()).collect();
+        files.sort();
+        files.iter().map(|f| std::fs::read(f).unwrap()).collect::<Vec<_>>()
+    };
+    let before = layer(&dir);
+    {
+        let st = s.shared.lock();
+        let gpu = st.gpu.as_ref().unwrap();
+        gpu.device.destroy();
+        let _ = gpu.device.poll(procraft_gpu::wgpu::PollType::wait_indefinitely());
+        assert!(gpu.is_lost());
+    }
+    std::sync::Arc::clone(&s).start_autosave(dir.to_string_lossy().into_owned());
+    // something to save
+    let edits = s.edits();
+    s.add_layer();
+    assert_ne!(s.edits(), edits);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(s.take_save_failure(), None);
+    assert!(s.take_failure().is_some_and(|said| said.contains("last saved")));
+    assert!(layer(&dir) == before, "what was saved stays as it was");
+    s.stop_autosave();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_failing_autosave_is_told_once_until_a_save_works() {
     let Some(s) = session(64, 64) else { return };

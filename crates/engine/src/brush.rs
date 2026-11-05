@@ -29,10 +29,7 @@ impl Source {
         if pixels.len() != TEXTURE_SIZE * TEXTURE_SIZE {
             return None;
         }
-        // FNV-1a
-        let id =
-            pixels.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
-        Some(Source { id, pixels: Arc::new(pixels) })
+        Some(Source { id: image_id(&pixels), pixels: Arc::new(pixels) })
     }
 
     /// The pixels as text (base64), to keep with a brush.
@@ -44,6 +41,54 @@ impl Source {
     pub fn from_text(text: &str) -> Option<Source> {
         Source::new(crate::base64::decode(text)?)
     }
+}
+
+/// An image's id, from its pixels (FNV-1a).
+fn image_id(pixels: &[u8]) -> u64 {
+    pixels.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// The most pixels a side of a brush file's grain is kept at. A grain fixed to the canvas is read
+/// once a canvas pixel, so a tile's width in pixels is the most of an image it can use: this holds
+/// all of it for most tiles, a little soft past that, at a quarter of the memory of twice the side.
+pub const FULL_GRAIN_MOST: usize = 1024;
+
+/// A brush file's grain image at more than `TEXTURE_SIZE`, square: its pixels are kept in a file of
+/// their own, and held here only until then.
+#[derive(Clone, Debug)]
+pub struct FullGrain {
+    pub id: u64,
+    /// Pixels a side (a power of two).
+    pub side: u32,
+    pub pixels: Option<Arc<Vec<u8>>>,
+}
+
+impl PartialEq for FullGrain {
+    fn eq(&self, other: &FullGrain) -> bool {
+        self.id == other.id
+    }
+}
+
+impl FullGrain {
+    /// The image, or none if it isn't `side` square.
+    pub fn new(side: u32, pixels: Vec<u8>) -> Option<FullGrain> {
+        (pixels.len() == (side as usize).pow(2)).then(|| FullGrain {
+            id: image_id(&pixels),
+            side,
+            pixels: Some(Arc::new(pixels)),
+        })
+    }
+}
+
+/// What a brush file gave its grain beyond the [`Source`] the brush holds of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GrainFile {
+    /// The id of the `Source` it goes with: a grain changed since leaves all this behind.
+    pub source: u64,
+    /// How wide the file's image is (pixels): a tile fixed to the canvas goes by it.
+    pub width: u32,
+    /// The image at more than the `Source` holds, if it has that to give.
+    pub full: Option<FullGrain>,
 }
 
 /// Size and opacity at the ends of a stroke.
@@ -462,6 +507,11 @@ pub struct Brush {
     /// How much each stamp adds at full pressure, 0..1 (the studio's flow control to the power
     /// [`FLOW_POWER`]).
     pub flow: f32,
+    /// The opacity slider, for a stroke: a finger's wet attack follows it as a pen's does its
+    /// pressure. Not part of the brush as it is kept.
+    pub touch_opacity: f32,
+    /// What a brush file gave the grain, if it came from one with its image in it.
+    pub grain_file: Option<GrainFile>,
     /// How much pen pressure shrinks the stamp (0 = not at all, 1 = to nothing at no pressure).
     pub pressure_size: f32,
     /// How much pen pressure lowers the stamp's opacity.
@@ -628,6 +678,8 @@ impl Brush {
             min_opacity: 0.0,
             max_opacity: 1.0,
             flow: 1.0,
+            touch_opacity: 1.0,
+            grain_file: None,
             pressure_size: 0.85,
             pressure_opacity: 0.0,
             pressure_curve: Curve::linear(),
@@ -658,6 +710,52 @@ impl Brush {
     pub fn size_unit(&self) -> f32 {
         let round_tip = self.shape.image.is_none() && self.shape.source.is_none();
         crate::brushfile::PIXELS_PER_SIZE * if round_tip { crate::brushfile::ROUND_TIP_SHARE } else { 1.0 }
+    }
+
+    /// The brush as a dual brush's second: drawn apart as coverage alone, its grain goes on stamp
+    /// by stamp, even one fixed to the canvas.
+    pub fn as_second(mut self) -> Brush {
+        if self.grain.mode == GrainMode::Texturized {
+            self.grain.mode = GrainMode::Moving;
+        }
+        self
+    }
+
+    /// What a brush file gave the grain the brush has now.
+    pub fn grain_file_now(&self) -> Option<&GrainFile> {
+        let source = self.grain.source.as_ref()?;
+        self.grain_file.as_ref().filter(|f| f.source == source.id)
+    }
+
+    /// The brush files' grains it can still come to: its own, even one its grain has moved on
+    /// from, its second's and its reset point's.
+    pub fn full_grains(&self) -> Vec<&FullGrain> {
+        let own = self.grain_file.iter().filter_map(|f| f.full.as_ref());
+        let others = self.secondary.iter().map(|b| &**b).chain(self.reset_point.iter().map(|r| &*r.brush));
+        own.chain(others.flat_map(Brush::full_grains)).collect()
+    }
+
+    /// The grain's tile on the canvas (pixels): fixed to the canvas, a brush file's image is as
+    /// wide as the file's own times its scale over root two; else what the grain says.
+    pub fn grain_tile(&self) -> f32 {
+        match self.grain_file_now() {
+            Some(f) if self.grain.mode == GrainMode::Texturized => {
+                f.width as f32 * self.grain.file_scale() / std::f32::consts::SQRT_2
+            }
+            _ => self.grain.scale,
+        }
+    }
+
+    /// The brush as a file whose grain image is `width` pixels wide keeps it: the same tile, by a
+    /// scale to suit. Only a grain fixed to the canvas goes by its image's width.
+    pub fn with_grain_image_width(mut self, width: u32) -> Brush {
+        if self.grain.mode == GrainMode::Texturized
+            && let Some(f) = self.grain_file_now()
+        {
+            let scale = self.grain.file_scale() * f.width as f32 / width.max(1) as f32;
+            self.grain.scale = crate::studio::MAX_GRAIN_SCALE * (scale / 16.0).sqrt();
+        }
+        self
     }
 
     /// Stamp diameter (canvas px) for a size slider at 0..1: the slider to the power
@@ -714,6 +812,62 @@ impl Brush {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_s_grain_goes_on_stamp_by_stamp() {
+        let mut b = Brush::round_pen();
+        b.grain.mode = GrainMode::Texturized;
+        assert_eq!(b.as_second().grain.mode, GrainMode::Moving);
+    }
+
+    #[test]
+    fn a_brush_file_s_grain_is_tiled_by_its_own_image() {
+        let source = Source::new(vec![9; TEXTURE_SIZE * TEXTURE_SIZE]).unwrap();
+        let scale = crate::studio::MAX_GRAIN_SCALE * (0.75f32 / 16.0).sqrt();
+        let mut b = Brush::round_pen();
+        b.grain = Grain { mode: GrainMode::Texturized, scale, source: Some(source.clone()), ..Grain::default() };
+        // without a file's width: what the grain says
+        assert_eq!(b.grain_tile(), scale);
+        b.grain_file = Some(GrainFile { source: source.id, width: 2048, full: None });
+        let tile = 2048.0 * 0.75 / std::f32::consts::SQRT_2;
+        assert!((b.grain_tile() - tile).abs() < 0.5, "{}", b.grain_tile());
+        // written with a smaller image it comes back the same size
+        let written = b.clone().with_grain_image_width(1024);
+        assert!((written.grain.file_scale() - 1.5).abs() < 1e-3);
+        // a grain changed since leaves the file's behind
+        b.grain.source = Source::new(vec![8; TEXTURE_SIZE * TEXTURE_SIZE]);
+        assert!(b.grain_file_now().is_none());
+        assert_eq!(b.grain_tile(), scale);
+    }
+
+    #[test]
+    fn a_moving_grain_is_written_at_its_own_scale_whatever_its_image_s_width() {
+        let source = Source::new(vec![9; TEXTURE_SIZE * TEXTURE_SIZE]).unwrap();
+        let scale = crate::studio::MAX_GRAIN_SCALE * (0.75f32 / 16.0).sqrt();
+        let mut b = Brush::round_pen();
+        b.grain = Grain { mode: GrainMode::Moving, scale, source: Some(source.clone()), ..Grain::default() };
+        b.grain_file = Some(GrainFile { source: source.id, width: 2048, full: None });
+        assert_eq!(b.with_grain_image_width(1024).grain.scale, scale);
+    }
+
+    #[test]
+    fn a_brush_holds_its_own_grain_its_second_s_and_its_reset_point_s() {
+        let with = |fill: u8| {
+            let full = FullGrain::new(512, vec![fill; 512 * 512]).unwrap();
+            let file = GrainFile { source: 1, width: 512, full: Some(full) };
+            Brush { grain_file: Some(file), ..Brush::round_pen() }
+        };
+        let mut second = with(2);
+        second.reset_point = Some(ResetPoint::of(&with(3), 0));
+        let mut before = with(4);
+        before.secondary = Some(Box::new(with(5)));
+        let mut brush = with(1);
+        brush.secondary = Some(Box::new(second));
+        brush.reset_point = Some(ResetPoint::of(&before, 0));
+        let ids: Vec<u64> = brush.full_grains().iter().map(|g| g.id).collect();
+        let wanted = [1, 2, 3, 4, 5].map(|fill| FullGrain::new(512, vec![fill; 512 * 512]).unwrap().id);
+        assert!(ids.len() == 5 && wanted.iter().all(|id| ids.contains(id)), "{ids:?}");
+    }
 
     #[test]
     fn a_moving_grain_s_tile_follows_the_stamp_or_is_cropped_by_its_file_scale() {

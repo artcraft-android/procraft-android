@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use procraft_core::{CanvasSession, configure, screen_profile};
 use procraft_gpu::{Gpu, wgpu};
+use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
 pub struct Screen {
@@ -79,6 +80,7 @@ impl Screen {
     /// `tried` backends were tried before the app started again: only those left are.
     pub fn new(
         window: Arc<Window>,
+        display: &OwnedDisplayHandle,
         from: usize,
         tried: usize,
         mut trying: impl FnMut(usize),
@@ -92,8 +94,9 @@ impl Screen {
             let last = tries + 1 >= left;
             trying(backend);
             let started = Instant::now();
-            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Screen::on(&window, backend, last)))
-                .unwrap_or_else(|panic| Err(format!("panicked: {}", procraft_gpu::panic_message(panic.as_ref()))));
+            let made =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Screen::on(&window, display, backend, last)))
+                    .unwrap_or_else(|panic| Err(format!("panicked: {}", procraft_gpu::panic_message(panic.as_ref()))));
             let name = Gpu::backend_name(backend);
             match made {
                 Ok(mut screen) => {
@@ -113,9 +116,10 @@ impl Screen {
 
     /// [`Screen::new`] on backend `backend`; one that isn't the `last` to try fails on any GPU
     /// error, a lost device or a surface it can't show.
-    fn on(window: &Arc<Window>, backend: usize, last: bool) -> Result<Screen, String> {
+    fn on(window: &Arc<Window>, display: &OwnedDisplayHandle, backend: usize, last: bool) -> Result<Screen, String> {
         let window = Arc::clone(window);
-        let instance = Gpu::instance_after(backend).ok_or("no such graphics backend")?;
+        let instance =
+            Gpu::instance_for_display(backend, Box::new(display.clone())).ok_or("no such graphics backend")?;
         let surface = instance.create_surface(Arc::clone(&window)).map_err(|e| format!("the window's surface: {e}"))?;
         let gpu = Gpu::for_surface(instance, &surface).map_err(|e| e.to_string())?;
         procraft_core::keep_device(&gpu);

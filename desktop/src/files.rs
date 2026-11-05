@@ -153,9 +153,42 @@ pub fn take_pending_brushes() -> Vec<(Vec<u8>, String)> {
         .collect()
 }
 
-/// Shows a message with an OK button.
+/// Shows a message with an OK button; it reaches the log and the terminal as well, for a system
+/// with no way of showing it.
 pub fn tell(title: &str, text: &str) {
+    log::error!("{title}: {text}");
+    eprintln!("{title}: {text}");
+    if cfg!(target_os = "linux") && !has_program("zenity") {
+        // what shows the app's dialogs on Linux isn't there: the first that is of the others
+        let shown = other_dialogs(title, text).iter().any(|(program, args)| {
+            std::process::Command::new(program).args(args).status().is_ok_and(|done| done.success())
+        });
+        if shown {
+            return;
+        }
+    }
     MessageDialog::new().set_level(MessageLevel::Error).set_title(title).set_description(text).show();
+}
+
+/// Whether `program` can be run here.
+fn has_program(program: &str) -> bool {
+    std::process::Command::new(program)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+/// The programs that can show a message where the app's own dialogs can't, in the order to try
+/// them, each with its arguments.
+fn other_dialogs(title: &str, text: &str) -> [(&'static str, Vec<String>); 3] {
+    let (title, text) = (title.to_owned(), text.to_owned());
+    [
+        ("kdialog", vec!["--title".to_owned(), title.clone(), "--error".to_owned(), text.clone()]),
+        ("xmessage", vec!["-center".to_owned(), format!("{title}\n\n{text}")]),
+        ("notify-send", vec!["--urgency=critical".to_owned(), title, text]),
+    ]
 }
 
 /// Files being written on threads of their own (exports, shares, Save As): since when, whether
@@ -863,6 +896,15 @@ fn seed() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_has_other_ways_of_showing_with_its_words_in_each() {
+        let ways = other_dialogs("No drawing", "no GPU");
+        assert_eq!(ways.map(|(program, _)| program), ["kdialog", "xmessage", "notify-send"]);
+        for (_, args) in other_dialogs("No drawing", "no GPU") {
+            assert!(args.iter().any(|a| a.contains("no GPU")), "{args:?}");
+        }
+    }
 
     fn folder(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("procraft-place-{name}-{}", std::process::id()));

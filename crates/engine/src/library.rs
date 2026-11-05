@@ -341,6 +341,11 @@ fn soft_curve() -> Curve {
     Curve::new(&[Vec2::new(0.0, 0.0), Vec2::new(0.5, 0.3), Vec2::new(1.0, 1.0)])
 }
 
+/// Where a stock brush starts to take the lean: the tilt angle's dial at a tenth of its quarter
+/// turn (as radians, as [`Tilt::angle`] keeps it), where brush files have it unless they say
+/// otherwise. A pen lower than 40° above the surface shades; one held as for writing draws the line.
+const LEANING: f32 = 0.1 * std::f32::consts::FRAC_PI_2;
+
 fn graphite() -> Brush {
     named(
         "Graphite",
@@ -364,7 +369,7 @@ fn graphite() -> Brush {
                 depth: 0.6,
                 source: None,
             },
-            tilt: Tilt { angle: 0.35, size: 1.2, opacity: 0.55 },
+            tilt: Tilt { angle: LEANING, size: 0.6, opacity: 0.55 },
             ..Brush::round_pen()
         },
     )
@@ -554,7 +559,7 @@ fn charcoal_stick() -> Brush {
                 depth: 0.95,
                 source: None,
             },
-            tilt: Tilt { angle: 0.3, size: 1.0, opacity: 0.3 },
+            tilt: Tilt { angle: LEANING, size: 0.6, opacity: 0.3 },
             pen_taper: Taper { start: 0.05, end: 0.05, size: 0.3, opacity: 0.2 },
             touch_taper: Taper::NONE,
             ..Brush::round_pen()
@@ -652,7 +657,7 @@ fn lead_holder() -> Brush {
             pressure_opacity: 0.85,
             shape: Shape::default(),
             grain: paper(grain::PAPER, 100.0, 0.25),
-            tilt: Tilt { angle: 0.4, size: 0.6, opacity: 0.4 },
+            tilt: Tilt { angle: LEANING, size: 0.6, opacity: 0.4 },
             ..graphite()
         },
     )
@@ -931,7 +936,7 @@ fn chalk() -> Brush {
             pressure_opacity: 0.7,
             shape: Shape { image: Some(shape::PASTEL), randomise: true, ..Shape::default() },
             grain: paper(grain::CONCRETE, 220.0, 0.85),
-            tilt: Tilt { angle: 0.3, size: 1.2, opacity: 0.3 },
+            tilt: Tilt { angle: LEANING, size: 0.5, opacity: 0.3 },
             pen_taper: Taper { start: 0.03, end: 0.03, size: 0.3, opacity: 0.2 },
             touch_taper: Taper::NONE,
             ..Brush::round_pen()
@@ -1542,7 +1547,7 @@ fn six_b_pencil() -> Brush {
             flow: 0.95,
             pressure_opacity: 0.7,
             grain: paper(grain::COARSE, 160.0, 0.75),
-            tilt: Tilt { angle: 0.3, size: 1.6, opacity: 0.6 },
+            tilt: Tilt { angle: LEANING, size: 0.6, opacity: 0.6 },
             ..graphite()
         },
     )
@@ -1556,7 +1561,7 @@ fn graphite_stick() -> Brush {
             flow: 0.7,
             shape: Shape { image: Some(shape::PASTEL), randomise: true, ..Shape::default() },
             grain: paper(grain::PAPER, 140.0, 0.8),
-            tilt: Tilt { angle: 0.25, size: 2.0, opacity: 0.4 },
+            tilt: Tilt { angle: LEANING, size: 0.6, opacity: 0.4 },
             ..graphite()
         },
     )
@@ -2693,6 +2698,8 @@ fn overlay_light() -> Brush {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::{Pointer, Sample};
+    use crate::stroke::StrokeBuilder;
     use crate::textures::{grains, shapes};
 
     #[test]
@@ -2713,6 +2720,39 @@ mod tests {
                 assert!(b.min_size < b.max_size && b.spacing > 0.0 && b.flow > 0.0, "{}", b.name);
                 assert!(b.grain.image.is_none() || b.grain.scale > 0.0, "{}", b.name);
             }
+        }
+    }
+
+    /// The width of a steady stroke of `b` running across a pen leaning `lean` degrees from upright.
+    fn width_leaning(b: &Brush, lean: f32) -> f32 {
+        let line = |i: u16| Sample {
+            pos: Vec2::new(f32::from(i) * 3.0, 100.0),
+            pressure: 0.3,
+            tilt: lean.to_radians(),
+            azimuth: 0.0,
+            roll: 0.0,
+            time_ms: f64::from(i) * 8.0,
+        };
+        let mut stroke = StrokeBuilder::new(b.clone(), b.diameter(0.3), Pointer::Stylus);
+        let mut stamps = stroke.add(&(0..200).map(line).collect::<Vec<_>>());
+        stamps.extend(stroke.finish());
+        let mut widths: Vec<f32> = stamps.iter().map(|s| s.radius * 2.0).collect();
+        widths.sort_by(f32::total_cmp);
+        widths[widths.len() / 2]
+    }
+
+    #[test]
+    fn a_stock_brush_leaves_a_writing_hold_alone_and_shades_when_laid_over() {
+        let leaning: Vec<Brush> = library().into_iter().flat_map(|s| s.brushes).filter(|b| b.tilt.size > 0.0).collect();
+        assert!(leaning.len() > 20, "{}", leaning.len());
+        for b in &leaning {
+            // the studio's own range (past it the lean takes a line to the brush's most at once)
+            assert!(b.tilt.size <= 1.0, "{}: {}", b.name, b.tilt.size);
+            let upright = width_leaning(b, 0.0);
+            for lean in [30.0, 45.0, 49.0] {
+                assert_eq!(width_leaning(b, lean), upright, "{} at {lean} degrees", b.name);
+            }
+            assert!(width_leaning(b, 60.0) > upright * 1.5, "{}", b.name);
         }
     }
 }

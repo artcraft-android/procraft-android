@@ -29,6 +29,7 @@ mod frame;
 mod gallery;
 mod gestures;
 mod gradients;
+mod grain_store;
 mod guide;
 mod history;
 mod host;
@@ -443,6 +444,8 @@ pub(crate) struct State {
     /// The drawing pad's strokes as drawn (pointer and input), drawn again when the brush changes;
     /// `None` on a canvas that keeps none.
     pub(crate) pad_strokes: Option<Vec<(PointerKind, Vec<PenSample>)>>,
+    /// Brush files' grains at their own size.
+    pub(crate) grain_store: grain_store::GrainStore,
     /// The pad shows only its sample scribble: a stroke of one's own takes it away.
     pub(crate) pad_sample: bool,
     /// The pad drawn as a sphere, the flat pad's strokes set aside meanwhile.
@@ -664,6 +667,7 @@ impl State {
     ) -> (Brush, StrokeStyle, f32) {
         let sliders = self.sliders(tool);
         let mut brush = self.brush(tool).clone();
+        brush.touch_opacity = sliders.opacity.clamp(0.0, 1.0);
         // a blending brush's opacity lightens each stamp, as its flow does, so its strokes still
         // build up to full; a glaze's caps the stroke
         let opacity = if brush.blends() && matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) {
@@ -682,8 +686,18 @@ impl State {
         );
         style.secondary = self.secondary;
         style.preview = self.pad_strokes.is_some();
+        style.wetness = StrokeStyle::wetness_at(sliders.opacity);
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.use_sources(gpu, &mut style, &brush);
+        }
+        // a grain fixed to the canvas, from a brush file's own image
+        let texturized = brush.grain.mode == procraft_engine::brush::GrainMode::Texturized;
+        let full = brush.grain_file_now().filter(|_| texturized).and_then(|f| f.full.as_ref());
+        if let Some(full) = full
+            && let Some(pixels) = self.grain_store.pixels(full)
+            && let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref())
+        {
+            canvas.use_full_grain(gpu, &mut style, full.id, full.side, &pixels);
         }
         (brush, style, diameter)
     }
@@ -699,7 +713,7 @@ impl State {
         first: &Brush,
         first_style: &StrokeStyle,
     ) -> Option<(Brush, SecondStroke, f32)> {
-        let mut second = first.secondary.as_deref()?.clone();
+        let mut second = first.secondary.as_deref()?.clone().as_second();
         if !first_style.takes_second() || !matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) {
             return None;
         }
@@ -1213,6 +1227,7 @@ impl CanvasSession {
             projection_stop: false,
             frames: 0,
             pad_strokes: None,
+            grain_store: grain_store::GrainStore::default(),
             pad_sample: false,
             sphere: None,
             frame_interval_ms: 0.0,

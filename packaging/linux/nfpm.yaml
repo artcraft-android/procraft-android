@@ -35,6 +35,8 @@ depends:
   - libvulkan1
 recommends:
   - mesa-vulkan-drivers
+  # OpenGL, where a GPU has no Vulkan: read when the app starts, not linked
+  - libegl1
   - xdg-desktop-portal
   # run when used: videos (time-lapse, animation exports, a video opened as frames), PDFs opened,
   # and Feedback Sounds' click; without them those say what to install, or stay silent

@@ -45,6 +45,8 @@ struct LayerUniform {
     dual_threshold: f32,
     // 1: the clip base shows through its own mask (clip_mask_tex), which clipping follows
     clip_masked: f32,
+    // pixels a side of the image the grain is read from
+    grain_side: f32,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -113,10 +115,18 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         let gs = sin(lu.grain_rotation);
         let uv = vec2<f32>(at.x * gc - at.y * gs, at.x * gs + at.y * gc) / lu.grain_scale;
         let sharp = lu.grain_sharp > 0.5;
-        let lod = select(max(log2(256.0 / lu.grain_scale), 0.0), 0.0, sharp);
-        var raw = textureSampleLevel(grains, grain_smp, uv, lu.grain, lod).r;
+        // a brush file's own image has the fine detail itself; ours only stands in for it
+        let own = lu.grain_side > 256.0;
+        let level = max(log2(lu.grain_side / lu.grain_scale), 0.0);
+        var raw = textureSampleLevel(grains, grain_smp, uv, lu.grain, select(level, 0.0, sharp && !own)).r;
         if (sharp) {
-            raw = sharp_grain(raw, uv);
+            if (own) {
+                // unfiltered: the texel under it at its level
+                let l = i32(round(level));
+                raw = textureLoad(grains, vec2<i32>(fract(uv) * vec2<f32>(textureDimensions(grains, l))), lu.grain, l).r;
+            } else {
+                raw = sharp_grain(raw, uv);
+            }
         }
         let g = grain_look(raw);
         // the coverage and the grain combined by the grain's blend mode, as deep as it says, and
@@ -248,12 +258,6 @@ fn fs_commit_locked(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32>
 
 // ---- blending -------------------------------------------------------------------------------
 
-fn unpremultiply(c: vec4<f32>) -> vec3<f32> {
-    if (c.a <= 0.0) {
-        return vec3<f32>(0.0);
-    }
-    return clamp(c.rgb / c.a, vec3<f32>(0.0), vec3<f32>(1.0));
-}
 
 // premultiplied colour squared (nearer to light), and back
 fn squared(c: vec4<f32>) -> vec4<f32> {
@@ -281,19 +285,3 @@ fn stroke_into(b: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
     return unsquared(mix(squared(b), squared(full), s.a));
 }
 
-// source `s` over backdrop `b` (both premultiplied) with blend function `mode`
-fn blend(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
-    // shade: the darker of the backdrop and the source laid over it, premultiplied and alpha too
-    if (mode == 26u) {
-        return min(b, s + b * (1.0 - s.a));
-    }
-    // behind (a brush's): the source laid under the backdrop
-    if (mode == 29u) {
-        return b + s * (1.0 - b.a);
-    }
-    let cb = unpremultiply(b);
-    let cs = unpremultiply(s);
-    let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(1.0));
-    let rgb = s.a * (1.0 - b.a) * cs + s.a * b.a * mixed + (1.0 - s.a) * b.rgb;
-    return vec4<f32>(rgb, s.a + b.a * (1.0 - s.a));
-}

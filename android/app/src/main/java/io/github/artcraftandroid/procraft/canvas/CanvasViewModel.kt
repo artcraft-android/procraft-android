@@ -2077,6 +2077,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         guide = s.guide()
     }
 
+    /** The canvas view's ear for a pen's side button that comes as a key (true: the second). */
+    var penKeyHeard: ((second: Boolean) -> Unit)? = null
+
+    /** A pen's side button came as a key (see [penKeyButton]): true if a canvas took it. */
+    fun penKey(second: Boolean): Boolean {
+        if (screen != Screen.CANVAS || session == null) return false
+        val heard = penKeyHeard ?: return false
+        heard(second)
+        return true
+    }
+
     /** The modify button tapped: what Tap □ is set to do (open or close the eyedropper at first). */
     fun tapModify() {
         when (gestures.purposeOf(Trigger.TAP_MODIFY)) {
@@ -2426,10 +2437,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun cutLayer() {
+    fun cutLayer(): Boolean {
         if (!currentTakesChanges()) {
             closePanels()
-            return
+            return false
         }
         val cut = session?.cutLayer()
         clipboard = cut ?: clipboard
@@ -2437,6 +2448,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         closePanels()
         refresh()
         if (cut != null) showNotice("Layer cut")
+        return cut != null
     }
 
     /** What was cut or copied, on a new layer; a [private] one is left out of the gallery's thumbnail. */
@@ -2775,8 +2787,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Cut & Paste: what is selected (or the layer) cut out and put back as a new layer. */
     fun cutAndPaste() {
-        cutLayer()
-        paste()
+        // nothing cut (a locked layer, an empty one): what is on the clipboard stays there
+        if (cutLayer()) paste()
     }
 
     /** Duplicate: the selection copied to a new layer, or without one the current layer. */
@@ -3190,7 +3202,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             }
             if (exportCancelled) return null
             if (made == null) {
-                showNotice("The time-lapse video couldn't be made.", warning = true)
+                // which of the two: they are different faults, in a report too
+                val readable = withContext(Dispatchers.IO) { t.frame(0)?.also { it.recycle() } != null }
+                showNotice(if (readable) "The time-lapse video couldn't be made." else "The time-lapse can't be read on this device.", warning = true)
                 return null
             }
             // full, then the check drawn in it before the card goes

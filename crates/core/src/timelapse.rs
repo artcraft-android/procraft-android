@@ -199,7 +199,7 @@ impl TimeLapse {
         if let Ok(entries) = fs::read_dir(&self.dir) {
             for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.starts_with("segment-") && name.ends_with(".mp4") {
+                if (name.starts_with("segment-") || name.starts_with(SET_ASIDE)) && name.ends_with(".mp4") {
                     let _ = fs::remove_file(&path);
                 }
             }
@@ -421,6 +421,9 @@ pub(crate) struct Mp4 {
     pub hevc: bool,
 }
 
+/// What a video is named after, with no note saying what it holds, so kept rather than lost.
+const SET_ASIDE: &str = "set-aside-";
+
 #[uniffi::export]
 impl TimeLapse {
     /// The video a package still needs made so every frame is in one (the ones made before kept,
@@ -576,6 +579,12 @@ impl TimeLapse {
         true
     }
 
+    /// The videos whose frames are still pictures too: what an app reads back before those
+    /// pictures go ([`Self::drop_clip_frames`]), a header not saying that a device can read it.
+    pub fn clips_with_pictures(&self) -> Vec<TimeLapseClip> {
+        self.clips().into_iter().filter(|c| self.frame_path(c.first).exists()).collect()
+    }
+
     /// The frames kept as pictures that its videos hold too, gone (as the artwork file keeps a
     /// time-lapse: only as video); only once every video's frames, counted from its header, are
     /// as many as it is noted to hold. How many went.
@@ -664,17 +673,26 @@ impl TimeLapse {
     }
 
     /// Every package video, and the note of them, gone; unless they hold the only copy of their
-    /// frames.
+    /// frames. With no note that holds there is no telling what they hold, so they go aside
+    /// instead, out of the way of what is made next.
     fn drop_segments(&self) {
-        if self.clips_on_disk().is_some_and(|k| !self.remakeable(&k)) {
+        let note = self.clips_on_disk();
+        if note.as_ref().is_some_and(|k| !self.remakeable(k)) {
             return;
         }
         let _ = fs::remove_file(self.dir.join("segments.json"));
         let Ok(entries) = fs::read_dir(&self.dir) else { return };
         for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_owned();
             if name.starts_with("segment-") && name.ends_with(".mp4") {
-                let _ = fs::remove_file(&path);
+                if note.is_some() {
+                    let _ = fs::remove_file(&path);
+                } else {
+                    let free = (0..).map(|i| self.dir.join(format!("{SET_ASIDE}{i}-{name}"))).find(|p| !p.exists());
+                    if let Some(aside) = free {
+                        let _ = fs::rename(&path, aside);
+                    }
+                }
             }
         }
     }
@@ -798,6 +816,26 @@ mod tests {
         assert_eq!(picks.len(), 30);
         assert_eq!((picks[0], picks[29]), (0, 300));
         assert!(picks.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn videos_with_no_note_of_them_are_set_aside_not_deleted() {
+        let artwork = std::env::temp_dir().join(format!("procraft-unnoted-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&artwork);
+        let t = TimeLapse::new(artwork.to_string_lossy().into_owned());
+        assert!(t.record([255u8, 0, 0, 255].repeat(16), 4, 4));
+        let dir = artwork.join("timelapse");
+        // a video the note of which was lost: it may be all there is of its frames
+        fs::write(dir.join("segment-1.mp4"), b"the only copy").unwrap();
+        fs::write(dir.join("segments.json"), b"{ not whole").unwrap();
+        let plan = t.segment_plan().expect("a plan");
+        assert!(!plan.append);
+        assert!(!dir.join("segment-1.mp4").exists(), "out of the way of what is made next");
+        assert_eq!(fs::read(dir.join("set-aside-0-segment-1.mp4")).unwrap(), b"the only copy");
+        // asked to delete what was recorded, it goes too
+        t.purge();
+        assert!(!dir.join("set-aside-0-segment-1.mp4").exists());
+        let _ = fs::remove_dir_all(&artwork);
     }
 
     #[test]
@@ -1071,6 +1109,33 @@ mod tests {
         fake_mp4(Path::new(&plan.path), 3, 2, 2);
         assert_eq!(t.drop_clip_frames(), 3);
         assert_eq!((t.count(), TimeLapse::new(dir.to_string_lossy().into_owned()).count()), (3, 3));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_videos_whose_pictures_are_still_there_are_read_back() {
+        let dir = std::env::temp_dir().join(format!("procraft-readback-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let t = TimeLapse::new(dir.to_string_lossy().into_owned());
+        for i in 0..3u8 {
+            assert!(t.record([i, 0, 0, 255].repeat(4), 2, 2));
+        }
+        assert!(t.clips_with_pictures().is_empty());
+        let plan = t.segment_plan().unwrap();
+        fake_mp4(Path::new(&plan.path), 3, 2, 2);
+        t.segment_made(plan.clone(), 2, 2, true);
+        let first = TimeLapseClip { path: plan.path, first: 0, frames: 3 };
+        assert_eq!(t.clips_with_pictures(), [first]);
+        // an app that can't read it back leaves them: every frame is still there
+        assert_eq!(frame_files(&t.dir).len(), 3);
+        assert_eq!(t.drop_clip_frames(), 3);
+        assert!(t.clips_with_pictures().is_empty());
+        // the next video is the only one to check
+        assert!(t.record([9, 0, 0, 255].repeat(4), 2, 2));
+        let plan = t.segment_plan().unwrap();
+        fake_mp4(Path::new(&plan.path), 1, 2, 2);
+        t.segment_made(plan.clone(), 2, 2, true);
+        assert_eq!(t.clips_with_pictures(), [TimeLapseClip { path: plan.path, first: 3, frames: 1 }]);
         let _ = fs::remove_dir_all(&dir);
     }
 }

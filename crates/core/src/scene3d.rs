@@ -2103,12 +2103,14 @@ impl State {
         let (brush, mut style, diameter) = self.stroke_brush(tool, current);
         // the brush shows as big as on the texture fitted to the window
         let size = self.window_size;
-        let diameter = diameter * View::fit((self.doc.width(), self.doc.height()), size).zoom();
+        let zoom = View::fit((self.doc.width(), self.doc.height()), size).zoom();
+        let diameter = diameter * zoom;
         self.strokes = self.strokes.wrapping_add(1);
         self.info.strokes = self.info.strokes.saturating_add(1);
         let seed = self.strokes.wrapping_mul(0x9e37_79b9);
         let mut builder = StrokeBuilder::with_seed(brush.clone(), diameter, pointer.into(), seed)
             .with_input(self.input.clone())
+            .scaled(zoom)
             .seen_at(1.0);
         let stamps = builder.add(&window_samples(samples));
         let (Some(gpu), Some(scene)) = (self.gpu.as_ref(), self.scene.as_mut()) else { return };

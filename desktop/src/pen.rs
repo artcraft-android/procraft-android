@@ -33,6 +33,13 @@ static SECOND_PRESSES: AtomicUsize = AtomicUsize::new(0);
 /// Each pointer the system has said is a pen (true) or a finger (false).
 static KINDS: Mutex<Option<HashMap<u64, bool>>> = Mutex::new(None);
 
+/// Each pen pointer the system said is built into a screen (true), so the hand is on what it
+/// paints, or isn't (false).
+static ON_SCREEN: Mutex<Option<HashMap<u64, bool>>> = Mutex::new(None);
+
+/// Pointers the system took back whose lift hasn't come yet.
+static TAKEN_BACK: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
 /// A tablet's pen moving the mouse pointer (X11 and a Mac give it as the mouse): its pressure
 /// (0..1) and whether its eraser end is the one on the screen.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -137,9 +144,42 @@ pub fn is_pen(id: u64) -> Option<bool> {
 
 /// The system said pointer `id` is a pen (`pen`) or a finger.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
-fn pointer_kind(id: u64, pen: bool) {
+pub(crate) fn pointer_kind(id: u64, pen: bool) {
     if let Ok(mut kinds) = KINDS.lock() {
         kinds.get_or_insert_with(Default::default).insert(id, pen);
+    }
+}
+
+/// The system took pointer `id` back (a palm it has made out, say).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn taken_back(id: u64) {
+    if let Ok(mut all) = TAKEN_BACK.lock()
+        && !all.contains(&id)
+    {
+        all.push(id);
+    }
+}
+
+/// Whether pointer `id`, lifting, is one the system took back: winit gives that as any other lift.
+pub fn was_taken_back(id: u64) -> bool {
+    let Ok(mut all) = TAKEN_BACK.lock() else { return false };
+    let found = all.iter().position(|p| *p == id);
+    found.map(|at| all.swap_remove(at)).is_some()
+}
+
+/// Whether pointer `id` is a pen that isn't on the screen it paints on: a tablet without one, or
+/// a pen the system can't say of (only Windows says, so a pen display elsewhere counts too: a
+/// brush outline round its tip costs less than no sign of the pen on a tablet).
+pub fn away_from_screen(id: u64) -> bool {
+    let on_screen = ON_SCREEN.lock().ok().and_then(|s| s.as_ref()?.get(&id).copied());
+    is_pen(id) == Some(true) && on_screen != Some(true)
+}
+
+/// The system said pen `id` is built into a screen, or isn't.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn pen_on_screen(id: u64, on_screen: bool) {
+    if let Ok(mut all) = ON_SCREEN.lock() {
+        all.get_or_insert_with(Default::default).insert(id, on_screen);
     }
 }
 
@@ -595,11 +635,15 @@ mod tablet {
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod system {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicIsize, Ordering};
 
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::Controls::{POINTER_DEVICE_INFO, POINTER_DEVICE_TYPE, POINTER_DEVICE_TYPE_INTEGRATED_PEN};
     use windows::Win32::UI::Input::Pointer::{
-        GetPointerFrameInfo, GetPointerPenInfo, GetPointerType, POINTER_INFO, POINTER_PEN_INFO,
+        GetPointerDevice, GetPointerFrameInfo, GetPointerInfo, GetPointerPenInfo, GetPointerType, POINTER_INFO,
+        POINTER_PEN_INFO,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, SetWindowLongPtrW,
@@ -614,9 +658,15 @@ mod system {
     const PEN_MASK_TILT_Y: u32 = 0x8;
     /// A pointer message's flags (its `wparam`'s high word): the pointer touches the screen.
     const POINTER_FLAG_INCONTACT: usize = 0x4;
+    /// A pointer's flags, as a message's and as a frame gives them: the system took it back, and
+    /// what it did is to be undone.
+    const POINTER_FLAG_CANCELED: u32 = 0x8000;
 
     /// winit's procedure for the window, called after ours.
     static WINIT: AtomicIsize = AtomicIsize::new(0);
+
+    /// The pen devices named in the log so far.
+    static LOGGED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
     pub fn watch(window: &winit::window::Window) {
         let Ok(handle) = window.window_handle() else { return };
@@ -629,9 +679,10 @@ mod system {
         WINIT.store(winit, Ordering::Relaxed);
     }
 
-    /// Notes what the other pointers in `id`'s frame are. winit takes a whole frame from its first
-    /// message and skips the rest, so a second finger's own messages never come here: unnoted, a
-    /// finger with a pressure would be taken for a pen, and draw whatever the finger settings say.
+    /// Notes what the other pointers in `id`'s frame are, and any taken back. winit takes a whole
+    /// frame from its first message and skips the rest, so a second finger's own messages never
+    /// come here: unnoted, a finger with a pressure would be taken for a pen, and draw whatever the
+    /// finger settings say.
     fn frame_kinds(id: u32) {
         let mut count = 0;
         // SAFETY: a count to fill, no pointers asked for yet
@@ -647,7 +698,29 @@ mod system {
             if pointer.pointerType == PT_PEN || pointer.pointerType == PT_TOUCH {
                 super::pointer_kind(u64::from(pointer.pointerId), pointer.pointerType == PT_PEN);
             }
+            if pointer.pointerFlags.0 & POINTER_FLAG_CANCELED != 0 {
+                super::taken_back(u64::from(pointer.pointerId));
+            }
         }
+    }
+
+    /// The kind of device pen `id` belongs to, as the system has it: built into a screen or not
+    /// (from the digitizer's own report), with its name in the log the first time it is heard
+    /// from.
+    fn pen_device(id: u32) -> Option<POINTER_DEVICE_TYPE> {
+        let mut pointer = POINTER_INFO::default();
+        // SAFETY: `pointer` is an info to fill for this pointer
+        unsafe { GetPointerInfo(id, &mut pointer) }.ok()?;
+        let mut device = POINTER_DEVICE_INFO::default();
+        // SAFETY: `device` is an info to fill for the device the system just named
+        unsafe { GetPointerDevice(pointer.sourceDevice, &mut device) }.ok()?;
+        let name = device.productString;
+        let end = name.iter().position(|c| *c == 0).unwrap_or(name.len());
+        let name = String::from_utf16_lossy(name.get(..end).unwrap_or_default());
+        if LOGGED.lock().is_ok_and(|mut logged| logged.insert(name.clone())) {
+            log::info!("pen: {name} (device type {})", device.pointerDeviceType.0);
+        }
+        Some(device.pointerDeviceType)
     }
 
     /// A pen's pointer message: its pressure and tilt kept by pointer, then the message on to
@@ -670,6 +743,12 @@ mod system {
                 super::pointer_kind(u64::from(id), kind == PT_PEN);
             }
             frame_kinds(id);
+            if (wparam.0 >> 16) as u32 & POINTER_FLAG_CANCELED != 0 {
+                super::taken_back(u64::from(id));
+            }
+            if msg == WM_POINTERDOWN && kind == PT_PEN {
+                super::pen_on_screen(u64::from(id), pen_device(id) == Some(POINTER_DEVICE_TYPE_INTEGRATED_PEN));
+            }
             // a pen held above the screen (not touching it)
             let touching = (wparam.0 >> 16) & POINTER_FLAG_INCONTACT != 0;
             hovering = msg == WM_POINTERUPDATE && kind == PT_PEN && !touching;
@@ -760,6 +839,16 @@ mod tests {
     }
 
     #[test]
+    fn a_pointer_taken_back_is_told_once() {
+        assert!(!was_taken_back(921));
+        taken_back(921);
+        taken_back(921);
+        assert!(!was_taken_back(922));
+        assert!(was_taken_back(921));
+        assert!(!was_taken_back(921));
+    }
+
+    #[test]
     fn a_pointer_is_a_pen_or_a_finger_as_the_system_said() {
         assert_eq!(is_pen(911), None);
         pointer_kind(911, false);
@@ -816,5 +905,14 @@ mod tests {
         // flat on the screen, still leaning right
         let (tilt, towards) = lean_of(90.0, 0.0);
         assert!((tilt - std::f32::consts::FRAC_PI_2).abs() < 0.01 && near(towards, std::f32::consts::FRAC_PI_2));
+    }
+
+    #[test]
+    fn a_pen_leaning_across_both_axes_takes_its_true_lean() {
+        // 45 degrees from upright towards the bottom right is 35.26 along each axis
+        let each = 0.5f32.sqrt().atan().to_degrees();
+        let (tilt, towards) = lean_of(each, each);
+        assert!((tilt.to_degrees() - 45.0).abs() < 1e-3, "{tilt}");
+        assert!((towards.to_degrees() - 135.0).abs() < 1e-3, "{towards}");
     }
 }
