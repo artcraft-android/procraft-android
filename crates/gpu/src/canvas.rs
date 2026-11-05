@@ -596,7 +596,9 @@ struct StampUniform {
     shape_sharp: u32,
     /// The coarsest mip level the shape is read from.
     shape_lod_cap: f32,
-    _pad: [u32; 2],
+    /// Pixels a side of the image a moving grain is read from.
+    grain_side: f32,
+    _pad: u32,
 }
 
 #[repr(C)]
@@ -3697,6 +3699,7 @@ impl Canvas {
                     next_instance = next_instance.saturating_add(count);
                     let (grain, grain_scale, grain_depth) =
                         style.moving_grain().map_or((-1, 1.0, 0.0), |(g, s, d)| (g as i32, s, d));
+                    let own_grain = self.full_grain_bind(device, &style);
                     let offset = uniforms.push(&StampUniform {
                         canvas_size: [self.width as f32, self.height as f32],
                         hardness: style.hardness.clamp(0.0, 1.0),
@@ -3712,7 +3715,8 @@ impl Canvas {
                         grain_sharp: u32::from(style.grain_sharp),
                         shape_sharp: u32::from(style.shape_sharp),
                         shape_lod_cap: style.shape_lod_cap,
-                        _pad: [0; 2],
+                        grain_side: style.grain_side,
+                        _pad: 0,
                         secondary: [style.secondary[0], style.secondary[1], style.secondary[2], 1.0],
                     });
                     let load = if clear { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load };
@@ -3729,7 +3733,7 @@ impl Canvas {
                             Rendering::Capped => self.pipelines.stamp_capped.as_ref().unwrap_or(&self.pipelines.stamp),
                         });
                         pass.set_bind_group(0, &self.uniform_bind, &[offset]);
-                        pass.set_bind_group(1, &self.brush_bind, &[]);
+                        pass.set_bind_group(1, own_grain.as_ref().unwrap_or(&self.brush_bind), &[]);
                         let start = u64::from(first) * size_of::<StampInstance>() as u64;
                         let end = u64::from(next_instance) * size_of::<StampInstance>() as u64;
                         pass.set_vertex_buffer(0, self.stamp_buffer.slice(start..end));

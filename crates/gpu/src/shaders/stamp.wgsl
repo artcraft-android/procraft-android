@@ -30,6 +30,8 @@ struct StampUniform {
     shape_sharp: u32,
     // the coarsest mip level the shape is read from: a small stamp's thin shape keeps its strength
     shape_lod_cap: f32,
+    // pixels a side of the image a moving grain is read from
+    grain_side: f32,
 }
 
 @group(0) @binding(0) var<uniform> su: StampUniform;
@@ -190,10 +192,18 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         let at = i.grain_at;
         let g_uv = vec2<f32>(at.x * gc - at.y * gs, at.x * gs + at.y * gc) / scale;
         let sharp = su.grain_sharp == 1u;
-        let g_lod = select(max(log2(256.0 / scale), 0.0), 0.0, sharp);
-        var raw = textureSampleLevel(grains, grain_smp, g_uv, su.grain, g_lod).r;
+        // a brush file's own image has the fine detail itself; ours only stands in for it
+        let own = su.grain_side > 256.0;
+        let g_lod = max(log2(su.grain_side / scale), 0.0);
+        var raw = textureSampleLevel(grains, grain_smp, g_uv, su.grain, select(g_lod, 0.0, sharp && !own)).r;
         if (sharp) {
-            raw = sharp_grain(raw, g_uv);
+            if (own) {
+                // unfiltered: the texel under it at its level
+                let l = i32(round(g_lod));
+                raw = textureLoad(grains, vec2<i32>(fract(g_uv) * vec2<f32>(textureDimensions(grains, l))), su.grain, l).r;
+            } else {
+                raw = sharp_grain(raw, g_uv);
+            }
         }
         let g = clamp((raw - 0.5) * (1.0 + su.grain_contrast) + 0.5 + su.grain_brightness, 0.0, 1.0);
         // combined with the shape by the grain's blend mode, as deep as it says, inside the shape

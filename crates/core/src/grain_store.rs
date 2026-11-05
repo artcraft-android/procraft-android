@@ -284,6 +284,21 @@ mod tests {
     }
 
     #[test]
+    fn a_stroke_reads_a_file_s_grain_at_its_own_size_whichever_way_it_moves() {
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        for mode in [GrainMode::Texturized, GrainMode::Moving] {
+            let s = CanvasSession::new(64, 64);
+            s.use_gpu(gpu.clone());
+            let set = s.import_brushes(brush_file_with(mode)).unwrap();
+            assert!(s.select_brush(set, 0));
+            let mut st = s.shared.lock();
+            let layer = st.doc.current();
+            let (_, style, _) = st.stroke_brush(crate::ToolKind::Paint, layer);
+            assert!(style.full_grain.is_some() && style.grain_side == 1024.0, "{mode:?}");
+        }
+    }
+
+    #[test]
     fn a_moving_grain_written_out_comes_back_at_the_scale_it_had() {
         let dir = folder("written-moving");
         let s = CanvasSession::new(64, 64);

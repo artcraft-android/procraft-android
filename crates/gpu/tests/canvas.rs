@@ -1727,6 +1727,27 @@ fn a_stroke_reads_a_brush_file_s_grain_at_its_own_size() {
         let (left, right) = (pixel(&layer, 128, 32, 32)[3], pixel(&layer, 128, 96, 32)[3]);
         assert!(left > 200 && right < 40, "{wet_pull:?} {laid_in_place}: {left} {right}");
     }
+    // a moving grain too, read as far from the stamp's middle as the pixel is: the stamp's right
+    // falls on the tile's white half, its left on the black
+    for (wet_pull, laid_in_place) in [(Some(0.5), false), (None, true), (None, false)] {
+        let mut doc = Document::new(128, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let mut style = StrokeStyle {
+            wet_pull,
+            laid_in_place,
+            rendering: Rendering::Gradual,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        half_grain(&mut canvas, &gpu, &mut style, 128.0);
+        style.grain_mode = procraft_engine::brush::GrainMode::Moving;
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(64.0, 32.0), 60.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        let (left, right) = (pixel(&layer, 128, 32, 32)[3], pixel(&layer, 128, 96, 32)[3]);
+        assert!(right > 200 && left < 40, "moving {wet_pull:?} {laid_in_place}: {left} {right}");
+    }
     // a smudge too: paint dragged down off a black band goes only where the grain lets it
     let mut doc = Document::new(128, 64);
     let mut canvas = Canvas::new(&gpu, &doc).unwrap();
@@ -1744,6 +1765,37 @@ fn a_stroke_reads_a_brush_file_s_grain_at_its_own_size() {
     let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
     let (left, right) = (pixel(&layer, 128, 32, 32)[3], pixel(&layer, 128, 96, 32)[3]);
     assert!(left > 60 && right < 10, "smudge: {left} {right}");
+}
+
+#[test]
+fn a_moving_grain_at_its_own_size_is_read_at_the_level_its_tile_calls_for() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // stripes a texel wide, four texels to a canvas pixel: the right level averages them to grey,
+    // where the finest would land on one stripe or the other. Sharp, the stripes of that level
+    let pixels: Vec<u8> = (0..1024 * 1024).map(|i| if i % 2 == 0 { 255 } else { 0 }).collect();
+    let middle = |grain_sharp: bool| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let mut style = StrokeStyle {
+            grain_mode: procraft_engine::brush::GrainMode::Moving,
+            grain_depth: 1.0,
+            grain_scale: 256.0,
+            grain_blend: 1,
+            grain_sharp,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.use_full_grain(&gpu, &mut style, 8, 1024, &pixels);
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.125, 32.0), 24.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (24..40).map(|x| pixel(&layer, 64, x, 32)[3]).collect::<Vec<u8>>()
+    };
+    let (filtered, sharp) = (middle(false), middle(true));
+    assert!(filtered.iter().all(|a| a.abs_diff(127) < 16), "{filtered:?}");
+    assert!(sharp.iter().all(|a| a.abs_diff(127) < 16), "{sharp:?}");
 }
 
 #[test]

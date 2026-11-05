@@ -689,9 +689,8 @@ impl State {
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.use_sources(gpu, &mut style, &brush);
         }
-        // a grain fixed to the canvas, from a brush file's own image
-        let texturized = brush.grain.mode == procraft_engine::brush::GrainMode::Texturized;
-        let full = brush.grain_file_now().filter(|_| texturized).and_then(|f| f.full.as_ref());
+        // a brush file's grain at its own size, fixed to the canvas or moving with each stamp
+        let full = brush.grain_file_now().and_then(|f| f.full.as_ref());
         if let Some(full) = full
             && let Some(pixels) = self.grain_store.pixels(full)
             && let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref())
