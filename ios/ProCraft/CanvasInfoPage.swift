@@ -50,6 +50,51 @@ private func megabytes(_ bytes: UInt64) -> String {
     String(format: "%.2f MB", Double(bytes) / 1_000_000)
 }
 
+/// The licences of what the app is made with, over everything, closed by its Done.
+struct LicencesPage: View {
+    let onDone: () -> Void
+
+    /// The notices, a paragraph each so a long list reads as it scrolls.
+    @State private var paragraphs: [String] = []
+
+    private static func read() -> [String] {
+        func bundled(_ name: String, _ kind: String, in folder: String? = nil) -> String {
+            guard let url = Bundle.main.url(forResource: name, withExtension: kind, subdirectory: folder) else { return "" }
+            return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        }
+        let text = "The interface font is Inter, by The Inter Project Authors.\n\n"
+            + bundled("Inter-OFL", "txt", in: "fonts")
+            + "\n\nThe app keeps Lucide icons (lucide.dev), by Lucide Icons and Contributors.\n\n"
+            + bundled("licenses", "txt")
+        return text.components(separatedBy: "\n\n")
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            screenFill
+                .contentShape(Rectangle())
+                .onTapGesture {}
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(paragraphs.indices, id: \.self) { i in
+                        Text(verbatim: paragraphs[i])
+                            .font(.system(size: 13))
+                            .foregroundStyle(ink)
+                    }
+                }
+                .padding(.horizontal, 28)
+                .padding(.top, 100)
+                .padding(.bottom, 40)
+            }
+            ToolHeader(title: "Licences", buttons: [], onDone: onDone)
+        }
+        .task {
+            let read = await Task.detached(priority: .userInitiated) { Self.read() }.value
+            paragraphs = read
+        }
+    }
+}
+
 /// Rows of a name and its value in a rounded card, a line between.
 private struct Rows: View {
     let rows: [(String, String)]

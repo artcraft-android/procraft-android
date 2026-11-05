@@ -251,6 +251,7 @@ final class CanvasModel {
     /// Gesture controls are open, on this page: it opens on the page it was last on.
     var gestureControlsOpen = false
     var canvasInfoOpen = false
+    var licencesOpen = false
     var gesturePage = GesturePurpose.eyedropper
     /// The palettes, kept by the shared core across artworks.
     static let paletteStore: Palettes = {

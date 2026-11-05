@@ -247,7 +247,10 @@ struct ActionsPanel: View {
                         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
                         model.saying = ("ProCraft", "Version \(version)")
                     }),
-                    .act("Licences", action: nil),
+                    .act("Licences", action: {
+                        model.closePanels()
+                        withAnimation(Motion.studioIn) { model.licencesOpen = true }
+                    }),
                 ],
             ]
         }

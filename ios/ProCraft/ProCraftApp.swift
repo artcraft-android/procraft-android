@@ -216,6 +216,8 @@ enum ScreenCapture {
         case "source-landscape":
             sideways = true
             source(model, .grain)
+        case "licences":
+            model.licencesOpen = true
         case "canvas-info":
             model.canvasInfoOpen = true
         case "text":

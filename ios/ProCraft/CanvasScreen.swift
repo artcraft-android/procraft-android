@@ -176,6 +176,10 @@ struct CanvasScreen: View {
                         .transition(.move(edge: .bottom))
                     NoticeBand(model: model)
                 }
+                if model.licencesOpen {
+                    LicencesPage { withAnimation(Motion.studioOut) { model.licencesOpen = false } }
+                        .transition(.move(edge: .bottom))
+                }
                 if model.canvasInfoOpen {
                     CanvasInfoPage(model: model, screen: screen.size)
                         .transition(.move(edge: .bottom))

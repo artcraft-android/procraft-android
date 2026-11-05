@@ -31,6 +31,9 @@ targets:
       - path: ../android/app/src/main/assets/fonts
         type: folder
         buildPhase: resources
+      # the licences of what the core and the app are made with
+      - path: ../android/app/src/main/assets/licenses.txt
+        buildPhase: resources
     preBuildScripts:
       - name: The core and its bindings (Rust)
         script: bash "$PROJECT_DIR/build-rust.sh"
