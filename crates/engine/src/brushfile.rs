@@ -64,11 +64,11 @@ pub enum Texture {
 }
 
 /// Canvas pixels a stamp's square is across at the most size, for each 1 of the file's `maxSize`.
-pub const PIXELS_PER_SIZE: f32 = 262.0;
+pub const PIXELS_PER_SIZE: f32 = 256.0;
 
 /// How much of a stamp's square a hard round tip drawn as an image covers: a round tip of ours
 /// (which fills its stamp) stands in for one at this share of the size.
-pub const ROUND_TIP_SHARE: f32 = 0.797;
+pub const ROUND_TIP_SHARE: f32 = 0.8157;
 
 /// Sets `brush`'s sizes from a file's (`maxSize`, `minSize`, in units of its
 /// [`Brush::size_unit`], so its shape first), the least kept no larger than the most.

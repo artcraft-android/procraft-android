@@ -315,7 +315,11 @@ impl StrokeStyle {
             full_grain: None,
             grain_side: TEXTURE_SIZE as f32,
             shape_sharp: brush.setting("shape_filtering") < 0.5,
-            shape_lod_cap: SHAPE_LOD_CAP,
+            shape_lod_cap: if brush.setting("shape_filtering").round() == 1.0 {
+                SHAPE_LOD_CAP_CLASSIC
+            } else {
+                SHAPE_LOD_CAP
+            },
             secondary: [1.0, 1.0, 1.0],
             preview: false,
             luminance: brush.setting("luminance_blending") >= 0.5,
@@ -1077,9 +1081,14 @@ struct SmudgeUniform {
 }
 
 /// The coarsest mip level of our brush images (256 texels a side) a small stamp reads its shape
-/// from: 32 texels a side. The reference caps the level at 4 or 3 (by the shape filtering's mode)
-/// on its own images, whose sizes vary; on ours, level 3 matches its strokes for either mode.
-const SHAPE_LOD_CAP: f32 = 3.0;
+/// from: 8 texels a side, so that a thin tip keeps its strength.
+const SHAPE_LOD_CAP: f32 = 5.0;
+
+/// As [`SHAPE_LOD_CAP`], for classic filtering (a filtering setting of 1): 16 texels a side.
+const SHAPE_LOD_CAP_CLASSIC: f32 = 4.0;
+
+/// How far a stamp's quad reaches past the stamp each way (pixels): its shape fills all of it.
+const QUAD_REACH: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
 /// Wet paint is laid a display frame's stamps at a time, the frames this long (ms).
 const WET_FRAME_MS: f64 = 1000.0 / 60.0;
@@ -4603,7 +4612,7 @@ impl Canvas {
         pass.set_bind_group(1, own_grain.as_ref().unwrap_or(&self.brush_bind), &[]);
         for (k, s) in instances.iter().enumerate() {
             let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
-            let bbox = IRect::around(center, (s.radius + 0.5) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
+            let bbox = IRect::around(center, (s.radius + QUAD_REACH) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
                 .intersect(full);
             if bbox.is_empty() || s.radius <= 0.0 {
                 continue;
@@ -4762,8 +4771,9 @@ impl Canvas {
             // dry paint laid in place: each stamp lays the paint itself, no pass of plots
             for (s, _, _) in stamps {
                 let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
-                let bbox = IRect::around(center, (s.radius + 0.5) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
-                    .intersect(full);
+                let bbox =
+                    IRect::around(center, (s.radius + QUAD_REACH) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
+                        .intersect(full);
                 if bbox.is_empty() || s.radius <= 0.0 {
                     continue;
                 }
@@ -4864,8 +4874,9 @@ impl Canvas {
             // then each stamp laid from its plot
             for (k, (s, _, _)) in group.iter().enumerate() {
                 let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
-                let bbox = IRect::around(center, (s.radius + 0.5) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
-                    .intersect(full);
+                let bbox =
+                    IRect::around(center, (s.radius + QUAD_REACH) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
+                        .intersect(full);
                 if bbox.is_empty() || s.radius <= 0.0 {
                     continue;
                 }

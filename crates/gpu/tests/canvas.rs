@@ -2749,26 +2749,73 @@ fn the_grey_view_shows_each_colour_as_the_grey_of_its_luminance() {
 fn a_small_stamp_s_thin_shape_keeps_its_strength() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
-    let mut doc = Document::new(64, 64);
-    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
     // a shape that is an upright line, a sixteenth of its width across
     let n = procraft_engine::textures::TEXTURE_SIZE;
-    let pixels = (0..n * n).map(|i| if (i % n).abs_diff(n / 2) < n / 32 { 255 } else { 0 }).collect();
-    let mut brush = Brush::round_pen();
-    brush.shape.source = procraft_engine::brush::Source::new(pixels);
-    let mut s = StrokeStyle { rendering: Rendering::Strongest, ..style(StrokeTool::Paint, 1.0) };
-    canvas.use_sources(&gpu, &mut s, &brush);
-    canvas.begin_stroke(doc.current(), s);
-    // stamps 9 px across, a fifth of a pixel apart: each lays its line where it passes. Read no
-    // coarser than the cap, the line keeps nearly its full strength; at the level the size alone
-    // would pick it is averaged to a faint grey, which the strongest stamp can't build past
-    let stamps: Vec<Stamp> = (0..100).map(|k| dot(Vec2::new(22.0 + k as f32 * 0.2, 32.0), 4.5)).collect();
-    canvas.add_stamps(&stamps);
-    canvas.end_stroke();
-    canvas.render(&gpu, &mut doc, None);
-    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
-    let laid: Vec<u8> = (26..38).map(|x| pixel(&layer, 64, x, 32)[3]).collect();
-    assert!(laid.iter().all(|&a| a > 200), "{laid:?}");
+    let pixels: Vec<u8> = (0..n * n).map(|i| if (i % n).abs_diff(n / 2) < n / 32 { 255 } else { 0 }).collect();
+    let laid = |filtering: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let mut brush = Brush::round_pen();
+        brush.shape.source = procraft_engine::brush::Source::new(pixels.clone());
+        brush.set_setting("shape_filtering", filtering);
+        let mut s = StrokeStyle {
+            rendering: Rendering::Strongest,
+            ..StrokeStyle::for_brush(&brush, StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0, false)
+        };
+        canvas.use_sources(&gpu, &mut s, &brush);
+        canvas.begin_stroke(doc.current(), s);
+        // stamps 2 px across, a fifth of a pixel apart: each lays its line where it passes
+        let stamps: Vec<Stamp> = (0..100).map(|k| dot(Vec2::new(22.0 + k as f32 * 0.2, 32.0), 1.0)).collect();
+        canvas.add_stamps(&stamps);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (26..38).map(|x| pixel(&layer, 64, x, 32)[3]).min().unwrap()
+    };
+    // at the level the size alone would pick the line is averaged to almost nothing, which the
+    // strongest stamp can't build past: no coarser than 8 texels a side a quarter of it stays, and
+    // no coarser than 16 with classic filtering half
+    let (improved, classic) = (laid(2.0), laid(1.0));
+    assert!(improved.abs_diff(63) < 12 && classic.abs_diff(127) < 24, "{improved} {classic}");
+}
+
+#[test]
+fn a_shape_fills_the_quad_that_reaches_past_its_stamp() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a full shape on a stamp 2 px across, in the middle of a pixel: the quad reaches 0.71 px past
+    // it each way, so pixels 1.5 px off are laid and pixels 2 px off aren't; squashed to a sliver
+    // the quad still reaches as far across it, and a shape's stamp too small to see still lays
+    let n = procraft_engine::textures::TEXTURE_SIZE;
+    let laid = |stamp: Stamp| {
+        let mut doc = Document::new(16, 16);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let mut brush = Brush::round_pen();
+        brush.shape.source = procraft_engine::brush::Source::new(vec![255; n * n]);
+        let mut s = style(StrokeTool::Paint, 1.0);
+        canvas.use_sources(&gpu, &mut s, &brush);
+        canvas.begin_stroke(doc.current(), s);
+        canvas.add_stamps(&[stamp]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (
+            pixel(&layer, 16, 9, 8)[3],
+            pixel(&layer, 16, 10, 8)[3],
+            pixel(&layer, 16, 8, 9)[3],
+            pixel(&layer, 16, 8, 8)[3],
+        )
+    };
+    let whole = laid(dot(Vec2::new(8.5, 8.5), 1.0));
+    assert!(whole.0 > 240 && whole.2 > 240, "{whole:?}");
+    let far = laid(dot(Vec2::new(7.9, 8.5), 1.0));
+    assert!(far.1 == 0 && far.0 > 240, "{far:?}");
+    let sliver = laid(Stamp { roundness: 0.05, ..dot(Vec2::new(8.5, 8.5), 4.0) });
+    assert!(sliver.2 < 5 && sliver.3 > 240, "{sliver:?}");
+    let sliver = laid(Stamp { roundness: 0.05, ..dot(Vec2::new(8.5, 9.0), 4.0) });
+    assert!(sliver.2 > 240, "{sliver:?}");
+    let tiny = laid(dot(Vec2::new(8.6, 8.5), 0.02));
+    assert!(tiny.3 > 240 && tiny.0 == 0, "{tiny:?}");
 }
 
 /// A driver stops work that runs too long, and the device with it. A long stroke goes to the GPU

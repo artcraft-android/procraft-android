@@ -141,6 +141,9 @@ impl Tint {
     }
 }
 
+/// What the spacing is a share of, for a stamp's square of 1 (measured).
+const SPACED_SQUARE: f32 = 262.0 / crate::brushfile::PIXELS_PER_SIZE;
+
 /// A stamp before taper: where it sits on the path, and its size and alpha from the input.
 #[derive(Clone, Copy, Debug)]
 struct Placed {
@@ -1679,7 +1682,7 @@ impl StrokeBuilder {
     fn step(&self, p: PathPoint) -> f32 {
         let spacing = self.brush.spacing.max(0.005);
         let extra = 0.5 + (spacing - SPACING_FLOOR).max(0.0) / (SPACING_SPAN / 2.0);
-        let shorter = self.square_at(p) * self.roundness_at(p).min(1.0);
+        let shorter = self.square_at(p) * SPACED_SQUARE * self.roundness_at(p).min(1.0);
         (spacing * shorter * self.extras.spacing_stride + extra).max(0.25)
     }
 
@@ -1715,8 +1718,7 @@ impl StrokeBuilder {
 
     /// The square a stamp's shape fills at a point (a round tip covers only part of it).
     fn square_at(&self, p: PathPoint) -> f32 {
-        let round_tip = self.brush.shape.image.is_none() && self.brush.shape.source.is_none();
-        self.diameter_at(p) / if round_tip { crate::brushfile::ROUND_TIP_SHARE } else { 1.0 }
+        self.diameter_at(p) / if self.brush.round_tip() { crate::brushfile::ROUND_TIP_SHARE } else { 1.0 }
     }
 
     /// The opacity a stamp drawn "over" needs so that a brush that builds up gradually reaches,
@@ -2122,7 +2124,8 @@ impl StrokeBuilder {
         let tile = self.brush.grain.moving_tile(p.grain_square * thinned, p.grain_zoom, p.grain_scale_by);
         Stamp {
             center: p.center - p.thrown * (1.0 - reach_left),
-            radius: (p.diameter * thinned * 0.5).max(0.25),
+            // a shape goes on showing on the quad that reaches past it however small it gets
+            radius: (p.diameter * thinned * 0.5).max(if self.brush.round_tip() { 0.25 } else { 0.01 }),
             alpha: (p.alpha * alpha).clamp(0.0, 1.0),
             angle: p.angle,
             roundness,
@@ -2261,13 +2264,27 @@ mod tests {
     }
 
     #[test]
+    fn only_a_round_tip_stops_at_a_least_size() {
+        let least = |image: Option<u32>| {
+            let mut brush = plain();
+            brush.shape.image = image;
+            let light: Vec<Sample> = line(20, 200.0).iter().map(|s| Sample { pressure: 0.02, ..*s }).collect();
+            let stamps = StrokeBuilder::new(brush, 1.0, Pointer::Stylus).add(&light);
+            stamps.iter().map(|s| s.radius).fold(f32::MAX, f32::min)
+        };
+        assert_eq!(least(None), 0.25);
+        assert!(least(Some(0)) < 0.1, "{}", least(Some(0)));
+    }
+
+    #[test]
     fn stamps_are_evenly_spaced() {
         let mut b = StrokeBuilder::new(plain(), 10.0, Pointer::Stylus);
         b.add(&line(37, 100.0));
         let all = b.finish();
         // spacing 0.1 of the round tip's square (10 px is 0.797 of it), half a pixel, and a little
         // with the spacing: about 1.8 px, over 100 px, plus the first stamp
-        let gap = 0.1 * 10.0 / crate::brushfile::ROUND_TIP_SHARE + 0.5 + (0.1 - SPACING_FLOOR) / (SPACING_SPAN / 2.0);
+        let square = 10.0 / crate::brushfile::ROUND_TIP_SHARE * SPACED_SQUARE;
+        let gap = 0.1 * square + 0.5 + (0.1 - SPACING_FLOOR) / (SPACING_SPAN / 2.0);
         assert_eq!(all.len(), (100.0 / gap) as usize + 1);
         for w in all.windows(2) {
             let d = w[0].center.distance(w[1].center);
@@ -2286,7 +2303,7 @@ mod tests {
             all[mid].center.distance(all[mid + 1].center)
         };
         let along = |i: usize| Sample::at(Vec2::new(i as f32 * 4.0, 50.0), 1.0, i as f64 * 4.0);
-        let square = 40.0 / crate::brushfile::ROUND_TIP_SHARE;
+        let square = 40.0 / crate::brushfile::ROUND_TIP_SHARE * SPACED_SQUARE;
         let extra = 0.5 + (0.1 - SPACING_FLOOR) / (SPACING_SPAN / 2.0);
         let round = gap_of(plain(), &along);
         assert!((round - (0.1 * square + extra)).abs() < 1e-3, "{round}");
