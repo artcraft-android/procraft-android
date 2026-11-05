@@ -210,8 +210,8 @@ fn by_speed(amount: f32, speed: f32) -> f32 {
     if amount >= 0.0 { 1.0 - amount * speed } else { 1.0 + amount * (1.0 - speed) }
 }
 
-/// Stabilisation averages the latest points: at full strength this many samples' worth (at the
-/// rate above), fewer as the strength to this power falls.
+/// Stabilisation averages each point with those either side of it: at full strength this many
+/// samples' worth each way (at the rate above), fewer as the strength to this power falls.
 const MOST_AVERAGED: f32 = 120.0;
 const STABILIZATION_POWER: f32 = 2.2;
 /// At full motion filtering, how little the filtered pen moves toward each new point; and at full
@@ -444,6 +444,123 @@ fn catmull_rom(p0: Option<Vec2>, p1: Vec2, p2: Vec2, p3: Option<Vec2>, t: f32) -
     }
 }
 
+/// What stabilisation holds of the input: its points, evenly a sample apart at the tuned rate
+/// however it came, each to be averaged with those either side once they are known. Past either
+/// end the input carries on turned half way round about that end, so the average starts and ends
+/// where the input does, however few points there are.
+#[derive(Clone, Debug, Default)]
+struct Averaged {
+    /// The points from the `gone`th on (those before are out of reach of what is still to come).
+    points: Vec<PathPoint>,
+    gone: usize,
+    /// How many have been averaged and gone on to the path.
+    settled: usize,
+    /// The input as it last came, and how many samples at the tuned rate it is past the last point.
+    input: Option<PathPoint>,
+    past: f64,
+}
+
+/// Points kept past those stabilisation can still reach before they are let go, to do it seldom.
+const AVERAGED_SLACK: usize = 256;
+
+impl Averaged {
+    /// All the points so far.
+    fn count(&self) -> usize {
+        self.gone + self.points.len()
+    }
+
+    /// The input came on to `to`, `steps` samples after it last did.
+    fn add(&mut self, to: PathPoint, steps: f64) {
+        let Some(from) = self.input.replace(to) else {
+            self.points.push(to);
+            return;
+        };
+        let mut next = 1.0 - self.past;
+        while next <= steps {
+            self.points.push(from.lerp(to, (next / steps) as f32));
+            next += 1.0;
+        }
+        self.past = steps - (next - 1.0);
+    }
+
+    /// The input ends where it is: that is its last point.
+    fn close(&mut self) {
+        if self.past > 1e-3
+            && let Some(input) = self.input
+        {
+            self.points.push(input);
+            self.past = 0.0;
+        }
+    }
+
+    /// Point `i`'s position, pressure and softened pressures (of those held, counting on past
+    /// either end).
+    fn lanes(&self, i: isize) -> [f32; 8] {
+        let lanes = |p: &PathPoint| {
+            let [a, b, c, d, e] = p.soft;
+            [p.pos.x, p.pos.y, p.pressure, a, b, c, d, e]
+        };
+        let (Some(first), Some(end)) = (self.points.first().map(lanes), self.points.last().map(lanes)) else {
+            return [0.0; 8];
+        };
+        let last = self.points.len() as isize - 1;
+        if last == 0 {
+            return first;
+        }
+        // each length of the input past an end goes the way it did, on from where the last ended
+        let (laps, at) = (i.div_euclid(last), i.rem_euclid(last));
+        let forward = laps.rem_euclid(2) == 0;
+        let mut there = self.points.get(if forward { at } else { last - at } as usize).map_or(first, lanes);
+        let whole = if forward { laps } else { laps + 1 } as f32;
+        for ((v, f), e) in there.iter_mut().zip(first).zip(end) {
+            *v = (e - f) * whole + if forward { *v } else { 2.0 * f - *v };
+        }
+        there
+    }
+
+    /// Point `i` (of them all) as held.
+    fn place(&self, i: usize) -> isize {
+        i.saturating_sub(self.gone) as isize
+    }
+
+    /// Point `i` and the `half` either side of it, added up.
+    fn sum(&self, i: usize, half: usize) -> [f32; 8] {
+        let (at, reach) = (self.place(i), half as isize);
+        let mut sum = [0.0f32; 8];
+        for j in at - reach..=at + reach {
+            for (s, v) in sum.iter_mut().zip(self.lanes(j)) {
+                *s += v;
+            }
+        }
+        sum
+    }
+
+    /// `sum`, point `i`'s, as the next point's.
+    fn slide(&self, sum: &mut [f32; 8], i: usize, half: usize) {
+        let (at, reach) = (self.place(i), half as isize);
+        for ((s, new), old) in sum.iter_mut().zip(self.lanes(at + reach + 1)).zip(self.lanes(at - reach)) {
+            *s += new - old;
+        }
+    }
+
+    /// Point `i` averaged with the `half` either side of it, `sum` being them all added up.
+    fn mean(&self, i: usize, half: usize, sum: [f32; 8]) -> Option<PathPoint> {
+        let [x, y, pressure, a, b, c, d, e] = sum.map(|v| v / (2 * half + 1) as f32);
+        let held = *self.points.get(self.place(i) as usize)?;
+        let soft = [a, b, c, d, e].map(|v| v.clamp(0.0, 1.0));
+        Some(PathPoint { pos: Vec2::new(x, y), pressure: pressure.clamp(0.0, 1.0), soft, ..held })
+    }
+
+    /// Lets go of the points no average still to come reaches.
+    fn forget(&mut self, half: usize) {
+        let over = (self.settled.saturating_sub(half + 1)).saturating_sub(self.gone);
+        if over > AVERAGED_SLACK {
+            self.points.drain(..over);
+            self.gone += over;
+        }
+    }
+}
+
 /// Streamline is tuned for input at this interval; other rates are scaled to match.
 const REFERENCE_INTERVAL_MS: f64 = 1000.0 / 120.0;
 /// The most samples at the tuned rate one sample stands for (after a pause, the filters catch up
@@ -514,9 +631,8 @@ pub struct StrokeBuilder {
     bounds: IRect,
     random: Random,
     extras: Extras,
-    /// The latest input points and their times, for stabilisation; the speed, smoothed; the next
-    /// gap's jitter.
-    recent: Vec<(Vec2, f64)>,
+    /// The input stabilisation holds; the speed, smoothed; the next gap's jitter.
+    averaged: Averaged,
     speed: f32,
     /// Whether the speed has been measured (the first move is taken as it is).
     speed_known: bool,
@@ -694,7 +810,7 @@ impl StrokeBuilder {
             bounds: IRect::EMPTY,
             random: Random(seed | 1),
             extras: Extras::default(),
-            recent: Vec::new(),
+            averaged: Averaged::default(),
             speed: 0.0,
             speed_known: false,
             soft: None,
@@ -793,6 +909,7 @@ impl StrokeBuilder {
         // none of the stamps so far are needed
         let mut ahead = self.open_copy(self.placed.len());
         let mut out = ahead.add(samples);
+        ahead.average_on(&mut out);
         ahead.flush(&mut out);
         out
     }
@@ -814,10 +931,11 @@ impl StrokeBuilder {
         }
     }
 
-    /// The stroke as it shows while drawn: the stretch to the newest path point, then straight on
-    /// to the input, which smoothing leaves the path behind (the path takes that stretch over as
-    /// it catches up, curved).
+    /// The stroke as it shows while drawn: stabilisation's average on to the input, the stretch to
+    /// the newest path point, then straight on to the input, which smoothing leaves the path behind
+    /// (the path takes that stretch over as it catches up, curved).
     fn reach_input(&mut self, out: &mut Vec<Stamp>) {
+        self.average_on(out);
         self.flush(out);
         if let Some(to) = self.input_point() {
             self.walk_to(to, out);
@@ -915,17 +1033,12 @@ impl StrokeBuilder {
     pub fn finish(&mut self) -> Vec<Stamp> {
         let mut run_on = 0.0;
         let mut ignored = Vec::new();
+        self.average_on(&mut ignored);
         if let Some(to) = self.input_point() {
-            if self.averaged() > 1 {
-                // stabilisation's average catches up with the pen in a straight run
-                self.flush(&mut ignored);
-                self.walk_to(to, &mut ignored);
-            } else {
-                // the smoothed path catches up with the pen along the curve, where it lifted the
-                // last point it curves through
-                self.path_to(to, &mut ignored);
-                self.flush(&mut ignored);
-            }
+            // the smoothed path catches up with the pen along the curve, where it lifted the last
+            // point it curves through
+            self.path_to(to, &mut ignored);
+            self.flush(&mut ignored);
             run_on = match self.ran_on {
                 Some(r) => r,
                 None => self.run_on(to, &mut ignored),
@@ -1000,38 +1113,74 @@ impl StrokeBuilder {
             let expression = together(self.extras.motion_expression, self.input.motion_expression);
             pos = f.lerp(s.pos, expression * EXPRESSION_MOST);
         }
-        // stabilisation: the average of the latest points, those of a longer time the stronger it
-        // is (as many samples as it averages at the tuned rate; half a sample's leeway)
-        let averaged = self.averaged();
-        if averaged > 1 {
-            self.recent.push((pos, s.time_ms));
-            let from = s.time_ms - (averaged as f64 - 0.5) * interval;
-            let over = self.recent.iter().take_while(|r| r.1 < from).count().min(self.recent.len() - 1);
-            self.recent.drain(..over);
-            let sum = self.recent.iter().fold(Vec2::ZERO, |a, r| a + r.0);
-            pos = sum * (1.0 / self.recent.len() as f32);
-        }
         let target = PathPoint { pos, pressure, soft, tilt, azimuth, roll, speed: self.speed };
-        let smoothed = match (self.smoothed, self.last_sample) {
-            (Some(prev), Some(last)) if !self.exact => {
-                let dt = (s.time_ms - last.time_ms).clamp(0.5, 50.0);
+        let dt = self.last_sample.map(|last| (s.time_ms - last.time_ms).clamp(0.5, 50.0));
+        self.keep_time(s);
+        if let Some(last) = self.last_sample {
+            self.before_last = [self.before_last[1], Some(last.pos)];
+        }
+        self.last_sample = Some(s);
+        let half = self.averaged();
+        if half > 0 {
+            // stabilisation: each point waits until those after it within reach of its average
+            // are known
+            let times = self.history.iter().rev().map(|h| h.0);
+            let gap = times.clone().next().zip(times.clone().nth(1)).map_or(0.0, |(now, before)| now - before);
+            self.averaged.add(target, (gap / interval).min(MOST_STEPS));
+            self.average_to(self.averaged.count().saturating_sub(half), half, out);
+            self.averaged.forget(half);
+        } else {
+            self.go_on(target, dt, out);
+        }
+        self.settle_start();
+    }
+
+    /// Takes the path on to `target`, `dt` milliseconds after the last (none: it is the first),
+    /// streamlined.
+    fn go_on(&mut self, target: PathPoint, dt: Option<f64>, out: &mut Vec<Stamp>) {
+        let smoothed = match (self.smoothed, dt) {
+            (Some(prev), Some(dt)) if !self.exact => {
                 let keep = (self.brush.streamline.clamp(0.0, 1.0) * 0.92).powf((dt / REFERENCE_INTERVAL_MS) as f32);
                 PathPoint { pos: prev.pos.lerp(target.pos, 1.0 - keep), ..target }
             }
             _ => target,
         };
         self.smoothed = Some(smoothed);
-        self.keep_time(s);
-        if let Some(last) = self.last_sample {
-            self.before_last = [self.before_last[1], Some(last.pos)];
-        }
-        self.last_sample = Some(s);
         self.path_to(smoothed, out);
-        self.settle_start();
     }
 
-    /// How many of the latest samples (at the tuned rate) stabilisation averages: more than one
-    /// when it is on (never on an exact path).
+    /// Takes the path on along stabilisation's points up to the `to`th, each averaged with the
+    /// `half` either side of it.
+    fn average_to(&mut self, to: usize, half: usize, out: &mut Vec<Stamp>) {
+        let interval = 1000.0 / if self.pointer.has_pressure() { PEN_RATE } else { FINGER_RATE };
+        let mut i = self.averaged.settled;
+        if i >= to {
+            return;
+        }
+        let mut sum = self.averaged.sum(i, half);
+        while i < to {
+            let next = self.averaged.mean(i, half, sum);
+            self.averaged.slide(&mut sum, i, half);
+            i += 1;
+            if let Some(next) = next {
+                self.go_on(next, Some(interval), out);
+            }
+        }
+        self.averaged.settled = i;
+    }
+
+    /// Takes the path on along stabilisation's points to the input's end, as if no more were to
+    /// come: where the stroke ends as it now stands, or would.
+    fn average_on(&mut self, out: &mut Vec<Stamp>) {
+        let half = self.averaged();
+        if half > 0 {
+            self.averaged.close();
+            self.average_to(self.averaged.count(), half, out);
+        }
+    }
+
+    /// How many samples (at the tuned rate) each way stabilisation averages: none when it is off
+    /// (and on an exact path).
     fn averaged(&self) -> usize {
         if self.exact {
             return 0;
@@ -2840,14 +2989,109 @@ mod tests {
         assert!(turn < 4.0, "the end turns {turn}°");
         assert!(stamps.last().is_some_and(|s| s.center.distance(Vec2::new(550.0, 400.0)) < 1.5));
         assert!(off_the_circle(&stamps) < 3.0, "{} px off the circle", off_the_circle(&stamps));
-        // stabilisation's average still catches up in a straight run
-        let stamps = drawn(InputSettings { stabilization: 0.3, ..InputSettings::default() });
-        let end = stamps.last().map_or(Vec2::ZERO, |s| s.center);
-        let run = stamps.iter().rev().take(8).map(|s| s.center).collect::<Vec<_>>();
-        let along = end - run.last().copied().unwrap_or(end);
-        let across = |p: Vec2| ((p - end).x * along.y - (p - end).y * along.x).abs() / along.length();
-        assert!(run.iter().all(|&p| across(p) < 0.05), "{run:?}");
-        assert!(end.distance(Vec2::new(550.0, 400.0)) < 1.5);
+    }
+
+    /// A quick slash, curved as a C, `ms` long and sampled 120 times a second: down the left of an
+    /// ellipse, slowly at its ends.
+    fn slash(ms: f64) -> Vec<Sample> {
+        let n = (ms * 0.12) as usize;
+        (0..=n)
+            .map(|i| {
+                let u = i as f32 / n as f32;
+                let a = std::f32::consts::PI * (0.15 + 0.8 * u * u * (3.0 - 2.0 * u));
+                Sample::at(Vec2::new(600.0 - 420.0 * a.sin(), 400.0 - 320.0 * a.cos()), 0.7, f64::from(i as u32) * 25.0 / 3.0)
+            })
+            .collect()
+    }
+
+    /// A stroke through `samples` with stabilisation at `amount`, whole.
+    fn stabilised(amount: f32, samples: &[Sample]) -> Vec<Stamp> {
+        let mut b = plain();
+        b.set_setting("stabilization", amount);
+        let mut s = StrokeBuilder::new(b, 6.0, Pointer::Stylus);
+        s.add(samples);
+        s.finish()
+    }
+
+    #[test]
+    fn a_stabilised_slash_bends_as_a_whole_and_keeps_both_its_ends() {
+        for ms in [150.0, 400.0, 900.0] {
+            let input = slash(ms);
+            let (start, end) = (input[0].pos, input[input.len() - 1].pos);
+            for amount in [0.2, 0.5, 0.75, 1.0] {
+                let stamps = stabilised(amount, &input);
+                assert!(stamps[0].center.distance(start) < 1.0, "{ms} ms at {amount}: starts off the input");
+                let last = stamps[stamps.len() - 1].center;
+                assert!(last.distance(end) < 2.0, "{ms} ms at {amount}: ends {last:?}, not {end:?}");
+                // nowhere does it break off into a straight run to the lift: from one 20 px stretch
+                // to the next it turns no more than the slash does (an average trailing the pen
+                // and catching up at the lift turned 18°)
+                let k = (20.0 / stamps[0].center.distance(stamps[1].center)).ceil() as usize;
+                let turn = most_turn(&stamps, k, k);
+                assert!(turn < 8.0, "{ms} ms at {amount}: turns {turn}° at once");
+            }
+        }
+    }
+
+    #[test]
+    fn stabilisation_averages_about_each_point_so_a_stroke_comes_out_the_same_either_way() {
+        // drawn back the way it came, at the same pace, it lies on the same curve
+        let there = slash(400.0);
+        let end = there[there.len() - 1].time_ms;
+        let mut back: Vec<Sample> = there.iter().map(|s| Sample { time_ms: end - s.time_ms, ..*s }).collect();
+        back.reverse();
+        let (a, b) = (stabilised(0.75, &there), stabilised(0.75, &back));
+        for p in a.iter().step_by(10) {
+            let near = b.iter().map(|q| q.center.distance(p.center)).fold(f32::MAX, f32::min);
+            assert!(near < 2.5, "{near} px off at {:?}", p.center);
+        }
+        // and with the average the width of the whole stroke, it leaves the curve for the chord
+        let input = slash(150.0);
+        let (from, to) = (input[0].pos, input[input.len() - 1].pos);
+        let along = (to - from).normalized_or(Vec2::new(1.0, 0.0));
+        let across = |p: Vec2| ((p - from).x * along.y - (p - from).y * along.x).abs();
+        let bow = |s: &[Stamp]| s.iter().map(|s| across(s.center)).fold(0.0, f32::max);
+        assert!(bow(&stabilised(1.0, &input)) < bow(&stabilised(0.2, &input)) * 0.5);
+    }
+
+    #[test]
+    fn a_stabilised_stroke_shows_as_it_will_end_and_keeps_what_it_has_drawn() {
+        let mut b = plain();
+        b.set_setting("stabilization", 0.5);
+        let input = slash(600.0);
+        let mut live = StrokeBuilder::new(b.clone(), 6.0, Pointer::Stylus);
+        let mut drawn = Vec::new();
+        for chunk in input.chunks(3) {
+            drawn.extend(live.add(chunk));
+            // what shows reaches the input, whatever the average still has to take in
+            let ahead = live.preview_to_input(&[]);
+            let end = ahead.last().or(drawn.last()).map_or(Vec2::ZERO, |s| s.center);
+            let at = chunk[chunk.len() - 1].pos;
+            assert!(end.distance(at) < 2.0, "{end:?} behind the input at {at:?}");
+        }
+        // shown just before the lift, the stroke is the stroke as it ends
+        let shown: Vec<Vec2> = drawn.iter().chain(&live.preview_to_input(&[])).map(|s| s.center).collect();
+        let done: Vec<Vec2> = live.finish().iter().map(|s| s.center).collect();
+        assert_eq!(shown.len(), done.len());
+        assert!(shown.iter().zip(&done).all(|(a, b)| a.distance(*b) < 0.01));
+    }
+
+    #[test]
+    fn stabilisation_keeps_a_tap_and_a_stroke_all_inside_its_reach() {
+        let mut b = plain();
+        b.set_setting("stabilization", 1.0);
+        let mut tap = StrokeBuilder::new(b.clone(), 6.0, Pointer::Stylus);
+        tap.add(&[Sample::at(Vec2::new(10.0, 10.0), 0.5, 0.0)]);
+        let tapped = tap.finish();
+        assert_eq!(tapped.len(), 1);
+        assert_eq!(tapped[0].center, Vec2::new(10.0, 10.0));
+        // a few points, far fewer than it averages at full strength
+        let few: Vec<Sample> =
+            (0..4).map(|i| Sample::at(Vec2::new(i as f32 * 30.0, 0.0), 0.5, f64::from(i) * 8.0)).collect();
+        let stamps = stabilised(1.0, &few);
+        assert!(stamps.iter().all(|s| s.center.is_finite()));
+        assert!(stamps[0].center.distance(few[0].pos) < 1.0);
+        assert!(stamps[stamps.len() - 1].center.distance(few[3].pos) < 2.0);
     }
 
     #[test]
