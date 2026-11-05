@@ -4234,6 +4234,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         studioOpen = true
     }
 
+    /** Names the studio's brush as it is typed: Done keeps the name, Cancel puts the old one back. */
+    fun renameStudio(name: String) {
+        session?.setStudioName(name)?.let { studioName = it }
+    }
+
     private fun readStudio() {
         val s = session ?: return
         val keys = io.github.artcraftandroid.procraft.ui.STUDIO_KEYS

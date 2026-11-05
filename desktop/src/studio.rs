@@ -691,6 +691,8 @@ pub struct Studio {
     pub open: bool,
     tab: usize,
     name: String,
+    /// The name as typed in its field on the About page, and whether the field has been focused.
+    renaming: Option<(String, bool)>,
     values: HashMap<String, f32>,
     /// A new brush: cancelled, it goes.
     new_brush: Option<(u32, u32)>,
@@ -744,6 +746,7 @@ impl Studio {
     /// away).
     pub fn begin(&mut self, ctx: &egui::Context, session: &CanvasSession, new: Option<(u32, u32)>) {
         self.name = session.studio_begin();
+        self.renaming = None;
         self.dual = session.studio_is_dual();
         self.second = false;
         self.other_tab = 0;
@@ -1100,6 +1103,10 @@ impl Studio {
     /// The open page's settings, in sections, spaced as the Android app spaces them.
     fn settings(&mut self, ui: &mut Ui, look: &mut Look, session: &Arc<CanvasSession>, area: Rect) {
         let Some(page) = PAGES.get(self.tab) else { return };
+        // another page ends a name being typed, as it was typed
+        if !page.sections.iter().any(|s| matches!(s.controls.first(), Some(Control::About))) {
+            self.renaming = None;
+        }
         let column = Rect::from_min_max(pos2(area.left() + 20.0, area.top()), pos2(area.right() - 20.0, area.bottom()));
         ui.scope_builder(UiBuilder::new().max_rect(column), |ui| {
             egui::ScrollArea::vertical()
@@ -1111,14 +1118,17 @@ impl Studio {
                     let mut above = Edge::Top;
                     for (k, section) in page.sections.iter().enumerate() {
                         // the About page is headed by the brush's name
-                        let title = section.title.map(str::to_owned).or_else(|| {
-                            matches!(section.controls.first(), Some(Control::About)).then(|| self.name.clone())
-                        });
+                        let about = matches!(section.controls.first(), Some(Control::About));
+                        let title = section.title.map(str::to_owned).or_else(|| about.then(|| self.name.clone()));
                         if let Some(title) = title {
                             ui.add_space(if k == 0 { 25.0 } else { gap(above, None) });
                             let (row, _) = ui.allocate_exact_size(vec2(width, 23.0), Sense::hover());
                             let at = pos2(row.left() + 8.0, row.center().y);
-                            text(ui.painter(), at, Align2::LEFT_CENTER, &title, 21.0, Weight::Bold, argb(HEADER));
+                            if about {
+                                self.name_heading(ui, session, row);
+                            } else {
+                                text(ui.painter(), at, Align2::LEFT_CENTER, &title, 21.0, Weight::Bold, argb(HEADER));
+                            }
                             above = Edge::Title;
                         }
                         for control in section.controls {
@@ -1130,6 +1140,42 @@ impl Studio {
                     ui.add_space(77.0);
                 });
         });
+    }
+
+    /// The About page's heading: the brush's name, clicked to change it there. Named as it is
+    /// typed, so that Done with the field open keeps it; Cancel puts the old name back.
+    fn name_heading(&mut self, ui: &mut Ui, session: &CanvasSession, row: Rect) {
+        let left = row.left() + 8.0;
+        let Some((typed, focused)) = self.renaming.as_mut() else {
+            let at = pos2(left, row.center().y);
+            let name = text(ui.painter(), at, Align2::LEFT_CENTER, &self.name, 21.0, Weight::Bold, argb(HEADER));
+            if ui.interact(name, ui.scope_id().with("brush name"), Sense::click()).clicked() {
+                self.renaming = Some((self.name.clone(), false));
+            }
+            return;
+        };
+        let field = Rect::from_min_max(pos2(left, row.top()), row.max);
+        let mut output = egui::TextEdit::singleline(typed)
+            .font(Weight::Bold.font(21.0))
+            .text_color(argb(HEADER))
+            .frame(egui::Frame::NONE)
+            .margin(vec2(0.0, 0.0))
+            .desired_width(field.width())
+            .show(&mut ui.new_child(UiBuilder::new().max_rect(field)));
+        if output.response.changed() {
+            self.name = session.set_studio_name(typed.clone());
+        }
+        if !*focused {
+            // the whole name chosen, to type over
+            output.response.request_focus();
+            let chars = egui::text::CCursor::new(typed.chars().count());
+            let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), chars);
+            output.state.cursor.set_char_range(Some(all));
+            output.state.store(ui.ctx(), output.response.id);
+            *focused = true;
+        } else if output.response.lost_focus() {
+            self.renaming = None;
+        }
     }
 
     /// Whether `enabled_by` lets a control be used: the control it names is on that choice.

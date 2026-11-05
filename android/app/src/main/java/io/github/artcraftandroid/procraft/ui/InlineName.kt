@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.TextUnit
@@ -27,10 +28,18 @@ import androidx.compose.ui.unit.TextUnit
 /**
  * A name edited where it is shown: focused with all of it selected and the keyboard up; done on
  * the keyboard's return or when focus leaves, once. The selection is [color] at about a third, its
- * handles [color].
+ * handles [color]. [onChange] hears each change, where leaving the screen would lose what was typed.
  */
 @Composable
-fun InlineName(name: String, color: Color, fontSize: TextUnit, modifier: Modifier = Modifier, onDone: (String) -> Unit) {
+fun InlineName(
+    name: String,
+    color: Color,
+    fontSize: TextUnit,
+    modifier: Modifier = Modifier,
+    fontWeight: FontWeight? = null,
+    onChange: (String) -> Unit = {},
+    onDone: (String) -> Unit,
+) {
     var value by remember { mutableStateOf(TextFieldValue(name, TextRange(0, name.length))) }
     val focus = remember { FocusRequester() }
     var focused by remember { mutableStateOf(false) }
@@ -46,13 +55,16 @@ fun InlineName(name: String, color: Color, fontSize: TextUnit, modifier: Modifie
     CompositionLocalProvider(LocalTextSelectionColors provides selection) {
         BasicTextField(
             value,
-            onValueChange = { value = it },
+            onValueChange = {
+                value = it
+                onChange(it.text)
+            },
             modifier = modifier.focusRequester(focus).onFocusChanged {
                 if (focused && !it.isFocused) finish()
                 focused = it.isFocused
             },
             singleLine = true,
-            textStyle = TextStyle(color = color, fontSize = fontSize),
+            textStyle = TextStyle(color = color, fontSize = fontSize, fontWeight = fontWeight),
             cursorBrush = SolidColor(color),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { finish() }),
