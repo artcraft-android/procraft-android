@@ -97,7 +97,8 @@ fun AppRoot(vm: CanvasViewModel) {
                 if (vm.transforming) TransformOverlay(vm)
                 if (vm.selecting) SelectionOverlay(vm, Pc.BarHeight)
                 vm.picking?.let { pick ->
-                    val pickingZ = if (pick.fromReference) 1f else 0f
+                    // 0f keeps it behind ReferenceWindow; 10f pulls it above ReferenceWindow
+                    val pickingZ = if (pick.fromReference) 10f else 0f
                     Loupe(pick, CanvasSpace.color(vm.colorRgb()), Modifier.zIndex(pickingZ))
                     if (!vm.barsHidden) PickingBar(Modifier.offset(y = Pc.BarHeight).zIndex(pickingZ), pick.fromReference)
                 }

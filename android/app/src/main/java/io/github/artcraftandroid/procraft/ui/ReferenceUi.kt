@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import kotlin.math.roundToInt
+import androidx.compose.ui.zIndex //imported for ReferenceWindow
 
 // the dark bars are glass, like the panels: what the picture has under them shows through, blurred
 private val BarFill get() = if (Pc.light) Color(0xFFEDEDED) else Color(0xDE1E1E1E)
@@ -82,14 +83,15 @@ private const val GlassSide = 24
  */
 @Composable
 fun BoxScope.ReferenceWindow(vm: CanvasViewModel) {
-    // it fades in where it is, and out when closed; over the whole screen, since the fade draws
-    // into a buffer its own size and the window sits away from the corner
-    androidx.compose.animation.AnimatedVisibility(
-        vm.referenceOn,
-        Modifier.matchParentSize(),
-        enter = androidx.compose.animation.fadeIn(Motion.referenceFade()),
-        exit = androidx.compose.animation.fadeOut(Motion.referenceFade()),
-    ) { ReferenceWindowContent(vm) }
+    if (!vm.referenceOn) return
+    Box(
+        Modifier
+            .fillMaxSize()
+            .zIndex(5f)
+            // ... existing modifiers
+    ) {
+        ReferenceWindowContent(vm)
+    }
 }
 
 /** Touches here go no further: not to the picture under a bar. */
