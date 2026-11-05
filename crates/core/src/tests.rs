@@ -2469,6 +2469,41 @@ fn undo_goes_back_through_a_shapes_drags_to_the_stroke_it_was_made_of() {
 }
 
 #[test]
+fn a_nodes_drag_by_touch_is_one_step_of_undo_and_a_tap_on_it_none() {
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.02);
+    let pts: Vec<PenSample> = (0..=40).map(|i| sample(20.0 + 4.0 * i as f32, 100.0, f64::from(i) * 8.0)).collect();
+    s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+    s.stroke_add(pts[1..].to_vec());
+    let info = s.quickshape_hold().expect("a shape");
+    s.stroke_end(vec![]);
+    s.set_shape_editing(true);
+    let (x, y) = (info.handles[2], info.handles[3]);
+    let drag = |by: f32, from: f64| {
+        s.touch_down(7, PointerKind::Finger, vec![sample(x, y, from)]);
+        for i in 1..=5 {
+            let (i, t) = (i as f32, f64::from(i) * 16.0);
+            s.touch_move(7, vec![sample(x, y + by * i / 5.0, from + t)]);
+        }
+        s.touch_up(7, vec![]);
+    };
+    s.touch_down(7, PointerKind::Finger, vec![sample(x, y, 1900.0)]);
+    s.touch_up(7, vec![]);
+    drag(40.0, 2000.0);
+    let moved = s.quickshape_info().unwrap();
+    assert!((moved.handles[3] - info.handles[3] - 40.0).abs() < 1.0, "{:?}", moved.handles);
+    // five moves, one step: one undo has it all back, the shape still open
+    s.undo();
+    assert_eq!(s.quickshape_info().unwrap().handles, info.handles);
+    s.redo();
+    assert_eq!(s.quickshape_info().unwrap().handles, moved.handles);
+    s.undo();
+    // past it the shape goes: the tap made no step of its own
+    s.undo();
+    assert!(s.quickshape_info().is_none());
+}
+
+#[test]
 fn copy_cut_paste_and_flip() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.4);
