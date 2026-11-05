@@ -374,17 +374,19 @@ impl CanvasSession {
                 if now == kept {
                     continue;
                 }
-                {
-                    let st = session.shared.lock();
-                    if st.gpu.as_ref().is_some_and(procraft_gpu::Gpu::is_lost) {
-                        return;
-                    }
-                    if !st.idle() {
-                        wait = again;
-                        continue;
-                    }
+                let lost = || session.shared.lock().gpu.as_ref().is_some_and(procraft_gpu::Gpu::is_lost);
+                if lost() {
+                    return;
+                }
+                if !session.shared.lock().idle() {
+                    wait = again;
+                    continue;
                 }
                 let result = session.save_if_idle_with(&mut saved, &dir);
+                // lost during the save: that is what failed it, and it tells of itself
+                if result.is_err() && lost() {
+                    return;
+                }
                 let mut failure = session.shared.save_failure.lock().unwrap_or_else(|e| e.into_inner());
                 match result {
                     Ok(true) => {

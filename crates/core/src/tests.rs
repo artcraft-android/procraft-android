@@ -965,7 +965,7 @@ fn an_autosave_that_finds_a_stroke_saves_as_it_ends() {
     let _ = pixel(&s, 0, 0);
     // a stroke under way when its turn comes
     s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
-    std::thread::sleep(every + std::time::Duration::from_millis(100) - started.elapsed());
+    std::thread::sleep((every + std::time::Duration::from_millis(100)).saturating_sub(started.elapsed()));
     assert_eq!(s.edits_saved(), None, "nothing saved with a stroke under way");
     s.stroke_end(vec![]);
     let _ = pixel(&s, 0, 0);
@@ -995,9 +995,6 @@ fn an_autosave_ends_with_the_graphics_device() {
         files.iter().map(|f| std::fs::read(f).unwrap()).collect::<Vec<_>>()
     };
     let before = layer(&dir);
-    std::sync::Arc::clone(&s).start_autosave(dir.to_string_lossy().into_owned());
-    s.stroke_begin(PointerKind::Finger, vec![sample(40.0, 40.0, 0.0)]);
-    s.stroke_end(vec![]);
     {
         let st = s.shared.lock();
         let gpu = st.gpu.as_ref().unwrap();
@@ -1005,6 +1002,11 @@ fn an_autosave_ends_with_the_graphics_device() {
         let _ = gpu.device.poll(procraft_gpu::wgpu::PollType::wait_indefinitely());
         assert!(gpu.is_lost());
     }
+    std::sync::Arc::clone(&s).start_autosave(dir.to_string_lossy().into_owned());
+    // something to save
+    let edits = s.edits();
+    s.add_layer();
+    assert_ne!(s.edits(), edits);
     std::thread::sleep(std::time::Duration::from_millis(300));
     assert_eq!(s.take_save_failure(), None);
     assert!(s.take_failure().is_some_and(|said| said.contains("last saved")));
