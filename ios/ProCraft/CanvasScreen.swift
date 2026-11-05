@@ -68,10 +68,14 @@ struct CanvasScreen: View {
                         .transition(.move(edge: .bottom))
                     NoticeBand(model: model)
                 }
+                if model.gestureControlsOpen {
+                    GestureControls(model: model)
+                        .transition(.move(edge: .bottom))
+                }
                 BlockedDialog(model: model)
                 AlertView(
                     content: model.question.map {
-                        AlertContent(title: $0.title, message: $0.message, action: $0.action, icon: PcIcons.trash)
+                        AlertContent(title: $0.title, message: $0.message, action: $0.action, icon: $0.icon)
                     },
                     onCancel: { model.question = nil },
                     onAction: {

@@ -32,8 +32,26 @@ struct ActionsPanel: View {
     let model: CanvasModel
     let arrowX: CGFloat
 
+    #if DEBUG
+    @State private var page = ScreenCapture.actionsPage
+    #else
+    @State private var page = ActionsPage.main
+    #endif
+
     var body: some View {
         Popover(width: actionsWidth, arrowX: arrowX) {
+            switch page {
+            case .main:
+                main
+            case .cursor:
+                CursorPage { page = .main }
+            case .pressure:
+                PressurePage(model: model) { page = .main }
+            }
+        }
+    }
+
+    private var main: some View {
             VStack(alignment: .leading, spacing: 0) {
                 Text(verbatim: "Actions")
                     .font(.system(size: 24, weight: .bold))
@@ -74,7 +92,6 @@ struct ActionsPanel: View {
                 .frame(maxHeight: 760)
                 .fixedSize(horizontal: false, vertical: true)
             }
-        }
     }
 
     /// The shown tab's groups of rows.
@@ -149,11 +166,13 @@ struct ActionsPanel: View {
                     .act("Brush scaling", value: "Canvas", action: nil),
                     .toggle("Project canvas", on: false, change: nil),
                     .toggle("Brush cursor", on: AppSettings.shared.brushCursorOn, change: { AppSettings.shared.brushCursorOn = $0 }),
-                    .act("Advanced cursor settings", action: nil),
+                    .act("Advanced cursor settings", action: { page = .cursor }),
                 ],
                 [
-                    .act("Pressure and Smoothing", action: nil),
-                    .act("Gesture controls", action: nil),
+                    .act("Pressure and Smoothing", action: { page = .pressure }),
+                    .act("Gesture controls", action: {
+                        withAnimation(Motion.studioIn) { model.gestureControlsOpen = true }
+                    }),
                 ],
             ]
         default:

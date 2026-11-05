@@ -33,6 +33,7 @@ struct Question {
     let title: String
     var message = "It can't be brought back."
     var action = "Delete"
+    var icon: PcIcon? = PcIcons.trash
     let perform: () -> Void
 }
 
@@ -202,6 +203,9 @@ final class CanvasModel {
     @ObservationIgnored private(set) lazy var studio = StudioModel(model: self)
     /// Delete on a locked layer: why not, OK alone.
     var lockedDeleteTold = false
+    /// Gesture controls are open, on this page: it opens on the page it was last on.
+    var gestureControlsOpen = false
+    var gesturePage = GesturePurpose.eyedropper
     /// The palettes, kept by the shared core across artworks.
     static let paletteStore: Palettes = {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first

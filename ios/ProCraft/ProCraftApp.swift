@@ -71,6 +71,8 @@ enum ScreenCapture {
     /// What the source editor opens over itself, and what the brush library opens.
     static var sourceShows: String?
     static var libraryShows: String?
+    /// The page the actions panel opens on.
+    static var actionsPage = ActionsPage.main
     /// What the layers panel opens, and the colour panel.
     static var layersShows: String?
     static var colorsShows: String?
@@ -118,6 +120,13 @@ enum ScreenCapture {
             model.pickLayer(other)
         }
         model.toggle(.layers)
+    }
+
+    /// The actions panel on its Prefs tab, turned to `page`.
+    private static func prefs(_ model: CanvasModel, _ page: ActionsPage) {
+        actionsPage = page
+        model.actionsTab = 4
+        model.toggle(.actions)
     }
 
     /// The colour panel in `mode`, what `shows` opens open.
@@ -182,6 +191,20 @@ enum ScreenCapture {
         case "source-landscape":
             sideways = true
             source(model, .grain)
+        case "prefs":
+            prefs(model, .main)
+        case "prefs-cursor":
+            prefs(model, .cursor)
+        case "prefs-pressure":
+            prefs(model, .pressure)
+        case "gestures":
+            model.gestureControlsOpen = true
+        case "gestures-hover":
+            model.gesturePage = .hover
+            model.gestureControlsOpen = true
+        case "gestures-general":
+            model.gesturePage = .general
+            model.gestureControlsOpen = true
         case "colors-classic":
             colors(model, .classic)
         case "colors-harmony":
