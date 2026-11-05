@@ -276,7 +276,8 @@ impl StrokeStyle {
             blur_jitter: if wet { brush.setting("wet_blur_jitter").clamp(0.0, 1.0) } else { 0.0 },
             grain_blend: brush.setting("grain_blend").round().clamp(0.0, GRAIN_LINEAR_HEIGHT as f32) as u32,
             burnt_blend: brush.setting("burnt_blend").round().clamp(0.0, BRUSH_BEHIND as f32) as u32,
-            grain_rotation: brush.setting("grain_rotation").clamp(-1.0, 1.0) * std::f32::consts::PI,
+            // a brush's rotation turns its grain the other way to the shaders' angle
+            grain_rotation: -brush.setting("grain_rotation").clamp(-1.0, 1.0) * std::f32::consts::PI,
             grain_sharp: brush.setting("grain_filtering") < 0.5,
             shape_sharp: brush.setting("shape_filtering") < 0.5,
             shape_lod_cap: SHAPE_LOD_CAP,
@@ -469,6 +470,15 @@ struct StampInstance {
     more: [f32; 4],
     /// The tint's brightness add.
     brightness_add: f32,
+}
+
+/// Where a moving grain is read from at the stamp's middle (see `Stamp::grain_offset`) as the
+/// shaders take it. They turn what they read by the grain's rotation, offset and all, but only the
+/// stamp's own patch of grain turns; where it is read from doesn't. So a turned grain rolling along
+/// a stroke slides under it and smears along the way the stroke goes, most at a half turn.
+fn grain_read_from(offset: procraft_engine::geom::Vec2, rotation: f32) -> [f32; 2] {
+    let (sin, cos) = rotation.sin_cos();
+    [offset.x * cos + offset.y * sin, offset.y * cos - offset.x * sin]
 }
 
 /// A stamp's (alpha, transfer) as its instance takes them: a capped stroke keeps its transfer
@@ -2294,7 +2304,7 @@ impl Canvas {
                     angle: if s.angle.is_finite() { s.angle } else { 0.0 },
                     roundness: if s.roundness.is_finite() { s.roundness.clamp(0.05, MOST_ROUNDNESS) } else { 1.0 },
                     grain_offset: if s.grain_offset.is_finite() {
-                        [s.grain_offset.x, s.grain_offset.y]
+                        grain_read_from(s.grain_offset, style.grain_rotation)
                     } else {
                         [0.0; 2]
                     },

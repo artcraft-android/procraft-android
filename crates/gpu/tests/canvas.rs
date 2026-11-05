@@ -1975,6 +1975,41 @@ fn canvases_take_turns_with_a_shared_stroke_and_make_brush_images_when_wanted() 
 }
 
 #[test]
+fn a_turned_grain_rolling_along_a_stroke_smears_along_it() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // how much the coverage changes from pixel to pixel along the middle of a straight stroke
+    let roughness = |rotation: f32| {
+        let mut doc = Document::new(400, 96);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let style = StrokeStyle {
+            grain: Some(3),
+            grain_mode: procraft_engine::brush::GrainMode::Moving,
+            grain_depth: 1.0,
+            grain_scale: 128.0,
+            grain_rotation: rotation,
+            ..style(StrokeTool::Paint, 1.0)
+        };
+        canvas.begin_stroke(doc.current(), style);
+        let stamps: Vec<Stamp> = (0..360)
+            .map(|x| {
+                let center = Vec2::new(20.0 + x as f32, 48.0);
+                Stamp { grain_offset: center, ..Stamp::round(center, 30.0, 0.02) }
+            })
+            .collect();
+        canvas.add_stamps(&stamps);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (120..280).map(|x| i32::from(pixel(&layer, 400, x, 48)[3]).abs_diff(i32::from(pixel(&layer, 400, x + 1, 48)[3]))).sum::<u32>()
+    };
+    // unturned the grain stays put on the canvas, crisp under every stamp; turned half way round
+    // each stamp reads it running the other way, so it blurs out along the stroke
+    let (still, turned) = (roughness(0.0), roughness(std::f32::consts::PI));
+    assert!(turned * 3 < still, "{turned} against {still}");
+}
+
+#[test]
 fn a_drawn_stroke_takes_its_grain_from_a_picture_of_its_own() {
     use wgpu::util::DeviceExt;
     let Some(gpu) = gpu() else { return };
