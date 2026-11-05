@@ -86,6 +86,11 @@ final class GalleryModel {
 
     /// Where each thumbnail is on the screen, for what rises from it.
     @ObservationIgnored var thumbAt: [String: CGRect] = [:]
+    /// Where each cell showing is on the window, the grid itself, and a stack's way back: where a
+    /// drag lands.
+    @ObservationIgnored var cellAt: [String: CGRect] = [:]
+    @ObservationIgnored var gridAt = CGRect.zero
+    @ObservationIgnored var backAt = CGRect.zero
     @ObservationIgnored var onOpen: (OpenArtwork) -> Void = { _ in }
 
     @ObservationIgnored private let work = DispatchQueue(label: "gallery", qos: .userInitiated)
@@ -130,6 +135,24 @@ final class GalleryModel {
     func showStack(_ dir: String?, name: String = "") {
         openStack = dir.map { ($0, name) }
         reload()
+    }
+
+    /// `entry` dragged to `to` in the gallery or stack showing (its place in the list without it),
+    /// out of its stack if it was in one.
+    func move(_ entry: GalleryEntry, to: Int) {
+        // at once, so the cells move as the finger lifts
+        var shown = entries.filter { $0.dir != entry.dir }
+        shown.insert(entry, at: min(max(to, 0), shown.count))
+        entries = shown
+        let into = folder ?? Gallery.store.root()
+        changing { Gallery.store.moveEntry(dir: entry.dir, to: Int64(to), into: into) }
+    }
+
+    /// An artwork dropped onto `onto` in the gallery: with an artwork it makes a stack, this one
+    /// first; a stack takes it in first.
+    func put(_ a: GalleryArtwork, onto: GalleryEntry) {
+        guard openStack == nil, a.dir != onto.dir else { return }
+        changing { Gallery.store.putOnto(dir: a.dir, onto: onto.dir) }
     }
 
     func stack(_ list: [GalleryArtwork]) {
@@ -311,6 +334,12 @@ final class GalleryModel {
                 self?.reload()
             }
         }
+    }
+
+    /// Files dropped on the gallery, brought in as Import's; the copies in `folder` go after them.
+    func importDropped(_ urls: [URL], from folder: URL) {
+        importFiles(urls)
+        work.async { try? FileManager.default.removeItem(at: folder) }
     }
 
     /// The import card's Cancel: the card goes at once, and what the import makes is thrown away.
@@ -587,6 +616,15 @@ final class GalleryModel {
     }
 
     /// `list` written as `format` for the share sheet, hanging from `from`.
+    /// The artwork as a file for a drag out of the gallery, made when the other app asks for it.
+    func fileForDrag(_ a: GalleryArtwork, format: String, done: @escaping (URL?) -> Void) {
+        let name = exportFileName(name: a.name, package: false) + Self.fileExtension(format)
+        let url = Sharing.exportsDir.appendingPathComponent(name)
+        work.async {
+            done(Self.write(a, format: format, to: url, quality: PdfQuality.best) ? url : nil)
+        }
+    }
+
     func share(_ list: [GalleryArtwork], format: String, quality: UInt8 = PdfQuality.best, from: CGRect?) {
         guard exportShown == nil, importShown == nil else { return }
         cancelled = false

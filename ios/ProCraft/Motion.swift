@@ -57,6 +57,8 @@ enum Motion {
     static let artworkPinchOpen: CGFloat = 1.35
     /// An artwork spread open, let go: settling fitted over the screen (or back into its place).
     static let pinchSettle = easeOut(0.3)
+    /// A dragged artwork's cell fading to what stays behind, and back.
+    static let artworkLift = easeInOut(0.25)
     /// Rows moving to make room.
     static let rowMove = settle(0.35)
     /// The QuickMenu's buttons spreading from its middle, and drawing back in.

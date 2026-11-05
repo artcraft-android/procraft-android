@@ -53,8 +53,8 @@ struct GalleryShare {
 
 /// The gallery: its title and buttons, then the artworks kept on the iPad (the core's store, in the
 /// app's own Application Support). A tap opens an artwork (on its name, renames it), a swipe left
-/// shows Share, Duplicate and Delete, two fingers spread on it open it in Preview; Select picks
-/// several; + makes a new canvas.
+/// shows Share, Duplicate and Delete, two fingers spread on it open it in Preview, and held it can
+/// be dragged (`GalleryDragger`); Select picks several; + makes a new canvas.
 struct GalleryView: View {
     let onOpen: (OpenArtwork) -> Void
 
@@ -81,6 +81,7 @@ struct GalleryView: View {
     @State private var previewFrom = 0
     /// An artwork two fingers are spreading open into Preview.
     @State private var opening: PinchOpening?
+    @State private var drag = GalleryDragShown()
 
     init(onOpen: @escaping (OpenArtwork) -> Void) {
         self.onOpen = onOpen
@@ -96,12 +97,18 @@ struct GalleryView: View {
         moreOpen = false
     }
 
+    /// Nothing is open over the gallery, so a touch on a cell can be taken for a drag or a spread.
+    private func quiet() -> Bool {
+        guard !selecting, !newCanvasOpen, !model.customOpen, sharing == nil, renaming == nil, deleting == nil,
+              pdfFor == nil, previewing == nil, opening == nil
+        else { return false }
+        return true
+    }
+
     /// Two fingers began at `point` on the window: the artwork whose picture is there starts to open,
     /// if nothing is open over the gallery.
     private func startOpening(at point: CGPoint) -> Bool {
-        guard !selecting, !newCanvasOpen, !model.customOpen, sharing == nil, renaming == nil, deleting == nil,
-              pdfFor == nil, previewing == nil, opening == nil,
-              let a = model.artworks.first(where: { model.thumbAt[$0.dir]?.contains(point) == true }),
+        guard quiet(), let a = model.artworks.first(where: { model.thumbAt[$0.dir]?.contains(point) == true }),
               let from = model.thumbAt[a.dir]
         else { return false }
         swiped = nil
@@ -138,8 +145,11 @@ struct GalleryView: View {
         let chosen = selected.contains(a.dir)
         return ArtworkCell(
             model: model, artwork: a, cell: cell, version: model.version,
-            chosen: selecting ? chosen : nil
+            chosen: selecting ? chosen : nil, wash: drag.onto == a.dir
         )
+        .modifier(CellPlace(model: model, dir: a.dir))
+        // dragged, it stays behind faint
+        .opacity(drag.dragging == a.dir ? draggedAlpha : 1)
         .opacity(open ? 1 - swipedFade : 1)
         // out of its place while two fingers spread it
         .opacity(opening?.artwork.dir == a.dir ? 0 : 1)
@@ -167,7 +177,7 @@ struct GalleryView: View {
         .onTapGesture { location in tapped(a, at: location.y, cell: cell) }
         .simultaneousGesture(
             DragGesture(minimumDistance: 14).onChanged { drag in
-                guard !selecting, opening == nil, abs(drag.translation.width) > abs(drag.translation.height) else { return }
+                guard !selecting, opening == nil, self.drag.dragging == nil, abs(drag.translation.width) > abs(drag.translation.height) else { return }
                 let next = drag.translation.width < 0 ? a.dir : nil
                 if next != swiped {
                     withAnimation(Motion.swipeSettle) { swiped = next }
@@ -177,7 +187,9 @@ struct GalleryView: View {
     }
 
     private func stackCell(dir: String, name: String, artworks: [GalleryArtwork], cell: CellSize) -> some View {
-        StackCell(name: name, artworks: artworks, cell: cell, version: model.version, dim: selecting)
+        StackCell(name: name, artworks: artworks, cell: cell, version: model.version, dim: selecting, wash: drag.onto == dir)
+            .modifier(CellPlace(model: model, dir: dir))
+            .opacity(drag.dragging == dir ? draggedAlpha : 1)
             .contentShape(Rectangle())
             .onTapGesture { location in
                 guard !selecting else { return }
@@ -207,6 +219,13 @@ struct GalleryView: View {
         }
         .scrollIndicators(.hidden)
         .scrollDisabled(opening != nil)
+        .background {
+            GeometryReader { place in
+                Color.clear.onChange(of: place.frame(in: .global), initial: true) { _, frame in
+                    model.gridAt = frame
+                }
+            }
+        }
     }
 
     @ViewBuilder private func header(_ screen: CGSize) -> some View {
@@ -233,6 +252,8 @@ struct GalleryView: View {
         } else {
             GalleryHeader(
                 stack: model.openStack?.name,
+                backLit: drag.backLit,
+                onBackPlaced: { model.backAt = $0 },
                 onBack: { model.showStack(nil) },
                 onSelect: {
                     swiped = nil
@@ -426,6 +447,7 @@ struct GalleryView: View {
                 onEnd: { opening?.end() }
             )
         }
+        .background { GalleryDragCatcher(model: model, shown: drag, canStart: quiet) }
         .overlay {
             ZStack {
                 previews
@@ -494,6 +516,9 @@ struct GalleryView: View {
                 renaming = first.map { Renaming(id: $0.dir, name: $0.name, shown: $0, stack: false) }
             case "gallery-custom", "gallery-custom-colour":
                 model.openCustom()
+            case "gallery-drag":
+                drag.dragging = model.artworks.dropFirst().first?.dir
+                drag.onto = first?.dir
             case "gallery-preview", "gallery-preview-controls":
                 previewFrom = 0
                 previewing = model.artworks
@@ -517,6 +542,9 @@ struct GalleryView: View {
 /// Photo capsule and the round + that makes a new canvas.
 private struct GalleryHeader: View {
     let stack: String?
+    /// An artwork dragged rests on the way back, to go back.
+    let backLit: Bool
+    let onBackPlaced: (CGRect) -> Void
     let onBack: () -> Void
     let onSelect: () -> Void
     let onImport: () -> Void
@@ -536,17 +564,25 @@ private struct GalleryHeader: View {
         ZStack(alignment: .topLeading) {
             if let stack {
                 // in a stack: back to the gallery, and the stack's name
+                let ink = backLit ? Pc.accent : Pc.galleryTitle
                 HStack(spacing: 0) {
-                    PcIconView(PcIcons.chevronLeft, size: 28, color: Pc.galleryTitle)
+                    PcIconView(PcIcons.chevronLeft, size: 28, color: ink)
                         .frame(width: 40)
                     Text(verbatim: stack)
                         .font(.system(size: 36, weight: .bold))
-                        .foregroundStyle(Pc.galleryTitle)
+                        .foregroundStyle(ink)
                         .lineLimit(1)
                 }
                 .frame(height: 41)
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onBack)
+                .background {
+                    GeometryReader { place in
+                        Color.clear.onChange(of: place.frame(in: .global), initial: true) { _, frame in
+                            onBackPlaced(frame)
+                        }
+                    }
+                }
                 .padding(.leading, 20)
                 .padding(.top, 12)
             } else {
@@ -686,12 +722,32 @@ private struct SwipeActions: View {
     }
 }
 
+/// Tells the gallery where a cell is on the window while it shows, for where a drag lands.
+private struct CellPlace: ViewModifier {
+    let model: GalleryModel
+    let dir: String
+
+    func body(content: Content) -> some View {
+        content.background {
+            GeometryReader { place in
+                Color.clear
+                    .onChange(of: place.frame(in: .global), initial: true) { _, frame in
+                        model.cellAt[dir] = frame
+                    }
+                    .onDisappear { model.cellAt[dir] = nil }
+            }
+        }
+    }
+}
+
 /// An artwork's picture in its thumbnail box, as large as fits, with a soft shadow under it.
 private struct Thumbnail: View {
     let artwork: GalleryArtwork
     let cell: CellSize
     let version: Int
     var chosen: Bool?
+    /// Blue, as what a dragged artwork would be stacked with.
+    var wash = false
     @State private var picture: UIImage?
 
     var body: some View {
@@ -707,6 +763,9 @@ private struct Thumbnail: View {
                 Image(uiImage: picture)
                     .resizable()
                     .interpolation(thumbnailInterpolation(picture, shown: size.width))
+            }
+            if wash {
+                dropWash
             }
             if let chosen {
                 // unpicked, a thin light ring
@@ -744,10 +803,11 @@ private struct ArtworkCell: View {
     let cell: CellSize
     let version: Int
     let chosen: Bool?
+    let wash: Bool
 
     var body: some View {
         VStack(spacing: 0) {
-            Thumbnail(artwork: artwork, cell: cell, version: version, chosen: chosen)
+            Thumbnail(artwork: artwork, cell: cell, version: version, chosen: chosen, wash: wash)
                 .background {
                     GeometryReader { place in
                         Color.clear
@@ -781,6 +841,7 @@ private struct StackCell: View {
     let cell: CellSize
     let version: Int
     let dim: Bool
+    let wash: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -793,7 +854,7 @@ private struct StackCell: View {
                                 .rotationEffect(.degrees(turn))
                         }
                     }
-                    Thumbnail(artwork: top, cell: cell, version: version)
+                    Thumbnail(artwork: top, cell: cell, version: version, wash: wash)
                 }
                 .frame(width: cell.width, height: cell.thumb, alignment: .bottom)
                 .padding(.top, 39)

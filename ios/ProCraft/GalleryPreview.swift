@@ -276,7 +276,7 @@ private struct PreviewArrow: View {
 }
 
 /// An artwork's frames as read for Preview, and how they play.
-private struct PlayedFrames {
+private struct PlayedFrames: @unchecked Sendable {
     let pictures: [UIImage]
     let order: [UInt32]
     let fps: Int
