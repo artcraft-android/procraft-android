@@ -198,6 +198,8 @@ final class CanvasModel {
     @ObservationIgnored private var libraryFailing = false
     /// Writes of the library, one at a time: each takes the library as it is when it runs.
     private static let libraryWrites = DispatchQueue(label: "ProCraft.brushLibrary", qos: .utility)
+    /// The brush studio.
+    @ObservationIgnored private(set) lazy var studio = StudioModel(model: self)
     /// A question open over everything.
     var question: Question? {
         didSet {
@@ -389,7 +391,7 @@ final class CanvasModel {
 
     /// After a change to the library: read it again, keep it, and draw previews again (they go by
     /// place).
-    private func libraryChanged() {
+    func libraryChanged() {
         brushSets = session.brushLibrary()
         currentBrush = session.currentBrush()
         readSetChoices()
@@ -426,13 +428,15 @@ final class CanvasModel {
         }
     }
 
-    /// A new brush at the top of the shown set. It opens in the studio once the iPad has one.
+    /// A new brush at the top of the shown set, opened in the studio.
     func newBrush() {
         if shownSet == Self.recentSet {
             shownSet = currentBrush.map { Int($0.set) } ?? 0
         }
         guard session.newBrush(set: UInt32(shownSet)) != nil else { return }
         libraryChanged()
+        studio.brandNew = true
+        studio.open()
     }
 
     /// A new set at the top of the library, shown, with its name ready to edit.
@@ -573,10 +577,10 @@ final class CanvasModel {
     }
 
     /// Brushes read meanwhile join the library (a set of their own at the top, or a brush at the
-    /// top of a set), that set shown; not while a question holds a brush by its place, which they
-    /// would move: then once that ends.
-    private func addBrushesRead() {
-        guard question == nil, !brushesRead.isEmpty else { return }
+    /// top of a set), that set shown; not while the studio or a question holds a brush by its
+    /// place, which they would move: then once that ends.
+    func addBrushesRead() {
+        guard !studio.isOpen, question == nil, !brushesRead.isEmpty else { return }
         if shownSet == Self.recentSet {
             shownSet = currentBrush.map { Int($0.set) } ?? 0
         }

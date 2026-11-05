@@ -24,6 +24,10 @@ final class AppSettings {
     /// The widest gap ColorDrop keeps out of, canvas pixels.
     static let mostFillGap = 32
 
+    /// The brush studio's open page, whichever brush it opens on.
+    var studioTab: Int { didSet { kept.set(studioTab, forKey: Key.studioTab) } }
+    /// The drawing pad's 3D preview: the pad a sphere on every page.
+    var pad3d: Bool { didSet { kept.set(pad3d, forKey: Key.pad3d) } }
     /// The side bar on the right edge instead of the left.
     var rightHanded: Bool { didSet { kept.set(rightHanded, forKey: Key.rightHanded) } }
     /// How long two fingers are held before undo repeats, seconds.
@@ -83,6 +87,8 @@ final class AppSettings {
             let c = (d.array(forKey: key) as? [NSNumber])?.map(\.floatValue) ?? []
             return c.count == 3 ? c.map { min(max($0, 0), 1) } : otherwise
         }
+        studioTab = d.integer(forKey: Key.studioTab)
+        pad3d = d.bool(forKey: Key.pad3d)
         rightHanded = d.bool(forKey: Key.rightHanded)
         rapidUndoDelay = float(Key.rapidUndoDelay, 0.65)
         brushCursorOn = bool(Key.brushCursor, true)
@@ -109,6 +115,8 @@ final class AppSettings {
     }
 
     private enum Key {
+        static let studioTab = "studioTab"
+        static let pad3d = "pad3d"
         static let rightHanded = "rightHanded"
         static let rapidUndoDelay = "rapidUndoDelay"
         static let brushCursor = "brushCursor"

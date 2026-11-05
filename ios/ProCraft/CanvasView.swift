@@ -342,37 +342,11 @@ final class CanvasView: UIView {
         return (coalesced.isEmpty ? [touch] : coalesced).map(sample)
     }
 
-    /// One sample, as the core takes it: pixels; pressure 0..1 (the force against the most the
-    /// device senses; a touch with none presses fully); the lean from upright and the direction
-    /// the Pencil's top leans, clockwise from up (its azimuth is from the view's x axis); the time
-    /// in milliseconds of the clock the core's waits run on (`CACurrentMediaTime`'s); and how far
-    /// the barrel is turned (Apple Pencil Pro, iPadOS 17.5; 0 for the others).
     private func sample(_ touch: UITouch) -> PenSample {
-        let at = touch.preciseLocation(in: self)
-        let pencil = touch.type == .pencil
-        if pencil {
-            pencilAt = at
+        if touch.type == .pencil {
+            pencilAt = touch.preciseLocation(in: self)
         }
-        let force = touch.maximumPossibleForce > 0 ? touch.force / touch.maximumPossibleForce : 1
-        let tilt = pencil ? Double.pi / 2 - Double(touch.altitudeAngle) : 0
-        var lean = pencil ? Double(touch.azimuthAngle(in: self)) + Double.pi / 2 : 0
-        lean = lean.truncatingRemainder(dividingBy: 2 * Double.pi)
-        if lean < 0 {
-            lean += 2 * Double.pi
-        }
-        var roll: Float = 0
-        if #available(iOS 17.5, *), pencil {
-            roll = Float(touch.rollAngle)
-        }
-        return PenSample(
-            x: Float(at.x * scale),
-            y: Float(at.y * scale),
-            pressure: Float(min(max(force, 0), 1)),
-            tilt: Float(tilt),
-            orientation: Float(lean),
-            timeMs: touch.timestamp * 1000,
-            roll: roll
-        )
+        return penSample(touch, in: self, scale: scale)
     }
 
     /// Hands what the touches asked to the app, and waits for the touches' next deadline.
@@ -389,4 +363,34 @@ final class CanvasView: UIView {
             self.obey(self.session.touchTick(nowMs: CACurrentMediaTime() * 1000))
         }
     }
+}
+
+/// One sample, as the core takes it: pixels; pressure 0..1 (the force against the most the device
+/// senses; a touch with none presses fully); the lean from upright and the direction the Pencil's
+/// top leans, clockwise from up (its azimuth is from the view's x axis); the time in milliseconds
+/// of the clock the core's waits run on (`CACurrentMediaTime`'s); and how far the barrel is turned
+/// (Apple Pencil Pro, iPadOS 17.5; 0 for the others).
+func penSample(_ touch: UITouch, in view: UIView, scale: CGFloat) -> PenSample {
+    let at = touch.preciseLocation(in: view)
+    let pencil = touch.type == .pencil
+    let force = touch.maximumPossibleForce > 0 ? touch.force / touch.maximumPossibleForce : 1
+    let tilt = pencil ? Double.pi / 2 - Double(touch.altitudeAngle) : 0
+    var lean = pencil ? Double(touch.azimuthAngle(in: view)) + Double.pi / 2 : 0
+    lean = lean.truncatingRemainder(dividingBy: 2 * Double.pi)
+    if lean < 0 {
+        lean += 2 * Double.pi
+    }
+    var roll: Float = 0
+    if #available(iOS 17.5, *), pencil {
+        roll = Float(touch.rollAngle)
+    }
+    return PenSample(
+        x: Float(at.x * scale),
+        y: Float(at.y * scale),
+        pressure: Float(min(max(force, 0), 1)),
+        tilt: Float(tilt),
+        orientation: Float(lean),
+        timeMs: touch.timestamp * 1000,
+        roll: roll
+    )
 }

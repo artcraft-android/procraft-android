@@ -60,6 +60,11 @@ struct CanvasScreen: View {
                 if let choice = model.layerChoice {
                     LayerChoiceList(model: model, choice: choice, screen: screen.size)
                 }
+                if model.studio.isOpen {
+                    BrushStudio(model: model)
+                        .transition(.move(edge: .bottom))
+                    NoticeBand(model: model)
+                }
                 BlockedDialog(model: model)
                 AlertView(
                     content: model.question.map {

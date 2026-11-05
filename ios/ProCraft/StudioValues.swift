@@ -1,7 +1,7 @@
 import Foundation
 
 /// To the nearest whole number, halves going up: -12.5 is -12, where `.rounded()` would make it -13.
-private func wholeNumber(_ x: Float) -> Int {
+func wholeNumber(_ x: Float) -> Int {
     Int((Double(x) + 0.5).rounded(.down))
 }
 

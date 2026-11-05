@@ -58,7 +58,8 @@ struct RootView: View {
 #if DEBUG
 /// For the screen captures the iPad workflow takes on the simulator: launched with `-screen NAME`,
 /// the app turns on its side and opens a new canvas the size of the screen with the panel NAME
-/// open (`canvas` for none, `gallery` for the gallery).
+/// open (`canvas` for none, `gallery` for the gallery), or the brush studio on its Shape page
+/// (`studio`), which has the most kinds of control, or its Grain editor (`source`).
 enum ScreenCapture {
     static func start(open: @escaping (CanvasModel) -> Void) {
         let arguments = ProcessInfo.processInfo.arguments
@@ -83,6 +84,12 @@ enum ScreenCapture {
             case "colors": model.toggle(.color)
             case "actions": model.toggle(.actions)
             case "adjustments": model.toggle(.adjustments)
+            case "studio":
+                AppSettings.shared.studioTab = 3
+                model.studio.open()
+            case "source":
+                model.studio.open()
+                model.studio.sourceEditing = .grain
             default: break
             }
         }

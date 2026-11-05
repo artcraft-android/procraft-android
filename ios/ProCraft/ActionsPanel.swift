@@ -263,13 +263,17 @@ private struct RowView: View {
 struct PcSwitch: View {
     let on: Bool
     var enabled = true
+    /// Its colours where they aren't the usual ones: fixed off, and its track when off.
+    var fixedTrack: Color?
+    var fixedKnob: Color?
+    var offTrack: Color?
 
     var body: some View {
-        let track = !enabled ? Pc.switchFixed : on ? Pc.accent : Pc.switchOff
+        let track = !enabled ? fixedTrack ?? Pc.switchFixed : on ? Pc.accent : offTrack ?? Pc.switchOff
         ZStack(alignment: .leading) {
             Capsule().fill(track)
             Capsule()
-                .fill(enabled ? Color.white : Pc.switchFixedKnob)
+                .fill(enabled ? Color.white : fixedKnob ?? Pc.switchFixedKnob)
                 .frame(width: 37, height: 24)
                 .offset(x: 2 + (on ? 22 : 0))
         }

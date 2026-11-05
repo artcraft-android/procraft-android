@@ -344,7 +344,7 @@ private struct ResultCell: View {
 
 /// A brush's sample stroke filling its cell's height, centred, its ends past the cell's sides. It
 /// lies over a clear view: wider than the cell, it would otherwise widen everything sized with it.
-private struct SampleStroke: View {
+struct SampleStroke: View {
     let image: UIImage
     var tint: Color?
 
@@ -776,6 +776,10 @@ private struct BrushRow: View {
                     return
                 }
                 model.chooseBrush(brush)
+                // a highlighted brush opens in the studio
+                if selected {
+                    model.studio.open()
+                }
             }
             .modifier(HeldDrag(
                 ui: ui,
