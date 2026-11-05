@@ -2077,6 +2077,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         guide = s.guide()
     }
 
+    /** The canvas view's ear for a pen's side button that comes as a key (true: the second). */
+    var penKeyHeard: ((second: Boolean) -> Unit)? = null
+
+    /** A pen's side button came as a key (see [penKeyButton]): true if a canvas took it. */
+    fun penKey(second: Boolean): Boolean {
+        if (screen != Screen.CANVAS || session == null) return false
+        val heard = penKeyHeard ?: return false
+        heard(second)
+        return true
+    }
+
     /** The modify button tapped: what Tap □ is set to do (open or close the eyedropper at first). */
     fun tapModify() {
         when (gestures.purposeOf(Trigger.TAP_MODIFY)) {
