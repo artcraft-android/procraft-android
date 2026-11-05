@@ -43,7 +43,7 @@ private let balanceTones = ["Shadows", "Midtones", "Highlights"]
 extension CanvasModel {
     /// The adjustments with a screen on the iPad so far.
     func opensOnThisDevice(_ a: Adjustment) -> Bool {
-        a != .gradientMap && a != .clone
+        a != .gradientMap
     }
 
     /// Changes the open adjustment and reads what it shows.
@@ -959,6 +959,23 @@ struct AdjustModes: View {
         .background(Capsule().fill(chosen ? Pc.accent : Color.clear))
         .contentShape(Capsule())
         .onTapGesture { model.chooseAdjustMode(pencil: pencil) }
+    }
+}
+
+/// The clone source: a dark ring with a light edge, so it shows on any colour.
+struct ClonePuck: View {
+    let model: CanvasModel
+
+    var body: some View {
+        if let puck = model.adjustShown?.clonePuck, puck.count >= 2 {
+            let at = CGPoint(x: CGFloat(puck[0]) / model.pixels, y: CGFloat(puck[1]) / model.pixels)
+            Canvas { context, _ in
+                let ring = Path(ellipseIn: CGRect(x: at.x - 30, y: at.y - 30, width: 60, height: 60))
+                context.stroke(ring, with: .color(.white), lineWidth: 4)
+                context.stroke(ring, with: .color(.black), lineWidth: 2)
+            }
+            .allowsHitTesting(false)
+        }
     }
 }
 

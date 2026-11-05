@@ -120,7 +120,7 @@ extension CanvasModel {
     }
 
     /// Does `a`, a QuickMenu button opened at window point `at`. What has no screen on the iPad yet
-    /// (text, the animation's and the reference's, Gradient Map and Clone) does nothing.
+    /// (text, the animation's and the reference's, Gradient Map) does nothing.
     func runQuickAction(_ a: QuickAction, at: CGPoint) {
         func onCurrent(_ f: (LayerInfo) -> Void) {
             if let l = layers.first(where: { $0.current }) {
@@ -163,6 +163,7 @@ extension CanvasModel {
         case .transform: toggleTransform()
         case .adjustments: toggle(.adjustments)
         case .liquify: startAdjustment(.liquify)
+        case .clone: startAdjustment(.clone)
         case .colors: toggle(.color)
         case .layers: toggle(.layers)
         case .brushes: toggle(.brushes)

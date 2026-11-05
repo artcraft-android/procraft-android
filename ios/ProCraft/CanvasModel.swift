@@ -750,7 +750,7 @@ final class CanvasModel {
 
     /// Whether the side bar shows: a mode taking the screen slides it off its edge.
     var sideBarShown: Bool {
-        !transforming && !selecting && !adjusting
+        !transforming && !selecting && (!adjusting || adjustShown?.pencil == true)
     }
 
     /// The modes open now, as the core's `modeSwitch` takes them.
@@ -863,6 +863,10 @@ final class CanvasModel {
         adjustModesOpen = false
         liquifyPopup = 0
         readAdjust()
+        // cloning paints with the brush: its sliders show
+        if a == .clone {
+            readSliders()
+        }
     }
 
     /// Ends the adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
@@ -909,8 +913,13 @@ final class CanvasModel {
     /// Every value back to where the adjustment started.
     func resetAdjustment() {
         guard adjustment != nil else { return }
+        let painted = adjustShown?.pencil == true
         session.adjustmentReset()
         readAdjust()
+        if painted, adjustShown?.pencil != true {
+            readSliders()
+        }
+        refresh()
     }
 
     /// Liquify's slider `index` (size, pressure, distortion, momentum), 0..1.
@@ -1461,8 +1470,8 @@ final class CanvasModel {
     /// The view moved: what is drawn over the canvas follows.
     func refreshView() {
         viewMatrix = session.viewMatrix()
-        // the perspective puck follows the canvas
-        if adjustment == .perspectiveBlur {
+        // the perspective and clone pucks follow the canvas
+        if adjustment == .perspectiveBlur || adjustment == .clone {
             readAdjust()
         }
         // the shape's handles follow the canvas

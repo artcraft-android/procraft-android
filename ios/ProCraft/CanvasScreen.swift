@@ -64,6 +64,9 @@ struct CanvasScreen: View {
                     QuickShapeBar(model: model)
                         .offset(y: Pc.barHeight)
                 }
+                if model.adjustment == .clone, !hidden {
+                    ClonePuck(model: model)
+                }
                 if model.adjustment == .perspectiveBlur, !hidden {
                     PerspectivePuck(model: model)
                 }
