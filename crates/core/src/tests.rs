@@ -3229,6 +3229,33 @@ fn a_saved_animation_can_be_drawn_with_no_window() {
 }
 
 #[test]
+fn a_colour_dropped_in_a_ring_leaves_no_pale_rim_inside_the_line() {
+    let Some(s) = session(400, 400) else { return };
+    s.set_brush_size(0.1);
+    s.set_color(0.93, 0.52, 0.27);
+    let ring: Vec<PenSample> = (0..=120)
+        .map(|i| {
+            let a = i as f32 / 120.0 * 6.5;
+            sample(200.0 + 130.0 * a.cos(), 200.0 + 130.0 * a.sin(), f64::from(i) * 8.0)
+        })
+        .collect();
+    s.stroke_begin(PointerKind::Finger, ring[..1].to_vec());
+    s.stroke_add(ring[1..].to_vec());
+    s.stroke_end(vec![]);
+    assert!(s.pour_begin(200.0, 200.0, 0.93, 0.52, 0.27, 0.5));
+    s.pour_end(true, None);
+    // from the middle out to the line and into it, nothing paler than the paint
+    for spoke in 0..24 {
+        let t = (spoke as f32 * 15.0 + 7.0).to_radians();
+        for d in 100..124 {
+            let d = d as f32;
+            let [_, _, b, _] = pixel(&s, (200.0 + d * t.cos()) as u32, (200.0 + d * t.sin()) as u32);
+            assert!(b < 75, "a rim at {d} on spoke {spoke}: {b}");
+        }
+    }
+}
+
+#[test]
 fn layers_export_as_animations() {
     let Some(s) = session(40, 40) else { return };
     s.set_brush_size(0.6);

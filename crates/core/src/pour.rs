@@ -44,6 +44,10 @@ impl Pour {
             if self.gap > 0 {
                 mask = fill::close_gaps(&mask, flood.seed(), self.gap);
             }
+            // poured into what is see-through, it goes on under the line it stopped at
+            if flood.colour[3] == 0 {
+                fill::under_edges(&mut mask, self.elsewhere.as_deref().unwrap_or(&self.before));
+            }
             if let Some(sel) = &self.selection {
                 for (m, &s) in mask.data.iter_mut().zip(&sel.data) {
                     *m = ((u16::from(*m) * u16::from(s) + 127) / 255) as u8;
