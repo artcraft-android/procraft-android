@@ -78,9 +78,14 @@ const PICKER_GLASS: menu::Glass = menu::Glass {
     corner: 26.0,
     shadow: false,
 };
-/// A press moved this far (points) slides or scrolls; held still this long, it drags the brush.
+/// A press moved this far (points) has gone somewhere; held still this long, it drags the brush.
 const SLOP: f32 = 8.0;
 const HOLD: Duration = Duration::from_millis(400);
+/// A press slides its brush once this far sideways (points), going this many times further
+/// sideways than up or down: a hand scrolling swings in an arc, and a slide opens onto Delete, so
+/// anything less plainly sideways is left to the list.
+const SLIDE_SLOP: f32 = 14.0;
+const SLIDE_LEAN: f32 = 2.0;
 
 /// A brush's sample stroke, and whether it runs under the name (which then sits on a dark pill).
 struct Preview {
@@ -93,7 +98,7 @@ struct Preview {
 type DrawnPreview = ((u32, u32), Option<(egui::ColorImage, bool)>);
 
 /// What a press on a brush turned out to be.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Way {
     Undecided,
     /// Sideways: the brush slides.
@@ -102,6 +107,19 @@ enum Way {
     Drag,
     /// Up or down first: the list has it, and scrolls.
     Scroll,
+}
+
+/// What a press on a brush that has moved `d` (points) from where it went down is, once it can be
+/// told: plainly sideways it slides the brush; else, gone up or down, the list has it.
+fn way_moved(d: Vec2) -> Option<Way> {
+    let (across, along) = (d.x.abs(), d.y.abs());
+    if across >= SLIDE_SLOP && across >= along * SLIDE_LEAN {
+        Some(Way::Swipe)
+    } else if along >= SLOP && across < along * SLIDE_LEAN {
+        Some(Way::Scroll)
+    } else {
+        None
+    }
 }
 
 /// A press on a brush, followed until let go: which (set and place), where and when it went down,
@@ -918,8 +936,10 @@ impl Library {
         if down {
             match p.way {
                 Way::Undecided => {
-                    if d.length() > SLOP {
-                        p.way = if d.x.abs() > d.y.abs() { Way::Swipe } else { Way::Scroll };
+                    if let Some(way) = way_moved(d) {
+                        p.way = way;
+                    } else if d.length() > SLOP {
+                        // going somewhere, not yet plain which way: it is no hold
                     } else if p.since.elapsed() >= HOLD && !self.recent {
                         // (the Recent set's brushes stay where they are)
                         p.way = Way::Drag;
@@ -1630,6 +1650,36 @@ mod tests {
         f.to(press + vec2(-90.0, -9.0));
         assert!((f.top() - held).abs() < 0.01, "moved from {held} to {}", f.top());
         f.up(press + vec2(-90.0, -9.0));
+    }
+
+    #[test]
+    fn a_press_slides_a_brush_only_going_plainly_sideways() {
+        let swipe = |x, y| way_moved(vec2(x, y)) == Some(Way::Swipe);
+        let scroll = |x, y| way_moved(vec2(x, y)) == Some(Way::Scroll);
+        // straight across, and a little off it, either way
+        assert!(swipe(-14.0, 0.0) && swipe(14.0, 0.0) && swipe(-20.0, 9.0) && swipe(20.0, -9.0));
+        // straight up or down, and a hand's arc across as far as along, or further
+        assert!(scroll(0.0, 8.0) && scroll(0.0, -8.0) && scroll(-12.0, -10.0) && scroll(-19.0, 10.0));
+        // too little to tell: it waits
+        assert_eq!(way_moved(vec2(-13.0, 7.0)), None);
+        assert_eq!(way_moved(vec2(-5.0, 5.0)), None);
+    }
+
+    #[test]
+    fn a_hand_swinging_across_as_it_scrolls_moves_the_list_and_slides_no_brush() {
+        let mut f = Finger::new();
+        let (start, from) = (f.top(), f.on_a_brush());
+        f.down(from);
+        let mut at = from;
+        // up and to the left, as a wrist turns: as far across as along at first
+        for k in 0..16 {
+            at += if k < 3 { vec2(-6.0, -5.0) } else { vec2(-3.0, -8.0) };
+            f.to(at);
+            assert!(f.library.slid.values().all(|s| *s == 0.0), "a brush slid on a scroll, step {k}");
+        }
+        f.up(at);
+        assert!(f.top() < start - 50.0, "the list stayed: {} to {}", start, f.top());
+        assert!(f.library.swiped.is_none(), "a brush opened on a scroll");
     }
 
     #[test]
