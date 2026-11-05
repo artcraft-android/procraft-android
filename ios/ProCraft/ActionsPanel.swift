@@ -8,6 +8,8 @@ private enum ActionRow {
     case act(String, value: String? = nil, action: (() -> Void)?)
     /// A switch row (dimmed without an action).
     case toggle(String, on: Bool, change: ((Bool) -> Void)?)
+    /// A button row that a swipe to the left slides open, its private action's button coming in.
+    case privately(String, label: String, action: (() -> Void)?, onPrivate: (() -> Void)?)
     /// A slider along the row's foot, its value at the right.
     case slide(String, value: String, share: Float, change: (Float) -> Void)
     /// A group's heading, above it.
@@ -135,6 +137,11 @@ struct ActionsPanel: View {
             }
     }
 
+    private func ask(_ how: InsertAsk, _ isPrivate: Bool) {
+        model.insertPrivate = isPrivate
+        model.insertAsk = how
+    }
+
     /// The shown tab's groups of rows.
     private func groups() -> [[ActionRow]] {
         let settings = AppSettings.shared
@@ -142,10 +149,11 @@ struct ActionsPanel: View {
         switch model.actionsTab {
         case 0:
             return [
+                // swiped to the left, the first three and Paste put what they bring on a private layer
                 [
-                    .act("Insert a file", action: { model.insertAsk = .file }),
-                    .act("Insert a photo", action: { model.insertAsk = .photo }),
-                    .act("Take a photo", action: { model.insertAsk = .camera }),
+                    .privately("Insert a file", label: "Insert a private file", action: { ask(.file, false) }, onPrivate: { ask(.file, true) }),
+                    .privately("Insert a photo", label: "Insert a private photo", action: { ask(.photo, false) }, onPrivate: { ask(.photo, true) }),
+                    .privately("Take a photo", label: "Take a private photo", action: { ask(.camera, false) }, onPrivate: { ask(.camera, true) }),
                     .act("Add text", action: { model.text.add() }),
                 ],
                 // Paste is grey until something has been cut or copied
@@ -153,7 +161,11 @@ struct ActionsPanel: View {
                     .act("Cut", action: { model.cutLayer() }),
                     .act("Copy", action: { model.copyLayer() }),
                     .act("Copy canvas", action: { model.copyCanvas() }),
-                    .act("Paste", action: model.canPaste ? { model.paste() } : nil),
+                    .privately(
+                        "Paste", label: "Paste Private",
+                        action: model.canPaste ? { model.paste() } : nil,
+                        onPrivate: model.canPaste ? { model.paste(isPrivate: true) } : nil
+                    ),
                 ],
             ]
         case 1:
@@ -339,6 +351,8 @@ private struct RowView: View {
             .frame(height: 44)
             .contentShape(Rectangle())
             .onTapGesture { change?(!on) }
+        case let .privately(label, privateLabel, action, onPrivate):
+            PrivateRow(label: label, privateLabel: privateLabel, action: action, onPrivate: onPrivate)
         case let .slide(label, value, share, change):
             SlideRow(label: label, value: value, share: share, change: change)
         case let .heading(label):
@@ -348,6 +362,71 @@ private struct RowView: View {
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .padding(.leading, 16)
         }
+    }
+}
+
+/// A row that a swipe to the left slides open, its private action's button coming in from the
+/// right; let go past halfway it stays open. A tap on the row closes it again.
+private struct PrivateRow: View {
+    let label: String
+    let privateLabel: String
+    let action: (() -> Void)?
+    let onPrivate: (() -> Void)?
+
+    private let full: CGFloat = 248
+
+    @State private var slide: CGFloat = 0
+    @State private var from: CGFloat?
+
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            Text(verbatim: label)
+                .font(.system(size: 17))
+                .foregroundStyle(action != nil ? Pc.actionsRow : Pc.actionsDisabled)
+                .lineLimit(1)
+                .padding(.leading, 16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .offset(x: -slide)
+            if slide > 0 {
+                Text(verbatim: privateLabel)
+                    .font(.system(size: 17))
+                    .foregroundStyle(onPrivate != nil ? Color(argb: 0xFFA8_A8A8) : Pc.actionsDisabled)
+                    .lineLimit(1)
+                    .frame(width: 245)
+                    .frame(maxHeight: .infinity)
+                    .background(RoundedRectangle(cornerRadius: 13, style: .circular).fill(Color(argb: 0xFF45_4545)))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        slide = 0
+                        onPrivate?()
+                    }
+                    .offset(x: full - slide)
+            }
+        }
+        .frame(height: 44)
+        .clipped()
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if slide > 0 {
+                withAnimation(Motion.swipeSettle) { slide = 0 }
+            } else {
+                action?()
+            }
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 10)
+                .onChanged { drag in
+                    guard from != nil || abs(drag.translation.width) > abs(drag.translation.height) else { return }
+                    let start = from ?? slide
+                    from = start
+                    slide = min(max(start - drag.translation.width, 0), full)
+                }
+                .onEnded { _ in
+                    guard from != nil else { return }
+                    from = nil
+                    withAnimation(Motion.swipeSettle) { slide = slide > full / 2 ? full : 0 }
+                }
+        )
     }
 }
 
