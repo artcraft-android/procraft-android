@@ -53,6 +53,10 @@ enum Motion {
     static let alertOut = easeOut(0.35)
     /// A swiped row settling open or shut.
     static let swipeSettle = Animation.spring(duration: 0.3, bounce: 0.2)
+    /// Two fingers spread on an artwork: let go spread this much or more, it opens in Preview.
+    static let artworkPinchOpen: CGFloat = 1.35
+    /// An artwork spread open, let go: settling fitted over the screen (or back into its place).
+    static let pinchSettle = easeOut(0.3)
     /// Rows moving to make room.
     static let rowMove = settle(0.35)
     /// The QuickMenu's buttons spreading from its middle, and drawing back in.

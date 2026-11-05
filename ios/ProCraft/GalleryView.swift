@@ -53,7 +53,8 @@ struct GalleryShare {
 
 /// The gallery: its title and buttons, then the artworks kept on the iPad (the core's store, in the
 /// app's own Application Support). A tap opens an artwork (on its name, renames it), a swipe left
-/// shows Share, Duplicate and Delete; Select picks several; + makes a new canvas.
+/// shows Share, Duplicate and Delete, two fingers spread on it open it in Preview; Select picks
+/// several; + makes a new canvas.
 struct GalleryView: View {
     let onOpen: (OpenArtwork) -> Void
 
@@ -75,6 +76,11 @@ struct GalleryView: View {
     @State private var importAsked = false
     @State private var photoAsked = false
     @State private var photo: PhotosPickerItem?
+    @State private var previewing: [GalleryArtwork]?
+    /// Which of them Preview starts on.
+    @State private var previewFrom = 0
+    /// An artwork two fingers are spreading open into Preview.
+    @State private var opening: PinchOpening?
 
     init(onOpen: @escaping (OpenArtwork) -> Void) {
         self.onOpen = onOpen
@@ -88,6 +94,19 @@ struct GalleryView: View {
         selecting = false
         selected = []
         moreOpen = false
+    }
+
+    /// Two fingers began at `point` on the window: the artwork whose picture is there starts to open,
+    /// if nothing is open over the gallery.
+    private func startOpening(at point: CGPoint) -> Bool {
+        guard !selecting, !newCanvasOpen, !model.customOpen, sharing == nil, renaming == nil, deleting == nil,
+              pdfFor == nil, previewing == nil, opening == nil,
+              let a = model.artworks.first(where: { model.thumbAt[$0.dir]?.contains(point) == true }),
+              let from = model.thumbAt[a.dir]
+        else { return false }
+        swiped = nil
+        opening = PinchOpening(artwork: a, from: from, at: point)
+        return true
     }
 
     private func tapped(_ a: GalleryArtwork, at y: CGFloat, cell: CellSize) {
@@ -122,6 +141,8 @@ struct GalleryView: View {
             chosen: selecting ? chosen : nil
         )
         .opacity(open ? 1 - swipedFade : 1)
+        // out of its place while two fingers spread it
+        .opacity(opening?.artwork.dir == a.dir ? 0 : 1)
         .overlay(alignment: .top) {
             if open {
                 SwipeActions(
@@ -146,7 +167,7 @@ struct GalleryView: View {
         .onTapGesture { location in tapped(a, at: location.y, cell: cell) }
         .simultaneousGesture(
             DragGesture(minimumDistance: 14).onChanged { drag in
-                guard !selecting, abs(drag.translation.width) > abs(drag.translation.height) else { return }
+                guard !selecting, opening == nil, abs(drag.translation.width) > abs(drag.translation.height) else { return }
                 let next = drag.translation.width < 0 ? a.dir : nil
                 if next != swiped {
                     withAnimation(Motion.swipeSettle) { swiped = next }
@@ -185,6 +206,7 @@ struct GalleryView: View {
             .padding(.bottom, 24)
         }
         .scrollIndicators(.hidden)
+        .scrollDisabled(opening != nil)
     }
 
     @ViewBuilder private func header(_ screen: CGSize) -> some View {
@@ -198,6 +220,7 @@ struct GalleryView: View {
                     model.stack(picked())
                     endSelecting()
                 },
+                onPreview: showPicked,
                 onShare: { sharing = GalleryShare(artworks: picked(), from: nil) },
                 onDuplicate: {
                     picked().forEach(model.duplicate)
@@ -219,6 +242,28 @@ struct GalleryView: View {
                 onPhoto: { photoAsked = true },
                 onNew: { withAnimation(Motion.menuOpen) { newCanvasOpen.toggle() } }
             )
+        }
+    }
+
+    private func showPicked() {
+        previewFrom = 0
+        previewing = picked()
+    }
+
+    /// An artwork spreading open, and Preview, over the whole screen.
+    @ViewBuilder private var previews: some View {
+        if let spreading = opening {
+            PinchOpeningOverlay(opening: spreading) { opened in
+                if opened {
+                    let all = model.artworks
+                    previewFrom = all.firstIndex { $0.dir == spreading.artwork.dir } ?? 0
+                    previewing = all
+                }
+                opening = nil
+            }
+        }
+        if let list = previewing {
+            ArtworkPreview(list: list, version: model.version, start: previewFrom) { previewing = nil }
         }
     }
 
@@ -244,6 +289,10 @@ struct GalleryView: View {
                     moreOpen = false
                     model.stack(picked())
                     endSelecting()
+                },
+                onPreview: {
+                    moreOpen = false
+                    showPicked()
                 },
                 onDuplicate: {
                     moreOpen = false
@@ -370,6 +419,18 @@ struct GalleryView: View {
             .animation(Motion.studioIn, value: model.customOpen)
         }
         .background(Pc.galleryBackground.ignoresSafeArea())
+        .background {
+            PinchCatcher(
+                onBegin: startOpening(at:),
+                onChange: { scale, middle in opening?.follow(scale: scale, at: middle) },
+                onEnd: { opening?.end() }
+            )
+        }
+        .overlay {
+            ZStack {
+                previews
+            }
+        }
         .overlay { alerts }
         .overlay {
             ProgressCard(shown: model.exportShown, title: "Exporting", glyph: PcIcons.tabShare, onCancel: model.cancelExport)
@@ -433,6 +494,18 @@ struct GalleryView: View {
                 renaming = first.map { Renaming(id: $0.dir, name: $0.name, shown: $0, stack: false) }
             case "gallery-custom", "gallery-custom-colour":
                 model.openCustom()
+            case "gallery-preview", "gallery-preview-controls":
+                previewFrom = 0
+                previewing = model.artworks
+            case "gallery-pinch":
+                // once the seeded cells have been laid out
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    guard let a = model.artworks.first, let from = model.thumbAt[a.dir] else { return }
+                    let middle = CGPoint(x: from.midX, y: from.midY)
+                    let spreading = PinchOpening(artwork: a, from: from, at: middle)
+                    spreading.follow(scale: 1.6, at: CGPoint(x: middle.x + 60, y: middle.y + 40))
+                    opening = spreading
+                }
             default:
                 break
             }
@@ -517,6 +590,7 @@ private struct SelectHeader: View {
     let wide: Bool
     let canStack: Bool
     let onStack: () -> Void
+    let onPreview: () -> Void
     let onShare: () -> Void
     let onDuplicate: () -> Void
     let onDelete: () -> Void
@@ -550,6 +624,7 @@ private struct SelectHeader: View {
                 HStack(spacing: 0) {
                     if wide {
                         word("Stack", 65, enabled: canStack && count >= 2, onStack)
+                        word("Preview", 80, enabled: any, onPreview)
                         word("Share", 65, enabled: any, onShare)
                         word("Duplicate", 91, enabled: any, onDuplicate)
                         word("Delete", 70, enabled: any, onDelete)
@@ -631,7 +706,7 @@ private struct Thumbnail: View {
             if let picture {
                 Image(uiImage: picture)
                     .resizable()
-                    .interpolation(picture.size.width * picture.scale <= size.width * 3 ? .none : .high)
+                    .interpolation(thumbnailInterpolation(picture, shown: size.width))
             }
             if let chosen {
                 // unpicked, a thin light ring
@@ -675,9 +750,12 @@ private struct ArtworkCell: View {
             Thumbnail(artwork: artwork, cell: cell, version: version, chosen: chosen)
                 .background {
                     GeometryReader { place in
-                        Color.clear.onChange(of: place.frame(in: .global), initial: true) { _, frame in
-                            model.thumbAt[artwork.dir] = frame
-                        }
+                        Color.clear
+                            .onChange(of: place.frame(in: .global), initial: true) { _, frame in
+                                model.thumbAt[artwork.dir] = frame
+                            }
+                            // scrolled away it is nowhere, whatever it last said
+                            .onDisappear { model.thumbAt[artwork.dir] = nil }
                     }
                 }
                 .frame(width: cell.width, height: cell.thumb, alignment: .bottom)

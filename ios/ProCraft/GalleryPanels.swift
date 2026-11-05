@@ -286,12 +286,13 @@ struct ImageFormats: View {
     }
 }
 
-/// More options for the picked artworks: Stack (two or more) and Duplicate, under More.
+/// More options for the picked artworks: Preview, Stack (two or more) and Duplicate, under More.
 struct MoreOptions: View {
     let screen: CGSize
     let count: Int
     let canStack: Bool
     let onStack: () -> Void
+    let onPreview: () -> Void
     let onDuplicate: () -> Void
 
     private func row(_ label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
@@ -321,6 +322,8 @@ struct MoreOptions: View {
                     .padding(.leading, 24)
                     .padding(.vertical, 14)
                 VStack(spacing: 0) {
+                    row("Preview", enabled: count > 0, action: onPreview)
+                    Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
                     row("Stack", enabled: canStack && count >= 2, action: onStack)
                     Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
                     row("Duplicate", enabled: count > 0, action: onDuplicate)
