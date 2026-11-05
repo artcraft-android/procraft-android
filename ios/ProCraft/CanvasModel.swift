@@ -27,6 +27,15 @@ struct BlockedLayer {
     let layer: LayerInfo
 }
 
+/// A question over everything before something that can't be undone: what it asks, and what
+/// happens on yes.
+struct Question {
+    let title: String
+    var message = "It can't be brought back."
+    var action = "Delete"
+    let perform: () -> Void
+}
+
 /// The layers under a point held with Layer Select, the first of them made current.
 struct LayerChoiceAt {
     let at: CGPoint
@@ -169,6 +178,36 @@ final class CanvasModel {
     private(set) var previews: [String: UIImage] = [:]
     private(set) var shadedNames: [String: Bool] = [:]
     @ObservationIgnored private var previewsAsked: Set<String> = []
+    /// Goes up as the library changes: a preview drawn for a place that has since moved is dropped.
+    @ObservationIgnored private var previewsMade = 0
+    /// The Recent set's place among the sets.
+    static let recentSet = -1
+    /// The Recent set: the brushes last painted with, and those pinned there.
+    private(set) var recentBrushes: [RecentBrush] = []
+    /// The library's brush swiped open to its buttons (its key), if one is.
+    var swipedBrush: String?
+    /// The set whose name is being edited.
+    var renamingSet: Int?
+    /// A brush found from the Recent set, to be scrolled to in its own.
+    var foundBrush: String?
+    /// The brush chosen before the current one, for Previous brush.
+    @ObservationIgnored private var lastBrush: (set: UInt32, index: UInt32)?
+    /// Brushes read from files, waiting to join the library.
+    @ObservationIgnored private var brushesRead: [BrushesRead] = []
+    /// The library couldn't be kept and that was told: not again until it is kept once more.
+    @ObservationIgnored private var libraryFailing = false
+    /// Writes of the library, one at a time: each takes the library as it is when it runs.
+    private static let libraryWrites = DispatchQueue(label: "ProCraft.brushLibrary", qos: .utility)
+    /// A question open over everything.
+    var question: Question? {
+        didSet {
+            // while it is up, brushes read from a file wait to join the library: it may hold a
+            // brush by its place
+            if question == nil {
+                addBrushesRead()
+            }
+        }
+    }
 
     init(session: CanvasSession, dir: String) {
         self.session = session
@@ -285,6 +324,10 @@ final class CanvasModel {
     /// would.
     func showSet(_ index: Int) {
         shownSet = index
+        if index == Self.recentSet {
+            recentBrushes = session.recentBrushes()
+            return
+        }
         guard let choice = setChoice[index], brushSets.indices.contains(index) else { return }
         let brushes = brushSets[index].brushes
         if brushes.indices.contains(choice) {
@@ -297,6 +340,9 @@ final class CanvasModel {
         guard session.selectBrush(set: b.set, index: b.index) else { return }
         // the set left behind keeps showing the brush it had
         if let before {
+            if before.set != b.set || before.index != b.index {
+                lastBrush = (before.set, before.index)
+            }
             setChoice[Int(before.set)] = Int(before.index)
         }
         currentBrush = session.currentBrush()
@@ -325,9 +371,222 @@ final class CanvasModel {
     private func keepChoices() {
         let session = session
         let dir = Self.brushesDir
-        DispatchQueue.global(qos: .utility).async {
-            _ = session.keepBrushChoices(dir: dir)
+        Self.libraryWrites.async { [weak self] in
+            let kept = session.keepBrushChoices(dir: dir)
+            DispatchQueue.main.async { self?.libraryKept(kept) }
         }
+    }
+
+    /// Tells, once until the library is kept again, that it couldn't be (the storage full, say).
+    private func libraryKept(_ kept: Bool) {
+        if kept {
+            libraryFailing = false
+        } else if !libraryFailing {
+            libraryFailing = true
+            showNotice("The brush library couldn't be kept.", warning: true)
+        }
+    }
+
+    /// After a change to the library: read it again, keep it, and draw previews again (they go by
+    /// place).
+    private func libraryChanged() {
+        brushSets = session.brushLibrary()
+        currentBrush = session.currentBrush()
+        readSetChoices()
+        if shownSet != Self.recentSet {
+            shownSet = min(max(shownSet, 0), max(brushSets.count - 1, 0))
+        }
+        recentBrushes = session.recentBrushes()
+        readSliders()
+        previewsMade += 1
+        previews = [:]
+        shadedNames = [:]
+        previewsAsked = []
+        keepBrushLibrary()
+    }
+
+    func duplicateBrush(_ b: BrushInfo) {
+        guard session.duplicateBrush(set: b.set, index: b.index) != nil else { return }
+        libraryChanged()
+    }
+
+    func deleteBrush(_ b: BrushInfo) {
+        if session.deleteBrush(set: b.set, index: b.index) {
+            libraryChanged()
+        }
+    }
+
+    /// Moves `b` to place `index` of set `set` (a brush dragged onto a set, or along its own).
+    func moveBrush(_ b: BrushInfo, set: Int, index: Int) {
+        if set == Int(b.set), index == Int(b.index) {
+            return
+        }
+        if session.moveBrush(set: b.set, index: b.index, toSet: UInt32(set), toIndex: UInt32(index)) {
+            libraryChanged()
+        }
+    }
+
+    /// A new brush at the top of the shown set, opened in the studio.
+    func newBrush() {
+        if shownSet == Self.recentSet {
+            shownSet = currentBrush.map { Int($0.set) } ?? 0
+        }
+        guard session.newBrush(set: UInt32(shownSet)) != nil else { return }
+        libraryChanged()
+    }
+
+    /// A new set at the top of the library, shown, with its name ready to edit.
+    func newBrushSet() {
+        shownSet = Int(session.newBrushSet())
+        libraryChanged()
+        renamingSet = shownSet
+    }
+
+    func renameBrushSet(_ i: Int, name: String) {
+        renamingSet = nil
+        if session.renameBrushSet(set: UInt32(i), name: name) {
+            libraryChanged()
+        }
+    }
+
+    func changeBrushSetIcon(_ i: Int, icon: Int) {
+        if session.setBrushSetIcon(set: UInt32(i), icon: UInt32(icon)) {
+            libraryChanged()
+        }
+    }
+
+    /// Moves set `from` to place `to` (a set held and dragged onto another); the shown set stays
+    /// shown.
+    func moveBrushSet(from: Int, to: Int) {
+        guard from != to, session.moveBrushSet(set: UInt32(from), to: UInt32(to)) else { return }
+        if shownSet == from {
+            shownSet = to
+        } else if shownSet > from, shownSet <= to {
+            shownSet -= 1
+        } else if shownSet >= to, shownSet < from {
+            shownSet += 1
+        }
+        libraryChanged()
+    }
+
+    func duplicateBrushSet(_ i: Int) {
+        guard let made = session.duplicateBrushSet(set: UInt32(i)) else { return }
+        shownSet = Int(made)
+        libraryChanged()
+    }
+
+    func deleteBrushSet(_ i: Int) {
+        guard session.deleteBrushSet(set: UInt32(i)) else { return }
+        if shownSet >= i {
+            shownSet = max(shownSet - 1, 0)
+        }
+        libraryChanged()
+    }
+
+    /// Pins a brush of the Recent set there, or unpins it.
+    func pinRecentBrush(_ b: BrushInfo, pinned: Bool) {
+        guard session.pinRecentBrush(set: b.set, index: b.index, pinned: pinned) else { return }
+        recentBrushes = session.recentBrushes()
+        keepChoices()
+    }
+
+    /// Takes a brush out of the Recent set.
+    func clearRecentBrush(_ b: BrushInfo) {
+        guard session.clearRecentBrush(set: b.set, index: b.index) else { return }
+        recentBrushes = session.recentBrushes()
+        keepChoices()
+    }
+
+    /// Empties the Recent set, its pinned brushes too.
+    func clearRecentBrushes() {
+        session.clearRecentBrushes()
+        recentBrushes = []
+        keepChoices()
+    }
+
+    /// A brush of the Recent set shown in its own set, chosen there.
+    func findBrush(_ b: BrushInfo) {
+        shownSet = Int(b.set)
+        chooseBrush(b)
+        foundBrush = Self.brushKey(b)
+    }
+
+    /// Back to the brush chosen before this one (and Previous brush again comes back here).
+    func previousBrush() {
+        guard let last = lastBrush else { return }
+        let now = currentBrush
+        guard session.selectBrush(set: last.set, index: last.index) else { return }
+        lastBrush = now.map { ($0.set, $0.index) }
+        currentBrush = session.currentBrush()
+        setChoice[Int(last.set)] = Int(last.index)
+        readSliders()
+        keepChoices()
+    }
+
+    /// A brush, or (no brush) the shown set, written to a file and handed to the share sheet.
+    func shareBrush(_ b: BrushInfo?) {
+        let session = session
+        let set = shownSet
+        guard b != nil || brushSets.indices.contains(set) else { return }
+        let name = b?.name ?? brushSets[set].name
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let bytes = b.map { session.brushAsFile(set: $0.set, index: $0.index) } ?? session.brushSetAsFile(set: UInt32(set))
+            var made: URL?
+            if let bytes {
+                let file = Sharing.exportsDir
+                    .appendingPathComponent(Sharing.safeName(name, otherwise: "Brush"))
+                    .appendingPathExtension(b != nil ? "brush" : "brushset")
+                if (try? bytes.write(to: file, options: .atomic)) != nil {
+                    made = file
+                }
+            }
+            DispatchQueue.main.async {
+                if let made {
+                    Sharing.share([made])
+                } else {
+                    self?.showNotice("The brush couldn't be exported.", warning: true)
+                }
+            }
+        }
+    }
+
+    /// A brush or set file from elsewhere: read off the main thread, it joins the library and its
+    /// set is shown.
+    func importBrushes(from url: URL) {
+        let name = url.lastPathComponent
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let bytes = url.readPicked()
+            let read = bytes.flatMap { readBrushes(bytes: $0, fileName: name) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if bytes == nil {
+                    self.showNotice("This file could not be read.", warning: true)
+                } else if let read {
+                    self.brushesRead.append(read)
+                    self.addBrushesRead()
+                } else {
+                    self.showNotice("This file has no brushes in it.", warning: true)
+                }
+            }
+        }
+    }
+
+    /// Brushes read meanwhile join the library (a set of their own at the top, or a brush at the
+    /// top of a set), that set shown; not while a question holds a brush by its place, which they
+    /// would move: then once that ends.
+    private func addBrushesRead() {
+        guard question == nil, !brushesRead.isEmpty else { return }
+        if shownSet == Self.recentSet {
+            shownSet = currentBrush.map { Int($0.set) } ?? 0
+        }
+        for read in brushesRead {
+            if let set = session.addBrushesRead(read: read, shown: UInt32(shownSet)) {
+                shownSet = Int(set)
+            }
+        }
+        brushesRead = []
+        libraryChanged()
+        showNotice("Brushes added to the library.")
     }
 
     /// Draws `b`'s sample stroke off the main thread (half its own canvas: the cell shows it across
@@ -339,10 +598,12 @@ final class CanvasModel {
         previewsAsked.insert(key)
         let session = session
         let name = b.name
+        let made = previewsMade
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let t = session.brushPreview(set: b.set, index: b.index, width: 530, height: 162),
                   let image = Self.image(t) else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    guard self?.previewsMade == made else { return }
                     self?.previewsAsked.remove(key)
                     if tries > 1 {
                         self?.loadPreview(b, tries: tries - 1)
@@ -367,6 +628,7 @@ final class CanvasModel {
             }
             let under = x1 > x0 && cover > 2 * (x1 - x0) * (y1 - y0)
             DispatchQueue.main.async {
+                guard self?.previewsMade == made else { return }
                 self?.previews[key] = image
                 self?.shadedNames[key] = under
             }
@@ -404,6 +666,11 @@ final class CanvasModel {
     }
 
     func toggle(_ p: Panel) {
+        // with a brush swiped open, its button only closes the swipe
+        if p == .brushes, panel == .brushes, swipedBrush != nil {
+            swipedBrush = nil
+            return
+        }
         _ = switchModes(.panel(colour: p == .color))
         panel = panel == p ? .none : p
         if panel == .layers {
@@ -413,6 +680,16 @@ final class CanvasModel {
 
     func closePanels() {
         panel = .none
+        swipedBrush = nil
+    }
+
+    /// A tap outside the open panel closes it; with a brush swiped open, only the swipe.
+    func tapOutsidePanel() {
+        if panel == .brushes, swipedBrush != nil {
+            swipedBrush = nil
+        } else {
+            closePanels()
+        }
     }
 
     /// Whether the side bar shows: a mode taking the screen slides it off its edge.
@@ -508,8 +785,9 @@ final class CanvasModel {
     private func keepBrushLibrary() {
         let session = session
         let dir = Self.brushesDir
-        DispatchQueue.global(qos: .utility).async {
-            _ = session.keepBrushes(dir: dir)
+        Self.libraryWrites.async { [weak self] in
+            let kept = session.keepBrushes(dir: dir)
+            DispatchQueue.main.async { self?.libraryKept(kept) }
         }
     }
 

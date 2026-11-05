@@ -17,7 +17,7 @@ struct CanvasScreen: View {
                     // a touch on the canvas while a panel is open closes it and goes no further
                     Color.clear
                         .contentShape(Rectangle())
-                        .onTapGesture { model.closePanels() }
+                        .onTapGesture { model.tapOutsidePanel() }
                 }
                 if let pick = model.picking {
                     Loupe(pick: pick, current: CanvasSpace.shared.color(model.colorRgb()), pixels: model.pixels)
@@ -61,6 +61,17 @@ struct CanvasScreen: View {
                     LayerChoiceList(model: model, choice: choice, screen: screen.size)
                 }
                 BlockedDialog(model: model)
+                AlertView(
+                    content: model.question.map {
+                        AlertContent(title: $0.title, message: $0.message, action: $0.action, icon: PcIcons.trash)
+                    },
+                    onCancel: { model.question = nil },
+                    onAction: {
+                        let perform = model.question?.perform
+                        model.question = nil
+                        perform?()
+                    }
+                )
                 AlertView(
                     content: model.askRasterize ? AlertContent(
                         title: "Rasterize this text layer?",
