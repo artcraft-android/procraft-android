@@ -137,8 +137,9 @@ impl State {
     fn draw_shape(&mut self) {
         let (Some(edit), Some(old)) = (self.shape.as_ref(), self.stroke.as_ref()) else { return };
         // the outline is the path: nothing smooths it, or round its corners
-        let mut builder =
-            StrokeBuilder::with_seed(old.brush().clone(), old.diameter(), old.pointer(), 0x5eed_1234).exact_path();
+        let mut builder = StrokeBuilder::with_seed(old.brush().clone(), old.diameter(), old.pointer(), 0x5eed_1234)
+            .scaled(self.brush_scale())
+            .exact_path();
         // an ellipse goes where the stroke went, each of its points taken onto it: a stroke that
         // didn't close stays open there, as drawn, rather than meeting itself in a seam
         let outline = match edit.shape.kind {
@@ -347,7 +348,9 @@ impl CanvasSession {
         let choices = found.iter().map(|s| s.kind).collect();
         canvas.undo();
         canvas.begin_stroke(last.layer, last.style);
-        st.stroke = Some(StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), 0x5eed_1234));
+        let scale = st.brush_scale();
+        st.stroke =
+            Some(StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), 0x5eed_1234).scaled(scale));
         st.second = None;
         let (drawn, pressure, pace) = (last.drawn, last.pressure, last.pace);
         st.shape = Some(ShapeEdit { shape: first, choices, drawn, pressure, pace, held: None });
