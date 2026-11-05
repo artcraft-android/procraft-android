@@ -1216,10 +1216,13 @@ final class CanvasModel {
     /// Reads again what the core may have changed (a stroke, an undo).
     func refresh() {
         refreshFlags()
-        // undo and redo keep a snapped shape as drawn first
-        if quickShape != nil, session.quickshapeInfo() == nil {
-            quickShape = nil
-            quickShapeEditing = false
+        // undo and redo step through a snapped shape: its handles where they now are, and past its
+        // drags it gives way to the stroke as drawn and ends
+        if quickShape != nil {
+            quickShape = session.quickshapeInfo()
+            if quickShape == nil {
+                quickShapeEditing = false
+            }
         }
         layers = session.layers()
         followMaskColour()
