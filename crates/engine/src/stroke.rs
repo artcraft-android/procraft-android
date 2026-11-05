@@ -9,6 +9,8 @@ use crate::curve::Curve;
 use crate::geom::{IRect, Vec2};
 use crate::input::{Pointer, Sample};
 use crate::studio::{SPACING_FLOOR, SPACING_SPAN};
+use std::f64::consts::{PI, TAU};
+use std::sync::Arc;
 
 /// One dab of the brush tip, in canvas pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -215,6 +217,54 @@ fn pressure_keep(amount: f32) -> f32 {
     0.999 * amount.clamp(0.0, 1.0).powf(0.0625)
 }
 
+/// Motion filtering's weights for a point and those either side of it (an odd count, adding up to
+/// one), `amount` and `expression` 0..1, at `rate` samples a second. A windowed low-pass, but only
+/// how much of each frequency it lets through is kept, so nothing is moved along: the path doesn't
+/// lag or cut inside a curve.
+fn motion_weights(amount: f32, expression: f32, rate: f64) -> Vec<f32> {
+    let strength = f64::from(amount.clamp(0.0, 1.0)).powf(MOTION_POWER);
+    let cut = rate * (1.0 - strength) + MOTION_LOWEST_CUT * strength;
+    let longer = 1.0 + (MOTION_EXPRESSION_LONGEST - 1.0) * f64::from(expression.clamp(0.0, 1.0));
+    let wanted = rate / cut * longer;
+    let size = (wanted.ceil() as usize).next_power_of_two().clamp(2, MOTION_MOST_SAMPLES);
+    let span = wanted.min((size - 1) as f64);
+    let band = 2.0 * cut / rate;
+    let filter: Vec<f64> = (0..span as usize)
+        .map(|i| {
+            let x = (i as f64 + 1.0 - span / 2.0) * band * PI;
+            let sinc = if x == 0.0 { 1.0 } else { x.sin() / x };
+            // a Blackman-Harris window
+            let t = TAU * i as f64 / span;
+            band * sinc * (0.35875 - 0.48829 * t.cos() + 0.14128 * (2.0 * t).cos() - 0.01168 * (3.0 * t).cos())
+        })
+        .collect();
+    let circle: Vec<(f64, f64)> = (0..size).map(|k| (TAU * k as f64 / size as f64).sin_cos()).collect();
+    let turn = |k: usize| circle.get(k & (size - 1)).copied().unwrap_or((0.0, 1.0));
+    let through: Vec<f64> = (0..=size / 2)
+        .map(|k| {
+            let (mut re, mut im) = (0.0, 0.0);
+            for (n, h) in filter.iter().enumerate() {
+                let (sin, cos) = turn(k * n);
+                re += h * cos;
+                im += h * sin;
+            }
+            f64::hypot(re, im)
+        })
+        .collect();
+    // back from frequencies to samples, each way from the point
+    let side: Vec<f64> = (0..=size / 2)
+        .map(|j| {
+            let wave = |(k, t): (usize, &f64)| t * turn(j * k).1 * if k == 0 || k == size / 2 { 1.0 } else { 2.0 };
+            through.iter().enumerate().map(wave).sum()
+        })
+        .collect();
+    let least = side.first().map_or(0.0, |w| w.abs() * 1e-5);
+    let reach = side.iter().rposition(|w| w.abs() > least).unwrap_or(0);
+    let all: Vec<f64> = side.iter().take(reach + 1).rev().chain(side.iter().skip(1).take(reach)).copied().collect();
+    let sum: f64 = all.iter().sum();
+    all.iter().map(|w| (w / sum) as f32).collect()
+}
+
 /// What a speed control of `amount` leaves of a size or opacity at `speed` (0..1): faster input
 /// takes away as far as the amount says; an amount below 0, slower input does (as measured).
 fn by_speed(amount: f32, speed: f32) -> f32 {
@@ -226,10 +276,16 @@ fn by_speed(amount: f32, speed: f32) -> f32 {
 /// samples' worth each way (at the rate above), fewer as the strength to this power falls.
 const MOST_AVERAGED: f32 = 120.0;
 const STABILIZATION_POWER: f32 = 2.2;
-/// At full motion filtering, how little the filtered pen moves toward each new point; and at full
-/// expression, how much of the way back to the pen it comes.
-const MOTION_FILTER_MOST: f32 = 0.9;
-const EXPRESSION_MOST: f32 = 0.5;
+/// Motion filtering lets through what moves slower than its cut and takes out what shakes faster:
+/// at full strength the cut is this, in hertz. Below that it rises to the input's own rate with
+/// the strength to this power, so a little is strong already.
+const MOTION_LOWEST_CUT: f64 = 1.0 / 16.0;
+const MOTION_POWER: f64 = 0.01;
+/// How many times longer full expression makes the filter: longer cuts sharper, so more of the
+/// hand's own motion under the cut comes through.
+const MOTION_EXPRESSION_LONGEST: f64 = 8.0;
+/// The most samples the filter may span.
+const MOTION_MOST_SAMPLES: usize = 1024;
 /// Brush files keep the spacing jitter and the speed's spacing at ten times the studio's
 /// controls: the share of a gap they widen it by.
 const SPACING_FILE_SCALE: f32 = 10.0;
@@ -456,8 +512,8 @@ fn catmull_rom(p0: Option<Vec2>, p1: Vec2, p2: Vec2, p3: Option<Vec2>, t: f32) -
     }
 }
 
-/// What stabilisation holds of the input: its points, evenly a sample apart at the tuned rate
-/// however it came, each to be averaged with those either side once they are known. Past either
+/// What stabilisation and motion filtering hold of the input: its points, evenly a sample apart at
+/// the tuned rate however it came, each to be averaged with those either side once they are known. Past either
 /// end the input carries on turned half way round about that end, so the average starts and ends
 /// where the input does, however few points there are.
 #[derive(Clone, Debug, Default)]
@@ -557,7 +613,12 @@ impl Averaged {
 
     /// Point `i` averaged with the `half` either side of it, `sum` being them all added up.
     fn mean(&self, i: usize, half: usize, sum: [f32; 8]) -> Option<PathPoint> {
-        let [x, y, pressure, a, b, c, d, e] = sum.map(|v| v / (2 * half + 1) as f32);
+        self.at_lanes(i, sum.map(|v| v / (2 * half + 1) as f32))
+    }
+
+    /// Point `i` with its position and pressures as `lanes` has them.
+    fn at_lanes(&self, i: usize, lanes: [f32; 8]) -> Option<PathPoint> {
+        let [x, y, pressure, a, b, c, d, e] = lanes;
         let held = *self.points.get(self.place(i) as usize)?;
         let soft = [a, b, c, d, e].map(|v| v.clamp(0.0, 1.0));
         Some(PathPoint { pos: Vec2::new(x, y), pressure: pressure.clamp(0.0, 1.0), soft, ..held })
@@ -675,8 +736,10 @@ pub struct StrokeBuilder {
     /// Screen points a canvas pixel spans, for the speed dynamics.
     points_per_pixel: f32,
     input: InputSettings,
-    /// Where the motion filter has the pen.
-    filtered: Option<Vec2>,
+    /// What the path's points are averaged with: motion filtering's weights, stabilisation's
+    /// average of them if it has one too. Made as the stroke starts; empty if there is no motion
+    /// filtering.
+    weights: Option<Arc<[f32]>>,
     /// Where in a moving grain the stroke starts.
     grain_start: Vec2,
     /// When each sample came (milliseconds, always later than the one before) and how far the
@@ -837,7 +900,7 @@ impl StrokeBuilder {
             screen_turn: 0.0,
             points_per_pixel: 1.0,
             input: InputSettings::default(),
-            filtered: None,
+            weights: None,
             grain_start: Vec2::ZERO,
             history: Vec::new(),
             input_length: 0.0,
@@ -1114,18 +1177,10 @@ impl StrokeBuilder {
             self.speed = ((now + held * self.speed) / (held + 1.0)).clamp(0.0, 1.0);
             self.speed_known = true;
         }
-        // motion filtering: the pen followed slowly, so small shakes fall away; the expression
-        // gives back part of the hand's own motion
-        let mut pos = s.pos;
-        let filtering = together(self.extras.motion_filtering, self.input.motion_filtering);
-        if filtering > 0.0 && !self.exact {
-            let follow = 1.0 - (filtering * MOTION_FILTER_MOST).powf(steps);
-            let f = self.filtered.map_or(s.pos, |f| f.lerp(s.pos, follow));
-            self.filtered = Some(f);
-            let expression = together(self.extras.motion_expression, self.input.motion_expression);
-            pos = f.lerp(s.pos, expression * EXPRESSION_MOST);
+        if self.weights.is_none() {
+            self.weights = Some(self.made_weights().into());
         }
-        let target = PathPoint { pos, pressure, soft, tilt, azimuth, roll, speed: self.speed };
+        let target = PathPoint { pos: s.pos, pressure, soft, tilt, azimuth, roll, speed: self.speed };
         let dt = self.last_sample.map(|last| (s.time_ms - last.time_ms).clamp(0.5, 50.0));
         self.keep_time(s);
         if let Some(last) = self.last_sample {
@@ -1134,8 +1189,8 @@ impl StrokeBuilder {
         self.last_sample = Some(s);
         let half = self.averaged();
         if half > 0 {
-            // stabilisation: each point waits until those after it within reach of its average
-            // are known
+            // stabilisation and motion filtering: each point waits until those after it within
+            // reach of its average are known
             let times = self.history.iter().rev().map(|h| h.0);
             let gap = times.clone().next().zip(times.clone().nth(1)).map_or(0.0, |(now, before)| now - before);
             self.averaged.add(target, (gap / interval).min(MOST_STEPS));
@@ -1170,6 +1225,24 @@ impl StrokeBuilder {
         if i >= to {
             return;
         }
+        if let Some(weights) = self.weights.clone().filter(|w| !w.is_empty()) {
+            let (from, end) = (self.averaged.place(i) - half as isize, self.averaged.place(to - 1) + half as isize);
+            let lanes: Vec<[f32; 8]> = (from..=end).map(|j| self.averaged.lanes(j)).collect();
+            for around in lanes.windows(weights.len()) {
+                let mut sum = [0.0f32; 8];
+                for (w, point) in weights.iter().zip(around) {
+                    for (s, v) in sum.iter_mut().zip(point) {
+                        *s += w * v;
+                    }
+                }
+                if let Some(next) = self.averaged.at_lanes(i, sum) {
+                    self.go_on(next, Some(interval), out);
+                }
+                i += 1;
+            }
+            self.averaged.settled = i;
+            return;
+        }
         let mut sum = self.averaged.sum(i, half);
         while i < to {
             let next = self.averaged.mean(i, half, sum);
@@ -1192,9 +1265,37 @@ impl StrokeBuilder {
         }
     }
 
-    /// How many samples (at the tuned rate) each way stabilisation averages: none when it is off
-    /// (and on an exact path).
+    /// How many samples (at the tuned rate) each way the path's points are averaged: none when
+    /// neither stabilisation nor motion filtering is on (and on an exact path).
     fn averaged(&self) -> usize {
+        match self.weights.as_deref() {
+            Some(weights) if !weights.is_empty() => weights.len() / 2,
+            _ => self.stabilised(),
+        }
+    }
+
+    /// Motion filtering's weights, with stabilisation's average of them: both go by the same
+    /// points, so one pass does the two. The stronger of the app's and the brush's.
+    fn made_weights(&self) -> Vec<f32> {
+        let amount = self.extras.motion_filtering.max(self.input.motion_filtering);
+        if self.exact || amount <= 0.0 {
+            return Vec::new();
+        }
+        let expression = self.extras.motion_expression.max(self.input.motion_expression);
+        let rate = if self.pointer.has_pressure() { PEN_RATE } else { FINGER_RATE };
+        let filter = motion_weights(amount, expression, rate);
+        let width = 2 * self.stabilised() + 1;
+        let mut both = vec![0.0; filter.len() + width - 1];
+        for (i, w) in filter.iter().enumerate() {
+            for b in both.iter_mut().skip(i).take(width) {
+                *b += w / width as f32;
+            }
+        }
+        both
+    }
+
+    /// How many samples each way stabilisation averages.
+    fn stabilised(&self) -> usize {
         if self.exact {
             return 0;
         }
@@ -2943,7 +3044,9 @@ mod tests {
             b.set_setting("motion_filtering", filtering);
             let mut s = StrokeBuilder::new(b, 4.0, Pointer::Stylus);
             s.add(&zigzag);
-            let ys: Vec<f32> = s.stamps()[20..].iter().map(|s| s.center.y).collect();
+            let stamps = s.finish();
+            let third = stamps.len() / 3;
+            let ys: Vec<f32> = stamps.iter().skip(third).take(third).map(|s| s.center.y).collect();
             ys.iter().cloned().fold(f32::MIN, f32::max) - ys.iter().cloned().fold(f32::MAX, f32::min)
         };
         assert!(spread(1.0) < spread(0.0) * 0.5, "{} {}", spread(1.0), spread(0.0));
@@ -3176,9 +3279,9 @@ mod tests {
             (800.0 - last.center.x, last.radius)
         };
         let close = |a: f32, b: f32, share: f32| (a - b).abs() <= share * a.abs().max(b.abs());
-        for (setting, behind) in [("stabilization", 200.0), ("motion_filtering", 15.0)] {
+        for (setting, amount, behind) in [("stabilization", 1.0, 200.0), ("motion_filtering", 0.25, 15.0)] {
             let mut b = plain();
-            b.set_setting(setting, 1.0);
+            b.set_setting(setting, amount);
             let (slow, fast) = (end(&b, PEN_RATE).0, end(&b, PEN_RATE * 3.0).0);
             assert!(slow > behind, "{setting} lags {slow}");
             assert!(close(slow, fast, 0.1), "{setting}: {slow} behind at 240 Hz, {fast} at 720 Hz");
@@ -3291,6 +3394,46 @@ mod tests {
     }
 
     #[test]
+    fn motion_filtering_is_a_low_pass_that_moves_nothing_along() {
+        let weights = motion_weights(0.25, 0.0, PEN_RATE);
+        assert_eq!(weights.len() % 2, 1);
+        assert!((weights.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+        assert!(weights.iter().zip(weights.iter().rev()).all(|(a, b)| (a - b).abs() < 1e-6));
+        assert!(motion_weights(0.75, 0.0, PEN_RATE).len() > weights.len());
+        assert!(motion_weights(0.25, 1.0, PEN_RATE).len() > weights.len());
+        assert!(motion_weights(1.0, 1.0, PEN_RATE).len() <= MOTION_MOST_SAMPLES + 1);
+        // how much of a wave at `hertz` comes through
+        let through = |hertz: f64| {
+            let reach = (weights.len() / 2) as f64;
+            let at = |(n, w): (usize, &f32)| f64::from(*w) * (TAU * hertz * (n as f64 - reach) / PEN_RATE).cos();
+            weights.iter().enumerate().map(at).sum::<f64>()
+        };
+        assert!(through(1.0) > 0.9, "{}", through(1.0));
+        assert!(through(30.0).abs() < 0.02, "{}", through(30.0));
+        // a slow circle keeps its size, where following behind the pen would cut inside it; both
+        // ends stay where the input's are
+        let circle: Vec<Sample> = (0..=480)
+            .map(|i| {
+                let t = f64::from(i) / PEN_RATE;
+                let (y, x) = (TAU * 0.5 * t).sin_cos();
+                Sample::at(Vec2::new(300.0 + 200.0 * x as f32, 300.0 + 200.0 * y as f32), 1.0, t * 1000.0)
+            })
+            .collect();
+        let mut b = plain();
+        b.set_setting("motion_filtering", 0.25);
+        let mut s = StrokeBuilder::new(b, 4.0, Pointer::Stylus);
+        s.add(&circle);
+        let stamps = s.finish();
+        let centre = Vec2::new(300.0, 300.0);
+        let third = stamps.len() / 3;
+        for stamp in stamps.iter().skip(third).take(third) {
+            let off = stamp.center.distance(centre) - 200.0;
+            assert!(off.abs() < 3.0, "{off}");
+        }
+        assert!(stamps[0].center.distance(circle[0].pos) < 3.0, "{:?}", stamps[0].center);
+    }
+
+    #[test]
     fn the_apps_input_settings_smooth_and_curve_pressure() {
         let brush = Brush::round_pen();
         let samples: Vec<Sample> = (0..120)
@@ -3303,19 +3446,31 @@ mod tests {
                 s
             })
             .collect();
-        let spread = |input: InputSettings| {
+        // a line waving at `hertz`: how far it waves in the middle of the stroke
+        let spread = |hertz: f64, input: InputSettings| {
+            let wave: Vec<Sample> = (0..=480)
+                .map(|i| {
+                    let t = f64::from(i) / PEN_RATE;
+                    let y = 6.0 * (TAU * hertz * t).sin() as f32;
+                    let mut s = Sample::at(Vec2::new(i as f32 * 2.0, y), 0.5, t * 1000.0);
+                    s.tilt = 0.0;
+                    s
+                })
+                .collect();
             let mut b = StrokeBuilder::new(brush.clone(), 4.0, Pointer::Stylus).with_input(input);
-            let stamps = b.add(&samples);
-            // once settled: the last stamps
-            let ys: Vec<f32> = stamps.iter().rev().take(15).map(|s| s.center.y).collect();
+            b.add(&wave);
+            let stamps = b.finish();
+            let third = stamps.len() / 3;
+            let ys: Vec<f32> = stamps.iter().skip(third).take(third).map(|s| s.center.y).collect();
             ys.iter().cloned().fold(f32::MIN, f32::max) - ys.iter().cloned().fold(f32::MAX, f32::min)
         };
-        let plain = spread(InputSettings::default());
-        let filtered = spread(InputSettings { motion_filtering: 1.0, ..InputSettings::default() });
-        let expressive =
-            spread(InputSettings { motion_filtering: 1.0, motion_expression: 1.0, ..InputSettings::default() });
-        assert!(filtered < plain * 0.5, "{filtered} vs {plain}");
-        assert!(expressive > filtered, "{expressive} vs {filtered}");
+        let filtering = InputSettings { motion_filtering: 0.1, ..InputSettings::default() };
+        let expressive = InputSettings { motion_expression: 1.0, ..filtering.clone() };
+        let (plain, filtered) = (spread(30.0, InputSettings::default()), spread(30.0, filtering.clone()));
+        assert!(filtered < plain * 0.1, "{filtered} vs {plain}");
+        // the hand's own motion, under the cut, comes through more with expression
+        let (kept, more) = (spread(4.0, filtering), spread(4.0, expressive));
+        assert!(more > kept, "{more} vs {kept}");
         // a curve that doubles light pressure makes bigger stamps
         let curved = InputSettings {
             pressure_curve: Curve::new(&[Vec2::new(0.0, 0.0), Vec2::new(0.5, 1.0), Vec2::new(1.0, 1.0)]),
