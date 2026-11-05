@@ -472,6 +472,8 @@ struct GalleryView: View {
             .animation(Motion.studioIn, value: model.customOpen)
         }
         .background(Pc.galleryBackground.ignoresSafeArea())
+        // Preview has the whole screen, its close button where the status bar's battery is
+        .statusBarHidden(previewing != nil)
         .background {
             PinchCatcher(
                 onBegin: startOpening(at:),
@@ -551,6 +553,10 @@ struct GalleryView: View {
                 renaming = first.map { Renaming(id: $0.dir, name: $0.name, shown: $0, stack: false) }
             case "gallery-custom", "gallery-custom-colour":
                 model.openCustom()
+            case "gallery-more":
+                selecting = true
+                selected = Set(model.artworks.prefix(2).map(\.dir))
+                moreOpen = true
             case "gallery-about":
                 about = true
             case "gallery-recovery":

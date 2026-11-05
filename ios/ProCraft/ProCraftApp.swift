@@ -122,12 +122,27 @@ enum ScreenCapture {
 
     /// A few artworks for the gallery's captures to show.
     static func seedGallery(_ gallery: GalleryModel) {
-        guard gallery.entries.isEmpty else { return }
-        for size in [(1200, 900), (900, 1200), (1000, 1000)] {
-            let session = CanvasSession(width: UInt32(size.0), height: UInt32(size.1))
-            try? session.save(dir: Gallery.store.newFolder(folder: nil))
+        if gallery.entries.isEmpty {
+            for size in [(1200, 900), (900, 1200), (1000, 1000)] {
+                let session = CanvasSession(width: UInt32(size.0), height: UInt32(size.1))
+                try? session.save(dir: Gallery.store.newFolder(folder: nil))
+            }
+            gallery.reload()
         }
-        gallery.reload()
+        // never drawn, they have no pictures of their own, and Preview and a spread show one
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        for (artwork, colour) in zip(gallery.artworks, [UIColor.systemTeal, .systemOrange, .systemPurple]) {
+            let size = CGSize(width: CGFloat(artwork.width) / 4, height: CGFloat(artwork.height) / 4)
+            let png = UIGraphicsImageRenderer(size: size, format: format).pngData { context in
+                colour.setFill()
+                context.fill(CGRect(origin: .zero, size: size))
+                UIColor.white.setFill()
+                context.cgContext.fillEllipse(in: CGRect(origin: .zero, size: size).insetBy(dx: size.width * 0.3, dy: size.height * 0.3))
+            }
+            try? png.write(to: URL(fileURLWithPath: artwork.dir).appendingPathComponent("thumbnail.png"))
+        }
+        gallery.artworkSaved()
     }
 
     /// Transform open over a filled layer: on an empty one there is nothing to move.
