@@ -157,15 +157,34 @@ struct BrushChange {
 }
 
 impl State {
-    /// The brush being edited.
-    fn studio_brush(&mut self) -> Option<&mut Brush> {
+    /// The brush open in the studio, whichever of a dual brush's parts shows.
+    fn studio_whole(&mut self) -> Option<&mut Brush> {
         let ((set, index), _) = self.studio.as_ref()?;
         let (set, index) = (*set, *index);
         self.library.get_mut(set)?.brushes.get_mut(index)
     }
 
+    /// The brush being edited: a dual brush's first or second, as shown.
+    fn studio_brush(&mut self) -> Option<&mut Brush> {
+        let second = self.studio_second;
+        let brush = self.studio_whole()?;
+        if second { brush.secondary.as_deref_mut() } else { Some(brush) }
+    }
+
+    /// A dual brush's first (without its second) or `second` alone, as it is now.
+    pub(crate) fn studio_part(&mut self, second: bool) -> Option<Brush> {
+        let brush = self.studio_whole()?;
+        if second {
+            brush.secondary.as_deref().cloned()
+        } else {
+            Some(Brush { secondary: None, thumbnail: None, ..brush.clone() })
+        }
+    }
+
     /// The brush being edited, about to change: its preview is drawn afresh from now on.
     fn studio_change(&mut self) -> Option<&mut Brush> {
+        // a dual brush's shows both parts
+        self.studio_whole()?.thumbnail = None;
         let brush = self.studio_brush()?;
         brush.thumbnail = None;
         Some(brush)
@@ -189,8 +208,37 @@ impl CanvasSession {
                 brush.reset_point = Some(ResetPoint::of(brush, now()));
             }
             st.studio = Some((at, st.brush(st.tool).clone()));
+            st.studio_second = false;
         }
         st.brush(st.tool).name.clone()
+    }
+
+    /// Whether the brush open in the studio is a dual brush.
+    pub fn studio_is_dual(&self) -> bool {
+        self.shared.lock().studio_whole().is_some_and(|b| b.secondary.is_some())
+    }
+
+    /// Whether a dual brush's second is the part shown, its pages and controls.
+    pub fn studio_shows_second(&self) -> bool {
+        self.shared.lock().studio_second
+    }
+
+    /// Shows a dual brush's first or `second` in the studio (a plain brush keeps its one part).
+    pub fn studio_show_second(&self, second: bool) {
+        let mut st = self.shared.lock();
+        st.studio_second = second && st.studio_whole().is_some_and(|b| b.secondary.is_some());
+    }
+
+    /// How a dual brush's two strokes combine: a mode of `combine_blend_modes`.
+    pub fn studio_combine_mode(&self) -> u32 {
+        self.shared.lock().studio_whole().map_or(0, |b| b.setting("dual_blend").round().max(0.0) as u32)
+    }
+
+    pub fn set_studio_combine_mode(&self, mode: u32) {
+        if let Some(brush) = self.shared.lock().studio_whole() {
+            brush.thumbnail = None;
+            brush.set_setting("dual_blend", mode as f32);
+        }
     }
 
     /// Who made the brush being edited, and when its reset point was made.
@@ -566,6 +614,7 @@ impl CanvasSession {
     pub fn studio_end(&self, keep: bool) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        st.studio_second = false;
         let Some(((set, index), before)) = st.studio.take() else { return };
         if !keep && let Some(brush) = st.library.get_mut(set).and_then(|s| s.brushes.get_mut(index)) {
             // a reset point made meanwhile stays

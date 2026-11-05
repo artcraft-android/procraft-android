@@ -285,17 +285,65 @@ impl CanvasSession {
     /// A sample stroke drawn with the brush, white on transparent, fitted into `width` × `height`
     /// pixels.
     pub fn brush_preview(&self, set: u32, index: u32, width: u32, height: u32) -> Option<ThumbnailImage> {
+        let brush = self.shared.lock().library.get(set as usize)?.brushes.get(index as usize)?.clone();
+        self.drawn_preview(brush, width, height)
+    }
+
+    /// The same of the first or `second` part alone of the dual brush open in the studio.
+    pub fn studio_part_preview(&self, second: bool, width: u32, height: u32) -> Option<ThumbnailImage> {
+        let brush = self.shared.lock().studio_part(second)?;
+        self.drawn_preview(brush, width, height)
+    }
+}
+
+/// Where a tool's notches are kept on a brush.
+pub(crate) fn notch_tool(tool: crate::ToolKind) -> usize {
+    procraft_engine::brush::Notches::tool(tool == crate::ToolKind::Paint, tool == crate::ToolKind::Smudge)
+}
+
+/// A square grey picture `n` pixels a side averaged down to half that.
+fn halved(pixels: &[u8], n: usize) -> Vec<u8> {
+    let h = n / 2;
+    let at = |x: usize, y: usize| u32::from(pixels.get(y * n + x).copied().unwrap_or(0));
+    (0..h * h)
+        .map(|i| {
+            let (x, y) = (i % h * 2, i / h * 2);
+            ((at(x, y) + at(x + 1, y) + at(x, y + 1) + at(x + 1, y + 1) + 2) / 4) as u8
+        })
+        .collect()
+}
+
+/// A square grey picture `n` pixels a side read between its pixels at (`u`, `v`) (pixel centres
+/// on whole numbers), 0..1; nothing outside it.
+fn bilinear(pixels: &[u8], n: usize, u: f32, v: f32) -> f32 {
+    let at = |x: i64, y: i64| {
+        if x < 0 || y < 0 || x >= n as i64 || y >= n as i64 {
+            0.0
+        } else {
+            f32::from(pixels.get(y as usize * n + x as usize).copied().unwrap_or(0)) / 255.0
+        }
+    };
+    let (x0, y0) = (u.floor(), v.floor());
+    let (fx, fy) = (u - x0, v - y0);
+    let (x0, y0) = (x0 as i64, y0 as i64);
+    let top = at(x0, y0) * (1.0 - fx) + at(x0 + 1, y0) * fx;
+    let bottom = at(x0, y0 + 1) * (1.0 - fx) + at(x0 + 1, y0 + 1) * fx;
+    top * (1.0 - fy) + bottom * fy
+}
+
+impl CanvasSession {
+    /// `brush`'s sample stroke (see [`CanvasSession::brush_preview`]).
+    fn drawn_preview(&self, brush: procraft_engine::brush::Brush, width: u32, height: u32) -> Option<ThumbnailImage> {
         let (w, h) = (width.clamp(16, 2048), height.clamp(16, 1024));
         let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
+        // the preview it came with, while it is as it came
+        if let Some((tw, th, rgba)) = brush.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) {
+            return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
+        }
         // what it needs taken under the lock; drawn without it, so painting goes on meanwhile
-        let (brush, gpu, kept) = {
+        let (gpu, kept) = {
             let mut st = self.shared.lock();
-            let brush = st.library.get(set as usize)?.brushes.get(index as usize)?.clone();
-            // the preview it came with, while it is as it came
-            if let Some((tw, th, rgba)) = brush.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) {
-                return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
-            }
-            (brush, st.gpu.clone()?, st.preview.take())
+            (st.gpu.clone()?, st.preview.take())
         };
         // drawn on a canvas of the sample stroke's own, then fitted into the preview
         let (mut canvas, mut doc) = match kept {
@@ -352,39 +400,4 @@ impl CanvasSession {
         self.shared.lock().preview.get_or_insert((canvas, doc));
         Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba?, w, h) })
     }
-}
-
-/// Where a tool's notches are kept on a brush.
-pub(crate) fn notch_tool(tool: crate::ToolKind) -> usize {
-    procraft_engine::brush::Notches::tool(tool == crate::ToolKind::Paint, tool == crate::ToolKind::Smudge)
-}
-
-/// A square grey picture `n` pixels a side averaged down to half that.
-fn halved(pixels: &[u8], n: usize) -> Vec<u8> {
-    let h = n / 2;
-    let at = |x: usize, y: usize| u32::from(pixels.get(y * n + x).copied().unwrap_or(0));
-    (0..h * h)
-        .map(|i| {
-            let (x, y) = (i % h * 2, i / h * 2);
-            ((at(x, y) + at(x + 1, y) + at(x, y + 1) + at(x + 1, y + 1) + 2) / 4) as u8
-        })
-        .collect()
-}
-
-/// A square grey picture `n` pixels a side read between its pixels at (`u`, `v`) (pixel centres
-/// on whole numbers), 0..1; nothing outside it.
-fn bilinear(pixels: &[u8], n: usize, u: f32, v: f32) -> f32 {
-    let at = |x: i64, y: i64| {
-        if x < 0 || y < 0 || x >= n as i64 || y >= n as i64 {
-            0.0
-        } else {
-            f32::from(pixels.get(y as usize * n + x as usize).copied().unwrap_or(0)) / 255.0
-        }
-    };
-    let (x0, y0) = (u.floor(), v.floor());
-    let (fx, fy) = (u - x0, v - y0);
-    let (x0, y0) = (x0 as i64, y0 as i64);
-    let top = at(x0, y0) * (1.0 - fx) + at(x0 + 1, y0) * fx;
-    let bottom = at(x0, y0 + 1) * (1.0 - fx) + at(x0 + 1, y0 + 1) * fx;
-    top * (1.0 - fy) + bottom * fy
 }

@@ -510,6 +510,8 @@ pub(crate) struct State {
     liquify_last: Option<Vec2>,
     /// The brush studio is open on this (set, brush), and the brush as it opened.
     studio: Option<((usize, usize), Brush)>,
+    /// It shows a dual brush's second, not its first.
+    studio_second: bool,
     /// The adjustment is painted on (Pencil); cloning, from where, and by how far once it starts.
     pencil: bool,
     cloning: bool,
@@ -1248,6 +1250,7 @@ impl CanvasSession {
             last_filter: None,
             liquify_last: None,
             studio: None,
+            studio_second: false,
             pencil: false,
             cloning: false,
             simplified_undos: true,

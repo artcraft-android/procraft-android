@@ -261,6 +261,15 @@ pub fn brush_blend_modes() -> Vec<BlendModeInfo> {
         .collect()
 }
 
+/// The modes a dual brush's two strokes combine by, in the order the studio lists them.
+#[uniffi::export]
+pub fn combine_blend_modes() -> Vec<BlendModeInfo> {
+    procraft_engine::brush::combine_modes()
+        .into_iter()
+        .map(|(id, name)| BlendModeInfo { id, name: name.to_owned() })
+        .collect()
+}
+
 /// The modes a brush's grain blends by, in the order the studio lists them.
 #[uniffi::export]
 pub fn grain_blend_modes() -> Vec<BlendModeInfo> {

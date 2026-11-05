@@ -255,6 +255,26 @@ pub fn grain_blends() -> Vec<(u32, &'static str)> {
     modes
 }
 
+/// The modes a dual brush's two strokes combine by, in the order the studio lists them.
+pub fn combine_modes() -> Vec<(u32, &'static str)> {
+    use crate::document::BlendMode as B;
+    [
+        B::Multiply,
+        B::Darken,
+        B::ColorBurn,
+        B::LinearBurn,
+        B::Normal,
+        B::Lighten,
+        B::ColorDodge,
+        B::Overlay,
+        B::HardMix,
+        B::Difference,
+    ]
+    .iter()
+    .map(|m| (m.id(), m.name()))
+    .collect()
+}
+
 /// The blend mode that lays a brush's paint under what the layer has (only brushes and their burnt
 /// edges have it), numbered past the grain's own modes.
 pub const BRUSH_BEHIND: u32 = 29;

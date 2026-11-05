@@ -3138,6 +3138,37 @@ fn a_group_frame_shows_the_layers_showing_in_it() {
 }
 
 #[test]
+fn the_studio_edits_either_part_of_a_dual_brush_and_a_cancel_puts_back_both() {
+    let Some(s) = session(64, 64) else { return };
+    let at = s.current_brush();
+    assert!(s.combine_brushes(at.set, at.index, if at.index == 0 { 1 } else { 0 }));
+    s.studio_begin();
+    assert!(s.studio_is_dual());
+    let spacing = || s.studio_settings(vec!["spacing".to_owned()])[0];
+    let (first, was) = (spacing(), s.studio_combine_mode());
+    s.studio_show_second(true);
+    assert!(s.studio_shows_second());
+    let second = spacing();
+    s.set_studio_setting("spacing".to_owned(), second + 0.1);
+    assert!((spacing() - second - 0.1).abs() < 1e-3, "the second took it");
+    s.studio_show_second(false);
+    assert_eq!(spacing(), first, "the first didn't");
+    // how they combine is the pair's, whichever part shows
+    let multiply = crate::layers::combine_blend_modes()[0].id;
+    s.studio_show_second(true);
+    s.set_studio_combine_mode(multiply);
+    assert_eq!(s.studio_combine_mode(), multiply);
+    assert!(s.studio_part_preview(false, 64, 32).is_some() && s.studio_part_preview(true, 64, 32).is_some());
+    s.studio_end(false);
+    s.studio_begin();
+    assert!(!s.studio_shows_second(), "it opens on the first");
+    s.studio_show_second(true);
+    assert_eq!(spacing(), second);
+    assert_eq!(s.studio_combine_mode(), was);
+    s.studio_end(false);
+}
+
+#[test]
 fn layers_export_as_animations() {
     let Some(s) = session(40, 40) else { return };
     s.set_brush_size(0.6);
