@@ -137,7 +137,7 @@ pub fn is_pen(id: u64) -> Option<bool> {
 
 /// The system said pointer `id` is a pen (`pen`) or a finger.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
-fn pointer_kind(id: u64, pen: bool) {
+pub(crate) fn pointer_kind(id: u64, pen: bool) {
     if let Ok(mut kinds) = KINDS.lock() {
         kinds.get_or_insert_with(Default::default).insert(id, pen);
     }

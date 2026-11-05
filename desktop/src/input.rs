@@ -3,7 +3,8 @@
 //! it can't do by touch: the wheel zooms, and the middle button (or space) moves the canvas; on a
 //! model it turns it, as a finger does, and with Shift moves it. Dragged with Space and Ctrl (⌘)
 //! held it zooms the canvas, with R held it turns it (with Shift in 15° steps), and R tapped turns
-//! it a step (the core's key drags, keys.rs). A pen and fingers go on as they do.
+//! it a step (the core's key drags, keys.rs). A pen with those keys held does as the mouse does;
+//! otherwise a pen and fingers go on as they do.
 
 use std::time::{Duration, Instant};
 
@@ -47,7 +48,7 @@ pub struct Input {
     panning: bool,
     /// The mouse dragged with a key held, zooming or turning the canvas (the core's key drag).
     key_drag: Option<KeyDrag>,
-    /// The pen moving the view (pressed with space held), as the mouse does.
+    /// The pen moving the view (pressed with space or R held), as the mouse does.
     pen_panning: Option<u64>,
     /// A tablet's pen pressed the mouse pointer (X11, a Mac): its pressure as last read, for the
     /// stroke's moves while it goes unread a moment (another pointer heard from in between).
@@ -157,6 +158,17 @@ impl Input {
         } else {
             None
         }
+    }
+
+    /// A press at `p` with keys held begins the drag they make of it, if they make one. True if
+    /// they do.
+    fn begin_key_drag(&mut self, session: &CanvasSession, p: (f32, f32)) -> bool {
+        let Some(how) = self.drag_held() else { return false };
+        session.key_drag_begin(how, p.0, p.1);
+        self.key_drag = Some(how);
+        self.space_used = true;
+        self.r_dragged |= how == KeyDrag::Turn;
+        true
     }
 
     fn end_key_drag(&mut self, session: &CanvasSession) {
@@ -305,6 +317,10 @@ impl Input {
                 self.alt = false;
                 self.shift = false;
                 self.end_key_drag(session);
+                // (the pen's lift, like a key's, may never come)
+                if self.pen_panning.take().is_some() {
+                    self.panning = false;
+                }
                 self.ignored.clear();
                 false
             }
@@ -338,12 +354,7 @@ impl Input {
                     (MouseButton::Left, ElementState::Pressed)
                         if self.down.is_empty() && !self.panning && !over(p) && self.drag_held().is_some() =>
                     {
-                        if let Some(how) = self.drag_held() {
-                            session.key_drag_begin(how, p.0, p.1);
-                            self.key_drag = Some(how);
-                            self.space_used = true;
-                            self.r_dragged |= how == KeyDrag::Turn;
-                        }
+                        self.begin_key_drag(session, p);
                         false
                     }
                     (MouseButton::Left, ElementState::Released) if self.key_drag.is_some() => {
@@ -448,25 +459,39 @@ impl Input {
             None => PointerKind::Finger,
         };
         let pressure = pen.unwrap_or(1.0);
-        // with space held the pen moves the view, as the mouse does
+        // with keys held the pen moves the view, as the mouse does: Space moves it, Space and Ctrl
+        // (⌘) zoom it, R turns it, and nothing is painted
         if pen.is_some() {
             match touch.phase {
-                TouchPhase::Started if self.space && self.down.is_empty() && !self.panning && !over(p) => {
-                    self.panning = true;
-                    self.space_used = true;
+                TouchPhase::Started
+                    if (self.space || self.r_key.is_some()) && self.down.is_empty() && !self.panning && !over(p) =>
+                {
+                    if !self.begin_key_drag(session, p) {
+                        self.panning = true;
+                        self.space_used = true;
+                    }
                     self.pen_panning = Some(touch.id);
                     self.cursor = Some(p);
                     return false;
                 }
                 _ if self.pen_panning != Some(touch.id) => {}
+                TouchPhase::Moved if self.key_drag.is_some() => {
+                    self.cursor = Some(p);
+                    session.key_drag_move(p.0, p.1, self.shift);
+                    return true;
+                }
                 TouchPhase::Moved => return self.pan_to(session, p),
                 TouchPhase::Ended | TouchPhase::Cancelled => {
+                    self.end_key_drag(session);
                     self.panning = false;
                     self.pen_panning = None;
                     return false;
                 }
-                TouchPhase::Started => {}
+                TouchPhase::Started => self.pen_panning = None,
             }
+            // the pointer goes with it: a pen down moves no mouse (the wheel zooms about where it
+            // is, and what shows once it lifts starts from there)
+            self.cursor = Some(p);
         }
         let known = self.down.contains(&touch.id);
         match touch.phase {
@@ -511,5 +536,158 @@ fn is_r(event: &KeyEvent) -> bool {
             egui::Key::from_name(c).is_none() && event.physical_key == PhysicalKey::Code(KeyCode::KeyR)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use winit::dpi::PhysicalPosition;
+    use winit::event::{DeviceId, Force};
+
+    use super::*;
+
+    fn shown() -> Arc<CanvasSession> {
+        let session = CanvasSession::new(400, 300);
+        session.set_display_scale(1.0);
+        session.show_in(800, 600);
+        session
+    }
+
+    /// A pen's touch at (`x`, `y`), the system having said it is one.
+    fn pen(id: u64, phase: TouchPhase, x: f64, y: f64) -> WindowEvent {
+        crate::pen::pointer_kind(id, true);
+        WindowEvent::Touch(Touch {
+            device_id: DeviceId::dummy(),
+            phase,
+            location: PhysicalPosition::new(x, y),
+            force: Some(Force::Normalized(0.5)),
+            id,
+        })
+    }
+
+    fn send(input: &mut Input, session: &CanvasSession, event: &WindowEvent) {
+        input.on_event(session, event, false, |_| false);
+    }
+
+    /// `id` pressed at (100, 100), moved and lifted at `to`.
+    fn drag(input: &mut Input, session: &CanvasSession, id: u64, to: (f64, f64)) {
+        send(input, session, &pen(id, TouchPhase::Started, 100.0, 100.0));
+        send(input, session, &pen(id, TouchPhase::Moved, to.0, to.1));
+        send(input, session, &pen(id, TouchPhase::Ended, to.0, to.1));
+    }
+
+    fn painted(input: &Input) -> bool {
+        input.commands.iter().any(|c| matches!(c, TouchCommand::Cursor { .. }))
+    }
+
+    /// The view's zoom, its turn (radians) and where the canvas's corner shows.
+    fn view(session: &CanvasSession) -> (f32, f32, (f32, f32)) {
+        let m = session.view_matrix();
+        (m[0].hypot(m[1]), m[1].atan2(m[0]), (m[4], m[5]))
+    }
+
+    #[test]
+    fn a_pen_dragged_with_space_and_ctrl_zooms_the_canvas_as_the_mouse_does_and_paints_nothing() {
+        let (session, mut input) = (shown(), Input::default());
+        (input.space, input.control) = (true, true);
+        let (before, ..) = view(&session);
+        drag(&mut input, &session, 7001, (280.0, 100.0));
+        let (after, ..) = view(&session);
+        // 180 right is e times as near
+        assert!((after / before - std::f32::consts::E).abs() < 1e-3, "{before} {after}");
+        assert!(!painted(&input) && input.idle(), "{:?}", input.commands);
+        // nor is Space's tap left to open the QuickMenu
+        input.space = false;
+        assert!(input.space_used);
+    }
+
+    #[test]
+    fn a_pen_dragged_with_r_held_turns_the_canvas_as_the_mouse_does_and_paints_nothing() {
+        let (session, mut input) = (shown(), Input::default());
+        input.r_key = Some(Instant::now());
+        send(&mut input, &session, &pen(7002, TouchPhase::Started, 600.0, 300.0));
+        send(&mut input, &session, &pen(7002, TouchPhase::Moved, 400.0, 500.0));
+        assert!(input.moving_view() && !input.pressing());
+        send(&mut input, &session, &pen(7002, TouchPhase::Ended, 400.0, 500.0));
+        // a quarter of the way round the window's middle
+        let (_, turn, _) = view(&session);
+        assert!((turn - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "{turn}");
+        assert!(!painted(&input) && input.r_dragged);
+    }
+
+    #[test]
+    fn a_pen_dragged_with_space_alone_still_moves_the_canvas() {
+        let (session, mut input) = (shown(), Input::default());
+        input.space = true;
+        let (before, _, (x, y)) = view(&session);
+        drag(&mut input, &session, 7003, (130.0, 140.0));
+        let (after, _, moved) = view(&session);
+        assert_eq!(before, after);
+        assert!((moved.0 - x - 30.0).abs() < 1e-3 && (moved.1 - y - 40.0).abs() < 1e-3, "{moved:?}");
+        assert!(!painted(&input) && input.idle());
+    }
+
+    #[test]
+    fn a_zoom_let_go_with_the_pen_down_stops_and_paints_nothing_after() {
+        let (session, mut input) = (shown(), Input::default());
+        (input.space, input.control) = (true, true);
+        send(&mut input, &session, &pen(7004, TouchPhase::Started, 100.0, 100.0));
+        // Space let go, as its key's event ends the zoom
+        input.space = false;
+        input.end_key_drag(&session);
+        let zoom = view(&session).0;
+        send(&mut input, &session, &pen(7004, TouchPhase::Moved, 300.0, 100.0));
+        send(&mut input, &session, &pen(7004, TouchPhase::Ended, 300.0, 100.0));
+        assert_eq!(view(&session).0, zoom);
+        assert!(!painted(&input) && input.idle());
+        // the next stroke paints
+        drag(&mut input, &session, 7004, (120.0, 100.0));
+        assert!(painted(&input));
+    }
+
+    #[test]
+    fn a_pen_held_as_the_window_loses_the_keys_moves_the_view_no_more() {
+        for keys in [(true, true), (true, false)] {
+            let (session, mut input) = (shown(), Input::default());
+            (input.space, input.control) = keys;
+            send(&mut input, &session, &pen(7005, TouchPhase::Started, 100.0, 100.0));
+            send(&mut input, &session, &WindowEvent::Focused(false));
+            assert!(input.idle() && !input.moving_view());
+            // its lift never came: the next stroke paints all the same, moves and all
+            send(&mut input, &session, &pen(7005, TouchPhase::Started, 100.0, 100.0));
+            input.commands.clear();
+            send(&mut input, &session, &pen(7005, TouchPhase::Moved, 140.0, 100.0));
+            assert!(painted(&input), "{keys:?}");
+        }
+    }
+
+    #[test]
+    fn the_wheel_zooms_about_where_the_pen_last_was_though_the_mouse_never_came() {
+        let (session, mut input) = (shown(), Input::default());
+        drag(&mut input, &session, 7006, (300.0, 200.0));
+        let (before, ..) = view(&session);
+        let wheel = WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: MouseScrollDelta::LineDelta(0.0, 1.0),
+            phase: TouchPhase::Moved,
+        };
+        assert!(input.on_event(&session, &wheel, false, |_| false));
+        assert!((view(&session).0 / before - WHEEL_ZOOM).abs() < 1e-3);
+        assert_eq!(input.cursor(), Some((300.0, 200.0)));
+    }
+
+    #[test]
+    fn fingers_leave_the_pointer_alone() {
+        let (session, mut input) = (shown(), Input::default());
+        crate::pen::pointer_kind(7007, false);
+        let finger = |phase, x, y| {
+            let location = PhysicalPosition::new(x, y);
+            WindowEvent::Touch(Touch { device_id: DeviceId::dummy(), phase, location, force: None, id: 7007 })
+        };
+        send(&mut input, &session, &finger(TouchPhase::Started, 100.0, 100.0));
+        send(&mut input, &session, &finger(TouchPhase::Moved, 140.0, 100.0));
+        assert_eq!(input.cursor(), None);
     }
 }
