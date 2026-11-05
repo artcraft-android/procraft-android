@@ -1,7 +1,8 @@
 //! The pen's own gestures beside its touches, the same for every app: held over the canvas, its
 //! double-tap (or side button) and its squeeze.
 //!
-//! Hovering, the brush's outline shows where the pen would paint ([`CanvasSession::pen_hover_cursor`]):
+//! Hovering, the brush's outline shows where the pen would paint, at the size it would paint with
+//! the pressure the brush estimates for a pen held there ([`CanvasSession::pen_hover_cursor`]):
 //! it fades in once the pen has hovered a moment, back out while it races across, and out as it
 //! rises to the top of the height it is sensed at. Hover's touch works while it is there.
 //!
@@ -95,6 +96,9 @@ pub struct HoverCursor {
     pub x: f32,
     pub y: f32,
     pub alpha: f32,
+    /// The share of the brush's size the outline shows: what its pressure dynamics make of the
+    /// pressure it estimates while hovering.
+    pub scale: f32,
 }
 
 /// The pen's hover and squeeze, kept with the touches.
@@ -172,12 +176,17 @@ impl CanvasSession {
             }
             (t.pen.hover?, t.pen.settled)
         };
-        if self.shared.lock().adjust.open().is_some() {
-            return None;
-        }
+        let scale = {
+            let st = self.shared.lock();
+            if st.adjust.open().is_some() {
+                return None;
+            }
+            let brush = st.brush(st.tool);
+            brush.pressure_factors(brush.setting("hover_pressure")).0
+        };
         let shown = ((settled - HOVER_SHOWS_S) / HOVER_FADES_IN_S).clamp(0.0, 1.0);
         let low = if h.height > 0.0 { ((1.0 - h.height) * HOVER_HEIGHT_FADE).clamp(0.0, 1.0) } else { 1.0 };
-        Some(HoverCursor { x: h.x, y: h.y, alpha: shown * low })
+        Some(HoverCursor { x: h.x, y: h.y, alpha: shown * low, scale })
     }
 
     /// The pen's button pressed (its `second`), hovering or touching at (`x`, `y`): what Gesture
@@ -438,6 +447,24 @@ mod tests {
         assert_eq!(s.info().tool, ToolKind::Smudge);
         s.touch_pen_double_tap(PenPreferred::SwitchPrevious, 0.0, 0.0);
         assert_eq!(s.info().tool, ToolKind::Paint);
+    }
+
+    #[test]
+    fn the_hover_outline_is_the_brush_at_its_estimated_pressure() {
+        let s = session();
+        s.touch_pen_hover(over(20.0, 20.0, 0.2, 0.0));
+        let scale_at = |pressure: f32| {
+            let mut st = s.shared.lock();
+            let tool = st.tool;
+            st.brush_mut(tool).expect("the tool has a brush").set_settings([("hover_pressure", pressure)]);
+            drop(st);
+            s.pen_hover_cursor().map(|c| c.scale)
+        };
+        // pressed fully it paints at its size; held lighter, as much smaller as its dynamics say
+        assert_eq!(scale_at(1.0), Some(1.0));
+        let light = scale_at(0.2).expect("hovering");
+        let lighter = scale_at(0.0).expect("hovering");
+        assert!(lighter <= light && light < 1.0, "{lighter} {light}");
     }
 
     #[test]

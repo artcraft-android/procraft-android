@@ -300,19 +300,19 @@ final class CanvasView: UIView {
             cursor.hide()
             return
         }
-        showCursor(at: CGPoint(x: CGFloat(shown.x) / scale, y: CGFloat(shown.y) / scale), hovering: true, alpha: CGFloat(shown.alpha))
+        showCursor(at: CGPoint(x: CGFloat(shown.x) / scale, y: CGFloat(shown.y) / scale), hovering: true, alpha: CGFloat(shown.alpha), size: CGFloat(shown.scale))
     }
 
     /// The brush's outline at `point` (points), as long as Brush cursor shows it when hovering (or
     /// painting); none, it goes.
-    func showCursor(at point: CGPoint?, hovering: Bool, alpha: CGFloat = 1) {
+    func showCursor(at point: CGPoint?, hovering: Bool, alpha: CGFloat = 1, size: CGFloat = 1) {
         let settings = AppSettings.shared
         let wanted = hovering ? settings.cursorShows != .painting : settings.cursorShows != .hovering
         guard let point, settings.brushCursorOn, wanted else {
             cursor.hide()
             return
         }
-        cursor.show(at: point, alpha: alpha, session: session, pixels: scale, drawn: settings.cursorStyle)
+        cursor.show(at: point, alpha: alpha, scale: size, session: session, pixels: scale, drawn: settings.cursorStyle)
     }
 
     /// A shape drawn snapped into place: Apple Pencil Pro feels it, where the Pencil is.

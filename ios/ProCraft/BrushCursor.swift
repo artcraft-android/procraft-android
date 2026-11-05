@@ -32,14 +32,14 @@ final class BrushCursorView: UIView {
     }
 
     /// Shows the outline at `point` (points in this view), `alpha` strong, sized and shaped for
-    /// the current brush as `session` has it (`pixels` window pixels a point).
-    func show(at point: CGPoint, alpha: CGFloat, session: CanvasSession, pixels: CGFloat, drawn: CursorStyle = .brush) {
+    /// the current brush as `session` has it (`pixels` window pixels a point), `scale` of its size.
+    func show(at point: CGPoint, alpha: CGFloat, scale: CGFloat = 1, session: CanvasSession, pixels: CGFloat, drawn: CursorStyle = .brush) {
         let now = CACurrentMediaTime()
         // read as it appears, and again now and then: the brush or its size may change meanwhile
         if isHidden || now - readAt >= 0.1 {
             readAt = now
             let info = session.info()
-            radius = CGFloat(info.brushDiameter * info.zoom / 2) / pixels
+            radius = CGFloat(info.brushDiameter * info.zoom / 2) / pixels * scale
             switch drawn {
             case .contrast:
                 style = 1

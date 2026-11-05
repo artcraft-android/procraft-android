@@ -651,6 +651,16 @@ impl CanvasSession {
         true
     }
 
+    /// The pen's barrel rolled `turn` radians with the liquify brush at window point (`x`, `y`): a
+    /// twirl turns as far with it, right or left as the barrel went. False if `brush` isn't a twirl.
+    pub fn liquify_rolled(&self, x: f32, y: f32, turn: f32, mut brush: LiquifyBrush) -> bool {
+        if !matches!(brush.kind, LiquifyKind::TwirlRight | LiquifyKind::TwirlLeft) {
+            return false;
+        }
+        brush.kind = if turn > 0.0 { LiquifyKind::TwirlRight } else { LiquifyKind::TwirlLeft };
+        self.liquify_held(x, y, 0.0, turn.abs() / LIQUIFY_HELD_TURN, brush)
+    }
+
     /// The liquify brush carries on after it lifts: from its last stamp along the window velocity
     /// (`vx`, `vy`, pixels a millisecond), slowing to a stop and fading as it goes, for as long as
     /// `momentum` (0..1) lets it.

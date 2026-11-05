@@ -159,6 +159,8 @@ pub struct TouchSettings {
     pub pen_second_button: Option<GestureAction>,
     /// Three fingers rubbed back and forth clear the layer.
     pub scrub: bool,
+    /// The pen's barrel rolled turns Liquify's twirl.
+    pub liquify_roll: bool,
     /// While the pen hovers over the canvas, a finger dragged across moves the brush's opacity and
     /// two pinched its size.
     pub hover_touch: bool,
@@ -186,6 +188,7 @@ impl Default for TouchSettings {
             pen_button: None,
             pen_second_button: None,
             scrub: true,
+            liquify_roll: true,
             hover_touch: false,
             hold_ms: 400.0,
             quickshape_ms: 650.0,
@@ -445,6 +448,8 @@ pub(crate) struct Touches {
     liquify_ms: f64,
     liquify_velocity: (f32, f32),
     liquify_pen: bool,
+    /// Where the pen's barrel last was (radians), once the stroke has read it.
+    liquify_roll: Option<f32>,
     /// Where liquify's brush came to rest and when, how long (seconds) it has worked on there, and
     /// when it next does.
     liquify_rest: (f32, f32),
@@ -541,6 +546,7 @@ impl Default for Touches {
             liquify_ms: 0.0,
             liquify_velocity: (0.0, 0.0),
             liquify_pen: false,
+            liquify_roll: None,
             liquify_rest: (0.0, 0.0),
             liquify_rest_ms: 0.0,
             liquify_held: 0.0,
@@ -596,6 +602,14 @@ pub(crate) fn drag_step(dx: f32, ms: f64) -> f32 {
     let frames = (ms.max(1.0) / 1000.0 * 60.0).max(0.06) as f32;
     let speed = dx.abs() / frames;
     (speed / 30.0).powf(0.86) * dx / 200.0
+}
+
+/// How far the pen's barrel has turned since `last` (radians), the short way round, and it now at
+/// `now`. A pen with no barrel to read stays at 0, so turns nothing.
+fn barrel_turn(last: &mut Option<f32>, now: f32) -> f32 {
+    let Some(before) = last.replace(now) else { return 0.0 };
+    let turn = (now - before).rem_euclid(std::f32::consts::TAU);
+    if turn > std::f32::consts::PI { turn - std::f32::consts::TAU } else { turn }
 }
 
 /// A liquify stroke's points, (x, y, pressure) each: a finger's (or a mouse's) at full pressure.
@@ -1009,8 +1023,13 @@ impl CanvasSession {
                         t.liquify_held = 0.0;
                     }
                     let pen = t.liquify_pen;
+                    let rolled = pen && t.settings.liquify_roll;
+                    let turn = if rolled { barrel_turn(&mut t.liquify_roll, last.roll) } else { 0.0 };
                     drop(t);
                     self.adjustment_liquify_stroke(liquify_points(pen, &samples), false);
+                    if turn != 0.0 {
+                        self.adjustment_liquify_rolled(at.0, at.1, turn);
+                    }
                     out.push(TouchCommand::AdjustChanged);
                     return out;
                 }
@@ -1389,6 +1408,7 @@ impl CanvasSession {
                 t.liquify_ms = now;
                 t.liquify_velocity = (0.0, 0.0);
                 t.liquify_pen = is_pen(kind);
+                t.liquify_roll = None;
                 t.liquify_rest = at;
                 t.liquify_rest_ms = now;
                 t.liquify_held = 0.0;
@@ -2200,6 +2220,39 @@ mod tests {
 
     fn session() -> std::sync::Arc<CanvasSession> {
         CanvasSession::new(64, 64)
+    }
+
+    #[test]
+    fn the_barrel_turns_the_short_way_round() {
+        use std::f32::consts::TAU;
+        let mut last = None;
+        // its first reading turns nothing: it may start anywhere
+        assert_eq!(barrel_turn(&mut last, 1.0), 0.0);
+        assert!((barrel_turn(&mut last, 1.5) - 0.5).abs() < 1e-5);
+        assert!((barrel_turn(&mut last, 1.2) + 0.3).abs() < 1e-5);
+        // past a full turn it is a small step on, not nearly all the way back
+        let step = 0.1 + TAU - 6.2;
+        last = Some(6.2);
+        assert!((barrel_turn(&mut last, 0.1) - step).abs() < 1e-5);
+        assert!((barrel_turn(&mut last, 6.2) + step).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_pen_with_no_barrel_to_read_turns_nothing() {
+        let mut last = None;
+        for _ in 0..4 {
+            assert_eq!(barrel_turn(&mut last, 0.0), 0.0);
+        }
+    }
+
+    #[test]
+    fn only_a_twirl_turns_with_the_barrel() {
+        use crate::adjust::{LiquifyBrush, LiquifyKind};
+        let s = session();
+        let brush = |kind| LiquifyBrush { kind, size: 0.5, pressure: 0.5, distortion: 0.0 };
+        assert!(s.liquify_rolled(10.0, 10.0, 0.3, brush(LiquifyKind::TwirlLeft)));
+        assert!(s.liquify_rolled(10.0, 10.0, -0.3, brush(LiquifyKind::TwirlRight)));
+        assert!(!s.liquify_rolled(10.0, 10.0, 0.3, brush(LiquifyKind::Push)));
     }
 
     /// What the touches cost a pen stroke's events, the router and the stroke's own work (no GPU):
