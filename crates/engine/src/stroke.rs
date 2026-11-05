@@ -131,6 +131,10 @@ impl Tint {
 #[derive(Clone, Copy, Debug)]
 struct Placed {
     center: Vec2,
+    /// How far the lateral and linear jitter threw it from the path, of a reach this far: the
+    /// reach goes with the size, so a taper draws it back in.
+    thrown: Vec2,
+    reach: f32,
     distance: f32,
     diameter: f32,
     alpha: f32,
@@ -156,6 +160,8 @@ struct Placed {
     /// How much of the stamp's roundness is the drawn shape's, which the pressure squeezes (the
     /// rest is what leaning adds).
     drawn_share: f32,
+    /// What the input's speed left of the size (see [`StrokeBuilder::sized`]).
+    speed_size: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1550,12 +1556,22 @@ impl StrokeBuilder {
         if self.pointer.has_pressure() { self.brush.factors(p.soft[0], p.soft[1]) } else { (1.0, 1.0) }
     }
 
+    /// The stamp's size with `by` of it left (0..1, what the pressure and the speed leave): they
+    /// take it down to the brush's least, not to nothing.
+    fn sized(&self, by: f32) -> f32 {
+        let least = (self.brush.min_size.min(self.brush.biggest()) * self.scale).min(self.diameter);
+        least + (self.diameter - least) * by.max(0.0)
+    }
+
+    /// What faster input leaves of the size at a point (an amount below 0: slower input).
+    fn speed_size(&self, p: PathPoint) -> f32 {
+        by_speed(self.extras.speed_size, p.speed).max(0.0)
+    }
+
     /// The stamp diameter at a point of the path, before jitter and taper.
     fn diameter_at(&self, p: PathPoint) -> f32 {
         let (pressure, _) = self.pressed(p);
-        // faster input thins the stroke (an amount below 0: slower input does)
-        let speed = by_speed(self.extras.speed_size, p.speed).max(0.05);
-        let drawn = self.diameter * pressure * speed;
+        let drawn = self.sized(pressure * self.speed_size(p));
         // leaning adds to it, up to the most the brush may be
         let most = (self.brush.biggest() * self.scale).max(drawn);
         (drawn + self.tilt_growth(p)).min(most)
@@ -1594,12 +1610,14 @@ impl StrokeBuilder {
         ((1.0 - compression) + compression * across * (across + long).max(0.0).sqrt()).clamp(0.0, 1.0)
     }
 
-    /// The plain distance to the next stamp: the spacing's share of the stamp's square, and half
-    /// a pixel more (and a little with the spacing).
+    /// The plain distance to the next stamp: the spacing's share of the stamp's square by its
+    /// shorter side (a flat stamp lies as close as its height says), and half a pixel more (and a
+    /// little with the spacing).
     fn step(&self, p: PathPoint) -> f32 {
         let spacing = self.brush.spacing.max(0.005);
         let extra = 0.5 + (spacing - SPACING_FLOOR).max(0.0) / (SPACING_SPAN / 2.0);
-        (spacing * self.square_at(p) * self.extras.spacing_stride + extra).max(0.25)
+        let shorter = self.square_at(p) * self.roundness_at(p).min(1.0);
+        (spacing * shorter * self.extras.spacing_stride + extra).max(0.25)
     }
 
     /// The gap to the next stamp at `p`, the one before it `last`: the two gaps' mean, widened
@@ -1648,6 +1666,24 @@ impl StrokeBuilder {
             built += alpha * (1.0 - built) * (1.0 - built);
         }
         1.0 - (1.0 - built.min(1.0)).powf(1.0 / n.ceil())
+    }
+
+    /// How much of the stamp at a point is its drawn shape, not what leaning grows it by.
+    fn drawn_share(&self, p: PathPoint) -> f32 {
+        let grown = self.tilt_growth(p);
+        let drawn = (self.diameter_at(p) - grown).max(1e-3);
+        drawn / (drawn + grown)
+    }
+
+    /// The stamp's height over its width at a point, before jitter and taper: leaning adds the same
+    /// to its height as to its width, then the roundness tilt takes it from its upright roundness
+    /// towards its leaning one.
+    fn roundness_at(&self, p: PathPoint) -> f32 {
+        let x = &self.extras;
+        let leant = self.leaning(p, x.tilt_angles.roundness);
+        let tilted = x.tilt_roundness_max * (1.0 - leant) + (1.0 - x.tilt_roundness) * leant;
+        let size_left = self.pressed(p).0 * self.speed_size(p);
+        self.pressed_roundness(self.drawn_share(p), p.soft[3], size_left) * tilted
     }
 
     /// How far a tilt switch at `theta` lets its control act: all of it when the switch is off,
@@ -1768,14 +1804,9 @@ impl StrokeBuilder {
             Vec2::new(self.direction.cos(), self.direction.sin()),
             Vec2::new(-self.direction.sin(), self.direction.cos()),
         );
-        // leaning adds the same to the stamp's height as to its width, then the roundness tilt
-        // takes it from its upright roundness towards its leaning one
-        let grown = self.tilt_growth(p);
-        let drawn = (diameter - grown).max(1e-3);
-        let drawn_share = drawn / (drawn + grown);
-        let leant = self.leaning(p, x.tilt_angles.roundness);
-        let tilted = x.tilt_roundness_max * (1.0 - leant) + (1.0 - x.tilt_roundness) * leant;
-        let base_roundness = self.pressed_roundness(drawn_share, p.soft[3]) * tilted;
+        let drawn_share = self.drawn_share(p);
+        let speed_size = self.speed_size(p);
+        let base_roundness = self.roundness_at(p);
         // the jitter reaches half the stamp's diagonal (its square as round as it is here), and a
         // pixel more
         let half = self.square_at(p) * 0.5;
@@ -1814,14 +1845,15 @@ impl StrokeBuilder {
             let size = 1.0 - shape.size_jitter.clamp(0.0, 1.0) * size_jitter_by * self.random.next();
             let fade = 1.0 - shape.opacity_jitter.clamp(0.0, 1.0) * opacity_jitter_by * self.random.next();
             let mut center = p.pos + cap;
+            let mut thrown = Vec2::ZERO;
             // one random point a stamp: as far as a share of the reach, in a random direction, the
             // reach across and along the stroke each its own
             if x.jitter_lateral > 0.0 || x.jitter_linear > 0.0 {
                 let far = self.random.next();
                 let towards = (self.random.next() * 2.0 - 1.0) * std::f32::consts::PI;
-                center = center
-                    + across * (far * towards.sin() * jitter_lateral * jitter_reach)
+                thrown = across * (far * towards.sin() * jitter_lateral * jitter_reach)
                     + along * (far * towards.cos() * jitter_linear * jitter_reach);
+                center = center + thrown;
             }
             if shape.throw > 0.0 {
                 let a = self.random.next() * std::f32::consts::TAU;
@@ -1894,6 +1926,8 @@ impl StrokeBuilder {
             let grain_size = tile / self.brush.grain.scale.max(1.0);
             let placed = Placed {
                 center,
+                thrown,
+                reach: jitter_reach,
                 distance,
                 diameter: diameter * size * wide,
                 alpha: alpha * fade,
@@ -1914,6 +1948,7 @@ impl StrokeBuilder {
                 time_ms: self.now_ms,
                 pressed: p.soft,
                 drawn_share,
+                speed_size,
             };
             self.placed.push(placed);
             let stamp = self.finish_stamp(&placed, start_span, None);
@@ -1929,10 +1964,14 @@ impl StrokeBuilder {
     }
 
     /// The stamp's roundness before leaning and jitter: the shape's, squeezed as light pressure
-    /// `pressure` says, on the `drawn_share` of the stamp that isn't grown by leaning.
-    fn pressed_roundness(&self, drawn_share: f32, pressure: f32) -> f32 {
+    /// `pressure` says, on the `drawn_share` of the stamp that isn't grown by leaning. Its height
+    /// goes to the brush's least as its width does: with `size_left` of the width left, the less
+    /// of it there is, the rounder a stamp held up by the least.
+    fn pressed_roundness(&self, drawn_share: f32, pressure: f32, size_left: f32) -> f32 {
         let squeezed = 1.0 - self.extras.pressure_roundness * (1.0 - pressure.clamp(0.0, 1.0));
-        drawn_share * self.brush.shape.roundness.clamp(0.05, 1.0) * squeezed + (1.0 - drawn_share)
+        let round = self.brush.shape.roundness.clamp(0.05, 1.0) * squeezed;
+        let wide = self.sized(size_left).max(1e-3);
+        drawn_share * self.sized(size_left * round) / wide + (1.0 - drawn_share)
     }
 
     fn taper(&self) -> &Taper {
@@ -1955,23 +1994,35 @@ impl StrokeBuilder {
         // a pen's pressure fades into the tapers as far as the brush says: the size, opacity,
         // bleed and roundness it gave scaled to what the faded pressure gives
         let fade = self.extras.taper_pressure;
+        let fading = self.pointer.has_pressure() && fade > 0.0;
         let (mut grain_press, mut roundness) = (p.grain_press, p.roundness);
-        if self.pointer.has_pressure() && fade > 0.0 {
+        let [s, o, b, r, _] = p.pressed;
+        let size_left = if self.pointer.has_pressure() { self.brush.factors(s, o).0 } else { 1.0 } * p.speed_size;
+        let (mut faded_left, mut faded_round) = (size_left, r);
+        if fading {
             let kept = (1.0 - fade) + fade * (start * finish).powf(Taper::tip_power(tip));
-            let [s, o, b, r, _] = p.pressed;
-            let (s0, o0) = self.brush.factors(s, o);
+            let (_, o0) = self.brush.factors(s, o);
             let (s1, o1) = self.brush.factors(s * kept, o * kept);
-            if s0 > 0.0 {
-                size *= s1 / s0;
+            (faded_left, faded_round) = (s1 * p.speed_size, r * kept);
+            let sized = self.sized(size_left);
+            if sized > 0.0 {
+                size *= self.sized(faded_left) / sized;
             }
             if o0 > 0.0 {
                 alpha *= (o1 / o0).powf(FLOW_POWER);
             }
             grain_press = (b * kept).clamp(0.0, 1.0);
-            let r0 = self.pressed_roundness(p.drawn_share, r);
-            if r0 > 0.0 {
-                let r1 = self.pressed_roundness(p.drawn_share, r * kept);
-                roundness = (roundness * r1 / r0).clamp(0.05, MOST_ROUNDNESS);
+        }
+        // a taper thins what the stamp is drawn at; what leaning grows it by comes after, so a
+        // leaning pen's tips keep that
+        let share = p.drawn_share;
+        let thinned = share * size + (1.0 - share);
+        if fading || share < 1.0 {
+            let before = self.pressed_roundness(share, r, size_left);
+            let left_share = if thinned > 0.0 { share * size / thinned } else { share };
+            if before > 0.0 {
+                let after = self.pressed_roundness(left_share, faded_round, faded_left);
+                roundness = (roundness * after / before).clamp(0.05, MOST_ROUNDNESS);
             }
         }
         // the bleed: the pressure's, through the pressure, and the lean's, whatever the pressure
@@ -1980,9 +2031,11 @@ impl StrokeBuilder {
         if grain_bleed > 0.0 {
             grain_press = (pressed_bleed * grain_press + p.bleed_lean) / grain_bleed;
         }
+        // the jitter's reach (half the stamp's diagonal and a pixel) goes with what is left of it
+        let reach_left = ((p.reach - 1.0) * thinned + 1.0) / p.reach.max(1.0);
         Stamp {
-            center: p.center,
-            radius: (p.diameter * size * 0.5).max(0.25),
+            center: p.center - p.thrown * (1.0 - reach_left),
+            radius: (p.diameter * thinned * 0.5).max(0.25),
             alpha: (p.alpha * alpha).clamp(0.0, 1.0),
             angle: p.angle,
             roundness,
@@ -2014,6 +2067,7 @@ mod tests {
             streamline: 0.0,
             pressure_smoothing: 0.0,
             spacing: 0.1,
+            min_size: 0.0,
             pen_taper: Taper::NONE,
             touch_taper: Taper::NONE,
             ..Brush::round_pen()
@@ -2088,6 +2142,38 @@ mod tests {
     }
 
     #[test]
+    fn a_flat_stamp_lies_as_close_as_its_shorter_side_says() {
+        let gap_of = |brush: Brush, sample: &dyn Fn(usize) -> Sample| {
+            let mut b = StrokeBuilder::new(brush, 40.0, Pointer::Stylus);
+            b.add(&(0..=100).map(sample).collect::<Vec<_>>());
+            let all = b.finish();
+            let mid = all.len() / 2;
+            all[mid].center.distance(all[mid + 1].center)
+        };
+        let along = |i: usize| Sample::at(Vec2::new(i as f32 * 4.0, 50.0), 1.0, i as f64 * 4.0);
+        let square = 40.0 / crate::brushfile::ROUND_TIP_SHARE;
+        let extra = 0.5 + (0.1 - SPACING_FLOOR) / (SPACING_SPAN / 2.0);
+        let round = gap_of(plain(), &along);
+        assert!((round - (0.1 * square + extra)).abs() < 1e-3, "{round}");
+        // a quarter as tall: a quarter of the size's part of the gap
+        let flat = Brush { shape: Shape { roundness: 0.25, ..Shape::default() }, ..plain() };
+        let close = gap_of(flat, &along);
+        assert!((close - (0.025 * square + extra)).abs() < 1e-3, "{close}");
+        // light pressure squashing it brings the stamps closer too
+        let mut squashed = Brush { pressure_size: 0.0, ..plain() };
+        squashed.set_setting("pressure_roundness", 1.0);
+        let light = |i: usize| Sample { pressure: 0.5, ..along(i) };
+        let pressed = gap_of(squashed, &light);
+        assert!((pressed - (0.05 * square + extra)).abs() < 1e-3, "{pressed}");
+        // and a lean that flattens it
+        let mut leaning = plain();
+        leaning.set_setting("tilt_roundness", 0.5);
+        let leant = |i: usize| Sample { tilt: 1.2, ..along(i) };
+        let upright = gap_of(leaning.clone(), &along);
+        assert!(gap_of(leaning, &leant) < upright * 0.95, "{upright}");
+    }
+
+    #[test]
     fn spacing_carries_across_samples() {
         let mut few = StrokeBuilder::new(plain(), 10.0, Pointer::Stylus);
         few.add(&line(3, 100.0));
@@ -2122,6 +2208,47 @@ mod tests {
         let touch = finger.add(&samples);
         assert!(pressed[0].radius < touch[0].radius && pressed[0].alpha < touch[0].alpha);
         assert_eq!(touch[0].radius, 5.0);
+    }
+
+    #[test]
+    fn pressure_and_speed_take_the_size_down_to_the_brush_s_least() {
+        let brush = Brush { pressure_size: 1.0, min_size: 6.0, ..plain() };
+        let radius = |brush: &Brush, pressure: f32| {
+            let mut stroke = StrokeBuilder::new(brush.clone(), 26.0, Pointer::Stylus);
+            stroke.add(&[Sample::at(Vec2::new(0.0, 0.0), pressure, 0.0)])[0].radius
+        };
+        // no pressure leaves the least, half of it half way from there to the size
+        assert!((radius(&brush, 0.0) - 3.0).abs() < 1e-4);
+        assert!((radius(&brush, 0.5) - 8.0).abs() < 1e-4);
+        assert!((radius(&brush, 1.0) - 13.0).abs() < 1e-4);
+        // a size at the least doesn't follow the pressure at all
+        let thin = |pressure: f32| {
+            let mut stroke = StrokeBuilder::new(brush.clone(), 6.0, Pointer::Stylus);
+            stroke.add(&[Sample::at(Vec2::new(0.0, 0.0), pressure, 0.0)])[0].radius
+        };
+        assert_eq!(thin(0.1), thin(1.0));
+        // the least goes with the brush's scale on the canvas
+        let mut scaled = StrokeBuilder::new(brush.clone(), 52.0, Pointer::Stylus).scaled(2.0);
+        assert!((scaled.add(&[Sample::at(Vec2::ZERO, 0.0, 0.0)])[0].radius - 6.0).abs() < 1e-4);
+        // the shape's height goes there too: a squashed stamp fills out as the least holds it up
+        let flat = Brush { shape: Shape { roundness: 0.5, ..Shape::default() }, ..brush.clone() };
+        let round = |pressure: f32| {
+            let mut stroke = StrokeBuilder::new(flat.clone(), 26.0, Pointer::Stylus);
+            stroke.add(&[Sample::at(Vec2::ZERO, pressure, 0.0)])[0].roundness
+        };
+        assert!((round(1.0) - 16.0 / 26.0).abs() < 1e-4, "{}", round(1.0));
+        assert!((round(0.0) - 1.0).abs() < 1e-4, "{}", round(0.0));
+        // a pen's pressure faded into a taper thins it as far as the least too
+        let mut faded = Brush { pen_taper: Taper { start: 0.0, end: 0.0, size: 0.0, opacity: 0.0 }, ..brush };
+        faded.pen_taper.start = 1.0;
+        faded.set_setting("pen_taper_pressure", 1.0);
+        let mut stroke = StrokeBuilder::new(faded, 26.0, Pointer::Stylus);
+        let samples: Vec<Sample> =
+            (0..40).map(|i| Sample::at(Vec2::new(i as f32 * 10.0, 0.0), 1.0, f64::from(i) * 8.0)).collect();
+        stroke.add(&samples);
+        let all = stroke.finish();
+        assert!((all[0].radius - 3.0).abs() < 1e-3, "{}", all[0].radius);
+        assert!((all.last().unwrap().radius - 13.0).abs() < 1e-3);
     }
 
     #[test]
@@ -2867,6 +2994,49 @@ mod tests {
         assert!((shaded[0].gradation - (0.6 * reach).sqrt()).abs() < 1e-4, "{}", shaded[0].gradation);
         let rounded = stamps(&[("tilt_roundness", 0.5), ("tilt_size", 0.0)], 0.0);
         assert!((rounded[0].roundness - (1.0 - 0.5 * reach)).abs() < 1e-4, "{}", rounded[0].roundness);
+    }
+
+    #[test]
+    fn a_taper_thins_what_the_stamp_is_drawn_at_and_a_lean_s_growth_stays() {
+        let mut b = Brush { pen_taper: Taper { start: 0.0, end: 0.5, size: 1.0, opacity: 0.0 }, ..plain() };
+        b.tilt.size = 0.1;
+        b.set_setting("size_tilt_angle", 0.1);
+        b.set_setting("tilt_size_compression", 0.0);
+        let leaning = |i: usize| {
+            let at = Sample::at(Vec2::new(i as f32 * 8.0, 50.0), 1.0, i as f64 * 8.0);
+            Sample { tilt: crate::brush::FLAT_TILT, ..at }
+        };
+        let mut stroke = StrokeBuilder::new(b.clone(), 10.0, Pointer::Stylus);
+        stroke.add(&(0..=60).map(leaning).collect::<Vec<_>>());
+        let all = stroke.finish();
+        let growth = 0.1 * Tilt::reach(crate::brush::FLAT_TILT, 0.1) * b.size_unit();
+        let (middle, end) = (&all[all.len() / 2], all.last().unwrap());
+        assert!((middle.radius - (10.0 + growth) / 2.0).abs() < 1e-3, "{}", middle.radius);
+        // the end, thinned to nothing, is what the lean adds
+        assert!((end.radius - growth / 2.0).abs() < 0.2, "{} {growth}", end.radius);
+        // and its height stays by it: round where only the growth is left of a flat stamp
+        let flat = Brush { shape: Shape { roundness: 0.2, ..Shape::default() }, ..b };
+        let mut stroke = StrokeBuilder::new(flat, 10.0, Pointer::Stylus);
+        stroke.add(&(0..=60).map(leaning).collect::<Vec<_>>());
+        let all = stroke.finish();
+        assert!(all[all.len() / 2].roundness < 0.9, "{}", all[all.len() / 2].roundness);
+        assert!(all.last().unwrap().roundness > 0.97, "{}", all.last().unwrap().roundness);
+    }
+
+    #[test]
+    fn a_taper_draws_the_jitter_in_with_the_size() {
+        let taper = Taper { start: 1.0, end: 0.0, size: 1.0, opacity: 0.0 };
+        let mut b = Brush { pen_taper: taper, ..plain() };
+        b.set_setting("jitter_lateral", 1.0);
+        let mut stroke = StrokeBuilder::new(b, 40.0, Pointer::Stylus);
+        stroke.add(&line(100, 1200.0));
+        let all = stroke.finish();
+        // the first stamps, thinned almost to nothing, stay by the path; past the taper they don't
+        let off = |s: &Stamp| (s.center.y - 50.0).abs();
+        let tips = all.iter().take_while(|s| s.radius < 1.0).map(off).fold(0.0, f32::max);
+        let whole = all.iter().rev().take(100).map(off).fold(0.0, f32::max);
+        assert!(tips < 4.0, "{tips}");
+        assert!(whole > 30.0, "{whole}");
     }
 
     #[test]
