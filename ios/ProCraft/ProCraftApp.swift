@@ -206,6 +206,11 @@ enum ScreenCapture {
         case "adjust-modes":
             model.startAdjustment(.gaussianBlur)
             model.adjustModesOpen = true
+        case "effect-gradient":
+            model.startAdjustment(.gradientMap)
+        case "effect-gradient-edit":
+            model.startAdjustment(.gradientMap)
+            model.gradientMap.edit(model.gradientMap.index)
         case "effect-hsb":
             model.startAdjustment(.hsb)
         case "effect-balance":

@@ -136,6 +136,9 @@ struct ColorPanel: View {
     let arrowX: CGFloat
     let screenHeight: CGFloat
     var background: HeldColor?
+    /// What a held colour's panel is called, and what its tick does.
+    var title = "Background"
+    var onDone: (() -> Void)?
 
     @State private var ui = ColorUi()
     @State private var photo: PhotosPickerItem?
@@ -153,12 +156,18 @@ struct ColorPanel: View {
         let height: CGFloat = short && model.colorMode == .disc ? 57 : 64
         return ZStack(alignment: .topLeading) {
             if background != nil {
-                PanelHeader(title: "Background", start: 20, end: 12, height: height, chevron: false) {
+                PanelHeader(title: title, start: 20, end: 12, height: height, chevron: false) {
                     PcIconView(PcIcons.doneTick, size: 40, color: .white)
                         .frame(width: 44, height: 44)
                         .background(Circle().fill(Pc.accent))
                         .contentShape(Circle())
-                        .onTapGesture { model.endBackgroundPick() }
+                        .onTapGesture {
+                            if let onDone {
+                                onDone()
+                            } else {
+                                model.endBackgroundPick()
+                            }
+                        }
                         .padding(.top, 19)
                 }
             } else if model.colorMode == .palettes {

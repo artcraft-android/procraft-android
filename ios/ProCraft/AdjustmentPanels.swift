@@ -41,11 +41,6 @@ private let balancePairs: [(left: String, right: String, colours: [UInt32])] = [
 private let balanceTones = ["Shadows", "Midtones", "Highlights"]
 
 extension CanvasModel {
-    /// The adjustments with a screen on the iPad so far.
-    func opensOnThisDevice(_ a: Adjustment) -> Bool {
-        a != .gradientMap
-    }
-
     /// Changes the open adjustment and reads what it shows.
     func adjust(_ change: (CanvasSession) -> Void) {
         change(session)
@@ -79,6 +74,7 @@ struct AdjustmentPanel: View {
             case .hsb: HsbPanel(model: model, shown: shown, wide: wide)
             case .colorBalance: BalancePanel(model: model, shown: shown, wide: wide)
             case .curves: CurvesPanel(model: model, shown: shown)
+            case .gradientMap: GradientMapPanel(model: model, wide: wide)
             case .glitch: GlitchPanel(model: model, shown: shown, wide: wide)
             case .noise: NoisePanel(model: model, shown: shown, wide: wide)
             case .bloom: BloomPanel(model: model, shown: shown, wide: wide)

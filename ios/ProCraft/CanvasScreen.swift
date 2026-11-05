@@ -114,6 +114,17 @@ struct CanvasScreen: View {
                 if model.selecting, !hidden {
                     SelectionPopover(model: model, screen: screen.size)
                 }
+                if model.adjustment == .gradientMap, let pick = model.gradientMap.stopColour, !hidden {
+                    // over the panel, centred
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { model.gradientMap.endColour() }
+                    ColorPanel(
+                        model: model, arrowX: colorPanelWidth / 2, screenHeight: screen.size.height,
+                        background: pick.held, title: "Colors", onDone: { model.gradientMap.endColour() }
+                    )
+                    .offset(x: (screen.size.width - colorPanelWidth) / 2, y: Pc.barHeight)
+                }
                 if model.copyPasteOpen {
                     CopyPastePanel(model: model, screen: screen.size)
                 }

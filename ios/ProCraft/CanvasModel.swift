@@ -221,6 +221,7 @@ final class CanvasModel {
     @ObservationIgnored private(set) lazy var drop = ColorDrop(model: self)
     @ObservationIgnored private(set) lazy var selection = SelectionTool(model: self)
     @ObservationIgnored private(set) lazy var transform = TransformTool(model: self)
+    @ObservationIgnored private(set) lazy var gradientMap = GradientMapTool(model: self)
     /// The view as the core has it: `[a, b, c, d, e, f]`, canvas pixels to window pixels.
     private(set) var viewMatrix: [Float] = []
     /// Delete on a locked layer: why not, OK alone.
@@ -859,6 +860,10 @@ final class CanvasModel {
         guard currentTakesChanges() else { return }
         _ = switchModes(.adjustment)
         panel = .none
+        // Gradient Map maps by the library
+        if a == .gradientMap {
+            _ = gradientMap
+        }
         guard session.adjustmentStart(adjustment: a) else { return }
         adjustModesOpen = false
         liquifyPopup = 0
@@ -872,6 +877,10 @@ final class CanvasModel {
     /// Ends the adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
     func endAdjustment(commit: Bool) {
         guard adjustment != nil else { return }
+        // a gradient being edited is kept as it is
+        if adjustment == .gradientMap {
+            gradientMap.endEdit()
+        }
         adjustMenuAt = nil
         adjustModesOpen = false
         liquifyPopup = 0
