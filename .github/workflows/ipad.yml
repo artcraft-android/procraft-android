@@ -101,7 +101,7 @@ jobs:
           settings="prefs prefs-cursor prefs-pressure gestures gestures-hover gestures-general"
           adjusting="liquify liquify-mode liquify-twirl adjust-menu adjust-modes effect-hsb effect-balance effect-curves effect-glitch effect-noise effect-bloom effect-halftone effect-chromatic effect-perspective effect-gradient effect-gradient-edit"
           quick="quick-menu quick-menus quick-picker copy-paste"
-          tools="transform transform-snapping transform-interpolation transform-warp transform-numeric selection selection-feather selection-saved crop crop-settings recolor layer-opacity"
+          tools="transform transform-snapping transform-interpolation transform-warp transform-numeric selection selection-feather selection-saved crop crop-settings recolor layer-opacity guide guide-edit guide-symmetry"
           shelf="gallery-select gallery-swipe gallery-new gallery-formats gallery-rename gallery-custom"
           for screen in gallery canvas brushes layers colors actions adjustments $studio $over $source $library $layers $colours $settings $adjusting $quick $tools $shelf; do
             xcrun simctl launch --terminate-running-process "$device" io.github.artcraftandroid.procraft -screen "$screen"

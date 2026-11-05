@@ -120,7 +120,7 @@ extension CanvasModel {
     }
 
     /// Does `a`, a QuickMenu button opened at window point `at`. What has no screen on the iPad yet
-    /// (text, guides' editors, the animation's and the reference's) does nothing.
+    /// (text, the animation's and the reference's) does nothing.
     func runQuickAction(_ a: QuickAction, at: CGPoint) {
         func onCurrent(_ f: (LayerInfo) -> Void) {
             if let l = layers.first(where: { $0.current }) {
@@ -179,7 +179,7 @@ extension CanvasModel {
         case .guideIsometric: toggleGuideKind(.isometric)
         case .guidePerspective: toggleGuideKind(.perspective)
         case .guideSymmetry: toggleGuideKind(.symmetry)
-        case .drawingAssist: setGuideAssisted(!session.guide().assisted)
+        case .drawingAssist: setGuideAssisted(!guide.info.assisted)
         case .brushScaling:
             let settings = AppSettings.shared
             settings.brushOnScreen.toggle()
@@ -190,14 +190,13 @@ extension CanvasModel {
 
     /// The drawing guide on as `kind`, or off if it already is that.
     private func toggleGuideKind(_ kind: GuideType) {
-        let guide = session.guide()
-        if guide.on, guide.kind == kind {
+        if guide.info.on, guide.info.kind == kind {
             setGuideOn(false)
             return
         }
-        if !guide.on {
+        if !guide.info.on {
             setGuideOn(true)
         }
-        _ = session.setGuideKind(kind: kind)
+        guide.choose(kind)
     }
 }

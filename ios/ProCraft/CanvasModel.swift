@@ -186,7 +186,9 @@ final class CanvasModel {
     @ObservationIgnored private var clipboard: ThumbnailImage?
     private(set) var canPaste = false
     /// The drawing guide is on.
-    private(set) var guideOn = false
+    var guideOn: Bool {
+        guide.info.on
+    }
 
     // the layers, top first, the background under them, and their thumbnails
     private(set) var layers: [LayerInfo] = []
@@ -235,6 +237,7 @@ final class CanvasModel {
     @ObservationIgnored private(set) lazy var gradientMap = GradientMapTool(model: self)
     @ObservationIgnored private(set) lazy var crop = CropTool(model: self)
     @ObservationIgnored private(set) lazy var recolor = RecolorTool(model: self)
+    @ObservationIgnored private(set) lazy var guide = GuideTool(model: self)
     /// The middle of the screen, window pixels.
     @ObservationIgnored var screenCentre = CGPoint.zero
     /// The layer whose opacity a drag changes, while the mode is on, and its opacity as it is dragged.
@@ -785,7 +788,7 @@ final class CanvasModel {
 
     /// Whether the side bar shows: a mode taking the screen slides it off its edge.
     var sideBarShown: Bool {
-        showSideBar && !transforming && !selecting && crop.shown == nil && opacityLayer == nil
+        showSideBar && !transforming && !selecting && crop.shown == nil && opacityLayer == nil && !guide.editing
             && (!adjusting || adjustShown?.pencil == true)
     }
 
@@ -1287,7 +1290,7 @@ final class CanvasModel {
     }
 
     func setGuideOn(_ on: Bool) {
-        guideOn = session.setGuideOn(on: on).on
+        guide.setOn(on)
     }
 
     // MARK: the layers
@@ -1589,6 +1592,10 @@ final class CanvasModel {
     /// The view moved: what is drawn over the canvas follows.
     func refreshView() {
         viewMatrix = session.viewMatrix()
+        // the guide's lines follow the canvas
+        if guide.info.on || guide.editing {
+            guide.read()
+        }
         // the perspective and clone pucks follow the canvas
         if adjustment == .perspectiveBlur || adjustment == .clone {
             readAdjust()

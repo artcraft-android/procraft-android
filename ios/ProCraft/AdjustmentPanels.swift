@@ -16,6 +16,7 @@ private var kindsEdge: Color { themed(0xFF74_7474, 0xFFFA_FAFA) }
 private var sliderTrack: Color { themed(0xFF2E_2E2E, 0xFFDD_DDDD) }
 private var sliderTick: Color { themed(0xFF4A_4A4A, 0xFFC8_C8C8) }
 private var noiseButton: Color { themed(0xFF1E_1E1E, 0xFFFF_FFFF) }
+private var valueChip: Color { themed(0xFF2A_2A2A, 0xFFFF_FFFF) }
 private var moreFill: Color { themed(0xFF1C_1C1C, 0xFFFA_FAFA) }
 private var moreEdge: Color { themed(0xFF3A_3A3A, 0xFFE1_E1E1) }
 private var moreDots: Color { themed(0xFF9A_9A9A, 0xFF59_5959) }
@@ -113,7 +114,7 @@ private func value(_ list: [Float], _ i: Int) -> Float {
 }
 
 /// A slider's value as shown: None at nothing, Max at all (`max`), else a percentage.
-private func reading(_ v: Float, max: Bool = false) -> String {
+func reading(_ v: Float, max: Bool = false) -> String {
     if v <= 0 {
         return "None"
     }
@@ -421,14 +422,14 @@ private struct CurvesPanel: View {
 }
 
 /// One choice in a `KindsSwitch`.
-private struct Kind {
+struct Kind {
     let icon: PcIcon
     let label: String
     let width: CGFloat
 }
 
 /// A toolbar's row of kinds, `width` wide, the `chosen` one blue.
-private struct KindsSwitch: View {
+struct KindsSwitch: View {
     let width: CGFloat
     let kinds: [Kind]
     let chosen: Int
@@ -465,14 +466,16 @@ private struct KindsSwitch: View {
 }
 
 /// A labelled toolbar slider `width` wide: `both` ways runs -1..1 with its fill from the middle,
-/// else 0..1.
-private struct OptionSlider: View {
+/// else 0..1. A `chip` value sits on a rounded chip (one that can be typed: `onChip` opens its keypad).
+struct OptionSlider: View {
     let label: String
     let value: Float
     let shown: String
     let width: CGFloat
     var both = false
     var labelInk: Color?
+    var chip = false
+    var onChip: (() -> Void)?
     let onChange: (Float) -> Void
 
     var body: some View {
@@ -481,8 +484,19 @@ private struct OptionSlider: View {
                 Text(verbatim: label)
                     .foregroundStyle(labelInk ?? hsbLabel)
                 Spacer(minLength: 0)
-                Text(verbatim: shown)
-                    .foregroundStyle(hsbValue)
+                if chip {
+                    Text(verbatim: shown)
+                        .foregroundStyle(hsbValue)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 3)
+                        .background(RoundedRectangle(cornerRadius: 14, style: .circular).fill(valueChip))
+                        .contentShape(Rectangle())
+                        .onTapGesture { onChip?() }
+                        .offset(x: 8, y: -4)
+                } else {
+                    Text(verbatim: shown)
+                        .foregroundStyle(hsbValue)
+                }
             }
             .font(.system(size: 16))
             .lineLimit(1)

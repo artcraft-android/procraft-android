@@ -163,7 +163,8 @@ struct ActionsPanel: View {
                     .toggle("Animation Assist", on: false, change: nil),
                     .toggle("Page Assist", on: false, change: nil),
                     .toggle("Drawing Guide", on: model.guideOn, change: { model.setGuideOn($0) }),
-                    .act("Edit Drawing Guide", action: nil),
+                    // only with the guide on
+                    .act("Edit Drawing Guide", action: model.guideOn ? { model.guide.open() } : nil),
                 ],
                 [.toggle("Reference", on: false, change: nil)],
                 [

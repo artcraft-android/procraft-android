@@ -133,8 +133,7 @@ extension CanvasModel {
     }
 
     func setGuideAssisted(_ on: Bool) {
-        _ = session.setGuideAssisted(assisted: on)
-        refresh()
+        guide.setAssisted(on)
     }
 
     func rasterize(_ l: LayerInfo) {
