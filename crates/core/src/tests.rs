@@ -9416,6 +9416,44 @@ fn a_touch_with_a_panel_open_paints_only_as_a_drag() {
     assert!(s.info().can_undo);
 }
 
+/// Lifted moving with momentum, liquify goes on by the touch timer until it runs out, and then
+/// the timer stops; without momentum it stops as it lifts.
+#[test]
+fn liquify_lifted_moving_goes_on_by_the_touch_timer() {
+    use crate::Adjustment;
+    let drag = |momentum: f32| -> Option<std::sync::Arc<CanvasSession>> {
+        let s = session(256, 256)?;
+        s.set_brush_size(0.1);
+        s.stroke_begin(PointerKind::Finger, vec![sample(128.0, 10.0, 0.0)]);
+        s.stroke_add((1..30).map(|i| sample(128.0, 10.0 + i as f32 * 8.0, i as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+        assert!(s.adjustment_start(Adjustment::Liquify));
+        s.adjustment_liquify_value(0, 0.2);
+        s.adjustment_liquify_value(3, momentum);
+        s.touch_down(1, PointerKind::Finger, vec![sample(60.0, 128.0, 1000.0)]);
+        for i in 1..=10 {
+            s.touch_move(1, vec![sample(60.0 + i as f32 * 6.0, 128.0, 1000.0 + f64::from(i) * 8.0)]);
+        }
+        s.touch_up(1, vec![sample(120.0, 128.0, 1088.0)]);
+        Some(s)
+    };
+    let Some(still) = drag(0.0) else { return };
+    assert_eq!(still.touch_deadline(), None);
+    let Some(s) = drag(1.0) else { return };
+    let row = |s: &CanvasSession| (100..220).map(|x| pixel(s, x, 128)).collect::<Vec<_>>();
+    let lifted = row(&s);
+    let mut now = 1088.0f64;
+    let mut ticks = 0;
+    while let Some(due) = s.touch_deadline() {
+        now = now.max(due);
+        s.touch_tick(now);
+        ticks += 1;
+        assert!(ticks < 200, "it never stopped");
+    }
+    assert!(ticks > 30, "{ticks} ticks");
+    assert_ne!(row(&s), lifted, "it went on after the lift");
+}
+
 /// Liquify held still works on as the time passes, a stamp at a time adding up to the whole of it.
 #[test]
 fn liquify_held_still_works_on() {
