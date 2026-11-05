@@ -6,7 +6,7 @@ use std::io::BufWriter;
 use std::path::Path;
 
 use procraft_engine::animation::{self, Animation, Playback};
-use procraft_engine::document::{Document, LayerId};
+use procraft_engine::document::{Document, LayerId, LayerKind};
 use procraft_engine::formats::GifWriter;
 
 use crate::layers::ThumbnailImage;
@@ -370,16 +370,32 @@ impl CanvasSession {
     }
 
     /// Frame `id`'s picture over the whole canvas, fitted to `max_side` (premultiplied), for the
-    /// timeline; none for a group or before the canvas exists.
+    /// timeline; none for a group with nothing showing or before the canvas exists.
     pub fn frame_thumbnail(&self, id: u64, max_side: u32) -> Option<ThumbnailImage> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if st.doc.layer(LayerId(id)).is_none_or(|l| l.kind == procraft_engine::document::LayerKind::Group) {
-            return None;
-        }
+        let id = LayerId(id);
+        let group = st.doc.layer(id)?.kind == LayerKind::Group;
         let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return None };
-        let t = canvas.layer_picture(gpu, &mut st.doc, LayerId(id), max_side).ok()?;
-        Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
+        if !group {
+            let t = canvas.layer_picture(gpu, &mut st.doc, id, max_side).ok()?;
+            return Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba });
+        }
+        // a group's layers laid over one another at this size, with no regard to their blend
+        // modes: rendering the group alone would composite the whole canvas twice for each frame
+        let mut picture: Option<ThumbnailImage> = None;
+        for (layer, opacity) in showing_in(&st.doc, id, 1.0) {
+            let t = canvas.layer_picture(gpu, &mut st.doc, layer, max_side).ok()?;
+            let p = picture.get_or_insert_with(|| ThumbnailImage {
+                width: t.width,
+                height: t.height,
+                rgba: vec![0; t.rgba.len()],
+            });
+            if p.rgba.len() == t.rgba.len() {
+                lay_over(&mut p.rgba, &t.rgba, opacity);
+            }
+        }
+        picture
     }
 
     /// How many more frames the frame of layer `id` is held.
@@ -390,6 +406,32 @@ impl CanvasSession {
     pub fn set_frame_hold(&self, id: u64, frames: u32) {
         if let Some(a) = self.shared.lock().doc.animation.as_mut() {
             a.set_hold(LayerId(id), frames);
+        }
+    }
+}
+
+/// The layers showing in group `id`, at any depth, bottom first, each with its opacity there
+/// (`opacity` being the group's own surroundings').
+fn showing_in(doc: &Document, id: LayerId, opacity: f32) -> Vec<(LayerId, f32)> {
+    let mut shown = Vec::new();
+    for member in doc.members(Some(id)) {
+        let Some(layer) = doc.layer(member).filter(|l| l.visible) else { continue };
+        if layer.kind == LayerKind::Group {
+            shown.extend(showing_in(doc, member, opacity * layer.opacity));
+        } else {
+            shown.push((member, opacity * layer.opacity));
+        }
+    }
+    shown
+}
+
+/// Premultiplied `top`, at `opacity`, laid over `under`.
+fn lay_over(under: &mut [u8], top: &[u8], opacity: f32) {
+    for (u, t) in under.as_chunks_mut::<4>().0.iter_mut().zip(top.as_chunks::<4>().0) {
+        let [.., alpha] = *t;
+        let keep = 1.0 - f32::from(alpha) / 255.0 * opacity;
+        for (a, b) in u.iter_mut().zip(t) {
+            *a = (f32::from(*b) * opacity + f32::from(*a) * keep).round().min(255.0) as u8;
         }
     }
 }
@@ -488,6 +530,18 @@ pub fn frame_rate(fps: f32) -> FrameRate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_layer_laid_over_keeps_what_shows_through_it() {
+        // half-covering red at half strength, over solid blue
+        let mut under = [0, 0, 255, 255];
+        lay_over(&mut under, &[128, 0, 0, 128], 0.5);
+        assert_eq!(under, [64, 0, 191, 255]);
+        // over nothing it is itself
+        let mut under = [0, 0, 0, 0];
+        lay_over(&mut under, &[10, 20, 30, 40], 1.0);
+        assert_eq!(under, [10, 20, 30, 40]);
+    }
 
     #[test]
     fn the_export_frame_rate_slider_goes_from_a_tenth_to_sixty_slow_at_the_start() {
