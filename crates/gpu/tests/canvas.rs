@@ -1658,8 +1658,8 @@ fn paint_laid_in_place_takes_each_stamp_s_own_colour() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
     // red paint: a stamp turned a third of the way round the hues is green, and one all of the
-    // secondary colour is blue, wet or dry
-    let shown = |wet_pull: Option<f32>, stamp: Stamp| {
+    // secondary colour is blue, wet or dry, and laid apart (for its wet edges) or not
+    let shown = |wet_pull: Option<f32>, wet_edges: f32, stamp: Stamp| {
         let mut doc = Document::new(64, 64);
         let mut canvas = Canvas::new(&gpu, &doc).unwrap();
         let style = StrokeStyle {
@@ -1667,6 +1667,7 @@ fn paint_laid_in_place_takes_each_stamp_s_own_colour() {
             laid_in_place: wet_pull.is_none(),
             rendering: Rendering::Gradual,
             secondary: [0.0, 0.0, 1.0],
+            wet_edges,
             ..StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0)
         };
         canvas.begin_stroke(doc.current(), style);
@@ -1676,16 +1677,21 @@ fn paint_laid_in_place_takes_each_stamp_s_own_colour() {
         let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
         pixel(&layer, 64, 32, 32)
     };
-    let near = |a: [u8; 4], b: [u8; 4]| a.iter().zip(b).all(|(x, y)| x.abs_diff(y) < 8);
+    // as strong as the paint shows there, and none of the other two
+    let near = |a: [u8; 4], channel: usize| {
+        a[3] > 190 && (0..3).all(|c| a[c].abs_diff(if c == channel { a[3] } else { 0 }) < 8)
+    };
     let plain = Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0);
     let turned = Stamp { tint: Tint { hue: 1.0 / 3.0, ..Tint::NONE }, ..plain };
     let second = Stamp { secondary: 1.0, ..plain };
     for wet_pull in [Some(0.5), None] {
-        let [red, green, blue] = [plain, turned, second].map(|s| shown(wet_pull, s));
-        assert!(
-            near(red, [255, 0, 0, 255]) && near(green, [0, 255, 0, 255]) && near(blue, [0, 0, 255, 255]),
-            "{wet_pull:?}: {red:?} {green:?} {blue:?}"
-        );
+        for wet_edges in [0.0, 0.5] {
+            let [red, green, blue] = [plain, turned, second].map(|s| shown(wet_pull, wet_edges, s));
+            assert!(
+                near(red, 0) && near(green, 1) && near(blue, 2),
+                "{wet_pull:?} {wet_edges}: {red:?} {green:?} {blue:?}"
+            );
+        }
     }
 }
 
@@ -1728,11 +1734,8 @@ fn wet_paint_lays_as_far_as_its_wetness() {
     let shown = |wetness: f32| {
         let mut doc = Document::new(64, 64);
         let mut canvas = Canvas::new(&gpu, &doc).unwrap();
-        let style = StrokeStyle {
-            wet_pull: Some(0.5),
-            wetness,
-            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
-        };
+        let style =
+            StrokeStyle { wet_pull: Some(0.5), wetness, ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0) };
         canvas.begin_stroke(doc.current(), style);
         canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0)]);
         canvas.end_stroke();
@@ -1745,6 +1748,37 @@ fn wet_paint_lays_as_far_as_its_wetness() {
     assert_eq!(StrokeStyle::wetness_at(1.0), 1.0);
     assert_eq!(StrokeStyle::wetness_at(0.0), 0.0);
     assert!((StrokeStyle::wetness_at(0.5) - (1.0 - 0.5f32.powf(2.2))).abs() < 1e-6);
+}
+
+#[test]
+fn wet_paint_goes_over_the_layer_squared_only_when_it_mixes_with_the_layer_as_it_was() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // white over black, shown 0.78 of the way by its wet edges: plainly, or as its colours mix
+    let shown = |wet_from_before: bool| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0));
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 24.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let style = StrokeStyle {
+            wet_pull: Some(0.5),
+            wet_from_before,
+            wet_edges: 1.0,
+            rendering: Rendering::Gradual,
+            luminance: true,
+            ..StrokeStyle::new(StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        pixel(&layer, 64, 32, 32)[0]
+    };
+    let (recursive, from_before) = (shown(false), shown(true));
+    assert!(recursive.abs_diff(200) < 8 && from_before.abs_diff(226) < 8, "{recursive} {from_before}");
 }
 
 #[test]

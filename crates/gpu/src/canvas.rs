@@ -940,7 +940,11 @@ fn smudge_uniform(
         grain_brightness: style.grain_brightness,
         grain_contrast: style.grain_contrast,
         wet_edges: if style.preview { 0.0 } else { style.wet_edges },
-        luminance: u32::from(style.luminance && style.wet_pull.is_some()),
+        luminance: match (style.luminance && style.wet_pull.is_some(), style.wet_from_before) {
+            (false, _) => 0,
+            (true, false) => 1,
+            (true, true) => 2,
+        },
         spare: 0,
     }
 }
@@ -4355,8 +4359,9 @@ impl Canvas {
                 .or((grain_once(style) || style.wet_edges > 0.0).then_some((0, -1.0)))
                 .filter(|_| wet_paint)
                 .map(|(mode, threshold)| (*style, mode, threshold));
-            // and wet paint keeps the stroke as it was laid, to go on mixing with
-            let grain = apart.is_some() && style.wet_pull.is_some();
+            // and keeps the stroke as it was laid, each stamp's colour in it (and wet paint to go on
+            // mixing with)
+            let grain = apart.is_some();
             // and builds up by what is left in the modulated mode (and keeps how much shows, laid
             // apart)
             let amount_bytes = (wet_paint && style.rendering == Rendering::Gradual || apart.is_some())
@@ -4584,7 +4589,7 @@ impl Canvas {
             dual,
             dual_threshold,
             grain_once: if grain_once(&style) { 1.0 } else { 0.0 },
-            laid_apart: if style.wet_pull.is_some() { 2 } else { 0 },
+            laid_apart: 2,
             ..smudge_uniform(&bytemuck::Zeroable::zeroed(), &style, rect, size)
         });
         let mut pass = encoder
@@ -4648,7 +4653,7 @@ impl Canvas {
                     modulated,
                     grain_once,
                     count: 0,
-                    laid_apart,
+                    laid_apart: laid_apart * 2,
                     paint: [r, g, b, 1.0],
                     ..smudge_uniform(s, style, bbox, size)
                 });

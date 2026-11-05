@@ -89,7 +89,8 @@ struct SmudgeStamp {
     grain_contrast: f32,
     // how far paint laid in place pools, as cs_synthesize lays it (see the composite shader)
     wet_edges: f32,
-    // wet paint with luminance blending: 1 when its colours mix squared
+    // wet paint with luminance blending: 1 when its colours mix squared, 2 when they do as it goes
+    // over the layer too (paint that mixes only with the layer as it was)
     luminance: u32,
     spare5: u32,
 }
@@ -368,9 +369,6 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
             let l = st.stride * st.size.y + k;
             amount[l] = amount[l] + weight * (1.0 - amount[l]);
         }
-        if (st.laid_apart == 1u) {
-            return;
-        }
         out = from_mix(mix(to_mix(w), to_mix(laid), weight));
     }
     if (st.preserve_alpha == 1u) {
@@ -423,7 +421,7 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     if (st.laid_apart == 2u && laid > 0.0) {
         // what a second adds past that is laid as plain paint, as it is where none was laid at all
         let scale = min(a / laid, LAID_MOST_SCALE);
-        let kept = was + (unpack4x8unorm(grained[k]) - was) * scale;
+        let kept = over_layer(was, unpack4x8unorm(grained[k]), scale);
         out = mix(kept, vec4<f32>(st.paint.rgb, 1.0), max(a - laid * scale, 0.0));
     }
     if (st.preserve_alpha == 1u) {
@@ -469,7 +467,15 @@ fn from_mix(c: vec4<f32>) -> vec4<f32> {
     if (st.luminance == 0u || c.a <= 0.0) {
         return c;
     }
-    return vec4<f32>(sqrt(c.rgb / c.a) * c.a, c.a);
+    return vec4<f32>(sqrt(max(c.rgb, vec3<f32>(0.0)) / c.a) * c.a, c.a);
+}
+
+// what paint laid apart shows over the layer `was`: `t` of the way to `laid`
+fn over_layer(was: vec4<f32>, laid: vec4<f32>, t: f32) -> vec4<f32> {
+    if (st.luminance == 2u) {
+        return from_mix(mix(to_mix(was), to_mix(laid), t));
+    }
+    return was + (laid - was) * t;
 }
 
 // the canvas point under stamp `w` at its point `t` (-1..1 across each way)
