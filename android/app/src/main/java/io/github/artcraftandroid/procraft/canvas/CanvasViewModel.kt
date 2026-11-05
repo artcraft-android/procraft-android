@@ -52,6 +52,7 @@ import io.github.artcraftandroid.procraft.core.Interpolation
 import io.github.artcraftandroid.procraft.core.LayerInfo
 import io.github.artcraftandroid.procraft.core.TextAlignment
 import io.github.artcraftandroid.procraft.core.TextInfo
+import io.github.artcraftandroid.procraft.core.TextSide
 import io.github.artcraftandroid.procraft.core.LayerType
 import io.github.artcraftandroid.procraft.core.MobileException
 import io.github.artcraftandroid.procraft.core.SelectionDisplay
@@ -861,6 +862,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     val brushBlendModeList: List<BlendModeInfo> = brushBlendModes()
     /** The modes a brush's grain blends by, as the studio lists them. */
     val grainBlendModeList: List<BlendModeInfo> = grainBlendModes()
+    val combineBlendModeList: List<BlendModeInfo> = io.github.artcraftandroid.procraft.core.combineBlendModes()
 
     init {
         refreshGallery()
@@ -2006,20 +2008,36 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         artworkDir = null
         panel = Panel.NONE
         screen = Screen.GALLERY
+        closingSaves.incrementAndGet()
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                // after the autosave's save under way, if one is
-                s.stopAutosave()
-                dir?.let { told(runCatching { s.save(it.path) }.map { true }) }
-                // its memory free at once, not when the object is collected
-                s.releaseCanvas()
-                // the frames it recorded made into one more video, their pictures then gone, as
-                // the artwork file keeps a time-lapse
-                lapse?.let { runCatching { it.forPackage() }; it.close() }
+            try {
+                withContext(Dispatchers.IO) {
+                    // after the autosave's save under way, if one is
+                    s.stopAutosave()
+                    dir?.let { told(runCatching { s.save(it.path) }.map { true }) }
+                    // its memory free at once, not when the object is collected
+                    s.releaseCanvas()
+                    // the frames it recorded made into one more video, their pictures then gone, as
+                    // the artwork file keeps a time-lapse
+                    lapse?.let { runCatching { it.forPackage() }; it.close() }
+                }
+            } finally {
+                closingSaves.decrementAndGet()
             }
             galleryVersion++
             refreshGallery()
         }
+    }
+
+    /** Artworks left that are still being saved. */
+    private val closingSaves = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Gallery Recovery, once what is being saved is kept: artworks the gallery can't show stacked as Recovered Artworks. */
+    suspend fun recoverLostArtworks() {
+        while (closingSaves.get() > 0) kotlinx.coroutines.delay(100)
+        withContext(Dispatchers.IO) { store.recoverLost() }
+        galleryVersion++
+        refreshGallery()
     }
 
     /** When time on the open artwork last started counting (elapsed realtime), 0 while away. */
@@ -2288,6 +2306,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             while (session === s) {
                 kotlinx.coroutines.delay(SAVE_FAILURE_POLL_MS)
                 s.takeSaveFailure()?.let { told(Result.failure(Exception(it))) }
+                // a smudge the GPU had no memory for, or its device lost
+                s.takeFailure()?.let { withContext(Dispatchers.Main) { showNotice(it, warning = true) } }
             }
         }
         // a canvas the device's graphics can't draw says so (one opened from its cell, by the zoom)
@@ -2463,11 +2483,45 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** The buttons the ring shows. */
     val quickMenuSlots: List<QuickAction> get() = quickMenus.getOrNull(quickMenuShown)?.slots.orEmpty()
 
-    fun setQuickSlot(i: Int, a: QuickAction) {
+    fun setQuickSlot(i: Int, a: QuickAction) = setQuickSlot(i, a, 0uL)
+
+    /** Sets button [i] of the ring to give brush [b] to the current tool. */
+    fun setQuickSlotBrush(i: Int, b: BrushInfo) {
+        val s = session ?: return
+        val key = s.quickBrushKey(b.set, b.index)
+        if (key == 0uL) return
+        setQuickSlot(i, QuickAction.BRUSHES, key)
+        // the library keeps the brush's key, following it about
+        keepChoices(s)
+    }
+
+    private fun setQuickSlot(i: Int, a: QuickAction, brush: ULong) {
         val menu = quickMenus.getOrNull(quickMenuShown) ?: return
         if (i !in menu.slots.indices) return
-        quickMenus = quickMenus.toMutableList().also { it[quickMenuShown] = menu.copy(slots = menu.slots.toMutableList().also { s -> s[i] = a }) }
+        val brushes = MutableList(menu.slots.size) { menu.brushes.getOrElse(it) { 0uL } }.also { it[i] = brush }
+        val slots = menu.slots.toMutableList().also { it[i] = a }
+        quickMenus = quickMenus.toMutableList().also { it[quickMenuShown] = menu.copy(slots = slots, brushes = brushes) }
         keepQuickMenus()
+    }
+
+    /** The brush button [i] of the ring gives the current tool, if it is set to one still in the library. */
+    fun quickSlotBrush(i: Int): BrushInfo? {
+        val menu = quickMenus.getOrNull(quickMenuShown) ?: return null
+        val key = menu.brushes.getOrElse(i) { 0uL }
+        if (menu.slots.getOrNull(i) != QuickAction.BRUSHES || key == 0uL) return null
+        return session?.quickBrush(key)
+    }
+
+    /** What button [i] of the ring says: the brush's name when it is set to one. */
+    fun quickSlotLabel(i: Int): String = quickSlotBrush(i)?.name ?: quickMenuSlots.getOrNull(i)?.button.orEmpty()
+
+    /** Runs button [i] of the ring: its brush given to the current tool, else its action. */
+    fun runQuickSlot(i: Int, at: Offset) {
+        quickSlotBrush(i)?.let {
+            chooseBrush(it)
+            return
+        }
+        quickMenuSlots.getOrNull(i)?.let { runQuickAction(it, at) }
     }
 
     /** Adds a menu ("QuickMenu N", every button No Action) and shows it; the active one stays until a menu is chosen. Returns its index. */
@@ -2514,6 +2568,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             in android.view.KeyEvent.KEYCODE_0..android.view.KeyEvent.KEYCODE_9 -> ('0' + (keyCode - android.view.KeyEvent.KEYCODE_0)).toString()
             android.view.KeyEvent.KEYCODE_LEFT_BRACKET -> "["
             android.view.KeyEvent.KEYCODE_RIGHT_BRACKET -> "]"
+            android.view.KeyEvent.KEYCODE_SEMICOLON -> ";"
+            android.view.KeyEvent.KEYCODE_SPACE -> "space"
             android.view.KeyEvent.KEYCODE_DEL -> "backspace"
             android.view.KeyEvent.KEYCODE_FORWARD_DEL -> "delete"
             android.view.KeyEvent.KEYCODE_DPAD_LEFT -> "left"
@@ -2542,10 +2598,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             KeyShortcut.DuplicateLayer -> duplicateCurrent()
             KeyShortcut.Interface -> toggleBars()
             KeyShortcut.ClearLayer -> clearCurrentLayer()
+            KeyShortcut.CopyCanvas -> runQuickAction(QuickAction.COPY_CANVAS, screenCentre)
+            KeyShortcut.ColourBalance -> runQuickAction(QuickAction.COLOR_BALANCE, screenCentre)
+            KeyShortcut.PerspectiveGuide -> runQuickAction(QuickAction.GUIDE_PERSPECTIVE, screenCentre)
+            KeyShortcut.QuickMenu -> toggleQuickMenu(screenCentre)
             KeyShortcut.GreyView -> session?.let { it.setGreyView(!it.greyView()) }
             is KeyShortcut.BrushSize -> changeSize((size + shortcut.by).coerceIn(0f, 1f))
             is KeyShortcut.Nudge -> session?.transformArrow(shortcut.dx, shortcut.dy)?.let { transformMoved(it) }
         }
+        return true
+    }
+
+    /** Alt on a hardware keyboard went down or up: held it is □ held; it taps nothing, being in the system's own shortcuts. */
+    fun modifyKey(down: Boolean): Boolean {
+        if (screen != Screen.CANVAS || session == null) return false
+        if (down) modifyPressed() else modifyReleased(true)
         return true
     }
 
@@ -2999,6 +3066,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun showSet(index: Int) {
         shownSet = index
+        pickedBrushes.clear()
         if (index == RECENT_SET) {
             readRecentBrushes()
             return
@@ -3239,6 +3307,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return
         // either way the canvas is fitted to the screen again: cancelled, growing back into place
         val changed = s.cropEnd(keep)
+        // a crop the GPU couldn't make: the canvas is as it was, and says so
+        s.takeFailure()?.let { showNotice(it, warning = true) }
         if (!keep) {
             refreshView()
             followView()
@@ -3418,9 +3488,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         textStyleOpen = true
     }
 
-    /** The style sheet's Cancel: its changes go back (the text stays), and the keyboard returns. */
+    /** The style sheet's Cancel: its changes go back (the text, where it is and its width stay), and the keyboard returns. */
     fun cancelTextStyle() {
-        textBeforeStyle?.let { before -> changeText { before.copy(text = it.text) } }
+        textBeforeStyle?.let { before -> changeText { before.copy(text = it.text, x = it.x, y = it.y, width = it.width) } }
         textStyleOpen = false
     }
 
@@ -3574,6 +3644,39 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         changeText { it.copy(x = it.x + b.x - a.x, y = it.y + b.y - a.y) }
     }
 
+    /** The side of the text box whose dot is within [reach] pixels of window point [p], if any. */
+    fun textSideAt(p: Offset, reach: Float): TextSide? = session?.textSideAt(p.x, p.y, reach)
+
+    /** A drag of the text box's [side] begins at window point [from]: the side follows it, the other staying put. */
+    fun beginTextSide(side: TextSide, from: Offset): Boolean = session?.textSideBegin(side, from.x, from.y) == true
+
+    /** The side being dragged follows the drag to window point [to]: the text wraps to the box's new width. */
+    fun dragTextSide(to: Offset) {
+        val info = session?.textSideDrag(to.x, to.y) ?: return
+        textInfo = info
+        renderText()
+    }
+
+    /** The side's drag ends: one undo step while the text is edited. */
+    fun endTextSide() {
+        session?.textSideEnd()
+        refresh()
+    }
+
+    /**
+     * Inside editing text, a change to its box's width undone ([undo]) or redone, the text still
+     * edited; false if there is none.
+     */
+    private fun stepTextBox(undo: Boolean): Boolean {
+        val s = session ?: return false
+        val name = (if (undo) s.textBoxUndo() else s.textBoxRedo()) ?: return false
+        s.editingText()?.let(s::layerText)?.let { textInfo = it }
+        renderText()
+        showNotice((if (undo) "Undo " else "Redo ") + name)
+        refresh()
+        return true
+    }
+
     /** Whether the current layer holds editable text. */
     fun currentIsText() = layers.firstOrNull { it.current }?.text == true
 
@@ -3632,6 +3735,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** After a change to the library: read it again, keep it, and draw previews again (they go by place). */
     private fun libraryChanged() {
         val s = session ?: return
+        // picks go by place, which may hold another brush now
+        pickedBrushes.clear()
         brushSets = s.brushLibrary()
         currentBrush = s.currentBrush()
         readSetChoices()
@@ -3650,6 +3755,48 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteBrush(b: BrushInfo) {
         if (session?.deleteBrush(b.set, b.index) == true) libraryChanged()
+    }
+
+    /** The brushes of the shown set picked by a swipe right, by place ("set-index"). */
+    val pickedBrushes = androidx.compose.runtime.mutableStateListOf<String>()
+
+    fun togglePickedBrush(b: BrushInfo) {
+        val key = "${b.set}-${b.index}"
+        if (!pickedBrushes.remove(key)) pickedBrushes.add(key)
+    }
+
+    /** One brush is picked, in the current brush's set, and neither is a pair already. */
+    val canCombinePicked: Boolean
+        get() {
+            val s = session ?: return false
+            val c = currentBrush ?: return false
+            val (set, index) = pickedBrushes.singleOrNull()?.let(::pickedPlace) ?: return false
+            return set == c.set && !s.brushIsDual(set, index) && !s.brushIsDual(c.set, c.index)
+        }
+
+    private fun pickedPlace(key: String): Pair<UInt, UInt>? {
+        val (set, index) = key.split('-').map { it.toUIntOrNull() ?: return null }
+        return set to index
+    }
+
+    /** The picked brush becomes the current brush's second; a tool on either has the pair. */
+    fun combinePicked() {
+        val s = session ?: return
+        val c = currentBrush ?: return
+        val (_, index) = pickedBrushes.singleOrNull()?.let(::pickedPlace) ?: return
+        pickedBrushes.clear()
+        if (s.combineBrushes(c.set, c.index, index)) {
+            currentBrush = s.currentBrush()
+            libraryChanged()
+        }
+    }
+
+    fun deletePickedBrushes() {
+        val s = session ?: return
+        // from the last up, so the places of the rest hold
+        val places = pickedBrushes.mapNotNull(::pickedPlace).sortedByDescending { it.second }
+        pickedBrushes.clear()
+        if (places.count { (set, index) -> s.deleteBrush(set, index) } > 0) libraryChanged()
     }
 
     /** Moves [b] to place [index] of set [set] (a brush dragged onto a set, or along its own). */
@@ -3999,12 +4146,68 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun studio(key: String): Float = studioValues[key] ?: 0f
 
+    /** The studio's brush is a dual brush, and its second part shows. */
+    var studioDual by mutableStateOf(false)
+        private set
+    var studioSecond by mutableStateOf(false)
+        private set
+    /** Its two parts' sample strokes, and how they combine. */
+    var studioParts by mutableStateOf<List<ImageBitmap?>>(listOf(null, null))
+        private set
+    var studioCombineMode by androidx.compose.runtime.mutableIntStateOf(0)
+        private set
+    /** The page the part not shown was left on. */
+    private var otherPartTab = 0
+    private var studioPartsJob: Job? = null
+
+    /** Shows a dual brush's first or [second], each on the page it was left on. */
+    fun showStudioPart(second: Boolean) {
+        val s = session ?: return
+        if (second == studioSecond) return
+        studioSecond = second
+        s.studioShowSecond(second)
+        otherPartTab = studioTab.also { studioTab = otherPartTab }
+        readStudio()
+    }
+
+    fun changeStudioCombineMode(mode: Int) {
+        val s = session ?: return
+        s.setStudioCombineMode(mode.toUInt())
+        studioCombineMode = mode
+        refreshStudioPreview()
+        syncPad()
+    }
+
+    /** Draws the parts' sample strokes again, a moment after the last change. */
+    private fun refreshStudioParts() {
+        val s = session ?: return
+        if (!studioDual) return
+        studioPartsJob?.cancel()
+        studioPartsJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(STUDIO_PREVIEW_DELAY_MS)
+            val parts = withContext(Dispatchers.Default) {
+                listOf(false, true).map { second ->
+                    s.studioPartPreview(second, 680u, 222u)?.let { t ->
+                        val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
+                        bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
+                        bitmap.asImageBitmap()
+                    }
+                }
+            }
+            if (studioOpen) studioParts = parts
+        }
+    }
+
     /** Opens the studio on the current tool's brush. */
     fun openStudio() {
         val s = session ?: return
         // the brush library stays open under it, so Cancel and Done go back to it
         if (panel != Panel.BRUSHES) closePanels()
         studioName = s.studioBegin()
+        studioDual = s.studioIsDual()
+        studioSecond = false
+        otherPartTab = 0
+        studioCombineMode = s.studioCombineMode().toInt()
         // each visit's pad paints in white, black with the light interface
         padColor = if (lightInterface) PAD_BLACK else PAD_WHITE
         readStudio()
@@ -4285,6 +4488,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun refreshStudioPreview() {
         val s = session ?: return
         val b = currentBrush ?: return
+        refreshStudioParts()
         studioPreviewJob?.cancel()
         studioPreviewJob = viewModelScope.launch {
             kotlinx.coroutines.delay(STUDIO_PREVIEW_DELAY_MS)
@@ -4648,7 +4852,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                         val mime = if (format == Animated.HEVC) android.media.MediaFormat.MIMETYPE_VIDEO_HEVC else android.media.MediaFormat.MIMETYPE_VIDEO_AVC
                         val (vw, vh) = VideoWriter.fit(w, h, maxOf(w, h), mime) ?: return@withContext null
                         val count = (t.seconds * TURNTABLE_FPS).roundToInt().coerceAtLeast(1)
-                        val ok = VideoWriter.write(file, vw, vh, TURNTABLE_FPS, count, mime) { i, pixels ->
+                        val ok = VideoWriter.write(file, vw, vh, TURNTABLE_FPS.toFloat(), count, mime) { i, pixels ->
                             if (cancelled()) return@write false
                             videoDone = i.toFloat() / count
                             val p = s.modelTurntablePicture(i.toUInt(), count.toUInt(), t, vw.toUInt(), vh.toUInt(), true) ?: return@write false
@@ -4714,23 +4918,32 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** One animation export at a time: they write the same file. */
     private val animationExports = Mutex()
 
+    /** The artwork's own frame rate, which an animated export starts at: Animation Assist's, else 15. */
+    fun artworkFps(): Float = (session?.animationSettings()?.fps?.toInt() ?: ANIMATION_FPS).toFloat()
+
     /**
-     * The animation written as [format] into the cache, to share: Web Ready fits 480 pixels, else
-     * the canvas size (a video as large as the encoder takes, up to 4096).
+     * The animation written as [format] into the cache, to share, [fps] frames a second: Web Ready
+     * fits 480 pixels, else the canvas size (a video as large as the encoder takes, up to 4096).
      */
-    suspend fun exportAnimation(format: Animated, webReady: Boolean, dither: Boolean, transparent: Boolean, cancelled: () -> Boolean = { false }): File? {
+    suspend fun exportAnimation(
+        format: Animated,
+        webReady: Boolean,
+        dither: Boolean,
+        perFramePalette: Boolean,
+        transparent: Boolean,
+        fps: Float,
+        cancelled: () -> Boolean = { false },
+    ): File? {
         val s = session ?: return null
         return animationExports.withLock { withContext(Dispatchers.IO) {
             val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
             val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
             val file = File(dir, "$base.${format.extension}")
             val side = if (webReady) WEB_READY_SIDE else 0
-            // Animation Assist's own frame rate, when it is on
-            val fps = s.animationSettings()?.fps?.toInt() ?: ANIMATION_FPS
             try {
                 when (format) {
-                    Animated.GIF -> s.exportGif(file.path, side.toUInt(), fps.toFloat(), dither, transparent)
-                    Animated.PNG -> s.exportApng(file.path, side.toUInt(), fps.toFloat(), transparent)
+                    Animated.GIF -> s.exportGif(file.path, side.toUInt(), fps, dither, perFramePalette, transparent)
+                    Animated.PNG -> s.exportApng(file.path, side.toUInt(), fps, transparent)
                     Animated.MP4, Animated.HEVC -> {
                         val mime = if (format == Animated.HEVC) android.media.MediaFormat.MIMETYPE_VIDEO_HEVC else android.media.MediaFormat.MIMETYPE_VIDEO_AVC
                         val (cw, ch) = canvasSize()
@@ -4763,12 +4976,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** [exportAnimation] with the export card (as every export has), how far it has come shown; Cancel stops a video. */
-    suspend fun shareAnimation(format: Animated, webReady: Boolean, dither: Boolean, transparent: Boolean): File? {
+    suspend fun shareAnimation(format: Animated, webReady: Boolean, dither: Boolean, perFramePalette: Boolean, transparent: Boolean, fps: Float): File? {
         val s = session ?: return null
         s.resetExportProgress()
         videoDone = 0f
         return withCard("The animation could not be exported.", { if (format.video) videoDone else s.exportProgress() }) {
-            exportAnimation(format, webReady, dither, transparent) { exportCancelled }
+            exportAnimation(format, webReady, dither, perFramePalette, transparent, fps) { exportCancelled }
         }
     }
 
@@ -4995,7 +5208,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         feedback()
         // a finished text's step goes back to editing that text first, as a step of its own
         if (textInfo == null && !transforming) session?.textUndoLayer()?.let { if (resumeText(it)) return }
-        // undoing while editing text undoes the whole edit
+        // editing text, a change to its box's width goes back a step at a time, still editing
+        if (textInfo != null && stepTextBox(undo = true)) return
+        // undoing while editing text otherwise undoes the whole edit
         if (textInfo != null) {
             textInfo = null
             textStyleOpen = false
@@ -5041,9 +5256,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun redo() {
         feedback()
         if (transforming) return
+        if (textInfo != null && stepTextBox(undo = false)) return
+        // text being edited is kept first
+        val editing = textInfo != null
+        textInfo = null
+        textStyleOpen = false
         val could = canRedo
         // a text edit redone is edited again
-        val text = if (textInfo == null) session?.textRedoLayer() else null
+        val text = if (!editing) session?.textRedoLayer() else null
         // recoloring, the core steps the open fill aside and makes it again over what comes back
         val name = session?.let { s -> if (recoloring) pourNow { s.redo() } else s.redo() }
         if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
@@ -6057,6 +6277,28 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var currentFrame by mutableStateOf<Int?>(null)
         private set
 
+    /** The timeline's places: each frame's index, again for each frame it is held. */
+    var frameSlots by mutableStateOf<List<Int>>(emptyList())
+        private set
+
+    /** The frame and how far into its hold the timeline was last left. */
+    private var heldAt by mutableStateOf(0 to 0)
+
+    /** How far into its hold the current frame is shown (0: the frame itself). */
+    val heldPlace: Int
+        get() {
+            val f = currentFrame ?: return 0
+            return if (heldAt.first == f) heldAt.second.coerceAtMost(frameSlots.count { it == f } - 1).coerceAtLeast(0) else 0
+        }
+
+    /** The timeline's place in the middle. */
+    val currentSlot: Int?
+        get() = currentFrame?.let { f -> frameSlots.indexOf(f).takeIf { it >= 0 }?.plus(heldPlace) }
+
+    /** Playing: the timeline's place shown. */
+    var playingSlot by mutableStateOf<Int?>(null)
+        private set
+
     /** Each frame's picture for the timeline. */
     val frameThumbnails = mutableStateMapOf<ULong, ImageBitmap>()
 
@@ -6087,12 +6329,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         animation = settings
         if (settings == null) {
             animationFrames = emptyList()
+            frameSlots = emptyList()
             currentFrame = null
             animationSettingsOpen = false
             frameOptionsOpen = false
             return
         }
         animationFrames = s.animationFrames()
+        frameSlots = s.animationSequence().map { it.toInt() }
         currentFrame = s.currentFrame()?.toInt()
         refreshFrameThumbnails()
     }
@@ -6123,16 +6367,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         animation = s.animationSettings()
     }
 
-    /** Frame [i] becomes the one drawn on (a tap on the current one opens its options). */
-    fun tapFrame(i: Int) {
+    /** Place [slot] comes to the middle, its frame the one drawn on (a tap on the current one opens its options). */
+    fun tapFrame(slot: Int) {
         if (playingFrame != null) stopPlaying()
-        if (i == currentFrame) {
+        if (slot == currentSlot) {
             frameOptionsOpen = !frameOptionsOpen
             animationSettingsOpen = false
             return
         }
         frameOptionsOpen = false
-        animationFrames.getOrNull(i)?.let { selectLayer(it) }
+        goToSlot(slot)
+    }
+
+    private fun goToSlot(slot: Int) {
+        val frame = frameSlots.getOrNull(slot) ?: return
+        heldAt = frame to slot - frameSlots.indexOf(frame)
+        if (frame != currentFrame) animationFrames.getOrNull(frame)?.let { selectLayer(it) }
     }
 
     /** The timeline dragged: playing stops and the frame's options close. */
@@ -6147,11 +6397,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * The timeline let go with frame [i] in its middle: it becomes the current frame, as a tap
-     * makes it (null: nothing chosen, the current frame shows again).
+     * The timeline let go with place [slot] in its middle: its frame becomes the current one, as
+     * a tap makes it (null: nothing chosen, the current frame shows again).
      */
-    fun endScrub(i: Int?) {
-        if (i != null && i != currentFrame) animationFrames.getOrNull(i)?.let { selectLayer(it) }
+    fun endScrub(slot: Int?) {
+        if (slot != null) goToSlot(slot)
         session?.setPlayFrame(null)
     }
 
@@ -6163,14 +6413,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun currentFrameLayer(): LayerInfo? = currentFrame?.let { animationFrames.getOrNull(it) }?.let { id -> layers.firstOrNull { it.id == id } }
 
+    /** The frame copied; on a held place it splits there, the copy taking over. */
     fun duplicateFrame() {
         frameOptionsOpen = false
-        currentFrameLayer()?.let(::duplicate)
+        val held = heldPlace
+        val layer = currentFrameLayer() ?: return
+        if (held > 0) layerChange { if (it.splitHeldFrame(layer.id, held.toUInt()) == null) message = noRoom() } else duplicate(layer)
     }
 
+    /** The frame deleted; on a held place it is held one frame less. */
     fun deleteFrame() {
         frameOptionsOpen = false
-        currentFrameLayer()?.let(::delete)
+        val layer = currentFrameLayer() ?: return
+        if (heldPlace > 0) layerChange { it.dropHeldFrame(layer.id) } else delete(layer)
     }
 
     fun frameHold(): Int = currentFrame?.let { animationFrames.getOrNull(it) }?.let { session?.frameHold(it)?.toInt() } ?: 0
@@ -6180,8 +6435,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun changeFrameHold(frames: Int) {
         val id = currentFrame?.let { animationFrames.getOrNull(it) } ?: return
-        session?.setFrameHold(id, frames.coerceIn(0, MAX_HOLD).toUInt())
+        session?.changeFrameHold(id, frames.coerceIn(0, MAX_HOLD).toUInt(), false)
+        frameSlots = session?.animationSequence()?.map { it.toInt() }.orEmpty()
         holdVersion++
+    }
+
+    /** The hold's slider let go: the whole drag is one undo step. */
+    fun endFrameHold() {
+        val id = currentFrame?.let { animationFrames.getOrNull(it) } ?: return
+        session?.changeFrameHold(id, frameHold().toUInt(), true)
+        refresh()
     }
 
     fun togglePlaying() = if (playingFrame != null) stopPlaying() else play()
@@ -6201,6 +6464,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             while (true) {
                 val frame = order[at]
                 playingFrame = frame
+                playingSlot = at
                 s.setPlayFrame(frame.toUInt())
                 kotlinx.coroutines.delay(1000L / (animation?.fps ?: a.fps).toInt().coerceAtLeast(1))
                 // round again, turned back, or (a single pass) done
@@ -6217,6 +6481,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         playJob = null
         if (playingFrame != null) {
             playingFrame = null
+            playingSlot = null
             session?.setPlayFrame(null)
         }
     }

@@ -813,3 +813,70 @@ fn stroked(f: &mut Fonts, key: CacheKey, width: f32) -> Option<swash::scale::ima
         .style(Stroke::new(width))
         .render(&mut scaler, key.glyph_id)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{fonts, lay_out, shown};
+    use crate::text::{TextAlignment, TextInfo};
+
+    fn inter() {
+        crate::add_text_font(include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec());
+    }
+
+    fn text(words: &str, width: f32) -> TextInfo {
+        TextInfo {
+            text: words.to_owned(),
+            font: "inter".to_owned(),
+            style: "Regular".to_owned(),
+            size: 40.0,
+            kerning: 0.0,
+            tracking: 0.0,
+            leading: 0.0,
+            baseline: 0.0,
+            opacity: 1.0,
+            align: TextAlignment::Left,
+            underline: false,
+            outline: false,
+            vertical: false,
+            all_caps: false,
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            x: 0.0,
+            y: 0.0,
+            width,
+        }
+    }
+
+    /// The text of each line as laid out.
+    fn lines(t: &TextInfo) -> Vec<String> {
+        let laid = lay_out(&mut fonts(), t);
+        let words = shown(t);
+        let paragraphs: Vec<&str> = words.split('\n').collect();
+        laid.lines
+            .iter()
+            .map(|l| {
+                let p = paragraphs[l.paragraph];
+                let (a, b) = (l.glyphs.first().map_or(0, |g| g.start), l.glyphs.last().map_or(0, |g| g.end));
+                p[a..b].to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_word_wider_than_the_box_breaks_by_letters_and_the_box_grows_down() {
+        inter();
+        let one = crate::text_box(text("Text", 0.0));
+        let te = crate::text_box(text("Te", 0.0))[2];
+        // words wrap whole where they fit
+        assert_eq!(lines(&text("Text Text", one[2] + 5.0)), ["Text", "Text"]);
+        // narrower than the word, it breaks between letters, the box as tall as the lines
+        let narrow = text("Text", te + 1.0);
+        assert_eq!(lines(&narrow), ["Te", "xt"]);
+        let b = crate::text_box(narrow.clone());
+        assert_eq!(b[2], te + 1.0);
+        assert!((b[3] - 2.0 * one[3]).abs() < 1.0, "{} for a line {}", b[3], one[3]);
+        // narrower than a letter, a letter a line
+        assert_eq!(lines(&text("Text", 5.0)), ["T", "e", "x", "t"]);
+    }
+}

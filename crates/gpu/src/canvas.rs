@@ -175,10 +175,16 @@ impl StrokeStyle {
         self.tool == StrokeTool::Smudge || self.paints_in_place()
     }
 
-    /// Whether a dual brush's second can go with the stroke: not with a smudge or wet paint (the
-    /// paint laid in place by a dry brush is put together with it, see `cs_synthesize`).
+    /// Whether a dual brush's second can go with the stroke: not with a smudge (paint laid in
+    /// place, dry or wet, is put together with it, see `cs_synthesize`).
     pub fn takes_second(&self) -> bool {
-        !self.in_place() || (self.tool == StrokeTool::Paint && self.laid_in_place && self.wet_pull.is_none())
+        self.tool != StrokeTool::Smudge
+    }
+
+    /// The style as a dual brush's second: only coverage, drawn apart into its own texture, so
+    /// never laid in place or mixed wet, whatever its own settings say.
+    pub fn as_second(self) -> StrokeStyle {
+        StrokeStyle { laid_in_place: false, wet_pull: None, wet_from_before: false, ..self }
     }
 
     /// Whether the stroke paints its layer as it goes: wet paint, or dry paint laid in place.
@@ -276,7 +282,8 @@ impl StrokeStyle {
             blur_jitter: if wet { brush.setting("wet_blur_jitter").clamp(0.0, 1.0) } else { 0.0 },
             grain_blend: brush.setting("grain_blend").round().clamp(0.0, GRAIN_LINEAR_HEIGHT as f32) as u32,
             burnt_blend: brush.setting("burnt_blend").round().clamp(0.0, BRUSH_BEHIND as f32) as u32,
-            grain_rotation: brush.setting("grain_rotation").clamp(-1.0, 1.0) * std::f32::consts::PI,
+            // a brush's rotation turns its grain the other way to the shaders' angle
+            grain_rotation: -brush.setting("grain_rotation").clamp(-1.0, 1.0) * std::f32::consts::PI,
             grain_sharp: brush.setting("grain_filtering") < 0.5,
             shape_sharp: brush.setting("shape_filtering") < 0.5,
             shape_lod_cap: SHAPE_LOD_CAP,
@@ -469,6 +476,15 @@ struct StampInstance {
     more: [f32; 4],
     /// The tint's brightness add.
     brightness_add: f32,
+}
+
+/// Where a moving grain is read from at the stamp's middle (see `Stamp::grain_offset`) as the
+/// shaders take it. They turn what they read by the grain's rotation, offset and all, but only the
+/// stamp's own patch of grain turns; where it is read from doesn't. So a turned grain rolling along
+/// a stroke slides under it and smears along the way the stroke goes, most at a half turn.
+fn grain_read_from(offset: procraft_engine::geom::Vec2, rotation: f32) -> [f32; 2] {
+    let (sin, cos) = rotation.sin_cos();
+    [offset.x * cos + offset.y * sin, offset.y * cos - offset.x * sin]
 }
 
 /// A stamp's (alpha, transfer) as its instance takes them: a capped stroke keeps its transfer
@@ -819,6 +835,41 @@ fn smudge_bind(
     })
 }
 
+/// The colour `c` tinted (see [`stamp_extras`]), as the stamp shader does it.
+fn tinted(c: [f32; 3], [turn, keep_s, add_s, keep_b]: [f32; 4], add_b: f32) -> [f32; 3] {
+    if [turn, keep_s, add_s, keep_b, add_b] == [0.0, 1.0, 0.0, 1.0, 0.0] {
+        return c;
+    }
+    let [r, g, b] = c;
+    let high = r.max(g).max(b);
+    let range = high - r.min(g).min(b);
+    let (hue, saturation) = if range <= 1e-5 {
+        (0.0, 0.0)
+    } else if high == r {
+        ((g - b) / range, range / high)
+    } else if high == g {
+        ((b - r) / range + 2.0, range / high)
+    } else {
+        ((r - g) / range + 4.0, range / high)
+    };
+    let hue = (hue / 6.0 + turn).rem_euclid(1.0);
+    let saturation = (saturation * keep_s + add_s).clamp(0.0, 1.0);
+    let brightness = (high * keep_b + add_b).clamp(0.0, 1.0);
+    [5.0, 3.0, 1.0].map(|n: f32| {
+        let k = (hue + n / 6.0).rem_euclid(1.0) * 6.0;
+        brightness - brightness * saturation * k.min(4.0 - k).clamp(0.0, 1.0)
+    })
+}
+
+/// What the stamp `s` paints with: the stroke's colour as it tints it, mixed towards the secondary
+/// colour as far as it says.
+fn stamp_paint(s: &StampInstance, style: &StrokeStyle) -> [f32; 3] {
+    let [r, g, b] = tinted(style.color, s.tint, s.brightness_add);
+    let [other_r, other_g, other_b] = style.secondary;
+    let towards = |from: f32, to: f32| from + (to - from) * s.look[2];
+    [towards(r, other_r), towards(g, other_g), towards(b, other_b)]
+}
+
 /// A smudge stamp's uniform: what every pass reads of the stamp `s` and the stroke's `style`
 /// (the rest as the pass sets it).
 fn smudge_uniform(
@@ -875,6 +926,10 @@ fn smudge_uniform(
         dual_threshold: -1.0,
         laid_apart: 0,
         source_before: u32::from(style.wet_from_before),
+        grain_brightness: style.grain_brightness,
+        grain_contrast: style.grain_contrast,
+        wet_edges: if style.preview { 0.0 } else { style.wet_edges },
+        luminance: u32::from(style.luminance && style.wet_pull.is_some()),
         spare: 0,
     }
 }
@@ -947,12 +1002,20 @@ struct SmudgeUniform {
     /// its second's threshold (negative: none).
     dual: u32,
     dual_threshold: f32,
-    /// 1 when the stamp only adds to the paint laid so far, which `cs_synthesize` lays down.
+    /// 1 when the stamp only adds to the paint laid so far, which `cs_synthesize` lays down; 2
+    /// when it is wet paint, which keeps what it lays as well.
     laid_apart: u32,
     /// The coarsest mip level the shape is read from.
     shape_lod_cap: f32,
     /// 1 when wet paint mixes with the layer as it was before the stroke (a glaze).
     source_before: u32,
+    /// The grain's levels, as the stamp shader takes them.
+    grain_brightness: f32,
+    grain_contrast: f32,
+    /// How far paint laid in place pools, as `cs_synthesize` lays it.
+    wet_edges: f32,
+    /// Wet paint with luminance blending: 1 when its colours mix squared.
+    luminance: u32,
     spare: u32,
 }
 
@@ -971,11 +1034,11 @@ const WET_PLOT_MOST: u32 = 128;
 const WET_PLOTS_TEXELS: u64 = 1024 * 1024;
 
 /// The stamps of one pass of wet paint (see `cs_wet_plots`), each as its middle, radius and turn,
-/// then its roundness, pull, mixture and final mixture.
+/// then its roundness, pull, mixture and final mixture, then what it paints with.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct WetPass {
-    stamps: [[f32; 8]; WET_PASS_MOST],
+    stamps: [[f32; 12]; WET_PASS_MOST],
 }
 const WET_PASS_SIZE: u64 = std::mem::size_of::<WetPass>() as u64;
 
@@ -1003,7 +1066,7 @@ struct Smudge {
     /// Wet paint that builds up by what is left (the modulated mode): how much each pixel has taken
     /// so far, 0..1; for paint laid apart, then how much of the paint shows at each pixel.
     amount: Option<wgpu::Buffer>,
-    /// A dual brush's dry paint laid in place: laid apart (into `amount`'s second half) and put
+    /// A dual brush's paint laid in place: laid apart (into `amount`'s second half) and put
     /// together with its second where either goes (`cs_synthesize`), with the stroke's look and
     /// its second's dual mode + 1 and threshold (the mode 0 once the second is dropped).
     apart: Option<(StrokeStyle, u32, f32)>,
@@ -1555,6 +1618,10 @@ pub struct Canvas {
     composites: u64,
     active: Option<ActiveStroke>,
     smudge: Option<Smudge>,
+    /// The open smudge stroke couldn't be begun (what it takes couldn't be made): it does nothing
+    /// until it ends. And whether that is still to be told.
+    smudge_refused: bool,
+    smudge_untold: bool,
     /// A layer's pixels set aside by [`Canvas::hold_layer`].
     held: Option<Snapshot>,
     /// Counts the undo steps ever made, so that a change since some moment shows.
@@ -1716,7 +1783,22 @@ fn array_view(texture: &wgpu::Texture) -> wgpu::TextureView {
 
 impl Canvas {
     pub fn new(gpu: &Gpu, doc: &Document) -> Result<Canvas, GpuError> {
+        let mut canvas = Canvas::unfilled(gpu, doc)?;
+        canvas.fill_rest(gpu, doc);
+        Ok(canvas)
+    }
+
+    /// A canvas with no layer textures yet, for layers about to come from elsewhere (an artwork
+    /// opened, a crop): each is made as its layer goes up, those past the budget being parked
+    /// instead, so that a canvas of many layers never holds a texture for every one at once.
+    /// [`Canvas::fill_rest`] ends it.
+    pub fn unfilled(gpu: &Gpu, doc: &Document) -> Result<Canvas, GpuError> {
         Canvas::make(gpu, doc, None, true)
+    }
+
+    /// Makes the textures of the layers that have none and aren't parked (clear).
+    pub fn fill_rest(&mut self, gpu: &Gpu, doc: &Document) {
+        self.sync_layers(gpu, doc);
     }
 
     /// A canvas whose strokes are drawn into it from elsewhere ([`Canvas::begin_drawn_stroke`]),
@@ -1724,7 +1806,9 @@ impl Canvas {
     /// with other canvases its size, one stroke open among them at a time), and makes its shape
     /// and grain images only once something wants them.
     pub fn for_drawn_strokes(gpu: &Gpu, doc: &Document, stroke: &SharedStroke) -> Result<Canvas, GpuError> {
-        Canvas::make(gpu, doc, Some(stroke), false)
+        let mut canvas = Canvas::make(gpu, doc, Some(stroke), false)?;
+        canvas.fill_rest(gpu, doc);
+        Ok(canvas)
     }
 
     fn make(gpu: &Gpu, doc: &Document, stroke: Option<&SharedStroke>, images: bool) -> Result<Canvas, GpuError> {
@@ -1800,7 +1884,7 @@ impl Canvas {
         let (uniform_buffer, uniform_bind) = uniforms(device, &pipelines.uniform_layout, uniform_slots);
         let stamp_capacity = 4096;
         let stamp_buffer = stamp_buffer(device, stamp_capacity);
-        let mut canvas = Canvas {
+        let canvas = Canvas {
             width,
             height,
             pipelines,
@@ -1846,6 +1930,8 @@ impl Canvas {
             composites: 0,
             active: None,
             smudge: None,
+            smudge_refused: false,
+            smudge_untold: false,
             held: None,
             steps_made: 0,
             mark: None,
@@ -1885,7 +1971,6 @@ impl Canvas {
             shape_sources: SourceSlots::after(shape_images.len()),
             grain_sources: SourceSlots::after(grain_images.len()),
         };
-        canvas.sync_layers(gpu, doc);
         Ok(canvas)
     }
 
@@ -2223,9 +2308,10 @@ impl Canvas {
     }
 
     /// Whether the open stroke can show a tip (see [`Canvas::set_tip`]): one built up in the
-    /// stroke texture, not painted in place or onto an adjustment.
+    /// stroke texture, not painted in place or onto an adjustment, nor a dual brush's: its second
+    /// isn't there yet to cut it.
     pub fn shows_tip(&self) -> bool {
-        self.active.is_some_and(|a| !a.pencil && !a.style.in_place())
+        self.active.is_some_and(|a| !a.pencil && !a.style.in_place() && a.second.is_none())
     }
 
     /// The open stroke's tip, drawn over it until the next stamps or tip: its last stamps as
@@ -2288,7 +2374,7 @@ impl Canvas {
                     angle: if s.angle.is_finite() { s.angle } else { 0.0 },
                     roundness: if s.roundness.is_finite() { s.roundness.clamp(0.05, MOST_ROUNDNESS) } else { 1.0 },
                     grain_offset: if s.grain_offset.is_finite() {
-                        [s.grain_offset.x, s.grain_offset.y]
+                        grain_read_from(s.grain_offset, style.grain_rotation)
                     } else {
                         [0.0; 2]
                     },
@@ -2332,9 +2418,14 @@ impl Canvas {
     /// never into the layer. Only painting strokes show them.
     pub fn set_prediction(&mut self, stamps: &[Stamp]) {
         self.prediction.clear();
-        // (a dual brush's not: drawn over the canvas, it couldn't be cut by its second)
-        let Some(style) =
-            self.active.filter(|a| a.second.is_none()).map(|a| a.style).filter(|s| s.tool == StrokeTool::Paint)
+        // (a dual brush's not: drawn over the canvas, it couldn't be cut by its second; nor paint
+        // laid in place: drawn over every layer, its stamps show none of what it is laid on, a
+        // block of colour that the stroke then isn't)
+        let Some(style) = self
+            .active
+            .filter(|a| a.second.is_none())
+            .map(|a| a.style)
+            .filter(|s| s.tool == StrokeTool::Paint && !s.paints_in_place())
         else {
             return;
         };
@@ -2697,12 +2788,23 @@ impl Canvas {
         self.caches.is_some()
     }
 
-    /// What the layers' textures may take, in bytes: past it, the layers needed least lately
-    /// that aren't being worked on are parked (kept compressed off the GPU, and the composite made
-    /// around pictures of them) until needed again. 0 keeps every layer on the GPU.
+    /// Whether a smudge stroke couldn't be begun since this was last asked (what it takes couldn't
+    /// be made on the GPU: past its memory, or more than a binding may hold), once.
+    pub fn take_smudge_refused(&mut self) -> bool {
+        std::mem::take(&mut self.smudge_untold)
+    }
+
+    /// What the layers' textures and the history may take, in bytes: past it, the layers needed
+    /// least lately that aren't being worked on are parked (kept compressed off the GPU, and the
+    /// composite made around pictures of them) until needed again. 0 keeps every layer on the GPU.
     pub fn set_resident_budget(&mut self, bytes: u64) {
         self.resident_budget = bytes;
         self.set_cache_composites(bytes > 0);
+    }
+
+    /// What was set with [`Canvas::set_resident_budget`].
+    pub fn resident_budget(&self) -> u64 {
+        self.resident_budget
     }
 
     /// A parked layer's small pictures, if they are big enough for a thumbnail `max_side` across.
@@ -2849,8 +2951,7 @@ impl Canvas {
     /// pictures of the others.
     fn park_extra(&mut self, gpu: &Gpu, doc: &Document) {
         self.parking_left = false;
-        let per = u64::from(self.width) * u64::from(self.height) * 4;
-        let most = usize::try_from(self.resident_budget / per.max(1)).unwrap_or(usize::MAX);
+        let most = self.most_resident();
         if self.resident_budget == 0 || self.layers.len() <= most {
             return;
         }
@@ -3410,6 +3511,7 @@ impl Canvas {
             // a stroke ends: the next has a second only if it says so
             if matches!(op, Op::Commit(_) | Op::Cancel) {
                 self.queued_second = None;
+                self.smudge_refused = false;
             }
             match op {
                 Op::Stamps { instances, wet, times, style, layer, clear, second: false, .. } if style.in_place() => {
@@ -3491,6 +3593,10 @@ impl Canvas {
                 }
                 Op::Commit(stroke) if stroke.style.in_place() => {
                     self.within = None;
+                    // one that couldn't be begun made no step, nor takes the name of one
+                    if self.smudge.is_none() {
+                        self.next_name = None;
+                    }
                     // wet paint's last frame, held back for the rest of it
                     let held = self.smudge.as_mut().map(|s| std::mem::take(&mut s.pending)).unwrap_or_default();
                     let uniforms = (&mut smudge_uniforms, &mut wet_uniforms);
@@ -4223,14 +4329,36 @@ impl Canvas {
             self.dirty = self.full();
         }
         if self.smudge.as_ref().is_none_or(|s| s.layer != target) {
+            if self.smudge_refused {
+                return;
+            }
             let Some(layer) = self.layers.get(&target) else { return };
+            let wet_paint = style.paints_in_place();
+            let layer_bytes = u64::from(row) * u64::from(self.height);
+            // paint laid in place with a second, a texturized grain or wet edges is laid apart,
+            // and put together with them
+            let second = self.queued_second.map(|d| (d.mode + 1, d.threshold));
+            let apart = second
+                .or((grain_once(style) || style.wet_edges > 0.0).then_some((0, -1.0)))
+                .filter(|_| wet_paint)
+                .map(|(mode, threshold)| (*style, mode, threshold));
+            // and wet paint keeps the stroke as it was laid, to go on mixing with
+            let grain = apart.is_some() && style.wet_pull.is_some();
+            // and builds up by what is left in the modulated mode (and keeps how much shows, laid
+            // apart)
+            let amount_bytes = (wet_paint && style.rendering == Rendering::Gradual || apart.is_some())
+                .then(|| layer_bytes * if apart.is_some() { 2 } else { 1 });
+            // all it takes made first, and the stroke not begun if any of it can't be (past the
+            // GPU's memory, or more than a binding may hold): begun, each frame it is in would go
+            // undrawn (the screen flashing) and its undo step would wipe what it covered
+            let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+            let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let work = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("smudge layer"),
-                size: u64::from(row) * u64::from(self.height),
+                size: layer_bytes,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let wet_paint = style.paints_in_place();
             let carry = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("smudge carry"),
                 // the carry, and the blur's two passes over it (see the shader's cs_blur_down); or
@@ -4244,63 +4372,56 @@ impl Canvas {
                 mapped_at_creation: false,
             });
             let before = texture(device, "smudge before", self.width, self.height, LAYER_FORMAT);
+            let grained = grain.then(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("smudge grained"),
+                    size: layer_bytes,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+            let amount = amount_bytes.map(|size| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("smudge amount"),
+                    size,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+            let failed = pollster::block_on(invalid.pop()).or(pollster::block_on(memory.pop()));
+            let bound = (if grain { 2 * layer_bytes } else { layer_bytes }).max(amount_bytes.unwrap_or(0));
+            let most = device.limits().max_storage_buffer_binding_size;
+            let too_much = || (bound > most).then(|| format!("{bound} bytes bound, {most} at most"));
+            let refused = failed.map(|e| e.to_string()).or_else(too_much);
+            if let Some(why) = refused {
+                log::error!("smudging: {why}");
+                self.smudge_refused = true;
+                self.smudge_untold = true;
+                return;
+            }
             encoder.copy_texture_to_texture(
                 copy_at(&layer.texture, 0, 0),
                 copy_at(&before, 0, 0),
                 extent(self.width, self.height),
             );
-            encoder.copy_texture_to_buffer(
-                copy_at(&layer.texture, 0, 0),
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &work,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(row),
-                        rows_per_image: Some(self.height),
-                    },
-                },
-                extent(self.width, self.height),
-            );
-            // wet paint with a texturized grain keeps the stroke without it, then the layer as it was
-            let layer_bytes = u64::from(row) * u64::from(self.height);
-            let grained = grain_once(style).then(|| {
-                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("smudge grained"),
-                    size: 2 * layer_bytes,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                for offset in [0, layer_bytes] {
-                    encoder.copy_texture_to_buffer(
-                        copy_at(&layer.texture, 0, 0),
-                        wgpu::TexelCopyBufferInfo {
-                            buffer: &buffer,
-                            layout: wgpu::TexelCopyBufferLayout {
-                                offset,
-                                bytes_per_row: Some(row),
-                                rows_per_image: Some(self.height),
-                            },
+            let copy_into = |encoder: &mut wgpu::CommandEncoder, buffer: &wgpu::Buffer, offset: u64| {
+                encoder.copy_texture_to_buffer(
+                    copy_at(&layer.texture, 0, 0),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset,
+                            bytes_per_row: Some(row),
+                            rows_per_image: Some(self.height),
                         },
-                        extent(self.width, self.height),
-                    );
-                }
-                buffer
-            });
-            // a dual brush's dry paint laid in place is laid apart, put together with its second
-            let apart = (style.laid_in_place && style.wet_pull.is_none())
-                .then_some(self.queued_second)
-                .flatten()
-                .map(|d| (*style, d.mode + 1, d.threshold));
-            // and builds up by what is left in the modulated mode (and keeps how much shows, laid
-            // apart)
-            let amount = (wet_paint && style.rendering == Rendering::Gradual || apart.is_some()).then(|| {
-                device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("smudge amount"),
-                    size: layer_bytes * if apart.is_some() { 2 } else { 1 },
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                })
-            });
+                    },
+                    extent(self.width, self.height),
+                );
+            };
+            copy_into(encoder, &work, 0);
+            if let Some(buffer) = &grained {
+                copy_into(encoder, buffer, 0);
+            }
             self.smudge = Some(Smudge {
                 layer: target,
                 work,
@@ -4449,7 +4570,8 @@ impl Canvas {
             mode: 1,
             dual,
             dual_threshold,
-            grain_once: if smudge.grained.is_some() { 1.0 } else { 0.0 },
+            grain_once: if grain_once(&style) { 1.0 } else { 0.0 },
+            laid_apart: if style.wet_pull.is_some() { 2 } else { 0 },
             ..smudge_uniform(&bytemuck::Zeroable::zeroed(), &style, rect, size)
         });
         let mut pass = encoder
@@ -4479,7 +4601,8 @@ impl Canvas {
         }
         let size = (self.width, self.height, self.row_bytes());
         let full = IRect::from_size(self.width, self.height);
-        let second = self.smudge.as_ref().is_some_and(|s| s.apart.is_some()).then(|| self.second_stroke.get(device).1);
+        let dual = self.smudge.as_ref().and_then(|s| s.apart.as_ref()).is_some_and(|a| a.1 != 0);
+        let second = dual.then(|| self.second_stroke.get(device).1);
         let Some(smudge) = self.smudge.as_mut() else { return };
         let bind = smudge_bind(
             device,
@@ -4489,8 +4612,8 @@ impl Canvas {
             smudge,
             second,
         );
-        let grain_once = if smudge.grained.is_some() { 1.0 } else { 0.0 };
-        let modulated = u32::from(smudge.amount.is_some());
+        let grain_once = if grain_once(style) { 1.0 } else { 0.0 };
+        let modulated = u32::from(smudge.amount.is_some() && style.rendering == Rendering::Gradual);
         let laid_apart = u32::from(smudge.apart.is_some());
         let mut changed = IRect::EMPTY;
         let mut pass =
@@ -4506,12 +4629,14 @@ impl Canvas {
                     continue;
                 }
                 changed = changed.union(bbox);
+                let [r, g, b] = stamp_paint(s, style);
                 let offset = params.push(&SmudgeUniform {
                     mode: 1,
                     modulated,
                     grain_once,
                     count: 0,
                     laid_apart,
+                    paint: [r, g, b, 1.0],
                     ..smudge_uniform(s, style, bbox, size)
                 });
                 pass.set_bind_group(0, &bind, &[offset, 0]);
@@ -4541,7 +4666,7 @@ impl Canvas {
             while plot > 4 && u64::from(plot * plot) * n as u64 > WET_PLOTS_TEXELS {
                 plot /= 2;
             }
-            let mut list = WetPass { stamps: [[0.0; 8]; WET_PASS_MOST] };
+            let mut list = WetPass { stamps: [[0.0; 12]; WET_PASS_MOST] };
             for (k, (s, w, _)) in group.iter().enumerate() {
                 // the paint runs out with the length the stroke has gone
                 if let Some([x, y]) = smudge.last {
@@ -4556,6 +4681,7 @@ impl Canvas {
                 let pull = pull * wet_pull_by;
                 let grade = (style.grade * grade_by).clamp(-1.0, 1.0);
                 let final_mixture = final_mixture(mixture, pull, grade, (k, n), first);
+                let [r, g, b] = stamp_paint(s, style);
                 if let Some(slot) = list.stamps.get_mut(k) {
                     *slot = [
                         s.center[0],
@@ -4566,6 +4692,10 @@ impl Canvas {
                         pull,
                         mixture,
                         final_mixture,
+                        r,
+                        g,
+                        b,
+                        1.0,
                     ];
                 }
             }
@@ -4577,6 +4707,7 @@ impl Canvas {
                 modulated,
                 kept: if first { -1 } else { 0 },
                 grain_once,
+                laid_apart: laid_apart * 2,
                 count: u32::try_from(n).unwrap_or(0),
                 plot,
                 index,
@@ -4608,7 +4739,11 @@ impl Canvas {
             smudge.plot = plot;
         }
         drop(pass);
-        self.smudged(encoder, changed);
+        if laid_apart == 1 {
+            self.synthesize(device, encoder, params, changed);
+        } else {
+            self.smudged(encoder, changed);
+        }
     }
 
     /// Ends a smudge stroke: one undo step with the pixels it changed, or (`cancel`) puts the
@@ -5648,7 +5783,13 @@ impl Canvas {
 
     /// How many layers' textures fit the budget (any number without one).
     pub fn most_resident(&self) -> usize {
-        most_resident(self.resident_budget, self.width, self.height)
+        if self.resident_budget == 0 {
+            return usize::MAX;
+        }
+        // the history takes from the same memory, a layer's worth at a time
+        let per = (u64::from(self.width) * u64::from(self.height) * 4).max(1);
+        let room = self.resident_budget.saturating_sub(self.history_bytes() / per * per);
+        most_resident(room.max(1), self.width, self.height)
     }
 
     /// Lets go of the textures of layers unchanged since parked (their compressed copies kept),
@@ -7930,6 +8071,8 @@ fn texture(device: &wgpu::Device, label: &str, width: u32, height: u32, format: 
     // where the GPU's block compression loses parts of a picture redrawn a part at a time (Mali),
     // a texture that can be a storage one is kept uncompressed
     let uncompressed = crate::textures_uncompressed() && format == wgpu::TextureFormat::Rgba8Unorm;
+    #[cfg(test)]
+    let width = if tests::fails(label) { device.limits().max_texture_dimension_2d + 1 } else { width };
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: extent(width, height),
@@ -8729,6 +8872,8 @@ pub fn read_texture(gpu: &Gpu, texture: &wgpu::Texture, width: u32, height: u32)
 pub enum Readback {
     /// Already here.
     Ready(Vec<u8>),
+    /// The copy couldn't be made (why): nothing is coming.
+    Failed(String),
     Copying {
         device: wgpu::Device,
         /// The buffer and how much of it the pixels take; kept for the next readback after.
@@ -8750,6 +8895,7 @@ impl Readback {
     pub fn bytes(&self) -> usize {
         match self {
             Readback::Ready(p) => p.len(),
+            Readback::Failed(_) => 0,
             Readback::Copying { size, .. } => usize::try_from(*size).unwrap_or(usize::MAX),
         }
     }
@@ -8759,6 +8905,7 @@ impl Readback {
     pub fn pixels(self) -> Result<Vec<u8>, GpuError> {
         let (device, buffer, size, kept, row, padded, mapped) = match self {
             Readback::Ready(p) => return Ok(p),
+            Readback::Failed(why) => return Err(GpuError::Readback(why)),
             Readback::Copying { device, buffer, size, kept, row, padded, mapped } => {
                 (device, buffer, size, kept, row, padded, mapped)
             }
@@ -8800,6 +8947,9 @@ fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readba
     let padded = row.div_ceil(256) * 256;
     let size = (padded * height as usize) as u64;
     let buffer = gpu.readback_buffer(size);
+    // a texture there was no memory for (or one its device let go) copies nothing, and the buffer
+    // would give back what it held before, another layer's pixels perhaps: the read fails instead
+    let invalid = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
     encoder.copy_texture_to_buffer(
         copy_at(texture, rect.x0, rect.y0),
@@ -8814,6 +8964,9 @@ fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readba
         extent(width, height),
     );
     gpu.queue.submit([encoder.finish()]);
+    if let Some(e) = pollster::block_on(invalid.pop()) {
+        return Readback::Failed(e.to_string());
+    }
     let (tx, rx) = mpsc::channel();
     buffer.slice(..size).map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
@@ -8825,6 +8978,123 @@ fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readba
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    std::thread_local! {
+        /// The label of textures this thread can't make, as past the GPU's memory.
+        static FAILING: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// Whether a texture labelled `label` is to fail on this thread.
+    pub(super) fn fails(label: &str) -> bool {
+        FAILING.with(|f| f.get() == Some(label))
+    }
+
+    #[test]
+    fn a_canvas_made_for_filling_holds_no_layer_textures_until_they_come() {
+        use procraft_engine::document::Document;
+        let Ok(gpu) = Gpu::headless() else { return };
+        let mut doc = Document::new(512, 512);
+        for _ in 0..7 {
+            doc.add_layer();
+        }
+        let held = || {
+            gpu.flush();
+            gpu.device.generate_allocator_report().map_or(0, |r| r.total_allocated_bytes)
+        };
+        let before = held();
+        let mut canvas = Canvas::unfilled(&gpu, &doc).unwrap();
+        let unfilled = held() - before;
+        canvas.fill_rest(&gpu, &doc);
+        // where the device can't say, there is nothing to compare
+        let layers = 8 * 512 * 512 * 4;
+        assert!(before == 0 || held() - before - unfilled >= layers);
+    }
+
+    #[test]
+    fn the_history_takes_from_the_room_for_layers() {
+        use procraft_engine::document::Document;
+        use procraft_engine::stroke::Stamp;
+        let Ok(gpu) = Gpu::headless() else { return };
+        let mut doc = Document::new(64, 64);
+        let per = 64 * 64 * 4;
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.set_resident_budget(4 * per);
+        assert_eq!(canvas.most_resident(), 4);
+        let id = doc.current();
+        // each stroke over the whole layer keeps a layer's worth to undo
+        for _ in 0..2 {
+            canvas.begin_stroke(id, StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0));
+            canvas.add_stamps(&[Stamp::round(procraft_engine::geom::Vec2::new(32.0, 32.0), 64.0, 1.0)]);
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+        }
+        assert!(canvas.history_bytes() >= 2 * per);
+        assert_eq!(canvas.most_resident(), 2);
+        // never none
+        canvas.set_resident_budget(per);
+        assert_eq!(canvas.most_resident(), 1);
+    }
+
+    #[test]
+    fn a_texture_the_gpu_couldnt_make_reads_as_a_failure_not_as_old_pixels() {
+        let Ok(gpu) = Gpu::headless() else { return };
+        // a read that leaves its pixels in the buffer kept for the next
+        let filled = texture(&gpu.device, "filled", 64, 64, LAYER_FORMAT);
+        gpu.queue.write_texture(
+            copy_at(&filled, 0, 0),
+            &[200; 64 * 64 * 4],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(64 * 4), rows_per_image: Some(64) },
+            extent(64, 64),
+        );
+        assert_eq!(read_texture(&gpu, &filled, 64, 64).unwrap()[0], 200);
+        FAILING.with(|f| f.set(Some("empty")));
+        let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let empty = texture(&gpu.device, "empty", 64, 64, LAYER_FORMAT);
+        assert!(pollster::block_on(scope.pop()).is_some());
+        FAILING.with(|f| f.set(None));
+        assert!(read_texture(&gpu, &empty, 64, 64).is_err());
+    }
+
+    #[test]
+    fn a_smudge_the_gpu_has_no_memory_for_draws_on_and_makes_no_step() {
+        use procraft_engine::document::Document;
+        use procraft_engine::stroke::Stamp;
+        let Ok(gpu) = Gpu::headless() else { return };
+        let dot = |x: f32, radius: f32| Stamp::round(procraft_engine::geom::Vec2::new(x, 32.0), radius, 1.0);
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let id = doc.current();
+        canvas.begin_stroke(id, StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0));
+        canvas.add_stamps(&[dot(20.0, 12.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let before = canvas.read_layer(&gpu, id).unwrap();
+        let steps = canvas.steps_made();
+        let smudge = || StrokeStyle::new(StrokeTool::Smudge, [0.0; 3], 1.0);
+        let stamps: Vec<Stamp> = (0..8).map(|i| dot(20.0 + i as f32 * 3.0, 10.0)).collect();
+        // refused: frames go on being drawn, the layer as it was, nothing to undo, told once
+        FAILING.with(|f| f.set(Some("smudge before")));
+        canvas.begin_stroke(id, smudge());
+        canvas.add_stamps(&stamps);
+        canvas.render(&gpu, &mut doc, None);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        FAILING.with(|f| f.set(None));
+        assert_eq!(gpu.errors(), 0);
+        assert!(canvas.take_smudge_refused());
+        assert!(!canvas.take_smudge_refused());
+        assert_eq!(canvas.steps_made(), steps);
+        assert_eq!(canvas.read_layer(&gpu, id).unwrap(), before);
+        // the next, with room, smudges as ever
+        canvas.begin_stroke(id, smudge());
+        canvas.add_stamps(&stamps);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        assert_eq!(gpu.errors(), 0);
+        assert!(!canvas.take_smudge_refused());
+        assert_eq!(canvas.steps_made(), steps + 1);
+        assert_ne!(canvas.read_layer(&gpu, id).unwrap(), before);
+    }
 
     #[test]
     fn a_stamps_pressure_scales_the_wet_mixes_dilution_and_charge() {

@@ -1,10 +1,10 @@
 //! Sharing the layers as an animation, as the Android app's (ui/AnimatedExportUi.kt): the frames
-//! playing, the settings (the size, and per format dithering and a transparent background),
-//! Cancel, and the round Done that saves the file. The file is made as the settings change, to
-//! show its size; it and the preview's frames are made off the window's thread. On a model, its
-//! turntable in place of the layers: its size, rotate or swing, its duration, zoom and ease, and
-//! the environment behind it; its file made once Done is pressed. While Done waits for the file,
-//! the export card shows how far it has come.
+//! playing, the settings (the size, the frame rate, and per format dithering and a transparent
+//! background), Cancel, and the round Done that saves the file. The file is made as the settings
+//! change, to show its size; it and the preview's frames are made off the window's thread. On a
+//! model, its turntable in place of the layers: its size, rotate or swing, its duration, zoom and
+//! ease, and the environment behind it; its file made once Done is pressed. While Done waits for
+//! the file, the export card shows how far it has come.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,6 +29,8 @@ const CAPSULE_FILL: Themed = Themed(0xFF1A1A1A, 0xFFFBFBFB);
 const CAPSULE_EDGE: Themed = Themed(0xFF373737, 0xFFE0E0E0);
 const CHOICE_FILL: Themed = Themed(0xFF2E2E2E, 0xFFE3E3E3);
 const SLIDER_TRACK: Themed = Themed(0xFF3E3E3E, 0xFFDDDDDD);
+/// The frame rate slider's track after its knob.
+const FPS_TRACK: Themed = Themed(0xFF333333, 0xFFDDDDDD);
 /// A model's turntable sizes (video's 16:9 across, or a square) and its frames a second.
 const TURNTABLE_SIZES: [(u32, u32, &str); 4] =
     [(1280, 720, "720p"), (1920, 1080, "1080p"), (3840, 2160, "4K"), (1080, 1080, "Square")];
@@ -42,6 +44,14 @@ const MAX_VIDEO_SIDE: u32 = 4096;
 const PREVIEW_FPS: u64 = 15;
 /// The frame rate when Animation Assist is off.
 const ANIMATION_FPS: u32 = 15;
+/// Where "Frames per second" is drawn from (in from the panel's left, down from the size's bar);
+/// where its value ends, in from the panel's right; the track's middle under the bar; and how far
+/// under the bar the switches start.
+const FPS_LABEL_X: f32 = 18.0;
+const FPS_LABEL_Y: f32 = 17.5;
+const FPS_VALUE_RIGHT: f32 = 23.0;
+const FPS_TRACK_Y: f32 = 50.0;
+const FPS_ROW_HEIGHT: f32 = 72.0;
 
 /// The animated formats.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,9 +81,9 @@ impl Animated {
     }
 }
 
-/// The settings a file is made with: Web Ready, dithering, a transparent background; on a model,
-/// how its turntable goes and its size.
-type Settings = (bool, bool, bool, Option<(Turntable, usize)>);
+/// The settings a file is made with: Web Ready, dithering, a palette per frame, a transparent
+/// background, the frames a second; on a model, how its turntable goes and its size.
+type Settings = (bool, bool, bool, bool, f32, Option<(Turntable, usize)>);
 /// A file being made: its settings, and where it went and how big it is, once made.
 type Making = (Settings, Receiver<Option<(PathBuf, u64)>>);
 /// What the preview's frames are read for: a transparent background or not, what side, and on a
@@ -86,7 +96,11 @@ pub struct AnimatedExport {
     format: Animated,
     web_ready: bool,
     dither: bool,
+    per_frame_palette: bool,
     transparent: bool,
+    /// Where the frame rate slider is (0..1); none until the screen first shows, when it is put
+    /// at the artwork's own rate.
+    fps_at: Option<f32>,
     /// The file made, the settings it was made with and its size; the one being made.
     made: Option<(Settings, PathBuf, u64)>,
     making: Option<Making>,
@@ -126,7 +140,9 @@ impl AnimatedExport {
             format,
             web_ready: false,
             dither: true,
+            per_frame_palette: false,
             transparent: false,
+            fps_at: None,
             made: None,
             making: None,
             failed: None,
@@ -157,7 +173,12 @@ impl AnimatedExport {
     }
 
     fn settings(&self) -> Settings {
-        (self.web_ready, self.dither, self.transparent, self.turntable)
+        (self.web_ready, self.dither, self.per_frame_palette, self.transparent, self.fps(), self.turntable)
+    }
+
+    /// The frames a second the file is made at, as the slider shows them.
+    fn fps(&self) -> f32 {
+        self.fps_at.map_or(ANIMATION_FPS as f32, procraft_core::export_fps_at)
     }
 
     /// The file made for the settings now, made again (off the window's thread) when they
@@ -179,13 +200,13 @@ impl AnimatedExport {
             return;
         }
         // a model's turntable is made once Done is pressed
-        if wanted.3.is_some() && !self.saving {
+        if wanted.5.is_some() && !self.saving {
             return;
         }
         let (tx, rx) = channel();
         let session = Arc::clone(session);
         let format = self.format;
-        let (web_ready, dither, transparent, turntable) = wanted;
+        let (web_ready, dither, per_frame_palette, transparent, fps, turntable) = wanted;
         let video_done = Arc::clone(&self.video_done);
         video_done.store(0, Ordering::Relaxed);
         // among the files being written (the app waits for them as it ends; the panel over the
@@ -195,8 +216,6 @@ impl AnimatedExport {
             let base = procraft_core::export_file_name(session.name(), false);
             let path = dir.join(format!("{base}.{}", format.extension()));
             let side = if web_ready { WEB_READY_SIDE } else { 0 };
-            // Animation Assist's own frame rate, when it is on
-            let fps = session.animation_settings().map_or(ANIMATION_FPS, |a| a.fps) as f32;
             let file = path.to_string_lossy().into_owned();
             let made = std::fs::create_dir_all(&dir).map_err(|e| e.to_string());
             let made = made.and_then(|()| match turntable {
@@ -205,7 +224,9 @@ impl AnimatedExport {
             });
             let made = made.and_then(|()| match format {
                 _ if turntable.is_some() => Ok(()),
-                Animated::Gif => session.export_gif(file, side, fps, dither, transparent).map_err(|e| e.to_string()),
+                Animated::Gif => session
+                    .export_gif(file, side, fps, dither, per_frame_palette, transparent)
+                    .map_err(|e| e.to_string()),
                 Animated::Png => session.export_apng(file, side, fps, transparent).map_err(|e| e.to_string()),
                 Animated::Mp4 | Animated::Hevc => {
                     let info = session.info();
@@ -217,7 +238,7 @@ impl AnimatedExport {
                         info.width,
                         info.height,
                         most,
-                        fps as u32,
+                        fps,
                         hevc,
                         4,
                         order.len(),
@@ -312,6 +333,11 @@ impl AnimatedExport {
     /// preview (24 in), a tap beside it closing it again. Cancel and the round Done are at the
     /// top right.
     pub fn show(&mut self, ctx: &egui::Context, look: &mut Look, session: &Arc<CanvasSession>) -> Option<Ended> {
+        // the frame rate starts as the artwork's own: Animation Assist's, else 15
+        if self.fps_at.is_none() {
+            let fps = session.animation_settings().map_or(ANIMATION_FPS, |a| a.fps) as f32;
+            self.fps_at = Some(procraft_core::export_fps_fraction(fps));
+        }
         let screen = ctx.content_rect();
         let wide = screen.width() > screen.height();
         let left = if wide { PANEL_WIDTH + 10.0 } else { 0.0 };
@@ -423,10 +449,12 @@ impl AnimatedExport {
                         self.web_ready = i == 1;
                     }
                 }
-                y = track.bottom() + 6.5;
+                self.fps_slider(ui, panel, track.bottom());
+                y = track.bottom() + FPS_ROW_HEIGHT;
                 let mut rows = Vec::new();
                 if self.format == Animated::Gif {
                     rows.push(("Dithering", self.dither));
+                    rows.push(("Per frame color palette", self.per_frame_palette));
                 }
                 if self.can_transparent() {
                     rows.push(("Transparent background", self.transparent));
@@ -437,10 +465,10 @@ impl AnimatedExport {
                     text(ui.painter(), at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(ROW_INK));
                     crate::transform::switch(ui, pos2(row.left() + 16.0 + 307.0, row.center().y - 14.0), on, label);
                     if ui.interact(row, ui.scope_id().with(label), Sense::click()).clicked() {
-                        if label == "Dithering" {
-                            self.dither = !self.dither;
-                        } else {
-                            self.transparent = !self.transparent;
+                        match label {
+                            "Dithering" => self.dither = !self.dither,
+                            "Per frame color palette" => self.per_frame_palette = !self.per_frame_palette,
+                            _ => self.transparent = !self.transparent,
                         }
                     }
                     y += 52.0;
@@ -493,6 +521,38 @@ impl AnimatedExport {
 }
 
 impl AnimatedExport {
+    /// "Frames per second" in `panel` under the size's bar (its bottom at `top`): the name and the
+    /// rate over a thin track, blue up to a small white knob, as measured.
+    fn fps_slider(&mut self, ui: &egui::Ui, panel: Rect, top: f32) {
+        let fraction = self.fps_at.unwrap_or(0.0);
+        // the name's and the value's caps at y 132.5, the value's ink 24 in from the panel's right
+        let label_at = pos2(panel.left() + FPS_LABEL_X, top + FPS_LABEL_Y);
+        text(ui.painter(), label_at, Align2::LEFT_TOP, "Frames per second", 17.0, Weight::Regular, argb(ROW_INK));
+        let value = procraft_core::export_fps_label(self.fps());
+        let value_at = pos2(panel.right() - FPS_VALUE_RIGHT, top + FPS_LABEL_Y);
+        text(ui.painter(), value_at, Align2::RIGHT_TOP, &value, 17.0, Weight::Regular, argb(ROW_INK));
+        // the track 3 tall, its middle at y 160.5; the knob's middle from 22.5 in to 23 in
+        let cy = top + FPS_TRACK_Y;
+        let (x0, x1) = (panel.left() + 22.5, panel.right() - 23.0);
+        let x = x0 + (x1 - x0) * fraction.clamp(0.0, 1.0);
+        let (left, right) = (panel.left() + 18.0, panel.right() - 18.0);
+        let painter = ui.painter();
+        painter.rect_filled(Rect::from_min_max(pos2(left, cy - 1.5), pos2(right, cy + 1.5)), 1.5, argb(FPS_TRACK));
+        painter.rect_filled(Rect::from_min_max(pos2(left, cy - 1.5), pos2(x, cy + 1.5)), 1.5, argb(pc::ACCENT));
+        let knob = Rect::from_center_size(pos2(x, cy), vec2(16.0, 10.0));
+        let shadow =
+            egui::epaint::Shadow { offset: [0, 1], blur: 3, spread: 0, color: Color32::from_black_alpha(0x30) };
+        painter.add(shadow.as_shape(knob, 4));
+        painter.rect_filled(knob, 4, Color32::WHITE);
+        // dragged anywhere along it, the knob following
+        let band = Rect::from_min_max(pos2(panel.left() + 8.0, cy - 14.0), pos2(panel.right() - 8.0, cy + 14.0));
+        let response = ui.interact(band, ui.scope_id().with("fps slider"), Sense::click_and_drag());
+        let by = crate::look::dragged_by(&mut self.held, &response);
+        if by != 0.0 {
+            self.fps_at = Some((fraction + by / (x1 - x0)).clamp(0.0, 1.0));
+        }
+    }
+
     /// A model's turntable settings in `panel` from `y` down: its size, rotate or swing, its
     /// duration, zoom and ease, and the environment behind it.
     fn turntable_settings(&mut self, ui: &egui::Ui, panel: Rect, mut y: f32, t: Turntable, size: usize) {
@@ -634,7 +694,7 @@ fn turntable_file(
         Animated::Mp4 | Animated::Hevc => {
             let count = ((t.seconds * TURNTABLE_FPS).round() as u32).max(1);
             let hevc = format == Animated::Hevc;
-            crate::video::write_mp4(path, w, h, w.max(h), TURNTABLE_FPS as u32, hevc, 4, count as usize, |i, vw, vh| {
+            crate::video::write_mp4(path, w, h, w.max(h), TURNTABLE_FPS, hevc, 4, count as usize, |i, vw, vh| {
                 video_done.store((i as f32 / count as f32).to_bits(), Ordering::Relaxed);
                 session.model_turntable_picture(i as u32, count, t, vw, vh, false).map(|p| p.rgba)
             })

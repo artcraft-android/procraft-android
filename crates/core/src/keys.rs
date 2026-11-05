@@ -43,6 +43,13 @@ pub enum KeyShortcut {
     /// The interface hidden, or shown again.
     Interface,
     ClearLayer,
+    /// The whole canvas copied, as it shows.
+    CopyCanvas,
+    ColourBalance,
+    /// The perspective guide on, or off.
+    PerspectiveGuide,
+    /// The QuickMenu opened, or closed.
+    QuickMenu,
     /// The canvas shown in perceptual greys, or in colour again (the window's view only).
     GreyView,
     /// The brush's size changed by `by` (of the slider's whole run).
@@ -57,39 +64,45 @@ pub enum KeyShortcut {
     },
 }
 
-/// The shortcut on `key`, if any: a letter or digit (either case), "[", "]", "delete",
-/// "backspace", or an arrow ("left", "right", "up", "down"); `command` is Ctrl (⌘), and the
-/// arrows nudge only while `transforming`.
+/// The shortcut on `key`, if any: a letter or digit (either case), "[", "]", ";", "space",
+/// "delete", "backspace", or an arrow ("left", "right", "up", "down"); `command` is Ctrl (⌘), and
+/// the arrows nudge only while `transforming`. Ctrl and Alt together are AltGr typing a key, so
+/// they count as neither.
 ///
 /// With the command key: Z undoes (with Shift redoes), C, X and V copy, cut and paste the layer,
-/// D deselects, G shows the canvas in perceptual greys (as Krita's soft proofing does). Alone: B
-/// paints, E erases, M the eyedropper, S selection, V transform, U Hue, Saturation,
-/// Brightness, C the colours, X swaps them, D deselects, J duplicates the layer, K Actions,
-/// L Layers, 0 the interface, Delete (Backspace) clears the layer, [ and ] the brush's size by
-/// 1% (with Shift 5%, with Alt 10%).
+/// A copies the canvas, B opens Color Balance, U Hue, Saturation, Brightness, D deselects, J
+/// duplicates the layer, K Actions, 0 the interface, ";" the perspective guide, Delete
+/// (Backspace) clears the layer, [ and ] the brush's size by 1%, G shows the canvas in perceptual
+/// greys (as Krita's soft proofing does). Alone: B paints, E erases, M the eyedropper, S
+/// selection, V transform, C the colours, X swaps them, L Layers, Space the QuickMenu, [ and ] the
+/// brush's size by 5% (with Shift 10%); U, D, J, K and 0 as with the command key.
 #[uniffi::export]
 pub fn key_shortcut(key: String, command: bool, shift: bool, alt: bool, transforming: bool) -> Option<KeyShortcut> {
     use KeyShortcut::*;
     let key = key.to_lowercase();
-    if command {
+    if command && !alt {
         return match key.as_str() {
             "z" if shift => Some(Redo),
             "z" => Some(Undo),
             "c" => Some(CopyLayer),
             "x" => Some(CutLayer),
             "v" => Some(Paste),
+            "a" => Some(CopyCanvas),
+            "b" => Some(ColourBalance),
+            "u" => Some(HueSaturationBrightness),
             "d" => Some(Deselect),
+            "j" => Some(DuplicateLayer),
+            "k" => Some(Actions),
+            "0" => Some(Interface),
+            ";" => Some(PerspectiveGuide),
+            "delete" | "backspace" => Some(ClearLayer),
             "g" => Some(GreyView),
+            "[" => Some(BrushSize { by: -0.01 }),
+            "]" => Some(BrushSize { by: 0.01 }),
             _ => None,
         };
     }
-    let step = if alt {
-        0.10
-    } else if shift {
-        0.05
-    } else {
-        0.01
-    };
+    let step = if shift { 0.10 } else { 0.05 };
     let nudge = |dx: f32, dy: f32| transforming.then_some(Nudge { dx, dy });
     match key.as_str() {
         "b" => Some(Paint),
@@ -105,7 +118,7 @@ pub fn key_shortcut(key: String, command: bool, shift: bool, alt: bool, transfor
         "k" => Some(Actions),
         "l" => Some(Layers),
         "0" => Some(Interface),
-        "delete" | "backspace" => Some(ClearLayer),
+        "space" => Some(QuickMenu),
         "[" => Some(BrushSize { by: -step }),
         "]" => Some(BrushSize { by: step }),
         "left" => nudge(-1.0, 0.0),
@@ -289,8 +302,9 @@ const SHORTCUTS: &[(&str, &[Entry])] = &[
             entry(&[command("c")], "Copy the layer"),
             entry(&[command("x")], "Cut the layer"),
             entry(&[command("v")], "Paste"),
-            entry(&[alone("j")], "Duplicate the layer"),
-            entry(&[alone("delete"), alone("backspace")], "Clear the layer"),
+            entry(&[command("a")], "Copy the canvas"),
+            entry(&[alone("j"), command("j")], "Duplicate the layer"),
+            entry(&[command("delete"), command("backspace")], "Clear the layer"),
             entry(&[alone("d"), command("d")], "Deselect"),
         ],
     ),
@@ -302,7 +316,9 @@ const SHORTCUTS: &[(&str, &[Entry])] = &[
             entry(&[alone("m")], "Eyedropper: the next touch picks a colour"),
             entry(&[alone("s")], "Selection"),
             entry(&[alone("v")], "Transform"),
-            entry(&[alone("u")], "Hue, Saturation, Brightness"),
+            entry(&[alone("u"), command("u")], "Hue, Saturation, Brightness"),
+            entry(&[command("b")], "Color Balance"),
+            entry(&[command(";")], "Perspective guide on or off"),
             entry(&[alone("x")], "Swap the colours"),
             entry(&[alone("left"), alone("right"), alone("up"), alone("down")], "Transforming: move it a pixel"),
         ],
@@ -311,17 +327,18 @@ const SHORTCUTS: &[(&str, &[Entry])] = &[
         "Panels",
         &[
             entry(&[alone("c")], "Colours"),
-            entry(&[alone("k")], "Actions"),
+            entry(&[alone("k"), command("k")], "Actions"),
             entry(&[alone("l")], "Layers"),
+            entry(&[alone("space")], "QuickMenu"),
             entry(&[alone("0")], "Hide or show the interface"),
         ],
     ),
     (
         "Brush size",
         &[
-            entry(&[alone("["), alone("]")], "Smaller or bigger by 1%"),
-            entry(&[(false, true, false, "["), (false, true, false, "]")], "By 5%"),
-            entry(&[(false, false, true, "["), (false, false, true, "]")], "By 10%"),
+            entry(&[command("["), command("]")], "Smaller or bigger by 1%"),
+            entry(&[alone("["), alone("]")], "By 5%"),
+            entry(&[(false, true, false, "["), (false, true, false, "]")], "By 10%"),
         ],
     ),
     (
@@ -360,6 +377,7 @@ fn key_label(key: &str, mac: bool) -> String {
         ("right", _) => "→".into(),
         ("up", _) => "↑".into(),
         ("down", _) => "↓".into(),
+        ("space", _) => "Space".into(),
         ("=", _) => "+".into(),
         ("-", _) => "−".into(),
         _ => key.to_uppercase(),
@@ -429,11 +447,30 @@ mod tests {
         assert_eq!(key("g", true, false, false), Some(GreyView));
         assert_eq!(key("y", true, false, false), None);
         assert_eq!(key("v", false, false, false), Some(Transform));
-        assert_eq!(key("b", true, false, false), None);
         assert_eq!(key("S", false, true, false), Some(Selection));
         assert_eq!(key("0", false, false, false), Some(Interface));
-        assert_eq!(key("backspace", false, false, false), Some(ClearLayer));
         assert_eq!(key("q", false, false, false), None);
+    }
+
+    #[test]
+    fn the_command_key_reaches_what_alone_chooses_something_else() {
+        assert_eq!(key("a", true, false, false), Some(CopyCanvas));
+        assert_eq!(key("b", true, false, false), Some(ColourBalance));
+        assert_eq!(key("b", false, false, false), Some(Paint));
+        assert_eq!(key(";", true, false, false), Some(PerspectiveGuide));
+        assert_eq!(key("space", false, false, false), Some(QuickMenu));
+        for (k, shortcut) in [("k", Actions), ("u", HueSaturationBrightness), ("j", DuplicateLayer), ("0", Interface)] {
+            assert_eq!(key(k, true, false, false), Some(shortcut));
+            assert_eq!(key(k, false, false, false), Some(shortcut));
+        }
+    }
+
+    #[test]
+    fn clearing_a_layer_takes_the_command_key() {
+        for k in ["delete", "backspace"] {
+            assert_eq!(key(k, true, false, false), Some(ClearLayer));
+            assert_eq!(key(k, false, false, false), None);
+        }
     }
 
     #[test]
@@ -449,13 +486,13 @@ mod tests {
         }
         let keys = |does: &str| rows.iter().find(|r| r.does == does).map(|r| r.keys.clone());
         assert_eq!(keys("Redo").as_deref(), Some("Ctrl+Shift+Z"));
-        assert_eq!(keys("Clear the layer").as_deref(), Some("Delete  Backspace"));
+        assert_eq!(keys("Clear the layer").as_deref(), Some("Ctrl+Delete  Ctrl+Backspace"));
         // the desktop's own only on the desktop, a Mac's keys as its symbols
         assert_eq!(keys("Save"), None);
         let mac = key_shortcut_list(true, true);
         let row = |does: &str| mac.iter().flat_map(|g| &g.rows).find(|r| r.does == does).cloned().unwrap();
         assert_eq!(row("Redo").keys, "⇧⌘Z");
-        assert_eq!(row("By 10%").keys, "⌥[  ⌥]");
+        assert_eq!(row("By 10%").keys, "⇧[  ⇧]");
         assert_eq!(row("Save as").keys, "⇧⌘S");
         assert_eq!(row("Zoom").keys, "⌘Space and drag");
         assert!(row("Zoom").combos.is_empty());
@@ -471,9 +508,11 @@ mod tests {
 
     #[test]
     fn brackets_step_the_size_and_arrows_nudge_only_a_transform() {
-        assert_eq!(key("[", false, false, false), Some(BrushSize { by: -0.01 }));
-        assert_eq!(key("]", false, true, false), Some(BrushSize { by: 0.05 }));
-        assert_eq!(key("]", false, true, true), Some(BrushSize { by: 0.10 }));
+        assert_eq!(key("[", true, false, false), Some(BrushSize { by: -0.01 }));
+        assert_eq!(key("]", false, false, false), Some(BrushSize { by: 0.05 }));
+        assert_eq!(key("]", false, true, false), Some(BrushSize { by: 0.10 }));
+        // AltGr typing a bracket is the bracket alone
+        assert_eq!(key("[", true, false, true), Some(BrushSize { by: -0.05 }));
         assert_eq!(key("left", false, false, false), None);
         assert_eq!(key_shortcut("up".into(), false, false, false, true), Some(Nudge { dx: 0.0, dy: -1.0 }));
     }

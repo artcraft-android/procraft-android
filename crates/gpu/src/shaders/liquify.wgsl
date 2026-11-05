@@ -4,7 +4,8 @@
 struct LiquifyUniform {
     // (centre x, y, radius, pressure)
     stamp: vec4<f32>,
-    // (the brush's move since its last stamp x, y, mode, seed)
+    // (the brush's move since its last stamp x, y, or how far a twirl, pinch or expand had gone
+    // before this stamp and goes after it; mode, seed)
     move_mode: vec4<f32>,
     // (canvas width, height, distortion, unused)
     canvas: vec4<f32>,
@@ -37,6 +38,27 @@ fn hash(p: vec2<f32>) -> f32 {
     return fract(sin(dot(p, vec2<f32>(12.9898, 78.233)) + lu.move_mode.w) * 43758.5453);
 }
 
+// `v` turned by `a`
+fn turned(v: vec2<f32>, a: f32) -> vec2<f32> {
+    let c = cos(a);
+    let s = sin(a);
+    return vec2<f32>(v.x * c - v.y * s, v.x * s + v.y * c);
+}
+
+// how far from the centre (a part of the radius) what `a` of drawing in has brought to `d` came
+// from (drawing out, below zero): the brush's falloff followed back in small steps, none past 1,
+// where they would overshoot the centre and fold the picture, however long it has been held
+fn traced(d: f32, a: f32) -> f32 {
+    var x = d;
+    let steps = i32(clamp(ceil(abs(a)), 16.0, 64.0));
+    let h = clamp(a, -64.0, 64.0) / f32(steps);
+    for (var i = 0; i < steps; i += 1) {
+        let k = max(1.0 - x * x, 0.0);
+        x += h * x * k * k;
+    }
+    return x;
+}
+
 // what one stamp adds to the offsets at its own pixel (or, for reconstruct, how much of them goes)
 @fragment
 fn fs_liquify(in: StampOut) -> @location(0) vec4<f32> {
@@ -53,16 +75,17 @@ fn fs_liquify(in: StampOut) -> @location(0) vec4<f32> {
     switch mode {
         // push: what is under the brush goes with it
         case 0: { add = lu.move_mode.xy * f; }
-        // twirl right and left: turned about the centre
+        // twirl right and left: turned about the centre, from how far it had turned to how far it
+        // now does, so stamps at one place add up to the whole turn
         case 1, 2: {
-            let turn = select(-1.0, 1.0, mode == 1) * f * 0.12;
-            let c = cos(turn);
-            let s = sin(turn);
-            add = away - vec2<f32>(away.x * c - away.y * s, away.x * s + away.y * c);
+            let way = select(1.0, -1.0, mode == 1) * f;
+            add = turned(away, lu.move_mode.x * way) - turned(away, lu.move_mode.y * way);
         }
-        // pinch: drawn in towards the centre; expand: pushed out
-        case 3: { add = -away * f * 0.08; }
-        case 4: { add = away * f * 0.08; }
+        // pinch: drawn in towards the centre; expand: pushed out; likewise
+        case 3, 4: {
+            let way = select(-1.0, 1.0, mode == 3) * lu.stamp.w;
+            add = away * (traced(d, lu.move_mode.x * way) - traced(d, lu.move_mode.y * way)) / max(d, 1e-4);
+        }
         // crystals: scattered
         case 5: {
             let a = hash(floor(in.pos.xy / 6.0)) * 6.2831853;

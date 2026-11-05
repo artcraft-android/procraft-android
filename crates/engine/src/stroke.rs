@@ -9,6 +9,8 @@ use crate::curve::Curve;
 use crate::geom::{IRect, Vec2};
 use crate::input::{Pointer, Sample};
 use crate::studio::{SPACING_FLOOR, SPACING_SPAN};
+use std::f64::consts::{PI, TAU};
+use std::sync::Arc;
 
 /// One dab of the brush tip, in canvas pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -22,10 +24,11 @@ pub struct Stamp {
     pub angle: f32,
     /// 1 = as drawn; lower squashes the stamp across its rotation.
     pub roundness: f32,
-    /// Where a moving grain is read from: the stamp's middle in the grain (canvas pixels), each
-    /// point of the stamp read that far from it as on the canvas (the grain never turns or
-    /// squashes with the stamp). A rolling grain is read in place, so it stays put as the stamps
-    /// move over it; a static one moves along with each stamp.
+    /// Where a moving grain is read from: the stamp's middle in the grain (canvas pixels at this
+    /// stamp's tile), each point of the stamp read that far from it as on the canvas (the grain
+    /// never turns or squashes with the stamp). A rolling grain goes on from stamp to stamp by as
+    /// far as they moved, so it stays put as the stamps move over it, whatever their tile; a
+    /// static one moves along with each stamp.
     pub grain_offset: Vec2,
     /// How hard the pen presses the paint into a grain (the pressure, 0..1), and how much that
     /// counts (the brush's pressure bleed and its tilt bleed as far as the pen leans, 0..2):
@@ -129,6 +132,10 @@ impl Tint {
 #[derive(Clone, Copy, Debug)]
 struct Placed {
     center: Vec2,
+    /// How far the lateral and linear jitter threw it from the path, of a reach this far: the
+    /// reach goes with the size, so a taper draws it back in.
+    thrown: Vec2,
+    reach: f32,
     distance: f32,
     diameter: f32,
     alpha: f32,
@@ -138,12 +145,16 @@ struct Placed {
     tint: Tint,
     secondary: f32,
     grain_depth: f32,
-    grain_size: f32,
     grain_press: f32,
     /// The tilt bleed as far as the pen leans (it adds to the pressure bleed).
     bleed_lean: f32,
-    /// How far its moving grain rolls along with the stroke (see [`Extras::grain_movement`]).
-    grain_movement: f32,
+    /// Where its moving grain is read from, in tiles (see [`Stamp::grain_offset`]).
+    grain_read: Vec2,
+    /// The square its grain's tile goes by (as far as it follows the stamp's size), and the
+    /// grain's zoom and what the scale's pressure curve leaves of its scale.
+    grain_square: f32,
+    grain_zoom: f32,
+    grain_scale_by: f32,
     gradation: f32,
     transfer: f32,
     attack: f32,
@@ -154,6 +165,8 @@ struct Placed {
     /// How much of the stamp's roundness is the drawn shape's, which the pressure squeezes (the
     /// rest is what leaning adds).
     drawn_share: f32,
+    /// What the input's speed left of the size (see [`StrokeBuilder::sized`]).
+    speed_size: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -203,6 +216,66 @@ const SAMPLE_FRAMES: f32 = 0.25;
 const PEN_RATE: f64 = 240.0;
 const FINGER_RATE: f64 = 120.0;
 
+/// How much of where it was the path keeps at each point at the rates above, for an `amount` of
+/// streamline: strong from the first, as measured (a corner at 600 points a second is cut 18 at
+/// 60%, 52 at the most).
+fn streamline_keep(amount: f32) -> f32 {
+    0.96 * amount.clamp(0.0, 1.0).powf(0.125)
+}
+
+/// The same for the pressure, `amount` of its streamline.
+fn pressure_keep(amount: f32) -> f32 {
+    0.999 * amount.clamp(0.0, 1.0).powf(0.0625)
+}
+
+/// Motion filtering's weights for a point and those either side of it (an odd count, adding up to
+/// one), `amount` and `expression` 0..1, at `rate` samples a second. A windowed low-pass, but only
+/// how much of each frequency it lets through is kept, so nothing is moved along: the path doesn't
+/// lag or cut inside a curve.
+fn motion_weights(amount: f32, expression: f32, rate: f64) -> Vec<f32> {
+    let strength = f64::from(amount.clamp(0.0, 1.0)).powf(MOTION_POWER);
+    let cut = rate * (1.0 - strength) + MOTION_LOWEST_CUT * strength;
+    let longer = 1.0 + (MOTION_EXPRESSION_LONGEST - 1.0) * f64::from(expression.clamp(0.0, 1.0));
+    let wanted = rate / cut * longer;
+    let size = (wanted.ceil() as usize).next_power_of_two().clamp(2, MOTION_MOST_SAMPLES);
+    let span = wanted.min((size - 1) as f64);
+    let band = 2.0 * cut / rate;
+    let filter: Vec<f64> = (0..span as usize)
+        .map(|i| {
+            let x = (i as f64 + 1.0 - span / 2.0) * band * PI;
+            let sinc = if x == 0.0 { 1.0 } else { x.sin() / x };
+            // a Blackman-Harris window
+            let t = TAU * i as f64 / span;
+            band * sinc * (0.35875 - 0.48829 * t.cos() + 0.14128 * (2.0 * t).cos() - 0.01168 * (3.0 * t).cos())
+        })
+        .collect();
+    let circle: Vec<(f64, f64)> = (0..size).map(|k| (TAU * k as f64 / size as f64).sin_cos()).collect();
+    let turn = |k: usize| circle.get(k & (size - 1)).copied().unwrap_or((0.0, 1.0));
+    let through: Vec<f64> = (0..=size / 2)
+        .map(|k| {
+            let (mut re, mut im) = (0.0, 0.0);
+            for (n, h) in filter.iter().enumerate() {
+                let (sin, cos) = turn(k * n);
+                re += h * cos;
+                im += h * sin;
+            }
+            f64::hypot(re, im)
+        })
+        .collect();
+    // back from frequencies to samples, each way from the point
+    let side: Vec<f64> = (0..=size / 2)
+        .map(|j| {
+            let wave = |(k, t): (usize, &f64)| t * turn(j * k).1 * if k == 0 || k == size / 2 { 1.0 } else { 2.0 };
+            through.iter().enumerate().map(wave).sum()
+        })
+        .collect();
+    let least = side.first().map_or(0.0, |w| w.abs() * 1e-5);
+    let reach = side.iter().rposition(|w| w.abs() > least).unwrap_or(0);
+    let all: Vec<f64> = side.iter().take(reach + 1).rev().chain(side.iter().skip(1).take(reach)).copied().collect();
+    let sum: f64 = all.iter().sum();
+    all.iter().map(|w| (w / sum) as f32).collect()
+}
+
 /// What a speed control of `amount` leaves of a size or opacity at `speed` (0..1): faster input
 /// takes away as far as the amount says; an amount below 0, slower input does (as measured).
 fn by_speed(amount: f32, speed: f32) -> f32 {
@@ -210,18 +283,20 @@ fn by_speed(amount: f32, speed: f32) -> f32 {
     if amount >= 0.0 { 1.0 - amount * speed } else { 1.0 + amount * (1.0 - speed) }
 }
 
-/// The pressure a finger's wet mix takes (its dilution, pull, attack and their curves): with no
-/// pressure of its own, each input's is drawn towards full from the one before, settling here at
-/// a finger's input rate.
-pub const FINGER_WET_PRESSURE: f32 = 0.8;
-/// Stabilisation averages the latest points: at full strength this many samples' worth (at the
-/// rate above), fewer as the strength to this power falls.
+/// Stabilisation averages each point with those either side of it: at full strength this many
+/// samples' worth each way (at the rate above), fewer as the strength to this power falls.
 const MOST_AVERAGED: f32 = 120.0;
 const STABILIZATION_POWER: f32 = 2.2;
-/// At full motion filtering, how little the filtered pen moves toward each new point; and at full
-/// expression, how much of the way back to the pen it comes.
-const MOTION_FILTER_MOST: f32 = 0.9;
-const EXPRESSION_MOST: f32 = 0.5;
+/// Motion filtering lets through what moves slower than its cut and takes out what shakes faster:
+/// at full strength the cut is this, in hertz. Below that it rises to the input's own rate with
+/// the strength to this power, so a little is strong already.
+const MOTION_LOWEST_CUT: f64 = 1.0 / 16.0;
+const MOTION_POWER: f64 = 0.01;
+/// How many times longer full expression makes the filter: longer cuts sharper, so more of the
+/// hand's own motion under the cut comes through.
+const MOTION_EXPRESSION_LONGEST: f64 = 8.0;
+/// The most samples the filter may span.
+const MOTION_MOST_SAMPLES: usize = 1024;
 /// Brush files keep the spacing jitter and the speed's spacing at ten times the studio's
 /// controls: the share of a gap they widen it by.
 const SPACING_FILE_SCALE: f32 = 10.0;
@@ -448,6 +523,128 @@ fn catmull_rom(p0: Option<Vec2>, p1: Vec2, p2: Vec2, p3: Option<Vec2>, t: f32) -
     }
 }
 
+/// What stabilisation and motion filtering hold of the input: its points, evenly a sample apart at
+/// the tuned rate however it came, each to be averaged with those either side once they are known. Past either
+/// end the input carries on turned half way round about that end, so the average starts and ends
+/// where the input does, however few points there are.
+#[derive(Clone, Debug, Default)]
+struct Averaged {
+    /// The points from the `gone`th on (those before are out of reach of what is still to come).
+    points: Vec<PathPoint>,
+    gone: usize,
+    /// How many have been averaged and gone on to the path.
+    settled: usize,
+    /// The input as it last came, and how many samples at the tuned rate it is past the last point.
+    input: Option<PathPoint>,
+    past: f64,
+}
+
+/// Points kept past those stabilisation can still reach before they are let go, to do it seldom.
+const AVERAGED_SLACK: usize = 256;
+
+impl Averaged {
+    /// All the points so far.
+    fn count(&self) -> usize {
+        self.gone + self.points.len()
+    }
+
+    /// The input came on to `to`, `steps` samples after it last did.
+    fn add(&mut self, to: PathPoint, steps: f64) {
+        let Some(from) = self.input.replace(to) else {
+            self.points.push(to);
+            return;
+        };
+        let mut next = 1.0 - self.past;
+        while next <= steps {
+            self.points.push(from.lerp(to, (next / steps) as f32));
+            next += 1.0;
+        }
+        self.past = steps - (next - 1.0);
+    }
+
+    /// The input ends where it is: that is its last point.
+    fn close(&mut self) {
+        if self.past > 1e-3
+            && let Some(input) = self.input
+        {
+            self.points.push(input);
+            self.past = 0.0;
+        }
+    }
+
+    /// Point `i`'s position, pressure and softened pressures (of those held, counting on past
+    /// either end).
+    fn lanes(&self, i: isize) -> [f32; 8] {
+        let lanes = |p: &PathPoint| {
+            let [a, b, c, d, e] = p.soft;
+            [p.pos.x, p.pos.y, p.pressure, a, b, c, d, e]
+        };
+        let (Some(first), Some(end)) = (self.points.first().map(lanes), self.points.last().map(lanes)) else {
+            return [0.0; 8];
+        };
+        let last = self.points.len() as isize - 1;
+        if last == 0 {
+            return first;
+        }
+        // each length of the input past an end goes the way it did, on from where the last ended
+        let (laps, at) = (i.div_euclid(last), i.rem_euclid(last));
+        let forward = laps.rem_euclid(2) == 0;
+        let mut there = self.points.get(if forward { at } else { last - at } as usize).map_or(first, lanes);
+        let whole = if forward { laps } else { laps + 1 } as f32;
+        for ((v, f), e) in there.iter_mut().zip(first).zip(end) {
+            *v = (e - f) * whole + if forward { *v } else { 2.0 * f - *v };
+        }
+        there
+    }
+
+    /// Point `i` (of them all) as held.
+    fn place(&self, i: usize) -> isize {
+        i.saturating_sub(self.gone) as isize
+    }
+
+    /// Point `i` and the `half` either side of it, added up.
+    fn sum(&self, i: usize, half: usize) -> [f32; 8] {
+        let (at, reach) = (self.place(i), half as isize);
+        let mut sum = [0.0f32; 8];
+        for j in at - reach..=at + reach {
+            for (s, v) in sum.iter_mut().zip(self.lanes(j)) {
+                *s += v;
+            }
+        }
+        sum
+    }
+
+    /// `sum`, point `i`'s, as the next point's.
+    fn slide(&self, sum: &mut [f32; 8], i: usize, half: usize) {
+        let (at, reach) = (self.place(i), half as isize);
+        for ((s, new), old) in sum.iter_mut().zip(self.lanes(at + reach + 1)).zip(self.lanes(at - reach)) {
+            *s += new - old;
+        }
+    }
+
+    /// Point `i` averaged with the `half` either side of it, `sum` being them all added up.
+    fn mean(&self, i: usize, half: usize, sum: [f32; 8]) -> Option<PathPoint> {
+        self.at_lanes(i, sum.map(|v| v / (2 * half + 1) as f32))
+    }
+
+    /// Point `i` with its position and pressures as `lanes` has them.
+    fn at_lanes(&self, i: usize, lanes: [f32; 8]) -> Option<PathPoint> {
+        let [x, y, pressure, a, b, c, d, e] = lanes;
+        let held = *self.points.get(self.place(i) as usize)?;
+        let soft = [a, b, c, d, e].map(|v| v.clamp(0.0, 1.0));
+        Some(PathPoint { pos: Vec2::new(x, y), pressure: pressure.clamp(0.0, 1.0), soft, ..held })
+    }
+
+    /// Lets go of the points no average still to come reaches.
+    fn forget(&mut self, half: usize) {
+        let over = (self.settled.saturating_sub(half + 1)).saturating_sub(self.gone);
+        if over > AVERAGED_SLACK {
+            self.points.drain(..over);
+            self.gone += over;
+        }
+    }
+}
+
 /// Streamline is tuned for input at this interval; other rates are scaled to match.
 const REFERENCE_INTERVAL_MS: f64 = 1000.0 / 120.0;
 /// The most samples at the tuned rate one sample stands for (after a pause, the filters catch up
@@ -460,8 +657,6 @@ const RUN_ON_TOUCH: usize = 4;
 const RUN_ON_PEN: usize = 1;
 const RUN_ON_SHRINK: f32 = 0.66;
 const RUN_ON_TURN: f32 = 1.125;
-/// How far (canvas pixels) offset jitter may move a stroke's start in a moving grain.
-const GRAIN_JITTER_SPAN: f32 = 1024.0;
 /// Stamps a stroke may hold (a guard against runaway input, far above any real stroke).
 const MAX_STAMPS: usize = 400_000;
 /// How far the path goes before the stroke's direction (which stamps following it turn to) has
@@ -518,9 +713,8 @@ pub struct StrokeBuilder {
     bounds: IRect,
     random: Random,
     extras: Extras,
-    /// The latest input points and their times, for stabilisation; the speed, smoothed; the next
-    /// gap's jitter.
-    recent: Vec<(Vec2, f64)>,
+    /// The input stabilisation holds; the speed, smoothed; the next gap's jitter.
+    averaged: Averaged,
     speed: f32,
     /// Whether the speed has been measured (the first move is taken as it is).
     speed_known: bool,
@@ -551,10 +745,14 @@ pub struct StrokeBuilder {
     /// Screen points a canvas pixel spans, for the speed dynamics.
     points_per_pixel: f32,
     input: InputSettings,
-    /// Where the motion filter has the pen.
-    filtered: Option<Vec2>,
-    /// Where in a moving grain the stroke starts.
+    /// What the path's points are averaged with: motion filtering's weights, stabilisation's
+    /// average of them if it has one too. Made as the stroke starts; empty if there is no motion
+    /// filtering.
+    weights: Option<Arc<[f32]>>,
+    /// Where in a moving grain the stroke starts (tiles), and where the last stamp was read from
+    /// there and lay on the canvas.
     grain_start: Vec2,
+    grain_last: Option<(Vec2, Vec2)>,
     /// When each sample came (milliseconds, always later than the one before) and how far the
     /// input had gone by then (canvas pixels, as it came), for the tapers that last a time.
     history: Vec<(f64, f32)>,
@@ -568,6 +766,9 @@ pub struct StrokeBuilder {
     /// How many of the stroke's stamps before `placed` a copy leaves out (see
     /// [`StrokeBuilder::open_copy`]).
     left_out: usize,
+    /// How far the start taper reaches, once its time has passed: from then on it is what the
+    /// stroke keeps (so what is drawn for good stays as it is when the stroke ends).
+    start_settled: Option<f32>,
 }
 
 /// Smoothing and pressure set for every stroke, whatever the brush, on top of the brush's own.
@@ -695,7 +896,7 @@ impl StrokeBuilder {
             bounds: IRect::EMPTY,
             random: Random(seed | 1),
             extras: Extras::default(),
-            recent: Vec::new(),
+            averaged: Averaged::default(),
             speed: 0.0,
             speed_known: false,
             soft: None,
@@ -710,14 +911,16 @@ impl StrokeBuilder {
             screen_turn: 0.0,
             points_per_pixel: 1.0,
             input: InputSettings::default(),
-            filtered: None,
+            weights: None,
             grain_start: Vec2::ZERO,
+            grain_last: None,
             history: Vec::new(),
             input_length: 0.0,
             before_last: [None; 2],
             ran_on: None,
             kept: 0,
             left_out: 0,
+            start_settled: None,
         }
         .reading_extras()
     }
@@ -730,7 +933,7 @@ impl StrokeBuilder {
             self.stroke_secondary = self.extras.stroke_secondary * self.random.next();
         }
         if self.extras.grain_offset_jitter {
-            self.grain_start = Vec2::new(self.random.next(), self.random.next()) * GRAIN_JITTER_SPAN;
+            self.grain_start = Vec2::new(self.random.next(), self.random.next());
         }
         if self.brush.shape.randomise {
             self.stroke_turn = self.random.next() * std::f32::consts::TAU;
@@ -793,7 +996,17 @@ impl StrokeBuilder {
         // none of the stamps so far are needed
         let mut ahead = self.open_copy(self.placed.len());
         let mut out = ahead.add(samples);
+        ahead.average_on(&mut out);
         ahead.flush(&mut out);
+        out
+    }
+
+    /// As [`StrokeBuilder::preview`], and on from the path to the input itself: all the stroke
+    /// shows ahead of what is drawn for good.
+    pub fn preview_to_input(&mut self, samples: &[Sample]) -> Vec<Stamp> {
+        let mut ahead = self.open_copy(self.placed.len());
+        let mut out = ahead.add(samples);
+        ahead.reach_input(&mut out);
         out
     }
 
@@ -805,28 +1018,61 @@ impl StrokeBuilder {
         }
     }
 
-    /// Whether the stroke shows its end tapered as it is drawn: a pen's, with a taper that lasts a
-    /// time and the tip animation on.
+    /// The stroke as it shows while drawn: stabilisation's average on to the input, the stretch to
+    /// the newest path point, then straight on to the input, which smoothing leaves the path behind
+    /// (the path takes that stretch over as it catches up, curved).
+    fn reach_input(&mut self, out: &mut Vec<Stamp>) {
+        self.average_on(out);
+        self.flush(out);
+        if let Some(to) = self.input_point() {
+            self.walk_to(to, out);
+        }
+    }
+
+    /// The newest input as a point of the path, smoothed by nothing.
+    fn input_point(&self) -> Option<PathPoint> {
+        let (last, head) = (self.last_sample?, self.head?);
+        let newest = self.ahead.unwrap_or(head);
+        Some(PathPoint {
+            pos: last.pos,
+            pressure: self.pressure.unwrap_or(1.0),
+            soft: self.soft.unwrap_or(newest.soft),
+            tilt: newest.tilt,
+            azimuth: newest.azimuth,
+            roll: newest.roll,
+            speed: newest.speed,
+        })
+    }
+
+    /// Whether the stroke shows its tapers as it is drawn, through a tip redrawn as it goes: one
+    /// that lasts a time at its start (until that time has passed), and at its end a finger's, or
+    /// a pen's with the tip animation on.
     pub fn shows_tip(&self) -> bool {
-        self.pointer.has_pressure() && self.extras.tip_animation && !self.classic() && self.taper().end > 0.0
+        !self.classic() && (self.taper().start > 0.0 || self.end_shows())
     }
 
     /// Adds samples to a stroke shown with its tip (see [`StrokeBuilder::shows_tip`]): returns
-    /// the stamps to draw for good now, those the end taper no longer reaches, and the tip, the
-    /// stamps after them as they would be drawn were the stroke to end here.
+    /// the stamps to draw for good now, those past the start taper's time that the end taper no
+    /// longer reaches, and the tip, the stamps after them as they would be drawn were the stroke
+    /// to end here.
     pub fn add_tipped(&mut self, samples: &[Sample]) -> (Vec<Stamp>, Vec<Stamp>) {
         self.add(samples);
         let start = self.start_span();
-        let reach = self.length - self.end_span(0.0);
+        let reach = match self.start_settled {
+            // the start's reach still moving: nothing is drawn for good yet
+            None => f32::NEG_INFINITY,
+            Some(_) if self.end_shows() => self.length - self.end_span(0.0),
+            Some(_) => f32::INFINITY,
+        };
         // the stamps lie in order along the path: the first the taper reaches is after those kept
         let open = self.placed.get(self.kept..).unwrap_or_default();
         let to = open.iter().position(|p| p.distance >= reach).map_or(self.placed.len(), |i| self.kept + i);
         let kept = self.placed.get(self.kept..to).unwrap_or_default();
         let kept = kept.iter().map(|p| self.finish_stamp(p, start, None)).collect();
         self.kept = to;
-        // the tip as if the stroke ended here: walked on to its newest point
+        // the tip as if the stroke ended here: walked on to the input
         let mut ended = self.open_copy(to);
-        ended.flush(&mut Vec::new());
+        ended.reach_input(&mut Vec::new());
         (kept, ended.tip_from(0))
     }
 
@@ -835,7 +1081,7 @@ impl StrokeBuilder {
     pub fn preview_tip(&mut self, samples: &[Sample]) -> Vec<Stamp> {
         let mut ahead = self.open_copy(self.kept);
         ahead.add(samples);
-        ahead.flush(&mut Vec::new());
+        ahead.reach_input(&mut Vec::new());
         ahead.tip_from(0)
     }
 
@@ -854,11 +1100,13 @@ impl StrokeBuilder {
         copy
     }
 
-    /// The stamps from `from` on as they would be drawn were the stroke to end here.
+    /// The stamps from `from` on as they would be drawn were the stroke to end here (its end
+    /// tapered only where that shows as it is drawn).
     fn tip_from(&self, from: usize) -> Vec<Stamp> {
-        let (start, end, length) = (self.start_span(), self.end_span(0.0), self.length);
+        let start = self.start_span();
+        let end = self.end_shows().then(|| (self.length, self.end_span(0.0)));
         let tip = self.placed.get(from..).unwrap_or_default();
-        tip.iter().map(|p| self.finish_stamp(p, start, Some((length, end)))).collect()
+        tip.iter().map(|p| self.finish_stamp(p, start, end)).collect()
     }
 
     /// Every stamp so far as currently drawn (no end taper yet).
@@ -872,27 +1120,12 @@ impl StrokeBuilder {
     pub fn finish(&mut self) -> Vec<Stamp> {
         let mut run_on = 0.0;
         let mut ignored = Vec::new();
-        if let (Some(last), Some(head)) = (self.last_sample, self.head) {
-            let newest = self.ahead.unwrap_or(head);
-            let to = PathPoint {
-                pos: last.pos,
-                pressure: self.pressure.unwrap_or(1.0),
-                soft: self.soft.unwrap_or(newest.soft),
-                tilt: newest.tilt,
-                azimuth: newest.azimuth,
-                roll: newest.roll,
-                speed: newest.speed,
-            };
-            if self.averaged() > 1 {
-                // stabilisation's average catches up with the pen in a straight run
-                self.flush(&mut ignored);
-                self.walk_to(to, &mut ignored);
-            } else {
-                // the smoothed path catches up with the pen along the curve, where it lifted the
-                // last point it curves through
-                self.path_to(to, &mut ignored);
-                self.flush(&mut ignored);
-            }
+        self.average_on(&mut ignored);
+        if let Some(to) = self.input_point() {
+            // the smoothed path catches up with the pen along the curve, where it lifted the last
+            // point it curves through
+            self.path_to(to, &mut ignored);
+            self.flush(&mut ignored);
             run_on = match self.ran_on {
                 Some(r) => r,
                 None => self.run_on(to, &mut ignored),
@@ -920,7 +1153,7 @@ impl StrokeBuilder {
         let since = self.last_sample.map_or(0.0, |last| (s.time_ms - last.time_ms).abs());
         let steps = if since > 0.0 { (since / interval).min(MOST_STEPS) as f32 } else { 1.0 };
         let raw = if pen { self.input.pressure_curve.eval(s.pressure.clamp(0.0, 1.0)).clamp(0.0, 1.0) } else { 1.0 };
-        let smoothing = together(self.brush.pressure_smoothing, self.input.pressure_smoothing).min(0.95);
+        let smoothing = pressure_keep(together(self.brush.pressure_smoothing, self.input.pressure_smoothing));
         let pressure = match self.pressure {
             None => raw,
             Some(p) => p + (raw - p) * (1.0 - smoothing.powf(steps)),
@@ -956,49 +1189,136 @@ impl StrokeBuilder {
             self.speed = ((now + held * self.speed) / (held + 1.0)).clamp(0.0, 1.0);
             self.speed_known = true;
         }
-        // motion filtering: the pen followed slowly, so small shakes fall away; the expression
-        // gives back part of the hand's own motion
-        let mut pos = s.pos;
-        let filtering = together(self.extras.motion_filtering, self.input.motion_filtering);
-        if filtering > 0.0 && !self.exact {
-            let follow = 1.0 - (filtering * MOTION_FILTER_MOST).powf(steps);
-            let f = self.filtered.map_or(s.pos, |f| f.lerp(s.pos, follow));
-            self.filtered = Some(f);
-            let expression = together(self.extras.motion_expression, self.input.motion_expression);
-            pos = f.lerp(s.pos, expression * EXPRESSION_MOST);
+        if self.weights.is_none() {
+            self.weights = Some(self.made_weights().into());
         }
-        // stabilisation: the average of the latest points, those of a longer time the stronger it
-        // is (as many samples as it averages at the tuned rate; half a sample's leeway)
-        let averaged = self.averaged();
-        if averaged > 1 {
-            self.recent.push((pos, s.time_ms));
-            let from = s.time_ms - (averaged as f64 - 0.5) * interval;
-            let over = self.recent.iter().take_while(|r| r.1 < from).count().min(self.recent.len() - 1);
-            self.recent.drain(..over);
-            let sum = self.recent.iter().fold(Vec2::ZERO, |a, r| a + r.0);
-            pos = sum * (1.0 / self.recent.len() as f32);
-        }
-        let target = PathPoint { pos, pressure, soft, tilt, azimuth, roll, speed: self.speed };
-        let smoothed = match (self.smoothed, self.last_sample) {
-            (Some(prev), Some(last)) if !self.exact => {
-                let dt = (s.time_ms - last.time_ms).clamp(0.5, 50.0);
-                let keep = (self.brush.streamline.clamp(0.0, 1.0) * 0.92).powf((dt / REFERENCE_INTERVAL_MS) as f32);
-                PathPoint { pos: prev.pos.lerp(target.pos, 1.0 - keep), ..target }
-            }
-            _ => target,
-        };
-        self.smoothed = Some(smoothed);
+        let target = PathPoint { pos: s.pos, pressure, soft, tilt, azimuth, roll, speed: self.speed };
+        let dt = self.last_sample.map(|last| (s.time_ms - last.time_ms).clamp(0.5, 50.0));
         self.keep_time(s);
         if let Some(last) = self.last_sample {
             self.before_last = [self.before_last[1], Some(last.pos)];
         }
         self.last_sample = Some(s);
+        let half = self.averaged();
+        if half > 0 {
+            // stabilisation and motion filtering: each point waits until those after it within
+            // reach of its average are known
+            let times = self.history.iter().rev().map(|h| h.0);
+            let gap = times.clone().next().zip(times.clone().nth(1)).map_or(0.0, |(now, before)| now - before);
+            self.averaged.add(target, (gap / interval).min(MOST_STEPS));
+            self.average_to(self.averaged.count().saturating_sub(half), half, out);
+            self.averaged.forget(half);
+        } else {
+            self.go_on(target, dt, out);
+        }
+        self.settle_start();
+    }
+
+    /// Takes the path on to `target`, `dt` milliseconds after the last (none: it is the first),
+    /// streamlined.
+    fn go_on(&mut self, target: PathPoint, dt: Option<f64>, out: &mut Vec<Stamp>) {
+        let smoothed = match (self.smoothed, dt) {
+            (Some(prev), Some(dt)) if !self.exact => {
+                let interval = 1000.0 / if self.pointer.has_pressure() { PEN_RATE } else { FINGER_RATE };
+                let keep = streamline_keep(self.brush.streamline).powf((dt / interval) as f32);
+                PathPoint { pos: prev.pos.lerp(target.pos, 1.0 - keep), ..target }
+            }
+            _ => target,
+        };
+        self.smoothed = Some(smoothed);
         self.path_to(smoothed, out);
     }
 
-    /// How many of the latest samples (at the tuned rate) stabilisation averages: more than one
-    /// when it is on (never on an exact path).
+    /// Takes the path on along stabilisation's points up to the `to`th, each averaged with the
+    /// `half` either side of it.
+    fn average_to(&mut self, to: usize, half: usize, out: &mut Vec<Stamp>) {
+        let interval = 1000.0 / if self.pointer.has_pressure() { PEN_RATE } else { FINGER_RATE };
+        let mut i = self.averaged.settled;
+        if i >= to {
+            return;
+        }
+        if let Some(weights) = self.weights.clone().filter(|w| !w.is_empty()) {
+            let (from, end) = (self.averaged.place(i) - half as isize, self.averaged.place(to - 1) + half as isize);
+            let lanes: Vec<[f32; 8]> = (from..=end).map(|j| self.averaged.lanes(j)).collect();
+            for around in lanes.windows(weights.len()) {
+                let mut sum = [0.0f32; 8];
+                for (w, point) in weights.iter().zip(around) {
+                    for (s, v) in sum.iter_mut().zip(point) {
+                        *s += w * v;
+                    }
+                }
+                if let Some(next) = self.averaged.at_lanes(i, sum) {
+                    let next = self.still_where_it_was(next);
+                    self.go_on(next, Some(interval), out);
+                }
+                i += 1;
+            }
+            self.averaged.settled = i;
+            return;
+        }
+        let mut sum = self.averaged.sum(i, half);
+        while i < to {
+            let next = self.averaged.mean(i, half, sum);
+            self.averaged.slide(&mut sum, i, half);
+            i += 1;
+            if let Some(next) = next {
+                let next = self.still_where_it_was(next);
+                self.go_on(next, Some(interval), out);
+            }
+        }
+        self.averaged.settled = i;
+    }
+
+    /// `next`, an average of the input: where the input hasn't gone anywhere it stays exactly there,
+    /// or the average's rounding would read as a move and a tap as a stroke.
+    fn still_where_it_was(&self, next: PathPoint) -> PathPoint {
+        match self.averaged.points.first().filter(|_| self.input_length <= 0.0) {
+            Some(first) => PathPoint { pos: first.pos, ..next },
+            None => next,
+        }
+    }
+
+    /// Takes the path on along stabilisation's points to the input's end, as if no more were to
+    /// come: where the stroke ends as it now stands, or would.
+    fn average_on(&mut self, out: &mut Vec<Stamp>) {
+        let half = self.averaged();
+        if half > 0 {
+            self.averaged.close();
+            self.average_to(self.averaged.count(), half, out);
+        }
+    }
+
+    /// How many samples (at the tuned rate) each way the path's points are averaged: none when
+    /// neither stabilisation nor motion filtering is on (and on an exact path).
     fn averaged(&self) -> usize {
+        match self.weights.as_deref() {
+            Some(weights) if !weights.is_empty() => weights.len() / 2,
+            _ => self.stabilised(),
+        }
+    }
+
+    /// Motion filtering's weights, with stabilisation's average of them: both go by the same
+    /// points, so one pass does the two. The stronger of the app's and the brush's.
+    fn made_weights(&self) -> Vec<f32> {
+        let amount = self.extras.motion_filtering.max(self.input.motion_filtering);
+        if self.exact || amount <= 0.0 {
+            return Vec::new();
+        }
+        let expression = self.extras.motion_expression.max(self.input.motion_expression);
+        let rate = if self.pointer.has_pressure() { PEN_RATE } else { FINGER_RATE };
+        let filter = motion_weights(amount, expression, rate);
+        let width = 2 * self.stabilised() + 1;
+        let mut both = vec![0.0; filter.len() + width - 1];
+        for (i, w) in filter.iter().enumerate() {
+            for b in both.iter_mut().skip(i).take(width) {
+                *b += w / width as f32;
+            }
+        }
+        both
+    }
+
+    /// How many samples each way stabilisation averages.
+    fn stabilised(&self) -> usize {
         if self.exact {
             return 0;
         }
@@ -1080,8 +1400,12 @@ impl StrokeBuilder {
     }
 
     /// How far along the path the start taper grows to full (0: none): the classic one over its
-    /// length in canvas pixels; the newer one over the input up to the first point past its time.
+    /// length in canvas pixels; the newer one over the input up to the first point past its time
+    /// (see [`StrokeBuilder::settle_start`]).
     fn start_span(&self) -> f32 {
+        if let Some(span) = self.start_settled {
+            return span;
+        }
         let taper = self.taper();
         if taper.start <= 0.0 {
             return 0.0;
@@ -1089,15 +1413,48 @@ impl StrokeBuilder {
         if self.classic() {
             return taper.start * CLASSIC_TAPER_SPAN;
         }
+        self.on_path(self.start_input())
+    }
+
+    /// How far the input had come at the first point past the newer start taper's time.
+    fn start_input(&self) -> f32 {
         let Some(&(t0, _)) = self.history.first() else { return 0.0 };
+        let time = f64::from(self.taper().start) * TAPER_TIME_MS;
+        self.history.iter().find(|(t, _)| t - t0 > time).map_or(self.input_length, |&(_, l)| l)
+    }
+
+    /// Whether the start taper's reach is known: none, the classic one's (a length), or the input
+    /// has gone on past the newer one's time.
+    fn start_known(&self) -> bool {
+        let taper = self.taper();
+        if taper.start <= 0.0 || self.classic() {
+            return true;
+        }
         let time = f64::from(taper.start) * TAPER_TIME_MS;
-        let input = self.history.iter().find(|(t, _)| t - t0 > time).map_or(self.input_length, |&(_, l)| l);
-        self.on_path(input)
+        matches!((self.history.first(), self.history.last()), (Some(&(t0, _)), Some(&(t, _))) if t - t0 > time)
+    }
+
+    /// Fixes the start taper's reach as the input passes its time, at how far the input had come
+    /// (the path, waiting a point behind it, may not have got there yet): later input doesn't
+    /// move it, so the stroke's start drawn for good stays as it is.
+    fn settle_start(&mut self) {
+        if self.start_settled.is_some() || !self.start_known() {
+            return;
+        }
+        let timed = self.taper().start > 0.0 && !self.classic();
+        self.start_settled = Some(if timed { self.start_input() } else { self.start_span() });
+    }
+
+    /// Whether the end taper shows while the stroke is drawn: a finger's always, a pen's with the
+    /// tip animation on (a classic taper's only as it ends, where it runs on).
+    fn end_shows(&self) -> bool {
+        !self.classic() && self.taper().end > 0.0 && (!self.pointer.has_pressure() || self.extras.tip_animation)
     }
 
     /// How far back from the end the end taper starts (0: none): the classic one over the run-on
     /// (`run_on` canvas pixels) up to its length; the newer one over the input since the last
-    /// point before its time.
+    /// point before its time, counted back from the last move: held still, then lifted, the end
+    /// keeps the taper it showed.
     fn end_span(&self, run_on: f32) -> f32 {
         let taper = self.taper();
         if taper.end <= 0.0 {
@@ -1106,9 +1463,10 @@ impl StrokeBuilder {
         if self.classic() {
             return run_on.min(taper.end * CLASSIC_TAPER_SPAN);
         }
-        let Some(&(last, total)) = self.history.last() else { return 0.0 };
+        let Some(&(_, total)) = self.history.last() else { return 0.0 };
+        let moved = self.history.iter().find(|(_, l)| *l >= total).map_or(0.0, |&(t, _)| t);
         let time = f64::from(taper.end) * TAPER_TIME_MS;
-        let first = self.history.iter().position(|(t, _)| *t >= last - time).unwrap_or(0);
+        let first = self.history.iter().position(|(t, _)| *t >= moved - time).unwrap_or(0);
         let before = first.checked_sub(1).and_then(|i| self.history.get(i)).map_or(0.0, |&(_, l)| l);
         self.on_path(total - before)
     }
@@ -1215,12 +1573,22 @@ impl StrokeBuilder {
         if self.pointer.has_pressure() { self.brush.factors(p.soft[0], p.soft[1]) } else { (1.0, 1.0) }
     }
 
+    /// The stamp's size with `by` of it left (0..1, what the pressure and the speed leave): they
+    /// take it down to the brush's least, not to nothing.
+    fn sized(&self, by: f32) -> f32 {
+        let least = (self.brush.min_size.min(self.brush.biggest()) * self.scale).min(self.diameter);
+        least + (self.diameter - least) * by.max(0.0)
+    }
+
+    /// What faster input leaves of the size at a point (an amount below 0: slower input).
+    fn speed_size(&self, p: PathPoint) -> f32 {
+        by_speed(self.extras.speed_size, p.speed).max(0.0)
+    }
+
     /// The stamp diameter at a point of the path, before jitter and taper.
     fn diameter_at(&self, p: PathPoint) -> f32 {
         let (pressure, _) = self.pressed(p);
-        // faster input thins the stroke (an amount below 0: slower input does)
-        let speed = by_speed(self.extras.speed_size, p.speed).max(0.05);
-        let drawn = self.diameter * pressure * speed;
+        let drawn = self.sized(pressure * self.speed_size(p));
         // leaning adds to it, up to the most the brush may be
         let most = (self.brush.biggest() * self.scale).max(drawn);
         (drawn + self.tilt_growth(p)).min(most)
@@ -1259,12 +1627,14 @@ impl StrokeBuilder {
         ((1.0 - compression) + compression * across * (across + long).max(0.0).sqrt()).clamp(0.0, 1.0)
     }
 
-    /// The plain distance to the next stamp: the spacing's share of the stamp's square, and half
-    /// a pixel more (and a little with the spacing).
+    /// The plain distance to the next stamp: the spacing's share of the stamp's square by its
+    /// shorter side (a flat stamp lies as close as its height says), and half a pixel more (and a
+    /// little with the spacing).
     fn step(&self, p: PathPoint) -> f32 {
         let spacing = self.brush.spacing.max(0.005);
         let extra = 0.5 + (spacing - SPACING_FLOOR).max(0.0) / (SPACING_SPAN / 2.0);
-        (spacing * self.square_at(p) * self.extras.spacing_stride + extra).max(0.25)
+        let shorter = self.square_at(p) * self.roundness_at(p).min(1.0);
+        (spacing * shorter * self.extras.spacing_stride + extra).max(0.25)
     }
 
     /// The gap to the next stamp at `p`, the one before it `last`: the two gaps' mean, widened
@@ -1313,6 +1683,24 @@ impl StrokeBuilder {
             built += alpha * (1.0 - built) * (1.0 - built);
         }
         1.0 - (1.0 - built.min(1.0)).powf(1.0 / n.ceil())
+    }
+
+    /// How much of the stamp at a point is its drawn shape, not what leaning grows it by.
+    fn drawn_share(&self, p: PathPoint) -> f32 {
+        let grown = self.tilt_growth(p);
+        let drawn = (self.diameter_at(p) - grown).max(1e-3);
+        drawn / (drawn + grown)
+    }
+
+    /// The stamp's height over its width at a point, before jitter and taper: leaning adds the same
+    /// to its height as to its width, then the roundness tilt takes it from its upright roundness
+    /// towards its leaning one.
+    fn roundness_at(&self, p: PathPoint) -> f32 {
+        let x = &self.extras;
+        let leant = self.leaning(p, x.tilt_angles.roundness);
+        let tilted = x.tilt_roundness_max * (1.0 - leant) + (1.0 - x.tilt_roundness) * leant;
+        let size_left = self.pressed(p).0 * self.speed_size(p);
+        self.pressed_roundness(self.drawn_share(p), p.soft[3], size_left) * tilted
     }
 
     /// How far a tilt switch at `theta` lets its control act: all of it when the switch is off,
@@ -1406,16 +1794,15 @@ impl StrokeBuilder {
         ]
         .map(by);
         let along = |k: PressureCurve| curves.through(k, pressure);
-        // the wet mix takes a finger's pressure as it settles (see [`FINGER_WET_PRESSURE`])
-        let wetted = if self.pointer.has_pressure() { pressure } else { FINGER_WET_PRESSURE };
+        // the wet mix follows the stamp's own pressure, a finger's full
         let wet = [
-            curves.at(PC::WetGrade, wetted),
-            curves.at(PC::WetBlur, wetted),
-            curves.at(PC::WetBlurJitter, wetted),
-            curves.at(PC::WetnessJitter, wetted),
-            curves.at(PC::Charge, wetted),
-            curves.through(PC::Dilution, wetted),
-            curves.through(PC::WetPull, wetted),
+            by(PC::WetGrade),
+            by(PC::WetBlur),
+            by(PC::WetBlurJitter),
+            by(PC::WetnessJitter),
+            by(PC::Charge),
+            along(PC::Dilution),
+            along(PC::WetPull),
             along(PC::SmudgePull),
         ];
         let color_jitter_by =
@@ -1434,14 +1821,9 @@ impl StrokeBuilder {
             Vec2::new(self.direction.cos(), self.direction.sin()),
             Vec2::new(-self.direction.sin(), self.direction.cos()),
         );
-        // leaning adds the same to the stamp's height as to its width, then the roundness tilt
-        // takes it from its upright roundness towards its leaning one
-        let grown = self.tilt_growth(p);
-        let drawn = (diameter - grown).max(1e-3);
-        let drawn_share = drawn / (drawn + grown);
-        let leant = self.leaning(p, x.tilt_angles.roundness);
-        let tilted = x.tilt_roundness_max * (1.0 - leant) + (1.0 - x.tilt_roundness) * leant;
-        let base_roundness = self.pressed_roundness(drawn_share, p.soft[3]) * tilted;
+        let drawn_share = self.drawn_share(p);
+        let speed_size = self.speed_size(p);
+        let base_roundness = self.roundness_at(p);
         // the jitter reaches half the stamp's diagonal (its square as round as it is here), and a
         // pixel more
         let half = self.square_at(p) * 0.5;
@@ -1470,7 +1852,7 @@ impl StrokeBuilder {
             Some(theta) if self.pointer.has_pressure() => Tilt::reach(p.tilt, theta),
             Some(theta) => Tilt::reach(std::f32::consts::FRAC_PI_2, theta),
         };
-        let attack = (p.soft[1].clamp(0.0, 1.0) * attack_tilt * curves.through(PC::Attack, wetted)).clamp(0.0, 1.0);
+        let attack = (p.soft[1].clamp(0.0, 1.0) * attack_tilt * curves.through(PC::Attack, pressure)).clamp(0.0, 1.0);
         let [hue_by, saturation_by, lightness_by, darkness_by, secondary_by] = color_first;
         let [hue_more, saturation_more, lightness_more, darkness_more, secondary_more] = color_more;
         // a pen turns the stamp as it is held (its azimuth, and roll), in place of following the
@@ -1480,14 +1862,15 @@ impl StrokeBuilder {
             let size = 1.0 - shape.size_jitter.clamp(0.0, 1.0) * size_jitter_by * self.random.next();
             let fade = 1.0 - shape.opacity_jitter.clamp(0.0, 1.0) * opacity_jitter_by * self.random.next();
             let mut center = p.pos + cap;
+            let mut thrown = Vec2::ZERO;
             // one random point a stamp: as far as a share of the reach, in a random direction, the
             // reach across and along the stroke each its own
             if x.jitter_lateral > 0.0 || x.jitter_linear > 0.0 {
                 let far = self.random.next();
                 let towards = (self.random.next() * 2.0 - 1.0) * std::f32::consts::PI;
-                center = center
-                    + across * (far * towards.sin() * jitter_lateral * jitter_reach)
+                thrown = across * (far * towards.sin() * jitter_lateral * jitter_reach)
                     + along * (far * towards.cos() * jitter_linear * jitter_reach);
+                center = center + thrown;
             }
             if shape.throw > 0.0 {
                 let a = self.random.next() * std::f32::consts::TAU;
@@ -1556,10 +1939,21 @@ impl StrokeBuilder {
             let grain_press = p.soft[2].clamp(0.0, 1.0);
             // its tile under this stamp (following the stamp's size, or cropped), as a multiple of
             // the grain's own scale, which the renderer takes it times
-            let tile = self.brush.grain.moving_tile(diameter * size, x.grain_zoom * zoom_by, grain_scale_by);
-            let grain_size = tile / self.brush.grain.scale.max(1.0);
+            let (grain_square, grain_zoom) = (self.square_at(p) * size, x.grain_zoom * zoom_by);
+            let tile = self.brush.grain.moving_tile(grain_square, grain_zoom, grain_scale_by);
+            // it rolls on by as far as the stamp moved, at this stamp's tile and movement: so a
+            // tile that follows the size (or a movement that follows the pressure) changes how
+            // fast it rolls and doesn't send it elsewhere
+            let rolled = x.grain_movement * movement_by / tile;
+            let grain_read = match self.grain_last {
+                Some((read, from)) => read + (center - from) * rolled,
+                None => self.grain_start + center * rolled,
+            };
+            self.grain_last = Some((grain_read, center));
             let placed = Placed {
                 center,
+                thrown,
+                reach: jitter_reach,
                 distance,
                 diameter: diameter * size * wide,
                 alpha: alpha * fade,
@@ -1569,10 +1963,12 @@ impl StrokeBuilder {
                 tint,
                 secondary,
                 grain_depth: depth / base,
-                grain_size: grain_size.max(1e-3),
                 grain_press,
                 bleed_lean: (x.tilt_bleed * self.leaning(p, x.tilt_angles.bleed)).clamp(0.0, 1.0),
-                grain_movement: x.grain_movement * movement_by,
+                grain_read,
+                grain_square,
+                grain_zoom,
+                grain_scale_by,
                 gradation: (x.tilt_gradation * self.leaning(p, x.tilt_angles.gradation)).max(0.0).sqrt().min(1.0),
                 transfer,
                 attack,
@@ -1580,6 +1976,7 @@ impl StrokeBuilder {
                 time_ms: self.now_ms,
                 pressed: p.soft,
                 drawn_share,
+                speed_size,
             };
             self.placed.push(placed);
             let stamp = self.finish_stamp(&placed, start_span, None);
@@ -1588,17 +1985,15 @@ impl StrokeBuilder {
         }
     }
 
-    /// Where a stamp's moving grain is read from (see [`Stamp::grain_offset`]): in place on the
-    /// canvas as far as the grain rolls, from wherever the stroke starts in it.
-    fn grain_offset(&self, p: &Placed) -> Vec2 {
-        self.grain_start + p.center * p.grain_movement
-    }
-
     /// The stamp's roundness before leaning and jitter: the shape's, squeezed as light pressure
-    /// `pressure` says, on the `drawn_share` of the stamp that isn't grown by leaning.
-    fn pressed_roundness(&self, drawn_share: f32, pressure: f32) -> f32 {
+    /// `pressure` says, on the `drawn_share` of the stamp that isn't grown by leaning. Its height
+    /// goes to the brush's least as its width does: with `size_left` of the width left, the less
+    /// of it there is, the rounder a stamp held up by the least.
+    fn pressed_roundness(&self, drawn_share: f32, pressure: f32, size_left: f32) -> f32 {
         let squeezed = 1.0 - self.extras.pressure_roundness * (1.0 - pressure.clamp(0.0, 1.0));
-        drawn_share * self.brush.shape.roundness.clamp(0.05, 1.0) * squeezed + (1.0 - drawn_share)
+        let round = self.brush.shape.roundness.clamp(0.05, 1.0) * squeezed;
+        let wide = self.sized(size_left).max(1e-3);
+        drawn_share * self.sized(size_left * round) / wide + (1.0 - drawn_share)
     }
 
     fn taper(&self) -> &Taper {
@@ -1621,23 +2016,35 @@ impl StrokeBuilder {
         // a pen's pressure fades into the tapers as far as the brush says: the size, opacity,
         // bleed and roundness it gave scaled to what the faded pressure gives
         let fade = self.extras.taper_pressure;
+        let fading = self.pointer.has_pressure() && fade > 0.0;
         let (mut grain_press, mut roundness) = (p.grain_press, p.roundness);
-        if self.pointer.has_pressure() && fade > 0.0 {
+        let [s, o, b, r, _] = p.pressed;
+        let size_left = if self.pointer.has_pressure() { self.brush.factors(s, o).0 } else { 1.0 } * p.speed_size;
+        let (mut faded_left, mut faded_round) = (size_left, r);
+        if fading {
             let kept = (1.0 - fade) + fade * (start * finish).powf(Taper::tip_power(tip));
-            let [s, o, b, r, _] = p.pressed;
-            let (s0, o0) = self.brush.factors(s, o);
+            let (_, o0) = self.brush.factors(s, o);
             let (s1, o1) = self.brush.factors(s * kept, o * kept);
-            if s0 > 0.0 {
-                size *= s1 / s0;
+            (faded_left, faded_round) = (s1 * p.speed_size, r * kept);
+            let sized = self.sized(size_left);
+            if sized > 0.0 {
+                size *= self.sized(faded_left) / sized;
             }
             if o0 > 0.0 {
                 alpha *= (o1 / o0).powf(FLOW_POWER);
             }
             grain_press = (b * kept).clamp(0.0, 1.0);
-            let r0 = self.pressed_roundness(p.drawn_share, r);
-            if r0 > 0.0 {
-                let r1 = self.pressed_roundness(p.drawn_share, r * kept);
-                roundness = (roundness * r1 / r0).clamp(0.05, MOST_ROUNDNESS);
+        }
+        // a taper thins what the stamp is drawn at; what leaning grows it by comes after, so a
+        // leaning pen's tips keep that
+        let share = p.drawn_share;
+        let thinned = share * size + (1.0 - share);
+        if fading || share < 1.0 {
+            let before = self.pressed_roundness(share, r, size_left);
+            let left_share = if thinned > 0.0 { share * size / thinned } else { share };
+            if before > 0.0 {
+                let after = self.pressed_roundness(left_share, faded_round, faded_left);
+                roundness = (roundness * after / before).clamp(0.05, MOST_ROUNDNESS);
             }
         }
         // the bleed: the pressure's, through the pressure, and the lean's, whatever the pressure
@@ -1646,20 +2053,24 @@ impl StrokeBuilder {
         if grain_bleed > 0.0 {
             grain_press = (pressed_bleed * grain_press + p.bleed_lean) / grain_bleed;
         }
+        // the jitter's reach (half the stamp's diagonal and a pixel) goes with what is left of it
+        let reach_left = ((p.reach - 1.0) * thinned + 1.0) / p.reach.max(1.0);
+        // a grain that follows the stamp's size follows what is left of it
+        let tile = self.brush.grain.moving_tile(p.grain_square * thinned, p.grain_zoom, p.grain_scale_by);
         Stamp {
-            center: p.center,
-            radius: (p.diameter * size * 0.5).max(0.25),
+            center: p.center - p.thrown * (1.0 - reach_left),
+            radius: (p.diameter * thinned * 0.5).max(0.25),
             alpha: (p.alpha * alpha).clamp(0.0, 1.0),
             angle: p.angle,
             roundness,
-            grain_offset: self.grain_offset(p),
+            grain_offset: p.grain_read * tile,
             grain_press,
             grain_bleed,
             flip: p.flip,
             tint: p.tint,
             secondary: p.secondary,
             grain_depth: p.grain_depth,
-            grain_size: p.grain_size,
+            grain_size: (tile / self.brush.grain.scale.max(1.0)).max(1e-3),
             gradation: p.gradation,
             taper: size.clamp(0.0, 1.0),
             transfer: p.transfer,
@@ -1680,6 +2091,7 @@ mod tests {
             streamline: 0.0,
             pressure_smoothing: 0.0,
             spacing: 0.1,
+            min_size: 0.0,
             pen_taper: Taper::NONE,
             touch_taper: Taper::NONE,
             ..Brush::round_pen()
@@ -1754,6 +2166,38 @@ mod tests {
     }
 
     #[test]
+    fn a_flat_stamp_lies_as_close_as_its_shorter_side_says() {
+        let gap_of = |brush: Brush, sample: &dyn Fn(usize) -> Sample| {
+            let mut b = StrokeBuilder::new(brush, 40.0, Pointer::Stylus);
+            b.add(&(0..=100).map(sample).collect::<Vec<_>>());
+            let all = b.finish();
+            let mid = all.len() / 2;
+            all[mid].center.distance(all[mid + 1].center)
+        };
+        let along = |i: usize| Sample::at(Vec2::new(i as f32 * 4.0, 50.0), 1.0, i as f64 * 4.0);
+        let square = 40.0 / crate::brushfile::ROUND_TIP_SHARE;
+        let extra = 0.5 + (0.1 - SPACING_FLOOR) / (SPACING_SPAN / 2.0);
+        let round = gap_of(plain(), &along);
+        assert!((round - (0.1 * square + extra)).abs() < 1e-3, "{round}");
+        // a quarter as tall: a quarter of the size's part of the gap
+        let flat = Brush { shape: Shape { roundness: 0.25, ..Shape::default() }, ..plain() };
+        let close = gap_of(flat, &along);
+        assert!((close - (0.025 * square + extra)).abs() < 1e-3, "{close}");
+        // light pressure squashing it brings the stamps closer too
+        let mut squashed = Brush { pressure_size: 0.0, ..plain() };
+        squashed.set_setting("pressure_roundness", 1.0);
+        let light = |i: usize| Sample { pressure: 0.5, ..along(i) };
+        let pressed = gap_of(squashed, &light);
+        assert!((pressed - (0.05 * square + extra)).abs() < 1e-3, "{pressed}");
+        // and a lean that flattens it
+        let mut leaning = plain();
+        leaning.set_setting("tilt_roundness", 0.5);
+        let leant = |i: usize| Sample { tilt: 1.2, ..along(i) };
+        let upright = gap_of(leaning.clone(), &along);
+        assert!(gap_of(leaning, &leant) < upright * 0.95, "{upright}");
+    }
+
+    #[test]
     fn spacing_carries_across_samples() {
         let mut few = StrokeBuilder::new(plain(), 10.0, Pointer::Stylus);
         few.add(&line(3, 100.0));
@@ -1788,6 +2232,70 @@ mod tests {
         let touch = finger.add(&samples);
         assert!(pressed[0].radius < touch[0].radius && pressed[0].alpha < touch[0].alpha);
         assert_eq!(touch[0].radius, 5.0);
+    }
+
+    #[test]
+    fn pressure_and_speed_take_the_size_down_to_the_brush_s_least() {
+        let brush = Brush { pressure_size: 1.0, min_size: 6.0, ..plain() };
+        let radius = |brush: &Brush, pressure: f32| {
+            let mut stroke = StrokeBuilder::new(brush.clone(), 26.0, Pointer::Stylus);
+            stroke.add(&[Sample::at(Vec2::new(0.0, 0.0), pressure, 0.0)])[0].radius
+        };
+        // no pressure leaves the least, half of it half way from there to the size
+        assert!((radius(&brush, 0.0) - 3.0).abs() < 1e-4);
+        assert!((radius(&brush, 0.5) - 8.0).abs() < 1e-4);
+        assert!((radius(&brush, 1.0) - 13.0).abs() < 1e-4);
+        // a size at the least doesn't follow the pressure at all
+        let thin = |pressure: f32| {
+            let mut stroke = StrokeBuilder::new(brush.clone(), 6.0, Pointer::Stylus);
+            stroke.add(&[Sample::at(Vec2::new(0.0, 0.0), pressure, 0.0)])[0].radius
+        };
+        assert_eq!(thin(0.1), thin(1.0));
+        // the least goes with the brush's scale on the canvas
+        let mut scaled = StrokeBuilder::new(brush.clone(), 52.0, Pointer::Stylus).scaled(2.0);
+        assert!((scaled.add(&[Sample::at(Vec2::ZERO, 0.0, 0.0)])[0].radius - 6.0).abs() < 1e-4);
+        // the shape's height goes there too: a squashed stamp fills out as the least holds it up
+        let flat = Brush { shape: Shape { roundness: 0.5, ..Shape::default() }, ..brush.clone() };
+        let round = |pressure: f32| {
+            let mut stroke = StrokeBuilder::new(flat.clone(), 26.0, Pointer::Stylus);
+            stroke.add(&[Sample::at(Vec2::ZERO, pressure, 0.0)])[0].roundness
+        };
+        assert!((round(1.0) - 16.0 / 26.0).abs() < 1e-4, "{}", round(1.0));
+        assert!((round(0.0) - 1.0).abs() < 1e-4, "{}", round(0.0));
+        // a pen's pressure faded into a taper thins it as far as the least too
+        let mut faded = Brush { pen_taper: Taper { start: 0.0, end: 0.0, size: 0.0, opacity: 0.0 }, ..brush };
+        faded.pen_taper.start = 1.0;
+        faded.set_setting("pen_taper_pressure", 1.0);
+        let mut stroke = StrokeBuilder::new(faded, 26.0, Pointer::Stylus);
+        let samples: Vec<Sample> =
+            (0..40).map(|i| Sample::at(Vec2::new(i as f32 * 10.0, 0.0), 1.0, f64::from(i) * 8.0)).collect();
+        stroke.add(&samples);
+        let all = stroke.finish();
+        assert!((all[0].radius - 3.0).abs() < 1e-3, "{}", all[0].radius);
+        assert!((all.last().unwrap().radius - 13.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn streamline_is_strong_from_the_first_and_none_at_none() {
+        assert_eq!(streamline_keep(0.0), 0.0);
+        assert!((streamline_keep(0.5) - 0.8803).abs() < 1e-3);
+        assert!((streamline_keep(1.0) - 0.96).abs() < 1e-6);
+        // a corner taken at a steady 600 a second rounds more the more there is, a good way off it
+        // at the top
+        let cut = |streamline: f32| {
+            let brush = Brush { streamline, ..plain() };
+            let mut b = StrokeBuilder::new(brush, 4.0, Pointer::Finger);
+            let n = 60;
+            let at = |x: f32, y: f32, i: usize| Sample::at(Vec2::new(x, y), 1.0, i as f64 * 1000.0 / 120.0);
+            let mut samples: Vec<Sample> = (0..=n).map(|i| at(i as f32 * 5.0, 0.0, i)).collect();
+            samples.extend((1..=n).map(|i| at(300.0, i as f32 * 5.0, n + i)));
+            b.add(&samples);
+            let corner = Vec2::new(300.0, 0.0);
+            b.finish().iter().map(|s| s.center.distance(corner)).fold(f32::MAX, f32::min)
+        };
+        assert!(cut(0.0) < 1.0);
+        assert!(cut(0.6) > 15.0 && cut(0.6) < 35.0, "{}", cut(0.6));
+        assert!(cut(1.0) > 45.0, "{}", cut(1.0));
     }
 
     #[test]
@@ -1830,6 +2338,137 @@ mod tests {
         assert!(live_end.x < 299.0, "streamline lags while drawing");
         assert!(end.radius < 0.5);
         assert!(all[all.len() / 2].radius > 1.9);
+    }
+
+    #[test]
+    fn the_stroke_shown_runs_straight_on_from_the_smoothed_path_to_the_input() {
+        let brush = Brush { streamline: 0.9, ..plain() };
+        // along, then turning sharply away: the path falls well behind the input
+        let mut samples = line(40, 200.0);
+        let corner = samples.last().unwrap().pos;
+        samples.extend((1..=10).map(|i| {
+            let pos = corner + Vec2::new(0.0, i as f32 * 8.0);
+            Sample::at(pos, 1.0, 160.0 + f64::from(i) * 4.0)
+        }));
+        let input = samples.last().unwrap().pos;
+        let mut b = StrokeBuilder::new(brush, 4.0, Pointer::Finger);
+        let kept = b.add(&samples);
+        let (count, length) = (b.stamp_count(), b.length());
+        assert!(kept.last().unwrap().center.distance(input) > 20.0, "the path lags");
+        let ahead = b.preview_to_input(&[]);
+        // to the input, as near as the stamps' spacing goes
+        let reached = ahead.last().unwrap().center;
+        assert!(reached.distance(input) < 2.0, "{reached:?}");
+        // the last stretch straight, from where the path has got to
+        let tail: Vec<Vec2> = ahead.iter().rev().take(8).map(|s| s.center).collect();
+        let along = (input - tail[7]) * (1.0 / input.distance(tail[7]));
+        for p in &tail {
+            let d = *p - tail[7];
+            assert!((d.x * along.y - d.y * along.x).abs() < 0.05, "{p:?} is off the line");
+        }
+        // the stroke itself left as it was
+        assert_eq!((b.stamp_count(), b.length()), (count, length));
+        // with nothing to catch up, nothing more is shown
+        let mut plain_stroke = StrokeBuilder::new(plain(), 4.0, Pointer::Finger);
+        plain_stroke.add(&line(10, 50.0));
+        let end = plain_stroke.preview_to_input(&[]).last().map(|s| s.center);
+        assert!(end.is_none_or(|e| e.distance(Vec2::new(50.0, 50.0)) < 2.0), "{end:?}");
+    }
+
+    #[test]
+    fn a_pens_tip_reaches_the_input_past_the_smoothed_path() {
+        let taper = Taper { start: 0.0, end: 0.5, size: 1.0, opacity: 0.0 };
+        let brush = Brush { pen_taper: taper, streamline: 0.9, ..plain() };
+        let samples = line(50, 300.0);
+        let input = samples.last().unwrap().pos;
+        let mut b = StrokeBuilder::new(brush, 4.0, Pointer::Stylus);
+        assert!(b.shows_tip());
+        let (_, tip) = b.add_tipped(&samples);
+        let end = tip.last().unwrap();
+        assert!(end.center.distance(input) < 2.0 && end.radius < 0.5, "{:?} {}", end.center, end.radius);
+    }
+
+    #[test]
+    fn a_fingers_tapers_show_as_it_is_drawn_and_what_is_kept_stays_at_the_end() {
+        let taper = Taper { start: 0.8, end: 0.5, size: 1.0, opacity: 0.0 };
+        let brush = Brush { touch_taper: taper, streamline: 0.3, ..plain() };
+        // 4 px every 8 ms along, then lifted
+        let samples: Vec<Sample> =
+            (0..=80).map(|i| Sample::at(Vec2::new(20.0 + i as f32 * 4.0, 50.0), 1.0, i as f64 * 8.0)).collect();
+        let mut b = StrokeBuilder::new(brush, 20.0, Pointer::Finger);
+        assert!(b.shows_tip());
+        let mut kept = Vec::new();
+        let mut first_tip = None;
+        for (k, chunk) in samples.chunks(2).enumerate() {
+            let (more, tip) = b.add_tipped(chunk);
+            // within the start taper's time (67 ms) nothing is drawn for good, and the tip shows
+            // the start tapered
+            if k < 4 {
+                assert!(more.is_empty(), "kept at {k}");
+            }
+            if k == 3 {
+                first_tip = Some(tip.clone());
+            }
+            kept.extend(more);
+            // the head thinned as it goes
+            if k > 12 {
+                let head = tip.last().unwrap();
+                assert!(head.radius < 3.0, "head {} at {k}", head.radius);
+            }
+        }
+        let first_tip = first_tip.unwrap();
+        assert!(first_tip[0].radius < 3.0 && first_tip.last().unwrap().radius < 3.0, "{first_tip:?}");
+        assert!(kept.len() > 20, "{}", kept.len());
+        // what was drawn for good is the stroke as it ends
+        let all = b.finish();
+        for (i, (k, a)) in kept.iter().zip(&all).enumerate() {
+            assert!(k.center.distance(a.center) < 1e-3 && (k.radius - a.radius).abs() < 1e-3, "{i}: {k:?} {a:?}");
+        }
+        assert!(all[0].radius < 2.0 && all.last().unwrap().radius < 2.0);
+    }
+
+    #[test]
+    fn a_start_taper_reaches_what_the_input_covered_though_the_path_waits_a_point_behind() {
+        let taper = Taper { start: 0.5, end: 0.0, size: 1.0, opacity: 0.0 };
+        let brush = Brush { touch_taper: taper, ..plain() };
+        // the first move comes after the taper's 42 ms, 60 px on: the path hasn't walked any of it
+        let mut samples =
+            vec![Sample::at(Vec2::new(0.0, 50.0), 1.0, 0.0), Sample::at(Vec2::new(60.0, 50.0), 1.0, 100.0)];
+        samples.extend(
+            (1..40).map(|i| Sample::at(Vec2::new(60.0 + i as f32 * 10.0, 50.0), 1.0, 100.0 + f64::from(i) * 8.0)),
+        );
+        let mut b = StrokeBuilder::new(brush, 20.0, Pointer::Finger);
+        b.add(&samples);
+        let all = b.finish();
+        let at = |x: f32| {
+            all.iter().min_by(|a, b| (a.center.x - x).abs().total_cmp(&(b.center.x - x).abs())).unwrap().radius
+        };
+        assert!(at(5.0) < 3.0, "{}", at(5.0));
+        assert!((at(30.0) - 5.0).abs() < 1.0, "{}", at(30.0));
+        assert_eq!(at(80.0), 10.0);
+    }
+
+    #[test]
+    fn held_still_then_lifted_the_end_keeps_the_taper_it_showed() {
+        let taper = Taper { start: 0.0, end: 0.5, size: 1.0, opacity: 0.0 };
+        let brush = Brush { touch_taper: taper, ..plain() };
+        let samples: Vec<Sample> =
+            (0..=60).map(|i| Sample::at(Vec2::new(i as f32 * 10.0, 50.0), 1.0, i as f64 * 8.0)).collect();
+        let radii = |lift_ms: Option<f64>| {
+            let mut b = StrokeBuilder::new(brush.clone(), 20.0, Pointer::Finger);
+            let (_, tip) = b.add_tipped(&samples);
+            // the lift, where it last was, after the wait
+            if let Some(ms) = lift_ms {
+                b.add(&[Sample::at(Vec2::new(600.0, 50.0), 1.0, 480.0 + ms)]);
+            }
+            let all = b.finish();
+            (tip.last().unwrap().radius, all.iter().rev().take(6).map(|s| s.radius).collect::<Vec<f32>>())
+        };
+        let (shown, straight_away) = radii(None);
+        let (_, after_a_hold) = radii(Some(1500.0));
+        assert!(shown < 3.0, "{shown}");
+        assert!(straight_away[0] < 3.0, "{straight_away:?}");
+        assert_eq!(straight_away, after_a_hold);
     }
 
     #[test]
@@ -1920,7 +2559,7 @@ mod tests {
         let whole_tip = |b: &StrokeBuilder, ahead: &[Sample]| {
             let mut copy = b.clone();
             copy.add(ahead);
-            copy.flush(&mut Vec::new());
+            copy.reach_input(&mut Vec::new());
             copy.tip_from(b.kept)
         };
         let mut checked = 0;
@@ -1932,6 +2571,8 @@ mod tests {
             let mut ahead_stamps = whole.add(&ahead);
             whole.flush(&mut ahead_stamps);
             assert_eq!(b.preview(&ahead), ahead_stamps, "previewed at {k}");
+            whole.walk_to(whole.input_point().unwrap(), &mut ahead_stamps);
+            assert_eq!(b.preview_to_input(&ahead), ahead_stamps, "previewed to the input at {k}");
             // the stroke left as it was
             assert_eq!((b.stamp_count(), b.kept), (count, kept_before));
             let (_, tip) = b.add_tipped(chunk);
@@ -1965,8 +2606,9 @@ mod tests {
         let ahead = b.preview_tip(&[Sample::at(Vec2::new(240.0, 50.0), 1.0, 420.0)]);
         assert!(ahead.last().unwrap().center.x > 230.0 && ahead.last().unwrap().radius < 1.0);
         assert!(kept.len() + more.len() + tip.len() >= b.stamp_count());
-        // a finger, a classic taper or the animation off show no tip
-        assert!(!StrokeBuilder::new(brush.clone(), 10.0, Pointer::Finger).shows_tip());
+        // a finger's end shows tapered whatever the animation; a classic taper or the animation
+        // off show no tip
+        assert!(StrokeBuilder::new(brush.clone(), 10.0, Pointer::Finger).shows_tip());
         let mut classic = brush.clone();
         classic.set_setting("classic_taper", 1.0);
         assert!(!StrokeBuilder::new(classic, 10.0, Pointer::Stylus).shows_tip());
@@ -2085,6 +2727,18 @@ mod tests {
         let one = angles(1);
         assert!(one.iter().all(|&a| a == one[0]), "{one:?}");
         assert_ne!(angles(2)[0], one[0]);
+    }
+
+    #[test]
+    fn a_still_tap_stays_a_tap_with_its_points_averaged() {
+        let at = Vec2::new(1234.567, 987.654);
+        for (setting, amount) in [("motion_filtering", 0.25), ("motion_filtering", 0.8), ("stabilization", 0.5)] {
+            let mut brush = Brush { shape: Shape { count: 7, ..Shape::default() }, ..plain() };
+            brush.set_setting(setting, amount);
+            let mut tap = StrokeBuilder::new(brush, 10.0, Pointer::Stylus);
+            tap.add(&[Sample::at(at, 1.0, 0.0), Sample::at(at, 1.0, 40.0), Sample::at(at, 1.0, 80.0)]);
+            assert_eq!(tap.finish().len(), 1, "{setting} {amount}");
+        }
     }
 
     #[test]
@@ -2267,9 +2921,23 @@ mod tests {
         assert!(attack(1.0, 0.0, true, Pointer::Stylus) < 0.01);
         let flat = Tilt::reach(crate::brush::FLAT_TILT, 0.0);
         assert!((attack(1.0, crate::brush::FLAT_TILT, true, Pointer::Stylus) - flat).abs() < 1e-3);
-        // a finger as a flat pen, at the pressure its wet mix takes
-        let finger = Tilt::reach(std::f32::consts::FRAC_PI_2, 0.0) * FINGER_WET_PRESSURE;
+        // a finger as a flat pen, at full pressure
+        let finger = Tilt::reach(std::f32::consts::FRAC_PI_2, 0.0);
         assert!((attack(1.0, 0.0, true, Pointer::Finger) - finger).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_finger_s_wet_mix_takes_full_pressure_whatever_the_sample_says() {
+        let wet = |pointer: Pointer, pressure: f32| {
+            let b = Brush { pressure_size: 0.0, ..plain() };
+            StrokeBuilder::new(b, 10.0, pointer).preview(&[Sample::at(Vec2::new(10.0, 10.0), pressure, 0.0)])[0].wet
+        };
+        // without curves the dilution and the pull follow the pressure: a finger has none, so full
+        let finger = wet(Pointer::Finger, 0.3);
+        assert!((finger[5] - 1.0).abs() < 1e-4 && (finger[6] - 1.0).abs() < 1e-4, "{finger:?}");
+        // a pen takes them at its own
+        let pen = wet(Pointer::Stylus, 0.5);
+        assert!((pen[5] - pen[6]).abs() < 1e-4 && pen[6] < 0.9, "{pen:?}");
     }
 
     #[test]
@@ -2362,6 +3030,49 @@ mod tests {
         assert!((shaded[0].gradation - (0.6 * reach).sqrt()).abs() < 1e-4, "{}", shaded[0].gradation);
         let rounded = stamps(&[("tilt_roundness", 0.5), ("tilt_size", 0.0)], 0.0);
         assert!((rounded[0].roundness - (1.0 - 0.5 * reach)).abs() < 1e-4, "{}", rounded[0].roundness);
+    }
+
+    #[test]
+    fn a_taper_thins_what_the_stamp_is_drawn_at_and_a_lean_s_growth_stays() {
+        let mut b = Brush { pen_taper: Taper { start: 0.0, end: 0.5, size: 1.0, opacity: 0.0 }, ..plain() };
+        b.tilt.size = 0.1;
+        b.set_setting("size_tilt_angle", 0.1);
+        b.set_setting("tilt_size_compression", 0.0);
+        let leaning = |i: usize| {
+            let at = Sample::at(Vec2::new(i as f32 * 8.0, 50.0), 1.0, i as f64 * 8.0);
+            Sample { tilt: crate::brush::FLAT_TILT, ..at }
+        };
+        let mut stroke = StrokeBuilder::new(b.clone(), 10.0, Pointer::Stylus);
+        stroke.add(&(0..=60).map(leaning).collect::<Vec<_>>());
+        let all = stroke.finish();
+        let growth = 0.1 * Tilt::reach(crate::brush::FLAT_TILT, 0.1) * b.size_unit();
+        let (middle, end) = (&all[all.len() / 2], all.last().unwrap());
+        assert!((middle.radius - (10.0 + growth) / 2.0).abs() < 1e-3, "{}", middle.radius);
+        // the end, thinned to nothing, is what the lean adds
+        assert!((end.radius - growth / 2.0).abs() < 0.2, "{} {growth}", end.radius);
+        // and its height stays by it: round where only the growth is left of a flat stamp
+        let flat = Brush { shape: Shape { roundness: 0.2, ..Shape::default() }, ..b };
+        let mut stroke = StrokeBuilder::new(flat, 10.0, Pointer::Stylus);
+        stroke.add(&(0..=60).map(leaning).collect::<Vec<_>>());
+        let all = stroke.finish();
+        assert!(all[all.len() / 2].roundness < 0.9, "{}", all[all.len() / 2].roundness);
+        assert!(all.last().unwrap().roundness > 0.97, "{}", all.last().unwrap().roundness);
+    }
+
+    #[test]
+    fn a_taper_draws_the_jitter_in_with_the_size() {
+        let taper = Taper { start: 1.0, end: 0.0, size: 1.0, opacity: 0.0 };
+        let mut b = Brush { pen_taper: taper, ..plain() };
+        b.set_setting("jitter_lateral", 1.0);
+        let mut stroke = StrokeBuilder::new(b, 40.0, Pointer::Stylus);
+        stroke.add(&line(100, 1200.0));
+        let all = stroke.finish();
+        // the first stamps, thinned almost to nothing, stay by the path; past the taper they don't
+        let off = |s: &Stamp| (s.center.y - 50.0).abs();
+        let tips = all.iter().take_while(|s| s.radius < 1.0).map(off).fold(0.0, f32::max);
+        let whole = all.iter().rev().take(100).map(off).fold(0.0, f32::max);
+        assert!(tips < 4.0, "{tips}");
+        assert!(whole > 30.0, "{whole}");
     }
 
     #[test]
@@ -2530,6 +3241,20 @@ mod tests {
         assert!((cropped_light - cropped_hard).abs() < 1e-3, "{cropped_light} {cropped_hard}");
         let ((light, light_r), (hard, hard_r)) = (tile(0.0, 0.5), tile(0.0, 1.0));
         assert!(light < hard * 0.8 && (light / hard - light_r / hard_r).abs() < 0.02, "{light} {hard}");
+        // the stamp's square it goes by, which a round tip covers only part of
+        let diagonal = 10.0 / crate::brushfile::ROUND_TIP_SHARE * std::f32::consts::SQRT_2;
+        assert!((hard - diagonal).abs() < 1e-3, "{hard}");
+        // a taper's thinning too
+        let mut b = Brush { pressure_size: 0.0, pen_taper: Taper { start: 1.0, ..Taper::NONE }, ..plain() };
+        b.pen_taper.size = 1.0;
+        b.set_setting("grain_zoom", 0.0);
+        b.grain.scale = crate::studio::MAX_GRAIN_SCALE / 4.0;
+        let mut s = StrokeBuilder::new(b, 40.0, Pointer::Stylus);
+        s.add(&line(100, 1200.0));
+        let all = s.finish();
+        let (thin, whole) = (all[2], all[all.len() - 1]);
+        assert!(thin.radius < whole.radius * 0.2, "{} {}", thin.radius, whole.radius);
+        assert!((thin.grain_size / whole.grain_size - thin.radius / whole.radius).abs() < 0.02);
         // the brush's own motion filtering smooths as the app's does
         let zigzag: Vec<Sample> = (0..60)
             .map(|i| Sample::at(Vec2::new(i as f32 * 2.0, if i % 2 == 0 { 0.0 } else { 20.0 }), 1.0, i as f64 * 8.0))
@@ -2539,7 +3264,9 @@ mod tests {
             b.set_setting("motion_filtering", filtering);
             let mut s = StrokeBuilder::new(b, 4.0, Pointer::Stylus);
             s.add(&zigzag);
-            let ys: Vec<f32> = s.stamps()[20..].iter().map(|s| s.center.y).collect();
+            let stamps = s.finish();
+            let third = stamps.len() / 3;
+            let ys: Vec<f32> = stamps.iter().skip(third).take(third).map(|s| s.center.y).collect();
             ys.iter().cloned().fold(f32::MIN, f32::max) - ys.iter().cloned().fold(f32::MAX, f32::min)
         };
         assert!(spread(1.0) < spread(0.0) * 0.5, "{} {}", spread(1.0), spread(0.0));
@@ -2633,7 +3360,7 @@ mod tests {
     fn the_smoothed_path_catches_up_with_the_pen_along_the_curve() {
         let drawn = |input: InputSettings| {
             let mut s =
-                StrokeBuilder::new(Brush { streamline: 0.35, ..plain() }, 6.0, Pointer::Stylus).with_input(input);
+                StrokeBuilder::new(Brush { streamline: 0.015, ..plain() }, 6.0, Pointer::Stylus).with_input(input);
             s.add(&half_circle());
             s.finish()
         };
@@ -2646,14 +3373,113 @@ mod tests {
         assert!(turn < 4.0, "the end turns {turn}°");
         assert!(stamps.last().is_some_and(|s| s.center.distance(Vec2::new(550.0, 400.0)) < 1.5));
         assert!(off_the_circle(&stamps) < 3.0, "{} px off the circle", off_the_circle(&stamps));
-        // stabilisation's average still catches up in a straight run
-        let stamps = drawn(InputSettings { stabilization: 0.3, ..InputSettings::default() });
-        let end = stamps.last().map_or(Vec2::ZERO, |s| s.center);
-        let run = stamps.iter().rev().take(8).map(|s| s.center).collect::<Vec<_>>();
-        let along = end - run.last().copied().unwrap_or(end);
-        let across = |p: Vec2| ((p - end).x * along.y - (p - end).y * along.x).abs() / along.length();
-        assert!(run.iter().all(|&p| across(p) < 0.05), "{run:?}");
-        assert!(end.distance(Vec2::new(550.0, 400.0)) < 1.5);
+    }
+
+    /// A quick slash, curved as a C, `ms` long and sampled 120 times a second: down the left of an
+    /// ellipse, slowly at its ends.
+    fn slash(ms: f64) -> Vec<Sample> {
+        let n = (ms * 0.12) as usize;
+        (0..=n)
+            .map(|i| {
+                let u = i as f32 / n as f32;
+                let a = std::f32::consts::PI * (0.15 + 0.8 * u * u * (3.0 - 2.0 * u));
+                Sample::at(
+                    Vec2::new(600.0 - 420.0 * a.sin(), 400.0 - 320.0 * a.cos()),
+                    0.7,
+                    f64::from(i as u32) * 25.0 / 3.0,
+                )
+            })
+            .collect()
+    }
+
+    /// A stroke through `samples` with stabilisation at `amount`, whole.
+    fn stabilised(amount: f32, samples: &[Sample]) -> Vec<Stamp> {
+        let mut b = plain();
+        b.set_setting("stabilization", amount);
+        let mut s = StrokeBuilder::new(b, 6.0, Pointer::Stylus);
+        s.add(samples);
+        s.finish()
+    }
+
+    #[test]
+    fn a_stabilised_slash_bends_as_a_whole_and_keeps_both_its_ends() {
+        for ms in [150.0, 400.0, 900.0] {
+            let input = slash(ms);
+            let (start, end) = (input[0].pos, input[input.len() - 1].pos);
+            for amount in [0.2, 0.5, 0.75, 1.0] {
+                let stamps = stabilised(amount, &input);
+                assert!(stamps[0].center.distance(start) < 1.0, "{ms} ms at {amount}: starts off the input");
+                let last = stamps[stamps.len() - 1].center;
+                assert!(last.distance(end) < 2.0, "{ms} ms at {amount}: ends {last:?}, not {end:?}");
+                // nowhere does it break off into a straight run to the lift: from one 20 px stretch
+                // to the next it turns no more than the slash does (an average trailing the pen
+                // and catching up at the lift turned 18°)
+                let k = (20.0 / stamps[0].center.distance(stamps[1].center)).ceil() as usize;
+                let turn = most_turn(&stamps, k, k);
+                assert!(turn < 8.0, "{ms} ms at {amount}: turns {turn}° at once");
+            }
+        }
+    }
+
+    #[test]
+    fn stabilisation_averages_about_each_point_so_a_stroke_comes_out_the_same_either_way() {
+        // drawn back the way it came, at the same pace, it lies on the same curve
+        let there = slash(400.0);
+        let end = there[there.len() - 1].time_ms;
+        let mut back: Vec<Sample> = there.iter().map(|s| Sample { time_ms: end - s.time_ms, ..*s }).collect();
+        back.reverse();
+        let (a, b) = (stabilised(0.75, &there), stabilised(0.75, &back));
+        for p in a.iter().step_by(10) {
+            let near = b.iter().map(|q| q.center.distance(p.center)).fold(f32::MAX, f32::min);
+            assert!(near < 2.5, "{near} px off at {:?}", p.center);
+        }
+        // and with the average the width of the whole stroke, it leaves the curve for the chord
+        let input = slash(150.0);
+        let (from, to) = (input[0].pos, input[input.len() - 1].pos);
+        let along = (to - from).normalized_or(Vec2::new(1.0, 0.0));
+        let across = |p: Vec2| ((p - from).x * along.y - (p - from).y * along.x).abs();
+        let bow = |s: &[Stamp]| s.iter().map(|s| across(s.center)).fold(0.0, f32::max);
+        assert!(bow(&stabilised(1.0, &input)) < bow(&stabilised(0.2, &input)) * 0.5);
+    }
+
+    #[test]
+    fn a_stabilised_stroke_shows_as_it_will_end_and_keeps_what_it_has_drawn() {
+        let mut b = plain();
+        b.set_setting("stabilization", 0.5);
+        let input = slash(600.0);
+        let mut live = StrokeBuilder::new(b.clone(), 6.0, Pointer::Stylus);
+        let mut drawn = Vec::new();
+        for chunk in input.chunks(3) {
+            drawn.extend(live.add(chunk));
+            // what shows reaches the input, whatever the average still has to take in
+            let ahead = live.preview_to_input(&[]);
+            let end = ahead.last().or(drawn.last()).map_or(Vec2::ZERO, |s| s.center);
+            let at = chunk[chunk.len() - 1].pos;
+            assert!(end.distance(at) < 2.0, "{end:?} behind the input at {at:?}");
+        }
+        // shown just before the lift, the stroke is the stroke as it ends
+        let shown: Vec<Vec2> = drawn.iter().chain(&live.preview_to_input(&[])).map(|s| s.center).collect();
+        let done: Vec<Vec2> = live.finish().iter().map(|s| s.center).collect();
+        assert_eq!(shown.len(), done.len());
+        assert!(shown.iter().zip(&done).all(|(a, b)| a.distance(*b) < 0.01));
+    }
+
+    #[test]
+    fn stabilisation_keeps_a_tap_and_a_stroke_all_inside_its_reach() {
+        let mut b = plain();
+        b.set_setting("stabilization", 1.0);
+        let mut tap = StrokeBuilder::new(b.clone(), 6.0, Pointer::Stylus);
+        tap.add(&[Sample::at(Vec2::new(10.0, 10.0), 0.5, 0.0)]);
+        let tapped = tap.finish();
+        assert_eq!(tapped.len(), 1);
+        assert_eq!(tapped[0].center, Vec2::new(10.0, 10.0));
+        // a few points, far fewer than it averages at full strength
+        let few: Vec<Sample> =
+            (0..4).map(|i| Sample::at(Vec2::new(i as f32 * 30.0, 0.0), 0.5, f64::from(i) * 8.0)).collect();
+        let stamps = stabilised(1.0, &few);
+        assert!(stamps.iter().all(|s| s.center.is_finite()));
+        assert!(stamps[0].center.distance(few[0].pos) < 1.0);
+        assert!(stamps[stamps.len() - 1].center.distance(few[3].pos) < 2.0);
     }
 
     #[test]
@@ -2677,9 +3503,9 @@ mod tests {
             (800.0 - last.center.x, last.radius)
         };
         let close = |a: f32, b: f32, share: f32| (a - b).abs() <= share * a.abs().max(b.abs());
-        for (setting, behind) in [("stabilization", 200.0), ("motion_filtering", 15.0)] {
+        for (setting, amount, behind) in [("stabilization", 1.0, 200.0), ("motion_filtering", 0.25, 15.0)] {
             let mut b = plain();
-            b.set_setting(setting, 1.0);
+            b.set_setting(setting, amount);
             let (slow, fast) = (end(&b, PEN_RATE).0, end(&b, PEN_RATE * 3.0).0);
             assert!(slow > behind, "{setting} lags {slow}");
             assert!(close(slow, fast, 0.1), "{setting}: {slow} behind at 240 Hz, {fast} at 720 Hz");
@@ -2699,7 +3525,7 @@ mod tests {
         // the half circle, as it is and with a pen's streamline: the first 6 px head down the
         // circle's tangent (the chord that far along is 1.2° off it; the first stretch walked as
         // if its first point came twice headed 4° to 6° off)
-        for streamline in [0.0, 0.35] {
+        for streamline in [0.0, 0.015] {
             let mut s = StrokeBuilder::new(Brush { streamline, ..plain() }, 6.0, Pointer::Stylus);
             s.add(&half_circle());
             let stamps = s.finish();
@@ -2792,6 +3618,46 @@ mod tests {
     }
 
     #[test]
+    fn motion_filtering_is_a_low_pass_that_moves_nothing_along() {
+        let weights = motion_weights(0.25, 0.0, PEN_RATE);
+        assert_eq!(weights.len() % 2, 1);
+        assert!((weights.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+        assert!(weights.iter().zip(weights.iter().rev()).all(|(a, b)| (a - b).abs() < 1e-6));
+        assert!(motion_weights(0.75, 0.0, PEN_RATE).len() > weights.len());
+        assert!(motion_weights(0.25, 1.0, PEN_RATE).len() > weights.len());
+        assert!(motion_weights(1.0, 1.0, PEN_RATE).len() <= MOTION_MOST_SAMPLES + 1);
+        // how much of a wave at `hertz` comes through
+        let through = |hertz: f64| {
+            let reach = (weights.len() / 2) as f64;
+            let at = |(n, w): (usize, &f32)| f64::from(*w) * (TAU * hertz * (n as f64 - reach) / PEN_RATE).cos();
+            weights.iter().enumerate().map(at).sum::<f64>()
+        };
+        assert!(through(1.0) > 0.9, "{}", through(1.0));
+        assert!(through(30.0).abs() < 0.02, "{}", through(30.0));
+        // a slow circle keeps its size, where following behind the pen would cut inside it; both
+        // ends stay where the input's are
+        let circle: Vec<Sample> = (0..=480)
+            .map(|i| {
+                let t = f64::from(i) / PEN_RATE;
+                let (y, x) = (TAU * 0.5 * t).sin_cos();
+                Sample::at(Vec2::new(300.0 + 200.0 * x as f32, 300.0 + 200.0 * y as f32), 1.0, t * 1000.0)
+            })
+            .collect();
+        let mut b = plain();
+        b.set_setting("motion_filtering", 0.25);
+        let mut s = StrokeBuilder::new(b, 4.0, Pointer::Stylus);
+        s.add(&circle);
+        let stamps = s.finish();
+        let centre = Vec2::new(300.0, 300.0);
+        let third = stamps.len() / 3;
+        for stamp in stamps.iter().skip(third).take(third) {
+            let off = stamp.center.distance(centre) - 200.0;
+            assert!(off.abs() < 3.0, "{off}");
+        }
+        assert!(stamps[0].center.distance(circle[0].pos) < 3.0, "{:?}", stamps[0].center);
+    }
+
+    #[test]
     fn the_apps_input_settings_smooth_and_curve_pressure() {
         let brush = Brush::round_pen();
         let samples: Vec<Sample> = (0..120)
@@ -2804,19 +3670,31 @@ mod tests {
                 s
             })
             .collect();
-        let spread = |input: InputSettings| {
+        // a line waving at `hertz`: how far it waves in the middle of the stroke
+        let spread = |hertz: f64, input: InputSettings| {
+            let wave: Vec<Sample> = (0..=480)
+                .map(|i| {
+                    let t = f64::from(i) / PEN_RATE;
+                    let y = 6.0 * (TAU * hertz * t).sin() as f32;
+                    let mut s = Sample::at(Vec2::new(i as f32 * 2.0, y), 0.5, t * 1000.0);
+                    s.tilt = 0.0;
+                    s
+                })
+                .collect();
             let mut b = StrokeBuilder::new(brush.clone(), 4.0, Pointer::Stylus).with_input(input);
-            let stamps = b.add(&samples);
-            // once settled: the last stamps
-            let ys: Vec<f32> = stamps.iter().rev().take(15).map(|s| s.center.y).collect();
+            b.add(&wave);
+            let stamps = b.finish();
+            let third = stamps.len() / 3;
+            let ys: Vec<f32> = stamps.iter().skip(third).take(third).map(|s| s.center.y).collect();
             ys.iter().cloned().fold(f32::MIN, f32::max) - ys.iter().cloned().fold(f32::MAX, f32::min)
         };
-        let plain = spread(InputSettings::default());
-        let filtered = spread(InputSettings { motion_filtering: 1.0, ..InputSettings::default() });
-        let expressive =
-            spread(InputSettings { motion_filtering: 1.0, motion_expression: 1.0, ..InputSettings::default() });
-        assert!(filtered < plain * 0.5, "{filtered} vs {plain}");
-        assert!(expressive > filtered, "{expressive} vs {filtered}");
+        let filtering = InputSettings { motion_filtering: 0.1, ..InputSettings::default() };
+        let expressive = InputSettings { motion_expression: 1.0, ..filtering.clone() };
+        let (plain, filtered) = (spread(30.0, InputSettings::default()), spread(30.0, filtering.clone()));
+        assert!(filtered < plain * 0.1, "{filtered} vs {plain}");
+        // the hand's own motion, under the cut, comes through more with expression
+        let (kept, more) = (spread(4.0, filtering), spread(4.0, expressive));
+        assert!(more > kept, "{more} vs {kept}");
         // a curve that doubles light pressure makes bigger stamps
         let curved = InputSettings {
             pressure_curve: Curve::new(&[Vec2::new(0.0, 0.0), Vec2::new(0.5, 1.0), Vec2::new(1.0, 1.0)]),
@@ -2849,6 +3727,42 @@ mod tests {
         let a = offsets(0.0, 1.0, 7)[0];
         let b = offsets(0.0, 1.0, 8)[0];
         assert_ne!(a, b);
-        assert!(a.x >= 0.0 && a.x <= GRAIN_JITTER_SPAN && a.y >= 0.0 && a.y <= GRAIN_JITTER_SPAN);
+        // (a tile's worth at most; the stamps are 4 px, the grain following them by default)
+        assert!(a.x >= 0.0 && a.x <= 8.0 && a.y >= 0.0 && a.y <= 8.0, "{a:?}");
+    }
+
+    #[test]
+    fn a_rolling_grain_goes_on_from_stamp_to_stamp_whatever_its_tile_does() {
+        // a tile that follows a stamp whose size follows the pressure, far from the canvas's corner
+        let mut brush = Brush { pressure_size: 1.0, ..plain() };
+        brush.set_setting("grain_movement", 1.0);
+        brush.set_setting("grain_zoom", 0.0);
+        brush.grain.scale = crate::studio::MAX_GRAIN_SCALE / 4.0;
+        let scale = brush.grain.scale;
+        let samples: Vec<Sample> = (0..=200)
+            .map(|i| {
+                let pressure = 0.6 + 0.4 * (i as f32 / 12.0).sin();
+                Sample::at(Vec2::new(5000.0 + i as f32 * 2.0, 3000.0), pressure, i as f64 * 8.0)
+            })
+            .collect();
+        let mut stroke = StrokeBuilder::new(brush, 30.0, Pointer::Stylus);
+        stroke.add(&samples);
+        let stamps = stroke.finish();
+        // each stamp's place in the grain, in tiles, is the last's and what it moved over its tile:
+        // however much the tile changes it never jumps
+        let reads: Vec<(Vec2, Vec2)> = stamps
+            .iter()
+            .map(|s| {
+                let tile = s.grain_size * scale;
+                (s.grain_offset * (1.0 / tile), s.center)
+            })
+            .collect();
+        for pair in stamps.windows(2).zip(reads.windows(2)) {
+            let (s, r) = pair;
+            let moved = s[1].center.distance(s[0].center) / (s[1].grain_size * scale);
+            let went = r[1].0.distance(r[0].0);
+            assert!((went - moved).abs() < 1e-3, "{went} {moved}");
+        }
+        assert!(stamps[10].grain_size != stamps[40].grain_size);
     }
 }

@@ -138,6 +138,9 @@ fun GalleryScreen(vm: CanvasViewModel) {
     var renamingStack by remember { mutableStateOf<io.github.artcraftandroid.procraft.gallery.Stack?>(null) }
     // the app's name tapped: what it is and its version, over the gallery
     var about by remember { mutableStateOf(false) }
+    // Gallery Recovery's card: how far its pie has come while it shows, and whether it is done
+    var recovery by remember { mutableStateOf<Float?>(null) }
+    var recovered by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<Artwork?>(null) }
     // the artwork (by folder) whose actions a swipe left is showing
     var swiped by remember { mutableStateOf<String?>(null) }
@@ -641,7 +644,27 @@ fun GalleryScreen(vm: CanvasViewModel) {
             about,
             enter = androidx.compose.animation.fadeIn(tween(300)),
             exit = androidx.compose.animation.fadeOut(tween(150)),
-        ) { AboutApp { about = false } }
+        ) {
+            AboutApp(
+                onRecover = {
+                    if (recovery == null) {
+                        scope.launch {
+                            // the card shows long enough to be read, however quick the search
+                            recovery = 0f
+                            val pie = launch { androidx.compose.animation.core.animate(0f, 0.95f, animationSpec = tween(RECOVERY_SEARCH_MS)) { v, _ -> recovery = v } }
+                            vm.recoverLostArtworks()
+                            pie.join()
+                            recovered = true
+                            kotlinx.coroutines.delay(RECOVERY_DONE_MS)
+                            recovery = null
+                            recovered = false
+                            about = false
+                        }
+                    }
+                },
+            ) { about = false }
+        }
+        RecoveryProgress(recovery, recovered)
     }
 
     // deleting the picked artworks, or one swiped to
@@ -1383,7 +1406,27 @@ private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, onClos
         val image by produceState<ImageBitmap?>(null, a.dir.path, version) {
             value = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(a.thumbnail.path)?.asImageBitmap() }
         }
-        image?.let { ThumbnailImage(it, a.name, ContentScale.Fit) }
+        // an animated artwork plays as its settings say, its thumbnail showing until its frames are read
+        val side = androidx.compose.ui.platform.LocalConfiguration.current.let { with(androidx.compose.ui.platform.LocalDensity.current) { maxOf(it.screenWidthDp, it.screenHeightDp).dp.roundToPx() } }
+        val played by produceState<PlayedFrames?>(null, a.dir.path, version) {
+            value = null
+            value = withContext(Dispatchers.Default) { readFrames(a.dir.path, side) }
+        }
+        var frame by remember(played) { mutableStateOf<ImageBitmap?>(null) }
+        androidx.compose.runtime.LaunchedEffect(played) {
+            val p = played ?: return@LaunchedEffect
+            var at = 0u
+            var step = 1
+            while (true) {
+                frame = p.pictures.getOrNull(p.order.getOrElse(at.toInt()) { 0 })
+                kotlinx.coroutines.delay(1000L / p.fps.coerceAtLeast(1))
+                // round again, turned back, or (a single pass) staying on its last frame
+                val next = io.github.artcraftandroid.procraft.core.animationNextStep(p.playback, p.order.size.toUInt(), at, step) ?: break
+                at = next.at
+                step = next.step
+            }
+        }
+        (frame ?: image)?.let { ThumbnailImage(it, a.name, ContentScale.Fit) }
         androidx.compose.animation.AnimatedVisibility(controls, Modifier.fillMaxSize(), enter = androidx.compose.animation.fadeIn(), exit = androidx.compose.animation.fadeOut()) {
             Box(Modifier.fillMaxSize()) {
                 // a light disc with a black cross, 41 in from the top right
@@ -1399,6 +1442,34 @@ private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, onClos
                 PreviewArrow(left = false, Modifier.align(Alignment.CenterEnd)) { if (index < list.size - 1) index++ }
             }
         }
+    }
+}
+
+/** An artwork's frames as read for Preview, and how they play. */
+private class PlayedFrames(val pictures: List<ImageBitmap>, val order: List<Int>, val fps: Int, val playback: io.github.artcraftandroid.procraft.core.AnimationPlayback)
+
+/** The most memory (bytes) an animation's frames take in Preview: past it they are smaller. */
+private const val PLAYED_MOST = 256e6
+
+/** The frames of the artwork in [dir] if it is animated, at no more than [side] pixels. Slow. */
+private fun readFrames(dir: String, side: Int): PlayedFrames? {
+    if (!io.github.artcraftandroid.procraft.core.artworkPlays(dir)) return null
+    val s = runCatching { io.github.artcraftandroid.procraft.core.CanvasSession.open(dir) }.getOrNull() ?: return null
+    try {
+        val settings = s.animationSettings()?.takeIf { !it.pages } ?: return null
+        if (!s.drawWithoutWindow()) return null
+        val count = s.animationFrameCount()
+        val fit = kotlin.math.sqrt(PLAYED_MOST / 4.0 / count.coerceAtLeast(1u).toDouble()).toInt()
+        val pictures = (0u until count).mapNotNull { i ->
+            s.animationFrame(i, false, minOf(side, fit).toUInt())?.let { t ->
+                val bitmap = CanvasSpace.tag(android.graphics.Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), android.graphics.Bitmap.Config.ARGB_8888))
+                bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(t.rgba))
+                bitmap.asImageBitmap()
+            }
+        }
+        return PlayedFrames(pictures, s.animationSequence().map { it.toInt() }, settings.fps.toInt(), settings.playback)
+    } finally {
+        s.destroy()
     }
 }
 
@@ -1658,7 +1729,7 @@ private fun Chip(text: String, modifier: Modifier = Modifier) {
  * its version; a round button at the top right closes it, as back does.
  */
 @Composable
-private fun AboutApp(onClose: () -> Unit) {
+private fun AboutApp(onRecover: () -> Unit, onClose: () -> Unit) {
     BackHandler(onBack = onClose)
     val context = androidx.compose.ui.platform.LocalContext.current
     val version = remember {
@@ -1681,6 +1752,13 @@ private fun AboutApp(onClose: () -> Unit) {
             Text(version, color = AboutInk, fontSize = 13.sp, maxLines = 1, modifier = Modifier.padding(top = 14.dp))
         }
         Box(
+            Modifier.align(Alignment.TopCenter).padding(top = AboutButtonTop).size(220.dp, 38.dp).clip(RoundedCornerShape(8.dp))
+                .background(AboutButtonFill).clickable(onClick = onRecover),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("Start Gallery Recovery", color = AboutButtonInk, fontSize = 15.sp, maxLines = 1)
+        }
+        Box(
             Modifier.align(Alignment.TopEnd).padding(top = 31.dp, end = 31.5.dp).size(22.5.dp).clip(CircleShape).background(AboutClose)
                 .clickable(onClick = onClose),
             contentAlignment = Alignment.Center,
@@ -1700,3 +1778,9 @@ private val AboutIconField = Color(0xFF0B0B0C)
 private val AboutInk = Color(0xFFBDBDBD)
 private val AboutClose = Color(0xFFE3E3E3)
 private val AboutCloseInk = Color(0xFF1C1C1C)
+// the button 520 under the icon's top, 220 x 38
+private val AboutButtonTop = 615.dp
+private val AboutButtonFill = Color(0xFF1A1A1A)
+private val AboutButtonInk = Color(0xFFC4C4C4)
+private const val RECOVERY_SEARCH_MS = 700
+private const val RECOVERY_DONE_MS = 900L

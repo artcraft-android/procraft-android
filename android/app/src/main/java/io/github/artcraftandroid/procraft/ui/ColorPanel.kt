@@ -10,6 +10,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.layout.positionInRoot
@@ -23,6 +25,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
@@ -101,6 +104,13 @@ private val ShortScreen = 900.dp
  * the header (64), the sliders (108), the palette (142), the tabs (70) and a 25 margin.
  */
 private val ShortClassicRest = 465.dp
+
+/**
+ * The palettes' list takes the height left over, up to its measured height: the screen less the
+ * bar and arrow (56), the header (64), the Compact and Cards switch (44), the tabs (70) and a 25
+ * margin.
+ */
+private val PalettesRest = 259.dp
 private val RingOuter = 182.dp
 private val RingInner = 124.dp
 private val DiscRadius = 105.dp
@@ -205,7 +215,7 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
     val undocking = !background && vm.colorsUndocking
     val look = LocalPanelLook.current
     ProvidePanelLook(if (undocking) PanelLook(0f, look.scale, look.pivot) else look) {
-    Popover(PanelWidth, arrowX, (if (background) modifier else modifier.onGloballyPositioned { vm.dropAvoid = it.boundsInRoot() }).alpha(if (undocking) 0f else 1f)) {
+    Popover(PanelWidth, arrowX, (if (background) modifier else modifier.onGloballyPositioned { vm.dropAvoid = it.boundsInRoot() }).heightIn(max = screenHeight - Pc.BarHeight - 25.dp).alpha(if (undocking) 0f else 1f)) {
         Box {
             if (background) {
                 PanelHeader("Background", start = 20.dp, end = 12.dp, height = headerHeight, chevron = false) {
@@ -229,23 +239,26 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
             if (!background) UndockHandle(vm, Modifier.align(Alignment.TopCenter))
             if (vm.colorMode == ColorMode.HARMONY) HarmonyKindButton(vm)
         }
-        // the other modes come one by one; until then they show the classic picker
-        when (vm.colorMode) {
-            ColorMode.DISC -> Disc(c, short = short)
-            ColorMode.VALUE -> Value(c, short = short, inks = vm.inks)
-            ColorMode.HARMONY -> Harmony(vm, c, short = short)
-            ColorMode.PALETTES -> Palettes(vm, c, short)
-            else -> Classic(c, square = if (short) (screenHeight - ShortClassicRest).coerceIn(150.dp, 344.dp) else 344.dp)
-        }
-        if (vm.colorMode != ColorMode.PALETTES && short) {
-            ShortBottom(vm, c)
-        } else if (vm.colorMode != ColorMode.PALETTES) {
-            History(vm, c)
-            vm.palettes.getOrNull(vm.defaultPalette)?.let { p ->
-                Box(Modifier.fillMaxWidth().height(if (short) 34.dp else 44.dp)) {
-                    Text(p.name, color = Pc.PanelTitle, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(start = 21.dp, top = if (short) 8.dp else 13.dp))
+        if (vm.colorMode == ColorMode.PALETTES) {
+            Palettes(vm, c, (screenHeight - PalettesRest).coerceIn(40.dp, if (short) 458.dp else 577.dp))
+        } else Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+            // on a screen too short for it all the picker scrolls, the tabs staying
+            when (vm.colorMode) {
+                ColorMode.DISC -> Disc(c, short = short)
+                ColorMode.VALUE -> Value(c, short = short, inks = vm.inks)
+                ColorMode.HARMONY -> Harmony(vm, c, short = short)
+                else -> Classic(c, square = if (short) (screenHeight - ShortClassicRest).coerceIn(150.dp, 344.dp) else 344.dp)
+            }
+            if (short) {
+                ShortBottom(vm, c)
+            } else {
+                History(vm, c)
+                vm.palettes.getOrNull(vm.defaultPalette)?.let { p ->
+                    Box(Modifier.fillMaxWidth().height(44.dp)) {
+                        Text(p.name, color = Pc.PanelTitle, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(start = 21.dp, top = 13.dp))
+                    }
+                    SwatchGrid(vm, c, vm.defaultPalette, p, Modifier.padding(horizontal = 8.dp))
                 }
-                SwatchGrid(vm, c, vm.defaultPalette, p, Modifier.padding(horizontal = 8.dp))
             }
         }
         ModeTabs(vm)
@@ -797,7 +810,7 @@ private fun Harmony(vm: CanvasViewModel, c: ColorPick, compact: Boolean = false,
 
 /** All palettes as compact cards: the default one ticked, each with its menu and its swatches. */
 @Composable
-private fun Palettes(vm: CanvasViewModel, c: ColorPick, short: Boolean) {
+private fun Palettes(vm: CanvasViewModel, c: ColorPick, listHeight: Dp) {
     var renaming by remember { mutableStateOf<Int?>(null) }
     val cards = vm.paletteCards
     Row(Modifier.padding(horizontal = 8.5.dp).fillMaxWidth().height(36.dp).clip(RoundedCornerShape(9.dp)).background(Pc.SetCell).padding(2.dp)) {
@@ -815,7 +828,7 @@ private fun Palettes(vm: CanvasViewModel, c: ColorPick, short: Boolean) {
         }
     }
     LazyColumn(
-        Modifier.padding(top = 8.dp).fillMaxWidth().height(if (short) 458.dp else 577.dp),
+        Modifier.padding(top = 8.dp).fillMaxWidth().height(listHeight),
         // cards: three 120 tiles across
         contentPadding = if (cards) PaddingValues(start = 8.dp, end = 8.dp, bottom = 8.dp) else PaddingValues(start = 8.5.dp, end = 8.5.dp, bottom = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),

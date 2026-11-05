@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
 use egui::{
@@ -68,6 +68,11 @@ const ABOUT_FIELD: u32 = 0xFF0B0B0C;
 const ABOUT_INK: u32 = 0xFFBDBDBD;
 const ABOUT_CLOSE: u32 = 0xFFE3E3E3;
 const ABOUT_CLOSE_INK: u32 = 0xFF1C1C1C;
+/// About's button: 520 under the mark's top, 220 x 38.
+const ABOUT_BUTTON: (f32, f32) = (220.0, 38.0);
+const ABOUT_BUTTON_DOWN: f32 = 520.0;
+const ABOUT_BUTTON_FILL: u32 = 0xFF1A1A1A;
+const ABOUT_BUTTON_INK: u32 = 0xFFC4C4C4;
 const RENAME_FRAME: (f32, f32) = (281.0, 280.0);
 const RENAME_TOP: f32 = 20.0;
 const RENAME_MARGIN: f32 = 12.0;
@@ -204,6 +209,8 @@ pub struct Gallery {
     picked: Vec<String>,
     more_open: bool,
     preview: Option<(Vec<GalleryArtwork>, usize, bool, f32)>,
+    /// The animation of the artwork shown in Preview, by its folder.
+    played: Option<Played>,
     /// An artwork two fingers are spreading open into Preview.
     spreading: Option<Spread>,
     alert: crate::alert::Alert,
@@ -343,6 +350,7 @@ impl Gallery {
             picked: Vec::new(),
             more_open: false,
             preview: None,
+            played: None,
             spreading: None,
             alert: crate::alert::Alert::default(),
             pdf_alert: crate::alert::Alert::default(),
@@ -896,6 +904,26 @@ impl Gallery {
                 Weight::Regular,
                 argb(ABOUT_INK),
             );
+            let at = pos2(field.center().x - ABOUT_BUTTON.0 / 2.0, field.top() + ABOUT_BUTTON_DOWN);
+            let recovery = Rect::from_min_size(at, vec2(ABOUT_BUTTON.0, ABOUT_BUTTON.1));
+            ui.painter().rect_filled(recovery, 8.0, argb(ABOUT_BUTTON_FILL));
+            let ink = argb(ABOUT_BUTTON_INK);
+            text(
+                ui.painter(),
+                recovery.center(),
+                Align2::CENTER_CENTER,
+                "Start Gallery Recovery",
+                15.0,
+                Weight::Regular,
+                ink,
+            );
+            // nothing is looked through while a file is still being written
+            let tapped = ui.interact(recovery, ui.scope_id().with("about recovery"), Sense::click()).clicked();
+            if tapped && !crate::files::still_writing() {
+                self.store.recover_lost_artworks();
+                self.refresh();
+                close = true;
+            }
             let button = Rect::from_min_size(pos2(screen.right() - 31.5 - 22.5, screen.top() + 31.0), vec2(22.5, 22.5));
             ui.painter().circle_filled(button.center(), 11.25, argb(ABOUT_CLOSE));
             let (c, d) = (button.center(), 4.0);
@@ -990,7 +1018,9 @@ impl Gallery {
         egui::Area::new(Id::unique("preview")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
             let response = ui.allocate_rect(screen, Sense::click_and_drag());
             ui.painter().rect_filled(screen, 0, Color32::BLACK);
-            if let Some(t) = self.texture(&a) {
+            self.play(ctx, &a);
+            let frame = self.played.as_ref().and_then(Played::frame);
+            if let Some(t) = frame.or_else(|| self.texture(&a)) {
                 let picture = Self::fitted(screen, &a);
                 let picture = picture.translate(vec2(0.0, screen.center().y - picture.center().y));
                 let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -1033,8 +1063,21 @@ impl Gallery {
                 closed = true;
             }
         });
-        if !closed {
+        if closed {
+            self.played = None;
+        } else {
             self.preview = Some((list, index, controls, moved));
+        }
+    }
+
+    /// Preview's artwork `a`, if it is animated: its frames read on a thread, then played as its
+    /// settings say (its thumbnail shows until then).
+    fn play(&mut self, ctx: &egui::Context, a: &GalleryArtwork) {
+        if self.played.as_ref().is_none_or(|p| p.dir != a.dir) {
+            self.played = Some(Played::start(a.dir.clone(), self.screen_px.0.max(self.screen_px.1)));
+        }
+        if let Some(p) = self.played.as_mut() {
+            p.go_on(ctx);
         }
     }
 
@@ -1973,6 +2016,115 @@ fn one_line(ui: &Ui, text: &str, size: f32, weight: Weight, colour: Color32, max
 
 fn presets_path() -> std::path::PathBuf {
     crate::files::app_dir().join("presets.json")
+}
+
+/// The most memory (bytes) an animation's frames take in Preview: past it they are smaller.
+const PLAYED_MOST: f64 = 256e6;
+
+/// An artwork's frames as read for Preview, and how they play.
+struct PlayedFrames {
+    pictures: Vec<procraft_core::ThumbnailImage>,
+    order: Vec<u32>,
+    fps: u32,
+    playback: procraft_core::AnimationPlayback,
+}
+
+/// An animated artwork in Preview: being read, then played.
+struct Played {
+    dir: String,
+    read: Option<std::sync::mpsc::Receiver<Option<PlayedFrames>>>,
+    frames: Vec<TextureHandle>,
+    order: Vec<u32>,
+    fps: u32,
+    playback: procraft_core::AnimationPlayback,
+    at: u32,
+    step: i32,
+    due: Option<Instant>,
+}
+
+impl Played {
+    /// Starts reading the artwork in `dir`, if it plays, at no more than `side` pixels.
+    fn start(dir: String, side: u32) -> Played {
+        let (done, read) = std::sync::mpsc::channel();
+        let (from, plays) = (dir.clone(), procraft_core::artwork_plays(dir.clone()));
+        if plays {
+            std::thread::spawn(move || _ = done.send(read_frames(from, side)));
+        }
+        Played {
+            dir,
+            read: plays.then_some(read),
+            frames: Vec::new(),
+            order: Vec::new(),
+            fps: 1,
+            playback: procraft_core::AnimationPlayback::Loop,
+            at: 0,
+            step: 1,
+            due: None,
+        }
+    }
+
+    /// Takes in what was read, and moves on when the time has come.
+    fn go_on(&mut self, ctx: &egui::Context) {
+        if let Some(read) = &self.read {
+            match read.try_recv() {
+                Ok(frames) => {
+                    self.read = None;
+                    if let Some(f) = frames {
+                        self.frames = f
+                            .pictures
+                            .iter()
+                            .enumerate()
+                            .map(|(i, t)| {
+                                let size = [t.width as usize, t.height as usize];
+                                let image = egui::ColorImage::from_rgba_unmultiplied(size, &t.rgba);
+                                ctx.load_texture(format!("played {i}"), image, egui::TextureOptions::LINEAR)
+                            })
+                            .collect();
+                        (self.order, self.fps, self.playback) = (f.order, f.fps.max(1), f.playback);
+                        self.due = Some(Instant::now());
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(50)),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.read = None,
+            }
+        }
+        let Some(due) = self.due else { return };
+        let frame = Duration::from_secs_f64(1.0 / f64::from(self.fps));
+        let now = Instant::now();
+        if now < due {
+            ctx.request_repaint_after(due - now);
+            return;
+        }
+        let len = u32::try_from(self.order.len()).unwrap_or(0);
+        match procraft_core::animation_next_step(self.playback, len, self.at, self.step) {
+            Some(next) => {
+                (self.at, self.step) = (next.at, next.step);
+                self.due = Some(now + frame);
+                ctx.request_repaint_after(frame);
+            }
+            // a single pass stays on its last frame
+            None => self.due = None,
+        }
+    }
+
+    /// The frame showing, once there are frames.
+    fn frame(&self) -> Option<egui::TextureId> {
+        let index = *self.order.get(self.at as usize)? as usize;
+        self.frames.get(index).map(TextureHandle::id)
+    }
+}
+
+/// The frames of the artwork in `dir`, at no more than `side` pixels and [`PLAYED_MOST`] together.
+fn read_frames(dir: String, side: u32) -> Option<PlayedFrames> {
+    let session = procraft_core::CanvasSession::open(dir).ok()?;
+    let settings = session.animation_settings().filter(|s| !s.pages)?;
+    if !session.draw_without_window() {
+        return None;
+    }
+    let count = session.animation_frame_count();
+    let fit = (PLAYED_MOST / 4.0 / f64::from(count.max(1))).sqrt() as u32;
+    let pictures: Vec<_> = (0..count).filter_map(|i| session.animation_frame(i, false, side.min(fit))).collect();
+    Some(PlayedFrames { pictures, order: session.animation_sequence(), fps: settings.fps, playback: settings.playback })
 }
 
 /// A thread reading the gallery's thumbnails one after another: an artwork's folder, when it was

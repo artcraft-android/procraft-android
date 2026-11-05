@@ -65,6 +65,13 @@ const SHORT_SCREEN: f32 = 900.0;
 /// Short, the classic square takes the height left over: the window less the bar and arrow (56),
 /// the header (64), the sliders (108), the palette (142), the tabs (70) and a 25 margin.
 const SHORT_CLASSIC_REST: f32 = 465.0;
+/// The palettes' list takes the height left over, up to its measured height: the screen less the
+/// bar and arrow (56), the header (64), the Compact and Cards switch (44), the tabs (70) and a 25
+/// margin.
+const PALETTES_REST: f32 = 259.0;
+/// What the panel leaves under it, as the short classic panel does: its picker scrolls in a window
+/// too short for that.
+const PANEL_MARGIN: f32 = 17.0;
 /// The short panel's menu: its width, edge and corners.
 const SHORT_MENU_WIDTH: f32 = 252.0;
 const SHORT_MENU_EDGE: u32 = 0x24FFFFFF;
@@ -97,7 +104,7 @@ impl Shape {
                 value_group: 151.0,
                 value_gap: 7.0,
                 value_top: 3.0,
-                palette_list: 458.0,
+                palette_list: (screen_height - PALETTES_REST).clamp(120.0, 458.0),
             }
         } else {
             Shape {
@@ -266,6 +273,8 @@ pub struct Colours {
     swatch_press: Option<(u32, usize, std::time::Instant, bool)>,
     /// The short panel's "•••" (where it is) and its menu.
     short_dots: Rect,
+    /// How far the picker is scrolled, in a window too short for all of it.
+    scrolled: f32,
     short_menu: crate::menu::Menu,
     /// Floating: where the window is (its top-left), where the pointer holds its grabber while
     /// it moves, and whether its Value shows red, green and blue.
@@ -308,6 +317,7 @@ impl Default for Colours {
             new_palette_button: Rect::NOTHING,
             swatch_press: None,
             short_dots: Rect::NOTHING,
+            scrolled: 0.0,
             short_menu: crate::menu::Menu::default(),
             floating: None,
             floating_grab: None,
@@ -589,11 +599,14 @@ impl Colours {
             (true, true) => 44.0 + 36.0,
             (true, false) => 34.0 + 108.0,
         };
-        let height = if self.mode == Mode::Palettes {
+        let whole = if self.mode == Mode::Palettes {
             panel::ARROW_HEIGHT + HEADER_HEIGHT + 36.0 + 8.0 + shape.palette_list + 70.0
         } else {
             panel::ARROW_HEIGHT + header + picker_height + bottom + 8.0 + 70.0
         };
+        let height = whole.min(screen.height() - pc::BAR_HEIGHT - PANEL_MARGIN);
+        let overflow = whole - height;
+        self.scrolled = self.scrolled.min(overflow);
         let mut hex_row = Rect::NOTHING;
         let rect = Rect::from_min_size(pos2(left, top), vec2(PANEL_WIDTH, height));
         egui::Area::new(egui::Id::unique("colour panel")).fixed_pos(rect.min).order(egui::Order::Foreground).show(
@@ -648,6 +661,26 @@ impl Colours {
                 }
 
                 let top = body.top() + header;
+                if self.mode == Mode::Harmony {
+                    self.harmony_kind_button(ui, body);
+                }
+                // on a window too short for it all the picker scrolls, by the wheel or a drag
+                // between its controls, the tabs staying
+                let clip = ui.clip_rect();
+                let top = if overflow > 0.0 {
+                    let view = Rect::from_min_max(pos2(body.left(), top), pos2(body.right(), body.bottom() - 70.0));
+                    let dragged = ui.interact(view, ui.scope_id().with("scroll"), Sense::drag()).drag_delta().y;
+                    let wheel = if ui.rect_contains_pointer(view) {
+                        ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y))
+                    } else {
+                        0.0
+                    };
+                    self.scrolled = (self.scrolled - dragged - wheel).clamp(0.0, overflow);
+                    ui.set_clip_rect(clip.intersect(view));
+                    top - self.scrolled
+                } else {
+                    top
+                };
                 match self.mode {
                     Mode::Palettes => self.palettes_view(ui, look, session, body, top, shape.palette_list),
                     Mode::Disc => {
@@ -662,10 +695,7 @@ impl Colours {
                         }
                     }
                     Mode::Classic => self.classic(ui, session, body, top, shape.square),
-                    Mode::Harmony => {
-                        self.harmony_kind_button(ui, body);
-                        self.harmony(ui, session, body, top, shape);
-                    }
+                    Mode::Harmony => self.harmony(ui, session, body, top, shape),
                     Mode::Value => hex_row = self.value(ui, session, body, top, shape),
                 }
 
@@ -736,10 +766,12 @@ impl Colours {
                     y += 44.0;
                     self.palette_rows(ui, session, drop, rect, body, y);
                 }
+                ui.set_clip_rect(clip);
                 let tabs = Rect::from_min_max(pos2(body.left(), body.bottom() - 70.0), body.max);
                 if let Some(mode) = mode_tabs(ui, look, tabs, self.mode) {
                     self.mode = mode;
                     self.hex = None;
+                    self.scrolled = 0.0;
                 }
             },
         );

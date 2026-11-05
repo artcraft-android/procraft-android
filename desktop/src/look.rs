@@ -103,6 +103,9 @@ pub mod pc {
     pub const SIDE_BAR_CORNER: f32 = 20.0;
     /// Where the side bar's centre sits, as a fraction of the window's height.
     pub const SIDE_BAR_CENTRE: f32 = 0.5234;
+    /// Left under the side bar in a window too short for its measured tracks, and how short they go.
+    const SHORT_SIDE_BAR_FOOT: f32 = 17.0;
+    const SHORTEST_TRACK: f32 = 44.0;
     pub const SLIDER_WIDTH: f32 = 40.0;
     pub const SLIDER_HEIGHT: f32 = 170.0;
     pub const SLIDER_CORNER: f32 = 13.0;
@@ -116,10 +119,11 @@ pub mod pc {
     pub const GLASS_MENU_EDGE: Themed = Themed(0x24FFFFFF, 0x14000000);
 
     /// The gaps between the tool buttons and between the action buttons for a bar `width` wide:
-    /// the room left after both margins picks one of five steps.
+    /// the room left after both margins picks one of five steps, or where its two ends would run
+    /// into each other (a narrow window), the first tighter one that keeps them apart.
     pub fn bar_gaps(width: f32) -> (f32, f32) {
         let room = width - BAR_MARGIN * 2.0;
-        if room < 435.0 {
+        let measured = if room < 435.0 {
             (2.0, 4.0)
         } else if room < 530.0 {
             (8.0, 14.0)
@@ -129,7 +133,24 @@ pub mod pc {
             (8.0, 14.0)
         } else {
             (26.0, 14.0)
+        };
+        let needs = |(tool, action): (f32, f32)| {
+            BAR_MARGIN * 2.0 + GALLERY_WIDTH + (BAR_BUTTON_WIDTH + action) * 4.0 + BAR_BUTTON_WIDTH * 5.0 + tool * 4.0
+        };
+        [measured, (8.0, 14.0)].into_iter().find(|&gaps| needs(gaps) <= width).unwrap_or((2.0, 4.0))
+    }
+
+    /// The side bar in a window `height` tall: its top from the window's, and how long each of its
+    /// two tracks is. At `SIDE_BAR_CENTRE` with its measured tracks wherever that clears the top
+    /// bar; in a shorter window just under the top bar, its tracks giving up what it is short of,
+    /// so that all of it can be reached.
+    pub fn side_bar_fit(height: f32) -> (f32, f32) {
+        let top = height * SIDE_BAR_CENTRE - SIDE_BAR_HEIGHT / 2.0;
+        if top >= BAR_HEIGHT {
+            return (top, SLIDER_HEIGHT);
         }
+        let rest = SIDE_BAR_HEIGHT - SLIDER_HEIGHT * 2.0;
+        (BAR_HEIGHT, ((height - BAR_HEIGHT - SHORT_SIDE_BAR_FOOT - rest) / 2.0).clamp(SHORTEST_TRACK, SLIDER_HEIGHT))
     }
 }
 
@@ -677,7 +698,42 @@ pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::spring;
+    use super::{pc, spring};
+
+    #[test]
+    fn the_top_bars_ends_never_meet_and_a_wide_enough_window_keeps_its_measured_step() {
+        assert_eq!(pc::bar_gaps(720.0), (8.0, 14.0));
+        assert_eq!(pc::bar_gaps(1200.0), (26.0, 14.0));
+        // the step for this width has gaps of 26 and 14, which would take 694
+        assert_eq!(pc::bar_gaps(650.0), (8.0, 14.0));
+        assert_eq!(pc::bar_gaps(610.0), (2.0, 4.0));
+        for width in 558..2000 {
+            let width = width as f32;
+            let (tool, action) = pc::bar_gaps(width);
+            let needs = pc::BAR_MARGIN * 2.0
+                + pc::GALLERY_WIDTH
+                + (pc::BAR_BUTTON_WIDTH + action) * 4.0
+                + pc::BAR_BUTTON_WIDTH * 5.0
+                + tool * 4.0;
+            assert!(needs <= width, "{width}");
+        }
+    }
+
+    #[test]
+    fn the_side_bar_stays_as_measured_or_fits_under_the_top_bar() {
+        // portrait top 333.5, landscape top 130
+        assert!((pc::side_bar_fit(1133.0).0 - 333.5).abs() < 0.1);
+        assert!((pc::side_bar_fit(744.0).0 - 130.0).abs() < 0.1);
+        for height in 580..2000 {
+            assert_eq!(pc::side_bar_fit(height as f32).1, pc::SLIDER_HEIGHT);
+        }
+        for height in 480..580 {
+            let height = height as f32;
+            let (top, track) = pc::side_bar_fit(height);
+            assert_eq!(top, pc::BAR_HEIGHT);
+            assert!(top + pc::SIDE_BAR_HEIGHT - (pc::SLIDER_HEIGHT - track) * 2.0 <= height, "{height}");
+        }
+    }
 
     #[test]
     fn a_spring_starts_still_overshoots_and_settles() {

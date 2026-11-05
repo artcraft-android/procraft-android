@@ -650,22 +650,43 @@ pub struct GifWriter {
     out: Vec<u8>,
     width: u16,
     height: u16,
+    /// The palette every frame shares (the GIF's global one) and how many colours it uses; none
+    /// when each frame has its own.
+    shared: Option<(Vec<[u8; 3]>, usize)>,
 }
 
 impl GifWriter {
-    /// A GIF `width` × `height` (each 1 to 65535).
+    /// A GIF `width` × `height` (each 1 to 65535), each frame with a palette of its own.
     pub fn new(width: u32, height: u32) -> GifWriter {
+        GifWriter::with(width, height, None)
+    }
+
+    /// A GIF whose frames all share one palette, made from `samples` (straight-alpha RGBA
+    /// pixels taken from every frame; the transparent ones left out).
+    pub fn shared(width: u32, height: u32, samples: &[[u8; 4]]) -> GifWriter {
+        GifWriter::with(width, height, Some(palette(samples, samples.len())))
+    }
+
+    fn with(width: u32, height: u32, shared: Option<(Vec<[u8; 3]>, usize)>) -> GifWriter {
         let (w, h) = (width.clamp(1, 65535) as u16, height.clamp(1, 65535) as u16);
         let mut out = b"GIF89a".to_vec();
         out.extend_from_slice(&w.to_le_bytes());
         out.extend_from_slice(&h.to_le_bytes());
-        // no global colour table
-        out.extend_from_slice(&[0x00, 0, 0]);
+        match &shared {
+            // a global colour table of 256 entries
+            Some((colours, _)) => {
+                out.extend_from_slice(&[0b1111_0111, 0, 0]);
+                for c in colours.iter().take(256) {
+                    out.extend_from_slice(c);
+                }
+            }
+            None => out.extend_from_slice(&[0x00, 0, 0]),
+        }
         // loop forever
         out.extend_from_slice(&[0x21, 0xFF, 11]);
         out.extend_from_slice(b"NETSCAPE2.0");
         out.extend_from_slice(&[3, 1, 0, 0, 0]);
-        GifWriter { out, width: w, height: h }
+        GifWriter { out, width: w, height: h, shared }
     }
 
     /// Adds a frame (straight-alpha RGBA, the GIF's size) shown `delay_cs` hundredths of a
@@ -680,9 +701,11 @@ impl GifWriter {
     pub fn encoded_frame(&self, rgba: &[u8], delay_cs: u16, dither: bool) -> Vec<u8> {
         let (w, h) = (self.width, self.height);
         let pixels = rgba.as_chunks::<4>().0;
-        let (palette, used) = palette(pixels, usize::from(w) * usize::from(h));
+        let own = self.shared.is_none().then(|| palette(pixels, usize::from(w) * usize::from(h)));
+        let Some((palette, used)) = own.as_ref().or(self.shared.as_ref()) else { return Vec::new() };
+        let (palette, used) = (palette.as_slice(), *used);
         let indices =
-            if dither { dithered(pixels, usize::from(w), &palette, used) } else { nearest_all(pixels, &palette, used) };
+            if dither { dithered(pixels, usize::from(w), palette, used) } else { nearest_all(pixels, palette, used) };
         let mut out = Vec::new();
         let out = &mut out;
         // the frame clears to transparent after it shows; index 255 is transparent
@@ -693,10 +716,14 @@ impl GifWriter {
         out.extend_from_slice(&[0, 0, 0, 0]);
         out.extend_from_slice(&w.to_le_bytes());
         out.extend_from_slice(&h.to_le_bytes());
-        // a local colour table of 256 entries
-        out.push(0b1000_0111);
-        for c in palette.iter().take(256) {
-            out.extend_from_slice(c);
+        if own.is_some() {
+            // a local colour table of 256 entries
+            out.push(0b1000_0111);
+            for c in palette.iter().take(256) {
+                out.extend_from_slice(c);
+            }
+        } else {
+            out.push(0);
         }
         out.push(8);
         for block in lzw(&indices).chunks(255) {
@@ -1196,6 +1223,36 @@ mod tests {
         let i = px[0] as usize;
         assert!(px.iter().all(|&p| p as usize == i));
         assert_eq!(&g[table + i * 3..table + i * 3 + 3], &[255, 0, 0]);
+    }
+
+    #[test]
+    fn frames_sharing_one_palette_keep_their_colours() {
+        let (w, h) = (6u32, 4u32);
+        let red = [255u8, 0, 0, 255].repeat(24);
+        let mut blue = [0u8, 0, 255, 255].repeat(24);
+        // half of the second transparent
+        blue[..48].iter_mut().skip(3).step_by(4).for_each(|a| *a = 0);
+        let samples: Vec<[u8; 4]> = [&red, &blue].iter().flat_map(|f| f.as_chunks::<4>().0.to_vec()).collect();
+        let mut writer = GifWriter::shared(w, h, &samples);
+        writer.frame(&red, 5, false);
+        writer.frame(&blue, 5, true);
+        let g = writer.finish();
+        // one global table, after the screen's size; the frames carry none
+        assert_eq!(g[10], 0b1111_0111);
+        let desc: Vec<usize> =
+            g.windows(3).enumerate().filter(|(_, x)| x == &[0x21, 0xF9, 4]).map(|(i, _)| i + 8).collect();
+        assert_eq!(desc.len(), 2);
+        assert!(desc.iter().all(|&d| g[d] == 0x2C && g[d + 9] == 0));
+        let mut shown: Vec<Vec<u8>> = Vec::new();
+        let got = crate::gif::frames(&g, |canvas, _| {
+            shown.push(canvas.to_vec());
+            true
+        });
+        assert_eq!(got, Some((w, h, 2)));
+        assert_eq!(&shown[0][..4], &[255, 0, 0, 255]);
+        // the second shows blue where it is opaque, nothing where it isn't
+        assert_eq!(&shown[1][48..52], &[0, 0, 255, 255]);
+        assert_eq!(shown[1][3], 0);
     }
 
     #[test]

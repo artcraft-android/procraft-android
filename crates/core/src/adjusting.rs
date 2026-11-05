@@ -843,6 +843,13 @@ impl CanvasSession {
         self.liquify_stroke(points, start, brush);
     }
 
+    /// The liquify brush held still at window point (`x`, `y`) works on, from `from` to `to`
+    /// seconds of being held. False if the kind of brush does nothing held.
+    pub fn adjustment_liquify_held(&self, x: f32, y: f32, from: f32, to: f32) -> bool {
+        let brush = self.adjusting(|a, _| a.liquify_brush());
+        self.liquify_held(x, y, from, to, brush)
+    }
+
     /// The liquify brush lifted moving at (`vx`, `vy`) window pixels a millisecond: it carries on
     /// with its momentum.
     pub fn adjustment_liquify_coast(&self, vx: f32, vy: f32) {

@@ -26,8 +26,9 @@ import androidx.compose.runtime.setValue
 import io.github.artcraftandroid.procraft.canvas.ADJUSTMENTS_LISTED
 import io.github.artcraftandroid.procraft.canvas.LISTED
 import io.github.artcraftandroid.procraft.canvas.adjustment
-import io.github.artcraftandroid.procraft.canvas.button
 import io.github.artcraftandroid.procraft.canvas.label
+import io.github.artcraftandroid.procraft.core.BrushInfo
+import io.github.artcraftandroid.procraft.core.BrushSetInfo
 import io.github.artcraftandroid.procraft.core.QuickAction
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -151,7 +152,7 @@ fun BoxScope.QuickMenu(vm: CanvasViewModel) {
             Text(vm.quickMenus.getOrNull(vm.quickMenuShown)?.name.orEmpty(), color = TitleInk, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
         }
         val slots = vm.quickMenuSlots
-        slots.forEachIndexed { i, action ->
+        slots.forEachIndexed { i, _ ->
             val (dx, dy) = Slots.getOrNull(i) ?: return@forEachIndexed
             val x = c.first + dx.dp * shown - RingButtonWidth / 2
             val y = c.second + dy.dp * shown - RingButtonHeight / 2
@@ -164,14 +165,14 @@ fun BoxScope.QuickMenu(vm: CanvasViewModel) {
                                 closeMenus()
                             } else {
                                 vm.quickMenuAt = null
-                                vm.runQuickAction(action, at)
+                                vm.runQuickSlot(i, at)
                             }
                         },
                         onLongClick = { if (!menusOpen) choosing = i },
                     ),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(action.button, color = ButtonInk, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, textAlign = TextAlign.Center)
+                Text(vm.quickSlotLabel(i), color = ButtonInk, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, textAlign = TextAlign.Center)
             }
         }
         // the actions a held button can be set to, hung from it
@@ -179,7 +180,13 @@ fun BoxScope.QuickMenu(vm: CanvasViewModel) {
             val (dx, dy) = Slots.getOrNull(i) ?: return@let
             val centre = c.first + dx.dp
             val top = c.second + dy.dp - RingButtonHeight / 2
-            ActionPicker(slots.getOrNull(i) ?: QuickAction.NONE, centre, top, top + RingButtonHeight, maxWidth, maxHeight) {
+            ActionPicker(
+                slots.getOrNull(i) ?: QuickAction.NONE, vm.quickSlotBrush(i), vm.brushSets, centre, top, top + RingButtonHeight, maxWidth, maxHeight,
+                onBrush = {
+                    vm.setQuickSlotBrush(i, it)
+                    choosing = null
+                },
+            ) {
                 vm.setQuickSlot(i, it)
                 choosing = null
             }
@@ -374,14 +381,32 @@ private fun MenusPopover(
     }
 }
 
+/** A page of a held button's picker. */
+private enum class PickerPage { ACTIONS, ADJUSTMENTS, BRUSH_SETS, BRUSHES }
+
+/** A row of the picker: what it says, whether it opens a list of its own, and what a tap does. */
+private class PickerRow(val label: String, val more: Boolean, val tap: () -> Unit)
+
 /**
  * A held QuickMenu button's picker, hung from the button by an arrow (above it when there is no
- * room below): every action by name, the button's own blue, scrolled to it; Adjustments opens
- * their own list. A row tapped sets the button.
+ * room below): every action by name, the button's own blue, scrolled to it. Adjustments opens
+ * their own list; Select brush the brush sets, then a set's brushes. A row tapped sets the button.
  */
 @Composable
-private fun ActionPicker(current: QuickAction, centreX: Dp, buttonTop: Dp, buttonBottom: Dp, maxWidth: Dp, maxHeight: Dp, onPick: (QuickAction) -> Unit) {
-    var adjustments by remember { mutableStateOf(current.adjustment != null) }
+private fun ActionPicker(
+    current: QuickAction,
+    brush: BrushInfo?,
+    sets: List<BrushSetInfo>,
+    centreX: Dp,
+    buttonTop: Dp,
+    buttonBottom: Dp,
+    maxWidth: Dp,
+    maxHeight: Dp,
+    onBrush: (BrushInfo) -> Unit,
+    onPick: (QuickAction) -> Unit,
+) {
+    var page by remember { mutableStateOf(if (current.adjustment != null) PickerPage.ADJUSTMENTS else PickerPage.ACTIONS) }
+    var set by remember { mutableStateOf(0) }
     val below = buttonBottom + PickerArrow + PickerHeight <= maxHeight - PickerMargin
     val left = (centreX - PickerWidth / 2).coerceIn(PickerMargin, (maxWidth - PickerWidth - PickerMargin).coerceAtLeast(PickerMargin))
     val top = if (below) buttonBottom + PickerArrow else buttonTop - PickerArrow - PickerHeight
@@ -393,28 +418,59 @@ private fun ActionPicker(current: QuickAction, centreX: Dp, buttonTop: Dp, butto
         val base = if (below) tip + a + 1f else tip - a - 1f
         drawPath(Path().apply { moveTo(x, tip); lineTo(x + a, base); lineTo(x - a, base); close() }, PickerFill)
     }
+    // the page's title, where its way back goes, its rows and the one blue (in a list of its own,
+    // the button's, else the first)
+    val (title, back) = when (page) {
+        PickerPage.ACTIONS -> "Set Action" to null
+        PickerPage.ADJUSTMENTS -> "Adjustments" to PickerPage.ACTIONS
+        PickerPage.BRUSH_SETS -> "Brush Set" to PickerPage.ACTIONS
+        PickerPage.BRUSHES -> "Brushes" to PickerPage.BRUSH_SETS
+    }
+    val rows: List<PickerRow> = when (page) {
+        PickerPage.ACTIONS -> QuickAction.LISTED.map { a ->
+            when (a) {
+                null -> PickerRow("Adjustments", true) { page = PickerPage.ADJUSTMENTS }
+                QuickAction.BRUSHES -> PickerRow(a.label, true) {
+                    set = brush?.set?.toInt() ?: 0
+                    page = PickerPage.BRUSH_SETS
+                }
+                else -> PickerRow(a.label, false) { onPick(a) }
+            }
+        }
+        PickerPage.ADJUSTMENTS -> QuickAction.ADJUSTMENTS_LISTED.map { a -> PickerRow(a.label, false) { onPick(a) } }
+        PickerPage.BRUSH_SETS -> sets.mapIndexed { s, info ->
+            PickerRow(info.name, true) {
+                set = s
+                page = PickerPage.BRUSHES
+            }
+        }
+        PickerPage.BRUSHES -> sets.getOrNull(set)?.brushes.orEmpty().map { b -> PickerRow(b.name, false) { onBrush(b) } }
+    }
+    val chosen = when (page) {
+        PickerPage.ACTIONS -> QuickAction.LISTED.indexOf(current)
+        PickerPage.ADJUSTMENTS -> QuickAction.ADJUSTMENTS_LISTED.indexOf(current).coerceAtLeast(0)
+        PickerPage.BRUSH_SETS -> brush?.set?.toInt() ?: 0
+        PickerPage.BRUSHES -> brush?.takeIf { it.set.toInt() == set }?.index?.toInt() ?: 0
+    }
     Column(
         Modifier.offset(x = left, y = top).size(PickerWidth, PickerHeight).shadow(24.dp, RoundedCornerShape(PickerCorner))
             .clip(RoundedCornerShape(PickerCorner)).background(PickerFill).pointerInput(Unit) { detectTapGestures { } },
     ) {
-        // the title; in Adjustments a way back
+        // the title; in a list of its own a way back
         Row(
-            Modifier.fillMaxWidth().height(PickerHeader).let { if (adjustments) it.clickable { adjustments = false } else it }
-                .padding(start = if (adjustments) 13.dp else 21.dp, top = 15.dp),
+            Modifier.fillMaxWidth().height(PickerHeader).let { m -> back?.let { m.clickable { page = it } } ?: m }
+                .padding(start = if (back != null) 13.dp else 21.dp, top = 15.dp),
             verticalAlignment = Alignment.Top,
         ) {
-            if (adjustments) {
+            if (back != null) {
                 Icon(PcIcons.ChevronLeft, contentDescription = "Back", tint = PickerTitleInk, modifier = Modifier.size(24.dp))
                 Spacer(Modifier.width(4.dp))
             }
-            Text(if (adjustments) "Adjustments" else "Set Action", color = PickerTitleInk, fontSize = 19.3.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(title, color = PickerTitleInk, fontSize = 19.3.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
-        val rows: List<QuickAction?> = if (adjustments) QuickAction.ADJUSTMENTS_LISTED else QuickAction.LISTED
-        // the button's own action blue (in Adjustments, the first when it is none of them)
-        val chosen = if (adjustments) rows.indexOf(current).takeIf { it >= 0 } ?: 0 else rows.indexOf(current)
         val list = androidx.compose.foundation.lazy.rememberLazyListState()
         val past = with(LocalDensity.current) { (PickerRowPitch * 2 - PickerChosenAt).roundToPx() }
-        androidx.compose.runtime.LaunchedEffect(adjustments) {
+        androidx.compose.runtime.LaunchedEffect(page, set) {
             // the chosen row a little below the list's top
             if (chosen >= 2) list.scrollToItem(chosen - 2, past) else list.scrollToItem(0)
         }
@@ -425,19 +481,20 @@ private fun ActionPicker(current: QuickAction, centreX: Dp, buttonTop: Dp, butto
             contentPadding = PaddingValues(start = PickerInset, end = PickerInset, bottom = 6.dp),
         ) {
             items(rows.size) { k ->
-                val a = rows[k]
+                val row = rows[k]
                 val on = k == chosen
                 Box(
                     Modifier.fillMaxWidth().height(PickerRowHeight).clip(CircleShape).background(if (on) Pc.Accent else PickerRowFill)
-                        .clickable { if (a == null) adjustments = true else onPick(a) }.padding(horizontal = 16.dp),
+                        .clickable { row.tap() }.padding(horizontal = 16.dp),
                     contentAlignment = Alignment.CenterStart,
                 ) {
                     Text(
-                        a?.label ?: "Adjustments", color = if (on) Color.White else PickerRowInk, fontSize = RowText, letterSpacing = RowTracking,
+                        row.label, color = if (on) Color.White else PickerRowInk, fontSize = RowText, letterSpacing = RowTracking,
                         fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1, modifier = Modifier.offset(y = RowTextDrop),
                     )
-                    if (a == null) {
-                        Icon(PcIcons.ChevronRight, contentDescription = null, tint = PickerRowInk, modifier = Modifier.align(Alignment.CenterEnd).size(18.dp))
+                    if (row.more) {
+                        val ink = if (on) Color.White else PickerRowInk
+                        Icon(PcIcons.ChevronRight, contentDescription = null, tint = ink, modifier = Modifier.align(Alignment.CenterEnd).size(18.dp))
                     }
                 }
             }

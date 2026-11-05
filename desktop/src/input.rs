@@ -32,6 +32,8 @@ pub struct Input {
     clock: Instant,
     /// What the touches asked, for the app to do at the next frame.
     pub commands: Vec<TouchCommand>,
+    /// A press went to the canvas since the interface last looked.
+    pub canvas_pressed: bool,
     /// The pointers down on the canvas.
     down: Vec<u64>,
     /// Pointers down that the canvas didn't take (pressed on the interface, or on the canvas
@@ -53,6 +55,10 @@ pub struct Input {
     /// The brush cursor follows the mouse hovering, so its moves draw a frame.
     pub hover_shown: bool,
     space: bool,
+    /// Space has moved or zoomed the canvas since it went down; and it was tapped, doing neither
+    /// (taken by the interface as the QuickMenu).
+    space_used: bool,
+    pub space_tapped: bool,
     /// R held for the canvas (not typed) since when, and whether the mouse went down since (then
     /// it turned the canvas by dragging, and letting go turns it no step).
     r_key: Option<Instant>,
@@ -74,6 +80,7 @@ impl Default for Input {
         Input {
             clock: Instant::now(),
             commands: Vec::new(),
+            canvas_pressed: false,
             down: Vec::new(),
             ignored: Vec::new(),
             cursor: None,
@@ -84,6 +91,8 @@ impl Default for Input {
             pen_pressure: None,
             hover_shown: false,
             space: false,
+            space_used: false,
+            space_tapped: false,
             r_key: None,
             r_dragged: false,
             command_key: false,
@@ -121,6 +130,11 @@ impl Input {
     /// Something is pressed on the canvas (a pen, the mouse, a finger), and not to move the view.
     pub fn pressing(&self) -> bool {
         !self.down.is_empty() && !self.moving_view()
+    }
+
+    /// Alt held as the modify button is (Ctrl with it is AltGr, typing).
+    pub fn modify_key(&self) -> bool {
+        self.alt && !self.control
     }
 
     /// Space or R is held, or the mouse moves the view.
@@ -202,6 +216,7 @@ impl Input {
     fn pressed(&mut self, session: &CanvasSession, id: u64, kind: PointerKind, at: (f32, f32), pressure: f32) {
         self.down.retain(|d| *d != id);
         self.down.push(id);
+        self.canvas_pressed = true;
         let out = session.touch_down(id, kind, self.sample(id, at, pressure));
         self.take(out);
     }
@@ -243,7 +258,12 @@ impl Input {
                 false
             }
             WindowEvent::KeyboardInput { event, .. } if event.logical_key == Key::Named(NamedKey::Space) => {
-                self.space = event.state == ElementState::Pressed && !consumed;
+                let held = event.state == ElementState::Pressed && !consumed;
+                if held && !self.space {
+                    self.space_used = self.command_key || self.control;
+                }
+                self.space_tapped |= self.space && !held && !self.space_used;
+                self.space = held;
                 if !self.space && self.panning && !self.down.contains(&MOUSE) {
                     self.panning = false;
                     self.pen_panning = None;
@@ -321,6 +341,7 @@ impl Input {
                         if let Some(how) = self.drag_held() {
                             session.key_drag_begin(how, p.0, p.1);
                             self.key_drag = Some(how);
+                            self.space_used = true;
                             self.r_dragged |= how == KeyDrag::Turn;
                         }
                         false
@@ -333,6 +354,7 @@ impl Input {
                         if self.down.is_empty() && !over(p) && (self.space || *button == MouseButton::Middle) =>
                     {
                         self.panning = true;
+                        self.space_used = true;
                         false
                     }
                     (MouseButton::Left, ElementState::Pressed) if !self.panning && !over(p) => {
@@ -431,6 +453,7 @@ impl Input {
             match touch.phase {
                 TouchPhase::Started if self.space && self.down.is_empty() && !self.panning && !over(p) => {
                     self.panning = true;
+                    self.space_used = true;
                     self.pen_panning = Some(touch.id);
                     self.cursor = Some(p);
                     return false;

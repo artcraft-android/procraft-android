@@ -255,6 +255,26 @@ pub fn grain_blends() -> Vec<(u32, &'static str)> {
     modes
 }
 
+/// The modes a dual brush's two strokes combine by, in the order the studio lists them.
+pub fn combine_modes() -> Vec<(u32, &'static str)> {
+    use crate::document::BlendMode as B;
+    [
+        B::Multiply,
+        B::Darken,
+        B::ColorBurn,
+        B::LinearBurn,
+        B::Normal,
+        B::Lighten,
+        B::ColorDodge,
+        B::Overlay,
+        B::HardMix,
+        B::Difference,
+    ]
+    .iter()
+    .map(|m| (m.id(), m.name()))
+    .collect()
+}
+
 /// The blend mode that lays a brush's paint under what the layer has (only brushes and their burnt
 /// edges have it), numbered past the grain's own modes.
 pub const BRUSH_BEHIND: u32 = 29;
@@ -354,8 +374,9 @@ pub struct Grain {
 }
 
 /// A moving grain's tile, cropped (not following the stamp's size), for each of the scale as
-/// brush files keep it: 128 canvas pixels over the half diagonal.
-const CROPPED_GRAIN_TILE: f32 = 128.0 / std::f32::consts::FRAC_1_SQRT_2;
+/// brush files keep it: a stamp whose half side is 128 canvas pixels spans the half diagonal of a
+/// tile.
+const CROPPED_GRAIN_TILE: f32 = 256.0 / std::f32::consts::FRAC_1_SQRT_2;
 
 impl Grain {
     /// The scale as brush files keep it (`textureScale`): the studio's control squared, times 16.
@@ -366,12 +387,15 @@ impl Grain {
     /// A moving grain's tile on the canvas (pixels) under a stamp `diameter` pixels across, its
     /// zoom `zoom` (0 follows the stamp's size, 1 crops) and its scale times `scale_by` (the
     /// scale's pressure curve): following the size, the stamp's diagonal times the file's scale;
-    /// cropped, [`CROPPED_GRAIN_TILE`] times it; in between in proportion.
+    /// cropped, [`CROPPED_GRAIN_TILE`] times it. In between the zoom goes by how much of the tile
+    /// the stamp spans, not by the tile's size, so a big tile gives way to a small one early.
     pub fn moving_tile(&self, diameter: f32, zoom: f32, scale_by: f32) -> f32 {
-        let scale = (self.file_scale() * scale_by).max(1.0 / 32.0);
-        let zoom = zoom.clamp(0.0, 1.0);
-        let follow = diameter.max(0.0) / std::f32::consts::FRAC_1_SQRT_2;
-        (scale * (follow * (1.0 - zoom) + CROPPED_GRAIN_TILE * zoom)).max(1.0)
+        let scale = self.file_scale() * scale_by;
+        let (zoom, diameter) = (zoom.clamp(0.0, 1.0), diameter.max(1e-3));
+        let least = 1.0 / 32.0;
+        let follow = std::f32::consts::FRAC_1_SQRT_2 / scale.max(least);
+        let cropped = diameter / (CROPPED_GRAIN_TILE * scale).max(least * CROPPED_GRAIN_TILE / 128.0);
+        (diameter / (follow * (1.0 - zoom) + cropped * zoom)).max(1.0)
     }
 
     /// The scale for a moving grain whose cropped tile is `tile` canvas pixels.
@@ -693,16 +717,17 @@ mod tests {
 
     #[test]
     fn a_moving_grain_s_tile_follows_the_stamp_or_is_cropped_by_its_file_scale() {
-        // a file scale of 1: following the size, the stamp's diagonal; cropped, 128 over the half
-        // diagonal; half way, between them
+        // a file scale of 1: following the size, the stamp's diagonal; cropped, 256 over the half
+        // diagonal; half way, by the share of the tile each spans
         let grain = Grain { scale: crate::studio::MAX_GRAIN_SCALE / 4.0, ..Grain::default() };
         assert!((grain.file_scale() - 1.0).abs() < 1e-5);
         let diagonal = 100.0 * std::f32::consts::SQRT_2;
         assert!((grain.moving_tile(100.0, 0.0, 1.0) - diagonal).abs() < 1e-3);
-        assert!((grain.moving_tile(100.0, 1.0, 1.0) - 181.019).abs() < 1e-2);
-        assert!((grain.moving_tile(100.0, 0.5, 1.0) - (diagonal + 181.019) / 2.0).abs() < 1e-2);
+        assert!((grain.moving_tile(100.0, 1.0, 1.0) - 362.039).abs() < 1e-2);
+        let halfway = 2.0 / (1.0 / diagonal + 1.0 / 362.039);
+        assert!((grain.moving_tile(100.0, 0.5, 1.0) - halfway).abs() < 1e-2);
         // the scale's pressure curve scales it; a cropped tile asked for gives its scale back
-        assert!((grain.moving_tile(100.0, 1.0, 0.5) - 90.51).abs() < 1e-2);
+        assert!((grain.moving_tile(100.0, 1.0, 0.5) - 181.019).abs() < 1e-2);
         let wanted = Grain { scale: Grain::scale_for_cropped_tile(90.0), ..Grain::default() };
         assert!((wanted.moving_tile(30.0, 1.0, 1.0) - 90.0).abs() < 1e-3);
     }

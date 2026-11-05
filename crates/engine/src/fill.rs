@@ -475,6 +475,51 @@ fn distance(a: &[u8; 4], b: &[u8; 4]) -> u8 {
     a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0)
 }
 
+/// How far past a flood's bounds a soft edge is followed, pixels.
+const EDGE_MOST: usize = 32;
+
+/// `mask`, a flood out of see-through `pixels` (premultiplied RGBA8), taken on up the soft edges it
+/// stopped at, each pixel as much as the one below it on the way up: the colour goes behind them
+/// as far as their solid middle, leaving no pale rim between a fill and its line. Only ever up, so
+/// it stops at a line's middle, and a flat half-covered area (none of it above the next) stays out.
+pub fn under_edges(mask: &mut Mask, pixels: &[u8]) {
+    let (w, h) = (mask.width as usize, mask.height as usize);
+    let Some([x, y, bw, bh]) = mask.bounds() else { return };
+    let alpha = |i: usize| pixels.get(i * 4 + 3).copied().unwrap_or(0);
+    // what was taken reaches the edge it stopped at from either side, so a pass each way
+    let (left, right) = ((x as usize).saturating_sub(EDGE_MOST), (x as usize + bw as usize + EDGE_MOST).min(w));
+    let (top, bottom) = ((y as usize).saturating_sub(EDGE_MOST), (y as usize + bh as usize + EDGE_MOST).min(h));
+    let mut step = |cx: usize, cy: usize| {
+        let at = cy * w + cx;
+        let here = alpha(at);
+        if here == 0 || mask.data.get(at).is_none_or(|m| *m == 255) {
+            return;
+        }
+        let mut most = mask.data.get(at).copied().unwrap_or(0);
+        for ny in cy.saturating_sub(1)..(cy + 2).min(h) {
+            for nx in cx.saturating_sub(1)..(cx + 2).min(w) {
+                let near = ny * w + nx;
+                if here > alpha(near) {
+                    most = most.max(mask.data.get(near).copied().unwrap_or(0));
+                }
+            }
+        }
+        if let Some(m) = mask.data.get_mut(at) {
+            *m = most;
+        }
+    };
+    for cy in top..bottom {
+        for cx in left..right {
+            step(cx, cy);
+        }
+    }
+    for cy in (top..bottom).rev() {
+        for cx in (left..right).rev() {
+            step(cx, cy);
+        }
+    }
+}
+
 /// Pours `colour` (RGB, 0..1) into `pixels` (premultiplied RGBA8) as much as `mask` takes it,
 /// where the flood was measured on these same pixels from a seed of colour `seed`. What there is
 /// of the seed's colour becomes the new colour, each channel scaled so that black and white stay
@@ -942,6 +987,22 @@ mod tests {
         let px: Vec<u8> = wall.iter().flat_map(|&w| if w == 1 { [0, 0, 0, 255] } else { [0, 0, 0, 0] }).collect();
         let m = Flood::new(3, 3, &px, (0, 0)).unwrap().mask(0.5);
         assert_eq!(m.data, vec![255, 0, 255, 255, 0, 255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn a_fill_goes_on_up_a_soft_edge_to_the_lines_middle_and_no_further() {
+        // a row: see-through, a line's rim up to its solid middle and down again, see-through
+        let alphas = [0u8, 0, 40, 120, 220, 255, 220, 120, 40, 0, 0];
+        let pixels: Vec<u8> = alphas.iter().flat_map(|a| [0, 0, 0, *a]).collect();
+        let mut mask = Mask { width: 11, height: 1, data: vec![255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0] };
+        under_edges(&mut mask, &pixels);
+        assert_eq!(mask.data, vec![255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0]);
+        // an even half-covered area beside the flood stays out, past its first pixel
+        let alphas = [0u8, 0, 128, 128, 128, 128];
+        let pixels: Vec<u8> = alphas.iter().flat_map(|a| [0, 0, 0, *a]).collect();
+        let mut mask = Mask { width: 6, height: 1, data: vec![255, 255, 0, 0, 0, 0] };
+        under_edges(&mut mask, &pixels);
+        assert_eq!(mask.data, vec![255, 255, 255, 0, 0, 0]);
     }
 
     #[test]

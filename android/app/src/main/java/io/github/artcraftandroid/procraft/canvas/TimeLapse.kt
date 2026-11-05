@@ -154,7 +154,7 @@ class TimeLapse(artwork: File) {
         }
         dropClipFrames()
         val parts = core.forPackage().segments.map(::File)
-        return if (parts.isNotEmpty() && VideoWriter.join(parts, out, FPS)) true else null
+        return if (parts.isNotEmpty() && VideoWriter.join(parts, out, FPS.toFloat())) true else null
     }
 
     /**
@@ -180,7 +180,7 @@ class TimeLapse(artwork: File) {
         val frameBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val paint = Paint(Paint.FILTER_BITMAP_FLAG)
         try {
-            val ok = VideoWriter.write(out, w, h, FPS, picks.size, mime, video.bitsPerPixel) { n, pixels ->
+            val ok = VideoWriter.write(out, w, h, FPS.toFloat(), picks.size, mime, video.bitsPerPixel) { n, pixels ->
                 if (!going(n / picks.size.toFloat())) return@write false
                 val source = frame(picks[n]) ?: return@write false
                 // fitted on white

@@ -57,6 +57,7 @@ fun AppRoot(vm: CanvasViewModel) {
         BackHandler {
             when {
                 vm.guideEditing -> vm.closeGuideEditor(keep = false)
+                vm.cropRect != null -> vm.endCrop(false)
                 vm.lightingStudioOpen -> vm.closeLightingStudio(keep = false)
                 vm.studioOpen -> vm.closeStudio(keep = false)
                 vm.transformPopup != TransformPopup.NONE -> vm.transformPopup = TransformPopup.NONE
@@ -92,10 +93,6 @@ fun AppRoot(vm: CanvasViewModel) {
                 GuideOverlay(vm)
                 if (vm.transforming) TransformOverlay(vm)
                 if (vm.selecting) SelectionOverlay(vm, Pc.BarHeight)
-                if (vm.panel != Panel.NONE) {
-                    // a tap outside an open panel closes it (and does not paint)
-                    Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { vm.tapOutsidePanel() } })
-                }
                 vm.picking?.let { pick ->
                     val pickingZ = if (pick.fromReference) 1f else 0f
                     Loupe(pick, CanvasSpace.color(vm.colorRgb()), Modifier.zIndex(pickingZ))
@@ -138,20 +135,25 @@ fun AppRoot(vm: CanvasViewModel) {
                     val up = Modifier.graphicsLayer { translationY = -size.height * (1f - barsShown) }
                     val aside = Modifier.graphicsLayer { translationX = size.width * (1f - barsShown) * if (vm.rightHanded) 1f else -1f }
                     TopBar(vm, Modifier.align(Alignment.TopCenter).then(up).then(fade))
+                    val sideBar = Pc.sideBarFit(maxHeight)
                     // a mode taking the screen slides it off its edge, and back when it ends
                     androidx.compose.animation.AnimatedVisibility(
                         vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
                             vm.opacityLayer == null &&
                             (vm.adjustment == null || vm.adjustPencil),
-                        Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = maxHeight * Pc.SIDE_BAR_CENTRE - Pc.SideBarHeight / 2),
+                        Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = sideBar.top),
                         enter = Motion.sideBarIn(vm.rightHanded),
                         exit = Motion.sideBarOut(vm.rightHanded),
                     ) {
-                        SideBar(vm, aside.then(fade), right = vm.rightHanded)
+                        SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track)
                     }
                 }
                 NoticeBand(vm)
                 DropBandUi(vm)
+                // a full-screen page covers the timeline, as it covers the canvas; the panels open over it
+                val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.timeLapseReplaying ||
+                    vm.animatedExport != null || vm.modelAnimatedExport != null
+                if (!vm.barsHidden && !pageOver) AnimationBar(vm)
                 // each panel hangs from its button: colour, layers, then the tool that opened the library;
                 // it grows out of its arrow as it opens and fades as it closes
                 PanelPresence(vm.panel, Panel.NONE, fading = vm.panelFading, onFaded = { vm.panelFading = false }) { shown, alpha, scale, origin ->
@@ -180,7 +182,7 @@ fun AppRoot(vm: CanvasViewModel) {
                         scaleX = scale
                         scaleY = scale
                         transformOrigin = androidx.compose.ui.graphics.TransformOrigin(place.arrowX / width, 0f)
-                    }
+                    }.then(if (vm.panel == Panel.NONE) Modifier.takingNoTouches() else Modifier)
                     ProvidePanelLook(PanelLook(alpha, scale, pivot)) {
                         when (shown) {
                             Panel.LAYERS -> if (vm.backgroundPicking) {
@@ -253,10 +255,6 @@ fun AppRoot(vm: CanvasViewModel) {
                 if (vm.adjustment == Adjustment.PERSPECTIVE_BLUR) PerspectivePuck(vm)
                 if (vm.recoloring) RecolorReticle(vm)
                 QuickShapeHandles(vm)
-                // a full-screen page covers the timeline, as it covers the canvas
-                val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.timeLapseReplaying ||
-                    vm.animatedExport != null || vm.modelAnimatedExport != null
-                if (!vm.barsHidden && !pageOver) AnimationBar(vm)
                 CopyPastePanel(vm)
                 QuickMenu(vm)
                 LayerChoice(vm)

@@ -53,6 +53,14 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -84,6 +92,13 @@ private val KeyboardDisc get() = if (Pc.light) Color(0xFFFBFBFB) else Color(0xFF
 private val KeyboardBar get() = if (Pc.light) Color(0xFFE9ECED) else Color(0xFF2B2B2B)
 private val DoneBlue = Color(0xFF0190FF)
 private val BoxLine = Color(0xFF0076FD)
+/** The box's outline and the dots on its sides (as measured, a lighter blue than the caret's). */
+private val BoxOutline = Color(0xFF0184FF)
+/** A side's dot: how wide it is, and how near a finger takes it. */
+private val SideDot = 7.5.dp
+private val SideReach = 20.dp
+/** Fingers tapped outside the box this quickly (ms) undo or redo, as on the canvas. */
+private const val EditTapMs = 300L
 /** The sheet's words: white, black on the light interface. */
 // a design row's track and the middle tick of one that runs both ways
 private val DesignTrack get() = if (Pc.light) Color(0xFFE3E3E3) else Color(0xFF5A5A5A)
@@ -101,12 +116,56 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     val box by rememberUpdatedState(windowBox(vm, info))
-    // a tap outside the box ends the edit, keeping it; dragging inside it moves the text
+    // a tap outside the box ends the edit, keeping it; dragging inside it moves the text, and
+    // dragging a side's dot (past the touch slop) moves that side: the box's width
     Box(Modifier.fillMaxSize().pointerInput(Unit) {
         awaitEachGesture {
             val down = awaitFirstDown()
+            vm.textSideAt(down.position, SideReach.toPx())?.let { side ->
+                down.consume()
+                var dragging = false
+                while (true) {
+                    val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                    if (!dragging && (c.position - down.position).getDistance() > viewConfiguration.touchSlop) {
+                        dragging = vm.beginTextSide(side, down.position)
+                    }
+                    if (dragging) vm.dragTextSide(c.position)
+                    c.consume()
+                    // after the move: a finger's lift can carry its last one
+                    if (!c.pressed) break
+                }
+                if (dragging) vm.endTextSide() else {
+                    // a tap on the dot is a tap on the text
+                    vm.textKeyboard = true
+                    focus.requestFocus()
+                    keyboard?.show()
+                }
+                return@awaitEachGesture
+            }
             if (!box.contains(down.position)) {
-                vm.endText(true)
+                // one finger there ends the edit, keeping it; two tapped undo and three redo
+                // inside it (a width changed goes back a step at a time), as on the canvas
+                var most = 1
+                var moved = false
+                var lastAt = down.uptimeMillis
+                // where each finger came down
+                val from = mutableMapOf(down.id to down.position)
+                while (true) {
+                    val e = awaitPointerEvent()
+                    most = maxOf(most, e.changes.count { it.pressed })
+                    for (c in e.changes) {
+                        val at = from.getOrPut(c.id) { c.position }
+                        moved = moved || (c.position - at).getDistance() > viewConfiguration.touchSlop
+                        lastAt = maxOf(lastAt, c.uptimeMillis)
+                    }
+                    if (e.changes.none { it.pressed }) break
+                }
+                val tapped = !moved && lastAt - down.uptimeMillis <= EditTapMs
+                when {
+                    most == 1 -> vm.endText(true)
+                    most == 2 && tapped -> vm.undo()
+                    most >= 3 && tapped -> vm.redo()
+                }
                 return@awaitEachGesture
             }
             // a touch on the text brings the keyboard back if it was put away
@@ -124,7 +183,15 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
         }
     })
     TextBox(vm, info)
-    BasicTextField(vm.textField, vm::changeTextField, Modifier.size(1.dp).alpha(0f).focusRequester(focus))
+    // undo and redo are the app's, not the field's (a width change goes back a step at a time)
+    BasicTextField(
+        vm.textField, vm::changeTextField,
+        Modifier.size(1.dp).alpha(0f).focusRequester(focus).onPreviewKeyEvent { e ->
+            val z = e.type == KeyEventType.KeyDown && e.key == Key.Z && (e.isCtrlPressed || e.isMetaPressed)
+            if (z) { if (e.isShiftPressed) vm.redo() else vm.undo() }
+            z
+        },
+    )
     LaunchedEffect(vm.textStyleOpen, vm.textKeyboard) {
         if (vm.textStyleOpen || !vm.textKeyboard) keyboard?.hide() else {
             focus.requestFocus()
@@ -162,7 +229,7 @@ private fun windowBox(vm: CanvasViewModel, info: TextInfo): androidx.compose.ui.
     return androidx.compose.ui.geometry.Rect(corners.minOf { it.x }, corners.minOf { it.y }, corners.maxOf { it.x }, corners.maxOf { it.y })
 }
 
-/** The text's box: a thin blue line around where it is drawn, a dot at the middle of each side. */
+/** The text's box: a thin blue line around where it is drawn, a dot at the middle of each side (dragged, its width). */
 @Composable
 private fun TextBox(vm: CanvasViewModel, info: TextInfo) {
     val box = remember(info) { TextRenderer.bounds(info) }
@@ -187,9 +254,9 @@ private fun TextBox(vm: CanvasViewModel, info: TextInfo) {
             corners.drop(1).forEach { lineTo(it.x, it.y) }
             close()
         }
-        drawPath(path, BoxLine, style = Stroke(1.dp.toPx()))
+        drawPath(path, BoxOutline, style = Stroke(1.dp.toPx()))
         for (side in listOf(corners[0] + (corners[3] - corners[0]) / 2f, corners[1] + (corners[2] - corners[1]) / 2f)) {
-            drawCircle(BoxLine, 3.dp.toPx(), side)
+            drawCircle(BoxOutline, SideDot.toPx() / 2f, side)
         }
         // the caret, or the selected letters ringed in blue with a handle at each end (the text as
         // the core lays it out; vertical text spreads its letters apart, so it shows none)

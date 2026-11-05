@@ -1,9 +1,11 @@
 //! Frames as an MP4 video through the system's own encoder, as the Android app's VideoWriter does
-//! with MediaCodec: H.264 or HEVC, at a frame rate, the bit rate four bits a pixel a second (at
-//! least a megabit). On Windows that is Media Foundation; on a Mac AVFoundation; elsewhere the
+//! with MediaCodec: H.264 or HEVC, at a frame rate (a fraction of a frame a second too, each
+//! frame's time exact), the bit rate four bits a pixel a second (at least a megabit). On Windows that is Media Foundation; on a Mac AVFoundation; elsewhere the
 //! system's ffmpeg, the frames piped to it raw (and read back from it the same way).
 
 use std::path::Path;
+
+use procraft_core::FrameRate;
 
 /// What is said where videos are made and read with ffmpeg and it isn't installed.
 pub const NO_FFMPEG: &str = "Making and opening videos needs ffmpeg: install it from your system's packages.";
@@ -38,6 +40,8 @@ mod system {
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
     use windows::core::{GUID, HSTRING};
 
+    use super::FrameRate;
+
     /// Media Foundation, started for as long as it is held.
     struct Started;
 
@@ -56,14 +60,14 @@ mod system {
         }
     }
 
-    fn video_type(subtype: &GUID, width: u32, height: u32, fps: u32) -> windows::core::Result<IMFMediaType> {
+    fn video_type(subtype: &GUID, width: u32, height: u32, rate: FrameRate) -> windows::core::Result<IMFMediaType> {
         let t = unsafe { MFCreateMediaType()? };
         unsafe {
             t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
             t.SetGUID(&MF_MT_SUBTYPE, subtype)?;
             t.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
             t.SetUINT64(&MF_MT_FRAME_SIZE, (u64::from(width) << 32) | u64::from(height))?;
-            t.SetUINT64(&MF_MT_FRAME_RATE, (u64::from(fps) << 32) | 1)?;
+            t.SetUINT64(&MF_MT_FRAME_RATE, (u64::from(rate.frames.max(1)) << 32) | u64::from(rate.seconds.max(1)))?;
             t.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1 << 32) | 1)?;
         }
         Ok(t)
@@ -76,8 +80,8 @@ mod system {
         stream: u32,
         width: u32,
         height: u32,
-        frame_time: i64,
-        written: i64,
+        rate: FrameRate,
+        written: u64,
         _started: Started,
     }
 
@@ -86,7 +90,7 @@ mod system {
             out: &Path,
             width: u32,
             height: u32,
-            fps: u32,
+            rate: FrameRate,
             hevc: bool,
             bits: u32,
         ) -> windows::core::Result<Writer> {
@@ -99,19 +103,17 @@ mod system {
             let url = HSTRING::from(out.as_os_str());
             let writer = unsafe { MFCreateSinkWriterFromURL(&url, None, attributes.as_ref())? };
             let subtype = if hevc { MFVideoFormat_HEVC } else { MFVideoFormat_H264 };
-            let output = video_type(&subtype, width, height, fps)?;
+            let output = video_type(&subtype, width, height, rate)?;
             unsafe { output.SetUINT32(&MF_MT_AVG_BITRATE, super::bit_rate(width, height, bits))? };
             let stream = unsafe { writer.AddStream(&output)? };
             // the frames as 32-bit BGRX rows, top first; the writer converts them for the encoder
-            let input = video_type(&MFVideoFormat_RGB32, width, height, fps)?;
+            let input = video_type(&MFVideoFormat_RGB32, width, height, rate)?;
             unsafe {
                 input.SetUINT32(&MF_MT_DEFAULT_STRIDE, width * 4)?;
                 writer.SetInputMediaType(stream, &input, None)?;
                 writer.BeginWriting()?;
             }
-            // a frame lasts 1/fps seconds, in 100 ns units
-            let frame_time = 10_000_000 / i64::from(fps.max(1));
-            Ok(Writer { writer, stream, width, height, frame_time, written: 0, _started: started })
+            Ok(Writer { writer, stream, width, height, rate, written: 0, _started: started })
         }
 
         /// The next frame, `bgrx` rows top first (`width` × `height` × 4 bytes).
@@ -127,8 +129,10 @@ mod system {
                 buffer.SetCurrentLength(len)?;
                 let sample = MFCreateSample()?;
                 sample.AddBuffer(&buffer)?;
-                sample.SetSampleTime(self.written * self.frame_time)?;
-                sample.SetSampleDuration(self.frame_time)?;
+                // when it starts and how long it lasts, in 100 ns units
+                let at = |i: u64| i64::try_from(self.rate.time_of(i, 10_000_000)).unwrap_or(i64::MAX);
+                sample.SetSampleTime(at(self.written))?;
+                sample.SetSampleDuration(at(self.written + 1) - at(self.written))?;
                 self.writer.WriteSample(self.stream, &sample)?;
             }
             self.written += 1;
@@ -294,16 +298,26 @@ mod system {
         adaptor: Retained<AVAssetWriterInputPixelBufferAdaptor>,
         width: u32,
         height: u32,
-        fps: i32,
+        /// The frame rate as a ratio: frame `i` shows at `i * seconds / frames`.
+        frames: i32,
+        seconds: i64,
         written: i64,
     }
 
     impl Writer {
-        pub fn new(out: &Path, width: u32, height: u32, fps: u32, hevc: bool, bits: u32) -> Result<Writer, String> {
+        pub fn new(
+            out: &Path,
+            width: u32,
+            height: u32,
+            rate: super::FrameRate,
+            hevc: bool,
+            bits: u32,
+        ) -> Result<Writer, String> {
             // the writer won't write over a file
             let _ = std::fs::remove_file(out);
             let url = file_url(out)?;
-            let fps = i32::try_from(fps.max(1)).map_err(|e| e.to_string())?;
+            let frames = i32::try_from(rate.frames.max(1)).map_err(|e| e.to_string())?;
+            let seconds = i64::from(rate.seconds.max(1));
             // SAFETY: the system's constant names; the settings are what a compressed video's are
             // (checked before the input is made, which would throw on ones it can't apply)
             unsafe {
@@ -354,8 +368,8 @@ mod system {
                 if !writer.startWriting() {
                     return Err(said(writer.error(), "the writer didn't start"));
                 }
-                writer.startSessionAtSourceTime(CMTime::new(0, fps));
-                Ok(Writer { writer, input, adaptor, width, height, fps, written: 0 })
+                writer.startSessionAtSourceTime(CMTime::new(0, frames));
+                Ok(Writer { writer, input, adaptor, width, height, frames, seconds, written: 0 })
             }
         }
 
@@ -410,7 +424,7 @@ mod system {
                     }
                 }
                 CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::empty());
-                let at = CMTime::new(self.written, self.fps);
+                let at = CMTime::new(self.written * self.seconds, self.frames);
                 if !self.adaptor.appendPixelBuffer_withPresentationTime(&buffer, at) {
                     return Err(said(self.writer.error(), "a frame wasn't written"));
                 }
@@ -533,26 +547,27 @@ pub fn read_frames(path: &Path, mut each: impl FnMut(Vec<u8>, u32, u32, f64) -> 
 }
 
 #[allow(clippy::too_many_arguments)]
-/// `count` frames as an MP4 at `out`, H.264 (or HEVC) at `fps`, the picture `width` × `height`
-/// fitted to `max_side`; `frame(i, w, h)` gives frame `i` as straight RGBA rows of `w` × `h`.
-/// Returns the size it was made at.
+/// `count` frames as an MP4 at `out`, H.264 (or HEVC) at `fps` frames a second (to a thousandth),
+/// the picture `width` × `height` fitted to `max_side`; `frame(i, w, h)` gives frame `i` as
+/// straight RGBA rows of `w` × `h`. Returns the size it was made at.
 pub fn write_mp4(
     out: &Path,
     width: u32,
     height: u32,
     max_side: u32,
-    fps: u32,
+    fps: f32,
     hevc: bool,
     bits_per_pixel: u32,
     count: usize,
     frame: impl Fn(usize, u32, u32) -> Option<Vec<u8>>,
 ) -> Result<(u32, u32), String> {
+    let rate = procraft_core::frame_rate(fps);
     #[cfg(any(windows, target_os = "macos"))]
     {
         let _ = std::fs::remove_file(out);
         // the largest size the encoder takes
         let mut writer = None;
-        fit(width, height, max_side, |w, h| match system::Writer::new(out, w, h, fps, hevc, bits_per_pixel) {
+        fit(width, height, max_side, |w, h| match system::Writer::new(out, w, h, rate, hevc, bits_per_pixel) {
             Ok(made) => {
                 writer = Some((made, w, h));
                 true
@@ -576,7 +591,7 @@ pub fn write_mp4(
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         let (w, h) = fit(width, height, max_side, |_, _| true).ok_or("no size fits")?;
-        ffmpeg::write(out, w, h, fps, hevc, bit_rate(w, h, bits_per_pixel), count, frame)?;
+        ffmpeg::write(out, w, h, rate, hevc, bit_rate(w, h, bits_per_pixel), count, frame)?;
         Ok((w, h))
     }
 }
@@ -655,14 +670,14 @@ mod ffmpeg {
         all.get(i).or(all.last()).copied().unwrap_or((&[], "h264", "format=yuv420p"))
     }
 
-    /// `count` frames of `width` × `height` (even) as an MP4 at `out`: H.264, or HEVC, at `fps` and
+    /// `count` frames of `width` × `height` (even) as an MP4 at `out`: H.264, or HEVC, at `rate` and
     /// `bit_rate` bits a second; `frame(i, w, h)` gives frame `i` as straight RGBA rows.
     #[allow(clippy::too_many_arguments)]
     pub fn write(
         out: &Path,
         width: u32,
         height: u32,
-        fps: u32,
+        rate: super::FrameRate,
         hevc: bool,
         bit_rate: u32,
         count: usize,
@@ -675,7 +690,7 @@ mod ffmpeg {
         let mut child = run("ffmpeg")
             .args(device)
             .args(["-y", "-f", "rawvideo", "-pix_fmt", "rgba"])
-            .args(["-s", &format!("{width}x{height}"), "-r", &fps.to_string(), "-i", "-"])
+            .args(["-s", &format!("{width}x{height}"), "-r", &format!("{}/{}", rate.frames, rate.seconds), "-i", "-"])
             .args(["-vf", filter, "-c:v", codec])
             .args(["-b:v", &bit_rate.to_string(), "-movflags", "+faststart"])
             .args(if hevc { &["-tag:v", "hvc1"][..] } else { &[][..] })
@@ -766,6 +781,30 @@ mod ffmpeg {
             }
         }
 
+        /// A tenth of a frame a second, as ffmpeg is told it (a ratio): each frame shows ten seconds.
+        #[test]
+        fn a_slow_video_made_by_ffmpeg_shows_each_frame_ten_seconds() {
+            let dir = std::env::temp_dir().join(format!("procraft-ffmpeg-slow-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            let out = dir.join("slow.mp4");
+            let rate = procraft_core::frame_rate(0.1);
+            let made = super::write(&out, 64, 48, rate, false, 1_000_000, 3, |i, w, h| {
+                Some([(i * 80) as u8, 90, 200, 255].repeat(w as usize * h as usize))
+            });
+            match made {
+                Err(e) if e == super::super::NO_FFMPEG => return eprintln!("skipped: no ffmpeg"),
+                other => other.unwrap(),
+            }
+            let mut times = Vec::new();
+            let count = super::read(&out, &mut |_, _, _, at| {
+                times.push(at);
+                true
+            });
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(count.unwrap(), 3);
+            assert_eq!(times, [0.0, 10.0, 20.0]);
+        }
+
         #[test]
         fn frames_made_into_a_video_by_ffmpeg_come_back() {
             let dir = std::env::temp_dir().join(format!("procraft-ffmpeg-{}", std::process::id()));
@@ -773,7 +812,8 @@ mod ffmpeg {
             let out = dir.join("made.mp4");
             // six frames, each a flat colour
             let colour = |i: usize| [(i * 40) as u8, 200 - (i * 30) as u8, 90, 255];
-            let made = super::write(&out, 64, 48, 6, false, 1_000_000, 6, |i, w, h| {
+            let rate = procraft_core::frame_rate(6.0);
+            let made = super::write(&out, 64, 48, rate, false, 1_000_000, 6, |i, w, h| {
                 Some(colour(i).repeat(w as usize * h as usize))
             });
             match made {
@@ -800,6 +840,35 @@ mod ffmpeg {
                     &rgba[mid..mid + 4]
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Frames at a tenth of a frame a second through the system's writer: each shows for ten
+    /// seconds, its time exact.
+    #[test]
+    fn a_slow_video_shows_each_frame_ten_seconds() {
+        let dir = std::env::temp_dir().join(format!("procraft-slow-video-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join("slow.mp4");
+        let made = super::write_mp4(&out, 64, 48, 64, 0.1, false, 4, 3, |i, w, h| {
+            Some([(i * 80) as u8, 90, 200, 255].repeat(w as usize * h as usize))
+        });
+        match made {
+            Err(e) if e == super::NO_FFMPEG => return eprintln!("skipped: no ffmpeg"),
+            other => assert_eq!(other.unwrap(), (64, 48)),
+        }
+        let mut times = Vec::new();
+        let count = super::read_frames(&out, |_, _, _, at| {
+            times.push(at);
+            true
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(count.unwrap(), 3);
+        for (i, at) in times.iter().enumerate() {
+            assert!((at - 10.0 * i as f64).abs() < 1e-3, "frame {i} at {at}");
         }
     }
 }

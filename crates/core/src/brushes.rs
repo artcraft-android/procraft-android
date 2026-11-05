@@ -285,72 +285,14 @@ impl CanvasSession {
     /// A sample stroke drawn with the brush, white on transparent, fitted into `width` × `height`
     /// pixels.
     pub fn brush_preview(&self, set: u32, index: u32, width: u32, height: u32) -> Option<ThumbnailImage> {
-        let (w, h) = (width.clamp(16, 2048), height.clamp(16, 1024));
-        let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
-        // what it needs taken under the lock; drawn without it, so painting goes on meanwhile
-        let (brush, gpu, kept) = {
-            let mut st = self.shared.lock();
-            let brush = st.library.get(set as usize)?.brushes.get(index as usize)?.clone();
-            // the preview it came with, while it is as it came
-            if let Some((tw, th, rgba)) = brush.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) {
-                return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
-            }
-            (brush, st.gpu.clone()?, st.preview.take())
-        };
-        // drawn on a canvas of the sample stroke's own, then fitted into the preview
-        let (mut canvas, mut doc) = match kept {
-            Some(kept) => kept,
-            None => {
-                let mut doc = Document::new(cw, ch);
-                doc.background_visible = false;
-                (Canvas::new(&gpu, &doc).ok()?, doc)
-            }
-        };
-        let layer = doc.current();
-        canvas.wipe_layer(layer);
-        let mut style = StrokeStyle::for_brush(&brush, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false);
-        style.preview = true;
-        canvas.use_sources(&gpu, &mut style, &brush);
-        // a dual brush's second, drawn along the same sample stroke at its size beside the first's
-        let stamp_only = brush.setting("preview_stamp") >= 0.5;
-        let second = brush.secondary.as_deref().filter(|_| !stamp_only && style.takes_second()).and_then(|second| {
-            let mut second_style = StrokeStyle::for_brush(second, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false);
-            second_style.preview = true;
-            second_style.laid_in_place = false;
-            canvas.use_sources(&gpu, &mut second_style, second);
-            let ratio = second.diameter(0.5) / brush.diameter(0.5).max(1e-3);
-            let mode = brush.setting("dual_blend").round().max(0.0) as u32;
-            (!second_style.in_place()).then(|| {
-                let dual =
-                    procraft_gpu::SecondStroke { style: second_style, mode, threshold: second_style.alpha_threshold };
-                (second, dual, preview::diameter(&brush) * ratio)
-            })
-        });
-        match &second {
-            Some((_, dual, _)) => canvas.begin_dual_stroke(layer, style, *dual),
-            None => canvas.begin_stroke(layer, style),
-        }
-        if stamp_only {
-            // the brush's stamp on its own, filling the preview's height
-            canvas.add_stamps(&[Stamp::round(Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0), ch as f32 * 0.4, 1.0)]);
-        } else {
-            let samples = preview::samples(&brush);
-            if let Some((second, _, diameter)) = second {
-                let mut stroke = StrokeBuilder::new(second.clone(), diameter, Pointer::Stylus).steady();
-                canvas.add_second_stamps(&stroke.add(&samples));
-                canvas.replace_second_stamps(&stroke.finish());
-            }
-            let mut stroke = StrokeBuilder::new(brush.clone(), preview::diameter(&brush), Pointer::Stylus).steady();
-            canvas.add_stamps(&stroke.add(&samples));
-            canvas.replace_stamps(&stroke.finish());
-        }
-        canvas.end_stroke();
-        canvas.render(&gpu, &mut doc, None);
-        canvas.forget_history();
-        let rgba = canvas.read_composite(&gpu).ok();
-        // kept for the next (one drawn meanwhile elsewhere already is)
-        self.shared.lock().preview.get_or_insert((canvas, doc));
-        Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba?, w, h) })
+        let brush = self.shared.lock().library.get(set as usize)?.brushes.get(index as usize)?.clone();
+        self.drawn_preview(brush, width, height)
+    }
+
+    /// The same of the first or `second` part alone of the dual brush open in the studio.
+    pub fn studio_part_preview(&self, second: bool, width: u32, height: u32) -> Option<ThumbnailImage> {
+        let brush = self.shared.lock().studio_part(second)?;
+        self.drawn_preview(brush, width, height)
     }
 }
 
@@ -387,4 +329,75 @@ fn bilinear(pixels: &[u8], n: usize, u: f32, v: f32) -> f32 {
     let top = at(x0, y0) * (1.0 - fx) + at(x0 + 1, y0) * fx;
     let bottom = at(x0, y0 + 1) * (1.0 - fx) + at(x0 + 1, y0 + 1) * fx;
     top * (1.0 - fy) + bottom * fy
+}
+
+impl CanvasSession {
+    /// `brush`'s sample stroke (see [`CanvasSession::brush_preview`]).
+    fn drawn_preview(&self, brush: procraft_engine::brush::Brush, width: u32, height: u32) -> Option<ThumbnailImage> {
+        let (w, h) = (width.clamp(16, 2048), height.clamp(16, 1024));
+        let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
+        // the preview it came with, while it is as it came
+        if let Some((tw, th, rgba)) = brush.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) {
+            return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
+        }
+        // what it needs taken under the lock; drawn without it, so painting goes on meanwhile
+        let (gpu, kept) = {
+            let mut st = self.shared.lock();
+            (st.gpu.clone()?, st.preview.take())
+        };
+        // drawn on a canvas of the sample stroke's own, then fitted into the preview
+        let (mut canvas, mut doc) = match kept {
+            Some(kept) => kept,
+            None => {
+                let mut doc = Document::new(cw, ch);
+                doc.background_visible = false;
+                (Canvas::new(&gpu, &doc).ok()?, doc)
+            }
+        };
+        let layer = doc.current();
+        canvas.wipe_layer(layer);
+        let mut style = StrokeStyle::for_brush(&brush, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false);
+        style.preview = true;
+        canvas.use_sources(&gpu, &mut style, &brush);
+        // a dual brush's second, drawn along the same sample stroke at its size beside the first's
+        let stamp_only = brush.setting("preview_stamp") >= 0.5;
+        let second = brush.secondary.as_deref().filter(|_| !stamp_only && style.takes_second()).and_then(|second| {
+            let mut second_style =
+                StrokeStyle::for_brush(second, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false).as_second();
+            second_style.preview = true;
+            canvas.use_sources(&gpu, &mut second_style, second);
+            let ratio = second.diameter(0.5) / brush.diameter(0.5).max(1e-3);
+            let mode = brush.setting("dual_blend").round().max(0.0) as u32;
+            (!second_style.in_place()).then(|| {
+                let dual =
+                    procraft_gpu::SecondStroke { style: second_style, mode, threshold: second_style.alpha_threshold };
+                (second, dual, preview::diameter(&brush) * ratio)
+            })
+        });
+        match &second {
+            Some((_, dual, _)) => canvas.begin_dual_stroke(layer, style, *dual),
+            None => canvas.begin_stroke(layer, style),
+        }
+        if stamp_only {
+            // the brush's stamp on its own, filling the preview's height
+            canvas.add_stamps(&[Stamp::round(Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0), ch as f32 * 0.4, 1.0)]);
+        } else {
+            let samples = preview::samples(&brush);
+            if let Some((second, _, diameter)) = second {
+                let mut stroke = StrokeBuilder::new(second.clone(), diameter, Pointer::Stylus).steady();
+                canvas.add_second_stamps(&stroke.add(&samples));
+                canvas.replace_second_stamps(&stroke.finish());
+            }
+            let mut stroke = StrokeBuilder::new(brush.clone(), preview::diameter(&brush), Pointer::Stylus).steady();
+            canvas.add_stamps(&stroke.add(&samples));
+            canvas.replace_stamps(&stroke.finish());
+        }
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        canvas.forget_history();
+        let rgba = canvas.read_composite(&gpu).ok();
+        // kept for the next (one drawn meanwhile elsewhere already is)
+        self.shared.lock().preview.get_or_insert((canvas, doc));
+        Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba?, w, h) })
+    }
 }

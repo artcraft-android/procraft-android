@@ -429,6 +429,9 @@ fn abr_brush(a: &procraft_engine::abr::AbrBrush) -> Brush {
     // Photoshop turns the other way (its 129 degrees are -129 here)
     b.shape.rotation = -a.angle;
     let d = a.dynamics;
+    if d.tip && d.angle_control == procraft_engine::abr::ANGLE_BY_DIRECTION {
+        b.shape.follow = 1.0;
+    }
     let flow = d.tool_flow.unwrap_or(1.0);
     // as a preset comes in elsewhere: no taper, no StreamLine, glazed uniformly at its tool's flow
     for (key, value) in [
@@ -552,6 +555,9 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
         b.spacing = Brush::spacing_within_reach(spacing);
     }
     b.shape.rotation = k.angle;
+    if k.follows {
+        b.shape.follow = 1.0;
+    }
     if !k.pressure_size {
         b.pressure_size = 0.0;
     }

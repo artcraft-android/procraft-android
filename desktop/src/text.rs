@@ -12,7 +12,7 @@ use egui::{
     Align2, Color32, CornerRadius, Id, Key, KeyboardShortcut, Modifiers, Order, Pos2, Rect, Sense, Shape, Stroke,
     TextureHandle, TextureOptions, UiBuilder, Vec2, pos2, vec2,
 };
-use procraft_core::{CanvasSession, TextAlignment, TextDraw, TextDrawn, TextInfo};
+use procraft_core::{CanvasSession, TextAlignment, TextDraw, TextDrawn, TextInfo, TextSide};
 
 use crate::alert::{Alert, Answer, Asking};
 use crate::icons::{self, Icon};
@@ -30,6 +30,13 @@ const KEYBOARD_DISC: Themed = Themed(0xFF393939, 0xFFFBFBFB);
 const KEYBOARD_BAR: Themed = Themed(0xFF2B2B2B, 0xFFE9ECED);
 const DONE_BLUE: u32 = 0xFF0190FF;
 const BOX_LINE: u32 = 0xFF0076FD;
+/// The box's outline and the dots on its sides (as measured, a lighter blue than the caret's).
+const BOX_OUTLINE: u32 = 0xFF0184FF;
+/// A side's dot: how wide it is, how near a press takes it, and how far it moves before it drags
+/// (points).
+const SIDE_DOT: f32 = 7.5;
+const SIDE_REACH: f32 = 20.0;
+const SLOP: f32 = 8.0;
 /// A design row's track, and the middle tick of one that runs both ways.
 const DESIGN_TRACK: Themed = Themed(0xFF5A5A5A, 0xFFE3E3E3);
 const DESIGN_TICK: Themed = Themed(0xFF8A8A8A, 0xFFC8C8C8);
@@ -164,6 +171,15 @@ type Picture = (TextureHandle, [f32; 4]);
 /// A name drawn in a face: the name, the family, the style and the size (pixels).
 type FaceKey = (String, String, String, u32);
 
+/// A press on a side's dot: which side, where it began (points), and whether it is dragging the
+/// side yet (past the slop).
+#[derive(Clone, Copy)]
+struct SidePress {
+    side: TextSide,
+    from: Pos2,
+    dragging: bool,
+}
+
 /// Where the text stands on the canvas: its box (left, top, width, height) and the caret before
 /// the first and after the last letter chosen (x, top, bottom; none for vertical text).
 struct Geometry {
@@ -193,6 +209,8 @@ pub struct TextEditor {
     ring: Option<(Chosen, Option<Picture>)>,
     /// A drag moving the text: where (points) it was last.
     dragging: Option<Pos2>,
+    /// A press on a side's dot, dragged: the box's width.
+    side: Option<SidePress>,
     /// Names drawn in their faces (by name, family, style and pixel size): the picture and its
     /// size in points.
     faces: HashMap<FaceKey, Option<(TextureHandle, Vec2)>>,
@@ -239,6 +257,7 @@ impl TextEditor {
         self.geometry = None;
         self.ring = None;
         self.dragging = None;
+        self.side = None;
     }
 
     /// New text in the middle of where the canvas shows, all of it chosen for typing over, in
@@ -296,6 +315,7 @@ impl TextEditor {
         self.style_open = false;
         self.before_style = None;
         self.dragging = None;
+        self.side = None;
         self.drawer.forget();
         self.info = Some(info);
         self.draw(session);
@@ -306,6 +326,17 @@ impl TextEditor {
         f(info);
         session.set_text(info.clone());
         self.draw(session);
+    }
+
+    /// The text being edited as the core now has it (a change to its box's width undone or
+    /// redone), drawn again.
+    pub fn reread(&mut self, session: &CanvasSession) {
+        if self.info.is_some()
+            && let Some(info) = session.editing_text().and_then(|id| session.layer_text(id))
+        {
+            self.info = Some(info);
+            self.draw(session);
+        }
     }
 
     fn draw(&mut self, session: &CanvasSession) {
@@ -340,6 +371,9 @@ impl TextEditor {
         self.geometry = None;
         self.ring = None;
         self.dragging = None;
+        if self.side.take().is_some_and(|s| s.dragging) {
+            session.text_side_end();
+        }
     }
 
     /// A stroke landed on a text layer: asks to rasterize it.
@@ -408,7 +442,8 @@ impl TextEditor {
     }
 
     /// Over the canvas: the box, the caret or the letters chosen, the field typed into, and the
-    /// touches (a press outside the box ends the edit, keeping it; a drag inside moves the text).
+    /// touches (a press outside the box ends the edit, keeping it; a drag inside moves the text; a
+    /// side's dot dragged moves that side, the box's width).
     fn canvas_part(&mut self, ctx: &egui::Context, session: &CanvasSession) -> Option<Said> {
         let info = self.info.clone()?;
         let ppp = ctx.pixels_per_point();
@@ -446,6 +481,7 @@ impl TextEditor {
         }
         let screen = ctx.content_rect();
         let blue = argb(BOX_LINE);
+        let outline = argb(BOX_OUTLINE);
         let mut ended = false;
         egui::Area::new(Id::unique("text editor")).fixed_pos(screen.min).order(Order::Middle).fade_in(false).show(
             ctx,
@@ -457,17 +493,19 @@ impl TextEditor {
                     && let Some(p) = at
                     && ui.ctx().layer_id_at(p) == Some(ui.layer_id())
                 {
-                    if upright.contains(p) {
+                    if let Some(side) = session.text_side_at(p.x * ppp, p.y * ppp, SIDE_REACH * ppp) {
+                        self.side = Some(SidePress { side, from: p, dragging: false });
+                    } else if upright.contains(p) {
                         self.dragging = Some(p);
                     } else {
                         ended = true;
                     }
                 }
                 let painter = ui.painter();
-                painter.add(Shape::closed_line(corners.to_vec(), Stroke::new(1.0, blue)));
+                painter.add(Shape::closed_line(corners.to_vec(), Stroke::new(1.0, outline)));
                 for (a, b) in [(0, 3), (1, 2)] {
                     if let (Some(p), Some(q)) = (corners.get(a), corners.get(b)) {
-                        painter.circle_filled(p.lerp(*q, 0.5), 3.0, blue);
+                        painter.circle_filled(p.lerp(*q, 0.5), SIDE_DOT / 2.0, outline);
                     }
                 }
                 // the caret, or the chosen letters ringed with a handle at each end
@@ -500,8 +538,41 @@ impl TextEditor {
             self.end(session, true);
             return None;
         }
-        // dragged, the text follows
         let (down, at) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.interact_pos()));
+        // a side's dot dragged past the slop: that side follows, the other staying put
+        if let Some(mut press) = self.side {
+            // moved first: the frame the button is let go in can carry the last move. It ends
+            // where the button came up: the system moves the pointer again on letting go
+            let let_go = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::PointerButton {
+                        pos, button: egui::PointerButton::Primary, pressed: false, ..
+                    } => Some(*pos),
+                    _ => None,
+                })
+            });
+            if let Some(now) = let_go.or(at) {
+                if !press.dragging && now.distance(press.from) > SLOP {
+                    press.dragging = session.text_side_begin(press.side, press.from.x * ppp, press.from.y * ppp);
+                }
+                if press.dragging
+                    && let Some(info) = session.text_side_drag(now.x * ppp, now.y * ppp)
+                    && self.info.as_ref() != Some(&info)
+                {
+                    self.info = Some(info);
+                    self.draw(session);
+                }
+            }
+            if down && at.is_some() {
+                self.side = Some(press);
+            } else {
+                if press.dragging {
+                    session.text_side_end();
+                }
+                self.side = None;
+            }
+        }
+        // dragged, the text follows
         match (self.dragging, at) {
             (Some(last), Some(now)) if down => {
                 if let (Some(a), Some(b)) = (to_canvas(m, ppp, last), to_canvas(m, ppp, now))
@@ -659,9 +730,10 @@ impl TextEditor {
             said = self.import_font(session);
         }
         if tapped(ui, cancel, "cancel") {
+            // the text, where it is and its width stay
             if let (Some(before), Some(now)) = (self.before_style.clone(), self.info.as_ref()) {
-                let typed = now.text.clone();
-                self.change(session, |i| *i = TextInfo { text: typed, ..before });
+                let (typed, x, y, width) = (now.text.clone(), now.x, now.y, now.width);
+                self.change(session, |i| *i = TextInfo { text: typed, x, y, width, ..before });
             }
             self.style_open = false;
         }

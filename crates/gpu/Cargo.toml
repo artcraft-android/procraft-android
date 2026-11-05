@@ -22,6 +22,10 @@ thiserror = { workspace = true }
 [target.'cfg(target_os = "android")'.dependencies]
 wgpu = { workspace = true, features = ["gles"] }
 
+# OpenGL on Windows where neither Vulkan nor Direct3D 12 makes a device (an older GPU or driver)
+[target.'cfg(windows)'.dependencies]
+wgpu = { workspace = true, features = ["gles"] }
+
 # Metal on Apple's systems (the iPad app's core, the Mac's desktop app)
 [target.'cfg(target_vendor = "apple")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }

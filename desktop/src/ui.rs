@@ -23,6 +23,7 @@ use crate::layers::Layers;
 use crate::library::Library;
 use crate::look::{Look, argb, pc};
 use crate::overlays::{Overlays, snapped_to};
+use crate::system_clipboard::{Pasted, SystemClipboard};
 
 const POPOVER_FILL: Color32 = Color32::from_rgb(0x28, 0x2a, 0x2d);
 /// A tool button held this long (seconds), as a long press, takes the current brush.
@@ -30,6 +31,12 @@ const TOOL_HOLD_S: f64 = 0.4;
 /// The pictures and the videos Insert a file and Insert a photo take (and a drop on the canvas).
 const PICTURES: [&str; 8] = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
 const VIDEOS: [&str; 6] = ["mp4", "m4v", "mov", "wmv", "avi", "mkv"];
+
+/// Whether `path` is named as a picture is.
+fn is_picture(path: &std::path::Path) -> bool {
+    let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    PICTURES.contains(&extension.as_str())
+}
 /// A video's frames come in at the animation's frame rate, or this one; this many at most.
 const VIDEO_FPS: u32 = 15;
 const MOST_VIDEO_FRAMES: u32 = 999;
@@ -62,9 +69,11 @@ pub struct Interface {
     pub canvas_rect: Rect,
     /// A popover is open: a press on the canvas only closes it.
     pub popover_open: bool,
-    /// Only a brush library is open (none of its menus): a press on the canvas closes it and
-    /// paints, as a mouse is used (on the tablet such a tap only closes it).
-    pub library_lets_paint: bool,
+    /// Only a panel is open (none of its menus): a press on the canvas goes to the canvas, waiting
+    /// to be a tap, which only closes the panel, or a drag, which closes it and paints.
+    pub panel_lets_through: bool,
+    /// The last press went to the canvas, which closes the panel in its own time.
+    canvas_pressed: bool,
     /// The file the artwork was last saved to (or opened from, if it saves back there).
     pub path: Option<PathBuf>,
     /// The artwork's edits when it was last saved: anything else is unsaved.
@@ -83,6 +92,10 @@ pub struct Interface {
     bars_hidden: bool,
     /// A layer copied or cut, to paste.
     clipboard: Option<procraft_core::ThumbnailImage>,
+    /// What other apps copied, which Paste takes once it is the newer.
+    system_clipboard: SystemClipboard,
+    /// Paste's button shows, the window in front (it is looked at again as that begins).
+    paste_shown: bool,
     /// The Copy & Paste panel is up.
     copy_paste: bool,
     /// Layer Select's list: where (points) and the layers drawn there, top first.
@@ -178,7 +191,8 @@ impl Default for Interface {
             actions: Vec::new(),
             canvas_rect: Rect::EVERYTHING,
             popover_open: false,
-            library_lets_paint: false,
+            panel_lets_through: false,
+            canvas_pressed: false,
             path: None,
             saved_edits: 0,
             saving: None,
@@ -190,6 +204,8 @@ impl Default for Interface {
             overlays: Overlays::default(),
             bars_hidden: false,
             clipboard: None,
+            system_clipboard: SystemClipboard::new(is_picture),
+            paste_shown: false,
             copy_paste: false,
             layer_choice: None,
             actions_panel: Actions::default(),
@@ -375,11 +391,16 @@ impl Interface {
         let ctx = ui.ctx().clone();
         self.style_once(&ctx);
         self.ended_export = None;
+        self.canvas_pressed = std::mem::take(&mut input.canvas_pressed);
         // looked at again soon while an insert is read, or brushes made
         let brushes_coming = self.brushes_added(session);
         // the autosave told of when it fails (once until a save works again), the palettes too
         if let Some(why) = session.take_save_failure() {
             self.overlays.notice(procraft_core::save_failure_said(why), true);
+        }
+        // a crop or a smudge the GPU had no memory for
+        if let Some(why) = session.take_failure() {
+            self.overlays.notice(why, true);
         }
         if self.colours.palettes.take_failure().is_some() {
             self.overlays.notice("The palettes couldn't be kept.", true);
@@ -389,7 +410,13 @@ impl Interface {
         self.colours.follow_mask(session, on_mask);
         // the eyedropper picks from the current layer or the canvas, as the preferences say
         session.set_eyedropper_from_layer(self.prefs.eyedropper_layer);
-        if self.inserted(session) || brushes_coming {
+        let paste_shown = (self.open == Some(Popover::Actions) || self.copy_paste) && ctx.input(|i| i.focused);
+        if paste_shown && !self.paste_shown {
+            self.system_clipboard.offer();
+        }
+        self.paste_shown = paste_shown;
+        let pasting = self.pasted(session);
+        if self.inserted(session) || brushes_coming || pasting {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         // the pen's barrel buttons: what Gesture controls set Pen button and Pen second button to
@@ -620,7 +647,12 @@ impl Interface {
         // the modify button tapped does what Tap □ is set to (opens or closes the eyedropper at
         // first); held, touches do what □ + Touch and □ + Pen are set to (unless one did, its tap
         // then does nothing)
-        let used = session.set_modify_held(taps.modify_down);
+        // Alt held is the button held; tapped it does nothing, being in the system's own shortcuts
+        let used = session.set_modify_held(taps.modify_down || input.modify_key());
+        // Space tapped, not moving the canvas, opens or closes the QuickMenu
+        if std::mem::take(&mut input.space_tapped) && !self.keys_taken() {
+            self.quick_menu.toggle(ctx.content_rect().center());
+        }
         if taps.modify_tapped && !used {
             self.tap_modify(&ctx, session);
         }
@@ -747,8 +779,7 @@ impl Interface {
             ctx.set_cursor_icon(icon);
         }
         self.popover_open = self.open.is_some() || self.settings || self.text.editing();
-        self.library_lets_paint =
-            self.open == Some(Popover::Brushes) && !self.settings && !self.text.editing() && !self.library.modal();
+        self.panel_lets_through = self.open.is_some_and(|p| !self.modal(p)) && !self.settings && !self.text.editing();
     }
 
     /// The touch companion, with its switch on in Advanced settings.
@@ -1080,6 +1111,9 @@ impl Interface {
                 // what a pen's own settings ask its button to show
                 TouchCommand::ShowColours => self.toggle(session, Popover::Colour),
                 TouchCommand::ShowBrushes => self.toggle(session, Popover::Brushes),
+                // a press on the canvas with a panel open: dragged or held, it goes on; a tap only
+                // closes the panel
+                TouchCommand::PanelFades | TouchCommand::PanelTapped => self.open = None,
                 // a stroke or a fill on a text layer: it takes them once rasterized
                 TouchCommand::TextLayer => self.text.ask_rasterize(),
                 // (the pen's hover, which sets the brush with a finger, isn't the desktop's)
@@ -1120,7 +1154,15 @@ impl Interface {
         {
             return;
         }
-        // undoing while editing text undoes the whole edit
+        // editing text, a change to its box's width goes back a step at a time, still editing
+        if self.text.editing()
+            && let Some(name) = session.text_box_undo()
+        {
+            self.text.reread(session);
+            self.overlays.notice(format!("Undo {name}"), false);
+            return;
+        }
+        // undoing while editing text otherwise undoes the whole edit
         self.text.end(session, true);
         let could = session.info().can_undo;
         let name = session.undo();
@@ -1133,6 +1175,13 @@ impl Interface {
 
     fn redo(&mut self, session: &CanvasSession) {
         self.feedback();
+        if self.text.editing()
+            && let Some(name) = session.text_box_redo()
+        {
+            self.text.reread(session);
+            self.overlays.notice(format!("Redo {name}"), false);
+            return;
+        }
         // text being edited is kept first
         let editing = self.text.editing();
         self.text.end(session, true);
@@ -1170,13 +1219,18 @@ impl Interface {
 
     /// The QuickMenu, while it shows: what a button does is done.
     fn quick_menu(&mut self, ctx: &egui::Context, session: &CanvasSession) {
-        if let Some((action, at)) = self.quick_menu.show(ctx, &mut self.look) {
-            self.run_quick(ctx, session, action, at);
+        match self.quick_menu.show(ctx, &mut self.look, session, &mut self.keep_brushes) {
+            Some(crate::quick_menu::Ran::Action(action, at)) => self.run_quick(ctx, session, action, at),
+            // a button set to a brush gives it to the current tool
+            Some(crate::quick_menu::Ran::Brush(b)) if session.select_brush(b.set, b.index) => {
+                self.keep_brushes = true;
+                self.library.library_changed();
+            }
+            _ => {}
         }
     }
 
-    /// A QuickMenu button's action, the menu opened at `at` (points). Adding text does nothing
-    /// yet (the desktop doesn't edit text).
+    /// A QuickMenu button's action, the menu opened at `at` (points).
     fn run_quick(&mut self, ctx: &egui::Context, session: &CanvasSession, action: QuickAction, at: egui::Pos2) {
         let current = session.layers().into_iter().find(|l| l.current);
         let id = current.as_ref().map(|l| l.id);
@@ -1288,7 +1342,7 @@ impl Interface {
             QuickAction::Copy => self.copy_layer(session),
             QuickAction::CopyCanvas => self.copy_canvas(session),
             QuickAction::Cut => self.cut_layer(session),
-            QuickAction::Paste => self.paste(session),
+            QuickAction::Paste => self.paste(ctx, false),
             QuickAction::CopyPasteMenu => self.copy_paste = true,
             QuickAction::FlipHorizontal => session.flip_canvas(true),
             QuickAction::FlipVertical => session.flip_canvas(false),
@@ -1532,7 +1586,8 @@ impl Interface {
         if !self.copy_paste {
             return;
         }
-        let Some(choice) = crate::copy_paste::show(ctx, &mut self.look, self.clipboard.is_some()) else { return };
+        let can_paste = self.can_paste();
+        let Some(choice) = crate::copy_paste::show(ctx, &mut self.look, can_paste) else { return };
         self.copy_paste = false;
         match choice {
             Choice::Close => {}
@@ -1542,9 +1597,9 @@ impl Interface {
             Choice::Duplicate => self.duplicate_current(session),
             Choice::CutAndPaste => {
                 self.cut_layer(session);
-                self.paste(session);
+                self.paste_own(session, false);
             }
-            Choice::Paste => self.paste(session),
+            Choice::Paste => self.paste(ctx, false),
         }
     }
 
@@ -1556,6 +1611,7 @@ impl Interface {
         }
         if let Some(cut) = session.cut_layer() {
             self.clipboard = Some(cut);
+            self.system_clipboard.copied_here();
             self.overlays.notice("Layer cut", false);
         }
     }
@@ -1565,6 +1621,7 @@ impl Interface {
         self.open = None;
         if let Some(copied) = session.copy_layer() {
             self.clipboard = Some(copied);
+            self.system_clipboard.copied_here();
             self.overlays.notice("Layer copied", false);
         }
     }
@@ -1574,25 +1631,49 @@ impl Interface {
         self.open = None;
         if let Some(copied) = session.copy_canvas() {
             self.clipboard = Some(copied);
+            self.system_clipboard.copied_here();
             self.overlays.notice("Canvas copied", false);
         }
     }
 
-    /// What was copied or cut, pasted as a new layer.
-    fn paste(&mut self, session: &CanvasSession) {
-        self.open = None;
-        let Some(image) = self.clipboard.clone() else { return };
-        if session.paste(image).is_none() {
-            crate::files::no_room(session);
-        }
+    /// Whether there is anything for Paste to take, as far as is known.
+    fn can_paste(&self) -> bool {
+        self.clipboard.is_some() || self.system_clipboard.offers
     }
 
-    /// What was copied or cut, pasted as a new private layer (one the gallery's thumbnail leaves
-    /// out).
-    fn paste_private(&mut self, session: &CanvasSession) {
+    /// Paste (on a new private layer, one the gallery's thumbnail leaves out, if `private`): what
+    /// was copied last, here or in another app. The system's clipboard is read first, so what
+    /// comes of it comes on a later frame (`pasted`).
+    fn paste(&mut self, ctx: &egui::Context, private: bool) {
+        self.open = None;
+        self.system_clipboard.paste(private);
+        ctx.request_repaint();
+    }
+
+    /// What Paste found on the system's clipboard, once it has: another app's picture comes in as
+    /// an inserted one does, ready to transform. True while a look at it is under way.
+    fn pasted(&mut self, session: &Arc<CanvasSession>) -> bool {
+        match self.system_clipboard.take_pasted() {
+            Some(Pasted::Own { private }) => self.paste_own(session, private),
+            Some(Pasted::Picture { image, private }) => {
+                if session.insert_image(image, private).is_some() {
+                    self.toggle_transform(session);
+                } else {
+                    crate::files::no_room(session);
+                }
+            }
+            Some(Pasted::Files { paths, private }) => self.insert_files(session, paths, private),
+            None => {}
+        }
+        self.system_clipboard.busy()
+    }
+
+    /// What was copied or cut here, pasted as a new layer (a private one, if `private`).
+    fn paste_own(&mut self, session: &CanvasSession, private: bool) {
         self.open = None;
         let Some(image) = self.clipboard.clone() else { return };
-        if session.paste_private(image).is_none() {
+        let pasted = if private { session.paste_private(image) } else { session.paste(image) };
+        if pasted.is_none() {
             crate::files::no_room(session);
         }
     }
@@ -1601,7 +1682,7 @@ impl Interface {
     fn duplicate_current(&mut self, session: &CanvasSession) {
         if session.has_selection() {
             self.copy_layer(session);
-            self.paste(session);
+            self.paste_own(session, false);
         } else if let Some(current) = session.layers().into_iter().find(|l| l.current)
             && session.duplicate_layer(current.id).is_none()
         {
@@ -1817,13 +1898,7 @@ impl Interface {
             return;
         };
         // while one of the panel's menus is open, a press elsewhere only closes the menu
-        let modal = match which {
-            Popover::Layers => self.layers.modal(),
-            Popover::Brushes => self.library.modal(),
-            Popover::Colour => self.colours.modal(),
-            Popover::Actions => self.licences || self.actions_panel.modal(),
-            Popover::Adjustments => false,
-        };
+        let modal = self.modal(which);
         let shown = match which {
             Popover::Brushes => {
                 let shown = self.library.show(ctx, &mut self.look, session, tool, button, backdrops);
@@ -1836,7 +1911,10 @@ impl Interface {
                 if let Some((text, warning)) = self.layers.notice.take() {
                     self.overlays.notice(text, warning);
                 }
-                self.clipboard = self.layers.copied.take().or(self.clipboard.take());
+                if let Some(copied) = self.layers.copied.take() {
+                    self.clipboard = Some(copied);
+                    self.system_clipboard.copied_here();
+                }
                 if std::mem::take(&mut self.layers.share) {
                     self.actions.push(Action::Export(Format::ChosenLayerPngs, 100));
                 }
@@ -1872,7 +1950,7 @@ impl Interface {
             Popover::Actions => {
                 let assist = session.animation_settings();
                 let showing = crate::actions::Showing {
-                    can_paste: self.clipboard.is_some(),
+                    can_paste: self.can_paste(),
                     animation: assist.as_ref().is_some_and(|a| !a.pages),
                     pages: assist.as_ref().is_some_and(|a| a.pages),
                     time_lapse: self.time_lapse.recording(),
@@ -1981,8 +2059,8 @@ impl Interface {
                     Some(Act::Cut) => self.cut_layer(session),
                     Some(Act::Copy) => self.copy_layer(session),
                     Some(Act::CopyCanvas) => self.copy_canvas(session),
-                    Some(Act::Paste) => self.paste(session),
-                    Some(Act::PastePrivate) => self.paste_private(session),
+                    Some(Act::Paste) => self.paste(ctx, false),
+                    Some(Act::PastePrivate) => self.paste(ctx, true),
                     // the panel does these itself
                     Some(
                         Act::Page(_)
@@ -2004,12 +2082,25 @@ impl Interface {
         }
     }
 
-    /// A press anywhere but on the popover at `shown` and its `button`, or Escape, closes it.
+    /// One of the menus of popover `which` is open.
+    fn modal(&self, which: Popover) -> bool {
+        match which {
+            Popover::Layers => self.layers.modal(),
+            Popover::Brushes => self.library.modal(),
+            Popover::Colour => self.colours.modal(),
+            Popover::Actions => self.licences || self.actions_panel.modal(),
+            Popover::Adjustments => false,
+        }
+    }
+
+    /// A press anywhere but on the popover at `shown` and its `button`, or Escape, closes it (one
+    /// the canvas took closes it as the touches say).
     fn close_outside(&mut self, ctx: &egui::Context, shown: Rect, button: Rect) {
-        let pressed_outside = ctx.input(|i| {
-            i.pointer.any_pressed()
-                && i.pointer.interact_pos().is_some_and(|p| !shown.contains(p) && !button.contains(p))
-        });
+        let pressed_outside = !self.canvas_pressed
+            && ctx.input(|i| {
+                i.pointer.any_pressed()
+                    && i.pointer.interact_pos().is_some_and(|p| !shown.contains(p) && !button.contains(p))
+            });
         if escape(ctx) || pressed_outside {
             self.open = None;
         }
@@ -2098,18 +2189,19 @@ impl Interface {
                 continue;
             };
             ctx.input_mut(|i| i.consume_key(modifiers, key));
-            self.key_shortcut(session, info, shortcut);
+            self.key_shortcut(ctx, session, info, shortcut);
         }
     }
 
     /// Does what a keyboard shortcut says.
-    fn key_shortcut(&mut self, session: &CanvasSession, info: &CanvasInfo, shortcut: KeyShortcut) {
+    fn key_shortcut(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo, shortcut: KeyShortcut) {
+        let middle = ctx.content_rect().center();
         match shortcut {
             KeyShortcut::Undo => self.undo(session),
             KeyShortcut::Redo => self.redo(session),
             KeyShortcut::CopyLayer => self.copy_layer(session),
             KeyShortcut::CutLayer => self.cut_layer(session),
-            KeyShortcut::Paste => self.paste(session),
+            KeyShortcut::Paste => self.paste(ctx, false),
             KeyShortcut::Paint => self.choose_tool(session, ToolKind::Paint),
             KeyShortcut::Erase => self.choose_tool(session, ToolKind::Erase),
             KeyShortcut::Eyedropper => session.set_pick_next(!session.pick_next()),
@@ -2124,6 +2216,10 @@ impl Interface {
             KeyShortcut::DuplicateLayer => self.duplicate_current(session),
             KeyShortcut::Interface => self.toggle_bars(session),
             KeyShortcut::ClearLayer => self.clear_layer(session),
+            KeyShortcut::CopyCanvas => self.run_quick(ctx, session, QuickAction::CopyCanvas, middle),
+            KeyShortcut::ColourBalance => self.run_quick(ctx, session, QuickAction::ColorBalance, middle),
+            KeyShortcut::PerspectiveGuide => self.run_quick(ctx, session, QuickAction::GuidePerspective, middle),
+            KeyShortcut::QuickMenu => self.quick_menu.toggle(middle),
             KeyShortcut::GreyView => session.set_grey_view(!session.grey_view()),
             KeyShortcut::BrushSize { by } => session.set_brush_size((info.size + by).clamp(0.0, 1.0)),
             KeyShortcut::Nudge { dx, dy } => self.transform.moved(session.transform_arrow(dx, dy)),
@@ -2168,6 +2264,7 @@ fn key_name(key: Key) -> Option<&'static str> {
     Some(match key {
         Key::OpenBracket | Key::OpenCurlyBracket => "[",
         Key::CloseBracket | Key::CloseCurlyBracket => "]",
+        Key::Semicolon => ";",
         Key::Delete => "delete",
         Key::Backspace => "backspace",
         Key::ArrowLeft => "left",

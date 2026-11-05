@@ -44,6 +44,18 @@ pub fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
     panic.downcast_ref::<&str>().copied().or_else(|| panic.downcast_ref::<String>().map(String::as_str)).unwrap_or("")
 }
 
+/// The graphics APIs in `backends` by name ("Vulkan", "Direct3D 12", "OpenGL", ...).
+fn backends_name(backends: wgpu::Backends) -> String {
+    let named = [
+        (wgpu::Backends::VULKAN, "Vulkan"),
+        (wgpu::Backends::DX12, "Direct3D 12"),
+        (wgpu::Backends::METAL, "Metal"),
+        (wgpu::Backends::GL, "OpenGL"),
+    ];
+    let names: Vec<&str> = named.iter().filter(|(b, _)| backends.contains(*b)).map(|(_, name)| *name).collect();
+    if names.is_empty() { format!("{backends:?}") } else { names.join(" or ") }
+}
+
 /// Whether a GPU named `name` on `backend` needs its canvas textures uncompressed.
 fn keeps_textures_uncompressed(name: &str, backend: wgpu::Backend) -> bool {
     backend == wgpu::Backend::Vulkan && name.to_ascii_lowercase().contains("mali")
@@ -61,6 +73,12 @@ pub enum GpuError {
     Surface(String),
     #[error("reading pixels back: {0}")]
     Readback(String),
+    #[error("the GPU is out of memory: {0}")]
+    OutOfMemory(String),
+    #[error("the GPU device was lost")]
+    Lost,
+    #[error("GPU work failed: {0}")]
+    Failed(String),
 }
 
 /// The device everything renders with. A clone is the same device, sharing what is made for it.
@@ -90,7 +108,8 @@ impl Gpu {
     /// The backends a device is made from, best first: those `WGPU_BACKEND` names if it is set
     /// (to try another when a driver fails); on Android Vulkan, then OpenGL ES (for a device
     /// whose Vulkan is missing or fails); on Windows Vulkan and Direct3D 12, Direct3D 12 first on
-    /// ARM (the Snapdragon X's Vulkan driver fails as a canvas opens); elsewhere the native API.
+    /// ARM (the Snapdragon X's Vulkan driver fails as a canvas opens), then OpenGL (a GPU or
+    /// driver too old for either); elsewhere the native API.
     fn backends() -> Vec<wgpu::Backends> {
         if let Some(chosen) = wgpu::Backends::from_env().filter(|b| !b.is_empty()) {
             return vec![chosen];
@@ -98,9 +117,9 @@ impl Gpu {
         if cfg!(target_os = "android") {
             vec![wgpu::Backends::VULKAN, wgpu::Backends::GL]
         } else if cfg!(all(windows, target_arch = "aarch64")) {
-            vec![wgpu::Backends::DX12, wgpu::Backends::VULKAN]
+            vec![wgpu::Backends::DX12, wgpu::Backends::VULKAN, wgpu::Backends::GL]
         } else if cfg!(windows) {
-            vec![wgpu::Backends::VULKAN, wgpu::Backends::DX12]
+            vec![wgpu::Backends::VULKAN, wgpu::Backends::DX12, wgpu::Backends::GL]
         } else {
             vec![wgpu::Backends::PRIMARY]
         }
@@ -109,6 +128,11 @@ impl Gpu {
     /// How many backends there are to make a device from (see [`Gpu::instance_after`]).
     pub fn backend_count() -> usize {
         Gpu::backends().len()
+    }
+
+    /// Backend `index`'s name, for the log and messages (see [`Gpu::instance_after`]).
+    pub fn backend_name(index: usize) -> String {
+        Gpu::backends().get(index).map_or_else(|| format!("backend {index}"), |b| backends_name(*b))
     }
 
     /// The instance to try after `tries` failed to make a device (see [`Gpu::backends`]); None
@@ -194,6 +218,18 @@ impl Gpu {
     }
 
     fn create(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<Gpu, GpuError> {
+        // every GPU the backend sees, for the log (a laptop's two, a driver's own name and version)
+        for adapter in pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())) {
+            let info = adapter.get_info();
+            log::info!(
+                "GPU seen: {} ({:?}, {:?}, driver {} {})",
+                info.name,
+                info.backend,
+                info.device_type,
+                info.driver,
+                info.driver_info
+            );
+        }
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
@@ -280,6 +316,34 @@ impl Gpu {
         self.lost.load(Ordering::Relaxed)
     }
 
+    /// Runs `work`, waits for what it sent the GPU, and says whether any of it went wrong: a
+    /// texture or buffer there was no memory for (made all the same, but holding nothing), work
+    /// that used one (left undone: a copy into it copies nothing), the device lost meanwhile, or
+    /// the work panicking (as wgpu does on a lost device). What `work` made must then not take
+    /// the place of what was there. Only what this thread does is looked at.
+    pub fn checked<T>(&self, work: impl FnOnce() -> T) -> Result<T, GpuError> {
+        if self.is_lost() {
+            return Err(GpuError::Lost);
+        }
+        let memory = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let invalid = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+        // done on the GPU, so a device lost doing it shows
+        self.flush();
+        let invalid = pollster::block_on(invalid.pop());
+        let memory = pollster::block_on(memory.pop());
+        if self.is_lost() {
+            return Err(GpuError::Lost);
+        }
+        if let Some(e) = memory {
+            return Err(GpuError::OutOfMemory(e.to_string()));
+        }
+        if let Some(e) = invalid {
+            return Err(GpuError::Failed(e.to_string()));
+        }
+        done.map_err(|panic| GpuError::Failed(format!("panicked: {}", panic_message(panic.as_ref()))))
+    }
+
     /// Makes the pipelines canvases draw with, and the brush images they hold, now, so the first
     /// canvas on this device is made at once (slow: off the main thread).
     pub fn prepare_canvases(&self) {
@@ -322,6 +386,14 @@ impl Gpu {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn backends_are_named_for_the_log() {
+        use wgpu::Backends;
+        assert_eq!(super::backends_name(Backends::DX12), "Direct3D 12");
+        assert_eq!(super::backends_name(Backends::VULKAN | Backends::GL), "Vulkan or OpenGL");
+        assert_eq!(super::Gpu::backend_name(99), "backend 99");
+    }
+
+    #[test]
     fn mali_gpus_on_vulkan_keep_their_canvas_textures_uncompressed() {
         use wgpu::Backend;
         assert!(super::keeps_textures_uncompressed("Mali-G68 MC4", Backend::Vulkan));
@@ -330,6 +402,37 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn work_that_fails_on_the_gpu_is_told() {
+        let gpu = match Gpu::headless() {
+            Ok(g) => g,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        assert_eq!(gpu.checked(|| 7).ok(), Some(7));
+        // a texture it won't make, and a panic on the way
+        let most = gpu.device.limits().max_texture_dimension_2d;
+        let made = gpu.checked(|| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("too large"),
+                size: wgpu::Extent3d { width: most + 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        });
+        assert!(matches!(made, Err(GpuError::Failed(_))));
+        assert!(matches!(gpu.checked::<()>(|| panic!("a wrapper panicking")), Err(GpuError::Failed(_))));
+        // nothing goes past it to the errors counted
+        assert_eq!(gpu.errors(), 0);
+        // and a device lost
+        gpu.device.destroy();
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        assert!(matches!(gpu.checked(|| 7), Err(GpuError::Lost)));
+    }
 
     #[test]
     fn canvases_on_one_device_share_their_pipelines() {

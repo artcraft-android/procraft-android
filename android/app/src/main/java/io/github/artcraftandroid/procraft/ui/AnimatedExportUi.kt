@@ -32,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -50,6 +52,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
+import io.github.artcraftandroid.procraft.core.exportFpsAt
+import io.github.artcraftandroid.procraft.core.exportFpsFraction
+import io.github.artcraftandroid.procraft.core.exportFpsLabel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -67,9 +72,9 @@ private val CapsuleEdge get() = if (Pc.light) Color(0xFFE0E0E0) else Color(0xFF3
 private val DoneBlue = Color(0xFF0190FF)
 
 /**
- * Sharing the layers as an animation: the frames playing, the settings (the size, and per format
- * dithering and a transparent background), Cancel, and the round Done that exports and shares.
- * The file is made as the settings change, to show its size.
+ * Sharing the layers as an animation: the frames playing, the settings (the size, the frame rate,
+ * and per format dithering and a transparent background), Cancel, and the round Done that exports
+ * and shares. The file is made as the settings change, to show its size.
  */
 @Composable
 fun AnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
@@ -77,14 +82,18 @@ fun AnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
     val scope = rememberCoroutineScope()
     var webReady by remember { mutableStateOf(false) }
     var dither by remember { mutableStateOf(true) }
+    var perFramePalette by remember { mutableStateOf(false) }
     var transparent by remember { mutableStateOf(false) }
+    // where the frame rate slider is, starting at the artwork's own rate; the rate as it shows it
+    var fpsAt by remember { mutableFloatStateOf(exportFpsFraction(vm.artworkFps())) }
+    val fps = exportFpsAt(fpsAt)
     var exporting by remember { mutableStateOf(false) }
     val canTransparent = format == CanvasViewModel.Animated.GIF || format == CanvasViewModel.Animated.PNG
     // the file as the settings make it, for its size
     var bytes by remember { mutableStateOf<Long?>(null) }
-    LaunchedEffect(webReady, dither, transparent) {
+    LaunchedEffect(webReady, dither, perFramePalette, transparent, fps) {
         bytes = null
-        bytes = vm.exportAnimation(format, webReady, dither, transparent)?.length()
+        bytes = vm.exportAnimation(format, webReady, dither, perFramePalette, transparent, fps)?.length()
     }
     ExportScreen(
         title = format.title,
@@ -96,7 +105,7 @@ fun AnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
             exporting = true
             scope.launch {
                 // the export card shows how far it has come, and says if it couldn't be made
-                val file = vm.shareAnimation(format, webReady, dither, transparent)
+                val file = vm.shareAnimation(format, webReady, dither, perFramePalette, transparent, fps)
                 exporting = false
                 if (file != null) {
                     vm.endAnimatedExport()
@@ -123,8 +132,11 @@ fun AnimatedExport(vm: CanvasViewModel, format: CanvasViewModel.Animated) {
         },
     ) {
         Segments(listOf("Max Resolution", "Web Ready"), if (webReady) 1 else 0) { webReady = it == 1 }
-        Spacer(Modifier.height(6.5.dp))
-        if (format == CanvasViewModel.Animated.GIF) SettingRow("Dithering", dither) { dither = it }
+        FpsSlider(fpsAt, exportFpsLabel(fps)) { fpsAt = it }
+        if (format == CanvasViewModel.Animated.GIF) {
+            SettingRow("Dithering", dither) { dither = it }
+            SettingRow("Per frame color palette", perFramePalette) { perFramePalette = it }
+        }
         if (canTransparent) SettingRow("Transparent background", transparent) { transparent = it }
     }
 }
@@ -306,6 +318,67 @@ private fun SettingRow(label: String, on: Boolean, onChange: (Boolean) -> Unit) 
 private val ChoiceFill get() = if (Pc.light) Color(0xFFE3E3E3) else Color(0xFF2E2E2E)
 private val SliderTrack get() = if (Pc.light) Color(0xFFDDDDDD) else Color(0xFF3E3E3E)
 
+
+/**
+ * "Frames per second" under the size's bar, down to the switches: its name and the rate [value]
+ * (caps at y 132.5, the value's ink 24 in from the panel's right), over a 3-tall track (its middle
+ * at y 160.5) blue up to a small white knob at [fraction], as measured. Dragged anywhere along it,
+ * the knob follows.
+ */
+@Composable
+private fun FpsSlider(fraction: Float, value: String, onChange: (Float) -> Unit) {
+    val change by androidx.compose.runtime.rememberUpdatedState(onChange)
+    val current by androidx.compose.runtime.rememberUpdatedState(fraction)
+    Box(Modifier.fillMaxWidth().height(FpsRowHeight)) {
+        Text("Frames per second", color = RowInk, fontSize = 17.sp, maxLines = 1, modifier = Modifier.padding(start = FpsLabelX, top = FpsLabelY))
+        Text(value, color = RowInk, fontSize = 17.sp, maxLines = 1, modifier = Modifier.align(Alignment.TopEnd).padding(end = FpsValueRight, top = FpsLabelY))
+        androidx.compose.foundation.Canvas(
+            Modifier.fillMaxWidth().height(28.dp).offset(y = FpsTrackY - 14.dp).pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    down.consume()
+                    val travel = size.width - 22.5.dp.toPx() - 23.dp.toPx()
+                    var last = down.position.x
+                    while (true) {
+                        val ev = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                        if (!ev.pressed) break
+                        change((current + (ev.position.x - last) / travel).coerceIn(0f, 1f))
+                        last = ev.position.x
+                        ev.consume()
+                    }
+                }
+            },
+        ) {
+            val y = size.height / 2f
+            val thick = 3.dp.toPx()
+            val (left, right) = 18.dp.toPx() to size.width - 18.dp.toPx()
+            // the knob's middle from 22.5 in to 23 in
+            val (x0, x1) = 22.5.dp.toPx() to size.width - 23.dp.toPx()
+            val x = x0 + (x1 - x0) * current.coerceIn(0f, 1f)
+            val corner = androidx.compose.ui.geometry.CornerRadius(thick / 2f)
+            drawRoundRect(FpsTrack, androidx.compose.ui.geometry.Offset(left, y - thick / 2f), androidx.compose.ui.geometry.Size(right - left, thick), corner)
+            drawRoundRect(Pc.Accent, androidx.compose.ui.geometry.Offset(left, y - thick / 2f), androidx.compose.ui.geometry.Size(x - left, thick), corner)
+            // 16 x 10, corners 4, over a faint shadow
+            val (w, h) = 16.dp.toPx() to 10.dp.toPx()
+            val knob = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                color = android.graphics.Color.WHITE
+                setShadowLayer(1.5.dp.toPx(), 0f, 1.dp.toPx(), 0x30000000)
+            }
+            drawContext.canvas.nativeCanvas.drawRoundRect(x - w / 2f, y - h / 2f, x + w / 2f, y + h / 2f, 4.dp.toPx(), 4.dp.toPx(), knob)
+        }
+    }
+}
+
+/**
+ * Where "Frames per second" starts and its value ends (in from the panel's sides), its top under
+ * the bar, the track's middle under the bar, and how far under the bar the switches start.
+ */
+private val FpsLabelX = 18.dp
+private val FpsValueRight = 22.dp
+private val FpsLabelY = 18.dp
+private val FpsTrackY = 50.dp
+private val FpsRowHeight = 72.5.dp
+private val FpsTrack get() = if (Pc.light) Color(0xFFDDDDDD) else Color(0xFF333333)
 
 /** One of two choices in a group, 40 tall: the chosen one blue with a tick. */
 @Composable

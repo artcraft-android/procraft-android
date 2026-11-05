@@ -598,10 +598,12 @@ mod system {
     use std::sync::atomic::{AtomicIsize, Ordering};
 
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::UI::Input::Pointer::{GetPointerPenInfo, GetPointerType, POINTER_PEN_INFO};
+    use windows::Win32::UI::Input::Pointer::{
+        GetPointerFrameInfo, GetPointerPenInfo, GetPointerType, POINTER_INFO, POINTER_PEN_INFO,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, SetWindowLongPtrW,
-        WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
+        WM_ENDSESSION, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
     };
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -627,9 +629,36 @@ mod system {
         WINIT.store(winit, Ordering::Relaxed);
     }
 
+    /// Notes what the other pointers in `id`'s frame are. winit takes a whole frame from its first
+    /// message and skips the rest, so a second finger's own messages never come here: unnoted, a
+    /// finger with a pressure would be taken for a pen, and draw whatever the finger settings say.
+    fn frame_kinds(id: u32) {
+        let mut count = 0;
+        // SAFETY: a count to fill, no pointers asked for yet
+        if unsafe { GetPointerFrameInfo(id, &mut count, None) }.is_err() || count < 2 {
+            return;
+        }
+        let mut pointers = vec![POINTER_INFO::default(); count as usize];
+        // SAFETY: room for the `count` pointers it said there are
+        if unsafe { GetPointerFrameInfo(id, &mut count, Some(pointers.as_mut_ptr())) }.is_err() {
+            return;
+        }
+        for pointer in pointers.iter().take(count as usize) {
+            if pointer.pointerType == PT_PEN || pointer.pointerType == PT_TOUCH {
+                super::pointer_kind(u64::from(pointer.pointerId), pointer.pointerType == PT_PEN);
+            }
+        }
+    }
+
     /// A pen's pointer message: its pressure and tilt kept by pointer, then the message on to
-    /// winit (a hovering pen's to the system, as the mouse's).
+    /// winit (a hovering pen's to the system, as the mouse's). And the session's end noted.
     unsafe extern "system" fn pointer_messages(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // Windows shutting down or signing out ends the app without the event loop's end: the run
+        // ended all the same, so the next start keeps its graphics backend (else it would move on,
+        // as after a crash; the artwork open is autosaved)
+        if msg == WM_ENDSESSION && wparam.0 != 0 {
+            crate::startup::gpu_ended();
+        }
         let mut hovering = false;
         if msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE || msg == WM_POINTERUP {
             // the pointer's id is the low word of `wparam`
@@ -640,6 +669,7 @@ mod system {
             if unsafe { GetPointerType(id, &mut kind) }.is_ok() && (kind == PT_PEN || kind == PT_TOUCH) {
                 super::pointer_kind(u64::from(id), kind == PT_PEN);
             }
+            frame_kinds(id);
             // a pen held above the screen (not touching it)
             let touching = (wparam.0 >> 16) & POINTER_FLAG_INCONTACT != 0;
             hovering = msg == WM_POINTERUPDATE && kind == PT_PEN && !touching;

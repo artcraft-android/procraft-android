@@ -214,17 +214,23 @@ impl SideBar {
         let mut taps = SideTaps::default();
         let ctx = ui.ctx().clone();
         let window = ctx.content_rect();
-        let top = window.top() + window.height() * pc::SIDE_BAR_CENTRE - pc::SIDE_BAR_HEIGHT / 2.0;
+        let (top, track_height) = pc::side_bar_fit(window.height());
+        // shorter tracks bring what is under each up with them
+        let shorter = pc::SLIDER_HEIGHT - track_height;
+        let opacity_top = OPACITY_TRACK_TOP - shorter;
         let left = if right { window.right() - pc::SIDE_BAR_WIDTH } else { window.left() };
-        let bar = Rect::from_min_size(pos2(left, top), vec2(pc::SIDE_BAR_WIDTH, pc::SIDE_BAR_HEIGHT));
+        let bar = Rect::from_min_size(
+            pos2(left, window.top() + top),
+            vec2(pc::SIDE_BAR_WIDTH, pc::SIDE_BAR_HEIGHT - shorter * 2.0),
+        );
         // a control's left edge in the bar, mirrored on the right
         let x = |left: f32, width: f32| if right { pc::SIDE_BAR_WIDTH - left - width } else { left };
         let at = |l: f32, y: f32, w: f32, h: f32| Rect::from_min_size(bar.min + vec2(x(l, w), y), vec2(w, h));
-        let tracks = [(Slider::Size, SIZE_TRACK_TOP, info.size), (Slider::Opacity, OPACITY_TRACK_TOP, info.opacity)];
+        let tracks = [(Slider::Size, SIZE_TRACK_TOP, info.size), (Slider::Opacity, opacity_top, info.opacity)];
         egui::Area::new(egui::Id::unique("side bar")).fixed_pos(bar.min).order(egui::Order::Middle).show(&ctx, |ui| {
             ui.set_min_size(bar.size());
             // translucent, with windows where the slider tracks are: they show what is behind
-            look.shape(ui, "side bar", right, bar, |pixmap, t| {
+            look.shape(ui, "side bar", (right, track_height.to_bits()), bar, |pixmap, t| {
                 let mut pb = tiny_skia::PathBuilder::new();
                 let c = pc::SIDE_BAR_CORNER;
                 let corners = if right { [c, 0.0, 0.0, c] } else { [0.0, c, c, 0.0] };
@@ -232,14 +238,14 @@ impl SideBar {
                 for (_, y, _) in tracks {
                     let track = Rect::from_min_size(
                         pos2(x(SLIDER_LEFT, pc::SLIDER_WIDTH), y),
-                        vec2(pc::SLIDER_WIDTH, pc::SLIDER_HEIGHT),
+                        vec2(pc::SLIDER_WIDTH, track_height),
                     );
                     round_rect(&mut pb, track, [pc::SLIDER_CORNER; 4]);
                 }
                 fill(pixmap, pb.finish(), argb(pc::SIDE_BAR), t);
             });
             for (which, y, value) in tracks {
-                let rect = at(SLIDER_LEFT, y, pc::SLIDER_WIDTH, pc::SLIDER_HEIGHT);
+                let rect = at(SLIDER_LEFT, y, pc::SLIDER_WIDTH, track_height);
                 self.slider(ui, look, session, which, rect, value);
             }
             // a slider held still keeps its panel up, until the next press elsewhere
@@ -252,7 +258,7 @@ impl SideBar {
             }
             // the modify button: held, it changes what a canvas touch does; tapped, it does what
             // Tap □ is set to (opens the eyedropper)
-            let modify = at(5.0, 191.0, 40.0, 41.0);
+            let modify = at(5.0, 191.0 - shorter, 40.0, 41.0);
             let response = ui.interact(modify, ui.scope_id().with("modify"), Sense::click_and_drag());
             taps.modify_down = response.is_pointer_button_down_on();
             taps.modify_tapped = response.clicked();
@@ -267,7 +273,7 @@ impl SideBar {
             for (icon, enabled, y, undo) in
                 [(&icons::UNDO, info.can_undo, 430.5, true), (&icons::REDO, info.can_redo, 472.5, false)]
             {
-                let rect = at(5.0, y, 40.0, 41.0);
+                let rect = at(5.0, y - shorter * 2.0, 40.0, 41.0);
                 let tapped = ui.interact(rect, ui.scope_id().with(("side", undo)), Sense::click()).clicked();
                 if tapped && enabled {
                     if undo {
@@ -276,13 +282,20 @@ impl SideBar {
                         taps.redo = true;
                     }
                 }
-                // a 50 frame shown 36 across
-                let tint = if enabled { argb(pc::SIDE_GLYPH) } else { argb(pc::SIDE_GLYPH_DISABLED) };
-                look.icon(ui, icon, rect.center(), 36.0, tint);
+                // a 50 frame shown 36 across; turning on or off (a stroke kept, the last step
+                // undone) fades over 0.15 s either way, linear, as measured: the lit glyph over
+                // the unlit one
+                let lit = ui.ctx().animate_bool_with_time(ui.scope_id().with(("side lit", undo)), enabled, 0.15);
+                if lit < 1.0 {
+                    look.icon(ui, icon, rect.center(), 36.0, argb(pc::SIDE_GLYPH_DISABLED));
+                }
+                if lit > 0.0 {
+                    look.icon(ui, icon, rect.center(), 36.0, argb(pc::SIDE_GLYPH).gamma_multiply(lit));
+                }
             }
         });
         if let Some((which, kept)) = self.panel {
-            let y = if which == Slider::Size { SIZE_TRACK_TOP } else { OPACITY_TRACK_TOP };
+            let y = if which == Slider::Size { SIZE_TRACK_TOP } else { opacity_top };
             let left = x(SLIDER_LEFT + pc::SLIDER_WIDTH + SLIDER_PANEL_GAP, SLIDER_PANEL_SIDE);
             let min = bar.min + vec2(left, y - SLIDER_PANEL_RISE);
             let rect = Rect::from_min_size(min, vec2(SLIDER_PANEL_SIDE, SLIDER_PANEL_SIDE));
@@ -306,7 +319,7 @@ impl SideBar {
     /// pulled onto it, and a tap on one goes there. On a notch, the thumb shows a blue bar.
     fn slider(&mut self, ui: &Ui, look: &mut Look, session: &CanvasSession, which: Slider, rect: Rect, value: f32) {
         let size = which == Slider::Size;
-        let travel = pc::SLIDER_HEIGHT - pc::THUMB_HEIGHT - pc::THUMB_INSET * 2.0;
+        let travel = rect.height() - pc::THUMB_HEIGHT - pc::THUMB_INSET * 2.0;
         let response = ui.interact(rect, ui.scope_id().with(("slider", which)), Sense::click_and_drag());
         let set = |v: f32| match which {
             Slider::Size => session.set_brush_size(v),

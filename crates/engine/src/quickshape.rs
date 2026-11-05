@@ -501,8 +501,9 @@ fn polygon(pts: &[Vec2], n: usize) -> Option<Shape> {
 }
 
 /// The ellipse with the stroke's centre and spread: for points evenly round an ellipse, the
-/// spread along each axis is half the axis squared.
-fn fit_ellipse(pts: &[Vec2]) -> Shape {
+/// spread along each axis is half the axis squared. Its first axis points to where the stroke
+/// began.
+pub fn fit_ellipse(pts: &[Vec2]) -> Shape {
     let (c, weight) = pts.windows(2).fold((Vec2::ZERO, 0.0f32), |(sum, w), pair| match pair {
         [a, b] => {
             let l = a.distance(*b);

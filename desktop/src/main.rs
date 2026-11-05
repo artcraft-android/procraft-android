@@ -56,6 +56,7 @@ mod sound;
 mod source_editor;
 mod startup;
 mod studio;
+mod system_clipboard;
 mod text;
 mod timelapse;
 mod tool_header;
@@ -215,8 +216,19 @@ fn main() {
         tap_held: None,
         closed: false,
     };
-    if let Err(e) = event_loop.run_app(&mut app) {
-        log::error!("event loop: {e}");
+    // a panic on the window's thread ends the app: said, rather than the window just vanishing
+    // (its message and place are in the log already)
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| event_loop.run_app(&mut app))) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::error!("event loop: {e}"),
+        Err(panic) => {
+            if let Some(screen) = &app.screen {
+                screen.window.set_visible(false);
+            }
+            startup::say_stopped(procraft_gpu::panic_message(panic.as_ref()));
+            // what the app held is let go by the system: a driver that panicked may not take it back
+            std::process::exit(101);
+        }
     }
 }
 
@@ -308,14 +320,16 @@ impl ApplicationHandler for App {
         // a pen's lean, which winit's touches leave out (on Wayland the whole pen)
         pen::watch(&window, self.wake.clone());
         // from the backend the last run used, or the next if that run never ended
-        let screen = match Screen::new(window, startup::gpu_start(procraft_gpu::Gpu::backend_count())) {
+        let from = startup::gpu_start(procraft_gpu::Gpu::backend_count());
+        let tried = startup::gpu_tried();
+        let screen = match Screen::new(window, from, tried, startup::gpu_trying, self.wake.clone()) {
             Ok((s, backend)) => {
-                startup::gpu_running(backend);
+                startup::gpu_made(backend);
                 s
             }
             Err(e) => {
-                log::error!("no GPU for the window: {e}");
-                files::tell("ProCraft can't draw", &format!("No GPU device for the window: {e}"));
+                log::error!("no GPU for the window:\n{e}");
+                files::tell("ProCraft can't draw", &startup::no_gpu_text(&e));
                 event_loop.exit();
                 return;
             }
@@ -383,11 +397,12 @@ impl ApplicationHandler for App {
             }
             event => {
                 let Some(session) = session else { return };
-                // with a popover open, a press on the canvas only closes it (a brush library alone
-                // closes and paints); while the artwork is being exported none reaches it
-                // (nothing the export would end is started)
-                let blocked =
-                    (self.ui.popover_open && !self.ui.library_lets_paint) || files::exporting_since().is_some();
+                // with a popover open, a press on the canvas only closes it (a panel alone lets it
+                // through, to wait there to be a tap or a drag); while the artwork is being
+                // exported none reaches it (nothing the export would end is started)
+                let through = self.ui.popover_open && self.ui.panel_lets_through;
+                let blocked = (self.ui.popover_open && !through) || files::exporting_since().is_some();
+                session.set_touch_panel_open(through);
                 let canvas = self.ui.canvas_rect;
                 let over = |p: (f32, f32)| blocked || screen.over_interface(p, canvas);
                 if self.input.on_event(&session, &event, response.consumed, over) {
@@ -436,6 +451,9 @@ impl ApplicationHandler for App {
         if self.screen.as_ref().is_some_and(|s| s.gpu.is_lost()) {
             self.gpu_lost(event_loop);
             return;
+        }
+        if let Some(fine) = self.screen.as_mut().and_then(Screen::canvases_made) {
+            self.canvases_made(fine, event_loop);
         }
         // what the files written meanwhile had to say; looked at again soon while any is writing
         files::tell_what_was_told();
@@ -799,7 +817,9 @@ impl App {
     /// go on as they are. None: the event is held back.
     fn tap_assist(&mut self, event: WindowEvent) -> Option<WindowEvent> {
         let WindowEvent::Touch(touch) = &event else { return Some(event) };
-        if !self.ui.tap_assistance() || touch.force.is_some() {
+        // (a finger may give a pressure too: the system says which it is)
+        let pen = crate::pen::is_pen(touch.id).unwrap_or(touch.force.is_some());
+        if !self.ui.tap_assistance() || pen {
             return Some(event);
         }
         let held = self.tap_held.filter(|(id, _, _)| *id == touch.id);
@@ -1012,14 +1032,32 @@ impl App {
         self.projection = None;
         self.screen = None;
         files::tell("The graphics device stopped", "ProCraft starts again, with the artwork as it was last saved.");
-        match std::env::current_exe() {
-            Ok(me) => {
-                if let Err(e) = std::process::Command::new(me).spawn() {
-                    log::error!("starting again: {e}");
-                }
-            }
-            Err(e) => log::error!("starting again: {e}"),
+        startup::start_again(None);
+        event_loop.exit();
+    }
+
+    /// The canvases' pipelines are made, `fine` without a GPU error. A backend that fails on them
+    /// gives way to the next: the app starts again on it while nothing is open or being read
+    /// (else the next start takes it), unless it is the last there is (then kept as it is).
+    fn canvases_made(&mut self, fine: bool, event_loop: &ActiveEventLoop) {
+        let Some((tried, last)) = self.screen.as_ref().map(|s| (s.tried, s.last)) else { return };
+        startup::gpu_prepared(fine || last);
+        if fine || last {
+            return;
         }
+        let busy = self.session.is_some()
+            || self.reading_artwork.is_some()
+            || self.reading_photo.is_some()
+            || self.importing.is_some()
+            || files::still_writing();
+        if busy || !startup::kept() {
+            log::warn!("the canvases' pipelines failed on this graphics backend: the next start takes the next");
+            return;
+        }
+        log::warn!("the canvases' pipelines failed on this graphics backend: starting again on the next");
+        self.screen = None;
+        self.closed = true;
+        startup::start_again(Some(tried));
         event_loop.exit();
     }
 
