@@ -862,6 +862,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     val brushBlendModeList: List<BlendModeInfo> = brushBlendModes()
     /** The modes a brush's grain blends by, as the studio lists them. */
     val grainBlendModeList: List<BlendModeInfo> = grainBlendModes()
+    val combineBlendModeList: List<BlendModeInfo> = io.github.artcraftandroid.procraft.core.combineBlendModes()
 
     init {
         refreshGallery()
@@ -4143,12 +4144,68 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun studio(key: String): Float = studioValues[key] ?: 0f
 
+    /** The studio's brush is a dual brush, and its second part shows. */
+    var studioDual by mutableStateOf(false)
+        private set
+    var studioSecond by mutableStateOf(false)
+        private set
+    /** Its two parts' sample strokes, and how they combine. */
+    var studioParts by mutableStateOf<List<ImageBitmap?>>(listOf(null, null))
+        private set
+    var studioCombineMode by androidx.compose.runtime.mutableIntStateOf(0)
+        private set
+    /** The page the part not shown was left on. */
+    private var otherPartTab = 0
+    private var studioPartsJob: Job? = null
+
+    /** Shows a dual brush's first or [second], each on the page it was left on. */
+    fun showStudioPart(second: Boolean) {
+        val s = session ?: return
+        if (second == studioSecond) return
+        studioSecond = second
+        s.studioShowSecond(second)
+        otherPartTab = studioTab.also { studioTab = otherPartTab }
+        readStudio()
+    }
+
+    fun changeStudioCombineMode(mode: Int) {
+        val s = session ?: return
+        s.setStudioCombineMode(mode.toUInt())
+        studioCombineMode = mode
+        refreshStudioPreview()
+        syncPad()
+    }
+
+    /** Draws the parts' sample strokes again, a moment after the last change. */
+    private fun refreshStudioParts() {
+        val s = session ?: return
+        if (!studioDual) return
+        studioPartsJob?.cancel()
+        studioPartsJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(STUDIO_PREVIEW_DELAY_MS)
+            val parts = withContext(Dispatchers.Default) {
+                listOf(false, true).map { second ->
+                    s.studioPartPreview(second, 680u, 222u)?.let { t ->
+                        val bitmap = io.github.artcraftandroid.procraft.ui.CanvasSpace.tag(Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), Bitmap.Config.ARGB_8888))
+                        bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
+                        bitmap.asImageBitmap()
+                    }
+                }
+            }
+            if (studioOpen) studioParts = parts
+        }
+    }
+
     /** Opens the studio on the current tool's brush. */
     fun openStudio() {
         val s = session ?: return
         // the brush library stays open under it, so Cancel and Done go back to it
         if (panel != Panel.BRUSHES) closePanels()
         studioName = s.studioBegin()
+        studioDual = s.studioIsDual()
+        studioSecond = false
+        otherPartTab = 0
+        studioCombineMode = s.studioCombineMode().toInt()
         // each visit's pad paints in white, black with the light interface
         padColor = if (lightInterface) PAD_BLACK else PAD_WHITE
         readStudio()
@@ -4429,6 +4486,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun refreshStudioPreview() {
         val s = session ?: return
         val b = currentBrush ?: return
+        refreshStudioParts()
         studioPreviewJob?.cancel()
         studioPreviewJob = viewModelScope.launch {
             kotlinx.coroutines.delay(STUDIO_PREVIEW_DELAY_MS)

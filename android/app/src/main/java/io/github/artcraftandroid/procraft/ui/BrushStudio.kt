@@ -69,6 +69,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -390,18 +391,103 @@ private fun BlendPicker(vm: CanvasViewModel, c: StudioControl.Picker) {
     }
 }
 
+/** The pages a dual brush's second has: the first alone has the rest, which go for the pair. */
+private val SecondPages = setOf("Stroke path", "Stabilization", "Taper", "Shape", "Grain", "Rendering", "Dynamics", "Stylus", "Properties")
+/** The two parts heading the pages' card: each this tall, this far apart; the bar by the one shown. */
+private val PartHeight = 61.dp
+private val PartGap = 3.dp
+private val PartBar = 5.dp
+/** The room they take before the pages (with the list's own 4 gap). */
+private val PartsHeight = 146.dp
+/** Tapped, the part shown opens both as cards, Combine Mode between. */
+private val PartCardWidth = 340.dp
+private val PartCardHeight = 111.dp
+private val PartCardFill = Color(0xFF212121)
+private val CombineRow = 51.dp
+private val CombineListLeft = 368.dp
+
+/** A dual brush's two parts: the one shown barred; tapped, it opens their cards, and the other shows. */
+@Composable
+private fun StudioParts(vm: CanvasViewModel) {
+    var cards by remember { mutableStateOf(false) }
+    var list by remember { mutableStateOf(false) }
+    var at by remember { mutableStateOf(IntOffset.Zero) }
+    var rowY by remember { mutableFloatStateOf(0f) }
+    Column(
+        Modifier.fillMaxWidth().height(PartsHeight).onGloballyPositioned {
+            val p = it.positionInWindow()
+            at = IntOffset(p.x.roundToInt(), p.y.roundToInt())
+        },
+        verticalArrangement = Arrangement.spacedBy(PartGap),
+    ) {
+        for ((i, second) in listOf(false, true).withIndex()) {
+            Box(Modifier.fillMaxWidth().height(PartHeight).tap { if (second == vm.studioSecond) cards = true else vm.showStudioPart(second) }) {
+                vm.studioParts.getOrNull(i)?.let { Image(it, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
+                if (second == vm.studioSecond) Box(Modifier.size(PartBar, PartHeight - 1.dp).clip(RoundedCornerShape(2.dp)).background(Pc.Accent))
+            }
+        }
+    }
+    if (cards) {
+        val place = remember(at) {
+            object : androidx.compose.ui.window.PopupPositionProvider {
+                override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize) = at
+            }
+        }
+        // a tap outside closes them, but for one on Combine Mode's own list
+        PcPopup(
+            textScale = MATCHED_POPUP_TEXT,
+            popupPositionProvider = place,
+            onDismissRequest = { if (!list) cards = false },
+            properties = androidx.compose.ui.window.PopupProperties(focusable = !list),
+        ) {
+            Column(Modifier.width(PartCardWidth).clip(RoundedCornerShape(12.dp)).background(StudioTabs), verticalArrangement = Arrangement.spacedBy(PartGap)) {
+                PartCard(vm, 0, "Primary", second = false)
+                Row(
+                    Modifier.fillMaxWidth().height(CombineRow).onGloballyPositioned { rowY = it.boundsInWindow().center.y }.tap { list = true }.padding(start = 11.dp, end = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Combine Mode", color = StudioDim, fontSize = 17.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                    val name = vm.combineBlendModeList.firstOrNull { it.id.toInt() == vm.studioCombineMode }?.name.orEmpty()
+                    Text(name, color = Pc.Accent, fontSize = 15.sp, maxLines = 1)
+                    Spacer(Modifier.width(6.dp))
+                    Icon(PcIcons.ChevronRight, contentDescription = null, tint = StudioDim, modifier = Modifier.size(24.dp))
+                }
+                PartCard(vm, 1, "Secondary", second = true)
+            }
+        }
+    }
+    if (list) {
+        BlendModeList(vm.combineBlendModeList, vm.studioCombineMode, rowY, CombineListLeft) { picked ->
+            list = false
+            picked?.let { vm.changeStudioCombineMode(it) }
+        }
+    }
+}
+
+/** A part as a card: blue when it shows; tapped, it shows, the cards staying. */
+@Composable
+private fun PartCard(vm: CanvasViewModel, i: Int, name: String, second: Boolean) {
+    val on = second == vm.studioSecond
+    Box(Modifier.fillMaxWidth().height(PartCardHeight).clip(RoundedCornerShape(12.dp)).background(if (on) Pc.Accent else PartCardFill).tap { vm.showStudioPart(second) }) {
+        vm.studioParts.getOrNull(i)?.let {
+            Image(it, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(horizontal = 30.dp, vertical = 20.dp))
+        }
+        Text(name, color = if (on) Color.White else StudioPageInk, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(start = 11.dp, top = 7.dp))
+    }
+}
+
 private val ModeRow = 38.dp
 private val ModeListWidth = 250.dp
 /** At most this many rows show at once; the rest scroll. */
 private const val MODE_ROWS_SHOWN = 11
 
 /**
- * The blend modes in the layer panel's order, as a light list 10 from the window's right with the
- * current one ([current], an engine number) over the window height [centreY]; a tap picks one,
- * a tap outside it closes it ([onDone] with null).
+ * The blend modes in the layer panel's order, as a light list 10 from the window's right (or [left]
+ * from its left) with the current one ([current], an engine number) over the window height
+ * [centreY]; a tap picks one, a tap outside it closes it ([onDone] with null).
  */
 @Composable
-private fun BlendModeList(modes: List<io.github.artcraftandroid.procraft.core.BlendModeInfo>, current: Int, centreY: Float, onDone: (Int?) -> Unit) {
+private fun BlendModeList(modes: List<io.github.artcraftandroid.procraft.core.BlendModeInfo>, current: Int, centreY: Float, left: Dp? = null, onDone: (Int?) -> Unit) {
     val density = LocalDensity.current
     val chosen = modes.indexOfFirst { it.id.toInt() == current }.coerceAtLeast(0)
     val shown = minOf(MODE_ROWS_SHOWN, modes.size)
@@ -415,7 +501,7 @@ private fun BlendModeList(modes: List<io.github.artcraftandroid.procraft.core.Bl
                 val margin = with(density) { 10.dp.roundToPx() }
                 val top = (centreY - (chosen - first + 0.5f) * pitch).roundToInt()
                 return IntOffset(
-                    windowSize.width - margin - popupContentSize.width,
+                    left?.let { with(density) { it.roundToPx() } } ?: (windowSize.width - margin - popupContentSize.width),
                     top.coerceIn(margin, (windowSize.height - margin - popupContentSize.height).coerceAtLeast(margin)),
                 )
             }
@@ -560,7 +646,9 @@ private fun StudioPagesCard(vm: CanvasViewModel) {
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 8.dp, end = 8.dp, top = 17.dp, bottom = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            if (vm.studioDual) StudioParts(vm)
             STUDIO_TABS.forEachIndexed { i, tab ->
+                if (vm.studioSecond && tab.name !in SecondPages) return@forEachIndexed
                 val on = vm.studioTab == i
                 Row(
                     Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(22.dp)).background(if (on) Pc.Accent else Color.Transparent).tap { vm.studioTab = i },

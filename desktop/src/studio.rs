@@ -132,6 +132,21 @@ const fn toggle(key: &'static str, label: &'static str) -> Control {
 
 const FILTERING: &[&str] = &["No filtering", "Classic filtering", "Improved filtering"];
 
+/// The pages a dual brush's second has: the first alone has the rest, which go for the pair.
+const SECOND_PAGES: &[&str] =
+    &["Stroke path", "Stabilization", "Taper", "Shape", "Grain", "Rendering", "Dynamics", "Stylus", "Properties"];
+/// A dual brush's two parts head the pages' card: each this tall, this far apart, with a bar this
+/// wide by the one shown; the pages start this far under the first.
+const PART_HEIGHT: f32 = 61.0;
+const PART_PITCH: f32 = 64.0;
+const PART_BAR: f32 = 5.0;
+const PARTS_HEIGHT: f32 = 150.0;
+/// The shown part tapped opens both as cards over the column, how they combine between them.
+const PART_CARD: egui::Vec2 = vec2(340.0, 111.0);
+const PART_CARD_FILL: u32 = 0xFF212121;
+const COMBINE_ROW: f32 = 51.0;
+const PART_CARD_GAP: f32 = 3.0;
+
 const PAGES: &[Page] = &[
     Page {
         name: "Stroke path",
@@ -705,6 +720,15 @@ pub struct Studio {
     /// opened), while open.
     keypad: Option<Keypad>,
     blend_list: Option<(&'static str, f32, bool)>,
+    /// A dual brush: whether this is one, the second part showing, the page the other part was
+    /// on, its parts' sample strokes (and whether to draw them again), and where their cards
+    /// are, while open.
+    dual: bool,
+    second: bool,
+    other_tab: usize,
+    part_previews: [Option<TextureHandle>; 2],
+    parts_stale: bool,
+    part_cards: Option<Pos2>,
     /// A wide window (the pages' card, sources as squares); the brush's About; the pad shown as a
     /// sphere (and since when it was told).
     wide: bool,
@@ -720,6 +744,11 @@ impl Studio {
     /// away).
     pub fn begin(&mut self, ctx: &egui::Context, session: &CanvasSession, new: Option<(u32, u32)>) {
         self.name = session.studio_begin();
+        self.dual = session.studio_is_dual();
+        self.second = false;
+        self.other_tab = 0;
+        self.parts_stale = self.dual;
+        self.part_cards = None;
         self.new_brush = new;
         // white on the dark pad, black on the light
         self.pad_colour = if crate::look::light() { PAD_BLACK } else { PAD_WHITE };
@@ -764,6 +793,108 @@ impl Studio {
         self.values.get(key).copied().unwrap_or(0.0)
     }
 
+    /// Shows a dual brush's first or `second`, each on the page it was left on.
+    fn show_part(&mut self, ctx: &egui::Context, session: &CanvasSession, second: bool) {
+        if second != self.second {
+            self.second = second;
+            std::mem::swap(&mut self.tab, &mut self.other_tab);
+            session.studio_show_second(second);
+            self.read(ctx, session);
+        }
+    }
+
+    /// The two parts' sample strokes, drawn again when something has changed and nothing is held.
+    fn read_part_previews(&mut self, ctx: &egui::Context, session: &CanvasSession) {
+        if !self.dual || !self.parts_stale || ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        self.parts_stale = false;
+        for (i, second) in [false, true].into_iter().enumerate() {
+            let Some(t) = session.studio_part_preview(second, 680, 222) else { continue };
+            let image = egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
+            let texture = ctx.load_texture(format!("studio part {i}"), image, egui::TextureOptions::LINEAR);
+            if let Some(shown) = self.part_previews.get_mut(i) {
+                *shown = Some(texture);
+            }
+        }
+    }
+
+    /// Part `i`'s sample stroke, in `rect`.
+    fn part_preview(&self, ui: &Ui, i: usize, rect: Rect) {
+        if let Some(Some(texture)) = self.part_previews.get(i) {
+            let size = texture.size_vec2();
+            let scale = (rect.width() / size.x).min(rect.height() / size.y);
+            let at = Rect::from_center_size(rect.center(), size * scale);
+            let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
+            ui.painter().image(texture.id(), at, uv, Color32::WHITE);
+        }
+    }
+
+    /// The two parts, at `top`, the shown one barred: tapped it opens their cards, the other shows.
+    fn parts(&mut self, ui: &mut Ui, session: &CanvasSession, card: Rect, top: f32) {
+        for (i, second) in [false, true].into_iter().enumerate() {
+            let at = pos2(card.left() + 8.0, top + i as f32 * PART_PITCH);
+            let row = Rect::from_min_size(at, vec2(card.width() - 16.0, PART_HEIGHT));
+            self.part_preview(ui, i, row);
+            if second == self.second {
+                let bar = Rect::from_min_size(row.min, vec2(PART_BAR, PART_HEIGHT - 1.0));
+                ui.painter().rect_filled(bar, 2, argb(pc::ACCENT));
+            }
+            if ui.interact(row, ui.scope_id().with(("part", i)), Sense::click()).clicked() {
+                if second == self.second {
+                    self.part_cards = Some(pos2(card.left() + 8.0, top));
+                } else {
+                    self.show_part(ui.ctx(), session, second);
+                }
+            }
+        }
+    }
+
+    /// The parts as cards over the column, Combine Mode between them: a card tapped shows that
+    /// part and they stay; a tap anywhere else closes them.
+    fn part_cards_view(&mut self, ctx: &egui::Context, look: &mut Look, session: &CanvasSession) {
+        let Some(at) = self.part_cards else { return };
+        let row_top = at.y + PART_CARD.y + PART_CARD_GAP;
+        let row = Rect::from_min_size(pos2(at.x, row_top), vec2(PART_CARD.x, COMBINE_ROW));
+        let below = pos2(at.x, row.bottom() + PART_CARD_GAP);
+        let whole = Rect::from_min_size(at, vec2(PART_CARD.x, below.y + PART_CARD.y - at.y));
+        egui::Area::new(Id::unique("studio parts")).fixed_pos(at).order(Order::Foreground).show(ctx, |ui| {
+            ui.allocate_rect(whole, Sense::click());
+            ui.painter().rect_filled(whole, 12, argb(TABS_FILL));
+            for (i, (second, name, top)) in [(false, "Primary", at), (true, "Secondary", below)].into_iter().enumerate()
+            {
+                let card = Rect::from_min_size(top, PART_CARD);
+                let on = second == self.second;
+                ui.painter().rect_filled(card, 12, if on { argb(pc::ACCENT) } else { argb(PART_CARD_FILL) });
+                let label = pos2(card.left() + 11.0, card.top() + 7.0);
+                let ink = if on { Color32::WHITE } else { argb(PAGE_INK) };
+                text(ui.painter(), label, Align2::LEFT_TOP, name, 12.5, Weight::SemiBold, ink);
+                self.part_preview(ui, i, card.shrink2(vec2(30.0, 20.0)));
+                if ui.interact(card, ui.scope_id().with(("part card", i)), Sense::click()).clicked() {
+                    self.show_part(ctx, session, second);
+                }
+            }
+            let mode = session.studio_combine_mode();
+            let name = procraft_core::combine_blend_modes()
+                .into_iter()
+                .find(|m| m.id == mode)
+                .map_or(String::new(), |m| m.name);
+            let left = pos2(row.left() + 11.0, row.center().y);
+            text(ui.painter(), left, Align2::LEFT_CENTER, "Combine Mode", 17.0, Weight::Regular, argb(DIM));
+            let right = pos2(row.right() - 42.0, row.center().y);
+            text(ui.painter(), right, Align2::RIGHT_CENTER, &name, 15.0, Weight::Regular, argb(pc::ACCENT));
+            look.icon(ui, &icons::CHEVRON_RIGHT, pos2(row.right() - 18.0, row.center().y), 24.0, argb(DIM));
+            if ui.interact(row, ui.scope_id().with("combine mode"), Sense::click()).clicked() {
+                self.blend_list = Some((COMBINE_MODE, row.center().y, true));
+            }
+        });
+        let outside =
+            ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !whole.contains(p)));
+        if outside && self.blend_list.is_none() {
+            self.part_cards = None;
+        }
+    }
+
     fn set(&mut self, session: &Arc<CanvasSession>, key: &str, value: f32) {
         self.values.insert(key.to_owned(), value);
         session.set_studio_setting(key.to_owned(), value);
@@ -775,6 +906,7 @@ impl Studio {
             }
         }
         self.preview_due = Some(Instant::now() + PREVIEW_DELAY);
+        self.parts_stale = self.dual;
         self.sync_pad(session);
     }
 
@@ -874,7 +1006,7 @@ impl Studio {
                 (rail, Rect::from_min_max(pos2(rail.right(), line.bottom()), screen.max), pad)
             };
             if wide {
-                self.pages_card(ui, look, pages);
+                self.pages_card(ui, look, session, pages);
             } else {
                 self.rail(ui, look, pages);
             }
@@ -892,6 +1024,8 @@ impl Studio {
         {
             self.keypad = Some(keypad);
         }
+        self.read_part_previews(ctx, session);
+        self.part_cards_view(ctx, look, session);
         self.blend_list_view(ctx, look, session);
         let mut curve = std::mem::take(&mut self.curve_points);
         if self.curve.menu(ctx, &mut curve) {
@@ -913,13 +1047,20 @@ impl Studio {
     }
 
     /// Wide: the pages by icon and name on a card headed "Brush Studio".
-    fn pages_card(&mut self, ui: &mut Ui, look: &mut Look, card: Rect) {
+    fn pages_card(&mut self, ui: &mut Ui, look: &mut Look, session: &CanvasSession, card: Rect) {
         ui.painter().rect_filled(card, 20, argb(TABS_FILL));
         ui.painter().rect_stroke(card, 20, Stroke::new(1.0, argb(CARD_EDGE)), egui::StrokeKind::Inside);
         let at = pos2(card.left() + 24.0, card.top() + 19.0);
         text(ui.painter(), at, Align2::LEFT_TOP, "Brush Studio", 23.0, Weight::Bold, argb(CARD_TITLE));
         let mut y = card.top() + 19.0 + 29.0 + 17.0;
+        if self.dual {
+            self.parts(ui, session, card, y);
+            y += PARTS_HEIGHT;
+        }
         for (i, page) in PAGES.iter().enumerate() {
+            if self.second && !SECOND_PAGES.contains(&page.name) {
+                continue;
+            }
             let row = Rect::from_min_size(pos2(card.left() + 8.0, y), vec2(card.width() - 16.0, 44.0));
             let on = self.tab == i;
             if on {
@@ -2264,6 +2405,9 @@ fn switch_row(ui: &Ui, row: Rect, label: &str, on: bool) -> bool {
 const MODE_ROW: f32 = 38.0;
 const MODE_LIST_WIDTH: f32 = 250.0;
 const MODE_ROWS_SHOWN: usize = 11;
+/// The list of how a dual brush's parts combine: its key, and how far in it opens.
+const COMBINE_MODE: &str = "combine mode";
+const COMBINE_LIST_LEFT: f32 = 368.0;
 const MODE_LIST_FILL: u32 = 0xFFE1E1E1;
 const MODE_LIST_LINE: u32 = 0xFFCDCDCD;
 const MODE_LIST_INK: u32 = 0xFF393939;
@@ -2282,9 +2426,13 @@ impl Studio {
     /// picks one, a tap outside closes it.
     fn blend_list_view(&mut self, ctx: &egui::Context, look: &mut Look, session: &Arc<CanvasSession>) {
         let Some((key, centre, fresh)) = self.blend_list else { return };
-        let modes =
-            if key == "grain_blend" { procraft_core::grain_blend_modes() } else { procraft_core::brush_blend_modes() };
-        let current = self.value(key).round() as u32;
+        let combining = key == COMBINE_MODE;
+        let modes = match key {
+            "grain_blend" => procraft_core::grain_blend_modes(),
+            COMBINE_MODE => procraft_core::combine_blend_modes(),
+            _ => procraft_core::brush_blend_modes(),
+        };
+        let current = if combining { session.studio_combine_mode() } else { self.value(key).round() as u32 };
         let chosen = modes.iter().position(|m| m.id == current).unwrap_or(0);
         let shown = MODE_ROWS_SHOWN.min(modes.len());
         let first = chosen.saturating_sub(shown / 2).min(modes.len().saturating_sub(shown));
@@ -2293,8 +2441,9 @@ impl Studio {
         let screen = ctx.content_rect();
         let top = (centre - (chosen - first) as f32 * pitch - pitch / 2.0)
             .clamp(screen.top() + 10.0, (screen.bottom() - 10.0 - height).max(screen.top() + 10.0));
-        let rect =
-            Rect::from_min_size(pos2(screen.right() - 10.0 - MODE_LIST_WIDTH, top), vec2(MODE_LIST_WIDTH, height));
+        // the Combine Mode's beside its row, the others' over the settings
+        let left = if combining { screen.left() + COMBINE_LIST_LEFT } else { screen.right() - 10.0 - MODE_LIST_WIDTH };
+        let rect = Rect::from_min_size(pos2(left, top), vec2(MODE_LIST_WIDTH, height));
         let mut picked = None;
         egui::Area::new(Id::unique("blend list")).fixed_pos(rect.min).order(Order::Tooltip).show(ctx, |ui| {
             let shadow =
@@ -2336,7 +2485,13 @@ impl Studio {
             });
         });
         if let Some(id) = picked {
-            self.set(session, key, id as f32);
+            if combining {
+                session.set_studio_combine_mode(id);
+                self.parts_stale = true;
+                self.sync_pad(session);
+            } else {
+                self.set(session, key, id as f32);
+            }
             self.blend_list = None;
             return;
         }
