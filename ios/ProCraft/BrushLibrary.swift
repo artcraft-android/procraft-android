@@ -323,11 +323,7 @@ private struct ResultCell: View {
         ZStack(alignment: .topLeading) {
             shape.fill(selected ? Pc.rowSelected : resultFill)
             if let preview {
-                Image(uiImage: preview)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, minHeight: 81, maxHeight: 81)
-                    .clipped()
+                SampleStroke(image: preview)
             }
             BrushName(name: brush.name, selected: selected, shaded: model.shadedNames[key] == true)
                 .padding(.leading, 14)
@@ -343,6 +339,31 @@ private struct ResultCell: View {
                 model.loadPreview(brush)
             }
         }
+    }
+}
+
+/// A brush's sample stroke filling its cell's height, centred, its ends past the cell's sides. It
+/// lies over a clear view: wider than the cell, it would otherwise widen everything sized with it.
+private struct SampleStroke: View {
+    let image: UIImage
+    var tint: Color?
+
+    var body: some View {
+        Color.clear
+            .overlay {
+                if let tint {
+                    Image(uiImage: image)
+                        .renderingMode(.template)
+                        .resizable()
+                        .scaledToFill()
+                        .foregroundStyle(tint)
+                } else {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                }
+            }
+            .clipped()
     }
 }
 
@@ -728,17 +749,7 @@ private struct BrushRow: View {
                 shape.fill(selected ? Pc.rowSelected : Color.clear)
                 if let preview {
                     // the samples are drawn white: dark on the light interface's cells
-                    if Look.shared.light && !selected {
-                        Image(uiImage: preview)
-                            .renderingMode(.template)
-                            .resizable()
-                            .scaledToFill()
-                            .foregroundStyle(Color.black)
-                    } else {
-                        Image(uiImage: preview)
-                            .resizable()
-                            .scaledToFill()
-                    }
+                    SampleStroke(image: preview, tint: Look.shared.light && !selected ? .black : nil)
                 }
                 BrushName(name: brush.name, selected: selected, shaded: model.shadedNames[key] == true)
                     .padding(.leading, 18)
@@ -801,9 +812,7 @@ private struct DragGhost: View {
             ZStack(alignment: .topLeading) {
                 shape.fill(Pc.rowSelected.opacity(0.9))
                 if let preview = model.previews[key] {
-                    Image(uiImage: preview)
-                        .resizable()
-                        .scaledToFill()
+                    SampleStroke(image: preview)
                 }
                 Text(verbatim: d.name)
                     .font(.system(size: 14, weight: .semibold))
