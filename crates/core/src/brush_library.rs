@@ -548,8 +548,6 @@ impl State {
         self.set_choices.iter().find(|c| c.0 == set).map(|c| c.1)
     }
 
-    /// Notes `place` as the brush last painted with, in the Recent set (a pinned one stays where
-    /// it is): to the end if it is there already, else past the others, the oldest giving way.
     /// The brush files' grains anything here can still read: the library's, what ships, the brush
     /// as the studio found it and the last stroke's. Recent, the pinned, the tools' and the
     /// QuickMenu's brushes are places in the library, not brushes of their own, and brushes brought
@@ -562,6 +560,8 @@ impl State {
         library.chain(shipped).chain(studio).chain(last).flat_map(Brush::full_grains).map(|g| g.id).collect()
     }
 
+    /// Notes `place` as the brush last painted with, in the Recent set (a pinned one stays where
+    /// it is): to the end if it is there already, else past the others, the oldest giving way.
     pub(crate) fn note_recent(&mut self, place: (usize, usize)) {
         if self.pinned_brushes.contains(&place) {
             return;

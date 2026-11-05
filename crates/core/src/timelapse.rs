@@ -468,6 +468,10 @@ impl TimeLapse {
     /// ones before hold the only copy of their frames (they stay, and the frames since stay out
     /// of the package this time).
     pub fn segment_made(&self, plan: SegmentPlan, width: u32, height: u32, made: bool) -> Option<SegmentPlan> {
+        // (not all of what makes them clears up after a failure)
+        if !made {
+            let _ = fs::remove_file(&plan.path);
+        }
         let end = plan.frames.last().map_or(0, |f| f + 1);
         if made {
             let segments = match (plan.append, self.kept_segments()) {
