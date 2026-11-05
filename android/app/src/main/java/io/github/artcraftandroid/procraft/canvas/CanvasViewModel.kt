@@ -417,6 +417,16 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         interfacePrefs.edit().putBoolean(LIGHT_INTERFACE, on).apply()
     }
 
+    /** With a mask current, what is pasted goes into it by its brightness, not onto a new layer. */
+    var pasteIntoMask by mutableStateOf(interfacePrefs.getBoolean(PASTE_INTO_MASK, false))
+        private set
+
+    fun changePasteIntoMask(on: Boolean) {
+        pasteIntoMask = on
+        session?.setPasteIntoMask(on)
+        interfacePrefs.edit().putBoolean(PASTE_INTO_MASK, on).apply()
+    }
+
     /** How big the whole interface is set to show (1: as measured), and where its slider is while it moves. */
     var interfaceSize by mutableFloatStateOf(io.github.artcraftandroid.procraft.core.interfaceSizeKept(interfacePrefs.getFloat(INTERFACE_SIZE, 1f)))
         private set
@@ -2293,6 +2303,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.setBrushScaling(brushOnScreen)
         s.setLightInterface(lightInterface)
         s.setInterfaceSize(interfaceShown)
+        s.setPasteIntoMask(pasteIntoMask)
         // as it was left, or fitted
         if (!orientationMemory) s.forgetSavedView()
         s.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputCurve.flatMap { listOf(it.x, it.y) })
@@ -6933,6 +6944,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val RAPID_UNDO_DELAY = "rapid_undo_delay"
         const val LIGHT_INTERFACE = "light_interface"
         const val INTERFACE_SIZE = "interface_size"
+        const val PASTE_INTO_MASK = "paste_into_mask"
         const val BRUSH_CURSOR = "brush_cursor"
         const val CURSOR_SHOWS = "cursor_shows"
         const val CURSOR_STYLE = "cursor_style"

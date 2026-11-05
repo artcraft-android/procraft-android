@@ -1,6 +1,6 @@
 //! Copy, cut and paste, the canvas flipped, and pictures brought in as layers.
 
-use procraft_engine::document::LayerId;
+use procraft_engine::document::{LayerId, LayerKind};
 use procraft_engine::geom::IRect;
 
 use crate::layers::ThumbnailImage;
@@ -152,9 +152,13 @@ impl CanvasSession {
     }
 
     /// A new layer above the current one holding `image` where it was copied from (centred when
-    /// it is another size); returns its id.
+    /// it is another size), or the current mask holding its brightness if masks take what is
+    /// pasted; returns the layer's id.
     pub fn paste(&self, image: ThumbnailImage) -> Option<u64> {
-        self.add_picture(image, false, false)
+        match self.mask_to_paste_into() {
+            Some(mask) => self.paste_into(mask, image),
+            None => self.add_picture(image, false, false),
+        }
     }
 
     /// As [`paste`](Self::paste), on a private layer: one the gallery's thumbnail leaves out.
@@ -242,6 +246,35 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
+    /// The current layer, if it is a mask that takes what is pasted.
+    fn mask_to_paste_into(&self) -> Option<LayerId> {
+        let st = self.shared.lock();
+        let current = st.doc.current();
+        let is_mask = st.doc.layer(current).is_some_and(|l| l.kind == LayerKind::Mask);
+        (st.paste_into_mask && is_mask && !st.doc.is_locked(current)).then_some(current)
+    }
+
+    /// `mask` shows `image` by its brightness, what is clear in that hiding: one undo step.
+    fn paste_into(&self, mask: LayerId, image: ThumbnailImage) -> Option<u64> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let mut pixels = placed(image, st.doc.width(), st.doc.height(), false)?;
+        for px in pixels.as_chunks_mut::<4>().0 {
+            // (colours are premultiplied, so what is clear counts as black)
+            let [r, g, b, _] = px.map(u32::from);
+            let grey = ((54 * r + 183 * g + 19 * b + 128) >> 8).min(255) as u8;
+            *px = [grey, grey, grey, 255];
+        }
+        st.finish_stroke();
+        st.settle();
+        let canvas = st.canvas.as_mut()?;
+        canvas.name_next_step("paste");
+        canvas.write_layer(mask, pixels);
+        st.revision += 1;
+        self.shared.frame(st);
+        Some(mask.0)
+    }
+
     fn add_picture(&self, image: ThumbnailImage, fit: bool, private: bool) -> Option<u64> {
         let (w, h) = {
             let st = self.shared.lock();

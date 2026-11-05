@@ -63,6 +63,8 @@ pub struct Prefs {
     pub project_canvas: bool,
     /// The eyedropper picks from the current layer alone, not the canvas as composited.
     pub eyedropper_layer: bool,
+    /// With a mask current, what is pasted goes into it by its brightness, not onto a new layer.
+    pub paste_into_mask: bool,
     /// Advanced settings: an artwork opens as it was left; fitting the canvas keeps it clear of
     /// the top bar and the side bar; new artworks don't record their time-lapse; strokes made in
     /// an adjustment undo together; how far the pen moves before it counts as fast (0.25..1); the
@@ -112,6 +114,7 @@ impl Default for Prefs {
             pad_3d: false,
             project_canvas: false,
             eyedropper_layer: false,
+            paste_into_mask: false,
             orientation_memory: true,
             fit_inside: false,
             no_time_lapse: false,
@@ -180,6 +183,7 @@ impl Prefs {
                 "pad_3d" => p.pad_3d = on,
                 "project_canvas" => p.project_canvas = on,
                 "eyedropper_layer" => p.eyedropper_layer = on,
+                "paste_into_mask" => p.paste_into_mask = on,
                 "orientation_memory" => p.orientation_memory = on,
                 "fit_inside" => p.fit_inside = on,
                 "no_time_lapse" => p.no_time_lapse = on,
@@ -234,6 +238,7 @@ impl Prefs {
             format!("pad_3d {}", self.pad_3d),
             format!("project_canvas {}", self.project_canvas),
             format!("eyedropper_layer {}", self.eyedropper_layer),
+            format!("paste_into_mask {}", self.paste_into_mask),
             format!("orientation_memory {}", self.orientation_memory),
             format!("fit_inside {}", self.fit_inside),
             format!("no_time_lapse {}", self.no_time_lapse),

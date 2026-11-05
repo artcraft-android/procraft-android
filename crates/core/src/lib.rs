@@ -461,6 +461,8 @@ pub(crate) struct State {
     pub(crate) grey_view: bool,
     /// The eyedropper picks from the current layer alone, not the canvas as composited.
     pub(crate) eyedropper_from_layer: bool,
+    /// What is pasted with a mask current goes into the mask, by its brightness (experimental).
+    pub(crate) paste_into_mask: bool,
     /// Where the middle of one of the surround grid's lines is, across and down (window pixels);
     /// none given, half a point in from the top-left corner.
     grid_origin: Option<[f32; 2]>,
@@ -1253,6 +1255,7 @@ impl CanvasSession {
             interface_size: 1.0,
             grey_view: false,
             eyedropper_from_layer: false,
+            paste_into_mask: false,
             grid_origin: None,
             light: false,
             pending_doc: None,
@@ -1657,6 +1660,12 @@ impl CanvasSession {
 
     pub fn eyedropper_from_layer(&self) -> bool {
         self.shared.lock().eyedropper_from_layer
+    }
+
+    /// What is pasted with a mask current goes into the mask, by its brightness (`on`), or onto a
+    /// new layer as anything pasted does. An experimental extra, off unless asked for.
+    pub fn set_paste_into_mask(&self, on: bool) {
+        self.shared.lock().paste_into_mask = on;
     }
 
     /// How many window pixels make one interface point (the screen's density).

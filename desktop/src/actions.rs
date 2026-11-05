@@ -104,6 +104,8 @@ pub enum Act {
     ProjectCanvas,
     /// The eyedropper picks from the current layer, or the canvas as composited.
     EyedropperLayer,
+    /// With a mask current, Paste goes into it.
+    PasteIntoMask,
     ResetInput,
 }
 
@@ -382,6 +384,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                         SLIDE_HEIGHT,
                         Slid::InterfaceSize,
                     ),
+                    Switch("Paste into masks (experimental)", prefs.paste_into_mask, Some(Act::PasteIntoMask)),
                 ],
                 vec![Switch("Size & Opacity sidebar", showing.side_bar, Some(Act::SideBar))],
             ]
@@ -625,6 +628,10 @@ impl Actions {
             }
             Some(Tapped::Act(Act::EyedropperLayer)) => {
                 prefs.eyedropper_layer = !prefs.eyedropper_layer;
+                Some(Act::Prefs)
+            }
+            Some(Tapped::Act(Act::PasteIntoMask)) => {
+                prefs.paste_into_mask = !prefs.paste_into_mask;
                 Some(Act::Prefs)
             }
             Some(Tapped::Act(Act::ResetInput)) => {

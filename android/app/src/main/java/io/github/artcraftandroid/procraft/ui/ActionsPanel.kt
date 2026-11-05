@@ -306,6 +306,7 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                     onDone = vm::settleInterfaceSize,
                     onChange = vm::moveInterfaceSize,
                 ),
+                Toggle("Paste into masks (experimental)", vm.pasteIntoMask) { vm.changePasteIntoMask(it) },
             ),
             listOf(Toggle("Size & Opacity sidebar", vm.showSideBar) { vm.showSideBar = it }),
         )

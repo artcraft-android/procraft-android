@@ -2508,6 +2508,40 @@ fn a_nodes_drag_by_touch_is_one_step_of_undo_and_a_tap_on_it_none() {
 }
 
 #[test]
+fn a_mask_takes_what_is_pasted_by_its_brightness_only_when_asked() {
+    let Some(s) = session(64, 64) else { return };
+    s.set_color(1.0, 0.0, 0.0);
+    let layer = s.layers().iter().find(|l| l.current).unwrap().id;
+    assert!(s.fill_layer(layer));
+    let mask = s.add_mask(layer).unwrap();
+    s.select_layer(mask);
+    // white on the left, clear on the right: a sketch on a layer of its own
+    let rgba: Vec<u8> = (0..64 * 64).flat_map(|i| if i % 64 < 32 { [255; 4] } else { [0; 4] }).collect();
+    let picture = crate::layers::ThumbnailImage { width: 64, height: 64, rgba };
+    // as anything pasted, a new layer
+    let layers = s.layers().len();
+    let pasted = s.paste(picture.clone()).unwrap();
+    assert_eq!(s.layers().len(), layers + 1);
+    assert_ne!(pasted, mask);
+    s.undo();
+    assert_eq!(s.layers().len(), layers);
+    s.select_layer(mask);
+    // asked to, the mask holds it: the layer shows where it was bright, nowhere else
+    s.set_paste_into_mask(true);
+    assert_eq!(s.paste(picture.clone()), Some(mask));
+    assert_eq!(s.layers().len(), layers);
+    assert_eq!(pixel(&s, 10, 32), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 50, 32), [255, 255, 255, 255]);
+    // one step back to the mask as it was
+    s.undo();
+    assert_eq!(pixel(&s, 50, 32), [255, 0, 0, 255]);
+    // on any other layer it is a new layer still
+    s.select_layer(layer);
+    assert_ne!(s.paste(picture), Some(layer));
+    assert_eq!(s.layers().len(), layers + 1);
+}
+
+#[test]
 fn copy_cut_paste_and_flip() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.4);
