@@ -33,6 +33,29 @@ final class CanvasView: UIView {
     /// The brush's outline where the Pencil or the pointer hovers (shown while hovering only, as
     /// Brush cursor starts).
     private let cursor = BrushCursorView()
+    /// The Pencil's touch and its samples on their way to the core, each held until its true force
+    /// is known.
+    private var penId: UInt64?
+    private lazy var pencil = PencilHold(
+        begin: { [weak self] samples in
+            guard let self, let id = self.penId else { return }
+            self.obey(self.session.touchDown(id: id, kind: .stylus, samples: samples))
+        },
+        move: { [weak self] samples in
+            guard let self, let id = self.penId else { return }
+            self.obey(self.session.touchMove(id: id, samples: samples))
+        },
+        ahead: { [weak self] samples in
+            self?.session.strokePredict(samples: samples)
+        },
+        end: { [weak self] samples in
+            guard let self, let id = self.penId else { return }
+            self.penId = nil
+            self.obey(self.session.touchUp(id: id, samples: samples))
+        }
+    )
+    /// What Apple Pencil Pro feels.
+    private lazy var feedback = PencilFeedback(view: self)
 
     init(session: CanvasSession) {
         self.session = session
@@ -140,6 +163,8 @@ final class CanvasView: UIView {
     func detach() {
         tick?.invalidate()
         tick = nil
+        _ = pencil.cancel()
+        penId = nil
         guard attached else { return }
         session.detachWindow()
         attached = false
@@ -162,7 +187,15 @@ final class CanvasView: UIView {
             if ids.count == 1 {
                 strokeTouch = key
             }
-            out += session.touchDown(id: id, kind: kind(of: touch), samples: samples(of: touch, in: event))
+            if touch.type == .pencil {
+                pencil.down(touch)
+                penId = id
+                feedback.prepare()
+                pencil.add(coalesced(touch, in: event), sample: sample)
+                pencil.release()
+            } else {
+                out += session.touchDown(id: id, kind: kind(of: touch), samples: samples(of: touch, in: event))
+            }
         }
         obey(out)
     }
@@ -171,11 +204,16 @@ final class CanvasView: UIView {
         var out: [TouchCommand] = []
         for touch in touches {
             guard let id = ids[ObjectIdentifier(touch)] else { continue }
-            out += session.touchMove(id: id, samples: samples(of: touch, in: event))
+            if pencil.holds(touch) {
+                pencil.add(coalesced(touch, in: event), sample: sample)
+                pencil.release(predicted: (event?.predictedTouches(for: touch) ?? []).map(sample))
+            } else {
+                out += session.touchMove(id: id, samples: samples(of: touch, in: event))
+            }
         }
         // the stroke drawn ahead to where it is predicted to go, until the next move
         if let key = strokeTouch,
-           let touch = touches.first(where: { ObjectIdentifier($0) == key }),
+           let touch = touches.first(where: { ObjectIdentifier($0) == key }), !pencil.holds(touch),
            let predicted = event?.predictedTouches(for: touch), !predicted.isEmpty
         {
             session.strokePredict(samples: predicted.map(sample))
@@ -187,7 +225,12 @@ final class CanvasView: UIView {
         var out: [TouchCommand] = []
         for touch in touches {
             guard let id = ids.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
-            out += session.touchUp(id: id, samples: samples(of: touch, in: event))
+            if pencil.holds(touch) {
+                pencil.add(coalesced(touch, in: event), sample: sample)
+                pencil.lift()
+            } else {
+                out += session.touchUp(id: id, samples: samples(of: touch, in: event))
+            }
         }
         if ids.isEmpty {
             strokeTouch = nil
@@ -200,12 +243,25 @@ final class CanvasView: UIView {
         for touch in touches {
             guard let id = ids.removeValue(forKey: ObjectIdentifier(touch)) else { continue }
             // the system took the touch back (a palm, its own gesture): what it did is undone
-            out += session.touchCancelOne(id: id)
+            if pencil.holds(touch) {
+                if pencil.cancel() {
+                    out += session.touchCancelOne(id: id)
+                }
+                penId = nil
+            } else {
+                out += session.touchCancelOne(id: id)
+            }
         }
         if ids.isEmpty {
             strokeTouch = nil
         }
         obey(out)
+    }
+
+    /// True values for samples given as estimates: the stroke waiting on them goes on.
+    override func touchesEstimatedPropertiesUpdated(_ touches: Set<UITouch>) {
+        pencil.update(touches, sample: sample)
+        pencil.release()
     }
 
     // MARK: the Pencil's own gestures
@@ -257,6 +313,11 @@ final class CanvasView: UIView {
             return
         }
         cursor.show(at: point, alpha: alpha, session: session, pixels: scale, drawn: settings.cursorStyle)
+    }
+
+    /// A shape drawn snapped into place: Apple Pencil Pro feels it, where the Pencil is.
+    func shapeSnapped() {
+        feedback.completed(at: pencilAt ?? CGPoint(x: bounds.midX, y: bounds.midY))
     }
 
     /// The Pencil's double-tap, where it hovers (`hovering`, else where it last was): what Gesture
@@ -338,8 +399,12 @@ final class CanvasView: UIView {
     /// The touch's samples in this event: those the system coalesced since the last, then the
     /// latest.
     private func samples(of touch: UITouch, in event: UIEvent?) -> [PenSample] {
-        let coalesced = event?.coalescedTouches(for: touch) ?? []
-        return (coalesced.isEmpty ? [touch] : coalesced).map(sample)
+        coalesced(touch, in: event).map(sample)
+    }
+
+    private func coalesced(_ touch: UITouch, in event: UIEvent?) -> [UITouch] {
+        let all = event?.coalescedTouches(for: touch) ?? []
+        return all.isEmpty ? [touch] : all
     }
 
     private func sample(_ touch: UITouch) -> PenSample {

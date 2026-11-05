@@ -308,6 +308,7 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 model.cancelPick()
             case .shapeSnapped:
                 model.quickShapeSnapped()
+                canvas.shapeSnapped()
             case .shapeChanged:
                 model.quickShapeChanged()
             case .shapeEnded:

@@ -15,6 +15,24 @@ final class PadView: UIView {
     private var attached = false
     /// The touch painting, while one is.
     private var stroke: ObjectIdentifier?
+    /// The Pencil's samples, each held until its true force is known.
+    private lazy var pencil = PencilHold(
+        begin: { [weak self] samples in
+            guard let pad = self?.studio.pad else { return }
+            // the first stroke of one's own takes the sample scribble's place
+            pad.beginOwnStroke()
+            pad.strokeBegin(pointer: .stylus, samples: samples)
+        },
+        move: { [weak self] samples in
+            self?.studio.pad?.strokeAdd(samples: samples)
+        },
+        ahead: { [weak self] samples in
+            self?.studio.pad?.strokePredict(samples: samples)
+        },
+        end: { [weak self] samples in
+            self?.studio.pad?.strokeEnd(samples: samples)
+        }
+    )
 
     init(studio: StudioModel) {
         self.studio = studio
@@ -115,26 +133,54 @@ final class PadView: UIView {
         guard stroke == nil, let pad = studio.pad, let touch = touches.first else { return }
         studio.padMenuOpen = false
         stroke = ObjectIdentifier(touch)
-        // the first stroke of one's own takes the sample scribble's place
-        pad.beginOwnStroke()
-        pad.strokeBegin(pointer: touch.type == .pencil ? .stylus : .finger, samples: samples(of: touch, in: event))
+        if touch.type == .pencil {
+            pencil.down(touch)
+            pencil.add(coalesced(touch, in: event), sample: sample)
+            pencil.release()
+        } else {
+            // the first stroke of one's own takes the sample scribble's place
+            pad.beginOwnStroke()
+            pad.strokeBegin(pointer: .finger, samples: samples(of: touch, in: event))
+        }
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let pad = studio.pad, let touch = painting(touches) else { return }
-        pad.strokeAdd(samples: samples(of: touch, in: event))
+        if pencil.holds(touch) {
+            pencil.add(coalesced(touch, in: event), sample: sample)
+            pencil.release(predicted: (event?.predictedTouches(for: touch) ?? []).map(sample))
+        } else {
+            pad.strokeAdd(samples: samples(of: touch, in: event))
+        }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = painting(touches) else { return }
         stroke = nil
-        studio.pad?.strokeEnd(samples: samples(of: touch, in: event))
+        if pencil.holds(touch) {
+            pencil.add(coalesced(touch, in: event), sample: sample)
+            pencil.lift()
+        } else {
+            studio.pad?.strokeEnd(samples: samples(of: touch, in: event))
+        }
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard painting(touches) != nil else { return }
+        guard let touch = painting(touches) else { return }
         stroke = nil
-        studio.pad?.strokeCancel()
+        if pencil.holds(touch) {
+            if pencil.cancel() {
+                studio.pad?.strokeCancel()
+            }
+        } else {
+            studio.pad?.strokeCancel()
+        }
+    }
+
+    /// True values for samples given as estimates: the stroke waiting on them goes on.
+    override func touchesEstimatedPropertiesUpdated(_ touches: Set<UITouch>) {
+        pencil.update(touches, sample: sample)
+        pencil.release()
     }
 
     /// The touch painting, if it is among `touches`.
@@ -143,8 +189,16 @@ final class PadView: UIView {
     }
 
     private func samples(of touch: UITouch, in event: UIEvent?) -> [PenSample] {
-        let coalesced = event?.coalescedTouches(for: touch) ?? []
-        return (coalesced.isEmpty ? [touch] : coalesced).map { penSample($0, in: self, scale: scale) }
+        coalesced(touch, in: event).map(sample)
+    }
+
+    private func coalesced(_ touch: UITouch, in event: UIEvent?) -> [UITouch] {
+        let all = event?.coalescedTouches(for: touch) ?? []
+        return all.isEmpty ? [touch] : all
+    }
+
+    private func sample(_ touch: UITouch) -> PenSample {
+        penSample(touch, in: self, scale: scale)
     }
 }
 
