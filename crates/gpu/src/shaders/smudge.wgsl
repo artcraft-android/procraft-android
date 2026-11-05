@@ -84,7 +84,12 @@ struct SmudgeStamp {
     shape_lod_cap: f32,
     // 1: wet paint mixes with the layer as it was before the stroke (a glaze), not as it goes
     source_before: u32,
+    // the grain's levels, as the stamp shader takes them
+    grain_brightness: f32,
+    grain_contrast: f32,
     spare3: u32,
+    spare4: u32,
+    spare5: u32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -293,7 +298,7 @@ fn grain_plain(p: vec2<f32>) -> f32 {
     if (sharp) {
         g = sharp_grain(g, uv);
     }
-    return g;
+    return clamp((g - 0.5) * (1.0 + st.grain_contrast) + 0.5 + st.grain_brightness, 0.0, 1.0);
 }
 
 // how much a wet stamp lays at canvas point `p` (stamp frame point `t`): its shape and its grain

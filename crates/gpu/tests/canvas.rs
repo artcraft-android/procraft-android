@@ -1486,6 +1486,38 @@ fn dry_paint_laid_in_place_builds_up_by_what_is_left() {
 }
 
 #[test]
+fn a_grain_s_levels_reach_paint_laid_in_place() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a dot laid in place through a moving grain: its brightness takes the grain to nothing or to
+    // all, as a stamp drawn over would have it
+    let cover = |grain_brightness: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let style = StrokeStyle {
+            grain: Some(0),
+            grain_mode: procraft_engine::brush::GrainMode::Moving,
+            grain_depth: 1.0,
+            grain_scale: 64.0,
+            grain_blend: 1,
+            grain_brightness,
+            rendering: Rendering::Gradual,
+            laid_in_place: true,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (24..40).map(|x| u32::from(pixel(&layer, 64, x, 32)[3])).sum::<u32>()
+    };
+    let (dark, plain, light) = (cover(-1.0), cover(0.0), cover(1.0));
+    assert_eq!(dark, 0, "the grain taken to nothing lets nothing through");
+    assert!(plain > 0 && light > plain + 16 * 20, "plain {plain}, light {light}");
+}
+
+#[test]
 fn a_dual_brush_s_paint_laid_in_place_is_cut_by_its_second() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

@@ -885,7 +885,9 @@ fn smudge_uniform(
         dual_threshold: -1.0,
         laid_apart: 0,
         source_before: u32::from(style.wet_from_before),
-        spare: 0,
+        grain_brightness: style.grain_brightness,
+        grain_contrast: style.grain_contrast,
+        spare: [0; 3],
     }
 }
 
@@ -963,7 +965,10 @@ struct SmudgeUniform {
     shape_lod_cap: f32,
     /// 1 when wet paint mixes with the layer as it was before the stroke (a glaze).
     source_before: u32,
-    spare: u32,
+    /// The grain's levels, as the stamp shader takes them.
+    grain_brightness: f32,
+    grain_contrast: f32,
+    spare: [u32; 3],
 }
 
 /// The coarsest mip level of our brush images (256 texels a side) a small stamp reads its shape
