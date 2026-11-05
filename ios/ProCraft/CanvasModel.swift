@@ -839,6 +839,8 @@ final class CanvasModel {
         _ = switchModes(.recolor)
         closePanels()
         recoloring = true
+        // the reticle is placed through the view
+        refreshView()
         recolor.start(at: screenCentre)
     }
 

@@ -106,7 +106,15 @@ struct GalleryView: View {
         }
     }
 
-    private func artworkCell(_ a: GalleryArtwork, cell: CellSize) -> some View {
+    /// How far a swiped cell's actions shift to stay on the screen: they are wider than a narrow
+    /// cell, so the first and last columns' would run off it.
+    private func pillShift(_ a: GalleryArtwork, cell: CellSize, columns: Int) -> CGFloat {
+        let over = max((swipePillWidth * 3 + 6 - cell.pitch) / 2, 0)
+        let column = (model.entries.firstIndex { $0.dir == a.dir } ?? 0) % columns
+        return column == 0 ? over : column == columns - 1 ? -over : 0
+    }
+
+    private func artworkCell(_ a: GalleryArtwork, cell: CellSize, columns: Int) -> some View {
         let open = swiped == a.dir
         let chosen = selected.contains(a.dir)
         return ArtworkCell(
@@ -129,6 +137,7 @@ struct GalleryView: View {
                 )
                 // centred on the thumbnail's frame
                 .padding(.top, 39 + cell.thumb / 2 - swipePillHeight / 2)
+                .offset(x: pillShift(a, cell: cell, columns: columns))
                 .transition(.scale(scale: 0.2, anchor: .trailing).combined(with: .opacity))
             }
         }
@@ -167,7 +176,7 @@ struct GalleryView: View {
                 ForEach(model.entries, id: \.dir) { entry in
                     switch entry {
                     case let .artwork(artwork):
-                        artworkCell(artwork, cell: cell)
+                        artworkCell(artwork, cell: cell, columns: columns)
                     case let .stack(dir, name, artworks):
                         stackCell(dir: dir, name: name, artworks: artworks, cell: cell)
                     }

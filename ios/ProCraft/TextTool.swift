@@ -113,6 +113,8 @@ final class TextTool {
         styles = textStyles()
         render()
         model.refresh()
+        // its box is drawn through the view
+        model.refreshView()
     }
 
     /// New text in the middle of the canvas, all of it selected for typing over: a medium sans, sized
