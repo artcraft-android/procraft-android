@@ -45,7 +45,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
-import io.github.artcraftandroid.procraft.core.interfaceSizeKept
+import io.github.artcraftandroid.procraft.canvas.keptPlugins
 import io.github.artcraftandroid.procraft.ui.Switch
 import io.github.artcraftandroid.procraft.ui.fittedInterfaceSize
 
@@ -57,8 +57,9 @@ class SettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("interface", Context.MODE_PRIVATE)
+        val interfaceSize = keptPlugins(prefs).interfaceSize()
         setContent {
-            val size = fittedInterfaceSize(interfaceSizeKept(prefs.getFloat(CanvasViewModel.INTERFACE_SIZE, 1f)))
+            val size = fittedInterfaceSize(interfaceSize)
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density * size, density.fontScale)) {
                 SettingsScreen(prefs) { finish() }
