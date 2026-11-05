@@ -194,8 +194,8 @@ final class SelectionTool {
         queue.async { [weak self] in
             guard let self else { return }
             let latest = waiting.withLock {
-                let latest = nextFeather
-                nextFeather = nil
+                let latest = self.nextFeather
+                self.nextFeather = nil
                 return latest
             }
             if let latest {

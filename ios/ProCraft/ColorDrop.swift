@@ -239,8 +239,8 @@ final class ColorDrop {
         queue.async { [weak self] in
             guard let self else { return }
             let latest = waiting.withLock {
-                let latest = nextThreshold
-                nextThreshold = nil
+                let latest = self.nextThreshold
+                self.nextThreshold = nil
                 return latest
             }
             if let latest {
@@ -421,7 +421,7 @@ struct ColorDropBand: View {
 
     var body: some View {
         let line = kept == .dragging || kept == .filling
-        let height = 32 + (drop.sliding ? 24 : 0) + (line ? 4 : 0)
+        let height: CGFloat = 32 + (drop.sliding ? 24 : 0) + (line ? 4 : 0)
         let opening = drop.band != .none
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 13) {
