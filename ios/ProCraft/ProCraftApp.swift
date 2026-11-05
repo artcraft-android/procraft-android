@@ -83,6 +83,9 @@ enum ScreenCapture {
     private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text"]
     /// What opens over the gallery.
     static var galleryShows: String?
+    /// A gradient's second stop opens its colours, in this mode.
+    static var stopOpens = false
+    static var compactMode: ColorMode?
     /// What opens over the QuickMenu.
     static var quickShows: String?
 
@@ -248,6 +251,11 @@ enum ScreenCapture {
         case "effect-gradient":
             model.startAdjustment(.gradientMap)
         case "effect-gradient-edit":
+            model.startAdjustment(.gradientMap)
+            model.gradientMap.edit(model.gradientMap.index)
+        case _ where name.hasPrefix("effect-gradient-stop"):
+            stopOpens = true
+            compactMode = ColorMode.allCases.first { name.hasSuffix($0.label.lowercased()) }
             model.startAdjustment(.gradientMap)
             model.gradientMap.edit(model.gradientMap.index)
         case "effect-hsb":

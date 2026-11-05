@@ -431,7 +431,7 @@ struct GalleryView: View {
                 sharing = GalleryShare(artworks: model.artworks, from: nil)
             case "gallery-rename":
                 renaming = first.map { Renaming(id: $0.dir, name: $0.name, shown: $0, stack: false) }
-            case "gallery-custom":
+            case "gallery-custom", "gallery-custom-colour":
                 model.openCustom()
             default:
                 break

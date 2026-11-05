@@ -17,6 +17,10 @@ private let harmonyRadius: CGFloat = 149
 private let brightnessTrack: [UInt32] = [0x000000, 0xFFFFFF]
 /// The space the panel's rows and the menus they open are placed in.
 private let colorsSpace = "colors"
+private let compactWidth: CGFloat = 260
+private let compactFill = Color(argb: 0xFF1E_1E1E)
+private let compactGroup = Color(argb: 0xFF29_2929)
+private let compactHexField = Color(argb: 0xFF34_3434)
 
 /// The colour panel's modes.
 enum ColorMode: CaseIterable {
@@ -83,6 +87,8 @@ private final class ColorUi {
     var hexTyped: String?
     var hexRow = CGRect.zero
     var hexSet: ((UInt32) -> Void)?
+    /// The window in the panel's own space, where a panel that can be anywhere keeps the keypad.
+    var hexRoom: CGRect?
     var renaming: Int?
     var choosingPhoto = false
     var choosingFile = false
@@ -136,9 +142,6 @@ struct ColorPanel: View {
     let arrowX: CGFloat
     let screenHeight: CGFloat
     var background: HeldColor?
-    /// What a held colour's panel is called, and what its tick does.
-    var title = "Background"
-    var onDone: (() -> Void)?
 
     @State private var ui = ColorUi()
     @State private var photo: PhotosPickerItem?
@@ -156,18 +159,12 @@ struct ColorPanel: View {
         let height: CGFloat = short && model.colorMode == .disc ? 57 : 64
         return ZStack(alignment: .topLeading) {
             if background != nil {
-                PanelHeader(title: title, start: 20, end: 12, height: height, chevron: false) {
+                PanelHeader(title: "Background", start: 20, end: 12, height: height, chevron: false) {
                     PcIconView(PcIcons.doneTick, size: 40, color: .white)
                         .frame(width: 44, height: 44)
                         .background(Circle().fill(Pc.accent))
                         .contentShape(Circle())
-                        .onTapGesture {
-                            if let onDone {
-                                onDone()
-                            } else {
-                                model.endBackgroundPick()
-                            }
-                        }
+                        .onTapGesture { model.endBackgroundPick() }
                         .padding(.top, 19)
                 }
             } else if model.colorMode == .palettes {
@@ -220,7 +217,7 @@ struct ColorPanel: View {
         case .classic:
             ClassicPicker(c: c, square: short ? min(max(screenHeight - shortClassicRest, 150), 344) : 344)
         case .harmony:
-            HarmonyPicker(model: model, c: c, short: short)
+            HarmonyPicker(kind: model.harmonyKind, c: c, short: short)
         case .value:
             ValuePicker(c: c, ui: ui, short: short)
         case .palettes:
@@ -411,53 +408,67 @@ private struct SliderRow: View {
     }
 }
 
-/// The classic picker: saturation across and brightness up a square, then a slider for each.
+/// The classic picker: saturation across and brightness up a square, then a slider for each;
+/// compact, a 248 square with the hue alone under it.
 private struct ClassicPicker: View {
     let c: any ColorPick
     let square: CGFloat
+    var compact = false
 
     var body: some View {
         let hue = c.hue
         let pure = CanvasModel.rgb(hue: hue, saturation: 1, brightness: 1)
+        let across: CGFloat = compact ? 248 : 344
+        let down: CGFloat = compact ? 248 : square
         VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
                 ZStack {
                     LinearGradient(colors: [.white, canvasColor(pure)], startPoint: .leading, endPoint: .trailing)
                     LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
                 }
-                .frame(width: 344, height: square)
+                .frame(width: across, height: down)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .circular))
                 .contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
-                    let x = Float(min(max(drag.location.x / 344, 0), 1))
-                    let y = Float(min(max(drag.location.y / max(square, 1), 0), 1))
+                    let x = Float(min(max(drag.location.x / across, 0), 1))
+                    let y = Float(min(max(drag.location.y / max(down, 1), 0), 1))
                     c.setHsv(hue, x, 1 - y)
                 })
                 // the knob may hang over the square's edge
                 Knob(radius: 10.75, fill: canvasColor(c.rgb()))
-                    .offset(x: CGFloat(c.saturation) * 344 - 10.75, y: CGFloat(1 - c.brightness) * square - 10.75)
+                    .offset(x: CGFloat(c.saturation) * across - 10.75, y: CGFloat(1 - c.brightness) * down - 10.75)
                     .allowsHitTesting(false)
             }
-            .frame(width: 344, height: square, alignment: .topLeading)
-            .padding(.horizontal, 16)
-            VStack(spacing: 0) {
+            .frame(width: across, height: down, alignment: .topLeading)
+            .padding(.horizontal, compact ? 6 : 16)
+            if compact {
+                // the hue only, 240 wide under the 248 square
                 SliderRow(value: huePosition(control: .slider, hue: hue), colours: sliderHues) {
                     c.setHsv(hueAt(control: .slider, position: $0), c.saturation, c.brightness)
                 }
-                SliderRow(value: c.saturation, colours: [0x7F7F7F, pure]) { c.setHsv(hue, $0, c.brightness) }
-                SliderRow(value: c.brightness, colours: brightnessTrack) { c.setHsv(hue, c.saturation, $0) }
+                .padding(.horizontal, 10)
+                .frame(height: 40, alignment: .top)
+            } else {
+                VStack(spacing: 0) {
+                    SliderRow(value: huePosition(control: .slider, hue: hue), colours: sliderHues) {
+                        c.setHsv(hueAt(control: .slider, position: $0), c.saturation, c.brightness)
+                    }
+                    SliderRow(value: c.saturation, colours: [0x7F7F7F, pure]) { c.setHsv(hue, $0, c.brightness) }
+                    SliderRow(value: c.brightness, colours: brightnessTrack) { c.setHsv(hue, c.saturation, $0) }
+                }
+                .padding(.horizontal, 20)
             }
-            .padding(.horizontal, 20)
         }
     }
 }
 
-/// The harmony picker: a 298 wheel (hue around, saturation out, in Display P3) with a knob for the
-/// colour and one for each companion of the harmony kind, and a brightness slider below.
+/// The harmony picker: a 298 wheel (hue around, saturation out, in Display P3; compact, 200) with a
+/// knob for the colour and one for each companion of the harmony kind, and a brightness slider below.
 private struct HarmonyPicker: View {
-    let model: CanvasModel
+    let kind: HarmonyKind
     let c: any ColorPick
     let short: Bool
+    var compact = false
 
     /// The hue, saturation and brightness dragged to, kept while the colour they make is the colour
     /// (not worked out again from it: a dark or greyish colour's would wander, and black's be lost).
@@ -475,7 +486,7 @@ private struct HarmonyPicker: View {
         let p3 = CanvasSpace.shared.p3
         let rgb = c.rgb()
         let hsv = held.flatMap { $0.rgb == rgb ? $0.hsv : nil } ?? rgbToP3Hsv(rgb: rgb, p3: p3)
-        let radius = short ? harmonyRadius - 1 : harmonyRadius
+        let radius: CGFloat = compact ? 100 : short ? harmonyRadius - 1 : harmonyRadius
         let value = hsv[2]
         let at: (Float) -> CGPoint = { turn in
             let a = CGFloat(turn) * 2 * .pi
@@ -489,7 +500,7 @@ private struct HarmonyPicker: View {
                         .resizable()
                         .frame(width: radius * 2, height: radius * 2)
                 }
-                ForEach(Array(model.harmonyKind.turns.enumerated()), id: \.offset) { _, t in
+                ForEach(Array(kind.turns.enumerated()), id: \.offset) { _, t in
                     let h = ((hsv[0] + t / 360).truncatingRemainder(dividingBy: 1) + 1).truncatingRemainder(dividingBy: 1)
                     let p = at(h)
                     Knob(radius: 10.75, fill: canvasColor(p3HsvToRgb(h: h, s: hsv[1], v: value, p3: p3)))
@@ -508,8 +519,8 @@ private struct HarmonyPicker: View {
                 set(h, min((u * u + w * w).squareRoot(), 1), value)
             })
             SliderRow(value: value, colours: brightnessTrack) { set(hsv[0], hsv[1], $0) }
-                .padding(.horizontal, 20)
-                .padding(.top, short ? 10 : 31)
+                .padding(.horizontal, compact ? 10 : 20)
+                .padding(.top, compact ? 8 : short ? 10 : 31)
         }
         .frame(maxWidth: .infinity)
         // the header is 78 tall here, with the kind under the title
@@ -626,6 +637,8 @@ private struct ValueRow: View {
 private struct HexRow: View {
     let rgb: UInt32
     let ui: ColorUi
+    var rowFill = Pc.hexRow
+    var fieldFill = Pc.hexField
     let onSet: (UInt32) -> Void
 
     var body: some View {
@@ -643,7 +656,7 @@ private struct HexRow: View {
                 .foregroundStyle(Pc.panelTitle)
                 .lineLimit(1)
                 .frame(width: 84.5, height: 28)
-                .background(field.fill(Pc.hexField))
+                .background(field.fill(fieldFill))
                 .overlay {
                     if typed != nil {
                         field.strokeBorder(Pc.accent, lineWidth: 1)
@@ -652,7 +665,7 @@ private struct HexRow: View {
                 .padding(.trailing, 8)
         }
         .frame(height: 44)
-        .background(RoundedRectangle(cornerRadius: 10, style: .circular).fill(Pc.hexRow))
+        .background(RoundedRectangle(cornerRadius: 10, style: .circular).fill(rowFill))
         .overlay {
             GeometryReader { g in
                 Color.clear
@@ -665,6 +678,40 @@ private struct HexRow: View {
             }
         }
         .padding(.top, 6)
+    }
+}
+
+/// The hex keypad while it is open, for a ZStack over a panel: beside the panel, its middle level
+/// with the row, and on the window where the panel knows where that is.
+private struct HexOverlay: View {
+    let ui: ColorUi
+
+    private var at: CGPoint {
+        var x = ui.hexRow.minX - 12 - 259
+        var y = ui.hexRow.midY - 170
+        if let room = ui.hexRoom {
+            x = max(x, room.minX)
+            y = min(max(y, room.minY), max(room.maxY - 340, room.minY))
+        }
+        return CGPoint(x: x, y: y)
+    }
+
+    var body: some View {
+        if let typed = ui.hexTyped {
+            MenuDismissal { ui.closeAll() }
+            HexPad(
+                onKey: { key in
+                    // a seventh digit starts a new code
+                    let next = (typed.count >= 6 ? "" : typed) + String(key)
+                    ui.hexTyped = next
+                    if next.count == 6, let rgb = UInt32(next, radix: 16) {
+                        ui.hexSet?(rgb)
+                    }
+                },
+                onBack: { ui.hexTyped = String(typed.dropLast()) }
+            )
+            .offset(x: at.x, y: at.y)
+        }
     }
 }
 
@@ -1046,22 +1093,7 @@ private struct ColorMenus: View {
                 MenuDismissal { close() }
                 shortMenu
             }
-            if let typed = ui.hexTyped {
-                MenuDismissal { close() }
-                // beside the panel, its middle level with the row
-                HexPad(
-                    onKey: { key in
-                        // a seventh digit starts a new code
-                        let next = (typed.count >= 6 ? "" : typed) + String(key)
-                        ui.hexTyped = next
-                        if next.count == 6, let rgb = UInt32(next, radix: 16) {
-                            ui.hexSet?(rgb)
-                        }
-                    },
-                    onBack: { ui.hexTyped = String(typed.dropLast()) }
-                )
-                .offset(x: ui.hexRow.minX - 12 - 259, y: ui.hexRow.midY - 170)
-            }
+            HexOverlay(ui: ui)
         }
     }
 
@@ -1210,6 +1242,7 @@ private struct ColorMenus: View {
 private struct DiscPicker: View {
     let c: any ColorPick
     let short: Bool
+    var compact = false
     @Environment(\.displayScale) private var displayScale
     /// The disc's picture for the hue it was made for.
     @State private var disc: (hue: Float, image: UIImage)?
@@ -1228,52 +1261,60 @@ private struct DiscPicker: View {
 
     var body: some View {
         let hue = c.hue
-        let side = Int((discRadius * 2 * displayScale).rounded())
-        let top: CGFloat = short ? 0 : 8
+        // compact, the whole picker is 240 across instead of 364
+        let k: CGFloat = compact ? 240 / 364 : 1
+        let across = 364 * k
+        let radius = discRadius * k
+        let inner = ringInner * k
+        let outer = ringOuter * k
+        let side = Int((radius * 2 * displayScale).rounded())
+        let left: CGFloat = compact ? 10 : 6
+        let top: CGFloat = compact ? 4 : short ? 0 : 8
+        let bottom: CGFloat = compact ? 6 : short ? 3 : 17
         Canvas { context, size in
             let o = CGPoint(x: size.width / 2, y: size.height / 2)
-            let mid = (ringInner + ringOuter) / 2
+            let mid = (inner + outer) / 2
             context.stroke(
                 Path(ellipseIn: CGRect(x: o.x - mid, y: o.y - mid, width: mid * 2, height: mid * 2)),
                 with: .style(Self.ring),
-                lineWidth: ringOuter - ringInner
+                lineWidth: outer - inner
             )
             if let picture = disc?.image {
-                context.draw(Image(uiImage: picture), in: CGRect(x: o.x - discRadius, y: o.y - discRadius, width: discRadius * 2, height: discRadius * 2))
+                context.draw(Image(uiImage: picture), in: CGRect(x: o.x - radius, y: o.y - radius, width: radius * 2, height: radius * 2))
             }
             // the ring's knob sits on the middle of the ring, where the hue is
             let turn = CGFloat(huePosition(control: .ring, hue: hue)) * 2 * .pi
-            knob(&context, at: CGPoint(x: o.x + cos(turn) * mid, y: o.y - sin(turn) * mid), radius: 26.2,
+            knob(&context, at: CGPoint(x: o.x + cos(turn) * mid, y: o.y - sin(turn) * mid), radius: 26.2 * k,
                  fill: CanvasSpace.shared.color(CanvasModel.rgb(hue: hue, saturation: 1, brightness: 1)))
             let p = squareToDiscPoint(x: c.saturation * 2 - 1, y: 1 - c.brightness * 2)
             if p.count >= 2 {
-                knob(&context, at: CGPoint(x: o.x + CGFloat(p[0]) * discRadius, y: o.y + CGFloat(p[1]) * discRadius), radius: 10.75,
+                knob(&context, at: CGPoint(x: o.x + CGFloat(p[0]) * radius, y: o.y + CGFloat(p[1]) * radius), radius: 10.75,
                      fill: CanvasSpace.shared.color(c.rgb()))
             }
         }
-        .frame(width: 364, height: 364)
-        .padding(.leading, 6)
+        .frame(width: across, height: across)
+        .padding(.leading, left)
         .padding(.top, top)
-        .padding(.bottom, short ? 3 : 17)
+        .padding(.bottom, bottom)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { drag in
                     // in the picker's own square (past its padding)
-                    let centre = CGPoint(x: 6 + 182, y: top + 182)
+                    let centre = CGPoint(x: left + across / 2, y: top + across / 2)
                     let d = CGPoint(x: drag.location.x - centre.x, y: drag.location.y - centre.y)
                     if onRing == nil {
                         let start = CGPoint(x: drag.startLocation.x - centre.x, y: drag.startLocation.y - centre.y)
-                        onRing = hypot(start.x, start.y) > (discRadius + ringInner) / 2
+                        onRing = hypot(start.x, start.y) > (radius + inner) / 2
                     }
                     if onRing == true {
                         var turn = Float(atan2(-d.y, d.x) / (2 * .pi))
                         turn = (turn + 1).truncatingRemainder(dividingBy: 1)
                         c.setHsv(hueAt(control: .ring, position: turn), c.saturation, c.brightness)
                     } else {
-                        var u = d.x / discRadius
-                        var v = d.y / discRadius
+                        var u = d.x / radius
+                        var v = d.y / radius
                         let length = hypot(u, v)
                         if length > 1 {
                             u /= length
@@ -1343,3 +1384,219 @@ private struct ModeTabs: View {
 
 /// The colour panel's width.
 let colorPanelWidth = panelWidth
+/// How wide the compact colour picker is, for placing it.
+let compactColorsWidth = compactWidth
+
+/// The compact colour picker other screens open (a gradient stop's colour, Custom Canvas's
+/// background): "Colors", a picker per mode and the modes as icons, 260 wide; no swatches, history
+/// or palette. It needs no canvas: the gallery opens it too.
+struct CompactColors: View {
+    let c: any ColorPick
+    let arrowX: CGFloat
+    /// The window, to keep the hex keypad on it.
+    let screen: CGSize
+    var side = ArrowSide.top
+    var harmonyKind = HarmonyKind.complementary
+
+    @State private var mode = ColorMode.disc
+    @State private var ui = ColorUi()
+    @State private var palettes: [PaletteInfo] = []
+
+    @ViewBuilder private var picker: some View {
+        switch mode {
+        case .disc:
+            DiscPicker(c: c, short: false, compact: true)
+        case .classic:
+            ClassicPicker(c: c, square: 248, compact: true)
+        case .harmony:
+            HarmonyPicker(kind: harmonyKind, c: c, short: false, compact: true)
+        case .value:
+            CompactValue(c: c, ui: ui)
+        case .palettes:
+            CompactPalettes(c: c, palettes: palettes)
+        }
+    }
+
+    /// The modes as a row of icons, the chosen one blue.
+    private var tabs: some View {
+        HStack(spacing: 0) {
+            ForEach(ColorMode.allCases, id: \.self) { m in
+                // the tabs' 36-unit glyphs, a little smaller here
+                PcIconView(m.icon, size: 33, color: m == mode ? Pc.accent : Pc.panelTitle)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture { mode = m }
+            }
+        }
+        .frame(height: 52)
+    }
+
+    var body: some View {
+        Popover(width: compactWidth, arrowX: arrowX, fill: compactFill, side: side) {
+            // a 16.5 cap, as measured over a gradient stop
+            Text(verbatim: "Colors")
+                .font(.system(size: 23, weight: .bold))
+                .foregroundStyle(Pc.panelTitle)
+                .padding(.leading, 18)
+                .padding(.top, 9)
+                .padding(.bottom, 5)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            picker
+            tabs
+        }
+        .coordinateSpace(.named(colorsSpace))
+        .background {
+            GeometryReader { place in
+                Color.clear.onChange(of: place.frame(in: .global), initial: true) { _, frame in
+                    ui.hexRoom = CGRect(x: -frame.minX, y: -frame.minY, width: screen.width, height: screen.height)
+                }
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            ZStack(alignment: .topLeading) {
+                HexOverlay(ui: ui)
+            }
+        }
+        .onAppear {
+            palettes = CanvasModel.paletteStore.list()
+            #if DEBUG
+            mode = ScreenCapture.compactMode ?? mode
+            #endif
+        }
+    }
+}
+
+/// Value, compact: HSB or RGB (a switch picks), then the hex code; 240 wide.
+private struct CompactValue: View {
+    let c: any ColorPick
+    let ui: ColorUi
+
+    @State private var rgbShown = false
+
+    private func choice(_ label: String, rgb: Bool) -> some View {
+        let on = rgbShown == rgb
+        return Text(verbatim: label)
+            .font(.system(size: 15, weight: on ? .semibold : .regular))
+            .foregroundStyle(on ? Color.white : Pc.panelTitle)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(RoundedRectangle(cornerRadius: 9, style: .circular).fill(on ? Pc.accent : Color.clear))
+            .contentShape(Rectangle())
+            .onTapGesture { rgbShown = rgb }
+    }
+
+    var body: some View {
+        let rgb = c.rgb()
+        let r = (rgb >> 16) & 0xFF
+        let g = (rgb >> 8) & 0xFF
+        let b = rgb & 0xFF
+        let hue = c.hue
+        let byte: (Float) -> UInt32 = { UInt32(wholeNumber($0 * 255)) }
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                choice("HSB", rgb: false)
+                choice("RGB", rgb: true)
+            }
+            .frame(height: 36)
+            .background(RoundedRectangle(cornerRadius: 9, style: .circular).fill(compactGroup))
+            VStack(spacing: 18) {
+                if rgbShown {
+                    CompactValueRow(letter: "R", value: Float(r) / 255, colours: [packed(0, g, b), packed(255, g, b)], shown: "\(r)") {
+                        c.setRgb(packed(byte($0), g, b))
+                    }
+                    CompactValueRow(letter: "G", value: Float(g) / 255, colours: [packed(r, 0, b), packed(r, 255, b)], shown: "\(g)") {
+                        c.setRgb(packed(r, byte($0), b))
+                    }
+                    CompactValueRow(letter: "B", value: Float(b) / 255, colours: [packed(r, g, 0), packed(r, g, 255)], shown: "\(b)") {
+                        c.setRgb(packed(r, g, byte($0)))
+                    }
+                } else {
+                    CompactValueRow(letter: "H", value: huePosition(control: .slider, hue: hue), colours: sliderHues, shown: "\(wholeNumber(hue * 360))°") {
+                        c.setHsv(hueAt(control: .slider, position: $0), c.saturation, c.brightness)
+                    }
+                    CompactValueRow(letter: "S", value: c.saturation, colours: [0x7F7F7F, CanvasModel.rgb(hue: hue, saturation: 1, brightness: 1)], shown: "\(wholeNumber(c.saturation * 100))%") {
+                        c.setHsv(hue, $0, c.brightness)
+                    }
+                    CompactValueRow(letter: "B", value: c.brightness, colours: brightnessTrack, shown: "\(wholeNumber(c.brightness * 100))%") {
+                        c.setHsv(hue, c.saturation, $0)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .frame(maxWidth: .infinity)
+            .frame(height: 188, alignment: .top)
+            .background(RoundedRectangle(cornerRadius: 10, style: .circular).fill(compactGroup))
+            .padding(.top, 6)
+            HexRow(rgb: rgb, ui: ui, rowFill: compactGroup, fieldFill: compactHexField) { c.setRgb($0) }
+            Color.clear.frame(height: 10)
+        }
+        .padding(.horizontal, 10)
+    }
+}
+
+/// One compact number slider, 216 wide: its letter, the track and the value.
+private struct CompactValueRow: View {
+    let letter: String
+    let value: Float
+    let colours: [UInt32]
+    let shown: String
+    let onChange: (Float) -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(verbatim: letter)
+                .font(.system(size: 15))
+                .foregroundStyle(Pc.panelTitle)
+                .frame(width: 20, alignment: .leading)
+            SliderRow(value: value, colours: colours, onChange: onChange)
+            Text(verbatim: shown)
+                .font(.system(size: 15))
+                .foregroundStyle(Pc.panelTitle)
+                .lineLimit(1)
+                .frame(width: 48, alignment: .trailing)
+        }
+        .frame(height: 44)
+    }
+}
+
+/// The palettes' swatches, one grid after another, a tap taking a colour.
+private struct CompactPalettes: View {
+    let c: any ColorPick
+    let palettes: [PaletteInfo]
+
+    private func grid(_ palette: PaletteInfo) -> some View {
+        VStack(spacing: 0) {
+            ForEach(0 ..< 3, id: \.self) { row in
+                HStack(spacing: 0) {
+                    ForEach(0 ..< 10, id: \.self) { col in
+                        let slot = row * 10 + col
+                        let rgb = palette.colors.indices.contains(slot) ? palette.colors[slot] : nil
+                        Rectangle()
+                            .fill(rgb.map(canvasColor) ?? Pc.emptySlot)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if let rgb {
+                                    c.setRgb(rgb)
+                                }
+                            }
+                    }
+                }
+                .frame(height: 24)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .circular))
+    }
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVStack(spacing: 10) {
+                ForEach(palettes.indices, id: \.self) { i in
+                    grid(palettes[i])
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+        }
+        .frame(height: 240)
+    }
+}

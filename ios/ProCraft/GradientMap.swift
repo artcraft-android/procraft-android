@@ -38,7 +38,7 @@ final class GradientMapTool {
     /// The gradient being edited, by its place in `gradients`.
     private(set) var editing: Int?
     /// A stop's colour being chosen: the stop, and what shows it.
-    private(set) var stopColour: (stop: Int, held: HeldColor)?
+    private(set) var stopColour: (stop: Int, held: HeldColor, at: CGPoint)?
 
     init(model: CanvasModel) {
         self.model = model
@@ -124,13 +124,14 @@ final class GradientMapTool {
         changeEdited { library.deleteStop(index: $0, stop: UInt32(i)) }
     }
 
-    /// Opens the colours for stop `i`, each change mapped by at once.
-    func colour(_ i: Int) {
+    /// Opens the colours for stop `i`, their arrow on the window's point `at`, each change mapped by
+    /// at once.
+    func colour(_ i: Int, at: CGPoint) {
         guard let e = editing, gradients.indices.contains(e), gradients[e].stops.indices.contains(i) else { return }
         let held = HeldColor(rgb: gradients[e].stops[i].rgb) { [weak self] rgb in
             self?.changeEdited { self?.library.setStopColour(index: $0, stop: UInt32(i), rgb: rgb) }
         }
-        stopColour = (i, held)
+        stopColour = (i, held, at)
     }
 
     func endColour() {
@@ -340,19 +341,24 @@ private struct GradientEditor: View {
         }
     }
 
-    private func letGo(_ drag: DragGesture.Value, _ width: CGFloat) {
+    /// The top of stop `i` on the window, the bar `width` wide and starting at `origin`.
+    private func top(_ i: Int, _ width: CGFloat, _ origin: CGPoint) -> CGPoint {
+        CGPoint(x: origin.x + xOf(gradient.stops[i].position, width), y: origin.y + 22 - stopSize / 2)
+    }
+
+    private func letGo(_ drag: DragGesture.Value, _ width: CGFloat, _ origin: CGPoint) {
         holdTimer?.invalidate()
         touching = false
         defer { dragged = nil }
         guard !moved, !wasHeld else { return }
         if let dragged {
-            tool.colour(dragged)
+            tool.colour(dragged, at: top(dragged, width, origin))
         } else {
             tool.addStop(position(drag.startLocation.x, width))
         }
     }
 
-    private func bar(_ width: CGFloat) -> some View {
+    private func bar(_ width: CGFloat, origin: CGPoint) -> some View {
         let stops = gradient.stops
         return UnevenRoundedRectangle(bottomLeadingRadius: 12, bottomTrailingRadius: 12, style: .circular)
             .fill(gradientFill(gradient, from: r / width, to: 1 - r / width))
@@ -384,7 +390,7 @@ private struct GradientEditor: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { touched($0, width) }
-                    .onEnded { letGo($0, width) }
+                    .onEnded { letGo($0, width, origin) }
             )
     }
 
@@ -403,7 +409,16 @@ private struct GradientEditor: View {
                 }
             Spacer(minLength: 0)
             GeometryReader { place in
-                bar(place.size.width)
+                bar(place.size.width, origin: place.frame(in: .global).origin)
+                    #if DEBUG
+                    .onAppear {
+                        guard ScreenCapture.stopOpens, gradient.stops.indices.contains(1) else { return }
+                        // once the panel has come up
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                            tool.colour(1, at: top(1, place.size.width, place.frame(in: .global).origin))
+                        }
+                    }
+                    #endif
                     .overlay(alignment: .topLeading) {
                         if let i = holding, gradient.stops.indices.contains(i) {
                             ZStack(alignment: .topLeading) {

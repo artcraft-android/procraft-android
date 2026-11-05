@@ -82,7 +82,9 @@ struct CustomCanvas: View {
     @State private var field: Field? = .width
     /// What has been typed into the field, until it is left.
     @State private var typed = ""
-    @State private var background: Color
+    @State private var background: UInt32
+    /// The background's colour while its picker is open.
+    @State private var picking: HeldColor?
     @State private var hidden: Bool
     @State private var resolution: UInt32
     @State private var quality: UInt32
@@ -105,7 +107,7 @@ struct CustomCanvas: View {
         _height = State(initialValue: start.sizeHeight)
         _dpi = State(initialValue: start.dpi)
         _unit = State(initialValue: SizeUnit.allCases.first { $0.key == start.unit } ?? .pixels)
-        _background = State(initialValue: Color(argb: 0xFF00_0000 | start.background))
+        _background = State(initialValue: start.background)
         _hidden = State(initialValue: start.backgroundHidden)
         _resolution = State(initialValue: start.timeLapseResolution)
         _quality = State(initialValue: start.timeLapseQuality)
@@ -114,22 +116,15 @@ struct CustomCanvas: View {
         _cmyk = State(initialValue: isCmykProfile(name: start.profile))
     }
 
-    private var backgroundRgb: UInt32 {
-        var r: CGFloat = 1
-        var g: CGFloat = 1
-        var b: CGFloat = 1
-        UIColor(background).getRed(&r, green: &g, blue: &b, alpha: nil)
-        func channel(_ v: CGFloat) -> UInt32 {
-            UInt32(min(max((v * 255).rounded(), 0), 255))
-        }
-        return channel(r) << 16 | channel(g) << 8 | channel(b)
+    private func pickBackground() {
+        picking = HeldColor(rgb: background) { background = $0 }
     }
 
     private func preset() -> CanvasPreset {
         let shown = name.trimmingCharacters(in: .whitespaces)
         return CanvasPreset(
             name: shown.isEmpty ? "Untitled Canvas" : shown, unit: unit.key, sizeWidth: width, sizeHeight: height,
-            dpi: dpi, background: backgroundRgb, backgroundHidden: hidden, timeLapseResolution: resolution,
+            dpi: dpi, background: background, backgroundHidden: hidden, timeLapseResolution: resolution,
             timeLapseQuality: quality, timeLapseHevc: hevc, profile: profile
         )
     }
@@ -377,13 +372,20 @@ struct CustomCanvas: View {
         default:
             VStack(spacing: 24) {
                 group {
-                    ColorPicker(selection: $background, supportsOpacity: false) {
+                    HStack(spacing: 0) {
                         Text(verbatim: "Background color")
                             .font(.system(size: 15))
                             .foregroundStyle(ink)
+                        Spacer(minLength: 0)
+                        Circle()
+                            .fill(Color(argb: 0xFF00_0000 | background))
+                            .overlay(Circle().strokeBorder(Color(argb: 0xFF55_5555), lineWidth: 1))
+                            .frame(width: 24, height: 24)
                     }
                     .padding(.horizontal, 16)
                     .frame(height: 47)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: pickBackground)
                 }
                 group {
                     switchLine("Background hidden", on: hidden) { hidden.toggle() }
@@ -475,9 +477,26 @@ struct CustomCanvas: View {
                     )
                     .frame(width: screen.size.width, height: screen.size.height, alignment: .bottom)
                 }
+                // the background's colour, in a compact picker hanging from its swatch (60 in from
+                // the right, under the row) at the screen's edge
+                if let picking, section == 3 {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { self.picking = nil }
+                    CompactColors(c: picking, arrowX: 200, screen: screen.size)
+                        .offset(x: screen.size.width - compactColorsWidth, y: 168)
+                }
             }
         }
         .ignoresSafeArea()
+        #if DEBUG
+        .onAppear {
+            if ScreenCapture.galleryShows == "gallery-custom-colour" {
+                section = 3
+                pickBackground()
+            }
+        }
+        #endif
         .fileImporter(isPresented: $profileAsked, allowedContentTypes: [.item]) { result in
             if case let .success(url) = result, let bytes = url.readPicked(), let imported = importProfile(bytes: bytes) {
                 profile = imported

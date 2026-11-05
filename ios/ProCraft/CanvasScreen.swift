@@ -146,15 +146,14 @@ struct CanvasScreen: View {
                     SelectionPopover(model: model, screen: screen.size)
                 }
                 if model.adjustment == .gradientMap, let pick = model.gradientMap.stopColour, !hidden {
-                    // over the panel, centred
+                    // over the stop, its arrow at the stop's top, kept inside the window
+                    let left = min(max(pick.at.x - compactColorsWidth / 2, 0), max(screen.size.width - compactColorsWidth, 0))
                     Color.clear
                         .contentShape(Rectangle())
                         .onTapGesture { model.gradientMap.endColour() }
-                    ColorPanel(
-                        model: model, arrowX: colorPanelWidth / 2, screenHeight: screen.size.height,
-                        background: pick.held, title: "Colors", onDone: { model.gradientMap.endColour() }
-                    )
-                    .offset(x: (screen.size.width - colorPanelWidth) / 2, y: Pc.barHeight)
+                    CompactColors(c: pick.held, arrowX: pick.at.x - left, screen: screen.size, side: .bottom, harmonyKind: model.harmonyKind)
+                        .frame(width: screen.size.width, height: pick.at.y, alignment: .bottomLeading)
+                        .offset(x: left)
                 }
                 TextEditing(model: model, screen: screen.size)
                 CropOverlay(model: model)
