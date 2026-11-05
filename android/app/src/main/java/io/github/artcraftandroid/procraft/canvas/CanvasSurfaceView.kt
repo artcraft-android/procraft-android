@@ -347,8 +347,12 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     /** Whether a pen on the canvas now would paint (no tool of another kind open). */
     private fun painting() = vm.adjustment == null && !vm.selecting && !vm.transforming
 
+    /** Input stopped coming, so the finger or pen has stopped: nothing runs ahead of it any more. */
+    private val predictionOver = Runnable { session?.strokePredict(emptyList()) }
+
     /** Draws the predicted next samples of the stroke ahead of it (replaced at the next input). */
     private fun predict(s: CanvasSession) {
+        removeCallbacks(predictionOver)
         val p = predictor.predict() ?: return
         try {
             val i = p.findPointerIndex(strokePointer)
@@ -356,6 +360,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         } finally {
             p.recycle()
         }
+        postDelayed(predictionOver, PREDICTION_LASTS_MS)
     }
 
     private fun kindOf(e: MotionEvent, index: Int): PointerKind = when (e.getToolType(index)) {
@@ -384,5 +389,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     private companion object {
         const val TAG = "ProCraft"
+
+        /** How long a prediction stands with no input after it, milliseconds: a few input intervals. */
+        const val PREDICTION_LASTS_MS = 40L
     }
 }
