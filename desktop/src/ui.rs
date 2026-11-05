@@ -1687,6 +1687,8 @@ impl Interface {
     fn pasted(&mut self, session: &Arc<CanvasSession>) -> bool {
         match self.system_clipboard.take_pasted() {
             Some(Pasted::Own { private }) => self.paste_own(session, private),
+            // (a mask that takes what is pasted has no use for a copy of the picture)
+            Some(Pasted::Picture { image, private: false }) if session.paste_picture_into_mask(image.clone()) => {}
             Some(Pasted::Picture { image, private }) => {
                 if session.insert_image(image, private).is_some() {
                     self.toggle_transform(session);

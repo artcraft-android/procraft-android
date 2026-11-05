@@ -34,6 +34,8 @@ pub(crate) const DIRECTIONAL_INNER: f32 = 40.0;
 pub(crate) const DIRECTIONAL_REACH: f32 = 110.0;
 /// Perspective blur's arrow at first: up the window. The point along it given for drawing lies
 /// this far from the puck (canvas pixels).
+/// How many ways liquify has.
+const LIQUIFY_KINDS: usize = 8;
 const ARROW_UP: f32 = -std::f32::consts::FRAC_PI_2;
 const ARROW_TIP: f32 = 100.0;
 
@@ -123,8 +125,9 @@ pub(crate) struct Adjusting {
     glitch_kind: GlitchKind,
     glitch: [Vec<f32>; 4],
     liquify_kind: LiquifyKind,
-    /// Size, pressure, distortion and momentum.
+    /// Size, pressure, distortion and momentum; each way keeps its own distortion.
     liquify: [f32; 4],
+    liquify_distortions: [f32; LIQUIFY_KINDS],
     liquify_amount: f32,
     liquified: bool,
     /// Changed since it opened (a slider, a choice, a liquify stroke): undo takes that back.
@@ -184,7 +187,8 @@ impl Default for Adjusting {
             glitch_kind: GlitchKind::Artifact,
             glitch: glitch_defaults(),
             liquify_kind: LiquifyKind::Push,
-            liquify: [0.5, 1.0, 0.0, 0.8],
+            liquify: [0.5, 1.0, 0.0, 0.0],
+            liquify_distortions: [0.0; LIQUIFY_KINDS],
             liquify_amount: 1.0,
             liquified: false,
             touched: false,
@@ -805,13 +809,21 @@ impl CanvasSession {
 
     /// Liquify's way.
     pub fn adjustment_liquify_kind(&self, kind: LiquifyKind) {
-        self.adjusting(|a, _| a.liquify_kind = kind);
+        self.adjusting(|a, _| {
+            a.liquify_kind = kind;
+            a.liquify[2] = a.liquify_distortions.get(kind as usize).copied().unwrap_or(0.0);
+        });
     }
 
     /// Liquify's slider `index` (0 size, 1 pressure, 2 distortion, 3 momentum) moved to `value`.
     pub fn adjustment_liquify_value(&self, index: u32, value: f32) {
         self.adjusting(|a, _| {
             if let Some(v) = a.liquify.get_mut(index as usize) {
+                *v = value.clamp(0.0, 1.0);
+            }
+            if index == 2
+                && let Some(v) = a.liquify_distortions.get_mut(a.liquify_kind as usize)
+            {
                 *v = value.clamp(0.0, 1.0);
             }
         });
@@ -833,14 +845,15 @@ impl CanvasSession {
         });
     }
 
-    /// A liquify stroke's window points (x, y, pressure each); `start` begins it.
-    pub fn adjustment_liquify_stroke(&self, points: Vec<f32>, start: bool) {
+    /// A liquify stroke's window points (x, y, pressure, milliseconds since the last, each), a
+    /// pen's if `pen`; `start` begins it.
+    pub fn adjustment_liquify_stroke(&self, points: Vec<f32>, start: bool, pen: bool) {
         let brush = self.adjusting(|a, _| {
             a.liquified = true;
             a.touched = true;
             a.liquify_brush()
         });
-        self.liquify_stroke(points, start, brush);
+        self.liquify_stroke(points, start, pen, brush);
     }
 
     /// The liquify brush held still at window point (`x`, `y`) works on, from `from` to `to`
@@ -850,11 +863,16 @@ impl CanvasSession {
         self.liquify_held(x, y, from, to, brush)
     }
 
-    /// The liquify brush lifted moving at (`vx`, `vy`) window pixels a millisecond: it carries on
-    /// with its momentum.
-    pub fn adjustment_liquify_coast(&self, vx: f32, vy: f32) {
+    /// The liquify brush lifts: true if it, or what it threw off, goes on.
+    pub fn adjustment_liquify_lift(&self) -> bool {
         let (brush, momentum) = self.adjusting(|a, _| (a.liquify_brush(), a.liquify_momentum()));
-        self.liquify_coast(vx, vy, momentum, brush);
+        self.liquify_lift(momentum, brush)
+    }
+
+    /// `seconds` go by for what liquify set going: true if it goes on. Nothing does once it closes.
+    pub fn adjustment_liquify_tick(&self, seconds: f32) -> bool {
+        let (open, brush) = self.adjusting(|a, _| (a.open, a.liquify_brush()));
+        open == Some(Adjustment::Liquify) && self.liquify_tick(seconds, brush)
     }
 
     /// Cloning, the source moved to window point (`x`, `y`): the next stroke fixes how far from it

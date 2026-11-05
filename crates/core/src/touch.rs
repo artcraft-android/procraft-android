@@ -26,10 +26,8 @@ use crate::{CanvasSession, PenSample, PointerKind, ToolKind};
 
 /// A tap: down and up within this, moving no further than [`TAP_SLOP`] points.
 const TAP_MS: f64 = 300.0;
-/// A liquify brush lifted within this long of its last move carries on.
-const LIQUIFY_STILL_MS: f64 = 60.0;
-/// Liquify held still works on: from this long after it stops, a stamp this often, as measured;
-/// moved less than this (points) it counts as still.
+/// Liquify held still works on from this long after it stops, as measured; moved less than this
+/// (points) it counts as still. Time passes for it, and for what it set going, this often.
 const LIQUIFY_HELD_WAIT_MS: f64 = 110.0;
 const LIQUIFY_HELD_STEP_MS: f64 = 16.0;
 const LIQUIFY_HELD_SLOP: f32 = 3.0;
@@ -449,13 +447,12 @@ pub(crate) struct Touches {
     select_moved: bool,
     lasso_snapped: bool,
     /// An adjustment's touch went past the slop (it is not a tap), and has begun displacing;
-    /// liquify's brush, where it last was (window pixels), when, and how fast (pixels a
-    /// millisecond).
+    /// liquify's brush, when it last moved and when time last passed for it, and whether a pen
+    /// holds it.
     adjust_moved: bool,
     adjust_displacing: bool,
-    liquify_at: (f32, f32),
     liquify_ms: f64,
-    liquify_velocity: (f32, f32),
+    liquify_tick_ms: f64,
     liquify_pen: bool,
     /// Where liquify's brush came to rest and when, how long (seconds) it has worked on there, and
     /// when it next does.
@@ -552,9 +549,8 @@ impl Default for Touches {
             lasso_snapped: false,
             adjust_moved: false,
             adjust_displacing: false,
-            liquify_at: (0.0, 0.0),
             liquify_ms: 0.0,
-            liquify_velocity: (0.0, 0.0),
+            liquify_tick_ms: 0.0,
             liquify_pen: false,
             liquify_rest: (0.0, 0.0),
             liquify_rest_ms: 0.0,
@@ -614,9 +610,15 @@ pub(crate) fn drag_step(dx: f32, ms: f64) -> f32 {
     (speed / 30.0).powf(0.86) * dx / 200.0
 }
 
-/// A liquify stroke's points, (x, y, pressure) each: a finger's (or a mouse's) at full pressure.
-fn liquify_points(pen: bool, samples: &[PenSample]) -> Vec<f32> {
-    samples.iter().flat_map(|s| [s.x, s.y, if pen { s.pressure } else { 1.0 }]).collect()
+/// A liquify stroke's points, (x, y, pressure, milliseconds since the last) each, the first since
+/// `since`: a finger's (or a mouse's) at full pressure.
+fn liquify_points(pen: bool, samples: &[PenSample], mut since: f64) -> Vec<f32> {
+    let mut points = Vec::with_capacity(samples.len() * 4);
+    for s in samples {
+        points.extend([s.x, s.y, if pen { s.pressure } else { 1.0 }, (s.time_ms - since) as f32]);
+        since = s.time_ms;
+    }
+    points
 }
 
 fn is_pen(kind: PointerKind) -> bool {
@@ -1029,24 +1031,18 @@ impl CanvasSession {
                     (st.adjust.open().map(|o| o.0), st.adjust.displacing())
                 };
                 if open == Some(Adjustment::Liquify) {
-                    // the brush liquifies along the drag, its speed followed for when it lifts
+                    // the brush liquifies along the drag
                     let mut t = self.touches();
-                    let dt = (last.time_ms - t.liquify_ms) as f32;
-                    if dt > 0.0 {
-                        let (vx, vy) = t.liquify_velocity;
-                        let (px, py) = t.liquify_at;
-                        t.liquify_velocity = (vx * 0.5 + (at.0 - px) / dt * 0.5, vy * 0.5 + (at.1 - py) / dt * 0.5);
-                        t.liquify_at = at;
-                        t.liquify_ms = last.time_ms;
-                    }
                     if dist(at, t.liquify_rest) > LIQUIFY_HELD_SLOP * t.scale {
                         t.liquify_rest = at;
                         t.liquify_rest_ms = last.time_ms;
                         t.liquify_held = 0.0;
                     }
                     let pen = t.liquify_pen;
+                    let points = liquify_points(pen, &samples, t.liquify_ms);
+                    t.liquify_ms = last.time_ms;
                     drop(t);
-                    self.adjustment_liquify_stroke(liquify_points(pen, &samples), false);
+                    self.adjustment_liquify_stroke(points, false, pen);
                     out.push(TouchCommand::AdjustChanged);
                     return out;
                 }
@@ -1175,22 +1171,25 @@ impl CanvasSession {
             self.held_goes_on(t, false, &mut out);
             t = self.touches();
         }
-        // liquify held still works on, as the time passes
+        // liquify held still works on as the time passes, and what it set going goes on
         if t.liquify_due.is_some_and(|due| due <= now_ms) {
             t.liquify_due = None;
-            if t.mode == Mode::Adjust {
+            let passed = ((now_ms - t.liquify_tick_ms) / 1000.0) as f32;
+            t.liquify_tick_ms = now_ms;
+            let held = (t.mode == Mode::Adjust).then(|| {
                 let to = ((now_ms - t.liquify_rest_ms - LIQUIFY_HELD_WAIT_MS) / 1000.0).max(0.0) as f32;
-                let from = std::mem::replace(&mut t.liquify_held, to);
-                let at = t.liquify_rest;
-                drop(t);
-                let works = to <= from || self.adjustment_liquify_held(at.0, at.1, from, to);
-                t = self.touches();
-                if works {
-                    t.liquify_due = Some(now_ms + LIQUIFY_HELD_STEP_MS);
-                    if to > from {
-                        out.push(TouchCommand::AdjustChanged);
-                    }
-                }
+                (t.liquify_rest, std::mem::replace(&mut t.liquify_held, to), to)
+            });
+            drop(t);
+            let worked =
+                held.is_some_and(|(at, from, to)| to > from && self.adjustment_liquify_held(at.0, at.1, from, to));
+            let going = self.adjustment_liquify_tick(passed);
+            t = self.touches();
+            if going || held.is_some() {
+                t.liquify_due = Some(now_ms + LIQUIFY_HELD_STEP_MS);
+            }
+            if worked || going {
+                out.push(TouchCommand::AdjustChanged);
             }
         }
         // a freehand selection held still snaps to a shape, which the lift then selects
@@ -1438,15 +1437,14 @@ impl CanvasSession {
             t.puck_drag = self.perspective_drag_at(at, t.handle_scale);
             t.puck_dragging = false;
             if open == Adjustment::Liquify {
-                t.liquify_at = at;
                 t.liquify_ms = now;
-                t.liquify_velocity = (0.0, 0.0);
+                t.liquify_tick_ms = now;
                 t.liquify_pen = is_pen(kind);
                 t.liquify_rest = at;
                 t.liquify_rest_ms = now;
                 t.liquify_held = 0.0;
-                t.liquify_due = Some(now + LIQUIFY_HELD_WAIT_MS);
-                self.adjustment_liquify_stroke(liquify_points(t.liquify_pen, samples), true);
+                t.liquify_due = Some(now + LIQUIFY_HELD_STEP_MS);
+                self.adjustment_liquify_stroke(liquify_points(t.liquify_pen, samples, now), true, t.liquify_pen);
                 out.push(TouchCommand::AdjustChanged);
             }
             return;
@@ -1777,11 +1775,9 @@ impl CanvasSession {
                 let liquifying = self.shared.lock().adjust.open().is_some_and(|o| o.0 == Adjustment::Liquify);
                 if liquifying {
                     // still moving when it lifts, liquify carries on
-                    if !cancelled && now - t.liquify_ms <= LIQUIFY_STILL_MS {
-                        let (vx, vy) = t.liquify_velocity;
-                        drop(t);
-                        self.adjustment_liquify_coast(vx, vy);
-                    }
+                    drop(t);
+                    let going = !cancelled && self.adjustment_liquify_lift();
+                    self.touches().liquify_due = going.then_some(now + LIQUIFY_HELD_STEP_MS);
                 } else if !cancelled && !t.adjust_moved && now - t.tap_start <= TAP_MS {
                     out.push(TouchCommand::AdjustMenu { x: at.0, y: at.1 });
                 }

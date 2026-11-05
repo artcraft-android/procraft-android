@@ -40,6 +40,7 @@ mod keys;
 mod layer;
 mod layer_ops;
 mod layers;
+mod liquify;
 mod modes;
 mod palettes;
 mod pick;
@@ -518,8 +519,8 @@ pub(crate) struct State {
     /// Crop and Resize as it is edited.
     crop_edit: crop_edit::CropEdit,
     last_filter: Option<procraft_gpu::Filter>,
-    /// The liquify brush's last stamp (canvas pixels).
-    liquify_last: Option<Vec2>,
+    /// The liquify brush as it goes.
+    liquify: liquify::LiquifyRun,
     /// The brush studio is open on this (set, brush), and the brush as it opened.
     studio: Option<((usize, usize), Brush)>,
     /// It shows a dual brush's second, not its first.
@@ -1283,7 +1284,7 @@ impl CanvasSession {
             adjust: adjusting::Adjusting::default(),
             crop_edit: crop_edit::CropEdit::default(),
             last_filter: None,
-            liquify_last: None,
+            liquify: liquify::LiquifyRun::default(),
             studio: None,
             studio_second: false,
             pencil: false,

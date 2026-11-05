@@ -1188,51 +1188,110 @@ fn curves_gradient_maps_and_colour_balance_draw() {
     canvas.render(&gpu, &mut doc, None);
 }
 
+/// A stamp of a liquify brush at (`x`, `y`), going right.
+fn liquify_stamp(
+    mode: procraft_gpu::LiquifyMode,
+    [x, y]: [f32; 2],
+    radius: f32,
+    amount: f32,
+) -> procraft_gpu::LiquifyStamp {
+    procraft_gpu::LiquifyStamp { centre: [x, y], way: [1.0, 0.0], radius, amount, mode }
+}
+
+/// Where the paint in row `y` of `px` (`width` across) lies: the middle of each run of it.
+fn runs_of_paint(px: &[u8], width: u32, y: u32) -> Vec<f32> {
+    let row: Vec<f32> = (0..width).map(|x| f32::from(pixel(px, width, x, y)[3])).collect();
+    let mut runs = Vec::new();
+    let mut x = 0;
+    while x < row.len() {
+        if row[x] > 30.0 {
+            let start = x;
+            while x < row.len() && row[x] > 30.0 {
+                x += 1;
+            }
+            let weight: f32 = row[start..x].iter().sum();
+            runs.push(row[start..x].iter().enumerate().map(|(i, v)| (start + i) as f32 * v).sum::<f32>() / weight);
+        }
+        x += 1;
+    }
+    runs
+}
+
 #[test]
-fn liquify_pushes_paint_along_and_reconstructs() {
-    use procraft_gpu::{Filter, LiquifyMode, LiquifyStamp};
+fn liquify_carries_the_picture_along_with_the_brush_as_measured() {
+    use procraft_gpu::{Filter, LiquifyMode};
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
-    let mut doc = Document::new(64, 64);
+    let mut doc = Document::new(2048, 256);
     let mut canvas = Canvas::new(&gpu, &doc).unwrap();
     let layer = doc.current();
     canvas.begin_stroke(layer, style(StrokeTool::Paint, 1.0));
-    canvas.add_stamps(&[dot(Vec2::new(20.0, 32.0), 6.0)]);
+    let lines = [1284.0, 1339.0, 1404.0, 1459.0, 1524.0, 1579.0, 1637.0, 1695.0, 1756.0];
+    for x in lines {
+        canvas.add_stamps(&(0..256).step_by(2).map(|y| dot(Vec2::new(x, y as f32), 3.0)).collect::<Vec<_>>());
+    }
     canvas.end_stroke();
     canvas.render(&gpu, &mut doc, None);
     canvas.begin_transform(layer);
     canvas.begin_liquify();
-    // pushed 10 to the right, in small steps
-    let push = |x: f32| LiquifyStamp {
-        centre: [x, 32.0],
-        moved: [2.0, 0.0],
-        radius: 20.0,
-        pressure: 1.0,
-        distortion: 0.0,
-        seed: 0.0,
-        mode: LiquifyMode::Push,
-    };
-    canvas.liquify_stamps(&[push(20.0), push(22.0), push(24.0), push(26.0), push(28.0)]);
+    // a brush of 351 from 600 to 1400 at full pressure, along the row looked at
+    for k in 0..200 {
+        let x = 600.0 + 4.0 * (k + 1) as f32;
+        canvas.liquify_stamps(&[liquify_stamp(LiquifyMode::Push, [x, 128.0], 351.0, 4.0)]);
+    }
     canvas.set_filter(Filter::Liquify { amount: 1.0 });
     canvas.render(&gpu, &mut doc, None);
     let px = canvas.read_layer(&gpu, layer).unwrap();
-    assert!(pixel(&px, 64, 28, 32)[3] > 200, "{:?}", pixel(&px, 64, 28, 32));
-    assert!(pixel(&px, 64, 15, 32)[3] < 50, "{:?}", pixel(&px, 64, 15, 32));
-    // reconstructed many times over: back where it was
-    let back = LiquifyStamp { mode: LiquifyMode::Reconstruct, ..push(26.0) };
-    canvas.liquify_stamps(&vec![back; 60]);
-    canvas.set_filter(Filter::Liquify { amount: 1.0 });
-    canvas.render(&gpu, &mut doc, None);
-    let px = canvas.read_layer(&gpu, layer).unwrap();
-    assert!(pixel(&px, 64, 15, 32)[3] > 200, "{:?}", pixel(&px, 64, 15, 32));
-    canvas.liquify_clear();
-    canvas.end_transform(true);
+    let runs = runs_of_paint(&px, 2048, 128);
+    let measured = [1465.0, 1482.0, 1506.0, 1529.0, 1562.0, 1597.0, 1642.0, 1696.0, 1756.0];
+    assert_eq!(runs.len(), measured.len(), "{runs:?}");
+    for (run, wanted) in runs.iter().zip(measured) {
+        assert!((run - wanted).abs() < 4.0, "{run} for {wanted}: {runs:?}");
+    }
+    canvas.end_transform(false);
     canvas.render(&gpu, &mut doc, None);
 }
 
 #[test]
-fn liquify_expand_held_long_goes_on_growing_and_doesnt_fold() {
-    use procraft_gpu::{Filter, LiquifyMode, LiquifyStamp};
+fn liquify_twirls_as_long_as_it_works_and_rebuilds_as_fast_as_measured() {
+    use procraft_gpu::{Filter, LiquifyMode};
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(256, 256);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let layer = doc.current();
+    canvas.begin_stroke(layer, style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(158.0, 128.0), 4.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    canvas.begin_transform(layer);
+    canvas.begin_liquify();
+    // 30 from the centre of a brush of 100: right turns clockwise on the screen, by 4 radians a
+    // second at the centre and 0.82 of that there, so a quarter of a second takes it 0.82 round
+    for _ in 0..25 {
+        canvas.liquify_stamps(&[liquify_stamp(LiquifyMode::TwirlRight, [128.0, 128.0], 100.0, 0.01)]);
+    }
+    canvas.set_filter(Filter::Liquify { amount: 1.0 });
+    canvas.render(&gpu, &mut doc, None);
+    let px = canvas.read_layer(&gpu, layer).unwrap();
+    let (x, y) = (128.0 + 30.0 * 0.82f32.cos(), 128.0 + 30.0 * 0.82f32.sin());
+    assert!(pixel(&px, 256, x as u32, y as u32)[3] > 100, "not at ({x}, {y})");
+    assert!(pixel(&px, 256, 158, 128)[3] < 30, "still where it was");
+    // half a second of rebuilding at the centre leaves 3% of it
+    for _ in 0..50 {
+        canvas.liquify_stamps(&[liquify_stamp(LiquifyMode::Reconstruct, [128.0, 128.0], 400.0, 0.01)]);
+    }
+    canvas.set_filter(Filter::Liquify { amount: 1.0 });
+    canvas.render(&gpu, &mut doc, None);
+    let px = canvas.read_layer(&gpu, layer).unwrap();
+    assert!(pixel(&px, 256, 158, 128)[3] > 100, "not back");
+    canvas.end_transform(false);
+    canvas.render(&gpu, &mut doc, None);
+}
+
+#[test]
+fn liquify_held_long_goes_on_growing_and_doesnt_fold() {
+    use procraft_gpu::{Filter, LiquifyMode};
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
     let mut doc = Document::new(64, 64);
@@ -1244,16 +1303,9 @@ fn liquify_expand_held_long_goes_on_growing_and_doesnt_fold() {
     canvas.render(&gpu, &mut doc, None);
     canvas.begin_transform(layer);
     canvas.begin_liquify();
-    let held = |from: f32| LiquifyStamp {
-        centre: [32.0, 32.0],
-        moved: [from, from + 1.0],
-        radius: 24.0,
-        pressure: 1.0,
-        distortion: 0.0,
-        seed: 0.0,
-        mode: LiquifyMode::Expand,
-    };
-    canvas.liquify_stamps(&(0..40).map(|i| held(i as f32)).collect::<Vec<_>>());
+    for _ in 0..60 {
+        canvas.liquify_stamps(&[liquify_stamp(LiquifyMode::Expand, [32.0, 32.0], 24.0, 0.05)]);
+    }
     canvas.set_filter(Filter::Liquify { amount: 1.0 });
     canvas.render(&gpu, &mut doc, None);
     let px = canvas.read_layer(&gpu, layer).unwrap();
@@ -1263,6 +1315,37 @@ fn liquify_expand_held_long_goes_on_growing_and_doesnt_fold() {
     }
     canvas.liquify_clear();
     canvas.end_transform(true);
+    canvas.render(&gpu, &mut doc, None);
+}
+
+#[test]
+fn liquify_kept_at_part_of_itself_looks_as_it_did_shown_at_that_part() {
+    use procraft_gpu::{Filter, LiquifyMode};
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(128, 128);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let layer = doc.current();
+    canvas.begin_stroke(layer, style(StrokeTool::Paint, 1.0));
+    canvas.add_stamps(&[dot(Vec2::new(50.0, 64.0), 8.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    canvas.begin_transform(layer);
+    canvas.begin_liquify();
+    for k in 0..30 {
+        let x = 50.0 + k as f32;
+        canvas.liquify_stamps(&[liquify_stamp(LiquifyMode::Push, [x, 64.0], 40.0, 1.0)]);
+    }
+    canvas.set_filter(Filter::Liquify { amount: 0.4 });
+    canvas.render(&gpu, &mut doc, None);
+    let shown = canvas.read_layer(&gpu, layer).unwrap();
+    canvas.liquify_scale(0.4);
+    canvas.set_filter(Filter::Liquify { amount: 1.0 });
+    canvas.render(&gpu, &mut doc, None);
+    let kept = canvas.read_layer(&gpu, layer).unwrap();
+    let most = shown.iter().zip(&kept).map(|(a, b)| a.abs_diff(*b)).max();
+    assert!(most.is_some_and(|d| d <= 2), "{most:?}");
+    canvas.end_transform(false);
     canvas.render(&gpu, &mut doc, None);
 }
 

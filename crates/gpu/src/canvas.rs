@@ -1326,8 +1326,10 @@ enum Op {
     LiquifyBegin,
     /// The adjustment's painted-on mask made, empty.
     PencilBegin,
-    /// Liquify stamps drawn into the field.
+    /// A step of the liquify brush: its stamps added up, the field carried along by them.
     LiquifyStamps(Vec<LiquifyStamp>),
+    /// The liquify field scaled by this much.
+    LiquifyScale(f32),
     /// The liquify field back to no offsets.
     LiquifyClear,
     /// The transform ends: kept as one undo step (keeping only the part `within`, when its layers
@@ -1407,28 +1409,46 @@ pub enum Filter {
 }
 
 /// How a liquify stamp moves what is under it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LiquifyMode {
     Push,
     TwirlRight,
     TwirlLeft,
     Pinch,
     Expand,
-    Crystals,
+    /// Drawn in (a negative amount: out) towards its way only, narrower the nearer to 1 `narrow`.
+    Lobe {
+        narrow: f32,
+    },
     Edge,
     Reconstruct,
 }
 
-/// One liquify stamp: where (canvas pixels), how far the brush moved since the last one, its
-/// radius and pressure (0..1), how much it scatters (distortion, 0..1), and a seed.
+impl LiquifyMode {
+    /// The number the shader knows the mode by, and how narrow a lobe is.
+    fn code(self) -> (f32, f32) {
+        match self {
+            LiquifyMode::Push => (0.0, 0.0),
+            LiquifyMode::TwirlRight => (1.0, 0.0),
+            LiquifyMode::TwirlLeft => (2.0, 0.0),
+            LiquifyMode::Pinch => (3.0, 0.0),
+            LiquifyMode::Expand => (4.0, 0.0),
+            LiquifyMode::Lobe { narrow } => (5.0, narrow),
+            LiquifyMode::Edge => (6.0, 0.0),
+            LiquifyMode::Reconstruct => (7.0, 0.0),
+        }
+    }
+}
+
+/// One liquify stamp: where and how wide (canvas pixels), the way it goes (one long, for a push, a
+/// lobe or an edge) and how much it does: for a push or an edge how far the brush moved, the rest
+/// how long it worked (seconds), each times how hard it presses.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LiquifyStamp {
     pub centre: [f32; 2],
-    pub moved: [f32; 2],
+    pub way: [f32; 2],
     pub radius: f32,
-    pub pressure: f32,
-    pub distortion: f32,
-    pub seed: f32,
+    pub amount: f32,
     pub mode: LiquifyMode,
 }
 
@@ -1436,9 +1456,9 @@ pub struct LiquifyStamp {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct LiquifyUniform {
     stamp: [f32; 4],
-    move_mode: [f32; 4],
+    way: [f32; 4],
     canvas: [f32; 4],
-    pad: [f32; 4],
+    area: [f32; 4],
 }
 
 /// An adjustment painted on: how much of each pixel the brush has covered (the stroke format, its
@@ -1449,11 +1469,25 @@ struct PencilMask {
     bounds: IRect,
 }
 
-/// The liquify field: offsets (canvas pixels) a pixel shows the copy from, and that with the copy
-/// for the adjustment's last pass.
+/// The liquify field: offsets (canvas pixels) a pixel shows the copy from, kept at half the
+/// canvas's size, and that with the copy for the adjustment's last pass.
 struct LiquifyField {
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
     bind: wgpu::BindGroup,
+    /// Field pixels a canvas pixel, across and down.
+    scale: [f32; 2],
+    /// Where a step works, grown to the widest it has needed.
+    scratch: Option<LiquifyScratch>,
+}
+
+/// What a step's stamps add up to and the field as they leave it, for a part of the field.
+struct LiquifyScratch {
+    width: u32,
+    height: u32,
+    sums: wgpu::TextureView,
+    next: wgpu::Texture,
+    next_view: wgpu::TextureView,
 }
 
 #[repr(C)]
@@ -1571,9 +1605,12 @@ pub(crate) struct Pipelines {
     before_layout: wgpu::BindGroupLayout,
     /// Adjustment passes by their fragment entry.
     filters: HashMap<&'static str, wgpu::RenderPipeline>,
-    /// Liquify stamps added into the field, and reconstruct's fading of it.
-    liquify_add: wgpu::RenderPipeline,
-    liquify_fade: wgpu::RenderPipeline,
+    /// Liquify's stamps added up and the field carried along by them, the format the field
+    /// takes here, and what that second pass reads.
+    liquify_stamp: wgpu::RenderPipeline,
+    liquify_step: wgpu::RenderPipeline,
+    liquify_format: wgpu::TextureFormat,
+    liquify_layout: wgpu::BindGroupLayout,
     selection_module: wgpu::ShaderModule,
     smudge_layout: wgpu::BindGroupLayout,
     smudge_carry: wgpu::ComputePipeline,
@@ -3314,11 +3351,16 @@ impl Canvas {
         self.active = Some(ActiveStroke { layer, style, bounds: IRect::EMPTY, pencil: true, second: None });
     }
 
-    /// Liquify stamps drawn into the field, in order.
+    /// A step of the liquify brush: `stamps` added up, then the field carried along by them.
     pub fn liquify_stamps(&mut self, stamps: &[LiquifyStamp]) {
         if !stamps.is_empty() {
             self.ops.push(Op::LiquifyStamps(stamps.to_vec()));
         }
+    }
+
+    /// The liquify field kept at `amount` of itself.
+    pub fn liquify_scale(&mut self, amount: f32) {
+        self.ops.push(Op::LiquifyScale(amount));
     }
 
     /// The liquify field back to no offsets.
@@ -4096,7 +4138,9 @@ impl Canvas {
                     self.filter(gpu, &mut encoder, &mut uniforms, filter);
                 }
                 Op::LiquifyBegin => {
-                    let field = texture(device, "liquify field", self.width, self.height, LIQUIFY_FORMAT);
+                    let (width, height) = (self.width.div_ceil(2), self.height.div_ceil(2));
+                    let format = self.pipelines.liquify_format;
+                    let field = texture(device, "liquify field", width, height, format);
                     let view = field.create_view(&wgpu::TextureViewDescriptor::default());
                     drop(render_pass(
                         &mut encoder,
@@ -4104,7 +4148,13 @@ impl Canvas {
                         &view,
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     ));
-                    self.liquify = Some(LiquifyField { bind: self.copy_bind_with(device, &view), view });
+                    self.liquify = Some(LiquifyField {
+                        bind: self.copy_bind_with(device, &view),
+                        view,
+                        texture: field,
+                        scale: [width as f32 / self.width as f32, height as f32 / self.height as f32],
+                        scratch: None,
+                    });
                 }
                 Op::PencilBegin => {
                     let mask = texture(device, "pencil mask", self.width, self.height, STROKE_FORMAT);
@@ -4129,29 +4179,8 @@ impl Canvas {
                         }
                     }
                 }
-                Op::LiquifyStamps(stamps) => {
-                    if let Some(field) = &self.liquify {
-                        let (w, h) = (self.width as f32, self.height as f32);
-                        let mut pass = render_pass(&mut encoder, "liquify", &field.view, wgpu::LoadOp::Load);
-                        for st in stamps {
-                            let mode = st.mode as u32 as f32;
-                            let offset = uniforms.push(&LiquifyUniform {
-                                stamp: [st.centre[0], st.centre[1], st.radius.max(1.0), st.pressure],
-                                move_mode: [st.moved[0], st.moved[1], mode, st.seed],
-                                canvas: [w, h, st.distortion, 0.0],
-                                pad: [0.0; 4],
-                            });
-                            let pipeline = if st.mode == LiquifyMode::Reconstruct {
-                                &self.pipelines.liquify_fade
-                            } else {
-                                &self.pipelines.liquify_add
-                            };
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(0, &self.uniform_bind, &[offset]);
-                            pass.draw(0..6, 0..1);
-                        }
-                    }
-                }
+                Op::LiquifyStamps(stamps) => self.liquify_step(device, &mut encoder, &mut uniforms, &stamps, 1.0),
+                Op::LiquifyScale(amount) => self.liquify_step(device, &mut encoder, &mut uniforms, &[], amount),
                 Op::LiquifyClear => {
                     if let Some(field) = &self.liquify {
                         drop(render_pass(
@@ -5418,7 +5447,10 @@ impl Canvas {
                 ("fs_bloom", values([amount, threshold, transition, burn], [sigma, 0.0, 0.0, 0.0]))
             }
             Filter::Curves => ("fs_curves", values([0.0; 4], [0.0; 4])),
-            Filter::Liquify { amount } => ("fs_liquified", values([amount, 0.0, 0.0, 0.0], [0.0; 4])),
+            Filter::Liquify { amount } => {
+                let [across, down] = self.liquify.as_ref().map_or([1.0; 2], |l| l.scale);
+                ("fs_liquified", values([amount, across, down, 0.0], [0.0; 4]))
+            }
             Filter::Clone { offset: [x, y] } => ("fs_clone", values([x, y, 0.0, 0.0], [0.0; 4])),
             Filter::Glitch { kind, amount, values: [v0, v1, v2], zoom, seed } => {
                 ("fs_glitch", values([kind.min(3) as f32, amount, v0, v1], [v2, zoom, seed, 0.0]))
@@ -5463,6 +5495,119 @@ impl Canvas {
             }
         }
         self.dirty = self.full();
+    }
+
+    /// A step of the liquify brush: `stamps` added up over the part of the field they reach, the
+    /// field there carried along by that and `keep` of it left. No stamps: the whole field.
+    fn liquify_step(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &mut UniformData,
+        stamps: &[LiquifyStamp],
+        keep: f32,
+    ) {
+        let (canvas_w, canvas_h) = (self.width as f32, self.height as f32);
+        let chosen = self.selection.as_ref().map(|s| &s.view);
+        let Some(field) = self.liquify.as_mut() else { return };
+        let (width, height) = (field.texture.width(), field.texture.height());
+        let [across, down] = field.scale;
+        // the stamps' reach, in field pixels
+        let (x0, y0, x1, y1) = if stamps.is_empty() {
+            (0, 0, width, height)
+        } else {
+            let (mut left, mut top, mut right, mut bottom) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for st in stamps {
+                let ([x, y], r) = (st.centre, st.radius.max(LIQUIFY_LEAST_RADIUS));
+                left = left.min(x - r);
+                top = top.min(y - r);
+                right = right.max(x + r);
+                bottom = bottom.max(y + r);
+            }
+            let low = |v: f32, most: u32| (v.floor() as i64 - 1).clamp(0, i64::from(most)) as u32;
+            let high = |v: f32, most: u32| (v.ceil() as i64 + 1).clamp(0, i64::from(most)) as u32;
+            (
+                low(left * across, width),
+                low(top * down, height),
+                high(right * across, width),
+                high(bottom * down, height),
+            )
+        };
+        let (area_w, area_h) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+        if area_w == 0 || area_h == 0 {
+            return;
+        }
+        let scratch = match field.scratch.take() {
+            Some(s) if s.width >= area_w && s.height >= area_h => s,
+            old => {
+                // each way up to the next size a little over, to do this seldom
+                let wide = old.as_ref().map_or(0, |s| s.width).max(area_w.next_multiple_of(128)).min(width);
+                let high = old.as_ref().map_or(0, |s| s.height).max(area_h.next_multiple_of(128)).min(height);
+                let sums = texture(device, "liquify sums", wide, high, LIQUIFY_SUMS_FORMAT);
+                let next = texture(device, "liquify step", wide, high, self.pipelines.liquify_format);
+                LiquifyScratch {
+                    width: wide,
+                    height: high,
+                    sums: sums.create_view(&wgpu::TextureViewDescriptor::default()),
+                    next_view: next.create_view(&wgpu::TextureViewDescriptor::default()),
+                    next,
+                }
+            }
+        };
+        let area = [x0 as f32, y0 as f32, area_w as f32, area_h as f32];
+        let canvas = [canvas_w, canvas_h, across, down];
+        let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
+        let mut pass = render_pass(encoder, "liquify stamps", &scratch.sums, clear);
+        pass.set_viewport(0.0, 0.0, area[2], area[3], 0.0, 1.0);
+        pass.set_pipeline(&self.pipelines.liquify_stamp);
+        for st in stamps {
+            let (mode, narrow) = st.mode.code();
+            let offset = uniforms.push(&LiquifyUniform {
+                stamp: [st.centre[0], st.centre[1], st.radius.max(LIQUIFY_LEAST_RADIUS), st.amount],
+                way: [st.way[0], st.way[1], mode, narrow],
+                canvas,
+                area,
+            });
+            pass.set_bind_group(0, &self.uniform_bind, &[offset]);
+            pass.draw(0..6, 0..1);
+        }
+        drop(pass);
+        let reads = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("liquify step"),
+            layout: &self.pipelines.liquify_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&scratch.sums) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&field.view) },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(chosen.unwrap_or(&self.everything)),
+                },
+            ],
+        });
+        let offset = uniforms.push(&LiquifyUniform {
+            stamp: [keep, 0.0, 0.0, 0.0],
+            way: [0.0, 0.0, 0.0, if chosen.is_some() { 1.0 } else { 0.0 }],
+            canvas,
+            area,
+        });
+        let mut pass = render_pass(encoder, "liquify step", &scratch.next_view, clear);
+        pass.set_viewport(0.0, 0.0, area[2], area[3], 0.0, 1.0);
+        pass.set_pipeline(&self.pipelines.liquify_step);
+        pass.set_bind_group(0, &self.uniform_bind, &[offset]);
+        pass.set_bind_group(1, &reads, &[]);
+        pass.draw(0..3, 0..1);
+        drop(pass);
+        encoder.copy_texture_to_texture(
+            scratch.next.as_image_copy(),
+            wgpu::TexelCopyTextureInfo {
+                texture: &field.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: x0, y: y0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            extent(area_w, area_h),
+        );
+        field.scratch = Some(scratch);
     }
 
     /// `view` bound as an adjustment's source, with where it shows when `masked`: what is painted
@@ -6183,7 +6328,7 @@ impl Canvas {
     /// too), a filter one for each halving of a wide blur and its passes; the rest one or none.
     fn slots_for(&self, op: &Op, ops: &[Op]) -> usize {
         match op {
-            Op::LiquifyStamps(stamps) => stamps.len(),
+            Op::LiquifyStamps(stamps) => stamps.len() + 1,
             Op::TransformSet { .. } | Op::TransformMesh { .. } => {
                 let added = ops.iter().filter(|o| matches!(o, Op::TransformAlso(_))).count();
                 1 + self.transform_more.len() + added
@@ -6230,6 +6375,7 @@ impl Canvas {
             | Op::LiquifyBegin
             | Op::PencilBegin
             | Op::LiquifyStamps(_)
+            | Op::LiquifyScale(_)
             | Op::LiquifyClear
             | Op::TransformEnd { .. } => transformed_live(),
             Op::Release { before: None, .. } => self.held.as_ref().is_none_or(|h| live.contains(&h.layer)),
@@ -7560,7 +7706,7 @@ pub fn textures_bytes(textures: &[wgpu::Texture]) -> u64 {
 }
 
 impl Pipelines {
-    pub(crate) fn new(device: &wgpu::Device) -> Pipelines {
+    pub(crate) fn new(device: &wgpu::Device, liquify_format: wgpu::TextureFormat) -> Pipelines {
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -7797,20 +7943,28 @@ impl Pipelines {
             })
             .collect();
         let liquify_module = module("liquify", include_str!("shaders/liquify.wgsl"));
-        let liquify_layout = layout("liquify", &[Some(&uniform_layout)]);
-        let liquify_pipeline = |label: &str, blend: wgpu::BlendState| {
-            blended_pipeline(
-                device,
-                &liquify_layout,
-                &liquify_module,
-                label,
-                ("vs_liquify", "fs_liquify"),
-                LIQUIFY_FORMAT,
-                Some(blend),
-            )
-        };
-        let liquify_add = liquify_pipeline("liquify add", ADD);
-        let liquify_fade = liquify_pipeline("liquify fade", FADE);
+        let liquify_stamp = blended_pipeline(
+            device,
+            &layout("liquify stamps", &[Some(&uniform_layout)]),
+            &liquify_module,
+            "liquify stamps",
+            ("vs_stamp", "fs_stamp"),
+            LIQUIFY_SUMS_FORMAT,
+            Some(ADD),
+        );
+        let liquify_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("liquify step"),
+            entries: &[tex_entry(0), tex_entry(1), tex_entry(2)],
+        });
+        let liquify_step = blended_pipeline(
+            device,
+            &layout("liquify step", &[Some(&uniform_layout), Some(&liquify_layout)]),
+            &liquify_module,
+            "liquify step",
+            ("vs_step", "fs_step"),
+            liquify_format,
+            None,
+        );
         let surround_pipeline_layout = layout("surround", &[Some(&uniform_layout)]);
         let storage = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -8027,8 +8181,10 @@ impl Pipelines {
             crop,
             before_layout,
             filters,
-            liquify_add,
-            liquify_fade,
+            liquify_stamp,
+            liquify_step,
+            liquify_format,
+            liquify_layout,
             mesh: device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("warp"),
                 layout: Some(&transform_pipeline_layout),
@@ -8125,8 +8281,20 @@ fn region_copy(
     texture
 }
 
-/// The liquify field: two half floats of offset a pixel.
-const LIQUIFY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
+/// The smallest a liquify stamp can be, canvas pixels.
+const LIQUIFY_LEAST_RADIUS: f32 = 0.25;
+
+/// What a liquify step's stamps add up to: an offset, and how much is rebuilt.
+const LIQUIFY_SUMS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// The liquify field: two floats of offset a pixel, as many bits as can be drawn into here. Each
+/// step redraws the field from itself, so half floats would drift.
+pub(crate) fn liquify_format(adapter: &wgpu::Adapter) -> wgpu::TextureFormat {
+    let wanted = wgpu::TextureFormat::Rg32Float;
+    let needed = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT;
+    let can = adapter.get_texture_format_features(wanted).allowed_usages.contains(needed);
+    if can { wanted } else { wgpu::TextureFormat::Rg16Float }
+}
 
 /// Added to what is there (liquify stamps into the field).
 const ADD: wgpu::BlendState = wgpu::BlendState {
@@ -8138,20 +8306,6 @@ const ADD: wgpu::BlendState = wgpu::BlendState {
     alpha: wgpu::BlendComponent {
         src_factor: wgpu::BlendFactor::One,
         dst_factor: wgpu::BlendFactor::One,
-        operation: wgpu::BlendOperation::Add,
-    },
-};
-
-/// What is there kept by one minus what is drawn's alpha (reconstruct fading the field).
-const FADE: wgpu::BlendState = wgpu::BlendState {
-    color: wgpu::BlendComponent {
-        src_factor: wgpu::BlendFactor::Zero,
-        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-        operation: wgpu::BlendOperation::Add,
-    },
-    alpha: wgpu::BlendComponent {
-        src_factor: wgpu::BlendFactor::Zero,
-        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
         operation: wgpu::BlendOperation::Add,
     },
 };

@@ -778,10 +778,11 @@ private fun LiquifyPanelAndMenus(vm: CanvasViewModel, screenWidth: Dp, screenHei
             val centre = if (wide) (screenWidth - 1093.dp) / 2 + 86.dp + 94.dp * 8 + 37.5.dp else screenWidth / 2
             val left = (centre - 130.dp).coerceIn(0.dp, screenWidth - 260.dp)
             MenuPopover(centre - left, left, buttonsTop) {
-                MenuTitle("Adjust")
+                MenuTitle("Strength")
                 Spacer(Modifier.height(4.dp))
                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(MenuGroup).padding(vertical = 8.dp)) {
-                    SliderRow("Amount", vm.liquifyAmount, "${(vm.liquifyAmount * 100).roundToInt()}%") { vm.changeLiquifyAmount(it) }
+                    val amount = if (vm.liquifyAmount >= 1f) "Max" else "${(vm.liquifyAmount * 100).roundToInt()}%"
+                    SliderRow("Amount", vm.liquifyAmount, amount) { vm.changeLiquifyAmount(it) }
                 }
             }
         }

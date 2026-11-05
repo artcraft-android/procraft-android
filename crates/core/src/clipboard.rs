@@ -63,6 +63,17 @@ impl State {
     }
 }
 
+/// `image`'s straight colours premultiplied, as layers hold them.
+fn premultiplied(mut image: ThumbnailImage) -> ThumbnailImage {
+    for px in image.rgba.as_chunks_mut::<4>().0 {
+        let a = u16::from(px[3]);
+        for c in px.iter_mut().take(3) {
+            *c = ((u16::from(*c) * a + 127) / 255) as u8;
+        }
+    }
+    image
+}
+
 /// `image` placed on a `width` × `height` canvas: centred, and scaled down to fit when `fit` and
 /// it is larger (premultiplied RGBA8; anything outside is cut off).
 fn placed(image: ThumbnailImage, width: u32, height: u32, fit: bool) -> Option<Vec<u8>> {
@@ -156,7 +167,7 @@ impl CanvasSession {
     /// pasted; returns the layer's id.
     pub fn paste(&self, image: ThumbnailImage) -> Option<u64> {
         match self.mask_to_paste_into() {
-            Some(mask) => self.paste_into(mask, image),
+            Some(mask) => self.paste_into(mask, image, false),
             None => self.add_picture(image, false, false),
         }
     }
@@ -170,14 +181,13 @@ impl CanvasSession {
     /// centred and scaled down to fit (on a private layer, one the gallery's thumbnail leaves
     /// out, if `private`); returns its id.
     pub fn insert_image(&self, image: ThumbnailImage, private: bool) -> Option<u64> {
-        let mut premultiplied = image;
-        for px in premultiplied.rgba.as_chunks_mut::<4>().0 {
-            let a = u16::from(px[3]);
-            for c in px.iter_mut().take(3) {
-                *c = ((u16::from(*c) * a + 127) / 255) as u8;
-            }
-        }
-        self.add_picture(premultiplied, true, private)
+        self.add_picture(premultiplied(image), true, private)
+    }
+
+    /// The current mask holding the brightness of `image` (from another app, straight RGBA8),
+    /// centred and scaled down to fit, if masks take what is pasted; whether it does.
+    pub fn paste_picture_into_mask(&self, image: ThumbnailImage) -> bool {
+        self.mask_to_paste_into().is_some_and(|mask| self.paste_into(mask, premultiplied(image), true).is_some())
     }
 
     /// The frames of the animated GIF `bytes` as layers above the current one, each fitted to the
@@ -255,10 +265,10 @@ impl CanvasSession {
     }
 
     /// `mask` shows `image` by its brightness, what is clear in that hiding: one undo step.
-    fn paste_into(&self, mask: LayerId, image: ThumbnailImage) -> Option<u64> {
+    fn paste_into(&self, mask: LayerId, image: ThumbnailImage, fit: bool) -> Option<u64> {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let mut pixels = placed(image, st.doc.width(), st.doc.height(), false)?;
+        let mut pixels = placed(image, st.doc.width(), st.doc.height(), fit)?;
         for px in pixels.as_chunks_mut::<4>().0 {
             // (colours are premultiplied, so what is clear counts as black)
             let [r, g, b, _] = px.map(u32::from);
