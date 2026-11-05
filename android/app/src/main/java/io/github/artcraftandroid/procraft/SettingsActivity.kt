@@ -57,7 +57,7 @@ class SettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("interface", Context.MODE_PRIVATE)
-        val interfaceSize = keptPlugins(prefs).interfaceSize()
+        val interfaceSize = keptPlugins(this, prefs).interfaceSize()
         setContent {
             val size = fittedInterfaceSize(interfaceSize)
             val density = LocalDensity.current

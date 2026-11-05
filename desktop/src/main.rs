@@ -671,6 +671,7 @@ impl App {
             crate::pen::take_button_presses();
             // a share from the gallery shows its card there
             interface.export_card.show(ui.ctx(), &mut interface.look);
+            interface.plugin_alert(ui.ctx());
             if reading == Some(true) {
                 opening_veil(ui.ctx());
             }
@@ -859,6 +860,11 @@ impl App {
     /// come in as Import brings them (an artwork, a picture, or a model with its files).
     fn take_dropped(&mut self) {
         let paths = std::mem::take(&mut self.dropped);
+        // a plugin file is asked about wherever it lands
+        let (plugins, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| files::is_plugin_file(p));
+        if let Some(path) = plugins.first() {
+            self.ui.offer_plugin_file(path);
+        }
         if paths.is_empty() {
             return;
         }

@@ -135,6 +135,9 @@ pub struct Interface {
     /// Share's PDF asks how well it keeps its pictures first (for this format).
     pdf_alert: Alert,
     pdf_for: Option<Format>,
+    /// A plugin file's one screen, and the file while it asks.
+    plugin_alert: Alert,
+    plugin_file: Option<Vec<u8>>,
     /// An export under way, as its card shows it.
     pub export_card: crate::export_card::ExportCard,
     /// The brushes changed (the library closed, a slider let go, a notch saved): keep them.
@@ -232,6 +235,8 @@ impl Default for Interface {
             blocked_alert: Alert::default(),
             pdf_alert: Alert::default(),
             pdf_for: None,
+            plugin_alert: Alert::default(),
+            plugin_file: None,
             export_card: crate::export_card::ExportCard::default(),
             keep_brushes: false,
             tool_hold_acted: false,
@@ -575,6 +580,7 @@ impl Interface {
             self.quick_menu(&ctx, session);
             self.blocked_alert(&ctx, session);
             self.pdf_quality_alert(&ctx);
+            self.plugin_alert(&ctx);
             self.export_card.show(&ctx, &mut self.look);
             self.touch_companion(&ctx, session);
             if self.show_interface_button(&ctx) {
@@ -747,6 +753,7 @@ impl Interface {
         self.quick_menu(&ctx, session);
         self.blocked_alert(&ctx, session);
         self.pdf_quality_alert(&ctx);
+        self.plugin_alert(&ctx);
         self.export_card.show(&ctx, &mut self.look);
         self.text_editor(&ctx, session);
         // a gesture setting changed: the touches follow it, and it is kept
@@ -1776,6 +1783,43 @@ impl Interface {
         }
     }
 
+    /// Asks whether to import the plugin file at `path`: nothing in it runs, and nothing is kept
+    /// until the answer comes. What can't be imported says why.
+    pub fn offer_plugin_file(&mut self, path: &std::path::Path) {
+        let cant = "Can't import this plugin";
+        let Some(bytes) = procraft_core::read_plugin_file(path) else {
+            self.plugin_alert.tell(cant, "This file can't be read.", None);
+            return;
+        };
+        let offer = self.prefs.plugins.inspect(bytes.clone());
+        if let Some(why) = offer.refused {
+            self.plugin_alert.tell(cant, &why, None);
+            return;
+        }
+        self.plugin_file = Some(bytes);
+        self.plugin_alert.ask(Asking {
+            title: offer.name,
+            message: offer.message,
+            action: "Import".to_owned(),
+            icon: None,
+            destructive: false,
+            extra: None,
+            first: None,
+            alone: false,
+        });
+    }
+
+    /// A plugin file's screen, while it shows: answered, the file is imported, or it was only
+    /// being told something.
+    pub fn plugin_alert(&mut self, ctx: &egui::Context) {
+        let Some(answer) = self.plugin_alert.show(ctx, &mut self.look) else { return };
+        let Some(bytes) = self.plugin_file.take().filter(|_| answer == Answer::Action) else { return };
+        match self.prefs.plugins.install(bytes) {
+            Some(why) => self.plugin_alert.tell("Can't import this plugin", &why, None),
+            None => self.prefs.keep(),
+        }
+    }
+
     /// The blocked alert, while it shows: unlock or show the layer, or open Layers.
     fn blocked_alert(&mut self, ctx: &egui::Context, session: &CanvasSession) {
         let Some(answer) = self.blocked_alert.show(ctx, &mut self.look) else { return };
@@ -2002,6 +2046,11 @@ impl Interface {
                 let (shown, act) =
                     self.actions_panel.show(ctx, &mut self.look, button, &showing, &mut self.prefs, backdrops);
                 match act {
+                    Some(Act::ImportPlugin) => {
+                        if let Some(path) = crate::files::pick_plugin() {
+                            self.offer_plugin_file(&path);
+                        }
+                    }
                     Some(Act::Prefs) => {
                         self.prefs.apply(session);
                         session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));

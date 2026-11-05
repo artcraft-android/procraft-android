@@ -1,0 +1,618 @@
+//! The points where an applied patch steps in. Each does nothing with none applied, and holds no
+//! feature of its own: what a patch does is in its file. They stay for good, so there are as few as
+//! patches need, and each is as narrow as it can be.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use crate::CanvasSession;
+use crate::patch_run::{Running, Stop};
+use crate::plugin_file;
+use crate::plugins::Plugins;
+
+struct Applied {
+    id: String,
+    running: Running,
+}
+
+#[derive(Default)]
+struct Patches {
+    /// In id order, so patches go in the same order however they were applied.
+    applied: Vec<Applied>,
+    /// What stopped since the list last asked, and why.
+    stopped: Vec<(String, Stop)>,
+    /// A stop the app hasn't told yet: whoever is drawing sees the stroke change, not the list.
+    untold: Option<Stop>,
+}
+
+/// The applied patches, shared by a list and the sessions going through it. Not a static: they go
+/// with the list, so one comes off at once, no restart.
+#[derive(Default)]
+pub(crate) struct Hooks {
+    /// Whether any is applied: all a stroke with none pays for is reading this.
+    any: AtomicBool,
+    patches: Mutex<Patches>,
+    /// Where a stop is written down, to stay off through a restart.
+    store: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for Hooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hooks").field("any", &self.any).finish_non_exhaustive()
+    }
+}
+
+impl Hooks {
+    pub(crate) fn kept_in(store: Option<PathBuf>) -> Hooks {
+        Hooks { store, ..Hooks::default() }
+    }
+
+    fn patches(&self) -> MutexGuard<'_, Patches> {
+        self.patches.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Writes down that `id` stopped, for the list and for the next start.
+    fn note_stop(&self, patches: &mut Patches, id: String, stop: Stop) {
+        log::warn!("a patch stopped: {id}: {stop:?}");
+        if let Some(store) = &self.store {
+            plugin_file::note_stopped(store, &id, stop.text());
+        }
+        patches.stopped.push((id, stop));
+        patches.untold = Some(stop);
+    }
+
+    /// The position hook: where a sample in window pixels lands, before the stroke sees it.
+    #[inline]
+    pub(crate) fn position(&self, x: f32, y: f32) -> (f32, f32) {
+        if self.any.load(Ordering::Relaxed) { self.position_through_patches(x, y) } else { (x, y) }
+    }
+
+    /// One that stops is off the hook there and then, and the sample goes on as it came to it.
+    fn position_through_patches(&self, x: f32, y: f32) -> (f32, f32) {
+        // what isn't a position goes on as it came, and no patch answers for it
+        if !x.is_finite() || !y.is_finite() {
+            return (x, y);
+        }
+        let mut patches = self.patches();
+        let mut at = (x, y);
+        let mut i = 0;
+        while let Some(patch) = patches.applied.get_mut(i) {
+            match patch.running.position(at.0, at.1) {
+                Ok(to) => {
+                    at = to;
+                    i += 1;
+                }
+                Err(stop) => {
+                    let gone = patches.applied.remove(i);
+                    self.note_stop(&mut patches, gone.id, stop);
+                }
+            }
+        }
+        self.any.store(!patches.applied.is_empty(), Ordering::Relaxed);
+        at
+    }
+
+    pub(crate) fn is_on(&self, id: &str) -> bool {
+        self.patches().applied.iter().any(|p| p.id == id)
+    }
+
+    pub(crate) fn put_on(&self, id: String, running: Running) {
+        let mut patches = self.patches();
+        patches.applied.retain(|p| p.id != id);
+        let at = patches.applied.partition_point(|p| p.id < id);
+        patches.applied.insert(at, Applied { id, running });
+        self.any.store(true, Ordering::Relaxed);
+    }
+
+    /// Takes `id` off: from the next sample on, the app is as if it had never been.
+    pub(crate) fn take_off(&self, id: &str) {
+        let mut patches = self.patches();
+        patches.applied.retain(|p| p.id != id);
+        self.any.store(!patches.applied.is_empty(), Ordering::Relaxed);
+    }
+
+    /// Tells `id`, if it is on, control `index` has `value`.
+    pub(crate) fn control(&self, id: &str, index: usize, value: f32) {
+        let mut patches = self.patches();
+        let Some(at) = patches.applied.iter().position(|p| p.id == id) else { return };
+        let told = patches.applied.get_mut(at).map(|p| p.running.control(index, value));
+        if let Some(Err(stop)) = told {
+            let gone = patches.applied.remove(at);
+            self.note_stop(&mut patches, gone.id, stop);
+            self.any.store(!patches.applied.is_empty(), Ordering::Relaxed);
+        }
+    }
+
+    /// Writes down that `id` couldn't start, as if it had stopped.
+    pub(crate) fn failed(&self, id: &str, stop: Stop) {
+        self.note_stop(&mut self.patches(), id.to_owned(), stop);
+    }
+
+    /// A stop in words for the app to tell, once.
+    pub(crate) fn take_said(&self) -> Option<String> {
+        self.patches().untold.take().map(|stop| format!("A patch stopped. {}", stop.text()))
+    }
+
+    /// What stopped since this was last asked.
+    pub(crate) fn take_stopped(&self) -> Vec<(String, Stop)> {
+        std::mem::take(&mut self.patches().stopped)
+    }
+}
+
+#[uniffi::export]
+impl CanvasSession {
+    /// Strokes go through the patches `plugins` has applied, as they come and go, from here on.
+    pub fn use_patches(&self, plugins: Arc<Plugins>) {
+        let hooks = plugins.hooks();
+        self.shared.lock().hooks = Some(hooks);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use procraft_engine::view::View;
+    use procraft_gpu::Gpu;
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::patch_run::tests::{OFFSET, position_module};
+    use crate::patch_run::{MODULE, Running};
+    use crate::plugin_file::tests::{pack, patch};
+    use crate::{PenSample, PointerKind};
+
+    const ID: &str = "org.example.offset";
+
+    fn store(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("procraft-hooks-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.to_string_lossy().into_owned()
+    }
+
+    fn file(manifest: &Value, module: &[u8]) -> Vec<u8> {
+        pack(manifest, &[(MODULE, module)])
+    }
+
+    fn offset() -> Vec<u8> {
+        wat::parse_str(OFFSET).unwrap()
+    }
+
+    fn offset_manifest() -> Value {
+        let mut manifest = patch(ID, &offset());
+        manifest["controls"] = json!([
+            { "key": "x", "type": "slider", "label": "X", "least": -100, "most": 100, "step": 1, "starts": 0 },
+            { "key": "y", "type": "slider", "label": "Y", "least": -100, "most": 100, "step": 1, "starts": 0 },
+        ]);
+        manifest
+    }
+
+    /// A list holding the offset patch, in `dir`.
+    fn with_offset(dir: &str) -> Arc<Plugins> {
+        let plugins = Plugins::with_store(dir.to_owned());
+        assert_eq!(plugins.install(file(&offset_manifest(), &offset())), None);
+        plugins
+    }
+
+    /// A patch of no controls whose `procraft_position` does `body`, imported and applied.
+    fn applied(dir: &str, before: &str, body: &str) -> Arc<Plugins> {
+        let module = position_module(before, body);
+        let plugins = Plugins::with_store(dir.to_owned());
+        assert_eq!(plugins.install(file(&patch(ID, &module), &module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        plugins
+    }
+
+    fn card(plugins: &Plugins) -> crate::plugins::PluginInfo {
+        plugins.patches().remove(0)
+    }
+
+    /// A list as the next start reads it back.
+    fn restarted(dir: &str, plugins: &Plugins) -> Arc<Plugins> {
+        let next = Plugins::with_store(dir.to_owned());
+        for line in plugins.kept_lines() {
+            let (key, value) = line.split_once(' ').unwrap();
+            next.read_kept(key.to_owned(), value.to_owned());
+        }
+        next
+    }
+
+    #[test]
+    fn with_nothing_applied_a_sample_goes_through_as_it_came() {
+        let hooks = Hooks::default();
+        assert_eq!(hooks.position(1.5, -2.5), (1.5, -2.5));
+        // whatever it is, even what no patch could hand on
+        let (x, y) = hooks.position(f32::NAN, f32::INFINITY);
+        assert!(x.is_nan() && y == f32::INFINITY);
+    }
+
+    #[test]
+    fn a_sample_that_isn_t_a_position_doesn_t_stop_a_patch() {
+        let hooks = Hooks::default();
+        hooks.put_on("offset".to_owned(), Running::start(&offset(), &[]).unwrap());
+        assert!(hooks.position(f32::NAN, 2.0).0.is_nan());
+        assert_eq!(hooks.position(1.0, f32::INFINITY), (1.0, f32::INFINITY));
+        assert!(hooks.is_on("offset"));
+        assert_eq!(hooks.take_stopped(), []);
+    }
+
+    #[test]
+    fn a_patch_goes_on_as_applied_and_off_as_unapplied_with_no_restart() {
+        let dir = store("apply");
+        let plugins = with_offset(&dir);
+        let hooks = plugins.hooks();
+        assert_eq!(hooks.position(10.0, 10.0), (10.0, 10.0), "imported, it does nothing");
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert_eq!(plugins.set_slider(format!("{ID}.x"), 7.0), Some(7.0));
+        assert_eq!(plugins.set_slider(format!("{ID}.y"), -3.0), Some(-3.0));
+        assert_eq!(hooks.position(10.0, 10.0), (17.0, 7.0));
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert_eq!(hooks.position(10.0, 10.0), (10.0, 10.0));
+        // and back as it was left
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert_eq!(hooks.position(10.0, 10.0), (17.0, 7.0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn applied_it_comes_back_through_a_restart_whatever_order_values_are_read_in() {
+        let dir = store("restart");
+        let plugins = with_offset(&dir);
+        plugins.set_on(ID.to_owned(), true);
+        plugins.set_slider(format!("{ID}.x"), 7.0);
+        let mut lines = plugins.kept_lines();
+        for _ in 0..2 {
+            let next = Plugins::with_store(dir.to_owned());
+            for line in &lines {
+                let (key, value) = line.split_once(' ').unwrap();
+                next.read_kept(key.to_owned(), value.to_owned());
+            }
+            assert_eq!(next.hooks().position(1.0, 1.0), (8.0, 1.0));
+            lines.reverse();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removed_it_is_off_the_hook_and_gone() {
+        let dir = store("remove");
+        let plugins = with_offset(&dir);
+        plugins.set_on(ID.to_owned(), true);
+        plugins.set_slider(format!("{ID}.x"), 7.0);
+        let hooks = plugins.hooks();
+        assert_eq!(hooks.position(1.0, 1.0), (8.0, 1.0));
+        let keys = plugins.remove(ID.to_owned()).unwrap();
+        assert!(keys.contains(&format!("{ID}.x")) && keys.contains(&format!("{ID}.applied")), "{keys:?}");
+        assert_eq!(hooks.position(1.0, 1.0), (1.0, 1.0));
+        assert!(plugins.patches().is_empty());
+        assert!(Plugins::with_store(dir.clone()).patches().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_newer_version_takes_over_on_the_hook() {
+        let dir = store("update");
+        let plugins = with_offset(&dir);
+        plugins.set_on(ID.to_owned(), true);
+        plugins.set_slider(format!("{ID}.x"), 7.0);
+        let hooks = plugins.hooks();
+        let mut newer = offset_manifest();
+        newer["version"] = json!("1.1.0");
+        assert_eq!(plugins.install(file(&newer, &offset())), None);
+        assert_eq!(card(&plugins).version, "1.1.0");
+        assert!(card(&plugins).on);
+        assert_eq!(hooks.position(1.0, 1.0), (8.0, 1.0), "applied still, with what was set");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a patch that goes wrong on a sample must come to, whatever went wrong.
+    fn stops(name: &str, before: &str, body: &str, reason: &str) {
+        let dir = store(name);
+        let plugins = applied(&dir, before, body);
+        let hooks = plugins.hooks();
+        assert_eq!(hooks.position(3.0, 4.0), (3.0, 4.0), "the sample goes through unchanged");
+        let stopped = card(&plugins);
+        assert!(!stopped.on);
+        assert_eq!(stopped.problem.as_deref(), Some(reason));
+        assert_eq!(hooks.position(5.0, 6.0), (5.0, 6.0), "and it is off the hook");
+        assert!(!hooks.any.load(Ordering::Relaxed));
+        // it stays off through a restart, even with its flag kept as applied, and says why
+        let next = Plugins::with_store(dir.clone());
+        next.read_kept(format!("{ID}.applied"), "true".to_owned());
+        assert_eq!(next.hooks().position(3.0, 4.0), (3.0, 4.0));
+        let kept = card(&next);
+        assert!(!kept.on);
+        assert_eq!(kept.problem.as_deref(), Some(reason));
+        // unapplied, it says nothing more; asked again, it gets its chance
+        assert!(next.set_on(ID.to_owned(), false));
+        assert_eq!(card(&next).problem, None);
+        assert_eq!(card(&Plugins::with_store(dir.clone())).problem, None);
+        assert!(next.set_on(ID.to_owned(), true));
+        assert!(card(&next).on);
+        // and removed, nothing of it is left
+        assert!(next.remove(ID.to_owned()).is_some());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_patch_that_loops_for_ever_is_stopped_and_switched_off() {
+        stops("loop", "", "(loop (br 0)) (i64.const 0)", "Switched off: it took too long.");
+    }
+
+    #[test]
+    fn a_patch_that_traps_is_switched_off() {
+        stops("trap", "", "(unreachable)", "Switched off: it crashed.");
+    }
+
+    #[test]
+    fn a_patch_that_returns_garbage_is_switched_off() {
+        // two NaNs
+        let nan = "(i64.const 0x7fc000007fc00000)";
+        stops("garbage", "", nan, "Switched off: it gave a position that makes no sense.");
+    }
+
+    #[test]
+    fn a_patch_over_the_memory_cap_is_switched_off() {
+        let grows = "(drop (memory.grow (i32.const 1000))) (i64.const 0)";
+        stops("memory", "(memory 1)", grows, "Switched off: it asked for too much memory.");
+    }
+
+    #[test]
+    fn a_patch_stopped_on_a_stroke_is_told_once_by_the_session() {
+        let dir = store("told");
+        let plugins = applied(&dir, "", "(unreachable)");
+        let s = CanvasSession::new(200, 200);
+        s.use_patches(Arc::clone(&plugins));
+        assert_eq!(s.take_failure(), None);
+        {
+            let mut st = s.shared.lock();
+            st.view = Some(View::fit((200, 200), (200, 200)));
+            let at = st.to_canvas(&[sample(10.0, 20.0, 0.0)]);
+            assert_eq!(at.len(), 1);
+            let plain = st
+                .view
+                .and_then(|v| v.to_screen().inverse())
+                .unwrap()
+                .apply(procraft_engine::geom::Vec2::new(10.0, 20.0));
+            assert_eq!(at[0].pos, plain, "the sample goes through unchanged");
+        }
+        assert_eq!(s.take_failure().as_deref(), Some("A patch stopped. Switched off: it crashed."));
+        assert_eq!(s.take_failure(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_patch_that_can_t_start_stays_off_and_says_why() {
+        let dir = store("start");
+        let module = position_module("(memory 1000)", "(i64.const 0)");
+        let plugins = Plugins::with_store(dir.clone());
+        assert_eq!(plugins.install(file(&patch(ID, &module), &module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        let stopped = card(&plugins);
+        assert!(!stopped.on);
+        assert_eq!(stopped.problem.as_deref(), Some("Switched off: it asked for too much memory."));
+        assert!(!plugins.hooks().any.load(Ordering::Relaxed));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stopped_patch_leaves_the_others_on() {
+        let bad = position_module("", "(unreachable)");
+        let hooks = Hooks::default();
+        let mut good = Running::start(&offset(), &[]).unwrap();
+        good.control(0, 2.0).unwrap();
+        hooks.put_on("b".to_owned(), good);
+        hooks.put_on("a".to_owned(), Running::start(&bad, &[]).unwrap());
+        assert_eq!(hooks.position(1.0, 1.0), (3.0, 1.0));
+        assert!(!hooks.is_on("a") && hooks.is_on("b"));
+        assert_eq!(hooks.take_stopped(), [("a".to_owned(), Stop::Crashed)]);
+        assert_eq!(hooks.take_stopped(), []);
+    }
+
+    #[test]
+    fn patches_go_in_id_order_however_they_were_applied() {
+        // the second moves what the first gave it, so the order shows
+        let doubles = position_module(
+            "",
+            "(i64.or
+                (i64.extend_i32_u (i32.reinterpret_f32 (f32.mul (local.get 0) (f32.const 2))))
+                (i64.shl (i64.extend_i32_u (i32.reinterpret_f32 (local.get 1))) (i64.const 32)))",
+        );
+        let offset_by = |x: f32| {
+            let mut running = Running::start(&offset(), &[]).unwrap();
+            running.control(0, x).unwrap();
+            running
+        };
+        let hooks = Hooks::default();
+        hooks.put_on("b".to_owned(), Running::start(&doubles, &[]).unwrap());
+        hooks.put_on("a".to_owned(), offset_by(1.0));
+        assert_eq!(hooks.position(1.0, 0.0), (4.0, 0.0));
+    }
+
+    /// A session on a headless GPU drawing just where the input goes, or none without a GPU.
+    fn session() -> Option<Arc<CanvasSession>> {
+        let gpu = match Gpu::headless() {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return None;
+            }
+        };
+        let s = CanvasSession::new(200, 200);
+        {
+            let mut st = s.shared.lock();
+            st.window_size = (200, 200);
+            st.view = Some(View::fit((200, 200), (200, 200)));
+            st.gpu = Some(gpu);
+            st.ensure_canvas();
+        }
+        s.studio_begin();
+        s.set_studio_setting("streamline".to_owned(), 0.0);
+        s.studio_end(true);
+        Some(s)
+    }
+
+    fn sample(x: f32, y: f32, ms: f64) -> PenSample {
+        PenSample { x, y, pressure: 1.0, tilt: 0.0, orientation: 0.0, time_ms: ms, roll: 0.0 }
+    }
+
+    fn draw(s: &CanvasSession) {
+        s.stroke_begin(PointerKind::Stylus, vec![sample(30.0, 50.0, 0.0)]);
+        s.stroke_add((1..20).map(|i| sample(30.0 + i as f32 * 6.0, 50.0, f64::from(i) * 8.0)).collect());
+        s.stroke_end(vec![sample(150.0, 50.0, 170.0)]);
+    }
+
+    /// What the canvas looks like, after a render.
+    fn picture(s: &CanvasSession) -> Vec<u8> {
+        let mut st = s.shared.lock();
+        let layer = st.doc.current();
+        st.layer_pixels(layer).unwrap()
+    }
+
+    /// The rows of `rgba`, 200 wide, that anything was drawn on.
+    fn rows_drawn(rgba: &[u8]) -> Vec<usize> {
+        let rows = rgba.chunks(200 * 4).enumerate();
+        rows.filter(|(_, row)| row.chunks(4).any(|p| p[3] > 0)).map(|(y, _)| y).collect()
+    }
+
+    #[test]
+    fn a_stroke_lands_where_the_patch_says_and_as_it_did_once_it_is_gone() {
+        let Some(plain) = session() else { return };
+        draw(&plain);
+        let drawn = picture(&plain);
+        assert!(!rows_drawn(&drawn).is_empty());
+
+        // with the list on the session and nothing applied, nothing differs at all
+        let dir = store("stroke");
+        let plugins = with_offset(&dir);
+        let Some(s) = session() else { return };
+        s.use_patches(Arc::clone(&plugins));
+        draw(&s);
+        assert!(picture(&s) == drawn);
+
+        let Some(s) = session() else { return };
+        s.use_patches(Arc::clone(&plugins));
+        plugins.set_on(ID.to_owned(), true);
+        plugins.set_slider(format!("{ID}.y"), 40.0);
+        draw(&s);
+        let moved = rows_drawn(&picture(&s));
+        let want: Vec<usize> = rows_drawn(&drawn).iter().map(|y| y + 40).collect();
+        assert_eq!(moved, want, "the same stroke, 40 pixels down");
+
+        // unapplied it is as if it had never been
+        let Some(s) = session() else { return };
+        s.use_patches(Arc::clone(&plugins));
+        plugins.set_on(ID.to_owned(), false);
+        draw(&s);
+        assert!(picture(&s) == drawn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nanoseconds a sample takes through `hooks`, over a run long enough to read.
+    fn cost(hooks: &Hooks) -> f64 {
+        const SAMPLES: u32 = 2_000_000;
+        let start = Instant::now();
+        let mut sum = 0.0_f32;
+        for i in 0..SAMPLES {
+            sum += hooks.position(std::hint::black_box(i as f32 % 2000.0), 300.0).0;
+        }
+        std::hint::black_box(sum);
+        start.elapsed().as_secs_f64() * 1e9 / f64::from(SAMPLES)
+    }
+
+    /// What the hook costs a sample, and what a patch that spends all its fuel costs: run on a
+    /// device with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn hook_cost() {
+        let none = Hooks::default();
+        println!(
+            "position hook, none applied: {:.2} ns a sample",
+            (0..5).map(|_| cost(&none)).fold(f64::MAX, f64::min)
+        );
+
+        let applied = Hooks::default();
+        let mut running = Running::start(&offset(), &[]).unwrap();
+        running.control(0, 3.0).unwrap();
+        applied.put_on("offset".to_owned(), running);
+        println!(
+            "the offset patch applied: {:.1} ns a sample",
+            (0..5).map(|_| cost(&applied)).fold(f64::MAX, f64::min)
+        );
+
+        // the worst a patch can do to a sample before it is stopped, over and over
+        let mut slowest = f64::MAX;
+        for _ in 0..50 {
+            let mut running = Running::start(&position_module("", "(loop (br 0)) (i64.const 0)"), &[]).unwrap();
+            let start = Instant::now();
+            assert_eq!(running.position(1.0, 2.0), Err(Stop::TooSlow));
+            slowest = slowest.min(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        println!("a patch spending all its fuel on a sample: {slowest:.3} ms");
+
+        let start = Instant::now();
+        let mut running = Running::start(&offset(), &[]).unwrap();
+        println!("starting a patch: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0);
+        running.control(0, 1.0).unwrap();
+    }
+
+    /// The same stroke, with the list on the session and without: run on a device with
+    /// `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn a_stroke_costs_the_same_with_nothing_applied() {
+        let to_canvas_ns = |hooks: Option<Arc<Hooks>>| {
+            let s = CanvasSession::new(200, 200);
+            let mut st = s.shared.lock();
+            st.view = Some(View::fit((200, 200), (200, 200)));
+            st.hooks = hooks;
+            let samples: Vec<PenSample> = (0..2000).map(|i| sample(i as f32 % 200.0, 50.0, f64::from(i))).collect();
+            (0..7)
+                .map(|_| {
+                    let start = Instant::now();
+                    for _ in 0..500 {
+                        std::hint::black_box(st.to_canvas(std::hint::black_box(&samples)));
+                    }
+                    start.elapsed().as_secs_f64() * 1e9 / (500.0 * 2000.0)
+                })
+                .fold(f64::MAX, f64::min)
+        };
+        for _ in 0..3 {
+            let bare = to_canvas_ns(None);
+            let hooked = to_canvas_ns(Some(Arc::new(Hooks::default())));
+            println!("to_canvas a sample: {bare:.2} ns without the list, {hooked:.2} ns with it, none applied");
+        }
+    }
+
+    /// A real patch file, built by `tools/pack_patch.py`, end to end on the hook. Run with
+    /// `--ignored` and `PROCRAFT_PATCH_FILE` naming it.
+    #[test]
+    #[ignore]
+    fn a_built_patch_file_works() {
+        let bytes = std::fs::read(std::env::var("PROCRAFT_PATCH_FILE").unwrap()).unwrap();
+        let dir = store("built");
+        let plugins = Plugins::with_store(dir.clone());
+        let offer = plugins.inspect(bytes.clone());
+        println!("{offer:?}");
+        assert_eq!(offer.refused, None);
+        assert_eq!(plugins.install(bytes), None);
+        let found = card(&plugins);
+        assert!(plugins.set_on(found.id.clone(), true));
+        let hooks = plugins.hooks();
+        assert_eq!(hooks.position(100.0, 100.0), (100.0, 100.0), "at its start it moves nothing");
+        for control in &found.controls {
+            let crate::plugins::PluginControl::Slider { control } = control else { panic!() };
+            plugins.set_slider(control.key.clone(), if control.label == "X" { 12.0 } else { -8.0 });
+        }
+        assert_eq!(hooks.position(100.0, 100.0), (112.0, 92.0));
+        let next = restarted(&dir, &plugins);
+        assert_eq!(next.hooks().position(100.0, 100.0), (112.0, 92.0));
+        assert!(next.set_on(found.id.clone(), false));
+        assert_eq!(next.hooks().position(100.0, 100.0), (100.0, 100.0));
+        assert!(next.remove(found.id).is_some());
+        assert!(next.patches().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

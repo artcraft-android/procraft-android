@@ -417,9 +417,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         interfacePrefs.edit().putBoolean(LIGHT_INTERFACE, on).apply()
     }
 
-    /** The plugins, their values kept with the interface settings, and the list the Plugins page draws. */
-    private val plugins = keptPlugins(interfacePrefs)
-    var pluginList by mutableStateOf(plugins.list())
+    /** The patches and plugins, their values kept with the interface settings, and what their two pages draw. */
+    private val plugins = keptPlugins(app, interfacePrefs)
+    var patchList by mutableStateOf(plugins.patches())
+        private set
+    var pluginList by mutableStateOf(plugins.plugins())
         private set
 
     /** How big the whole interface is set to show (1: as measured). */
@@ -429,6 +431,80 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** How big it shows now: [interfaceSize], as far as the window has room. */
     var interfaceShown = 1f
         private set
+
+    /** Applies or unapplies a patch: it goes on or off its hooks at once, and its values wait for it. */
+    fun setPluginOn(plugin: io.github.artcraftandroid.procraft.core.PluginInfo, on: Boolean) {
+        if (!plugins.setOn(plugin.id, on)) return
+        interfacePrefs.edit().putBoolean(plugin.onKey, on).apply()
+        pluginsChanged()
+    }
+
+    /** A plugin file waiting on the one screen that asks about it, and what it holds. */
+    var pluginOffer by mutableStateOf<io.github.artcraftandroid.procraft.core.PluginOffer?>(null)
+        private set
+    private var offeredPlugin: ByteArray? = null
+
+    /** Whether [uri] is a plugin file, by its name. */
+    fun isPluginFile(uri: android.net.Uri) = fileName(uri)?.endsWith(".procraftplugin", ignoreCase = true) == true
+
+    /** Asks about the plugin file at [uri]: nothing in it runs, and nothing is kept until it is accepted. What can't be imported says why. */
+    fun offerPlugin(uri: android.net.Uri) {
+        viewModelScope.launch {
+            val most = io.github.artcraftandroid.procraft.core.pluginFileMostBytes().toLong() + 1
+            val bytes = withContext(Dispatchers.IO) {
+                runCatching {
+                    getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+                        // no further than a file that can be taken, whatever it is
+                        val out = java.io.ByteArrayOutputStream()
+                        val chunk = ByteArray(64 * 1024)
+                        while (out.size() < most) {
+                            val read = input.read(chunk)
+                            if (read < 0) break
+                            out.write(chunk, 0, read)
+                        }
+                        out.toByteArray()
+                    }
+                }.getOrNull()
+            }
+            if (bytes == null) {
+                message = "This file can't be read."
+                return@launch
+            }
+            val offer = plugins.inspect(bytes)
+            if (offer.refused != null) {
+                message = offer.refused
+                return@launch
+            }
+            offeredPlugin = bytes
+            pluginOffer = offer
+        }
+    }
+
+    fun declinePlugin() {
+        offeredPlugin = null
+        pluginOffer = null
+    }
+
+    /** Imports the file asked about; it shows at once. */
+    fun acceptPlugin() {
+        val bytes = offeredPlugin
+        declinePlugin()
+        message = bytes?.let(plugins::install)
+        pluginsChanged()
+    }
+
+    /** Removes an imported plugin, its folder and its values; it goes at once. */
+    fun removePlugin(plugin: io.github.artcraftandroid.procraft.core.PluginInfo) {
+        val forget = plugins.remove(plugin.id)
+        if (forget == null) {
+            message = "This plugin couldn't be removed."
+            return
+        }
+        val edit = interfacePrefs.edit()
+        forget.forEach(edit::remove)
+        edit.apply()
+        pluginsChanged()
+    }
 
     /** A plugin's switch flipped; a key no control has changes nothing. */
     fun setPluginSwitch(key: String, on: Boolean) {
@@ -446,15 +522,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         pluginsChanged()
     }
 
-    /** What the plugins the app has code for do now; any other does nothing. */
+    /** The two lists as they stand: a patch may have stopped on a stroke since they were read. */
+    fun readPlugins() {
+        patchList = plugins.patches()
+        pluginList = plugins.plugins()
+    }
+
+    /** What the patches and extras do now; a plugin nothing answers to does nothing. */
     private fun pluginsChanged() {
-        pluginList = plugins.list()
+        readPlugins()
         interfaceSize = plugins.interfaceSize()
         session?.let(::applyPlugins)
     }
 
     /** [s] goes by the plugins that reach a canvas. */
     private fun applyPlugins(s: CanvasSession) {
+        s.usePatches(plugins)
         s.setPasteIntoMask(plugins.pasteIntoMask())
         s.setFillGap(plugins.fillGap())
         s.setEyedropperFromLayer(plugins.eyedropperFromLayer())

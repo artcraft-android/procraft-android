@@ -60,7 +60,7 @@ pub struct Prefs {
     pub pad_3d: bool,
     /// The canvas shown on a second display too.
     pub project_canvas: bool,
-    /// The Plugins page's list, its values kept here with the rest.
+    /// The Patches and Plugins pages' lists, their values kept here with the rest.
     pub plugins: Arc<Plugins>,
     /// Advanced settings: an artwork opens as it was left; fitting the canvas keeps it clear of
     /// the top bar and the side bar; new artworks don't record their time-lapse; strokes made in
@@ -138,7 +138,8 @@ const STYLES: [CursorStyle; 3] = [CursorStyle::Contrast, CursorStyle::Colour, Cu
 impl Prefs {
     /// As kept (anything missing or unreadable as it starts).
     pub fn kept() -> Prefs {
-        let mut p = Prefs::default();
+        let store = crate::files::app_dir().join("plugins").to_string_lossy().into_owned();
+        let mut p = Prefs { plugins: Plugins::with_store(store), ..Prefs::default() };
         let text = std::fs::read_to_string(crate::files::app_dir().join("interface")).unwrap_or_default();
         for line in text.lines() {
             let Some((name, value)) = line.split_once(' ') else { continue };
@@ -245,6 +246,7 @@ impl Prefs {
         session.set_brush_scaling(self.brush_on_screen);
         session.set_selection_visibility(self.selection_visibility);
         session.set_fill_gap(self.plugins.fill_gap());
+        session.use_patches(Arc::clone(&self.plugins));
         session.set_simplified_undos(self.simplified_undos);
         session.set_speed_distance(self.speed_distance);
         session.set_input_settings(

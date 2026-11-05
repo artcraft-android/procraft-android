@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use egui::{Align2, Color32, Id, Order, Painter, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
-use procraft_core::{PluginControl, PluginInfo, Plugins, plugin_slider_along, plugin_slider_at, plugin_slider_shown};
+use procraft_core::{
+    PluginControl, PluginInfo, PluginKind, PluginSource, Plugins, plugin_slider_along, plugin_slider_at,
+    plugin_slider_shown,
+};
 
 use crate::animated_export::Animated;
 use crate::files::Format;
@@ -38,9 +41,12 @@ const CHOICE_HEIGHT: f32 = 42.0;
 const SLIDE_HEIGHT: f32 = 63.0;
 const GROUP_GAP: f32 = 20.0;
 const HEADING_HEIGHT: f32 = 45.0;
-/// A plugin's card: above its description, under it, how far in, and its tag.
+/// A card on the Patches or Plugins page: above its description, its problem's line, under it,
+/// how far in, and its tag; and the page with nothing on it.
 const PLUGIN_HEAD: f32 = 40.0;
+const PLUGIN_PROBLEM: f32 = 22.0;
 const PLUGIN_FOOT: f32 = 12.0;
+const PLUGINS_EMPTY: f32 = 60.0;
 const PLUGIN_INSET: f32 = 16.0;
 const PLUGIN_TAG: Themed = Themed(0x1FFFFFFF, 0x14000000);
 /// The panel ends this far above the window's bottom edge, and its rows scroll past this tall.
@@ -86,6 +92,8 @@ pub enum Act {
     AdvancedSettings,
     /// The keyboard shortcuts' list.
     Shortcuts,
+    /// A plugin file to pick and ask about.
+    ImportPlugin,
     GestureControls,
     CanvasInfo,
     AnimationAssist,
@@ -119,6 +127,7 @@ pub enum Page {
     Tabs,
     Pressure,
     Cursor,
+    Patches,
     Plugins,
 }
 
@@ -352,6 +361,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                 vec![
                     Button("Pressure and Smoothing", None, Some(Act::Page(Page::Pressure))),
                     Button("Gesture controls", None, Some(Act::GestureControls)),
+                    Button("Patches", None, Some(Act::Page(Page::Patches))),
                     Button("Plugins", None, Some(Act::Page(Page::Plugins))),
                 ],
                 vec![
@@ -452,7 +462,7 @@ pub struct Actions {
     /// The rows with a private action swiped (by group and row), until the tab changes or the
     /// panel closes.
     swipes: Swipes,
-    /// A plugin's slider under the pointer: its key, and where it has gone.
+    /// A patch's or plugin's slider under the pointer: its key, and where it has gone.
     plugin_moved: Option<(String, f32)>,
 }
 
@@ -542,12 +552,14 @@ impl Actions {
                             + 13.0;
                         header + rows.min(MOST_ROWS)
                     }
-                    Page::Plugins => {
+                    Page::Patches | Page::Plugins => {
                         let painter = ctx.layer_painter(egui::LayerId::background());
-                        let list = prefs.plugins.list();
+                        let list =
+                            if page == Page::Patches { prefs.plugins.patches() } else { prefs.plugins.plugins() };
                         let cards: f32 = list.iter().map(|p| plugin_height(&painter, p, ACTIONS_WIDTH - 24.0)).sum();
                         let gaps = GROUP_GAP * list.len().saturating_sub(1) as f32;
-                        header + 8.0 + (cards + gaps + 13.0).min(MOST_ROWS)
+                        let rows = if list.is_empty() { PLUGINS_EMPTY } else { cards + gaps };
+                        header + 8.0 + (rows + 13.0).min(MOST_ROWS)
                     }
                 }
         };
@@ -682,7 +694,8 @@ impl Actions {
             Page::Tabs => self.tabs(ui, look, body, groups, rows_alpha),
             Page::Cursor => self.cursor_page(ui, look, body, prefs),
             Page::Pressure => self.pressure_page(ui, look, body, prefs),
-            Page::Plugins => self.plugins_page(ui, look, body, prefs),
+            Page::Patches => self.plugins_page(ui, look, body, prefs, true),
+            Page::Plugins => self.plugins_page(ui, look, body, prefs, false),
         }
     }
 
@@ -842,16 +855,28 @@ impl Actions {
         tapped
     }
 
-    /// The plugins, a card each, drawn from what the list says of them. A slider's value goes in
-    /// as it lets go: what it sets may move the slider itself.
-    fn plugins_page(&mut self, ui: &mut Ui, look: &mut Look, body: Rect, prefs: &mut Prefs) -> Option<Tapped> {
-        if self.page_header(ui, look, body, "Plugins") {
+    /// The patches, or the plugins, a card each, drawn from what the list says of them. A slider's
+    /// value goes in as it lets go, unless it is live: what it sets may move the slider.
+    fn plugins_page(
+        &mut self,
+        ui: &mut Ui,
+        look: &mut Look,
+        body: Rect,
+        prefs: &mut Prefs,
+        patches: bool,
+    ) -> Option<Tapped> {
+        if self.page_header(ui, look, body, if patches { "Patches" } else { "Plugins" }) {
             return None;
         }
+        let button = Rect::from_min_size(pos2(body.right() - 12.0 - 72.0, body.top() + 12.0 + 5.0), vec2(72.0, 34.0));
+        let at = pos2(button.right() - 4.0, button.center().y);
+        text(ui.painter(), at, Align2::RIGHT_CENTER, "Import", 17.0, Weight::Regular, argb(pc::ACCENT));
+        let import = ui.interact(button, ui.scope_id().with("import plugin"), Sense::click()).clicked();
         let list = Rect::from_min_max(
             pos2(body.left() + 12.0, body.top() + 12.0 + 44.0 + 8.0),
             pos2(body.right() - 12.0, body.bottom()),
         );
+        let shown = if patches { prefs.plugins.patches() } else { prefs.plugins.plugins() };
         let mut changed = false;
         ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
             ScrollArea::vertical()
@@ -859,7 +884,15 @@ impl Actions {
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                    for (g, plugin) in prefs.plugins.list().iter().enumerate() {
+                    if shown.is_empty() {
+                        let width = ui.available_width();
+                        let (area, _) = ui.allocate_exact_size(vec2(width, PLUGINS_EMPTY), Sense::hover());
+                        let words = "Nothing imported yet. Import a .procraftplugin file to add one.";
+                        let inside = width - 2.0 * PLUGIN_INSET;
+                        let said = wrapped(ui.painter(), words, 15.0, Weight::Regular, argb(ACTIONS_ROW), inside);
+                        ui.painter().galley(area.min + vec2(PLUGIN_INSET, 8.0), said, argb(ACTIONS_ROW));
+                    }
+                    for (g, plugin) in shown.iter().enumerate() {
                         if g > 0 {
                             ui.add_space(GROUP_GAP);
                         }
@@ -872,6 +905,9 @@ impl Actions {
             && let Some((key, value)) = self.plugin_moved.take()
         {
             changed |= prefs.plugins.set_slider(key, value).is_some();
+        }
+        if import {
+            return Some(Tapped::Act(Act::ImportPlugin));
         }
         changed.then_some(Tapped::Act(Act::Prefs))
     }
@@ -968,23 +1004,52 @@ impl Actions {
     }
 }
 
+/// Whether a card's controls show: a patch's once applied, a filter's while it can do something.
+fn controls_show(plugin: &PluginInfo) -> bool {
+    plugin.on && plugin.problem.is_none()
+}
+
+/// A row under a card's controls.
+#[derive(Clone, Copy)]
+enum CardRow {
+    Apply,
+    Unapply,
+    Remove,
+}
+
+/// What can be done with `plugin`: a patch is applied or not, and what was imported can go.
+fn card_rows(plugin: &PluginInfo) -> Vec<CardRow> {
+    let mut rows = Vec::new();
+    if plugin.kind == PluginKind::Patch {
+        rows.push(if plugin.on { CardRow::Unapply } else { CardRow::Apply });
+    }
+    if plugin.source == PluginSource::File {
+        rows.push(CardRow::Remove);
+    }
+    rows
+}
+
 /// How tall `plugin`'s card is, `width` wide.
 fn plugin_height(painter: &Painter, plugin: &PluginInfo, width: f32) -> f32 {
     let inside = width - 2.0 * PLUGIN_INSET;
     let said = wrapped(painter, &plugin.description, 14.0, Weight::Regular, Color32::WHITE, inside);
+    let problem = if plugin.problem.is_some() { PLUGIN_PROBLEM } else { 0.0 };
     let controls: f32 = plugin
         .controls
         .iter()
+        .filter(|_| controls_show(plugin))
         .map(|c| match c {
             PluginControl::Switch { .. } => 1.0 + ROW_HEIGHT,
             PluginControl::Slider { .. } => 1.0 + SLIDE_HEIGHT,
         })
         .sum();
-    PLUGIN_HEAD + said.size().y + PLUGIN_FOOT + controls
+    let rows = card_rows(plugin).len() as f32 * (1.0 + ROW_HEIGHT);
+    PLUGIN_HEAD + said.size().y + problem + PLUGIN_FOOT + controls + rows
 }
 
-/// `plugin` as a card: its name and tag, what it does, and its controls, whatever they are. A
-/// switch flips at once, a slider leaves where it has gone in `moved`. Returns whether a value
+/// `plugin` as a card: its name and tag, what it does, what is the matter with it, its controls
+/// whatever they are, and the rows that apply or remove it. A switch flips at once, a live slider
+/// goes in as it moves, another leaves where it has gone in `moved`. Returns whether a value
 /// changed.
 fn plugin_card(
     ui: &mut Ui,
@@ -1012,10 +1077,17 @@ fn plugin_card(
     let said = wrapped(&painter, &plugin.description, 14.0, Weight::Regular, argb(ACTIONS_ROW), inside);
     let said_height = said.size().y;
     painter.galley(pos2(left, area.top() + PLUGIN_HEAD), said, argb(ACTIONS_ROW));
-    let mut y = area.top() + PLUGIN_HEAD + said_height + PLUGIN_FOOT;
+    let mut y = area.top() + PLUGIN_HEAD + said_height;
+    if let Some(problem) = &plugin.problem {
+        let at = pos2(left, y + PLUGIN_PROBLEM / 2.0 + 2.0);
+        text(&painter, at, Align2::LEFT_CENTER, problem, 14.0, Weight::Medium, argb(SLIDE_VALUE));
+        y += PLUGIN_PROBLEM;
+    }
+    y += PLUGIN_FOOT;
+    let line = |y: f32| Rect::from_min_size(pos2(area.left(), y), vec2(width, 1.0));
     let mut changed = false;
-    for (i, control) in plugin.controls.iter().enumerate() {
-        painter.rect_filled(Rect::from_min_size(pos2(area.left(), y), vec2(width, 1.0)), 0, argb(ACTIONS_SEPARATOR));
+    for (i, control) in plugin.controls.iter().enumerate().filter(|_| controls_show(plugin)) {
+        painter.rect_filled(line(y), 0, argb(ACTIONS_SEPARATOR));
         y += 1.0;
         match control {
             PluginControl::Switch { control } => {
@@ -1036,11 +1108,35 @@ fn plugin_card(
                 let shown = plugin_slider_shown(control.clone(), value);
                 let along = plugin_slider_along(control.clone(), value);
                 if let Some(at) = slide_row(ui, cell, &control.label, &shown, along, (g, i)) {
-                    *moved = Some((control.key.clone(), plugin_slider_at(control.clone(), at)));
+                    let to = plugin_slider_at(control.clone(), at);
+                    if control.live {
+                        changed |= plugins.set_slider(control.key.clone(), to).is_some();
+                    } else {
+                        *moved = Some((control.key.clone(), to));
+                    }
                 }
                 y += SLIDE_HEIGHT;
             }
         }
+    }
+    for (r, row) in card_rows(plugin).into_iter().enumerate() {
+        painter.rect_filled(line(y), 0, argb(ACTIONS_SEPARATOR));
+        let cell = Rect::from_min_size(pos2(area.left(), y + 1.0), vec2(width, ROW_HEIGHT));
+        let label = match row {
+            CardRow::Apply => "Apply",
+            CardRow::Unapply => "Unapply",
+            CardRow::Remove => "Remove",
+        };
+        let at = pos2(cell.left() + 16.0, cell.center().y);
+        text(&painter, at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
+        if ui.interact(cell, ui.scope_id().with(("plugin action", g, r)), Sense::click()).clicked() {
+            match row {
+                CardRow::Apply | CardRow::Unapply => changed |= plugins.set_on(plugin.id.clone(), !plugin.on),
+                CardRow::Remove if plugins.remove(plugin.id.clone()).is_some() => changed = true,
+                CardRow::Remove => crate::files::say("This couldn't be removed."),
+            }
+        }
+        y += 1.0 + ROW_HEIGHT;
     }
     changed
 }
@@ -1293,59 +1389,115 @@ mod tests {
 
     use super::*;
 
+    const SHADER: &str = "fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }";
+    const SHADER_SHA: &str = "bd416b9b96feb1bc64443427e430c45e1dab90fd55790939eaf5f2a35f5b55a0";
+
+    /// A patch's module, as small as one can be: every sample goes to the corner.
+    const MODULE: &str =
+        "0061736d0100000001070160027d7d017e030201000715011170726f63726166745f706f736974696f6e00000a0601040042000b";
+    const MODULE_SHA: &str = "f0491d3d48103d36e31e89c7bd4d8de782239dcb8f8158235c7d9c6b0425ecde";
+
+    /// A patch file, as small as one can be.
+    fn patch_file() -> Vec<u8> {
+        let module: Vec<u8> =
+            (0..MODULE.len() / 2).map(|i| u8::from_str_radix(&MODULE[2 * i..2 * i + 2], 16).unwrap()).collect();
+        let manifest = format!(
+            r#"{{"schema":1,"id":"org.example.patch","name":"A patch","version":"1.0.0","kind":"patch",
+            "publisher":{{"name":"Someone"}},"description":"Changes the app.","compat":{{"procraft":{{"interface":1}}}},
+            "files":[{{"path":"patch.wasm","sha256":"{MODULE_SHA}","size":{}}}],"permissions":[],"hooks":["position"]}}"#,
+            module.len()
+        );
+        let mut zip = procraft_engine::zip::ZipWriter::new();
+        zip.add("craft-extension.json", manifest.as_bytes());
+        zip.add("patch.wasm", &module);
+        zip.finish()
+    }
+
+    /// A plugin file, as small as one can be.
+    fn plugin_file() -> Vec<u8> {
+        let manifest = format!(
+            r#"{{"schema":1,"id":"org.example.filter","name":"A filter","version":"1.0.0","kind":"filter",
+            "publisher":{{"name":"Someone"}},"description":"Changes a layer.","compat":{{"procraft":{{"interface":1}}}},
+            "files":[{{"path":"filter.wgsl","sha256":"{SHADER_SHA}","size":{}}}],"permissions":[],"controls":[]}}"#,
+            SHADER.len()
+        );
+        let mut zip = procraft_engine::zip::ZipWriter::new();
+        zip.add("craft-extension.json", manifest.as_bytes());
+        zip.add("filter.wgsl", SHADER.as_bytes());
+        zip.finish()
+    }
+
     fn body() -> Rect {
-        Rect::from_min_size(pos2(100.0, 50.0), vec2(ACTIONS_WIDTH, 700.0))
+        Rect::from_min_size(pos2(100.0, 50.0), vec2(ACTIONS_WIDTH, 1400.0))
     }
 
     fn press(at: Pos2, pressed: bool) -> Event {
         Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }
     }
 
-    /// The Plugins page, with no window.
+    /// The Patches or Plugins page, with no window.
     struct Page {
         ctx: egui::Context,
         look: Look,
         actions: Actions,
         prefs: Prefs,
+        patches: bool,
         time: f64,
     }
 
     impl Page {
-        fn new() -> Page {
+        fn new(patches: bool) -> Page {
             let ctx = egui::Context::default();
             crate::look::install_fonts(&ctx);
             let (look, actions, prefs) = (Look::default(), Actions::default(), Prefs::default());
-            let mut page = Page { ctx, look, actions, prefs, time: 0.0 };
+            let mut page = Page { ctx, look, actions, prefs, patches, time: 0.0 };
             page.frame(Vec::new());
             page.frame(Vec::new());
             page
         }
 
-        /// A frame: whether it said a value changed.
-        fn frame(&mut self, events: Vec<Event>) -> bool {
+        /// A frame, and what it asked of the app.
+        fn asked(&mut self, events: Vec<Event>) -> Option<Act> {
             self.time += 1.0 / 60.0;
             let raw = RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 1600.0))),
                 time: Some(self.time),
                 events,
                 ..RawInput::default()
             };
-            let Page { ctx, look, actions, prefs, .. } = self;
-            let mut changed = false;
+            let Page { ctx, look, actions, prefs, patches, .. } = self;
+            let mut asked = None;
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                changed = actions.plugins_page(ui, look, body(), prefs).is_some();
+                if let Some(Tapped::Act(act)) = actions.plugins_page(ui, look, body(), prefs, *patches) {
+                    asked = Some(act);
+                }
             });
             output.textures_delta.clear();
-            changed
+            asked
         }
 
-        /// A press and a lift at `at`: whether either said a value changed.
-        fn tap(&mut self, at: Pos2) -> bool {
+        /// A frame: whether it said a value changed.
+        fn frame(&mut self, events: Vec<Event>) -> bool {
+            self.asked(events) == Some(Act::Prefs)
+        }
+
+        /// A press and a lift at `at`: what they asked of the app.
+        fn tap_asks(&mut self, at: Pos2) -> Option<Act> {
             self.frame(vec![Event::PointerMoved(at)]);
-            let pressed = self.frame(vec![press(at, true)]);
-            let lifted = self.frame(vec![press(at, false)]);
-            let after = self.frame(Vec::new());
-            pressed || lifted || after
+            let pressed = self.asked(vec![press(at, true)]);
+            let lifted = self.asked(vec![press(at, false)]);
+            let after = self.asked(Vec::new());
+            let settled = pressed.or(lifted).or(after);
+            self.frame(Vec::new());
+            settled
+        }
+
+        fn tap(&mut self, at: Pos2) -> bool {
+            self.tap_asks(at) == Some(Act::Prefs)
+        }
+
+        fn list(&self) -> Vec<PluginInfo> {
+            if self.patches { self.prefs.plugins.patches() } else { self.prefs.plugins.plugins() }
         }
 
         /// Each card's top and bottom on the page.
@@ -1353,7 +1505,7 @@ mod tests {
             let painter = self.ctx.layer_painter(egui::LayerId::background());
             let mut top = body().top() + 12.0 + 44.0 + 8.0;
             let mut cards = Vec::new();
-            for plugin in self.prefs.plugins.list() {
+            for plugin in self.list() {
                 let bottom = top + plugin_height(&painter, &plugin, ACTIONS_WIDTH - 24.0);
                 cards.push((top, bottom));
                 top = bottom + GROUP_GAP;
@@ -1361,21 +1513,33 @@ mod tests {
             cards
         }
 
-        /// A point on the first card's slider, `along` its way (0..1).
+        /// The middle of a card's row, `up` rows from its last.
+        fn on_row(&self, card: usize, up: f32) -> Pos2 {
+            pos2(body().center().x, self.cards()[card].1 - ROW_HEIGHT / 2.0 - up * (ROW_HEIGHT + 1.0))
+        }
+
+        /// A point on the first card's slider, `along` its way (0..1): its last row.
         fn on_slider(&self, along: f32) -> Pos2 {
             let (left, right) = (body().left() + 12.0 + 16.0, body().right() - 12.0 - 16.0);
             pos2(left + along * (right - left), self.cards()[0].1 - SLIDE_HEIGHT / 2.0)
         }
 
-        /// The middle of the second card's switch row.
+        /// The middle of the second card's switch row, its last.
         fn on_switch(&self) -> Pos2 {
-            pos2(body().center().x, self.cards()[1].1 - ROW_HEIGHT / 2.0)
+            self.on_row(1, 0.0)
         }
     }
 
     #[test]
-    fn a_tap_on_a_plugin_s_switch_flips_it() {
-        let mut page = Page::new();
+    fn the_extras_show_with_their_controls_and_nothing_to_apply_or_remove() {
+        let page = Page::new(false);
+        assert_eq!(page.cards().len(), 4);
+        assert!(page.list().iter().all(|p| card_rows(p).is_empty() && controls_show(p)));
+    }
+
+    #[test]
+    fn a_tap_on_an_extra_s_switch_flips_it() {
+        let mut page = Page::new(false);
         let at = page.on_switch();
         assert!(!page.prefs.plugins.paste_into_mask());
         assert!(page.tap(at));
@@ -1385,8 +1549,8 @@ mod tests {
     }
 
     #[test]
-    fn a_plugin_s_slider_goes_in_as_it_lets_go() {
-        let mut page = Page::new();
+    fn an_extra_s_slider_goes_in_as_it_lets_go() {
+        let mut page = Page::new(false);
         let (end, start) = (page.on_slider(1.0), page.on_slider(0.0));
         page.frame(vec![Event::PointerMoved(end)]);
         page.frame(vec![press(end, true)]);
@@ -1406,11 +1570,69 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_along_a_plugin_s_slider_sets_it() {
-        let mut page = Page::new();
+    fn a_tap_along_an_extra_s_slider_sets_it() {
+        let mut page = Page::new(false);
         let at = page.on_slider(0.6);
         assert!(page.tap(at));
         assert_eq!(page.prefs.plugins.interface_size(), 1.05);
+    }
+
+    #[test]
+    fn with_nothing_imported_the_patches_page_is_empty_and_offers_import() {
+        let mut page = Page::new(true);
+        assert!(page.cards().is_empty());
+        let at = pos2(body().right() - 12.0 - 36.0, body().top() + 12.0 + 22.0);
+        assert_eq!(page.tap_asks(at), Some(Act::ImportPlugin));
+    }
+
+    #[test]
+    fn the_plugins_page_offers_import_too() {
+        let mut page = Page::new(false);
+        let at = pos2(body().right() - 12.0 - 36.0, body().top() + 12.0 + 22.0);
+        assert_eq!(page.tap_asks(at), Some(Act::ImportPlugin));
+    }
+
+    /// A page on a folder of its own, for a test's files.
+    fn with_store(patches: bool, name: &str) -> (Page, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("procraft-actions-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut page = Page::new(patches);
+        page.prefs.plugins = Plugins::with_store(dir.to_string_lossy().into_owned());
+        (page, dir)
+    }
+
+    #[test]
+    fn an_imported_filter_shows_and_goes_by_its_remove() {
+        let (mut page, dir) = with_store(false, "filter");
+        assert_eq!(page.prefs.plugins.install(plugin_file()), None);
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        assert_eq!(page.cards().len(), 5);
+        let at = page.on_row(4, 0.0);
+        assert!(page.tap(at));
+        assert_eq!(page.cards().len(), 4);
+        assert!(!dir.join("org.example.filter").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_imported_patch_is_applied_unapplied_and_removed_by_its_rows() {
+        let (mut page, dir) = with_store(true, "patch");
+        assert_eq!(page.prefs.plugins.install(patch_file()), None);
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        assert_eq!(page.cards().len(), 1);
+        assert!(!page.list()[0].on);
+        let at = page.on_row(0, 1.0);
+        assert!(page.tap(at));
+        assert!(page.list()[0].on);
+        assert!(page.tap(at));
+        assert!(!page.list()[0].on);
+        let at = page.on_row(0, 0.0);
+        assert!(page.tap(at));
+        assert!(page.cards().is_empty());
+        assert!(!dir.join("org.example.patch").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A card for a plugin the app has no code for: it shows, and a tap on it changes nothing.
@@ -1420,9 +1642,14 @@ mod tests {
             id: "someone.stranger".to_owned(),
             name: "Stranger".to_owned(),
             description: "No code answers to it.".to_owned(),
-            bundled: false,
+            source: PluginSource::Bundled,
+            kind: PluginKind::Extra,
+            version: "1.0.0".to_owned(),
+            publisher: "Someone".to_owned(),
             experimental: false,
-            on: false,
+            on: true,
+            on_key: "someone.stranger.enabled".to_owned(),
+            problem: None,
             controls: vec![
                 PluginControl::Switch {
                     control: PluginSwitch {
@@ -1444,13 +1671,14 @@ mod tests {
                         shown_times: 1.0,
                         unit: " px".to_owned(),
                         at_least: None,
+                        live: false,
                     },
                 },
             ],
         };
         let (ctx, plugins) = (egui::Context::default(), Plugins::new());
         crate::look::install_fonts(&ctx);
-        let before = plugins.list();
+        let before = plugins.plugins();
         let mut time = 0.0;
         let mut moved = None;
         let mut frame = |events: Vec<Event>, moved: &mut Option<(String, f32)>| {
@@ -1475,6 +1703,6 @@ mod tests {
             frame(Vec::new(), &mut moved);
         }
         assert_eq!(moved.map(|m| m.0), Some("someone.stranger.slider".to_owned()));
-        assert_eq!(plugins.list(), before);
+        assert_eq!(plugins.plugins(), before);
     }
 }

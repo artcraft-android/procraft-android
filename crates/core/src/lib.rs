@@ -32,6 +32,7 @@ mod gradients;
 mod grain_store;
 mod guide;
 mod history;
+mod hooks;
 mod host;
 mod hues;
 mod interface_size;
@@ -43,8 +44,10 @@ mod layers;
 mod liquify;
 mod modes;
 mod palettes;
+mod patch_run;
 mod pick;
 mod pickers;
+mod plugin_file;
 mod plugins;
 mod pour;
 mod presets;
@@ -128,9 +131,10 @@ pub use pickers::{
     disc_picture, disc_to_square, disc_to_square_point, harmony_wheel, p3_hsv_of, p3_hsv_to_rgb, rgb_to_p3_hsv,
     square_to_disc, square_to_disc_point,
 };
+pub use plugin_file::read_plugin_file;
 pub use plugins::{
-    PluginControl, PluginInfo, PluginSlider, PluginSwitch, Plugins, plugin_slider_along, plugin_slider_at,
-    plugin_slider_shown, plugin_slider_whole,
+    PluginControl, PluginInfo, PluginKind, PluginOffer, PluginSlider, PluginSource, PluginSwitch, Plugins,
+    plugin_file_most_bytes, plugin_slider_along, plugin_slider_at, plugin_slider_shown, plugin_slider_whole,
 };
 pub use presets::{
     CanvasPreset, P3, SRGB, per_inch, preset_height, preset_label, preset_number, preset_width, presets_from_json,
@@ -386,6 +390,8 @@ pub(crate) struct State {
     pub(crate) brush_on_screen: bool,
     /// ColorDrop keeps out of gaps up to this many pixels wide in what bounds it (0: none).
     pub(crate) fill_gap: u32,
+    /// What samples go through on their way to a stroke, if anything.
+    pub(crate) hooks: Option<Arc<hooks::Hooks>>,
     /// Crops kept for undo: the canvas and document from before; and one undone, for redo, with
     /// the steps the canvas then put back had made (redo only while that hasn't changed).
     crop_undo: Option<(Canvas, Document)>,
@@ -868,13 +874,16 @@ impl State {
         let Some(inv) = self.view.and_then(|v| v.to_screen().inverse()) else { return Vec::new() };
         samples
             .iter()
-            .map(|s| Sample {
-                pos: inv.apply(Vec2::new(s.x, s.y)),
-                pressure: s.pressure,
-                tilt: s.tilt,
-                azimuth: s.orientation,
-                roll: s.roll,
-                time_ms: s.time_ms,
+            .map(|s| {
+                let (x, y) = self.hooks.as_ref().map_or((s.x, s.y), |hooks| hooks.position(s.x, s.y));
+                Sample {
+                    pos: inv.apply(Vec2::new(x, y)),
+                    pressure: s.pressure,
+                    tilt: s.tilt,
+                    azimuth: s.orientation,
+                    roll: s.roll,
+                    time_ms: s.time_ms,
+                }
             })
             .collect()
     }
@@ -1223,6 +1232,7 @@ impl CanvasSession {
             selection_visibility: 0.25,
             brush_on_screen: false,
             fill_gap: 0,
+            hooks: None,
             input: procraft_engine::stroke::InputSettings::default(),
             crop_redo: None,
             library: shelf,

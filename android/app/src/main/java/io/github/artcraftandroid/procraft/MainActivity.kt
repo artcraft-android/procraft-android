@@ -80,6 +80,11 @@ class MainActivity : ComponentActivity() {
             else -> null
         } ?: return
         intent.action = null
+        // a plugin is asked about where the app stands: it needs no artwork closed
+        if (vm.isPluginFile(uri)) {
+            vm.offerPlugin(uri)
+            return
+        }
         if (vm.screen == io.github.artcraftandroid.procraft.canvas.Screen.CANVAS) vm.closeArtwork()
         vm.importFile(uri)
     }

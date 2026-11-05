@@ -53,6 +53,7 @@ fun AppRoot(vm: CanvasViewModel) {
             // a share from the gallery shows its card there, and a file brought in its own
             ExportProgress(vm.exportShown, vm::cancelExport)
             ImportProgress(vm.importShown, vm::cancelImport)
+            PluginOfferAlert(vm)
             return@ProCraftTheme
         }
         // back closes an open panel first, then leaves the artwork for the gallery
@@ -238,6 +239,7 @@ fun AppRoot(vm: CanvasViewModel) {
                     exit = androidx.compose.animation.slideOutVertically(Motion.studioOut()) { it },
                 ) { Box(Modifier.fillMaxSize()) { GestureControls(vm) } }
                 BlockedDialog(vm)
+                PluginOfferAlert(vm)
                 ExportProgress(vm.exportShown, vm::cancelExport)
                 ImportProgress(vm.importShown, vm::cancelImport)
                 // a passing message goes in the band under the top bar, as what undo and redo did
