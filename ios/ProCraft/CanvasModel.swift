@@ -156,6 +156,8 @@ final class CanvasModel {
     private(set) var adjustShown: AdjustShown?
     var adjustMenuAt: CGPoint?
     var liquifyPopup = 0
+    /// Layer or Pencil shows under the bar.
+    var adjustModesOpen = false
     /// The touch coming down closed that menu: the tap it makes doesn't open it again.
     @ObservationIgnored private(set) var closedAdjustMenu = false
 
@@ -858,6 +860,7 @@ final class CanvasModel {
         _ = switchModes(.adjustment)
         panel = .none
         guard session.adjustmentStart(adjustment: a) else { return }
+        adjustModesOpen = false
         liquifyPopup = 0
         readAdjust()
     }
@@ -866,13 +869,18 @@ final class CanvasModel {
     func endAdjustment(commit: Bool) {
         guard adjustment != nil else { return }
         adjustMenuAt = nil
+        adjustModesOpen = false
         liquifyPopup = 0
+        let painted = adjustShown?.pencil == true
         _ = session.adjustmentEnd(commit: commit)
         if commit {
             showNotice("Adjustment applied")
         }
         readAdjust()
         adjustment = nil
+        if painted {
+            readSliders()
+        }
         refresh()
     }
 
@@ -979,7 +987,7 @@ final class CanvasModel {
         readSliders()
     }
 
-    private func readSliders() {
+    func readSliders() {
         let info = session.info()
         size = info.size
         opacity = info.opacity
@@ -1402,6 +1410,7 @@ final class CanvasModel {
         closedAdjustMenu = adjustMenuAt != nil
         if adjustment != nil {
             adjustMenuAt = nil
+            adjustModesOpen = false
             liquifyPopup = 0
         }
     }
@@ -1452,6 +1461,10 @@ final class CanvasModel {
     /// The view moved: what is drawn over the canvas follows.
     func refreshView() {
         viewMatrix = session.viewMatrix()
+        // the perspective puck follows the canvas
+        if adjustment == .perspectiveBlur {
+            readAdjust()
+        }
         // the shape's handles follow the canvas
         if quickShape != nil {
             quickShape = session.quickshapeInfo()

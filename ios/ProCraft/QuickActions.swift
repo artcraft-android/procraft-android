@@ -120,12 +120,18 @@ extension CanvasModel {
     }
 
     /// Does `a`, a QuickMenu button opened at window point `at`. What has no screen on the iPad yet
-    /// (text, the animation's and the reference's, the adjustments but Liquify) does nothing.
+    /// (text, the animation's and the reference's, Gradient Map and Clone) does nothing.
     func runQuickAction(_ a: QuickAction, at: CGPoint) {
         func onCurrent(_ f: (LayerInfo) -> Void) {
             if let l = layers.first(where: { $0.current }) {
                 f(l)
             }
+        }
+        if let adjustment = quickActionAdjustment(action: a) {
+            if opensOnThisDevice(adjustment) {
+                startAdjustment(adjustment)
+            }
+            return
         }
         switch a {
         case .newLayer: addLayer()

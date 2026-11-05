@@ -69,12 +69,21 @@ struct AdjustmentBar: View {
                             .lineLimit(1)
                             .padding(.leading, 3)
                     }
+                    // Layer or Pencil, for the adjustments that can be painted on
+                    if adjustmentPaintable(adjustment: a) {
+                        PcIconView(PcIcons.disclose, size: 32, color: modeText)
+                            .frame(width: 33, height: 32)
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 .frame(height: 32)
                 .background(modeBar)
                 .contentShape(Rectangle())
-                .onTapGesture {}
+                .onTapGesture {
+                    if adjustmentPaintable(adjustment: a) {
+                        model.adjustModesOpen.toggle()
+                    }
+                }
                 if swiped {
                     GeometryReader { g in
                         Pc.accent.frame(width: g.size.width * CGFloat(min(max(amount, 0), 1)))

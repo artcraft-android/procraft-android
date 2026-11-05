@@ -64,9 +64,13 @@ struct CanvasScreen: View {
                     QuickShapeBar(model: model)
                         .offset(y: Pc.barHeight)
                 }
+                if model.adjustment == .perspectiveBlur, !hidden {
+                    PerspectivePuck(model: model)
+                }
                 if model.adjusting, !hidden {
                     AdjustmentBar(model: model)
                         .offset(y: Pc.barHeight)
+                    AdjustModes(model: model)
                 }
                 if model.adjustment == .liquify, !hidden {
                     LiquifyPanel(model: model, screen: screen.size)
@@ -76,6 +80,14 @@ struct CanvasScreen: View {
                     AdjustmentMenu(model: model, screen: screen.size)
                 }
                 // the bottom toolbars rise from below the screen, and drop away
+                ZStack {
+                    if model.adjusting, model.adjustment != .liquify, !hidden {
+                        AdjustmentPanel(model: model, screen: screen.size)
+                            .transition(.move(edge: .bottom))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .animation(model.adjusting ? Motion.toolbarIn : Motion.toolbarOut, value: model.adjusting)
                 ZStack {
                     if model.transforming, !hidden {
                         TransformToolbar(model: model, screenWidth: screen.size.width)
@@ -404,6 +416,7 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             case let .quickMenu(x, y):
                 model.toggleQuickMenu(at: CGPoint(x: CGFloat(x) / model.pixels, y: CGFloat(y) / model.pixels))
             case .adjustChanged:
+                model.adjustModesOpen = false
                 model.readAdjust()
             case let .adjustMenu(x, y):
                 if !model.closedAdjustMenu {

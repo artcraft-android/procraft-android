@@ -78,6 +78,8 @@ enum ScreenCapture {
     static var colorsShows: String?
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
+    /// The screens, by how their names begin, that need the canvas attached.
+    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-"]
     /// What opens over the QuickMenu.
     static var quickShows: String?
 
@@ -201,6 +203,27 @@ enum ScreenCapture {
         case "source-landscape":
             sideways = true
             source(model, .grain)
+        case "adjust-modes":
+            model.startAdjustment(.gaussianBlur)
+            model.adjustModesOpen = true
+        case "effect-hsb":
+            model.startAdjustment(.hsb)
+        case "effect-balance":
+            model.startAdjustment(.colorBalance)
+        case "effect-curves":
+            model.startAdjustment(.curves)
+        case "effect-glitch":
+            model.startAdjustment(.glitch)
+        case "effect-noise":
+            model.startAdjustment(.noise)
+        case "effect-bloom":
+            model.startAdjustment(.bloom)
+        case "effect-halftone":
+            model.startAdjustment(.halftone)
+        case "effect-chromatic":
+            model.startAdjustment(.chromaticAberration)
+        case "effect-perspective":
+            model.startAdjustment(.perspectiveBlur)
         case "transform":
             transform(model)
         case "transform-snapping":
@@ -334,6 +357,9 @@ enum ScreenCapture {
             case "colors": model.toggle(.color)
             case "actions": model.toggle(.actions)
             case "adjustments": model.toggle(.adjustments)
+            // what works on the canvas waits for the view to attach it
+            case _ where Self.canvasScreens.contains(where: { name.hasPrefix($0) }):
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { Self.open(name, in: model) }
             default: Self.open(name, in: model)
             }
         }

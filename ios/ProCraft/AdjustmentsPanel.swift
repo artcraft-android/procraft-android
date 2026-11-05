@@ -4,7 +4,7 @@ private let adjustmentsWidth: CGFloat = 330
 private var menuText: Color { Look.shared.light ? Color(argb: 0xFF39_3939) : Color(argb: 0xFFC5_C5C5) }
 
 /// The adjustments menu hanging from its button, in groups as the core lists them: colour, blurs,
-/// effects, painting. (Liquify opens; the others' own screens are still to come on the iPad.)
+/// effects, painting. (Gradient Map's and Clone's own screens are still to come on the iPad.)
 struct AdjustmentsPanel: View {
     let model: CanvasModel
     let arrowX: CGFloat
@@ -38,7 +38,7 @@ struct AdjustmentsPanel: View {
                                         .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .leading)
                                         .contentShape(Rectangle())
                                         .onTapGesture {
-                                            if adjustment == .liquify {
+                                            if model.opensOnThisDevice(adjustment) {
                                                 model.startAdjustment(adjustment)
                                             }
                                         }
