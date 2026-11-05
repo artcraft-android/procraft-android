@@ -532,10 +532,9 @@ pub(crate) struct State {
     feather_base: Option<(procraft_engine::selection::Mask, Vec<f32>)>,
     /// The last drag step on the box (window point, when), for its speed.
     last_drag: Option<(Vec2, std::time::Instant)>,
-    /// The stroke being drawn as input (canvas points) and its pressures summed, for QuickShape,
+    /// The stroke being drawn as input (canvas points), for QuickShape,
     /// and the shape it snapped to while that is shown.
     drawn: Vec<Vec2>,
-    drawn_pressure: f32,
     /// How long it was on the move, and when it was last heard from (milliseconds).
     drawn_moving: f64,
     drawn_at: f64,
@@ -1282,7 +1281,6 @@ impl CanvasSession {
             clone_offset: None,
             last_drag: None,
             drawn: Vec::new(),
-            drawn_pressure: 0.0,
             drawn_moving: 0.0,
             drawn_samples: Vec::new(),
             drawn_at: 0.0,
@@ -1460,7 +1458,6 @@ impl CanvasSession {
         st.assist_angle = None;
         let canvas_samples = st.assisted(canvas_samples);
         st.drawn.clear();
-        st.drawn_pressure = 0.0;
         st.drawn_moving = 0.0;
         st.drawn_samples.clear();
         st.remember_input(&canvas_samples);
@@ -1476,7 +1473,6 @@ impl CanvasSession {
                 diameter,
                 pointer,
                 drawn: Vec::new(),
-                pressure: 1.0,
                 pace: quickshape::SAMPLE_PACE,
                 steps: 0,
                 fresh: second.is_none().then(|| builder.clone()),
