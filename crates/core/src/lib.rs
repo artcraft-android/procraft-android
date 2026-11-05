@@ -796,7 +796,7 @@ impl State {
         // every layer up as it was read, or no canvas: one the GPU had no memory for would show
         // empty, and be saved so once painted on
         let made = gpu.checked(|| -> Result<Canvas, procraft_gpu::GpuError> {
-            let mut c = Canvas::new(gpu, doc)?;
+            let mut c = Canvas::unfilled(gpu, doc)?;
             c.set_resident_budget(crate::layers::resident_budget());
             for (id, pixels) in &pixels {
                 // past what fits, kept compressed until needed
@@ -805,6 +805,7 @@ impl State {
                     log::error!("opening a layer: {e}");
                 }
             }
+            c.fill_rest(gpu, doc);
             // as read: not changed
             c.take_changed();
             Ok(c)
@@ -1054,7 +1055,7 @@ impl Shared {
                 drop(send);
                 // the canvas made while the first layers are read (its textures take a while); if
                 // it can't be, the readers stop at their next layer, nothing taking what they read
-                let mut c = Canvas::new(&gpu, &doc)?;
+                let mut c = Canvas::unfilled(&gpu, &doc)?;
                 c.set_resident_budget(budget);
                 let mut waiting = std::collections::BTreeMap::new();
                 let mut at = 0;
@@ -1091,6 +1092,7 @@ impl Shared {
                         }
                     }
                 }
+                c.fill_rest(&gpu, &doc);
                 // as read: not changed
                 c.take_changed();
                 log::info!(

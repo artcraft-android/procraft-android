@@ -19,6 +19,45 @@ static DEVICE: Mutex<Option<Gpu>> = Mutex::new(None);
 /// The backend the app's device was made from (`usize::MAX`: none yet).
 static BACKEND: AtomicUsize = AtomicUsize::new(usize::MAX);
 
+/// What is left to the system whatever the app asks for, bytes: GPU memory is charged to no
+/// process, so the system can't tell who to stop when it runs out, and stops everything else first.
+const LEFT_FREE: u64 = 512 << 20;
+
+/// Whether `bytes` more of the GPU's memory would leave the system short. Only where the system
+/// says what it has free (Android, whose GPU memory is the same memory as everything else's).
+pub(crate) fn short_of_memory(bytes: u64) -> bool {
+    memory_free().is_some_and(|free| bytes.saturating_add(LEFT_FREE) > free)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// What this thread's tests have free, in place of the system's.
+    pub(crate) static MEMORY_FREE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn memory_free() -> Option<u64> {
+    MEMORY_FREE.with(std::cell::Cell::get)
+}
+
+#[cfg(all(target_os = "android", not(test)))]
+fn memory_free() -> Option<u64> {
+    available_in(&std::fs::read_to_string("/proc/meminfo").ok()?)
+}
+
+#[cfg(not(any(target_os = "android", test)))]
+fn memory_free() -> Option<u64> {
+    None
+}
+
+/// The memory `/proc/meminfo`'s text says is available, bytes.
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn available_in(meminfo: &str) -> Option<u64> {
+    let line = meminfo.lines().find_map(|l| l.strip_prefix("MemAvailable:"))?;
+    let kb: u64 = line.trim().strip_suffix("kB")?.trim().parse().ok()?;
+    Some(kb * 1024)
+}
+
 /// Where the record of the backend being tried is kept (the app's own folder); none, none kept.
 static RECORD_FOLDER: Mutex<Option<PathBuf>> = Mutex::new(None);
 

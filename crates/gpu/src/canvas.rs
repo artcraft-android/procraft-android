@@ -1735,7 +1735,22 @@ fn array_view(texture: &wgpu::Texture) -> wgpu::TextureView {
 
 impl Canvas {
     pub fn new(gpu: &Gpu, doc: &Document) -> Result<Canvas, GpuError> {
+        let mut canvas = Canvas::unfilled(gpu, doc)?;
+        canvas.fill_rest(gpu, doc);
+        Ok(canvas)
+    }
+
+    /// A canvas with no layer textures yet, for layers about to come from elsewhere (an artwork
+    /// opened, a crop): each is made as its layer goes up, those past the budget being parked
+    /// instead, so that a canvas of many layers never holds a texture for every one at once.
+    /// [`Canvas::fill_rest`] ends it.
+    pub fn unfilled(gpu: &Gpu, doc: &Document) -> Result<Canvas, GpuError> {
         Canvas::make(gpu, doc, None, true)
+    }
+
+    /// Makes the textures of the layers that have none and aren't parked (clear).
+    pub fn fill_rest(&mut self, gpu: &Gpu, doc: &Document) {
+        self.sync_layers(gpu, doc);
     }
 
     /// A canvas whose strokes are drawn into it from elsewhere ([`Canvas::begin_drawn_stroke`]),
@@ -1743,7 +1758,9 @@ impl Canvas {
     /// with other canvases its size, one stroke open among them at a time), and makes its shape
     /// and grain images only once something wants them.
     pub fn for_drawn_strokes(gpu: &Gpu, doc: &Document, stroke: &SharedStroke) -> Result<Canvas, GpuError> {
-        Canvas::make(gpu, doc, Some(stroke), false)
+        let mut canvas = Canvas::make(gpu, doc, Some(stroke), false)?;
+        canvas.fill_rest(gpu, doc);
+        Ok(canvas)
     }
 
     fn make(gpu: &Gpu, doc: &Document, stroke: Option<&SharedStroke>, images: bool) -> Result<Canvas, GpuError> {
@@ -1819,7 +1836,7 @@ impl Canvas {
         let (uniform_buffer, uniform_bind) = uniforms(device, &pipelines.uniform_layout, uniform_slots);
         let stamp_capacity = 4096;
         let stamp_buffer = stamp_buffer(device, stamp_capacity);
-        let mut canvas = Canvas {
+        let canvas = Canvas {
             width,
             height,
             pipelines,
@@ -1906,7 +1923,6 @@ impl Canvas {
             shape_sources: SourceSlots::after(shape_images.len()),
             grain_sources: SourceSlots::after(grain_images.len()),
         };
-        canvas.sync_layers(gpu, doc);
         Ok(canvas)
     }
 
@@ -2729,12 +2745,17 @@ impl Canvas {
         std::mem::take(&mut self.smudge_untold)
     }
 
-    /// What the layers' textures may take, in bytes: past it, the layers needed least lately
-    /// that aren't being worked on are parked (kept compressed off the GPU, and the composite made
-    /// around pictures of them) until needed again. 0 keeps every layer on the GPU.
+    /// What the layers' textures and the history may take, in bytes: past it, the layers needed
+    /// least lately that aren't being worked on are parked (kept compressed off the GPU, and the
+    /// composite made around pictures of them) until needed again. 0 keeps every layer on the GPU.
     pub fn set_resident_budget(&mut self, bytes: u64) {
         self.resident_budget = bytes;
         self.set_cache_composites(bytes > 0);
+    }
+
+    /// What was set with [`Canvas::set_resident_budget`].
+    pub fn resident_budget(&self) -> u64 {
+        self.resident_budget
     }
 
     /// A parked layer's small pictures, if they are big enough for a thumbnail `max_side` across.
@@ -2881,8 +2902,7 @@ impl Canvas {
     /// pictures of the others.
     fn park_extra(&mut self, gpu: &Gpu, doc: &Document) {
         self.parking_left = false;
-        let per = u64::from(self.width) * u64::from(self.height) * 4;
-        let most = usize::try_from(self.resident_budget / per.max(1)).unwrap_or(usize::MAX);
+        let most = self.most_resident();
         if self.resident_budget == 0 || self.layers.len() <= most {
             return;
         }
@@ -5699,7 +5719,13 @@ impl Canvas {
 
     /// How many layers' textures fit the budget (any number without one).
     pub fn most_resident(&self) -> usize {
-        most_resident(self.resident_budget, self.width, self.height)
+        if self.resident_budget == 0 {
+            return usize::MAX;
+        }
+        // the history takes from the same memory, a layer's worth at a time
+        let per = (u64::from(self.width) * u64::from(self.height) * 4).max(1);
+        let room = self.resident_budget.saturating_sub(self.history_bytes() / per * per);
+        most_resident(room.max(1), self.width, self.height)
     }
 
     /// Lets go of the textures of layers unchanged since parked (their compressed copies kept),
@@ -8897,6 +8923,52 @@ mod tests {
     /// Whether a texture labelled `label` is to fail on this thread.
     pub(super) fn fails(label: &str) -> bool {
         FAILING.with(|f| f.get() == Some(label))
+    }
+
+    #[test]
+    fn a_canvas_made_for_filling_holds_no_layer_textures_until_they_come() {
+        use procraft_engine::document::Document;
+        let Ok(gpu) = Gpu::headless() else { return };
+        let mut doc = Document::new(512, 512);
+        for _ in 0..7 {
+            doc.add_layer();
+        }
+        let held = || {
+            gpu.flush();
+            gpu.device.generate_allocator_report().map_or(0, |r| r.total_allocated_bytes)
+        };
+        let before = held();
+        let mut canvas = Canvas::unfilled(&gpu, &doc).unwrap();
+        let unfilled = held() - before;
+        canvas.fill_rest(&gpu, &doc);
+        // where the device can't say, there is nothing to compare
+        let layers = 8 * 512 * 512 * 4;
+        assert!(before == 0 || held() - before - unfilled >= layers);
+    }
+
+    #[test]
+    fn the_history_takes_from_the_room_for_layers() {
+        use procraft_engine::document::Document;
+        use procraft_engine::stroke::Stamp;
+        let Ok(gpu) = Gpu::headless() else { return };
+        let mut doc = Document::new(64, 64);
+        let per = 64 * 64 * 4;
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.set_resident_budget(4 * per);
+        assert_eq!(canvas.most_resident(), 4);
+        let id = doc.current();
+        // each stroke over the whole layer keeps a layer's worth to undo
+        for _ in 0..2 {
+            canvas.begin_stroke(id, StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0));
+            canvas.add_stamps(&[Stamp::round(procraft_engine::geom::Vec2::new(32.0, 32.0), 64.0, 1.0)]);
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+        }
+        assert!(canvas.history_bytes() >= 2 * per);
+        assert_eq!(canvas.most_resident(), 2);
+        // never none
+        canvas.set_resident_budget(per);
+        assert_eq!(canvas.most_resident(), 1);
     }
 
     #[test]

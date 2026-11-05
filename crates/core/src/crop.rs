@@ -18,6 +18,10 @@ const LOST_SAID: &str =
 /// What the apps tell when a smudge stroke couldn't be begun.
 const SMUDGE_SAID: &str = "There isn't enough graphics memory to smudge on this canvas.";
 
+/// What a canvas holds besides its layers, in layers' worth: its stroke (two), composite and
+/// caches (four).
+const CANVAS_LAYERS: u64 = 7;
+
 /// What the apps tell when a crop couldn't be made.
 fn crop_failure_said(e: &procraft_gpu::GpuError) -> String {
     match e {
@@ -67,24 +71,42 @@ impl CanvasSession {
         let c = crop([x, y, width, height], angle, resample_to.then_some((new_width, new_height)));
         let doc = st.doc.resized(c.width, c.height);
         let ids: Vec<_> = st.doc.pixel_layer_ids().collect();
+        // the old canvas stays for undo, so this is all more: refused while there is still room,
+        // not left to the system to find out
+        let budget = old.resident_budget();
+        let per = u64::from(c.width) * u64::from(c.height) * 4;
+        let resident = ids.len().min(procraft_gpu::most_resident(budget, c.width, c.height)) as u64;
+        if crate::device::short_of_memory((resident + CANVAS_LAYERS) * per) {
+            log::error!("cropping: {} layers of {per} bytes won't fit in the memory free", resident);
+            st.crop_edit.failure = Some(crop_failure_said(&procraft_gpu::GpuError::OutOfMemory(String::new())));
+            return false;
+        }
         // the new canvas made beside the old, which stays as it is unless every layer went across
         // as it should: a texture the GPU had no memory for would otherwise come over empty
         let made = gpu.checked(|| -> Result<Canvas, procraft_gpu::GpuError> {
             old.render(gpu, &mut st.doc, None);
-            let mut canvas = Canvas::new(gpu, &doc)?;
-            canvas.set_resident_budget(crate::layers::resident_budget());
+            let mut canvas = Canvas::unfilled(gpu, &doc)?;
+            canvas.set_resident_budget(budget);
             for id in ids {
                 // copied (moved by whole pixels) or resampled on the GPU, nothing read back
                 let m = c.to_old;
-                let on_gpu = match c.whole_pixels() {
-                    Some(offset) => canvas.copy_layer_from(gpu, old, id, offset),
-                    None => canvas.resample_layer_from(gpu, old, id, [m.a, m.b, m.c, m.d, m.e, m.f]),
-                };
+                let room = canvas.has_room();
+                let on_gpu = room
+                    && match c.whole_pixels() {
+                        Some(offset) => canvas.copy_layer_from(gpu, old, id, offset),
+                        None => canvas.resample_layer_from(gpu, old, id, [m.a, m.b, m.c, m.d, m.e, m.f]),
+                    };
                 if !on_gpu {
-                    let pixels = old.read_layer(gpu, id)?;
-                    canvas.upload_layer(gpu, id, &resample(&pixels, sw, sh, &c))?;
+                    let pixels = resample(&old.read_layer(gpu, id)?, sw, sh, &c);
+                    // past what fits, kept compressed until needed
+                    if room {
+                        canvas.upload_layer(gpu, id, &pixels)?;
+                    } else {
+                        canvas.park_pixels(id, &pixels)?;
+                    }
                 }
             }
+            canvas.fill_rest(gpu, &doc);
             #[cfg(test)]
             tests::fail_here(gpu);
             Ok(canvas)
@@ -396,6 +418,48 @@ mod tests {
         again.use_gpu(gpu);
         assert_eq!(contents(&again), before);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_crop_past_the_memory_free_is_refused_and_says_so() {
+        let Some(s) = painted(120) else { return };
+        let before = contents(&s);
+        // nothing like enough left beside what the system keeps
+        crate::device::MEMORY_FREE.with(|f| f.set(Some(100 << 20)));
+        assert!(!s.crop_canvas(10.0, 10.0, 60.0, 50.0, 0.0, false, 0, 0));
+        assert!(s.take_failure().is_some_and(|why| why.contains("memory")));
+        assert_eq!(contents(&s), before);
+        // with room, cropped
+        crate::device::MEMORY_FREE.with(|f| f.set(Some(600 << 20)));
+        assert!(s.crop_canvas(10.0, 10.0, 60.0, 50.0, 0.0, false, 0, 0));
+        crate::device::MEMORY_FREE.with(|f| f.set(None));
+        assert_eq!(contents(&s).1, (60, 50));
+        assert_eq!(s.take_failure(), None);
+    }
+
+    #[test]
+    fn a_crop_past_the_budget_parks_what_doesnt_fit_and_loses_nothing() {
+        let (Some(fits), Some(parks)) = (painted(120), painted(120)) else { return };
+        let per = 80 * 70 * 4;
+        // room for one layer of the new size: the other two go compressed
+        for (x, angle) in [(10.0, 0.0), (10.5, 0.2)] {
+            if let Some(c) = parks.shared.lock().canvas.as_mut() {
+                c.set_resident_budget(per);
+            }
+            assert!(fits.crop_canvas(x, 10.0, 80.0, 70.0, angle, false, 0, 0));
+            assert!(parks.crop_canvas(x, 10.0, 80.0, 70.0, angle, false, 0, 0));
+            assert_eq!(parks.shared.lock().canvas.as_ref().map(procraft_gpu::Canvas::parked_layers), Some(2));
+            assert_eq!(contents(&parks), contents(&fits));
+            assert!(parks.undo().is_some());
+            assert!(fits.undo().is_some());
+        }
+    }
+
+    #[test]
+    fn what_the_system_has_free_is_read_from_its_memory_report() {
+        let report = "MemTotal:       11543576 kB\nMemFree:         1248464 kB\nMemAvailable:    6577012 kB\n";
+        assert_eq!(crate::device::available_in(report), Some(6_577_012 * 1024));
+        assert_eq!(crate::device::available_in("MemTotal: 1 kB\n"), None);
     }
 
     #[test]

@@ -3,6 +3,10 @@
 //! `LARGE_SIDES` (comma separated; 2048, 2300 and 3000 if unset), on `LARGE_LAYERS` painted layers
 //! (5 if unset). Built with `cargo ndk -t arm64-v8a test -p procraft-gpu --test large_canvas
 //! --no-run`, pushed to /data/local/tmp and run with `--ignored --nocapture --test-threads=1`.
+//!
+//! Keep it well under the device's free memory: a process started from `adb shell` can't be
+//! killed and GPU memory is charged to no process, so going past it panics the kernel (2300 with
+//! 100 layers did on an 11.5 GB tablet: the crop step takes about three canvases' layers).
 
 #![allow(clippy::unwrap_used)]
 
