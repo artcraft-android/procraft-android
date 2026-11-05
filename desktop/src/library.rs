@@ -60,6 +60,9 @@ const SWIPE_GAP: f32 = 5.5;
 const SWIPE_FILL: u32 = 0xFF3F3F3F;
 const SWIPE_INK: u32 = 0xFFC5C5C5;
 const SWIPE_DELETE: u32 = 0xFFFF3A46;
+/// A brush slid right is picked, this fill over its row; it follows the pointer this far.
+const PICKED_BRUSH: u32 = 0xFF2C5281;
+const PICK_REACH: f32 = 72.0;
 /// The set icons to choose from: five across, each cell this big, in a panel this big (edged,
 /// nearly solid over the library), 11 left of the set, kept 25 above the window's bottom.
 const PICKER_COLUMNS: usize = 5;
@@ -134,6 +137,7 @@ struct SetPress {
 enum Deleting {
     Set(u32),
     Brush(u32, u32),
+    Picked,
 }
 
 #[derive(Default)]
@@ -167,6 +171,8 @@ pub struct Library {
     /// How far each brush is slid (points, left negative), and the brush slid open.
     slid: HashMap<(u32, u32), f32>,
     swiped: Option<(u32, u32)>,
+    /// The brushes of the shown set picked by sliding them right.
+    picked: Vec<(u32, u32)>,
     /// Where the sets and the shown set's brushes were last drawn, for a dragged brush to land.
     set_rects: Vec<(usize, Rect)>,
     brush_rects: Vec<((u32, u32), Rect)>,
@@ -277,6 +283,7 @@ impl Library {
         self.stale = true;
         self.slid.clear();
         self.swiped = None;
+        self.picked.clear();
         self.changed = true;
     }
 
@@ -312,6 +319,7 @@ impl Library {
             .min(library.len().saturating_sub(1));
         let recent = self.recent;
         let recents = if recent { session.recent_brushes() } else { Vec::new() };
+        self.picked.retain(|p| !recent && p.0 as usize == shown);
         self.settle_slides(ctx);
         // the set a dragged brush or set is over
         let dragging = self.press.filter(|p| p.way == Way::Drag);
@@ -346,9 +354,13 @@ impl Library {
                 panel::header(ui, look, body, title, 20.0, true, false);
                 // the plus: new brushes and sets, and importing
                 plus = Rect::from_min_size(pos2(body.right() - 12.0 - 41.0, body.top() + 12.0), vec2(41.0, 40.0));
-                look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(PANEL_GLYPH));
-                if ui.interact(plus, ui.scope_id().with("plus"), Sense::click()).clicked() {
-                    self.plus_menu.open();
+                if self.picked.is_empty() {
+                    look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(PANEL_GLYPH));
+                    if ui.interact(plus, ui.scope_id().with("plus"), Sense::click()).clicked() {
+                        self.plus_menu.open();
+                    }
+                } else {
+                    self.picked_actions(ui, session, plus);
                 }
 
                 lists = Rect::from_min_max(pos2(body.left(), body.top() + HEADER_HEIGHT), body.max);
@@ -564,9 +576,11 @@ impl Library {
             }
         }
         if let Some((key, selected)) = brush_tapped {
-            // with a brush slid open, a tap only closes it
+            // with a brush slid open, a tap only closes it; with brushes picked, only lets them go
             if self.swiped.is_some() {
                 self.swiped = None;
+            } else if !self.picked.is_empty() {
+                self.picked.clear();
             } else {
                 session.select_brush(key.0, key.1);
                 self.changed = true;
@@ -619,16 +633,56 @@ impl Library {
                     }
                 }
                 Some(Deleting::Brush(set, index)) if session.delete_brush(set, index) => self.library_changed(),
+                Some(Deleting::Picked) => {
+                    // from the last up, so the places of the rest hold
+                    self.picked.sort_unstable();
+                    for (set, index) in self.picked.iter().rev() {
+                        session.delete_brush(*set, *index);
+                    }
+                    self.library_changed();
+                }
                 Some(Deleting::Brush(..)) | None => {}
             }
         }
         rect
     }
 
+    /// In the place of the `plus`: Delete for the picked brushes, and Combine beside it
+    /// for one in the current brush's set, it taking the picked brush as its second.
+    fn picked_actions(&mut self, ui: &Ui, session: &CanvasSession, plus: Rect) {
+        let (right, top) = (plus.right(), plus.top() + 4.0);
+        let word = |ui: &Ui, text: &str, at: Rect, salt: &str| {
+            let galley = one_line(ui, text, 15.0, Weight::Regular, argb(SWIPE_INK), at.width());
+            let middle = at.center() - galley.size() / 2.0;
+            ui.painter().galley(middle, galley, argb(SWIPE_INK));
+            ui.interact(at, ui.scope_id().with(salt), Sense::click()).clicked()
+        };
+        let delete = Rect::from_min_size(pos2(right - 63.0, top), vec2(63.0, 32.0));
+        if word(ui, "Delete", delete, "delete picked") {
+            self.ask_delete(Deleting::Picked);
+        }
+        let current = session.current_brush();
+        let pair = match self.picked[..] {
+            [(set, index)] if set == current.set => Some(index),
+            _ => None,
+        };
+        let pair = pair
+            .filter(|i| !session.brush_is_dual(current.set, *i) && !session.brush_is_dual(current.set, current.index));
+        if let Some(second) = pair {
+            let combine = Rect::from_min_size(pos2(delete.left() - 4.0 - 80.0, top), vec2(80.0, 32.0));
+            if word(ui, "Combine", combine, "combine picked")
+                && session.combine_brushes(current.set, current.index, second)
+            {
+                self.library_changed();
+            }
+        }
+    }
+
     fn ask_delete(&mut self, what: Deleting) {
         let title = match what {
             Deleting::Set(_) => "Delete this set and its brushes?",
             Deleting::Brush(..) => "Delete this brush?",
+            Deleting::Picked => "Delete these brushes?",
         };
         self.delete_what = Some(what);
         self.deleting.open(title, "It can't be brought back.", "Delete", Some(&icons::TRASH));
@@ -861,7 +915,11 @@ impl Library {
                     }
                 }
                 Way::Swipe => {
-                    self.slid.insert(p.key, (p.start + d.x).clamp(-width, 0.0));
+                    // the current brush counts as picked already
+                    let current = session.current_brush();
+                    let closed = self.swiped != Some(p.key) && !self.recent && p.key != (current.set, current.index);
+                    let most = if closed { PICK_REACH } else { 0.0 };
+                    self.slid.insert(p.key, (p.start + d.x).clamp(-width, most));
                     ctx.request_repaint();
                 }
                 Way::Scroll => {}
@@ -875,6 +933,13 @@ impl Library {
         match p.way {
             Way::Swipe => {
                 let slide = self.slid.get(&p.key).copied().unwrap_or(0.0);
+                if slide > PICK_REACH / 2.0 {
+                    if let Some(at) = self.picked.iter().position(|k| *k == p.key) {
+                        self.picked.remove(at);
+                    } else {
+                        self.picked.push(p.key);
+                    }
+                }
                 let open = self.swiped == Some(p.key);
                 let opened = slide < -width / 3.0;
                 if opened != open {
@@ -1070,13 +1135,16 @@ impl Library {
         // the dragged brush is faint where it was
         let faint = self.press.is_some_and(|p| p.key == key && p.way == Way::Drag);
         let alpha = if faint { 0.3 } else { 1.0 };
+        let picked = self.picked.contains(&key);
         if selected {
             painter.rect_filled(at, 12, argb(pc::ACCENT).gamma_multiply(alpha));
+        } else if picked {
+            painter.rect_filled(at, 12, argb(PICKED_BRUSH).gamma_multiply(alpha));
         }
         let mut faded = painter.clone();
         faded.multiply_opacity(alpha);
         let shaded = self.preview_in(&faded, key, at, selected);
-        let ink = if selected { Color32::WHITE } else { argb(PANEL_TITLE) }.gamma_multiply(alpha);
+        let ink = if selected || picked { Color32::WHITE } else { argb(PANEL_TITLE) }.gamma_multiply(alpha);
         let galley = one_line(ui, &b.name, 14.0, Weight::SemiBold, ink, at.width() - 18.0 - 10.0);
         let name_at = at.min + vec2(18.0, 11.75);
         if shaded {

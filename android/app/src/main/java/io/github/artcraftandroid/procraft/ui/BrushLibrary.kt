@@ -107,6 +107,9 @@ private val SwipeGap = 5.5.dp
 private val SwipeFill = Color(0xFF3F3F3F)
 private val SwipeInk = Color(0xFFC5C5C5)
 private val SwipeDelete = Color(0xFFFF3A46)
+/** A brush swiped right is picked, this fill over its row; it follows the finger this far. */
+private val PickedBrush = Color(0xFF2C5281)
+private val PickReach = 72.dp
 
 /** A brush's name on its cell: on a dark pill where its sample stroke runs under it. */
 @Composable
@@ -253,6 +256,7 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     var query by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<Pair<String, () -> Unit>?>(null) }
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.pickedBrushes.clear() } }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { vm.importBrushes(it) } }
     // a brush held and dragged: which, where the finger is and where on the brush it took hold
     // (window pixels); and where the sets, the brushes and the lists are on the screen
@@ -322,7 +326,21 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             end = 12.dp,
             height = 52.dp,
         ) {
-            Box(Modifier.padding(top = 12.dp).size(41.dp, 40.dp).clickable { adding = true }, contentAlignment = Alignment.Center) {
+            // brushes picked: Delete in the plus's place, and Combine for one with the current brush
+            if (vm.pickedBrushes.isNotEmpty()) Row(Modifier.padding(top = 16.dp)) {
+                if (vm.canCombinePicked) {
+                    Box(Modifier.size(80.dp, 32.dp).clickable { vm.combinePicked() }, contentAlignment = Alignment.Center) {
+                        Text("Combine", color = SwipeInk, fontSize = 15.sp, maxLines = 1)
+                    }
+                    Spacer(Modifier.width(4.dp))
+                }
+                Box(
+                    Modifier.size(63.dp, 32.dp).clickable { deleting = "Delete these brushes?" to { vm.deletePickedBrushes() } },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("Delete", color = SwipeInk, fontSize = 15.sp, maxLines = 1)
+                }
+            } else Box(Modifier.padding(top = 12.dp).size(41.dp, 40.dp).clickable { adding = true }, contentAlignment = Alignment.Center) {
                 Icon(PcIcons.PlusMedium, contentDescription = "Add", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
                 // hangs below the plus, their right edges in line
                 LibraryMenu(adding, androidx.compose.ui.graphics.TransformOrigin(1f, 0f), MenuPlace { a, size -> IntOffset(a.right - size.width, a.bottom) }, onDismiss = { adding = false }, overPanel = true) {
@@ -538,6 +556,7 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                         // the current brush, or the brush last chosen in this set (in the Recent
                         // set the current brush alone)
                         val selected = if (recent) vm.currentBrush?.let { it.set == b.set && it.index == b.index } == true else vm.highlighted(b)
+                        val picked = key in vm.pickedBrushes
                         // previews go by place, and are dropped when the library changes
                         val preview = vm.previews[key]
                         LaunchedEffect(key, preview == null) { if (preview == null) vm.loadPreview(b) }
@@ -545,6 +564,8 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                             SwipeBrush(
                                 open = vm.swipedBrush == key,
                                 onOpen = { vm.swipedBrush = if (it) key else null },
+                                // the current brush counts as picked already
+                                onPick = if (recent || selected) null else ({ vm.togglePickedBrush(b) }),
                                 actions = if (recent) {
                                     listOf(
                                         SwipeAction(PcIcons.SwipeFind, "Find") { vm.findBrush(b) },
@@ -586,11 +607,16 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                                             )
                                         }
                                         .clip(RoundedCornerShape(12.dp))
-                                        .background(if (selected) Pc.RowSelected else Color.Transparent)
+                                        .background(if (selected) Pc.RowSelected else if (picked) PickedBrush else Color.Transparent)
                                         .clickable {
                                             // with a brush swiped open, a tap only closes it
                                             if (vm.swipedBrush != null) {
                                                 vm.swipedBrush = null
+                                                return@clickable
+                                            }
+                                            // and with brushes picked, only lets them go
+                                            if (vm.pickedBrushes.isNotEmpty()) {
+                                                vm.pickedBrushes.clear()
                                                 return@clickable
                                             }
                                             // a highlighted brush opens in the studio
@@ -608,7 +634,7 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                                             modifier = Modifier.fillMaxSize(),
                                         )
                                     }
-                                    BrushName(b.name, selected, vm.shadedNames[key] == true, Modifier.padding(start = 18.dp, top = 11.75.dp))
+                                    BrushName(b.name, selected || picked, vm.shadedNames[key] == true, Modifier.padding(start = 18.dp, top = 11.75.dp))
                                     // a pinned brush's mark, at the cell's top right
                                     if (pinned) {
                                         Icon(
@@ -688,16 +714,19 @@ private class SwipeAction(val icon: ImageVector, val label: String, val fill: Co
 
 /**
  * A brush that slides away to the left, showing its [actions] in its place: Share, Duplicate and
- * Delete; in the Recent set Find, Pin (or Unpin) and Clear.
+ * Delete; in the Recent set Find, Pin (or Unpin) and Clear. Slid right past half of [PickReach] it
+ * springs back and is picked or let go ([onPick]).
  */
 @Composable
 private fun SwipeBrush(
     open: Boolean,
     onOpen: (Boolean) -> Unit,
     actions: List<SwipeAction>,
+    onPick: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     var width by remember { mutableIntStateOf(0) }
+    val reach = if (onPick == null) 0f else with(LocalDensity.current) { PickReach.toPx() }
     val offset = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
     LaunchedEffect(open, width) { offset.animateTo(if (open) -width.toFloat() else 0f, Motion.swipeSettle()) }
@@ -713,13 +742,14 @@ private fun SwipeBrush(
             }
         }
         Box(
-            Modifier.offset { IntOffset(offset.value.roundToInt(), 0) }.pointerInput(open, width) {
+            Modifier.offset { IntOffset(offset.value.roundToInt(), 0) }.pointerInput(open, width, reach) {
                 detectHorizontalDragGestures(
                     onHorizontalDrag = { change, amount ->
                         change.consume()
-                        scope.launch { offset.snapTo((offset.value + amount).coerceIn(-width.toFloat(), 0f)) }
+                        scope.launch { offset.snapTo((offset.value + amount).coerceIn(-width.toFloat(), if (open) 0f else reach)) }
                     },
                     onDragEnd = {
+                        if (offset.value > reach / 2f && reach > 0f) onPick?.invoke()
                         val opened = offset.value < -width / 3f
                         if (opened == open) scope.launch { offset.animateTo(if (open) -width.toFloat() else 0f, Motion.swipeSettle()) } else onOpen(opened)
                     },

@@ -3065,6 +3065,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun showSet(index: Int) {
         shownSet = index
+        pickedBrushes.clear()
         if (index == RECENT_SET) {
             readRecentBrushes()
             return
@@ -3751,6 +3752,48 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteBrush(b: BrushInfo) {
         if (session?.deleteBrush(b.set, b.index) == true) libraryChanged()
+    }
+
+    /** The brushes of the shown set picked by a swipe right, by place ("set-index"). */
+    val pickedBrushes = androidx.compose.runtime.mutableStateListOf<String>()
+
+    fun togglePickedBrush(b: BrushInfo) {
+        val key = "${b.set}-${b.index}"
+        if (!pickedBrushes.remove(key)) pickedBrushes.add(key)
+    }
+
+    /** One brush is picked, in the current brush's set, and neither is a pair already. */
+    val canCombinePicked: Boolean
+        get() {
+            val s = session ?: return false
+            val c = currentBrush ?: return false
+            val (set, index) = pickedBrushes.singleOrNull()?.let(::pickedPlace) ?: return false
+            return set == c.set && !s.brushIsDual(set, index) && !s.brushIsDual(c.set, c.index)
+        }
+
+    private fun pickedPlace(key: String): Pair<UInt, UInt>? {
+        val (set, index) = key.split('-').map { it.toUIntOrNull() ?: return null }
+        return set to index
+    }
+
+    /** The picked brush becomes the current brush's second; a tool on either has the pair. */
+    fun combinePicked() {
+        val s = session ?: return
+        val c = currentBrush ?: return
+        val (_, index) = pickedBrushes.singleOrNull()?.let(::pickedPlace) ?: return
+        pickedBrushes.clear()
+        if (s.combineBrushes(c.set, c.index, index)) {
+            currentBrush = s.currentBrush()
+            libraryChanged()
+        }
+    }
+
+    fun deletePickedBrushes() {
+        val s = session ?: return
+        // from the last up, so the places of the rest hold
+        val places = pickedBrushes.mapNotNull(::pickedPlace).sortedByDescending { it.second }
+        pickedBrushes.clear()
+        if (places.count { (set, index) -> s.deleteBrush(set, index) } > 0) libraryChanged()
     }
 
     /** Moves [b] to place [index] of set [set] (a brush dragged onto a set, or along its own). */
