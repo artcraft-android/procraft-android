@@ -1615,6 +1615,66 @@ fn a_dual_brush_s_paint_laid_in_place_is_cut_by_its_second() {
     }
 }
 
+/// A grain fixed to the canvas, `tile` wide, in `style`: 512 square, its left half white and the
+/// rest black, so that multiplied paint shows only on the left of each tile.
+fn half_grain(canvas: &mut Canvas, gpu: &Gpu, style: &mut StrokeStyle, tile: f32) {
+    style.grain_mode = procraft_engine::brush::GrainMode::Texturized;
+    style.grain_depth = 1.0;
+    style.grain_scale = tile;
+    style.grain_blend = 1;
+    let pixels: Vec<u8> = (0..512 * 512).map(|i| if i % 512 < 256 { 255 } else { 0 }).collect();
+    canvas.use_full_grain(gpu, style, 7, 512, &pixels);
+}
+
+#[test]
+fn a_stroke_reads_a_brush_file_s_grain_at_its_own_size() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // wet, dry laid in place and stamped: each reads the image it was given, not the brush images
+    for (wet_pull, laid_in_place) in [(Some(0.5), false), (None, true), (None, false)] {
+        let mut doc = Document::new(128, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let mut style = StrokeStyle {
+            wet_pull,
+            laid_in_place,
+            rendering: Rendering::Gradual,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        half_grain(&mut canvas, &gpu, &mut style, 128.0);
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(64.0, 32.0), 60.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        let (left, right) = (pixel(&layer, 128, 32, 32)[3], pixel(&layer, 128, 96, 32)[3]);
+        assert!(left > 200 && right < 40, "{wet_pull:?} {laid_in_place}: {left} {right}");
+    }
+}
+
+#[test]
+fn a_stroke_going_on_to_its_layer_keeps_its_grain_as_the_next_begins() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // both queued for one render: the first is put together with its own image, the next with none
+    let mut doc = Document::new(128, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let mut first = StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0);
+    half_grain(&mut canvas, &gpu, &mut first, 128.0);
+    canvas.begin_stroke(doc.current(), first);
+    canvas.add_stamps(&[Stamp::round(Vec2::new(64.0, 16.0), 12.0, 1.0)]);
+    canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 16.0), 12.0, 1.0)]);
+    canvas.add_stamps(&[Stamp::round(Vec2::new(96.0, 16.0), 12.0, 1.0)]);
+    canvas.end_stroke();
+    canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0));
+    canvas.add_stamps(&[Stamp::round(Vec2::new(96.0, 48.0), 12.0, 1.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    let (left, right, next) =
+        (pixel(&layer, 128, 32, 16)[3], pixel(&layer, 128, 96, 16)[3], pixel(&layer, 128, 96, 48)[3]);
+    assert!(left > 200 && right < 40 && next > 200, "{left} {right} {next}");
+}
+
 #[test]
 fn a_texturized_grain_on_paint_laid_in_place_goes_by_its_blend_mode() {
     let Some(gpu) = gpu() else { return };

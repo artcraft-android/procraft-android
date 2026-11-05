@@ -92,7 +92,8 @@ struct SmudgeStamp {
     // wet paint with luminance blending: 1 when its colours mix squared, 2 when they do as it goes
     // over the layer too (paint that mixes only with the layer as it was)
     luminance: u32,
-    spare5: u32,
+    // pixels a side of the image the grain is read from
+    grain_side: f32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -299,9 +300,18 @@ fn grain_plain(p: vec2<f32>) -> f32 {
     let gs = sin(st.grain_rotation);
     let uv = vec2<f32>(at.x * gc - at.y * gs, at.x * gs + at.y * gc) / scale;
     let sharp = st.grain_sharp > 0.5;
-    var g = textureSampleLevel(grains, grain_smp, uv, st.grain, select(max(log2(256.0 / scale), 0.0), 0.0, sharp)).r;
+    // a brush file's own image has the fine detail itself; ours only stands in for it
+    let own = st.grain_side > 256.0;
+    let level = max(log2(st.grain_side / scale), 0.0);
+    var g = textureSampleLevel(grains, grain_smp, uv, st.grain, select(level, 0.0, sharp && !own)).r;
     if (sharp) {
-        g = sharp_grain(g, uv);
+        if (own) {
+            // unfiltered: the texel under it at its level
+            let l = i32(round(level));
+            g = textureLoad(grains, vec2<i32>(fract(uv) * vec2<f32>(textureDimensions(grains, l))), st.grain, l).r;
+        } else {
+            g = sharp_grain(g, uv);
+        }
     }
     return clamp((g - 0.5) * (1.0 + st.grain_contrast) + 0.5 + st.grain_brightness, 0.0, 1.0);
 }

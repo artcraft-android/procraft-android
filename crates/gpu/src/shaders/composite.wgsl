@@ -45,6 +45,8 @@ struct LayerUniform {
     dual_threshold: f32,
     // 1: the clip base shows through its own mask (clip_mask_tex), which clipping follows
     clip_masked: f32,
+    // pixels a side of the image the grain is read from
+    grain_side: f32,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -113,10 +115,18 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         let gs = sin(lu.grain_rotation);
         let uv = vec2<f32>(at.x * gc - at.y * gs, at.x * gs + at.y * gc) / lu.grain_scale;
         let sharp = lu.grain_sharp > 0.5;
-        let lod = select(max(log2(256.0 / lu.grain_scale), 0.0), 0.0, sharp);
-        var raw = textureSampleLevel(grains, grain_smp, uv, lu.grain, lod).r;
+        // a brush file's own image has the fine detail itself; ours only stands in for it
+        let own = lu.grain_side > 256.0;
+        let level = max(log2(lu.grain_side / lu.grain_scale), 0.0);
+        var raw = textureSampleLevel(grains, grain_smp, uv, lu.grain, select(level, 0.0, sharp && !own)).r;
         if (sharp) {
-            raw = sharp_grain(raw, uv);
+            if (own) {
+                // unfiltered: the texel under it at its level
+                let l = i32(round(level));
+                raw = textureLoad(grains, vec2<i32>(fract(uv) * vec2<f32>(textureDimensions(grains, l))), lu.grain, l).r;
+            } else {
+                raw = sharp_grain(raw, uv);
+            }
         }
         let g = grain_look(raw);
         // the coverage and the grain combined by the grain's blend mode, as deep as it says, and

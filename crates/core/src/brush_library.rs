@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use procraft_engine::brush::{Author, Brush, Notches, PressureCurves, ResetPoint, Source, StockImage, StockImages};
+use procraft_engine::brush::{
+    Author, Brush, FullGrain, GrainFile, Notches, PressureCurves, ResetPoint, Source, StockImage, StockImages,
+};
 use procraft_engine::brushfile::{self, Texture};
 use procraft_engine::curve::Curve;
 use procraft_engine::geom::Vec2;
@@ -99,6 +101,15 @@ fn blank_brush() -> Brush {
     Brush { name: "Untitled Brush".to_owned(), ..Brush::round_pen() }
 }
 
+/// What a brush file gave a grain, as kept: its image's width and, if it has one at more than the
+/// brush holds, that image's id and side.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedGrainFile {
+    width: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    full: Option<(u64, u32)>,
+}
+
 /// A brush as kept: where it came from, its name, the controls that differ from there and, if it
 /// differs, its pressure curve.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -123,6 +134,9 @@ struct SavedBrush {
     shape_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     grain_source: Option<String>,
+    /// What its file gave the grain beyond that, the image kept in a file of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grain_file: Option<SavedGrainFile>,
     /// The shipped shape and grain images it uses, where they differ from its origin's (-1: none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shape_image: Option<i64>,
@@ -396,6 +410,9 @@ impl State {
             shape_source: brush.shape.source.as_ref().filter(|_| brush.stock.shape.is_none()).map(Source::to_text),
             // a stock grain's is made again from its name when the brush comes back
             grain_source: brush.grain.source.as_ref().filter(|_| brush.stock.grain.is_none()).map(Source::to_text),
+            grain_file: brush
+                .grain_file_now()
+                .map(|f| SavedGrainFile { width: f.width, full: f.full.as_ref().map(|g| (g.id, g.side)) }),
             shape_image: image(brush.shape.image, base.shape.image),
             grain_image: image(brush.grain.image, base.grain.image),
             thumbnail: brush.thumbnail.as_deref().map(procraft_engine::base64::encode),
@@ -445,6 +462,11 @@ impl State {
         if let Some(text) = &b.grain_source {
             brush.grain.source = Source::from_text(text);
         }
+        brush.grain_file = b.grain_file.as_ref().zip(brush.grain.source.as_ref()).map(|(f, source)| GrainFile {
+            source: source.id,
+            width: f.width,
+            full: f.full.map(|(id, side)| FullGrain { id, side, pixels: None }),
+        });
         for (text, material) in [(&b.metallic_source, &mut brush.metallic), (&b.roughness_source, &mut brush.roughness)]
         {
             if let Some(text) = text {
@@ -922,6 +944,7 @@ impl CanvasSession {
         let path = std::path::Path::new(&path);
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
+            self.shared.lock().grain_store.use_folder(dir);
         }
         let written = crate::project::write_atomically(path, |p| {
             std::fs::write(p, json.as_bytes()).map_err(|e| crate::project::file_error("keeping the brushes", e))
@@ -935,6 +958,9 @@ impl CanvasSession {
     /// Puts back a library kept with [`Self::save_brush_library_file`]; false, changing nothing,
     /// if there is none or it can't be read.
     pub fn load_brush_library_file(&self, path: String) -> bool {
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            self.shared.lock().grain_store.use_folder(dir);
+        }
         std::fs::read_to_string(&path).is_ok_and(|json| self.load_brush_library(json))
     }
 

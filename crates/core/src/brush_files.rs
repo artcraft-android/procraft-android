@@ -2,7 +2,9 @@
 //! library, and written from it. A brush's shape and grain images go with it; an image a file only
 //! names (one that came with the app that made it) is stood in for by the nearest of ours.
 
-use procraft_engine::brush::{Author, Brush, GrainMode, MaterialSource, Source, StockImage, StockImages};
+use procraft_engine::brush::{
+    Author, Brush, FULL_GRAIN_MOST, FullGrain, GrainFile, GrainMode, MaterialSource, Source, StockImage, StockImages,
+};
 use procraft_engine::brushfile::{self, BrushFile, Pictures, Texture};
 use procraft_engine::curve::Curve;
 use procraft_engine::textures::{self, TEXTURE_SIZE, grain, shape};
@@ -61,6 +63,18 @@ fn author_name(brush: &Brush) -> &str {
 }
 
 impl CanvasSession {
+    /// The image of a brush file's grain at its own size, and pixels a side, if it can be had.
+    fn full_grain(&self, brush: &Brush) -> Option<(u32, std::sync::Arc<Vec<u8>>)> {
+        let full = brush.grain_file_now()?.full.as_ref()?;
+        Some((full.side, self.shared.lock().grain_store.pixels(full)?))
+    }
+
+    /// `brush` as a file with the grain image [`Self::brush_pictures`] writes keeps it.
+    fn as_written(&self, brush: Brush) -> Brush {
+        let side = self.full_grain(&brush).map_or(TEXTURE_SIZE as u32, |(side, _)| side);
+        brush.with_grain_image_width(side)
+    }
+
     fn brush_pictures(&self, brush: &Brush, set: u32, index: u32) -> Made {
         // the preview it came with, else one drawn
         let thumbnail = brush.thumbnail.as_deref().map(<[u8]>::to_vec).unwrap_or_else(|| {
@@ -71,7 +85,10 @@ impl CanvasSession {
         let author = brush.author.as_ref();
         Made {
             shape: gray_png(&shape_pixels(brush)),
-            grain: grain_pixels(brush).map(|p| gray_png(&p)),
+            grain: match self.full_grain(brush) {
+                Some((side, pixels)) => Some(sized_gray_png(side, side, &pixels)),
+                None => grain_pixels(brush).map(|p| gray_png(&p)),
+            },
             metallic: material_pixels(&brush.metallic).map(|p| gray_png(&p)),
             roughness: material_pixels(&brush.roughness).map(|p| gray_png(&p)),
             thumbnail,
@@ -165,16 +182,18 @@ impl CanvasSession {
     /// Returns the set they went into, or none if they couldn't be added.
     pub fn add_read_brushes(&self, read: ReadBrushes, shown: u32) -> Option<u32> {
         match read {
-            ReadBrushes::Set { name, brushes } => {
+            ReadBrushes::Set { name, mut brushes } => {
                 let mut st = self.shared.lock();
+                brushes.iter_mut().for_each(|b| st.grain_store.take(b));
                 let name = if name.trim().is_empty() { IMPORTED.to_owned() } else { name.trim().to_owned() };
                 let origins = vec![None; brushes.len()];
                 st.library.insert(0, LibrarySet { name, brushes, origins, icon: crate::brush_library::IMPORTED_ICON });
                 st.move_brush_refs(|(rs, ri)| Some((rs + 1, ri)));
                 Some(0)
             }
-            ReadBrushes::One(brush) => {
+            ReadBrushes::One(mut brush) => {
                 let mut st = self.shared.lock();
+                st.grain_store.take(&mut brush);
                 let at = match st.library.iter().position(|s| s.name == IMPORTED) {
                     Some(at) => at,
                     None => {
@@ -253,6 +272,7 @@ impl CanvasSession {
             st.with_sliders(st.library.get(set as usize)?.brushes.get(index as usize)?, set as usize, index as usize)
         };
         let made = self.brush_pictures(&brush, set, index);
+        let brush = self.as_written(brush);
         Some(brushfile::write(&brush, author_name(&brush), &made.pictures()))
     }
 
@@ -266,6 +286,7 @@ impl CanvasSession {
             (entry.name.clone(), brushes)
         };
         let made: Vec<Made> = brushes.iter().enumerate().map(|(i, b)| self.brush_pictures(b, set, i as u32)).collect();
+        let brushes: Vec<Brush> = brushes.into_iter().map(|b| self.as_written(b)).collect();
         let list: Vec<(&Brush, &str, Pictures<'_>)> =
             brushes.iter().zip(&made).map(|(b, m)| (b, author_name(b), m.pictures())).collect();
         let seed =
@@ -634,9 +655,11 @@ fn brush_from(file: &BrushFile) -> Brush {
     }
     b.notches = file.notches.clone();
     b.sliders = file.sliders;
-    b.secondary = file.secondary.as_deref().map(|second| Box::new(brush_from(second)));
+    // (a second's grain goes on stamp by stamp, so by the grain's own tile)
+    b.secondary = file.secondary.as_deref().map(|second| Box::new(Brush { grain_file: None, ..brush_from(second) }));
     let (image, source) = grain_for(&file.grain, file.thumbnail.as_deref());
     b.grain.image = image;
+    b.grain_file = grain_file_for(&file.grain, source.as_ref());
     b.grain.source = source;
     for (texture, material) in [(&file.metallic, &mut b.metallic), (&file.roughness, &mut b.roughness)] {
         let (image, source) = material_for(texture);
@@ -958,6 +981,23 @@ fn named_grain(n: &str) -> Option<u32> {
 /// for paint; none if it can't be read.
 fn gray_texture(bytes: &[u8], inverted: bool) -> Option<Source> {
     let (w, h, channels, buf) = decode_png(bytes)?;
+    Source::new(gray_square((w, h, channels), &buf, inverted, TEXTURE_SIZE))
+}
+
+/// What the image of a brush file's grain gives it beyond `source`: its width, and the image at up
+/// to [`FULL_GRAIN_MOST`] a side if it has more than `source` holds.
+fn grain_file_for(t: &Texture, source: Option<&Source>) -> Option<GrainFile> {
+    let (Texture::Image { bytes, inverted }, Some(source)) = (t, source) else { return None };
+    let (w, h, channels, buf) = decode_png(bytes)?;
+    let longest = w.max(h);
+    let full = (longest > TEXTURE_SIZE)
+        .then(|| longest.next_power_of_two().min(FULL_GRAIN_MOST))
+        .and_then(|side| FullGrain::new(side as u32, gray_square((w, h, channels), &buf, *inverted, side)));
+    Some(GrainFile { source: source.id, width: w as u32, full })
+}
+
+/// A decoded image (`buf`, `w` x `h`, of `channels`) as grey, `n` square, white for paint.
+fn gray_square((w, h, channels): (usize, usize, usize), buf: &[u8], inverted: bool, n: usize) -> Vec<u8> {
     let value = |x: usize, y: usize| -> f32 {
         let at = (y * w + x) * channels;
         let px = buf.get(at..at + channels).unwrap_or(&[]);
@@ -970,7 +1010,6 @@ fn gray_texture(bytes: &[u8], inverted: bool) -> Option<Source> {
         };
         lum * alpha / 255.0
     };
-    let n = TEXTURE_SIZE;
     // a smaller image is blown up smoothly, between its pixels' centres
     let between = |fx: f32, fy: f32| -> f32 {
         let (fx, fy) = (fx.clamp(0.0, (w - 1) as f32), fy.clamp(0.0, (h - 1) as f32));
@@ -1003,7 +1042,7 @@ fn gray_texture(bytes: &[u8], inverted: bool) -> Option<Source> {
             pixels.push(v.round().clamp(0.0, 255.0) as u8);
         }
     }
-    Source::new(pixels)
+    pixels
 }
 
 /// The brush's shape as an image: its own, one of ours, or its round tip drawn.
@@ -1050,7 +1089,7 @@ fn gray_png(pixels: &[u8]) -> Vec<u8> {
 }
 
 /// A grey PNG of `pixels`, `width` x `height`.
-fn sized_gray_png(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
+pub(crate) fn sized_gray_png(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, width, height);
     encoder.set_color(png::ColorType::Grayscale);
@@ -1282,6 +1321,26 @@ mod tests {
         // our own textures go out and come back the same
         let back = gray_texture(&gray_png(&textures::grains()[3].pixels), false).unwrap();
         assert_eq!(*back.pixels, textures::grains()[3].pixels);
+    }
+
+    #[test]
+    fn a_brush_file_s_grain_keeps_its_width_and_as_much_of_its_image_as_is_worth_keeping() {
+        let source = Source::new(vec![0; TEXTURE_SIZE * TEXTURE_SIZE]).unwrap();
+        let file = |n: usize| {
+            let bytes = sized_gray_png(n as u32, n as u32, &vec![128; n * n]);
+            grain_file_for(&Texture::Image { bytes, inverted: false }, Some(&source)).unwrap()
+        };
+        // no more than the brush's own image holds, none kept apart
+        let small = file(200);
+        assert_eq!((small.width, small.full.is_none()), (200, true));
+        // a side that isn't a power of two takes the next, as far as the most
+        let middle = file(400);
+        assert_eq!((middle.width, middle.full.unwrap().side), (400, 512));
+        let large = file(1500);
+        assert_eq!((large.width, large.full.unwrap().side), (1500, FULL_GRAIN_MOST as u32));
+        // nothing without an image in the file
+        let stock = Texture::Stock { name: "Paper".into(), inverted: false };
+        assert!(grain_file_for(&stock, Some(&source)).is_none());
     }
 
     #[test]

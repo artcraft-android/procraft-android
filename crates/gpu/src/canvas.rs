@@ -153,6 +153,10 @@ pub struct StrokeStyle {
     pub grain_rotation: f32,
     /// No grain filtering: the grain read pixel by pixel, sharp, as from a finer image.
     pub grain_sharp: bool,
+    /// A brush file's grain to read in place of the brush images (see
+    /// [`Canvas::use_full_grain`]), and pixels a side of the image the grain is read from.
+    pub full_grain: Option<u64>,
+    pub grain_side: f32,
     /// No shape filtering: the shape image read pixel by pixel, its edges and specks hard.
     pub shape_sharp: bool,
     /// The coarsest mip level a small stamp reads its shape from, so a thin shape keeps its
@@ -231,6 +235,8 @@ impl StrokeStyle {
             burnt_blend: MULTIPLY_MODE,
             grain_rotation: 0.0,
             grain_sharp: false,
+            full_grain: None,
+            grain_side: TEXTURE_SIZE as f32,
             shape_sharp: false,
             shape_lod_cap: SHAPE_LOD_CAP,
             secondary: [1.0, 1.0, 1.0],
@@ -258,7 +264,7 @@ impl StrokeStyle {
             shape: brush.shape.image,
             grain: brush.grain.image.filter(|_| brush.grain.depth > 0.0),
             grain_mode: brush.grain.mode,
-            grain_scale: brush.grain.scale.max(1.0),
+            grain_scale: brush.grain_tile().max(1.0),
             grain_depth: brush.grain.depth.clamp(0.0, 1.0),
             rendering: brush.rendering,
             pull: DEFAULT_PULL,
@@ -292,6 +298,8 @@ impl StrokeStyle {
             // each stamp's own: `Stamp::grain_turn`)
             grain_rotation: brush.setting("grain_turn").clamp(-1.0, 1.0) * std::f32::consts::PI,
             grain_sharp: brush.setting("grain_filtering") < 0.5,
+            full_grain: None,
+            grain_side: TEXTURE_SIZE as f32,
             shape_sharp: brush.setting("shape_filtering") < 0.5,
             shape_lod_cap: SHAPE_LOD_CAP,
             secondary: [1.0, 1.0, 1.0],
@@ -601,7 +609,8 @@ struct LayerUniform {
     dual_threshold: f32,
     /// 1 when the clip base shows through its own mask, which clipping then follows.
     clip_masked: f32,
-    _dual_pad: u32,
+    /// Pixels a side of the image the grain is read from.
+    grain_side: f32,
 }
 
 impl Default for LayerUniform {
@@ -632,7 +641,7 @@ impl Default for LayerUniform {
             dual: 0,
             dual_threshold: -1.0,
             clip_masked: 0.0,
-            _dual_pad: 0,
+            grain_side: TEXTURE_SIZE as f32,
         }
     }
 }
@@ -671,6 +680,7 @@ impl LayerUniform {
             grain_blend: s.grain_blend,
             burnt_blend: s.burnt_blend,
             grain_sharp: if s.grain_sharp { 1.0 } else { 0.0 },
+            grain_side: s.grain_side,
             ..self
         };
         match s.canvas_grain() {
@@ -945,7 +955,7 @@ fn smudge_uniform(
             (true, false) => 1,
             (true, true) => 2,
         },
-        spare: 0,
+        grain_side: style.grain_side,
     }
 }
 
@@ -1031,7 +1041,8 @@ struct SmudgeUniform {
     wet_edges: f32,
     /// Wet paint with luminance blending: 1 when its colours mix squared.
     luminance: u32,
-    spare: u32,
+    /// Pixels a side of the image the grain is read from.
+    grain_side: f32,
 }
 
 /// The coarsest mip level of our brush images (256 texels a side) a small stamp reads its shape
@@ -1604,6 +1615,9 @@ pub struct Canvas {
     /// The open stroke's grain fixed to the canvas, from a picture its size in place of a brush
     /// image (see [`Canvas::set_stroke_grain`]); kept until the stroke has ended.
     stroke_grain: Option<wgpu::TextureView>,
+    /// Brush files' grains at their own size, and the one the stroke's bind reads.
+    full_grains: FullGrains,
+    bound_full_grain: Option<u64>,
     shape_sources: SourceSlots,
     grain_sources: SourceSlots,
     /// Full coverage, stood in for the selection when there is none.
@@ -1983,6 +1997,8 @@ impl Canvas {
             grains,
             brush_images: images,
             stroke_grain: None,
+            full_grains: FullGrains::default(),
+            bound_full_grain: None,
             shape_sources: SourceSlots::after(shape_images.len()),
             grain_sources: SourceSlots::after(grain_images.len()),
         };
@@ -2060,6 +2076,16 @@ impl Canvas {
         self.bind_brush_images(&gpu.device);
     }
 
+    /// `style` reads the brush file's grain `id` (`pixels`, `side` square) in place of the brush
+    /// images: each stroke its own, kept on the GPU while it is among the last few used.
+    pub fn use_full_grain(&mut self, gpu: &Gpu, style: &mut StrokeStyle, id: u64, side: u32, pixels: &[u8]) {
+        if self.full_grains.hold(gpu, id, side, pixels) {
+            style.grain = Some(0);
+            style.full_grain = Some(id);
+            style.grain_side = side as f32;
+        }
+    }
+
     /// The open stroke's grain fixed to the canvas is read from `grain` from now on, in place of a
     /// brush image: a picture the canvas's size (square), one grey per pixel, viewed as an array
     /// of one, such as 3D painting reads along a model's three axes. How the grain shows (its
@@ -2071,6 +2097,8 @@ impl Canvas {
             return;
         };
         // one tile the canvas, read texel for texel
+        active.style.full_grain = None;
+        active.style.grain_side = TEXTURE_SIZE as f32;
         active.style.grain = Some(0);
         active.style.grain_scale = self.width as f32;
         active.style.grain_rotation = 0.0;
@@ -2079,9 +2107,32 @@ impl Canvas {
         self.bind_brush_images(device);
     }
 
-    /// The grains strokes read: the open stroke's own picture, else the brush images.
+    /// The grains the open stroke reads: its own picture, else the brush images.
     fn grain_view(&self) -> &wgpu::TextureView {
-        self.stroke_grain.as_ref().unwrap_or(&self.grains_view)
+        match self.active.as_ref() {
+            Some(a) => self.grain_view_of(&a.style),
+            None => self.stroke_grain.as_ref().unwrap_or(&self.grains_view),
+        }
+    }
+
+    /// The grains a stroke in `style` reads, the open one or one still going on to its layer.
+    fn grain_view_of(&self, style: &StrokeStyle) -> &wgpu::TextureView {
+        match style.full_grain.and_then(|id| self.full_grains.view(id)) {
+            Some(view) => view,
+            None => self.stroke_grain.as_ref().unwrap_or(&self.grains_view),
+        }
+    }
+
+    /// The bind of the shape and grain arrays for a stroke in `style` that reads its own grain.
+    fn full_grain_bind(&self, device: &wgpu::Device, style: &StrokeStyle) -> Option<wgpu::BindGroup> {
+        let grain = style.full_grain.and_then(|id| self.full_grains.view(id))?;
+        let mask = self.selection.as_ref().map_or(&self.everything, |s| &s.view);
+        Some(brush_bind(
+            device,
+            &self.pipelines.brush_layout,
+            [&self.shapes_view, grain, mask],
+            [&self.shape_sampler, &self.grain_sampler],
+        ))
     }
 
     /// Whether it holds its shape and grain images (else stand-ins until something wants them).
@@ -3422,6 +3473,12 @@ impl Canvas {
     /// Undoing a structural step puts the earlier document into `doc`.
     pub fn render(&mut self, gpu: &Gpu, doc: &mut Document, target: Option<Target<'_>>) {
         self.sync_layers(gpu, doc);
+        // the stroke's bind goes with the open stroke's grain
+        let full_grain = self.active.as_ref().and_then(|a| a.style.full_grain);
+        if full_grain != self.bound_full_grain {
+            self.bound_full_grain = full_grain;
+            self.bind_brush_images(&gpu.device);
+        }
         if !self.brush_images && self.wants_brush_images() {
             self.prepare_brush_images(gpu);
         }
@@ -4570,6 +4627,7 @@ impl Canvas {
     ) {
         let rect = rect.intersect(IRect::from_size(self.width, self.height));
         let Some(&(style, dual, dual_threshold)) = self.smudge.as_ref().and_then(|s| s.apart.as_ref()) else { return };
+        let own_grain = self.full_grain_bind(device, &style);
         if rect.is_empty() {
             return;
         }
@@ -4595,7 +4653,7 @@ impl Canvas {
         let mut pass = encoder
             .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("synthesize"), timestamp_writes: None });
         pass.set_bind_group(0, &bind, &[offset, 0]);
-        pass.set_bind_group(1, &self.brush_bind, &[]);
+        pass.set_bind_group(1, own_grain.as_ref().unwrap_or(&self.brush_bind), &[]);
         pass.set_pipeline(&self.pipelines.smudge_synthesize);
         pass.dispatch_workgroups(rect.width().div_ceil(8), rect.height().div_ceil(8), 1);
         drop(pass);
@@ -4619,6 +4677,7 @@ impl Canvas {
         }
         let size = (self.width, self.height, self.row_bytes());
         let full = IRect::from_size(self.width, self.height);
+        let own_grain = self.full_grain_bind(device, style);
         let dual = self.smudge.as_ref().and_then(|s| s.apart.as_ref()).is_some_and(|a| a.1 != 0);
         let second = dual.then(|| self.second_stroke.get(device).1);
         let Some(smudge) = self.smudge.as_mut() else { return };
@@ -4636,7 +4695,7 @@ impl Canvas {
         let mut changed = IRect::EMPTY;
         let mut pass =
             encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("wet"), timestamp_writes: None });
-        pass.set_bind_group(1, &self.brush_bind, &[]);
+        pass.set_bind_group(1, own_grain.as_ref().unwrap_or(&self.brush_bind), &[]);
         if style.wet_pull.is_none() {
             // dry paint laid in place: each stamp lays the paint itself, no pass of plots
             for (s, _, _) in stamps {
@@ -4839,7 +4898,8 @@ impl Canvas {
             let stroke_view = &self.stroke_view;
             let quad = |layer: &wgpu::TextureView| {
                 let views = [layer, stroke_view, stroke_view, stroke_view, stroke_view, second, stroke_view];
-                quad_bind(device, &self.pipelines.quad_layout, views, self.grain_view(), &self.grain_sampler)
+                let grain = self.grain_view_of(&stroke.style);
+                quad_bind(device, &self.pipelines.quad_layout, views, grain, &self.grain_sampler)
             };
             match (stroke.style.tool, locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
                 (StrokeTool::Paint, true) => {
@@ -4878,7 +4938,8 @@ impl Canvas {
                             .with_grain(Some(&stroke.style))
                             .with_dual(Some(&stroke)),
                     );
-                    let dual = stroke.second.map(|_| quad(&self.stroke_view));
+                    let dual =
+                        (stroke.second.is_some() || stroke.style.full_grain.is_some()).then(|| quad(&self.stroke_view));
                     if let Some(layer) = self.layers.get(&stroke.layer) {
                         let mut pass = render_pass(encoder, "commit", &layer.view, wgpu::LoadOp::Load);
                         pass.set_pipeline(match tool {
@@ -8557,6 +8618,54 @@ fn clip_base_and_mask(doc: &Document, first: LayerId) -> impl Iterator<Item = La
 /// How many images of the user's own each of the shape and grain arrays holds at once.
 const SOURCE_SLOTS: usize = 8;
 
+/// How many brush files' grains stay on the GPU at their own size.
+const FULL_GRAINS_HELD: usize = 3;
+
+/// Brush files' grains at their own size, each an array with its mip levels, the image in its first
+/// layer: only the last few used, so that their memory doesn't grow with the brushes.
+#[derive(Default)]
+struct FullGrains {
+    held: Vec<(u64, wgpu::TextureView, u64)>,
+    clock: u64,
+}
+
+impl FullGrains {
+    /// Has the image `id` ready; false if `pixels` aren't `side` square.
+    fn hold(&mut self, gpu: &Gpu, id: u64, side: u32, pixels: &[u8]) -> bool {
+        self.clock += 1;
+        let clock = self.clock;
+        if let Some(slot) = self.held.iter_mut().find(|slot| slot.0 == id) {
+            slot.2 = clock;
+            return true;
+        }
+        if !side.is_power_of_two() || pixels.len() != (side as usize).pow(2) {
+            return false;
+        }
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("full grain"),
+            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: gpu.array_layers_least() },
+            mip_level_count: side.ilog2() + 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        write_image_levels(gpu, &texture, 0, side, pixels);
+        if self.held.len() >= FULL_GRAINS_HELD
+            && let Some(oldest) = self.held.iter().enumerate().min_by_key(|(_, slot)| slot.2).map(|(i, _)| i)
+        {
+            self.held.swap_remove(oldest);
+        }
+        self.held.push((id, array_view(&texture), clock));
+        true
+    }
+
+    fn view(&self, id: u64) -> Option<&wgpu::TextureView> {
+        self.held.iter().find(|slot| slot.0 == id).map(|slot| &slot.1)
+    }
+}
+
 /// The spare layers of a brush image array, after the shipped images: which image of the user's
 /// own each holds, and when it was last used (the longest unused gives way).
 struct SourceSlots {
@@ -8638,7 +8747,11 @@ fn brush_images(gpu: &Gpu, label: &str, images: &[GrayImage]) -> wgpu::Texture {
 
 /// One brush image (`TEXTURE_SIZE` square) into `layer` of `texture`, every mip level.
 fn write_brush_image(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, pixels: &[u8]) {
-    let n = TEXTURE_SIZE as u32;
+    write_image_levels(gpu, texture, layer, TEXTURE_SIZE as u32, pixels);
+}
+
+/// A greyscale image `n` square into `layer` of `texture`, every mip level.
+fn write_image_levels(gpu: &Gpu, texture: &wgpu::Texture, layer: u32, n: u32, pixels: &[u8]) {
     let mut level = pixels.to_vec();
     let mut size = n;
     for mip in 0..n.ilog2() + 1 {
