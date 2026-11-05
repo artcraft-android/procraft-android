@@ -28,7 +28,7 @@ fn from_panel(quarters: u32, natural: f32, tall: f32, x: f32, y: f32) -> (f32, f
 /// What turning from way up `from` to `to` does to the view of a window `width` × `height` pixels
 /// (as it was): where the old window's corner lands, and the angle its x axis lands at.
 fn turn_of_view(from: u32, to: u32, width: f32, height: f32) -> (f32, f32, f32) {
-    let (natural, tall) = if from % 2 == 0 { (width, height) } else { (height, width) };
+    let (natural, tall) = if from.is_multiple_of(2) { (width, height) } else { (height, width) };
     let map = |x: f32, y: f32| {
         let (px, py) = to_panel(from, natural, tall, x, y);
         from_panel(to, natural, tall, px, py)
@@ -43,7 +43,7 @@ fn turn_of_view(from: u32, to: u32, width: f32, height: f32) -> (f32, f32, f32) 
 /// its natural way up, so that is half a point in from whichever corner that is.
 fn grid_line(quarters: u32, width: f32, height: f32, pixels_per_point: f32) -> (f32, f32) {
     let half = 0.5 * pixels_per_point;
-    let (natural, tall) = if quarters % 2 == 0 { (width, height) } else { (height, width) };
+    let (natural, tall) = if quarters.is_multiple_of(2) { (width, height) } else { (height, width) };
     match quarters % 4 {
         1 => (half, natural - half),
         2 => (natural - half, tall - half),
