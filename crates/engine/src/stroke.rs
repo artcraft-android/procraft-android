@@ -67,6 +67,9 @@ pub struct Stamp {
     /// When the input that placed it came (ms, the newest sample's time): wet paint is laid a
     /// display frame's stamps at a time.
     pub time_ms: f64,
+    /// How far along the path it is (canvas pixels), whatever jitter threw it from there: wet
+    /// paint runs out with this.
+    pub distance: f32,
 }
 
 impl Stamp {
@@ -93,6 +96,7 @@ impl Stamp {
             attack: 1.0,
             wet: [1.0; 8],
             time_ms: 0.0,
+            distance: 0.0,
         }
     }
 
@@ -2144,6 +2148,7 @@ impl StrokeBuilder {
             attack: p.attack,
             wet: p.wet,
             time_ms: p.time_ms,
+            distance: p.distance,
         }
     }
 }
@@ -2811,6 +2816,18 @@ mod tests {
         // the same seed replays the same stroke
         let mut again = StrokeBuilder::new(Brush { shape: b.brush().shape.clone(), ..plain() }, 10.0, Pointer::Stylus);
         assert_eq!(again.add(&down), stamps);
+    }
+
+    #[test]
+    fn a_stamp_knows_how_far_along_the_path_it_is_wherever_jitter_threw_it() {
+        let mut brush = plain();
+        brush.set_setting("jitter_lateral", 1.0);
+        let stamps = StrokeBuilder::new(brush, 10.0, Pointer::Stylus).add(&line(20, 200.0));
+        let thrown: f32 = stamps.windows(2).map(|p| p[0].center.distance(p[1].center)).sum();
+        let last = stamps.last().unwrap();
+        assert!(thrown > 2.0 * last.distance, "{thrown} {}", last.distance);
+        assert!(stamps.windows(2).all(|p| p[1].distance >= p[0].distance));
+        assert!(last.distance <= 200.0, "{}", last.distance);
     }
 
     #[test]

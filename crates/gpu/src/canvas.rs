@@ -832,6 +832,14 @@ fn final_mixture(mixture: f32, pull: f32, grade: f32, (k, n): (usize, usize), fi
     }
 }
 
+/// Where a stamp comes in its stroke: when its input came (ms) and how far along the path it is
+/// (canvas pixels).
+#[derive(Clone, Copy)]
+struct Paced {
+    time_ms: f64,
+    distance: f32,
+}
+
 /// The display frame wet paint input at `time_ms` is laid in.
 fn wet_frame(time_ms: f64) -> i64 {
     (time_ms / WET_FRAME_MS).floor() as i64
@@ -1122,10 +1130,6 @@ struct Smudge {
     kept: i32,
     /// Stamps laid so far (for the wetness jitter).
     stamps: u32,
-    /// How far the stroke has gone (canvas pixels, from stamp to stamp) and where its last stamp
-    /// was: wet paint runs out with it.
-    length: f32,
-    last: Option<[f32; 2]>,
     /// Wet paint with a texturized grain: the stroke without the grain, then the layer as it was,
     /// the grain laid over the change once (see `grain_once`).
     grained: Option<wgpu::Buffer>,
@@ -1138,7 +1142,7 @@ struct Smudge {
     apart: Option<(StrokeStyle, u32, f32)>,
     /// Wet paint: stamps waiting for the rest of their display frame (with their wet-mix scaling
     /// and input time), the passes laid so far, and the texels a side of the last pass's plots.
-    pending: Vec<(StampInstance, [f32; 8], f64)>,
+    pending: Vec<(StampInstance, [f32; 8], Paced)>,
     passes: u32,
     plot: u32,
 }
@@ -1184,10 +1188,10 @@ enum Op {
         /// Into the stroke's second (a dual brush's).
         second: bool,
         instances: Vec<StampInstance>,
-        /// Each stamp's wet-mix scaling (see [`Stamp::wet`]) and input time, for the wet paint
-        /// drawn in place.
+        /// Each stamp's wet-mix scaling (see [`Stamp::wet`]) and where it comes in the stroke, for
+        /// the wet paint drawn in place.
         wet: Vec<[f32; 8]>,
-        times: Vec<f64>,
+        times: Vec<Paced>,
         style: StrokeStyle,
         clear: bool,
         layer: LayerId,
@@ -2470,7 +2474,13 @@ impl Canvas {
             stamps.iter().filter(|s| s.center.is_finite() && s.radius.is_finite() && s.alpha.is_finite()).collect();
         let wet: Vec<[f32; 8]> =
             drawn.iter().map(|s| s.wet.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 })).collect();
-        let times: Vec<f64> = drawn.iter().map(|s| if s.time_ms.is_finite() { s.time_ms } else { 0.0 }).collect();
+        let times: Vec<Paced> = drawn
+            .iter()
+            .map(|s| Paced {
+                time_ms: if s.time_ms.is_finite() { s.time_ms } else { 0.0 },
+                distance: if s.distance.is_finite() { s.distance } else { 0.0 },
+            })
+            .collect();
         let instances: Vec<StampInstance> = drawn
             .iter()
             .map(|s| {
@@ -4416,7 +4426,7 @@ impl Canvas {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         (params, passes): (&mut UniformData, &mut UniformData),
-        (instances, wet, times): (&[StampInstance], &[[f32; 8]], &[f64]),
+        (instances, wet, times): (&[StampInstance], &[[f32; 8]], &[Paced]),
         style: &StrokeStyle,
         target: LayerId,
         restart: bool,
@@ -4448,8 +4458,6 @@ impl Canvas {
             smudge.scale = 1.0;
             smudge.kept = -1;
             smudge.stamps = 0;
-            smudge.length = 0.0;
-            smudge.last = None;
             smudge.pending.clear();
             smudge.passes = 0;
             smudge.plot = 0;
@@ -4576,8 +4584,6 @@ impl Canvas {
                 scale: 1.0,
                 kept: -1,
                 stamps: 0,
-                length: 0.0,
-                last: None,
                 grained,
                 amount,
                 apart,
@@ -4589,8 +4595,8 @@ impl Canvas {
         if style.paints_in_place() {
             let Some(smudge) = self.smudge.as_mut() else { return };
             smudge.pending.extend(instances.iter().zip(wet).zip(times).map(|((s, w), t)| (*s, *w, *t)));
-            let newest = smudge.pending.last().map(|s| wet_frame(s.2));
-            let ready = smudge.pending.iter().take_while(|s| Some(wet_frame(s.2)) != newest).count();
+            let newest = smudge.pending.last().map(|s| wet_frame(s.2.time_ms));
+            let ready = smudge.pending.iter().take_while(|s| Some(wet_frame(s.2.time_ms)) != newest).count();
             let ready: Vec<_> = smudge.pending.drain(..ready).collect();
             self.lay_wet(device, encoder, (params, passes), &ready, style);
             return;
@@ -4732,7 +4738,7 @@ impl Canvas {
     }
 
     /// Lays wet paint, a pass a display frame (at most [`WET_PASS_MOST`] stamps): `stamps` in
-    /// order, with their wet-mix scaling and input times. Each pass works out what each of its
+    /// order, with their wet-mix scaling and places in the stroke. Each pass works out what each of its
     /// stamps lays down from the layer as the pass finds it (see the shader's `cs_wet_plots`), then
     /// lays the stamps, each through its shape and grain.
     fn lay_wet(
@@ -4740,7 +4746,7 @@ impl Canvas {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         (params, passes): (&mut UniformData, &mut UniformData),
-        stamps: &[(StampInstance, [f32; 8], f64)],
+        stamps: &[(StampInstance, [f32; 8], Paced)],
         style: &StrokeStyle,
     ) {
         if stamps.is_empty() {
@@ -4802,8 +4808,9 @@ impl Canvas {
         }
         let mut from = 0;
         while let Some(head) = stamps.get(from) {
-            let frame = wet_frame(head.2);
-            let count = stamps.iter().skip(from).take(WET_PASS_MOST).take_while(|s| wet_frame(s.2) == frame).count();
+            let frame = wet_frame(head.2.time_ms);
+            let count =
+                stamps.iter().skip(from).take(WET_PASS_MOST).take_while(|s| wet_frame(s.2.time_ms) == frame).count();
             let group = stamps.get(from..from + count.max(1)).unwrap_or_default();
             from += group.len().max(1);
             let n = group.len();
@@ -4816,17 +4823,13 @@ impl Canvas {
                 plot /= 2;
             }
             let mut list = WetPass { stamps: [[0.0; 12]; WET_PASS_MOST] };
-            for (k, (s, w, _)) in group.iter().enumerate() {
-                // the paint runs out with the length the stroke has gone
-                if let Some([x, y]) = smudge.last {
-                    smudge.length += (s.center[0] - x).hypot(s.center[1] - y);
-                }
-                smudge.last = Some(s.center);
+            for (k, (s, w, paced)) in group.iter().enumerate() {
                 let [grade_by, _, _, wet_jitter_by, charge_by, dilution_by, wet_pull_by, _] = *w;
                 // the mixture varies from stamp to stamp by the wetness jitter
                 let jitter = 1.0 - style.wet_jitter * wet_jitter_by * unit_hash(smudge.stamps);
                 smudge.stamps = smudge.stamps.saturating_add(1);
-                let (mixture, pull) = wet_mixture(style, smudge.length, jitter, s.more[3], dilution_by, charge_by);
+                // the paint runs out with the length the stroke has gone
+                let (mixture, pull) = wet_mixture(style, paced.distance, jitter, s.more[3], dilution_by, charge_by);
                 let pull = pull * wet_pull_by;
                 let grade = (style.grade * grade_by).clamp(-1.0, 1.0);
                 let final_mixture = final_mixture(mixture, pull, grade, (k, n), first);

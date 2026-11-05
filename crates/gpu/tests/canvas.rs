@@ -1474,7 +1474,11 @@ fn wet_paint_mixes_with_what_is_under_it() {
     canvas.begin_stroke(doc.current(), wet);
     canvas.add_stamps(
         &(0..120)
-            .map(|i| Stamp { time_ms: f64::from(i), ..Stamp::round(Vec2::new(4.0 + i as f32 * 0.5, 32.0), 4.0, 0.5) })
+            .map(|i| Stamp {
+                time_ms: f64::from(i),
+                distance: i as f32 * 0.5,
+                ..Stamp::round(Vec2::new(4.0 + i as f32 * 0.5, 32.0), 4.0, 0.5)
+            })
             .collect::<Vec<_>>(),
     );
     canvas.end_stroke();
@@ -1512,6 +1516,7 @@ fn a_slower_wet_stroke_runs_out_sooner() {
             &(0..720)
                 .map(|i| Stamp {
                     time_ms: f64::from(i) * ms_a_stamp,
+                    distance: i as f32 * 0.5,
                     ..Stamp::round(Vec2::new(4.0 + i as f32 * 0.5, 16.0), 6.0, 1.0)
                 })
                 .collect::<Vec<_>>(),
@@ -2176,6 +2181,7 @@ fn modulated_wet_paint_lays_a_pixel_once() {
             &(0..760)
                 .map(|i| Stamp {
                     time_ms: f64::from(i),
+                    distance: i as f32 * 0.5,
                     ..Stamp::round(Vec2::new(10.0 + i as f32 * 0.5, 16.0), 10.0, 1.0)
                 })
                 .collect::<Vec<_>>(),
@@ -2362,6 +2368,41 @@ fn wet_attack_puts_more_paint_over_what_is_there() {
 }
 
 #[test]
+fn wet_paint_runs_out_with_the_path_not_with_how_far_jitter_threw_its_stamps() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // the same path, its stamps kept on it or thrown from side to side
+    let far_end = |thrown: f32| {
+        let mut doc = Document::new(256, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let wet = StrokeStyle {
+            wet_pull: Some(0.9),
+            dilution: 0.8,
+            load: 0.5,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), wet);
+        let stamps: Vec<Stamp> = (0..400)
+            .map(|i| {
+                let y = 32.0 + if i % 2 == 0 { thrown } else { -thrown };
+                Stamp {
+                    time_ms: f64::from(i),
+                    distance: i as f32 * 0.5,
+                    ..Stamp::round(Vec2::new(20.0 + i as f32 * 0.5, y), 16.0, 1.0)
+                }
+            })
+            .collect();
+        canvas.add_stamps(&stamps);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        pixel(&layer, 256, 210, 32)[3]
+    };
+    let (kept, thrown) = (far_end(0.0), far_end(8.0));
+    assert!(kept.abs_diff(thrown) < 10, "{kept} {thrown}");
+}
+
+#[test]
 fn wet_paint_thins_over_bare_paper_as_far_as_its_pull_lets_it() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
@@ -2377,7 +2418,12 @@ fn wet_paint_thins_over_bare_paper_as_far_as_its_pull_lets_it() {
         };
         canvas.begin_stroke(doc.current(), wet);
         canvas.add_stamps(
-            &(0..140).map(|i| Stamp::round(Vec2::new(10.0 + i as f32 * 0.7, 32.0), 4.0, 0.5)).collect::<Vec<_>>(),
+            &(0..140)
+                .map(|i| Stamp {
+                    distance: i as f32 * 0.7,
+                    ..Stamp::round(Vec2::new(10.0 + i as f32 * 0.7, 32.0), 4.0, 0.5)
+                })
+                .collect::<Vec<_>>(),
         );
         canvas.end_stroke();
         canvas.render(&gpu, &mut doc, None);
