@@ -92,11 +92,8 @@ impl Screen {
             let last = tries + 1 >= left;
             trying(backend);
             let started = Instant::now();
-            let made =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Screen::on(&window, backend, last)))
-                    .unwrap_or_else(|panic| {
-                        Err(format!("panicked: {}", procraft_gpu::panic_message(panic.as_ref())))
-                    });
+            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Screen::on(&window, backend, last)))
+                .unwrap_or_else(|panic| Err(format!("panicked: {}", procraft_gpu::panic_message(panic.as_ref()))));
             let name = Gpu::backend_name(backend);
             match made {
                 Ok(mut screen) => {
@@ -121,6 +118,7 @@ impl Screen {
         let instance = Gpu::instance_after(backend).ok_or("no such graphics backend")?;
         let surface = instance.create_surface(Arc::clone(&window)).map_err(|e| format!("the window's surface: {e}"))?;
         let gpu = Gpu::for_surface(instance, &surface).map_err(|e| e.to_string())?;
+        procraft_core::keep_device(&gpu);
         let size = window.inner_size();
         let config = configure(&gpu, &surface, (size.width, size.height), INTERFACE_WIDE);
         if !last && config.is_none() {

@@ -3198,6 +3198,29 @@ fn a_held_frame_splits_where_it_is_chosen_and_loses_a_place_on_delete() {
 }
 
 #[test]
+fn a_saved_animation_can_be_drawn_with_no_window() {
+    let Some(s) = session(40, 40) else { return };
+    s.set_brush_size(0.6);
+    s.set_color(1.0, 0.0, 0.0);
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 15.0, 0.0)]);
+    s.stroke_end(vec![]);
+    s.add_layer();
+    let dir = std::env::temp_dir().join(format!("procraft-plays-{}", std::process::id()));
+    let path = dir.to_string_lossy().into_owned();
+    s.save(path.clone()).unwrap();
+    assert!(!crate::artwork_plays(path.clone()), "not animated");
+    assert!(s.set_animation_assist(true));
+    s.save(path.clone()).unwrap();
+    assert!(crate::artwork_plays(path.clone()));
+    let opened = CanvasSession::open(path).unwrap();
+    assert!(opened.draw_without_window());
+    assert_eq!(opened.animation_frame_count(), 2);
+    let first = opened.animation_frame(0, false, 40).unwrap();
+    assert!(first.rgba.chunks(4).any(|p| p[0] > 200 && p[2] < 50), "the first frame's paint");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn layers_export_as_animations() {
     let Some(s) = session(40, 40) else { return };
     s.set_brush_size(0.6);

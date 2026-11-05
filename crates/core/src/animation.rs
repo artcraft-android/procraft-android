@@ -43,6 +43,18 @@ impl CanvasSession {
             .collect()
     }
 
+    /// Gives an artwork opened to be looked at, with no window, the app's device and its canvas,
+    /// so its frames can be drawn (`animation_frame`). False if either can't be had. Slow: call it
+    /// off the main thread.
+    pub fn draw_without_window(&self) -> bool {
+        crate::device::warm_gpu();
+        let gpu = crate::device::kept().clone();
+        let mut st = self.shared.lock();
+        st.gpu = gpu;
+        st.ensure_canvas();
+        st.canvas.is_some()
+    }
+
     /// How many frames the animation has.
     pub fn animation_frame_count(&self) -> u32 {
         u32::try_from(frames(&self.shared.lock().doc).len()).unwrap_or(u32::MAX)

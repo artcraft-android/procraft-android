@@ -73,6 +73,11 @@ pub(crate) fn kept() -> MutexGuard<'static, Option<Gpu>> {
     DEVICE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// `gpu`, a device the app made for itself, is the one for drawing with no window as well.
+pub fn keep_device(gpu: &Gpu) {
+    *kept() = Some(gpu.clone());
+}
+
 /// Makes the app's device and its canvases' pipelines ahead of the first artwork, so that it opens
 /// at once; nothing if it is made. Slow: call it off the main thread.
 #[uniffi::export]

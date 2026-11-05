@@ -1406,7 +1406,27 @@ private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, onClos
         val image by produceState<ImageBitmap?>(null, a.dir.path, version) {
             value = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(a.thumbnail.path)?.asImageBitmap() }
         }
-        image?.let { ThumbnailImage(it, a.name, ContentScale.Fit) }
+        // an animated artwork plays as its settings say, its thumbnail showing until its frames are read
+        val side = androidx.compose.ui.platform.LocalConfiguration.current.let { with(androidx.compose.ui.platform.LocalDensity.current) { maxOf(it.screenWidthDp, it.screenHeightDp).dp.roundToPx() } }
+        val played by produceState<PlayedFrames?>(null, a.dir.path, version) {
+            value = null
+            value = withContext(Dispatchers.Default) { readFrames(a.dir.path, side) }
+        }
+        var frame by remember(played) { mutableStateOf<ImageBitmap?>(null) }
+        androidx.compose.runtime.LaunchedEffect(played) {
+            val p = played ?: return@LaunchedEffect
+            var at = 0u
+            var step = 1
+            while (true) {
+                frame = p.pictures.getOrNull(p.order.getOrElse(at.toInt()) { 0 })
+                kotlinx.coroutines.delay(1000L / p.fps.coerceAtLeast(1))
+                // round again, turned back, or (a single pass) staying on its last frame
+                val next = io.github.artcraftandroid.procraft.core.animationNextStep(p.playback, p.order.size.toUInt(), at, step) ?: break
+                at = next.at
+                step = next.step
+            }
+        }
+        (frame ?: image)?.let { ThumbnailImage(it, a.name, ContentScale.Fit) }
         androidx.compose.animation.AnimatedVisibility(controls, Modifier.fillMaxSize(), enter = androidx.compose.animation.fadeIn(), exit = androidx.compose.animation.fadeOut()) {
             Box(Modifier.fillMaxSize()) {
                 // a light disc with a black cross, 41 in from the top right
@@ -1422,6 +1442,34 @@ private fun ArtworkPreview(list: List<Artwork>, version: Int, start: Int, onClos
                 PreviewArrow(left = false, Modifier.align(Alignment.CenterEnd)) { if (index < list.size - 1) index++ }
             }
         }
+    }
+}
+
+/** An artwork's frames as read for Preview, and how they play. */
+private class PlayedFrames(val pictures: List<ImageBitmap>, val order: List<Int>, val fps: Int, val playback: io.github.artcraftandroid.procraft.core.AnimationPlayback)
+
+/** The most memory (bytes) an animation's frames take in Preview: past it they are smaller. */
+private const val PLAYED_MOST = 256e6
+
+/** The frames of the artwork in [dir] if it is animated, at no more than [side] pixels. Slow. */
+private fun readFrames(dir: String, side: Int): PlayedFrames? {
+    if (!io.github.artcraftandroid.procraft.core.artworkPlays(dir)) return null
+    val s = runCatching { io.github.artcraftandroid.procraft.core.CanvasSession.open(dir) }.getOrNull() ?: return null
+    try {
+        val settings = s.animationSettings()?.takeIf { !it.pages } ?: return null
+        if (!s.drawWithoutWindow()) return null
+        val count = s.animationFrameCount()
+        val fit = kotlin.math.sqrt(PLAYED_MOST / 4.0 / count.coerceAtLeast(1u).toDouble()).toInt()
+        val pictures = (0u until count).mapNotNull { i ->
+            s.animationFrame(i, false, minOf(side, fit).toUInt())?.let { t ->
+                val bitmap = CanvasSpace.tag(android.graphics.Bitmap.createBitmap(t.width.toInt(), t.height.toInt(), android.graphics.Bitmap.Config.ARGB_8888))
+                bitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(t.rgba))
+                bitmap.asImageBitmap()
+            }
+        }
+        return PlayedFrames(pictures, s.animationSequence().map { it.toInt() }, settings.fps.toInt(), settings.playback)
+    } finally {
+        s.destroy()
     }
 }
 

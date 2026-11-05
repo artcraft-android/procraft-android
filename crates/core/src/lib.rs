@@ -127,7 +127,8 @@ pub use presets::{
     presets_json, profile_chip, standard_presets,
 };
 pub use project::{ArtworkInfo, export_file_name, read_signature, save_failure_said, write_photo, write_signature};
-pub use project::{PackageTimeLapse, package_time_lapse};
+pub use device::keep_device;
+pub use project::{PackageTimeLapse, artwork_plays, package_time_lapse};
 pub use project::{PagesOutcome, PsdOutcome, import_pages, import_psd};
 pub use quick_menu::{
     QuickAction, QuickMenuSet, quick_action_adjusts, quick_action_label, quick_actions_listed,
