@@ -1,11 +1,26 @@
+import PhotosUI
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// The canvas filling the screen with the interface over it: the bar across the top and the side
 /// bar. The artwork is kept saved as it changes, as the app goes into the background, and as it
 /// is left.
 struct CanvasScreen: View {
     let model: CanvasModel
+
+    @State private var photo: PhotosPickerItem?
+
+    private func asked(_ ask: InsertAsk) -> Binding<Bool> {
+        Binding(get: { model.insertAsk == ask }, set: { if !$0 { model.insertAsk = nil } })
+    }
+
+    private func sharePdf(_ quality: UInt8) {
+        if let kind = model.pdfAsking {
+            model.share(kind, quality: quality)
+        }
+        model.pdfAsking = nil
+    }
 
     var body: some View {
         GeometryReader { screen in
@@ -145,6 +160,26 @@ struct CanvasScreen: View {
                         .transition(.move(edge: .bottom))
                 }
                 ColorDropDot(drop: model.drop)
+                ProgressCard(shown: model.exportShown, title: "Exporting", glyph: PcIcons.tabShare) {
+                    model.exportCancelled = true
+                }
+                AlertView(
+                    content: model.pdfAsking != nil ? AlertContent(
+                        title: "PDF quality", action: "Best", icon: PcIcons.page, destructive: false,
+                        cancel: "Good", extra: "Better"
+                    ) : nil,
+                    onCancel: { model.pdfAsking = nil },
+                    onAction: { sharePdf(PdfQuality.best) },
+                    onExtra: { sharePdf(PdfQuality.better) },
+                    onFirst: { sharePdf(PdfQuality.good) }
+                )
+                AlertView(
+                    content: model.saying.map {
+                        AlertContent(title: $0.title, message: $0.message, action: "OK", destructive: false, alone: true)
+                    },
+                    onCancel: { model.saying = nil },
+                    onAction: { model.saying = nil }
+                )
                 BlockedDialog(model: model)
                 AlertView(
                     content: model.question.map {
@@ -184,6 +219,29 @@ struct CanvasScreen: View {
             .animation(model.sideBarShown ? Motion.sideBarIn : Motion.sideBarOut, value: model.sideBarShown)
         }
         .ignoresSafeArea()
+        .fileImporter(isPresented: asked(.file), allowedContentTypes: [.image]) { result in
+            if case let .success(url) = result {
+                model.insertFile(url, isPrivate: model.insertPrivate)
+            }
+        }
+        .photosPicker(isPresented: asked(.photo), selection: $photo, matching: .images)
+        .onChange(of: photo) { _, item in
+            guard let item else { return }
+            photo = nil
+            Task { @MainActor in
+                let data = try? await item.loadTransferable(type: Data.self)
+                model.insertPicture(data, name: nil, isPrivate: model.insertPrivate)
+            }
+        }
+        .fullScreenCover(isPresented: asked(.camera)) {
+            CameraPicker { picture in
+                model.insertAsk = nil
+                if let picture {
+                    model.insertPhoto(picture, isPrivate: model.insertPrivate)
+                }
+            }
+            .ignoresSafeArea()
+        }
     }
 
     /// How far the side bar has moved off its edge: all the way with the interface hidden or a

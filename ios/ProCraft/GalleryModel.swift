@@ -226,9 +226,9 @@ final class GalleryModel {
 
     // MARK: pictures
 
-    /// Straight RGBA pixels, at most `maxPicture` on a side, in Display P3 if the picture is, else
-    /// sRGB.
-    private static func decode(_ data: Data) -> (image: ThumbnailImage, p3: Bool)? {
+    /// Straight RGBA pixels, at most `maxPicture` on a side, in Display P3 (`p3`) or sRGB; not said,
+    /// in Display P3 if the picture is, else sRGB.
+    static func decode(_ data: Data, p3 wanted: Bool? = nil) -> (image: ThumbnailImage, p3: Bool)? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -240,7 +240,7 @@ final class GalleryModel {
         let width = picture.width
         let height = picture.height
         let named = picture.colorSpace?.name.map { $0 as String }
-        let p3 = named?.contains("P3") == true
+        let p3 = wanted ?? (named?.contains("P3") == true)
         guard let space = CGColorSpace(name: p3 ? CGColorSpace.displayP3 : CGColorSpace.sRGB) else { return nil }
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
         let drawn: Bool = pixels.withUnsafeMutableBytes { bytes in

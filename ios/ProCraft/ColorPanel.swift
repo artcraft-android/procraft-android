@@ -330,7 +330,7 @@ struct ColorPanel: View {
 }
 
 /// The system's camera, for a palette from a photo taken.
-private struct CameraPicker: UIViewControllerRepresentable {
+struct CameraPicker: UIViewControllerRepresentable {
     let onDone: (UIImage?) -> Void
 
     final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {

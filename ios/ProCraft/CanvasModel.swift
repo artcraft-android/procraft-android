@@ -146,6 +146,17 @@ final class CanvasModel {
     // the modes the top bar's buttons open (each still to come on the iPad)
     private(set) var transforming = false
     private(set) var selecting = false
+    /// The export card, and its Cancel tapped.
+    var exportShown: ProgressShown?
+    @ObservationIgnored var exportCancelled = false
+    /// How a picture is being brought in; what waits for a PDF's quality; what a small alert says.
+    var insertAsk: InsertAsk?
+    var insertPrivate = false
+    var pdfAsking: ShareKind?
+    var saying: (title: String, message: String)?
+    /// The size and opacity side bar shows.
+    var showSideBar = true
+
     /// The QuickMenu, open around this window point (in points); the Copy & Paste panel.
     var quickMenuAt: CGPoint?
     var copyPasteOpen = false
@@ -767,7 +778,7 @@ final class CanvasModel {
 
     /// Whether the side bar shows: a mode taking the screen slides it off its edge.
     var sideBarShown: Bool {
-        !transforming && !selecting && (!adjusting || adjustShown?.pencil == true)
+        showSideBar && !transforming && !selecting && (!adjusting || adjustShown?.pencil == true)
     }
 
     /// The modes open now, as the core's `modeSwitch` takes them.
@@ -1168,9 +1179,10 @@ final class CanvasModel {
         }
     }
 
-    func paste() {
+    /// What was cut or copied, on a new layer; a private one is left out of the gallery's thumbnail.
+    func paste(isPrivate: Bool = false) {
         guard let image = clipboard else { return }
-        if session.paste(image: image) == nil {
+        if (isPrivate ? session.pastePrivate(image: image) : session.paste(image: image)) == nil {
             noRoomForLayers()
         }
         closePanels()
@@ -1230,6 +1242,12 @@ final class CanvasModel {
     }
 
     /// Says how many layers this canvas holds, there being no room for another.
+    /// Says the canvas holds no more layers, and how many it holds.
+    func noRoomSaid() -> String {
+        let info = session.info()
+        return "This canvas holds at most \(layersFor(width: max(info.width, 1), height: max(info.height, 1))) layers."
+    }
+
     func noRoomForLayers() {
         let info = session.info()
         showNotice("This canvas holds at most \(layersFor(width: max(info.width, 1), height: max(info.height, 1))) layers.", warning: true)

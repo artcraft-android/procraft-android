@@ -8,6 +8,8 @@ private enum ActionRow {
     case act(String, value: String? = nil, action: (() -> Void)?)
     /// A switch row (dimmed without an action).
     case toggle(String, on: Bool, change: ((Bool) -> Void)?)
+    /// A slider along the row's foot, its value at the right.
+    case slide(String, value: String, share: Float, change: (Float) -> Void)
     /// A group's heading, above it.
     case heading(String)
 }
@@ -37,6 +39,40 @@ struct ActionsPanel: View {
     #else
     @State private var page = ActionsPage.main
     #endif
+    /// Brush scaling's menu is open.
+    @State private var scalingMenu = false
+
+    /// Brush scaling's choices beside its row, the third of the group: its left edge 54 in from the
+    /// row's right end.
+    private var scalingChoices: some View {
+        ZStack(alignment: .topLeading) {
+            MenuDismissal { scalingMenu = false }
+            GlassMenu(overPanel: true, width: 254) {
+                ForEach(0 ..< 2, id: \.self) { i in
+                    let chosen = AppSettings.shared.brushOnScreen == (i == 1)
+                    HStack(spacing: 0) {
+                        Text(verbatim: i == 0 ? "Relative to canvas" : "Relative to screen")
+                            .font(.system(size: 17))
+                            .foregroundStyle(Pc.text)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        if chosen {
+                            PcIconView(PcIcons.menuTick, size: 24, color: Pc.accent)
+                        }
+                    }
+                    .padding(.leading, 20)
+                    .padding(.trailing, 19)
+                    .frame(height: 40)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        model.changeBrushScaling(onScreen: i == 1)
+                        scalingMenu = false
+                    }
+                }
+            }
+            .offset(x: actionsWidth - 12 - 54, y: 218)
+        }
+    }
 
     var body: some View {
         Popover(width: actionsWidth, arrowX: arrowX) {
@@ -47,6 +83,11 @@ struct ActionsPanel: View {
                 CursorPage { page = .main }
             case .pressure:
                 PressurePage(model: model) { page = .main }
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if scalingMenu {
+                scalingChoices
             }
         }
     }
@@ -96,13 +137,15 @@ struct ActionsPanel: View {
 
     /// The shown tab's groups of rows.
     private func groups() -> [[ActionRow]] {
+        let settings = AppSettings.shared
+        let undoRange = AppSettings.rapidUndoRange
         switch model.actionsTab {
         case 0:
             return [
                 [
-                    .act("Insert a file", action: nil),
-                    .act("Insert a photo", action: nil),
-                    .act("Take a photo", action: nil),
+                    .act("Insert a file", action: { model.insertAsk = .file }),
+                    .act("Insert a photo", action: { model.insertAsk = .photo }),
+                    .act("Take a photo", action: { model.insertAsk = .camera }),
                     .act("Add text", action: nil),
                 ],
                 // Paste is grey until something has been cut or copied
@@ -133,17 +176,19 @@ struct ActionsPanel: View {
             return [
                 [
                     .heading("Share Image"),
-                    .act("ProCraft", action: nil),
-                    .act("PSD", action: nil),
-                    .act("PDF", action: nil),
-                    .act("JPEG", action: nil),
-                    .act("PNG", action: nil),
-                    .act("TIFF", action: nil),
+                    // ours first, then the same package named for the other app
+                    .act("ProCraft", action: { model.sharePackage(suffix: ".procraft") }),
+                    .act("Procreate", action: { model.sharePackage(suffix: ".procreate") }),
+                    .act("PSD", action: { model.share(.psd) }),
+                    .act("PDF", action: { model.pdfAsking = .pdf }),
+                    .act("JPEG", action: { model.share(.jpeg) }),
+                    .act("PNG", action: { model.share(.png) }),
+                    .act("TIFF", action: { model.share(.tiff) }),
                 ],
                 [
                     .heading("Share Layers"),
-                    .act("PDF", action: nil),
-                    .act("PNG Files", action: nil),
+                    .act("PDF", action: { model.pdfAsking = .layersPdf }),
+                    .act("PNG Files", action: { model.share(.layerPngs) }),
                     .act("Animated GIF", action: nil),
                     .act("Animated PNG", action: nil),
                     .act("Animated MP4", action: nil),
@@ -163,7 +208,7 @@ struct ActionsPanel: View {
                 [
                     .toggle("Light interface", on: AppSettings.shared.lightInterface, change: { model.changeLightInterface($0) }),
                     .toggle("Right-hand interface", on: AppSettings.shared.rightHanded, change: { AppSettings.shared.rightHanded = $0 }),
-                    .act("Brush scaling", value: "Canvas", action: nil),
+                    .act("Brush scaling", value: AppSettings.shared.brushOnScreen ? "Screen" : "Canvas", action: { scalingMenu = true }),
                     .toggle("Project canvas", on: false, change: nil),
                     .toggle("Brush cursor", on: AppSettings.shared.brushCursorOn, change: { AppSettings.shared.brushCursorOn = $0 }),
                     .act("Advanced cursor settings", action: { page = .cursor }),
@@ -174,11 +219,30 @@ struct ActionsPanel: View {
                         withAnimation(Motion.studioIn) { model.gestureControlsOpen = true }
                     }),
                 ],
+                [
+                    .slide(
+                        "Rapid undo delay", value: String(format: "%.2fs", settings.rapidUndoDelay),
+                        share: (settings.rapidUndoDelay - undoRange.lowerBound) / (undoRange.upperBound - undoRange.lowerBound),
+                        change: { model.changeRapidUndoDelay($0) }
+                    ),
+                    .slide(
+                        "Selection mask visibility", value: String(format: "%.1f%%", settings.selectionVisibility * 100),
+                        share: settings.selectionVisibility, change: { model.changeSelectionVisibility($0) }
+                    ),
+                    .slide(
+                        "ColorDrop gap closing", value: settings.fillGap == 0 ? "Off" : "\(settings.fillGap) px",
+                        share: Float(settings.fillGap) / Float(AppSettings.mostFillGap), change: { model.changeFillGap($0) }
+                    ),
+                ],
+                [.toggle("Size & Opacity sidebar", on: model.showSideBar, change: { model.showSideBar = $0 })],
             ]
         default:
             return [
                 [
-                    .act("About ProCraft", action: nil),
+                    .act("About ProCraft", action: {
+                        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+                        model.saying = ("ProCraft", "Version \(version)")
+                    }),
                     .act("Licences", action: nil),
                 ],
             ]
@@ -268,6 +332,8 @@ private struct RowView: View {
             .frame(height: 44)
             .contentShape(Rectangle())
             .onTapGesture { change?(!on) }
+        case let .slide(label, value, share, change):
+            SlideRow(label: label, value: value, share: share, change: change)
         case let .heading(label):
             Text(verbatim: label)
                 .font(.system(size: 17, weight: .semibold))
@@ -275,6 +341,52 @@ private struct RowView: View {
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 .padding(.leading, 16)
         }
+    }
+}
+
+/// A row with a slider along its foot, 16 in from each side; a touch anywhere on it moves it.
+private struct SlideRow: View {
+    let label: String
+    let value: String
+    let share: Float
+    let change: (Float) -> Void
+
+    var body: some View {
+        GeometryReader { g in
+            let w = g.size.width
+            let span = max(w - 32, 1)
+            let x = 16 + CGFloat(min(max(share, 0), 1)) * span
+            ZStack(alignment: .topLeading) {
+                Text(verbatim: label)
+                    .font(.system(size: 17))
+                    .foregroundStyle(Pc.slideLabel)
+                    .lineLimit(1)
+                    .padding(.leading, 16)
+                    .padding(.top, 9)
+                Text(verbatim: value)
+                    .font(.system(size: 17))
+                    .foregroundStyle(Pc.slideValue)
+                    .lineLimit(1)
+                    .padding(.trailing, 16)
+                    .padding(.top, 9)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                Rectangle().fill(Pc.slideTrack)
+                    .frame(width: span, height: 3)
+                    .offset(x: 16, y: 63 - 17.5 - 1.5)
+                Rectangle().fill(Pc.accent)
+                    .frame(width: max(x - 16, 0), height: 3)
+                    .offset(x: 16, y: 63 - 17.5 - 1.5)
+                Capsule().fill(Color.white)
+                    .frame(width: 16, height: 10)
+                    .offset(x: x - 8, y: 63 - 17.5 - 5)
+            }
+            .frame(width: w, height: 63, alignment: .topLeading)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
+                change(Float(min(max((drag.location.x - 16) / span, 0), 1)))
+            })
+        }
+        .frame(height: 63)
     }
 }
 
