@@ -443,9 +443,9 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
             // away, or without either wherever it is less than full. The paint itself, blended
             // once more with what was under it (nothing shows where the layer was empty)
             let full = select(1.0, laid, st.grain_once > 0.5 || st.dual != 0u);
-            let own = clamp(was + (unpack4x8unorm(grained[k]) - was) / laid, vec4<f32>(0.0), vec4<f32>(1.0));
+            let own = clamp(over_layer(was, unpack4x8unorm(grained[k]), 1.0 / laid), vec4<f32>(0.0), vec4<f32>(1.0));
             let burnt = vec4<f32>(unpremultiply(blend(was, own, st.burnt_blend)) * own.a, own.a);
-            kept = mix(was, mix(own, burnt, clamp(st.burnt * abs(full - a), 0.0, 1.0)), laid * scale);
+            kept = over_layer(was, mix(own, burnt, clamp(st.burnt * abs(full - a), 0.0, 1.0)), laid * scale);
         }
         out = mix(kept, vec4<f32>(st.paint.rgb, 1.0), max(a - laid * scale, 0.0));
     }

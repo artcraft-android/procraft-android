@@ -62,7 +62,8 @@ struct OverlayUniform {
     color: [f32; 4],
     shape: i32,
     srgb: u32,
-    _pad: [u32; 2],
+    shape_lod_cap: f32,
+    _pad: u32,
 }
 /// Undo steps kept, and the most memory they may hold (their pixels and the selections they put
 /// back).
@@ -4533,6 +4534,7 @@ impl Canvas {
             self.lay_wet(device, encoder, (params, passes), &ready, style);
             return;
         }
+        let own_grain = self.full_grain_bind(device, style);
         let Some(smudge) = self.smudge.as_mut() else { return };
         let bind = smudge_bind(
             device,
@@ -4546,7 +4548,7 @@ impl Canvas {
         let mut changed = IRect::EMPTY;
         let mut pass =
             encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("smudge"), timestamp_writes: None });
-        pass.set_bind_group(1, &self.brush_bind, &[]);
+        pass.set_bind_group(1, own_grain.as_ref().unwrap_or(&self.brush_bind), &[]);
         for (k, s) in instances.iter().enumerate() {
             let center = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
             let bbox = IRect::around(center, (s.radius + 0.5) * s.roundness.max(1.0) * std::f32::consts::SQRT_2)
@@ -6571,7 +6573,8 @@ impl Canvas {
             },
             shape: style.shape.map_or(-1, |s| s as i32),
             srgb: u32::from(srgb),
-            _pad: [0; 2],
+            shape_lod_cap: style.shape_lod_cap,
+            _pad: 0,
         });
         let size = size_of::<StampInstance>() as u64;
         pass.set_pipeline(overlay_pipeline);

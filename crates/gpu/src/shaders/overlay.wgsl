@@ -12,7 +12,8 @@ struct OverlayUniform {
     shape: i32,
     // 1 when the target encodes sRGB itself
     srgb: u32,
-    _p0: u32,
+    // the coarsest mip level the shape is read from, as for the stamps
+    shape_lod_cap: f32,
     _p1: u32,
 }
 
@@ -48,8 +49,9 @@ fn vs_overlay(@builtin(vertex_index) vi: u32, inst: StampIn) -> Out {
     let zoom = max(ou.m1.z, 1e-3);
     let r = max(inst.radius, 0.25);
     let rs = r * zoom;
-    // one screen pixel to spare for anti-aliasing
-    let grow = (rs + 1.0) / rs;
+    // one screen pixel to spare for anti-aliasing, or the half a canvas pixel a shape reaches past
+    // the stamp
+    let grow = (rs + max(1.0, 0.5 * zoom)) / rs;
     let q = corners[vi % 6u] * grow;
     let local = vec2<f32>(q.x * r, q.y * r * inst.roundness);
     let c = cos(inst.angle);
@@ -72,20 +74,23 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_overlay(i: Out) -> @location(0) vec4<f32> {
     let r = i.radius;
+    let zoom = max(ou.m1.z, 1e-3);
     var a = 0.0;
     if (ou.shape < 0) {
         let d = length(i.q) * r;
         let rim = clamp(r - d + 0.5, 0.0, 1.0);
         let soft = 1.0 - smoothstep(min(ou.m1.w, 0.999) * r, r + 0.5, d);
-        a = min(rim, soft);
+        // as a stamp's: under a canvas pixel across, only its area of one
+        let small = min(2.0 * r / zoom, 1.0);
+        a = min(rim, soft) * small * small;
     } else {
-        let uv = i.q * 0.5 + 0.5;
-        let lod = max(log2(256.0 / max(2.0 * r, 1.0)), 0.0);
+        // as a stamp's: filling it and half a canvas pixel round it, at the same mip level
+        let uv = i.q * (r / (r + 0.5 * zoom)) * 0.5 + 0.5;
+        let lod = clamp(log2(256.0 / max(2.0 * r / zoom + 1.0, 1.0)), 0.0, ou.shape_lod_cap);
         let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
         a = select(0.0, textureSampleLevel(shapes, shape_smp, uv, ou.shape, lod).r, inside);
     }
-    let small = min(r * 2.0, 1.0);
-    a = a * small * small * i.alpha * ou.color.a;
+    a = a * i.alpha * ou.color.a;
     var rgb = ou.color.rgb;
     if (ou.srgb == 1u) {
         rgb = srgb_to_linear(rgb);

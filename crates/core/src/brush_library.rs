@@ -550,6 +550,18 @@ impl State {
 
     /// Notes `place` as the brush last painted with, in the Recent set (a pinned one stays where
     /// it is): to the end if it is there already, else past the others, the oldest giving way.
+    /// The brush files' grains anything here can still read: the library's, what ships, the brush
+    /// as the studio found it and the last stroke's. Recent, the pinned, the tools' and the
+    /// QuickMenu's brushes are places in the library, not brushes of their own, and brushes brought
+    /// in have their grain kept in the same breath as they join it.
+    pub(crate) fn grains_held(&self) -> std::collections::HashSet<u64> {
+        let library = self.library.iter().flat_map(|set| &set.brushes);
+        let shipped = self.shipped.iter().flat_map(|set| &set.brushes);
+        let studio = self.studio.iter().map(|(_, brush)| brush);
+        let last = self.last_stroke.iter().map(|stroke| &stroke.brush);
+        library.chain(shipped).chain(studio).chain(last).flat_map(Brush::full_grains).map(|g| g.id).collect()
+    }
+
     pub(crate) fn note_recent(&mut self, place: (usize, usize)) {
         if self.pinned_brushes.contains(&place) {
             return;
@@ -1021,9 +1033,7 @@ impl CanvasSession {
         if loaded {
             // only with the library back can it be told which grains' files nothing uses any more
             let st = self.shared.lock();
-            let used =
-                st.library.iter().flat_map(|set| &set.brushes).filter_map(|b| b.grain_file.as_ref()?.full.as_ref());
-            st.grain_store.forget_all_but(&used.map(|g| g.id).collect());
+            st.grain_store.forget_all_but(&st.grains_held(), &dir.join(LIBRARY_FILE));
         }
         loaded
     }

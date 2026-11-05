@@ -712,10 +712,27 @@ impl Brush {
         crate::brushfile::PIXELS_PER_SIZE * if round_tip { crate::brushfile::ROUND_TIP_SHARE } else { 1.0 }
     }
 
+    /// The brush as a dual brush's second: drawn apart as coverage alone, its grain goes on stamp
+    /// by stamp, even one fixed to the canvas.
+    pub fn as_second(mut self) -> Brush {
+        if self.grain.mode == GrainMode::Texturized {
+            self.grain.mode = GrainMode::Moving;
+        }
+        self
+    }
+
     /// What a brush file gave the grain the brush has now.
     pub fn grain_file_now(&self) -> Option<&GrainFile> {
         let source = self.grain.source.as_ref()?;
         self.grain_file.as_ref().filter(|f| f.source == source.id)
+    }
+
+    /// The brush files' grains it can still come to: its own, even one its grain has moved on
+    /// from, its second's and its reset point's.
+    pub fn full_grains(&self) -> Vec<&FullGrain> {
+        let own = self.grain_file.iter().filter_map(|f| f.full.as_ref());
+        let others = self.secondary.iter().map(|b| &**b).chain(self.reset_point.iter().map(|r| &*r.brush));
+        own.chain(others.flat_map(Brush::full_grains)).collect()
     }
 
     /// The grain's tile on the canvas (pixels): fixed to the canvas, a brush file's image is as
@@ -730,9 +747,11 @@ impl Brush {
     }
 
     /// The brush as a file whose grain image is `width` pixels wide keeps it: the same tile, by a
-    /// scale to suit.
+    /// scale to suit. Only a grain fixed to the canvas goes by its image's width.
     pub fn with_grain_image_width(mut self, width: u32) -> Brush {
-        if let Some(f) = self.grain_file_now() {
+        if self.grain.mode == GrainMode::Texturized
+            && let Some(f) = self.grain_file_now()
+        {
             let scale = self.grain.file_scale() * f.width as f32 / width.max(1) as f32;
             self.grain.scale = crate::studio::MAX_GRAIN_SCALE * (scale / 16.0).sqrt();
         }
@@ -795,6 +814,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_second_s_grain_goes_on_stamp_by_stamp() {
+        let mut b = Brush::round_pen();
+        b.grain.mode = GrainMode::Texturized;
+        assert_eq!(b.as_second().grain.mode, GrainMode::Moving);
+    }
+
+    #[test]
     fn a_brush_file_s_grain_is_tiled_by_its_own_image() {
         let source = Source::new(vec![9; TEXTURE_SIZE * TEXTURE_SIZE]).unwrap();
         let scale = crate::studio::MAX_GRAIN_SCALE * (0.75f32 / 16.0).sqrt();
@@ -812,6 +838,35 @@ mod tests {
         b.grain.source = Source::new(vec![8; TEXTURE_SIZE * TEXTURE_SIZE]);
         assert!(b.grain_file_now().is_none());
         assert_eq!(b.grain_tile(), scale);
+    }
+
+    #[test]
+    fn a_moving_grain_is_written_at_its_own_scale_whatever_its_image_s_width() {
+        let source = Source::new(vec![9; TEXTURE_SIZE * TEXTURE_SIZE]).unwrap();
+        let scale = crate::studio::MAX_GRAIN_SCALE * (0.75f32 / 16.0).sqrt();
+        let mut b = Brush::round_pen();
+        b.grain = Grain { mode: GrainMode::Moving, scale, source: Some(source.clone()), ..Grain::default() };
+        b.grain_file = Some(GrainFile { source: source.id, width: 2048, full: None });
+        assert_eq!(b.with_grain_image_width(1024).grain.scale, scale);
+    }
+
+    #[test]
+    fn a_brush_holds_its_own_grain_its_second_s_and_its_reset_point_s() {
+        let with = |fill: u8| {
+            let full = FullGrain::new(512, vec![fill; 512 * 512]).unwrap();
+            let file = GrainFile { source: 1, width: 512, full: Some(full) };
+            Brush { grain_file: Some(file), ..Brush::round_pen() }
+        };
+        let mut second = with(2);
+        second.reset_point = Some(ResetPoint::of(&with(3), 0));
+        let mut before = with(4);
+        before.secondary = Some(Box::new(with(5)));
+        let mut brush = with(1);
+        brush.secondary = Some(Box::new(second));
+        brush.reset_point = Some(ResetPoint::of(&before, 0));
+        let ids: Vec<u64> = brush.full_grains().iter().map(|g| g.id).collect();
+        let wanted = [1, 2, 3, 4, 5].map(|fill| FullGrain::new(512, vec![fill; 512 * 512]).unwrap().id);
+        assert!(ids.len() == 5 && wanted.iter().all(|id| ids.contains(id)), "{ids:?}");
     }
 
     #[test]

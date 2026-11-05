@@ -712,7 +712,7 @@ impl State {
         first: &Brush,
         first_style: &StrokeStyle,
     ) -> Option<(Brush, SecondStroke, f32)> {
-        let mut second = first.secondary.as_deref()?.clone();
+        let mut second = first.secondary.as_deref()?.clone().as_second();
         if !first_style.takes_second() || !matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) {
             return None;
         }

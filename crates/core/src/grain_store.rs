@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use procraft_engine::brush::{Brush, FullGrain};
 
@@ -15,6 +16,10 @@ const FOLDER: &str = "grains";
 
 /// How many grains are held in memory at once.
 const HELD_MOST: usize = 4;
+
+/// How long a grain's file stays, whatever the library says: a brush another window has just
+/// brought in may not be in the library kept on disk yet.
+const LATELY: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Default)]
 pub(crate) struct GrainStore {
@@ -47,15 +52,29 @@ impl GrainStore {
         }
     }
 
-    /// Takes the files of grains other than those in `used` out of the folder, as a brush that was
-    /// deleted leaves its own behind. Files that aren't grains' stay.
-    pub(crate) fn forget_all_but(&self, used: &HashSet<u64>) {
+    /// Takes the files of grains nothing can want any more out of the folder, as a brush that was
+    /// deleted leaves its own behind. A file stays if its grain is in `used`, if the text of the
+    /// library kept at `library` names it anywhere (a brush in there may not have come back whole),
+    /// or if it was kept lately. Files that aren't grains' stay, and all do if the library can't be
+    /// read.
+    pub(crate) fn forget_all_but(&self, used: &HashSet<u64>, library: &Path) {
         let Some(entries) = self.folder.as_deref().and_then(|folder| fs::read_dir(folder).ok()) else { return };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".grain"));
-            let id = name.filter(|n| n.len() == 16).and_then(|n| u64::from_str_radix(n, 16).ok());
-            if id.is_some_and(|id| !used.contains(&id))
+        let unused: Vec<(u64, PathBuf)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let name = path.file_name()?.to_str()?.strip_suffix(".grain")?;
+                let id = u64::from_str_radix(name, 16).ok().filter(|_| name.len() == 16)?;
+                let age = entry.metadata().ok()?.modified().ok()?.elapsed().ok()?;
+                (age >= LATELY && !used.contains(&id)).then_some((id, path))
+            })
+            .collect();
+        if unused.is_empty() {
+            return;
+        }
+        let Ok(kept) = fs::read_to_string(library) else { return };
+        for (id, path) in unused {
+            if !kept.contains(&id.to_string())
                 && let Err(e) = fs::remove_file(&path)
             {
                 log::warn!("a brush's grain file stays: {e}");
@@ -101,6 +120,8 @@ fn file(folder: &Path, id: u64) -> PathBuf {
 fn write(folder: &Path, id: u64, pixels: &[u8]) -> bool {
     let path = file(folder, id);
     if fs::metadata(&path).is_ok_and(|m| m.len() == pixels.len() as u64) {
+        // as lately kept as a new one
+        let _ = fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(SystemTime::now()));
         return true;
     }
     let written = fs::create_dir_all(folder).map_err(|e| crate::project::file_error("keeping a brush's grain", e));
@@ -117,8 +138,9 @@ fn write(folder: &Path, id: u64, pixels: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use procraft_engine::brush::{GrainFile, GrainMode};
+    use procraft_engine::brush::{GrainFile, GrainMode, ResetPoint, Source};
     use procraft_engine::brushfile::{self, Pictures};
+    use procraft_engine::textures::TEXTURE_SIZE;
 
     use super::*;
     use crate::CanvasSession;
@@ -128,6 +150,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("procraft-grains-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// Makes the file at `path` as if it were kept long ago.
+    fn aged(path: &Path) {
+        let long_ago = SystemTime::now() - 2 * LATELY;
+        fs::File::options().write(true).open(path).unwrap().set_modified(long_ago).unwrap();
     }
 
     fn brush(fill: u8) -> (Brush, FullGrain) {
@@ -183,8 +211,12 @@ mod tests {
 
     /// A brush file with a grain 1500 wide at a scale of 0.75.
     fn brush_file() -> Vec<u8> {
+        brush_file_with(GrainMode::Texturized)
+    }
+
+    fn brush_file_with(mode: GrainMode) -> Vec<u8> {
         let mut b = Brush { name: "Grainy".to_owned(), ..Brush::round_pen() };
-        b.grain.mode = GrainMode::Texturized;
+        b.grain.mode = mode;
         b.grain.depth = 1.0;
         b.grain.scale = procraft_engine::studio::MAX_GRAIN_SCALE * (0.75f32 / 16.0).sqrt();
         let side = 1500u32;
@@ -252,6 +284,22 @@ mod tests {
     }
 
     #[test]
+    fn a_moving_grain_written_out_comes_back_at_the_scale_it_had() {
+        let dir = folder("written-moving");
+        let s = CanvasSession::new(64, 64);
+        s.save_brush_library_file(dir.join("library.json").to_string_lossy().into_owned());
+        let set = s.import_brushes(brush_file_with(GrainMode::Moving)).unwrap();
+        let scale = imported(&s).grain.file_scale();
+        let bytes = s.brush_as_file(set, 0).unwrap();
+        let other = CanvasSession::new(64, 64);
+        other.import_brushes(bytes).unwrap();
+        let back = imported(&other);
+        assert!((back.grain.file_scale() - scale).abs() < 1e-3, "{} {scale}", back.grain.file_scale());
+        assert_eq!(back.grain_file.and_then(|f| f.full).map(|g| g.side), Some(1024));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_brush_written_out_comes_back_the_same_size() {
         let dir = folder("written");
         let s = CanvasSession::new(64, 64);
@@ -268,20 +316,89 @@ mod tests {
     }
 
     #[test]
-    fn only_the_files_of_grains_nothing_uses_go() {
+    fn only_the_files_of_grains_nothing_can_want_go() {
         let dir = folder("forget");
         let mut store = GrainStore::default();
         store.use_folder(&dir);
-        let (mut used, kept) = brush(6);
-        let (mut unused, gone) = brush(7);
-        store.take(&mut used);
-        store.take(&mut unused);
+        let [used, named, lately, gone] = [6, 7, 8, 9].map(|fill| {
+            let (mut b, full) = brush(fill);
+            store.take(&mut b);
+            full
+        });
+        let at = |grain: &FullGrain| file(&dir.join(FOLDER), grain.id);
+        for grain in [&used, &named, &gone] {
+            aged(&at(grain));
+        }
         let other = dir.join(FOLDER).join("notes.txt");
         fs::write(&other, "stays").unwrap();
-        store.forget_all_but(&HashSet::from([kept.id]));
-        assert!(file(&dir.join(FOLDER), kept.id).exists() && !file(&dir.join(FOLDER), gone.id).exists());
-        assert!(other.exists());
+        let library = dir.join("library.json");
+
+        // no library to go by: nothing goes
+        store.forget_all_but(&HashSet::from([used.id]), &library);
+        assert!(at(&gone).exists());
+
+        // one that names a grain, as a brush that didn't come back would
+        fs::write(&library, format!("[{{\"broken\":[{},512]}}]", named.id)).unwrap();
+        store.forget_all_but(&HashSet::from([used.id]), &library);
+        assert!(at(&used).exists() && at(&named).exists() && at(&lately).exists() && other.exists());
+        assert!(!at(&gone).exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_grain_kept_again_counts_as_kept_lately() {
+        let dir = folder("again");
+        let mut store = GrainStore::default();
+        store.use_folder(&dir);
+        let (mut first, full) = brush(6);
+        store.take(&mut first);
+        let path = file(&dir.join(FOLDER), full.id);
+        aged(&path);
+        let (mut again, _) = brush(6);
+        store.take(&mut again);
+        let library = dir.join("library.json");
+        fs::write(&library, "[]").unwrap();
+        store.forget_all_but(&HashSet::new(), &library);
+        assert!(path.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_grain_stays_while_a_reset_point_or_a_second_holds_it() {
+        for by_reset in [true, false] {
+            let dir = folder(if by_reset { "held-reset" } else { "held-second" });
+            let path = dir.to_string_lossy().into_owned();
+            let s = CanvasSession::new(64, 64);
+            assert!(s.keep_brushes(path.clone()));
+            s.import_brushes(brush_file()).unwrap();
+            let id = imported(&s).grain_file.and_then(|f| f.full).unwrap().id;
+            // the brush moves on to a grain of its own, only the other still holding the file's
+            for set in &mut s.shared.lock().library {
+                for b in set.brushes.iter_mut().filter(|b| b.name == "Grainy") {
+                    if by_reset {
+                        b.reset_point = Some(ResetPoint::of(b, 1));
+                    } else {
+                        b.secondary = Some(Box::new(b.clone()));
+                    }
+                    b.grain.source = Source::new(vec![8; TEXTURE_SIZE * TEXTURE_SIZE]);
+                }
+            }
+            assert!(s.keep_brushes(path.clone()));
+            let grain = file(&dir.join(FOLDER), id);
+            aged(&grain);
+
+            let again = CanvasSession::new(64, 64);
+            assert!(again.open_brushes(path));
+            assert!(grain.exists(), "{by_reset}");
+            let mut st = again.shared.lock();
+            assert!(st.grains_held().contains(&id), "{by_reset}");
+            let back = st.library.iter().find_map(|set| set.brushes.iter().find(|b| b.name == "Grainy")).unwrap();
+            assert!(back.grain_file_now().is_none(), "{by_reset}");
+            let full = back.full_grains().first().copied().unwrap().clone();
+            assert!(st.grain_store.pixels(&full).is_some(), "{by_reset}");
+            drop(st);
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
@@ -295,6 +412,7 @@ mod tests {
         assert!(s.keep_brushes(path.clone()));
         let grain = file(&dir.join(FOLDER), id);
         assert!(grain.exists());
+        aged(&grain);
 
         // kept while a brush uses it
         let again = CanvasSession::new(64, 64);

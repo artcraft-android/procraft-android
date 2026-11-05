@@ -205,6 +205,12 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
     if (i.look.w > 0.0) {
         a = a * (1.0 - i.look.w * clamp(0.5 - 0.5 * i.q.x, 0.0, 1.0));
     }
+    // the round tip's rim takes a pixel as covered to its middle: a tip under a pixel across
+    // covers only its area of one (a shape's quad reaches past it, which thins it as far)
+    if (su.shape < 0) {
+        let small = min(r * 2.0, 1.0);
+        a = a * small * small;
+    }
     // paint keeps inside the selection
     let inside_selection = textureSampleLevel(selected, shape_smp, i.pos.xy / su.canvas_size, 0.0).r;
     a = a * i.alpha * inside_selection;
