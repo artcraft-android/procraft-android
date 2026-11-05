@@ -58,7 +58,7 @@ impl TimeLapseUi {
         if let Some((_, lapse)) = &self.lapse {
             let lapse = Arc::clone(lapse);
             std::thread::spawn(move || {
-                let gone = lapse.drop_clip_frames();
+                let gone = drop_pictures(&lapse);
                 if gone > 0 {
                     log::info!("the time-lapse's videos hold {gone} frames: their pictures went");
                 }
@@ -298,8 +298,31 @@ pub fn for_package(dir: &str) -> procraft_core::PackageTimeLapse {
         };
     }
     // the pictures now in a video go, as the artwork file keeps a time-lapse: only as video
-    lapse.drop_clip_frames();
+    drop_pictures(&lapse);
     lapse.for_package()
+}
+
+/// The pictures its videos hold too gone, once this system has read those videos: videos go
+/// through its own decoders, and where it has none for them the pictures are all there is to
+/// replay. How many went.
+fn drop_pictures(lapse: &TimeLapse) -> u32 {
+    let readable = lapse.clips_with_pictures().iter().all(|clip| {
+        let mut read = false;
+        let done = crate::video::read_frames(std::path::Path::new(&clip.path), |_, _, _, _| {
+            read = true;
+            false
+        });
+        if let Err(e) = done {
+            log::warn!("a time-lapse video: {e}");
+        }
+        read
+    });
+    if readable {
+        lapse.drop_clip_frames()
+    } else {
+        log::warn!("the time-lapse's videos can't be read here: their pictures stay");
+        0
+    }
 }
 
 /// Sets its flag once dropped: what it stops, stopped however its holder ends.
