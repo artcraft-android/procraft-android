@@ -737,6 +737,14 @@ private val LIQUIFY_NAMES = listOf(
 /** The liquify panel: the brush's size, pressure, distortion and momentum; its way, adjust and reset. */
 @Composable
 fun LiquifyPanel(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp, modifier: Modifier = Modifier) {
+    // a menu fills the screen: the panel keeps to its foot meanwhile
+    Box(if (vm.liquifyPopup != 0) Modifier.fillMaxSize() else Modifier, contentAlignment = Alignment.BottomCenter) {
+        LiquifyPanelAndMenus(vm, screenWidth, screenHeight, modifier)
+    }
+}
+
+@Composable
+private fun LiquifyPanelAndMenus(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp, modifier: Modifier) {
     val wide = widePanels()
     if (wide) LiquifyWide(vm, modifier) else LiquifyUpright(vm, modifier)
     // the way's list and the adjust slider open over the panel's buttons
