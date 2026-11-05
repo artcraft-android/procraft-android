@@ -627,7 +627,8 @@ private struct LayersMenus: View {
                 }
             }
         }
-        .offset(x: 79 - glassMenuWidth / 2, y: 52)
+        // under the title row, whose foot is 60 down with the arrow above it
+        .offset(x: 74 - glassMenuWidth / 2, y: 60)
         .menuTransition(.top)
     }
 }

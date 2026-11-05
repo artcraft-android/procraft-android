@@ -1032,10 +1032,12 @@ private struct ColorMenus: View {
         VStack(spacing: 0) {
             ForEach(HarmonyKind.allCases, id: \.self) { kind in
                 HStack(spacing: 0) {
+                    // the longest name runs a point into the row's margin, whole
                     Text(verbatim: kind.label)
                         .font(.system(size: 17))
                         .foregroundStyle(Pc.menuInk)
                         .lineLimit(1)
+                        .fixedSize()
                     Spacer(minLength: 0)
                     if kind == model.harmonyKind {
                         PcIconView(PcIcons.tick, size: 18, color: Pc.menuInk)
