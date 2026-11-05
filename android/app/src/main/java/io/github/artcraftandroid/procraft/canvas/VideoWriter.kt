@@ -142,8 +142,10 @@ object VideoWriter {
      * Videos [parts] (made alike: one video track each, the same kind, size and stream settings) one
      * after another at [out], their frames copied, nothing encoded again; each part's frames follow
      * the last one's by one frame at [fps]. False if a part can't be read or was made otherwise.
+     * One part is copied as it is, needing nothing of the device's media system.
      */
     fun join(parts: List<File>, out: File, fps: Float): Boolean {
+        parts.singleOrNull()?.let { part -> return runCatching { part.copyTo(out, overwrite = true) }.isSuccess }
         val muxer = runCatching { MediaMuxer(out.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4) }.getOrNull() ?: return false
         var track = -1
         var first: MediaFormat? = null

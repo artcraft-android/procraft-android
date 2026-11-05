@@ -576,6 +576,12 @@ impl TimeLapse {
         true
     }
 
+    /// The videos whose frames are still pictures too: what an app reads back before those
+    /// pictures go ([`Self::drop_clip_frames`]), a header not saying that a device can read it.
+    pub fn clips_with_pictures(&self) -> Vec<TimeLapseClip> {
+        self.clips().into_iter().filter(|c| self.frame_path(c.first).exists()).collect()
+    }
+
     /// The frames kept as pictures that its videos hold too, gone (as the artwork file keeps a
     /// time-lapse: only as video); only once every video's frames, counted from its header, are
     /// as many as it is noted to hold. How many went.
@@ -1071,6 +1077,33 @@ mod tests {
         fake_mp4(Path::new(&plan.path), 3, 2, 2);
         assert_eq!(t.drop_clip_frames(), 3);
         assert_eq!((t.count(), TimeLapse::new(dir.to_string_lossy().into_owned()).count()), (3, 3));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_videos_whose_pictures_are_still_there_are_read_back() {
+        let dir = std::env::temp_dir().join(format!("procraft-readback-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let t = TimeLapse::new(dir.to_string_lossy().into_owned());
+        for i in 0..3u8 {
+            assert!(t.record([i, 0, 0, 255].repeat(4), 2, 2));
+        }
+        assert!(t.clips_with_pictures().is_empty());
+        let plan = t.segment_plan().unwrap();
+        fake_mp4(Path::new(&plan.path), 3, 2, 2);
+        t.segment_made(plan.clone(), 2, 2, true);
+        let first = TimeLapseClip { path: plan.path, first: 0, frames: 3 };
+        assert_eq!(t.clips_with_pictures(), [first]);
+        // an app that can't read it back leaves them: every frame is still there
+        assert_eq!(frame_files(&t.dir).len(), 3);
+        assert_eq!(t.drop_clip_frames(), 3);
+        assert!(t.clips_with_pictures().is_empty());
+        // the next video is the only one to check
+        assert!(t.record([9, 0, 0, 255].repeat(4), 2, 2));
+        let plan = t.segment_plan().unwrap();
+        fake_mp4(Path::new(&plan.path), 1, 2, 2);
+        t.segment_made(plan.clone(), 2, 2, true);
+        assert_eq!(t.clips_with_pictures(), [TimeLapseClip { path: plan.path, first: 3, frames: 1 }]);
         let _ = fs::remove_dir_all(&dir);
     }
 }

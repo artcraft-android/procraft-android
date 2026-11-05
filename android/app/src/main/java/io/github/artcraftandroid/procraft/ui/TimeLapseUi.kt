@@ -17,6 +17,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -31,6 +32,7 @@ import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.TimeLapse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.withContext
 
 // the canvas's surround and grid, light with the light interface
@@ -68,6 +70,7 @@ fun TimeLapseReplay(vm: CanvasViewModel) {
     var index by remember { mutableIntStateOf(0) }
     var scrubbing by remember { mutableStateOf(false) }
     var shown by remember { mutableStateOf<ImageBitmap?>(null) }
+    var unreadable by remember { mutableStateOf(false) }
     BackHandler { vm.timeLapseReplaying = false }
     // play, frame by frame, until the end or a scrub
     LaunchedEffect(scrubbing) {
@@ -76,10 +79,13 @@ fun TimeLapseReplay(vm: CanvasViewModel) {
             index++
         }
     }
-    LaunchedEffect(index) {
-        val i = index
-        val image = withContext(Dispatchers.IO) { vm.timeLapseFrame(i)?.asImageBitmap() }
-        if (image != null) shown = image
+    // one read at a time, of the newest frame: where a read takes longer than a frame some are
+    // skipped, and those read still show
+    LaunchedEffect(Unit) {
+        snapshotFlow { index }.conflate().collect { i ->
+            val image = withContext(Dispatchers.IO) { vm.timeLapseFrame(i)?.asImageBitmap() }
+            if (image != null) shown = image else unreadable = true
+        }
     }
     Box(
         Modifier.fillMaxSize().background(ReplayFill).drawBehind { surroundGrid(vm.gridOrigin) }.pointerInput(count) {
@@ -101,7 +107,8 @@ fun TimeLapseReplay(vm: CanvasViewModel) {
             // edge to edge, under the header
             Image(it, contentDescription = "Time-lapse", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
         }
-        if (count == 0) Text("Nothing recorded yet", color = Color(0xFF8E8E93), fontSize = 17.sp, modifier = Modifier.align(Alignment.Center))
+        val empty = if (count == 0) "Nothing recorded yet" else "The time-lapse can't be read on this device".takeIf { unreadable && shown == null }
+        if (empty != null) Text(empty, color = Color(0xFF8E8E93), fontSize = 17.sp, modifier = Modifier.align(Alignment.Center))
         // the time into the replay, in frames past the second
         val frames = index
         val seconds = frames / TimeLapse.FPS

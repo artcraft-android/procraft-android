@@ -3190,7 +3190,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             }
             if (exportCancelled) return null
             if (made == null) {
-                showNotice("The time-lapse video couldn't be made.", warning = true)
+                // which of the two: they are different faults, in a report too
+                val readable = withContext(Dispatchers.IO) { t.frame(0)?.also { it.recycle() } != null }
+                showNotice(if (readable) "The time-lapse video couldn't be made." else "The time-lapse can't be read on this device.", warning = true)
                 return null
             }
             // full, then the check drawn in it before the card goes
