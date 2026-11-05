@@ -343,11 +343,11 @@ pub fn recognise(stroke: &[Vec2]) -> Vec<Shape> {
         // open: corners make a polyline; an even bend an arc
         let polyline = Shape { kind: ShapeKind::Polyline, nodes: simplify(&pts, CORNER_TOLERANCE * size(&pts)) };
         let arc = fit_arc(&pts);
-        let arc_error = arc.as_ref().map_or(f32::MAX, |a| arc_error(a, &pts));
+        let bend_error = arc.as_ref().map_or(f32::MAX, |a| outline_error(a, &pts));
         // a sharp corner counts only where the corners fit clearly better than an even bend: a
         // hand's wobble along an arc can turn as sharply between a few points, but is no corner
-        let cornered = || sharp_corner(&pts, &polyline.nodes) && arc_error > 2.0 * outline_error(&polyline, &pts);
-        if polyline.nodes.len() >= 3 && (arc_error > 0.04 || cornered()) {
+        let cornered = || sharp_corner(&pts, &polyline.nodes) && bend_error > 2.0 * outline_error(&polyline, &pts);
+        if polyline.nodes.len() >= 3 && (bend_error > 0.04 || cornered()) {
             return vec![polyline, line_of(&pts)];
         }
         return match arc {
@@ -635,51 +635,44 @@ fn from_nearest(nodes: Vec<Vec2>, start: Vec2) -> Vec<Vec2> {
     out
 }
 
-/// The arc through the stroke's ends and its middle point.
+/// The arc the stroke makes: where it began, where it ended, and one point between them that the
+/// curve is drawn through. A quadratic through the ends and a single point can only bend so many
+/// ways, so where that point sits is what decides how closely the curve follows the stroke: it is
+/// taken from the stroke itself and moved until the curve it gives lies closest to what was drawn,
+/// rather than sitting at some halfway mark of its own.
 fn fit_arc(pts: &[Vec2]) -> Option<Shape> {
-    let a = *pts.first()?;
-    let b = *pts.get(pts.len() / 2)?;
-    let c = *pts.last()?;
-    circle_through(a, b, c)?;
-    Some(Shape { kind: ShapeKind::Arc, nodes: vec![a, b, c] })
-}
-
-fn circle_through(a: Vec2, b: Vec2, c: Vec2) -> Option<(Vec2, f32)> {
-    let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
-    if d.abs() < 1e-6 {
-        return None;
+    let first = *pts.first()?;
+    let last = *pts.last()?;
+    let flat = STRAIGHT * first.distance(last).max(1.0);
+    // enough places to try that the curve lands on the bend, few enough to stay one stroke's work
+    let stride = (pts.len() / 32).max(1);
+    let mut best: Option<(f32, Vec2)> = None;
+    for &middle in pts.iter().step_by(stride) {
+        if distance_to_segment(middle, first, last) <= flat {
+            continue;
+        }
+        let shape = Shape { kind: ShapeKind::Arc, nodes: vec![first, middle, last] };
+        let error = outline_error(&shape, pts);
+        if best.is_none_or(|(least, _)| error < least) {
+            best = Some((error, middle));
+        }
     }
-    let (a2, b2, c2) = (a.dot(a), b.dot(b), c.dot(c));
-    let centre = Vec2::new(
-        (a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d,
-        (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d,
-    );
-    Some((centre, centre.distance(a)))
+    let (_, middle) = best?;
+    Some(Shape { kind: ShapeKind::Arc, nodes: vec![first, middle, last] })
 }
 
 fn arc_points(nodes: &[Vec2]) -> Vec<Vec2> {
     let get = |i: usize| nodes.get(i).copied().unwrap_or(Vec2::ZERO);
-    let (a, b, c) = (get(0), get(1), get(2));
-    let Some((centre, r)) = circle_through(a, b, c) else { return vec![a, c] };
-    let angle = |p: Vec2| (p - centre).y.atan2((p - centre).x);
-    let (ta, tb, tc) = (angle(a), angle(b), angle(c));
-    // the sweep from a to c that passes b
-    let norm = |t: f32| t.rem_euclid(TAU);
-    let ccw = norm(tb - ta) <= norm(tc - ta);
-    let sweep = if ccw { norm(tc - ta) } else { -norm(ta - tc) };
+    let (a, middle, c) = (get(0), get(1), get(2));
+    // the control that carries the curve through the middle point at its halfway
+    let control = middle * 2.0 - (a + c) * 0.5;
     (0..=OUTLINE_STEPS)
         .map(|i| {
-            let t = ta + sweep * i as f32 / OUTLINE_STEPS as f32;
-            centre + Vec2::new(t.cos(), t.sin()) * r
+            let t = i as f32 / OUTLINE_STEPS as f32;
+            let keep = 1.0 - t;
+            a * (keep * keep) + control * (2.0 * keep * t) + c * (t * t)
         })
         .collect()
-}
-
-/// How far the stroke strays from the arc, on average, as a share of the stroke's size.
-fn arc_error(arc: &Shape, pts: &[Vec2]) -> f32 {
-    let get = |i: usize| arc.nodes.get(i).copied().unwrap_or(Vec2::ZERO);
-    let Some((centre, r)) = circle_through(get(0), get(1), get(2)) else { return f32::MAX };
-    pts.iter().map(|p| (p.distance(centre) - r).abs()).sum::<f32>() / pts.len().max(1) as f32 / size(pts)
 }
 
 /// Whether the stroke turns sharply at any of the corners it simplifies to: its direction just
@@ -780,6 +773,37 @@ mod tests {
         let found = recognise(&polygon_path(&tri, 25));
         assert_eq!(found[0].kind, ShapeKind::Triangle, "{found:?}");
         assert_eq!(found[1].kind, ShapeKind::EquilateralTriangle);
+    }
+
+    #[test]
+    fn an_arc_bends_through_its_middle_point() {
+        // a bow: the point halfway along it is the one the curve has to pass through
+        let bow: Vec<Vec2> = (0..=40)
+            .map(|i| {
+                let t = i as f32 / 40.0;
+                Vec2::new(100.0 + 600.0 * t, 200.0 + 120.0 * (t * std::f32::consts::PI).sin())
+            })
+            .collect();
+        let shape = &recognise(&bow)[0];
+        assert_eq!(shape.kind, ShapeKind::Arc);
+        let middle = shape.nodes[1];
+        let near = shape.outline().iter().map(|p| p.distance(middle)).fold(f32::MAX, f32::min);
+        assert!(near < 1.0, "the curve passes {near:.1} from its middle point");
+    }
+
+    #[test]
+    fn moving_the_middle_point_bends_the_arc_and_leaves_its_ends() {
+        let mut shape = Shape {
+            kind: ShapeKind::Arc,
+            nodes: vec![Vec2::new(0.0, 0.0), Vec2::new(100.0, 60.0), Vec2::new(200.0, 0.0)],
+        };
+        let bend = |s: &Shape| s.outline().iter().map(|p| p.y).fold(f32::MIN, f32::max);
+        let before = bend(&shape);
+        shape.move_handle(1, Vec2::new(100.0, 140.0));
+        assert!(bend(&shape) > before + 10.0, "bent to {:.1} from {before:.1}", bend(&shape));
+        let drawn = shape.outline();
+        assert!(drawn.first().is_some_and(|p| p.distance(Vec2::new(0.0, 0.0)) < 0.01));
+        assert!(drawn.last().is_some_and(|p| p.distance(Vec2::new(200.0, 0.0)) < 0.01));
     }
 
     #[test]
