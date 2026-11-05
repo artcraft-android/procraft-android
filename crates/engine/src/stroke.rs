@@ -145,12 +145,16 @@ struct Placed {
     tint: Tint,
     secondary: f32,
     grain_depth: f32,
-    grain_size: f32,
     grain_press: f32,
     /// The tilt bleed as far as the pen leans (it adds to the pressure bleed).
     bleed_lean: f32,
     /// Where its moving grain is read from, in tiles (see [`Stamp::grain_offset`]).
     grain_read: Vec2,
+    /// The square its grain's tile goes by (as far as it follows the stamp's size), and the
+    /// grain's zoom and what the scale's pressure curve leaves of its scale.
+    grain_square: f32,
+    grain_zoom: f32,
+    grain_scale_by: f32,
     gradation: f32,
     transfer: f32,
     attack: f32,
@@ -1935,8 +1939,8 @@ impl StrokeBuilder {
             let grain_press = p.soft[2].clamp(0.0, 1.0);
             // its tile under this stamp (following the stamp's size, or cropped), as a multiple of
             // the grain's own scale, which the renderer takes it times
-            let tile = self.brush.grain.moving_tile(diameter * size, x.grain_zoom * zoom_by, grain_scale_by);
-            let grain_size = tile / self.brush.grain.scale.max(1.0);
+            let (grain_square, grain_zoom) = (self.square_at(p) * size, x.grain_zoom * zoom_by);
+            let tile = self.brush.grain.moving_tile(grain_square, grain_zoom, grain_scale_by);
             // it rolls on by as far as the stamp moved, at this stamp's tile and movement: so a
             // tile that follows the size (or a movement that follows the pressure) changes how
             // fast it rolls and doesn't send it elsewhere
@@ -1959,10 +1963,12 @@ impl StrokeBuilder {
                 tint,
                 secondary,
                 grain_depth: depth / base,
-                grain_size: grain_size.max(1e-3),
                 grain_press,
                 bleed_lean: (x.tilt_bleed * self.leaning(p, x.tilt_angles.bleed)).clamp(0.0, 1.0),
                 grain_read,
+                grain_square,
+                grain_zoom,
+                grain_scale_by,
                 gradation: (x.tilt_gradation * self.leaning(p, x.tilt_angles.gradation)).max(0.0).sqrt().min(1.0),
                 transfer,
                 attack,
@@ -2049,20 +2055,22 @@ impl StrokeBuilder {
         }
         // the jitter's reach (half the stamp's diagonal and a pixel) goes with what is left of it
         let reach_left = ((p.reach - 1.0) * thinned + 1.0) / p.reach.max(1.0);
+        // a grain that follows the stamp's size follows what is left of it
+        let tile = self.brush.grain.moving_tile(p.grain_square * thinned, p.grain_zoom, p.grain_scale_by);
         Stamp {
             center: p.center - p.thrown * (1.0 - reach_left),
             radius: (p.diameter * thinned * 0.5).max(0.25),
             alpha: (p.alpha * alpha).clamp(0.0, 1.0),
             angle: p.angle,
             roundness,
-            grain_offset: p.grain_read * (p.grain_size * self.brush.grain.scale.max(1.0)),
+            grain_offset: p.grain_read * tile,
             grain_press,
             grain_bleed,
             flip: p.flip,
             tint: p.tint,
             secondary: p.secondary,
             grain_depth: p.grain_depth,
-            grain_size: p.grain_size,
+            grain_size: (tile / self.brush.grain.scale.max(1.0)).max(1e-3),
             gradation: p.gradation,
             taper: size.clamp(0.0, 1.0),
             transfer: p.transfer,
@@ -3233,6 +3241,20 @@ mod tests {
         assert!((cropped_light - cropped_hard).abs() < 1e-3, "{cropped_light} {cropped_hard}");
         let ((light, light_r), (hard, hard_r)) = (tile(0.0, 0.5), tile(0.0, 1.0));
         assert!(light < hard * 0.8 && (light / hard - light_r / hard_r).abs() < 0.02, "{light} {hard}");
+        // the stamp's square it goes by, which a round tip covers only part of
+        let diagonal = 10.0 / crate::brushfile::ROUND_TIP_SHARE * std::f32::consts::SQRT_2;
+        assert!((hard - diagonal).abs() < 1e-3, "{hard}");
+        // a taper's thinning too
+        let mut b = Brush { pressure_size: 0.0, pen_taper: Taper { start: 1.0, ..Taper::NONE }, ..plain() };
+        b.pen_taper.size = 1.0;
+        b.set_setting("grain_zoom", 0.0);
+        b.grain.scale = crate::studio::MAX_GRAIN_SCALE / 4.0;
+        let mut s = StrokeBuilder::new(b, 40.0, Pointer::Stylus);
+        s.add(&line(100, 1200.0));
+        let all = s.finish();
+        let (thin, whole) = (all[2], all[all.len() - 1]);
+        assert!(thin.radius < whole.radius * 0.2, "{} {}", thin.radius, whole.radius);
+        assert!((thin.grain_size / whole.grain_size - thin.radius / whole.radius).abs() < 0.02);
         // the brush's own motion filtering smooths as the app's does
         let zigzag: Vec<Sample> = (0..60)
             .map(|i| Sample::at(Vec2::new(i as f32 * 2.0, if i % 2 == 0 { 0.0 } else { 20.0 }), 1.0, i as f64 * 8.0))

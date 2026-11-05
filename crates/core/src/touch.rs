@@ -1577,9 +1577,11 @@ impl CanvasSession {
                 | Mode::Held
         ) {
             t.gesture_scale = 1.0;
-            t.view_moving = false;
             t.pinch.clear();
             t.pinch.push((now, 1.0));
+        }
+        if t.mode != Mode::Gesture {
+            t.view_moving = false;
         }
         t.mode = Mode::Gesture;
         // a tap's time counts from when its last finger landed; those down already have gone as
@@ -2090,7 +2092,7 @@ impl CanvasSession {
         st.view.is_some_and(|v| v.zoom() < st.fitted_view().zoom())
     }
 
-    /// One step of two fingers at `ms`: the view follows them. True if it moved.
+    /// One step of two fingers at `ms`: the view follows them. True if there were two to follow.
     fn move_gesture(&self, t: &mut Touches, ms: f64) -> bool {
         let Some((a, b)) = t.gesture_pair else { return false };
         let at = |id: u64| t.down.iter().find(|d| d.id == id).map(|d| d.at);
