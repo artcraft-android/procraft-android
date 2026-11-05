@@ -191,6 +191,18 @@ enum ScreenCapture {
         case "source-landscape":
             sideways = true
             source(model, .grain)
+        case "liquify":
+            model.startAdjustment(.liquify)
+        case "liquify-mode":
+            model.startAdjustment(.liquify)
+            model.liquifyPopup = 1
+        case "liquify-twirl":
+            model.startAdjustment(.liquify)
+            model.chooseLiquifyKind(.twirlRight)
+            model.liquifyPopup = 2
+        case "adjust-menu":
+            model.startAdjustment(.liquify)
+            model.adjustMenuAt = CGPoint(x: 372, y: 500)
         case "prefs":
             prefs(model, .main)
         case "prefs-cursor":

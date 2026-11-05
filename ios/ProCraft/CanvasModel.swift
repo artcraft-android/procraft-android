@@ -146,7 +146,18 @@ final class CanvasModel {
     // the modes the top bar's buttons open (each still to come on the iPad)
     private(set) var transforming = false
     private(set) var selecting = false
-    private(set) var adjusting = false
+    /// The adjustment open, its values as the core has them, the menu a tap on the canvas opened
+    /// during it (where, in points), and liquify's list (1) or adjust slider (2).
+    private(set) var adjustment: Adjustment?
+    private(set) var adjustShown: AdjustShown?
+    var adjustMenuAt: CGPoint?
+    var liquifyPopup = 0
+    /// The touch coming down closed that menu: the tap it makes doesn't open it again.
+    @ObservationIgnored private(set) var closedAdjustMenu = false
+
+    var adjusting: Bool {
+        adjustment != nil
+    }
     private(set) var recoloring = false
 
     /// The Actions panel's tab, kept from one session to the next.
@@ -743,8 +754,98 @@ final class CanvasModel {
         if change.end.recolor { recoloring = false }
         if change.end.transform { transforming = false }
         if change.end.selection { selecting = false }
-        if change.end.adjustment { adjusting = false }
+        if change.end.adjustment { endAdjustment(commit: true) }
         return change.goesOn
+    }
+
+    // MARK: the adjustments
+
+    /// The adjustment's values as the core has them now.
+    func readAdjust() {
+        let shown = session.adjustmentShown()
+        adjustShown = shown
+        adjustment = shown.adjustment
+    }
+
+    /// Opens adjustment `a` on the current layer (keeping one already open).
+    func startAdjustment(_ a: Adjustment) {
+        guard currentTakesChanges() else { return }
+        _ = switchModes(.adjustment)
+        panel = .none
+        guard session.adjustmentStart(adjustment: a) else { return }
+        liquifyPopup = 0
+        readAdjust()
+    }
+
+    /// Ends the adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
+    func endAdjustment(commit: Bool) {
+        guard adjustment != nil else { return }
+        adjustMenuAt = nil
+        liquifyPopup = 0
+        _ = session.adjustmentEnd(commit: commit)
+        if commit {
+            showNotice("Adjustment applied")
+        }
+        readAdjust()
+        adjustment = nil
+        refresh()
+    }
+
+    /// Keeps what the adjustment did as one undo step and starts it again from there.
+    func applyAdjustment() {
+        guard adjustment != nil else { return }
+        session.adjustmentApply()
+        showNotice("Adjustment applied")
+        readAdjust()
+        refresh()
+    }
+
+    /// Takes back the adjustment's changes, or with none, the last one kept.
+    func undoAdjustment() {
+        guard adjustment != nil else { return }
+        session.adjustmentUndo()
+        readAdjust()
+        refresh()
+    }
+
+    func togglePreview() {
+        session.adjustmentPreview(original: adjustShown?.preview != true)
+        readAdjust()
+    }
+
+    /// Every value back to where the adjustment started.
+    func resetAdjustment() {
+        guard adjustment != nil else { return }
+        session.adjustmentReset()
+        readAdjust()
+    }
+
+    /// Liquify's slider `index` (size, pressure, distortion, momentum), 0..1.
+    func liquifyValue(_ index: Int) -> Float {
+        let values = adjustShown?.liquify ?? []
+        return values.indices.contains(index) ? values[index] : 0
+    }
+
+    func chooseLiquifyKind(_ kind: LiquifyKind) {
+        session.adjustmentLiquifyKind(kind: kind)
+        liquifyPopup = 0
+        readAdjust()
+    }
+
+    func setLiquifyValue(_ index: Int, _ value: Float) {
+        session.adjustmentLiquifyValue(index: UInt32(min(max(index, 0), 3)), value: value)
+        readAdjust()
+    }
+
+    func changeLiquifyAmount(_ amount: Float) {
+        session.adjustmentLiquifyAmount(amount: amount)
+        readAdjust()
+    }
+
+    func resetLiquify() {
+        session.adjustmentLiquifyReset()
+        liquifyPopup = 0
+        readAdjust()
     }
 
     // MARK: the side bar
@@ -1144,6 +1245,12 @@ final class CanvasModel {
     /// A touch is coming down on an idle canvas: the touches take the settings as they are now.
     func prepareTouches() {
         session.setTouchSettings(settings: Gestures.shared.touchSettings())
+        // a touch on the canvas closes an adjustment's menu and liquify's popups
+        closedAdjustMenu = adjustMenuAt != nil
+        if adjustment != nil {
+            adjustMenuAt = nil
+            liquifyPopup = 0
+        }
     }
 
     /// A stroke finished: its layer's thumbnail and the undo state changed.

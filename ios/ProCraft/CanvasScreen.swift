@@ -57,6 +57,17 @@ struct CanvasScreen: View {
                     QuickShapeBar(model: model)
                         .offset(y: Pc.barHeight)
                 }
+                if model.adjusting, !hidden {
+                    AdjustmentBar(model: model)
+                        .offset(y: Pc.barHeight)
+                }
+                if model.adjustment == .liquify, !hidden {
+                    LiquifyPanel(model: model, screen: screen.size)
+                        .transition(.move(edge: .bottom))
+                }
+                if model.adjusting, !hidden {
+                    AdjustmentMenu(model: model, screen: screen.size)
+                }
                 if let choice = model.layerChoice {
                     LayerChoiceList(model: model, choice: choice, screen: screen.size)
                 }
@@ -329,6 +340,12 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 canvas.showCursor(at: nil, hovering: false)
             case .textLayer:
                 model.askRasterize = true
+            case .adjustChanged:
+                model.readAdjust()
+            case let .adjustMenu(x, y):
+                if !model.closedAdjustMenu {
+                    model.adjustMenuAt = CGPoint(x: CGFloat(x) / model.pixels, y: CGFloat(y) / model.pixels)
+                }
             case .brushChanged:
                 model.brushTouched()
             case .showColours:
