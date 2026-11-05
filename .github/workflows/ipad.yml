@@ -96,7 +96,8 @@ jobs:
           over="keypad keypad-pressure keypad-tilt blend-list node-menu pad-menu"
           source="source source-shape source-import repeat source-library source-landscape"
           library="library-add library-set-menu library-icons library-search library-swipe library-recent"
-          for screen in gallery canvas brushes layers colors actions adjustments $studio $over $source $library; do
+          layers="layers-many layers-swipe layers-options layers-blend layers-menu layers-rename layers-picked"
+          for screen in gallery canvas brushes layers colors actions adjustments $studio $over $source $library $layers; do
             xcrun simctl launch --terminate-running-process "$device" io.github.artcraftandroid.procraft -screen "$screen"
             sleep 10
             xcrun simctl io "$device" screenshot "screens/$screen.png"

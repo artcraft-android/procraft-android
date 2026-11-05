@@ -81,6 +81,18 @@ struct CanvasScreen: View {
                     }
                 )
                 AlertView(
+                    content: model.lockedDeleteTold ? AlertContent(
+                        title: "Locked layer selection",
+                        message: "A locked layer can’t be deleted. Unlock it first.",
+                        action: "OK",
+                        icon: PcIcons.pageLocked,
+                        destructive: false,
+                        alone: true
+                    ) : nil,
+                    onCancel: { model.lockedDeleteTold = false },
+                    onAction: { model.lockedDeleteTold = false }
+                )
+                AlertView(
                     content: model.askRasterize ? AlertContent(
                         title: "Rasterize this text layer?",
                         message: "Its text can't be edited afterwards; you can paint on it.",

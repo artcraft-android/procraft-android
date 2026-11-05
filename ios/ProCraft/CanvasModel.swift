@@ -200,6 +200,8 @@ final class CanvasModel {
     private static let libraryWrites = DispatchQueue(label: "ProCraft.brushLibrary", qos: .utility)
     /// The brush studio.
     @ObservationIgnored private(set) lazy var studio = StudioModel(model: self)
+    /// Delete on a locked layer: why not, OK alone.
+    var lockedDeleteTold = false
     /// A question open over everything.
     var question: Question? {
         didSet {
@@ -870,6 +872,13 @@ final class CanvasModel {
         }
     }
 
+    func copyLayerContents(_ l: LayerInfo) {
+        if let copied = session.copyLayerContents(id: l.id) {
+            clipboard = copied
+            canPaste = true
+        }
+    }
+
     func copyCanvas() {
         if let copied = session.copyCanvas() {
             clipboard = copied
@@ -899,10 +908,15 @@ final class CanvasModel {
 
     func addLayer() {
         if session.addLayer() == 0 {
-            let info = session.info()
-            showNotice("This canvas holds at most \(layersFor(width: max(info.width, 1), height: max(info.height, 1))) layers.", warning: true)
+            noRoomForLayers()
         }
         refresh()
+    }
+
+    /// Says how many layers this canvas holds, there being no room for another.
+    func noRoomForLayers() {
+        let info = session.info()
+        showNotice("This canvas holds at most \(layersFor(width: max(info.width, 1), height: max(info.height, 1))) layers.", warning: true)
     }
 
     func selectLayer(_ id: UInt64) {

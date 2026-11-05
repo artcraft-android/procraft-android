@@ -71,6 +71,8 @@ enum ScreenCapture {
     /// What the source editor opens over itself, and what the brush library opens.
     static var sourceShows: String?
     static var libraryShows: String?
+    /// What the layers panel opens.
+    static var layersShows: String?
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
 
@@ -103,6 +105,18 @@ enum ScreenCapture {
         sourceShows = shows
         model.studio.open()
         model.studio.sourceEditing = kind
+    }
+
+    /// The layers panel over a few layers, what `shows` opens open.
+    private static func layers(_ model: CanvasModel, shows: String) {
+        layersShows = shows
+        model.addLayer()
+        model.addLayer()
+        model.addLayer()
+        if shows == "picked", let other = model.layers.first(where: { !$0.current }) {
+            model.pickLayer(other)
+        }
+        model.toggle(.layers)
     }
 
     private static func library(_ model: CanvasModel, shows: String) {
@@ -160,6 +174,20 @@ enum ScreenCapture {
         case "source-landscape":
             sideways = true
             source(model, .grain)
+        case "layers-many":
+            layers(model, shows: "")
+        case "layers-swipe":
+            layers(model, shows: "swipe")
+        case "layers-options":
+            layers(model, shows: "options")
+        case "layers-blend":
+            layers(model, shows: "blend")
+        case "layers-menu":
+            layers(model, shows: "menu")
+        case "layers-rename":
+            layers(model, shows: "rename")
+        case "layers-picked":
+            layers(model, shows: "picked")
         case "library-add":
             library(model, shows: "add")
         case "library-set-menu":
