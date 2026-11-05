@@ -51,7 +51,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
     private var strokePointer = -1
 
-    private val pickSide get() = (CanvasViewModel.PICK_WINDOW_DP * resources.displayMetrics.density).toInt() or 1
+    private val pickSide get() = (CanvasViewModel.PICK_WINDOW_DP * vm.density).toInt() or 1
 
     init {
         holder.addCallback(this)
@@ -96,7 +96,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         windowWidth = width
         windowHeight = height
         vm.windowSize = Offset(width.toFloat(), height.toFloat())
-        vm.density = resources.displayMetrics.density
+        vm.screenDensity = resources.displayMetrics.density
         windowRotation = rotation
     }
 

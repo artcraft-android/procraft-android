@@ -388,7 +388,8 @@ impl ApplicationHandler for App {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(session) = &session {
                     session.set_display_scale(scale_factor as f32);
-                    self.ui.place_canvas(session, scale_factor as f32);
+                    let interface = scale_factor as f32 * screen.egui.egui_ctx().zoom_factor();
+                    self.ui.place_canvas(session, interface);
                 }
             }
             WindowEvent::RedrawRequested => self.frame(),
@@ -511,7 +512,7 @@ impl App {
             last.keep_brushes(files::brushes_dir());
         }
         session.open_brushes(files::brushes_dir());
-        self.ui.opened(&session, scale);
+        self.ui.opened(&session, scale * screen.egui.egui_ctx().zoom_factor());
         session.show_in(size.width, size.height);
         self.input = input::Input::default();
         self.session = Some(session);
@@ -589,6 +590,7 @@ impl App {
         // an export shows its own card; the veil is for a slow save
         let exporting = !self.ui.export_card.busy()
             && files::exporting_since().is_some_and(|since| since.elapsed() >= SLOW_OPENING);
+        screen.size_interface(self.ui.interface_size(), Some(session.as_ref()));
         let raw = screen.egui.take_egui_input(&screen.window);
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             self.ui.show(ui, &session, &mut self.input);
@@ -643,6 +645,7 @@ impl App {
     fn gallery_frame(&mut self) {
         let Some(screen) = self.screen.as_mut() else { return };
         self.last_frame = Instant::now();
+        screen.size_interface(self.ui.interface_size(), None);
         let raw = screen.egui.take_egui_input(&screen.window);
         let mut asked = None;
         let (gallery, interface) = (&mut self.gallery, &mut self.ui);
@@ -927,7 +930,7 @@ impl App {
                 // the gallery zooms into its picture
                 if let (Some(cell), Some(screen)) = (cell, &self.screen) {
                     let size = screen.window.inner_size();
-                    let scale = screen.window.scale_factor() as f32;
+                    let scale = screen.window.scale_factor() as f32 * screen.egui.egui_ctx().zoom_factor();
                     self.zoom = Some(zoom::Zoom::opening(&session, cell, (size.width, size.height), scale));
                 }
             }

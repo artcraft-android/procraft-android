@@ -45,7 +45,9 @@ import io.github.artcraftandroid.procraft.core.ToolKind
 /** The canvas screen: the canvas, the bars over it, and the panel that is open. */
 @Composable
 fun AppRoot(vm: CanvasViewModel) {
-    ProCraftTheme {
+    val interfaceSize = fittedInterfaceSize(vm.interfaceSize)
+    androidx.compose.runtime.SideEffect { vm.interfaceShownAt(interfaceSize) }
+    ProCraftTheme(interfaceSize) {
         if (vm.screen == Screen.GALLERY) {
             ZoomingGallery(vm, overlay = false)
             // a share from the gallery shows its card there, and a file brought in its own

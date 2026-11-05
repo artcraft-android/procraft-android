@@ -34,6 +34,8 @@ pub struct Prefs {
     pub light_interface: bool,
     /// The side bar on the right edge instead of the left.
     pub right_handed: bool,
+    /// How big the whole interface shows (1: as measured).
+    pub interface_size: f32,
     /// Brush sizes relative to the screen (else to the canvas).
     pub brush_on_screen: bool,
     pub brush_cursor: bool,
@@ -92,6 +94,7 @@ impl Default for Prefs {
         Prefs {
             light_interface: false,
             right_handed: false,
+            interface_size: 1.0,
             brush_on_screen: false,
             brush_cursor: true,
             cursor_shows: CursorShows::Hovering,
@@ -147,6 +150,11 @@ impl Prefs {
             match name {
                 "light_interface" => p.light_interface = on,
                 "right_handed" => p.right_handed = on,
+                "interface_size" => {
+                    if let Some(v) = number {
+                        p.interface_size = procraft_core::interface_size_kept(v);
+                    }
+                }
                 "brush_on_screen" => p.brush_on_screen = on,
                 "brush_cursor" => p.brush_cursor = on,
                 "cursor_shows" => p.cursor_shows = pick(&SHOWS, value).unwrap_or(p.cursor_shows),
@@ -208,6 +216,7 @@ impl Prefs {
         let lines = [
             format!("light_interface {}", self.light_interface),
             format!("right_handed {}", self.right_handed),
+            format!("interface_size {}", self.interface_size),
             format!("brush_on_screen {}", self.brush_on_screen),
             format!("brush_cursor {}", self.brush_cursor),
             format!("cursor_shows {}", place(&SHOWS, self.cursor_shows)),

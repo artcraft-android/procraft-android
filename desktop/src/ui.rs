@@ -338,6 +338,11 @@ impl Interface {
         crate::files::DRAG_FORMATS.get(self.prefs.drag_format).copied().unwrap_or(crate::files::Format::Procraft)
     }
 
+    /// How big the whole interface is set to show (Prefs).
+    pub fn interface_size(&self) -> f32 {
+        self.prefs.interface_size
+    }
+
     /// Tap Assistance is on (Advanced settings).
     pub fn tap_assistance(&self) -> bool {
         self.prefs.tap_assistance

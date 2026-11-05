@@ -745,7 +745,8 @@ fun LiquifyPanel(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp, modifie
 
 @Composable
 private fun LiquifyPanelAndMenus(vm: CanvasViewModel, screenWidth: Dp, screenHeight: Dp, modifier: Modifier) {
-    val wide = widePanels()
+    // upright too where the wide panel's 1093 won't fit, a big interface size leaving that little room
+    val wide = widePanels() && androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp >= 1093
     if (wide) LiquifyWide(vm, modifier) else LiquifyUpright(vm, modifier)
     // the way's list and the adjust slider open over the panel's buttons
     val panelLeft = (screenWidth - 654.dp) / 2

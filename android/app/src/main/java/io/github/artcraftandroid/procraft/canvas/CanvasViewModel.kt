@@ -417,6 +417,34 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         interfacePrefs.edit().putBoolean(LIGHT_INTERFACE, on).apply()
     }
 
+    /** How big the whole interface is set to show (1: as measured), and where its slider is while it moves. */
+    var interfaceSize by mutableFloatStateOf(io.github.artcraftandroid.procraft.core.interfaceSizeKept(interfacePrefs.getFloat(INTERFACE_SIZE, 1f)))
+        private set
+    var interfaceSizeMoved by mutableFloatStateOf(interfaceSize)
+        private set
+
+    /** How big it shows now: [interfaceSize], as far as the window has room. */
+    var interfaceShown = 1f
+        private set
+
+    /** The size's slider moved to [along] (0..1) of its way: nothing grows until it lets go, or the slider would run from the finger. */
+    fun moveInterfaceSize(along: Float) {
+        interfaceSizeMoved = io.github.artcraftandroid.procraft.core.interfaceSizeAt(along)
+    }
+
+    fun settleInterfaceSize() {
+        interfaceSize = interfaceSizeMoved
+        interfacePrefs.edit().putFloat(INTERFACE_SIZE, interfaceSize).apply()
+    }
+
+    /** The interface shows at [size] now: what hit-tests its handles, and what clears its bars, go with it. */
+    fun interfaceShownAt(size: Float) {
+        if (size == interfaceShown) return
+        interfaceShown = size
+        session?.setInterfaceSize(size)
+        applyFitInsets()
+    }
+
     fun changeRapidUndoDelay(seconds: Float) {
         rapidUndoDelay = seconds.coerceIn(RAPID_UNDO_MIN_S, RAPID_UNDO_MAX_S)
         interfacePrefs.edit().putFloat(RAPID_UNDO_DELAY, rapidUndoDelay).apply()
@@ -624,9 +652,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Cloning: where the source is (canvas pixels). */
     var clonePuck by mutableStateOf<Offset?>(null)
         private set
-    /** The canvas window's size (pixels) and density, for what starts in its middle. */
+    /** The canvas window's size (pixels) and the screen's density, for what starts in its middle. */
     var windowSize = Offset.Zero
-    var density = 2f
+    var screenDensity = 2f
+
+    /** Pixels a dp of the interface. */
+    val density get() = screenDensity * interfaceShown
 
     /** Where the adjustment's menu is open (window pixels), after a tap on the canvas. */
     var adjustMenuAt by mutableStateOf<Offset?>(null)
@@ -2261,6 +2292,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.setFillGap(fillGap.toUInt())
         s.setBrushScaling(brushOnScreen)
         s.setLightInterface(lightInterface)
+        s.setInterfaceSize(interfaceShown)
         // as it was left, or fitted
         if (!orientationMemory) s.forgetSavedView()
         s.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputCurve.flatMap { listOf(it.x, it.y) })
@@ -3589,7 +3621,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             r = ((rgb shr 16) and 255) / 255f, g = ((rgb shr 8) and 255) / 255f, b = (rgb and 255) / 255f,
             x = 0f, y = 0f, width = 0f,
         )
-        info = s.newTextPlaced(info, windowSize.x, windowSize.y, density)
+        info = s.newTextPlaced(info, windowSize.x, windowSize.y, screenDensity)
         if (s.textBegin(null, info) == null) {
             message = noRoom()
             return
@@ -6900,6 +6932,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val PAD_3D = "pad_3d_preview"
         const val RAPID_UNDO_DELAY = "rapid_undo_delay"
         const val LIGHT_INTERFACE = "light_interface"
+        const val INTERFACE_SIZE = "interface_size"
         const val BRUSH_CURSOR = "brush_cursor"
         const val CURSOR_SHOWS = "cursor_shows"
         const val CURSOR_STYLE = "cursor_style"

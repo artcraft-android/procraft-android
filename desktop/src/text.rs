@@ -289,7 +289,9 @@ impl TextEditor {
         };
         // a medium sans, sized and placed as new text looks on screen
         let (screen, ppp) = (ctx.content_rect(), ctx.pixels_per_point());
-        let info = session.new_text_placed(info, screen.width() * ppp, screen.height() * ppp, ppp);
+        // what lands on the canvas isn't sized by the interface's size
+        let density = ppp / ctx.zoom_factor();
+        let info = session.new_text_placed(info, screen.width() * ppp, screen.height() * ppp, density);
         if session.text_begin(None, info.clone()).is_none() {
             return false;
         }

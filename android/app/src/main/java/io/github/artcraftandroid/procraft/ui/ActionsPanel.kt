@@ -83,7 +83,7 @@ private class Toggle(val label: String, val checked: Boolean, val fixed: Boolean
 private class Heading(val label: String) : ActionRow
 
 /** A setting with its value on the right and a slider under its name, always shown. */
-private class Slide(val label: String, val value: String, val fraction: Float, val tall: Dp = 63.dp, val onChange: (Float) -> Unit) : ActionRow
+private class Slide(val label: String, val value: String, val fraction: Float, val tall: Dp = 63.dp, val onDone: () -> Unit = {}, val onChange: (Float) -> Unit) : ActionRow
 
 /** The pages the panel shows: its tabs, or a page of settings reached from one of them. */
 private enum class ActionsPage { TABS, PRESSURE, CURSOR }
@@ -298,6 +298,13 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                     if (vm.fillGap == 0) "Off" else "${vm.fillGap} px",
                     vm.fillGap / CanvasViewModel.MOST_FILL_GAP.toFloat(),
                     onChange = vm::changeFillGap,
+                ),
+                Slide(
+                    "Interface size (experimental)",
+                    "%.0f%%".format(vm.interfaceSizeMoved * 100f),
+                    io.github.artcraftandroid.procraft.core.interfaceSizeAlong(vm.interfaceSizeMoved),
+                    onDone = vm::settleInterfaceSize,
+                    onChange = vm::moveInterfaceSize,
                 ),
             ),
             listOf(Toggle("Size & Opacity sidebar", vm.showSideBar) { vm.showSideBar = it }),
@@ -620,17 +627,21 @@ private fun PressurePage(vm: CanvasViewModel, onBack: () -> Unit) {
 @Composable
 private fun SlideRow(row: Slide) {
     val change by rememberUpdatedState(row.onChange)
+    val done by rememberUpdatedState(row.onDone)
     Box(
         Modifier.fillMaxWidth().height(row.tall)
             .pointerInput(Unit) {
                 val inset = 16.dp.toPx()
                 fun at(x: Float) = ((x - inset) / (size.width - 2f * inset)).coerceIn(0f, 1f)
-                detectTapGestures { change(at(it.x)) }
+                detectTapGestures {
+                    change(at(it.x))
+                    done()
+                }
             }
             .pointerInput(Unit) {
                 val inset = 16.dp.toPx()
                 fun at(x: Float) = ((x - inset) / (size.width - 2f * inset)).coerceIn(0f, 1f)
-                detectHorizontalDragGestures(onDragStart = { change(at(it.x)) }) { c, _ ->
+                detectHorizontalDragGestures(onDragStart = { change(at(it.x)) }, onDragEnd = { done() }, onDragCancel = { done() }) { c, _ ->
                     c.consume()
                     change(at(c.position.x))
                 }
