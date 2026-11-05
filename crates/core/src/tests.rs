@@ -2342,8 +2342,10 @@ fn a_held_stroke_snaps_to_a_shape_and_is_edited() {
     assert!((moved.handles[0] - 190.0).abs() < 1.0, "{:?}", moved.handles);
     s.quickshape_done();
     assert!(s.quickshape_info().is_none());
-    // the circle's edge is painted, its middle is not
-    assert_eq!(pixel(&s, 10, 100)[0], 0);
+    // the circle's edge is painted, its middle is not (the line it is drawn from is the smoothed
+    // one, so the edge can sit a pixel or two in from where the raw fit had it)
+    let edge = (0..40).find(|&x| pixel(&s, x, 100)[0] == 0);
+    assert!(edge.is_some_and(|x| (7..=15).contains(&x)), "the left edge came out at {edge:?}");
     assert_eq!(pixel(&s, 100, 100), [255, 255, 255, 255]);
     s.undo();
     assert_eq!(pixel(&s, 10, 100), [255, 255, 255, 255]);
@@ -4385,7 +4387,7 @@ fn a_p3_canvas_exports_with_its_profile() {
     s.export_jpeg(path.to_string_lossy().into_owned()).unwrap();
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
-    let at = bytes.windows(12).position(|w| w == b"ICC_PROFILE ").expect("an embedded profile");
+    let at = bytes.windows(12).position(|w| w == b"ICC_PROFILE\0").expect("an embedded profile");
     assert_eq!(&bytes[at + 14..at + 14 + icc.len()], &icc[..]);
     let _ = std::fs::remove_file(path);
 }
