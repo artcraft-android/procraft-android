@@ -528,6 +528,9 @@ pub(crate) struct State {
     /// and the shape it snapped to while that is shown.
     drawn: Vec<Vec2>,
     drawn_pressure: f32,
+    /// How long it was on the move, and when it was last heard from (milliseconds).
+    drawn_moving: f64,
+    drawn_at: f64,
     shape: Option<quickshape::ShapeEdit>,
     /// The open stroke as it began, and the last stroke kept, for QuickShape afterwards.
     began: Option<quickshape::LastStroke>,
@@ -1254,6 +1257,8 @@ impl CanvasSession {
             last_drag: None,
             drawn: Vec::new(),
             drawn_pressure: 0.0,
+            drawn_moving: 0.0,
+            drawn_at: 0.0,
             shape: None,
             began: None,
             last_stroke: None,
@@ -1426,6 +1431,7 @@ impl CanvasSession {
         let canvas_samples = st.assisted(canvas_samples);
         st.drawn.clear();
         st.drawn_pressure = 0.0;
+        st.drawn_moving = 0.0;
         st.remember_input(&canvas_samples);
         // painted and erased strokes can be made shapes once they end
         st.last_stroke = None;
@@ -1438,6 +1444,7 @@ impl CanvasSession {
                 pointer,
                 drawn: Vec::new(),
                 pressure: 1.0,
+                pace: quickshape::SAMPLE_PACE,
                 steps: 0,
             });
         let Some(canvas) = st.canvas.as_mut() else { return };
