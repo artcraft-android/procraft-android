@@ -43,7 +43,10 @@ const BRUSH_COLUMN: Themed = Themed(0x26000000, 0xFFE0E0E0);
 const NAME_PILL: u32 = 0x80000000;
 /// The sample stroke's picture: half its own canvas, the cell showing it across its width.
 const PREVIEW: (u32, u32) = (530, 162);
-const PREVIEWS_A_FRAME: usize = 3;
+/// Sample strokes drawn on a thread of their own at a time, so those still in sight go next.
+const PREVIEWS_AT_A_TIME: usize = 4;
+/// How often the interface looks for sample strokes drawn while a thread is at them.
+const PREVIEW_LOOK: Duration = Duration::from_millis(16);
 /// Menus stay below the top bar; the set's menu sits this far left of it.
 const MENU_TOP: f32 = 57.0;
 const SET_MENU_GAP: f32 = 6.0;
@@ -82,6 +85,10 @@ struct Preview {
     shaded: bool,
 }
 
+/// A sample stroke drawn on its thread: the brush's, its picture (none if it draws nothing), and
+/// whether it runs under the name.
+type DrawnPreview = ((u32, u32), Option<(egui::ColorImage, bool)>);
+
 /// What a press on a brush turned out to be.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Way {
@@ -90,7 +97,7 @@ enum Way {
     Swipe,
     /// Held: the brush is dragged to another place or set.
     Drag,
-    /// Up or down first: the list scrolls.
+    /// Up or down first: the list has it, and scrolls.
     Scroll,
 }
 
@@ -139,6 +146,10 @@ pub struct Library {
     recent_menu: Menu,
     found: Option<(u32, u32)>,
     previews: HashMap<(u32, u32), Option<Preview>>,
+    /// The brushes in sight without a sample stroke yet, and those being drawn on a thread of
+    /// their own (the GPU takes a while over each: the list isn't held up for it).
+    wanted: Vec<((u32, u32), String)>,
+    drawing: Option<std::sync::mpsc::Receiver<DrawnPreview>>,
     plus_menu: Menu,
     /// The shown set's menu, and which set it is for.
     set_menu: Menu,
@@ -159,8 +170,6 @@ pub struct Library {
     /// Where the sets and the shown set's brushes were last drawn, for a dragged brush to land.
     set_rects: Vec<(usize, Rect)>,
     brush_rects: Vec<((u32, u32), Rect)>,
-    /// The brushes list to scroll by (a press moved up or down on a brush).
-    scroll_by: f32,
     /// The library changed: the app keeps it; its sample strokes are drawn again next frame (not
     /// dropped in the middle of one that shows them).
     pub changed: bool,
@@ -290,7 +299,9 @@ impl Library {
         );
         if std::mem::take(&mut self.stale) {
             self.previews.clear();
+            self.drawing = None;
         }
+        self.wanted.clear();
         let library = session.brush_library();
         let current = session.current_brush();
         // with the Recent set shown, the current brush's set takes new brushes
@@ -305,6 +316,7 @@ impl Library {
         // the set a dragged brush or set is over
         let dragging = self.press.filter(|p| p.way == Way::Drag);
         let lifted = self.set_press.filter(|p| p.lifted);
+        let taken = self.press.is_some_and(|p| matches!(p.way, Way::Swipe | Way::Drag));
         let over_set = dragging
             .map(|p| p.last)
             .or(lifted.map(|p| p.last))
@@ -364,7 +376,7 @@ impl Library {
                 }
                 lists.min.y += down;
                 if in_use {
-                    if let Some(key) = self.search_results(ui, session, &library, (current.set, current.index), lists) {
+                    if let Some(key) = self.search_results(ui, &library, (current.set, current.index), lists) {
                         brush_tapped = Some((key, false));
                     }
                 } else {
@@ -432,12 +444,14 @@ impl Library {
                         ScrollArea::vertical()
                             .id_salt(("library brushes", if recent { usize::MAX } else { shown }))
                             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                            // the list follows a press itself, and carries on when flicked; a brush
+                            // slid or dragged keeps it still
+                            .scroll_source(if taken {
+                                egui::scroll_area::ScrollSource::NONE
+                            } else {
+                                egui::scroll_area::ScrollSource::ALL
+                            })
                             .show(ui, |ui| {
-                                // a press moved up or down on a brush scrolls the list
-                                let by = std::mem::take(&mut self.scroll_by);
-                                if by != 0.0 {
-                                    ui.scroll_with_delta(vec2(0.0, by));
-                                }
                                 ui.add_space(9.75);
                                 // the Recent set's brushes (pinned there or not), or the shown set's
                                 let listed: Vec<(&BrushInfo, Option<bool>)> = if recent {
@@ -455,14 +469,12 @@ impl Library {
                                         .unwrap_or_default()
                                 };
                                 let chosen = library.get(shown).and_then(|set| set.chosen);
-                                let mut made = 0;
                                 for (b, pinned) in listed {
                                     // the current brush, or the brush last chosen in this set (in the
                                     // Recent set the current brush alone)
                                     let selected = (b.set, b.index) == (current.set, current.index)
                                         || (!recent && chosen == Some(b.index));
-                                    let (response, cell) =
-                                        self.brush_row(ui, look, session, b, selected, pinned, &mut made);
+                                    let (response, cell) = self.brush_row(ui, look, b, selected, pinned);
                                     // a brush found from the Recent set is scrolled to in its own
                                     if self.found == Some((b.set, b.index)) {
                                         self.found = None;
@@ -527,6 +539,7 @@ impl Library {
         );
         self.set_rects = set_rects;
         self.brush_rects = brush_rects;
+        self.draw_previews(ctx, session);
         self.follow_press(ctx, session);
         // a set let go after it was lifted was dragged, not tapped
         if self.follow_set_press(ctx, session, shown) {
@@ -851,7 +864,7 @@ impl Library {
                     self.slid.insert(p.key, (p.start + d.x).clamp(-width, 0.0));
                     ctx.request_repaint();
                 }
-                Way::Scroll => self.scroll_by += at.y - p.last.y,
+                Way::Scroll => {}
                 Way::Drag => ctx.request_repaint(),
             }
             p.last = at;
@@ -1018,15 +1031,16 @@ impl Library {
         &mut self,
         ui: &mut Ui,
         look: &mut Look,
-        session: &CanvasSession,
         b: &BrushInfo,
         selected: bool,
         pinned: Option<bool>,
-        made: &mut usize,
     ) -> (Option<(bool, Option<Swiped>)>, Rect) {
         let row = ui.available_width();
         let (outer, _) = ui.allocate_exact_size(vec2(row, BRUSH_HEIGHT), Sense::hover());
         let cell = outer.shrink2(vec2(12.0, 0.0));
+        if !ui.is_rect_visible(outer) {
+            return (None, cell);
+        }
         let key = (b.set, b.index);
         let slide = self.slid.get(&key).copied().unwrap_or(0.0);
         let at = cell.translate(vec2(slide, 0.0));
@@ -1034,7 +1048,8 @@ impl Library {
         if slide < 0.0 {
             chose = swipe_buttons(ui, look, cell, key, pinned);
         }
-        let response = ui.interact(at.intersect(cell), ui.scope_id().with(("brush", key)), Sense::click_and_drag());
+        // (only a click: a drag goes through to the list, which scrolls by itself)
+        let response = ui.interact(at.intersect(cell), ui.scope_id().with(("brush", key)), Sense::click());
         if response.is_pointer_button_down_on()
             && self.press.is_none()
             && let Some(origin) = ui.input(|i| i.pointer.interact_pos())
@@ -1050,7 +1065,7 @@ impl Library {
                 last: origin,
             });
         }
-        self.make_preview(ui, session, b, cell, made);
+        self.want_preview(ui, b, cell);
         let painter = ui.painter_at(cell);
         // the dragged brush is faint where it was
         let faint = self.press.is_some_and(|p| p.key == key && p.way == Way::Drag);
@@ -1079,23 +1094,61 @@ impl Library {
         (Some((tapped, chose)), cell)
     }
 
-    /// Reads a brush's sample stroke when it is first in sight (a few a frame).
-    fn make_preview(&mut self, ui: &Ui, session: &CanvasSession, b: &BrushInfo, cell: Rect, made: &mut usize) {
+    /// Asks for a brush's sample stroke when it is in sight and not drawn yet.
+    fn want_preview(&mut self, ui: &Ui, b: &BrushInfo, cell: Rect) {
         let key = (b.set, b.index);
-        if self.previews.contains_key(&key) || !ui.is_rect_visible(cell) {
-            return;
+        if !self.previews.contains_key(&key) && ui.is_rect_visible(cell) {
+            self.wanted.push((key, b.name.clone()));
         }
-        if *made >= PREVIEWS_A_FRAME {
-            ui.ctx().request_repaint();
-            return;
+    }
+
+    /// Takes the sample strokes drawn so far, and has those wanted drawn on a thread of their own.
+    fn draw_previews(&mut self, ctx: &egui::Context, session: &Arc<CanvasSession>) {
+        if let Some(drawing) = &self.drawing {
+            loop {
+                match drawing.try_recv() {
+                    Ok((key, drawn)) => {
+                        let preview = drawn.map(|(image, shaded)| {
+                            let texture = ctx.load_texture(format!("brush {key:?}"), image, TextureOptions::LINEAR);
+                            Preview { texture, shaded }
+                        });
+                        self.previews.insert(key, preview);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.drawing = None;
+                        break;
+                    }
+                }
+            }
         }
-        *made += 1;
-        let preview = session.brush_preview(b.set, b.index, PREVIEW.0, PREVIEW.1).map(|t| {
-            let shaded = under_name(&t.rgba, &b.name);
-            let image = egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
-            Preview { texture: ui.ctx().load_texture(format!("brush {key:?}"), image, TextureOptions::LINEAR), shaded }
-        });
-        self.previews.insert(key, preview);
+        let previews = &self.previews;
+        self.wanted.retain(|(key, _)| !previews.contains_key(key));
+        if self.drawing.is_none() && !self.wanted.is_empty() {
+            let (done, drawing) = std::sync::mpsc::channel();
+            let batch: Vec<_> = self.wanted.drain(..self.wanted.len().min(PREVIEWS_AT_A_TIME)).collect();
+            let session = Arc::clone(session);
+            let started = std::thread::Builder::new().name("brush previews".into()).spawn(move || {
+                for (key, name) in batch {
+                    let drawn = session.brush_preview(key.0, key.1, PREVIEW.0, PREVIEW.1).map(|t| {
+                        let shaded = under_name(&t.rgba, &name);
+                        let size = [t.width as usize, t.height as usize];
+                        (egui::ColorImage::from_rgba_premultiplied(size, &t.rgba), shaded)
+                    });
+                    // (the library changed meanwhile: these are no longer wanted)
+                    if done.send((key, drawn)).is_err() {
+                        return;
+                    }
+                }
+            });
+            match started {
+                Ok(_) => self.drawing = Some(drawing),
+                Err(e) => log::warn!("the brushes' sample strokes aren't drawn: {e}"),
+            }
+        }
+        if self.drawing.is_some() {
+            ctx.request_repaint_after(PREVIEW_LOOK);
+        }
     }
 
     /// The search field in `block` (shown where it overlaps `clip`): a magnifier, what is typed
@@ -1154,7 +1207,6 @@ impl Library {
     fn search_results(
         &mut self,
         ui: &mut Ui,
-        session: &CanvasSession,
         library: &[BrushSetInfo],
         current: (u32, u32),
         area: Rect,
@@ -1171,7 +1223,6 @@ impl Library {
             return None;
         }
         let mut tapped = None;
-        let mut made = 0;
         ui.scope_builder(UiBuilder::new().max_rect(area), |ui| {
             ScrollArea::vertical()
                 .id_salt("library results")
@@ -1188,7 +1239,7 @@ impl Library {
                             );
                             let key = (b.set, b.index);
                             let selected = key == current;
-                            self.make_preview(ui, session, b, tile, &mut made);
+                            self.want_preview(ui, b, tile);
                             let painter = ui.painter_at(tile);
                             painter.rect_filled(tile, 12, if selected { argb(pc::ACCENT) } else { argb(RESULT_FILL) });
                             let shaded = self.preview_in(&painter, key, tile, selected);
@@ -1350,4 +1401,141 @@ fn under_name(rgba: &[u8], name: &str) -> bool {
         cover += line.as_chunks::<4>().0.iter().map(|&[_, _, _, a]| u64::from(a)).sum::<u64>();
     }
     cover > 2 * ((x1 - x0) * (y1 - y0)) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Event, PointerButton, RawInput, TouchDeviceId, TouchId, TouchPhase};
+
+    use super::*;
+
+    /// The library open with a finger on it, as the window's touches reach the interface.
+    struct Finger {
+        ctx: egui::Context,
+        look: Look,
+        library: Library,
+        session: Arc<CanvasSession>,
+        time: f64,
+    }
+
+    impl Finger {
+        fn new() -> Finger {
+            let session = CanvasSession::new(64, 64);
+            let (ctx, look, library) = (egui::Context::default(), Look::default(), Library::default());
+            let mut finger = Finger { ctx, look, library, session, time: 0.0 };
+            // two frames to lay the list out and find it scrolls
+            finger.frame(Vec::new());
+            finger.frame(Vec::new());
+            finger
+        }
+
+        fn frame(&mut self, events: Vec<Event>) {
+            self.time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 700.0))),
+                time: Some(self.time),
+                events,
+                ..RawInput::default()
+            };
+            let Finger { ctx, look, library, session, .. } = self;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                let button = Rect::from_min_size(pos2(600.0, 10.0), vec2(40.0, 40.0));
+                library.show(ui.ctx(), look, session, ToolKind::Paint, button, &mut Vec::new());
+            });
+            output.textures_delta.clear();
+        }
+
+        fn touch(phase: TouchPhase, pos: Pos2) -> Event {
+            let (device_id, id) = (TouchDeviceId(1), TouchId(1));
+            Event::Touch { device_id, id, phase, pos, force: None }
+        }
+
+        fn down(&mut self, at: Pos2) {
+            self.frame(vec![
+                Self::touch(TouchPhase::Start, at),
+                Event::PointerMoved(at),
+                Event::PointerButton {
+                    pos: at,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+
+        fn to(&mut self, at: Pos2) {
+            self.frame(vec![Self::touch(TouchPhase::Move, at), Event::PointerMoved(at)]);
+        }
+
+        fn up(&mut self, at: Pos2) {
+            self.frame(vec![
+                Self::touch(TouchPhase::End, at),
+                Event::PointerButton {
+                    pos: at,
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                Event::PointerGone,
+            ]);
+        }
+
+        /// How far up the list has gone: where its first brush is.
+        fn top(&self) -> f32 {
+            self.library.brush_rects.first().map_or(0.0, |(_, r)| r.top())
+        }
+
+        /// A point on a brush in the middle of the list.
+        fn on_a_brush(&self) -> Pos2 {
+            let middle = self.library.brush_rects.len() / 3;
+            self.library.brush_rects.get(middle).map_or(Pos2::ZERO, |(_, r)| r.center())
+        }
+    }
+
+    #[test]
+    fn the_brushes_keep_up_with_a_finger_and_carry_on_when_flicked() {
+        let mut f = Finger::new();
+        assert!(f.library.brush_rects.len() > 6, "too few brushes to scroll");
+        let (start, from) = (f.top(), f.on_a_brush());
+        f.down(from);
+        // up the list, frame by frame: past a press's slop it moves as far as the finger does
+        let mut at = from;
+        for _ in 0..4 {
+            at.y -= 5.0;
+            f.to(at);
+        }
+        let (mid, finger) = (f.top(), at.y);
+        for _ in 0..16 {
+            at.y -= 5.0;
+            f.to(at);
+            let (moved, went) = (mid - f.top(), finger - at.y);
+            assert!((moved - went).abs() < 0.01, "the list went {moved} as the finger went {went}");
+        }
+        assert!(start > f.top());
+        // let go moving, it runs on
+        f.up(at);
+        let lifted = f.top();
+        for _ in 0..10 {
+            f.frame(Vec::new());
+        }
+        assert!(f.top() < lifted - 10.0, "stopped dead: {} to {}", lifted, f.top());
+    }
+
+    #[test]
+    fn a_brush_slid_sideways_or_tapped_leaves_the_list_where_it_is() {
+        let mut f = Finger::new();
+        let (start, from) = (f.top(), f.on_a_brush());
+        f.down(from);
+        let mut at = from;
+        for k in 0..10 {
+            at += vec2(-8.0, if k % 2 == 0 { 1.0 } else { -1.0 });
+            f.to(at);
+        }
+        f.up(at);
+        for _ in 0..5 {
+            f.frame(Vec::new());
+        }
+        assert!((f.top() - start).abs() < 3.0, "the list moved {}", f.top() - start);
+        assert!(f.library.slid.values().any(|s| *s < 0.0) || f.library.swiped.is_some(), "the brush didn't slide");
+    }
 }
