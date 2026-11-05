@@ -144,11 +144,11 @@ struct ActionsPanel: View {
         case 4:
             return [
                 [
-                    .toggle("Light interface", on: Look.shared.light, change: { Look.shared.light = $0 }),
-                    .toggle("Right-hand interface", on: false, change: nil),
+                    .toggle("Light interface", on: AppSettings.shared.lightInterface, change: { model.changeLightInterface($0) }),
+                    .toggle("Right-hand interface", on: AppSettings.shared.rightHanded, change: { AppSettings.shared.rightHanded = $0 }),
                     .act("Brush scaling", value: "Canvas", action: nil),
                     .toggle("Project canvas", on: false, change: nil),
-                    .toggle("Brush cursor", on: false, change: nil),
+                    .toggle("Brush cursor", on: AppSettings.shared.brushCursorOn, change: { AppSettings.shared.brushCursorOn = $0 }),
                     .act("Advanced cursor settings", action: nil),
                 ],
                 [

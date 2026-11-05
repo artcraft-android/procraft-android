@@ -1353,6 +1353,12 @@ final class CanvasModel {
         refreshFlags()
     }
 
+    /// The light interface: the panels and bars, and the surround and its grid.
+    func changeLightInterface(_ on: Bool) {
+        AppSettings.shared.lightInterface = on
+        session.setLightInterface(on: on)
+    }
+
     // MARK: pressure and smoothing
 
     /// The app's smoothing and pressure, for every stroke.
