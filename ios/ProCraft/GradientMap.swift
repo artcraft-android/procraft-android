@@ -354,7 +354,7 @@ private struct GradientEditor: View {
 
     private func bar(_ width: CGFloat) -> some View {
         let stops = gradient.stops
-        return Rectangle()
+        return UnevenRoundedRectangle(bottomLeadingRadius: 12, bottomTrailingRadius: 12, style: .circular)
             .fill(gradientFill(gradient, from: r / width, to: 1 - r / width))
             .overlay {
                 Canvas { context, size in
