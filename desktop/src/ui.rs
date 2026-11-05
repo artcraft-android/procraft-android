@@ -982,14 +982,23 @@ impl Interface {
     /// system's pointer gives way to the outline; where none shows (the brush too small to see,
     /// its outline none, or the brush cursor off) to a fine cross; and while a stroke is drawn to
     /// nothing, the stroke showing where the pen is (with the outline, if Prefs show it then).
+    /// Painting from afar (a mouse, a pen without a screen) the eye is on the screen and the hand
+    /// isn't, and the system's pointer stays where the pen went down, so the outline or the cross
+    /// go on through the stroke.
     fn hover_cursor(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo, input: &mut Input) {
         let painting = session.adjustment_shown().adjustment.is_none() && !self.selection.on && !self.transform.on;
         let on_canvas = |at: egui::Pos2| {
             self.canvas_rect.contains(at) && ctx.layer_id_at(at).is_none_or(|l| l.order == egui::Order::Background)
         };
         if !input.idle() {
-            if painting && input.pressing() && ctx.pointer_latest_pos().is_some_and(on_canvas) {
+            if painting
+                && input.pressing()
+                && let Some(at) = ctx.pointer_latest_pos().filter(|at| on_canvas(*at))
+            {
                 ctx.set_cursor_icon(egui::CursorIcon::None);
+                if input.pressing_from_afar() && !self.overlays.outline_shown() && self.overlays.picking.is_none() {
+                    hover_cross(ctx, at);
+                }
             }
             return;
         }
@@ -1000,11 +1009,7 @@ impl Interface {
         self.overlays.hover(session, info, ppp, at.filter(|_| self.prefs.cursor_shown(true)));
         if let Some(at) = at.filter(|_| !self.overlays.outline_shown()) {
             ctx.set_cursor_icon(egui::CursorIcon::None);
-            egui::Area::new(egui::Id::unique("hover cross"))
-                .order(egui::Order::Tooltip)
-                .interactable(false)
-                .fixed_pos(at)
-                .show(ctx, |ui| fine_cross(ui.painter(), at));
+            hover_cross(ctx, at);
         }
     }
 
@@ -1063,7 +1068,10 @@ impl Interface {
                     self.overlays.shape = None;
                     self.overlays.shape_editing = false;
                 }
-                TouchCommand::Cursor { x, y } if self.prefs.cursor_shown(false) => {
+                // (from afar it shows however it is set to, the hand not being on the stroke)
+                TouchCommand::Cursor { x, y }
+                    if self.prefs.cursor_shown(false) || (self.prefs.brush_cursor && input.pressing_from_afar()) =>
+                {
                     self.overlays.cursor(ctx, session, Some((x, y)));
                 }
                 // not shown while painting: the outline hovering where the stroke began goes away
@@ -2303,6 +2311,15 @@ fn guide_lines(painter: &egui::Painter, session: &CanvasSession) {
     for &[x0, y0, x1, y1] in g.lines.as_chunks::<4>().0 {
         painter.line_segment([egui::pos2(x0, y0) / ppp, egui::pos2(x1, y1) / ppp], stroke);
     }
+}
+
+/// The fine cross over the canvas at `at` (points), above all else.
+fn hover_cross(ctx: &egui::Context, at: egui::Pos2) {
+    egui::Area::new(egui::Id::unique("hover cross"))
+        .order(egui::Order::Tooltip)
+        .interactable(false)
+        .fixed_pos(at)
+        .show(ctx, |ui| fine_cross(ui.painter(), at));
 }
 
 /// The desktop's pointer over the canvas where no outline shows: a fine cross at `at` (points),

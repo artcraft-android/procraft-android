@@ -33,6 +33,10 @@ static SECOND_PRESSES: AtomicUsize = AtomicUsize::new(0);
 /// Each pointer the system has said is a pen (true) or a finger (false).
 static KINDS: Mutex<Option<HashMap<u64, bool>>> = Mutex::new(None);
 
+/// Each pen pointer the system said is built into a screen (true), so the hand is on what it
+/// paints, or isn't (false).
+static ON_SCREEN: Mutex<Option<HashMap<u64, bool>>> = Mutex::new(None);
+
 /// A tablet's pen moving the mouse pointer (X11 and a Mac give it as the mouse): its pressure
 /// (0..1) and whether its eraser end is the one on the screen.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -140,6 +144,22 @@ pub fn is_pen(id: u64) -> Option<bool> {
 pub(crate) fn pointer_kind(id: u64, pen: bool) {
     if let Ok(mut kinds) = KINDS.lock() {
         kinds.get_or_insert_with(Default::default).insert(id, pen);
+    }
+}
+
+/// Whether pointer `id` is a pen that isn't on the screen it paints on: a tablet without one, or
+/// a pen the system can't say of (only Windows says, so a pen display elsewhere counts too: a
+/// brush outline round its tip costs less than no sign of the pen on a tablet).
+pub fn away_from_screen(id: u64) -> bool {
+    let on_screen = ON_SCREEN.lock().ok().and_then(|s| s.as_ref()?.get(&id).copied());
+    is_pen(id) == Some(true) && on_screen != Some(true)
+}
+
+/// The system said pen `id` is built into a screen, or isn't.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn pen_on_screen(id: u64, on_screen: bool) {
+    if let Ok(mut all) = ON_SCREEN.lock() {
+        all.get_or_insert_with(Default::default).insert(id, on_screen);
     }
 }
 
@@ -595,11 +615,15 @@ mod tablet {
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod system {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicIsize, Ordering};
 
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::Controls::{POINTER_DEVICE_INFO, POINTER_DEVICE_TYPE, POINTER_DEVICE_TYPE_INTEGRATED_PEN};
     use windows::Win32::UI::Input::Pointer::{
-        GetPointerFrameInfo, GetPointerPenInfo, GetPointerType, POINTER_INFO, POINTER_PEN_INFO,
+        GetPointerDevice, GetPointerFrameInfo, GetPointerInfo, GetPointerPenInfo, GetPointerType, POINTER_INFO,
+        POINTER_PEN_INFO,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, SetWindowLongPtrW,
@@ -617,6 +641,9 @@ mod system {
 
     /// winit's procedure for the window, called after ours.
     static WINIT: AtomicIsize = AtomicIsize::new(0);
+
+    /// The pen devices named in the log so far.
+    static LOGGED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
     pub fn watch(window: &winit::window::Window) {
         let Ok(handle) = window.window_handle() else { return };
@@ -650,6 +677,25 @@ mod system {
         }
     }
 
+    /// The kind of device pen `id` belongs to, as the system has it: built into a screen or not
+    /// (from the digitizer's own report), with its name in the log the first time it is heard
+    /// from.
+    fn pen_device(id: u32) -> Option<POINTER_DEVICE_TYPE> {
+        let mut pointer = POINTER_INFO::default();
+        // SAFETY: `pointer` is an info to fill for this pointer
+        unsafe { GetPointerInfo(id, &mut pointer) }.ok()?;
+        let mut device = POINTER_DEVICE_INFO::default();
+        // SAFETY: `device` is an info to fill for the device the system just named
+        unsafe { GetPointerDevice(pointer.sourceDevice, &mut device) }.ok()?;
+        let name = device.productString;
+        let end = name.iter().position(|c| *c == 0).unwrap_or(name.len());
+        let name = String::from_utf16_lossy(name.get(..end).unwrap_or_default());
+        if LOGGED.lock().is_ok_and(|mut logged| logged.insert(name.clone())) {
+            log::info!("pen: {name} (device type {})", device.pointerDeviceType.0);
+        }
+        Some(device.pointerDeviceType)
+    }
+
     /// A pen's pointer message: its pressure and tilt kept by pointer, then the message on to
     /// winit (a hovering pen's to the system, as the mouse's). And the session's end noted.
     unsafe extern "system" fn pointer_messages(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -670,6 +716,9 @@ mod system {
                 super::pointer_kind(u64::from(id), kind == PT_PEN);
             }
             frame_kinds(id);
+            if msg == WM_POINTERDOWN && kind == PT_PEN {
+                super::pen_on_screen(u64::from(id), pen_device(id) == Some(POINTER_DEVICE_TYPE_INTEGRATED_PEN));
+            }
             // a pen held above the screen (not touching it)
             let touching = (wparam.0 >> 16) & POINTER_FLAG_INCONTACT != 0;
             hovering = msg == WM_POINTERUPDATE && kind == PT_PEN && !touching;

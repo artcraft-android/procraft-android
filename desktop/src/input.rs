@@ -133,6 +133,12 @@ impl Input {
         !self.down.is_empty() && !self.moving_view()
     }
 
+    /// What is painting isn't under the hand (a mouse, a tablet's pen without a screen, as far as
+    /// the system says): only the screen can show where it is.
+    pub fn pressing_from_afar(&self) -> bool {
+        self.pressing() && self.down.iter().any(|&id| id == MOUSE || crate::pen::away_from_screen(id))
+    }
+
     /// Alt held as the modify button is (Ctrl with it is AltGr, typing).
     pub fn modify_key(&self) -> bool {
         self.alt && !self.control
@@ -689,5 +695,34 @@ mod tests {
         send(&mut input, &session, &finger(TouchPhase::Started, 100.0, 100.0));
         send(&mut input, &session, &finger(TouchPhase::Moved, 140.0, 100.0));
         assert_eq!(input.cursor(), None);
+    }
+
+    #[test]
+    fn what_paints_from_afar_is_what_isnt_under_the_hand() {
+        let (session, mut input) = (shown(), Input::default());
+        // the mouse
+        let (device_id, position) = (DeviceId::dummy(), PhysicalPosition::new(100.0, 100.0));
+        send(&mut input, &session, &WindowEvent::CursorMoved { device_id, position });
+        let press = |state| WindowEvent::MouseInput { device_id, state, button: MouseButton::Left };
+        assert!(!input.pressing_from_afar(), "nothing is pressed");
+        send(&mut input, &session, &press(ElementState::Pressed));
+        assert!(input.pressing_from_afar() && painted(&input));
+        send(&mut input, &session, &press(ElementState::Released));
+        assert!(!input.pressing_from_afar());
+        // a tablet's pen, one the system can't say of, and one in a screen
+        crate::pen::pen_on_screen(7008, false);
+        crate::pen::pen_on_screen(7010, true);
+        for (id, afar) in [(7008, true), (7009, true), (7010, false)] {
+            send(&mut input, &session, &pen(id, TouchPhase::Started, 100.0, 100.0));
+            assert_eq!(input.pressing_from_afar(), afar, "{id}");
+            send(&mut input, &session, &pen(id, TouchPhase::Ended, 100.0, 100.0));
+        }
+        // a finger
+        crate::pen::pointer_kind(7011, false);
+        let location = PhysicalPosition::new(100.0, 100.0);
+        let phase = TouchPhase::Started;
+        let finger = WindowEvent::Touch(Touch { device_id, phase, location, force: None, id: 7011 });
+        send(&mut input, &session, &finger);
+        assert!(input.pressing() && !input.pressing_from_afar());
     }
 }
