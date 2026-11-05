@@ -3,6 +3,7 @@
 //! Only the last few used are held in memory. A grain whose file can't be read leaves its brush
 //! with the smaller image it has always had.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,6 +44,22 @@ impl GrainStore {
         let kept = self.folder.as_deref().is_some_and(|folder| write(folder, full.id, &pixels));
         if !kept && !self.unkept.iter().any(|(id, _)| *id == full.id) {
             self.unkept.push((full.id, pixels));
+        }
+    }
+
+    /// Takes the files of grains other than those in `used` out of the folder, as a brush that was
+    /// deleted leaves its own behind. Files that aren't grains' stay.
+    pub(crate) fn forget_all_but(&self, used: &HashSet<u64>) {
+        let Some(entries) = self.folder.as_deref().and_then(|folder| fs::read_dir(folder).ok()) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".grain"));
+            let id = name.filter(|n| n.len() == 16).and_then(|n| u64::from_str_radix(n, 16).ok());
+            if id.is_some_and(|id| !used.contains(&id))
+                && let Err(e) = fs::remove_file(&path)
+            {
+                log::warn!("a brush's grain file stays: {e}");
+            }
         }
     }
 
@@ -247,6 +264,51 @@ mod tests {
         let back = imported(&other);
         assert!((back.grain_tile() - tile).abs() < 1.0, "{} {tile}", back.grain_tile());
         assert_eq!(back.grain_file.and_then(|f| f.full).map(|g| g.side), Some(1024));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_files_of_grains_nothing_uses_go() {
+        let dir = folder("forget");
+        let mut store = GrainStore::default();
+        store.use_folder(&dir);
+        let (mut used, kept) = brush(6);
+        let (mut unused, gone) = brush(7);
+        store.take(&mut used);
+        store.take(&mut unused);
+        let other = dir.join(FOLDER).join("notes.txt");
+        fs::write(&other, "stays").unwrap();
+        store.forget_all_but(&HashSet::from([kept.id]));
+        assert!(file(&dir.join(FOLDER), kept.id).exists() && !file(&dir.join(FOLDER), gone.id).exists());
+        assert!(other.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_deleted_brush_s_grain_goes_when_the_library_next_opens() {
+        let dir = folder("deleted");
+        let path = dir.to_string_lossy().into_owned();
+        let s = CanvasSession::new(64, 64);
+        assert!(s.keep_brushes(path.clone()));
+        s.import_brushes(brush_file()).unwrap();
+        let id = imported(&s).grain_file.and_then(|f| f.full).unwrap().id;
+        assert!(s.keep_brushes(path.clone()));
+        let grain = file(&dir.join(FOLDER), id);
+        assert!(grain.exists());
+
+        // kept while a brush uses it
+        let again = CanvasSession::new(64, 64);
+        assert!(again.open_brushes(path.clone()));
+        assert!(grain.exists());
+
+        // gone once none does
+        for set in &mut again.shared.lock().library {
+            set.brushes.retain(|b| b.name != "Grainy");
+        }
+        assert!(again.keep_brushes(path.clone()));
+        let later = CanvasSession::new(64, 64);
+        assert!(later.open_brushes(path));
+        assert!(!grain.exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

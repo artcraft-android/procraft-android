@@ -7,6 +7,7 @@ use procraft_engine::geom::{Homography, Vec2};
 use procraft_engine::input::{Pointer, Sample};
 use procraft_engine::profile::Profile;
 use procraft_engine::stroke::{Stamp, StrokeBuilder, Tint};
+use procraft_engine::textures::TEXTURE_SIZE;
 use procraft_engine::view::View;
 use procraft_gpu::{Backdrop, Canvas, Gpu, Resample, StrokeStyle, StrokeTool, SurroundGrid, Target, wgpu};
 
@@ -1839,6 +1840,102 @@ fn wet_paint_goes_over_the_layer_squared_only_when_it_mixes_with_the_layer_as_it
     };
     let (recursive, from_before) = (shown(false), shown(true));
     assert!(recursive.abs_diff(200) < 8 && from_before.abs_diff(226) < 8, "{recursive} {from_before}");
+}
+
+#[test]
+fn a_stamp_under_a_pixel_across_lays_as_much_on_the_pixels_it_reaches() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // its quad reaches half a pixel past it, so a tiny stamp thins by that, not by its area as well:
+    // the middle of one under a pixel across is as strong as the middle of one over
+    let middle = |radius: f32| {
+        let mut doc = Document::new(16, 16);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let style = StrokeStyle { shape: Some(0), ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0) };
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(8.5, 8.5), radius, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        pixel(&layer, 16, 8, 8)[3]
+    };
+    let (under, over) = (middle(0.3), middle(0.6));
+    assert!(over > 100 && u32::from(under) * 10 > u32::from(over) * 8, "{under} {over}");
+}
+
+#[test]
+fn burnt_edges_burn_the_paint_wet_paint_goes_over_and_nothing_else() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // blue pooled to 0.78 over red, or over nothing: burnt by multiply, it goes darker where it is
+    // thin over the red, and the same over nothing
+    let shown = |burnt_edges: f32, over_red: bool| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        if over_red {
+            canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0));
+            canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 24.0, 1.0)]);
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+        }
+        let style = StrokeStyle {
+            wet_pull: Some(0.5),
+            rendering: Rendering::Gradual,
+            wet_edges: 1.0,
+            burnt_edges,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 1.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        pixel(&layer, 64, 32, 32)
+    };
+    let (plain, burnt) = (shown(0.0, true), shown(1.0, true));
+    assert!(plain[2].abs_diff(200) < 8 && burnt[2].abs_diff(156) < 8, "{plain:?} {burnt:?}");
+    assert!(plain[0].abs_diff(burnt[0]) < 4, "{plain:?} {burnt:?}");
+    let (bare, bare_burnt) = (shown(0.0, false), shown(1.0, false));
+    assert!(bare.iter().zip(bare_burnt).all(|(a, b)| a.abs_diff(b) < 3), "{bare:?} {bare_burnt:?}");
+}
+
+#[test]
+fn paint_laid_in_place_turns_a_mirrored_stamp_s_shape() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // a shape with its ink on the left half only: mirrored, the ink is on the right, wet or dry
+    for wet_pull in [Some(0.5), None] {
+        let shown = |flip: [bool; 2]| {
+            let mut doc = Document::new(64, 64);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            let pixels: Vec<u8> = (0..TEXTURE_SIZE * TEXTURE_SIZE)
+                .map(|i| if i % TEXTURE_SIZE < TEXTURE_SIZE / 2 { 255 } else { 0 })
+                .collect();
+            let brush = Brush {
+                shape: procraft_engine::brush::Shape {
+                    source: procraft_engine::brush::Source::new(pixels),
+                    ..Brush::round_pen().shape
+                },
+                ..Brush::round_pen()
+            };
+            let mut style = StrokeStyle {
+                wet_pull,
+                laid_in_place: wet_pull.is_none(),
+                rendering: Rendering::Gradual,
+                ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+            };
+            canvas.use_sources(&gpu, &mut style, &brush);
+            canvas.begin_stroke(doc.current(), style);
+            canvas.add_stamps(&[Stamp { flip, ..Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0) }]);
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+            (pixel(&layer, 64, 22, 32)[3], pixel(&layer, 64, 42, 32)[3])
+        };
+        let (plain, mirrored) = (shown([false, false]), shown([true, false]));
+        assert!(plain.0 > 200 && plain.1 < 40, "{wet_pull:?}: {plain:?}");
+        assert!(mirrored.1 > 200 && mirrored.0 < 40, "{wet_pull:?}: {mirrored:?}");
+    }
 }
 
 #[test]

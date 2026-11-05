@@ -956,6 +956,9 @@ fn smudge_uniform(
             (true, true) => 2,
         },
         grain_side: style.grain_side,
+        burnt: if style.preview { 0.0 } else { style.burnt_edges },
+        burnt_blend: style.burnt_blend,
+        flip: s.flip,
     }
 }
 
@@ -1043,6 +1046,11 @@ struct SmudgeUniform {
     luminance: u32,
     /// Pixels a side of the image the grain is read from.
     grain_side: f32,
+    /// How far paint laid apart burns the paint it goes over, and by what blend mode.
+    burnt: f32,
+    burnt_blend: u32,
+    /// −1 where the stamp's shape is mirrored on that axis, else 1.
+    flip: [f32; 2],
 }
 
 /// The coarsest mip level of our brush images (256 texels a side) a small stamp reads its shape
@@ -4409,11 +4417,11 @@ impl Canvas {
             let Some(layer) = self.layers.get(&target) else { return };
             let wet_paint = style.paints_in_place();
             let layer_bytes = u64::from(row) * u64::from(self.height);
-            // paint laid in place with a second, a texturized grain or wet edges is laid apart,
-            // and put together with them
+            // paint laid in place with a second, a texturized grain, wet or burnt edges is laid
+            // apart, and put together with them
             let second = self.queued_second.map(|d| (d.mode + 1, d.threshold));
             let apart = second
-                .or((grain_once(style) || style.wet_edges > 0.0).then_some((0, -1.0)))
+                .or((grain_once(style) || style.wet_edges > 0.0 || style.burnt_edges > 0.0).then_some((0, -1.0)))
                 .filter(|_| wet_paint)
                 .map(|(mode, threshold)| (*style, mode, threshold));
             // and keeps the stroke as it was laid, each stamp's colour in it (and wet paint to go on

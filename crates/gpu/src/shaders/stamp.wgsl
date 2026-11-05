@@ -205,10 +205,8 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
     if (i.look.w > 0.0) {
         a = a * (1.0 - i.look.w * clamp(0.5 - 0.5 * i.q.x, 0.0, 1.0));
     }
-    // a stamp smaller than a pixel covers only part of it
-    let small = min(r * 2.0, 1.0);
     // paint keeps inside the selection
     let inside_selection = textureSampleLevel(selected, shape_smp, i.pos.xy / su.canvas_size, 0.0).r;
-    a = a * small * small * i.alpha * inside_selection;
+    a = a * i.alpha * inside_selection;
     return vec4<f32>(i.color * a, a);
 }

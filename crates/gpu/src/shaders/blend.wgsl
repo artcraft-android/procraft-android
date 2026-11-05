@@ -202,3 +202,27 @@ fn dual_rise(x: f32, built: f32, mode: u32) -> f32 {
     }
     return built + min(built / GRAIN_RISE_FULL, 1.0) * (x - built);
 }
+
+fn unpremultiply(c: vec4<f32>) -> vec3<f32> {
+    if (c.a <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    return clamp(c.rgb / c.a, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// source `s` over backdrop `b` (both premultiplied) with blend function `mode`
+fn blend(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
+    // shade: the darker of the backdrop and the source laid over it, premultiplied and alpha too
+    if (mode == 26u) {
+        return min(b, s + b * (1.0 - s.a));
+    }
+    // behind (a brush's): the source laid under the backdrop
+    if (mode == 29u) {
+        return b + s * (1.0 - b.a);
+    }
+    let cb = unpremultiply(b);
+    let cs = unpremultiply(s);
+    let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(1.0));
+    let rgb = s.a * (1.0 - b.a) * cs + s.a * b.a * mixed + (1.0 - s.a) * b.rgb;
+    return vec4<f32>(rgb, s.a + b.a * (1.0 - s.a));
+}

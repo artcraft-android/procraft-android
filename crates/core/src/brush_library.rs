@@ -1018,6 +1018,13 @@ impl CanvasSession {
         if loaded && let Ok(choices) = std::fs::read_to_string(dir.join(CHOICES_FILE)) {
             self.load_brush_choices(choices);
         }
+        if loaded {
+            // only with the library back can it be told which grains' files nothing uses any more
+            let st = self.shared.lock();
+            let used =
+                st.library.iter().flat_map(|set| &set.brushes).filter_map(|b| b.grain_file.as_ref()?.full.as_ref());
+            st.grain_store.forget_all_but(&used.map(|g| g.id).collect());
+        }
         loaded
     }
 

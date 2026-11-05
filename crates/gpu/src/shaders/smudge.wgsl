@@ -94,6 +94,12 @@ struct SmudgeStamp {
     luminance: u32,
     // pixels a side of the image the grain is read from
     grain_side: f32,
+    // how far paint laid apart burns the paint it goes over, and by what blend mode
+    burnt: f32,
+    burnt_blend: u32,
+    // -1 where the stamp's shape is mirrored on that axis, else 1
+    flip_x: f32,
+    flip_y: f32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -263,7 +269,7 @@ fn mask(t: vec2<f32>) -> f32 {
         return min(rim, soft);
     }
     // the shape fills the stamp and half a pixel round it, as a brush stamp's does
-    let uv = t * (st.radius / (st.radius + 0.5)) * 0.5 + 0.5;
+    let uv = t * vec2<f32>(st.flip_x, st.flip_y) * (st.radius / (st.radius + 0.5)) * 0.5 + 0.5;
     if (st.shape_sharp > 0.5) {
         // unfiltered: the texel under it
         let size = vec2<i32>(textureDimensions(shapes));
@@ -431,7 +437,16 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     if (st.laid_apart == 2u && laid > 0.0) {
         // what a second adds past that is laid as plain paint, as it is where none was laid at all
         let scale = min(a / laid, LAID_MOST_SCALE);
-        let kept = over_layer(was, unpack4x8unorm(grained[k]), scale);
+        var kept = over_layer(was, unpack4x8unorm(grained[k]), scale);
+        if (st.burnt > 0.0) {
+            // burnt edges show where the stroke is thin: where its grain or its second took paint
+            // away, or without either wherever it is less than full. The paint itself, blended
+            // once more with what was under it (nothing shows where the layer was empty)
+            let full = select(1.0, laid, st.grain_once > 0.5 || st.dual != 0u);
+            let own = clamp(was + (unpack4x8unorm(grained[k]) - was) / laid, vec4<f32>(0.0), vec4<f32>(1.0));
+            let burnt = vec4<f32>(unpremultiply(blend(was, own, st.burnt_blend)) * own.a, own.a);
+            kept = mix(was, mix(own, burnt, clamp(st.burnt * abs(full - a), 0.0, 1.0)), laid * scale);
+        }
         out = mix(kept, vec4<f32>(st.paint.rgb, 1.0), max(a - laid * scale, 0.0));
     }
     if (st.preserve_alpha == 1u) {
