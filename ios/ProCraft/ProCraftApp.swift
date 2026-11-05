@@ -78,6 +78,8 @@ enum ScreenCapture {
     static var colorsShows: String?
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
+    /// What opens over the QuickMenu.
+    static var quickShows: String?
 
     /// The studio's pages, by capture.
     private static let pages: [String: Int] = [
@@ -191,6 +193,17 @@ enum ScreenCapture {
         case "source-landscape":
             sideways = true
             source(model, .grain)
+        case "quick-menu":
+            model.toggleQuickMenu(at: CGPoint(x: 372, y: 500))
+        case "quick-menus":
+            quickShows = "menus"
+            model.toggleQuickMenu(at: CGPoint(x: 372, y: 500))
+        case "quick-picker":
+            quickShows = "picker"
+            model.toggleQuickMenu(at: CGPoint(x: 372, y: 500))
+        case "copy-paste":
+            model.copyLayer()
+            model.copyPasteOpen = true
         case "liquify":
             model.startAdjustment(.liquify)
         case "liquify-mode":

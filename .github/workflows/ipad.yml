@@ -100,7 +100,8 @@ jobs:
           colours="colors-classic colors-harmony colors-harmony-menu colors-value colors-hex colors-palettes colors-add colors-palette-menu colors-background"
           settings="prefs prefs-cursor prefs-pressure gestures gestures-hover gestures-general"
           adjusting="liquify liquify-mode liquify-twirl adjust-menu"
-          for screen in gallery canvas brushes layers colors actions adjustments $studio $over $source $library $layers $colours $settings $adjusting; do
+          quick="quick-menu quick-menus quick-picker copy-paste"
+          for screen in gallery canvas brushes layers colors actions adjustments $studio $over $source $library $layers $colours $settings $adjusting $quick; do
             xcrun simctl launch --terminate-running-process "$device" io.github.artcraftandroid.procraft -screen "$screen"
             sleep 10
             xcrun simctl io "$device" screenshot "screens/$screen.png"

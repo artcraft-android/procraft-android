@@ -68,6 +68,10 @@ struct CanvasScreen: View {
                 if model.adjusting, !hidden {
                     AdjustmentMenu(model: model, screen: screen.size)
                 }
+                if model.copyPasteOpen {
+                    CopyPastePanel(model: model, screen: screen.size)
+                }
+                QuickMenuView(model: model, screen: screen.size)
                 if let choice = model.layerChoice {
                     LayerChoiceList(model: model, choice: choice, screen: screen.size)
                 }
@@ -340,6 +344,10 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 canvas.showCursor(at: nil, hovering: false)
             case .textLayer:
                 model.askRasterize = true
+            case .copyPaste:
+                model.copyPasteOpen = true
+            case let .quickMenu(x, y):
+                model.toggleQuickMenu(at: CGPoint(x: CGFloat(x) / model.pixels, y: CGFloat(y) / model.pixels))
             case .adjustChanged:
                 model.readAdjust()
             case let .adjustMenu(x, y):

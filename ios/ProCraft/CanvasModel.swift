@@ -146,6 +146,10 @@ final class CanvasModel {
     // the modes the top bar's buttons open (each still to come on the iPad)
     private(set) var transforming = false
     private(set) var selecting = false
+    /// The QuickMenu, open around this window point (in points); the Copy & Paste panel.
+    var quickMenuAt: CGPoint?
+    var copyPasteOpen = false
+
     /// The adjustment open, its values as the core has them, the menu a tap on the canvas opened
     /// during it (where, in points), and liquify's list (1) or adjust slider (2).
     private(set) var adjustment: Adjustment?
@@ -977,17 +981,31 @@ final class CanvasModel {
     // MARK: Actions
 
     func cutLayer() {
-        if let cut = session.cutLayer() {
+        guard currentTakesChanges() else {
+            closePanels()
+            return
+        }
+        let cut = session.cutLayer()
+        if let cut {
             clipboard = cut
             canPaste = true
         }
+        closePanels()
         refresh()
+        if cut != nil {
+            showNotice("Layer cut")
+        }
     }
 
     func copyLayer() {
-        if let copied = session.copyLayer() {
+        let copied = session.copyLayer()
+        if let copied {
             clipboard = copied
             canPaste = true
+        }
+        closePanels()
+        if copied != nil {
+            showNotice("Layer copied")
         }
     }
 
@@ -999,16 +1017,47 @@ final class CanvasModel {
     }
 
     func copyCanvas() {
-        if let copied = session.copyCanvas() {
-            clipboard = copied
-            canPaste = true
+        closePanels()
+        let session = session
+        // off the main thread: the picture waits for the canvas to finish any remaking first
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let copied = session.copyCanvas()
+            DispatchQueue.main.async {
+                guard let self, let copied else { return }
+                clipboard = copied
+                canPaste = true
+                showNotice("Canvas copied")
+            }
         }
     }
 
     func paste() {
         guard let image = clipboard else { return }
-        _ = session.paste(image: image)
+        if session.paste(image: image) == nil {
+            noRoomForLayers()
+        }
+        closePanels()
         refresh()
+    }
+
+    /// Cut & Paste: what is selected (or the layer) cut out and put back as a new layer.
+    func cutAndPaste() {
+        guard currentTakesChanges() else {
+            closePanels()
+            return
+        }
+        cutLayer()
+        paste()
+    }
+
+    /// Duplicate: the selection copied to a new layer, or without one the current layer.
+    func duplicateCurrent() {
+        if session.hasSelection() {
+            copyLayer()
+            paste()
+        } else if let l = layers.first(where: { $0.current }) {
+            duplicate(l)
+        }
     }
 
     func flipCanvas(horizontal: Bool) {
@@ -1274,6 +1323,12 @@ final class CanvasModel {
     /// Fits the canvas to the window again; what is over it follows the view as it settles.
     func settleToFit() {
         session.settleToFit()
+        followView()
+    }
+
+    /// One canvas pixel to a screen pixel; what is over it follows the view as it settles.
+    func settleToActualSize() {
+        session.settleToActualSize()
         followView()
     }
 
