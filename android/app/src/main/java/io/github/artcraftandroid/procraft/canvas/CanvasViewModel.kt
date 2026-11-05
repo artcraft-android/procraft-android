@@ -93,6 +93,14 @@ private const val TAG = "ProCraft"
 /** [CanvasViewModel.shownSet] while the library shows the Recent set. */
 const val RECENT_SET = -1
 
+/** Where the set at place [set] is once the set at [from] has moved to place [to]. */
+internal fun placeAfterSetMove(set: Int, from: Int, to: Int): Int = when (set) {
+    from -> to
+    in (from + 1)..to -> set - 1
+    in to until from -> set + 1
+    else -> set
+}
+
 enum class Panel { NONE, LAYERS, COLOR, BRUSHES, ACTIONS, ADJUSTMENTS }
 
 /** The eyedropper while it is open: the window point (pixels), what is shown around it, the colour it would pick. */
@@ -796,6 +804,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** A brush found from the Recent set ("set-index"), which its own set scrolls to. */
     var foundBrush by mutableStateOf<String?>(null)
     val previews = mutableStateMapOf<String, ImageBitmap>()
+
+    /** Counts the library's changes: a sample stroke asked for before the last one isn't kept. */
+    var previewRound by androidx.compose.runtime.mutableIntStateOf(0)
+        private set
 
     /** Previews whose stroke runs under the brush's name: the name then sits on a dark pill. */
     val shadedNames = mutableStateMapOf<String, Boolean>()
@@ -3755,8 +3767,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** After a change to the library: read it again, keep it, and draw previews again (they go by place). */
     private fun libraryChanged() {
         val s = session ?: return
-        // picks go by place, which may hold another brush now
+        // picks go by place, which may hold another brush now, and so do sample strokes being drawn
         pickedBrushes.clear()
+        previewRound++
         brushSets = s.brushLibrary()
         currentBrush = s.currentBrush()
         readSetChoices()
@@ -3852,16 +3865,25 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (session?.setBrushSetIcon(i.toUInt(), icon.toUInt()) == true) libraryChanged()
     }
 
-    /** Moves set [from] to place [to] (a set held and dragged onto another); the shown set stays shown. */
+    /**
+     * Moves set [from] to place [to] (a set held and dragged onto another); the shown set stays
+     * shown, and what is held by place goes with its set.
+     */
     fun moveBrushSet(from: Int, to: Int) {
         if (from == to || session?.moveBrushSet(from.toUInt(), to.toUInt()) != true) return
-        shownSet = when {
-            shownSet == from -> to
-            shownSet in (from + 1)..to -> shownSet - 1
-            shownSet in to until from -> shownSet + 1
-            else -> shownSet
-        }
+        // past the end is the last place, as the core takes it
+        val at = to.coerceAtMost(brushSets.lastIndex)
+        val moved = { set: Int -> placeAfterSetMove(set, from, at) }
+        if (shownSet != RECENT_SET) shownSet = moved(shownSet)
+        lastBrush = lastBrush?.let { (set, index) -> moved(set.toInt()).toUInt() to index }
+        swipedBrush = null
+        // no brush changed: their sample strokes go with their sets, not drawn again
+        val place = { key: String -> key.substringBefore('-').toIntOrNull()?.let { "${moved(it)}-${key.substringAfter('-')}" } ?: key }
+        val strokes = previews.mapKeys { place(it.key) }
+        val shaded = shadedNames.mapKeys { place(it.key) }
         libraryChanged()
+        previews.putAll(strokes)
+        shadedNames.putAll(shaded)
     }
 
     fun duplicateBrushSet(i: Int) {
@@ -4532,6 +4554,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val key = "${b.set}-${b.index}"
         if (previews.containsKey(key)) return
         val s = session ?: return
+        val round = previewRound
         viewModelScope.launch {
             val made = withContext(Dispatchers.Default) {
                 // half the sample stroke's own canvas: the cell shows it across its width
@@ -4551,7 +4574,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(t.rgba))
                 bitmap.asImageBitmap() to under
             }
-            if (made != null) {
+            if (made != null && round == previewRound) {
                 shadedNames[key] = made.second
                 previews[key] = made.first
             }
@@ -4583,11 +4606,22 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         keepBrushLibrary(s)
     }
 
-    /** Keeps the library as it is now, with the brushes in use, in its folder, off the main thread. */
+    /** The session whose library a write yet to start will keep. */
+    private val libraryKeepWaiting = java.util.concurrent.atomic.AtomicReference<CanvasSession?>(null)
+
+    /**
+     * Keeps the library as it is now, with the brushes in use, in its folder, off the main thread.
+     * Each write takes the library as it is when it runs, so one waiting already covers this
+     * change: a run of them (sets dragged about) costs two writes of a large library, not one each,
+     * and every write holds the core for as long as it reads the library.
+     */
     private fun keepBrushLibrary(s: CanvasSession) {
+        if (libraryKeepWaiting.getAndSet(s) === s) return
         viewModelScope.launch(Dispatchers.IO) {
-            // each write takes the library as it is when it runs, so the last one is the latest
-            val kept = brushLibraryWrites.withLock { runCatching { s.keepBrushes(brushesDir.path) }.getOrDefault(false) }
+            val kept = brushLibraryWrites.withLock {
+                libraryKeepWaiting.compareAndSet(s, null)
+                runCatching { s.keepBrushes(brushesDir.path) }.getOrDefault(false)
+            }
             libraryKept(kept)
         }
     }

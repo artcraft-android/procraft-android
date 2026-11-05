@@ -210,7 +210,7 @@ private fun SearchResults(vm: CanvasViewModel, query: String) {
         items(found, key = { "${it.set}-${it.index}" }) { b ->
             val key = "${b.set}-${b.index}"
             val preview = vm.previews[key]
-            LaunchedEffect(key, preview == null) { if (preview == null) vm.loadPreview(b) }
+            LaunchedEffect(key, preview == null, vm.previewRound) { if (preview == null) vm.loadPreview(b) }
             val selected = vm.highlighted(b)
             Box(
                 Modifier.fillMaxWidth().height(81.dp).clip(RoundedCornerShape(12.dp))
@@ -245,6 +245,7 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
+    val focus = androidx.compose.ui.platform.LocalFocusManager.current
     var adding by remember { mutableStateOf(false) }
     var setMenu by remember { mutableStateOf<Int?>(null) }
     var recentMenu by remember { mutableStateOf(false) }
@@ -413,6 +414,8 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 }
                 itemsIndexed(sets) { i, set ->
                     val selected = i == vm.shownSet
+                    // gone from the list, it is nowhere: where it last was may be under another row
+                    androidx.compose.runtime.DisposableEffect(i) { onDispose { setBounds.remove(i) } }
                     Box {
                         Row(
                             Modifier.fillMaxWidth().height(50.dp).onGloballyPositioned {
@@ -425,6 +428,7 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                                     detectDragGesturesAfterLongPress(
                                         onDragStart = { at ->
                                             setMenu = null
+                                            focus.clearFocus()
                                             grab = at
                                             dragAt = (setBounds[i]?.topLeft ?: Offset.Zero) + at
                                             draggedSet = i
@@ -559,7 +563,9 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                         val picked = key in vm.pickedBrushes
                         // previews go by place, and are dropped when the library changes
                         val preview = vm.previews[key]
-                        LaunchedEffect(key, preview == null) { if (preview == null) vm.loadPreview(b) }
+                        LaunchedEffect(key, preview == null, vm.previewRound) { if (preview == null) vm.loadPreview(b) }
+                        // gone from the list, it is nowhere: where it last was may be under another row
+                        androidx.compose.runtime.DisposableEffect(key) { onDispose { brushBounds.remove(key) } }
                         Box(Modifier.animateItem(Motion.rowFade(), Motion.rowMove(), Motion.rowFade())) {
                             SwipeBrush(
                                 open = vm.swipedBrush == key,
