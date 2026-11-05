@@ -56,6 +56,7 @@ mod sound;
 mod source_editor;
 mod startup;
 mod studio;
+mod system_clipboard;
 mod text;
 mod timelapse;
 mod tool_header;

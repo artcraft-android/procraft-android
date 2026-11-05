@@ -23,6 +23,7 @@ use crate::layers::Layers;
 use crate::library::Library;
 use crate::look::{Look, argb, pc};
 use crate::overlays::{Overlays, snapped_to};
+use crate::system_clipboard::{Pasted, SystemClipboard};
 
 const POPOVER_FILL: Color32 = Color32::from_rgb(0x28, 0x2a, 0x2d);
 /// A tool button held this long (seconds), as a long press, takes the current brush.
@@ -30,6 +31,12 @@ const TOOL_HOLD_S: f64 = 0.4;
 /// The pictures and the videos Insert a file and Insert a photo take (and a drop on the canvas).
 const PICTURES: [&str; 8] = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
 const VIDEOS: [&str; 6] = ["mp4", "m4v", "mov", "wmv", "avi", "mkv"];
+
+/// Whether `path` is named as a picture is.
+fn is_picture(path: &std::path::Path) -> bool {
+    let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    PICTURES.contains(&extension.as_str())
+}
 /// A video's frames come in at the animation's frame rate, or this one; this many at most.
 const VIDEO_FPS: u32 = 15;
 const MOST_VIDEO_FRAMES: u32 = 999;
@@ -85,6 +92,10 @@ pub struct Interface {
     bars_hidden: bool,
     /// A layer copied or cut, to paste.
     clipboard: Option<procraft_core::ThumbnailImage>,
+    /// What other apps copied, which Paste takes once it is the newer.
+    system_clipboard: SystemClipboard,
+    /// Paste's button shows, the window in front (it is looked at again as that begins).
+    paste_shown: bool,
     /// The Copy & Paste panel is up.
     copy_paste: bool,
     /// Layer Select's list: where (points) and the layers drawn there, top first.
@@ -193,6 +204,8 @@ impl Default for Interface {
             overlays: Overlays::default(),
             bars_hidden: false,
             clipboard: None,
+            system_clipboard: SystemClipboard::new(is_picture),
+            paste_shown: false,
             copy_paste: false,
             layer_choice: None,
             actions_panel: Actions::default(),
@@ -397,7 +410,13 @@ impl Interface {
         self.colours.follow_mask(session, on_mask);
         // the eyedropper picks from the current layer or the canvas, as the preferences say
         session.set_eyedropper_from_layer(self.prefs.eyedropper_layer);
-        if self.inserted(session) || brushes_coming {
+        let paste_shown = (self.open == Some(Popover::Actions) || self.copy_paste) && ctx.input(|i| i.focused);
+        if paste_shown && !self.paste_shown {
+            self.system_clipboard.offer();
+        }
+        self.paste_shown = paste_shown;
+        let pasting = self.pasted(session);
+        if self.inserted(session) || brushes_coming || pasting {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         // the pen's barrel buttons: what Gesture controls set Pen button and Pen second button to
@@ -1323,7 +1342,7 @@ impl Interface {
             QuickAction::Copy => self.copy_layer(session),
             QuickAction::CopyCanvas => self.copy_canvas(session),
             QuickAction::Cut => self.cut_layer(session),
-            QuickAction::Paste => self.paste(session),
+            QuickAction::Paste => self.paste(ctx, false),
             QuickAction::CopyPasteMenu => self.copy_paste = true,
             QuickAction::FlipHorizontal => session.flip_canvas(true),
             QuickAction::FlipVertical => session.flip_canvas(false),
@@ -1567,7 +1586,8 @@ impl Interface {
         if !self.copy_paste {
             return;
         }
-        let Some(choice) = crate::copy_paste::show(ctx, &mut self.look, self.clipboard.is_some()) else { return };
+        let can_paste = self.can_paste();
+        let Some(choice) = crate::copy_paste::show(ctx, &mut self.look, can_paste) else { return };
         self.copy_paste = false;
         match choice {
             Choice::Close => {}
@@ -1577,9 +1597,9 @@ impl Interface {
             Choice::Duplicate => self.duplicate_current(session),
             Choice::CutAndPaste => {
                 self.cut_layer(session);
-                self.paste(session);
+                self.paste_own(session, false);
             }
-            Choice::Paste => self.paste(session),
+            Choice::Paste => self.paste(ctx, false),
         }
     }
 
@@ -1591,6 +1611,7 @@ impl Interface {
         }
         if let Some(cut) = session.cut_layer() {
             self.clipboard = Some(cut);
+            self.system_clipboard.copied_here();
             self.overlays.notice("Layer cut", false);
         }
     }
@@ -1600,6 +1621,7 @@ impl Interface {
         self.open = None;
         if let Some(copied) = session.copy_layer() {
             self.clipboard = Some(copied);
+            self.system_clipboard.copied_here();
             self.overlays.notice("Layer copied", false);
         }
     }
@@ -1609,25 +1631,49 @@ impl Interface {
         self.open = None;
         if let Some(copied) = session.copy_canvas() {
             self.clipboard = Some(copied);
+            self.system_clipboard.copied_here();
             self.overlays.notice("Canvas copied", false);
         }
     }
 
-    /// What was copied or cut, pasted as a new layer.
-    fn paste(&mut self, session: &CanvasSession) {
-        self.open = None;
-        let Some(image) = self.clipboard.clone() else { return };
-        if session.paste(image).is_none() {
-            crate::files::no_room(session);
-        }
+    /// Whether there is anything for Paste to take, as far as is known.
+    fn can_paste(&self) -> bool {
+        self.clipboard.is_some() || self.system_clipboard.offers
     }
 
-    /// What was copied or cut, pasted as a new private layer (one the gallery's thumbnail leaves
-    /// out).
-    fn paste_private(&mut self, session: &CanvasSession) {
+    /// Paste (on a new private layer, one the gallery's thumbnail leaves out, if `private`): what
+    /// was copied last, here or in another app. The system's clipboard is read first, so what
+    /// comes of it comes on a later frame (`pasted`).
+    fn paste(&mut self, ctx: &egui::Context, private: bool) {
+        self.open = None;
+        self.system_clipboard.paste(private);
+        ctx.request_repaint();
+    }
+
+    /// What Paste found on the system's clipboard, once it has: another app's picture comes in as
+    /// an inserted one does, ready to transform. True while a look at it is under way.
+    fn pasted(&mut self, session: &Arc<CanvasSession>) -> bool {
+        match self.system_clipboard.take_pasted() {
+            Some(Pasted::Own { private }) => self.paste_own(session, private),
+            Some(Pasted::Picture { image, private }) => {
+                if session.insert_image(image, private).is_some() {
+                    self.toggle_transform(session);
+                } else {
+                    crate::files::no_room(session);
+                }
+            }
+            Some(Pasted::Files { paths, private }) => self.insert_files(session, paths, private),
+            None => {}
+        }
+        self.system_clipboard.busy()
+    }
+
+    /// What was copied or cut here, pasted as a new layer (a private one, if `private`).
+    fn paste_own(&mut self, session: &CanvasSession, private: bool) {
         self.open = None;
         let Some(image) = self.clipboard.clone() else { return };
-        if session.paste_private(image).is_none() {
+        let pasted = if private { session.paste_private(image) } else { session.paste(image) };
+        if pasted.is_none() {
             crate::files::no_room(session);
         }
     }
@@ -1636,7 +1682,7 @@ impl Interface {
     fn duplicate_current(&mut self, session: &CanvasSession) {
         if session.has_selection() {
             self.copy_layer(session);
-            self.paste(session);
+            self.paste_own(session, false);
         } else if let Some(current) = session.layers().into_iter().find(|l| l.current)
             && session.duplicate_layer(current.id).is_none()
         {
@@ -1865,7 +1911,10 @@ impl Interface {
                 if let Some((text, warning)) = self.layers.notice.take() {
                     self.overlays.notice(text, warning);
                 }
-                self.clipboard = self.layers.copied.take().or(self.clipboard.take());
+                if let Some(copied) = self.layers.copied.take() {
+                    self.clipboard = Some(copied);
+                    self.system_clipboard.copied_here();
+                }
                 if std::mem::take(&mut self.layers.share) {
                     self.actions.push(Action::Export(Format::ChosenLayerPngs, 100));
                 }
@@ -1901,7 +1950,7 @@ impl Interface {
             Popover::Actions => {
                 let assist = session.animation_settings();
                 let showing = crate::actions::Showing {
-                    can_paste: self.clipboard.is_some(),
+                    can_paste: self.can_paste(),
                     animation: assist.as_ref().is_some_and(|a| !a.pages),
                     pages: assist.as_ref().is_some_and(|a| a.pages),
                     time_lapse: self.time_lapse.recording(),
@@ -2010,8 +2059,8 @@ impl Interface {
                     Some(Act::Cut) => self.cut_layer(session),
                     Some(Act::Copy) => self.copy_layer(session),
                     Some(Act::CopyCanvas) => self.copy_canvas(session),
-                    Some(Act::Paste) => self.paste(session),
-                    Some(Act::PastePrivate) => self.paste_private(session),
+                    Some(Act::Paste) => self.paste(ctx, false),
+                    Some(Act::PastePrivate) => self.paste(ctx, true),
                     // the panel does these itself
                     Some(
                         Act::Page(_)
@@ -2152,7 +2201,7 @@ impl Interface {
             KeyShortcut::Redo => self.redo(session),
             KeyShortcut::CopyLayer => self.copy_layer(session),
             KeyShortcut::CutLayer => self.cut_layer(session),
-            KeyShortcut::Paste => self.paste(session),
+            KeyShortcut::Paste => self.paste(ctx, false),
             KeyShortcut::Paint => self.choose_tool(session, ToolKind::Paint),
             KeyShortcut::Erase => self.choose_tool(session, ToolKind::Erase),
             KeyShortcut::Eyedropper => session.set_pick_next(!session.pick_next()),
