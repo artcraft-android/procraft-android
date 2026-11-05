@@ -2048,10 +2048,11 @@ impl CanvasSession {
     }
 
     /// Whether fingers lifted, the last at `now`, were a tap: down together for no longer than a
-    /// tap takes, gone within that long of the first, and none moved away.
+    /// tap takes, and none moved away. It goes by the first lift: a finger left down after it
+    /// counts for nothing, as measured.
     fn fingers_tapped(t: &Touches, now: f64) -> bool {
         let lifted = t.tap_lifted.unwrap_or(now);
-        lifted - t.tap_start <= TAP_MS && now - lifted <= TAP_MS && t.tap_moved < FINGERS_TAP_SLOP * t.scale
+        lifted - t.tap_start <= TAP_MS && t.tap_moved < FINGERS_TAP_SLOP * t.scale
     }
 
     fn follow_fingers(t: &mut Touches) {
@@ -2296,8 +2297,8 @@ mod tests {
         assert!(wobbling_tap(&s, 0.0, 8.0, 80.0, 230.0, 340.0));
         // together longer than a tap is a hold, not a tap
         assert!(!wobbling_tap(&s, 0.0, 8.0, 30.0, 380.0, 400.0));
-        // one finger left down long after the other is no tap
-        assert!(!wobbling_tap(&s, 0.0, 8.0, 30.0, 150.0, 600.0));
+        // the first lift decides: one finger left down long after the other is a tap still
+        assert!(wobbling_tap(&s, 0.0, 8.0, 30.0, 150.0, 1000.0));
     }
 
     #[test]
