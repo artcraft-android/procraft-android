@@ -407,6 +407,8 @@ fn blend_key(mode: BlendMode) -> &'static [u8; 4] {
         BlendMode::Saturation => b"sat ",
         BlendMode::Color => b"colr",
         BlendMode::Luminosity => b"lum ",
+        // procreate has not "greater", "normal" is the nearest
+        BlendMode::Greater => b"norm",
     }
 }
 

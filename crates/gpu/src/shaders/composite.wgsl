@@ -275,7 +275,7 @@ fn unsquared(c: vec4<f32>) -> vec4<f32> {
 // the layer's)
 fn stroke_into(b: vec4<f32>, s: vec4<f32>) -> vec4<f32> {
     let mode = lu.stroke_blend & 255u;
-    if ((lu.stroke_blend & STROKE_LUMINANCE) == 0u || mode == 26u || mode == 29u || s.a <= 0.0) {
+    if ((lu.stroke_blend & STROKE_LUMINANCE) == 0u || mode == 26u || mode == 29u || mode == 30u || s.a <= 0.0) {
         return blend(b, s, mode);
     }
     let cb = unpremultiply(b);

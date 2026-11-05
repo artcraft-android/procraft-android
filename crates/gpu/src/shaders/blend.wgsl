@@ -220,6 +220,9 @@ fn blend(b: vec4<f32>, s: vec4<f32>, mode: u32) -> vec4<f32> {
     if (mode == 29u) {
         return b + s * (1.0 - b.a);
     }
+    if (mode == 30u) {
+      return select(b, s, s.a >= b.a);
+    }
     let cb = unpremultiply(b);
     let cs = unpremultiply(s);
     let mixed = clamp(blend_rgb(cb, cs, mode), vec3<f32>(0.0), vec3<f32>(1.0));
