@@ -11,6 +11,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.snapping.SnapPosition
 import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.layout.Arrangement
@@ -99,6 +100,9 @@ private val RowHeight = 69.dp
 /** A layer with a mask, and the mask, are a little shorter. */
 private val MaskedRowHeight = 65.dp
 private val RowGap = 1.dp
+/** A dragged row this near an end of the list scrolls it, at most this far a second. */
+private val DragEdge = 56.dp
+private val DragScroll = 480.dp
 private val ListCorner = 8.dp
 /** A group's row height, and how far in each level of group sits. */
 private val GroupHeight = 44.dp
@@ -159,6 +163,8 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
     val scope = rememberCoroutineScope()
     var dragId by remember { mutableStateOf<ULong?>(null) }
     var dragOffset by remember { mutableFloatStateOf(0f) }
+    // the rows that go with the dragged one (its mask, a group's layers)
+    var dragUnit by remember { mutableStateOf(emptySet<ULong>()) }
     // where each row is in the window: for dropping a dragged row and placing the options
     val rows = remember { mutableMapOf<ULong, Rect>() }
 
@@ -199,11 +205,36 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
         }
         lastIds[0] = ids
         var listAt by remember { mutableStateOf(Offset.Zero) }
+        val listBox = remember { arrayOf(Rect.Zero) }
+        // held near an end of the list it scrolls, faster the nearer, the row staying under the finger
+        val rowGap = with(LocalDensity.current) { RowGap.toPx() }
+        val dragEdge = with(LocalDensity.current) { DragEdge.toPx() }
+        val dragScroll = with(LocalDensity.current) { DragScroll.toPx() }
+        LaunchedEffect(dragId) {
+            val id = dragId ?: return@LaunchedEffect
+            var last = androidx.compose.runtime.withFrameNanos { it }
+            while (true) {
+                val now = androidx.compose.runtime.withFrameNanos { it }
+                val seconds = (now - last) / 1e9f
+                last = now
+                val y = (rows[id] ?: continue).center.y + dragOffset
+                val box = listBox[0]
+                val towards = when {
+                    y < box.top + dragEdge -> (y - box.top - dragEdge) / dragEdge
+                    y > box.bottom - dragEdge -> (y - box.bottom + dragEdge) / dragEdge
+                    else -> 0f
+                }.coerceIn(-1f, 1f)
+                if (towards != 0f) dragOffset += list.scrollBy(towards * dragScroll * seconds)
+            }
+        }
         // two rows being pinched, each following its finger part of the way
         var squeeze by remember { mutableStateOf<Squeeze?>(null) }
         LazyColumn(
             Modifier.weight(1f, fill = false).padding(horizontal = 12.dp)
-                .onGloballyPositioned { listAt = it.positionInWindow() }
+                .onGloballyPositioned {
+                    listAt = it.positionInWindow()
+                    listBox[0] = it.boundsInWindow()
+                }
                 // two rows pinched together merge with every layer between
                 .pinchRows({ listAt }, { y -> rows.entries.firstOrNull { y >= it.value.top && y <= it.value.bottom }?.key }, { squeeze = it }) { a, b ->
                     vm.mergeBetween(a, b)
@@ -216,13 +247,20 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
             val shown = vm.layers.filter { !vm.hidden(it) }
             // a layer's row: in the list, or on a model under its submesh, indented
             val layerItem: @Composable LazyItemScope.(Int, LayerInfo, Shape, Dp, String?) -> Unit = { index, l, shape, indent, subtitle ->
-                val dragging = dragId == l.id
+                val dragging = l.id in dragUnit
                 DisposableEffect(l.id) { onDispose { rows.remove(l.id) } }
+                // scrolled out of the list as it is dragged, the row stays, its gesture going on
+                val pinnable = androidx.compose.ui.layout.LocalPinnableContainer.current
+                val pinned = remember { arrayOfNulls<androidx.compose.ui.layout.PinnableContainer.PinnedHandle>(1) }
+                val aside by androidx.compose.animation.core.animateFloatAsState(
+                    remember(l.id) { androidx.compose.runtime.derivedStateOf { dragId?.let { makingWay(l.id, it, dragUnit, dragOffset, rows, rowGap) } ?: 0f } }.value,
+                    Motion.rowFade(),
+                )
                 Column(
                     Modifier.animateItem(Motion.rowFade(), if (dragging || blendAt >= 0) null else Motion.rowMove(), Motion.rowFade())
                         .onGloballyPositioned { rows[l.id] = it.boundsInWindow() }
                         .zIndex(if (dragging) 1f else squeeze?.above(l.id) ?: 0f).graphicsLayer {
-                            translationY = if (dragging) dragOffset else squeeze?.offset(l.id) ?: 0f
+                            translationY = if (dragging) dragOffset else (squeeze?.offset(l.id) ?: 0f) + aside
                             alpha = if (blendAt in 0 until index) belowShown else 1f
                         }
                         .twoFingers(
@@ -242,7 +280,9 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                                 onDragStart = {
                                     dragId = l.id
                                     dragOffset = 0f
+                                    dragUnit = vm.movingWith(l) + l.id
                                     swiped = null
+                                    pinned[0] = pinnable?.pin()
                                 },
                                 onDrag = { change, amount ->
                                     change.consume()
@@ -252,10 +292,16 @@ fun LayersPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) 
                                     rows[l.id]?.let { drop(vm, l, it.center.y + dragOffset, rows) }
                                     dragId = null
                                     dragOffset = 0f
+                                    dragUnit = emptySet()
+                                    pinned[0]?.release()
+                                    pinned[0] = null
                                 },
                                 onDragCancel = {
                                     dragId = null
                                     dragOffset = 0f
+                                    dragUnit = emptySet()
+                                    pinned[0]?.release()
+                                    pinned[0] = null
                                 },
                             )
                         },
@@ -457,6 +503,25 @@ private fun LayersTitleMenu(open: Boolean, vm: CanvasViewModel, onDismiss: () ->
 }
 
 /** Drops [l] where its row's middle came to rest: just above or below the row it is over. */
+/**
+ * How far row [id] stands aside while [dragged] (with the rest of [unit]) is dragged [offset] from
+ * its place: past the row's middle, the row takes the room the dragged rows left, so the gap shows
+ * where they will land.
+ */
+private fun makingWay(id: ULong, dragged: ULong, unit: Set<ULong>, offset: Float, rows: Map<ULong, Rect>, gap: Float): Float {
+    if (id in unit) return 0f
+    val row = rows[id] ?: return 0f
+    val y = (rows[dragged] ?: return 0f).center.y + offset
+    val moved = unit.mapNotNull { rows[it] }
+    val (top, bottom) = moved.minOf { it.top } to moved.maxOf { it.bottom }
+    val room = bottom - top + gap
+    return when {
+        row.bottom <= top && y < row.center.y -> room
+        row.top >= bottom && y > row.center.y -> -room
+        else -> 0f
+    }
+}
+
 private fun drop(vm: CanvasViewModel, l: LayerInfo, y: Float, rows: Map<ULong, Rect>) {
     val unit = vm.movingWith(l)
     val others = vm.layers.filter { it.id !in unit && !vm.hidden(it) }.mapNotNull { o -> rows[o.id]?.let { o to it } }
