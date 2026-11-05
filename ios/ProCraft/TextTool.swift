@@ -346,6 +346,8 @@ private struct TextInputHost: UIViewRepresentable {
 
     final class Coordinator: NSObject, UITextViewDelegate {
         let tool: TextTool
+        /// The field is being told what the tool holds: what it says back is its own doing.
+        var updating = false
 
         init(tool: TextTool) {
             self.tool = tool
@@ -356,7 +358,9 @@ private struct TextInputHost: UIViewRepresentable {
         }
 
         func textViewDidChangeSelection(_ view: UITextView) {
-            tool.selectionChanged(view.selectedRange)
+            if !updating {
+                tool.selectionChanged(view.selectedRange)
+            }
         }
 
         @objc func editStyle() {
@@ -395,12 +399,16 @@ private struct TextInputHost: UIViewRepresentable {
     }
 
     func updateUIView(_ view: UITextView, context: Context) {
+        // text set moves the selection to its end: new text stays all selected, for typing over
+        let selection = tool.selection
+        context.coordinator.updating = true
         if view.text != tool.field {
             view.text = tool.field
         }
-        if view.selectedRange != tool.selection {
-            view.selectedRange = tool.selection
+        if view.selectedRange != selection {
+            view.selectedRange = selection
         }
+        context.coordinator.updating = false
         let wanted = tool.keyboard && !tool.styleOpen
         DispatchQueue.main.async {
             if wanted, !view.isFirstResponder {
