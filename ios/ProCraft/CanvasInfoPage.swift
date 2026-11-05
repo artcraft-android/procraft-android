@@ -82,7 +82,7 @@ private struct Rows: View {
 
 /// Canvas information, full screen: a rail of pages (about the artwork, its dimensions, layers,
 /// colour profile, video and statistics), the artwork's name to edit as the title, Cancel and Done.
-struct CanvasInfo: View {
+struct CanvasInfoPage: View {
     let model: CanvasModel
     let screen: CGSize
 

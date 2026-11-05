@@ -177,7 +177,7 @@ struct CanvasScreen: View {
                     NoticeBand(model: model)
                 }
                 if model.canvasInfoOpen {
-                    CanvasInfo(model: model, screen: screen.size)
+                    CanvasInfoPage(model: model, screen: screen.size)
                         .transition(.move(edge: .bottom))
                 }
                 if model.gestureControlsOpen {
