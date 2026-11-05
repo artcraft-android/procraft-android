@@ -50,17 +50,6 @@ extension CanvasModel {
         refresh()
     }
 
-    /// Locks or unlocks `l`, saying so in the notice band as the core words it.
-    func toggleLocked(_ l: LayerInfo) {
-        let on = !l.locked
-        let said = session.lockSaid(id: l.id, on: on)
-        let done = session.setLayerLocked(id: l.id, on: on)
-        refresh()
-        if done {
-            showNotice(said)
-        }
-    }
-
     /// Layer `l` shown alone, or, already alone, every layer again; a message says which.
     func toggleSolo(_ l: LayerInfo) {
         let on = session.solo() != l.id
