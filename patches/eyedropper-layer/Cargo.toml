@@ -1,0 +1,19 @@
+[package]
+name = "eyedropper-layer"
+version = "1.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "A patch for ProCraft: the eyedropper picks from the current layer alone"
+
+[lib]
+crate-type = ["cdylib"]
+
+# Not a member of the app's workspace, and linked into nothing: it builds to a module of its own.
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true

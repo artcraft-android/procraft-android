@@ -5,6 +5,8 @@
 //! What a module exports, interface 1, in plain numbers:
 //! - `procraft_position(x: f32, y: f32) -> i64`: for the hook `position`, where a sample in window
 //!   pixels lands, x's bits in the low half and y's in the high.
+//! - `procraft_pick_layer() -> i32`: for the hook `pick_layer`, whether the eyedropper reads the
+//!   current layer (not 0) or the canvas as it is composited (0).
 //! - `procraft_control(index: i32, value: f32)`: a control's value (a switch is 0 or 1), by its
 //!   place in the manifest: each as the patch starts, then each as it changes. Needed if it has any.
 
@@ -31,23 +33,43 @@ const SAMPLE_FUEL: u64 = 100_000;
 const MOST_MOVE: f32 = 16_384.0;
 
 const POSITION: &str = "procraft_position";
+const PICK_LAYER: &str = "procraft_pick_layer";
 const CONTROL: &str = "procraft_control";
 
 /// What a patch may step into, by the name a manifest gives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Hook {
     Position,
+    PickLayer,
 }
 
 impl Hook {
     pub(crate) fn named(name: &str) -> Option<Hook> {
-        (name == "position").then_some(Hook::Position)
+        match name {
+            "position" => Some(Hook::Position),
+            "pick_layer" => Some(Hook::PickLayer),
+            _ => None,
+        }
     }
 
     /// What it lets a patch do, for the screen that asks whether to import one.
     pub(crate) fn sentence(self) -> &'static str {
         match self {
             Hook::Position => "This patch can change where your strokes land.",
+            Hook::PickLayer => "This patch can make the eyedropper read the current layer alone.",
+        }
+    }
+
+    /// It as a bit, in a set of hooks.
+    pub(crate) fn bit(self) -> u32 {
+        1 << self as u32
+    }
+
+    /// Whether `module` exports what this hook calls.
+    fn fits(self, module: &Module) -> bool {
+        match self {
+            Hook::Position => exports(module, POSITION, &[ValType::F32, ValType::F32], &[ValType::I64]),
+            Hook::PickLayer => exports(module, PICK_LAYER, &[], &[ValType::I32]),
         }
     }
 }
@@ -133,16 +155,16 @@ fn exports(module: &Module, name: &str, params: &[ValType], results: &[ValType])
     })
 }
 
-/// Whether `bytes` is a module a patch can be: valid, wanting nothing from outside, and exporting
-/// what it must (`controls`: it has some). Nothing in it runs.
-pub(crate) fn can_run(bytes: &[u8], controls: bool) -> bool {
+/// Whether `bytes` is a module a patch on `hooks` can be: valid, wanting nothing from outside, and
+/// exporting what it must (`controls`: it has some). Nothing in it runs.
+pub(crate) fn can_run(bytes: &[u8], hooks: &[Hook], controls: bool) -> bool {
     if bytes.len() > MOST_MODULE || !code_counts_hold(bytes) {
         return false;
     }
     let fits = guarded(|| {
         let module = Module::new(&engine(), bytes).map_err(|_| Stop::Damaged)?;
         Ok(module.imports().next().is_none()
-            && exports(&module, POSITION, &[ValType::F32, ValType::F32], &[ValType::I64])
+            && hooks.iter().all(|hook| hook.fits(&module))
             && (!controls || exports(&module, CONTROL, &[ValType::I32, ValType::F32], &[])))
     });
     fits.unwrap_or(false)
@@ -151,7 +173,8 @@ pub(crate) fn can_run(bytes: &[u8], controls: bool) -> bool {
 /// A patch's module, instantiated, with what it has of ours to call.
 pub(crate) struct Running {
     store: Store<StoreLimits>,
-    position: TypedFunc<(f32, f32), i64>,
+    position: Option<TypedFunc<(f32, f32), i64>>,
+    pick_layer: Option<TypedFunc<(), i32>>,
     control: Option<TypedFunc<(i32, f32), ()>>,
 }
 
@@ -174,9 +197,10 @@ impl Running {
             store.set_fuel(START_FUEL).map_err(|_| Stop::Damaged)?;
             let linker = Linker::new(&engine);
             let instance = linker.instantiate_and_start(&mut store, &module).map_err(|e| stop_of(&e))?;
-            let position = instance.get_typed_func(&store, POSITION).map_err(|_| Stop::Damaged)?;
+            let position = instance.get_typed_func(&store, POSITION).ok();
+            let pick_layer = instance.get_typed_func(&store, PICK_LAYER).ok();
             let control = instance.get_typed_func(&store, CONTROL).ok();
-            Ok(Running { store, position, control })
+            Ok(Running { store, position, pick_layer, control })
         })?;
         for (index, value) in controls.iter().enumerate() {
             running.control(index, *value)?;
@@ -194,9 +218,21 @@ impl Running {
         })
     }
 
+    /// Whether it says the eyedropper reads the current layer.
+    pub(crate) fn pick_layer(&mut self) -> Result<bool, Stop> {
+        let Running { store, pick_layer, .. } = self;
+        let Some(pick_layer) = pick_layer else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            pick_layer.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
     /// Where it says a sample at (x, y) lands.
     pub(crate) fn position(&mut self, x: f32, y: f32) -> Result<(f32, f32), Stop> {
         let Running { store, position, .. } = self;
+        let Some(position) = position else { return Ok((x, y)) };
         let packed = guarded(|| {
             store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
             position.call(&mut *store, (x, y)).map_err(|e| stop_of(&e))
@@ -240,7 +276,7 @@ pub(crate) mod tests {
     #[test]
     fn a_patch_moves_a_sample_by_what_its_controls_say() {
         let bytes = wat::parse_str(OFFSET).unwrap();
-        assert!(can_run(&bytes, true));
+        assert!(can_run(&bytes, &[Hook::Position], true));
         let mut running = Running::start(&bytes, &[3.0, -2.0]).unwrap();
         assert_eq!(running.position(10.0, 20.0), Ok((13.0, 18.0)));
         running.control(1, 5.0).unwrap();
@@ -254,7 +290,7 @@ pub(crate) mod tests {
                 r#"(module {import}
                     (func (export "procraft_position") (param f32 f32) (result i64) (i64.const 0)))"#
             );
-            can_run(&wat::parse_str(text).unwrap(), false)
+            can_run(&wat::parse_str(text).unwrap(), &[Hook::Position], false)
         };
         assert!(wants(""));
         assert!(!wants(r#"(import "wasi_snapshot_preview1" "fd_write" (func (param i32 i32 i32 i32) (result i32)))"#));
@@ -264,7 +300,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_module_must_export_what_it_is_called_by() {
-        let refused = |text: &str, controls| !can_run(&wat::parse_str(text).unwrap(), controls);
+        let refused = |text: &str, controls| !can_run(&wat::parse_str(text).unwrap(), &[Hook::Position], controls);
         assert!(refused("(module)", false));
         // not a function, or not the function it must be
         assert!(refused(r#"(module (memory (export "procraft_position") 1))"#, false));
@@ -284,13 +320,13 @@ pub(crate) mod tests {
 
     #[test]
     fn a_module_too_big_or_not_a_module_is_refused() {
-        assert!(!can_run(b"", false));
-        assert!(!can_run(b"\0asm", false));
-        assert!(!can_run(b"not a module at all", false));
+        assert!(!can_run(b"", &[Hook::Position], false));
+        assert!(!can_run(b"\0asm", &[Hook::Position], false));
+        assert!(!can_run(b"not a module at all", &[Hook::Position], false));
         let mut big = position_module("", "(i64.const 0)");
-        assert!(can_run(&big, false));
+        assert!(can_run(&big, &[Hook::Position], false));
         big.resize(MOST_MODULE + 1, 0);
-        assert!(!can_run(&big, false));
+        assert!(!can_run(&big, &[Hook::Position], false));
     }
 
     #[test]
@@ -298,9 +334,9 @@ pub(crate) mod tests {
         // the case that panicked the limits, with and without a second code section after it
         let crafted = [0, b'a', b's', b'm', 1, 0, 0, 0, 10, 3, 0, 0, 0];
         assert!(!code_counts_hold(&crafted));
-        assert!(!can_run(&crafted, false));
+        assert!(!can_run(&crafted, &[Hook::Position], false));
         let twice = [0, b'a', b's', b'm', 1, 0, 0, 0, 10, 1, 0, 10, 3, 0, 0, 0];
-        assert!(!can_run(&twice, false));
+        assert!(!can_run(&twice, &[Hook::Position], false));
         assert!(code_counts_hold(&position_module("", "(i64.const 0)")));
     }
 
@@ -322,12 +358,27 @@ pub(crate) mod tests {
             }
             bytes.truncate(bytes.len() - next() as usize % 8);
             // whatever it makes of it, and whatever it does if it still loads
-            if can_run(&bytes, true)
+            if can_run(&bytes, &[Hook::Position], true)
                 && let Ok(mut running) = Running::start(&bytes, &[1.0, 2.0])
             {
                 let _ = running.position(10.0, 20.0);
             }
         }
+    }
+
+    #[test]
+    fn a_hook_needs_its_export_and_a_module_answers_only_what_it_exports() {
+        let picks =
+            wat::parse_str(r#"(module (func (export "procraft_pick_layer") (result i32) (i32.const 7)))"#).unwrap();
+        assert!(can_run(&picks, &[Hook::PickLayer], false));
+        assert!(!can_run(&picks, &[Hook::Position], false));
+        assert!(!can_run(&picks, &[Hook::PickLayer, Hook::Position], false));
+        let mut running = started(&picks);
+        assert_eq!(running.pick_layer(), Ok(true));
+        // what it doesn't export goes on as it came
+        assert_eq!(running.position(1.0, 2.0), Ok((1.0, 2.0)));
+        let wrong = r#"(module (func (export "procraft_pick_layer") (param i32) (result i32) (i32.const 1)))"#;
+        assert!(!can_run(&wat::parse_str(wrong).unwrap(), &[Hook::PickLayer], false));
     }
 
     #[test]
@@ -370,7 +421,7 @@ pub(crate) mod tests {
         // as it starts, by what it declares
         let pages = MOST_MEMORY / 65536 + 1;
         let declared = position_module(&format!("(memory {pages})"), "(i64.const 0)");
-        assert!(can_run(&declared, false), "it can't be seen without running it");
+        assert!(can_run(&declared, &[Hook::Position], false), "it can't be seen without running it");
         assert_eq!(Running::start(&declared, &[]).err(), Some(Stop::Memory));
         // and as it runs, by what it grows to
         let grows = position_module("(memory 1)", &format!("(drop (memory.grow (i32.const {pages}))) (i64.const 0)"));

@@ -20,7 +20,33 @@ use crate::plugin_file::{self, Manifest, Refusal};
 const INTERFACE_SIZE: &str = "interface_size";
 const PASTE_INTO_MASK: &str = "paste_into_mask";
 const FILL_GAP: &str = "fill_gap";
-const EYEDROPPER_LAYER: &str = "eyedropper_layer";
+
+/// A setting the app used to have and a patch now brings: what it was kept under, as it started
+/// (a switch off is 0), and its name. Its value stays there for the patch, whose control says so.
+struct Moved {
+    key: &'static str,
+    starts: f32,
+    name: &'static str,
+}
+
+const MOVED: &[Moved] = &[Moved { key: "eyedropper_layer", starts: 0.0, name: "Eyedropper picks from layer" }];
+
+impl Moved {
+    /// Whether a value kept as `value` is one someone changed.
+    fn changed(&self, value: &str) -> bool {
+        let number = match value {
+            "true" => Some(1.0),
+            "false" => Some(0.0),
+            _ => value.parse::<f32>().ok(),
+        };
+        number.is_some_and(|number| number != self.starts)
+    }
+}
+
+/// Whether `key` is a setting the app used to have.
+pub(crate) fn moved(key: &str) -> bool {
+    MOVED.iter().any(|moved| moved.key == key)
+}
 
 /// What a plugin this app can't yet do anything with says.
 const NEEDS_NEWER: &str = "Needs a newer ProCraft";
@@ -117,6 +143,22 @@ impl PluginControl {
         match self {
             PluginControl::Switch { control } => &control.key,
             PluginControl::Slider { control } => &control.key,
+        }
+    }
+
+    /// Takes the value `text`, kept as [`Plugins::read_kept`] reads it, if it is its kind of value.
+    fn read(&mut self, text: &str) {
+        match self {
+            PluginControl::Switch { control } => {
+                if let Ok(on) = text.parse() {
+                    control.on = on;
+                }
+            }
+            PluginControl::Slider { control } => {
+                if let Some(read) = text.parse::<f32>().ok().filter(|v| v.is_finite()) {
+                    control.value = control.stepped(read);
+                }
+            }
         }
     }
 
@@ -273,12 +315,6 @@ fn extras() -> Vec<PluginInfo> {
             "Keeps ColorDrop from running out through gaps in your lines, up to this wide.",
             gap,
         ),
-        extra(
-            EYEDROPPER_LAYER,
-            "Eyedropper picks from layer",
-            "The eyedropper picks from the current layer alone, not the whole canvas.",
-            switch(EYEDROPPER_LAYER, "Pick from the current layer"),
-        ),
     ]
 }
 
@@ -315,6 +351,10 @@ fn can_do(manifest: &Manifest) -> String {
 struct Listed {
     bundled: Vec<PluginInfo>,
     files: Vec<PluginInfo>,
+    /// Moved settings read back with no patch yet to take them: key and value, kept as they are.
+    moved: Vec<(String, String)>,
+    /// The notice about them has been asked for: a start has one chance to say it.
+    notice_asked: bool,
 }
 
 impl Listed {
@@ -364,7 +404,7 @@ impl Plugins {
                 patch.problem = plugin_file::stopped_why(store, &patch.id);
             }
         }
-        let list = Listed { bundled: extras(), files };
+        let list = Listed { bundled: extras(), files, moved: Vec::new(), notice_asked: false };
         Arc::new(Plugins { list: Mutex::new(list), hooks: Arc::new(Hooks::kept_in(store.clone())), store })
     }
 
@@ -376,9 +416,11 @@ impl Plugins {
         }
         let values: Vec<f32> = patch.controls.iter().map(PluginControl::number).collect();
         let store = self.store.as_deref();
-        let module = store.and_then(|store| plugin_file::read_module(store, &patch.id, &patch.version));
-        match module.ok_or(Stop::Damaged).and_then(|bytes| Running::start(&bytes, &values)) {
-            Ok(running) => self.hooks.put_on(patch.id.clone(), running),
+        let code = store.and_then(|store| plugin_file::read_code(store, &patch.id, &patch.version));
+        let started =
+            code.ok_or(Stop::Damaged).and_then(|(hooks, bytes)| Ok((hooks, Running::start(&bytes, &values)?)));
+        match started {
+            Ok((hooks, running)) => self.hooks.put_on(patch.id.clone(), running, &hooks),
             Err(stop) => {
                 self.hooks.failed(&patch.id, stop);
                 patch.on = false;
@@ -420,7 +462,8 @@ impl Plugins {
         let list = self.listed();
         let every = list.bundled.iter().chain(&list.files);
         let values = every.flat_map(|p| &p.controls).map(|c| format!("{} {}", c.key(), c.kept()));
-        values.chain(list.files.iter().map(|p| format!("{} {}", p.on_key, p.on))).collect()
+        let flags = list.files.iter().map(|p| format!("{} {}", p.on_key, p.on));
+        values.chain(flags).chain(list.moved.iter().map(|(key, value)| format!("{key} {value}"))).collect()
     }
 
     /// Takes `bytes` in, as `install` says.
@@ -434,6 +477,13 @@ impl Plugins {
         let manifest = plugin_file::read_folder(&folder, id, version).ok_or(Refusal::NotKept)?;
         let mut fresh = from_file(manifest);
         let mut list = self.listed();
+        // a moved setting read back goes to the patch that takes it over
+        for control in &mut fresh.controls {
+            if let Some(at) = list.moved.iter().position(|(key, _)| key == control.key()) {
+                let (_, value) = list.moved.remove(at);
+                control.read(&value);
+            }
+        }
         match list.files.iter_mut().find(|p| p.id == fresh.id) {
             Some(old) => {
                 // an update keeps what was set, for what it still has
@@ -454,9 +504,14 @@ impl Plugins {
         Ok(())
     }
 
-    /// Whether what is here lets a plugin of `manifest` in: an older file doesn't replace a newer.
+    /// Whether what is here lets a plugin of `manifest` in: an older file doesn't replace a newer,
+    /// and a moved setting has one holder.
     fn can_take(&self, manifest: &Manifest) -> Result<(), Refusal> {
         let list = self.listed();
+        let others = || list.files.iter().filter(|p| p.id != manifest.id).flat_map(|p| &p.controls);
+        if manifest.controls.iter().any(|control| others().any(|other| other.key() == control.key())) {
+            return Err(Refusal::Clash);
+        }
         let kept = list.files.iter().find(|p| p.id == manifest.id);
         if kept.is_some_and(|k| plugin_file::version_is_older(&manifest.version, &k.version)) {
             return Err(Refusal::NewerInstalled);
@@ -502,20 +557,44 @@ impl Plugins {
             }
             return;
         }
-        let Some((plugin, at)) = list.control_mut(&key) else { return };
-        let Some(control) = plugin.controls.get_mut(at) else { return };
-        match control {
-            PluginControl::Switch { control } => {
-                if let Ok(on) = value.parse() {
-                    control.on = on;
-                }
+        if let Some((plugin, at)) = list.control_mut(&key) {
+            if let Some(control) = plugin.controls.get_mut(at) {
+                control.read(&value);
             }
-            PluginControl::Slider { control } => {
-                if let Some(read) = value.parse::<f32>().ok().filter(|v| v.is_finite()) {
-                    control.value = control.stepped(read);
-                }
-            }
+        } else if moved(&key) {
+            list.moved.retain(|(kept, _)| *kept != key);
+            list.moved.push((key, value));
         }
+    }
+
+    /// Words for someone who changed a setting that now comes as a patch, once: it is written down
+    /// that they were told. Their value stays where it was kept, for the patch to pick up.
+    pub fn take_moved_notice(&self) -> Option<String> {
+        let store = self.store.as_deref()?;
+        let mut list = self.listed();
+        if std::mem::replace(&mut list.notice_asked, true) {
+            return None;
+        }
+        let mut told = plugin_file::read_told(store);
+        let untold = MOVED.iter().filter(|moved| {
+            let changed = list.moved.iter().any(|(key, value)| key == moved.key && moved.changed(value));
+            changed && !told.iter().any(|key| key == moved.key)
+        });
+        let untold: Vec<&Moved> = untold.collect();
+        let (last, rest) = untold.split_last()?;
+        told.extend(untold.iter().map(|moved| moved.key.to_owned()));
+        plugin_file::note_told(store, &told);
+        if rest.is_empty() {
+            let name = last.name;
+            return Some(format!(
+                "{name} now comes as a patch. Your setting is kept: import the patch and it picks it up."
+            ));
+        }
+        let names = rest.iter().map(|moved| moved.name).collect::<Vec<_>>().join(", ");
+        let name = last.name;
+        Some(format!(
+            "{names} and {name} now come as patches. Your settings are kept: import each patch and it picks them up."
+        ))
     }
 
     /// Sets the switch kept under `key`; false if there is none.
@@ -630,11 +709,6 @@ impl Plugins {
             _ => 0,
         }
     }
-
-    /// Whether the eyedropper picks from the current layer alone.
-    pub fn eyedropper_from_layer(&self) -> bool {
-        matches!(self.control(EYEDROPPER_LAYER), Some(PluginControl::Switch { control }) if control.on)
-    }
 }
 
 #[cfg(test)]
@@ -731,7 +805,7 @@ mod tests {
         assert!(plugins.patches().is_empty());
         let list = plugins.plugins();
         let ids: Vec<&str> = list.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, ["interface_size", "paste_into_mask", "fill_gap", "eyedropper_layer"]);
+        assert_eq!(ids, ["interface_size", "paste_into_mask", "fill_gap"]);
         for p in &list {
             assert!(p.source == PluginSource::Bundled && p.kind == PluginKind::Extra, "{p:?}");
             assert!(p.experimental && p.on && p.on_key.is_empty(), "{p:?}");
@@ -741,7 +815,6 @@ mod tests {
         assert_eq!(plugins.interface_size(), 1.0);
         assert!(!plugins.paste_into_mask());
         assert_eq!(plugins.fill_gap(), 0);
-        assert!(!plugins.eyedropper_from_layer());
         let size = size_slider(&plugins);
         assert_eq!((size.least, size.most, size.value), (0.75, 1.25, 1.0));
     }
@@ -764,11 +837,9 @@ mod tests {
         plugins.read_kept("interface_size".to_owned(), "0.85".to_owned());
         plugins.read_kept("paste_into_mask".to_owned(), "true".to_owned());
         plugins.read_kept("fill_gap".to_owned(), "12".to_owned());
-        plugins.read_kept("eyedropper_layer".to_owned(), "true".to_owned());
         assert_eq!(plugins.interface_size(), 0.85);
         assert!(plugins.paste_into_mask());
         assert_eq!(plugins.fill_gap(), 12);
-        assert!(plugins.eyedropper_from_layer());
     }
 
     #[test]
@@ -798,7 +869,7 @@ mod tests {
         assert!(lines.contains(&"interface_size 1.15".to_owned()), "{lines:?}");
         assert!(lines.contains(&"paste_into_mask true".to_owned()), "{lines:?}");
         assert!(lines.contains(&"fill_gap 0".to_owned()), "{lines:?}");
-        assert_eq!(lines.len(), 4, "the extras have their controls and nothing else: {lines:?}");
+        assert_eq!(lines.len(), 3, "the extras have their controls and nothing else: {lines:?}");
         let again = Plugins::new();
         for line in &lines {
             let (key, value) = line.split_once(' ').unwrap();
@@ -892,7 +963,6 @@ mod tests {
         assert_eq!(plugins.interface_size(), 1.0);
         assert!(!plugins.paste_into_mask());
         assert_eq!(plugins.fill_gap(), 0);
-        assert!(!plugins.eyedropper_from_layer());
     }
 
     #[test]
@@ -1029,6 +1099,90 @@ mod tests {
         assert!(offer.message.contains("where your strokes land"), "{offer:?}");
         assert!(offer.message.contains("can't reach your files"), "{offer:?}");
         assert!(plugins.patches().is_empty());
+    }
+
+    /// A patch taking over the moved eyedropper setting, as a file.
+    fn eyedropper_file(id: &str) -> Vec<u8> {
+        let text = r#"(module (func (export "procraft_control") (param i32 f32))
+            (func (export "procraft_pick_layer") (result i32) (i32.const 0)))"#;
+        let module = wat::parse_str(text).unwrap();
+        let mut manifest = patch(id, &module);
+        manifest["hooks"] = json!(["pick_layer"]);
+        manifest["controls"] = json!([
+            { "key": "layer", "type": "switch", "label": "Layer", "keeps": "eyedropper_layer" },
+        ]);
+        pack(&manifest, &[(crate::patch_run::MODULE, &module)])
+    }
+
+    fn switch_on(plugins: &Plugins, key: &str) -> Option<bool> {
+        match plugins.control(key) {
+            Some(PluginControl::Switch { control }) => Some(control.on),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn someone_who_changed_a_moved_setting_is_told_once_and_keeps_it() {
+        let dir = store("moved");
+        let plugins = at(&dir);
+        plugins.read_kept("eyedropper_layer".to_owned(), "true".to_owned());
+        let said = plugins.take_moved_notice().unwrap();
+        assert!(said.starts_with("Eyedropper picks from layer now comes as a patch."), "{said}");
+        // once, in this run and the next
+        assert_eq!(plugins.take_moved_notice(), None);
+        let next = at(&dir);
+        next.read_kept("eyedropper_layer".to_owned(), "true".to_owned());
+        assert_eq!(next.take_moved_notice(), None);
+        // nothing is installed for them, and the value goes on being kept
+        assert!(next.patches().is_empty());
+        assert!(next.kept_lines().contains(&"eyedropper_layer true".to_owned()));
+        // the patch picks it up on import, and keeps it where it was, through a restart
+        assert_eq!(next.install(eyedropper_file("org.example.pick")), None);
+        assert_eq!(switch_on(&next, "eyedropper_layer"), Some(true));
+        let lines = next.kept_lines();
+        assert_eq!(lines.iter().filter(|line| line.starts_with("eyedropper_layer ")).count(), 1, "{lines:?}");
+        let again = at(&dir);
+        again.read_kept("eyedropper_layer".to_owned(), "true".to_owned());
+        assert_eq!(switch_on(&again, "eyedropper_layer"), Some(true));
+        // removed, the value goes with it
+        let keys = again.remove("org.example.pick".to_owned()).unwrap();
+        assert!(keys.contains(&"eyedropper_layer".to_owned()), "{keys:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_moved_setting_nobody_changed_says_nothing() {
+        let dir = store("moved-unchanged");
+        let plugins = at(&dir);
+        plugins.read_kept("eyedropper_layer".to_owned(), "false".to_owned());
+        assert_eq!(plugins.take_moved_notice(), None);
+        assert_eq!(at(&dir).take_moved_notice(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_moved_setting_with_its_patch_here_says_nothing() {
+        let dir = store("moved-held");
+        let plugins = at(&dir);
+        assert_eq!(plugins.install(eyedropper_file("org.example.pick")), None);
+        let next = at(&dir);
+        next.read_kept("eyedropper_layer".to_owned(), "true".to_owned());
+        assert_eq!(next.take_moved_notice(), None);
+        assert_eq!(switch_on(&next, "eyedropper_layer"), Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_moved_setting_has_one_holder() {
+        let dir = store("moved-clash");
+        let plugins = at(&dir);
+        assert_eq!(plugins.install(eyedropper_file("org.example.pick")), None);
+        let said = plugins.inspect(eyedropper_file("org.example.other")).refused;
+        assert_eq!(said.as_deref(), Some("Another plugin already holds a setting this one needs."));
+        assert_eq!(plugins.install(eyedropper_file("org.example.other")), said);
+        // and a newer version of the holder is still welcome
+        assert_eq!(plugins.install(eyedropper_file("org.example.pick")), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1533,7 +1533,7 @@ mod tests {
     #[test]
     fn the_extras_show_with_their_controls_and_nothing_to_apply_or_remove() {
         let page = Page::new(false);
-        assert_eq!(page.cards().len(), 4);
+        assert_eq!(page.cards().len(), 3);
         assert!(page.list().iter().all(|p| card_rows(p).is_empty() && controls_show(p)));
     }
 
@@ -1607,10 +1607,10 @@ mod tests {
         assert_eq!(page.prefs.plugins.install(plugin_file()), None);
         page.frame(Vec::new());
         page.frame(Vec::new());
-        assert_eq!(page.cards().len(), 5);
-        let at = page.on_row(4, 0.0);
-        assert!(page.tap(at));
         assert_eq!(page.cards().len(), 4);
+        let at = page.on_row(3, 0.0);
+        assert!(page.tap(at));
+        assert_eq!(page.cards().len(), 3);
         assert!(!dir.join("org.example.filter").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

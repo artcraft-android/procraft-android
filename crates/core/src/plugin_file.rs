@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::patch_run::{self, Hook, MODULE, MOST_MODULE};
-use crate::plugins::{PluginControl, PluginKind, PluginSlider, PluginSwitch};
+use crate::plugins::{self, PluginControl, PluginKind, PluginSlider, PluginSwitch};
 
 /// The manifest's name in a plugin file, and in its folder.
 const MANIFEST: &str = "craft-extension.json";
@@ -58,6 +58,7 @@ pub(crate) enum Refusal {
     Newer,
     OtherApp,
     NewerInstalled,
+    Clash,
     NotKept,
 }
 
@@ -75,6 +76,7 @@ impl Refusal {
             Refusal::Newer => "This plugin needs a newer ProCraft.",
             Refusal::OtherApp => "This plugin isn't for ProCraft.",
             Refusal::NewerInstalled => "A newer version of this plugin is already imported.",
+            Refusal::Clash => "Another plugin already holds a setting this one needs.",
             Refusal::NotKept => "This plugin couldn't be saved.",
         }
     }
@@ -187,6 +189,9 @@ struct RawControl {
     at_least: Option<String>,
     #[serde(default)]
     shown_times: Option<f64>,
+    /// A setting the app used to have, whose kept value this control takes over.
+    #[serde(default)]
+    keeps: Option<String>,
 }
 
 /// Whether `text`, at most `most` characters, is fit to show: nothing that hides, reorders or
@@ -277,7 +282,12 @@ fn checked_control(id: &str, raw: RawControl) -> Result<PluginControl, Refusal> 
     if !valid_key(&raw.key) || raw.label.trim().is_empty() || !shows_plainly(&raw.label, 40) {
         return Err(Refusal::Described);
     }
-    let key = format!("{id}.{}", raw.key);
+    // what the app no longer has stays where it was kept, for the patch that took it over
+    let key = match &raw.keeps {
+        Some(kept) if plugins::moved(kept) => kept.clone(),
+        Some(_) => return Err(Refusal::Described),
+        None => format!("{id}.{}", raw.key),
+    };
     match raw.kind.as_str() {
         "switch" => {
             let starts = match raw.starts {
@@ -420,7 +430,8 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
 /// Whether `data`, listed by `manifest` under `path`, is code that can run, if it is code at all:
 /// checked by reading it, as nothing in it runs until the patch is applied.
 fn code_holds(manifest: &Manifest, path: &str, data: &[u8]) -> bool {
-    manifest.kind != PluginKind::Patch || path != MODULE || patch_run::can_run(data, !manifest.controls.is_empty())
+    let controls = !manifest.controls.is_empty();
+    manifest.kind != PluginKind::Patch || path != MODULE || patch_run::can_run(data, &manifest.hooks, controls)
 }
 
 /// `bytes` read as a plugin file. Every entry is checked by what it claims before any is read,
@@ -615,11 +626,12 @@ pub(crate) fn read_folder(folder: &Path, id: &str, version: &str) -> Option<Mani
     Some(manifest)
 }
 
-/// The module of the patch `id` at `version` in `dir`, if all of it holds up as it did.
-pub(crate) fn read_module(dir: &Path, id: &str, version: &str) -> Option<Vec<u8>> {
+/// The hooks and the module of the patch `id` at `version` in `dir`, if all of it holds up as it
+/// did.
+pub(crate) fn read_code(dir: &Path, id: &str, version: &str) -> Option<(Vec<Hook>, Vec<u8>)> {
     let folder = dir.join(id).join(version);
-    read_folder(&folder, id, version)?;
-    read_capped(&folder.join(MODULE), MOST_MODULE)
+    let manifest = read_folder(&folder, id, version)?;
+    Some((manifest.hooks, read_capped(&folder.join(MODULE), MOST_MODULE)?))
 }
 
 /// Where it is written down that patch `id` stopped: beside its folder, which holds only what its
@@ -642,6 +654,25 @@ pub(crate) fn stopped_why(dir: &Path, id: &str) -> Option<String> {
 
 pub(crate) fn clear_stopped(dir: &Path, id: &str) {
     let _ = std::fs::remove_file(stopped_note(dir, id));
+}
+
+/// Where it is written down which moved settings someone has been told of, a line each.
+fn told_note(dir: &Path) -> PathBuf {
+    dir.join("told")
+}
+
+/// The moved settings someone has been told of.
+pub(crate) fn read_told(dir: &Path) -> Vec<String> {
+    let text = read_capped(&told_note(dir), MOST_STOP_NOTE).unwrap_or_default();
+    String::from_utf8_lossy(&text).lines().map(str::to_owned).collect()
+}
+
+/// Writes down that someone has been told of `told`, so it is said once.
+pub(crate) fn note_told(dir: &Path, told: &[String]) {
+    let written = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(told_note(dir), told.join("\n")));
+    if let Err(e) = written {
+        log::warn!("couldn't note what has been told: {e}");
+    }
 }
 
 /// `path`, if it is a plain file of at most `most` bytes.
@@ -1201,6 +1232,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_control_takes_over_a_moved_setting_and_nothing_else() {
+        let module = a_module();
+        let with_keeps = |keeps: &str| {
+            let mut manifest = patch("org.example.patch", &module);
+            manifest["controls"] = json!([{ "key": "on", "type": "switch", "label": "On", "keeps": keeps }]);
+            a_patch_file(&manifest, &module)
+        };
+        // (it needs its controls told; here only what it may be kept under is looked at)
+        assert_eq!(refusal(&with_keeps("light_interface")), Refusal::Described);
+        assert_eq!(refusal(&with_keeps("org.example.other.value")), Refusal::Described);
+        assert_eq!(refusal(&with_keeps("eyedropper_layer")), Refusal::Code);
+    }
+
+    #[test]
     fn a_control_can_t_be_called_what_a_flag_is_kept_under() {
         let module = a_module();
         let mut manifest = patch("org.example.patch", &module);
@@ -1236,10 +1281,10 @@ pub(crate) mod tests {
         let package = read_package(&a_patch_file(&patch("org.example.patch", &module), &module)).unwrap();
         keep(&dir, &package).unwrap();
         assert_eq!(read_all(&dir).len(), 1);
-        assert_eq!(read_module(&dir, "org.example.patch", "1.0.0"), Some(module));
+        assert_eq!(read_code(&dir, "org.example.patch", "1.0.0"), Some((vec![Hook::Position], module)));
         std::fs::write(dir.join("org.example.patch/1.0.0").join(MODULE), b"something else").unwrap();
         assert!(read_all(&dir).is_empty());
-        assert_eq!(read_module(&dir, "org.example.patch", "1.0.0"), None);
+        assert_eq!(read_code(&dir, "org.example.patch", "1.0.0"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

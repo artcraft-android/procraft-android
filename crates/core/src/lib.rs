@@ -472,7 +472,6 @@ pub(crate) struct State {
     /// The canvas shown in perceptual greys (the window's view only).
     pub(crate) grey_view: bool,
     /// The eyedropper picks from the current layer alone, not the canvas as composited.
-    pub(crate) eyedropper_from_layer: bool,
     /// What is pasted with a mask current goes into the mask, by its brightness (experimental).
     pub(crate) paste_into_mask: bool,
     /// Where the middle of one of the surround grid's lines is, across and down (window pixels);
@@ -1272,7 +1271,6 @@ impl CanvasSession {
             display_scale: 2.0,
             interface_size: 1.0,
             grey_view: false,
-            eyedropper_from_layer: false,
             paste_into_mask: false,
             grid_origin: None,
             light: false,
@@ -1669,16 +1667,6 @@ impl CanvasSession {
 
     pub fn grey_view(&self) -> bool {
         self.shared.lock().grey_view
-    }
-
-    /// The eyedropper picks from the current layer alone (`on`), or from the canvas as it is
-    /// composited (all its layers and the background).
-    pub fn set_eyedropper_from_layer(&self, on: bool) {
-        self.shared.lock().eyedropper_from_layer = on;
-    }
-
-    pub fn eyedropper_from_layer(&self) -> bool {
-        self.shared.lock().eyedropper_from_layer
     }
 
     /// What is pasted with a mask current goes into the mask, by its brightness (`on`), or onto a

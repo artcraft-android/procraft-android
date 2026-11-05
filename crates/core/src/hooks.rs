@@ -3,17 +3,19 @@
 //! patches need, and each is as narrow as it can be.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::CanvasSession;
-use crate::patch_run::{Running, Stop};
+use crate::patch_run::{Hook, Running, Stop};
 use crate::plugin_file;
 use crate::plugins::Plugins;
 
 struct Applied {
     id: String,
     running: Running,
+    /// The hooks it is on, as bits.
+    hooks: u32,
 }
 
 #[derive(Default)]
@@ -30,8 +32,8 @@ struct Patches {
 /// with the list, so one comes off at once, no restart.
 #[derive(Default)]
 pub(crate) struct Hooks {
-    /// Whether any is applied: all a stroke with none pays for is reading this.
-    any: AtomicBool,
+    /// The hooks with a patch on them, as bits: all a stroke with none pays for is reading this.
+    hooked: AtomicU32,
     patches: Mutex<Patches>,
     /// Where a stop is written down, to stay off through a restart.
     store: Option<PathBuf>,
@@ -39,7 +41,7 @@ pub(crate) struct Hooks {
 
 impl std::fmt::Debug for Hooks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Hooks").field("any", &self.any).finish_non_exhaustive()
+        f.debug_struct("Hooks").field("hooked", &self.hooked).finish_non_exhaustive()
     }
 }
 
@@ -62,23 +64,28 @@ impl Hooks {
         patches.untold = Some(stop);
     }
 
-    /// The position hook: where a sample in window pixels lands, before the stroke sees it.
-    #[inline]
-    pub(crate) fn position(&self, x: f32, y: f32) -> (f32, f32) {
-        if self.any.load(Ordering::Relaxed) { self.position_through_patches(x, y) } else { (x, y) }
+    fn has(&self, hook: Hook) -> bool {
+        self.hooked.load(Ordering::Relaxed) & hook.bit() != 0
     }
 
-    /// One that stops is off the hook there and then, and the sample goes on as it came to it.
-    fn position_through_patches(&self, x: f32, y: f32) -> (f32, f32) {
-        // what isn't a position goes on as it came, and no patch answers for it
-        if !x.is_finite() || !y.is_finite() {
-            return (x, y);
-        }
+    /// The bits go by what is on now.
+    fn rehook(&self, patches: &Patches) {
+        let hooked = patches.applied.iter().fold(0, |bits, patch| bits | patch.hooks);
+        self.hooked.store(hooked, Ordering::Relaxed);
+    }
+
+    /// `start` through each patch on `hook`, in turn. One that stops is off the hooks there and then,
+    /// and what it was handed goes on as it came to it.
+    fn through<T: Copy>(&self, hook: Hook, start: T, mut step: impl FnMut(&mut Running, T) -> Result<T, Stop>) -> T {
         let mut patches = self.patches();
-        let mut at = (x, y);
+        let mut at = start;
         let mut i = 0;
         while let Some(patch) = patches.applied.get_mut(i) {
-            match patch.running.position(at.0, at.1) {
+            if patch.hooks & hook.bit() == 0 {
+                i += 1;
+                continue;
+            }
+            match step(&mut patch.running, at) {
                 Ok(to) => {
                     at = to;
                     i += 1;
@@ -89,27 +96,45 @@ impl Hooks {
                 }
             }
         }
-        self.any.store(!patches.applied.is_empty(), Ordering::Relaxed);
+        self.rehook(&patches);
         at
+    }
+
+    /// The position hook: where a sample in window pixels lands, before the stroke sees it.
+    #[inline]
+    pub(crate) fn position(&self, x: f32, y: f32) -> (f32, f32) {
+        // what isn't a position goes on as it came, and no patch answers for it
+        if !self.has(Hook::Position) || !x.is_finite() || !y.is_finite() {
+            return (x, y);
+        }
+        self.through(Hook::Position, (x, y), |running, at| running.position(at.0, at.1))
+    }
+
+    /// The pick hook: whether the eyedropper reads the current layer, not the canvas as it is
+    /// composited. It only asks: reading either is the app's, and it is a read like any other.
+    pub(crate) fn pick_layer(&self) -> bool {
+        self.has(Hook::PickLayer)
+            && self.through(Hook::PickLayer, false, |running, said| Ok(said | running.pick_layer()?))
     }
 
     pub(crate) fn is_on(&self, id: &str) -> bool {
         self.patches().applied.iter().any(|p| p.id == id)
     }
 
-    pub(crate) fn put_on(&self, id: String, running: Running) {
+    pub(crate) fn put_on(&self, id: String, running: Running, hooks: &[Hook]) {
         let mut patches = self.patches();
         patches.applied.retain(|p| p.id != id);
         let at = patches.applied.partition_point(|p| p.id < id);
-        patches.applied.insert(at, Applied { id, running });
-        self.any.store(true, Ordering::Relaxed);
+        let hooks = hooks.iter().fold(0, |bits, hook| bits | hook.bit());
+        patches.applied.insert(at, Applied { id, running, hooks });
+        self.rehook(&patches);
     }
 
     /// Takes `id` off: from the next sample on, the app is as if it had never been.
     pub(crate) fn take_off(&self, id: &str) {
         let mut patches = self.patches();
         patches.applied.retain(|p| p.id != id);
-        self.any.store(!patches.applied.is_empty(), Ordering::Relaxed);
+        self.rehook(&patches);
     }
 
     /// Tells `id`, if it is on, control `index` has `value`.
@@ -120,7 +145,7 @@ impl Hooks {
         if let Some(Err(stop)) = told {
             let gone = patches.applied.remove(at);
             self.note_stop(&mut patches, gone.id, stop);
-            self.any.store(!patches.applied.is_empty(), Ordering::Relaxed);
+            self.rehook(&patches);
         }
     }
 
@@ -164,6 +189,12 @@ mod tests {
     use crate::{PenSample, PointerKind};
 
     const ID: &str = "org.example.offset";
+    /// Answers the pick hook by its one switch.
+    const PICKS: &str = r#"(module
+        (global $layer (mut i32) (i32.const 0))
+        (func (export "procraft_control") (param i32 f32)
+            (global.set $layer (f32.ne (local.get 1) (f32.const 0))))
+        (func (export "procraft_pick_layer") (result i32) (global.get $layer)))"#;
 
     fn store(name: &str) -> String {
         let dir = std::env::temp_dir().join(format!("procraft-hooks-{name}-{}", std::process::id()));
@@ -230,11 +261,76 @@ mod tests {
     #[test]
     fn a_sample_that_isn_t_a_position_doesn_t_stop_a_patch() {
         let hooks = Hooks::default();
-        hooks.put_on("offset".to_owned(), Running::start(&offset(), &[]).unwrap());
+        hooks.put_on("offset".to_owned(), Running::start(&offset(), &[]).unwrap(), &[Hook::Position]);
         assert!(hooks.position(f32::NAN, 2.0).0.is_nan());
         assert_eq!(hooks.position(1.0, f32::INFINITY), (1.0, f32::INFINITY));
         assert!(hooks.is_on("offset"));
         assert_eq!(hooks.take_stopped(), []);
+    }
+
+    /// A patch that says the pick reads the layer as its one switch says, in a store at `dir`.
+    fn picking(dir: &str) -> Arc<Plugins> {
+        let module = wat::parse_str(PICKS).unwrap();
+        let plugins = Plugins::with_store(dir.to_owned());
+        let mut manifest = patch(ID, &module);
+        manifest["hooks"] = json!(["pick_layer"]);
+        manifest["controls"] = json!([
+            { "key": "layer", "type": "switch", "label": "Layer", "keeps": "eyedropper_layer" },
+        ]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        plugins
+    }
+
+    #[test]
+    fn the_pick_reads_the_layer_only_while_a_patch_says_so() {
+        let dir = store("pick");
+        let plugins = picking(&dir);
+        let hooks = plugins.hooks();
+        assert!(!hooks.pick_layer(), "imported, it says nothing");
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert!(!hooks.pick_layer(), "applied, it goes by its switch");
+        assert!(plugins.set_switch("eyedropper_layer".to_owned(), true));
+        assert!(hooks.pick_layer());
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert!(!hooks.pick_layer());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pick_patch_that_crashes_leaves_the_pick_on_the_canvas() {
+        let dir = store("pick-crash");
+        let module =
+            wat::parse_str(r#"(module (func (export "procraft_pick_layer") (result i32) (unreachable)))"#).unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = patch(ID, &module);
+        manifest["hooks"] = json!(["pick_layer"]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        let hooks = plugins.hooks();
+        assert!(!hooks.pick_layer());
+        assert_eq!(card(&plugins).problem.as_deref(), Some("Switched off: it crashed."));
+        assert!(!hooks.has(Hook::PickLayer));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_eyedropper_reads_the_current_layer_while_a_patch_says_so() {
+        let Some(s) = session() else { return };
+        // paint on the first layer, then an empty one over it
+        draw(&s);
+        s.add_layer();
+        let shown = s.pick(100.0, 50.0, 21).unwrap().rgb;
+        assert!(shown.is_some());
+        let dir = store("pick-session");
+        let plugins = picking(&dir);
+        s.use_patches(Arc::clone(&plugins));
+        assert_eq!(s.pick(100.0, 50.0, 21).unwrap().rgb, shown, "with none applied, the canvas");
+        plugins.set_on(ID.to_owned(), true);
+        plugins.set_switch("eyedropper_layer".to_owned(), true);
+        assert_eq!(s.pick(100.0, 50.0, 21).unwrap().rgb, None, "the current layer is clear there");
+        plugins.set_on(ID.to_owned(), false);
+        assert_eq!(s.pick(100.0, 50.0, 21).unwrap().rgb, shown);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -316,7 +412,7 @@ mod tests {
         assert!(!stopped.on);
         assert_eq!(stopped.problem.as_deref(), Some(reason));
         assert_eq!(hooks.position(5.0, 6.0), (5.0, 6.0), "and it is off the hook");
-        assert!(!hooks.any.load(Ordering::Relaxed));
+        assert_eq!(hooks.hooked.load(Ordering::Relaxed), 0);
         // it stays off through a restart, even with its flag kept as applied, and says why
         let next = Plugins::with_store(dir.clone());
         next.read_kept(format!("{ID}.applied"), "true".to_owned());
@@ -393,7 +489,7 @@ mod tests {
         let stopped = card(&plugins);
         assert!(!stopped.on);
         assert_eq!(stopped.problem.as_deref(), Some("Switched off: it asked for too much memory."));
-        assert!(!plugins.hooks().any.load(Ordering::Relaxed));
+        assert_eq!(plugins.hooks().hooked.load(Ordering::Relaxed), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -403,8 +499,8 @@ mod tests {
         let hooks = Hooks::default();
         let mut good = Running::start(&offset(), &[]).unwrap();
         good.control(0, 2.0).unwrap();
-        hooks.put_on("b".to_owned(), good);
-        hooks.put_on("a".to_owned(), Running::start(&bad, &[]).unwrap());
+        hooks.put_on("b".to_owned(), good, &[Hook::Position]);
+        hooks.put_on("a".to_owned(), Running::start(&bad, &[]).unwrap(), &[Hook::Position]);
         assert_eq!(hooks.position(1.0, 1.0), (3.0, 1.0));
         assert!(!hooks.is_on("a") && hooks.is_on("b"));
         assert_eq!(hooks.take_stopped(), [("a".to_owned(), Stop::Crashed)]);
@@ -426,8 +522,8 @@ mod tests {
             running
         };
         let hooks = Hooks::default();
-        hooks.put_on("b".to_owned(), Running::start(&doubles, &[]).unwrap());
-        hooks.put_on("a".to_owned(), offset_by(1.0));
+        hooks.put_on("b".to_owned(), Running::start(&doubles, &[]).unwrap(), &[Hook::Position]);
+        hooks.put_on("a".to_owned(), offset_by(1.0), &[Hook::Position]);
         assert_eq!(hooks.position(1.0, 0.0), (4.0, 0.0));
     }
 
@@ -536,7 +632,7 @@ mod tests {
         let applied = Hooks::default();
         let mut running = Running::start(&offset(), &[]).unwrap();
         running.control(0, 3.0).unwrap();
-        applied.put_on("offset".to_owned(), running);
+        applied.put_on("offset".to_owned(), running, &[Hook::Position]);
         println!(
             "the offset patch applied: {:.1} ns a sample",
             (0..5).map(|_| cost(&applied)).fold(f64::MAX, f64::min)

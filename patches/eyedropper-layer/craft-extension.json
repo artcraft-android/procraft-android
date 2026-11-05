@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.eyedropper-layer",
+  "name": "Eyedropper picks from layer",
+  "version": "1.0.0",
+  "kind": "patch",
+  "publisher": { "name": "ProCraft" },
+  "description": "The eyedropper picks from the current layer alone, not the whole canvas.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["pick_layer"],
+  "controls": [
+    { "key": "layer", "type": "switch", "label": "Pick from the current layer", "starts": false, "keeps": "eyedropper_layer" }
+  ]
+}

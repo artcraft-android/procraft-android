@@ -418,8 +418,6 @@ impl Interface {
         // a mask current paints with masks' own colour
         let on_mask = session.layers().iter().any(|l| l.current && l.kind == procraft_core::LayerType::Mask);
         self.colours.follow_mask(session, on_mask);
-        // the eyedropper picks from the current layer or the canvas, as the preferences say
-        session.set_eyedropper_from_layer(self.prefs.plugins.eyedropper_from_layer());
         // and what is pasted goes into a mask only if they say so
         session.set_paste_into_mask(self.prefs.plugins.paste_into_mask());
         let paste_shown = (self.open == Some(Popover::Actions) || self.copy_paste) && ctx.input(|i| i.focused);
@@ -1812,6 +1810,9 @@ impl Interface {
     /// A plugin file's screen, while it shows: answered, the file is imported, or it was only
     /// being told something.
     pub fn plugin_alert(&mut self, ctx: &egui::Context) {
+        if let Some(said) = self.prefs.plugins.take_moved_notice() {
+            self.plugin_alert.tell("Now a patch", &said, None);
+        }
         let Some(answer) = self.plugin_alert.show(ctx, &mut self.look) else { return };
         let Some(bytes) = self.plugin_file.take().filter(|_| answer == Answer::Action) else { return };
         match self.prefs.plugins.install(bytes) {

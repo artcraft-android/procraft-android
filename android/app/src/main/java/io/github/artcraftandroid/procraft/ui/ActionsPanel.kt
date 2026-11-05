@@ -657,9 +657,19 @@ private fun PluginSliderRow(slider: PluginSlider, onSet: (PluginSlider, Float) -
     )
 }
 
-/** The one screen that asks whether to import a plugin file: what it is, and what it can do. */
+/** The one screen that asks whether to import a plugin file: what it is, and what it can do. Also where a setting that has moved to a patch is said, once. */
 @Composable
 fun PluginOfferAlert(vm: CanvasViewModel) {
+    Alert(
+        vm.movedNotice,
+        title = { "Now a patch" },
+        message = { it },
+        action = "OK",
+        onCancel = vm::movedNoticeRead,
+        onAction = { vm.movedNoticeRead() },
+        destructive = false,
+        alone = true,
+    )
     Alert(
         vm.pluginOffer,
         title = { it.name },

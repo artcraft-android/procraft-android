@@ -439,6 +439,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         pluginsChanged()
     }
 
+    /** Words for someone who changed a setting that now comes as a patch, said once. */
+    var movedNotice by mutableStateOf(plugins.takeMovedNotice())
+        private set
+
+    fun movedNoticeRead() {
+        movedNotice = null
+    }
+
     /** A plugin file waiting on the one screen that asks about it, and what it holds. */
     var pluginOffer by mutableStateOf<io.github.artcraftandroid.procraft.core.PluginOffer?>(null)
         private set
@@ -540,7 +548,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.usePatches(plugins)
         s.setPasteIntoMask(plugins.pasteIntoMask())
         s.setFillGap(plugins.fillGap())
-        s.setEyedropperFromLayer(plugins.eyedropperFromLayer())
     }
 
     /** The interface shows at [size] now: what hit-tests its handles, and what clears its bars, go with it. */
