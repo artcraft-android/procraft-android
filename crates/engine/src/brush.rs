@@ -462,6 +462,9 @@ pub struct Brush {
     /// How much each stamp adds at full pressure, 0..1 (the studio's flow control to the power
     /// [`FLOW_POWER`]).
     pub flow: f32,
+    /// The opacity slider, for a stroke: a finger's wet attack follows it as a pen's does its
+    /// pressure. Not part of the brush as it is kept.
+    pub touch_opacity: f32,
     /// How much pen pressure shrinks the stamp (0 = not at all, 1 = to nothing at no pressure).
     pub pressure_size: f32,
     /// How much pen pressure lowers the stamp's opacity.
@@ -628,6 +631,7 @@ impl Brush {
             min_opacity: 0.0,
             max_opacity: 1.0,
             flow: 1.0,
+            touch_opacity: 1.0,
             pressure_size: 0.85,
             pressure_opacity: 0.0,
             pressure_curve: Curve::linear(),

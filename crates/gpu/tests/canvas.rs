@@ -1722,6 +1722,32 @@ fn wet_paint_with_luminance_blending_mixes_squared() {
 }
 
 #[test]
+fn wet_paint_lays_as_far_as_its_wetness() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let shown = |wetness: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let style = StrokeStyle {
+            wet_pull: Some(0.5),
+            wetness,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        pixel(&layer, 64, 32, 32)[3]
+    };
+    let (full, half) = (shown(1.0), shown(0.5));
+    assert!(full > 250 && half.abs_diff(128) < 6, "{full} {half}");
+    assert_eq!(StrokeStyle::wetness_at(1.0), 1.0);
+    assert_eq!(StrokeStyle::wetness_at(0.0), 0.0);
+    assert!((StrokeStyle::wetness_at(0.5) - (1.0 - 0.5f32.powf(2.2))).abs() < 1e-6);
+}
+
+#[test]
 fn wet_edges_pool_paint_laid_in_place() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

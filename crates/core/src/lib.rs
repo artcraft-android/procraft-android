@@ -663,6 +663,7 @@ impl State {
     ) -> (Brush, StrokeStyle, f32) {
         let sliders = self.sliders(tool);
         let mut brush = self.brush(tool).clone();
+        brush.touch_opacity = sliders.opacity.clamp(0.0, 1.0);
         // a blending brush's opacity lightens each stamp, as its flow does, so its strokes still
         // build up to full; a glaze's caps the stroke
         let opacity = if brush.blends() && matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) {
@@ -681,6 +682,7 @@ impl State {
         );
         style.secondary = self.secondary;
         style.preview = self.pad_strokes.is_some();
+        style.wetness = StrokeStyle::wetness_at(sliders.opacity);
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.use_sources(gpu, &mut style, &brush);
         }

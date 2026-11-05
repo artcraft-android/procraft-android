@@ -1903,7 +1903,8 @@ impl StrokeBuilder {
             Some(theta) if self.pointer.has_pressure() => Tilt::reach(p.tilt, theta),
             Some(theta) => Tilt::reach(std::f32::consts::FRAC_PI_2, theta),
         };
-        let attack = (p.soft[1].clamp(0.0, 1.0) * attack_tilt * curves.through(PC::Attack, pressure)).clamp(0.0, 1.0);
+        let pressed = if self.pointer.has_pressure() { p.soft[1] } else { self.brush.touch_opacity };
+        let attack = (pressed.clamp(0.0, 1.0) * attack_tilt * curves.through(PC::Attack, pressure)).clamp(0.0, 1.0);
         let [hue_by, saturation_by, lightness_by, darkness_by, secondary_by] = color_first;
         let [hue_more, saturation_more, lightness_more, darkness_more, secondary_more] = color_more;
         // a pen turns the stamp as it is held (its azimuth, and roll), in place of following the
@@ -3046,6 +3047,17 @@ mod tests {
         // a finger as a flat pen, at full pressure
         let finger = Tilt::reach(std::f32::consts::FRAC_PI_2, 0.0);
         assert!((attack(1.0, 0.0, true, Pointer::Finger) - finger).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_finger_s_wet_attack_follows_the_opacity_slider() {
+        let attack = |pointer: Pointer| {
+            let b = Brush { pressure_size: 0.0, touch_opacity: 0.5, ..plain() };
+            StrokeBuilder::new(b, 10.0, pointer).preview(&[Sample::at(Vec2::new(10.0, 10.0), 1.0, 0.0)])[0].attack
+        };
+        assert!((attack(Pointer::Finger) - 0.5).abs() < 1e-4);
+        // a pen's follows its pressure instead
+        assert!((attack(Pointer::Stylus) - 1.0).abs() < 1e-4);
     }
 
     #[test]

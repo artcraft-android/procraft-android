@@ -134,6 +134,9 @@ pub struct StrokeStyle {
     /// (how much of its mixture each stamp lays down, -1..1), how blurred what it lays down is,
     /// and how much the pull varies from stamp to stamp; each 0..1 but the grade.
     pub attack: f32,
+    /// How far wet paint's stamps lay, by the opacity slider (see [`StrokeStyle::wetness_at`]);
+    /// 1 at full.
+    pub wetness: f32,
     pub grade: f32,
     pub blur: f32,
     pub wet_jitter: f32,
@@ -218,6 +221,7 @@ impl StrokeStyle {
             dilution: 0.0,
             falloff: 0.0,
             attack: 0.0,
+            wetness: 1.0,
             grade: 0.0,
             blur: 0.0,
             wet_jitter: 0.0,
@@ -274,6 +278,7 @@ impl StrokeStyle {
             dilution: if wet { brush.setting("wet_dilution").clamp(0.0, 1.0) } else { 0.0 },
             falloff: brush.setting("falloff").clamp(0.0, 1.0),
             attack: if wet { brush.setting("wet_attack").clamp(0.0, 1.0) } else { 0.0 },
+            wetness: 1.0,
             // the grade goes both ways (below 0 the stamps lay down less than their mixture)
             grade: if wet { brush.setting("wet_grade").clamp(-1.0, 1.0) } else { 0.0 },
             blur: if wet { brush.setting("wet_blur").clamp(0.0, 1.0) } else { 0.0 },
@@ -294,6 +299,11 @@ impl StrokeStyle {
             luminance: brush.setting("luminance_blending") >= 0.5,
             laid_in_place: tool == StrokeTool::Paint && brush.laid_in_place(),
         }
+    }
+
+    /// How far wet paint's stamps lay at the opacity slider's `opacity`.
+    pub fn wetness_at(opacity: f32) -> f32 {
+        1.0 - (1.0 - opacity.clamp(0.0, 1.0)).powf(2.2)
     }
 
     /// The grain applied to each stamp (moving), as (layer, scale, depth).
@@ -4711,6 +4721,7 @@ impl Canvas {
                 kept: if first { -1 } else { 0 },
                 grain_once,
                 laid_apart: laid_apart * 2,
+                alpha: (s.alpha * style.opacity * style.wetness).clamp(0.0, 1.0),
                 count: u32::try_from(n).unwrap_or(0),
                 plot,
                 index,
