@@ -42,6 +42,9 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
     /** The pen is hovering over the canvas. */
     private var penHovering = false
 
+    /** The pen's side buttons last seen held. */
+    private var penButtons = 0
+
     private var strokePointer = -1
 
     private val pickSide get() = (CanvasViewModel.PICK_WINDOW_DP * resources.displayMetrics.density).toInt() or 1
@@ -310,16 +313,17 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
      * them to do (the first, set to nothing, switches to the eraser and back).
      */
     private fun penButton(e: MotionEvent): Boolean {
-        if (e.actionMasked != MotionEvent.ACTION_BUTTON_PRESS) return false
-        val second = when (e.actionButton) {
-            MotionEvent.BUTTON_STYLUS_PRIMARY -> false
-            MotionEvent.BUTTON_STYLUS_SECONDARY -> true
-            else -> return false
-        }
-        val s = session ?: return true
-        obey(s.touchPenButton(second, e.x, e.y))
+        // by what the event says is held: some pens' drivers send no press of their own, only their
+        // hover and touch events with the button in them
+        val held = e.buttonState and PEN_BUTTONS
+        val pressed = held and penButtons.inv()
+        penButtons = held
+        val own = e.actionMasked == MotionEvent.ACTION_BUTTON_PRESS || e.actionMasked == MotionEvent.ACTION_BUTTON_RELEASE
+        if (pressed == 0) return own && (e.actionButton and PEN_BUTTONS) != 0
+        val s = session ?: return own
+        obey(s.touchPenButton(pressed and MotionEvent.BUTTON_STYLUS_PRIMARY == 0, e.x, e.y))
         vm.penButtonDone()
-        return true
+        return own
     }
 
     override fun onGenericMotionEvent(e: MotionEvent): Boolean = penButton(e) || super.onGenericMotionEvent(e)
@@ -392,5 +396,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
 
         /** How long a prediction stands with no input after it, milliseconds: a few input intervals. */
         const val PREDICTION_LASTS_MS = 40L
+
+        const val PEN_BUTTONS = MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY
     }
 }
