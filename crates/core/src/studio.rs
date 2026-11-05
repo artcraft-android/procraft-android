@@ -402,9 +402,16 @@ impl CanvasSession {
             motion_filtering: unit(motion_filtering),
             motion_expression: unit(motion_expression),
             pressure_smoothing: unit(pressure_smoothing),
+            start_at_tip: st.input.start_at_tip,
             pressure_curve: if pts.len() >= 2 { Curve::new(&pts) } else { Curve::linear() },
             speed_distance: st.input.speed_distance,
         };
+    }
+
+    /// Whether a stroke starts where the pen's tip lands: off, its start is the average of its
+    /// first few samples, so a shaky landing doesn't set where the stroke begins.
+    pub fn set_start_at_tip(&self, on: bool) {
+        self.shared.lock().input.start_at_tip = on;
     }
 
     /// How far input must move for the speed dynamics to count it as fast, as a part of the usual

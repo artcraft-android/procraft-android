@@ -471,10 +471,27 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         applyInput()
     }
 
-    fun resetInput() = changeInput(0f, 0f, 0f, 0f, listOf(Offset(0f, 0f), Offset(1f, 1f)))
+    fun resetInput() {
+        changeInput(0f, 0f, 0f, 0f, listOf(Offset(0f, 0f), Offset(1f, 1f)))
+        changeStartAtTip(true)
+    }
+
+    /** Whether a stroke starts where the pen's tip lands: off, it starts where its first few
+     * samples average out to, so a shaky landing doesn't set where the stroke begins. */
+    var startAtTip by mutableStateOf(interfacePrefs.getBoolean(INPUT_START_AT_TIP, true))
+        private set
+
+    fun changeStartAtTip(on: Boolean) {
+        startAtTip = on
+        interfacePrefs.edit().putBoolean(INPUT_START_AT_TIP, on).apply()
+        applyInput()
+    }
 
     private fun applyInput() {
-        session?.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputCurve.flatMap { listOf(it.x, it.y) })
+        session?.let {
+            it.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputCurve.flatMap { p -> listOf(p.x, p.y) })
+            it.setStartAtTip(startAtTip)
+        }
     }
 
     fun changeRightHanded(on: Boolean) {
@@ -2241,6 +2258,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // as it was left, or fitted
         if (!orientationMemory) s.forgetSavedView()
         s.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputCurve.flatMap { listOf(it.x, it.y) })
+        s.setStartAtTip(startAtTip)
         applyAppSettings(s)
         timeLapse = TimeLapse(dir).also {
             timeLapseRecording = it.recording
@@ -6909,6 +6927,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val INPUT_EXPRESSION = "input_motion_expression"
         const val INPUT_PRESSURE_SMOOTHING = "input_pressure_smoothing"
         const val INPUT_CURVE = "input_pressure_curve"
+        const val INPUT_START_AT_TIP = "input_start_at_tip"
         /** Frames a second an animation plays at (Animation Assist's own when it is on). */
         const val ANIMATION_FPS = 15
         /** The timeline's frame pictures' longest side, pixels; a frame's longest hold. */

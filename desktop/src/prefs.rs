@@ -52,6 +52,8 @@ pub struct Prefs {
     pub motion_filtering: f32,
     pub motion_expression: f32,
     pub pressure_smoothing: f32,
+    /// Whether a stroke starts where the pen's tip lands (see `InputSettings::start_at_tip`).
+    pub start_at_tip: bool,
     pub curve: Vec<[f32; 2]>,
     /// The Actions panel's tab open.
     pub actions_tab: usize,
@@ -104,6 +106,7 @@ impl Default for Prefs {
             motion_filtering: 0.0,
             motion_expression: 0.0,
             pressure_smoothing: 0.0,
+            start_at_tip: true,
             curve: straight(),
             actions_tab: 0,
             pad_3d: false,
@@ -169,6 +172,7 @@ impl Prefs {
                 "motion_filtering" => p.motion_filtering = unit.unwrap_or(0.0),
                 "motion_expression" => p.motion_expression = unit.unwrap_or(0.0),
                 "pressure_smoothing" => p.pressure_smoothing = unit.unwrap_or(0.0),
+                "start_at_tip" => p.start_at_tip = on,
                 "pad_3d" => p.pad_3d = on,
                 "project_canvas" => p.project_canvas = on,
                 "eyedropper_layer" => p.eyedropper_layer = on,
@@ -220,6 +224,7 @@ impl Prefs {
             format!("motion_filtering {}", self.motion_filtering),
             format!("motion_expression {}", self.motion_expression),
             format!("pressure_smoothing {}", self.pressure_smoothing),
+            format!("start_at_tip {}", self.start_at_tip),
             format!("curve {}", curve.join(",")),
             format!("actions_tab {}", self.actions_tab),
             format!("pad_3d {}", self.pad_3d),
@@ -258,6 +263,7 @@ impl Prefs {
             self.pressure_smoothing,
             self.curve.iter().flatten().copied().collect(),
         );
+        session.set_start_at_tip(self.start_at_tip);
     }
 
     pub fn rapid_undo_ms(&self) -> f64 {
@@ -280,6 +286,7 @@ impl Prefs {
         self.motion_filtering = 0.0;
         self.motion_expression = 0.0;
         self.pressure_smoothing = 0.0;
+        self.start_at_tip = true;
         self.curve = straight();
     }
 }

@@ -2067,6 +2067,7 @@ impl Interface {
                         | Act::ScalingMenu
                         | Act::LightInterface
                         | Act::RightHanded
+                        | Act::StartAtTip
                         | Act::BrushCursor
                         | Act::ProjectCanvas
                         | Act::EyedropperLayer

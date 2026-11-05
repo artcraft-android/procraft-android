@@ -100,6 +100,8 @@ pub enum Act {
     ScalingMenu,
     LightInterface,
     RightHanded,
+    /// Whether a stroke starts where the pen's tip lands (see `Prefs::start_at_tip`).
+    StartAtTip,
     BrushCursor,
     ProjectCanvas,
     /// The eyedropper picks from the current layer, or the canvas as composited.
@@ -136,8 +138,6 @@ enum Row {
     /// A switch row, on or off; what a tap does, or none where the desktop can't change it yet
     /// (shown dimmed, as it is).
     Switch(&'static str, bool, Option<Act>),
-    /// A switch that stays as it is, shown as set.
-    Fixed(&'static str, bool),
     /// A slider row this tall: its name, the value as shown, where it is (0..1), and what it sets.
     Slide(&'static str, String, f32, f32, Slid),
     Heading(&'static str),
@@ -619,6 +619,10 @@ impl Actions {
                 prefs.eyedropper_layer = !prefs.eyedropper_layer;
                 Some(Act::Prefs)
             }
+            Some(Tapped::Act(Act::StartAtTip)) => {
+                prefs.start_at_tip = !prefs.start_at_tip;
+                Some(Act::Prefs)
+            }
             Some(Tapped::Act(Act::ResetInput)) => {
                 prefs.reset_input();
                 Some(Act::Prefs)
@@ -900,7 +904,12 @@ impl Actions {
                     tapped = group_view(ui, &smoothing_rows(prefs), 0, &mut self.swipes).0;
                     ui.add_space(16.0);
                     // the stroke always starts at the pointer's tip here
-                    group_view(ui, &[Row::Fixed("Tip Attachment", true)], 1, &mut self.swipes);
+                    group_view(
+                        ui,
+                        &[Row::Switch("Start at tip", prefs.start_at_tip, Some(Act::StartAtTip))],
+                        1,
+                        &mut self.swipes,
+                    );
                     ui.add_space(24.0);
                     let (label, _) = ui.allocate_exact_size(vec2(width, 19.0), Sense::hover());
                     text(
@@ -1029,9 +1038,8 @@ fn group_view(ui: &mut Ui, rows: &[Row], g: usize, swipes: &mut Swipes) -> (Opti
                     tapped = Some(Tapped::Act(*act));
                 }
             }
-            Row::Switch(label, on, None) | Row::Fixed(label, on) => {
-                let ink = if matches!(row, Row::Fixed(..)) { ACTIONS_ROW } else { ACTIONS_DISABLED };
-                text(ui.painter(), label_at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(ink));
+            Row::Switch(label, on, None) => {
+                text(ui.painter(), label_at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(ACTIONS_DISABLED));
                 // a 63 x 28 switch, shown as it is: it can't be changed here
                 let track = Rect::from_min_size(switch_at, vec2(63.0, 28.0));
                 ui.painter().rect_filled(track, 14, argb(SWITCH_FIXED));

@@ -604,8 +604,8 @@ private fun PressurePage(vm: CanvasViewModel, onBack: () -> Unit) {
             ),
         )
         Spacer(Modifier.height(16.dp))
-        // the stroke always starts at the pen's tip here
-        Group(listOf(Toggle("Tip Attachment", true, fixed = true)))
+        // where a stroke begins: at the tip, or where its first few samples average out
+        Group(listOf(Toggle("Start at tip", vm.startAtTip) { vm.changeStartAtTip(it) }))
         Spacer(Modifier.height(24.dp))
         Text("App Pressure Sensitivity", color = Pc.SlideLabel, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 13.dp).height(19.dp))
         Box(Modifier.padding(horizontal = 7.dp).fillMaxWidth().aspectRatio(1f).background(CurveFill)) {

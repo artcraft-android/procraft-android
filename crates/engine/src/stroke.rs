@@ -231,11 +231,14 @@ fn pressure_keep(amount: f32) -> f32 {
 /// Motion filtering's weights for a point and those either side of it (an odd count, adding up to
 /// one), `amount` and `expression` 0..1, at `rate` samples a second. A windowed low-pass, but only
 /// how much of each frequency it lets through is kept, so nothing is moved along: the path doesn't
-/// lag or cut inside a curve.
+/// lag or cut inside a curve. Expression lengthens the filter, letting more of the hand's own
+/// motion under the cut through: the more of it is taken out, the less there is to let back.
 fn motion_weights(amount: f32, expression: f32, rate: f64) -> Vec<f32> {
-    let strength = f64::from(amount.clamp(0.0, 1.0)).powf(MOTION_POWER);
+    let amount = f64::from(amount.clamp(0.0, 1.0));
+    let strength = amount.powf(MOTION_POWER);
     let cut = rate * (1.0 - strength) + MOTION_LOWEST_CUT * strength;
-    let longer = 1.0 + (MOTION_EXPRESSION_LONGEST - 1.0) * f64::from(expression.clamp(0.0, 1.0));
+    let room = 1.0 - amount;
+    let longer = 1.0 + (MOTION_EXPRESSION_LONGEST - 1.0) * f64::from(expression.clamp(0.0, 1.0)) * room;
     let wanted = rate / cut * longer;
     let size = (wanted.ceil() as usize).next_power_of_two().clamp(2, MOTION_MOST_SAMPLES);
     let span = wanted.min((size - 1) as f64);
@@ -276,6 +279,20 @@ fn motion_weights(amount: f32, expression: f32, rate: f64) -> Vec<f32> {
     all.iter().map(|w| (w / sum) as f32).collect()
 }
 
+/// The start the held samples give: where they average out to, and their pressure, timed as the
+/// last of them came (its lean and its turn with it).
+fn averaged_start(held: &[Sample]) -> Sample {
+    let mut pos = Vec2::ZERO;
+    let mut pressure = 0.0;
+    for s in held {
+        pos = pos + s.pos;
+        pressure += s.pressure;
+    }
+    let n = held.len().max(1) as f32;
+    let last = held.last().copied().unwrap_or_else(|| Sample::at(Vec2::ZERO, 1.0, 0.0));
+    Sample { pos: pos * (1.0 / n), pressure: pressure / n, ..last }
+}
+
 /// What a speed control of `amount` leaves of a size or opacity at `speed` (0..1): faster input
 /// takes away as far as the amount says; an amount below 0, slower input does (as measured).
 fn by_speed(amount: f32, speed: f32) -> f32 {
@@ -283,10 +300,11 @@ fn by_speed(amount: f32, speed: f32) -> f32 {
     if amount >= 0.0 { 1.0 - amount * speed } else { 1.0 + amount * (1.0 - speed) }
 }
 
-/// Stabilisation averages each point with those either side of it: at full strength this many
-/// samples' worth each way (at the rate above), fewer as the strength to this power falls.
-const MOST_AVERAGED: f32 = 120.0;
-const STABILIZATION_POWER: f32 = 2.2;
+/// Stabilisation averages each point with those either side of it: at full strength, this long a
+/// stretch of the input, milliseconds. A length of the stroke rather than a count of samples, so
+/// the same setting averages the same distance however fast the input comes, and a quick stroke -
+/// covering more of itself within that stretch - comes out evened out more.
+const STABILIZATION_MS: f64 = 200.0;
 /// Motion filtering lets through what moves slower than its cut and takes out what shakes faster:
 /// at full strength the cut is this, in hertz. Below that it rises to the input's own rate with
 /// the strength to this power, so a little is strong already.
@@ -769,6 +787,9 @@ pub struct StrokeBuilder {
     /// How far the start taper reaches, once its time has passed: from then on it is what the
     /// stroke keeps (so what is drawn for good stays as it is when the stroke ends).
     start_settled: Option<f32>,
+    /// The stroke's first samples, held while its start is decided: with `start_at_tip` off the
+    /// start is their average, so a shaky landing doesn't set where the stroke begins.
+    held_start: Option<Vec<Sample>>,
 }
 
 /// Smoothing and pressure set for every stroke, whatever the brush, on top of the brush's own.
@@ -781,6 +802,9 @@ pub struct InputSettings {
     pub motion_expression: f32,
     /// Pressure changes smoothed, 0..1.
     pub pressure_smoothing: f32,
+    /// Whether the stroke starts where the pen's tip lands. Off, the start is the average of its
+    /// first few samples, so a shaky landing doesn't set where the stroke begins.
+    pub start_at_tip: bool,
     /// What pen pressure becomes before the brush's own curve.
     pub pressure_curve: Curve,
     /// How far input must move for the speed dynamics to count it as fast, as a part of the
@@ -795,6 +819,7 @@ impl Default for InputSettings {
             motion_filtering: 0.0,
             motion_expression: 0.0,
             pressure_smoothing: 0.0,
+            start_at_tip: true,
             pressure_curve: Curve::linear(),
             speed_distance: 1.0,
         }
@@ -921,6 +946,7 @@ impl StrokeBuilder {
             kept: 0,
             left_out: 0,
             start_settled: None,
+            held_start: None,
         }
         .reading_extras()
     }
@@ -1022,6 +1048,7 @@ impl StrokeBuilder {
     /// the newest path point, then straight on to the input, which smoothing leaves the path behind
     /// (the path takes that stretch over as it catches up, curved).
     fn reach_input(&mut self, out: &mut Vec<Stamp>) {
+        self.place_start(out);
         self.average_on(out);
         self.flush(out);
         if let Some(to) = self.input_point() {
@@ -1120,6 +1147,8 @@ impl StrokeBuilder {
     pub fn finish(&mut self) -> Vec<Stamp> {
         let mut run_on = 0.0;
         let mut ignored = Vec::new();
+        // a stroke too short to have settled its start goes on from the samples it held
+        self.place_start(&mut ignored);
         self.average_on(&mut ignored);
         if let Some(to) = self.input_point() {
             // the smoothed path catches up with the pen along the curve, where it lifted the last
@@ -1145,7 +1174,42 @@ impl StrokeBuilder {
         stamps
     }
 
+    /// Takes a sample: with `start_at_tip` off the stroke's first few are held back, and the
+    /// stroke begins where they average out to rather than where the tip happened to land.
     fn push(&mut self, s: Sample, out: &mut Vec<Stamp>) {
+        let points = self.held_points();
+        if let Some(held) = self.held_start.as_mut() {
+            held.push(s);
+            if held.len() < points {
+                return;
+            }
+            let start = averaged_start(held);
+            self.held_start = None;
+            self.push_point(start, out);
+        } else if !self.input.start_at_tip && self.head.is_none() {
+            self.held_start = Some(vec![s]);
+        } else {
+            self.push_point(s, out);
+        }
+    }
+
+    /// How many samples a stroke's start is averaged from when it doesn't start at its tip: a
+    /// frame's worth at the input's tuned rate.
+    fn held_points(&self) -> usize {
+        let rate = if self.pointer.has_pressure() { PEN_RATE } else { FINGER_RATE };
+        ((rate / 60.0).round() as usize).max(2)
+    }
+
+    /// Goes on from the samples held while the stroke's start was decided, where it is taken as it
+    /// stands: for the stroke as it ends, or as it shows now.
+    fn place_start(&mut self, out: &mut Vec<Stamp>) {
+        if let Some(held) = self.held_start.take() {
+            let start = averaged_start(&held);
+            self.push_point(start, out);
+        }
+    }
+
+    fn push_point(&mut self, s: Sample, out: &mut Vec<Stamp>) {
         self.now_ms = s.time_ms;
         let pen = self.pointer.has_pressure();
         // the samples at the tuned rate this one stands for (one if it came with the last's time)
@@ -1317,12 +1381,18 @@ impl StrokeBuilder {
         both
     }
 
-    /// How many samples each way stabilisation averages.
+    /// How many samples each way stabilisation averages: the stretch of stroke [`STABILIZATION_MS`]
+    /// covers at the brushed strength, in samples at the input's tuned rate.
     fn stabilised(&self) -> usize {
         if self.exact {
             return 0;
         }
-        (self.extras.stabilization.clamp(0.0, 1.0).powf(STABILIZATION_POWER) * MOST_AVERAGED) as usize
+        let amount = self.extras.stabilization.clamp(0.0, 1.0);
+        if amount <= 0.0 {
+            return 0;
+        }
+        let interval = 1000.0 / if self.pointer.has_pressure() { PEN_RATE } else { FINGER_RATE };
+        (f64::from(amount) * STABILIZATION_MS / interval / 2.0).round() as usize
     }
 
     /// Takes the path on to `to`: the stretch before it walked along the curve through the points
@@ -3503,7 +3573,7 @@ mod tests {
             (800.0 - last.center.x, last.radius)
         };
         let close = |a: f32, b: f32, share: f32| (a - b).abs() <= share * a.abs().max(b.abs());
-        for (setting, amount, behind) in [("stabilization", 1.0, 200.0), ("motion_filtering", 0.25, 15.0)] {
+        for (setting, amount, behind) in [("stabilization", 1.0, 60.0), ("motion_filtering", 0.25, 15.0)] {
             let mut b = plain();
             b.set_setting(setting, amount);
             let (slow, fast) = (end(&b, PEN_RATE).0, end(&b, PEN_RATE * 3.0).0);
@@ -3518,6 +3588,89 @@ mod tests {
             close(unsmoothed - slow, unsmoothed - fast, 0.15),
             "pressure: {slow} at 240 Hz, {fast} at 720 Hz, {unsmoothed} unsmoothed"
         );
+    }
+
+    #[test]
+    fn stabilisation_trails_by_a_tenth_of_a_second_at_its_most() {
+        // full strength holds the stroke back by half the stretch it averages, and no more: a
+        // stabiliser that drags the line a second behind the pen is a delay, not a stabiliser
+        let mut b = plain();
+        b.set_setting("stabilization", 1.0);
+        let mut s = StrokeBuilder::new(b, 4.0, Pointer::Stylus);
+        s.add(&line(400, 400.0));
+        let last = *s.stamps().last().unwrap();
+        // a pixel every four milliseconds, so a pixel behind is four milliseconds behind
+        let behind = (400.0 - last.center.x) * 4.0;
+        assert!((60.0..140.0).contains(&behind), "trails {behind} ms");
+    }
+
+    #[test]
+    fn a_quicker_stroke_is_evened_out_more() {
+        // the same three wobbles over the same 600 px, once at a stroll and once at a dash: the
+        // average covers a longer piece of the stroke the quicker it is drawn, so more of the
+        // wobble goes. The faster a stroke, the more it smooths it.
+        let wobble = |ms: f64| -> f32 {
+            let mut b = plain();
+            b.set_setting("stabilization", 0.5);
+            let mut s = StrokeBuilder::new(b, 4.0, Pointer::Stylus);
+            let wave: Vec<Sample> = (0..=240)
+                .map(|i| {
+                    let u = i as f32 / 240.0;
+                    Sample::at(
+                        Vec2::new(600.0 * u, 40.0 * (std::f32::consts::TAU * 3.0 * u).sin()),
+                        0.5,
+                        ms * (i as f64) / 240.0,
+                    )
+                })
+                .collect();
+            s.add(&wave);
+            let stamps = s.finish();
+            let third = stamps.len() / 3;
+            let ys: Vec<f32> = stamps.iter().skip(third).take(third).map(|s| s.center.y).collect();
+            ys.iter().copied().fold(f32::MIN, f32::max) - ys.iter().copied().fold(f32::MAX, f32::min)
+        };
+        let (stroll, dash) = (wobble(2400.0), wobble(600.0));
+        assert!(dash < stroll * 0.8, "{dash} of the wobble at a dash, {stroll} at a stroll");
+    }
+
+    #[test]
+    fn expression_has_nothing_left_to_give_at_full_filtering() {
+        // the more is filtered out, the less of the hand's own motion is left for expression to
+        // let back through; at the top of the slider it changes nothing at all
+        assert_eq!(motion_weights(1.0, 1.0, PEN_RATE), motion_weights(1.0, 0.0, PEN_RATE));
+        // at the bottom it still lengthens the filter
+        let (bare, expressed) = (motion_weights(0.05, 0.0, PEN_RATE), motion_weights(0.05, 1.0, PEN_RATE));
+        assert!(expressed.len() > bare.len(), "{} taps against {}", expressed.len(), bare.len());
+    }
+
+    #[test]
+    fn a_stroke_starts_where_its_first_points_average_out_without_starting_at_its_tip() {
+        // a shaky landing: the tip touches down a little off and settles over the next few samples
+        let landing: Vec<Sample> = [(100.0, 100.0), (104.0, 98.0), (97.0, 103.0), (103.0, 101.0)]
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y))| Sample::at(Vec2::new(x, y), 0.5, i as f64 * 4.0))
+            .collect();
+        let start = |at_tip: bool| -> Vec2 {
+            let input = InputSettings { start_at_tip: at_tip, ..InputSettings::default() };
+            let mut s = StrokeBuilder::new(plain(), 6.0, Pointer::Stylus).with_input(input);
+            s.add(&landing);
+            s.finish().first().map_or(Vec2::ZERO, |st| st.center)
+        };
+        // at the tip, the stroke begins where it landed
+        let on = start(true);
+        assert!(on.distance(Vec2::new(100.0, 100.0)) < 2.0, "starts {on:?}");
+        // not, where the four average out to - what the wobble settles on
+        let off = start(false);
+        let average = Vec2::new(101.0, 100.5);
+        assert!(off.distance(average) < 3.0, "starts {off:?}, not {average:?}");
+        // a tap is still a dot, held or not
+        let mut tap = StrokeBuilder::new(plain(), 6.0, Pointer::Stylus)
+            .with_input(InputSettings { start_at_tip: false, ..InputSettings::default() });
+        tap.add(&[Sample::at(Vec2::new(20.0, 20.0), 0.5, 0.0)]);
+        let tapped = tap.finish();
+        assert_eq!(tapped.len(), 1);
+        assert_eq!(tapped[0].center, Vec2::new(20.0, 20.0));
     }
 
     #[test]
