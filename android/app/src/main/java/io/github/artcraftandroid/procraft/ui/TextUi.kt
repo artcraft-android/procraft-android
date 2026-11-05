@@ -305,7 +305,9 @@ private fun TextBar(vm: CanvasViewModel) {
 private fun TextStyleSheet(vm: CanvasViewModel, info: TextInfo) {
     var page by remember { mutableIntStateOf(0) }
     val sheetWide = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp >= WIDE_SHEET
-    val importFont = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(vm::importFont) }
+    val importFont = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) vm.importFonts(uris)
+    }
     // wide, the cards end 33 above the bottom
     Column(
         Modifier.fillMaxWidth().height(if (sheetWide) 521.dp else 561.dp).background(SheetFill)
@@ -326,7 +328,7 @@ private fun TextStyleSheet(vm: CanvasViewModel, info: TextInfo) {
             Row(Modifier.height(43.dp).clip(CircleShape).background(SheetCapsule), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "Import", color = CapsuleInk, fontSize = 15.sp,
-                    modifier = Modifier.clickable { importFont.launch(arrayOf("font/ttf", "font/otf", "font/sfnt", "application/x-font-ttf", "application/x-font-otf", "application/octet-stream")) }.padding(horizontal = 14.dp),
+                    modifier = Modifier.clickable { importFont.launch(arrayOf("font/ttf", "font/otf", "font/sfnt", "font/collection", "application/font-sfnt", "application/x-font-ttf", "application/x-font-otf", "application/octet-stream")) }.padding(horizontal = 14.dp),
                 )
                 Text("Cancel", color = CapsuleInk, fontSize = 15.sp, modifier = Modifier.clickable { vm.cancelTextStyle() }.padding(horizontal = 14.dp))
             }

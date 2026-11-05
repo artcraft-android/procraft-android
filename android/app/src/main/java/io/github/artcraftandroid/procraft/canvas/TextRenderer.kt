@@ -92,7 +92,13 @@ object TextRenderer {
             }
             assets?.let { runCatching { Typeface.createFromAsset(it, file) }.getOrNull() } ?: Typeface.SANS_SERIF
         } else if (font.startsWith(FILE)) {
-            runCatching { Typeface.createFromFile(font.removePrefix(FILE)) }.getOrNull() ?: Typeface.SANS_SERIF
+            val path = font.removePrefix(FILE)
+            // a collection's later families say where in the file they start
+            val start = path.substringAfterLast('#', "").toIntOrNull()
+            runCatching {
+                if (start != null) Typeface.Builder(path.substringBeforeLast('#')).setTtcIndex(start).build()
+                else Typeface.createFromFile(path)
+            }.getOrNull() ?: Typeface.SANS_SERIF
         } else {
             Typeface.create(font.ifEmpty { "sans-serif" }, Typeface.NORMAL)
         }

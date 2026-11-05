@@ -3547,25 +3547,26 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Copies a font file into the app and offers it (the core keeps it); the text being edited takes it. */
-    fun importFont(uri: android.net.Uri) {
+    fun importFonts(uris: List<android.net.Uri>) {
         viewModelScope.launch {
-            val family = withContext(Dispatchers.IO) {
-                runCatching {
-                    val resolver = getApplication<Application>().contentResolver
-                    val name = resolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-                        if (c.moveToFirst()) c.getString(0) else null
-                    } ?: "Font.ttf"
-                    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
-                    // kept in the fonts folder by the core; a file that isn't a font is dropped
-                    TextRenderer.importFont(bytes, name)
-                }.getOrNull()
-            }
-            if (family != null) {
-                changeText { it.copy(font = family) }
-                showNotice("Font imported")
-            }
+            val families = withContext(Dispatchers.IO) { uris.mapNotNull { importFont(it) } }
+            val family = families.firstOrNull() ?: return@launch
+            changeText { it.copy(font = family) }
+            showNotice(if (families.size > 1) "Fonts imported" else "Font imported")
         }
     }
+
+    /** The font file at [uri] kept and offered: its family, or null. */
+    private fun importFont(uri: android.net.Uri): String? =
+        runCatching {
+            val resolver = getApplication<Application>().contentResolver
+            val name = resolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            } ?: "Font.ttf"
+            val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
+            // kept in the fonts folder by the core; a file that isn't a font is dropped
+            TextRenderer.importFont(bytes, name)
+        }.getOrNull()
 
     /** A stroke landed on a text layer: offer to rasterize it. */
     var askRasterize by mutableStateOf(false)
