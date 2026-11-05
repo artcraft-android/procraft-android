@@ -216,6 +216,7 @@ final class CanvasModel {
     private static let libraryWrites = DispatchQueue(label: "ProCraft.brushLibrary", qos: .utility)
     /// The brush studio.
     @ObservationIgnored private(set) lazy var studio = StudioModel(model: self)
+    @ObservationIgnored private(set) lazy var drop = ColorDrop(model: self)
     /// Delete on a locked layer: why not, OK alone.
     var lockedDeleteTold = false
     /// Gesture controls are open, on this page: it opens on the page it was last on.
@@ -750,7 +751,7 @@ final class CanvasModel {
     private func openModes() -> Modes {
         Modes(
             quickshape: quickShape != nil,
-            filling: false,
+            filling: drop.band == .filling,
             recolor: recoloring,
             layerOpacity: false,
             transform: transforming,
@@ -764,6 +765,7 @@ final class CanvasModel {
     private func switchModes(_ button: ModeButton) -> Bool {
         let change = modeSwitch(button: button, open: openModes())
         if change.end.quickshape { endQuickShape() }
+        if change.end.filling { drop.endBand() }
         if change.end.recolor { recoloring = false }
         if change.end.transform { transforming = false }
         if change.end.selection { selecting = false }
@@ -1303,6 +1305,8 @@ final class CanvasModel {
     /// A touch is coming down on an idle canvas: the touches take the settings as they are now.
     func prepareTouches() {
         session.setTouchSettings(settings: Gestures.shared.touchSettings())
+        // Continue filling: each touch fills where it lands; slid, it changes the threshold
+        session.setTouchFilling(fill: drop.touchFill())
         // a touch on the canvas closes an adjustment's menu and liquify's popups
         closedAdjustMenu = adjustMenuAt != nil
         if adjustment != nil {

@@ -40,6 +40,7 @@ struct CanvasScreen: View {
                             model.sliderPanelKept = false
                         })
                 }
+                ColorDropBand(drop: model.drop, width: screen.size.width)
                 // the top bar slides up off the screen and the side bar out to its side as they fade
                 TopBar(model: model)
                     .offset(y: hidden ? -Pc.barHeight : 0)
@@ -87,6 +88,7 @@ struct CanvasScreen: View {
                     GestureControls(model: model)
                         .transition(.move(edge: .bottom))
                 }
+                ColorDropDot(drop: model.drop)
                 BlockedDialog(model: model)
                 AlertView(
                     content: model.question.map {
@@ -346,6 +348,10 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 model.askRasterize = true
             case .copyPaste:
                 model.copyPasteOpen = true
+            case let .fillThreshold(threshold):
+                model.drop.pourThreshold(threshold)
+            case .filled:
+                model.drop.filled()
             case let .quickMenu(x, y):
                 model.toggleQuickMenu(at: CGPoint(x: CGFloat(x) / model.pixels, y: CGFloat(y) / model.pixels))
             case .adjustChanged:

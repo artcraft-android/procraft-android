@@ -247,6 +247,21 @@ struct ColorPanel: View {
             ModeTabs(model: model)
         }
         .coordinateSpace(.named(colorsSpace))
+        // a swatch dragged out and let go over the panel itself fills nothing
+        .background {
+            if background == nil {
+                GeometryReader { place in
+                    Color.clear.onChange(of: place.frame(in: .global), initial: true) { _, frame in
+                        model.drop.avoid = frame
+                    }
+                }
+            }
+        }
+        .onDisappear {
+            if background == nil {
+                model.drop.avoid = nil
+            }
+        }
         .overlay(alignment: .topLeading) { ColorMenus(model: model, ui: ui) }
         .photosPicker(isPresented: photoAsked, selection: $photo, matching: .images)
         .onChange(of: photo) { _, item in
@@ -799,6 +814,8 @@ private struct SwatchGrid: View {
     let c: any ColorPick
     let index: Int
     let palette: PaletteInfo
+    /// A colour dragged out onto the canvas fills there.
+    var droppable = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -807,21 +824,33 @@ private struct SwatchGrid: View {
                     ForEach(0 ..< 10, id: \.self) { col in
                         let slot = row * 10 + col
                         let rgb = palette.colors.indices.contains(slot) ? palette.colors[slot] : nil
-                        Rectangle()
-                            .fill(rgb.map(canvasColor) ?? Pc.emptySlot)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                if let rgb {
-                                    c.setRgb(rgb)
-                                } else {
-                                    model.setSwatch(index, slot, c.rgb())
+                        if let rgb, droppable, c is BrushColor {
+                            Rectangle()
+                                .fill(canvasColor(rgb))
+                                .overlay {
+                                    DropSource(
+                                        model: model, swatch: rgb,
+                                        onHold: { model.setSwatch(index, slot, nil) },
+                                        onTap: { c.setRgb(rgb) }
+                                    )
                                 }
-                            }
-                            .onLongPressGesture {
-                                if rgb != nil {
-                                    model.setSwatch(index, slot, nil)
+                        } else {
+                            Rectangle()
+                                .fill(rgb.map(canvasColor) ?? Pc.emptySlot)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    if let rgb {
+                                        c.setRgb(rgb)
+                                    } else {
+                                        model.setSwatch(index, slot, c.rgb())
+                                    }
                                 }
-                            }
+                                .onLongPressGesture {
+                                    if rgb != nil {
+                                        model.setSwatch(index, slot, nil)
+                                    }
+                                }
+                        }
                     }
                 }
                 .frame(height: 36)
@@ -930,7 +959,7 @@ private struct PalettesList: View {
             if cards {
                 PaletteTiles(model: model, c: c, index: i, palette: p)
             } else {
-                SwatchGrid(model: model, c: c, index: i, palette: p)
+                SwatchGrid(model: model, c: c, index: i, palette: p, droppable: false)
             }
         }
         .background(Pc.setCell)

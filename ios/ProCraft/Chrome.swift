@@ -126,8 +126,10 @@ private struct ColorButton: View {
             }
             .frame(width: Pc.colorDot, height: Pc.colorDot)
             .frame(width: Pc.barButtonWidth, height: Pc.barButtonHeight)
-            .contentShape(Rectangle())
-            .onTapGesture { model.toggle(.color) }
+            // held, the colour painted with before; dragged out onto the canvas, it fills there
+            .overlay {
+                DropSource(model: model, onHold: { model.previousColor() }, onTap: { model.toggle(.color) })
+            }
     }
 }
 
