@@ -29,7 +29,8 @@ const TAP_MS: f64 = 300.0;
 /// A liquify brush lifted within this long of its last move carries on.
 const LIQUIFY_STILL_MS: f64 = 60.0;
 const TAP_SLOP: f32 = 24.0;
-/// Fingers tapped together: none goes further than this (points) from where it landed.
+/// Fingers tapped together stay short of this (points) from where they landed, and from each
+/// other's move: this far, they are moving the canvas.
 const FINGERS_TAP_SLOP: f32 = 15.0;
 /// A touch on the canvas with a panel open moved this far (points) is a drag, not a tap.
 const PANEL_SLOP: f32 = 10.0;
@@ -384,7 +385,8 @@ pub(crate) struct Touches {
     assisted: bool,
     down_at: (f32, f32),
     /// When the last finger of a tap landed (the only one, until another does), when the first
-    /// of them lifted, how many there were, and how far any of them has gone from where it landed.
+    /// of them lifted, how many there were, and how far they have gone (see
+    /// [`CanvasSession::note_fingers_moved`]).
     tap_start: f64,
     tap_lifted: Option<f64>,
     tap_pointers: usize,
@@ -1146,7 +1148,7 @@ impl CanvasSession {
         if t.rapid_due.is_some_and(|due| due <= now_ms) {
             t.rapid_due = None;
             // two fingers held still keep undoing, three redoing
-            let still = t.tap_moved <= FINGERS_TAP_SLOP * t.scale;
+            let still = t.tap_moved < FINGERS_TAP_SLOP * t.scale;
             if t.mode == Mode::Gesture && still && t.down.len() == t.tap_pointers && t.settings.undo_taps {
                 match t.down.len() {
                     2 => out.push(TouchCommand::Undo),
@@ -1990,18 +1992,24 @@ impl CanvasSession {
         });
     }
 
-    /// Keeps how far any finger down has gone from where it landed: a finger's wobble, which a
-    /// touch screen reports move by move, takes it nowhere.
+    /// Keeps how far any finger down has gone from where it landed, or from where another's move
+    /// would have put it (a pinch or a turn parts them, each going only half as far): a finger's
+    /// wobble, which a touch screen reports move by move, takes it nowhere.
     fn note_fingers_moved(t: &mut Touches) {
-        let furthest = t.down.iter().map(|d| dist(d.at, d.from)).fold(0.0, f32::max);
-        t.tap_moved = t.tap_moved.max(furthest);
+        let moved = |d: &Down| (d.at.0 - d.from.0, d.at.1 - d.from.1);
+        for (i, a) in t.down.iter().enumerate() {
+            t.tap_moved = t.tap_moved.max(dist(a.at, a.from));
+            for b in t.down.iter().skip(i + 1) {
+                t.tap_moved = t.tap_moved.max(dist(moved(a), moved(b)));
+            }
+        }
     }
 
     /// Whether fingers lifted, the last at `now`, were a tap: down together for no longer than a
-    /// tap takes, gone within that long of the first, and none moved away from where it landed.
+    /// tap takes, gone within that long of the first, and none moved away.
     fn fingers_tapped(t: &Touches, now: f64) -> bool {
         let lifted = t.tap_lifted.unwrap_or(now);
-        lifted - t.tap_start <= TAP_MS && now - lifted <= TAP_MS && t.tap_moved <= FINGERS_TAP_SLOP * t.scale
+        lifted - t.tap_start <= TAP_MS && now - lifted <= TAP_MS && t.tap_moved < FINGERS_TAP_SLOP * t.scale
     }
 
     fn follow_fingers(t: &mut Touches) {
@@ -2264,6 +2272,22 @@ mod tests {
         }
         s.touch_up(1, at(125.0, 100.0, 60.0));
         assert!(!s.touch_up(2, at(225.0, 100.0, 70.0)).contains(&TouchCommand::Undo));
+        // nor a small pinch, each finger short of the tap's reach alone, nor a slight turn
+        for (dx, dy) in [(-8.0, 0.0), (0.0, 8.0)] {
+            s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 500.0));
+            s.touch_down(2, PointerKind::Finger, at(200.0, 100.0, 510.0));
+            s.touch_move(1, at(100.0 + dx, 100.0 + dy, 530.0));
+            s.touch_move(2, at(200.0 - dx, 100.0 - dy, 534.0));
+            s.touch_up(1, at(100.0 + dx, 100.0 + dy, 560.0));
+            assert!(!s.touch_up(2, at(200.0 - dx, 100.0 - dy, 570.0)).contains(&TouchCommand::Undo));
+        }
+        // nor fingers gone exactly the tap's reach, where they begin to move the canvas
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 700.0));
+        s.touch_down(2, PointerKind::Finger, at(200.0, 100.0, 710.0));
+        s.touch_move(1, at(115.0, 100.0, 730.0));
+        s.touch_move(2, at(215.0, 100.0, 734.0));
+        s.touch_up(1, at(115.0, 100.0, 760.0));
+        assert!(!s.touch_up(2, at(215.0, 100.0, 770.0)).contains(&TouchCommand::Undo));
         // nor one that had moved before the other landed: a stroke, taken back by a second finger
         s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 1000.0));
         s.touch_move(1, at(140.0, 100.0, 1050.0));
