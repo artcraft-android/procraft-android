@@ -2283,6 +2283,31 @@ mod tests {
     }
 
     #[test]
+    fn with_finger_painting_off_fingers_only_move_the_canvas() {
+        let s = session();
+        let settings = TouchSettings { finger_paint: false, one_finger_pan: true, ..TouchSettings::default() };
+        s.set_touch_settings(TouchSettings { undo_taps: false, ..settings });
+        // one finger
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
+        assert!(!painting(&s));
+        assert!(s.touch_move(1, at(200.0, 100.0, 20.0)).contains(&TouchCommand::ViewMoved));
+        assert!(!painting(&s));
+        assert!(!s.touch_up(1, at(200.0, 100.0, 40.0)).contains(&TouchCommand::StrokeEnded));
+        // two, one after the other and both at once
+        for (gap, ms) in [(30.0, 1000.0), (0.0, 2000.0)] {
+            s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, ms));
+            s.touch_down(2, PointerKind::Finger, at(300.0, 100.0, ms + gap));
+            assert!(!painting(&s));
+            let moved = s.touch_move(2, at(340.0, 100.0, ms + 60.0));
+            assert!(moved.contains(&TouchCommand::ViewMoved), "{moved:?}");
+            assert!(!painting(&s));
+            let mut out = s.touch_up(2, at(340.0, 100.0, ms + 80.0));
+            out.extend(s.touch_up(1, at(100.0, 100.0, ms + 90.0)));
+            assert!(!out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+        }
+    }
+
+    #[test]
     fn a_pointer_the_platform_takes_back_makes_no_tap_and_no_stroke() {
         let s = session();
         s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
