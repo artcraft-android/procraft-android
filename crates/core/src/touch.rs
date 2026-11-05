@@ -39,6 +39,9 @@ const TAP_SLOP: f32 = 24.0;
 const FINGERS_TAP_SLOP: f32 = 15.0;
 /// A touch on the canvas with a panel open moved this far (points) is a drag, not a tap.
 const PANEL_SLOP: f32 = 10.0;
+/// Fingers together on the canvas leave the view as it is until they have gone this far between
+/// them (points) from where they landed, so a tap doesn't nudge it: measured over 8, under 12.
+const VIEW_SLOP: f32 = 10.0;
 /// The single touch companion's Zoom: a drag this far (points) up zooms the canvas in e times.
 pub const COMPANION_ZOOM_DISTANCE: f32 = 180.0;
 
@@ -399,6 +402,8 @@ pub(crate) struct Touches {
     /// The two fingers' spread as a part of where it started, and its recent values with their
     /// times (the first at or before the speed's window).
     gesture_scale: f32,
+    /// The fingers have gone far enough to move the view ([`VIEW_SLOP`]).
+    view_moving: bool,
     pinch: Vec<(f64, f32)>,
     gesture_pair: Option<(u64, u64)>,
     last: (f32, f32, f32, f32),
@@ -505,6 +510,7 @@ impl Default for Touches {
             tap_pointers: 0,
             tap_moved: 0.0,
             gesture_scale: 1.0,
+            view_moving: false,
             pinch: Vec::new(),
             gesture_pair: None,
             last: (0.0, 0.0, 0.0, 0.0),
@@ -1571,6 +1577,7 @@ impl CanvasSession {
                 | Mode::Held
         ) {
             t.gesture_scale = 1.0;
+            t.view_moving = false;
             t.pinch.clear();
             t.pinch.push((now, 1.0));
         }
@@ -2112,7 +2119,12 @@ impl CanvasSession {
         let old = t.pinch.iter().skip(1).take_while(|(at, _)| *at <= from).count();
         t.pinch.drain(..old);
         t.last = (x, y, d, angle);
-        self.view_gesture(lx, ly, x - lx, y - ly, scale, turn);
+        let gone: f32 = t.down.iter().map(|d| dist(d.at, d.from)).sum();
+        t.view_moving |= gone >= VIEW_SLOP * t.scale;
+        // from where they are when it starts, so it doesn't jump
+        if t.view_moving {
+            self.view_gesture(lx, ly, x - lx, y - ly, scale, turn);
+        }
         true
     }
 
@@ -2576,6 +2588,27 @@ mod tests {
 
     fn zoom(s: &CanvasSession) -> f32 {
         s.shared.lock().view.map_or(0.0, |v| v.zoom())
+    }
+
+    #[test]
+    fn fingers_leave_the_view_as_it_is_until_they_have_gone_a_little_way() {
+        let s = shown(1.0);
+        let before = zoom(&s);
+        let (a, b) = ((200.0, 300.0), (400.0, 300.0));
+        s.touch_down(1, PointerKind::Finger, at(a.0, a.1, 0.0));
+        s.touch_down(2, PointerKind::Finger, at(b.0, b.1, 5.0));
+        // as measured: each 4 out leaves it, each 6 moves it
+        s.touch_move(1, at(a.0 - 4.0, a.1, 400.0));
+        s.touch_move(2, at(b.0 + 4.0, b.1, 405.0));
+        assert_eq!(zoom(&s), before);
+        s.touch_move(1, at(a.0 - 6.0, a.1, 450.0));
+        s.touch_move(2, at(b.0 + 6.0, b.1, 455.0));
+        // on from there, so with no jump: only what came after the first step past it
+        let started = zoom(&s);
+        assert!(started >= before && started < before * 1.02, "{started} from {before}");
+        s.touch_move(1, at(a.0 - 56.0, a.1, 500.0));
+        s.touch_move(2, at(b.0 + 56.0, b.1, 505.0));
+        assert!(zoom(&s) > started * 1.3, "{}", zoom(&s));
     }
 
     #[test]
