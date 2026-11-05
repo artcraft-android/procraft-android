@@ -2305,6 +2305,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             while (session === s) {
                 kotlinx.coroutines.delay(SAVE_FAILURE_POLL_MS)
                 s.takeSaveFailure()?.let { told(Result.failure(Exception(it))) }
+                // a smudge the GPU had no memory for, or its device lost
+                s.takeFailure()?.let { withContext(Dispatchers.Main) { showNotice(it, warning = true) } }
             }
         }
         // a canvas the device's graphics can't draw says so (one opened from its cell, by the zoom)
@@ -3303,6 +3305,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val s = session ?: return
         // either way the canvas is fitted to the screen again: cancelled, growing back into place
         val changed = s.cropEnd(keep)
+        // a crop the GPU couldn't make: the canvas is as it was, and says so
+        s.takeFailure()?.let { showNotice(it, warning = true) }
         if (!keep) {
             refreshView()
             followView()

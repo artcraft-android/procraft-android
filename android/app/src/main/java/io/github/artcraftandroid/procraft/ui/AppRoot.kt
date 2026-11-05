@@ -57,6 +57,7 @@ fun AppRoot(vm: CanvasViewModel) {
         BackHandler {
             when {
                 vm.guideEditing -> vm.closeGuideEditor(keep = false)
+                vm.cropRect != null -> vm.endCrop(false)
                 vm.lightingStudioOpen -> vm.closeLightingStudio(keep = false)
                 vm.studioOpen -> vm.closeStudio(keep = false)
                 vm.transformPopup != TransformPopup.NONE -> vm.transformPopup = TransformPopup.NONE

@@ -785,29 +785,36 @@ impl State {
     /// Creates the canvas once there is a GPU.
     #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
     pub(crate) fn ensure_canvas(&mut self) {
-        if self.canvas.is_some() || self.closed {
+        // one that couldn't be made isn't made again: what was opened stays, and a save writes it
+        if self.canvas.is_some() || self.closed || self.error.is_some() {
             return;
         }
         let Some(gpu) = self.gpu.as_ref() else { return };
-        match Canvas::new(gpu, &self.doc) {
-            Ok(mut c) => {
-                c.set_resident_budget(crate::layers::resident_budget());
-                let (w, h) = (self.doc.width(), self.doc.height());
-                for (id, pixels) in project::opened_pixels(std::mem::take(&mut self.pending_pixels), w, h) {
-                    // past what fits, kept compressed until needed
-                    let opened =
-                        if c.has_room() { c.upload_layer(gpu, id, &pixels) } else { c.park_pixels(id, &pixels) };
-                    if let Err(e) = opened {
-                        log::error!("opening a layer: {e}");
-                    }
+        let (w, h) = (self.doc.width(), self.doc.height());
+        let pixels = project::opened_pixels(std::mem::take(&mut self.pending_pixels), w, h);
+        let doc = &self.doc;
+        // every layer up as it was read, or no canvas: one the GPU had no memory for would show
+        // empty, and be saved so once painted on
+        let made = gpu.checked(|| -> Result<Canvas, procraft_gpu::GpuError> {
+            let mut c = Canvas::new(gpu, doc)?;
+            c.set_resident_budget(crate::layers::resident_budget());
+            for (id, pixels) in &pixels {
+                // past what fits, kept compressed until needed
+                let opened = if c.has_room() { c.upload_layer(gpu, *id, pixels) } else { c.park_pixels(*id, pixels) };
+                if let Err(e) = opened {
+                    log::error!("opening a layer: {e}");
                 }
-                // as read: not changed
-                c.take_changed();
-                self.canvas = Some(c);
             }
+            // as read: not changed
+            c.take_changed();
+            Ok(c)
+        });
+        match made.and_then(|made| made) {
+            Ok(c) => self.canvas = Some(c),
             Err(e) => {
                 log::error!("canvas: {e}");
                 self.error = Some(e.to_string());
+                self.pending_pixels = pixels.into_iter().map(|(id, px)| (id, project::Opened::Pixels(px))).collect();
             }
         }
     }
@@ -996,7 +1003,9 @@ impl Shared {
             Upload(Vec<u8>, Option<procraft_engine::geom::IRect>, Option<procraft_gpu::ReadyToPark>),
             Park(procraft_gpu::ReadyToPark),
         }
-        let made: Result<Canvas, procraft_gpu::GpuError> = {
+        // every layer up as it was read, or no canvas (what was opened kept): one the GPU had no
+        // memory for would show empty, and be saved so once painted on
+        let made = gpu.checked(|| -> Result<Canvas, procraft_gpu::GpuError> {
             let budget = crate::layers::resident_budget();
             let (w, h) = (doc.width(), doc.height());
             // read on a few threads (each file decoded and its compressed copy made: those below
@@ -1093,13 +1102,13 @@ impl Shared {
                 );
                 Ok(c)
             })
-        };
+        });
         let mut st = self.lock();
         if st.canvas.is_some() {
             return;
         }
         let same = st.doc == doc && st.pending_pixels.iter().map(|(id, _)| *id).eq(ids.iter().copied());
-        match made {
+        match made.and_then(|made| made) {
             Ok(c) if same => {
                 st.pending_pixels.clear();
                 st.canvas = Some(c);

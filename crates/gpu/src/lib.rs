@@ -73,6 +73,12 @@ pub enum GpuError {
     Surface(String),
     #[error("reading pixels back: {0}")]
     Readback(String),
+    #[error("the GPU is out of memory: {0}")]
+    OutOfMemory(String),
+    #[error("the GPU device was lost")]
+    Lost,
+    #[error("GPU work failed: {0}")]
+    Failed(String),
 }
 
 /// The device everything renders with. A clone is the same device, sharing what is made for it.
@@ -310,6 +316,34 @@ impl Gpu {
         self.lost.load(Ordering::Relaxed)
     }
 
+    /// Runs `work`, waits for what it sent the GPU, and says whether any of it went wrong: a
+    /// texture or buffer there was no memory for (made all the same, but holding nothing), work
+    /// that used one (left undone: a copy into it copies nothing), the device lost meanwhile, or
+    /// the work panicking (as wgpu does on a lost device). What `work` made must then not take
+    /// the place of what was there. Only what this thread does is looked at.
+    pub fn checked<T>(&self, work: impl FnOnce() -> T) -> Result<T, GpuError> {
+        if self.is_lost() {
+            return Err(GpuError::Lost);
+        }
+        let memory = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let invalid = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+        // done on the GPU, so a device lost doing it shows
+        self.flush();
+        let invalid = pollster::block_on(invalid.pop());
+        let memory = pollster::block_on(memory.pop());
+        if self.is_lost() {
+            return Err(GpuError::Lost);
+        }
+        if let Some(e) = memory {
+            return Err(GpuError::OutOfMemory(e.to_string()));
+        }
+        if let Some(e) = invalid {
+            return Err(GpuError::Failed(e.to_string()));
+        }
+        done.map_err(|panic| GpuError::Failed(format!("panicked: {}", panic_message(panic.as_ref()))))
+    }
+
     /// Makes the pipelines canvases draw with, and the brush images they hold, now, so the first
     /// canvas on this device is made at once (slow: off the main thread).
     pub fn prepare_canvases(&self) {
@@ -368,6 +402,37 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn work_that_fails_on_the_gpu_is_told() {
+        let gpu = match Gpu::headless() {
+            Ok(g) => g,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        assert_eq!(gpu.checked(|| 7).ok(), Some(7));
+        // a texture it won't make, and a panic on the way
+        let most = gpu.device.limits().max_texture_dimension_2d;
+        let made = gpu.checked(|| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("too large"),
+                size: wgpu::Extent3d { width: most + 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        });
+        assert!(matches!(made, Err(GpuError::Failed(_))));
+        assert!(matches!(gpu.checked::<()>(|| panic!("a wrapper panicking")), Err(GpuError::Failed(_))));
+        // nothing goes past it to the errors counted
+        assert_eq!(gpu.errors(), 0);
+        // and a device lost
+        gpu.device.destroy();
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        assert!(matches!(gpu.checked(|| 7), Err(GpuError::Lost)));
+    }
 
     #[test]
     fn canvases_on_one_device_share_their_pipelines() {

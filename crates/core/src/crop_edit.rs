@@ -65,6 +65,10 @@ pub(crate) struct CropEdit {
     /// A drag on the frame: what it took, the rectangle then, where it began (canvas pixels) and
     /// how far (canvas pixels) the frame snaps.
     drag: Option<(Grab, [f32; 4], Vec2, f32)>,
+    /// Why the last crop couldn't be made, until the app takes it to tell, and whether the GPU's
+    /// device being lost was told.
+    pub(crate) failure: Option<String>,
+    pub(crate) lost_told: bool,
 }
 
 impl CropEdit {
@@ -307,7 +311,7 @@ impl CanvasSession {
 
     /// Ends Crop and Resize: `keep` crops as set (and sets the DPI), else the canvas goes back as
     /// it was; either way it is fitted to the window again (cancelled, easing back). True if the
-    /// canvas changed.
+    /// canvas changed; false too if it couldn't be cropped ([`CanvasSession::take_failure`]).
     pub fn crop_end(&self, keep: bool) -> bool {
         let (rect, angle, resample, size, dpi) = {
             let mut st = self.shared.lock();
@@ -325,9 +329,6 @@ impl CanvasSession {
             let st = self.shared.lock();
             (st.doc.dpi, st.doc.width(), st.doc.height())
         };
-        if (dpi - canvas_dpi).abs() > 0.01 {
-            self.set_dpi(dpi);
-        }
         let [l, t, r, b] = rect;
         let (w, h) = (r - l, b - t);
         // nothing to crop: the whole canvas, unturned, at its size
@@ -337,10 +338,12 @@ impl CanvasSession {
             && h.round() as u32 == ch
             && angle == 0.0
             && size == (cw, ch);
-        if same {
-            return false;
+        let cropped = !same && self.crop_canvas(l, t, w, h, angle, resample, size.0, size.1);
+        // the DPI too, unless a crop was wanted and couldn't be made: then nothing changes
+        if (same || cropped) && (dpi - canvas_dpi).abs() > 0.01 {
+            self.set_dpi(dpi);
         }
-        self.crop_canvas(l, t, w, h, angle, resample, size.0, size.1)
+        cropped
     }
 }
 

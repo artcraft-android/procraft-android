@@ -1555,6 +1555,10 @@ pub struct Canvas {
     composites: u64,
     active: Option<ActiveStroke>,
     smudge: Option<Smudge>,
+    /// The open smudge stroke couldn't be begun (what it takes couldn't be made): it does nothing
+    /// until it ends. And whether that is still to be told.
+    smudge_refused: bool,
+    smudge_untold: bool,
     /// A layer's pixels set aside by [`Canvas::hold_layer`].
     held: Option<Snapshot>,
     /// Counts the undo steps ever made, so that a change since some moment shows.
@@ -1846,6 +1850,8 @@ impl Canvas {
             composites: 0,
             active: None,
             smudge: None,
+            smudge_refused: false,
+            smudge_untold: false,
             held: None,
             steps_made: 0,
             mark: None,
@@ -2702,6 +2708,12 @@ impl Canvas {
         self.caches.is_some()
     }
 
+    /// Whether a smudge stroke couldn't be begun since this was last asked (what it takes couldn't
+    /// be made on the GPU: past its memory, or more than a binding may hold), once.
+    pub fn take_smudge_refused(&mut self) -> bool {
+        std::mem::take(&mut self.smudge_untold)
+    }
+
     /// What the layers' textures may take, in bytes: past it, the layers needed least lately
     /// that aren't being worked on are parked (kept compressed off the GPU, and the composite made
     /// around pictures of them) until needed again. 0 keeps every layer on the GPU.
@@ -3415,6 +3427,7 @@ impl Canvas {
             // a stroke ends: the next has a second only if it says so
             if matches!(op, Op::Commit(_) | Op::Cancel) {
                 self.queued_second = None;
+                self.smudge_refused = false;
             }
             match op {
                 Op::Stamps { instances, wet, times, style, layer, clear, second: false, .. } if style.in_place() => {
@@ -3496,6 +3509,10 @@ impl Canvas {
                 }
                 Op::Commit(stroke) if stroke.style.in_place() => {
                     self.within = None;
+                    // one that couldn't be begun made no step, nor takes the name of one
+                    if self.smudge.is_none() {
+                        self.next_name = None;
+                    }
                     // wet paint's last frame, held back for the rest of it
                     let held = self.smudge.as_mut().map(|s| std::mem::take(&mut s.pending)).unwrap_or_default();
                     let uniforms = (&mut smudge_uniforms, &mut wet_uniforms);
@@ -4228,14 +4245,34 @@ impl Canvas {
             self.dirty = self.full();
         }
         if self.smudge.as_ref().is_none_or(|s| s.layer != target) {
+            if self.smudge_refused {
+                return;
+            }
             let Some(layer) = self.layers.get(&target) else { return };
+            let wet_paint = style.paints_in_place();
+            let layer_bytes = u64::from(row) * u64::from(self.height);
+            // wet paint with a texturized grain keeps the stroke without it, then the layer as it was
+            let grain = grain_once(style);
+            // a dual brush's dry paint laid in place is laid apart, put together with its second
+            let apart = (style.laid_in_place && style.wet_pull.is_none())
+                .then_some(self.queued_second)
+                .flatten()
+                .map(|d| (*style, d.mode + 1, d.threshold));
+            // and builds up by what is left in the modulated mode (and keeps how much shows, laid
+            // apart)
+            let amount_bytes = (wet_paint && style.rendering == Rendering::Gradual || apart.is_some())
+                .then(|| layer_bytes * if apart.is_some() { 2 } else { 1 });
+            // all it takes made first, and the stroke not begun if any of it can't be (past the
+            // GPU's memory, or more than a binding may hold): begun, each frame it is in would go
+            // undrawn (the screen flashing) and its undo step would wipe what it covered
+            let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+            let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let work = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("smudge layer"),
-                size: u64::from(row) * u64::from(self.height),
+                size: layer_bytes,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let wet_paint = style.paints_in_place();
             let carry = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("smudge carry"),
                 // the carry, and the blur's two passes over it (see the shader's cs_blur_down); or
@@ -4249,63 +4286,57 @@ impl Canvas {
                 mapped_at_creation: false,
             });
             let before = texture(device, "smudge before", self.width, self.height, LAYER_FORMAT);
+            let grained = grain.then(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("smudge grained"),
+                    size: 2 * layer_bytes,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+            let amount = amount_bytes.map(|size| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("smudge amount"),
+                    size,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+            let failed = pollster::block_on(invalid.pop()).or(pollster::block_on(memory.pop()));
+            let bound = (if grain { 2 * layer_bytes } else { layer_bytes }).max(amount_bytes.unwrap_or(0));
+            let most = device.limits().max_storage_buffer_binding_size;
+            let too_much = || (bound > most).then(|| format!("{bound} bytes bound, {most} at most"));
+            let refused = failed.map(|e| e.to_string()).or_else(too_much);
+            if let Some(why) = refused {
+                log::error!("smudging: {why}");
+                self.smudge_refused = true;
+                self.smudge_untold = true;
+                return;
+            }
             encoder.copy_texture_to_texture(
                 copy_at(&layer.texture, 0, 0),
                 copy_at(&before, 0, 0),
                 extent(self.width, self.height),
             );
-            encoder.copy_texture_to_buffer(
-                copy_at(&layer.texture, 0, 0),
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &work,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(row),
-                        rows_per_image: Some(self.height),
-                    },
-                },
-                extent(self.width, self.height),
-            );
-            // wet paint with a texturized grain keeps the stroke without it, then the layer as it was
-            let layer_bytes = u64::from(row) * u64::from(self.height);
-            let grained = grain_once(style).then(|| {
-                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("smudge grained"),
-                    size: 2 * layer_bytes,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                for offset in [0, layer_bytes] {
-                    encoder.copy_texture_to_buffer(
-                        copy_at(&layer.texture, 0, 0),
-                        wgpu::TexelCopyBufferInfo {
-                            buffer: &buffer,
-                            layout: wgpu::TexelCopyBufferLayout {
-                                offset,
-                                bytes_per_row: Some(row),
-                                rows_per_image: Some(self.height),
-                            },
+            let copy_into = |encoder: &mut wgpu::CommandEncoder, buffer: &wgpu::Buffer, offset: u64| {
+                encoder.copy_texture_to_buffer(
+                    copy_at(&layer.texture, 0, 0),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset,
+                            bytes_per_row: Some(row),
+                            rows_per_image: Some(self.height),
                         },
-                        extent(self.width, self.height),
-                    );
-                }
-                buffer
-            });
-            // a dual brush's dry paint laid in place is laid apart, put together with its second
-            let apart = (style.laid_in_place && style.wet_pull.is_none())
-                .then_some(self.queued_second)
-                .flatten()
-                .map(|d| (*style, d.mode + 1, d.threshold));
-            // and builds up by what is left in the modulated mode (and keeps how much shows, laid
-            // apart)
-            let amount = (wet_paint && style.rendering == Rendering::Gradual || apart.is_some()).then(|| {
-                device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("smudge amount"),
-                    size: layer_bytes * if apart.is_some() { 2 } else { 1 },
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                })
-            });
+                    },
+                    extent(self.width, self.height),
+                );
+            };
+            copy_into(encoder, &work, 0);
+            if let Some(buffer) = &grained {
+                copy_into(encoder, buffer, 0);
+                copy_into(encoder, buffer, layer_bytes);
+            }
             self.smudge = Some(Smudge {
                 layer: target,
                 work,
@@ -7935,6 +7966,8 @@ fn texture(device: &wgpu::Device, label: &str, width: u32, height: u32, format: 
     // where the GPU's block compression loses parts of a picture redrawn a part at a time (Mali),
     // a texture that can be a storage one is kept uncompressed
     let uncompressed = crate::textures_uncompressed() && format == wgpu::TextureFormat::Rgba8Unorm;
+    #[cfg(test)]
+    let width = if tests::fails(label) { device.limits().max_texture_dimension_2d + 1 } else { width };
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: extent(width, height),
@@ -8734,6 +8767,8 @@ pub fn read_texture(gpu: &Gpu, texture: &wgpu::Texture, width: u32, height: u32)
 pub enum Readback {
     /// Already here.
     Ready(Vec<u8>),
+    /// The copy couldn't be made (why): nothing is coming.
+    Failed(String),
     Copying {
         device: wgpu::Device,
         /// The buffer and how much of it the pixels take; kept for the next readback after.
@@ -8755,6 +8790,7 @@ impl Readback {
     pub fn bytes(&self) -> usize {
         match self {
             Readback::Ready(p) => p.len(),
+            Readback::Failed(_) => 0,
             Readback::Copying { size, .. } => usize::try_from(*size).unwrap_or(usize::MAX),
         }
     }
@@ -8764,6 +8800,7 @@ impl Readback {
     pub fn pixels(self) -> Result<Vec<u8>, GpuError> {
         let (device, buffer, size, kept, row, padded, mapped) = match self {
             Readback::Ready(p) => return Ok(p),
+            Readback::Failed(why) => return Err(GpuError::Readback(why)),
             Readback::Copying { device, buffer, size, kept, row, padded, mapped } => {
                 (device, buffer, size, kept, row, padded, mapped)
             }
@@ -8805,6 +8842,9 @@ fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readba
     let padded = row.div_ceil(256) * 256;
     let size = (padded * height as usize) as u64;
     let buffer = gpu.readback_buffer(size);
+    // a texture there was no memory for (or one its device let go) copies nothing, and the buffer
+    // would give back what it held before, another layer's pixels perhaps: the read fails instead
+    let invalid = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
     encoder.copy_texture_to_buffer(
         copy_at(texture, rect.x0, rect.y0),
@@ -8819,6 +8859,9 @@ fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readba
         extent(width, height),
     );
     gpu.queue.submit([encoder.finish()]);
+    if let Some(e) = pollster::block_on(invalid.pop()) {
+        return Readback::Failed(e.to_string());
+    }
     let (tx, rx) = mpsc::channel();
     buffer.slice(..size).map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
@@ -8830,6 +8873,77 @@ fn start_reading_part(gpu: &Gpu, texture: &wgpu::Texture, rect: IRect) -> Readba
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    std::thread_local! {
+        /// The label of textures this thread can't make, as past the GPU's memory.
+        static FAILING: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// Whether a texture labelled `label` is to fail on this thread.
+    pub(super) fn fails(label: &str) -> bool {
+        FAILING.with(|f| f.get() == Some(label))
+    }
+
+    #[test]
+    fn a_texture_the_gpu_couldnt_make_reads_as_a_failure_not_as_old_pixels() {
+        let Ok(gpu) = Gpu::headless() else { return };
+        // a read that leaves its pixels in the buffer kept for the next
+        let filled = texture(&gpu.device, "filled", 64, 64, LAYER_FORMAT);
+        gpu.queue.write_texture(
+            copy_at(&filled, 0, 0),
+            &[200; 64 * 64 * 4],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(64 * 4), rows_per_image: Some(64) },
+            extent(64, 64),
+        );
+        assert_eq!(read_texture(&gpu, &filled, 64, 64).unwrap()[0], 200);
+        FAILING.with(|f| f.set(Some("empty")));
+        let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let empty = texture(&gpu.device, "empty", 64, 64, LAYER_FORMAT);
+        assert!(pollster::block_on(scope.pop()).is_some());
+        FAILING.with(|f| f.set(None));
+        assert!(read_texture(&gpu, &empty, 64, 64).is_err());
+    }
+
+    #[test]
+    fn a_smudge_the_gpu_has_no_memory_for_draws_on_and_makes_no_step() {
+        use procraft_engine::document::Document;
+        use procraft_engine::stroke::Stamp;
+        let Ok(gpu) = Gpu::headless() else { return };
+        let dot = |x: f32, radius: f32| Stamp::round(procraft_engine::geom::Vec2::new(x, 32.0), radius, 1.0);
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let id = doc.current();
+        canvas.begin_stroke(id, StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0));
+        canvas.add_stamps(&[dot(20.0, 12.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let before = canvas.read_layer(&gpu, id).unwrap();
+        let steps = canvas.steps_made();
+        let smudge = || StrokeStyle::new(StrokeTool::Smudge, [0.0; 3], 1.0);
+        let stamps: Vec<Stamp> = (0..8).map(|i| dot(20.0 + i as f32 * 3.0, 10.0)).collect();
+        // refused: frames go on being drawn, the layer as it was, nothing to undo, told once
+        FAILING.with(|f| f.set(Some("smudge before")));
+        canvas.begin_stroke(id, smudge());
+        canvas.add_stamps(&stamps);
+        canvas.render(&gpu, &mut doc, None);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        FAILING.with(|f| f.set(None));
+        assert_eq!(gpu.errors(), 0);
+        assert!(canvas.take_smudge_refused());
+        assert!(!canvas.take_smudge_refused());
+        assert_eq!(canvas.steps_made(), steps);
+        assert_eq!(canvas.read_layer(&gpu, id).unwrap(), before);
+        // the next, with room, smudges as ever
+        canvas.begin_stroke(id, smudge());
+        canvas.add_stamps(&stamps);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        assert_eq!(gpu.errors(), 0);
+        assert!(!canvas.take_smudge_refused());
+        assert_eq!(canvas.steps_made(), steps + 1);
+        assert_ne!(canvas.read_layer(&gpu, id).unwrap(), before);
+    }
 
     #[test]
     fn a_stamps_pressure_scales_the_wet_mixes_dilution_and_charge() {

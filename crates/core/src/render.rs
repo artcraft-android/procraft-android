@@ -20,6 +20,11 @@ pub(crate) fn run(shared: Arc<Shared>, window: Window) {
     // the app's device (waited for while it is being made), else one made for this window and
     // kept for every artwork after
     let mut kept = crate::device::kept();
+    // one lost holds and draws nothing: this artwork makes a new one, and opens as last saved
+    if kept.as_ref().is_some_and(Gpu::is_lost) {
+        log::warn!("the GPU device was lost: making a new one");
+        *kept = None;
+    }
     // where to make a device from, if there is none to draw with
     let from = if own.is_none() && kept.is_none() { crate::device::first_backend() } else { 0 };
     // until the canvas first shows, a crash counts against the device's backend

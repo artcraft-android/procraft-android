@@ -385,6 +385,10 @@ impl Interface {
         if let Some(why) = session.take_save_failure() {
             self.overlays.notice(procraft_core::save_failure_said(why), true);
         }
+        // a crop or a smudge the GPU had no memory for
+        if let Some(why) = session.take_failure() {
+            self.overlays.notice(why, true);
+        }
         if self.colours.palettes.take_failure().is_some() {
             self.overlays.notice("The palettes couldn't be kept.", true);
         }
