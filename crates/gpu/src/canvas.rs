@@ -49,9 +49,9 @@ const _: () = assert!(
 const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
 
 /// The vertex layout of a stamp instance (stroke stamps and the predicted tail).
-const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 11] = wgpu::vertex_attr_array![
+const STAMP_ATTRIBUTES: [wgpu::VertexAttribute; 12] = wgpu::vertex_attr_array![
     0 => Float32x2, 1 => Float32, 2 => Float32, 3 => Float32, 4 => Float32, 5 => Float32x2, 6 => Float32x2, 7 => Float32x4,
-    8 => Float32x4, 9 => Float32x4, 10 => Float32
+    8 => Float32x4, 9 => Float32x4, 10 => Float32, 11 => Float32
 ];
 
 #[repr(C)]
@@ -283,7 +283,9 @@ impl StrokeStyle {
             grain_blend: brush.setting("grain_blend").round().clamp(0.0, GRAIN_LINEAR_HEIGHT as f32) as u32,
             burnt_blend: brush.setting("burnt_blend").round().clamp(0.0, BRUSH_BEHIND as f32) as u32,
             // a brush's rotation turns its grain the other way to the shaders' angle
-            grain_rotation: -brush.setting("grain_rotation").clamp(-1.0, 1.0) * std::f32::consts::PI,
+            // the editors' turn of the image, the whole grain with it (the rotation control is
+            // each stamp's own: `Stamp::grain_turn`)
+            grain_rotation: brush.setting("grain_turn").clamp(-1.0, 1.0) * std::f32::consts::PI,
             grain_sharp: brush.setting("grain_filtering") < 0.5,
             shape_sharp: brush.setting("shape_filtering") < 0.5,
             shape_lod_cap: SHAPE_LOD_CAP,
@@ -476,15 +478,8 @@ struct StampInstance {
     more: [f32; 4],
     /// The tint's brightness add.
     brightness_add: f32,
-}
-
-/// Where a moving grain is read from at the stamp's middle (see `Stamp::grain_offset`) as the
-/// shaders take it. They turn what they read by the grain's rotation, offset and all, but only the
-/// stamp's own patch of grain turns; where it is read from doesn't. So a turned grain rolling along
-/// a stroke slides under it and smears along the way the stroke goes, most at a half turn.
-fn grain_read_from(offset: procraft_engine::geom::Vec2, rotation: f32) -> [f32; 2] {
-    let (sin, cos) = rotation.sin_cos();
-    [offset.x * cos + offset.y * sin, offset.y * cos - offset.x * sin]
+    /// How far the grain's patch turns (see `Stamp::grain_turn`).
+    grain_turn: f32,
 }
 
 /// A stamp's (alpha, transfer) as its instance takes them: a capped stroke keeps its transfer
@@ -905,8 +900,14 @@ fn smudge_uniform(
         // a moving grain sized and as deep as this stamp says
         grain_scale: if moving { -(style.grain_scale * s.look[1]).max(1.0) } else { style.grain_scale },
         grain_depth: if moving { (style.grain_depth * s.look[0]).clamp(0.0, 1.0) } else { style.grain_depth },
-        grain_offset: s.grain_offset,
-        grain_rotation: style.grain_rotation,
+        // only the patch turns by the stamp's own turn, where it is read from staying put: the
+        // wet shader turns all it reads, so that is turned back first
+        grain_offset: {
+            let (sin, cos) = s.grain_turn.sin_cos();
+            let [x, y] = s.grain_offset;
+            [x * cos + y * sin, y * cos - x * sin]
+        },
+        grain_rotation: style.grain_rotation + s.grain_turn,
         grain_sharp: if style.grain_sharp { 1.0 } else { 0.0 },
         shape_sharp: if style.shape_sharp { 1.0 } else { 0.0 },
         shape_lod_cap: style.shape_lod_cap,
@@ -2374,13 +2375,14 @@ impl Canvas {
                     angle: if s.angle.is_finite() { s.angle } else { 0.0 },
                     roundness: if s.roundness.is_finite() { s.roundness.clamp(0.05, MOST_ROUNDNESS) } else { 1.0 },
                     grain_offset: if s.grain_offset.is_finite() {
-                        grain_read_from(s.grain_offset, style.grain_rotation)
+                        [s.grain_offset.x, s.grain_offset.y]
                     } else {
                         [0.0; 2]
                     },
                     flip: stamp_extras(s).0,
                     tint: stamp_extras(s).1,
                     brightness_add: stamp_extras(s).2,
+                    grain_turn: if s.grain_turn.is_finite() { s.grain_turn } else { 0.0 },
                     look: [s.grain_depth, s.grain_size, s.secondary, s.gradation]
                         .map(|v| if v.is_finite() { v.clamp(0.0, 4096.0) } else { 0.0 }),
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1
@@ -2443,6 +2445,7 @@ impl Canvas {
                     flip: stamp_extras(s).0,
                     tint: stamp_extras(s).1,
                     brightness_add: stamp_extras(s).2,
+                    grain_turn: 0.0,
                     look: [s.grain_depth, s.grain_size, s.secondary, s.gradation]
                         .map(|v| if v.is_finite() { v.clamp(0.0, 4096.0) } else { 0.0 }),
                     // the bleed up to 2 (the pressure's and the lean's), the rest 0..1

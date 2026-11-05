@@ -26,10 +26,13 @@ pub struct Stamp {
     pub roundness: f32,
     /// Where a moving grain is read from: the stamp's middle in the grain (canvas pixels at this
     /// stamp's tile), each point of the stamp read that far from it as on the canvas (the grain
-    /// never turns or squashes with the stamp). A rolling grain goes on from stamp to stamp by as
+    /// doesn't squash with the stamp). A rolling grain goes on from stamp to stamp by as
     /// far as they moved, so it stays put as the stamps move over it, whatever their tile; a
     /// static one moves along with each stamp.
     pub grain_offset: Vec2,
+    /// How far (radians) the grain's patch under this stamp turns about the stamp's middle, where
+    /// it is read from staying put: the grain's rotation control's share of the stamp's own turn.
+    pub grain_turn: f32,
     /// How hard the pen presses the paint into a grain (the pressure, 0..1), and how much that
     /// counts (the brush's pressure bleed and its tilt bleed as far as the pen leans, 0..2):
     /// pressed harder, the paint takes on more of the stamp and grain, its strongest parts first.
@@ -76,6 +79,7 @@ impl Stamp {
             angle: 0.0,
             roundness: 1.0,
             grain_offset: Vec2::ZERO,
+            grain_turn: 0.0,
             grain_press: 1.0,
             grain_bleed: 0.0,
             flip: [false; 2],
@@ -157,8 +161,10 @@ struct Placed {
     grain_press: f32,
     /// The tilt bleed as far as the pen leans (it adds to the pressure bleed).
     bleed_lean: f32,
-    /// Where its moving grain is read from, in tiles (see [`Stamp::grain_offset`]).
+    /// Where its moving grain is read from, in tiles (see [`Stamp::grain_offset`]), and how far
+    /// the patch read turns (see [`Stamp::grain_turn`]).
     grain_read: Vec2,
+    grain_turn: f32,
     /// The square its grain's tile goes by (as far as it follows the stamp's size), and the
     /// grain's zoom and what the scale's pressure curve leaves of its scale.
     grain_square: f32,
@@ -346,6 +352,8 @@ struct Extras {
     /// each stroke starts somewhere else in the grain.
     grain_movement: f32,
     grain_offset_jitter: bool,
+    /// How much of a stamp's own turn a moving grain's patch takes, −1..1.
+    grain_rotation: f32,
     /// Light pressure lowering (or, negative, raising) each stamp's flow, −1..1.
     pressure_flow: f32,
     /// How slowly size, opacity, bleed and roundness follow the pressure when the pen moves fast.
@@ -444,6 +452,7 @@ impl Extras {
             tilt_color: ["tilt_hue", "tilt_saturation", "tilt_brightness"].map(both),
             grain_movement: unit("grain_movement"),
             grain_offset_jitter: b.setting("grain_offset_jitter") >= 0.5,
+            grain_rotation: both("grain_rotation"),
             pressure_flow: both("pressure_flow"),
             // the stamp's own pressure follows as the roundness does
             pressure_response: [
@@ -813,6 +822,21 @@ impl Default for InputSettings {
     }
 }
 
+/// `v` turned `by` radians.
+fn turned_by(v: Vec2, by: f32) -> Vec2 {
+    if by == 0.0 {
+        return v;
+    }
+    let (sin, cos) = by.sin_cos();
+    Vec2::new(v.x * cos - v.y * sin, v.x * sin + v.y * cos)
+}
+
+/// `angle` (radians) from −π up to π.
+fn wrapped(angle: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    (angle + PI).rem_euclid(TAU) - PI
+}
+
 /// Two amounts, 0..1, together: each takes away what the other leaves.
 fn together(a: f32, b: f32) -> f32 {
     1.0 - (1.0 - a.clamp(0.0, 1.0)) * (1.0 - b.clamp(0.0, 1.0))
@@ -960,9 +984,7 @@ impl StrokeBuilder {
     /// screen for one that follows it, less the less it does, and on by the stroke's random turn
     /// (so a stamp that follows the stroke has none).
     fn dab_way(&self) -> f32 {
-        use std::f32::consts::{FRAC_PI_4, PI, TAU};
-        let way = FRAC_PI_4 * (1.0 + self.brush.shape.follow) + self.stroke_turn;
-        -((way + PI).rem_euclid(TAU) - PI)
+        -wrapped(std::f32::consts::FRAC_PI_4 * (1.0 + self.brush.shape.follow) + self.stroke_turn)
     }
 
     /// A random colour change by `jitter` (hue, saturation, lightness, darkness): the hue turned
@@ -1906,17 +1928,18 @@ impl StrokeBuilder {
                 let r = self.random.next().sqrt() * shape.throw * diameter;
                 center = center + Vec2::new(a.cos() * r, a.sin() * r);
             }
-            let mut angle = shape.rotation - self.screen_turn + follow * self.direction;
+            let turned = self.stroke_turn - self.screen_turn + follow * self.direction;
+            let mut own = shape.rotation;
             if shape.follow_azimuth {
-                angle += p.azimuth;
+                own += p.azimuth;
             }
             if let Some(from) = self.roll_from {
-                angle += p.roll - from;
+                own += p.roll - from;
             }
-            angle += self.stroke_turn;
             if shape.scatter > 0.0 {
-                angle += (self.random.next() * 2.0 - 1.0) * shape.scatter * scatter_by * std::f32::consts::PI;
+                own += (self.random.next() * 2.0 - 1.0) * shape.scatter * scatter_by * std::f32::consts::PI;
             }
+            let angle = turned + own;
             // the roundness jitter squeezes the width and the height apart, and the stamp is scaled
             // back so the larger of them stays whole
             let [jitter_y, jitter_x] = x.roundness_jitter;
@@ -1975,11 +1998,19 @@ impl StrokeBuilder {
             // tile that follows the size (or a movement that follows the pressure) changes how
             // fast it rolls and doesn't send it elsewhere
             let rolled = x.grain_movement * movement_by / tile;
-            let grain_read = match self.grain_last {
-                Some((read, from)) => read + (center - from) * rolled,
-                None => self.grain_start + center * rolled,
+            let moved = match self.grain_last {
+                Some((_, from)) => center - from,
+                None => center,
             };
+            let start = self.grain_last.map_or(self.grain_start, |(read, _)| read);
+            let grain_read = start + turned_by(moved, self.screen_turn) * rolled;
             self.grain_last = Some((grain_read, center));
+            // the patch read takes the rotation control's share of the stamp's whole turn, which
+            // counts from an eighth of a turn, from a pen's lean the other way (kept to the
+            // screen, the grain is too)
+            let held = if shape.follow_azimuth && self.pointer.has_pressure() { std::f32::consts::PI } else { 0.0 };
+            let from_eighth = wrapped(std::f32::consts::FRAC_PI_4 + turned) + own - held;
+            let grain_turn = x.grain_rotation * from_eighth + self.screen_turn;
             let placed = Placed {
                 center,
                 thrown,
@@ -1996,6 +2027,7 @@ impl StrokeBuilder {
                 grain_press,
                 bleed_lean: (x.tilt_bleed * self.leaning(p, x.tilt_angles.bleed)).clamp(0.0, 1.0),
                 grain_read,
+                grain_turn,
                 grain_square,
                 grain_zoom,
                 grain_scale_by,
@@ -2094,6 +2126,7 @@ impl StrokeBuilder {
             angle: p.angle,
             roundness,
             grain_offset: p.grain_read * tile,
+            grain_turn: p.grain_turn,
             grain_press,
             grain_bleed,
             flip: p.flip,
@@ -3841,6 +3874,46 @@ mod tests {
         assert_ne!(a, b);
         // (a tile's worth at most; the stamps are 4 px, the grain following them by default)
         assert!(a.x >= 0.0 && a.x <= 8.0 && a.y >= 0.0 && a.y <= 8.0, "{a:?}");
+    }
+
+    #[test]
+    fn a_grain_s_patch_takes_the_rotation_s_share_of_the_stamp_s_turn() {
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+        let turn = |rotation: f32, follow: f32, angle: f32| {
+            let mut b = plain();
+            b.set_setting("grain_rotation", rotation);
+            b.set_setting("shape_rotation", follow);
+            b.shape.rotation = angle;
+            let mut s = StrokeBuilder::new(b, 10.0, Pointer::Finger);
+            // down the screen
+            let down: Vec<Sample> =
+                (0..20).map(|i| Sample::at(Vec2::new(50.0, i as f32 * 8.0), 1.0, f64::from(i) * 8.0)).collect();
+            s.add(&down);
+            s.finish()[5].grain_turn
+        };
+        // none of it: the grain holds still whatever the stamp does
+        assert_eq!(turn(0.0, 1.0, 0.3), 0.0);
+        // a stamp that holds still still counts from its eighth of a turn
+        assert!((turn(1.0, 0.0, 0.0) - FRAC_PI_4).abs() < 1e-5);
+        assert!((turn(-1.0, 0.0, 0.0) + FRAC_PI_4).abs() < 1e-5);
+        assert!((turn(0.5, 0.0, 0.2) - 0.5 * (FRAC_PI_4 + 0.2)).abs() < 1e-5);
+        // following the stroke, it goes round with the stamp
+        assert!((turn(1.0, 1.0, 0.0) - (FRAC_PI_4 + FRAC_PI_2)).abs() < 1e-4);
+        // a brush kept to the screen keeps its grain to it, read and all
+        let mut b = plain();
+        b.set_setting("orient_to_screen", 1.0);
+        b.set_setting("grain_movement", 1.0);
+        let turned = |view: f32| {
+            let mut s = StrokeBuilder::new(b.clone(), 10.0, Pointer::Finger).on_view_turned(view);
+            s.add(&line(10, 100.0));
+            let all = s.finish();
+            (all[0].grain_turn, all[0].grain_offset, all.last().unwrap().grain_offset)
+        };
+        let (patch, first, last) = turned(FRAC_PI_2);
+        assert!((patch - FRAC_PI_2).abs() < 1e-5);
+        // along x on the canvas, down the screen
+        let went = last - first;
+        assert!(went.x.abs() < 1e-2 && went.y > 1.0, "{went:?}");
     }
 
     #[test]

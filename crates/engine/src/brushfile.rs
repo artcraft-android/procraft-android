@@ -610,8 +610,7 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
     }
     // the editors' turns of their images, as an orientation (1 none, 2 a half turn, 3 and 4 a
     // quarter turn one way and the other; the grain's two quarter turns the other way round from
-    // the shape's), added to the grain's turn (half turns, -1..1) and the shape's angle, so that a
-    // file written back needs none
+    // the shape's): the grain's kept (half turns, -1..1), the shape's added to its angle
     let orientation = |keys: &[&str]| keys.iter().find_map(|k| f.num(k)).map_or(1, |n| n.round() as i64);
     let grain_turns = match orientation(&["textureOrientation", "grainOrientation"]) {
         2 => 1.0,
@@ -620,8 +619,7 @@ fn read_in(zip: &ZipReader<'_>, prefix: &str) -> Option<BrushFile> {
         _ => 0.0,
     };
     if grain_turns != 0.0 {
-        let turned = f.num("textureRotation").unwrap_or(0.0) as f32 + grain_turns;
-        set("grain_rotation", (turned + 1.0).rem_euclid(2.0) - 1.0);
+        set("grain_turn", grain_turns);
     }
     let shape_turn = match orientation(&["shapeOrientation"]) {
         2 => std::f32::consts::PI,
@@ -827,6 +825,18 @@ fn add_brush(zip: &mut ZipWriter, prefix: &str, brush: &Brush, author: &str, pic
         put("dualBlendModeExtended", Value::Int(dual));
     }
     put("shapeAngle", Value::Real(f64::from(brush.shape.rotation)));
+    let grain_turn = brush.setting("grain_turn");
+    if grain_turn != 0.0 {
+        let orientation = if grain_turn < 0.0 {
+            3
+        } else if grain_turn < 1.0 {
+            4
+        } else {
+            2
+        };
+        put("textureOrientation", Value::Int(orientation));
+        put("grainOrientation", Value::Int(orientation));
+    }
     // a stock image as the brush's file named it; otherwise the image is its own, the file by
     // its own name
     for (stock, path, inverted) in [
@@ -1195,10 +1205,10 @@ mod tests {
         let back = read(&zip.finish()).unwrap();
         // 2: a half turn
         assert!((back.shape_angle - (0.1 + std::f32::consts::PI)).abs() < 1e-5, "{}", back.shape_angle);
-        // the grain's 3: a quarter turn back
-        let turns: Vec<f32> = back.settings.iter().filter(|(k, _)| k == "grain_rotation").map(|(_, v)| *v).collect();
-        assert_eq!(turns.len(), 1);
-        assert!((turns[0] - 0.25).abs() < 1e-5, "{turns:?}");
+        // the grain's 3: a quarter turn back, kept apart from its rotation control
+        let of = |key: &str| back.settings.iter().filter(|(k, _)| k == key).map(|(_, v)| *v).collect::<Vec<f32>>();
+        assert_eq!(of("grain_turn"), [-0.5]);
+        assert_eq!(of("grain_rotation"), [0.75]);
     }
 
     #[test]

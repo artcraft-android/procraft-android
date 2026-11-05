@@ -2267,14 +2267,13 @@ fn a_turned_grain_rolling_along_a_stroke_smears_along_it() {
             grain_mode: procraft_engine::brush::GrainMode::Moving,
             grain_depth: 1.0,
             grain_scale: 128.0,
-            grain_rotation: rotation,
             ..style(StrokeTool::Paint, 1.0)
         };
         canvas.begin_stroke(doc.current(), style);
         let stamps: Vec<Stamp> = (0..360)
             .map(|x| {
                 let center = Vec2::new(20.0 + x as f32, 48.0);
-                Stamp { grain_offset: center, ..Stamp::round(center, 30.0, 0.02) }
+                Stamp { grain_offset: center, grain_turn: rotation, ..Stamp::round(center, 30.0, 0.02) }
             })
             .collect();
         canvas.add_stamps(&stamps);
