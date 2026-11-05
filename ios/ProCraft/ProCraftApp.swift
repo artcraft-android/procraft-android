@@ -13,6 +13,7 @@ struct ProCraftApp: App {
         if available > 0 {
             setResidentBudget(bytes: UInt64(available / 4))
         }
+        TextFonts.prepare()
         // the GPU device and the canvases' pipelines made ahead of the first artwork
         DispatchQueue.global(qos: .userInitiated).async { warmGpu() }
     }
@@ -79,7 +80,7 @@ enum ScreenCapture {
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
-    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide"]
+    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text"]
     /// What opens over the gallery.
     static var galleryShows: String?
     /// What opens over the QuickMenu.
@@ -215,6 +216,11 @@ enum ScreenCapture {
         case "source-landscape":
             sideways = true
             source(model, .grain)
+        case "text":
+            model.text.add()
+        case "text-style":
+            model.text.add()
+            model.text.openStyle()
         case "guide":
             model.setGuideOn(true)
         case "guide-edit":

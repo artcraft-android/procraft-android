@@ -238,6 +238,7 @@ final class CanvasModel {
     @ObservationIgnored private(set) lazy var crop = CropTool(model: self)
     @ObservationIgnored private(set) lazy var recolor = RecolorTool(model: self)
     @ObservationIgnored private(set) lazy var guide = GuideTool(model: self)
+    @ObservationIgnored private(set) lazy var text = TextTool(model: self)
     /// The middle of the screen, window pixels.
     @ObservationIgnored var screenCentre = CGPoint.zero
     /// The layer whose opacity a drag changes, while the mode is on, and its opacity as it is dragged.
@@ -788,7 +789,7 @@ final class CanvasModel {
 
     /// Whether the side bar shows: a mode taking the screen slides it off its edge.
     var sideBarShown: Bool {
-        showSideBar && !transforming && !selecting && crop.shown == nil && opacityLayer == nil && !guide.editing
+        showSideBar && !transforming && !selecting && crop.shown == nil && opacityLayer == nil && !guide.editing && text.info == nil
             && (!adjusting || adjustShown?.pencil == true)
     }
 
@@ -1147,13 +1148,24 @@ final class CanvasModel {
     // MARK: undo and redo
 
     func undo() {
+        // a finished text's step goes back to editing that text first, as a step of its own
+        if text.info == nil, !transforming, let id = session.textUndoLayer(), text.resume(id) {
+            return
+        }
+        // editing text, a change to its box's width goes back a step at a time, still editing
+        if text.info != nil, text.stepBox(undo: true) {
+            return
+        }
+        // undoing while editing text otherwise undoes the whole edit
+        if text.info != nil {
+            text.drop()
+        }
         if transforming {
             transform.apply(.undo)
             return
         }
         let could = canUndo
         // recoloring, the core takes the fill under the reticle back first (after the fills queued)
-        let session = session
         let name = recoloring ? recolor.afterFills { session.undo() } : session.undo()
         if recoloring {
             recolor.readPoint()
@@ -1172,9 +1184,21 @@ final class CanvasModel {
         if transforming {
             return
         }
+        if text.info != nil, text.stepBox(undo: false) {
+            return
+        }
+        // text being edited is kept first
+        let editing = text.info != nil
+        text.drop()
+        // a text edit redone is edited again
+        let textLayer = editing ? nil : session.textRedoLayer()
+        defer {
+            if let textLayer {
+                _ = text.resume(textLayer)
+            }
+        }
         let could = canRedo
         // recoloring, the core steps the open fill aside and makes it again over what comes back
-        let session = session
         let name = recoloring ? recolor.afterFills { session.redo() } : session.redo()
         if could {
             showNotice("Redo" + (name.map { " \($0)" } ?? ""))

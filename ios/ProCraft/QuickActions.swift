@@ -120,7 +120,7 @@ extension CanvasModel {
     }
 
     /// Does `a`, a QuickMenu button opened at window point `at`. What has no screen on the iPad yet
-    /// (text, the animation's and the reference's) does nothing.
+    /// (the animation's and the reference's) does nothing.
     func runQuickAction(_ a: QuickAction, at: CGPoint) {
         func onCurrent(_ f: (LayerInfo) -> Void) {
             if let l = layers.first(where: { $0.current }) {
@@ -159,6 +159,7 @@ extension CanvasModel {
         case .previousBrush: previousBrush()
         case .layerOpacity: startLayerOpacity()
         case .recolor: toggleRecolor()
+        case .addText: text.add()
         case .selection: toggleSelecting()
         case .transform: toggleTransform()
         case .adjustments: toggle(.adjustments)

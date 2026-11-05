@@ -146,7 +146,7 @@ struct ActionsPanel: View {
                     .act("Insert a file", action: { model.insertAsk = .file }),
                     .act("Insert a photo", action: { model.insertAsk = .photo }),
                     .act("Take a photo", action: { model.insertAsk = .camera }),
-                    .act("Add text", action: nil),
+                    .act("Add text", action: { model.text.add() }),
                 ],
                 // Paste is grey until something has been cut or copied
                 [

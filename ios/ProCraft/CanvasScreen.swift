@@ -156,6 +156,7 @@ struct CanvasScreen: View {
                     )
                     .offset(x: (screen.size.width - colorPanelWidth) / 2, y: Pc.barHeight)
                 }
+                TextEditing(model: model, screen: screen.size)
                 CropOverlay(model: model)
                 if model.guide.editing {
                     GuideEditor(model: model, screen: screen.size)

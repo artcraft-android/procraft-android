@@ -684,7 +684,7 @@ private struct LayerOptionsMenu: View {
         case .reference:
             model.toggleReference(l)
         case .editText:
-            model.showNotice("Text can't be edited on the iPad yet.", warning: true)
+            model.text.edit(l)
         case .rasterize:
             model.rasterize(l)
         case .mergeDown:
