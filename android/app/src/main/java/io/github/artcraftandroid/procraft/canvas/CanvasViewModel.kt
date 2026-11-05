@@ -136,7 +136,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     /** Frosted panels open over the canvas, for the engine to blur what is behind them. */
-    val backdrops = io.github.artcraftandroid.procraft.ui.Backdrops { session?.setBackdrops(it) }
+    val backdrops = io.github.artcraftandroid.procraft.ui.Backdrops { regions, windows -> session?.setGlass(regions, windows) }
 
     var screen by mutableStateOf(Screen.GALLERY)
         private set
@@ -3431,6 +3431,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Where the window is (window pixels), and the size of its picture. */
     var referenceOffset by mutableStateOf(Offset.Unspecified)
         private set
+
+    /** The window's bars are slid out of the way. */
+    var referenceBarsHidden by mutableStateOf(false)
+        private set
     var referenceSize by mutableStateOf(DpSize(REFERENCE_WIDTH_DP.dp, REFERENCE_HEIGHT_DP.dp))
         private set
 
@@ -3486,6 +3490,18 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 message = "This picture can't be opened."
             }
         }
+    }
+
+    /** A tap on the window's picture: its bars slide away, or back. */
+    fun toggleReferenceBars() {
+        referenceBarsHidden = !referenceBarsHidden
+    }
+
+    /** Two taps on the window's picture: it fits the window again, the bars out of the way. */
+    fun fitReference() {
+        val fitted = io.github.artcraftandroid.procraft.core.ReferenceView(1f, 0f, 0f)
+        if (referenceMode == ReferenceMode.IMAGE) referenceImageView = fitted else referenceCanvasView = fitted
+        referenceBarsHidden = true
     }
 
     fun clearReference() {

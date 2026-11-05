@@ -629,7 +629,10 @@ impl Interface {
             }
         }
         self.canvas_rect = ui.available_rect_before_wrap();
-        let mut backdrops = Vec::new();
+        // the bars are glass over the canvas: the top bar's frost, the side bar's and its tracks'
+        let (mut backdrops, mut windows) = (Vec::new(), Vec::new());
+        let top_bar = ctx.content_rect().with_max_y(ctx.content_rect().top() + crate::look::pc::BAR_HEIGHT);
+        crate::chrome::frost(&mut backdrops, top_bar, 0.0, ctx.pixels_per_point());
         // a mode taking the screen puts the side bar away
         let adjusting = session.adjustment_shown();
         let side_bar = self.side_bar_shown
@@ -642,7 +645,7 @@ impl Interface {
         let taps = if side_bar {
             let modify_lit = session.pick_next();
             let right = self.prefs.right_handed;
-            self.side_bar.show(ui, &mut self.look, session, &info, modify_lit, right, &mut backdrops)
+            self.side_bar.show(ui, &mut self.look, session, &info, modify_lit, right, &mut backdrops, &mut windows)
         } else {
             crate::chrome::SideTaps::default()
         };
@@ -782,7 +785,7 @@ impl Interface {
         self.shortcut_list.show(&ctx, keys_to_canvas);
         self.name_colour(&ctx);
         self.place_canvas(session, ctx.pixels_per_point());
-        session.set_backdrops(backdrops);
+        session.set_glass(backdrops, windows);
         if input.moving_view() && !ctx.is_pointer_over_egui() {
             let icon = if input.zooming_view() { egui::CursorIcon::ZoomIn } else { egui::CursorIcon::Grab };
             ctx.set_cursor_icon(icon);

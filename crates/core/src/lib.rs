@@ -497,6 +497,8 @@ pub(crate) struct State {
     /// pixels).
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) backdrops: Vec<[f32; 6]>,
+    /// Where the glass over the canvas is thin (the side bar's slider tracks), the same way.
+    pub(crate) backdrop_windows: Vec<[f32; 6]>,
     /// The view kept with the artwork, shown when the window first comes.
     pub(crate) saved_view: Option<project::SavedView>,
     pub(crate) revision: u64,
@@ -1318,6 +1320,7 @@ impl CanvasSession {
             closed: false,
             fit_insets: [0.0; 4],
             backdrops: Vec::new(),
+            backdrop_windows: Vec::new(),
             saved_view: None,
         };
         Arc::new(CanvasSession {
@@ -1802,10 +1805,17 @@ impl CanvasSession {
     /// The frosted panels open over the canvas, five numbers each (left, top, right, bottom and
     /// corner radius, window pixels): what is behind them is drawn blurred.
     pub fn set_backdrops(&self, regions: Vec<f32>) {
-        let (regions, _) = regions.as_chunks::<6>();
+        self.set_glass(regions, Vec::new());
+    }
+
+    /// The same, with `windows` drawn over them, where the glass is thin: what is behind only
+    /// softens there.
+    pub fn set_glass(&self, regions: Vec<f32>, windows: Vec<f32>) {
+        let ((regions, _), (windows, _)) = (regions.as_chunks::<6>(), windows.as_chunks::<6>());
         let mut st = self.shared.lock();
-        if st.backdrops != regions {
+        if st.backdrops != regions || st.backdrop_windows != windows {
             st.backdrops = regions.to_vec();
+            st.backdrop_windows = windows.to_vec();
             self.shared.frame(&mut st);
         }
     }

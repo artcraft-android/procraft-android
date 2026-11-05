@@ -136,7 +136,9 @@ fun AppRoot(vm: CanvasViewModel) {
                     val fade = Modifier.graphicsLayer { alpha = barsShown }
                     val up = Modifier.graphicsLayer { translationY = -size.height * (1f - barsShown) }
                     val aside = Modifier.graphicsLayer { translationX = size.width * (1f - barsShown) * if (vm.rightHanded) 1f else -1f }
-                    TopBar(vm, Modifier.align(Alignment.TopCenter).then(up).then(fade))
+                    val height = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.BarHeight.toPx() }
+                    val topGlass = BarGlass(barsShown, androidx.compose.ui.geometry.Offset(0f, -height * (1f - barsShown)))
+                    TopBar(vm, Modifier.align(Alignment.TopCenter).then(rememberFrost(0.dp, topGlass)).then(up).then(fade))
                     val sideBar = Pc.sideBarFit(maxHeight)
                     // a mode taking the screen slides it off its edge, and back when it ends
                     androidx.compose.animation.AnimatedVisibility(
@@ -147,7 +149,7 @@ fun AppRoot(vm: CanvasViewModel) {
                         enter = Motion.sideBarIn(vm.rightHanded),
                         exit = Motion.sideBarOut(vm.rightHanded),
                     ) {
-                        SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track)
+                        SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track, shown = barsShown)
                     }
                 }
                 NoticeBand(vm)

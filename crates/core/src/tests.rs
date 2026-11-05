@@ -4250,6 +4250,12 @@ fn frosted_panels_come_six_numbers_each() {
     assert_eq!(s.shared.lock().backdrops, vec![[10.0, 20.0, 60.0, 80.0, 12.0, 0.5]]);
     s.set_backdrops(Vec::new());
     assert!(s.shared.lock().backdrops.is_empty());
+    // the thin glass goes with them, and with them being cleared
+    s.set_glass(vec![1.0, 2.0, 3.0, 4.0, 5.0, 1.0], vec![6.0, 7.0, 8.0, 9.0, 2.0, 0.5, 1.0]);
+    assert_eq!(s.shared.lock().backdrops, vec![[1.0, 2.0, 3.0, 4.0, 5.0, 1.0]]);
+    assert_eq!(s.shared.lock().backdrop_windows, vec![[6.0, 7.0, 8.0, 9.0, 2.0, 0.5]]);
+    s.set_backdrops(Vec::new());
+    assert!(s.shared.lock().backdrop_windows.is_empty());
 }
 
 #[test]

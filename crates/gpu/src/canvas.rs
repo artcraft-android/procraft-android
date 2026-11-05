@@ -387,6 +387,9 @@ pub struct Backdrop<'a> {
     /// Rounded rectangles in target pixels: left, top, right, bottom, corner radius, and how much
     /// the region shows (0..1, as its panel fades).
     pub regions: &'a [[f32; 6]],
+    /// Regions likewise, drawn over those, where the glass is thin: what is behind only softens
+    /// (about a tenth of `sigma`).
+    pub windows: &'a [[f32; 6]],
     pub sigma: f32,
 }
 
@@ -395,15 +398,15 @@ pub struct Backdrop<'a> {
 pub type SmallScene<'s> = &'s mut dyn FnMut(&mut wgpu::CommandEncoder, &wgpu::TextureView, (u32, u32));
 
 /// The backdrop's blur is this many texels wide (sigma) where it is worked out: the scene is
-/// drawn that much smaller.
-const BACKDROP_TEXELS: f32 = 6.0;
+/// drawn that much smaller, and drawn back up as it is that's a window's softening.
+const BACKDROP_TEXELS: f32 = 5.0;
 
-/// The scene drawn small for frosted panels, and the other half of its blur.
+/// The scene drawn small for frosted panels, half blurred, and blurred.
 struct BackdropGpu {
     size: (u32, u32),
     format: wgpu::TextureFormat,
-    views: [wgpu::TextureView; 2],
-    binds: [wgpu::BindGroup; 2],
+    views: [wgpu::TextureView; 3],
+    binds: [wgpu::BindGroup; 3],
 }
 
 impl BackdropGpu {
@@ -428,10 +431,42 @@ impl BackdropGpu {
                 })
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
-        let views = [view(), view()];
-        let binds =
-            [sampled_bind(device, layout, &views[0], sampler), sampled_bind(device, layout, &views[1], sampler)];
+        let views = [view(), view(), view()];
+        let binds = views.each_ref().map(|v| sampled_bind(device, layout, v, sampler));
         BackdropGpu { size, format, views, binds }
+    }
+}
+
+/// The glass [`Canvas::frost_ready`] worked out, `k` times smaller than the target of `size`, drawn
+/// into `pass`: blurred into each region, and the small scene as it is into the windows.
+#[allow(clippy::too_many_arguments)]
+fn draw_glass(
+    pass: &mut wgpu::RenderPass<'_>,
+    frost: &wgpu::RenderPipeline,
+    small: &BackdropGpu,
+    uniform_bind: &wgpu::BindGroup,
+    uniforms: &mut UniformData,
+    backdrop: Backdrop<'_>,
+    size: (u32, u32),
+    k: f32,
+) {
+    let (tw, th) = (size.0.max(1) as f32, size.1.max(1) as f32);
+    pass.set_pipeline(frost);
+    for (bind, regions) in [(&small.binds[2], backdrop.regions), (&small.binds[0], backdrop.windows)] {
+        pass.set_bind_group(0, bind, &[]);
+        for &[x0, y0, x1, y1, corner, alpha] in regions {
+            let usable = [x0, y0, x1, y1, corner, alpha].iter().all(|v| v.is_finite());
+            if !usable || x1 <= x0 || y1 <= y0 || alpha <= 0.0 {
+                continue;
+            }
+            let offset = uniforms.push(&BackdropUniform {
+                v0: [x0, y0, x1, y1],
+                v1: [corner, tw, th, k],
+                v2: [alpha.min(1.0), 0.0, 0.0, 0.0],
+            });
+            pass.set_bind_group(1, uniform_bind, &[offset]);
+            pass.draw(0..6, 0..1);
+        }
     }
 }
 
@@ -3628,7 +3663,7 @@ impl Canvas {
         }
 
         // the display takes four slots, and frosted panels three and one for each
-        let frosted = target.as_ref().and_then(|t| t.backdrop).map_or(0, |b| b.regions.len() + 3);
+        let frosted = target.as_ref().and_then(|t| t.backdrop).map_or(0, |b| b.regions.len() + b.windows.len() + 3);
         // remaking the caches composites the layers once more
         let cached = if self.cache_composites { doc.layers().len() + 2 } else { 0 };
         let worked: usize = ops.iter().map(|op| self.slots_for(op, &ops)).sum();
@@ -4430,10 +4465,12 @@ impl Canvas {
         }
 
         if let Some(target) = target {
-            self.display(device, &mut encoder, &mut uniforms, &target, predicted);
-            if let Some(backdrop) = target.backdrop.filter(|b| !b.regions.is_empty() && b.sigma > 0.0) {
-                self.frost(device, &mut encoder, &mut uniforms, &target, backdrop, None);
-            }
+            // what the glass shows is worked out first: drawn in the display's own pass, a tiled
+            // GPU needn't write the whole target out and read it back for a pass of its own
+            let shows = |b: &Backdrop<'_>| !(b.regions.is_empty() && b.windows.is_empty()) && b.sigma > 0.0;
+            let backdrop = target.backdrop.filter(shows);
+            let glass = backdrop.map(|b| (b, self.frost_ready(device, &mut encoder, &mut uniforms, &target, b, None)));
+            self.display(device, &mut encoder, &mut uniforms, &target, predicted, glass);
         }
         self.write_uniforms(gpu, &uniforms);
         gpu.queue.submit([encoder.finish()]);
@@ -6634,6 +6671,7 @@ impl Canvas {
         uniforms: &mut UniformData,
         target: &Target<'_>,
         predicted: std::ops::Range<u32>,
+        glass: Option<(Backdrop<'_>, f32)>,
     ) {
         let srgb = target.format.is_srgb();
         let Pipelines {
@@ -6647,8 +6685,14 @@ impl Canvas {
             selection_module,
             ..
         } = &*self.pipelines;
-        let ScreenPipelines { display, surround: surround_pipelines, overlay, selection: selection_pipelines, .. } =
-            &mut self.screen;
+        let ScreenPipelines {
+            display,
+            surround: surround_pipelines,
+            overlay,
+            selection: selection_pipelines,
+            frost,
+            ..
+        } = &mut self.screen;
         let pipeline = display.entry(target.format).or_insert_with(|| {
             // over the surround, which shows through see-through parts (a hidden background)
             blended_pipeline(
@@ -6764,66 +6808,69 @@ impl Canvas {
         }
 
         // the predicted tail of a painting stroke, over the canvas
-        let Some(style) = self.active.filter(|a| !a.pencil).map(|a| a.style).filter(|s| s.tool == StrokeTool::Paint)
-        else {
-            return;
-        };
-        if predicted.is_empty() {
-            return;
-        }
-        let overlay_pipeline = overlay.entry(target.format).or_insert_with(|| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("prediction"),
-                layout: Some(stamp_layout),
-                vertex: wgpu::VertexState {
-                    module: overlay_module,
-                    entry_point: Some("vs_overlay"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: size_of::<StampInstance>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &STAMP_ATTRIBUTES,
-                    })],
+        let style = self.active.filter(|a| !a.pencil).map(|a| a.style).filter(|s| s.tool == StrokeTool::Paint);
+        if let Some(style) = style.filter(|_| !predicted.is_empty()) {
+            let overlay_pipeline = overlay.entry(target.format).or_insert_with(|| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("prediction"),
+                    layout: Some(stamp_layout),
+                    vertex: wgpu::VertexState {
+                        module: overlay_module,
+                        entry_point: Some("vs_overlay"),
+                        compilation_options: Default::default(),
+                        buffers: &[Some(wgpu::VertexBufferLayout {
+                            array_stride: size_of::<StampInstance>() as u64,
+                            step_mode: wgpu::VertexStepMode::Instance,
+                            attributes: &STAMP_ATTRIBUTES,
+                        })],
+                    },
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: overlay_module,
+                        entry_point: Some("fs_overlay"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: target.format,
+                            blend: Some(PREMULTIPLIED_OVER),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            });
+            let c = target.to_screen.then(to_clip);
+            let offset = uniforms.push(&OverlayUniform {
+                m0: [c.a, c.b, c.c, c.d],
+                m1: [c.e, c.f, target.to_screen.scale_factor(), style.hardness.clamp(0.0, 1.0)],
+                color: {
+                    let [r, g, b] = convert_colour(style.color, target.convert);
+                    [r, g, b, style.opacity.clamp(0.0, 1.0)]
                 },
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: overlay_module,
-                    entry_point: Some("fs_overlay"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: target.format,
-                        blend: Some(PREMULTIPLIED_OVER),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-        });
-        let c = target.to_screen.then(to_clip);
-        let offset = uniforms.push(&OverlayUniform {
-            m0: [c.a, c.b, c.c, c.d],
-            m1: [c.e, c.f, target.to_screen.scale_factor(), style.hardness.clamp(0.0, 1.0)],
-            color: {
-                let [r, g, b] = convert_colour(style.color, target.convert);
-                [r, g, b, style.opacity.clamp(0.0, 1.0)]
-            },
-            shape: style.shape.map_or(-1, |s| s as i32),
-            srgb: u32::from(srgb),
-            shape_lod_cap: style.shape_lod_cap,
-            _pad: 0,
-        });
-        let size = size_of::<StampInstance>() as u64;
-        pass.set_pipeline(overlay_pipeline);
-        pass.set_bind_group(0, &self.uniform_bind, &[offset]);
-        pass.set_bind_group(1, &self.brush_bind, &[]);
-        pass.set_vertex_buffer(
-            0,
-            self.stamp_buffer.slice(u64::from(predicted.start) * size..u64::from(predicted.end) * size),
-        );
-        pass.draw(0..6, 0..predicted.end - predicted.start);
+                shape: style.shape.map_or(-1, |s| s as i32),
+                srgb: u32::from(srgb),
+                shape_lod_cap: style.shape_lod_cap,
+                _pad: 0,
+            });
+            let size = size_of::<StampInstance>() as u64;
+            pass.set_pipeline(overlay_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind, &[offset]);
+            pass.set_bind_group(1, &self.brush_bind, &[]);
+            pass.set_vertex_buffer(
+                0,
+                self.stamp_buffer.slice(u64::from(predicted.start) * size..u64::from(predicted.end) * size),
+            );
+            pass.draw(0..6, 0..predicted.end - predicted.start);
+        }
+
+        // the glass, over everything
+        if let (Some((backdrop, k)), Some(small), Some(frost)) =
+            (glass, self.backdrop.as_ref(), frost.get(&target.format))
+        {
+            draw_glass(&mut pass, frost, small, &self.uniform_bind, uniforms, backdrop, target.size, k);
+        }
     }
 
     /// Frosted panels over a picture something else drew on `target` (a model): `scene` draws it
@@ -6840,7 +6887,7 @@ impl Canvas {
         backdrop: Backdrop<'_>,
         scene: SmallScene<'_>,
     ) {
-        if backdrop.regions.is_empty() || backdrop.sigma <= 0.0 {
+        if (backdrop.regions.is_empty() && backdrop.windows.is_empty()) || backdrop.sigma <= 0.0 {
             return;
         }
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frost") });
@@ -6859,14 +6906,18 @@ impl Canvas {
             crisp_from: f32::INFINITY,
             grey: false,
         };
-        self.frost(&gpu.device, &mut encoder, &mut uniforms, &target, backdrop, Some(scene));
+        let k = self.frost_ready(&gpu.device, &mut encoder, &mut uniforms, &target, backdrop, Some(scene));
+        if let (Some(small), Some(frost)) = (self.backdrop.as_ref(), self.screen.frost.get(&target.format)) {
+            let mut pass = render_pass(&mut encoder, "frost", target.view, wgpu::LoadOp::Load);
+            draw_glass(&mut pass, frost, small, &self.uniform_bind, &mut uniforms, backdrop, target.size, k);
+        }
         self.write_uniforms(gpu, &uniforms);
         gpu.queue.submit([encoder.finish()]);
     }
 
-    /// Frosted panels: the canvas and its surround (or what `other` draws) drawn again, small,
-    /// blurred, and drawn into each region of the target.
-    fn frost(
+    /// Frosted panels: the canvas and its surround (or what `other` draws) drawn again, small, and
+    /// blurred, for [`draw_glass`]. Returns how many times smaller it is.
+    fn frost_ready(
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
@@ -6874,14 +6925,14 @@ impl Canvas {
         target: &Target<'_>,
         backdrop: Backdrop<'_>,
         other: Option<SmallScene<'_>>,
-    ) {
+    ) -> f32 {
         let k = (backdrop.sigma / BACKDROP_TEXELS).floor().clamp(1.0, 16.0);
         let size = ((target.size.0 as f32 / k).ceil() as u32, (target.size.1 as f32 / k).ceil() as u32);
         if self.backdrop.as_ref().is_none_or(|b| b.size != size || b.format != target.format) {
             self.backdrop =
                 Some(BackdropGpu::new(device, &self.pipelines.sampled_layout, &self.sampler, size, target.format));
         }
-        let Some(small) = self.backdrop.as_ref() else { return };
+        let Some(small) = self.backdrop.as_ref() else { return k };
         let srgb = target.format.is_srgb();
         let Pipelines { display_module, display_pipeline_layout, display_lut_layout, backdrop_module, .. } =
             &*self.pipelines;
@@ -6909,7 +6960,7 @@ impl Canvas {
                 target.format,
             )
         });
-        let frost = frost.entry(target.format).or_insert_with(|| {
+        frost.entry(target.format).or_insert_with(|| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("frost"),
                 layout: Some(&*display_pipeline_layout),
@@ -6967,7 +7018,7 @@ impl Canvas {
         let sigma = backdrop.sigma / k;
         let radius = (sigma * 3.0).ceil().min(64.0);
         for (from, to, step) in
-            [(&small.binds[0], &small.views[1], [1.0 / w, 0.0]), (&small.binds[1], &small.views[0], [0.0, 1.0 / h])]
+            [(&small.binds[0], &small.views[1], [1.0 / w, 0.0]), (&small.binds[1], &small.views[2], [0.0, 1.0 / h])]
         {
             let offset =
                 uniforms.push(&BackdropUniform { v0: [step[0], step[1], sigma, radius], v1: [0.0; 4], v2: [0.0; 4] });
@@ -6977,23 +7028,7 @@ impl Canvas {
             pass.set_bind_group(1, &self.uniform_bind, &[offset]);
             pass.draw(0..3, 0..1);
         }
-        // into each region
-        let (tw, th) = (target.size.0.max(1) as f32, target.size.1.max(1) as f32);
-        let mut pass = render_pass(encoder, "frost", target.view, wgpu::LoadOp::Load);
-        pass.set_pipeline(frost);
-        pass.set_bind_group(0, &small.binds[0], &[]);
-        for &[x0, y0, x1, y1, corner, alpha] in backdrop.regions {
-            if ![x0, y0, x1, y1, corner, alpha].iter().all(|v| v.is_finite()) || x1 <= x0 || y1 <= y0 || alpha <= 0.0 {
-                continue;
-            }
-            let offset = uniforms.push(&BackdropUniform {
-                v0: [x0, y0, x1, y1],
-                v1: [corner, tw, th, k],
-                v2: [alpha.min(1.0), 0.0, 0.0, 0.0],
-            });
-            pass.set_bind_group(1, &self.uniform_bind, &[offset]);
-            pass.draw(0..6, 0..1);
-        }
+        k
     }
 
     /// A layer scaled to fit `max_side` pixels (premultiplied). Runs what is queued first, then

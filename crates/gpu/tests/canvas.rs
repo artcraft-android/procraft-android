@@ -444,7 +444,7 @@ fn a_frosted_region_shows_what_is_behind_it_blurred() {
             surround: [0.0, 0.0, 0.0],
             grid: None,
             selection: None,
-            backdrop: Some(Backdrop { regions: &regions, sigma: 24.0 }),
+            backdrop: Some(Backdrop { regions: &regions, windows: &[], sigma: 24.0 }),
             convert: None,
             lut: None,
             crisp_from: f32::INFINITY,
@@ -464,6 +464,133 @@ fn a_frosted_region_shows_what_is_behind_it_blurred() {
     assert!(red(250, 50) < 3 && a > 240, "far from the edge: {}", red(250, 50));
     // the rounded corner leaves the canvas as it was
     assert_eq!(red(41, 11), 255);
+}
+
+/// A canvas with a hard edge at x = 100 shown in a 400 x 100 target, under `backdrop`.
+fn frosted_edge(gpu: &Gpu, regions: &[[f32; 6]], windows: &[[f32; 6]]) -> Vec<u8> {
+    let mut doc = Document::new(100, 100);
+    doc.background = [1.0, 1.0, 1.0];
+    let mut canvas = Canvas::new(gpu, &doc).unwrap();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("glass target"),
+        size: wgpu::Extent3d { width: 400, height: 100, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    canvas.render(
+        gpu,
+        &mut doc,
+        Some(Target {
+            view: &view,
+            format,
+            size: (400, 100),
+            to_screen: View::fit((100, 100), (100, 100)).to_screen(),
+            surround: [0.0, 0.0, 0.0],
+            grid: None,
+            selection: None,
+            backdrop: Some(Backdrop { regions, windows, sigma: 24.0 }),
+            convert: None,
+            lut: None,
+            crisp_from: f32::INFINITY,
+            grey: false,
+        }),
+    );
+    read(gpu, &target, 400, 100)
+}
+
+#[test]
+fn a_window_in_the_glass_only_softens_what_is_behind() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // frost across the edge, and a window in it lower down
+    let frost = [[40.0, 0.0, 300.0, 100.0, 0.0, 1.0]];
+    let window = [[40.0, 50.0, 300.0, 100.0, 0.0, 1.0]];
+    let px = frosted_edge(&gpu, &frost, &window);
+    let red = |x: u32, y: u32| pixel(&px, 400, x, y)[0];
+    // the frost spreads the edge far; through the window it stays near the edge
+    assert!((30..240).contains(&red(120, 20)), "frost 20 past the edge: {}", red(120, 20));
+    assert!(red(120, 75) < 10, "window 20 past the edge: {}", red(120, 75));
+    assert!(red(80, 75) > 245, "window 20 short of the edge: {}", red(80, 75));
+    // softened all the same: a pixel beside the edge is neither
+    assert!((20..235).contains(&red(99, 75)), "at the edge: {}", red(99, 75));
+    // a window with no frost anywhere still draws
+    let alone = frosted_edge(&gpu, &[], &window);
+    assert!((20..235).contains(&pixel(&alone, 400, 99, 75)[0]));
+    assert_eq!(pixel(&alone, 400, 99, 25)[0], 255, "above the window: as it was");
+}
+
+/// What the glass over the bars costs a frame: the canvas shown with and without it, at the
+/// tablet's size, waiting for the GPU each time. Run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn glass_cost() {
+    let Some(gpu) = gpu() else { return };
+    let (w, h) = (2560u32, 1600u32);
+    let mut doc = Document::new(2732, 2048);
+    doc.background = [0.8, 0.7, 0.6];
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("glass cost"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let to_screen = View::fit((2732, 2048), (w, h)).to_screen();
+    // the top bar and the side bar, 2 pixels a point, and its two tracks
+    let regions = [[0.0, 0.0, 2560.0, 88.0, 0.0, 1.0], [-40.0, 260.0, 102.0, 1298.0, 40.0, 1.0]];
+    let windows = [[10.0, 272.0, 90.0, 612.0, 26.0, 1.0], [10.0, 756.0, 90.0, 1096.0, 26.0, 1.0]];
+    let sigma = 47.0;
+    let mut frames = |backdrop: Option<Backdrop<'_>>| {
+        let mut each: Vec<f64> = (0..240)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                canvas.render(
+                    &gpu,
+                    &mut doc,
+                    Some(Target {
+                        view: &view,
+                        format,
+                        size: (w, h),
+                        to_screen,
+                        surround: [0.15, 0.15, 0.15],
+                        grid: None,
+                        selection: None,
+                        backdrop,
+                        convert: None,
+                        lut: None,
+                        crisp_from: f32::INFINITY,
+                        grey: false,
+                    }),
+                );
+                gpu.flush();
+                t.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        each.drain(..40);
+        each.sort_by(f64::total_cmp);
+        (each[each.len() / 2], each[each.len() * 9 / 10])
+    };
+    let glass = Some(Backdrop { regions: &regions, windows: &windows, sigma });
+    for round in 0..3 {
+        let (none, none_90) = frames(None);
+        let (with, with_90) = frames(glass);
+        println!(
+            "round {round}: no glass {none:.3} ms (90% {none_90:.3}), glass {with:.3} ms (90% {with_90:.3}), +{:.3} ms",
+            with - none
+        );
+    }
 }
 
 #[test]
