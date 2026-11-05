@@ -29,6 +29,8 @@ struct GalleryView: View {
     @Environment(\.displayScale) private var displayScale
     @State private var artworks: [GalleryArtwork] = []
     @State private var failure: String?
+    /// Goes up when artworks are saved, so thumbnails read again.
+    @State private var thumbnailsVersion = 0
 
     init(onOpen: @escaping (OpenArtwork) -> Void) {
         self.onOpen = onOpen
@@ -43,7 +45,7 @@ struct GalleryView: View {
                 ScrollView {
                     LazyVGrid(columns: Array(repeating: GridItem(.fixed(cell.pitch), spacing: 0), count: columns), spacing: 0) {
                         ForEach(artworks, id: \.dir) { artwork in
-                            ArtworkCell(artwork: artwork, cell: cell)
+                            ArtworkCell(artwork: artwork, cell: cell, version: thumbnailsVersion)
                                 .contentShape(Rectangle())
                                 .onTapGesture { open(artwork) }
                         }
@@ -55,6 +57,14 @@ struct GalleryView: View {
         }
         .background(Pc.galleryBackground.ignoresSafeArea())
         .onAppear(perform: reload)
+        // an artwork just left is saved while the gallery shows: its new thumbnail read then
+        .onReceive(NotificationCenter.default.publisher(for: Gallery.keptNotification)) { note in
+            reload()
+            thumbnailsVersion += 1
+            if let reason = note.object as? String {
+                failure = saveFailureSaid(reason: reason)
+            }
+        }
         .alert("Can't open the artwork", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -137,6 +147,7 @@ private struct GalleryHeader: View {
 private struct ArtworkCell: View {
     let artwork: GalleryArtwork
     let cell: CellSize
+    let version: Int
     @State private var picture: UIImage?
 
     var body: some View {
@@ -178,7 +189,7 @@ private struct ArtworkCell: View {
                 .foregroundStyle(Pc.gallerySize)
         }
         .frame(width: cell.pitch, height: cell.pitch, alignment: .top)
-        .task(id: artwork.modifiedMs) {
+        .task(id: "\(artwork.modifiedMs)-\(version)") {
             let path = (artwork.dir as NSString).appendingPathComponent("thumbnail.png")
             picture = await Task.detached(priority: .userInitiated) { UIImage(contentsOfFile: path) }.value
         }
@@ -187,6 +198,13 @@ private struct ArtworkCell: View {
 
 /// Where the gallery's artworks are kept.
 enum Gallery {
+    /// An artwork left has been saved; its object is why it couldn't be, if it couldn't.
+    static let keptNotification = Notification.Name("ProCraft.artworkKept")
+
+    static func artworkKept(failure: String?) {
+        NotificationCenter.default.post(name: keptNotification, object: failure)
+    }
+
     static let store: ArtworkStore = {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())

@@ -9,6 +9,8 @@ struct CanvasScreen: View {
 
     var body: some View {
         GeometryReader { screen in
+            let right = AppSettings.shared.rightHanded
+            let hidden = model.barsHidden
             ZStack(alignment: .topLeading) {
                 CanvasHost(model: model)
                 if model.panel != .none {
@@ -17,16 +19,106 @@ struct CanvasScreen: View {
                         .contentShape(Rectangle())
                         .onTapGesture { model.closePanels() }
                 }
+                if let pick = model.picking {
+                    Loupe(pick: pick, current: CanvasSpace.shared.color(model.colorRgb()), pixels: model.pixels)
+                    if !hidden {
+                        PickingBar(fromReference: pick.fromReference)
+                            .offset(y: Pc.barHeight)
+                    }
+                }
+                // with the interface hidden, a button in the top left brings it back
+                if hidden {
+                    ShowInterfaceButton(model: model)
+                        .transition(.opacity)
+                }
+                // a slider's panel kept up goes with the next touch anywhere else
+                if model.sliderPanelKept, model.sliderPanel != nil {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .gesture(DragGesture(minimumDistance: 0).onChanged { _ in
+                            model.sliderPanel = nil
+                            model.sliderPanelKept = false
+                        })
+                }
+                // the top bar slides up off the screen and the side bar out to its side as they fade
                 TopBar(model: model)
+                    .offset(y: hidden ? -Pc.barHeight : 0)
+                    .opacity(hidden ? 0 : 1)
                 NoticeBand(model: model)
-                SideBar(model: model)
-                    .offset(y: screen.size.height * Pc.sideBarCentre - Pc.sideBarHeight / 2)
+                SideBar(model: model, right: right)
+                    .frame(maxWidth: .infinity, alignment: right ? .trailing : .leading)
+                    .offset(x: sideBarShift(right), y: screen.size.height * Pc.sideBarCentre - Pc.sideBarHeight / 2)
+                    .opacity(hidden ? 0 : 1)
                 if model.panel != .none {
                     PanelHost(model: model, screen: screen.size)
                 }
+                QuickShapeHandles(model: model)
+                if !hidden {
+                    QuickShapeBar(model: model)
+                        .offset(y: Pc.barHeight)
+                }
+                if let choice = model.layerChoice {
+                    LayerChoiceList(model: model, choice: choice, screen: screen.size)
+                }
+                BlockedDialog(model: model)
+                AlertView(
+                    content: model.askRasterize ? AlertContent(
+                        title: "Rasterize this text layer?",
+                        message: "Its text can't be edited afterwards; you can paint on it.",
+                        action: "Rasterize",
+                        destructive: false
+                    ) : nil,
+                    onCancel: { model.askRasterize = false },
+                    onAction: { model.rasterizeCurrent() }
+                )
             }
+            .animation(Motion.bars, value: hidden)
+            .animation(model.sideBarShown ? Motion.sideBarIn : Motion.sideBarOut, value: model.sideBarShown)
         }
         .ignoresSafeArea()
+    }
+
+    /// How far the side bar has moved off its edge: all the way with the interface hidden or a
+    /// mode taking the screen.
+    private func sideBarShift(_ right: Bool) -> CGFloat {
+        guard model.barsHidden || !model.sideBarShown else { return 0 }
+        return right ? Pc.sideBarWidth : -Pc.sideBarWidth
+    }
+}
+
+/// The current layer turned a change away (locked, hidden, or an empty group): Cancel, unlock or
+/// show it, or open Layers. What was tried is not done afterwards.
+private struct BlockedDialog: View {
+    let model: CanvasModel
+
+    var body: some View {
+        AlertView(
+            content: model.blocked.map(content),
+            onCancel: { model.answerBlocked(fix: false, openLayers: false) },
+            onAction: { model.answerBlocked(fix: false, openLayers: true) },
+            onExtra: { model.answerBlocked(fix: true, openLayers: false) }
+        )
+    }
+
+    private func content(_ b: BlockedLayer) -> AlertContent {
+        let name = b.layer.name
+        switch b.why {
+        case .locked:
+            return AlertContent(
+                title: "Layer is locked", message: "\u{201C}\(name)\u{201D} can't be changed while it is locked.",
+                action: "Open Layers", icon: PcIcons.pageLocked, destructive: false, extra: "Unlock"
+            )
+        case .hidden:
+            return AlertContent(
+                title: "Layer is hidden", message: "\u{201C}\(name)\u{201D} can't be changed while it is hidden.",
+                action: "Open Layers", icon: PcIcons.eyeStruck, destructive: false, extra: "Show"
+            )
+        case .emptyGroup:
+            return AlertContent(
+                title: "Group is empty", message: "\u{201C}\(name)\u{201D} holds no layers to change.",
+                action: "Open Layers", icon: PcIcons.folder, destructive: false
+            )
+        }
     }
 }
 
@@ -35,38 +127,44 @@ private struct PanelHost: View {
     let model: CanvasModel
     let screen: CGSize
 
-    var body: some View {
-        // panels keep clear of the side bar
+    /// Where a panel `width` wide goes under its button: clear of the side bar, on either side.
+    private func place(_ width: CGFloat, _ buttonX: CGFloat) -> PopoverPlace {
         let clear = Pc.sideBarWidth + Pc.popoverGap
+        return AppSettings.shared.rightHanded
+            ? popoverPlace(width: width, buttonCentreX: buttonX, screenWidth: screen.width, minRight: clear)
+            : popoverPlace(width: width, buttonCentreX: buttonX, screenWidth: screen.width, minLeft: clear)
+    }
+
+    var body: some View {
         switch model.panel {
         case .brushes:
             let buttonX = screen.width - Pc.toolCentreFromRight(libraryButton(model.tool), barWidth: screen.width)
-            let place = popoverPlace(width: brushLibraryWidth, buttonCentreX: buttonX, screenWidth: screen.width, minLeft: clear)
+            let place = place(brushLibraryWidth, buttonX)
             // ending 25 above the screen's edge, as measured
             BrushLibrary(model: model, arrowX: place.arrowX)
                 .frame(height: screen.height - Pc.barHeight - 25)
                 .offset(x: place.left, y: Pc.barHeight)
         case .layers:
             let buttonX = screen.width - Pc.toolCentreFromRight(1, barWidth: screen.width)
-            let place = popoverPlace(width: layersPanelWidth, buttonCentreX: buttonX, screenWidth: screen.width, minLeft: clear)
+            let place = place(layersPanelWidth, buttonX)
             LayersPanel(model: model, arrowX: place.arrowX, maxHeight: screen.height - Pc.barHeight - Pc.popoverGap)
                 .offset(x: place.left, y: Pc.barHeight)
         case .actions:
             let buttonX = Pc.actionCentre(0, barWidth: screen.width)
-            let place = popoverPlace(width: actionsPanelWidth, buttonCentreX: buttonX, screenWidth: screen.width, minLeft: clear)
+            let place = place(actionsPanelWidth, buttonX)
             // ending 25 above the screen's edge, its rows scrolling, as measured
             ActionsPanel(model: model, arrowX: place.arrowX)
                 .frame(maxHeight: screen.height - Pc.barHeight - 25, alignment: .top)
                 .offset(x: place.left, y: Pc.barHeight)
         case .adjustments:
             let buttonX = Pc.actionCentre(1, barWidth: screen.width)
-            let place = popoverPlace(width: adjustmentsPanelWidth, buttonCentreX: buttonX, screenWidth: screen.width, minLeft: clear)
+            let place = place(adjustmentsPanelWidth, buttonX)
             AdjustmentsPanel(model: model, arrowX: place.arrowX)
                 .frame(maxHeight: screen.height - Pc.barHeight - 25, alignment: .top)
                 .offset(x: place.left, y: Pc.barHeight)
         case .color:
             let buttonX = screen.width - Pc.toolCentreFromRight(0, barWidth: screen.width)
-            let place = popoverPlace(width: colorPanelWidth, buttonCentreX: buttonX, screenWidth: screen.width, minLeft: clear)
+            let place = place(colorPanelWidth, buttonX)
             ColorPanel(model: model, arrowX: place.arrowX)
                 .offset(x: place.left, y: Pc.barHeight)
         default:
@@ -92,8 +190,6 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
     private var observers: [NSObjectProtocol] = []
     /// Back to the gallery, once the artwork is kept.
     private let leave: () -> Void
-    /// The colour under the eyedropper while it is open (0xRRGGBB).
-    private var picked: UInt32?
 
     init(model: CanvasModel) {
         self.model = model
@@ -115,8 +211,16 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        model.session.startAutosave(dir: model.dir)
+        let session = model.session
+        let dir = model.dir
+        // a new artwork exists in the gallery from the start (an opened one is there already)
+        if !FileManager.default.fileExists(atPath: (dir as NSString).appendingPathComponent("artwork.json")) {
+            DispatchQueue.global(qos: .utility).async { try? session.save(dir: dir) }
+        }
+        // kept saved by the core a few seconds after it changes; a failure told
+        session.startAutosave(dir: dir)
         canvas.onCommands = { [weak self] in self?.obey($0) }
+        canvas.beforeTouches = { [weak self] in self?.model.prepareTouches() }
         let pencil = UIPencilInteraction()
         pencil.delegate = self
         canvas.addInteraction(pencil)
@@ -124,6 +228,14 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
         observers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.saveInBackground() })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.model.resumeTracking() })
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        model.pixels = view.window?.screen.scale ?? view.traitCollection.displayScale
     }
 
     override var prefersStatusBarHidden: Bool { true }
@@ -131,7 +243,7 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
     // the screen's edges paint first; a second swipe is the system's
     override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge { .all }
 
-    /// What the touches asked; the rest wait for the interface that shows them.
+    /// What the touches asked; those of tools not on the iPad yet do nothing until they are.
     private func obey(_ commands: [TouchCommand]) {
         for command in commands {
             switch command {
@@ -139,26 +251,46 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 model.undo()
             case .redo:
                 model.redo()
+            case .clearLayer:
+                model.clearCurrentLayer()
+            case .toggleBars:
+                model.toggleBars()
             case .fit:
-                model.session.settleToFit()
-            case .strokeEnded, .shapeEnded:
+                model.settleToFit()
+            case let .layerSelect(x, y):
+                model.layerSelect(x: x, y: y)
+            case .quickShapeLast:
+                model.quickShapeLast()
+            case let .pick(x, y):
+                model.pick(x: x, y: y)
+            case .pickDone:
+                model.finishPick()
+            case .pickCancel:
+                model.cancelPick()
+            case .shapeSnapped:
+                model.quickShapeSnapped()
+            case .shapeChanged:
+                model.quickShapeChanged()
+            case .shapeEnded:
+                model.quickShapeEnded()
                 model.refresh()
+            case .strokeEnded:
+                model.strokeEnded()
+            case .viewMoved:
+                model.refreshView()
+            case let .cursor(x, y):
+                let pixels = model.pixels
+                canvas.showCursor(at: CGPoint(x: CGFloat(x) / pixels, y: CGFloat(y) / pixels), hovering: false)
+            case .cursorGone:
+                canvas.showCursor(at: nil, hovering: false)
+            case .textLayer:
+                model.askRasterize = true
             case .brushChanged:
                 model.brushTouched()
-            // the eyedropper (a hold, a squeeze): the colour under it, taken as it lets go (its
-            // loupe is still to come)
-            case let .pick(x, y):
-                if let rgb = model.session.pick(x: x, y: y, side: 1)?.rgb {
-                    picked = rgb
-                }
-            case .pickDone:
-                if let rgb = picked {
-                    model.setRgb(rgb)
-                }
-                picked = nil
-                model.pickNext = false
-            case .pickCancel:
-                picked = nil
+            case .showColours:
+                model.toggle(.color)
+            case .showBrushes:
+                model.toggle(.brushes)
             default:
                 break
             }
@@ -168,30 +300,65 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
     /// Back to the gallery, the artwork kept.
     private func close() {
         let session = model.session
-        // no save of its own after this one
-        session.stopAutosave()
-        do {
-            try session.save(dir: model.dir)
-        } catch {
-            NSLog("ProCraft: keeping the artwork: %@", "\(error)")
-        }
+        let dir = model.dir
+        model.noteTime()
+        model.stopWatching()
+        model.keepChoicesNow()
         canvas.detach()
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
         leave()
+        // off the main thread: a large artwork takes a while, and the gallery shows meanwhile
+        DispatchQueue.global(qos: .userInitiated).async {
+            // after the autosave under way, if one is, and no save of its own after this one
+            session.stopAutosave()
+            var failure: String?
+            do {
+                try session.save(dir: dir)
+            } catch {
+                failure = "\(error)"
+                NSLog("ProCraft: keeping the artwork: %@", "\(error)")
+            }
+            // its memory free at once, not when the object goes
+            session.releaseCanvas()
+            DispatchQueue.main.async { Gallery.artworkKept(failure: failure) }
+        }
     }
 
-    /// Saves the artwork, the system letting the app finish first (a background task).
+    /// Saves the artwork off the main thread, the system letting the app finish first (a background
+    /// task); the app may be ended without a word once it is in the background.
     private func saveInBackground() {
+        model.noteTime()
+        let model = model
+        let session = model.session
+        let dir = model.dir
         let app = UIApplication.shared
-        let task = app.beginBackgroundTask(withName: "Keep the artwork", expirationHandler: nil)
-        do {
-            try model.session.save(dir: model.dir)
-        } catch {
-            NSLog("ProCraft: keeping the artwork: %@", "\(error)")
+        var task = UIBackgroundTaskIdentifier.invalid
+        task = app.beginBackgroundTask(withName: "Keep the artwork") {
+            if task != .invalid {
+                app.endBackgroundTask(task)
+                task = .invalid
+            }
         }
-        if task != .invalid {
-            app.endBackgroundTask(task)
+        DispatchQueue.global(qos: .userInitiated).async {
+            var failure: String?
+            do {
+                try session.save(dir: dir)
+            } catch {
+                failure = "\(error)"
+                NSLog("ProCraft: keeping the artwork: %@", "\(error)")
+            }
+            DispatchQueue.main.async {
+                if let failure {
+                    model.saveFailed(failure)
+                } else {
+                    model.saveSucceeded()
+                }
+                if task != .invalid {
+                    app.endBackgroundTask(task)
+                    task = .invalid
+                }
+            }
         }
     }
 

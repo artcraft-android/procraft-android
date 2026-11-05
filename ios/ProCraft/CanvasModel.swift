@@ -20,6 +20,19 @@ struct Notice: Equatable {
     let warning: Bool
 }
 
+/// The current layer turned a change away, and why: a dialog offers to unlock or show it, or open
+/// Layers.
+struct BlockedLayer {
+    let why: Blocked
+    let layer: LayerInfo
+}
+
+/// The layers under a point held with Layer Select, the first of them made current.
+struct LayerChoiceAt {
+    let at: CGPoint
+    let ids: [UInt64]
+}
+
 /// The open artwork as the interface shows it: what the bars and panels show, read from the core
 /// and changed through it.
 @Observable
@@ -38,8 +51,14 @@ final class CanvasModel {
     private(set) var tool: ToolKind = .paint
     private(set) var size: Float = 0
     private(set) var opacity: Float = 1
-    /// The colour panel's mode.
-    var colorMode: ColorMode = .disc
+    /// The colour panel's mode, kept from one session to the next.
+    var colorMode: ColorMode {
+        get {
+            let all = ColorMode.allCases
+            return all.indices.contains(AppSettings.shared.colorMode) ? all[AppSettings.shared.colorMode] : .disc
+        }
+        set { AppSettings.shared.colorMode = ColorMode.allCases.firstIndex(of: newValue) ?? 0 }
+    }
     /// The second colour (0xRRGGBB), beside the current one in the colour panel: swapped with it,
     /// and mixed in by brushes whose colour dynamics say so.
     private(set) var secondaryRgb: UInt32 = 0xFFFFFF
@@ -60,6 +79,42 @@ final class CanvasModel {
     var sliderPanelKept = false
     private(set) var notice: Notice?
     @ObservationIgnored private var notices = 0
+
+    /// Window pixels to a point, as the canvas's view has it.
+    var pixels: CGFloat = 2
+    /// The interface is hidden (four fingers, or Full Screen).
+    private(set) var barsHidden = false
+    /// The eyedropper, while it is open.
+    private(set) var picking: PickState?
+    @ObservationIgnored private var pendingPick: (x: Float, y: Float)?
+    @ObservationIgnored private var pickRunning = false
+    @ObservationIgnored private var pickEnding = false
+    /// A stroke held still and snapped to a shape; `quickShapeEditing` shows its handles.
+    private(set) var quickShape: QuickShapeInfo?
+    var quickShapeEditing = false
+    /// The current layer turned a change away.
+    private(set) var blocked: BlockedLayer?
+    /// A stroke began on a text layer: it takes paint once rasterized.
+    var askRasterize = false
+    /// Layer Select found more than one layer under the finger.
+    var layerChoice: LayerChoiceAt?
+    /// Colours painted with lately (0xRRGGBB), newest first.
+    private(set) var history: [UInt32] = []
+    /// Whether a mask is current, the colour then the one masks paint with.
+    @ObservationIgnored private var onMask = false
+    /// The colour not in use (hue, saturation, brightness): masks' while a layer of another kind is
+    /// current, the brush's while a mask is.
+    @ObservationIgnored private var otherColour: [Float] = AppSettings.shared.maskColor
+    /// What is drawn over the canvas follows the view while it moves into place.
+    @ObservationIgnored private var settling: Timer?
+    /// A save failed and was told of: the next isn't, until one succeeds again.
+    @ObservationIgnored private var saveFailing = false
+    @ObservationIgnored private var saveWatch: Timer?
+    /// When time on the artwork last started counting; none while away.
+    @ObservationIgnored private var activeSince: Date?
+
+    /// The colour history, kept across artworks: each canvas's paint strokes add to it.
+    static let colourHistory = ColourHistory()
 
     /// The modify button was pressed: the next touch on the canvas picks a colour (the touches
     /// know too).
@@ -84,8 +139,11 @@ final class CanvasModel {
     private(set) var adjusting = false
     private(set) var recoloring = false
 
-    /// The Actions panel's tab.
-    var actionsTab = 0
+    /// The Actions panel's tab, kept from one session to the next.
+    var actionsTab: Int {
+        get { AppSettings.shared.actionsTab }
+        set { AppSettings.shared.actionsTab = newValue }
+    }
     /// What was last cut or copied, for pasting.
     @ObservationIgnored private var clipboard: ThumbnailImage?
     private(set) var canPaste = false
@@ -118,13 +176,19 @@ final class CanvasModel {
         _ = session.openBrushes(dir: Self.brushesDir)
         brushSets = session.brushLibrary()
         readSetChoices()
-        let c = session.color()
-        if c.count >= 3 {
-            let (h, s, v) = Self.hsv(c[0], c[1], c[2])
-            hue = h
-            saturation = s
-            brightness = v
-        }
+        let settings = AppSettings.shared
+        session.setSelectionVisibility(visibility: settings.selectionVisibility)
+        session.setFillGap(pixels: UInt32(settings.fillGap))
+        session.setBrushScaling(onScreen: settings.brushOnScreen)
+        session.setLightInterface(on: settings.lightInterface)
+        applyInput()
+        session.useColourHistory(history: Self.colourHistory)
+        history = Self.colourHistory.colours()
+        // the colour as it was last left
+        hue = settings.brushColor[0]
+        saturation = settings.brushColor[1]
+        brightness = settings.brushColor[2]
+        applyColor()
         tool = session.info().tool
         currentBrush = session.currentBrush()
         if let current = currentBrush {
@@ -133,6 +197,8 @@ final class CanvasModel {
         readSliders()
         refresh()
         pushSecondary()
+        activeSince = Date()
+        watchSaves()
     }
 
     /// Where the brush library and the brushes in use are kept.
@@ -250,6 +316,11 @@ final class CanvasModel {
         setChoice = choices
     }
 
+    /// As `keepChoices`, for the artwork being left.
+    func keepChoicesNow() {
+        keepChoices()
+    }
+
     /// Keeps the tools' brushes, the sets' choices and each brush's sliders for the next session.
     private func keepChoices() {
         let session = session
@@ -260,8 +331,9 @@ final class CanvasModel {
     }
 
     /// Draws `b`'s sample stroke off the main thread (half its own canvas: the cell shows it across
-    /// its width), and whether it runs under the brush's name.
-    func loadPreview(_ b: BrushInfo) {
+    /// its width), and whether it runs under the brush's name. None comes until the canvas has its
+    /// GPU, so one that doesn't is asked for again a little later, a few times.
+    func loadPreview(_ b: BrushInfo, tries: Int = 8) {
         let key = Self.brushKey(b)
         guard previews[key] == nil, !previewsAsked.contains(key) else { return }
         previewsAsked.insert(key)
@@ -269,7 +341,15 @@ final class CanvasModel {
         let name = b.name
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let t = session.brushPreview(set: b.set, index: b.index, width: 530, height: 162),
-                  let image = Self.image(t) else { return }
+                  let image = Self.image(t) else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self?.previewsAsked.remove(key)
+                    if tries > 1 {
+                        self?.loadPreview(b, tries: tries - 1)
+                    }
+                }
+                return
+            }
             // the name's box (19.5 in, 14 to 26 down, about 7.7 a letter wide, in a cell the
             // picture fills 80 high) covered more than 2/255 on average
             let k: Float = 162 / 80
@@ -308,6 +388,21 @@ final class CanvasModel {
         return UIImage(cgImage: image)
     }
 
+    /// A picture the core made with nothing see-through in it.
+    static func opaqueImage(_ t: ThumbnailImage) -> UIImage? {
+        let width = Int(t.width)
+        let height = Int(t.height)
+        guard width > 0, height > 0, t.rgba.count >= width * height * 4,
+              let provider = CGDataProvider(data: Data(t.rgba) as CFData),
+              let image = CGImage(
+                  width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
+              ) else { return nil }
+        return UIImage(cgImage: image)
+    }
+
     func toggle(_ p: Panel) {
         _ = switchModes(.panel(colour: p == .color))
         panel = panel == p ? .none : p
@@ -320,10 +415,15 @@ final class CanvasModel {
         panel = .none
     }
 
+    /// Whether the side bar shows: a mode taking the screen slides it off its edge.
+    var sideBarShown: Bool {
+        !transforming && !selecting && !adjusting
+    }
+
     /// The modes open now, as the core's `modeSwitch` takes them.
     private func openModes() -> Modes {
         Modes(
-            quickshape: false,
+            quickshape: quickShape != nil,
             filling: false,
             recolor: recoloring,
             layerOpacity: false,
@@ -337,6 +437,7 @@ final class CanvasModel {
     /// core says; true if it goes on to do what it does.
     private func switchModes(_ button: ModeButton) -> Bool {
         let change = modeSwitch(button: button, open: openModes())
+        if change.end.quickshape { endQuickShape() }
         if change.end.recolor { recoloring = false }
         if change.end.transform { transforming = false }
         if change.end.selection { selecting = false }
@@ -456,7 +557,13 @@ final class CanvasModel {
     /// Reads again what the core may have changed (a stroke, an undo).
     func refresh() {
         refreshFlags()
+        // undo and redo keep a snapped shape as drawn first
+        if quickShape != nil, session.quickshapeInfo() == nil {
+            quickShape = nil
+            quickShapeEditing = false
+        }
         layers = session.layers()
+        followMaskColour()
         background = session.background()
         if panel == .layers {
             refreshThumbnails()
@@ -604,7 +711,8 @@ final class CanvasModel {
     func setRgb(_ rgb: UInt32) {
         let channel = { (shift: UInt32) in Float((rgb >> shift) & 0xFF) / 255 }
         let (h, s, v) = Self.hsv(channel(16), channel(8), channel(0))
-        hue = h
+        // a grey keeps the hue it had, so the hue slider does not jump
+        hue = s > 0 ? h : hue
         saturation = s
         brightness = v
         applyColor()
@@ -628,6 +736,38 @@ final class CanvasModel {
         let c = colorRgb()
         let channel = { (shift: UInt32) in Float((c >> shift) & 0xFF) / 255 }
         session.setColor(r: channel(16), g: channel(8), b: channel(0))
+        keepColour()
+    }
+
+    /// Keeps the brush colour and the masks' for the next session.
+    private func keepColour() {
+        let now = [hue, saturation, brightness]
+        AppSettings.shared.brushColor = onMask ? otherColour : now
+        AppSettings.shared.maskColor = onMask ? now : otherColour
+    }
+
+    /// A mask became current, or stopped being: the colour trades places with the other kind's, as
+    /// masks paint with a colour of their own.
+    private func followMaskColour() {
+        let mask = layers.first { $0.current }?.kind == .mask
+        guard mask != onMask else { return }
+        onMask = mask
+        let now = [hue, saturation, brightness]
+        let next = otherColour
+        otherColour = now
+        setColor(hue: next[0], saturation: next[1], brightness: next[2])
+    }
+
+    /// The colour button held: back to the colour painted with before this one, if there was one.
+    func previousColor() {
+        guard let before = Self.colourHistory.previous(current: colorRgb()) else { return }
+        setRgb(before)
+        showNotice("Previous colour")
+    }
+
+    func clearHistory() {
+        Self.colourHistory.clear()
+        history = []
     }
 
     /// Hue (0..1), saturation and brightness to 0xRRGGBB, each channel rounded.
@@ -671,6 +811,329 @@ final class CanvasModel {
             }
         }
         return (h, most > 0 ? range / most : 0, most)
+    }
+
+    // MARK: the canvas's touches
+
+    /// A touch is coming down on an idle canvas: the touches take the settings as they are now.
+    func prepareTouches() {
+        session.setTouchSettings(settings: Gestures.shared.touchSettings())
+    }
+
+    /// A stroke finished: its layer's thumbnail and the undo state changed.
+    func strokeEnded() {
+        // a snapped shape the Pencil moved: its handles where it now is
+        if quickShape != nil {
+            quickShape = session.quickshapeInfo() ?? quickShape
+        }
+        // a stroke on a locked or hidden layer drew nothing: say why (text layers ask to rasterize)
+        if !adjusting, layers.first(where: { $0.current })?.text != true {
+            _ = currentTakesChanges()
+        }
+        refreshFlags()
+        // the stroke's colour went into the history
+        history = Self.colourHistory.colours()
+        if panel == .layers {
+            refreshThumbnails()
+        }
+    }
+
+    /// Fits the canvas to the window again; what is over it follows the view as it settles.
+    func settleToFit() {
+        session.settleToFit()
+        followView()
+    }
+
+    private func followView() {
+        settling?.invalidate()
+        let session = session
+        let until = Date().addingTimeInterval(Double(session.viewSettleSeconds()) + 0.05)
+        settling = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            self?.refreshView()
+            if Date() >= until || !session.viewMoving() {
+                timer.invalidate()
+                self?.refreshView()
+            }
+        }
+    }
+
+    /// The view moved: what is drawn over the canvas follows.
+    func refreshView() {
+        // the shape's handles follow the canvas
+        if quickShape != nil {
+            quickShape = session.quickshapeInfo()
+        }
+    }
+
+    /// The interface hidden or shown again (not while transforming).
+    func toggleBars() {
+        guard switchModes(.bars) else { return }
+        barsHidden.toggle()
+        if barsHidden {
+            panel = .none
+        }
+    }
+
+    func clearCurrentLayer() {
+        refresh()
+        guard let l = layers.first(where: { $0.current }), currentTakesChanges() else { return }
+        _ = session.selectLayer(id: l.id)
+        session.clearLayer()
+        refresh()
+        showNotice("Layer cleared")
+    }
+
+    /// Layer Select held at window point (`x`, `y`): the layer drawn there becomes current; more
+    /// than one there, a list offers the rest.
+    func layerSelect(x: Float, y: Float) {
+        let ids = session.layersAt(x: x, y: y)
+        guard let first = ids.first else {
+            showNotice("Nothing is drawn there.")
+            return
+        }
+        selectLayer(first)
+        let at = CGPoint(x: CGFloat(x) / pixels, y: CGFloat(y) / pixels)
+        layerChoice = ids.count > 1 ? LayerChoiceAt(at: at, ids: ids) : nil
+    }
+
+    /// Whether the current layer takes a change (a stroke, a transform, an adjustment, clearing,
+    /// cutting); if not (locked, hidden, or an empty group), a dialog says why. What was tried is
+    /// not done afterwards.
+    func currentTakesChanges() -> Bool {
+        guard let l = layers.first(where: { $0.current }), let why = session.whyBlocked() else { return true }
+        blocked = BlockedLayer(why: why, layer: l)
+        return false
+    }
+
+    /// The dialog's answer: unlock or show the layer (`fix`), open Layers (`openLayers`), or neither.
+    func answerBlocked(fix: Bool, openLayers: Bool) {
+        guard let b = blocked else { return }
+        blocked = nil
+        if fix {
+            switch b.why {
+            case .locked:
+                toggleLocked(b.layer)
+            case .hidden:
+                toggleVisible(b.layer)
+            case .emptyGroup:
+                break
+            }
+        }
+        if openLayers {
+            panel = .layers
+            refreshThumbnails()
+        }
+    }
+
+    func toggleLocked(_ l: LayerInfo) {
+        let on = !l.locked
+        let said = session.lockSaid(id: l.id, on: on)
+        if session.setLayerLocked(id: l.id, on: on) {
+            showNotice(said)
+        }
+        refresh()
+    }
+
+    func rasterizeCurrent() {
+        askRasterize = false
+        if let l = layers.first(where: { $0.current }) {
+            _ = session.rasterizeLayer(id: l.id)
+            refresh()
+        }
+    }
+
+    // MARK: the eyedropper
+
+    /// How wide a window of the screen the eyedropper reads, in pixels (odd, so a pixel is in the
+    /// middle).
+    var pickSide: UInt32 {
+        UInt32(54 * pixels) | 1
+    }
+
+    /// Moves the eyedropper to window point (`x`, `y`) and reads what is shown there, off the main
+    /// thread; points that arrive meanwhile replace each other.
+    func pick(x: Float, y: Float) {
+        pendingPick = (x, y)
+        if picking == nil {
+            picking = PickState(x: x, y: y, image: nil, rgb: nil)
+        }
+        if !pickRunning {
+            pickRunning = true
+            readPick()
+        }
+    }
+
+    private func readPick() {
+        guard let (x, y) = pendingPick else {
+            pickRunning = false
+            if pickEnding {
+                endPick()
+            }
+            return
+        }
+        pendingPick = nil
+        let session = session
+        let side = pickSide
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            let seen = session.pick(x: x, y: y, side: side)
+            let image = seen.flatMap { Self.opaqueImage(ThumbnailImage(width: $0.side, height: $0.side, rgba: $0.pixels)) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let now = self.picking {
+                    self.picking = PickState(x: x, y: y, image: image ?? now.image, rgb: seen?.rgb ?? now.rgb)
+                }
+                self.readPick()
+            }
+        }
+    }
+
+    /// The eyedropper lets go: its colour becomes the current one (a quick tap ends before the
+    /// colour under it has been read: it is taken once it has).
+    func finishPick() {
+        pickNext = false
+        if pickRunning {
+            pickEnding = true
+        } else {
+            endPick()
+        }
+    }
+
+    private func endPick() {
+        pickEnding = false
+        pendingPick = nil
+        if let rgb = picking?.rgb {
+            setRgb(rgb)
+        }
+        picking = nil
+    }
+
+    func cancelPick() {
+        pickEnding = false
+        pendingPick = nil
+        picking = nil
+    }
+
+    // MARK: QuickShape
+
+    /// What a stroke snapped to, for the band under the top bar.
+    private func snappedTo(_ kind: QuickShapeKind) -> String {
+        let shape: String
+        switch kind {
+        case .line: shape = "a line"
+        case .polyline: shape = "a polyline"
+        case .arc: shape = "an arc"
+        case .ellipse: shape = "an ellipse"
+        case .circle: shape = "a circle"
+        case .triangle: shape = "a triangle"
+        case .equilateralTriangle: shape = "an equilateral triangle"
+        case .quadrilateral: shape = "a quadrilateral"
+        case .rectangle: shape = "a rectangle"
+        case .square: shape = "a square"
+        }
+        return "Snapped to \(shape)"
+    }
+
+    /// The stroke held still snapped to a shape (the canvas's touches did it).
+    func quickShapeSnapped() {
+        guard let info = session.quickshapeInfo() else { return }
+        quickShape = info
+        quickShapeEditing = false
+        showNotice(snappedTo(info.kind))
+    }
+
+    /// The snapped shape changed (dragged, or a finger down while it is held).
+    func quickShapeChanged() {
+        quickShape = session.quickshapeInfo() ?? quickShape
+    }
+
+    /// The snapped shape was let go of as it is (the canvas's touches did it).
+    func quickShapeEnded() {
+        quickShape = nil
+        quickShapeEditing = false
+        refreshFlags()
+    }
+
+    /// The last stroke snaps to the shape it looks like, if nothing has been done since.
+    func quickShapeLast() {
+        guard let info = session.quickshapeLast() else { return }
+        quickShape = info
+        quickShapeEditing = false
+        showNotice(snappedTo(info.kind))
+        refreshFlags()
+    }
+
+    func chooseQuickShape(_ kind: QuickShapeKind) {
+        quickShape = session.quickshapeChoose(kind: kind) ?? quickShape
+    }
+
+    /// Keeps the snapped shape as drawn.
+    func endQuickShape() {
+        guard quickShape != nil else { return }
+        session.quickshapeDone()
+        quickShape = nil
+        quickShapeEditing = false
+        refreshFlags()
+    }
+
+    // MARK: pressure and smoothing
+
+    /// The app's smoothing and pressure, for every stroke.
+    func applyInput() {
+        let s = AppSettings.shared
+        session.setInputSettings(
+            stabilization: s.inputStabilization,
+            motionFiltering: s.inputMotionFiltering,
+            motionExpression: s.inputMotionExpression,
+            pressureSmoothing: s.inputPressureSmoothing,
+            curve: s.inputCurve
+        )
+    }
+
+    // MARK: keeping the artwork
+
+    /// Watches for a failed autosave: told once, until a save succeeds again.
+    private func watchSaves() {
+        let session = session
+        saveWatch = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            guard let reason = session.takeSaveFailure() else { return }
+            self?.saveFailed(reason)
+        }
+    }
+
+    /// A save failed, for `reason`: said the first time since one last succeeded.
+    func saveFailed(_ reason: String) {
+        if !saveFailing {
+            saveFailing = true
+            showNotice(saveFailureSaid(reason: reason), warning: true)
+        }
+    }
+
+    /// A save went through: the next failure is told again.
+    func saveSucceeded() {
+        saveFailing = false
+    }
+
+    /// Time on the artwork stops counting and goes on its record.
+    func noteTime() {
+        if let since = activeSince {
+            session.addTrackedTime(ms: UInt64(max(Date().timeIntervalSince(since), 0) * 1000))
+        }
+        activeSince = nil
+    }
+
+    /// The app is back in front: time on the artwork counts again.
+    func resumeTracking() {
+        if activeSince == nil {
+            activeSince = Date()
+        }
+    }
+
+    /// The artwork is being left: nothing goes on watching it.
+    func stopWatching() {
+        saveWatch?.invalidate()
+        saveWatch = nil
+        settling?.invalidate()
+        settling = nil
     }
 
     // MARK: messages

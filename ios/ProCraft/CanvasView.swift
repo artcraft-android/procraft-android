@@ -13,8 +13,14 @@ final class CanvasView: UIView {
     let session: CanvasSession
     /// What the touches asked of the app (undo, redo, fit, ...).
     var onCommands: ([TouchCommand]) -> Void = { _ in }
+    /// A touch is coming down with none on the canvas: the touches are told how things stand.
+    var beforeTouches: () -> Void = {}
 
     private var attached = false
+    /// The window as last given to the session, and the way up it was at.
+    private var windowWidth: UInt32 = 0
+    private var windowHeight: UInt32 = 0
+    private var windowTurn: UInt32 = 0
     /// Each touch's id for the core while it is down, by the touch.
     private var ids: [ObjectIdentifier: UInt64] = [:]
     private var nextId: UInt64 = 1
@@ -72,11 +78,42 @@ final class CanvasView: UIView {
         layer.contentsScale = scale
         let width = UInt32(max(1, (bounds.width * scale).rounded()))
         let height = UInt32(max(1, (bounds.height * scale).rounded()))
+        let turn = quarterTurns
         if attached {
+            // the canvas stays put on the glass as the bars turn upright
+            if turn != windowTurn {
+                session.followTurn(from: windowTurn, to: turn, width: windowWidth, height: windowHeight)
+            }
             session.resizeWindow(width: width, height: height)
+            remember(width: width, height: height, turn: turn)
         } else {
             attach(width: width, height: height)
+            if attached {
+                // turned while there was no window (the app away): the view follows now
+                if windowWidth > 0, turn != windowTurn {
+                    session.followTurn(from: windowTurn, to: turn, width: windowWidth, height: windowHeight)
+                }
+                remember(width: width, height: height, turn: turn)
+            }
         }
+    }
+
+    /// The way up the interface is, as quarter turns of what is drawn clockwise from upright (the
+    /// device turned the other way: the home edge on the right is one).
+    private var quarterTurns: UInt32 {
+        switch window?.windowScene?.interfaceOrientation {
+        case .landscapeRight: 1
+        case .portraitUpsideDown: 2
+        case .landscapeLeft: 3
+        default: 0
+        }
+    }
+
+    private func remember(width: UInt32, height: UInt32, turn: UInt32) {
+        _ = session.placeGrid(quarters: turn, width: width, height: height, pixelsPerPoint: Float(scale))
+        windowWidth = width
+        windowHeight = height
+        windowTurn = turn
     }
 
     /// Hands the layer to the core, whose render thread draws into it from now on.
@@ -111,8 +148,11 @@ final class CanvasView: UIView {
     // MARK: touches
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        // painting, the outline goes (Brush cursor shows it while hovering)
+        // painting, the hovering outline goes (Brush cursor may show one as it paints)
         cursor.hide()
+        if ids.isEmpty {
+            beforeTouches()
+        }
         var out: [TouchCommand] = []
         for touch in touches {
             let key = ObjectIdentifier(touch)
@@ -192,7 +232,7 @@ final class CanvasView: UIView {
         case .began, .changed:
             // a pointer has no height over the glass: one that has is the Pencil, followed above
             guard hover.zOffset == 0 else { return }
-            cursor.show(at: hover.location(in: self), alpha: 1, session: session, pixels: scale)
+            showCursor(at: hover.location(in: self), hovering: true)
         default:
             cursor.hide()
         }
@@ -204,8 +244,19 @@ final class CanvasView: UIView {
             cursor.hide()
             return
         }
-        let at = CGPoint(x: CGFloat(shown.x) / scale, y: CGFloat(shown.y) / scale)
-        cursor.show(at: at, alpha: CGFloat(shown.alpha), session: session, pixels: scale)
+        showCursor(at: CGPoint(x: CGFloat(shown.x) / scale, y: CGFloat(shown.y) / scale), hovering: true, alpha: CGFloat(shown.alpha))
+    }
+
+    /// The brush's outline at `point` (points), as long as Brush cursor shows it when hovering (or
+    /// painting); none, it goes.
+    func showCursor(at point: CGPoint?, hovering: Bool, alpha: CGFloat = 1) {
+        let settings = AppSettings.shared
+        let wanted = hovering ? settings.cursorShows != .painting : settings.cursorShows != .hovering
+        guard let point, settings.brushCursorOn, wanted else {
+            cursor.hide()
+            return
+        }
+        cursor.show(at: point, alpha: alpha, session: session, pixels: scale, drawn: settings.cursorStyle)
     }
 
     /// The Pencil's double-tap, where it hovers (`hovering`, else where it last was): what Gesture
