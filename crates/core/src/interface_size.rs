@@ -13,29 +13,6 @@ pub(crate) const STEP: f32 = 5.0;
 const LEAST_WIDTH: f32 = 640.0;
 const LEAST_HEIGHT: f32 = 480.0;
 
-/// `percent` on the nearest step, as a size.
-fn on_step(percent: f32) -> f32 {
-    (percent / STEP).round() * STEP / 100.0
-}
-
-/// The size at `along` (0..1) of the slider's way.
-#[uniffi::export]
-pub fn interface_size_at(along: f32) -> f32 {
-    on_step(LEAST + along.clamp(0.0, 1.0) * (MOST - LEAST))
-}
-
-/// How far along its slider (0..1) `size` is.
-#[uniffi::export]
-pub fn interface_size_along(size: f32) -> f32 {
-    ((size * 100.0 - LEAST) / (MOST - LEAST)).clamp(0.0, 1.0)
-}
-
-/// A size read back from where it was kept: on a step and in range, and 100% if it isn't a number.
-#[uniffi::export]
-pub fn interface_size_kept(kept: f32) -> f32 {
-    if kept.is_finite() { on_step((kept * 100.0).clamp(LEAST, MOST)) } else { 1.0 }
-}
-
 /// The size to show in a window `width` × `height` points (at 100%) with `chosen` set: as chosen,
 /// but a bigger one only as far as it leaves the interface the room it needs, on a step so a window
 /// dragged smaller doesn't lay everything out again at each pixel.
@@ -52,32 +29,6 @@ mod tests {
 
     use super::*;
     use crate::{CanvasSession, PenSample, PointerKind, TransformTouch};
-
-    #[test]
-    fn the_slider_moves_in_steps_with_100_in_the_middle() {
-        assert_eq!(interface_size_at(0.0), 0.75);
-        assert_eq!(interface_size_at(0.5), 1.0);
-        assert_eq!(interface_size_at(1.0), 1.25);
-        // the nearest step, from anywhere along it
-        assert_eq!(interface_size_at(0.51), 1.0);
-        assert_eq!(interface_size_at(0.56), 1.05);
-        assert_eq!(interface_size_along(1.0), 0.5);
-        for step in 0..=10 {
-            let along = step as f32 / 10.0;
-            assert!((interface_size_along(interface_size_at(along)) - along).abs() < 1e-5, "{along}");
-        }
-    }
-
-    #[test]
-    fn a_kept_size_comes_back_usable() {
-        assert_eq!(interface_size_kept(1.0), 1.0);
-        assert_eq!(interface_size_kept(0.85), 0.85);
-        assert_eq!(interface_size_kept(0.86), 0.85);
-        assert_eq!(interface_size_kept(9.0), 1.25);
-        assert_eq!(interface_size_kept(0.0), 0.75);
-        assert_eq!(interface_size_kept(f32::NAN), 1.0);
-        assert_eq!(interface_size_kept(f32::INFINITY), 1.0);
-    }
 
     #[test]
     fn a_bigger_size_goes_no_further_than_the_window_has_room() {
