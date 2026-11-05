@@ -65,6 +65,10 @@ const SHORT_SCREEN: f32 = 900.0;
 /// Short, the classic square takes the height left over: the window less the bar and arrow (56),
 /// the header (64), the sliders (108), the palette (142), the tabs (70) and a 25 margin.
 const SHORT_CLASSIC_REST: f32 = 465.0;
+/// The palettes' list takes the height left over, up to its measured height: the screen less the
+/// bar and arrow (56), the header (64), the Compact and Cards switch (44), the tabs (70) and a 25
+/// margin.
+const PALETTES_REST: f32 = 259.0;
 /// The short panel's menu: its width, edge and corners.
 const SHORT_MENU_WIDTH: f32 = 252.0;
 const SHORT_MENU_EDGE: u32 = 0x24FFFFFF;
@@ -97,7 +101,7 @@ impl Shape {
                 value_group: 151.0,
                 value_gap: 7.0,
                 value_top: 3.0,
-                palette_list: 458.0,
+                palette_list: (screen_height - PALETTES_REST).clamp(120.0, 458.0),
             }
         } else {
             Shape {
