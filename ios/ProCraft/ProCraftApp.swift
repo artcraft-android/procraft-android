@@ -79,7 +79,7 @@ enum ScreenCapture {
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
-    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-"]
+    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop"]
     /// What opens over the gallery.
     static var galleryShows: String?
     /// What opens over the QuickMenu.
@@ -215,6 +215,11 @@ enum ScreenCapture {
         case "source-landscape":
             sideways = true
             source(model, .grain)
+        case "crop":
+            model.crop.begin()
+        case "crop-settings":
+            model.crop.begin()
+            model.crop.settingsOpen = true
         case "adjust-modes":
             model.startAdjustment(.gaussianBlur)
             model.adjustModesOpen = true

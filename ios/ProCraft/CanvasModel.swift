@@ -233,6 +233,7 @@ final class CanvasModel {
     @ObservationIgnored private(set) lazy var selection = SelectionTool(model: self)
     @ObservationIgnored private(set) lazy var transform = TransformTool(model: self)
     @ObservationIgnored private(set) lazy var gradientMap = GradientMapTool(model: self)
+    @ObservationIgnored private(set) lazy var crop = CropTool(model: self)
     /// The view as the core has it: `[a, b, c, d, e, f]`, canvas pixels to window pixels.
     private(set) var viewMatrix: [Float] = []
     /// Delete on a locked layer: why not, OK alone.
@@ -778,7 +779,7 @@ final class CanvasModel {
 
     /// Whether the side bar shows: a mode taking the screen slides it off its edge.
     var sideBarShown: Bool {
-        showSideBar && !transforming && !selecting && (!adjusting || adjustShown?.pencil == true)
+        showSideBar && !transforming && !selecting && crop.shown == nil && (!adjusting || adjustShown?.pencil == true)
     }
 
     /// The modes open now, as the core's `modeSwitch` takes them.
@@ -1497,7 +1498,7 @@ final class CanvasModel {
         followView()
     }
 
-    private func followView() {
+    func followView() {
         settling?.invalidate()
         let session = session
         let until = Date().addingTimeInterval(Double(session.viewSettleSeconds()) + 0.05)

@@ -140,6 +140,7 @@ struct CanvasScreen: View {
                     )
                     .offset(x: (screen.size.width - colorPanelWidth) / 2, y: Pc.barHeight)
                 }
+                CropOverlay(model: model)
                 if model.copyPasteOpen {
                     CopyPastePanel(model: model, screen: screen.size)
                 }

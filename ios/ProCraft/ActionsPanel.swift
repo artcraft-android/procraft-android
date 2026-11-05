@@ -158,7 +158,7 @@ struct ActionsPanel: View {
             ]
         case 1:
             return [
-                [.act("Crop & Resize", action: nil)],
+                [.act("Crop & Resize", action: { model.crop.begin() })],
                 [
                     .toggle("Animation Assist", on: false, change: nil),
                     .toggle("Page Assist", on: false, change: nil),
