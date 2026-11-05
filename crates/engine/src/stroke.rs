@@ -24,10 +24,11 @@ pub struct Stamp {
     pub angle: f32,
     /// 1 = as drawn; lower squashes the stamp across its rotation.
     pub roundness: f32,
-    /// Where a moving grain is read from: the stamp's middle in the grain (canvas pixels), each
-    /// point of the stamp read that far from it as on the canvas (the grain never turns or
-    /// squashes with the stamp). A rolling grain is read in place, so it stays put as the stamps
-    /// move over it; a static one moves along with each stamp.
+    /// Where a moving grain is read from: the stamp's middle in the grain (canvas pixels at this
+    /// stamp's tile), each point of the stamp read that far from it as on the canvas (the grain
+    /// never turns or squashes with the stamp). A rolling grain goes on from stamp to stamp by as
+    /// far as they moved, so it stays put as the stamps move over it, whatever their tile; a
+    /// static one moves along with each stamp.
     pub grain_offset: Vec2,
     /// How hard the pen presses the paint into a grain (the pressure, 0..1), and how much that
     /// counts (the brush's pressure bleed and its tilt bleed as far as the pen leans, 0..2):
@@ -148,8 +149,8 @@ struct Placed {
     grain_press: f32,
     /// The tilt bleed as far as the pen leans (it adds to the pressure bleed).
     bleed_lean: f32,
-    /// How far its moving grain rolls along with the stroke (see [`Extras::grain_movement`]).
-    grain_movement: f32,
+    /// Where its moving grain is read from, in tiles (see [`Stamp::grain_offset`]).
+    grain_read: Vec2,
     gradation: f32,
     transfer: f32,
     attack: f32,
@@ -652,8 +653,6 @@ const RUN_ON_TOUCH: usize = 4;
 const RUN_ON_PEN: usize = 1;
 const RUN_ON_SHRINK: f32 = 0.66;
 const RUN_ON_TURN: f32 = 1.125;
-/// How far (canvas pixels) offset jitter may move a stroke's start in a moving grain.
-const GRAIN_JITTER_SPAN: f32 = 1024.0;
 /// Stamps a stroke may hold (a guard against runaway input, far above any real stroke).
 const MAX_STAMPS: usize = 400_000;
 /// How far the path goes before the stroke's direction (which stamps following it turn to) has
@@ -746,8 +745,10 @@ pub struct StrokeBuilder {
     /// average of them if it has one too. Made as the stroke starts; empty if there is no motion
     /// filtering.
     weights: Option<Arc<[f32]>>,
-    /// Where in a moving grain the stroke starts.
+    /// Where in a moving grain the stroke starts (tiles), and where the last stamp was read from
+    /// there and lay on the canvas.
     grain_start: Vec2,
+    grain_last: Option<(Vec2, Vec2)>,
     /// When each sample came (milliseconds, always later than the one before) and how far the
     /// input had gone by then (canvas pixels, as it came), for the tapers that last a time.
     history: Vec<(f64, f32)>,
@@ -908,6 +909,7 @@ impl StrokeBuilder {
             input: InputSettings::default(),
             weights: None,
             grain_start: Vec2::ZERO,
+            grain_last: None,
             history: Vec::new(),
             input_length: 0.0,
             before_last: [None; 2],
@@ -927,7 +929,7 @@ impl StrokeBuilder {
             self.stroke_secondary = self.extras.stroke_secondary * self.random.next();
         }
         if self.extras.grain_offset_jitter {
-            self.grain_start = Vec2::new(self.random.next(), self.random.next()) * GRAIN_JITTER_SPAN;
+            self.grain_start = Vec2::new(self.random.next(), self.random.next());
         }
         if self.brush.shape.randomise {
             self.stroke_turn = self.random.next() * std::f32::consts::TAU;
@@ -1242,6 +1244,7 @@ impl StrokeBuilder {
                     }
                 }
                 if let Some(next) = self.averaged.at_lanes(i, sum) {
+                    let next = self.still_where_it_was(next);
                     self.go_on(next, Some(interval), out);
                 }
                 i += 1;
@@ -1255,10 +1258,20 @@ impl StrokeBuilder {
             self.averaged.slide(&mut sum, i, half);
             i += 1;
             if let Some(next) = next {
+                let next = self.still_where_it_was(next);
                 self.go_on(next, Some(interval), out);
             }
         }
         self.averaged.settled = i;
+    }
+
+    /// `next`, an average of the input: where the input hasn't gone anywhere it stays exactly there,
+    /// or the average's rounding would read as a move and a tap as a stroke.
+    fn still_where_it_was(&self, next: PathPoint) -> PathPoint {
+        match self.averaged.points.first().filter(|_| self.input_length <= 0.0) {
+            Some(first) => PathPoint { pos: first.pos, ..next },
+            None => next,
+        }
     }
 
     /// Takes the path on along stabilisation's points to the input's end, as if no more were to
@@ -1924,6 +1937,15 @@ impl StrokeBuilder {
             // the grain's own scale, which the renderer takes it times
             let tile = self.brush.grain.moving_tile(diameter * size, x.grain_zoom * zoom_by, grain_scale_by);
             let grain_size = tile / self.brush.grain.scale.max(1.0);
+            // it rolls on by as far as the stamp moved, at this stamp's tile and movement: so a
+            // tile that follows the size (or a movement that follows the pressure) changes how
+            // fast it rolls and doesn't send it elsewhere
+            let rolled = x.grain_movement * movement_by / tile;
+            let grain_read = match self.grain_last {
+                Some((read, from)) => read + (center - from) * rolled,
+                None => self.grain_start + center * rolled,
+            };
+            self.grain_last = Some((grain_read, center));
             let placed = Placed {
                 center,
                 thrown,
@@ -1940,7 +1962,7 @@ impl StrokeBuilder {
                 grain_size: grain_size.max(1e-3),
                 grain_press,
                 bleed_lean: (x.tilt_bleed * self.leaning(p, x.tilt_angles.bleed)).clamp(0.0, 1.0),
-                grain_movement: x.grain_movement * movement_by,
+                grain_read,
                 gradation: (x.tilt_gradation * self.leaning(p, x.tilt_angles.gradation)).max(0.0).sqrt().min(1.0),
                 transfer,
                 attack,
@@ -1955,12 +1977,6 @@ impl StrokeBuilder {
             self.bounds = self.bounds.union(stamp.bounds());
             out.push(stamp);
         }
-    }
-
-    /// Where a stamp's moving grain is read from (see [`Stamp::grain_offset`]): in place on the
-    /// canvas as far as the grain rolls, from wherever the stroke starts in it.
-    fn grain_offset(&self, p: &Placed) -> Vec2 {
-        self.grain_start + p.center * p.grain_movement
     }
 
     /// The stamp's roundness before leaning and jitter: the shape's, squeezed as light pressure
@@ -2039,7 +2055,7 @@ impl StrokeBuilder {
             alpha: (p.alpha * alpha).clamp(0.0, 1.0),
             angle: p.angle,
             roundness,
-            grain_offset: self.grain_offset(p),
+            grain_offset: p.grain_read * (p.grain_size * self.brush.grain.scale.max(1.0)),
             grain_press,
             grain_bleed,
             flip: p.flip,
@@ -2703,6 +2719,18 @@ mod tests {
         let one = angles(1);
         assert!(one.iter().all(|&a| a == one[0]), "{one:?}");
         assert_ne!(angles(2)[0], one[0]);
+    }
+
+    #[test]
+    fn a_still_tap_stays_a_tap_with_its_points_averaged() {
+        let at = Vec2::new(1234.567, 987.654);
+        for (setting, amount) in [("motion_filtering", 0.25), ("motion_filtering", 0.8), ("stabilization", 0.5)] {
+            let mut brush = Brush { shape: Shape { count: 7, ..Shape::default() }, ..plain() };
+            brush.set_setting(setting, amount);
+            let mut tap = StrokeBuilder::new(brush, 10.0, Pointer::Stylus);
+            tap.add(&[Sample::at(at, 1.0, 0.0), Sample::at(at, 1.0, 40.0), Sample::at(at, 1.0, 80.0)]);
+            assert_eq!(tap.finish().len(), 1, "{setting} {amount}");
+        }
     }
 
     #[test]
@@ -3677,6 +3705,42 @@ mod tests {
         let a = offsets(0.0, 1.0, 7)[0];
         let b = offsets(0.0, 1.0, 8)[0];
         assert_ne!(a, b);
-        assert!(a.x >= 0.0 && a.x <= GRAIN_JITTER_SPAN && a.y >= 0.0 && a.y <= GRAIN_JITTER_SPAN);
+        // (a tile's worth at most; the stamps are 4 px, the grain following them by default)
+        assert!(a.x >= 0.0 && a.x <= 8.0 && a.y >= 0.0 && a.y <= 8.0, "{a:?}");
+    }
+
+    #[test]
+    fn a_rolling_grain_goes_on_from_stamp_to_stamp_whatever_its_tile_does() {
+        // a tile that follows a stamp whose size follows the pressure, far from the canvas's corner
+        let mut brush = Brush { pressure_size: 1.0, ..plain() };
+        brush.set_setting("grain_movement", 1.0);
+        brush.set_setting("grain_zoom", 0.0);
+        brush.grain.scale = crate::studio::MAX_GRAIN_SCALE / 4.0;
+        let scale = brush.grain.scale;
+        let samples: Vec<Sample> = (0..=200)
+            .map(|i| {
+                let pressure = 0.6 + 0.4 * (i as f32 / 12.0).sin();
+                Sample::at(Vec2::new(5000.0 + i as f32 * 2.0, 3000.0), pressure, i as f64 * 8.0)
+            })
+            .collect();
+        let mut stroke = StrokeBuilder::new(brush, 30.0, Pointer::Stylus);
+        stroke.add(&samples);
+        let stamps = stroke.finish();
+        // each stamp's place in the grain, in tiles, is the last's and what it moved over its tile:
+        // however much the tile changes it never jumps
+        let reads: Vec<(Vec2, Vec2)> = stamps
+            .iter()
+            .map(|s| {
+                let tile = s.grain_size * scale;
+                (s.grain_offset * (1.0 / tile), s.center)
+            })
+            .collect();
+        for pair in stamps.windows(2).zip(reads.windows(2)) {
+            let (s, r) = pair;
+            let moved = s[1].center.distance(s[0].center) / (s[1].grain_size * scale);
+            let went = r[1].0.distance(r[0].0);
+            assert!((went - moved).abs() < 1e-3, "{went} {moved}");
+        }
+        assert!(stamps[10].grain_size != stamps[40].grain_size);
     }
 }
