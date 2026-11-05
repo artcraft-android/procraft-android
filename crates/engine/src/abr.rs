@@ -37,6 +37,9 @@ pub struct AbrBrush {
     pub dynamics: AbrDynamics,
 }
 
+/// The control that turns a tip the way the stroke goes (the bristle brushes in real files have it).
+pub const ANGLE_BY_DIRECTION: i32 = 6;
+
 /// What a preset's shape and paint dynamics have the pen's pressure change.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AbrDynamics {
@@ -46,6 +49,8 @@ pub struct AbrDynamics {
     pub size_control: i32,
     pub min_diameter: f32,
     pub size_jitter: f32,
+    /// What turns the tip ([`ANGLE_BY_DIRECTION`] the way the stroke goes), with shape dynamics on.
+    pub angle_control: i32,
     /// Whether its paint (transfer) dynamics are on; what controls the opacity and the flow, the
     /// least of each, and how much the flow jitters.
     pub paint: bool,
@@ -468,7 +473,7 @@ struct Preset {
 /// aren't the preset's: the samples they name come after the presets. Its texture comes after its
 /// brushes, so it goes to what was kept of the preset, and to the preset as it is still read.
 fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
-    const KEYS: [&[u8]; 32] = [
+    const KEYS: [&[u8]; 33] = [
         b"brushPreset",
         b"Nm  TEXT",
         b"SpcnUntF#Prc",
@@ -500,6 +505,7 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
         b"Mnm UntF#Prc",
         b"flowlong",
         b"TxtCbool",
+        b"angleDynamicsObjc",
         // any other object: the end of a dynamics' own settings
         b"Objc",
     ];
@@ -531,7 +537,7 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
                 (first, in_texture, controlled) = (out.len(), false, None);
             }
             // its texture and dynamics, after its brushes
-            9..=21 | 23..=31 => {
+            9..=21 | 23..=32 => {
                 let switch = |r: &mut Reader<'_>| r.u8().is_some_and(|v| v != 0);
                 let later = match key {
                     9 => Later::TextureOn(switch(&mut r)),
@@ -545,7 +551,7 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
                     14 => Later::Invert(switch(&mut r)),
                     15 => Later::TipDynamics(switch(&mut r)),
                     16 => Later::MinDiameter(percent(&mut r).map_or(0.0, |v| v.clamp(0.0, 1.0))),
-                    17 | 19 | 20 => {
+                    17 | 19 | 20 | 31 => {
                         controlled = Some(key);
                         continue;
                     }
@@ -568,7 +574,7 @@ fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
                     },
                     29 => Later::ToolFlow(r.i32().map(|v| (v as f32 / 100.0).clamp(0.0, 1.0))),
                     30 => Later::EachTip(switch(&mut r)),
-                    31 => {
+                    32 => {
                         controlled = None;
                         continue;
                     }
@@ -646,6 +652,7 @@ impl Later {
             Later::EachTip(v) => p.texture_each_tip = *v,
             Later::Control(17, v) => d.size_control = *v,
             Later::Control(19, v) => d.opacity_control = *v,
+            Later::Control(31, v) => d.angle_control = *v,
             Later::Control(_, v) => d.flow_control = *v,
             Later::Jitter(17, v) => d.size_jitter = *v,
             Later::Jitter(20, v) => d.flow_jitter = *v,
@@ -886,7 +893,7 @@ mod tests {
         put32(&mut desc, 2);
         // an angle's control between isn't the size's
         desc.extend_from_slice(b"angleDynamicsObjcbVTylong");
-        put32(&mut desc, 2);
+        put32(&mut desc, ANGLE_BY_DIRECTION as u32);
         // paint dynamics: opacity by pressure, flow by nothing
         desc.extend_from_slice(b"usePaintDynamicsbool\x01prVrObjcbVTylong");
         put32(&mut desc, 0);
@@ -899,6 +906,7 @@ mod tests {
                 tip: true,
                 size_control: 2,
                 min_diameter: 0.4,
+                angle_control: ANGLE_BY_DIRECTION,
                 paint: true,
                 opacity_control: 2,
                 ..AbrDynamics::default()

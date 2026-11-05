@@ -16,6 +16,8 @@ pub struct KritaBrush {
     pub spacing: Option<f32>,
     /// The tip's own angle, radians.
     pub angle: f32,
+    /// The tip turns the way the stroke goes.
+    pub follows: bool,
     /// Whether pen pressure changes the size and the opacity.
     pub pressure_size: bool,
     pub pressure_opacity: bool,
@@ -97,6 +99,8 @@ pub fn read_preset(kpp: &[u8], file: &dyn Fn(&str) -> Option<Vec<u8>>) -> Option
         tip,
         spacing: if automatic { None } else { number(brush, "spacing").filter(|s| *s > 0.0) },
         angle: number(brush, "angle").unwrap_or(0.0),
+        // the tip's rotation by the Drawing Angle sensor, alone or among others
+        follows: flag("PressureRotation") && param("RotationSensor").is_some_and(|s| s.contains("drawingangle")),
         pressure_size: param("PressureSize").is_none_or(|v| v == "true"),
         pressure_opacity: param("PressureOpacity").is_some_and(|v| v == "true"),
         texture,
@@ -282,6 +286,21 @@ mod tests {
         format!(
             r#"<Preset paintopid="paintbrush" name="{name}"><param type="string" name="PressureSize"><![CDATA[{pressure_size}]]></param><param type="string" name="PressureOpacity"><![CDATA[true]]></param><param type="string" name="brush_definition"><![CDATA[{brush}]]></param></Preset>"#
         )
+    }
+
+    #[test]
+    fn a_tip_turned_by_the_drawing_angle_follows_the_stroke() {
+        let brush = r#"<Brush type="auto_brush" spacing="0.1" useAutoSpacing="0"><MaskGenerator type="circle" diameter="40"/></Brush>"#;
+        let with = |on: &str, sensor: &str| {
+            let rotation = format!(
+                r#"<param type="string" name="PressureRotation"><![CDATA[{on}]]></param><param type="string" name="RotationSensor"><![CDATA[<params id="{sensor}"/>]]></param></Preset>"#
+            );
+            read_preset(&kpp(&preset("Chain", brush, true).replace("</Preset>", &rotation)), &|_| None).unwrap().follows
+        };
+        assert!(with("true", "drawingangle"));
+        // by another sensor, or with the option off, it holds still
+        assert!(!with("true", "pressure"));
+        assert!(!with("false", "drawingangle"));
     }
 
     #[test]
