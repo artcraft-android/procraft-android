@@ -835,6 +835,41 @@ fn smudge_bind(
     })
 }
 
+/// The colour `c` tinted (see [`stamp_extras`]), as the stamp shader does it.
+fn tinted(c: [f32; 3], [turn, keep_s, add_s, keep_b]: [f32; 4], add_b: f32) -> [f32; 3] {
+    if [turn, keep_s, add_s, keep_b, add_b] == [0.0, 1.0, 0.0, 1.0, 0.0] {
+        return c;
+    }
+    let [r, g, b] = c;
+    let high = r.max(g).max(b);
+    let range = high - r.min(g).min(b);
+    let (hue, saturation) = if range <= 1e-5 {
+        (0.0, 0.0)
+    } else if high == r {
+        ((g - b) / range, range / high)
+    } else if high == g {
+        ((b - r) / range + 2.0, range / high)
+    } else {
+        ((r - g) / range + 4.0, range / high)
+    };
+    let hue = (hue / 6.0 + turn).rem_euclid(1.0);
+    let saturation = (saturation * keep_s + add_s).clamp(0.0, 1.0);
+    let brightness = (high * keep_b + add_b).clamp(0.0, 1.0);
+    [5.0, 3.0, 1.0].map(|n: f32| {
+        let k = (hue + n / 6.0).rem_euclid(1.0) * 6.0;
+        brightness - brightness * saturation * k.min(4.0 - k).clamp(0.0, 1.0)
+    })
+}
+
+/// What the stamp `s` paints with: the stroke's colour as it tints it, mixed towards the secondary
+/// colour as far as it says.
+fn stamp_paint(s: &StampInstance, style: &StrokeStyle) -> [f32; 3] {
+    let [r, g, b] = tinted(style.color, s.tint, s.brightness_add);
+    let [other_r, other_g, other_b] = style.secondary;
+    let towards = |from: f32, to: f32| from + (to - from) * s.look[2];
+    [towards(r, other_r), towards(g, other_g), towards(b, other_b)]
+}
+
 /// A smudge stamp's uniform: what every pass reads of the stamp `s` and the stroke's `style`
 /// (the rest as the pass sets it).
 fn smudge_uniform(
@@ -996,11 +1031,11 @@ const WET_PLOT_MOST: u32 = 128;
 const WET_PLOTS_TEXELS: u64 = 1024 * 1024;
 
 /// The stamps of one pass of wet paint (see `cs_wet_plots`), each as its middle, radius and turn,
-/// then its roundness, pull, mixture and final mixture.
+/// then its roundness, pull, mixture and final mixture, then what it paints with.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct WetPass {
-    stamps: [[f32; 8]; WET_PASS_MOST],
+    stamps: [[f32; 12]; WET_PASS_MOST],
 }
 const WET_PASS_SIZE: u64 = std::mem::size_of::<WetPass>() as u64;
 
@@ -4591,12 +4626,14 @@ impl Canvas {
                     continue;
                 }
                 changed = changed.union(bbox);
+                let [r, g, b] = stamp_paint(s, style);
                 let offset = params.push(&SmudgeUniform {
                     mode: 1,
                     modulated,
                     grain_once,
                     count: 0,
                     laid_apart,
+                    paint: [r, g, b, 1.0],
                     ..smudge_uniform(s, style, bbox, size)
                 });
                 pass.set_bind_group(0, &bind, &[offset, 0]);
@@ -4626,7 +4663,7 @@ impl Canvas {
             while plot > 4 && u64::from(plot * plot) * n as u64 > WET_PLOTS_TEXELS {
                 plot /= 2;
             }
-            let mut list = WetPass { stamps: [[0.0; 8]; WET_PASS_MOST] };
+            let mut list = WetPass { stamps: [[0.0; 12]; WET_PASS_MOST] };
             for (k, (s, w, _)) in group.iter().enumerate() {
                 // the paint runs out with the length the stroke has gone
                 if let Some([x, y]) = smudge.last {
@@ -4641,6 +4678,7 @@ impl Canvas {
                 let pull = pull * wet_pull_by;
                 let grade = (style.grade * grade_by).clamp(-1.0, 1.0);
                 let final_mixture = final_mixture(mixture, pull, grade, (k, n), first);
+                let [r, g, b] = stamp_paint(s, style);
                 if let Some(slot) = list.stamps.get_mut(k) {
                     *slot = [
                         s.center[0],
@@ -4651,6 +4689,10 @@ impl Canvas {
                         pull,
                         mixture,
                         final_mixture,
+                        r,
+                        g,
+                        b,
+                        1.0,
                     ];
                 }
             }

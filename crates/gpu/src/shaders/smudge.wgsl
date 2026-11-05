@@ -98,6 +98,8 @@ struct SmudgeStamp {
 struct WetStamp {
     at: vec4<f32>,
     mixing: vec4<f32>,
+    // what the stamp paints with, its colour dynamics in it
+    paint: vec4<f32>,
 }
 
 struct WetPass {
@@ -493,11 +495,10 @@ fn cs_wet_plots(@builtin(global_invocation_id) id: vec3<u32>) {
         c = plot_at(st.index * CARRIED, st.carried, t);
     }
     var out = c;
-    let paint = vec4<f32>(st.paint.rgb, 1.0);
     for (var k = 0u; k < st.count; k++) {
         let w = wet_pass.stamps[k];
         c = mix(layer_at(plot_point(w, t)), c, w.mixing.y);
-        c = mix(c, paint, w.mixing.z);
+        c = mix(c, w.paint, w.mixing.z);
         out = mix(under_first, c, w.mixing.w);
         carry[2u * CARRIED + k * n * n + id.y * n + id.x] = out;
     }

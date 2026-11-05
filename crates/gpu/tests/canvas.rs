@@ -1654,6 +1654,42 @@ fn a_texturized_grain_on_paint_laid_in_place_goes_by_its_blend_mode() {
 }
 
 #[test]
+fn paint_laid_in_place_takes_each_stamp_s_own_colour() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // red paint: a stamp turned a third of the way round the hues is green, and one all of the
+    // secondary colour is blue, wet or dry
+    let shown = |wet_pull: Option<f32>, stamp: Stamp| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let style = StrokeStyle {
+            wet_pull,
+            laid_in_place: wet_pull.is_none(),
+            rendering: Rendering::Gradual,
+            secondary: [0.0, 0.0, 1.0],
+            ..StrokeStyle::new(StrokeTool::Paint, [1.0, 0.0, 0.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[stamp]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        pixel(&layer, 64, 32, 32)
+    };
+    let near = |a: [u8; 4], b: [u8; 4]| a.iter().zip(b).all(|(x, y)| x.abs_diff(y) < 8);
+    let plain = Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0);
+    let turned = Stamp { tint: Tint { hue: 1.0 / 3.0, ..Tint::NONE }, ..plain };
+    let second = Stamp { secondary: 1.0, ..plain };
+    for wet_pull in [Some(0.5), None] {
+        let [red, green, blue] = [plain, turned, second].map(|s| shown(wet_pull, s));
+        assert!(
+            near(red, [255, 0, 0, 255]) && near(green, [0, 255, 0, 255]) && near(blue, [0, 0, 255, 255]),
+            "{wet_pull:?}: {red:?} {green:?} {blue:?}"
+        );
+    }
+}
+
+#[test]
 fn wet_edges_pool_paint_laid_in_place() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
