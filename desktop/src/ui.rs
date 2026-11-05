@@ -1603,9 +1603,11 @@ impl Interface {
             Choice::Copy => self.copy_layer(session),
             Choice::CopyAll => self.copy_canvas(session),
             Choice::Duplicate => self.duplicate_current(session),
+            // nothing cut (a locked layer, an empty one): what is on the clipboard stays there
             Choice::CutAndPaste => {
-                self.cut_layer(session);
-                self.paste_own(session, false);
+                if self.layer_cut(session) {
+                    self.paste_own(session, false);
+                }
             }
             Choice::Paste => self.paste(ctx, false),
         }
@@ -1613,15 +1615,20 @@ impl Interface {
 
     /// The current layer (or what is selected of it) cut, to paste.
     fn cut_layer(&mut self, session: &CanvasSession) {
+        self.layer_cut(session);
+    }
+
+    /// As [`Self::cut_layer`]; whether anything was.
+    fn layer_cut(&mut self, session: &CanvasSession) -> bool {
         self.open = None;
         if !self.takes_changes(session) {
-            return;
+            return false;
         }
-        if let Some(cut) = session.cut_layer() {
-            self.clipboard = Some(cut);
-            self.system_clipboard.copied_here();
-            self.overlays.notice("Layer cut", false);
-        }
+        let Some(cut) = session.cut_layer() else { return false };
+        self.clipboard = Some(cut);
+        self.system_clipboard.copied_here();
+        self.overlays.notice("Layer cut", false);
+        true
     }
 
     /// The current layer (or what is selected of it) copied, to paste.

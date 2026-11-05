@@ -2437,10 +2437,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun cutLayer() {
+    fun cutLayer(): Boolean {
         if (!currentTakesChanges()) {
             closePanels()
-            return
+            return false
         }
         val cut = session?.cutLayer()
         clipboard = cut ?: clipboard
@@ -2448,6 +2448,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         closePanels()
         refresh()
         if (cut != null) showNotice("Layer cut")
+        return cut != null
     }
 
     /** What was cut or copied, on a new layer; a [private] one is left out of the gallery's thumbnail. */
@@ -2786,8 +2787,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Cut & Paste: what is selected (or the layer) cut out and put back as a new layer. */
     fun cutAndPaste() {
-        cutLayer()
-        paste()
+        // nothing cut (a locked layer, an empty one): what is on the clipboard stays there
+        if (cutLayer()) paste()
     }
 
     /** Duplicate: the selection copied to a new layer, or without one the current layer. */
