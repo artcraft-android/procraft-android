@@ -90,6 +90,9 @@ const PICK_REACH: f32 = 72.0;
 /// A press moved this far (points) slides its row; held still this long, it is a hold.
 const SLOP: f32 = 8.0;
 const HOLD: std::time::Duration = std::time::Duration::from_millis(400);
+/// A dragged row this near an end of the list scrolls it, at most this far a second.
+const DRAG_EDGE: f32 = 56.0;
+const DRAG_SCROLL: f32 = 480.0;
 
 /// What a press on a row turned out to be.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -143,6 +146,12 @@ pub struct Layers {
     press: Option<RowPress>,
     slid: HashMap<u64, f32>,
     swiped: Option<u64>,
+    /// The rows that go with a dragged one (its mask, a group's layers), where the rows lay last
+    /// frame, the list's box, and how far to scroll it.
+    dragged_rows: Vec<u64>,
+    last_rows: HashMap<u64, Rect>,
+    list: Option<Rect>,
+    scroll_by: f32,
     /// A press on a row's visibility box: whose, since when, and whether holding it has acted.
     box_press: Option<(u64, Instant, bool)>,
     /// The fingers on a touch screen, two put on two rows being pinched, and two put on one row.
@@ -363,13 +372,15 @@ impl Layers {
                     pos2(body.right() - 12.0, body.bottom()),
                 );
                 let mut read = 0;
+                self.list = Some(list);
                 ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
                     ScrollArea::vertical()
                         .id_salt("layers list")
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                            let mut dragged = None;
+                            ui.scroll_with_delta(vec2(0.0, -std::mem::take(&mut self.scroll_by)));
+                            let mut dragged = Vec::new();
                             let mut squeezed = Vec::new();
                             for item in &items {
                                 let (l, (t, b), indent, shared) = match item {
@@ -413,14 +424,18 @@ impl Layers {
                                         .then_some(l.current && chosen_tile),
                                     chosen,
                                 };
-                                if self.press.is_some_and(|p| p.id == l.id && p.way == Way::Reorder) {
+                                if self.dragged_rows.contains(&l.id) {
                                     // held and dragged: drawn where it is dragged to, over the rest
-                                    dragged = Some((l, row, looks));
+                                    dragged.push((l, row, looks));
                                 } else if let Some((dy, upper)) = self.pinch.as_ref().and_then(|p| p.moved(l.id)) {
                                     // pinched: drawn after the rest, moved part of its finger's way
                                     squeezed.push((l, row.translate(vec2(0.0, dy)), looks, upper));
                                 } else {
                                     let slide = self.slid.get(&l.id).copied().unwrap_or(0.0);
+                                    let way = self.making_way(l.id);
+                                    let aside =
+                                        ui.ctx().animate_value_with_time(ui.scope_id().with(("aside", l.id)), way, 0.3);
+                                    let row = row.translate(vec2(0.0, aside));
                                     let at = row.translate(vec2(slide, 0.0));
                                     if slide < 0.0 {
                                         self.swipe_buttons(ui, session, l, row, alone);
@@ -479,7 +494,7 @@ impl Layers {
                                 let mut row_ui = ui.new_child(UiBuilder::new().max_rect(at));
                                 self.draw_row(&mut row_ui, look, session, l, at, looks, &modes, &mut read);
                             }
-                            if let Some((l, row, looks)) = dragged {
+                            for (l, row, looks) in dragged {
                                 let at = row.translate(vec2(0.0, self.press.map_or(0.0, |p| p.dy)));
                                 let mut row_ui = ui.new_child(UiBuilder::new().max_rect(at));
                                 self.draw_row(&mut row_ui, look, session, l, at, looks, &modes, &mut read);
@@ -489,6 +504,7 @@ impl Layers {
             },
         );
         self.follow_press(ctx, session, &layers, &row_rects);
+        self.last_rows.clone_from(&row_rects);
         self.follow_pinch(ctx, session, &row_rects);
         // a layer tapped: picked layers give way to it; the current one shows its options (or
         // hides them); any other becomes the current one
@@ -945,6 +961,25 @@ impl Layers {
         }
     }
 
+    /// How far row `id` stands aside for the rows being dragged: past its middle it takes the room
+    /// they left, so the gap shows where they will land.
+    fn making_way(&self, id: u64) -> f32 {
+        let (Some(p), Some(row)) = (self.press, self.last_rows.get(&id)) else { return 0.0 };
+        let moved: Vec<&Rect> = self.dragged_rows.iter().filter_map(|r| self.last_rows.get(r)).collect();
+        let Some(dragged) = self.last_rows.get(&p.id).filter(|_| !moved.is_empty()) else { return 0.0 };
+        let y = dragged.center().y + p.dy;
+        let top = moved.iter().fold(f32::INFINITY, |t, r| t.min(r.top()));
+        let bottom = moved.iter().fold(f32::NEG_INFINITY, |b, r| b.max(r.bottom()));
+        let room = bottom - top + ROW_GAP;
+        if row.bottom() <= top && y < row.center().y {
+            room
+        } else if row.top() >= bottom && y > row.center().y {
+            -room
+        } else {
+            0.0
+        }
+    }
+
     /// Follows the press on a row: moved sideways it slides the row (let go past half its buttons,
     /// it stays open; slid right past half the way, it picks the layer); held still, the row is
     /// dragged up and down and, let go, the layer moves next to the row it is over.
@@ -971,6 +1006,10 @@ impl Layers {
                         if l.is_some_and(|l| l.kind != LayerType::Mask) {
                             p.way = Way::Reorder;
                             self.swiped = None;
+                            self.dragged_rows = session.moving_with(p.id);
+                            if !self.dragged_rows.contains(&p.id) {
+                                self.dragged_rows.push(p.id);
+                            }
                         } else {
                             p.way = Way::Ignored;
                         }
@@ -985,7 +1024,23 @@ impl Layers {
                     ctx.request_repaint();
                 }
                 Way::Reorder => {
-                    p.dy = d.y;
+                    // the row scrolled with the list stays under the pointer
+                    let scrolled =
+                        self.last_rows.get(&p.id).zip(rows.get(&p.id)).map_or(0.0, |(was, row)| was.top() - row.top());
+                    p.origin.y -= scrolled;
+                    p.dy = d.y + scrolled;
+                    // held near an end of the list it scrolls, faster the nearer
+                    if let (Some(list), Some(row)) = (self.list, rows.get(&p.id)) {
+                        let y = row.center().y + p.dy;
+                        let towards = if y < list.top() + DRAG_EDGE {
+                            (y - list.top() - DRAG_EDGE) / DRAG_EDGE
+                        } else if y > list.bottom() - DRAG_EDGE {
+                            (y - list.bottom() + DRAG_EDGE) / DRAG_EDGE
+                        } else {
+                            0.0
+                        };
+                        self.scroll_by = towards.clamp(-1.0, 1.0) * DRAG_SCROLL * ctx.input(|i| i.stable_dt);
+                    }
                     ctx.request_repaint();
                 }
                 Way::Ignored => {}
@@ -994,6 +1049,7 @@ impl Layers {
             return;
         }
         self.press = None;
+        self.dragged_rows.clear();
         match p.way {
             Way::Swipe => {
                 let slide = self.slid.get(&p.id).copied().unwrap_or(0.0);
