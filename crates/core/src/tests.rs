@@ -9072,3 +9072,59 @@ fn a_touch_with_a_panel_open_paints_only_as_a_drag() {
     assert_ne!(pixel(&s, 120, 60), before);
     assert!(s.info().can_undo);
 }
+
+/// Liquify held still works on as the time passes, a stamp at a time adding up to the whole of it.
+#[test]
+fn liquify_held_still_works_on() {
+    use crate::Adjustment;
+    use crate::adjust::LiquifyKind;
+    // a line across the canvas (or a short bar across it, right of the middle), and the brush held
+    // in the middle for half a second
+    let held = |kind: LiquifyKind, bar: bool| -> Option<std::sync::Arc<CanvasSession>> {
+        let s = session(256, 256)?;
+        s.set_color(1.0, 0.0, 0.0);
+        s.set_brush_size(0.1);
+        if bar {
+            s.stroke_begin(PointerKind::Finger, vec![sample(168.0, 112.0, 0.0)]);
+            s.stroke_add((1..9).map(|i| sample(168.0, 112.0 + i as f32 * 4.0, i as f64 * 8.0)).collect());
+        } else {
+            s.stroke_begin(PointerKind::Finger, vec![sample(10.0, 128.0, 0.0)]);
+            s.stroke_add((1..30).map(|i| sample(10.0 + i as f32 * 8.0, 128.0, i as f64 * 8.0)).collect());
+        }
+        s.stroke_end(vec![]);
+        assert!(s.adjustment_start(Adjustment::Liquify));
+        s.adjustment_liquify_value(0, 0.28);
+        s.adjustment_liquify_kind(kind);
+        s.touch_down(1, PointerKind::Finger, vec![sample(128.0, 128.0, 1000.0)]);
+        assert_eq!(s.touch_deadline(), Some(1110.0));
+        for ms in (1016..=1500).step_by(16) {
+            s.touch_tick(f64::from(ms));
+        }
+        s.touch_up(1, vec![sample(128.0, 128.0, 1510.0)]);
+        // lifted, it stops
+        s.touch_tick(1600.0);
+        assert_eq!(s.touch_deadline(), None);
+        Some(s)
+    };
+    let ink = |s: &CanvasSession, x: u32, y: u32| {
+        let p = pixel(s, x, y);
+        p[0] > 150 && p[1] < 150
+    };
+    let Some(right) = held(LiquifyKind::TwirlRight, false) else { return };
+    // 0.39 s at 4 a second, 50 from the middle of a brush of 101: turned 51 degrees, clockwise
+    assert!(ink(&right, 159, 167) && !ink(&right, 159, 89), "turned clockwise on the screen");
+    assert!(!ink(&right, 178, 128), "turned away from where it was");
+    let Some(left) = held(LiquifyKind::TwirlLeft, false) else { return };
+    assert!(ink(&left, 159, 89) && !ink(&left, 159, 167), "turned anticlockwise on the screen");
+    let Some(pinch) = held(LiquifyKind::Pinch, true) else { return };
+    assert!(ink(&pinch, 152, 128) && !ink(&pinch, 168, 128), "drawn in");
+    let Some(expand) = held(LiquifyKind::Expand, true) else { return };
+    assert!(ink(&expand, 186, 128) && !ink(&expand, 168, 128), "pushed out");
+    // a push held still does nothing more: nothing to wait for
+    let Some(s) = session(256, 256) else { return };
+    assert!(s.adjustment_start(Adjustment::Liquify));
+    s.touch_down(1, PointerKind::Finger, vec![sample(128.0, 128.0, 0.0)]);
+    s.touch_tick(200.0);
+    assert_eq!(s.touch_deadline(), None);
+    s.touch_up(1, vec![sample(128.0, 128.0, 210.0)]);
+}

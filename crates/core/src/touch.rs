@@ -28,6 +28,11 @@ use crate::{CanvasSession, PenSample, PointerKind, ToolKind};
 const TAP_MS: f64 = 300.0;
 /// A liquify brush lifted within this long of its last move carries on.
 const LIQUIFY_STILL_MS: f64 = 60.0;
+/// Liquify held still works on: from this long after it stops, a stamp this often, as measured;
+/// moved less than this (points) it counts as still.
+const LIQUIFY_HELD_WAIT_MS: f64 = 110.0;
+const LIQUIFY_HELD_STEP_MS: f64 = 16.0;
+const LIQUIFY_HELD_SLOP: f32 = 3.0;
 const TAP_SLOP: f32 = 24.0;
 /// Fingers tapped together stay short of this (points) from where they landed, and from each
 /// other's move: this far, they are moving the canvas.
@@ -435,6 +440,12 @@ pub(crate) struct Touches {
     liquify_ms: f64,
     liquify_velocity: (f32, f32),
     liquify_pen: bool,
+    /// Where liquify's brush came to rest and when, how long (seconds) it has worked on there, and
+    /// when it next does.
+    liquify_rest: (f32, f32),
+    liquify_rest_ms: f64,
+    liquify_held: f32,
+    liquify_due: Option<f64>,
     /// Where on the clone source it was taken (window pixels from its centre).
     puck_grab: (f32, f32),
     /// What the touch does to perspective blur's puck, and whether it has started.
@@ -524,6 +535,10 @@ impl Default for Touches {
             liquify_ms: 0.0,
             liquify_velocity: (0.0, 0.0),
             liquify_pen: false,
+            liquify_rest: (0.0, 0.0),
+            liquify_rest_ms: 0.0,
+            liquify_held: 0.0,
+            liquify_due: None,
             puck_grab: (0.0, 0.0),
             puck_drag: None,
             puck_dragging: false,
@@ -739,7 +754,7 @@ impl CanvasSession {
     /// When the touches next need [`CanvasSession::touch_tick`] (a hold, a repeat), if ever.
     pub fn touch_deadline(&self) -> Option<f64> {
         let t = self.touches();
-        [t.hold_due, t.quickshape_due, t.rapid_due].into_iter().flatten().reduce(f64::min)
+        [t.hold_due, t.quickshape_due, t.rapid_due, t.liquify_due].into_iter().flatten().reduce(f64::min)
     }
 
     /// A pointer goes down on the canvas (`samples` its first input).
@@ -982,6 +997,11 @@ impl CanvasSession {
                         t.liquify_at = at;
                         t.liquify_ms = last.time_ms;
                     }
+                    if dist(at, t.liquify_rest) > LIQUIFY_HELD_SLOP * t.scale {
+                        t.liquify_rest = at;
+                        t.liquify_rest_ms = last.time_ms;
+                        t.liquify_held = 0.0;
+                    }
                     let pen = t.liquify_pen;
                     drop(t);
                     self.adjustment_liquify_stroke(liquify_points(pen, &samples), false);
@@ -1097,6 +1117,24 @@ impl CanvasSession {
         if t.mode == Mode::Held && t.hold_due.is_some_and(|due| due <= now_ms) {
             self.held_goes_on(t, false, &mut out);
             t = self.touches();
+        }
+        // liquify held still works on, as the time passes
+        if t.liquify_due.is_some_and(|due| due <= now_ms) {
+            t.liquify_due = None;
+            if t.mode == Mode::Adjust {
+                let to = ((now_ms - t.liquify_rest_ms - LIQUIFY_HELD_WAIT_MS) / 1000.0).max(0.0) as f32;
+                let from = std::mem::replace(&mut t.liquify_held, to);
+                let at = t.liquify_rest;
+                drop(t);
+                let works = to <= from || self.adjustment_liquify_held(at.0, at.1, from, to);
+                t = self.touches();
+                if works {
+                    t.liquify_due = Some(now_ms + LIQUIFY_HELD_STEP_MS);
+                    if to > from {
+                        out.push(TouchCommand::AdjustChanged);
+                    }
+                }
+            }
         }
         // a freehand selection held still snaps to a shape, which the lift then selects
         if t.mode == Mode::Select
@@ -1345,6 +1383,10 @@ impl CanvasSession {
                 t.liquify_ms = now;
                 t.liquify_velocity = (0.0, 0.0);
                 t.liquify_pen = is_pen(kind);
+                t.liquify_rest = at;
+                t.liquify_rest_ms = now;
+                t.liquify_held = 0.0;
+                t.liquify_due = Some(now + LIQUIFY_HELD_WAIT_MS);
                 self.adjustment_liquify_stroke(liquify_points(t.liquify_pen, samples), true);
                 out.push(TouchCommand::AdjustChanged);
             }

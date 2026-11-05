@@ -195,6 +195,22 @@ fn liquify_step(radius: f32, zoom: f32) -> f32 {
     (radius * 0.1).min(most).max(0.01)
 }
 const LIQUIFY_COAST_STAMPS: usize = 400;
+/// How far a stamp of a moving twirl turns (radians at its centre) and of a pinch or expand draws.
+const LIQUIFY_TURN: f32 = 0.12;
+const LIQUIFY_DRAW: f32 = 0.08;
+/// Held still they work on this much a second, as measured (the first at 220 degrees a second).
+const LIQUIFY_HELD_TURN: f32 = 4.0;
+const LIQUIFY_HELD_DRAW: f32 = 1.55;
+
+/// What a moving stamp of `kind` gives as its move: `moved` for a push, for a twirl, pinch or
+/// expand how far it goes from nothing.
+fn stamp_move(kind: LiquifyKind, moved: Vec2) -> [f32; 2] {
+    match kind {
+        LiquifyKind::TwirlRight | LiquifyKind::TwirlLeft => [0.0, LIQUIFY_TURN],
+        LiquifyKind::Pinch | LiquifyKind::Expand => [0.0, LIQUIFY_DRAW],
+        _ => [moved.x, moved.y],
+    }
+}
 /// The (set, brush) cloning paints with: the soft airbrush.
 const CLONE_BRUSH: (usize, usize) = (3, 0);
 /// How far (points) a motion blur's drag goes for its whole amount, and the blur that is (canvas
@@ -578,7 +594,7 @@ impl CanvasSession {
                 st.strokes = st.strokes.wrapping_add(1);
                 stamps.push(LiquifyStamp {
                     centre: [next.x, next.y],
-                    moved: [dir.x * step, dir.y * step],
+                    moved: stamp_move(brush.kind, dir * step),
                     radius,
                     pressure,
                     distortion: brush.distortion.clamp(0.0, 1.0),
@@ -596,6 +612,39 @@ impl CanvasSession {
             }
             self.shared.frame(st);
         }
+    }
+
+    /// The liquify brush held still at window point (`x`, `y`) works on, from `from` to `to`
+    /// seconds of being held: one stamp, that adds on from where the last left off. False if
+    /// `brush` does nothing held.
+    pub fn liquify_held(&self, x: f32, y: f32, from: f32, to: f32, brush: LiquifyBrush) -> bool {
+        let rate = match brush.kind {
+            LiquifyKind::TwirlRight | LiquifyKind::TwirlLeft => LIQUIFY_HELD_TURN,
+            LiquifyKind::Pinch | LiquifyKind::Expand => LIQUIFY_HELD_DRAW,
+            _ => return false,
+        };
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let Some(view) = st.view else { return true };
+        let Some(p) = view.screen_to_canvas(Vec2::new(x, y)).filter(|p| p.is_finite()) else { return true };
+        st.strokes = st.strokes.wrapping_add(1);
+        let stamp = LiquifyStamp {
+            centre: [p.x, p.y],
+            moved: [from * rate, to * rate],
+            radius: 4.0 + 1596.0 * brush.size.clamp(0.0, 1.0).powf(2.2),
+            pressure: 0.01 + 0.99 * brush.pressure.clamp(0.0, 1.0),
+            distortion: brush.distortion.clamp(0.0, 1.0),
+            seed: (st.strokes % 997) as f32,
+            mode: brush.kind.into(),
+        };
+        if let Some(canvas) = st.canvas.as_mut() {
+            canvas.liquify_stamps(&[stamp]);
+            if let Some(f) = st.last_filter {
+                canvas.set_filter(f);
+            }
+            self.shared.frame(st);
+        }
+        true
     }
 
     /// The liquify brush carries on after it lifts: from its last stamp along the window velocity
@@ -626,7 +675,7 @@ impl CanvasSession {
             st.strokes = st.strokes.wrapping_add(1);
             stamps.push(LiquifyStamp {
                 centre: [at.x, at.y],
-                moved: [dir.x * step, dir.y * step],
+                moved: stamp_move(brush.kind, dir * step),
                 radius,
                 pressure: strength * left,
                 distortion: brush.distortion.clamp(0.0, 1.0),
