@@ -893,7 +893,8 @@ fn smudge_uniform(
         source_before: u32::from(style.wet_from_before),
         grain_brightness: style.grain_brightness,
         grain_contrast: style.grain_contrast,
-        spare: [0; 3],
+        wet_edges: if style.preview { 0.0 } else { style.wet_edges },
+        spare: [0; 2],
     }
 }
 
@@ -975,7 +976,9 @@ struct SmudgeUniform {
     /// The grain's levels, as the stamp shader takes them.
     grain_brightness: f32,
     grain_contrast: f32,
-    spare: [u32; 3],
+    /// How far paint laid in place pools, as `cs_synthesize` lays it.
+    wet_edges: f32,
+    spare: [u32; 2],
 }
 
 /// The coarsest mip level of our brush images (256 texels a side) a small stamp reads its shape
@@ -4294,11 +4297,11 @@ impl Canvas {
             let Some(layer) = self.layers.get(&target) else { return };
             let wet_paint = style.paints_in_place();
             let layer_bytes = u64::from(row) * u64::from(self.height);
-            // paint laid in place with a second or a texturized grain is laid apart, and put
-            // together with them
+            // paint laid in place with a second, a texturized grain or wet edges is laid apart,
+            // and put together with them
             let second = self.queued_second.map(|d| (d.mode + 1, d.threshold));
             let apart = second
-                .or(grain_once(style).then_some((0, -1.0)))
+                .or((grain_once(style) || style.wet_edges > 0.0).then_some((0, -1.0)))
                 .filter(|_| wet_paint)
                 .map(|(mode, threshold)| (*style, mode, threshold));
             // and wet paint keeps the stroke as it was laid, to go on mixing with

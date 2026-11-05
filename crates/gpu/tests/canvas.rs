@@ -1650,6 +1650,39 @@ fn a_texturized_grain_on_paint_laid_in_place_goes_by_its_blend_mode() {
 }
 
 #[test]
+fn wet_edges_pool_paint_laid_in_place() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // full paint settles back to about 0.78 as it pools, wet or dry, and undo takes it all back
+    let shown = |wet_edges: f32, wet_pull: Option<f32>| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let style = StrokeStyle {
+            wet_pull,
+            laid_in_place: wet_pull.is_none(),
+            rendering: Rendering::Gradual,
+            wet_edges,
+            ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        let middle = pixel(&layer, 64, 32, 32)[3];
+        canvas.undo();
+        canvas.render(&gpu, &mut doc, None);
+        let undone = canvas.read_layer(&gpu, doc.current()).unwrap();
+        assert_eq!(pixel(&undone, 64, 32, 32)[3], 0);
+        middle
+    };
+    for wet_pull in [Some(0.5), None] {
+        let (plain, pooled) = (shown(0.0, wet_pull), shown(1.0, wet_pull));
+        assert!(plain > 250 && (190..=210).contains(&pooled), "{wet_pull:?}: {plain} {pooled}");
+    }
+}
+
+#[test]
 fn a_dual_brush_s_wet_paint_is_cut_by_its_second() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

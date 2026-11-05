@@ -87,7 +87,8 @@ struct SmudgeStamp {
     // the grain's levels, as the stamp shader takes them
     grain_brightness: f32,
     grain_contrast: f32,
-    spare3: u32,
+    // how far paint laid in place pools, as cs_synthesize lays it (see the composite shader)
+    wet_edges: f32,
     spare4: u32,
     spare5: u32,
 }
@@ -399,6 +400,11 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     let k = u32(p.y) * st.stride + u32(p.x);
     let laid = amount[st.stride * st.size.y + k];
     var a = laid;
+    if (st.wet_edges > 0.0 && laid > 0.0) {
+        // the paint pools, settling back to about 0.78 where it is full
+        let x = 4.5 * laid;
+        a = mix(laid, 1.0 - abs(sin(x) / x), st.wet_edges);
+    }
     if (st.grain_once > 0.5) {
         a = grain_combine(a, grain_plain(vec2<f32>(p) + 0.5), st.grain_depth, st.grain_blend);
     }
