@@ -929,7 +929,8 @@ fn smudge_uniform(
         grain_brightness: style.grain_brightness,
         grain_contrast: style.grain_contrast,
         wet_edges: if style.preview { 0.0 } else { style.wet_edges },
-        spare: [0; 2],
+        luminance: u32::from(style.luminance && style.wet_pull.is_some()),
+        spare: 0,
     }
 }
 
@@ -1013,7 +1014,9 @@ struct SmudgeUniform {
     grain_contrast: f32,
     /// How far paint laid in place pools, as `cs_synthesize` lays it.
     wet_edges: f32,
-    spare: [u32; 2],
+    /// Wet paint with luminance blending: 1 when its colours mix squared.
+    luminance: u32,
+    spare: u32,
 }
 
 /// The coarsest mip level of our brush images (256 texels a side) a small stamp reads its shape

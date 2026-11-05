@@ -89,7 +89,8 @@ struct SmudgeStamp {
     grain_contrast: f32,
     // how far paint laid in place pools, as cs_synthesize lays it (see the composite shader)
     wet_edges: f32,
-    spare4: u32,
+    // wet paint with luminance blending: 1 when its colours mix squared
+    luminance: u32,
     spare5: u32,
 }
 
@@ -370,7 +371,7 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
         if (st.laid_apart == 1u) {
             return;
         }
-        out = mix(w, laid, weight);
+        out = from_mix(mix(to_mix(w), to_mix(laid), weight));
     }
     if (st.preserve_alpha == 1u) {
         out = out * (w.a / max(out.a, 1e-6));
@@ -454,6 +455,23 @@ fn dither(a: u32, b: u32, c: u32) -> f32 {
 // room for a carried-over plot: the largest plot's texels (128 a side)
 const CARRIED: u32 = 16384u;
 
+// premultiplied paint as it mixes: with luminance blending its colour squared, its alpha as it is
+fn to_mix(c: vec4<f32>) -> vec4<f32> {
+    if (st.luminance == 0u || c.a <= 0.0) {
+        return c;
+    }
+    let plain = c.rgb / c.a;
+    return vec4<f32>(plain * plain * c.a, c.a);
+}
+
+// paint that has mixed, back as the layer keeps it
+fn from_mix(c: vec4<f32>) -> vec4<f32> {
+    if (st.luminance == 0u || c.a <= 0.0) {
+        return c;
+    }
+    return vec4<f32>(sqrt(c.rgb / c.a) * c.a, c.a);
+}
+
 // the canvas point under stamp `w` at its point `t` (-1..1 across each way)
 fn plot_point(w: WetStamp, t: vec2<f32>) -> vec2<f32> {
     let l = vec2<f32>(t.x * w.at.z, t.y * w.at.z * w.mixing.x);
@@ -489,7 +507,8 @@ fn cs_wet_plots(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let t = plot_t(vec2<f32>(id.xy), n);
-    let under_first = layer_at(plot_point(wet_pass.stamps[0], t));
+    // (what the brush carries stays as it mixes from pass to pass; only the plots go back)
+    let under_first = to_mix(layer_at(plot_point(wet_pass.stamps[0], t)));
     var c = under_first;
     if (st.kept >= 0) {
         c = plot_at(st.index * CARRIED, st.carried, t);
@@ -497,10 +516,10 @@ fn cs_wet_plots(@builtin(global_invocation_id) id: vec3<u32>) {
     var out = c;
     for (var k = 0u; k < st.count; k++) {
         let w = wet_pass.stamps[k];
-        c = mix(layer_at(plot_point(w, t)), c, w.mixing.y);
-        c = mix(c, w.paint, w.mixing.z);
+        c = mix(to_mix(layer_at(plot_point(w, t))), c, w.mixing.y);
+        c = mix(c, to_mix(w.paint), w.mixing.z);
         out = mix(under_first, c, w.mixing.w);
-        carry[2u * CARRIED + k * n * n + id.y * n + id.x] = out;
+        carry[2u * CARRIED + k * n * n + id.y * n + id.x] = from_mix(out);
     }
     carry[(1u - st.index) * CARRIED + id.y * n + id.x] = out;
 }

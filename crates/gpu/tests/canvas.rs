@@ -1690,6 +1690,38 @@ fn paint_laid_in_place_takes_each_stamp_s_own_colour() {
 }
 
 #[test]
+fn wet_paint_with_luminance_blending_mixes_squared() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // white taking a quarter of the way over black: a quarter by plain mixing, a half squared
+    let shown = |luminance: bool| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0));
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 24.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let style = StrokeStyle {
+            wet_pull: Some(0.0),
+            attack: 0.25,
+            dilution: 1.0,
+            rendering: Rendering::Gradual,
+            luminance,
+            ..StrokeStyle::new(StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0)
+        };
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(32.0, 32.0), 20.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        pixel(&layer, 64, 32, 32)
+    };
+    let (plain, squared) = (shown(false), shown(true));
+    assert!(plain[0].abs_diff(64) < 6 && plain[3] > 250, "{plain:?}");
+    assert!(squared[0].abs_diff(128) < 6 && squared[3] > 250, "{squared:?}");
+}
+
+#[test]
 fn wet_edges_pool_paint_laid_in_place() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
