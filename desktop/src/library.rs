@@ -373,7 +373,10 @@ impl Library {
                 // the search: out of sight at first, it comes down as a list is scrolled up past
                 // its top, and goes as they scroll down again (unless it is in use)
                 let in_use = self.searching || !self.query.is_empty();
-                let wheel = ui.input(|i| i.smooth_scroll_delta.y);
+                // (by the wheel, or a finger or the mouse pulling a list)
+                let pulled =
+                    self.press.is_some_and(|p| p.way == Way::Scroll) || self.set_press.is_some_and(|p| p.spent);
+                let wheel = ui.input(|i| i.smooth_scroll_delta.y + if pulled { i.pointer.delta().y } else { 0.0 });
                 if !in_use && let Some(p) = ui.input(|i| i.pointer.hover_pos()).filter(|p| lists.contains(*p)) {
                     let at_top = if p.x < lists.left() + SETS_WIDTH { self.lists_top.0 } else { self.lists_top.1 };
                     if wheel > 0.0 && at_top {
