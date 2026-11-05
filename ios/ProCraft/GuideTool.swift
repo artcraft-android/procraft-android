@@ -581,7 +581,9 @@ private struct SymmetryOptions: View {
         let g = tool.info
         // over the Options button, its arrow at the button's middle: the third of the row when wide
         let wide = screen.width > screen.height
-        let middle = wide ? 8 + 16 + (257 + 19) * 2 + 128.5 : (screen.width - 652) / 2 + 16 + 150
+        let thirdOfRow: CGFloat = 8 + 16 + 276 * 2 + 128.5
+        let firstOfRow: CGFloat = (screen.width - 652) / 2 + 166
+        let middle = wide ? thirdOfRow : firstOfRow
         let left = min(max(middle - 150, 0), screen.width - 300)
         ToolbarPopover(
             arrowX: middle - left, left: left, bottom: wide ? screen.height - 89 : screen.height - 98,

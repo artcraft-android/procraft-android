@@ -740,7 +740,7 @@ struct CopyPastePanel: View {
                     button(PcIcons.copyAll, "Copy All", action: act(model.copyCanvas))
                     button(PcIcons.copyDuplicate, "Duplicate", action: act(model.duplicateCurrent))
                     button(PcIcons.cutPaste, "Cut & Paste", action: act(model.cutAndPaste))
-                    button(PcIcons.pasteDown, "Paste", enabled: model.canPaste, action: act(model.paste))
+                    button(PcIcons.pasteDown, "Paste", enabled: model.canPaste, action: act({ model.paste() }))
                 }
                 .offset(y: 48)
             }
