@@ -62,6 +62,7 @@ mod text_draw;
 mod timelapse;
 mod touch;
 mod transform;
+mod turn;
 #[cfg(target_os = "android")]
 mod window;
 // the iPad app's window is its layer: taken and drawn into as Android's is
