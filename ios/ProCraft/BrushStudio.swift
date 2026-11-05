@@ -107,7 +107,7 @@ struct BrushStudio: View {
                     }
                 }
                 if let ask = ui.keypad {
-                    SliderKeypad(ask: ask, ui: ui, height: screen.size.height) { ui.keypad = nil }
+                    SliderKeypad(ask: ask, ui: ui, width: screen.size.width, height: screen.size.height) { ui.keypad = nil }
                         .id(ask.id)
                 }
                 if let ask = ui.nodeMenu {
@@ -119,6 +119,12 @@ struct BrushStudio: View {
                 }
             }
             .coordinateSpace(.named(studioSpace))
+            #if DEBUG
+            .onAppear {
+                ScreenCapture.studioShows?(studio, ui)
+                ScreenCapture.studioShows = nil
+            }
+            #endif
         }
     }
 }
@@ -382,29 +388,56 @@ private struct StudioSettings: View {
         let index = AppSettings.shared.studioTab
         let tab = studioTabs[min(max(index, 0), studioTabs.count - 1)]
         let rows = studioRows(tab, name: model.studio.name)
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    switch row {
-                    case let .space(height):
-                        Color.clear.frame(height: height)
-                    case let .title(title):
-                        Text(verbatim: title)
-                            .font(.system(size: 21, weight: .bold))
-                            .foregroundStyle(StudioInk.header)
-                            .lineLimit(1)
-                            .padding(.leading, 8)
-                    case let .control(control):
-                        StudioControlView(model: model, ui: ui, control: control, landscape: landscape)
+        ScrollViewReader { reader in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
+                        Group {
+                            switch row {
+                            case let .space(height):
+                                Color.clear.frame(height: height)
+                            case let .title(title):
+                                Text(verbatim: title)
+                                    .font(.system(size: 21, weight: .bold))
+                                    .foregroundStyle(StudioInk.header)
+                                    .lineLimit(1)
+                                    .padding(.leading, 8)
+                            case let .control(control):
+                                StudioControlView(model: model, ui: ui, control: control, landscape: landscape)
+                            }
+                        }
+                        .id(i)
                     }
                 }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 77)
             }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 77)
+            #if DEBUG
+            .onAppear {
+                if let row = captureRow(rows) {
+                    reader.scrollTo(row, anchor: .top)
+                }
+            }
+            #endif
         }
         .scrollIndicators(.hidden)
         .id(index)
     }
+
+    #if DEBUG
+    /// The row a capture wants at the top.
+    private func captureRow(_ rows: [StudioRow]) -> Int? {
+        rows.firstIndex { row in
+            guard case let .control(control) = row else { return false }
+            switch (ScreenCapture.studioRow, control) {
+            case ("roundness", .roundness), ("tilt", .tiltAngle):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+    #endif
 }
 
 /// The drawing pad's settings: preview size, the pad's colour, and clearing or resetting. It opens

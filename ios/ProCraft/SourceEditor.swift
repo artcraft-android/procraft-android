@@ -265,6 +265,18 @@ struct SourceEditor: View {
         .onAppear {
             image = studio.sourcePixels(kind)
             revision += 1
+            #if DEBUG
+            switch ScreenCapture.sourceShows {
+            case "import":
+                importing = true
+            case "repeat":
+                repeating = true
+            case "library":
+                library = true
+            default:
+                break
+            }
+            #endif
         }
         .task(id: Showing(revision: revision, repeating: repeating, settings: settings)) {
             await redraw()

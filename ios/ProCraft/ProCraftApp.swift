@@ -58,9 +58,125 @@ struct RootView: View {
 #if DEBUG
 /// For the screen captures the iPad workflow takes on the simulator: launched with `-screen NAME`,
 /// the app turns on its side and opens a new canvas the size of the screen with the panel NAME
-/// open (`canvas` for none, `gallery` for the gallery), or the brush studio on its Shape page
-/// (`studio`), which has the most kinds of control, or its Grain editor (`source`).
+/// open (`canvas` for none, `gallery` for the gallery), or one of the screens below it: a menu of
+/// the library, a page of the brush studio, something open over it, a source editor. Nothing can
+/// be touched in a capture, so what a touch would open is opened here.
 enum ScreenCapture {
+    /// What the studio opens over its page once it is up.
+    static var studioShows: ((StudioModel, StudioUi) -> Void)?
+    /// The control its page is scrolled to.
+    static var studioRow: String?
+    /// The page the keypad opens on.
+    static var keypadPage = KeypadPage.numeric
+    /// What the source editor opens over itself, and what the brush library opens.
+    static var sourceShows: String?
+    static var libraryShows: String?
+    /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
+    static var sideways = false
+
+    /// The studio's pages, by capture.
+    private static let pages: [String: Int] = [
+        "studio": 3, "studio-taper": 2, "studio-grain": 4, "studio-stylus": 9, "studio-materials": 11,
+        "studio-preview": 12, "studio-about": 13,
+    ]
+
+    /// Where a value is in the portrait studio, for a keypad to hang from.
+    private static let pill = CGRect(x: 648, y: 951, width: 72, height: 28)
+
+    private static func studio(_ model: CanvasModel, page: Int, shows: ((StudioModel, StudioUi) -> Void)? = nil) {
+        AppSettings.shared.studioTab = page
+        studioShows = shows
+        model.studio.open()
+    }
+
+    private static func keypad(_ page: KeypadPage) -> (StudioModel, StudioUi) -> Void {
+        { studio, ui in
+            keypadPage = page
+            ui.keypad = KeypadAsk(
+                id: "count", title: "Count", pill: pill, typed: typedNumber(.count, most: 16),
+                onValue: { _ in }, extras: keypadExtras(studio, "count")
+            )
+        }
+    }
+
+    private static func source(_ model: CanvasModel, _ kind: SourceKind, shows: String? = nil) {
+        sourceShows = shows
+        model.studio.open()
+        model.studio.sourceEditing = kind
+    }
+
+    private static func library(_ model: CanvasModel, shows: String) {
+        libraryShows = shows
+        model.toolPressed(.paint)
+    }
+
+    /// Opens what capture `name` shows, if it is one of these.
+    private static func open(_ name: String, in model: CanvasModel) {
+        if let page = pages[name] {
+            studio(model, page: page)
+            return
+        }
+        switch name {
+        case "studio-roundness":
+            studioRow = "roundness"
+            studio(model, page: 3)
+        case "studio-tilt":
+            studioRow = "tilt"
+            studio(model, page: 9)
+        case "studio-landscape":
+            sideways = true
+            studio(model, page: 3)
+        case "keypad":
+            studio(model, page: 3, shows: keypad(.numeric))
+        case "keypad-pressure":
+            studio(model, page: 3, shows: keypad(.pressure))
+        case "keypad-tilt":
+            studio(model, page: 3, shows: keypad(.tilt))
+        case "blend-list":
+            studio(model, page: 4) { studio, ui in
+                ui.blendList = BlendListAsk(modes: studio.brushModes, current: 0, centreY: 700) { _ in }
+            }
+        case "node-menu":
+            studio(model, page: 9) { _, ui in
+                let points = [CGPoint.zero, CGPoint(x: 0.5, y: 0.6), CGPoint(x: 1, y: 1)]
+                let box = CGRect(x: 109, y: 620, width: 607, height: 450)
+                ui.nodeMenu = NodeMenuAsk(points: points, index: 1, box: box) { _ in }
+            }
+        case "pad-menu":
+            studio(model, page: 3) { studio, _ in
+                studio.padButtonCentre = 176
+                studio.padMenuOpen = true
+            }
+        case "source":
+            source(model, .grain)
+        case "source-shape":
+            source(model, .shape)
+        case "source-import":
+            source(model, .grain, shows: "import")
+        case "repeat":
+            source(model, .grain, shows: "repeat")
+        case "source-library":
+            source(model, .grain, shows: "library")
+        case "source-landscape":
+            sideways = true
+            source(model, .grain)
+        case "library-add":
+            library(model, shows: "add")
+        case "library-set-menu":
+            library(model, shows: "set-menu")
+        case "library-icons":
+            library(model, shows: "icons")
+        case "library-search":
+            library(model, shows: "search")
+        case "library-swipe":
+            library(model, shows: "swipe")
+        case "library-recent":
+            library(model, shows: "recent")
+        default:
+            break
+        }
+    }
+
     static func start(open: @escaping (CanvasModel) -> Void) {
         let arguments = ProcessInfo.processInfo.arguments
         guard let at = arguments.firstIndex(of: "-screen"), at + 1 < arguments.count else { return }
@@ -84,14 +200,22 @@ enum ScreenCapture {
             case "colors": model.toggle(.color)
             case "actions": model.toggle(.actions)
             case "adjustments": model.toggle(.adjustments)
-            case "studio":
-                AppSettings.shared.studioTab = 3
-                model.studio.open()
-            case "source":
-                model.studio.open()
-                model.studio.sourceEditing = .grain
-            default: break
+            default: Self.open(name, in: model)
             }
+        }
+    }
+}
+
+extension View {
+    /// In a capture of the sideways studio, laid out as it is on its side.
+    @ViewBuilder
+    func sidewaysInCaptures(_ screen: CGSize) -> some View {
+        if ScreenCapture.sideways {
+            frame(width: screen.height, height: screen.width)
+                .rotationEffect(.degrees(90))
+                .frame(width: screen.width, height: screen.height)
+        } else {
+            self
         }
     }
 }

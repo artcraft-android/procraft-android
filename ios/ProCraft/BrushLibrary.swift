@@ -215,6 +215,30 @@ struct BrushLibrary: View {
                 model.importBrushes(from: url)
             }
         }
+        #if DEBUG
+        .onAppear {
+            switch ScreenCapture.libraryShows {
+            case "add":
+                ui.adding = true
+            case "set-menu":
+                ui.setMenu = model.shownSet
+            case "icons":
+                ui.setMenu = model.shownSet
+                ui.iconPicker = true
+            case "search":
+                ui.searchShown = true
+            case "recent":
+                model.showSet(CanvasModel.recentSet)
+            case "swipe":
+                // once the row is up, as a finger would find it
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    model.swipedBrush = model.currentBrush.map { CanvasModel.brushKey($0) }
+                }
+            default:
+                break
+            }
+        }
+        #endif
     }
 }
 

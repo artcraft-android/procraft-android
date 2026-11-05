@@ -62,6 +62,9 @@ struct CanvasScreen: View {
                 }
                 if model.studio.isOpen {
                     BrushStudio(model: model)
+                    #if DEBUG
+                        .sidewaysInCaptures(screen.size)
+                    #endif
                         .transition(.move(edge: .bottom))
                     NoticeBand(model: model)
                 }

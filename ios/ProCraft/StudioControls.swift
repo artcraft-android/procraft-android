@@ -228,7 +228,7 @@ struct KeypadExtras {
 }
 
 /// What control `key`'s keypad offers besides typing, as its brush holds it; none if nothing.
-private func keypadExtras(_ studio: StudioModel, _ key: String) -> KeypadExtras? {
+func keypadExtras(_ studio: StudioModel, _ key: String) -> KeypadExtras? {
     let e = sliderExtras(key: key)
     guard e.pressure || e.tilt else { return nil }
     return KeypadExtras(
@@ -403,22 +403,28 @@ private let keypadGraphGrid = Color(argb: 0xFFD0_D0D0)
 private let keypadSwitchOff = Color(argb: 0xFFC2_C1C5)
 
 /// A slider keypad's pages: typing the value, the slider's own pressure curve, its own tilt.
-private enum KeypadPage {
+enum KeypadPage {
     case numeric, pressure, tilt
 }
 
-/// A slider's keypad, a light popover to the right of its value, its arrow at the value: the
-/// slider's name, then 7 8 9 / 4 5 6 / 1 2 3 / 0 and backspace (81 x 66 keys), "-" 0 and backspace
+/// A slider's keypad, a light popover to the right of its value (to its left with no room there,
+/// as in the portrait studio), its arrow at the value: the slider's name, then 7 8 9 / 4 5 6 /
+/// 1 2 3 / 0 and backspace (81 x 66 keys), "-" 0 and backspace
 /// for a value that may be negative. Each key sets the value at once: the digits typed so far are
 /// the number (beyond the most, the most); "-" makes it negative; backspace takes the last one off
 /// (none left: nothing). A tap anywhere else closes it.
 struct SliderKeypad: View {
     let ask: KeypadAsk
     let ui: StudioUi
+    let width: CGFloat
     let height: CGFloat
     let onDismiss: () -> Void
 
+    #if DEBUG
+    @State private var page = ScreenCapture.keypadPage
+    #else
     @State private var page = KeypadPage.numeric
+    #endif
     @State private var text = ""
 
     /// Tabs over the keys when the slider has a pressure curve or a tilt of its own.
@@ -514,11 +520,15 @@ struct SliderKeypad: View {
         let tall = popoverHeight(tabs)
         let middle = ask.pill.midY
         let top = min(max(middle - tall / 2, 2), max(height - tall - 2, 2))
+        // the arrow's tip a little into the pill, the body 3 past its end
+        let into = Pc.arrowHeight - 3
+        let fits = ask.pill.maxX - into + keypadWidth + Pc.arrowHeight <= width
+        let left = fits ? ask.pill.maxX - into : ask.pill.minX + into - keypadWidth - Pc.arrowHeight
         ZStack(alignment: .topLeading) {
             Color.clear
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onDismiss)
-            Popover(width: keypadWidth, arrowX: middle - top, fill: keypadFill, corner: 22, side: .left) {
+            Popover(width: keypadWidth, arrowX: middle - top, fill: keypadFill, corner: 22, side: fits ? .left : .right) {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(verbatim: ask.title)
                         .font(.system(size: 22, weight: .bold))
@@ -546,8 +556,7 @@ struct SliderKeypad: View {
                 }
                 .frame(width: keypadWidth, height: tall, alignment: .topLeading)
             }
-            // the arrow's tip a little into the pill, the body 3 past its end
-            .offset(x: ask.pill.maxX - (Pc.arrowHeight - 3), y: top)
+            .offset(x: left, y: top)
         }
     }
 }
