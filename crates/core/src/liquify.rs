@@ -23,6 +23,9 @@ const WORK_PER_PIXEL: f32 = 1.0 / 3000.0;
 /// takes, for when a long move comes at once.
 const STEP_REACH: f32 = 0.05;
 const MOST_STEPS: usize = 16;
+/// A move counts for no more time than this (seconds): a longer gap is the brush having stopped,
+/// and being held works on by itself.
+const LONGEST_MOVE: f32 = 0.05;
 /// How fast the speed the brush lifts at follows the moves it makes (of the difference, a second).
 const VELOCITY_FOLLOW: f32 = 40.0;
 /// A pen's pressure follows by these parts at each point; anything else presses evenly.
@@ -125,6 +128,9 @@ pub(crate) struct LiquifyRun {
     velocity: Vec2,
     /// Whether it moved since time last passed.
     moved: bool,
+    /// How long its moves have worked since it was last held, so a shaking pen, moving and held at
+    /// once, isn't counted twice.
+    worked: f32,
     movers: Vec<Mover>,
     /// Seconds since it began, for what turns as it goes.
     clock: f32,
@@ -178,9 +184,11 @@ impl LiquifyRun {
             let force = self.followed(point.force, pen);
             let to = (point.at, force);
             let Some(from) = self.last.replace(to) else { continue };
-            seconds += point.seconds;
-            self.clock += point.seconds;
-            self.lay(from, to, point.seconds, brush, &mut steps);
+            let took = point.seconds.min(LONGEST_MOVE);
+            seconds += took;
+            self.worked += took;
+            self.clock += took;
+            self.lay(from, to, took, brush, &mut steps);
         }
         if let (Some(start), Some((end, _))) = (start, self.last)
             && seconds > 0.0
@@ -196,8 +204,11 @@ impl LiquifyRun {
     pub(crate) fn held(&mut self, at: Vec2, seconds: f32, brush: LiquifyBrush) -> Vec<Vec<LiquifyStamp>> {
         let mut steps = Steps::new(radius(brush.size));
         let force = self.force.unwrap_or(1.0);
-        self.clock += seconds;
-        self.lay((at, force), (at, force), seconds, brush, &mut steps);
+        let seconds = (seconds - std::mem::take(&mut self.worked)).max(0.0);
+        if seconds > 0.0 {
+            self.clock += seconds;
+            self.lay((at, force), (at, force), seconds, brush, &mut steps);
+        }
         steps.done()
     }
 
@@ -529,6 +540,25 @@ mod tests {
         run.along(&[at(0.0)], false, brush(kind, 0.0));
         let held: f32 = (0..100).map(|_| total(&run.held(Vec2::new(0.0, 100.0), 0.01, brush(kind, 0.0)))).sum();
         assert!((held - 1.0).abs() < 0.01, "a second held: {held}");
+    }
+
+    #[test]
+    fn a_timed_brush_counts_its_time_once_however_it_is_moved_and_held() {
+        let kind = LiquifyKind::TwirlLeft;
+        // stopped for two seconds, it moves on: the stop was worked by being held, not by this
+        let mut run = LiquifyRun::default();
+        run.along(&[at(0.0)], false, brush(kind, 0.0));
+        let after_a_stop = Point { seconds: 2.0, ..at(1.0) };
+        assert!(total(&run.along(&[after_a_stop], false, brush(kind, 0.0))) <= 0.05 + 1e-4);
+        // a pen shaking while held: its moves and its being held add up to the time, not twice it
+        let mut run = LiquifyRun::default();
+        run.along(&[at(0.0)], false, brush(kind, 0.0));
+        let mut done = 0.0;
+        for i in 0..100 {
+            done += total(&run.along(&[at((i % 2) as f32)], false, brush(kind, 0.0)));
+            done += total(&run.held(Vec2::new(0.0, 100.0), 0.01, brush(kind, 0.0)));
+        }
+        assert!((done - 1.0).abs() < 0.02, "a second: {done}");
     }
 
     #[test]
