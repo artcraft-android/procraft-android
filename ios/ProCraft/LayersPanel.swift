@@ -470,7 +470,9 @@ private struct RowFingers: UIViewRepresentable {
             hold.numberOfTouchesRequired = 2
             hold.minimumPressDuration = 0.5
             let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinching(_:)))
-            for recognizer in [swipe, hold, pinch] {
+            let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
+            tap.numberOfTouchesRequired = 2
+            for recognizer in [swipe, hold, pinch, tap] {
                 recognizer.cancelsTouchesInView = false
                 recognizer.delaysTouchesBegan = false
                 recognizer.delaysTouchesEnded = false
@@ -503,6 +505,14 @@ private struct RowFingers: UIViewRepresentable {
         @objc private func swiped(_ g: UISwipeGestureRecognizer) {
             if let l = paintLayer(g) {
                 model?.toggleAlphaLock(l)
+            }
+        }
+
+        /// Two fingers tapped on a layer: its opacity, dragged across the canvas.
+        @objc private func tapped(_ g: UITapGestureRecognizer) {
+            if let l = paintLayer(g) {
+                model?.selectLayer(l.id)
+                model?.startLayerOpacity()
             }
         }
 

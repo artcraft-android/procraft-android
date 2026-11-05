@@ -234,6 +234,12 @@ final class CanvasModel {
     @ObservationIgnored private(set) lazy var transform = TransformTool(model: self)
     @ObservationIgnored private(set) lazy var gradientMap = GradientMapTool(model: self)
     @ObservationIgnored private(set) lazy var crop = CropTool(model: self)
+    @ObservationIgnored private(set) lazy var recolor = RecolorTool(model: self)
+    /// The middle of the screen, window pixels.
+    @ObservationIgnored var screenCentre = CGPoint.zero
+    /// The layer whose opacity a drag changes, while the mode is on, and its opacity as it is dragged.
+    private(set) var opacityLayer: LayerInfo?
+    private(set) var opacityValue: Float = 1
     /// The view as the core has it: `[a, b, c, d, e, f]`, canvas pixels to window pixels.
     private(set) var viewMatrix: [Float] = []
     /// Delete on a locked layer: why not, OK alone.
@@ -779,7 +785,8 @@ final class CanvasModel {
 
     /// Whether the side bar shows: a mode taking the screen slides it off its edge.
     var sideBarShown: Bool {
-        showSideBar && !transforming && !selecting && crop.shown == nil && (!adjusting || adjustShown?.pencil == true)
+        showSideBar && !transforming && !selecting && crop.shown == nil && opacityLayer == nil
+            && (!adjusting || adjustShown?.pencil == true)
     }
 
     /// The modes open now, as the core's `modeSwitch` takes them.
@@ -788,7 +795,7 @@ final class CanvasModel {
             quickshape: quickShape != nil,
             filling: drop.band == .filling,
             recolor: recoloring,
-            layerOpacity: false,
+            layerOpacity: opacityLayer != nil,
             transform: transforming,
             selection: selecting,
             adjustment: adjusting
@@ -801,11 +808,68 @@ final class CanvasModel {
         let change = modeSwitch(button: button, open: openModes())
         if change.end.quickshape { endQuickShape() }
         if change.end.filling { drop.endBand() }
-        if change.end.recolor { recoloring = false }
+        if change.end.recolor { endRecolor() }
+        if change.end.layerOpacity { endLayerOpacity() }
         if change.end.transform { endTransform(commit: true) }
         if change.end.selection { closeSelecting() }
         if change.end.adjustment { endAdjustment(commit: true) }
         return change.goesOn
+    }
+
+    // MARK: Recolor and Layer Opacity
+
+    /// Recolor on, the reticle in the middle of the screen, or off (keeping what it filled).
+    func toggleRecolor() {
+        if recoloring {
+            _ = switchModes(.recolor)
+            return
+        }
+        guard currentTakesChanges() else { return }
+        // text takes no colour until it is rasterized
+        if layers.first(where: { $0.current })?.text == true {
+            askRasterize = true
+            return
+        }
+        _ = switchModes(.recolor)
+        closePanels()
+        recoloring = true
+        recolor.start(at: screenCentre)
+    }
+
+    /// Recolor ends, keeping what it filled.
+    func endRecolor() {
+        guard recoloring else { return }
+        recolor.end()
+        recoloring = false
+        refresh()
+    }
+
+    /// A drag across the canvas changes the current layer's opacity, read in the band under the top
+    /// bar; the shared touches drag it, each drag one undo step.
+    func startLayerOpacity() {
+        guard let l = layers.first(where: { $0.current }), l.kind == .paint || l.kind == .group else { return }
+        _ = switchModes(.layerOpacity)
+        closePanels()
+        opacityLayer = l
+        opacityValue = l.opacity
+        session.setTouchLayerOpacity(id: l.id)
+    }
+
+    /// The shared touches dragged the opacity: shown as it is; let go, the layers read again.
+    func layerOpacityTouched(ended: Bool) {
+        guard opacityLayer != nil else { return }
+        if let value = session.touchLayerOpacity() {
+            opacityValue = value
+        }
+        if ended {
+            refresh()
+        }
+    }
+
+    func endLayerOpacity() {
+        guard opacityLayer != nil else { return }
+        session.setTouchLayerOpacity(id: nil)
+        opacityLayer = nil
     }
 
     // MARK: transform and selection
@@ -1085,7 +1149,12 @@ final class CanvasModel {
             return
         }
         let could = canUndo
-        let name = session.undo()
+        // recoloring, the core takes the fill under the reticle back first (after the fills queued)
+        let session = session
+        let name = recoloring ? recolor.afterFills { session.undo() } : session.undo()
+        if recoloring {
+            recolor.readPoint()
+        }
         if could || name != nil {
             showNotice("Undo" + (name.map { " \($0)" } ?? ""))
         }
@@ -1101,7 +1170,9 @@ final class CanvasModel {
             return
         }
         let could = canRedo
-        let name = session.redo()
+        // recoloring, the core steps the open fill aside and makes it again over what comes back
+        let session = session
+        let name = recoloring ? recolor.afterFills { session.redo() } : session.redo()
         if could {
             showNotice("Redo" + (name.map { " \($0)" } ?? ""))
         }
@@ -1368,6 +1439,10 @@ final class CanvasModel {
         let c = colorRgb()
         let channel = { (shift: UInt32) in Float((c >> shift) & 0xFF) / 255 }
         session.setColor(r: channel(16), g: channel(8), b: channel(0))
+        // recoloring, the area under the reticle takes the new colour
+        if recoloring {
+            recolor.changeColour(r: channel(16), g: channel(8), b: channel(0))
+        }
         keepColour()
     }
 

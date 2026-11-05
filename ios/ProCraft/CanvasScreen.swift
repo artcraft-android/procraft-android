@@ -79,6 +79,13 @@ struct CanvasScreen: View {
                     QuickShapeBar(model: model)
                         .offset(y: Pc.barHeight)
                 }
+                if model.recoloring {
+                    RecolorReticle(model: model)
+                }
+                if model.opacityLayer != nil, !hidden {
+                    LayerOpacityBar(value: model.opacityValue)
+                        .offset(y: Pc.barHeight)
+                }
                 if model.adjustment == .clone, !hidden {
                     ClonePuck(model: model)
                 }
@@ -98,6 +105,14 @@ struct CanvasScreen: View {
                     AdjustmentMenu(model: model, screen: screen.size)
                 }
                 // the bottom toolbars rise from below the screen, and drop away
+                ZStack {
+                    if model.recoloring, !hidden {
+                        RecolorPanel(tool: model.recolor)
+                            .transition(.move(edge: .bottom))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .animation(model.recoloring ? Motion.toolbarIn : Motion.toolbarOut, value: model.recoloring)
                 ZStack {
                     if model.adjusting, model.adjustment != .liquify, !hidden {
                         AdjustmentPanel(model: model, screen: screen.size)
@@ -396,6 +411,7 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
         session.startAutosave(dir: dir)
         canvas.onCommands = { [weak self] in self?.obey($0) }
         canvas.beforeTouches = { [weak self] in self?.model.prepareTouches() }
+        canvas.afterTouches = { [weak self] ended in self?.model.layerOpacityTouched(ended: ended) }
         let pencil = UIPencilInteraction()
         pencil.delegate = self
         canvas.addInteraction(pencil)
@@ -411,6 +427,7 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         model.pixels = view.window?.screen.scale ?? view.traitCollection.displayScale
+        model.screenCentre = CGPoint(x: view.bounds.midX * model.pixels, y: view.bounds.midY * model.pixels)
     }
 
     override var prefersStatusBarHidden: Bool { true }
@@ -461,6 +478,10 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 canvas.showCursor(at: nil, hovering: false)
             case .textLayer:
                 model.askRasterize = true
+            case let .recolorMoved(x, y):
+                model.recolor.move(to: CGPoint(x: CGFloat(x), y: CGFloat(y)))
+            case let .recolorTapped(x, y):
+                model.recolor.tap(CGPoint(x: CGFloat(x), y: CGFloat(y)))
             case .copyPaste:
                 model.copyPasteOpen = true
             case .transformTouched:

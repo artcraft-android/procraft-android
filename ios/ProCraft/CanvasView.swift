@@ -15,6 +15,8 @@ final class CanvasView: UIView {
     var onCommands: ([TouchCommand]) -> Void = { _ in }
     /// A touch is coming down with none on the canvas: the touches are told how things stand.
     var beforeTouches: () -> Void = {}
+    /// The touches moved, or the last of them went.
+    var afterTouches: (_ ended: Bool) -> Void = { _ in }
 
     private var attached = false
     /// The window as last given to the session, and the way up it was at.
@@ -219,6 +221,7 @@ final class CanvasView: UIView {
             session.strokePredict(samples: predicted.map(sample))
         }
         obey(out)
+        afterTouches(false)
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -236,6 +239,7 @@ final class CanvasView: UIView {
             strokeTouch = nil
         }
         obey(out)
+        afterTouches(ids.isEmpty)
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -256,6 +260,7 @@ final class CanvasView: UIView {
             strokeTouch = nil
         }
         obey(out)
+        afterTouches(ids.isEmpty)
     }
 
     /// True values for samples given as estimates: the stroke waiting on them goes on.

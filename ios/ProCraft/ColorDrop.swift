@@ -181,8 +181,10 @@ final class ColorDrop {
         band = .filling
     }
 
+    /// Filling ends, and Recolor with it.
     func endFilling() {
         endBand()
+        model.endRecolor()
     }
 
     /// The band goes, and Continue filling with it.
