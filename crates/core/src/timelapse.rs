@@ -311,6 +311,10 @@ impl TimeLapse {
                 clip_hevc: made.map(|m| m.hevc),
             });
         } else {
+            // what this take copied is no one's only copy, so isn't set aside
+            for i in 0..t.ends.len() {
+                let _ = fs::remove_file(self.segment_path(i));
+            }
             self.drop_segments();
         }
     }
@@ -982,6 +986,16 @@ mod tests {
         t2.take_video(video.to_string_lossy().into_owned(), 3);
         t2.take_end();
         assert!(t2.for_package().segments.is_empty());
+        // nor are those before it, which leave nothing behind
+        let third = dir.join("third");
+        let t3 = TimeLapse::new(third.to_string_lossy().into_owned());
+        t3.take_begin(PackageTimeLapse { segments: vec![], ..t.for_package() });
+        assert!(t3.keep_frame([0, 0, 0, 255].repeat(4), 2, 2));
+        t3.take_video(video.to_string_lossy().into_owned(), 1);
+        t3.take_video(video.to_string_lossy().into_owned(), 2);
+        t3.take_end();
+        let names = fs::read_dir(&third).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned());
+        assert!(!names.into_iter().any(|n| n.ends_with(".mp4")));
         let _ = fs::remove_dir_all(&dir);
     }
 
