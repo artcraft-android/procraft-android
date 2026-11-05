@@ -219,7 +219,10 @@ fun GalleryScreen(vm: CanvasViewModel) {
                         vm.stackArtworks(picked())
                         endSelecting()
                     },
-                    onPreview = { previewing = picked() },
+                    onPreview = {
+                        previewFrom = 0
+                        previewing = picked()
+                    },
                     onShare = { sharing = GalleryShare(picked(), null) },
                     onDuplicate = {
                         picked().forEach(vm::duplicateArtwork)
