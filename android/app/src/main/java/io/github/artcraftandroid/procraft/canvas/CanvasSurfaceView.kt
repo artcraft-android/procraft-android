@@ -15,6 +15,7 @@ import io.github.artcraftandroid.procraft.core.PenSample
 import io.github.artcraftandroid.procraft.core.CompanionMode
 import io.github.artcraftandroid.procraft.core.PointerKind
 import io.github.artcraftandroid.procraft.core.TouchCommand
+import io.github.artcraftandroid.procraft.core.TouchMove
 import io.github.artcraftandroid.procraft.core.TransformHandle
 import kotlin.math.atan2
 import io.github.artcraftandroid.procraft.core.Adjustment
@@ -156,7 +157,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
                 if (e.actionMasked == MotionEvent.ACTION_DOWN) strokePointer = e.getPointerId(i)
                 s.touchDown(e.getPointerId(i).toULong(), kindOf(e, i), samples(e, i))
             }
-            MotionEvent.ACTION_MOVE -> (0 until e.pointerCount).flatMap { i -> s.touchMove(e.getPointerId(i).toULong(), samples(e, i)) }
+            MotionEvent.ACTION_MOVE -> s.touchMoves((0 until e.pointerCount).map { i -> TouchMove(e.getPointerId(i).toULong(), samples(e, i)) })
             MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP -> {
                 val i = e.actionIndex
                 // the system took the pointer back (a palm): what it did is undone, not ended

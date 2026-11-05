@@ -133,6 +133,13 @@ pub enum GestureAction {
     LayerSelect,
 }
 
+/// A pointer's move within an input event: which, and its input since the last.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct TouchMove {
+    pub id: u64,
+    pub samples: Vec<PenSample>,
+}
+
 /// The gesture settings the touches follow: what each way of touching does, and the delays.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct TouchSettings {
@@ -404,6 +411,8 @@ pub(crate) struct Touches {
     gesture_scale: f32,
     /// The fingers have gone far enough to move the view ([`VIEW_SLOP`]).
     view_moving: bool,
+    /// Others of the fingers moving in this event are still to be told of.
+    more_to_come: bool,
     pinch: Vec<(f64, f32)>,
     gesture_pair: Option<(u64, u64)>,
     last: (f32, f32, f32, f32),
@@ -511,6 +520,7 @@ impl Default for Touches {
             tap_moved: 0.0,
             gesture_scale: 1.0,
             view_moving: false,
+            more_to_come: false,
             pinch: Vec::new(),
             gesture_pair: None,
             last: (0.0, 0.0, 0.0, 0.0),
@@ -834,6 +844,19 @@ impl CanvasSession {
         out
     }
 
+    /// Pointers down move together, as one input event has them: the view goes by all of them at
+    /// once, never by a spread that only some of them have got to.
+    pub fn touch_moves(&self, moves: Vec<TouchMove>) -> Vec<TouchCommand> {
+        let mut out = Vec::new();
+        let last = moves.len().saturating_sub(1);
+        for (i, step) in moves.into_iter().enumerate() {
+            self.touches().more_to_come = i < last;
+            out.extend(self.touch_move(step.id, step.samples));
+        }
+        self.touches().more_to_come = false;
+        out
+    }
+
     /// A pointer down moves (`samples` its input since the last).
     pub fn touch_move(&self, id: u64, samples: Vec<PenSample>) -> Vec<TouchCommand> {
         let Some(last) = last_of(&samples).copied() else { return Vec::new() };
@@ -1059,6 +1082,7 @@ impl CanvasSession {
                     out.push(TouchCommand::ViewMoved);
                 }
             }
+            Mode::Gesture if t.more_to_come => {}
             Mode::Gesture => {
                 Self::note_fingers_moved(&mut t);
                 if t.down.len() >= 3 {
@@ -2590,6 +2614,23 @@ mod tests {
 
     fn zoom(s: &CanvasSession) -> f32 {
         s.shared.lock().view.map_or(0.0, |v| v.zoom())
+    }
+
+    #[test]
+    fn fingers_moving_in_one_event_never_show_a_spread_they_didn_t_have() {
+        let s = shown(1.0);
+        let before = zoom(&s);
+        let (a, b) = ((200.0, 300.0), (400.0, 300.0));
+        s.touch_down(1, PointerKind::Finger, at(a.0, a.1, 0.0));
+        s.touch_down(2, PointerKind::Finger, at(b.0, b.1, 5.0));
+        // panned: both go the same way, so the zoom never moves
+        for i in 1..=20 {
+            let (x, ms) = (i as f32 * 6.0, f64::from(i) * 8.0 + 400.0);
+            let step = |id: u64, p: (f32, f32)| TouchMove { id, samples: at(p.0 + x, p.1, ms) };
+            s.touch_moves(vec![step(1, a), step(2, b)]);
+            assert!((zoom(&s) / before - 1.0).abs() < 1e-5, "{} at {i}", zoom(&s));
+        }
+        assert!(!s.touches().more_to_come);
     }
 
     #[test]
