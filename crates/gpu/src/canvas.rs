@@ -181,6 +181,12 @@ impl StrokeStyle {
         !self.in_place() || (self.tool == StrokeTool::Paint && self.laid_in_place && self.wet_pull.is_none())
     }
 
+    /// The style as a dual brush's second: only coverage, drawn apart into its own texture, so
+    /// never laid in place or mixed wet, whatever its own settings say.
+    pub fn as_second(self) -> StrokeStyle {
+        StrokeStyle { laid_in_place: false, wet_pull: None, wet_from_before: false, ..self }
+    }
+
     /// Whether the stroke paints its layer as it goes: wet paint, or dry paint laid in place.
     fn paints_in_place(&self) -> bool {
         self.tool == StrokeTool::Paint && (self.wet_pull.is_some() || self.laid_in_place)

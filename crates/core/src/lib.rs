@@ -708,9 +708,8 @@ impl State {
         };
         let diameter = second.diameter(sliders.size);
         let alpha_lock = self.doc.layer(layer).is_some_and(|l| l.alpha_lock);
-        let mut style = StrokeStyle::for_brush(&second, tool.stroke_tool(), self.color, opacity, alpha_lock);
-        // the second is only coverage, drawn apart into its own texture
-        style.laid_in_place = false;
+        let mut style =
+            StrokeStyle::for_brush(&second, tool.stroke_tool(), self.color, opacity, alpha_lock).as_second();
         if style.in_place() {
             return None;
         }

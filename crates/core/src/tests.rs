@@ -8368,7 +8368,7 @@ fn a_dual_brush_draws_its_two_strokes_combined_by_its_mode() {
     // the second: wide dabs far apart
     let mut second = Brush { name: "Dabs".to_owned(), ..Brush::round_pen() };
     second.set_setting("spacing", 1.0);
-    let set = |s: &CanvasSession, mode: Option<f32>| {
+    let set = |s: &CanvasSession, second: &Brush, mode: Option<f32>| {
         let mut guard = s.shared.lock();
         let st = &mut *guard;
         let tool = st.tool;
@@ -8379,15 +8379,23 @@ fn a_dual_brush_draws_its_two_strokes_combined_by_its_mode() {
         }
     };
     // multiply: only where both cover
-    set(&s, Some(1.0));
+    set(&s, &second, Some(1.0));
     let both = covered(&s);
     // normal: where either does
-    set(&s, Some(0.0));
+    set(&s, &second, Some(0.0));
     let either = covered(&s);
-    set(&s, None);
+    // a second with a wet mix of its own is coverage all the same
+    let mut wet = second.clone();
+    wet.set_setting("wet_dilution", 0.5);
+    wet.set_setting("rendering_mode", 2.0);
+    assert!(wet.mixes_wet());
+    set(&s, &wet, Some(1.0));
+    let wet_both = covered(&s);
+    set(&s, &second, None);
     assert_eq!(covered(&s), plain, "back to one stroke");
     assert!(both > 0 && both < plain, "multiply {both} of {plain}");
     assert!(either >= plain, "normal {either} of {plain}");
+    assert!(wet_both > 0 && wet_both < plain, "a wet second, multiply {wet_both} of {plain}");
 }
 
 #[test]

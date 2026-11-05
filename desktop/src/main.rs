@@ -816,7 +816,9 @@ impl App {
     /// go on as they are. None: the event is held back.
     fn tap_assist(&mut self, event: WindowEvent) -> Option<WindowEvent> {
         let WindowEvent::Touch(touch) = &event else { return Some(event) };
-        if !self.ui.tap_assistance() || touch.force.is_some() {
+        // (a finger may give a pressure too: the system says which it is)
+        let pen = crate::pen::is_pen(touch.id).unwrap_or(touch.force.is_some());
+        if !self.ui.tap_assistance() || pen {
             return Some(event);
         }
         let held = self.tap_held.filter(|(id, _, _)| *id == touch.id);
