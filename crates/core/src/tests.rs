@@ -8699,7 +8699,20 @@ fn new_text_is_sized_and_placed_as_it_looks_on_screen() {
 fn crossing_strokes_sheet() {
     let (Ok(out), Ok(file)) = (std::env::var("CROSS_OUT"), std::env::var("CROSS_FILE")) else { return };
     let size: f32 = std::env::var("CROSS_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.3);
-    let Some(s) = session(1200, 600) else { return };
+    // `CROSS_CANVAS="WxH"`: a canvas that size (else 1200 square), shown at half its size
+    let (w, h) = std::env::var("CROSS_CANVAS")
+        .ok()
+        .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
+        .unwrap_or((1200u32, 1200u32));
+    let Ok(gpu) = Gpu::headless() else { return };
+    let s = CanvasSession::new(w, h);
+    {
+        let mut st = s.shared.lock();
+        st.window_size = (w / 2, h / 2);
+        st.view = Some(View::fit((w, h), (w / 2, h / 2)));
+        st.gpu = Some(gpu);
+        st.ensure_canvas();
+    }
     let set = s.import_any_brushes(std::fs::read(&file).unwrap(), Some(file.clone()), 0).unwrap();
     assert!(s.select_brush(set, 0));
     s.set_brush_size(size);
@@ -8937,4 +8950,29 @@ fn a_quick_menu_brush_follows_its_brush_about_the_library_and_goes_with_it() {
     // deleted, the key stands for nothing
     assert!(s.delete_brush(set, 0));
     assert_eq!(s.quick_brush(key), None);
+}
+
+/// With a panel open a tap leaves no dot, and a drag paints from where it came down, though it
+/// waited to be a drag.
+#[test]
+fn a_touch_with_a_panel_open_paints_only_as_a_drag() {
+    let Some(s) = session(256, 256) else { return };
+    let before = pixel(&s, 60, 60);
+    s.set_touch_panel_open(true);
+    s.touch_down(1, PointerKind::Finger, vec![sample(60.0, 60.0, 0.0)]);
+    s.touch_up(1, vec![sample(60.0, 60.0, 30.0)]);
+    assert_eq!(pixel(&s, 60, 60), before, "a tap paints nothing");
+    assert!(!s.info().can_undo);
+
+    s.touch_down(1, PointerKind::Finger, vec![sample(60.0, 60.0, 100.0)]);
+    s.touch_move(1, vec![sample(70.0, 60.0, 120.0)]);
+    assert_eq!(pixel(&s, 60, 60), before, "nothing yet, while it may be a tap");
+    let out = s.touch_move(1, vec![sample(100.0, 60.0, 140.0)]);
+    assert!(out.contains(&crate::TouchCommand::PanelFades), "{out:?}");
+    assert_ne!(pixel(&s, 60, 60), before, "shown from where it came down");
+    s.touch_move(1, vec![sample(180.0, 60.0, 200.0)]);
+    s.touch_up(1, vec![sample(180.0, 60.0, 220.0)]);
+    assert_ne!(pixel(&s, 60, 60), before);
+    assert_ne!(pixel(&s, 120, 60), before);
+    assert!(s.info().can_undo);
 }

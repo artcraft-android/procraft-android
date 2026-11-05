@@ -382,11 +382,18 @@ fun <T> PanelPresence(
     }
     @Suppress("UNCHECKED_CAST")
     val shown = if (target != hidden) target else if (fading) last[0] as T? ?: return else return
-    Box(
-        Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionOnScreen() }
-            .then(if (target == hidden) Modifier.pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } } else Modifier),
-    ) {
+    Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionOnScreen() }) {
         content(shown, if (target == hidden) fade.value else 1f, 1f, origin)
+    }
+}
+
+/** Keeps touches from what is inside: a panel fading away takes none (the canvas around it does). */
+fun Modifier.takingNoTouches(): Modifier = pointerInput(Unit) {
+    awaitEachGesture {
+        do {
+            val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+            event.changes.forEach { it.consume() }
+        } while (event.changes.any { it.pressed })
     }
 }
 

@@ -68,6 +68,11 @@ const ABOUT_FIELD: u32 = 0xFF0B0B0C;
 const ABOUT_INK: u32 = 0xFFBDBDBD;
 const ABOUT_CLOSE: u32 = 0xFFE3E3E3;
 const ABOUT_CLOSE_INK: u32 = 0xFF1C1C1C;
+/// About's button: 520 under the mark's top, 220 x 38.
+const ABOUT_BUTTON: (f32, f32) = (220.0, 38.0);
+const ABOUT_BUTTON_DOWN: f32 = 520.0;
+const ABOUT_BUTTON_FILL: u32 = 0xFF1A1A1A;
+const ABOUT_BUTTON_INK: u32 = 0xFFC4C4C4;
 const RENAME_FRAME: (f32, f32) = (281.0, 280.0);
 const RENAME_TOP: f32 = 20.0;
 const RENAME_MARGIN: f32 = 12.0;
@@ -896,6 +901,26 @@ impl Gallery {
                 Weight::Regular,
                 argb(ABOUT_INK),
             );
+            let at = pos2(field.center().x - ABOUT_BUTTON.0 / 2.0, field.top() + ABOUT_BUTTON_DOWN);
+            let recovery = Rect::from_min_size(at, vec2(ABOUT_BUTTON.0, ABOUT_BUTTON.1));
+            ui.painter().rect_filled(recovery, 8.0, argb(ABOUT_BUTTON_FILL));
+            let ink = argb(ABOUT_BUTTON_INK);
+            text(
+                ui.painter(),
+                recovery.center(),
+                Align2::CENTER_CENTER,
+                "Start Gallery Recovery",
+                15.0,
+                Weight::Regular,
+                ink,
+            );
+            // nothing is looked through while a file is still being written
+            let tapped = ui.interact(recovery, ui.scope_id().with("about recovery"), Sense::click()).clicked();
+            if tapped && !crate::files::still_writing() {
+                self.store.recover_lost_artworks();
+                self.refresh();
+                close = true;
+            }
             let button = Rect::from_min_size(pos2(screen.right() - 31.5 - 22.5, screen.top() + 31.0), vec2(22.5, 22.5));
             ui.painter().circle_filled(button.center(), 11.25, argb(ABOUT_CLOSE));
             let (c, d) = (button.center(), 4.0);

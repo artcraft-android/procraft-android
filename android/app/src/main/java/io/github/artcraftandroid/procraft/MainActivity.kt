@@ -152,9 +152,17 @@ class MainActivity : ComponentActivity() {
 
     /** A hardware keyboard's shortcuts on the canvas (keys no text field took). */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        if (isAltKey(keyCode) && event.repeatCount == 0 && !event.isCtrlPressed && vm.modifyKey(true)) return true
         if (event.repeatCount == 0 && vm.keyShortcut(keyCode, event.isCtrlPressed || event.isMetaPressed, event.isShiftPressed, event.isAltPressed)) return true
         return super.onKeyDown(keyCode, event)
     }
+
+    override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        if (isAltKey(keyCode) && vm.modifyHeld && vm.modifyKey(false)) return true
+        return super.onKeyUp(keyCode, event)
+    }
+
+    private fun isAltKey(keyCode: Int) = keyCode == android.view.KeyEvent.KEYCODE_ALT_LEFT || keyCode == android.view.KeyEvent.KEYCODE_ALT_RIGHT
 
     /** The keyboard shortcuts for the system's list of them (Meta+/, or Help's Keyboard shortcuts): the core's. */
     override fun onProvideKeyboardShortcuts(
@@ -183,6 +191,8 @@ class MainActivity : ComponentActivity() {
         name.length == 1 && name[0] in '0'..'9' -> android.view.KeyEvent.KEYCODE_0 + (name[0] - '0')
         name == "[" -> android.view.KeyEvent.KEYCODE_LEFT_BRACKET
         name == "]" -> android.view.KeyEvent.KEYCODE_RIGHT_BRACKET
+        name == ";" -> android.view.KeyEvent.KEYCODE_SEMICOLON
+        name == "space" -> android.view.KeyEvent.KEYCODE_SPACE
         name == "delete" -> android.view.KeyEvent.KEYCODE_FORWARD_DEL
         name == "backspace" -> android.view.KeyEvent.KEYCODE_DEL
         name == "left" -> android.view.KeyEvent.KEYCODE_DPAD_LEFT

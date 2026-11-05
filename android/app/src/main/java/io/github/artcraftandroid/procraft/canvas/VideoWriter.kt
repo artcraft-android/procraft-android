@@ -8,6 +8,7 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import java.io.File
 import java.nio.ByteBuffer
+import kotlin.math.roundToInt
 
 /** Video files made a frame at a time with the device's encoder. */
 object VideoWriter {
@@ -34,13 +35,14 @@ object VideoWriter {
     }
 
     /**
-     * [count] frames, [width] × [height] (even), [fps] a second, as an MP4 at [out] encoded with
-     * [mime]. [frame] fills a frame's ARGB pixels (rows top to bottom) and says whether it has one.
-     * Each encoder that takes the size is tried in the system's order (a tablet's own may refuse a
-     * size its software one takes); false if none makes it.
+     * [count] frames, [width] × [height] (even), [fps] a second (a fraction of a frame too, to a
+     * thousandth, each frame's time exact), as an MP4 at [out] encoded with [mime]. [frame] fills a
+     * frame's ARGB pixels (rows top to bottom) and says whether it has one. Each encoder that takes
+     * the size is tried in the system's order (a tablet's own may refuse a size its software one
+     * takes); false if none makes it.
      */
     fun write(
-        out: File, width: Int, height: Int, fps: Int, count: Int, mime: String = MediaFormat.MIMETYPE_VIDEO_AVC,
+        out: File, width: Int, height: Int, fps: Float, count: Int, mime: String = MediaFormat.MIMETYPE_VIDEO_AVC,
         bitsPerPixel: Int = BITS_PER_PIXEL, frame: (Int, IntArray) -> Boolean,
     ): Boolean {
         for (name in encoders(mime, width, height)) {
@@ -57,14 +59,22 @@ object VideoWriter {
             .filter { runCatching { it.getCapabilitiesForType(mime).videoCapabilities?.isSizeSupported(width, height) == true }.getOrDefault(false) }
             .map { it.name }
 
+    /** When frame [n] starts at [fps] frames a second, in microseconds: exact for a rate in thousandths. */
+    fun frameTime(n: Int, fps: Float): Long {
+        val rate = io.github.artcraftandroid.procraft.core.frameRate(fps)
+        return n * 1_000_000L * rate.seconds.toLong() / rate.frames.toLong().coerceAtLeast(1)
+    }
+
     private fun writeWith(
-        name: String, out: File, width: Int, height: Int, fps: Int, count: Int, mime: String, bitsPerPixel: Int,
+        name: String, out: File, width: Int, height: Int, fps: Float, count: Int, mime: String, bitsPerPixel: Int,
         frame: (Int, IntArray) -> Boolean,
     ): Boolean {
         val format = MediaFormat.createVideoFormat(mime, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
             setInteger(MediaFormat.KEY_BIT_RATE, bitRate(width, height, bitsPerPixel))
-            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+            // the encoder's guide to its bits a frame, whole (encoders may refuse a rate under one);
+            // the frames' times say how long each shows
+            setInteger(MediaFormat.KEY_FRAME_RATE, fps.roundToInt().coerceAtLeast(1))
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         }
         val codec = runCatching { MediaCodec.createByCodecName(name) }.getOrNull() ?: return false
@@ -110,11 +120,11 @@ object VideoWriter {
                 // without a picture to fill, the buffer could never be given back
                 val image = codec.getInputImage(input) ?: return false
                 writeYuv(image, pixels, width, height)
-                codec.queueInputBuffer(input, 0, width * height * 3 / 2, n * 1_000_000L / fps, 0)
+                codec.queueInputBuffer(input, 0, width * height * 3 / 2, frameTime(n, fps), 0)
                 n++
                 drain(false)
             }
-            codec.queueInputBuffer(nextInput(), 0, 0, n * 1_000_000L / fps, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+            codec.queueInputBuffer(nextInput(), 0, 0, frameTime(n, fps), MediaCodec.BUFFER_FLAG_END_OF_STREAM)
             drain(true)
             return track >= 0
         } catch (e: Exception) {
@@ -133,7 +143,7 @@ object VideoWriter {
      * after another at [out], their frames copied, nothing encoded again; each part's frames follow
      * the last one's by one frame at [fps]. False if a part can't be read or was made otherwise.
      */
-    fun join(parts: List<File>, out: File, fps: Int): Boolean {
+    fun join(parts: List<File>, out: File, fps: Float): Boolean {
         val muxer = runCatching { MediaMuxer(out.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4) }.getOrNull() ?: return false
         var track = -1
         var first: MediaFormat? = null
@@ -174,7 +184,7 @@ object VideoWriter {
                         extractor.advance()
                     }
                     if (last < 0) return false
-                    offset += last + 1_000_000L / fps
+                    offset += last + frameTime(1, fps)
                 } finally {
                     extractor.release()
                 }

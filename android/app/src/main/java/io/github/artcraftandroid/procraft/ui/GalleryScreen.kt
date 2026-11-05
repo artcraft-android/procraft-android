@@ -138,6 +138,9 @@ fun GalleryScreen(vm: CanvasViewModel) {
     var renamingStack by remember { mutableStateOf<io.github.artcraftandroid.procraft.gallery.Stack?>(null) }
     // the app's name tapped: what it is and its version, over the gallery
     var about by remember { mutableStateOf(false) }
+    // Gallery Recovery's card: how far its pie has come while it shows, and whether it is done
+    var recovery by remember { mutableStateOf<Float?>(null) }
+    var recovered by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf<Artwork?>(null) }
     // the artwork (by folder) whose actions a swipe left is showing
     var swiped by remember { mutableStateOf<String?>(null) }
@@ -641,7 +644,27 @@ fun GalleryScreen(vm: CanvasViewModel) {
             about,
             enter = androidx.compose.animation.fadeIn(tween(300)),
             exit = androidx.compose.animation.fadeOut(tween(150)),
-        ) { AboutApp { about = false } }
+        ) {
+            AboutApp(
+                onRecover = {
+                    if (recovery == null) {
+                        scope.launch {
+                            // the card shows long enough to be read, however quick the search
+                            recovery = 0f
+                            val pie = launch { androidx.compose.animation.core.animate(0f, 0.95f, animationSpec = tween(RECOVERY_SEARCH_MS)) { v, _ -> recovery = v } }
+                            vm.recoverLostArtworks()
+                            pie.join()
+                            recovered = true
+                            kotlinx.coroutines.delay(RECOVERY_DONE_MS)
+                            recovery = null
+                            recovered = false
+                            about = false
+                        }
+                    }
+                },
+            ) { about = false }
+        }
+        RecoveryProgress(recovery, recovered)
     }
 
     // deleting the picked artworks, or one swiped to
@@ -1658,7 +1681,7 @@ private fun Chip(text: String, modifier: Modifier = Modifier) {
  * its version; a round button at the top right closes it, as back does.
  */
 @Composable
-private fun AboutApp(onClose: () -> Unit) {
+private fun AboutApp(onRecover: () -> Unit, onClose: () -> Unit) {
     BackHandler(onBack = onClose)
     val context = androidx.compose.ui.platform.LocalContext.current
     val version = remember {
@@ -1681,6 +1704,13 @@ private fun AboutApp(onClose: () -> Unit) {
             Text(version, color = AboutInk, fontSize = 13.sp, maxLines = 1, modifier = Modifier.padding(top = 14.dp))
         }
         Box(
+            Modifier.align(Alignment.TopCenter).padding(top = AboutButtonTop).size(220.dp, 38.dp).clip(RoundedCornerShape(8.dp))
+                .background(AboutButtonFill).clickable(onClick = onRecover),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("Start Gallery Recovery", color = AboutButtonInk, fontSize = 15.sp, maxLines = 1)
+        }
+        Box(
             Modifier.align(Alignment.TopEnd).padding(top = 31.dp, end = 31.5.dp).size(22.5.dp).clip(CircleShape).background(AboutClose)
                 .clickable(onClick = onClose),
             contentAlignment = Alignment.Center,
@@ -1700,3 +1730,9 @@ private val AboutIconField = Color(0xFF0B0B0C)
 private val AboutInk = Color(0xFFBDBDBD)
 private val AboutClose = Color(0xFFE3E3E3)
 private val AboutCloseInk = Color(0xFF1C1C1C)
+// the button 520 under the icon's top, 220 x 38
+private val AboutButtonTop = 615.dp
+private val AboutButtonFill = Color(0xFF1A1A1A)
+private val AboutButtonInk = Color(0xFFC4C4C4)
+private const val RECOVERY_SEARCH_MS = 700
+private const val RECOVERY_DONE_MS = 900L

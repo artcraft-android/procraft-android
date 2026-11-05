@@ -230,6 +230,12 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             // what a pen's own settings ask its double-tap or squeeze to show
             TouchCommand.ShowColours -> vm.toggle(Panel.COLOR)
             TouchCommand.ShowBrushes -> vm.toggle(Panel.BRUSHES)
+            // a touch on the canvas with a panel open: dragged, it fades the panel; tapped, it only closes it
+            TouchCommand.PanelFades -> {
+                vm.swipedBrush = null
+                vm.fadePanels()
+            }
+            TouchCommand.PanelTapped -> vm.tapOutsidePanel()
         }
     }
 
@@ -268,6 +274,8 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
             // every sample as it arrives, not batched to the frame
             requestUnbufferedDispatch(e)
             s.setTouchSettings(vm.touchSettings())
+            // with a panel open, the touch waits to be a tap or a drag
+            s.setTouchPanelOpen(vm.panel != Panel.NONE)
             // Continue filling: each touch fills where it lands; slid, it changes the threshold
             s.setTouchFilling(vm.touchFill())
             // the selection tool's touch selects as the tool is set

@@ -210,9 +210,10 @@ fn by_speed(amount: f32, speed: f32) -> f32 {
     if amount >= 0.0 { 1.0 - amount * speed } else { 1.0 + amount * (1.0 - speed) }
 }
 
-/// The pressure a finger's wet mix takes (its dilution, pull, attack and their curves): with no
-/// pressure of its own, each input's is drawn towards full from the one before, settling here at
-/// a finger's input rate.
+/// The pressure a finger's wet mix takes in paint at (its dilution, charge, attack and blur
+/// curves): with no pressure of its own, each input's is drawn towards full from the one before,
+/// settling here at a finger's input rate. (The pull, grade and wetness jitter follow the stamp's
+/// own pressure, a finger's full.)
 pub const FINGER_WET_PRESSURE: f32 = 0.8;
 /// Stabilisation averages the latest points: at full strength this many samples' worth (at the
 /// rate above), fewer as the strength to this power falls.
@@ -568,6 +569,9 @@ pub struct StrokeBuilder {
     /// How many of the stroke's stamps before `placed` a copy leaves out (see
     /// [`StrokeBuilder::open_copy`]).
     left_out: usize,
+    /// How far the start taper reaches, once its time has passed: from then on it is what the
+    /// stroke keeps (so what is drawn for good stays as it is when the stroke ends).
+    start_settled: Option<f32>,
 }
 
 /// Smoothing and pressure set for every stroke, whatever the brush, on top of the brush's own.
@@ -718,6 +722,7 @@ impl StrokeBuilder {
             ran_on: None,
             kept: 0,
             left_out: 0,
+            start_settled: None,
         }
         .reading_extras()
     }
@@ -797,6 +802,15 @@ impl StrokeBuilder {
         out
     }
 
+    /// As [`StrokeBuilder::preview`], and on from the path to the input itself: all the stroke
+    /// shows ahead of what is drawn for good.
+    pub fn preview_to_input(&mut self, samples: &[Sample]) -> Vec<Stamp> {
+        let mut ahead = self.open_copy(self.placed.len());
+        let mut out = ahead.add(samples);
+        ahead.reach_input(&mut out);
+        out
+    }
+
     /// Walks the stretch to the newest path point, as if nothing came after it.
     fn flush(&mut self, out: &mut Vec<Stamp>) {
         if let (Some(c), Some(b)) = (self.ahead.take(), self.head) {
@@ -805,28 +819,60 @@ impl StrokeBuilder {
         }
     }
 
-    /// Whether the stroke shows its end tapered as it is drawn: a pen's, with a taper that lasts a
-    /// time and the tip animation on.
+    /// The stroke as it shows while drawn: the stretch to the newest path point, then straight on
+    /// to the input, which smoothing leaves the path behind (the path takes that stretch over as
+    /// it catches up, curved).
+    fn reach_input(&mut self, out: &mut Vec<Stamp>) {
+        self.flush(out);
+        if let Some(to) = self.input_point() {
+            self.walk_to(to, out);
+        }
+    }
+
+    /// The newest input as a point of the path, smoothed by nothing.
+    fn input_point(&self) -> Option<PathPoint> {
+        let (last, head) = (self.last_sample?, self.head?);
+        let newest = self.ahead.unwrap_or(head);
+        Some(PathPoint {
+            pos: last.pos,
+            pressure: self.pressure.unwrap_or(1.0),
+            soft: self.soft.unwrap_or(newest.soft),
+            tilt: newest.tilt,
+            azimuth: newest.azimuth,
+            roll: newest.roll,
+            speed: newest.speed,
+        })
+    }
+
+    /// Whether the stroke shows its tapers as it is drawn, through a tip redrawn as it goes: one
+    /// that lasts a time at its start (until that time has passed), and at its end a finger's, or
+    /// a pen's with the tip animation on.
     pub fn shows_tip(&self) -> bool {
-        self.pointer.has_pressure() && self.extras.tip_animation && !self.classic() && self.taper().end > 0.0
+        !self.classic() && (self.taper().start > 0.0 || self.end_shows())
     }
 
     /// Adds samples to a stroke shown with its tip (see [`StrokeBuilder::shows_tip`]): returns
-    /// the stamps to draw for good now, those the end taper no longer reaches, and the tip, the
-    /// stamps after them as they would be drawn were the stroke to end here.
+    /// the stamps to draw for good now, those past the start taper's time that the end taper no
+    /// longer reaches, and the tip, the stamps after them as they would be drawn were the stroke
+    /// to end here.
     pub fn add_tipped(&mut self, samples: &[Sample]) -> (Vec<Stamp>, Vec<Stamp>) {
         self.add(samples);
         let start = self.start_span();
-        let reach = self.length - self.end_span(0.0);
+        let reach = match self.start_settled {
+            // the start's reach still moving: nothing is drawn for good yet
+            None => f32::NEG_INFINITY,
+            Some(_) if self.end_shows() => self.length - self.end_span(0.0),
+            Some(_) => f32::INFINITY,
+        };
         // the stamps lie in order along the path: the first the taper reaches is after those kept
         let open = self.placed.get(self.kept..).unwrap_or_default();
         let to = open.iter().position(|p| p.distance >= reach).map_or(self.placed.len(), |i| self.kept + i);
         let kept = self.placed.get(self.kept..to).unwrap_or_default();
         let kept = kept.iter().map(|p| self.finish_stamp(p, start, None)).collect();
         self.kept = to;
-        // the tip as if the stroke ended here: walked on to its newest point
+        // the tip as if the stroke ended here: walked on to the input
         let mut ended = self.open_copy(to);
-        ended.flush(&mut Vec::new());
+        ended.reach_input(&mut Vec::new());
         (kept, ended.tip_from(0))
     }
 
@@ -835,7 +881,7 @@ impl StrokeBuilder {
     pub fn preview_tip(&mut self, samples: &[Sample]) -> Vec<Stamp> {
         let mut ahead = self.open_copy(self.kept);
         ahead.add(samples);
-        ahead.flush(&mut Vec::new());
+        ahead.reach_input(&mut Vec::new());
         ahead.tip_from(0)
     }
 
@@ -854,11 +900,13 @@ impl StrokeBuilder {
         copy
     }
 
-    /// The stamps from `from` on as they would be drawn were the stroke to end here.
+    /// The stamps from `from` on as they would be drawn were the stroke to end here (its end
+    /// tapered only where that shows as it is drawn).
     fn tip_from(&self, from: usize) -> Vec<Stamp> {
-        let (start, end, length) = (self.start_span(), self.end_span(0.0), self.length);
+        let start = self.start_span();
+        let end = self.end_shows().then(|| (self.length, self.end_span(0.0)));
         let tip = self.placed.get(from..).unwrap_or_default();
-        tip.iter().map(|p| self.finish_stamp(p, start, Some((length, end)))).collect()
+        tip.iter().map(|p| self.finish_stamp(p, start, end)).collect()
     }
 
     /// Every stamp so far as currently drawn (no end taper yet).
@@ -872,17 +920,7 @@ impl StrokeBuilder {
     pub fn finish(&mut self) -> Vec<Stamp> {
         let mut run_on = 0.0;
         let mut ignored = Vec::new();
-        if let (Some(last), Some(head)) = (self.last_sample, self.head) {
-            let newest = self.ahead.unwrap_or(head);
-            let to = PathPoint {
-                pos: last.pos,
-                pressure: self.pressure.unwrap_or(1.0),
-                soft: self.soft.unwrap_or(newest.soft),
-                tilt: newest.tilt,
-                azimuth: newest.azimuth,
-                roll: newest.roll,
-                speed: newest.speed,
-            };
+        if let Some(to) = self.input_point() {
             if self.averaged() > 1 {
                 // stabilisation's average catches up with the pen in a straight run
                 self.flush(&mut ignored);
@@ -994,6 +1032,7 @@ impl StrokeBuilder {
         }
         self.last_sample = Some(s);
         self.path_to(smoothed, out);
+        self.settle_start();
     }
 
     /// How many of the latest samples (at the tuned rate) stabilisation averages: more than one
@@ -1080,8 +1119,12 @@ impl StrokeBuilder {
     }
 
     /// How far along the path the start taper grows to full (0: none): the classic one over its
-    /// length in canvas pixels; the newer one over the input up to the first point past its time.
+    /// length in canvas pixels; the newer one over the input up to the first point past its time,
+    /// as far as the path had come then (see [`StrokeBuilder::settle_start`]).
     fn start_span(&self) -> f32 {
+        if let Some(span) = self.start_settled {
+            return span;
+        }
         let taper = self.taper();
         if taper.start <= 0.0 {
             return 0.0;
@@ -1093,6 +1136,31 @@ impl StrokeBuilder {
         let time = f64::from(taper.start) * TAPER_TIME_MS;
         let input = self.history.iter().find(|(t, _)| t - t0 > time).map_or(self.input_length, |&(_, l)| l);
         self.on_path(input)
+    }
+
+    /// Whether the start taper's reach is known: none, the classic one's (a length), or the input
+    /// has gone on past the newer one's time.
+    fn start_known(&self) -> bool {
+        let taper = self.taper();
+        if taper.start <= 0.0 || self.classic() {
+            return true;
+        }
+        let time = f64::from(taper.start) * TAPER_TIME_MS;
+        matches!((self.history.first(), self.history.last()), (Some(&(t0, _)), Some(&(t, _))) if t - t0 > time)
+    }
+
+    /// Fixes the start taper's reach as the input passes its time, as far as the path has come
+    /// then: later input doesn't move it, so the stroke's start drawn for good stays as it is.
+    fn settle_start(&mut self) {
+        if self.start_settled.is_none() && self.start_known() {
+            self.start_settled = Some(self.start_span());
+        }
+    }
+
+    /// Whether the end taper shows while the stroke is drawn: a finger's always, a pen's with the
+    /// tip animation on (a classic taper's only as it ends, where it runs on).
+    fn end_shows(&self) -> bool {
+        !self.classic() && self.taper().end > 0.0 && (!self.pointer.has_pressure() || self.extras.tip_animation)
     }
 
     /// How far back from the end the end taper starts (0: none): the classic one over the run-on
@@ -1406,16 +1474,19 @@ impl StrokeBuilder {
         ]
         .map(by);
         let along = |k: PressureCurve| curves.through(k, pressure);
-        // the wet mix takes a finger's pressure as it settles (see [`FINGER_WET_PRESSURE`])
+        // the paint the wet mix takes in (its dilution, charge, attack and blur) follows a
+        // finger's pressure as it settles (see [`FINGER_WET_PRESSURE`]); how it is carried and
+        // laid (the pull, the grade and the wetness jitter) follows the stamp's own pressure, a
+        // finger's full
         let wetted = if self.pointer.has_pressure() { pressure } else { FINGER_WET_PRESSURE };
         let wet = [
-            curves.at(PC::WetGrade, wetted),
+            curves.at(PC::WetGrade, pressure),
             curves.at(PC::WetBlur, wetted),
             curves.at(PC::WetBlurJitter, wetted),
-            curves.at(PC::WetnessJitter, wetted),
+            curves.at(PC::WetnessJitter, pressure),
             curves.at(PC::Charge, wetted),
             curves.through(PC::Dilution, wetted),
-            curves.through(PC::WetPull, wetted),
+            curves.through(PC::WetPull, pressure),
             along(PC::SmudgePull),
         ];
         let color_jitter_by =
@@ -1833,6 +1904,93 @@ mod tests {
     }
 
     #[test]
+    fn the_stroke_shown_runs_straight_on_from_the_smoothed_path_to_the_input() {
+        let brush = Brush { streamline: 0.9, ..plain() };
+        // along, then turning sharply away: the path falls well behind the input
+        let mut samples = line(40, 200.0);
+        let corner = samples.last().unwrap().pos;
+        samples.extend((1..=10).map(|i| {
+            let pos = corner + Vec2::new(0.0, i as f32 * 8.0);
+            Sample::at(pos, 1.0, 160.0 + f64::from(i) * 4.0)
+        }));
+        let input = samples.last().unwrap().pos;
+        let mut b = StrokeBuilder::new(brush, 4.0, Pointer::Finger);
+        let kept = b.add(&samples);
+        let (count, length) = (b.stamp_count(), b.length());
+        assert!(kept.last().unwrap().center.distance(input) > 20.0, "the path lags");
+        let ahead = b.preview_to_input(&[]);
+        // to the input, as near as the stamps' spacing goes
+        let reached = ahead.last().unwrap().center;
+        assert!(reached.distance(input) < 2.0, "{reached:?}");
+        // the last stretch straight, from where the path has got to
+        let tail: Vec<Vec2> = ahead.iter().rev().take(8).map(|s| s.center).collect();
+        let along = (input - tail[7]) * (1.0 / input.distance(tail[7]));
+        for p in &tail {
+            let d = *p - tail[7];
+            assert!((d.x * along.y - d.y * along.x).abs() < 0.05, "{p:?} is off the line");
+        }
+        // the stroke itself left as it was
+        assert_eq!((b.stamp_count(), b.length()), (count, length));
+        // with nothing to catch up, nothing more is shown
+        let mut plain_stroke = StrokeBuilder::new(plain(), 4.0, Pointer::Finger);
+        plain_stroke.add(&line(10, 50.0));
+        let end = plain_stroke.preview_to_input(&[]).last().map(|s| s.center);
+        assert!(end.is_none_or(|e| e.distance(Vec2::new(50.0, 50.0)) < 2.0), "{end:?}");
+    }
+
+    #[test]
+    fn a_pens_tip_reaches_the_input_past_the_smoothed_path() {
+        let taper = Taper { start: 0.0, end: 0.5, size: 1.0, opacity: 0.0 };
+        let brush = Brush { pen_taper: taper, streamline: 0.9, ..plain() };
+        let samples = line(50, 300.0);
+        let input = samples.last().unwrap().pos;
+        let mut b = StrokeBuilder::new(brush, 4.0, Pointer::Stylus);
+        assert!(b.shows_tip());
+        let (_, tip) = b.add_tipped(&samples);
+        let end = tip.last().unwrap();
+        assert!(end.center.distance(input) < 2.0 && end.radius < 0.5, "{:?} {}", end.center, end.radius);
+    }
+
+    #[test]
+    fn a_fingers_tapers_show_as_it_is_drawn_and_what_is_kept_stays_at_the_end() {
+        let taper = Taper { start: 0.8, end: 0.5, size: 1.0, opacity: 0.0 };
+        let brush = Brush { touch_taper: taper, streamline: 0.3, ..plain() };
+        // 4 px every 8 ms along, then lifted
+        let samples: Vec<Sample> =
+            (0..=80).map(|i| Sample::at(Vec2::new(20.0 + i as f32 * 4.0, 50.0), 1.0, i as f64 * 8.0)).collect();
+        let mut b = StrokeBuilder::new(brush, 20.0, Pointer::Finger);
+        assert!(b.shows_tip());
+        let mut kept = Vec::new();
+        let mut first_tip = None;
+        for (k, chunk) in samples.chunks(2).enumerate() {
+            let (more, tip) = b.add_tipped(chunk);
+            // within the start taper's time (67 ms) nothing is drawn for good, and the tip shows
+            // the start tapered
+            if k < 4 {
+                assert!(more.is_empty(), "kept at {k}");
+            }
+            if k == 3 {
+                first_tip = Some(tip.clone());
+            }
+            kept.extend(more);
+            // the head thinned as it goes
+            if k > 12 {
+                let head = tip.last().unwrap();
+                assert!(head.radius < 3.0, "head {} at {k}", head.radius);
+            }
+        }
+        let first_tip = first_tip.unwrap();
+        assert!(first_tip[0].radius < 3.0 && first_tip.last().unwrap().radius < 3.0, "{first_tip:?}");
+        assert!(kept.len() > 20, "{}", kept.len());
+        // what was drawn for good is the stroke as it ends
+        let all = b.finish();
+        for (i, (k, a)) in kept.iter().zip(&all).enumerate() {
+            assert!(k.center.distance(a.center) < 1e-3 && (k.radius - a.radius).abs() < 1e-3, "{i}: {k:?} {a:?}");
+        }
+        assert!(all[0].radius < 2.0 && all.last().unwrap().radius < 2.0);
+    }
+
+    #[test]
     fn a_touch_stroke_tapers_over_what_it_covers_in_the_taper_s_time() {
         let brush = Brush { touch_taper: Taper { start: 0.5, end: 0.5, size: 1.0, opacity: 0.0 }, ..plain() };
         // 600 px drawn in samples `ms` apart: the end taper covers the input since the last
@@ -1920,7 +2078,7 @@ mod tests {
         let whole_tip = |b: &StrokeBuilder, ahead: &[Sample]| {
             let mut copy = b.clone();
             copy.add(ahead);
-            copy.flush(&mut Vec::new());
+            copy.reach_input(&mut Vec::new());
             copy.tip_from(b.kept)
         };
         let mut checked = 0;
@@ -1932,6 +2090,8 @@ mod tests {
             let mut ahead_stamps = whole.add(&ahead);
             whole.flush(&mut ahead_stamps);
             assert_eq!(b.preview(&ahead), ahead_stamps, "previewed at {k}");
+            whole.walk_to(whole.input_point().unwrap(), &mut ahead_stamps);
+            assert_eq!(b.preview_to_input(&ahead), ahead_stamps, "previewed to the input at {k}");
             // the stroke left as it was
             assert_eq!((b.stamp_count(), b.kept), (count, kept_before));
             let (_, tip) = b.add_tipped(chunk);
@@ -1965,8 +2125,9 @@ mod tests {
         let ahead = b.preview_tip(&[Sample::at(Vec2::new(240.0, 50.0), 1.0, 420.0)]);
         assert!(ahead.last().unwrap().center.x > 230.0 && ahead.last().unwrap().radius < 1.0);
         assert!(kept.len() + more.len() + tip.len() >= b.stamp_count());
-        // a finger, a classic taper or the animation off show no tip
-        assert!(!StrokeBuilder::new(brush.clone(), 10.0, Pointer::Finger).shows_tip());
+        // a finger's end shows tapered whatever the animation; a classic taper or the animation
+        // off show no tip
+        assert!(StrokeBuilder::new(brush.clone(), 10.0, Pointer::Finger).shows_tip());
         let mut classic = brush.clone();
         classic.set_setting("classic_taper", 1.0);
         assert!(!StrokeBuilder::new(classic, 10.0, Pointer::Stylus).shows_tip());
@@ -2270,6 +2431,22 @@ mod tests {
         // a finger as a flat pen, at the pressure its wet mix takes
         let finger = Tilt::reach(std::f32::consts::FRAC_PI_2, 0.0) * FINGER_WET_PRESSURE;
         assert!((attack(1.0, 0.0, true, Pointer::Finger) - finger).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_finger_carries_wet_paint_at_full_pressure_and_takes_it_in_at_its_settled_one() {
+        let wet = |pointer: Pointer, pressure: f32| {
+            let b = Brush { pressure_size: 0.0, ..plain() };
+            StrokeBuilder::new(b, 10.0, pointer).preview(&[Sample::at(Vec2::new(10.0, 10.0), pressure, 0.0)])[0].wet
+        };
+        // without curves the dilution and the pull follow the pressure: a finger's dilution at
+        // the pressure its wet mix settles at, its pull (as its grade and wetness jitter) at full
+        let finger = wet(Pointer::Finger, 1.0);
+        assert!((finger[5] - FINGER_WET_PRESSURE).abs() < 1e-4, "{finger:?}");
+        assert!((finger[6] - 1.0).abs() < 1e-4, "{finger:?}");
+        // a pen takes both at its own pressure
+        let pen = wet(Pointer::Stylus, 0.5);
+        assert!((pen[5] - pen[6]).abs() < 1e-4 && pen[6] < 0.9, "{pen:?}");
     }
 
     #[test]

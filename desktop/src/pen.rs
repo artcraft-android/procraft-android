@@ -601,7 +601,7 @@ mod system {
     use windows::Win32::UI::Input::Pointer::{GetPointerPenInfo, GetPointerType, POINTER_PEN_INFO};
     use windows::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, SetWindowLongPtrW,
-        WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
+        WM_ENDSESSION, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
     };
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -628,8 +628,14 @@ mod system {
     }
 
     /// A pen's pointer message: its pressure and tilt kept by pointer, then the message on to
-    /// winit (a hovering pen's to the system, as the mouse's).
+    /// winit (a hovering pen's to the system, as the mouse's). And the session's end noted.
     unsafe extern "system" fn pointer_messages(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // Windows shutting down or signing out ends the app without the event loop's end: the run
+        // ended all the same, so the next start keeps its graphics backend (else it would move on,
+        // as after a crash; the artwork open is autosaved)
+        if msg == WM_ENDSESSION && wparam.0 != 0 {
+            crate::startup::gpu_ended();
+        }
         let mut hovering = false;
         if msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE || msg == WM_POINTERUP {
             // the pointer's id is the low word of `wparam`

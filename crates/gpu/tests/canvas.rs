@@ -646,6 +646,26 @@ fn the_predicted_tail_shows_but_never_paints() {
 }
 
 #[test]
+fn paint_laid_in_place_shows_no_predicted_tail_over_the_canvas() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(100, 100);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let style = StrokeStyle {
+        rendering: Rendering::Gradual,
+        laid_in_place: true,
+        ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+    };
+    canvas.begin_stroke(doc.current(), style);
+    assert!(!canvas.shows_tip());
+    canvas.add_stamps(&[dot(Vec2::new(20.0, 50.0), 5.0)]);
+    canvas.set_prediction(&[dot(Vec2::new(80.0, 50.0), 5.0)]);
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(pixel(&canvas.read_composite(&gpu).unwrap(), 100, 80, 50), [255, 255, 255, 255]);
+    canvas.end_stroke();
+}
+
+#[test]
 fn a_stroke_tip_shows_until_the_next_one_replaces_it() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

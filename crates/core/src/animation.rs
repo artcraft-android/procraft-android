@@ -422,9 +422,132 @@ pub fn animation_next_step(playback: AnimationPlayback, len: u32, at: u32, step:
     }
 }
 
+/// The animated exports' frame rate slider: 0.1 to 60 frames a second, the rate growing as the
+/// fraction along it to the power 2.4 (slow rates spread out at the start).
+const EXPORT_FPS_LEAST: f32 = 0.1;
+const EXPORT_FPS_MOST: f32 = 60.0;
+const EXPORT_FPS_CURVE: f32 = 2.4;
+
+/// `fps` as the slider shows it, and as the file is made at: in tenths under 1, whole from 1 up.
+fn shown_fps(fps: f32) -> f32 {
+    let fps = if fps.is_nan() { EXPORT_FPS_LEAST } else { fps.clamp(EXPORT_FPS_LEAST, EXPORT_FPS_MOST) };
+    let tenths = (fps * 10.0).round() / 10.0;
+    if tenths < 1.0 { tenths.max(EXPORT_FPS_LEAST) } else { fps.round() }
+}
+
+/// The frame rate an animated export's slider gives at `fraction` (0..1) along it, as shown.
+#[uniffi::export]
+pub fn export_fps_at(fraction: f32) -> f32 {
+    let t = if fraction.is_nan() { 0.0 } else { fraction.clamp(0.0, 1.0) };
+    shown_fps(EXPORT_FPS_LEAST + (EXPORT_FPS_MOST - EXPORT_FPS_LEAST) * t.powf(EXPORT_FPS_CURVE))
+}
+
+/// Where along the slider (0..1) frame rate `fps` sits.
+#[uniffi::export]
+pub fn export_fps_fraction(fps: f32) -> f32 {
+    let fps = if fps.is_nan() { EXPORT_FPS_LEAST } else { fps.clamp(EXPORT_FPS_LEAST, EXPORT_FPS_MOST) };
+    ((fps - EXPORT_FPS_LEAST) / (EXPORT_FPS_MOST - EXPORT_FPS_LEAST)).powf(1.0 / EXPORT_FPS_CURVE)
+}
+
+/// The slider's value for frame rate `fps`: "0.5" under 1, "11" from 1 up.
+#[uniffi::export]
+pub fn export_fps_label(fps: f32) -> String {
+    let fps = shown_fps(fps);
+    if fps < 1.0 { format!("{fps:.1}") } else { format!("{fps:.0}") }
+}
+
+/// A frame rate as a ratio, `frames` every `seconds` (0.1 a second: 1 every 10), so a video's
+/// frame times can be worked out exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct FrameRate {
+    pub frames: u32,
+    pub seconds: u32,
+}
+
+impl FrameRate {
+    /// When frame `index` starts, in `per_second` units of a second (rounded down).
+    pub fn time_of(self, index: u64, per_second: u64) -> u64 {
+        let t = u128::from(index) * u128::from(per_second) * u128::from(self.seconds) / u128::from(self.frames.max(1));
+        u64::try_from(t).unwrap_or(u64::MAX)
+    }
+}
+
+/// `fps` frames a second as a ratio, to a thousandth of a frame (at least a frame in 1000 seconds,
+/// at most 1000 frames a second).
+#[uniffi::export]
+pub fn frame_rate(fps: f32) -> FrameRate {
+    let fps = if fps.is_nan() { 1.0 } else { fps.clamp(0.001, 1000.0) };
+    let thousandths = ((fps * 1000.0).round() as u32).max(1);
+    let (mut a, mut b) = (thousandths, 1000);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    FrameRate { frames: thousandths / a, seconds: 1000 / a }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_export_frame_rate_slider_goes_from_a_tenth_to_sixty_slow_at_the_start() {
+        assert_eq!(export_fps_at(0.0), 0.1);
+        assert_eq!(export_fps_at(1.0), 60.0);
+        // as measured along it
+        for (fraction, fps) in [(0.125, 0.5), (0.25, 2.0), (0.375, 6.0), (0.5, 11.0), (0.56, 15.0), (0.75, 30.0)] {
+            assert!((export_fps_at(fraction) - fps).abs() < 1e-6, "{fraction}: {}", export_fps_at(fraction));
+        }
+        // past the ends it stays at them
+        assert_eq!(export_fps_at(-1.0), 0.1);
+        assert_eq!(export_fps_at(2.0), 60.0);
+        assert_eq!(export_fps_at(f32::NAN), 0.1);
+    }
+
+    #[test]
+    fn a_frame_rate_put_on_the_slider_reads_back_the_same() {
+        // the screen opens at the artwork's own rate
+        for fps in [0.1, 0.3, 0.5, 0.9, 1.0, 2.0, 12.0, 15.0, 24.0, 30.0, 59.0, 60.0] {
+            assert!((export_fps_at(export_fps_fraction(fps)) - fps).abs() < 1e-5, "{fps}");
+        }
+        assert_eq!(export_fps_fraction(0.1), 0.0);
+        assert!((export_fps_fraction(60.0) - 1.0).abs() < 1e-6);
+        assert!((export_fps_fraction(15.0) - 0.56).abs() < 0.005);
+        assert_eq!(export_fps_fraction(100.0), export_fps_fraction(60.0));
+    }
+
+    #[test]
+    fn the_frame_rate_shows_tenths_under_one_and_whole_from_one() {
+        assert_eq!(export_fps_label(0.1), "0.1");
+        assert_eq!(export_fps_label(0.5), "0.5");
+        assert_eq!(export_fps_label(0.94), "0.9");
+        assert_eq!(export_fps_label(0.96), "1");
+        assert_eq!(export_fps_label(11.45), "11");
+        assert_eq!(export_fps_label(60.0), "60");
+        assert_eq!(export_fps_label(export_fps_at(0.125)), "0.5");
+        assert_eq!(export_fps_label(export_fps_at(0.5)), "11");
+        // what is shown is what the file is made at
+        for i in 0..=1000 {
+            let fps = export_fps_at(i as f32 / 1000.0);
+            assert_eq!(export_fps_label(fps).parse::<f32>().unwrap(), fps);
+        }
+    }
+
+    #[test]
+    fn a_frame_rate_as_a_ratio_gives_exact_frame_times() {
+        assert_eq!(frame_rate(0.1), FrameRate { frames: 1, seconds: 10 });
+        assert_eq!(frame_rate(0.5), FrameRate { frames: 1, seconds: 2 });
+        assert_eq!(frame_rate(0.3), FrameRate { frames: 3, seconds: 10 });
+        assert_eq!(frame_rate(15.0), FrameRate { frames: 15, seconds: 1 });
+        assert_eq!(frame_rate(60.0), FrameRate { frames: 60, seconds: 1 });
+        // at 0.1 a frame lasts ten seconds, in 100 ns units
+        let slow = frame_rate(0.1);
+        assert_eq!(slow.time_of(1, 10_000_000), 100_000_000);
+        assert_eq!(slow.time_of(7, 1_000_000), 70_000_000);
+        // no drift over many frames
+        assert_eq!(frame_rate(0.3).time_of(3000, 1000), 10_000_000);
+        assert_eq!(frame_rate(15.0).time_of(15, 1_000_000), 1_000_000);
+        assert_eq!(frame_rate(0.0).seconds, 1000);
+    }
 
     fn run(playback: AnimationPlayback, len: u32, steps: usize) -> Vec<u32> {
         let mut shown = vec![0];

@@ -52,6 +52,7 @@ import io.github.artcraftandroid.procraft.core.Interpolation
 import io.github.artcraftandroid.procraft.core.LayerInfo
 import io.github.artcraftandroid.procraft.core.TextAlignment
 import io.github.artcraftandroid.procraft.core.TextInfo
+import io.github.artcraftandroid.procraft.core.TextSide
 import io.github.artcraftandroid.procraft.core.LayerType
 import io.github.artcraftandroid.procraft.core.MobileException
 import io.github.artcraftandroid.procraft.core.SelectionDisplay
@@ -2006,20 +2007,36 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         artworkDir = null
         panel = Panel.NONE
         screen = Screen.GALLERY
+        closingSaves.incrementAndGet()
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                // after the autosave's save under way, if one is
-                s.stopAutosave()
-                dir?.let { told(runCatching { s.save(it.path) }.map { true }) }
-                // its memory free at once, not when the object is collected
-                s.releaseCanvas()
-                // the frames it recorded made into one more video, their pictures then gone, as
-                // the artwork file keeps a time-lapse
-                lapse?.let { runCatching { it.forPackage() }; it.close() }
+            try {
+                withContext(Dispatchers.IO) {
+                    // after the autosave's save under way, if one is
+                    s.stopAutosave()
+                    dir?.let { told(runCatching { s.save(it.path) }.map { true }) }
+                    // its memory free at once, not when the object is collected
+                    s.releaseCanvas()
+                    // the frames it recorded made into one more video, their pictures then gone, as
+                    // the artwork file keeps a time-lapse
+                    lapse?.let { runCatching { it.forPackage() }; it.close() }
+                }
+            } finally {
+                closingSaves.decrementAndGet()
             }
             galleryVersion++
             refreshGallery()
         }
+    }
+
+    /** Artworks left that are still being saved. */
+    private val closingSaves = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Gallery Recovery, once what is being saved is kept: artworks the gallery can't show stacked as Recovered Artworks. */
+    suspend fun recoverLostArtworks() {
+        while (closingSaves.get() > 0) kotlinx.coroutines.delay(100)
+        withContext(Dispatchers.IO) { store.recoverLost() }
+        galleryVersion++
+        refreshGallery()
     }
 
     /** When time on the open artwork last started counting (elapsed realtime), 0 while away. */
@@ -2548,6 +2565,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             in android.view.KeyEvent.KEYCODE_0..android.view.KeyEvent.KEYCODE_9 -> ('0' + (keyCode - android.view.KeyEvent.KEYCODE_0)).toString()
             android.view.KeyEvent.KEYCODE_LEFT_BRACKET -> "["
             android.view.KeyEvent.KEYCODE_RIGHT_BRACKET -> "]"
+            android.view.KeyEvent.KEYCODE_SEMICOLON -> ";"
+            android.view.KeyEvent.KEYCODE_SPACE -> "space"
             android.view.KeyEvent.KEYCODE_DEL -> "backspace"
             android.view.KeyEvent.KEYCODE_FORWARD_DEL -> "delete"
             android.view.KeyEvent.KEYCODE_DPAD_LEFT -> "left"
@@ -2576,10 +2595,21 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             KeyShortcut.DuplicateLayer -> duplicateCurrent()
             KeyShortcut.Interface -> toggleBars()
             KeyShortcut.ClearLayer -> clearCurrentLayer()
+            KeyShortcut.CopyCanvas -> runQuickAction(QuickAction.COPY_CANVAS, screenCentre)
+            KeyShortcut.ColourBalance -> runQuickAction(QuickAction.COLOR_BALANCE, screenCentre)
+            KeyShortcut.PerspectiveGuide -> runQuickAction(QuickAction.GUIDE_PERSPECTIVE, screenCentre)
+            KeyShortcut.QuickMenu -> toggleQuickMenu(screenCentre)
             KeyShortcut.GreyView -> session?.let { it.setGreyView(!it.greyView()) }
             is KeyShortcut.BrushSize -> changeSize((size + shortcut.by).coerceIn(0f, 1f))
             is KeyShortcut.Nudge -> session?.transformArrow(shortcut.dx, shortcut.dy)?.let { transformMoved(it) }
         }
+        return true
+    }
+
+    /** Alt on a hardware keyboard went down or up: held it is □ held; it taps nothing, being in the system's own shortcuts. */
+    fun modifyKey(down: Boolean): Boolean {
+        if (screen != Screen.CANVAS || session == null) return false
+        if (down) modifyPressed() else modifyReleased(true)
         return true
     }
 
@@ -3452,9 +3482,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         textStyleOpen = true
     }
 
-    /** The style sheet's Cancel: its changes go back (the text stays), and the keyboard returns. */
+    /** The style sheet's Cancel: its changes go back (the text, where it is and its width stay), and the keyboard returns. */
     fun cancelTextStyle() {
-        textBeforeStyle?.let { before -> changeText { before.copy(text = it.text) } }
+        textBeforeStyle?.let { before -> changeText { before.copy(text = it.text, x = it.x, y = it.y, width = it.width) } }
         textStyleOpen = false
     }
 
@@ -3606,6 +3636,39 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val a = windowToCanvas(from) ?: return
         val b = windowToCanvas(to) ?: return
         changeText { it.copy(x = it.x + b.x - a.x, y = it.y + b.y - a.y) }
+    }
+
+    /** The side of the text box whose dot is within [reach] pixels of window point [p], if any. */
+    fun textSideAt(p: Offset, reach: Float): TextSide? = session?.textSideAt(p.x, p.y, reach)
+
+    /** A drag of the text box's [side] begins at window point [from]: the side follows it, the other staying put. */
+    fun beginTextSide(side: TextSide, from: Offset): Boolean = session?.textSideBegin(side, from.x, from.y) == true
+
+    /** The side being dragged follows the drag to window point [to]: the text wraps to the box's new width. */
+    fun dragTextSide(to: Offset) {
+        val info = session?.textSideDrag(to.x, to.y) ?: return
+        textInfo = info
+        renderText()
+    }
+
+    /** The side's drag ends: one undo step while the text is edited. */
+    fun endTextSide() {
+        session?.textSideEnd()
+        refresh()
+    }
+
+    /**
+     * Inside editing text, a change to its box's width undone ([undo]) or redone, the text still
+     * edited; false if there is none.
+     */
+    private fun stepTextBox(undo: Boolean): Boolean {
+        val s = session ?: return false
+        val name = (if (undo) s.textBoxUndo() else s.textBoxRedo()) ?: return false
+        s.editingText()?.let(s::layerText)?.let { textInfo = it }
+        renderText()
+        showNotice((if (undo) "Undo " else "Redo ") + name)
+        refresh()
+        return true
     }
 
     /** Whether the current layer holds editable text. */
@@ -4682,7 +4745,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                         val mime = if (format == Animated.HEVC) android.media.MediaFormat.MIMETYPE_VIDEO_HEVC else android.media.MediaFormat.MIMETYPE_VIDEO_AVC
                         val (vw, vh) = VideoWriter.fit(w, h, maxOf(w, h), mime) ?: return@withContext null
                         val count = (t.seconds * TURNTABLE_FPS).roundToInt().coerceAtLeast(1)
-                        val ok = VideoWriter.write(file, vw, vh, TURNTABLE_FPS, count, mime) { i, pixels ->
+                        val ok = VideoWriter.write(file, vw, vh, TURNTABLE_FPS.toFloat(), count, mime) { i, pixels ->
                             if (cancelled()) return@write false
                             videoDone = i.toFloat() / count
                             val p = s.modelTurntablePicture(i.toUInt(), count.toUInt(), t, vw.toUInt(), vh.toUInt(), true) ?: return@write false
@@ -4748,9 +4811,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** One animation export at a time: they write the same file. */
     private val animationExports = Mutex()
 
+    /** The artwork's own frame rate, which an animated export starts at: Animation Assist's, else 15. */
+    fun artworkFps(): Float = (session?.animationSettings()?.fps?.toInt() ?: ANIMATION_FPS).toFloat()
+
     /**
-     * The animation written as [format] into the cache, to share: Web Ready fits 480 pixels, else
-     * the canvas size (a video as large as the encoder takes, up to 4096).
+     * The animation written as [format] into the cache, to share, [fps] frames a second: Web Ready
+     * fits 480 pixels, else the canvas size (a video as large as the encoder takes, up to 4096).
      */
     suspend fun exportAnimation(
         format: Animated,
@@ -4758,6 +4824,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         dither: Boolean,
         perFramePalette: Boolean,
         transparent: Boolean,
+        fps: Float,
         cancelled: () -> Boolean = { false },
     ): File? {
         val s = session ?: return null
@@ -4766,12 +4833,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             val base = io.github.artcraftandroid.procraft.core.exportFileName(s.name(), false)
             val file = File(dir, "$base.${format.extension}")
             val side = if (webReady) WEB_READY_SIDE else 0
-            // Animation Assist's own frame rate, when it is on
-            val fps = s.animationSettings()?.fps?.toInt() ?: ANIMATION_FPS
             try {
                 when (format) {
-                    Animated.GIF -> s.exportGif(file.path, side.toUInt(), fps.toFloat(), dither, perFramePalette, transparent)
-                    Animated.PNG -> s.exportApng(file.path, side.toUInt(), fps.toFloat(), transparent)
+                    Animated.GIF -> s.exportGif(file.path, side.toUInt(), fps, dither, perFramePalette, transparent)
+                    Animated.PNG -> s.exportApng(file.path, side.toUInt(), fps, transparent)
                     Animated.MP4, Animated.HEVC -> {
                         val mime = if (format == Animated.HEVC) android.media.MediaFormat.MIMETYPE_VIDEO_HEVC else android.media.MediaFormat.MIMETYPE_VIDEO_AVC
                         val (cw, ch) = canvasSize()
@@ -4804,12 +4869,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** [exportAnimation] with the export card (as every export has), how far it has come shown; Cancel stops a video. */
-    suspend fun shareAnimation(format: Animated, webReady: Boolean, dither: Boolean, perFramePalette: Boolean, transparent: Boolean): File? {
+    suspend fun shareAnimation(format: Animated, webReady: Boolean, dither: Boolean, perFramePalette: Boolean, transparent: Boolean, fps: Float): File? {
         val s = session ?: return null
         s.resetExportProgress()
         videoDone = 0f
         return withCard("The animation could not be exported.", { if (format.video) videoDone else s.exportProgress() }) {
-            exportAnimation(format, webReady, dither, perFramePalette, transparent) { exportCancelled }
+            exportAnimation(format, webReady, dither, perFramePalette, transparent, fps) { exportCancelled }
         }
     }
 
@@ -5036,7 +5101,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         feedback()
         // a finished text's step goes back to editing that text first, as a step of its own
         if (textInfo == null && !transforming) session?.textUndoLayer()?.let { if (resumeText(it)) return }
-        // undoing while editing text undoes the whole edit
+        // editing text, a change to its box's width goes back a step at a time, still editing
+        if (textInfo != null && stepTextBox(undo = true)) return
+        // undoing while editing text otherwise undoes the whole edit
         if (textInfo != null) {
             textInfo = null
             textStyleOpen = false
@@ -5082,9 +5149,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun redo() {
         feedback()
         if (transforming) return
+        if (textInfo != null && stepTextBox(undo = false)) return
+        // text being edited is kept first
+        val editing = textInfo != null
+        textInfo = null
+        textStyleOpen = false
         val could = canRedo
         // a text edit redone is edited again
-        val text = if (textInfo == null) session?.textRedoLayer() else null
+        val text = if (!editing) session?.textRedoLayer() else null
         // recoloring, the core steps the open fill aside and makes it again over what comes back
         val name = session?.let { s -> if (recoloring) pourNow { s.redo() } else s.redo() }
         if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())

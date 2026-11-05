@@ -61,6 +61,9 @@ class ArtworkStore(val root: File) {
     /** A new stack in the gallery holding [artworks] (moved into it), where the first of them was, in the gallery's order. */
     fun stack(artworks: List<Artwork>): File = File(core.stack(artworks.map { it.dir.path }))
 
+    /** Puts artworks the gallery can't show in a new stack, Recovered Artworks; how many it found. */
+    fun recoverLost(): Int = core.recoverLostArtworks().toInt()
+
     fun renameStack(s: Stack, name: String) = core.renameStack(s.dir.path, name)
 
     private fun artwork(a: GalleryArtwork) = Artwork(File(a.dir), a.name, a.width.toInt(), a.height.toInt(), a.modifiedMs)

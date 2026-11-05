@@ -89,7 +89,10 @@ pub use adjust_menu::{
     quick_action_adjustment,
 };
 pub use adjusting::{AdjustShown, CLONE_PUCK_RADIUS};
-pub use animation::{AnimationPlayback, AnimationSettings, PlayStep, animation_next_step};
+pub use animation::{
+    AnimationPlayback, AnimationSettings, FrameRate, PlayStep, animation_next_step, export_fps_at, export_fps_fraction,
+    export_fps_label, frame_rate,
+};
 pub use brush_files::{BrushesRead, OTHER_BRUSH_EXTENSIONS, ReadBrushes, is_brush_zip, read_any_brushes, read_brushes};
 pub use brushes::{BrushInfo, BrushSetInfo, RecentBrush};
 pub use colour::{
@@ -141,7 +144,7 @@ pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
     source_from_picture, source_library, source_size,
 };
-pub use text::{TextAlignment, TextDraw, TextDrawn, TextInfo};
+pub use text::{TextAlignment, TextDraw, TextDrawn, TextInfo, TextSide};
 pub use text_draw::{
     TextPicture, TextTypeface, add_system_text_fonts, add_text_font, add_text_font_file, draw_chosen_text, draw_text,
     import_text_font, set_text_family_alias, set_text_font_folder, text_box, text_caret, text_families,
@@ -377,8 +380,9 @@ pub(crate) struct State {
     /// the steps the canvas then put back had made (redo only while that hasn't changed).
     crop_undo: Option<(Canvas, Document)>,
     crop_redo: Option<(Canvas, Document, u64)>,
-    /// The text layer being edited, and the document as the edit began.
-    text_edit: Option<(procraft_engine::document::LayerId, Document)>,
+    /// The text layer being edited, the document as the edit began, and the width changes made
+    /// inside it.
+    text_edit: Option<text::TextEdit>,
     /// Where the edit last drew its text into the layer (none: not yet, on a layer already there,
     /// so the next draw takes the whole layer).
     text_drawn: Option<procraft_engine::geom::IRect>,
@@ -849,18 +853,24 @@ fn draw_samples(
     canvas.add_stamps(&stamps);
     // the stretch to the newest point waits for the point after it to curve by: shown meanwhile
     // (as predicted input is, until the next)
-    show_ahead(canvas, &guide::mirrored(guide, &builder.preview(&[])));
+    show_ahead(canvas, builder, &[], guide);
     !stamps.is_empty()
 }
 
-/// Shows `stamps` ahead of the open stroke until the next input: as its tip where the canvas
-/// takes one, so they look as the stroke will (its grain, build-up and colour, under the layers
-/// above it and in its layer's blend), else drawn over the canvas.
-fn show_ahead(canvas: &mut Canvas, stamps: &[procraft_engine::stroke::Stamp]) {
+/// Shows what is ahead of the open stroke (`samples` being predicted input) until the next input:
+/// as its tip where the canvas takes one, on to the input itself, so it looks as the stroke will
+/// (its grain, build-up and colour, under the layers above it and in its layer's blend); else
+/// drawn over the canvas, and only as far as the path has got.
+fn show_ahead(
+    canvas: &mut Canvas,
+    builder: &mut StrokeBuilder,
+    samples: &[Sample],
+    guide: &procraft_engine::guide::Guide,
+) {
     if canvas.shows_tip() {
-        canvas.set_tip(stamps);
+        canvas.set_tip(&guide::mirrored(guide, &builder.preview_to_input(samples)));
     } else {
-        canvas.set_prediction(stamps);
+        canvas.set_prediction(&guide::mirrored(guide, &builder.preview(samples)));
     }
 }
 
@@ -1477,7 +1487,7 @@ impl CanvasSession {
         if canvas.shows_tip() && builder.shows_tip() {
             canvas.set_tip(&guide::mirrored(&guide, &builder.preview_tip(&canvas_samples)));
         } else {
-            show_ahead(canvas, &guide::mirrored(&guide, &builder.preview(&canvas_samples)));
+            show_ahead(canvas, builder, &canvas_samples, &guide);
         }
         self.shared.frame(st);
     }
@@ -1780,6 +1790,10 @@ impl CanvasSession {
 
     /// Undoes the last step; returns what it was called, if it was named.
     pub fn undo(&self) -> Option<String> {
+        // editing text, a change to its box's width goes back first, the text still edited
+        if let Some(name) = self.text_box_undo() {
+            return Some(name);
+        }
         if self.swap_crop(true) {
             return Some("Crop canvas".to_owned());
         }
@@ -1804,6 +1818,9 @@ impl CanvasSession {
 
     /// Redoes the last step undone; returns what it was called, if it was named.
     pub fn redo(&self) -> Option<String> {
+        if let Some(name) = self.text_box_redo() {
+            return Some(name);
+        }
         if self.swap_crop(false) {
             return Some("Crop canvas".to_owned());
         }
@@ -1881,9 +1898,12 @@ impl CanvasSession {
             can_undo: st.canvas.as_ref().is_some_and(Canvas::can_undo)
                 || st.crop_undo.is_some()
                 || st.shape.is_some()
-                || st.adjust.touched(),
+                || st.adjust.touched()
+                || st.text_edit.as_ref().is_some_and(|e| e.has_step(true)),
             // keeping an open shape drops what could be redone
-            can_redo: st.shape.is_none() && (st.canvas.as_ref().is_some_and(Canvas::can_redo) || st.crop_redo_ready()),
+            can_redo: (st.shape.is_none()
+                && (st.canvas.as_ref().is_some_and(Canvas::can_redo) || st.crop_redo_ready()))
+                || st.text_edit.as_ref().is_some_and(|e| e.has_step(false)),
             zoom: st.view.map_or(1.0, |v| v.zoom()),
             frames: st.frames,
             frame_interval_ms: st.frame_interval_ms,

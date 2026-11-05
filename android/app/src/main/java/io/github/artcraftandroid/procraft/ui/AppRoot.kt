@@ -92,10 +92,6 @@ fun AppRoot(vm: CanvasViewModel) {
                 GuideOverlay(vm)
                 if (vm.transforming) TransformOverlay(vm)
                 if (vm.selecting) SelectionOverlay(vm, Pc.BarHeight)
-                if (vm.panel != Panel.NONE) {
-                    // a tap outside an open panel closes it (and does not paint)
-                    Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { vm.tapOutsidePanel() } })
-                }
                 vm.picking?.let { pick ->
                     val pickingZ = if (pick.fromReference) 1f else 0f
                     Loupe(pick, CanvasSpace.color(vm.colorRgb()), Modifier.zIndex(pickingZ))
@@ -180,7 +176,7 @@ fun AppRoot(vm: CanvasViewModel) {
                         scaleX = scale
                         scaleY = scale
                         transformOrigin = androidx.compose.ui.graphics.TransformOrigin(place.arrowX / width, 0f)
-                    }
+                    }.then(if (vm.panel == Panel.NONE) Modifier.takingNoTouches() else Modifier)
                     ProvidePanelLook(PanelLook(alpha, scale, pivot)) {
                         when (shown) {
                             Panel.LAYERS -> if (vm.backgroundPicking) {

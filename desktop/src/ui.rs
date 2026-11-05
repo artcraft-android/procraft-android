@@ -62,9 +62,11 @@ pub struct Interface {
     pub canvas_rect: Rect,
     /// A popover is open: a press on the canvas only closes it.
     pub popover_open: bool,
-    /// Only a brush library is open (none of its menus): a press on the canvas closes it and
-    /// paints, as a mouse is used (on the tablet such a tap only closes it).
-    pub library_lets_paint: bool,
+    /// Only a panel is open (none of its menus): a press on the canvas goes to the canvas, waiting
+    /// to be a tap, which only closes the panel, or a drag, which closes it and paints.
+    pub panel_lets_through: bool,
+    /// The last press went to the canvas, which closes the panel in its own time.
+    canvas_pressed: bool,
     /// The file the artwork was last saved to (or opened from, if it saves back there).
     pub path: Option<PathBuf>,
     /// The artwork's edits when it was last saved: anything else is unsaved.
@@ -178,7 +180,8 @@ impl Default for Interface {
             actions: Vec::new(),
             canvas_rect: Rect::EVERYTHING,
             popover_open: false,
-            library_lets_paint: false,
+            panel_lets_through: false,
+            canvas_pressed: false,
             path: None,
             saved_edits: 0,
             saving: None,
@@ -375,6 +378,7 @@ impl Interface {
         let ctx = ui.ctx().clone();
         self.style_once(&ctx);
         self.ended_export = None;
+        self.canvas_pressed = std::mem::take(&mut input.canvas_pressed);
         // looked at again soon while an insert is read, or brushes made
         let brushes_coming = self.brushes_added(session);
         // the autosave told of when it fails (once until a save works again), the palettes too
@@ -620,7 +624,12 @@ impl Interface {
         // the modify button tapped does what Tap □ is set to (opens or closes the eyedropper at
         // first); held, touches do what □ + Touch and □ + Pen are set to (unless one did, its tap
         // then does nothing)
-        let used = session.set_modify_held(taps.modify_down);
+        // Alt held is the button held; tapped it does nothing, being in the system's own shortcuts
+        let used = session.set_modify_held(taps.modify_down || input.modify_key());
+        // Space tapped, not moving the canvas, opens or closes the QuickMenu
+        if std::mem::take(&mut input.space_tapped) && !self.keys_taken() {
+            self.quick_menu.toggle(ctx.content_rect().center());
+        }
         if taps.modify_tapped && !used {
             self.tap_modify(&ctx, session);
         }
@@ -747,8 +756,7 @@ impl Interface {
             ctx.set_cursor_icon(icon);
         }
         self.popover_open = self.open.is_some() || self.settings || self.text.editing();
-        self.library_lets_paint =
-            self.open == Some(Popover::Brushes) && !self.settings && !self.text.editing() && !self.library.modal();
+        self.panel_lets_through = self.open.is_some_and(|p| !self.modal(p)) && !self.settings && !self.text.editing();
     }
 
     /// The touch companion, with its switch on in Advanced settings.
@@ -1080,6 +1088,9 @@ impl Interface {
                 // what a pen's own settings ask its button to show
                 TouchCommand::ShowColours => self.toggle(session, Popover::Colour),
                 TouchCommand::ShowBrushes => self.toggle(session, Popover::Brushes),
+                // a press on the canvas with a panel open: dragged or held, it goes on; a tap only
+                // closes the panel
+                TouchCommand::PanelFades | TouchCommand::PanelTapped => self.open = None,
                 // a stroke or a fill on a text layer: it takes them once rasterized
                 TouchCommand::TextLayer => self.text.ask_rasterize(),
                 // (the pen's hover, which sets the brush with a finger, isn't the desktop's)
@@ -1120,7 +1131,15 @@ impl Interface {
         {
             return;
         }
-        // undoing while editing text undoes the whole edit
+        // editing text, a change to its box's width goes back a step at a time, still editing
+        if self.text.editing()
+            && let Some(name) = session.text_box_undo()
+        {
+            self.text.reread(session);
+            self.overlays.notice(format!("Undo {name}"), false);
+            return;
+        }
+        // undoing while editing text otherwise undoes the whole edit
         self.text.end(session, true);
         let could = session.info().can_undo;
         let name = session.undo();
@@ -1133,6 +1152,13 @@ impl Interface {
 
     fn redo(&mut self, session: &CanvasSession) {
         self.feedback();
+        if self.text.editing()
+            && let Some(name) = session.text_box_redo()
+        {
+            self.text.reread(session);
+            self.overlays.notice(format!("Redo {name}"), false);
+            return;
+        }
         // text being edited is kept first
         let editing = self.text.editing();
         self.text.end(session, true);
@@ -1822,13 +1848,7 @@ impl Interface {
             return;
         };
         // while one of the panel's menus is open, a press elsewhere only closes the menu
-        let modal = match which {
-            Popover::Layers => self.layers.modal(),
-            Popover::Brushes => self.library.modal(),
-            Popover::Colour => self.colours.modal(),
-            Popover::Actions => self.licences || self.actions_panel.modal(),
-            Popover::Adjustments => false,
-        };
+        let modal = self.modal(which);
         let shown = match which {
             Popover::Brushes => {
                 let shown = self.library.show(ctx, &mut self.look, session, tool, button, backdrops);
@@ -2009,12 +2029,25 @@ impl Interface {
         }
     }
 
-    /// A press anywhere but on the popover at `shown` and its `button`, or Escape, closes it.
+    /// One of the menus of popover `which` is open.
+    fn modal(&self, which: Popover) -> bool {
+        match which {
+            Popover::Layers => self.layers.modal(),
+            Popover::Brushes => self.library.modal(),
+            Popover::Colour => self.colours.modal(),
+            Popover::Actions => self.licences || self.actions_panel.modal(),
+            Popover::Adjustments => false,
+        }
+    }
+
+    /// A press anywhere but on the popover at `shown` and its `button`, or Escape, closes it (one
+    /// the canvas took closes it as the touches say).
     fn close_outside(&mut self, ctx: &egui::Context, shown: Rect, button: Rect) {
-        let pressed_outside = ctx.input(|i| {
-            i.pointer.any_pressed()
-                && i.pointer.interact_pos().is_some_and(|p| !shown.contains(p) && !button.contains(p))
-        });
+        let pressed_outside = !self.canvas_pressed
+            && ctx.input(|i| {
+                i.pointer.any_pressed()
+                    && i.pointer.interact_pos().is_some_and(|p| !shown.contains(p) && !button.contains(p))
+            });
         if escape(ctx) || pressed_outside {
             self.open = None;
         }
@@ -2103,12 +2136,13 @@ impl Interface {
                 continue;
             };
             ctx.input_mut(|i| i.consume_key(modifiers, key));
-            self.key_shortcut(session, info, shortcut);
+            self.key_shortcut(ctx, session, info, shortcut);
         }
     }
 
     /// Does what a keyboard shortcut says.
-    fn key_shortcut(&mut self, session: &CanvasSession, info: &CanvasInfo, shortcut: KeyShortcut) {
+    fn key_shortcut(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo, shortcut: KeyShortcut) {
+        let middle = ctx.content_rect().center();
         match shortcut {
             KeyShortcut::Undo => self.undo(session),
             KeyShortcut::Redo => self.redo(session),
@@ -2129,6 +2163,10 @@ impl Interface {
             KeyShortcut::DuplicateLayer => self.duplicate_current(session),
             KeyShortcut::Interface => self.toggle_bars(session),
             KeyShortcut::ClearLayer => self.clear_layer(session),
+            KeyShortcut::CopyCanvas => self.run_quick(ctx, session, QuickAction::CopyCanvas, middle),
+            KeyShortcut::ColourBalance => self.run_quick(ctx, session, QuickAction::ColorBalance, middle),
+            KeyShortcut::PerspectiveGuide => self.run_quick(ctx, session, QuickAction::GuidePerspective, middle),
+            KeyShortcut::QuickMenu => self.quick_menu.toggle(middle),
             KeyShortcut::GreyView => session.set_grey_view(!session.grey_view()),
             KeyShortcut::BrushSize { by } => session.set_brush_size((info.size + by).clamp(0.0, 1.0)),
             KeyShortcut::Nudge { dx, dy } => self.transform.moved(session.transform_arrow(dx, dy)),
@@ -2173,6 +2211,7 @@ fn key_name(key: Key) -> Option<&'static str> {
     Some(match key {
         Key::OpenBracket | Key::OpenCurlyBracket => "[",
         Key::CloseBracket | Key::CloseCurlyBracket => "]",
+        Key::Semicolon => ";",
         Key::Delete => "delete",
         Key::Backspace => "backspace",
         Key::ArrowLeft => "left",

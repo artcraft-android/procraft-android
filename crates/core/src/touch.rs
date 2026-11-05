@@ -8,7 +8,8 @@
 //! it; three fingers scrubbed clear the layer and swiped down do what Three-finger swipe is set to;
 //! four fingers tapped do what Four-finger tap is. The modify button tapped makes the next touch
 //! pick a colour; held, a touch does what □ + Touch (□ + Pen) is set to. A snapped shape being
-//! edited has its handles, outline and body dragged.
+//! edited has its handles, outline and body dragged. With a panel open over the canvas a touch waits:
+//! a tap only closes the panel; a drag fades it and goes on from where it came down.
 //!
 //! Positions are window pixels and times the platform's event clock (milliseconds).
 
@@ -28,6 +29,8 @@ const TAP_MS: f64 = 300.0;
 /// A liquify brush lifted within this long of its last move carries on.
 const LIQUIFY_STILL_MS: f64 = 60.0;
 const TAP_SLOP: f32 = 24.0;
+/// A touch on the canvas with a panel open moved this far (points) is a drag, not a tap.
+const PANEL_SLOP: f32 = 10.0;
 /// The single touch companion's Zoom: a drag this far (points) up zooms the canvas in e times.
 pub const COMPANION_ZOOM_DISTANCE: f32 = 180.0;
 
@@ -297,6 +300,11 @@ pub enum TouchCommand {
     /// platform ask its double-tap or squeeze to show ([`crate::PenPreferred`]).
     ShowColours,
     ShowBrushes,
+    /// A touch held for an open panel ([`CanvasSession::set_touch_panel_open`]) became a drag: the
+    /// panel fades away, and the touch goes on. It was a tap: the panel closes, and nothing else
+    /// happens. (Held still, it does what a hold does, the panel staying.)
+    PanelFades,
+    PanelTapped,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,6 +342,8 @@ enum Mode {
     Turn,
     /// Hover's touch: a finger dragging the opacity, two pinching the size.
     Hover,
+    /// A panel is open: the touch waits to be a tap or a drag, doing nothing yet.
+    Held,
 }
 
 /// A drag on perspective blur's puck: it moves the puck (held this far from its centre, window
@@ -348,6 +358,13 @@ enum PuckDrag {
 struct Down {
     id: u64,
     at: (f32, f32),
+}
+
+/// A touch waiting for an open panel: its kind, its first input, and its input since.
+struct Held {
+    kind: PointerKind,
+    first: Vec<PenSample>,
+    moves: Vec<PenSample>,
 }
 
 /// The touches' state: kept by the session, apart from the canvas's (they call into it).
@@ -445,6 +462,9 @@ pub(crate) struct Touches {
     hover_spread: f32,
     /// The pen's own gestures: where it hovers, and a squeeze held.
     pen: pen::PenState,
+    /// A panel is open over the canvas, and the touch waiting for it to go.
+    panel_open: bool,
+    held: Option<Held>,
     /// Window pixels a point.
     scale: f32,
 }
@@ -517,6 +537,8 @@ impl Default for Touches {
             hover_x: 0.0,
             hover_spread: 0.0,
             pen: pen::PenState::default(),
+            panel_open: false,
+            held: None,
             scale: 1.0,
         }
     }
@@ -685,6 +707,15 @@ impl CanvasSession {
         self.touches().companion = mode;
     }
 
+    /// A panel is open over the canvas (or not): a touch landing on the canvas waits, until a tap
+    /// only closes the panel ([`TouchCommand::PanelTapped`]) or a drag fades it
+    /// ([`TouchCommand::PanelFades`]) and does what it would have from where it came down. Held
+    /// still, it does what a hold does; more fingers landing move the canvas: both leave the
+    /// panel up.
+    pub fn set_touch_panel_open(&self, open: bool) {
+        self.touches().panel_open = open;
+    }
+
     /// Layer Opacity's layer's opacity as dragged, while it is on.
     pub fn touch_layer_opacity(&self) -> Option<f32> {
         self.touches().layer_opacity.map(|(_, opacity)| opacity)
@@ -739,9 +770,10 @@ impl CanvasSession {
         if is_pen(kind)
             && t.down.len() > 1
             && t.modify_pointer.is_none()
-            && matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Gesture | Mode::Pick)
+            && matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Gesture | Mode::Pick | Mode::Held)
         {
             let mode = std::mem::replace(&mut t.mode, Mode::None);
+            t.held = None;
             t.down.retain(|d| d.id == id);
             t.hold_due = None;
             t.quickshape_due = None;
@@ -761,7 +793,9 @@ impl CanvasSession {
             }
             out.push(TouchCommand::CursorGone);
         }
-        if t.down.len() == 1 {
+        if t.down.len() == 1 && t.panel_open {
+            Self::wait_for_panel(&mut t, kind, first, samples);
+        } else if t.down.len() == 1 {
             self.first_down(&mut t, kind, first, &samples, &mut out);
         } else {
             self.another_down(&mut t, kind, first.time_ms, &mut out);
@@ -804,6 +838,14 @@ impl CanvasSession {
                 self.clone_stroke_at(at, false);
                 self.stroke_add(samples);
                 out.push(TouchCommand::Cursor { x: at.0, y: at.1 });
+            }
+            Mode::Held if id == t.stroke_pointer => {
+                if let Some(held) = t.held.as_mut() {
+                    held.moves.extend(samples);
+                }
+                if dist(at, t.down_at) > PANEL_SLOP * t.scale {
+                    self.held_goes_on(t, true, &mut out);
+                }
             }
             Mode::Puck if id == t.stroke_pointer => {
                 let (gx, gy) = t.puck_grab;
@@ -1041,6 +1083,11 @@ impl CanvasSession {
     pub fn touch_tick(&self, now_ms: f64) -> Vec<TouchCommand> {
         let mut out = Vec::new();
         let mut t = self.touches();
+        // a finger waiting for a panel held still: the hold goes on below, the panel staying
+        if t.mode == Mode::Held && t.hold_due.is_some_and(|due| due <= now_ms) {
+            self.held_goes_on(t, false, &mut out);
+            t = self.touches();
+        }
         // a freehand selection held still snaps to a shape, which the lift then selects
         if t.mode == Mode::Select
             && t.quickshape_due.is_some_and(|due| due <= now_ms)
@@ -1132,6 +1179,39 @@ impl CanvasSession {
     fn opacity_lifted(&self, t: &mut Touches) {
         if let Some((layer, opacity)) = t.layer_opacity.filter(|_| std::mem::take(&mut t.opacity_moved)) {
             self.set_layer_opacity(layer, opacity, true);
+        }
+    }
+
+    /// The first pointer down with a panel open: it waits to be a tap or a drag.
+    fn wait_for_panel(t: &mut Touches, kind: PointerKind, first: PenSample, samples: Vec<PenSample>) {
+        t.down_at = (first.x, first.y);
+        t.pan_last = None;
+        t.tap_start = first.time_ms;
+        t.tap_pointers = 1;
+        t.tap_moved = 0.0;
+        t.stroke_pointer = t.down.first().map_or(0, |d| d.id);
+        t.held = Some(Held { kind, first: samples, moves: Vec::new() });
+        t.mode = Mode::Held;
+        if !is_pen(kind) && t.settings.hold.is_some() {
+            t.hold_due = Some(first.time_ms + t.settings.hold_ms);
+        }
+    }
+
+    /// The touch waiting for a panel is no tap: it does what it would have done from where it came
+    /// down, then its input since; a drag first fades the panel (`fades`), a hold leaves it up.
+    fn held_goes_on(&self, mut t: std::sync::MutexGuard<'_, Touches>, fades: bool, out: &mut Vec<TouchCommand>) {
+        let Some(held) = t.held.take() else { return };
+        let Some(first) = last_of(&held.first).copied() else { return };
+        let id = t.stroke_pointer;
+        t.mode = Mode::None;
+        t.hold_due = None;
+        if fades {
+            out.push(TouchCommand::PanelFades);
+        }
+        self.first_down(&mut t, held.kind, first, &held.first, out);
+        drop(t);
+        if !held.moves.is_empty() {
+            out.extend(self.touch_move(id, held.moves));
         }
     }
 
@@ -1385,9 +1465,12 @@ impl CanvasSession {
             }
             return;
         }
-        if matches!(t.mode, Mode::Pen | Mode::Pick) {
+        // (a pen waiting for a panel is a pen: fingers landing leave it to draw)
+        let pen_held = t.held.as_ref().is_some_and(|h| is_pen(h.kind));
+        if matches!(t.mode, Mode::Pen | Mode::Pick) || pen_held {
             return;
         }
+        t.held = None;
         // a second finger takes back the fill the first one made, and a transform's drag; it keeps
         // the opacity dragged so far
         if t.mode == Mode::Pour {
@@ -1424,7 +1507,14 @@ impl CanvasSession {
         self.end_stroke_tools(t);
         if matches!(
             t.mode,
-            Mode::Finger | Mode::Idle | Mode::Pour | Mode::Transform | Mode::Select | Mode::Recolor | Mode::Turn
+            Mode::Finger
+                | Mode::Idle
+                | Mode::Pour
+                | Mode::Transform
+                | Mode::Select
+                | Mode::Recolor
+                | Mode::Turn
+                | Mode::Held
         ) {
             t.gesture_scale = 1.0;
             t.pinch.clear();
@@ -1607,6 +1697,12 @@ impl CanvasSession {
                 }
             }
             Mode::Opacity => self.opacity_lifted(&mut t),
+            Mode::Held => {
+                t.held = None;
+                if !cancelled {
+                    out.push(TouchCommand::PanelTapped);
+                }
+            }
             // a tap starts the reticle again where it lands
             Mode::Recolor if !t.recolor_dragged && !cancelled => {
                 let at = last_of(&samples).map_or(t.down_at, |s| (s.x, s.y));
@@ -2096,6 +2192,94 @@ mod tests {
         let mut out = s.touch_up(3, at(160.0, 300.0, 1050.0));
         out.extend(s.touch_up(1, at(100.0, 300.0, 1060.0)));
         assert!(!out.contains(&TouchCommand::Undo), "{out:?}");
+    }
+
+    /// Whether a touch is painting (no GPU here, so no stroke to look at).
+    fn painting(s: &CanvasSession) -> bool {
+        matches!(s.touches().mode, Mode::Pen | Mode::Finger)
+    }
+
+    #[test]
+    fn a_tap_with_a_panel_open_only_closes_it() {
+        let s = session();
+        s.set_touch_panel_open(true);
+        for kind in [PointerKind::Finger, PointerKind::Stylus, PointerKind::Mouse] {
+            assert!(s.touch_down(1, kind, at(100.0, 100.0, 0.0)).is_empty());
+            assert!(!painting(&s));
+            // moving a little is still a tap
+            assert!(s.touch_move(1, at(105.0, 100.0, 20.0)).is_empty());
+            let out = s.touch_up(1, at(105.0, 100.0, 40.0));
+            assert!(out.contains(&TouchCommand::PanelTapped), "{out:?}");
+            assert!(!out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+            assert!(!painting(&s));
+        }
+        // the platform calling it off closes nothing
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 100.0));
+        assert!(!s.touch_cancel().contains(&TouchCommand::PanelTapped));
+    }
+
+    #[test]
+    fn a_drag_with_a_panel_open_fades_it_and_paints_from_where_it_came_down() {
+        let s = session();
+        s.set_touch_panel_open(true);
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
+        s.touch_move(1, at(115.0, 100.0, 10.0));
+        assert!(!painting(&s));
+        let out = s.touch_move(1, at(125.0, 100.0, 20.0));
+        assert_eq!(out.first(), Some(&TouchCommand::PanelFades), "{out:?}");
+        assert!(out.contains(&TouchCommand::Cursor { x: 125.0, y: 100.0 }), "{out:?}");
+        assert!(painting(&s));
+        // the panel goes only once
+        assert!(!s.touch_move(1, at(130.0, 100.0, 30.0)).contains(&TouchCommand::PanelFades));
+        let out = s.touch_up(1, at(140.0, 100.0, 40.0));
+        assert!(out.contains(&TouchCommand::StrokeEnded), "{out:?}");
+        assert!(!out.contains(&TouchCommand::PanelTapped), "{out:?}");
+    }
+
+    #[test]
+    fn a_finger_held_still_with_a_panel_open_picks_and_leaves_the_panel() {
+        let s = session();
+        s.set_touch_panel_open(true);
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
+        assert_eq!(s.touch_deadline(), Some(400.0));
+        let out = s.touch_tick(400.0);
+        assert!(out.contains(&TouchCommand::Pick { x: 100.0, y: 100.0 }), "{out:?}");
+        assert!(!out.contains(&TouchCommand::PanelFades), "{out:?}");
+        assert!(!painting(&s));
+        let out = s.touch_up(1, at(100.0, 100.0, 500.0));
+        assert!(out.contains(&TouchCommand::PickDone), "{out:?}");
+        assert!(!out.contains(&TouchCommand::PanelTapped), "{out:?}");
+    }
+
+    #[test]
+    fn fingers_with_a_panel_open_move_the_canvas_and_leave_the_panel() {
+        let s = session();
+        s.set_touch_panel_open(true);
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 0.0));
+        s.touch_down(2, PointerKind::Finger, at(300.0, 100.0, 10.0));
+        let mut out = s.touch_move(2, at(340.0, 100.0, 30.0));
+        assert!(out.contains(&TouchCommand::ViewMoved), "{out:?}");
+        out.extend(s.touch_up(2, at(340.0, 100.0, 60.0)));
+        out.extend(s.touch_up(1, at(100.0, 100.0, 70.0)));
+        assert!(!out.contains(&TouchCommand::PanelFades) && !out.contains(&TouchCommand::PanelTapped), "{out:?}");
+        assert!(!painting(&s));
+    }
+
+    #[test]
+    fn a_pen_waiting_for_a_panel_draws_on_past_a_finger_landing() {
+        let s = session();
+        s.set_touch_panel_open(true);
+        s.touch_down(1, PointerKind::Stylus, at(100.0, 100.0, 0.0));
+        s.touch_down(2, PointerKind::Finger, at(300.0, 100.0, 10.0));
+        let out = s.touch_move(1, at(130.0, 100.0, 20.0));
+        assert_eq!(out.first(), Some(&TouchCommand::PanelFades), "{out:?}");
+        assert!(painting(&s));
+        s.touch_cancel();
+        // and a pen landing on a finger waiting takes over from it, waiting in its turn
+        s.touch_down(1, PointerKind::Finger, at(100.0, 100.0, 100.0));
+        s.touch_down(2, PointerKind::Stylus, at(300.0, 100.0, 110.0));
+        let out = s.touch_up(2, at(300.0, 100.0, 130.0));
+        assert!(out.contains(&TouchCommand::PanelTapped), "{out:?}");
     }
 
     #[test]

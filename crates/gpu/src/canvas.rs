@@ -2332,9 +2332,14 @@ impl Canvas {
     /// never into the layer. Only painting strokes show them.
     pub fn set_prediction(&mut self, stamps: &[Stamp]) {
         self.prediction.clear();
-        // (a dual brush's not: drawn over the canvas, it couldn't be cut by its second)
-        let Some(style) =
-            self.active.filter(|a| a.second.is_none()).map(|a| a.style).filter(|s| s.tool == StrokeTool::Paint)
+        // (a dual brush's not: drawn over the canvas, it couldn't be cut by its second; nor paint
+        // laid in place: drawn over every layer, its stamps show none of what it is laid on, a
+        // block of colour that the stroke then isn't)
+        let Some(style) = self
+            .active
+            .filter(|a| a.second.is_none())
+            .map(|a| a.style)
+            .filter(|s| s.tool == StrokeTool::Paint && !s.paints_in_place())
         else {
             return;
         };

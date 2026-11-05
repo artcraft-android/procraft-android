@@ -204,8 +204,17 @@ fun ExportProgress(shown: io.github.artcraftandroid.procraft.canvas.CanvasViewMo
 fun ImportProgress(shown: io.github.artcraftandroid.procraft.canvas.CanvasViewModel.ImportShown?, onCancel: () -> Unit) =
     ProgressCard(shown?.let { CardShown(it.progress, it.done, it.name) }, "Importing", PcIcons.TabImport, onCancel)
 
+/**
+ * The card over everything while the gallery is searched for lost artworks ([progress] not null):
+ * as the import card, with nothing to cancel.
+ */
 @Composable
-private fun ProgressCard(shown: CardShown?, title: String, glyph: ImageVector, onCancel: () -> Unit) {
+fun RecoveryProgress(progress: Float?, done: Boolean) = ProgressCard(
+    progress?.let { CardShown(it, done, "Looking for lost or corrupted artworks") }, "Gallery Recovery", PcIcons.TabImport, null,
+)
+
+@Composable
+private fun ProgressCard(shown: CardShown?, title: String, glyph: ImageVector, onCancel: (() -> Unit)?) {
     val last = remember { arrayOfNulls<CardShown>(1) }
     if (shown != null) last[0] = shown
     val appear by animateFloatAsState(
@@ -295,8 +304,10 @@ private fun ProgressCard(shown: CardShown?, title: String, glyph: ImageVector, o
                         drawArc(accent, -90f, 360f * kept.progress.coerceIn(0f, 1f), useCenter = true)
                     }
                 }
-                Spacer(Modifier.height(22.dp))
-                AlertButton("Cancel", AlertCancelFill, AlertCancelInk, Modifier.fillMaxWidth()) { if (shown != null && !kept.done) onCancel() }
+                Spacer(Modifier.height(if (onCancel != null) 22.dp else 7.dp))
+                if (onCancel != null) {
+                    AlertButton("Cancel", AlertCancelFill, AlertCancelInk, Modifier.fillMaxWidth()) { if (shown != null && !kept.done) onCancel() }
+                }
             }
         }
     }
