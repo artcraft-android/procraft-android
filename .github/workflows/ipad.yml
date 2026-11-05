@@ -92,7 +92,7 @@ jobs:
           xcrun simctl bootstatus "$device" -b
           xcrun simctl install "$device" "$(find build/simulator -name ProCraft.app -path '*iphonesimulator*' | head -1)"
           mkdir -p screens
-          for screen in gallery canvas brushes layers colors actions adjustments; do
+          for screen in gallery canvas brushes layers colors actions adjustments studio source; do
             xcrun simctl launch --terminate-running-process "$device" io.github.artcraftandroid.procraft -screen "$screen"
             sleep 10
             xcrun simctl io "$device" screenshot "screens/$screen.png"
