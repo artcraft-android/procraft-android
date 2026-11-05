@@ -257,6 +257,7 @@ final class CanvasModel {
         self.session = session
         self.dir = dir
         _ = session.openBrushes(dir: Self.brushesDir)
+        addPendingBrushes()
         brushSets = session.brushLibrary()
         readSetChoices()
         let settings = AppSettings.shared
@@ -616,6 +617,21 @@ final class CanvasModel {
                     self.showNotice("This file has no brushes in it.", warning: true)
                 }
             }
+        }
+    }
+
+    /// Brush files brought in with no artwork open join the library now.
+    private func addPendingBrushes() {
+        let manager = FileManager.default
+        let dir = Gallery.pendingBrushes
+        let files = (try? manager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        for file in files {
+            // the name it came with, after what kept it apart
+            let name = String(file.lastPathComponent.dropFirst(37))
+            if let bytes = try? Data(contentsOf: file), let read = readBrushes(bytes: bytes, fileName: name) {
+                _ = session.addBrushesRead(read: read, shown: 0)
+            }
+            try? manager.removeItem(at: file)
         }
     }
 

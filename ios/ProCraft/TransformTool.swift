@@ -39,6 +39,20 @@ private let numericWidth: CGFloat = 248
 private let numericNodeGap: CGFloat = 5
 
 extension PcIcons {
+    /// A page, 14 x 18, its folded corner solid.
+    static let page = PcIcon(name: "page", width: 24, height: 24, parts: [
+        PcIconPart(
+            d: "M7 3H13.25L19 8.75V19a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"
+                + "M7.5 4.75H12.5V10.75H17.25V18.5a0.75 0.75 0 0 1-0.75 0.75H7.5a0.75 0.75 0 0 1-0.75-0.75V5.5a0.75 0.75 0 0 1 0.75-0.75z",
+            stroke: 0, fill: true, evenOdd: true
+        ),
+    ])
+
+    /// The import card's glyph.
+    static let tabImport = PcIcon(name: "tabimport", width: 50, height: 50, parts: [
+        PcIconPart(d: "M26.39 13.67L26.37 13.44L26.3 13.22L26.12 12.92L25.96 12.75L25.76 12.62L25.43 12.51L25.08 12.49L24.85 12.54L24.64 12.62L24.36 12.83L24.21 13.01L24.1 13.22L24.03 13.44L24.01 13.67L24.01 22.3L22.46 22.31L22.32 22.37L22.21 22.47L22.14 22.69L22.16 22.84L22.24 22.97L24.91 25.86L25.04 25.95L25.2 25.98L25.36 25.95L25.49 25.86L28.16 22.97L28.26 22.77L28.25 22.61L28.19 22.47L28.08 22.37L27.94 22.31L26.39 22.3ZM18.08 30.17L18.15 30.4L18.26 30.6L18.49 30.86L18.79 31.04L19.13 31.12L31.15 31.13L31.5 31.08L31.71 30.99L31.91 30.86L32.14 30.6L32.29 30.29L32.34 30.06L32.34 22.5L32.29 22.16L32.2 21.94L31.99 21.66L31.71 21.45L31.38 21.33L31.03 21.32L30.7 21.4L30.4 21.58L30.16 21.84L30.01 22.16L29.96 22.5L29.96 28.75L20.44 28.75L20.44 22.5L20.42 22.27L20.35 22.05L20.17 21.75L20 21.58L19.7 21.4L19.37 21.32L19.13 21.32L18.9 21.36L18.69 21.45L18.49 21.58L18.26 21.84L18.15 22.05L18.06 22.38L18.06 29.94Z", stroke: 0, fill: true, evenOdd: true),
+    ])
+
     /// The advanced mesh icon's cells: four across, three down, with thin gaps.
     static var advancedMesh: PcIcon {
         var cells = ""

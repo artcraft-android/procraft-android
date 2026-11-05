@@ -36,6 +36,8 @@ struct AlertView: View {
     let onCancel: () -> Void
     let onAction: () -> Void
     var onExtra: () -> Void = {}
+    /// The left button is a choice of its own (blue), not Cancel.
+    var onFirst: (() -> Void)?
 
     /// The last one shown, kept while it goes.
     @State private var shown: AlertContent?
@@ -91,7 +93,11 @@ struct AlertView: View {
             }
             HStack(spacing: buttonGap) {
                 if !c.alone {
-                    AlertButton(label: c.cancel, fill: cancelFill, ink: cancelInk) { if content != nil { onCancel() } }
+                    if let onFirst {
+                        AlertButton(label: c.cancel, fill: Pc.accent, ink: .white) { if content != nil { onFirst() } }
+                    } else {
+                        AlertButton(label: c.cancel, fill: cancelFill, ink: cancelInk) { if content != nil { onCancel() } }
+                    }
                 }
                 if let extra = c.extra {
                     AlertButton(label: extra, fill: Pc.accent, ink: .white) { if content != nil { onExtra() } }
@@ -111,6 +117,127 @@ struct AlertView: View {
         // a tap on the panel itself is not one beside it
         .contentShape(shape)
         .onTapGesture {}
+    }
+}
+
+/// The card over everything while a file is made or brought in (`shown` not nil): `title` after
+/// its glyph, a file's name under it when there is one, a pie filling clockwise from the top with
+/// how far it has come, and Cancel; once done the pie is full and a check is drawn in it. It comes
+/// and goes as an alert does, the screen dimmed; nothing under it is touched meanwhile.
+struct ProgressCard: View {
+    let shown: ProgressShown?
+    let title: String
+    let glyph: PcIcon
+    let onCancel: () -> Void
+
+    /// The last one shown, kept while it goes.
+    @State private var kept: ProgressShown?
+    @State private var up = false
+    @State private var check: CGFloat = 0
+
+    private func pie(_ c: ProgressShown) -> some View {
+        Canvas { context, size in
+            let r = min(size.width, size.height) / 2
+            let centre = CGPoint(x: size.width / 2, y: size.height / 2)
+            let disc = Path(ellipseIn: CGRect(x: 0, y: 0, width: size.width, height: size.height))
+            if c.done {
+                context.fill(disc, with: .color(Pc.accent))
+                // the check drawn along its length as it shows
+                var mark = Path()
+                mark.move(to: CGPoint(x: centre.x - 14, y: centre.y + 1))
+                mark.addLine(to: CGPoint(x: centre.x - 4, y: centre.y + 11))
+                mark.addLine(to: CGPoint(x: centre.x + 16, y: centre.y - 10))
+                context.stroke(
+                    mark.trimmedPath(from: 0, to: check), with: .color(.white),
+                    style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round)
+                )
+            } else {
+                context.stroke(
+                    Path(ellipseIn: CGRect(x: 2, y: 2, width: size.width - 4, height: size.height - 4)),
+                    with: .color(Pc.accent), lineWidth: 4
+                )
+                var wedge = Path()
+                wedge.move(to: centre)
+                wedge.addArc(
+                    center: centre, radius: r, startAngle: .degrees(-90),
+                    endAngle: .degrees(-90 + 360 * Double(min(max(c.progress, 0), 1))), clockwise: false
+                )
+                wedge.closeSubpath()
+                context.fill(wedge, with: .color(Pc.accent))
+            }
+        }
+        .frame(width: 76, height: 76)
+    }
+
+    private func card(_ c: ProgressShown) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 24, style: .circular)
+        return VStack(spacing: 0) {
+            HStack(spacing: c.detail != nil ? 12 : 13) {
+                PcIconView(glyph, size: 59, color: Pc.accent)
+                    .frame(width: c.detail != nil ? 16.5 : 22, height: 31)
+                    .offset(y: c.detail != nil ? 3.5 : 0)
+                Text(verbatim: title)
+                    .font(.system(size: 26, weight: .bold))
+                    .foregroundStyle(ink)
+                    .lineLimit(1)
+            }
+            .frame(height: 31)
+            if let detail = c.detail {
+                Text(verbatim: detail)
+                    .font(.system(size: 18))
+                    .foregroundStyle(ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(height: 58)
+            } else {
+                Spacer().frame(height: 40)
+            }
+            pie(c)
+            Spacer().frame(height: 22)
+            AlertButton(label: "Cancel", fill: cancelFill, ink: cancelInk) {
+                if shown != nil, !c.done {
+                    onCancel()
+                }
+            }
+        }
+        .padding(.horizontal, 17)
+        .padding(.top, c.detail != nil ? 25.5 : 21)
+        .padding(.bottom, 15)
+        .frame(width: 398)
+        .background(shape.fill(fill))
+        .overlay(shape.strokeBorder(Pc.glassMenuEdge, lineWidth: 1))
+        .clipShape(shape)
+    }
+
+    var body: some View {
+        ZStack {
+            if let c = kept {
+                Color.black.opacity(up ? dim : 0)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {}
+                card(c)
+                    .opacity(up ? 1 : 0)
+                    .scaleEffect(up ? 1 : startScale)
+            }
+        }
+        .onChange(of: shown, initial: true) { _, next in
+            if let next {
+                let first = kept == nil
+                kept = next
+                if first {
+                    withAnimation(Motion.alertIn) { up = true }
+                }
+                if next.done {
+                    withAnimation(.linear(duration: 0.3)) { check = 1 }
+                }
+            } else if kept != nil {
+                withAnimation(Motion.alertOut) { up = false } completion: {
+                    kept = nil
+                    check = 0
+                }
+            }
+        }
     }
 }
 

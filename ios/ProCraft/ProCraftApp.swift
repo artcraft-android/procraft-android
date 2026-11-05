@@ -80,6 +80,8 @@ enum ScreenCapture {
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
     private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-"]
+    /// What opens over the gallery.
+    static var galleryShows: String?
     /// What opens over the QuickMenu.
     static var quickShows: String?
 
@@ -112,6 +114,16 @@ enum ScreenCapture {
         sourceShows = shows
         model.studio.open()
         model.studio.sourceEditing = kind
+    }
+
+    /// A few artworks for the gallery's captures to show.
+    static func seedGallery(_ gallery: GalleryModel) {
+        guard gallery.entries.isEmpty else { return }
+        for size in [(1200, 900), (900, 1200), (1000, 1000)] {
+            let session = CanvasSession(width: UInt32(size.0), height: UInt32(size.1))
+            try? session.save(dir: Gallery.store.newFolder(folder: nil))
+        }
+        gallery.reload()
     }
 
     /// Transform open over a filled layer: on an empty one there is nothing to move.
@@ -346,6 +358,10 @@ enum ScreenCapture {
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeRight)) { _ in }
         if name == "gallery" {
+            return
+        }
+        if name.hasPrefix("gallery-") {
+            galleryShows = name
             return
         }
         // after the turn, the screen's size the other way round
