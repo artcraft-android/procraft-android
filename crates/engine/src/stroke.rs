@@ -1211,6 +1211,17 @@ impl StrokeBuilder {
         self.placed.iter().map(|p| p.center - p.thrown).collect()
     }
 
+    /// Brings the path up to the input as it stands: whatever was waiting to be averaged and placed
+    /// is, so the path covers everything drawn so far rather than stopping short of it.
+    pub fn catch_up(&mut self) {
+        let mut ignored = Vec::new();
+        self.average_on(&mut ignored);
+        if let Some(to) = self.input_point() {
+            self.path_to(to, &mut ignored);
+        }
+        self.flush(&mut ignored);
+    }
+
     /// Ends the stroke: walks on to where the pen lifted and applies the end taper. Returns all of
     /// the stroke's stamps, as they should finally be drawn.
     pub fn finish(&mut self) -> Vec<Stamp> {

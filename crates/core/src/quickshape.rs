@@ -518,17 +518,16 @@ impl CanvasSession {
         // the line the stabilisers and smoothing are drawing, not the movement it came from: a
         // shape should follow the line being painted rather than the hand's shake
         let mut path = st.drawn.clone();
-        if let Some(old) = st.stroke.as_ref() {
+        if let Some(old) = st.stroke.as_mut() {
+            // the path is a little behind the input until it is brought up to it, and a shape drawn
+            // from the part it had got to would leave the rest of the stroke out
+            old.catch_up();
             let mut smoothed = old.path_points();
-            // the stamps stop a spacing short of either end, so the stroke's own ends go on: a
-            // stroke that met itself still does
-            if smoothed.len() >= 2
-                && let (Some(&start), Some(&end)) = (st.drawn.first(), st.drawn.last())
-            {
-                smoothed.insert(0, start);
-                smoothed.push(end);
-            }
             if smoothed.len() >= 2 {
+                // the stroke's own first point goes on the front, so one that met itself still does
+                if let Some(&start) = st.drawn.first() {
+                    smoothed.insert(0, start);
+                }
                 path = smoothed;
             }
         }
