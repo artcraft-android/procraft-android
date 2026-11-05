@@ -485,6 +485,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     var inputStabilization by mutableStateOf(interfacePrefs.getFloat(INPUT_STABILIZATION, 0f))
         private set
+    var inputTipAttached by mutableStateOf(interfacePrefs.getBoolean(INPUT_TIP_ATTACHED, true))
+        private set
     var inputMotionFiltering by mutableStateOf(interfacePrefs.getFloat(INPUT_MOTION, 0f))
         private set
     var inputMotionExpression by mutableStateOf(interfacePrefs.getFloat(INPUT_EXPRESSION, 0f))
@@ -503,24 +505,27 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         expression: Float = inputMotionExpression,
         smoothing: Float = inputPressureSmoothing,
         curve: List<Offset> = inputCurve,
+        tipAttached: Boolean = inputTipAttached,
     ) {
         inputStabilization = stabilization
         inputMotionFiltering = motion
         inputMotionExpression = expression
         inputPressureSmoothing = smoothing
         inputCurve = curve
+        inputTipAttached = tipAttached
         interfacePrefs.edit()
             .putFloat(INPUT_STABILIZATION, stabilization).putFloat(INPUT_MOTION, motion)
             .putFloat(INPUT_EXPRESSION, expression).putFloat(INPUT_PRESSURE_SMOOTHING, smoothing)
             .putString(INPUT_CURVE, curve.joinToString(",") { "${it.x},${it.y}" })
+            .putBoolean(INPUT_TIP_ATTACHED, tipAttached)
             .apply()
         applyInput()
     }
 
-    fun resetInput() = changeInput(0f, 0f, 0f, 0f, listOf(Offset(0f, 0f), Offset(1f, 1f)))
+    fun resetInput() = changeInput(0f, 0f, 0f, 0f, listOf(Offset(0f, 0f), Offset(1f, 1f)), true)
 
     private fun applyInput() {
-        session?.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputCurve.flatMap { listOf(it.x, it.y) })
+        session?.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputTipAttached, inputCurve.flatMap { listOf(it.x, it.y) })
     }
 
     fun changeRightHanded(on: Boolean) {
@@ -2306,7 +2311,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         s.setPasteIntoMask(pasteIntoMask)
         // as it was left, or fitted
         if (!orientationMemory) s.forgetSavedView()
-        s.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputCurve.flatMap { listOf(it.x, it.y) })
+        s.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputTipAttached, inputCurve.flatMap { listOf(it.x, it.y) })
         applyAppSettings(s)
         timeLapse = TimeLapse(dir).also {
             timeLapseRecording = it.recording
@@ -7016,6 +7021,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val INPUT_EXPRESSION = "input_motion_expression"
         const val INPUT_PRESSURE_SMOOTHING = "input_pressure_smoothing"
         const val INPUT_CURVE = "input_pressure_curve"
+        const val INPUT_TIP_ATTACHED = "input_tip_attached"
         /** Frames a second an animation plays at (Animation Assist's own when it is on). */
         const val ANIMATION_FPS = 15
         /** The timeline's frame pictures' longest side, pixels; a frame's longest hold. */

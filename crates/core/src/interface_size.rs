@@ -4,9 +4,9 @@
 //! [`crate::CanvasSession::set_interface_size`].
 
 /// What it can be set to and the steps it moves in, percent.
-const LEAST: f32 = 75.0;
-const MOST: f32 = 125.0;
-const STEP: f32 = 5.0;
+pub(crate) const LEAST: f32 = 75.0;
+pub(crate) const MOST: f32 = 125.0;
+pub(crate) const STEP: f32 = 5.0;
 
 /// What a bigger size must leave the interface (points): the smallest window the desktop opens,
 /// which every panel fits. A window with less shows the interface at 100%.

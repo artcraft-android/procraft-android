@@ -567,6 +567,9 @@ struct Averaged {
     /// The input as it last came, and how many samples at the tuned rate it is past the last point.
     input: Option<PathPoint>,
     past: f64,
+    /// Past the ends the input comes back the way it went, so the average falls short of them,
+    /// instead of going on as it went.
+    mirrored: bool,
 }
 
 /// Points kept past those stabilisation can still reach before they are let go, to do it seldom.
@@ -615,6 +618,10 @@ impl Averaged {
         let last = self.points.len() as isize - 1;
         if last == 0 {
             return first;
+        }
+        if self.mirrored {
+            let at = i.rem_euclid(2 * last);
+            return self.points.get(at.min(2 * last - at) as usize).map_or(first, lanes);
         }
         // each length of the input past an end goes the way it did, on from where the last ended
         let (laps, at) = (i.div_euclid(last), i.rem_euclid(last));
@@ -822,6 +829,9 @@ pub struct InputSettings {
     /// How far input must move for the speed dynamics to count it as fast, as a part of the
     /// usual distance (0.25..1): less makes slower movement fast.
     pub speed_distance: f32,
+    /// Motion filtering keeps the stroke's end on the pen; off, the end falls short of it as much
+    /// as the filter smooths.
+    pub tip_attached: bool,
 }
 
 impl Default for InputSettings {
@@ -833,6 +843,7 @@ impl Default for InputSettings {
             pressure_smoothing: 0.0,
             pressure_curve: Curve::linear(),
             speed_distance: 1.0,
+            tip_attached: true,
         }
     }
 }
@@ -1087,7 +1098,7 @@ impl StrokeBuilder {
         self.average_on(out);
         self.stream_on(out);
         self.flush(out);
-        if let Some(to) = self.input_point() {
+        if let Some(to) = self.input_point().filter(|_| !self.averaged.mirrored) {
             self.walk_to(to, out);
         }
     }
@@ -1196,7 +1207,7 @@ impl StrokeBuilder {
         let mut ignored = Vec::new();
         self.average_on(&mut ignored);
         self.stream_on(&mut ignored);
-        if let Some(to) = self.input_point() {
+        if let Some(to) = self.input_point().filter(|_| !self.averaged.mirrored) {
             // the path comes up to the pen along the curve, where it lifted the last point it
             // curves through
             self.path_to(to, &mut ignored);
@@ -1265,7 +1276,9 @@ impl StrokeBuilder {
             self.speed_known = true;
         }
         if self.weights.is_none() {
-            self.weights = Some(self.made_weights().into());
+            let weights = self.made_weights();
+            self.averaged.mirrored = !self.input.tip_attached && !weights.is_empty();
+            self.weights = Some(weights.into());
         }
         let target = PathPoint { pos: s.pos, pressure, soft, tilt, azimuth, roll, speed: self.speed };
         let dt = self.last_sample.map(|last| (s.time_ms - last.time_ms).clamp(0.5, 50.0));
@@ -2567,6 +2580,30 @@ mod tests {
         plain_stroke.add(&line(10, 50.0));
         let end = plain_stroke.preview_to_input(&[]).last().map(|s| s.center);
         assert!(end.is_none_or(|e| e.distance(Vec2::new(50.0, 50.0)) < 2.0), "{end:?}");
+    }
+
+    #[test]
+    fn motion_filtering_keeps_the_stroke_on_the_pen_only_with_the_tip_attached() {
+        let along: Vec<Sample> =
+            (0..200).map(|i| Sample::at(Vec2::new(i as f32 * 4.0, 50.0), 1.0, i as f64 * 8.0)).collect();
+        let pen = along.last().unwrap().pos;
+        let stroke = |tip_attached: bool| {
+            let input = InputSettings { motion_filtering: 0.3, tip_attached, ..InputSettings::default() };
+            let mut b = StrokeBuilder::new(plain(), 4.0, Pointer::Finger).with_input(input);
+            b.add(&along);
+            let shown = b.preview_to_input(&[]);
+            (shown.last().map(|s| s.center), b.finish().last().map(|s| s.center))
+        };
+        let (shown, kept) = stroke(true);
+        assert!(shown.is_some_and(|s| s.distance(pen) < 2.0) && kept.is_some_and(|k| k.distance(pen) < 2.0));
+        let (shown, kept) = stroke(false);
+        assert!(shown.is_some_and(|s| s.distance(pen) > 20.0), "{shown:?}");
+        assert!(kept.is_some_and(|k| k.distance(pen) > 20.0), "{kept:?}");
+        // without a filter it has nothing to do
+        let input = InputSettings { tip_attached: false, ..InputSettings::default() };
+        let mut b = StrokeBuilder::new(plain(), 4.0, Pointer::Finger).with_input(input);
+        b.add(&along);
+        assert!(b.finish().last().is_some_and(|s| s.center.distance(pen) < 2.0));
     }
 
     /// Each point of `input` followed by the path, the newest of `window` followed more and more:

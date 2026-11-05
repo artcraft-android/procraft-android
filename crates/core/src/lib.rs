@@ -45,6 +45,7 @@ mod modes;
 mod palettes;
 mod pick;
 mod pickers;
+mod plugins;
 mod pour;
 mod presets;
 mod project;
@@ -126,6 +127,10 @@ pub use pick::Pick;
 pub use pickers::{
     disc_picture, disc_to_square, disc_to_square_point, harmony_wheel, p3_hsv_of, p3_hsv_to_rgb, rgb_to_p3_hsv,
     square_to_disc, square_to_disc_point,
+};
+pub use plugins::{
+    PluginControl, PluginInfo, PluginSlider, PluginSwitch, Plugins, plugin_slider_along, plugin_slider_at,
+    plugin_slider_shown,
 };
 pub use presets::{
     CanvasPreset, P3, SRGB, per_inch, preset_height, preset_label, preset_number, preset_width, presets_from_json,

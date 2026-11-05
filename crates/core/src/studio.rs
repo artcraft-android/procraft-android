@@ -396,14 +396,16 @@ impl CanvasSession {
         }
     }
 
-    /// The app's own smoothing and pressure for every stroke, each 0..1, and its pressure curve
-    /// (x, y pairs, 0..1; fewer than two points keep it straight).
+    /// The app's own smoothing and pressure for every stroke, each 0..1, whether motion filtering
+    /// keeps the stroke's end on the pen, and its pressure curve (x, y pairs, 0..1; fewer than two
+    /// points keep it straight).
     pub fn set_input_settings(
         &self,
         stabilization: f32,
         motion_filtering: f32,
         motion_expression: f32,
         pressure_smoothing: f32,
+        tip_attached: bool,
         curve: Vec<f32>,
     ) {
         let unit = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
@@ -416,6 +418,7 @@ impl CanvasSession {
             pressure_smoothing: unit(pressure_smoothing),
             pressure_curve: if pts.len() >= 2 { Curve::new(&pts) } else { Curve::linear() },
             speed_distance: st.input.speed_distance,
+            tip_attached,
         };
     }
 

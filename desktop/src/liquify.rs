@@ -263,7 +263,7 @@ impl Liquify {
             ui.painter().rect_filled(group, 13, argb(MENU_GROUP));
             let row = Rect::from_min_size(group.min + vec2(0.0, 8.0), vec2(group.width(), 59.0));
             let amount = shown.liquify_amount;
-            let label = if amount >= 1.0 { "Max".to_owned() } else { format!("{}%", (amount * 100.0).round() as i32) };
+            let label = percent(amount, None);
             if let Some(v) = menu_slider(ui, row, "Amount", amount, &label) {
                 session.adjustment_liquify_amount(v);
             }

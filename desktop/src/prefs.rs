@@ -2,7 +2,9 @@
 //! the app's folder (`interface`, a setting a line), as the Android app keeps them in its interface
 //! preferences.
 
-use procraft_core::CanvasSession;
+use std::sync::Arc;
+
+use procraft_core::{CanvasSession, Plugins};
 
 /// When the brush cursor shows: while the pointer hovers, while painting, or both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,14 +30,12 @@ pub const DRAG_IMAGE_FORMATS: [&str; 3] = ["JPEG", "PNG", "TIFF"];
 pub const RAPID_UNDO_MIN_S: f32 = 0.1;
 pub const RAPID_UNDO_MAX_S: f32 = 1.5;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Prefs {
     /// Panels and bars light grey with dark text.
     pub light_interface: bool,
     /// The side bar on the right edge instead of the left.
     pub right_handed: bool,
-    /// How big the whole interface shows (1: as measured).
-    pub interface_size: f32,
     /// Brush sizes relative to the screen (else to the canvas).
     pub brush_on_screen: bool,
     pub brush_cursor: bool,
@@ -54,6 +54,7 @@ pub struct Prefs {
     pub motion_filtering: f32,
     pub motion_expression: f32,
     pub pressure_smoothing: f32,
+    pub tip_attached: bool,
     pub curve: Vec<[f32; 2]>,
     /// The Actions panel's tab open.
     pub actions_tab: usize,
@@ -63,8 +64,8 @@ pub struct Prefs {
     pub project_canvas: bool,
     /// The eyedropper picks from the current layer alone, not the canvas as composited.
     pub eyedropper_layer: bool,
-    /// With a mask current, what is pasted goes into it by its brightness, not onto a new layer.
-    pub paste_into_mask: bool,
+    /// The Plugins page's list, its values kept here with the rest.
+    pub plugins: Arc<Plugins>,
     /// Advanced settings: an artwork opens as it was left; fitting the canvas keeps it clear of
     /// the top bar and the side bar; new artworks don't record their time-lapse; strokes made in
     /// an adjustment undo together; how far the pen moves before it counts as fast (0.25..1); the
@@ -96,7 +97,6 @@ impl Default for Prefs {
         Prefs {
             light_interface: false,
             right_handed: false,
-            interface_size: 1.0,
             brush_on_screen: false,
             brush_cursor: true,
             cursor_shows: CursorShows::Hovering,
@@ -109,12 +109,13 @@ impl Default for Prefs {
             motion_filtering: 0.0,
             motion_expression: 0.0,
             pressure_smoothing: 0.0,
+            tip_attached: true,
             curve: straight(),
             actions_tab: 0,
             pad_3d: false,
             project_canvas: false,
             eyedropper_layer: false,
-            paste_into_mask: false,
+            plugins: Plugins::new(),
             orientation_memory: true,
             fit_inside: false,
             no_time_lapse: false,
@@ -153,11 +154,6 @@ impl Prefs {
             match name {
                 "light_interface" => p.light_interface = on,
                 "right_handed" => p.right_handed = on,
-                "interface_size" => {
-                    if let Some(v) = number {
-                        p.interface_size = procraft_core::interface_size_kept(v);
-                    }
-                }
                 "brush_on_screen" => p.brush_on_screen = on,
                 "brush_cursor" => p.brush_cursor = on,
                 "cursor_shows" => p.cursor_shows = pick(&SHOWS, value).unwrap_or(p.cursor_shows),
@@ -180,10 +176,10 @@ impl Prefs {
                 "motion_filtering" => p.motion_filtering = unit.unwrap_or(0.0),
                 "motion_expression" => p.motion_expression = unit.unwrap_or(0.0),
                 "pressure_smoothing" => p.pressure_smoothing = unit.unwrap_or(0.0),
+                "tip_attached" => p.tip_attached = on,
                 "pad_3d" => p.pad_3d = on,
                 "project_canvas" => p.project_canvas = on,
                 "eyedropper_layer" => p.eyedropper_layer = on,
-                "paste_into_mask" => p.paste_into_mask = on,
                 "orientation_memory" => p.orientation_memory = on,
                 "fit_inside" => p.fit_inside = on,
                 "no_time_lapse" => p.no_time_lapse = on,
@@ -207,7 +203,7 @@ impl Prefs {
                         p.curve = points;
                     }
                 }
-                _ => {}
+                _ => p.plugins.read_kept(name.to_owned(), value.to_owned()),
             }
         }
         // the interface shows as it was left
@@ -220,7 +216,6 @@ impl Prefs {
         let lines = [
             format!("light_interface {}", self.light_interface),
             format!("right_handed {}", self.right_handed),
-            format!("interface_size {}", self.interface_size),
             format!("brush_on_screen {}", self.brush_on_screen),
             format!("brush_cursor {}", self.brush_cursor),
             format!("cursor_shows {}", place(&SHOWS, self.cursor_shows)),
@@ -233,12 +228,12 @@ impl Prefs {
             format!("motion_filtering {}", self.motion_filtering),
             format!("motion_expression {}", self.motion_expression),
             format!("pressure_smoothing {}", self.pressure_smoothing),
+            format!("tip_attached {}", self.tip_attached),
             format!("curve {}", curve.join(",")),
             format!("actions_tab {}", self.actions_tab),
             format!("pad_3d {}", self.pad_3d),
             format!("project_canvas {}", self.project_canvas),
             format!("eyedropper_layer {}", self.eyedropper_layer),
-            format!("paste_into_mask {}", self.paste_into_mask),
             format!("orientation_memory {}", self.orientation_memory),
             format!("fit_inside {}", self.fit_inside),
             format!("no_time_lapse {}", self.no_time_lapse),
@@ -253,6 +248,7 @@ impl Prefs {
             format!("drag_image_format {}", self.drag_image_format),
             format!("recolor_threshold {}", self.recolor_threshold),
         ];
+        let lines: Vec<String> = lines.into_iter().chain(self.plugins.kept_lines()).collect();
         crate::files::keep_text("interface", &(lines.join("\n") + "\n"));
     }
 
@@ -270,6 +266,7 @@ impl Prefs {
             self.motion_filtering,
             self.motion_expression,
             self.pressure_smoothing,
+            self.tip_attached,
             self.curve.iter().flatten().copied().collect(),
         );
     }

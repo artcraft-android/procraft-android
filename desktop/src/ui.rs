@@ -340,7 +340,7 @@ impl Interface {
 
     /// How big the whole interface is set to show (Prefs).
     pub fn interface_size(&self) -> f32 {
-        self.prefs.interface_size
+        self.prefs.plugins.interface_size()
     }
 
     /// Tap Assistance is on (Advanced settings).
@@ -416,7 +416,7 @@ impl Interface {
         // the eyedropper picks from the current layer or the canvas, as the preferences say
         session.set_eyedropper_from_layer(self.prefs.eyedropper_layer);
         // and what is pasted goes into a mask only if they say so
-        session.set_paste_into_mask(self.prefs.paste_into_mask);
+        session.set_paste_into_mask(self.prefs.plugins.paste_into_mask());
         let paste_shown = (self.open == Some(Popover::Actions) || self.copy_paste) && ctx.input(|i| i.focused);
         if paste_shown && !self.paste_shown {
             self.system_clipboard.offer();
@@ -2099,12 +2099,12 @@ impl Interface {
                     Some(
                         Act::Page(_)
                         | Act::ScalingMenu
+                        | Act::TipAttachment
                         | Act::LightInterface
                         | Act::RightHanded
                         | Act::BrushCursor
                         | Act::ProjectCanvas
                         | Act::EyedropperLayer
-                        | Act::PasteIntoMask
                         | Act::ResetInput,
                     )
                     | None => {}

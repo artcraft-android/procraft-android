@@ -6,12 +6,13 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use egui::{Align2, Color32, Id, Order, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
+use egui::{Align2, Color32, Id, Order, Painter, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
+use procraft_core::{PluginControl, PluginInfo, Plugins, plugin_slider_along, plugin_slider_at, plugin_slider_shown};
 
 use crate::animated_export::Animated;
 use crate::files::Format;
 use crate::icons;
-use crate::look::{Look, Themed, Weight, argb, cubic_bezier, highlight, mix, pc, text};
+use crate::look::{Look, Themed, Weight, argb, cubic_bezier, highlight, mix, pc, text, text_width, wrapped};
 use crate::menu::{Glass, Menu};
 use crate::panel::{self, PANEL_TITLE};
 use crate::prefs::{CursorShows, CursorStyle, Prefs, RAPID_UNDO_MAX_S, RAPID_UNDO_MIN_S};
@@ -37,6 +38,11 @@ const CHOICE_HEIGHT: f32 = 42.0;
 const SLIDE_HEIGHT: f32 = 63.0;
 const GROUP_GAP: f32 = 20.0;
 const HEADING_HEIGHT: f32 = 45.0;
+/// A plugin's card: above its description, under it, how far in, and its tag.
+const PLUGIN_HEAD: f32 = 40.0;
+const PLUGIN_FOOT: f32 = 12.0;
+const PLUGIN_INSET: f32 = 16.0;
+const PLUGIN_TAG: Themed = Themed(0x1FFFFFFF, 0x14000000);
 /// The panel ends this far above the window's bottom edge, and its rows scroll past this tall.
 const BOTTOM_MARGIN: f32 = 25.0;
 const MOST_ROWS: f32 = 760.0;
@@ -56,6 +62,7 @@ const TAB_IN_S: f32 = 0.2;
 /// [`Act::Prefs`] tells it a setting changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Act {
+    TipAttachment,
     InsertFile,
     InsertPhoto,
     /// Insert a file or a photo, or Paste, swiped open: what they bring goes on a private layer.
@@ -104,8 +111,6 @@ pub enum Act {
     ProjectCanvas,
     /// The eyedropper picks from the current layer, or the canvas as composited.
     EyedropperLayer,
-    /// With a mask current, Paste goes into it.
-    PasteIntoMask,
     ResetInput,
 }
 
@@ -116,6 +121,7 @@ pub enum Page {
     Tabs,
     Pressure,
     Cursor,
+    Plugins,
 }
 
 /// The settings a slider row sets.
@@ -124,7 +130,6 @@ enum Slid {
     RapidUndo,
     SelectionVisibility,
     FillGap,
-    InterfaceSize,
     Stabilization,
     MotionFiltering,
     MotionExpression,
@@ -139,8 +144,6 @@ enum Row {
     /// A switch row, on or off; what a tap does, or none where the desktop can't change it yet
     /// (shown dimmed, as it is).
     Switch(&'static str, bool, Option<Act>),
-    /// A switch that stays as it is, shown as set.
-    Fixed(&'static str, bool),
     /// A slider row this tall: its name, the value as shown, where it is (0..1), and what it sets.
     Slide(&'static str, String, f32, f32, Slid),
     Heading(&'static str),
@@ -354,6 +357,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                 vec![
                     Button("Pressure and Smoothing", None, Some(Act::Page(Page::Pressure))),
                     Button("Gesture controls", None, Some(Act::GestureControls)),
+                    Button("Plugins", None, Some(Act::Page(Page::Plugins))),
                 ],
                 vec![
                     Slide(
@@ -377,14 +381,6 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                         SLIDE_HEIGHT,
                         Slid::FillGap,
                     ),
-                    Slide(
-                        "Interface size (experimental)",
-                        format!("{:.0}%", prefs.interface_size * 100.0),
-                        procraft_core::interface_size_along(prefs.interface_size),
-                        SLIDE_HEIGHT,
-                        Slid::InterfaceSize,
-                    ),
-                    Switch("Paste into masks (experimental)", prefs.paste_into_mask, Some(Act::PasteIntoMask)),
                 ],
                 vec![Switch("Size & Opacity sidebar", showing.side_bar, Some(Act::SideBar))],
             ]
@@ -401,7 +397,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
 
 /// Pressure and Smoothing's sliders.
 fn smoothing_rows(prefs: &Prefs) -> Vec<Row> {
-    let percent = |v: f32| format!("{}%", (v * 100.0).round());
+    let percent = |v: f32| if v <= 0.0 { "None".to_owned() } else { format!("{:.1}%", v * 100.0) };
     vec![
         Row::Slide("Stabilization", percent(prefs.stabilization), prefs.stabilization, 64.0, Slid::Stabilization),
         Row::Slide(
@@ -468,6 +464,8 @@ pub struct Actions {
     /// The rows with a private action swiped (by group and row), until the tab changes or the
     /// panel closes.
     swipes: Swipes,
+    /// A plugin's slider under the pointer: its key, and where it has gone.
+    plugin_moved: Option<(String, f32)>,
 }
 
 type Swipes = HashMap<(usize, usize), Swipe>;
@@ -556,6 +554,13 @@ impl Actions {
                             + 13.0;
                         header + rows.min(MOST_ROWS)
                     }
+                    Page::Plugins => {
+                        let painter = ctx.layer_painter(egui::LayerId::background());
+                        let list = prefs.plugins.list();
+                        let cards: f32 = list.iter().map(|p| plugin_height(&painter, p, ACTIONS_WIDTH - 24.0)).sum();
+                        let gaps = GROUP_GAP * list.len().saturating_sub(1) as f32;
+                        header + 8.0 + (cards + gaps + 13.0).min(MOST_ROWS)
+                    }
                 }
         };
         // a page pushed in slides in from the right as the one it covers slides off to the left;
@@ -614,6 +619,10 @@ impl Actions {
                 prefs.light_interface = !prefs.light_interface;
                 Some(Act::Prefs)
             }
+            Some(Tapped::Act(Act::TipAttachment)) => {
+                prefs.tip_attached = !prefs.tip_attached;
+                Some(Act::Prefs)
+            }
             Some(Tapped::Act(Act::RightHanded)) => {
                 prefs.right_handed = !prefs.right_handed;
                 Some(Act::Prefs)
@@ -630,10 +639,6 @@ impl Actions {
                 prefs.eyedropper_layer = !prefs.eyedropper_layer;
                 Some(Act::Prefs)
             }
-            Some(Tapped::Act(Act::PasteIntoMask)) => {
-                prefs.paste_into_mask = !prefs.paste_into_mask;
-                Some(Act::Prefs)
-            }
             Some(Tapped::Act(Act::ResetInput)) => {
                 prefs.reset_input();
                 Some(Act::Prefs)
@@ -647,7 +652,6 @@ impl Actions {
                     }
                     Slid::SelectionVisibility => prefs.selection_visibility = at,
                     Slid::FillGap => prefs.fill_gap = (at * procraft_engine::fill::MOST_GAP as f32).round() as u32,
-                    Slid::InterfaceSize => prefs.interface_size = procraft_core::interface_size_at(at),
                     Slid::Stabilization => prefs.stabilization = at,
                     Slid::MotionFiltering => prefs.motion_filtering = at,
                     Slid::MotionExpression => prefs.motion_expression = at,
@@ -695,6 +699,7 @@ impl Actions {
             Page::Tabs => self.tabs(ui, look, body, groups, rows_alpha),
             Page::Cursor => self.cursor_page(ui, look, body, prefs),
             Page::Pressure => self.pressure_page(ui, look, body, prefs),
+            Page::Plugins => self.plugins_page(ui, look, body, prefs),
         }
     }
 
@@ -854,6 +859,40 @@ impl Actions {
         tapped
     }
 
+    /// The plugins, a card each, drawn from what the list says of them. A slider's value goes in
+    /// as it lets go: what it sets may move the slider itself.
+    fn plugins_page(&mut self, ui: &mut Ui, look: &mut Look, body: Rect, prefs: &mut Prefs) -> Option<Tapped> {
+        if self.page_header(ui, look, body, "Plugins") {
+            return None;
+        }
+        let list = Rect::from_min_max(
+            pos2(body.left() + 12.0, body.top() + 12.0 + 44.0 + 8.0),
+            pos2(body.right() - 12.0, body.bottom()),
+        );
+        let mut changed = false;
+        ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
+            ScrollArea::vertical()
+                .id_salt("plugin cards")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                    for (g, plugin) in prefs.plugins.list().iter().enumerate() {
+                        if g > 0 {
+                            ui.add_space(GROUP_GAP);
+                        }
+                        changed |= plugin_card(ui, plugin, g, &prefs.plugins, &mut self.plugin_moved);
+                    }
+                    ui.add_space(13.0);
+                });
+        });
+        if !ui.input(|i| i.pointer.any_down())
+            && let Some((key, value)) = self.plugin_moved.take()
+        {
+            changed |= prefs.plugins.set_slider(key, value).is_some();
+        }
+        changed.then_some(Tapped::Act(Act::Prefs))
+    }
+
     /// Advanced cursor settings: when the brush cursor shows, and how it is drawn.
     fn cursor_page(&mut self, ui: &mut Ui, look: &mut Look, body: Rect, prefs: &mut Prefs) -> Option<Tapped> {
         if self.page_header(ui, look, body, "Advanced cursor") {
@@ -915,8 +954,10 @@ impl Actions {
                     ui.add_space(20.0);
                     tapped = group_view(ui, &smoothing_rows(prefs), 0, &mut self.swipes).0;
                     ui.add_space(16.0);
-                    // the stroke always starts at the pointer's tip here
-                    group_view(ui, &[Row::Fixed("Tip Attachment", true)], 1, &mut self.swipes);
+                    // with no filtering it has nothing to do
+                    let can = (prefs.motion_filtering > 0.0).then_some(Act::TipAttachment);
+                    let tip = [Row::Switch("Tip Attachment", prefs.tip_attached, can)];
+                    tapped = tapped.or(group_view(ui, &tip, 1, &mut self.swipes).0);
                     ui.add_space(24.0);
                     let (label, _) = ui.allocate_exact_size(vec2(width, 19.0), Sense::hover());
                     text(
@@ -942,6 +983,81 @@ impl Actions {
         });
         tapped
     }
+}
+
+/// How tall `plugin`'s card is, `width` wide.
+fn plugin_height(painter: &Painter, plugin: &PluginInfo, width: f32) -> f32 {
+    let inside = width - 2.0 * PLUGIN_INSET;
+    let said = wrapped(painter, &plugin.description, 14.0, Weight::Regular, Color32::WHITE, inside);
+    let controls: f32 = plugin
+        .controls
+        .iter()
+        .map(|c| match c {
+            PluginControl::Switch { .. } => 1.0 + ROW_HEIGHT,
+            PluginControl::Slider { .. } => 1.0 + SLIDE_HEIGHT,
+        })
+        .sum();
+    PLUGIN_HEAD + said.size().y + PLUGIN_FOOT + controls
+}
+
+/// `plugin` as a card: its name and tag, what it does, and its controls, whatever they are. A
+/// switch flips at once, a slider leaves where it has gone in `moved`. Returns whether a value
+/// changed.
+fn plugin_card(
+    ui: &mut Ui,
+    plugin: &PluginInfo,
+    g: usize,
+    plugins: &Plugins,
+    moved: &mut Option<(String, f32)>,
+) -> bool {
+    let width = ui.available_width();
+    let (area, _) = ui.allocate_exact_size(vec2(width, plugin_height(ui.painter(), plugin, width)), Sense::hover());
+    let painter = ui.painter().clone();
+    painter.rect_filled(area, 22, argb(ACTIONS_GROUP));
+    let (left, name_y) = (area.left() + PLUGIN_INSET, area.top() + 12.0);
+    text(&painter, pos2(left, name_y), Align2::LEFT_TOP, &plugin.name, 17.0, Weight::SemiBold, argb(PANEL_TITLE));
+    // the tag after the name
+    let tag = "experimental";
+    let tag_left = left + text_width(&painter, &plugin.name, 17.0, Weight::SemiBold) + 8.0;
+    let tag_width = text_width(&painter, tag, 12.0, Weight::Medium) + 14.0;
+    let pill = Rect::from_min_size(pos2(tag_left, name_y + 1.0), vec2(tag_width, 19.0));
+    painter.rect_filled(pill, 9, argb(PLUGIN_TAG));
+    text(&painter, pill.center(), Align2::CENTER_CENTER, tag, 12.0, Weight::Medium, argb(ACTIONS_ROW));
+    let inside = width - 2.0 * PLUGIN_INSET;
+    let said = wrapped(&painter, &plugin.description, 14.0, Weight::Regular, argb(ACTIONS_ROW), inside);
+    let said_height = said.size().y;
+    painter.galley(pos2(left, area.top() + PLUGIN_HEAD), said, argb(ACTIONS_ROW));
+    let mut y = area.top() + PLUGIN_HEAD + said_height + PLUGIN_FOOT;
+    let mut changed = false;
+    for (i, control) in plugin.controls.iter().enumerate() {
+        painter.rect_filled(Rect::from_min_size(pos2(area.left(), y), vec2(width, 1.0)), 0, argb(ACTIONS_SEPARATOR));
+        y += 1.0;
+        match control {
+            PluginControl::Switch { control } => {
+                let cell = Rect::from_min_size(pos2(area.left(), y), vec2(width, ROW_HEIGHT));
+                let at = pos2(cell.left() + 16.0, cell.center().y);
+                text(&painter, at, Align2::LEFT_CENTER, &control.label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
+                let switch_at = pos2(cell.right() - 8.0 - 63.0, cell.center().y - 14.0);
+                crate::transform::switch(ui, switch_at, control.on, &control.key);
+                if ui.interact(cell, ui.scope_id().with(("plugin switch", g, i)), Sense::click()).clicked() {
+                    changed |= plugins.set_switch(control.key.clone(), !control.on);
+                }
+                y += ROW_HEIGHT;
+            }
+            PluginControl::Slider { control } => {
+                let cell = Rect::from_min_size(pos2(area.left(), y), vec2(width, SLIDE_HEIGHT));
+                let held = moved.as_ref().filter(|(key, _)| *key == control.key).map(|(_, value)| *value);
+                let value = held.unwrap_or(control.value);
+                let shown = plugin_slider_shown(control.clone(), value);
+                let along = plugin_slider_along(control.clone(), value);
+                if let Some(at) = slide_row(ui, cell, &control.label, &shown, along, (g, i)) {
+                    *moved = Some((control.key.clone(), plugin_slider_at(control.clone(), at)));
+                }
+                y += SLIDE_HEIGHT;
+            }
+        }
+    }
+    changed
 }
 
 /// A radio mark centred at `at`: blue with a tick when chosen, else a grey ring.
@@ -1045,9 +1161,8 @@ fn group_view(ui: &mut Ui, rows: &[Row], g: usize, swipes: &mut Swipes) -> (Opti
                     tapped = Some(Tapped::Act(*act));
                 }
             }
-            Row::Switch(label, on, None) | Row::Fixed(label, on) => {
-                let ink = if matches!(row, Row::Fixed(..)) { ACTIONS_ROW } else { ACTIONS_DISABLED };
-                text(ui.painter(), label_at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(ink));
+            Row::Switch(label, on, None) => {
+                text(ui.painter(), label_at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(ACTIONS_DISABLED));
                 // a 63 x 28 switch, shown as it is: it can't be changed here
                 let track = Rect::from_min_size(switch_at, vec2(63.0, 28.0));
                 ui.painter().rect_filled(track, 14, argb(SWITCH_FIXED));
@@ -1184,4 +1299,195 @@ fn slide_row(ui: &Ui, cell: Rect, label: &str, value: &str, fraction: f32, id: (
     painter.rect_filled(Rect::from_min_max(pos2(from, y - 1.5), pos2(x, y + 1.5)), 0, argb(pc::ACCENT));
     painter.rect_filled(Rect::from_center_size(pos2(x, y), vec2(16.0, 10.0)), 5, Color32::WHITE);
     set
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Event, Modifiers, PointerButton, RawInput};
+    use procraft_core::{PluginSlider, PluginSwitch};
+
+    use super::*;
+
+    fn body() -> Rect {
+        Rect::from_min_size(pos2(100.0, 50.0), vec2(ACTIONS_WIDTH, 700.0))
+    }
+
+    fn press(at: Pos2, pressed: bool) -> Event {
+        Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }
+    }
+
+    /// The Plugins page, with no window.
+    struct Page {
+        ctx: egui::Context,
+        look: Look,
+        actions: Actions,
+        prefs: Prefs,
+        time: f64,
+    }
+
+    impl Page {
+        fn new() -> Page {
+            let ctx = egui::Context::default();
+            crate::look::install_fonts(&ctx);
+            let (look, actions, prefs) = (Look::default(), Actions::default(), Prefs::default());
+            let mut page = Page { ctx, look, actions, prefs, time: 0.0 };
+            page.frame(Vec::new());
+            page.frame(Vec::new());
+            page
+        }
+
+        /// A frame: whether it said a value changed.
+        fn frame(&mut self, events: Vec<Event>) -> bool {
+            self.time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
+                time: Some(self.time),
+                events,
+                ..RawInput::default()
+            };
+            let Page { ctx, look, actions, prefs, .. } = self;
+            let mut changed = false;
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                changed = actions.plugins_page(ui, look, body(), prefs).is_some();
+            });
+            output.textures_delta.clear();
+            changed
+        }
+
+        /// A press and a lift at `at`: whether either said a value changed.
+        fn tap(&mut self, at: Pos2) -> bool {
+            self.frame(vec![Event::PointerMoved(at)]);
+            let pressed = self.frame(vec![press(at, true)]);
+            let lifted = self.frame(vec![press(at, false)]);
+            let after = self.frame(Vec::new());
+            pressed || lifted || after
+        }
+
+        /// Each card's top and bottom on the page.
+        fn cards(&self) -> Vec<(f32, f32)> {
+            let painter = self.ctx.layer_painter(egui::LayerId::background());
+            let mut top = body().top() + 12.0 + 44.0 + 8.0;
+            let mut cards = Vec::new();
+            for plugin in self.prefs.plugins.list() {
+                let bottom = top + plugin_height(&painter, &plugin, ACTIONS_WIDTH - 24.0);
+                cards.push((top, bottom));
+                top = bottom + GROUP_GAP;
+            }
+            cards
+        }
+
+        /// A point on the first card's slider, `along` its way (0..1).
+        fn on_slider(&self, along: f32) -> Pos2 {
+            let (left, right) = (body().left() + 12.0 + 16.0, body().right() - 12.0 - 16.0);
+            pos2(left + along * (right - left), self.cards()[0].1 - SLIDE_HEIGHT / 2.0)
+        }
+
+        /// The middle of the second card's switch row.
+        fn on_switch(&self) -> Pos2 {
+            pos2(body().center().x, self.cards()[1].1 - ROW_HEIGHT / 2.0)
+        }
+    }
+
+    #[test]
+    fn a_tap_on_a_plugin_s_switch_flips_it() {
+        let mut page = Page::new();
+        let at = page.on_switch();
+        assert!(!page.prefs.plugins.paste_into_mask());
+        assert!(page.tap(at));
+        assert!(page.prefs.plugins.paste_into_mask());
+        assert!(page.tap(at));
+        assert!(!page.prefs.plugins.paste_into_mask());
+    }
+
+    #[test]
+    fn a_plugin_s_slider_goes_in_as_it_lets_go() {
+        let mut page = Page::new();
+        let (end, start) = (page.on_slider(1.0), page.on_slider(0.0));
+        page.frame(vec![Event::PointerMoved(end)]);
+        page.frame(vec![press(end, true)]);
+        page.frame(Vec::new());
+        // held, the row follows and nothing else does
+        assert_eq!(page.actions.plugin_moved.as_ref().map(|m| m.1), Some(1.25));
+        assert_eq!(page.prefs.plugins.interface_size(), 1.0);
+        page.frame(vec![Event::PointerMoved(start)]);
+        page.frame(Vec::new());
+        assert_eq!(page.actions.plugin_moved.as_ref().map(|m| m.1), Some(0.75));
+        assert_eq!(page.prefs.plugins.interface_size(), 1.0);
+        let lifted = page.frame(vec![press(start, false)]);
+        let after = page.frame(Vec::new());
+        assert!(lifted || after);
+        assert_eq!(page.prefs.plugins.interface_size(), 0.75);
+        assert!(page.actions.plugin_moved.is_none());
+    }
+
+    #[test]
+    fn a_tap_along_a_plugin_s_slider_sets_it() {
+        let mut page = Page::new();
+        let at = page.on_slider(0.6);
+        assert!(page.tap(at));
+        assert_eq!(page.prefs.plugins.interface_size(), 1.05);
+    }
+
+    /// A card for a plugin the app has no code for: it shows, and a tap on it changes nothing.
+    #[test]
+    fn a_plugin_nothing_answers_to_draws_and_does_nothing() {
+        let stranger = PluginInfo {
+            id: "someone.stranger".to_owned(),
+            name: "Stranger".to_owned(),
+            description: "No code answers to it.".to_owned(),
+            bundled: false,
+            on: false,
+            controls: vec![
+                PluginControl::Switch {
+                    control: PluginSwitch {
+                        key: "someone.stranger.switch".to_owned(),
+                        label: "On".to_owned(),
+                        on: false,
+                        starts: false,
+                    },
+                },
+                PluginControl::Slider {
+                    control: PluginSlider {
+                        key: "someone.stranger.slider".to_owned(),
+                        label: "Amount".to_owned(),
+                        least: 0.0,
+                        most: 10.0,
+                        step: 0.5,
+                        value: 2.0,
+                        starts: 2.0,
+                        shown_times: 1.0,
+                        unit: " px".to_owned(),
+                    },
+                },
+            ],
+        };
+        let (ctx, plugins) = (egui::Context::default(), Plugins::new());
+        crate::look::install_fonts(&ctx);
+        let before = plugins.list();
+        let mut time = 0.0;
+        let mut moved = None;
+        let mut frame = |events: Vec<Event>, moved: &mut Option<(String, f32)>| {
+            time += 1.0 / 60.0;
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(600.0, 400.0))),
+                time: Some(time),
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                assert!(!plugin_card(ui, &stranger, 0, &plugins, moved));
+            });
+            output.textures_delta.clear();
+        };
+        frame(Vec::new(), &mut moved);
+        // its switch's row, then its slider's: the first has nothing to set, the second is held
+        for at in [pos2(200.0, 92.0), pos2(200.0, 140.0)] {
+            frame(vec![Event::PointerMoved(at)], &mut moved);
+            frame(vec![press(at, true)], &mut moved);
+            frame(vec![press(at, false)], &mut moved);
+            frame(Vec::new(), &mut moved);
+        }
+        assert_eq!(moved.map(|m| m.0), Some("someone.stranger.slider".to_owned()));
+        assert_eq!(plugins.list(), before);
+    }
 }

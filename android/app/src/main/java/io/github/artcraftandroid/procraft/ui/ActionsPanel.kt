@@ -612,8 +612,9 @@ private fun PressurePage(vm: CanvasViewModel, onBack: () -> Unit) {
             ),
         )
         Spacer(Modifier.height(16.dp))
-        // the stroke always starts at the pen's tip here
-        Group(listOf(Toggle("Tip Attachment", true, fixed = true)))
+        // with no filtering it has nothing to do
+        val tipChange: ((Boolean) -> Unit)? = if (vm.inputMotionFiltering > 0f) ({ on -> vm.changeInput(tipAttached = on) }) else null
+        Group(listOf(Toggle("Tip Attachment", vm.inputTipAttached, onChange = tipChange)))
         Spacer(Modifier.height(24.dp))
         Text("App Pressure Sensitivity", color = Pc.SlideLabel, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 13.dp).height(19.dp))
         Box(Modifier.padding(horizontal = 7.dp).fillMaxWidth().aspectRatio(1f).background(CurveFill)) {
