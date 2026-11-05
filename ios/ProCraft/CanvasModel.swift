@@ -217,6 +217,10 @@ final class CanvasModel {
     /// The brush studio.
     @ObservationIgnored private(set) lazy var studio = StudioModel(model: self)
     @ObservationIgnored private(set) lazy var drop = ColorDrop(model: self)
+    @ObservationIgnored private(set) lazy var selection = SelectionTool(model: self)
+    @ObservationIgnored private(set) lazy var transform = TransformTool(model: self)
+    /// The view as the core has it: `[a, b, c, d, e, f]`, canvas pixels to window pixels.
+    private(set) var viewMatrix: [Float] = []
     /// Delete on a locked layer: why not, OK alone.
     var lockedDeleteTold = false
     /// Gesture controls are open, on this page: it opens on the page it was last on.
@@ -767,10 +771,76 @@ final class CanvasModel {
         if change.end.quickshape { endQuickShape() }
         if change.end.filling { drop.endBand() }
         if change.end.recolor { recoloring = false }
-        if change.end.transform { transforming = false }
-        if change.end.selection { selecting = false }
+        if change.end.transform { endTransform(commit: true) }
+        if change.end.selection { closeSelecting() }
         if change.end.adjustment { endAdjustment(commit: true) }
         return change.goesOn
+    }
+
+    // MARK: transform and selection
+
+    /// The transform button: opens transform on the current layer, or keeps it and closes.
+    func toggleTransform() {
+        if transforming {
+            _ = switchModes(.transform)
+            return
+        }
+        guard currentTakesChanges() else { return }
+        _ = switchModes(.transform)
+        panel = .none
+        pickNext = false
+        guard transform.begin() else { return }
+        refreshView()
+        transforming = true
+    }
+
+    /// Ends transform: `commit` keeps the change as one undo step, otherwise the layer goes back.
+    func endTransform(commit: Bool) {
+        guard transforming else { return }
+        session.transformEnd(commit: commit)
+        transforming = false
+        transform.ended()
+        refresh()
+    }
+
+    /// The selection button: opens or closes the selection tool (a selection made stays).
+    func toggleSelecting() {
+        // open, it closes; else the other modes end
+        guard switchModes(.selection) else { return }
+        panel = .none
+        pickNext = false
+        selection.opened()
+        selecting = true
+        refreshView()
+        selection.showLook()
+    }
+
+    func closeSelecting() {
+        guard selecting else { return }
+        selection.closed()
+        selecting = false
+        selection.showLook()
+    }
+
+    /// Window pixels to canvas pixels through the view, or none when it cannot be inverted.
+    func windowToCanvas(_ p: CGPoint) -> CGPoint? {
+        guard viewMatrix.count == 6 else { return nil }
+        let m = viewMatrix.map { CGFloat($0) }
+        let det = m[0] * m[3] - m[1] * m[2]
+        guard abs(det) >= 1e-9 else { return nil }
+        let x = p.x - m[4]
+        let y = p.y - m[5]
+        return CGPoint(x: (m[3] * x - m[2] * y) / det, y: (m[0] * y - m[1] * x) / det)
+    }
+
+    /// Canvas pixels to window points through the view.
+    func canvasToWindow(_ p: CGPoint) -> CGPoint {
+        guard viewMatrix.count == 6 else { return p }
+        let m = viewMatrix.map { CGFloat($0) }
+        return CGPoint(
+            x: (m[0] * p.x + m[2] * p.y + m[4]) / pixels,
+            y: (m[1] * p.x + m[3] * p.y + m[5]) / pixels
+        )
     }
 
     // MARK: the adjustments
@@ -956,19 +1026,33 @@ final class CanvasModel {
     // MARK: undo and redo
 
     func undo() {
+        if transforming {
+            transform.apply(.undo)
+            return
+        }
         let could = canUndo
         let name = session.undo()
         if could || name != nil {
             showNotice("Undo" + (name.map { " \($0)" } ?? ""))
         }
+        // cloning, the core put the source back where it was before the stroke
+        if adjustment != nil {
+            readAdjust()
+        }
         refresh()
     }
 
     func redo() {
+        if transforming {
+            return
+        }
         let could = canRedo
         let name = session.redo()
         if could {
             showNotice("Redo" + (name.map { " \($0)" } ?? ""))
+        }
+        if adjustment != nil {
+            readAdjust()
         }
         refresh()
     }
@@ -1035,9 +1119,9 @@ final class CanvasModel {
             let copied = session.copyCanvas()
             DispatchQueue.main.async {
                 guard let self, let copied else { return }
-                clipboard = copied
-                canPaste = true
-                showNotice("Canvas copied")
+                self.clipboard = copied
+                self.canPaste = true
+                self.showNotice("Canvas copied")
             }
         }
     }
@@ -1307,6 +1391,13 @@ final class CanvasModel {
         session.setTouchSettings(settings: Gestures.shared.touchSettings())
         // Continue filling: each touch fills where it lands; slid, it changes the threshold
         session.setTouchFilling(fill: drop.touchFill())
+        // the selection tool's touch selects as the tool is set
+        session.setTouchSelecting(how: selection.touch())
+        if selecting {
+            selection.setPopup(.none)
+        }
+        // a transform's touch takes the node it lands on (the warp's inner points with the advanced mesh)
+        session.setTouchTransforming(transforming: transforming ? TransformTouch(advancedMesh: transform.advancedMesh) : nil)
         // a touch on the canvas closes an adjustment's menu and liquify's popups
         closedAdjustMenu = adjustMenuAt != nil
         if adjustment != nil {
@@ -1360,6 +1451,7 @@ final class CanvasModel {
 
     /// The view moved: what is drawn over the canvas follows.
     func refreshView() {
+        viewMatrix = session.viewMatrix()
         // the shape's handles follow the canvas
         if quickShape != nil {
             quickShape = session.quickshapeInfo()

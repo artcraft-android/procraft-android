@@ -112,6 +112,14 @@ enum ScreenCapture {
         model.studio.sourceEditing = kind
     }
 
+    /// Transform open over a filled layer: on an empty one there is nothing to move.
+    private static func transform(_ model: CanvasModel) {
+        if let l = model.layers.first(where: { $0.current }) {
+            model.fillLayer(l)
+        }
+        model.toggleTransform()
+    }
+
     /// The layers panel over a few layers, what `shows` opens open.
     private static func layers(_ model: CanvasModel, shows: String) {
         layersShows = shows
@@ -193,6 +201,29 @@ enum ScreenCapture {
         case "source-landscape":
             sideways = true
             source(model, .grain)
+        case "transform":
+            transform(model)
+        case "transform-snapping":
+            transform(model)
+            model.transform.popup = .snapping
+        case "transform-interpolation":
+            transform(model)
+            model.transform.popup = .interpolation
+        case "transform-warp":
+            transform(model)
+            model.transform.choose(TransformKind.warp)
+        case "transform-numeric":
+            transform(model)
+            model.transform.numeric = TransformNumericAsk(angle: false, at: CGPoint(x: 560, y: 400), right: false)
+        case "selection":
+            model.toggleSelecting()
+        case "selection-feather":
+            model.toggleSelecting()
+            model.selection.choose(.automatic)
+            model.selection.openPopup(.feather)
+        case "selection-saved":
+            model.toggleSelecting()
+            model.selection.openPopup(.saved)
         case "quick-menu":
             model.toggleQuickMenu(at: CGPoint(x: 372, y: 500))
         case "quick-menus":

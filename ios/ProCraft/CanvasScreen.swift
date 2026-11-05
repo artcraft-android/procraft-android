@@ -40,6 +40,12 @@ struct CanvasScreen: View {
                             model.sliderPanelKept = false
                         })
                 }
+                if model.transforming {
+                    TransformOverlay(model: model)
+                }
+                if model.selecting {
+                    SelectionOverlay(model: model)
+                }
                 ColorDropBand(drop: model.drop, width: screen.size.width)
                 // the top bar slides up off the screen and the side bar out to its side as they fade
                 TopBar(model: model)
@@ -68,6 +74,30 @@ struct CanvasScreen: View {
                 }
                 if model.adjusting, !hidden {
                     AdjustmentMenu(model: model, screen: screen.size)
+                }
+                // the bottom toolbars rise from below the screen, and drop away
+                ZStack {
+                    if model.transforming, !hidden {
+                        TransformToolbar(model: model, screenWidth: screen.size.width)
+                            .transition(.move(edge: .bottom))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .animation(model.transforming ? Motion.toolbarIn : Motion.toolbarOut, value: model.transforming)
+                if model.transforming, !hidden {
+                    TransformPopover(model: model, screen: screen.size)
+                    TransformNumeric(model: model, screen: screen.size)
+                }
+                ZStack {
+                    if model.selecting, !hidden {
+                        SelectionToolbar(model: model, screenWidth: screen.size.width)
+                            .transition(.move(edge: .bottom))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .animation(model.selecting ? Motion.toolbarIn : Motion.toolbarOut, value: model.selecting)
+                if model.selecting, !hidden {
+                    SelectionPopover(model: model, screen: screen.size)
                 }
                 if model.copyPasteOpen {
                     CopyPastePanel(model: model, screen: screen.size)
@@ -348,6 +378,25 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 model.askRasterize = true
             case .copyPaste:
                 model.copyPasteOpen = true
+            case .transformTouched:
+                model.transform.popup = .none
+            case let .transformMoved(transform):
+                model.transform.moved(transform)
+            case let .transformHeld(handle, x, y):
+                model.transform.hold(handle, x: x, y: y)
+            case let .transformLetGo(handle, x, y):
+                model.transform.release(handle, x: x, y: y)
+            case let .transformNumeric(angle, x, y, right):
+                let at = CGPoint(x: CGFloat(x) / model.pixels, y: CGFloat(y) / model.pixels)
+                model.transform.numeric = TransformNumericAsk(angle: angle, at: at, right: right)
+            case let .selectionDrag(x0, y0, x1, y1):
+                model.selection.dragged(CGPoint(x: CGFloat(x0), y: CGFloat(y0)), CGPoint(x: CGFloat(x1), y: CGFloat(y1)))
+            case let .selectionThreshold(x, y, threshold, done):
+                model.selection.colourSlid(CGPoint(x: CGFloat(x), y: CGFloat(y)), threshold: threshold, done: done)
+            case .freehandChanged:
+                model.selection.freehandChanged()
+            case .selectionChanged:
+                model.selection.touched()
             case let .fillThreshold(threshold):
                 model.drop.pourThreshold(threshold)
             case .filled:

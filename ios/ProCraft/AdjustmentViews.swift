@@ -135,7 +135,7 @@ struct AdjustmentMenu: View {
 
 /// A row of a toolbar's panel: its name and value over a thin slider, blue up to a small white
 /// knob, grey after it.
-private struct PanelSlider: View {
+struct PanelSlider: View {
     let label: String
     let value: Float
     let shown: String

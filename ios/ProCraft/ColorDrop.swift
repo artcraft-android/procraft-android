@@ -443,7 +443,7 @@ struct ColorDropBand: View {
                     .allowsHitTesting(false)
             )
             if drop.sliding {
-                Text(verbatim: "Threshold \(Int((drop.threshold * 100).rounded()))%")
+                Text(verbatim: "Threshold \(wholeNumber(drop.threshold * 100))%")
                     .font(.system(size: 14.4))
                     .foregroundStyle(ink)
                     .lineLimit(1)

@@ -34,8 +34,12 @@ struct TopBar: View {
                     ActionButton(icon: PcIcons.adjustments, selected: model.panel == .adjustments || model.adjusting || model.recoloring) {
                         model.toggle(.adjustments)
                     }
-                    ActionButton(icon: PcIcons.selection, selected: model.selecting, glyph: 33) {}
-                    ActionButton(icon: PcIcons.transform, selected: model.transforming, glyph: 44) {}
+                    ActionButton(icon: PcIcons.selection, selected: model.selecting, glyph: 33) {
+                        model.toggleSelecting()
+                    }
+                    ActionButton(icon: PcIcons.transform, selected: model.transforming, glyph: 44) {
+                        model.toggleTransform()
+                    }
                 }
                 .padding(.leading, Pc.barMargin)
                 .frame(maxWidth: .infinity, alignment: .leading)
