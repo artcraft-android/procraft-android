@@ -132,7 +132,7 @@ fn stroke_pixel(p: vec2<i32>) -> StrokePixel {
         if (lu.dual_threshold >= 0.0) {
             b = select(0.0, 1.0, b > lu.dual_threshold);
         }
-        let a = dual_combine(s.a, b, lu.dual - 1u);
+        let a = dual_rise(dual_combine(s.a, b, lu.dual - 1u), built, lu.dual - 1u);
         // the first's colour where it is, else the second's (drawn in the stroke's colour too)
         let colour = select(t.rgb / max(t.a, 1e-6), s.rgb / max(s.a, 1e-6), s.a > 0.0);
         s = vec4<f32>(colour * a, a);

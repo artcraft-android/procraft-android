@@ -1565,6 +1565,64 @@ fn a_dual_brush_s_paint_laid_in_place_is_cut_by_its_second() {
 }
 
 #[test]
+fn a_dual_brush_s_wet_paint_is_cut_by_its_second() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // wet paint on the right, its second on the left: by Multiply the paint shows only where both
+    // went, and undo takes it all back
+    let mut doc = Document::new(64, 32);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let first = StrokeStyle { wet_pull: Some(0.5), ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0) };
+    assert!(first.takes_second());
+    let second = procraft_gpu::SecondStroke {
+        style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0),
+        mode: 1,
+        threshold: -1.0,
+    };
+    canvas.begin_dual_stroke(doc.current(), first, second);
+    canvas.add_stamps(&[Stamp::round(Vec2::new(40.0, 16.0), 12.0, 1.0)]);
+    canvas.add_second_stamps(&[Stamp::round(Vec2::new(24.0, 16.0), 12.0, 1.0)]);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    let shown = [16, 32, 48].map(|x| pixel(&layer, 64, x, 16)[3]);
+    assert!(shown[0] == 0 && shown[1] > 240 && shown[2] == 0, "{shown:?}");
+    canvas.undo();
+    canvas.render(&gpu, &mut doc, None);
+    let undone = canvas.read_layer(&gpu, doc.current()).unwrap();
+    assert_eq!([16, 32, 48].map(|x| pixel(&undone, 64, x, 16)[3]), [0, 0, 0]);
+}
+
+#[test]
+fn a_dual_brush_s_second_adds_nothing_where_the_first_is_not() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // the first on the right, its second on the left, by Hard Mix, which fills what the two add up
+    // to one: where only the second went nothing shows, by Normal it does
+    let shown = |mode: u32| {
+        let mut doc = Document::new(64, 32);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let second = procraft_gpu::SecondStroke {
+            style: StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0),
+            mode,
+            threshold: -1.0,
+        };
+        let first = StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0);
+        canvas.begin_dual_stroke(doc.current(), first, second);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(40.0, 16.0), 12.0, 1.0)]);
+        canvas.add_second_stamps(&[Stamp::round(Vec2::new(24.0, 16.0), 12.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        [16, 32, 48].map(|x| pixel(&layer, 64, x, 16)[3])
+    };
+    let hard_mix = shown(17);
+    assert!(hard_mix[0] == 0 && hard_mix[1] > 240 && hard_mix[2] > 240, "{hard_mix:?}");
+    let normal = shown(0);
+    assert!(normal.iter().all(|&a| a > 240), "{normal:?}");
+}
+
+#[test]
 fn modulated_wet_paint_lays_a_pixel_once() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

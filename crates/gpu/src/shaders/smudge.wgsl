@@ -78,7 +78,8 @@ struct SmudgeStamp {
     dual: u32,
     dual_threshold: f32,
     // 1: the stamp only adds to the paint laid so far (`amount`'s second half), which
-    // cs_synthesize lays over the layer as it was
+    // cs_synthesize lays over the layer as it was; 2: wet paint, which also keeps what it lays in
+    // `grained`, so that the brush goes on mixing with the stroke as it was laid
     laid_apart: u32,
     // the coarsest mip level the shape is read from
     shape_lod_cap: f32,
@@ -127,8 +128,8 @@ fn pixel(x: i32, y: i32) -> vec4<f32> {
         return textureLoad(before_tex, vec2<i32>(cx, cy), 0);
     }
     let k = u32(cy) * st.stride + u32(cx);
-    // the brush picks up the stroke as it is without the grain laid over it
-    if (st.grain_once > 0.5) {
+    // the brush picks up the stroke as it is without the grain laid over it, or its second
+    if (st.grain_once > 0.5 || st.laid_apart == 2u) {
         return unpack4x8unorm(grained[k]);
     }
     return unpack4x8unorm(work[k]);
@@ -343,7 +344,7 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     let g = select(grain_at(vec2<f32>(p) + 0.5), 1.0, once);
     let m = shape * st.alpha;
     let k = u32(p.y) * st.stride + u32(p.x);
-    let w = select(unpack4x8unorm(work[k]), unpack4x8unorm(grained[k]), once);
+    let w = select(unpack4x8unorm(work[k]), unpack4x8unorm(grained[k]), once || st.laid_apart == 2u);
     // smudging: the grain lets less of what is carried through
     var out = mix(w, carried(p), m * g);
     if (st.mode == 1u) {
@@ -361,10 +362,12 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
             weight = weight * (1.0 - held);
             amount[k] = held + weight * (1.0 - held);
         }
-        if (st.laid_apart == 1u) {
+        if (st.laid_apart != 0u) {
             // how much of the paint shows there so far, put together with the rest later
             let l = st.stride * st.size.y + k;
             amount[l] = amount[l] + weight * (1.0 - amount[l]);
+        }
+        if (st.laid_apart == 1u) {
             return;
         }
         out = mix(w, laid, weight);
@@ -375,6 +378,11 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     // rounded to 8 bits up or down at random, in proportion to the remainder, so that faint stamps
     // add up as they should instead of rounding away
     let h = dither(u32(p.x), u32(p.y), bitcast<u32>(st.center.x) ^ (bitcast<u32>(st.center.y) * 2654435761u));
+    if (st.laid_apart == 2u && !once) {
+        // wet paint kept as it was laid; shown by cs_synthesize
+        grained[k] = pack4x8unorm(clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));
+        return;
+    }
     if (once) {
         // the stroke kept without the grain; shown with the grain over its change to the layer
         grained[k] = pack4x8unorm(clamp(out + (h - 0.5) / 255.0, vec4<f32>(0.0), vec4<f32>(1.0)));
@@ -387,8 +395,9 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 // A dual brush's paint laid in place, put together where its stamps or its second's went: the
-// paint over the layer as it was, as far as how much of it was laid and the second's coverage
-// (cut at its threshold) combine by the dual mode (with a texturized grain laid over it once).
+// paint over the layer as it was, as far as how much of it was laid (with a texturized grain laid
+// over it once) and the second's coverage (cut at its threshold) combine by the dual mode. Wet
+// paint keeps what it laid: its change to the layer, scaled from how much was laid to that.
 @compute @workgroup_size(8, 8)
 fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
     let p = st.bbox.xy + vec2<i32>(id.xy);
@@ -396,19 +405,23 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let k = u32(p.y) * st.stride + u32(p.x);
-    var a = amount[st.stride * st.size.y + k];
+    let laid = amount[st.stride * st.size.y + k];
+    var a = laid;
+    if (st.grain_once > 0.5) {
+        a = a * grain_at(vec2<f32>(p) + 0.5);
+    }
     if (st.dual != 0u) {
         var b = textureLoad(second_tex, p, 0).a;
         if (st.dual_threshold >= 0.0) {
             b = select(0.0, 1.0, b > st.dual_threshold);
         }
-        a = dual_combine(a, b, st.dual - 1u);
-    }
-    if (st.grain_once > 0.5) {
-        a = a * grain_at(vec2<f32>(p) + 0.5);
+        a = dual_rise(dual_combine(a, b, st.dual - 1u), laid, st.dual - 1u);
     }
     let was = textureLoad(before_tex, p, 0);
     var out = mix(was, vec4<f32>(st.paint.rgb, 1.0), a);
+    if (st.laid_apart == 2u && laid > 0.0) {
+        out = was + (unpack4x8unorm(grained[k]) - was) * (a / laid);
+    }
     if (st.preserve_alpha == 1u) {
         out = out * (was.a / max(out.a, 1e-6));
     }

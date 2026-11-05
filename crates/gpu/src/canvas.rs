@@ -175,10 +175,10 @@ impl StrokeStyle {
         self.tool == StrokeTool::Smudge || self.paints_in_place()
     }
 
-    /// Whether a dual brush's second can go with the stroke: not with a smudge or wet paint (the
-    /// paint laid in place by a dry brush is put together with it, see `cs_synthesize`).
+    /// Whether a dual brush's second can go with the stroke: not with a smudge (paint laid in
+    /// place, dry or wet, is put together with it, see `cs_synthesize`).
     pub fn takes_second(&self) -> bool {
-        !self.in_place() || (self.tool == StrokeTool::Paint && self.laid_in_place && self.wet_pull.is_none())
+        self.tool != StrokeTool::Smudge
     }
 
     /// The style as a dual brush's second: only coverage, drawn apart into its own texture, so
@@ -965,7 +965,8 @@ struct SmudgeUniform {
     /// its second's threshold (negative: none).
     dual: u32,
     dual_threshold: f32,
-    /// 1 when the stamp only adds to the paint laid so far, which `cs_synthesize` lays down.
+    /// 1 when the stamp only adds to the paint laid so far, which `cs_synthesize` lays down; 2
+    /// when it is wet paint, which keeps what it lays as well.
     laid_apart: u32,
     /// The coarsest mip level the shape is read from.
     shape_lod_cap: f32,
@@ -1024,7 +1025,7 @@ struct Smudge {
     /// Wet paint that builds up by what is left (the modulated mode): how much each pixel has taken
     /// so far, 0..1; for paint laid apart, then how much of the paint shows at each pixel.
     amount: Option<wgpu::Buffer>,
-    /// A dual brush's dry paint laid in place: laid apart (into `amount`'s second half) and put
+    /// A dual brush's paint laid in place: laid apart (into `amount`'s second half) and put
     /// together with its second where either goes (`cs_synthesize`), with the stroke's look and
     /// its second's dual mode + 1 and threshold (the mode 0 once the second is dropped).
     apart: Option<(StrokeStyle, u32, f32)>,
@@ -4292,13 +4293,11 @@ impl Canvas {
             let Some(layer) = self.layers.get(&target) else { return };
             let wet_paint = style.paints_in_place();
             let layer_bytes = u64::from(row) * u64::from(self.height);
-            // wet paint with a texturized grain keeps the stroke without it, then the layer as it was
-            let grain = grain_once(style);
-            // a dual brush's dry paint laid in place is laid apart, put together with its second
-            let apart = (style.laid_in_place && style.wet_pull.is_none())
-                .then_some(self.queued_second)
-                .flatten()
-                .map(|d| (*style, d.mode + 1, d.threshold));
+            // a dual brush's paint laid in place is laid apart, put together with its second
+            let apart = wet_paint.then_some(self.queued_second).flatten().map(|d| (*style, d.mode + 1, d.threshold));
+            // wet paint with a texturized grain or a second keeps the stroke without it, then the
+            // layer as it was
+            let grain = grain_once(style) || (apart.is_some() && style.wet_pull.is_some());
             // and builds up by what is left in the modulated mode (and keeps how much shows, laid
             // apart)
             let amount_bytes = (wet_paint && style.rendering == Rendering::Gradual || apart.is_some())
@@ -4526,7 +4525,8 @@ impl Canvas {
             mode: 1,
             dual,
             dual_threshold,
-            grain_once: if smudge.grained.is_some() { 1.0 } else { 0.0 },
+            grain_once: if grain_once(&style) { 1.0 } else { 0.0 },
+            laid_apart: if style.wet_pull.is_some() { 2 } else { 0 },
             ..smudge_uniform(&bytemuck::Zeroable::zeroed(), &style, rect, size)
         });
         let mut pass = encoder
@@ -4566,8 +4566,8 @@ impl Canvas {
             smudge,
             second,
         );
-        let grain_once = if smudge.grained.is_some() { 1.0 } else { 0.0 };
-        let modulated = u32::from(smudge.amount.is_some());
+        let grain_once = if grain_once(style) { 1.0 } else { 0.0 };
+        let modulated = u32::from(smudge.amount.is_some() && style.rendering == Rendering::Gradual);
         let laid_apart = u32::from(smudge.apart.is_some());
         let mut changed = IRect::EMPTY;
         let mut pass =
@@ -4654,6 +4654,7 @@ impl Canvas {
                 modulated,
                 kept: if first { -1 } else { 0 },
                 grain_once,
+                laid_apart: laid_apart * 2,
                 count: u32::try_from(n).unwrap_or(0),
                 plot,
                 index,
@@ -4685,7 +4686,11 @@ impl Canvas {
             smudge.plot = plot;
         }
         drop(pass);
-        self.smudged(encoder, changed);
+        if laid_apart == 1 {
+            self.synthesize(device, encoder, params, changed);
+        } else {
+            self.smudged(encoder, changed);
+        }
     }
 
     /// Ends a smudge stroke: one undo step with the pixels it changed, or (`cancel`) puts the

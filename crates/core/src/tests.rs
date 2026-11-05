@@ -8863,10 +8863,17 @@ fn crossing_strokes_sheet() {
             s.set_background_color(1.0, 1.0, 1.0, true);
             s.set_color(237.0 / 255.0, 133.0 / 255.0, 68.0 / 255.0);
             let ms: f64 = std::env::var("CROSS_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(700.0);
+            // `CROSS_PHASE`: the input that many ms later against the display's frames, and
+            // `CROSS_SEED`: strokes counted as already drawn, which seed the stroke's randomness
+            let phase: f64 = std::env::var("CROSS_PHASE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+            if let Some(seed) = std::env::var("CROSS_SEED").ok().and_then(|v| v.parse().ok()) {
+                s.shared.lock().strokes = seed;
+            }
             // input at 120 a second, as a finger's, along y 150 from `x0` to `x1` in `ms`
             let across = |x0: f32, x1: f32, ms: f64| {
                 let n = ((ms / 1000.0 * 120.0).round() as usize).max(2);
-                (0..=n).map(move |i| sample(x0 + (x1 - x0) * i as f32 / n as f32, 150.0, i as f64 * ms / n as f64))
+                (0..=n)
+                    .map(move |i| sample(x0 + (x1 - x0) * i as f32 / n as f32, 150.0, phase + i as f64 * ms / n as f64))
             };
             // `CROSS_FIRST="file|size|x0|x1|ms"`: a stroke with that brush first, the stroke over it
             if let Ok(first) = std::env::var("CROSS_FIRST") {

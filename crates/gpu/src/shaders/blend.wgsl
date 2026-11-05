@@ -192,3 +192,13 @@ fn dual_combine(a: f32, b: f32, mode: u32) -> f32 {
     }
     return a + (1.0 - a) * b;
 }
+
+// a dual brush's combined coverage `x` held to what the first stroke laid, `built`: as a grain
+// raises it, faint coverage takes only part of the rise and none takes none, so a second adds
+// nothing where the first isn't (but for Normal, which shows the second there)
+fn dual_rise(x: f32, built: f32, mode: u32) -> f32 {
+    if (mode == 0u || x <= built) {
+        return x;
+    }
+    return built + min(built / GRAIN_RISE_FULL, 1.0) * (x - built);
+}
