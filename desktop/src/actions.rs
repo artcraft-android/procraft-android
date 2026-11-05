@@ -109,8 +109,6 @@ pub enum Act {
     RightHanded,
     BrushCursor,
     ProjectCanvas,
-    /// The eyedropper picks from the current layer, or the canvas as composited.
-    EyedropperLayer,
     ResetInput,
 }
 
@@ -129,7 +127,6 @@ pub enum Page {
 enum Slid {
     RapidUndo,
     SelectionVisibility,
-    FillGap,
     Stabilization,
     MotionFiltering,
     MotionExpression,
@@ -339,7 +336,6 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
         4 => {
             let delay = prefs.rapid_undo_delay;
             let visibility = prefs.selection_visibility;
-            let gap = prefs.fill_gap;
             vec![
                 vec![
                     Switch("Light interface", prefs.light_interface, Some(Act::LightInterface)),
@@ -351,7 +347,6 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                     ),
                     Switch("Project canvas", prefs.project_canvas, Some(Act::ProjectCanvas)),
                     Switch("Brush cursor", prefs.brush_cursor, Some(Act::BrushCursor)),
-                    Switch("Eyedropper picks from layer", prefs.eyedropper_layer, Some(Act::EyedropperLayer)),
                     Button("Advanced cursor settings", None, Some(Act::Page(Page::Cursor))),
                 ],
                 vec![
@@ -373,13 +368,6 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                         visibility,
                         SLIDE_HEIGHT,
                         Slid::SelectionVisibility,
-                    ),
-                    Slide(
-                        "ColorDrop gap closing",
-                        if gap == 0 { "Off".to_owned() } else { format!("{gap} px") },
-                        gap as f32 / procraft_engine::fill::MOST_GAP as f32,
-                        SLIDE_HEIGHT,
-                        Slid::FillGap,
                     ),
                 ],
                 vec![Switch("Size & Opacity sidebar", showing.side_bar, Some(Act::SideBar))],
@@ -635,10 +623,6 @@ impl Actions {
                 prefs.project_canvas = !prefs.project_canvas;
                 Some(Act::Prefs)
             }
-            Some(Tapped::Act(Act::EyedropperLayer)) => {
-                prefs.eyedropper_layer = !prefs.eyedropper_layer;
-                Some(Act::Prefs)
-            }
             Some(Tapped::Act(Act::ResetInput)) => {
                 prefs.reset_input();
                 Some(Act::Prefs)
@@ -651,7 +635,6 @@ impl Actions {
                         prefs.rapid_undo_delay = RAPID_UNDO_MIN_S + at * (RAPID_UNDO_MAX_S - RAPID_UNDO_MIN_S);
                     }
                     Slid::SelectionVisibility => prefs.selection_visibility = at,
-                    Slid::FillGap => prefs.fill_gap = (at * procraft_engine::fill::MOST_GAP as f32).round() as u32,
                     Slid::Stabilization => prefs.stabilization = at,
                     Slid::MotionFiltering => prefs.motion_filtering = at,
                     Slid::MotionExpression => prefs.motion_expression = at,
@@ -1017,12 +1000,14 @@ fn plugin_card(
     let (left, name_y) = (area.left() + PLUGIN_INSET, area.top() + 12.0);
     text(&painter, pos2(left, name_y), Align2::LEFT_TOP, &plugin.name, 17.0, Weight::SemiBold, argb(PANEL_TITLE));
     // the tag after the name
-    let tag = "experimental";
-    let tag_left = left + text_width(&painter, &plugin.name, 17.0, Weight::SemiBold) + 8.0;
-    let tag_width = text_width(&painter, tag, 12.0, Weight::Medium) + 14.0;
-    let pill = Rect::from_min_size(pos2(tag_left, name_y + 1.0), vec2(tag_width, 19.0));
-    painter.rect_filled(pill, 9, argb(PLUGIN_TAG));
-    text(&painter, pill.center(), Align2::CENTER_CENTER, tag, 12.0, Weight::Medium, argb(ACTIONS_ROW));
+    if plugin.experimental {
+        let tag = "experimental";
+        let tag_left = left + text_width(&painter, &plugin.name, 17.0, Weight::SemiBold) + 8.0;
+        let tag_width = text_width(&painter, tag, 12.0, Weight::Medium) + 14.0;
+        let pill = Rect::from_min_size(pos2(tag_left, name_y + 1.0), vec2(tag_width, 19.0));
+        painter.rect_filled(pill, 9, argb(PLUGIN_TAG));
+        text(&painter, pill.center(), Align2::CENTER_CENTER, tag, 12.0, Weight::Medium, argb(ACTIONS_ROW));
+    }
     let inside = width - 2.0 * PLUGIN_INSET;
     let said = wrapped(&painter, &plugin.description, 14.0, Weight::Regular, argb(ACTIONS_ROW), inside);
     let said_height = said.size().y;
@@ -1436,6 +1421,7 @@ mod tests {
             name: "Stranger".to_owned(),
             description: "No code answers to it.".to_owned(),
             bundled: false,
+            experimental: false,
             on: false,
             controls: vec![
                 PluginControl::Switch {
@@ -1457,6 +1443,7 @@ mod tests {
                         starts: 2.0,
                         shown_times: 1.0,
                         unit: " px".to_owned(),
+                        at_least: None,
                     },
                 },
             ],

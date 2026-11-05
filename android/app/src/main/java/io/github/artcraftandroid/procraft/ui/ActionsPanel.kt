@@ -300,12 +300,6 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                     (vm.rapidUndoDelay - CanvasViewModel.RAPID_UNDO_MIN_S) / (CanvasViewModel.RAPID_UNDO_MAX_S - CanvasViewModel.RAPID_UNDO_MIN_S),
                 ) { vm.changeRapidUndoDelay(CanvasViewModel.RAPID_UNDO_MIN_S + it * (CanvasViewModel.RAPID_UNDO_MAX_S - CanvasViewModel.RAPID_UNDO_MIN_S)) },
                 Slide("Selection mask visibility", "%.1f%%".format(vm.selectionVisibility * 100f), vm.selectionVisibility, onChange = vm::changeSelectionVisibility),
-                Slide(
-                    "ColorDrop gap closing",
-                    if (vm.fillGap == 0) "Off" else "${vm.fillGap} px",
-                    vm.fillGap / CanvasViewModel.MOST_FILL_GAP.toFloat(),
-                    onChange = vm::changeFillGap,
-                ),
             ),
             listOf(Toggle("Size & Opacity sidebar", vm.showSideBar) { vm.showSideBar = it }),
         )
@@ -589,19 +583,21 @@ private val PluginTag get() = if (Pc.light) Color(0x14000000) else Color(0x1FFFF
 
 /** A plugin: its name and tag, what it does, and its controls, whatever they are. */
 @Composable
-private fun PluginCard(plugin: PluginInfo, onSwitch: (String, Boolean) -> Unit, onSlider: (String, Float) -> Unit) {
+private fun PluginCard(plugin: PluginInfo, onSwitch: (String, Boolean) -> Unit, onSlider: (PluginSlider, Float) -> Unit) {
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
         Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(plugin.name, color = Pc.PanelTitle, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                Text(
-                    "experimental",
-                    color = Pc.ActionsRow,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    modifier = Modifier.padding(start = 8.dp).clip(RoundedCornerShape(9.dp)).background(PluginTag).padding(horizontal = 7.dp, vertical = 2.dp),
-                )
+                if (plugin.experimental) {
+                    Text(
+                        "experimental",
+                        color = Pc.ActionsRow,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        modifier = Modifier.padding(start = 8.dp).clip(RoundedCornerShape(9.dp)).background(PluginTag).padding(horizontal = 7.dp, vertical = 2.dp),
+                    )
+                }
             }
             Text(plugin.description, color = Pc.ActionsRow, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
         }
@@ -617,7 +613,7 @@ private fun PluginCard(plugin: PluginInfo, onSwitch: (String, Boolean) -> Unit, 
 
 /** A plugin's slider: the row follows the finger, and the value goes in as it lets go, as what it sets may move the row itself. */
 @Composable
-private fun PluginSliderRow(slider: PluginSlider, onSet: (String, Float) -> Unit) {
+private fun PluginSliderRow(slider: PluginSlider, onSet: (PluginSlider, Float) -> Unit) {
     var moved by remember(slider.key) { mutableStateOf<Float?>(null) }
     val value = moved ?: slider.value
     SlideRow(
@@ -626,7 +622,7 @@ private fun PluginSliderRow(slider: PluginSlider, onSet: (String, Float) -> Unit
             pluginSliderShown(slider, value),
             pluginSliderAlong(slider, value),
             onDone = {
-                moved?.let { onSet(slider.key, it) }
+                moved?.let { onSet(slider, it) }
                 moved = null
             },
             onChange = { moved = pluginSliderAt(slider, it) },

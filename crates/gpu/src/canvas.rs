@@ -3639,23 +3639,26 @@ impl Canvas {
             self.uniform_buffer = buffer;
             self.uniform_bind = bind;
         }
-        let smudge_count: u64 = ops
-            .iter()
-            .map(|op| match op {
-                Op::Stamps { instances, style, .. } if style.in_place() => instances.len() as u64,
-                _ => 0,
-            })
-            .sum();
-        // wet paint: the stamps held back from before too, and a pass's own slot (at most one a
-        // stamp)
+        // the slots stamps painted in place take: a stamp's own and, for wet paint, its pass's (at
+        // most one a stamp, the stamps held back from before among them). Paint laid apart is put
+        // together after each lot of stamps, each lot of its second's, and twice as a stroke ends.
+        // Too few and none of it is written: the stroke, started again, comes out with nothing
         let held = self.smudge.as_ref().map_or(0, |s| s.pending.len() as u64);
-        let smudge_count = 2 * (smudge_count + held) + 1;
+        let (smudge_count, wet_count) = ops.iter().fold((2 * held + 1, held + 1), |(slots, passes), op| match op {
+            Op::Stamps { second: true, .. } => (slots + 1, passes),
+            Op::Stamps { instances, style, .. } if style.in_place() => {
+                let stamps = instances.len() as u64;
+                (slots + 2 * stamps + 1, passes + stamps)
+            }
+            Op::Commit(stroke) if stroke.style.in_place() => (slots + 2, passes),
+            _ => (slots, passes),
+        });
         if smudge_count > self.smudge_capacity {
             self.smudge_capacity = smudge_count.next_power_of_two();
             self.smudge_params = smudge_params(device, self.smudge_capacity);
         }
-        if smudge_count > self.wet_capacity {
-            self.wet_capacity = smudge_count.next_power_of_two();
+        if wet_count > self.wet_capacity {
+            self.wet_capacity = wet_count.next_power_of_two();
             self.wet_params = wet_params(device, self.wet_capacity);
         }
         let mut uniforms = UniformData::default();

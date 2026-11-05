@@ -2538,6 +2538,40 @@ fn wet_paint_runs_out_with_the_path_not_with_how_far_jitter_threw_its_stamps() {
 }
 
 #[test]
+fn wet_paint_keeps_a_stroke_of_stamps_a_display_frame_apart() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // far apart, each stamp is a pass of its own, and with wet edges each lot of them is put
+    // together as it comes: more slots a stamp than a closely spaced stroke takes
+    let mut doc = Document::new(640, 64);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let wet = StrokeStyle {
+        wet_pull: Some(0.9),
+        wet_edges: 0.5,
+        grade: 1.0,
+        rendering: Rendering::Gradual,
+        ..StrokeStyle::new(StrokeTool::Paint, [0.0, 0.0, 0.0], 1.0)
+    };
+    canvas.begin_stroke(doc.current(), wet);
+    let stamps: Vec<Stamp> = (0..60)
+        .map(|i| Stamp {
+            time_ms: f64::from(i) * 20.0,
+            distance: i as f32 * 10.0,
+            ..Stamp::round(Vec2::new(20.0 + i as f32 * 10.0, 32.0), 8.0, 1.0)
+        })
+        .collect();
+    for stamp in &stamps {
+        canvas.add_stamps(std::slice::from_ref(stamp));
+    }
+    // and its end redraws it whole, all in the one render when frames have fallen behind
+    canvas.replace_stamps(&stamps);
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+    assert!(pixel(&layer, 640, 300, 32)[3] > 100, "{:?}", pixel(&layer, 640, 300, 32));
+}
+
+#[test]
 fn wet_paint_thins_over_bare_paper_as_far_as_its_pull_lets_it() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);

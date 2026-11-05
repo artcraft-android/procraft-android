@@ -437,10 +437,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         pluginsChanged()
     }
 
-    /** A plugin's slider let go at [value]; a key no control has changes nothing. */
-    fun setPluginSlider(key: String, value: Float) {
-        val landed = plugins.setSlider(key, value) ?: return
-        interfacePrefs.edit().putFloat(key, landed).apply()
+    /** A plugin's slider let go at [value]; a key no control has changes nothing. A count stays kept as a whole number. */
+    fun setPluginSlider(slider: io.github.artcraftandroid.procraft.core.PluginSlider, value: Float) {
+        val landed = plugins.setSlider(slider.key, value) ?: return
+        val edit = interfacePrefs.edit()
+        if (io.github.artcraftandroid.procraft.core.pluginSliderWhole(slider)) edit.putInt(slider.key, landed.roundToInt()) else edit.putFloat(slider.key, landed)
+        edit.apply()
         pluginsChanged()
     }
 
@@ -448,7 +450,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun pluginsChanged() {
         pluginList = plugins.list()
         interfaceSize = plugins.interfaceSize()
-        session?.setPasteIntoMask(plugins.pasteIntoMask())
+        session?.let(::applyPlugins)
+    }
+
+    /** [s] goes by the plugins that reach a canvas. */
+    private fun applyPlugins(s: CanvasSession) {
+        s.setPasteIntoMask(plugins.pasteIntoMask())
+        s.setFillGap(plugins.fillGap())
+        s.setEyedropperFromLayer(plugins.eyedropperFromLayer())
     }
 
     /** The interface shows at [size] now: what hit-tests its handles, and what clears its bars, go with it. */
@@ -472,17 +481,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         selectionVisibility = v.coerceIn(0f, 1f)
         session?.setSelectionVisibility(selectionVisibility)
         interfacePrefs.edit().putFloat(SELECTION_VISIBILITY, selectionVisibility).apply()
-    }
-
-    /** ColorDrop keeps out of gaps up to this many canvas pixels wide in its lines (0: none). */
-    var fillGap by mutableStateOf(interfacePrefs.getInt(FILL_GAP, 0).coerceIn(0, MOST_FILL_GAP))
-        private set
-
-    /** The gap's slider moved to [share] (0..1) of its way. */
-    fun changeFillGap(share: Float) {
-        fillGap = (share.coerceIn(0f, 1f) * MOST_FILL_GAP).roundToInt()
-        session?.setFillGap(fillGap.toUInt())
-        interfacePrefs.edit().putInt(FILL_GAP, fillGap).apply()
     }
 
     // pressure and smoothing, for every stroke
@@ -2308,11 +2306,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // the canvas's colours are P3 or sRGB numbers: the colour panel and swatches follow
         refreshCanvasSpace(s)
         s.setSelectionVisibility(selectionVisibility)
-        s.setFillGap(fillGap.toUInt())
         s.setBrushScaling(brushOnScreen)
         s.setLightInterface(lightInterface)
         s.setInterfaceSize(interfaceShown)
-        s.setPasteIntoMask(plugins.pasteIntoMask())
+        applyPlugins(s)
         // as it was left, or fitted
         if (!orientationMemory) s.forgetSavedView()
         s.setInputSettings(inputStabilization, inputMotionFiltering, inputMotionExpression, inputPressureSmoothing, inputTipAttached, inputCurve.flatMap { listOf(it.x, it.y) })
@@ -7036,10 +7033,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         const val RAPID_UNDO_MIN_S = 0.1f
         const val RAPID_UNDO_MAX_S = 1.5f
         const val SELECTION_VISIBILITY = "selection_visibility"
-        const val FILL_GAP = "fill_gap"
-
-        /** The widest gap ColorDrop can keep out of, canvas pixels (the core's `MOST_GAP`). */
-        const val MOST_FILL_GAP = 32
         /** The guide editor fits the canvas this far in from the window's sides, top and bottom (points). */
         const val GUIDE_FIT_SIDE_DP = 40f
         const val GUIDE_FIT_BAND = 0.2f

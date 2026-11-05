@@ -11,6 +11,8 @@ use crate::interface_size;
 /// What the bundled plugins' values are kept under, as they were before there was a list.
 const INTERFACE_SIZE: &str = "interface_size";
 const PASTE_INTO_MASK: &str = "paste_into_mask";
+const FILL_GAP: &str = "fill_gap";
+const EYEDROPPER_LAYER: &str = "eyedropper_layer";
 
 /// A setting on or off. `key` is what its value is kept under: one key to a value, across all
 /// plugins.
@@ -37,6 +39,8 @@ pub struct PluginSlider {
     /// How it reads: the value times this, then `unit` (0.85 as 85%).
     pub shown_times: f32,
     pub unit: String,
+    /// What it reads at its least, if not that ("Off").
+    pub at_least: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, uniffi::Enum)]
@@ -53,6 +57,8 @@ pub struct PluginInfo {
     pub name: String,
     pub description: String,
     pub bundled: bool,
+    /// Tagged as experimental on the page.
+    pub experimental: bool,
     pub on: bool,
     pub controls: Vec<PluginControl>,
 }
@@ -108,6 +114,9 @@ pub fn plugin_slider_along(slider: PluginSlider, value: f32) -> f32 {
 /// `value` on `slider` as it reads, to as many places as its step needs.
 #[uniffi::export]
 pub fn plugin_slider_shown(slider: PluginSlider, value: f32) -> String {
+    if let Some(text) = slider.at_least.as_ref().filter(|_| value <= slider.least) {
+        return text.clone();
+    }
     let step = slider.step * slider.shown_times;
     let whole = |v: f32| (v - v.round()).abs() < 1e-3;
     let places = if whole(step) {
@@ -120,6 +129,12 @@ pub fn plugin_slider_shown(slider: PluginSlider, value: f32) -> String {
     format!("{:.*}{}", places, value * slider.shown_times, slider.unit)
 }
 
+/// Whether `slider` holds whole numbers: kept as one where what it is kept as matters.
+#[uniffi::export]
+pub fn plugin_slider_whole(slider: PluginSlider) -> bool {
+    slider.step > 0.0 && slider.step.fract() == 0.0 && slider.least.fract() == 0.0
+}
+
 /// The plugins the app comes with, as they start.
 fn bundled() -> Vec<PluginInfo> {
     vec![
@@ -128,6 +143,7 @@ fn bundled() -> Vec<PluginInfo> {
             name: "Interface size".to_owned(),
             description: "Makes the bars, panels and text bigger or smaller to suit your screen.".to_owned(),
             bundled: true,
+            experimental: true,
             on: false,
             controls: vec![PluginControl::Slider {
                 control: PluginSlider {
@@ -140,6 +156,7 @@ fn bundled() -> Vec<PluginInfo> {
                     starts: 1.0,
                     shown_times: 100.0,
                     unit: "%".to_owned(),
+                    at_least: None,
                 },
             }],
         },
@@ -148,11 +165,50 @@ fn bundled() -> Vec<PluginInfo> {
             name: "Paste into masks".to_owned(),
             description: "With a mask selected, Paste puts the picture's brightness into the mask.".to_owned(),
             bundled: true,
+            experimental: true,
             on: false,
             controls: vec![PluginControl::Switch {
                 control: PluginSwitch {
                     key: PASTE_INTO_MASK.to_owned(),
                     label: "Paste into the mask".to_owned(),
+                    on: false,
+                    starts: false,
+                },
+            }],
+        },
+        PluginInfo {
+            id: FILL_GAP.to_owned(),
+            name: "ColorDrop gap closing".to_owned(),
+            description: "Keeps ColorDrop from running out through gaps in your lines, up to this wide.".to_owned(),
+            bundled: true,
+            experimental: true,
+            on: false,
+            controls: vec![PluginControl::Slider {
+                control: PluginSlider {
+                    key: FILL_GAP.to_owned(),
+                    label: "Gap".to_owned(),
+                    least: 0.0,
+                    most: procraft_engine::fill::MOST_GAP as f32,
+                    step: 1.0,
+                    value: 0.0,
+                    starts: 0.0,
+                    shown_times: 1.0,
+                    unit: " px".to_owned(),
+                    at_least: Some("Off".to_owned()),
+                },
+            }],
+        },
+        PluginInfo {
+            id: EYEDROPPER_LAYER.to_owned(),
+            name: "Eyedropper picks from layer".to_owned(),
+            description: "The eyedropper picks from the current layer alone, not the whole canvas.".to_owned(),
+            bundled: true,
+            experimental: true,
+            on: false,
+            controls: vec![PluginControl::Switch {
+                control: PluginSwitch {
+                    key: EYEDROPPER_LAYER.to_owned(),
+                    label: "Pick from the current layer".to_owned(),
                     on: false,
                     starts: false,
                 },
@@ -255,6 +311,19 @@ impl Plugins {
     pub fn paste_into_mask(&self) -> bool {
         matches!(self.control(PASTE_INTO_MASK), Some(PluginControl::Switch { control }) if control.on)
     }
+
+    /// How wide a gap in its lines ColorDrop keeps out of, canvas pixels (0: none).
+    pub fn fill_gap(&self) -> u32 {
+        match self.control(FILL_GAP) {
+            Some(PluginControl::Slider { control }) => control.value as u32,
+            _ => 0,
+        }
+    }
+
+    /// Whether the eyedropper picks from the current layer alone.
+    pub fn eyedropper_from_layer(&self) -> bool {
+        matches!(self.control(EYEDROPPER_LAYER), Some(PluginControl::Switch { control }) if control.on)
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +348,7 @@ mod tests {
             name: "Stranger".to_owned(),
             description: "No code answers to it.".to_owned(),
             bundled: false,
+            experimental: false,
             on: false,
             controls: vec![
                 PluginControl::Switch {
@@ -300,6 +370,7 @@ mod tests {
                         starts: 2.0,
                         shown_times: 1.0,
                         unit: " px".to_owned(),
+                        at_least: None,
                     },
                 },
             ],
@@ -311,13 +382,15 @@ mod tests {
         let plugins = Plugins::new();
         let list = plugins.list();
         let ids: Vec<&str> = list.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, ["interface_size", "paste_into_mask"]);
+        assert_eq!(ids, ["interface_size", "paste_into_mask", "fill_gap", "eyedropper_layer"]);
         for p in &list {
-            assert!(p.bundled && !p.on, "{p:?}");
+            assert!(p.bundled && p.experimental && !p.on, "{p:?}");
             assert!(!p.name.is_empty() && !p.description.is_empty() && !p.controls.is_empty(), "{p:?}");
         }
         assert_eq!(plugins.interface_size(), 1.0);
         assert!(!plugins.paste_into_mask());
+        assert_eq!(plugins.fill_gap(), 0);
+        assert!(!plugins.eyedropper_from_layer());
         let size = size_slider(&plugins);
         assert_eq!((size.least, size.most, size.value), (0.75, 1.25, 1.0));
     }
@@ -342,10 +415,19 @@ mod tests {
         assert!(plugins.paste_into_mask());
         assert!(plugin(&plugins, INTERFACE_SIZE).on);
         assert!(plugin(&plugins, PASTE_INTO_MASK).on);
+        // the gap as a whole number, as both have it
+        plugins.read_kept("fill_gap".to_owned(), "12".to_owned());
+        plugins.read_kept("eyedropper_layer".to_owned(), "true".to_owned());
+        assert_eq!(plugins.fill_gap(), 12);
+        assert!(plugins.eyedropper_from_layer());
+        assert!(plugin(&plugins, FILL_GAP).on);
+        assert!(plugin(&plugins, EYEDROPPER_LAYER).on);
         // kept at 100% and off, they are as they start
         let plugins = Plugins::new();
         plugins.read_kept("interface_size".to_owned(), "1.0".to_owned());
         plugins.read_kept("paste_into_mask".to_owned(), "false".to_owned());
+        plugins.read_kept("fill_gap".to_owned(), "0".to_owned());
+        plugins.read_kept("eyedropper_layer".to_owned(), "false".to_owned());
         assert_eq!(plugins.interface_size(), 1.0);
         assert!(!plugins.paste_into_mask());
         assert!(plugins.list().iter().all(|p| !p.on));
@@ -375,7 +457,7 @@ mod tests {
         assert_eq!(plugins.set_slider(INTERFACE_SIZE.to_owned(), 1.15), Some(1.15));
         assert!(plugins.set_switch(PASTE_INTO_MASK.to_owned(), true));
         let lines = plugins.kept_lines();
-        assert_eq!(lines, ["interface_size 1.15", "paste_into_mask true"]);
+        assert_eq!(lines, ["interface_size 1.15", "paste_into_mask true", "fill_gap 0", "eyedropper_layer false"]);
         let again = Plugins::new();
         for line in &lines {
             let (key, value) = line.split_once(' ').unwrap();
@@ -424,18 +506,52 @@ mod tests {
         assert_eq!(plugin_slider_shown(hundredths, 2.25), "2.25 px");
     }
 
+    fn gap_slider(plugins: &Plugins) -> PluginSlider {
+        match plugins.control(FILL_GAP) {
+            Some(PluginControl::Slider { control }) => control,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_gap_keeps_its_range_and_how_it_reads() {
+        let plugins = Plugins::new();
+        let gap = gap_slider(&plugins);
+        assert_eq!((gap.least, gap.most, gap.step), (0.0, 32.0, 1.0));
+        assert_eq!(plugin_slider_shown(gap.clone(), 0.0), "Off");
+        assert_eq!(plugin_slider_shown(gap.clone(), 1.0), "1 px");
+        assert_eq!(plugin_slider_shown(gap.clone(), 32.0), "32 px");
+        assert_eq!(plugin_slider_at(gap.clone(), 0.5), 16.0);
+        assert_eq!(plugin_slider_along(gap, 8.0), 0.25);
+        // what was kept past its ends comes back inside them, as it always did
+        plugins.read_kept(FILL_GAP.to_owned(), "40".to_owned());
+        assert_eq!(plugins.fill_gap(), 32);
+        plugins.read_kept(FILL_GAP.to_owned(), "-3".to_owned());
+        assert_eq!(plugins.fill_gap(), 0);
+    }
+
+    #[test]
+    fn a_count_is_kept_as_a_whole_number() {
+        let plugins = Plugins::new();
+        assert!(plugin_slider_whole(gap_slider(&plugins)));
+        assert!(!plugin_slider_whole(size_slider(&plugins)));
+        plugins.set_slider(FILL_GAP.to_owned(), 12.0);
+        // as the desktop has always written it
+        assert!(plugins.kept_lines().contains(&"fill_gap 12".to_owned()));
+    }
+
     #[test]
     fn a_plugin_nothing_answers_to_shows_and_does_nothing() {
         let plugins = Plugins::new();
         plugins.listed().push(stranger());
-        assert_eq!(plugins.list().len(), 3);
+        assert_eq!(plugins.list().len(), 5);
         // its values change and are kept like any other's, and touch nothing else
         assert!(plugins.set_switch("someone.stranger.switch".to_owned(), true));
         assert_eq!(plugins.set_slider("someone.stranger.slider".to_owned(), 3.3), Some(3.5));
         assert!(plugin(&plugins, "someone.stranger").on);
         assert_eq!(plugins.interface_size(), 1.0);
         assert!(!plugins.paste_into_mask());
-        assert_eq!(plugins.kept_lines().len(), 4);
+        assert_eq!(plugins.kept_lines().len(), 6);
     }
 
     #[test]
@@ -458,6 +574,8 @@ mod tests {
         plugins.listed().clear();
         assert_eq!(plugins.interface_size(), 1.0);
         assert!(!plugins.paste_into_mask());
+        assert_eq!(plugins.fill_gap(), 0);
+        assert!(!plugins.eyedropper_from_layer());
     }
 
     #[test]
@@ -472,6 +590,7 @@ mod tests {
             starts: 0.0,
             shown_times: 1.0,
             unit: String::new(),
+            at_least: None,
         };
         for slider in [bad(5.0, 1.0, 1.0), bad(1.0, 1.0, 0.0), bad(0.0, 1.0, -1.0), bad(f32::NAN, f32::NAN, f32::NAN)] {
             let _ = slider.stepped(0.5);

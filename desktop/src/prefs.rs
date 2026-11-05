@@ -47,8 +47,6 @@ pub struct Prefs {
     pub rapid_undo_delay: f32,
     /// How strongly what isn't selected is banded, 0..1.
     pub selection_visibility: f32,
-    /// ColorDrop keeps out of gaps up to this many canvas pixels wide in its lines (0: none).
-    pub fill_gap: u32,
     /// The app's own smoothing for every stroke, each 0..1, and its pressure curve.
     pub stabilization: f32,
     pub motion_filtering: f32,
@@ -62,8 +60,6 @@ pub struct Prefs {
     pub pad_3d: bool,
     /// The canvas shown on a second display too.
     pub project_canvas: bool,
-    /// The eyedropper picks from the current layer alone, not the canvas as composited.
-    pub eyedropper_layer: bool,
     /// The Plugins page's list, its values kept here with the rest.
     pub plugins: Arc<Plugins>,
     /// Advanced settings: an artwork opens as it was left; fitting the canvas keeps it clear of
@@ -104,7 +100,6 @@ impl Default for Prefs {
             colour_model: crate::colour_models::ColourModel::Hsb,
             rapid_undo_delay: 0.65,
             selection_visibility: 0.25,
-            fill_gap: 0,
             stabilization: 0.0,
             motion_filtering: 0.0,
             motion_expression: 0.0,
@@ -114,7 +109,6 @@ impl Default for Prefs {
             actions_tab: 0,
             pad_3d: false,
             project_canvas: false,
-            eyedropper_layer: false,
             plugins: Plugins::new(),
             orientation_memory: true,
             fit_inside: false,
@@ -167,11 +161,6 @@ impl Prefs {
                     }
                 }
                 "selection_visibility" => p.selection_visibility = unit.unwrap_or(p.selection_visibility),
-                "fill_gap" => {
-                    if let Some(v) = number {
-                        p.fill_gap = (v.max(0.0).round() as u32).min(procraft_engine::fill::MOST_GAP);
-                    }
-                }
                 "stabilization" => p.stabilization = unit.unwrap_or(0.0),
                 "motion_filtering" => p.motion_filtering = unit.unwrap_or(0.0),
                 "motion_expression" => p.motion_expression = unit.unwrap_or(0.0),
@@ -179,7 +168,6 @@ impl Prefs {
                 "tip_attached" => p.tip_attached = on,
                 "pad_3d" => p.pad_3d = on,
                 "project_canvas" => p.project_canvas = on,
-                "eyedropper_layer" => p.eyedropper_layer = on,
                 "orientation_memory" => p.orientation_memory = on,
                 "fit_inside" => p.fit_inside = on,
                 "no_time_lapse" => p.no_time_lapse = on,
@@ -223,7 +211,6 @@ impl Prefs {
             format!("colour_model {}", self.colour_model.key()),
             format!("rapid_undo_delay {}", self.rapid_undo_delay),
             format!("selection_visibility {}", self.selection_visibility),
-            format!("fill_gap {}", self.fill_gap),
             format!("stabilization {}", self.stabilization),
             format!("motion_filtering {}", self.motion_filtering),
             format!("motion_expression {}", self.motion_expression),
@@ -233,7 +220,6 @@ impl Prefs {
             format!("actions_tab {}", self.actions_tab),
             format!("pad_3d {}", self.pad_3d),
             format!("project_canvas {}", self.project_canvas),
-            format!("eyedropper_layer {}", self.eyedropper_layer),
             format!("orientation_memory {}", self.orientation_memory),
             format!("fit_inside {}", self.fit_inside),
             format!("no_time_lapse {}", self.no_time_lapse),
@@ -258,7 +244,7 @@ impl Prefs {
         session.set_light_interface(self.light_interface);
         session.set_brush_scaling(self.brush_on_screen);
         session.set_selection_visibility(self.selection_visibility);
-        session.set_fill_gap(self.fill_gap);
+        session.set_fill_gap(self.plugins.fill_gap());
         session.set_simplified_undos(self.simplified_undos);
         session.set_speed_distance(self.speed_distance);
         session.set_input_settings(

@@ -414,7 +414,7 @@ impl Interface {
         let on_mask = session.layers().iter().any(|l| l.current && l.kind == procraft_core::LayerType::Mask);
         self.colours.follow_mask(session, on_mask);
         // the eyedropper picks from the current layer or the canvas, as the preferences say
-        session.set_eyedropper_from_layer(self.prefs.eyedropper_layer);
+        session.set_eyedropper_from_layer(self.prefs.plugins.eyedropper_from_layer());
         // and what is pasted goes into a mask only if they say so
         session.set_paste_into_mask(self.prefs.plugins.paste_into_mask());
         let paste_shown = (self.open == Some(Popover::Actions) || self.copy_paste) && ctx.input(|i| i.focused);
@@ -2104,7 +2104,6 @@ impl Interface {
                         | Act::RightHanded
                         | Act::BrushCursor
                         | Act::ProjectCanvas
-                        | Act::EyedropperLayer
                         | Act::ResetInput,
                     )
                     | None => {}

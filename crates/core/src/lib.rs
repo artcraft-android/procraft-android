@@ -130,7 +130,7 @@ pub use pickers::{
 };
 pub use plugins::{
     PluginControl, PluginInfo, PluginSlider, PluginSwitch, Plugins, plugin_slider_along, plugin_slider_at,
-    plugin_slider_shown,
+    plugin_slider_shown, plugin_slider_whole,
 };
 pub use presets::{
     CanvasPreset, P3, SRGB, per_inch, preset_height, preset_label, preset_number, preset_width, presets_from_json,
