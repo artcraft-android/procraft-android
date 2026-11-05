@@ -143,9 +143,13 @@ impl State {
     fn draw_shape(&mut self) {
         let (Some(edit), Some(old)) = (self.shape.as_ref(), self.stroke.as_ref()) else { return };
         // the outline is the path: nothing smooths it, or round its corners
+        // the start taper the stroke showed is the one the shape is drawn with: working it out again
+        // from a redrawn path puts it somewhere else along it
+        let start = old.start_taper();
         let mut builder = StrokeBuilder::with_seed(old.brush().clone(), old.diameter(), old.pointer(), 0x5eed_1234)
             .scaled(self.brush_scale())
-            .exact_path();
+            .exact_path()
+            .with_start_span((start > 0.0).then_some(start));
         // an ellipse goes where the stroke went, each of its points taken onto it: a stroke that
         // didn't close stays open there, as drawn, rather than meeting itself in a seam
         let outline = match edit.shape.kind {
@@ -606,12 +610,30 @@ mod tests {
         {
             let mut st = s.shared.lock();
             st.view = Some(procraft_engine::view::View::fit((1000, 800), (1000, 800)));
-            st.stroke = Some(StrokeBuilder::new(brush, 8.0, Pointer::Stylus));
+            // the builder takes them as drawing does, so the tapers the shape keeps are the ones
+            // this stroke had
+            let mut builder = StrokeBuilder::new(brush, 8.0, Pointer::Stylus);
+            builder.add(samples);
+            st.stroke = Some(builder);
             st.remember_input(samples);
         }
         assert!(s.quickshape_hold().is_some());
         let st = s.shared.lock();
         st.stroke.as_ref().unwrap().stamps()
+    }
+
+    #[test]
+    fn a_shape_keeps_the_start_taper_the_stroke_had() {
+        let mut brush = procraft_engine::brush::Brush::round_pen();
+        brush.pen_taper =
+            procraft_engine::brush::Taper { start: 0.5, end: 0.5, size: 1.0, ..procraft_engine::brush::Taper::NONE };
+        // a straight stroke drawn at a steady 8 ms a point
+        let samples: Vec<Sample> =
+            (0..=80).map(|i| Sample::at(Vec2::new(200.0 + 6.0 * i as f32, 400.0), 0.6, i as f64 * 8.0)).collect();
+        let stamps = snapped(brush, &samples);
+        let first = stamps.first().map_or(0.0, |s| s.radius);
+        let middle = stamps.get(stamps.len() / 2).map_or(0.0, |s| s.radius);
+        assert!(first < middle * 0.75, "start {first} against the middle {middle}");
     }
 
     #[test]

@@ -703,6 +703,9 @@ impl Random {
 /// include the end taper and the catch-up to where the pen lifted.
 #[derive(Clone, Debug)]
 pub struct StrokeBuilder {
+    /// Where this path is another stroke's redrawn, the start taper to draw with (path pixels):
+    /// None works it out from this input as usual.
+    taper_start: Option<f32>,
     brush: Brush,
     diameter: f32,
     pointer: Pointer,
@@ -900,6 +903,18 @@ impl StrokeBuilder {
         self
     }
 
+    /// Draws with the start taper another stroke had (path pixels), for a path that is that stroke
+    /// redrawn: working it out again from the new input puts it elsewhere.
+    pub fn with_start_span(mut self, span: Option<f32>) -> StrokeBuilder {
+        self.taper_start = span;
+        self
+    }
+
+    /// How far the start taper reaches on the path as it stands now (path pixels).
+    pub fn start_taper(&self) -> f32 {
+        self.start_span()
+    }
+
     /// A stroke with `brush` at `diameter` canvas pixels (the size slider's value).
     pub fn new(brush: Brush, diameter: f32, pointer: Pointer) -> StrokeBuilder {
         StrokeBuilder::with_seed(brush, diameter, pointer, 0x9e37_79b9)
@@ -940,6 +955,7 @@ impl StrokeBuilder {
             segments: 0,
             steady: false,
             exact: false,
+            taper_start: None,
             pad: None,
             pending_gap: None,
             stroke_shift: Tint::NONE,
@@ -1449,6 +1465,9 @@ impl StrokeBuilder {
     /// length in canvas pixels; the newer one over the input up to the first point past its time
     /// (see [`StrokeBuilder::settle_start`]).
     fn start_span(&self) -> f32 {
+        if let Some(start) = self.taper_start {
+            return start;
+        }
         if let Some(span) = self.start_settled {
             return span;
         }
