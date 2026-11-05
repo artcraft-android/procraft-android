@@ -199,7 +199,7 @@ impl TimeLapse {
         if let Ok(entries) = fs::read_dir(&self.dir) {
             for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.starts_with("segment-") && name.ends_with(".mp4") {
+                if (name.starts_with("segment-") || name.starts_with(SET_ASIDE)) && name.ends_with(".mp4") {
                     let _ = fs::remove_file(&path);
                 }
             }
@@ -420,6 +420,9 @@ pub(crate) struct Mp4 {
     pub height: u32,
     pub hevc: bool,
 }
+
+/// What a video is named after, with no note saying what it holds, so kept rather than lost.
+const SET_ASIDE: &str = "set-aside-";
 
 #[uniffi::export]
 impl TimeLapse {
@@ -670,17 +673,26 @@ impl TimeLapse {
     }
 
     /// Every package video, and the note of them, gone; unless they hold the only copy of their
-    /// frames.
+    /// frames. With no note that holds there is no telling what they hold, so they go aside
+    /// instead, out of the way of what is made next.
     fn drop_segments(&self) {
-        if self.clips_on_disk().is_some_and(|k| !self.remakeable(&k)) {
+        let note = self.clips_on_disk();
+        if note.as_ref().is_some_and(|k| !self.remakeable(k)) {
             return;
         }
         let _ = fs::remove_file(self.dir.join("segments.json"));
         let Ok(entries) = fs::read_dir(&self.dir) else { return };
         for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_owned();
             if name.starts_with("segment-") && name.ends_with(".mp4") {
-                let _ = fs::remove_file(&path);
+                if note.is_some() {
+                    let _ = fs::remove_file(&path);
+                } else {
+                    let free = (0..).map(|i| self.dir.join(format!("{SET_ASIDE}{i}-{name}"))).find(|p| !p.exists());
+                    if let Some(aside) = free {
+                        let _ = fs::rename(&path, aside);
+                    }
+                }
             }
         }
     }
@@ -804,6 +816,26 @@ mod tests {
         assert_eq!(picks.len(), 30);
         assert_eq!((picks[0], picks[29]), (0, 300));
         assert!(picks.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn videos_with_no_note_of_them_are_set_aside_not_deleted() {
+        let artwork = std::env::temp_dir().join(format!("procraft-unnoted-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&artwork);
+        let t = TimeLapse::new(artwork.to_string_lossy().into_owned());
+        assert!(t.record([255u8, 0, 0, 255].repeat(16), 4, 4));
+        let dir = artwork.join("timelapse");
+        // a video the note of which was lost: it may be all there is of its frames
+        fs::write(dir.join("segment-1.mp4"), b"the only copy").unwrap();
+        fs::write(dir.join("segments.json"), b"{ not whole").unwrap();
+        let plan = t.segment_plan().expect("a plan");
+        assert!(!plan.append);
+        assert!(!dir.join("segment-1.mp4").exists(), "out of the way of what is made next");
+        assert_eq!(fs::read(dir.join("set-aside-0-segment-1.mp4")).unwrap(), b"the only copy");
+        // asked to delete what was recorded, it goes too
+        t.purge();
+        assert!(!dir.join("set-aside-0-segment-1.mp4").exists());
+        let _ = fs::remove_dir_all(&artwork);
     }
 
     #[test]
