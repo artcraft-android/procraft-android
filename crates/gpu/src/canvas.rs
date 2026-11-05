@@ -65,6 +65,19 @@ struct OverlayUniform {
     shape_lod_cap: f32,
     _pad: u32,
 }
+/// The most painting sent to the GPU as one piece of work, by [`stamp_work`]. A driver stops work
+/// that runs too long and takes the device, and all it holds, with it: an Adreno 750 did at under
+/// three seconds, which a long stroke's redrawing at its end took as one piece, and a slower GPU
+/// is there with a much shorter stroke. This much is a thousandth of a second on that Adreno, so
+/// a fair margin even at a hundredth of its speed. Much less costs more than it saves: a tiled
+/// GPU can read and write the whole stroke for each piece.
+const WORK_AT_ONCE: u64 = 64 << 20;
+/// What a stamp counts for besides the pixels it covers; and a stamp painted in place, a compute
+/// pass for each, for each pixel and for itself.
+const STAMP_WORK: u64 = 1 << 10;
+const IN_PLACE_PIXEL_WORK: u64 = 16;
+const IN_PLACE_STAMP_WORK: u64 = 256 << 10;
+
 /// Undo steps kept, and the most memory they may hold (their pixels and the selections they put
 /// back).
 const MAX_UNDO: usize = 100;
@@ -499,6 +512,15 @@ struct StampInstance {
     brightness_add: f32,
     /// How far the grain's patch turns (see `Stamp::grain_turn`).
     grain_turn: f32,
+}
+
+/// How much work stamp `s` is on a canvas `full`: the pixels it covers there, more for one
+/// painted `in_place` (see [`WORK_AT_ONCE`]).
+fn stamp_work(s: &StampInstance, full: IRect, in_place: bool) -> u64 {
+    let at = procraft_engine::geom::Vec2::new(s.center[0], s.center[1]);
+    let reach = IRect::around(at, s.radius * s.roundness.max(1.0) * std::f32::consts::SQRT_2).intersect(full);
+    let pixels = u64::from(reach.width()) * u64::from(reach.height());
+    if in_place { pixels * IN_PLACE_PIXEL_WORK + IN_PLACE_STAMP_WORK } else { pixels + STAMP_WORK }
 }
 
 /// A stamp's (alpha, transfer) as its instance takes them: a capped stroke keeps its transfer
@@ -1652,6 +1674,10 @@ pub struct Canvas {
     uniform_slots: u64,
     stamp_buffer: wgpu::Buffer,
     stamp_capacity: u64,
+    /// The most stamps' work sent to the GPU as one piece (see [`WORK_AT_ONCE`]).
+    work_at_once: u64,
+    /// Pieces of work sent early, there being too much for one.
+    pieces_sent: u64,
     /// How many times the composite has been redrawn.
     composites: u64,
     active: Option<ActiveStroke>,
@@ -1965,6 +1991,8 @@ impl Canvas {
             uniform_slots,
             stamp_buffer,
             stamp_capacity,
+            work_at_once: WORK_AT_ONCE,
+            pieces_sent: 0,
             composites: 0,
             active: None,
             smudge: None,
@@ -2548,6 +2576,19 @@ impl Canvas {
             self.ops.push(Op::Within(rects));
             self.ops.push(Op::Commit(active));
         }
+    }
+
+    /// Sends stamps to the GPU in pieces of at most this much work, in place of [`WORK_AT_ONCE`]:
+    /// for tests.
+    #[doc(hidden)]
+    pub fn set_work_at_once(&mut self, work: u64) {
+        self.work_at_once = work;
+    }
+
+    /// How many pieces of work were sent early, there being too much for one: for tests.
+    #[doc(hidden)]
+    pub fn pieces_sent(&self) -> u64 {
+        self.pieces_sent
     }
 
     /// What the undo and redo history's pixels take on the GPU, bytes.
@@ -3499,7 +3540,7 @@ impl Canvas {
         });
         let depth = flattening.max().unwrap_or(0);
         self.make_groups(device, depth);
-        let ops = std::mem::take(&mut self.ops);
+        let ops = in_pieces(std::mem::take(&mut self.ops), self.full(), self.work_at_once);
 
         // this frame's stamps in one upload
         let mut instances: Vec<StampInstance> = Vec::new();
@@ -3569,6 +3610,8 @@ impl Canvas {
         // the work waits for a render of its own
         let mut committed: Vec<LayerId> = Vec::new();
         let mut deferred = false;
+        // stamps' work recorded and not sent yet
+        let mut recorded = 0u64;
         let mut ops = ops.into_iter();
         while let Some(op) = ops.next() {
             if live.as_ref().is_some_and(|live| !self.keeps_caches(&op, live)) {
@@ -3587,6 +3630,15 @@ impl Canvas {
                 self.ops.splice(0..0, rest);
                 deferred = true;
                 break;
+            }
+            // what is recorded goes first if this would make it too much for one piece
+            if let Op::Stamps { instances, style, second, .. } = &op {
+                let work = stamps_work(instances, self.full(), style.in_place() && !second);
+                if recorded > 0 && recorded.saturating_add(work) > self.work_at_once {
+                    self.send_piece(gpu, &mut encoder, (&mut uniforms, &mut smudge_uniforms, &mut wet_uniforms));
+                    recorded = 0;
+                }
+                recorded = recorded.saturating_add(work);
             }
             if let Op::Commit(stroke) = &op {
                 committed.push(stroke.layer);
@@ -5924,6 +5976,26 @@ impl Canvas {
         *uniforms = UniformData::default();
     }
 
+    /// Sends the work recorded so far with the three kinds of uniforms a render's painting uses,
+    /// going on with a new encoder (see [`WORK_AT_ONCE`]).
+    fn send_piece(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        (uniforms, smudge, wet): (&mut UniformData, &mut UniformData, &mut UniformData),
+    ) {
+        if !smudge.data.is_empty() {
+            gpu.queue.write_buffer(&self.smudge_params, 0, &smudge.data);
+        }
+        if !wet.data.is_empty() {
+            gpu.queue.write_buffer(&self.wet_params, 0, &wet.data);
+        }
+        self.send_now(gpu, encoder, uniforms);
+        *smudge = UniformData::default();
+        *wet = UniformData::default();
+        self.pieces_sent = self.pieces_sent.wrapping_add(1);
+    }
+
     /// Goes on remaking the caches for a while (parts of whole items, each part's layers brought
     /// back, composited, sent, then let go before the next part's come back); once both are done,
     /// they are the caches and the whole composite is made again.
@@ -8146,6 +8218,56 @@ impl UniformData {
         self.data.resize(offset + (slots * SLOT) as usize, 0);
         u32::try_from(offset).unwrap_or(0)
     }
+}
+
+/// The work of `stamps` on a canvas `full` (see [`stamp_work`]).
+fn stamps_work(stamps: &[StampInstance], full: IRect, in_place: bool) -> u64 {
+    stamps.iter().fold(0, |work, s| work.saturating_add(stamp_work(s, full, in_place)))
+}
+
+/// `ops` with stamps of more work than `most` as several in a row of no more (a stamp is never cut
+/// in two): a stroke redrawn whole would otherwise reach the GPU as one piece.
+fn in_pieces(ops: Vec<Op>, full: IRect, most: u64) -> Vec<Op> {
+    let mut pieces = Vec::with_capacity(ops.len());
+    for op in ops {
+        let Op::Stamps { second, instances, wet, times, style, clear, layer, pencil } = op else {
+            pieces.push(op);
+            continue;
+        };
+        let in_place = style.in_place() && !second;
+        // how many stamps go in each
+        let mut counts = Vec::new();
+        let (mut count, mut work) = (0usize, 0u64);
+        for s in &instances {
+            let more = stamp_work(s, full, in_place);
+            if count > 0 && work.saturating_add(more) > most {
+                counts.push(count);
+                (count, work) = (0, 0);
+            }
+            count += 1;
+            work = work.saturating_add(more);
+        }
+        if counts.is_empty() {
+            pieces.push(Op::Stamps { second, instances, wet, times, style, clear, layer, pencil });
+            continue;
+        }
+        counts.push(count);
+        let (mut instances, mut wet, mut times) = (instances.into_iter(), wet.into_iter(), times.into_iter());
+        for (i, count) in counts.into_iter().enumerate() {
+            pieces.push(Op::Stamps {
+                second,
+                instances: instances.by_ref().take(count).collect(),
+                wet: wet.by_ref().take(count).collect(),
+                times: times.by_ref().take(count).collect(),
+                style,
+                // from scratch the first time only
+                clear: clear && i == 0,
+                layer,
+                pencil,
+            });
+        }
+    }
+    pieces
 }
 
 /// The rows of `rect` (on the picture) out of a picture `width` pixels wide (RGBA8).

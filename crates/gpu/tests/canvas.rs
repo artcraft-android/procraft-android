@@ -2770,3 +2770,84 @@ fn a_small_stamp_s_thin_shape_keeps_its_strength() {
     let laid: Vec<u8> = (26..38).map(|x| pixel(&layer, 64, x, 32)[3]).collect();
     assert!(laid.iter().all(|&a| a > 200), "{laid:?}");
 }
+
+/// A driver stops work that runs too long, and the device with it. A long stroke goes to the GPU
+/// in pieces, its redrawing at the end too, each of them laid as it would have been in one.
+#[test]
+fn a_stroke_sent_in_pieces_lays_what_it_would_in_one() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let stamps = |n: usize| -> Vec<Stamp> {
+        (0..n)
+            .map(|i| Stamp {
+                time_ms: i as f64 * 3.0,
+                ..Stamp::round(Vec2::new(20.0 + i as f32 * 0.6, 40.0 + (i as f32 * 0.2).sin() * 20.0), 9.0, 0.4)
+            })
+            .collect()
+    };
+    let wet = StrokeStyle {
+        wet_pull: Some(0.85),
+        dilution: 0.5,
+        load: 0.1,
+        ..StrokeStyle::new(StrokeTool::Paint, [0.9, 0.2, 0.1], 1.0)
+    };
+    let styles = [
+        ("paint", StrokeStyle::new(StrokeTool::Paint, [0.1, 0.4, 0.9], 0.7)),
+        ("erase", style(StrokeTool::Erase, 0.8)),
+        ("smudge", StrokeStyle::new(StrokeTool::Smudge, [0.0; 3], 1.0)),
+        ("wet paint", wet),
+    ];
+    for (name, stroke) in styles {
+        let laid = |work: Option<u64>| {
+            let mut doc = Document::new(128, 96);
+            let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+            if let Some(work) = work {
+                canvas.set_work_at_once(work);
+            }
+            // something to erase, smudge and mix with
+            canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.5, 0.6, 0.2], 1.0));
+            canvas.add_stamps(&(0..96).map(|y| dot(Vec2::new(64.0, y as f32), 18.0)).collect::<Vec<_>>());
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            let before = canvas.pieces_sent();
+            // drawn as it comes, then again whole as a stroke's end does
+            canvas.begin_stroke(doc.current(), stroke);
+            canvas.add_stamps(&stamps(100));
+            canvas.render(&gpu, &mut doc, None);
+            canvas.replace_stamps(&stamps(140));
+            canvas.end_stroke();
+            canvas.render(&gpu, &mut doc, None);
+            (canvas.read_layer(&gpu, doc.current()).unwrap(), canvas.pieces_sent() - before)
+        };
+        let (whole, sent) = laid(None);
+        assert_eq!(sent, 0, "{name}: this little goes as one piece");
+        let (cut, sent) = laid(Some(1));
+        assert!(sent > 100, "{name}: {sent} pieces");
+        assert!(whole == cut, "{name}: laid differently in pieces");
+    }
+}
+
+/// A stroke redrawn at its end goes to the GPU as many pieces however it was drawn, and a stamp
+/// reaching past the canvas counts only for what it covers on it.
+#[test]
+fn a_long_stroke_of_large_stamps_is_more_than_one_piece() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let mut doc = Document::new(1024, 1024);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let across =
+        |n: usize| -> Vec<Stamp> { (0..n).map(|i| dot(Vec2::new(512.0, 300.0 + (i % 400) as f32), 300.0)).collect() };
+    canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 0.5));
+    canvas.replace_stamps(&across(4000));
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    assert!(canvas.pieces_sent() >= 16, "{} pieces", canvas.pieces_sent());
+    assert!(pixel(&canvas.read_layer(&gpu, doc.current()).unwrap(), 1024, 512, 512)[3] > 100);
+    // the same stamps all off the canvas are next to nothing
+    let sent = canvas.pieces_sent();
+    canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 0.5));
+    canvas.replace_stamps(&(0..4000).map(|_| dot(Vec2::new(-400.0, -400.0), 300.0)).collect::<Vec<_>>());
+    canvas.end_stroke();
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(canvas.pieces_sent(), sent);
+}
