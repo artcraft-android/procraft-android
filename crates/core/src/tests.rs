@@ -2393,6 +2393,82 @@ fn a_shape_still_held_follows_the_pen_and_a_finger_snaps_it() {
 }
 
 #[test]
+fn undo_goes_back_through_a_shapes_drags_to_the_stroke_it_was_made_of() {
+    use crate::quickshape::QuickShapeKind;
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.02);
+    // a wavering line, a line once it snaps
+    let pts: Vec<PenSample> = (0..=40)
+        .map(|i| {
+            let t = i as f32 / 40.0;
+            sample(20.0 + 160.0 * t, 100.0 + 5.0 * (t * 18.0).sin(), f64::from(i) * 8.0)
+        })
+        .collect();
+    let draw = || {
+        s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+        s.stroke_add(pts[1..].to_vec());
+    };
+    // (as drawn, an open shape staying open)
+    let seen = || {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+        canvas.read_composite(gpu).unwrap()
+    };
+    let blank = seen();
+    draw();
+    s.stroke_end(vec![]);
+    let stroke = seen();
+    s.undo();
+    assert_eq!(seen(), blank);
+    draw();
+    let info = s.quickshape_hold().expect("a shape");
+    assert_eq!(info.kind, QuickShapeKind::Line);
+    s.stroke_end(vec![]);
+    let snapped = seen();
+    assert_ne!(snapped, stroke);
+    // a drag is a step of its own, back and forward, the shape staying open
+    s.quickshape_step();
+    let moved = s.quickshape_move_handle(1, 180.0, 60.0).unwrap();
+    assert!(!s.info().can_redo);
+    s.undo();
+    assert_eq!(s.quickshape_info().unwrap().handles, info.handles);
+    assert_eq!(seen(), snapped);
+    assert!(s.info().can_redo);
+    s.redo();
+    assert_eq!(s.quickshape_info().unwrap().handles, moved.handles);
+    assert!(!s.info().can_redo);
+    s.undo();
+    // past the drags the shape goes, its stroke back as drawn
+    s.undo();
+    assert!(s.quickshape_info().is_none());
+    assert_eq!(seen(), stroke);
+    assert!(s.info().can_undo && s.info().can_redo);
+    // redone, it is the shape as it snapped, kept, its drags gone
+    s.redo();
+    assert!(s.quickshape_info().is_none());
+    assert_eq!(seen(), snapped);
+    assert!(!s.info().can_redo);
+    // and so on either way, a kept shape as one being edited
+    s.undo();
+    assert_eq!(seen(), stroke);
+    s.undo();
+    assert_eq!(seen(), blank);
+    s.redo();
+    assert_eq!(seen(), stroke);
+    s.redo();
+    assert_eq!(seen(), snapped);
+    // with something done since, undo takes that, and the shape is a step like any other
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 900.0)]);
+    s.stroke_end(vec![]);
+    s.undo();
+    assert_eq!(seen(), snapped);
+    s.undo();
+    assert_eq!(seen(), blank);
+}
+
+#[test]
 fn copy_cut_paste_and_flip() {
     let Some(s) = session(100, 100) else { return };
     s.set_brush_size(0.4);
@@ -3486,7 +3562,9 @@ fn the_last_stroke_snaps_to_a_shape_until_something_else_is_done() {
     assert_eq!(pixel(&s, 40, 64), [255, 255, 255, 255]);
     assert_eq!(pixel(&s, 76, 54), [255, 255, 255, 255]);
     assert!((50..70).any(|y| pixel(&s, 100, y)[0] < 128));
-    // one step: undone, nothing is left
+    // undone, the stroke is back as drawn; undone again, nothing is left
+    s.undo();
+    assert!(near(40, 64) && near(76, 54));
     s.undo();
     assert!((50..70).all(|y| pixel(&s, 100, y) == [255, 255, 255, 255]));
     // once something else is done (an undo here), there is no last stroke to snap

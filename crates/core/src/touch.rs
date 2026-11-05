@@ -1096,19 +1096,25 @@ impl CanvasSession {
                 }
             }
             Mode::Shape(i) => {
+                let began = !std::mem::replace(&mut t.shape_dragged, true);
                 drop(t);
+                if began {
+                    self.quickshape_step();
+                }
                 self.quickshape_move_handle(i, at.0, at.1);
                 out.push(TouchCommand::ShapeChanged);
             }
             Mode::ShapePin | Mode::ShapeMove if id == t.stroke_pointer => {
                 // only a drag past a tap's slop moves it, then from where it began
-                if !t.shape_dragged {
-                    t.shape_dragged = dist(at, t.down_at) > slop;
-                }
+                let began = !t.shape_dragged && dist(at, t.down_at) > slop;
+                t.shape_dragged |= began;
                 if t.shape_dragged {
                     let (pin, from) = (t.mode == Mode::ShapePin, t.shape_last);
                     t.shape_last = at;
                     drop(t);
+                    if began {
+                        self.quickshape_step();
+                    }
                     if pin {
                         self.quickshape_pin(at.0, at.1, false);
                     } else {
@@ -1365,6 +1371,7 @@ impl CanvasSession {
                 .min_by(|a, b| a.1.total_cmp(&b.1));
             if let Some((i, _)) = handle {
                 t.mode = Mode::Shape(i as u32);
+                t.shape_dragged = false;
                 return;
             }
             t.stroke_pointer = id;

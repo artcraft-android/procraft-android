@@ -539,10 +539,16 @@ pub(crate) struct State {
     /// How long it was on the move, and when it was last heard from (milliseconds).
     drawn_moving: f64,
     drawn_at: f64,
+    /// Its input as the stroke took it, for a shape to go back to.
+    drawn_samples: Vec<Sample>,
     shape: Option<quickshape::ShapeEdit>,
     /// The open stroke as it began, and the last stroke kept, for QuickShape afterwards.
     began: Option<quickshape::LastStroke>,
     last_stroke: Option<quickshape::LastStroke>,
+    /// The last shape kept, which undo gives back the stroke it was made of; and the shape whose
+    /// stroke that gave back, which redo makes a shape again.
+    kept_shape: Option<quickshape::KeptShape>,
+    unkept_shape: Option<quickshape::KeptShape>,
     /// Strokes follow the drawing guide even where drawing assist is off (□ held down).
     force_assist: bool,
     /// Where the stroke began (canvas pixels), for assisted drawing; the guide and view as the
@@ -599,7 +605,7 @@ impl State {
 
     /// Finishes an open stroke.
     fn finish_stroke(&mut self) {
-        self.shape = None;
+        let shape = self.shape.take();
         // a stroke on a model ends there, as the pen lifting would end it
         if self.scene_shown() && self.scene.as_ref().is_some_and(|s| s.stroking) {
             self.scene_stroke_add(&[], true);
@@ -609,6 +615,7 @@ impl State {
             close_stroke(canvas, open, self.second.take(), &self.doc.stroke_guide());
             self.bake_painted_on();
         }
+        self.note_kept_shape(shape);
     }
 
     /// Ends a continuous change still open (a slider drag, a transform): it becomes one undo step.
@@ -1273,10 +1280,13 @@ impl CanvasSession {
             drawn: Vec::new(),
             drawn_pressure: 0.0,
             drawn_moving: 0.0,
+            drawn_samples: Vec::new(),
             drawn_at: 0.0,
             shape: None,
             began: None,
             last_stroke: None,
+            kept_shape: None,
+            unkept_shape: None,
             force_assist: false,
             assist_from: None,
             assist_angle: None,
@@ -1448,9 +1458,12 @@ impl CanvasSession {
         st.drawn.clear();
         st.drawn_pressure = 0.0;
         st.drawn_moving = 0.0;
+        st.drawn_samples.clear();
         st.remember_input(&canvas_samples);
         // painted and erased strokes can be made shapes once they end
         st.last_stroke = None;
+        st.kept_shape = None;
+        st.unkept_shape = None;
         st.began =
             matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase).then(|| quickshape::LastStroke {
                 layer: current,
@@ -1462,6 +1475,8 @@ impl CanvasSession {
                 pressure: 1.0,
                 pace: quickshape::SAMPLE_PACE,
                 steps: 0,
+                fresh: second.is_none().then(|| builder.clone()),
+                samples: Vec::new(),
             });
         let Some(canvas) = st.canvas.as_mut() else { return };
         match second {
@@ -1839,6 +1854,9 @@ impl CanvasSession {
         if let Some(name) = self.step_adjusting(Self::undo_step, true) {
             return name;
         }
+        if self.quickshape_undo() {
+            return None;
+        }
         self.undo_step()
     }
 
@@ -1861,6 +1879,9 @@ impl CanvasSession {
         // an adjustment open on the layer, with nothing changed yet: the step after it
         if let Some(name) = self.step_adjusting(Self::redo_step, false) {
             return name;
+        }
+        if self.quickshape_redo() {
+            return None;
         }
         // recoloring, the open fill steps aside and is made again over what comes back
         let recoloring = self.recolor_step_aside();
@@ -1934,10 +1955,11 @@ impl CanvasSession {
                 || st.shape.is_some()
                 || st.adjust.touched()
                 || st.text_edit.as_ref().is_some_and(|e| e.has_step(true)),
-            // keeping an open shape drops what could be redone
-            can_redo: (st.shape.is_none()
-                && (st.canvas.as_ref().is_some_and(Canvas::can_redo) || st.crop_redo_ready()))
-                || st.text_edit.as_ref().is_some_and(|e| e.has_step(false)),
+            // an open shape has only its own drags to redo
+            can_redo: st.shape.as_ref().map_or_else(
+                || st.canvas.as_ref().is_some_and(Canvas::can_redo) || st.crop_redo_ready() || st.shape_to_redo(),
+                quickshape::ShapeEdit::can_redo,
+            ) || st.text_edit.as_ref().is_some_and(|e| e.has_step(false)),
             zoom: st.view.map_or(1.0, |v| v.zoom()),
             frames: st.frames,
             frame_interval_ms: st.frame_interval_ms,

@@ -3004,6 +3004,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         quickShape = session?.quickshapeInfo() ?: quickShape
     }
 
+    /** Undo or redo stepped through the snapped shape: as it now is, if it is still there. */
+    private fun followQuickShape() {
+        quickShape = session?.quickshapeInfo()
+        if (quickShape == null) quickShapeEditing = false
+    }
+
     /** The snapped shape was let go of as it is (the canvas's touches did it). */
     fun quickShapeEnded() {
         quickShape = null
@@ -5237,6 +5243,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         val could = canUndo
         val name = session?.let { s -> if (recoloring) pourNow { s.undo() } else s.undo() }
         if (could || name != null) showNotice("Undo" + name?.let { " $it" }.orEmpty())
+        followQuickShape()
         // a model's tile chosen before comes back, with its channel's colour
         if (modelOpen) followModelChannel()
         // cloning, the core put the source back where it was before the stroke
@@ -5281,6 +5288,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // recoloring, the core steps the open fill aside and makes it again over what comes back
         val name = session?.let { s -> if (recoloring) pourNow { s.redo() } else s.redo() }
         if (could) showNotice("Redo" + name?.let { " $it" }.orEmpty())
+        followQuickShape()
         if (modelOpen) followModelChannel()
         refresh()
         if (panel == Panel.LAYERS) refreshThumbnails()

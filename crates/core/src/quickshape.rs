@@ -8,7 +8,7 @@ use procraft_engine::geom::Vec2;
 use procraft_engine::input::Sample;
 use procraft_engine::quickshape::{Shape, ShapeKind, fit_ellipse, recognise};
 use procraft_engine::stroke::StrokeBuilder;
-use procraft_gpu::StrokeStyle;
+use procraft_gpu::{Canvas, StrokeStyle};
 
 use crate::{CanvasSession, PointerKind, State};
 
@@ -72,6 +72,11 @@ pub struct QuickShapeInfo {
 /// A snapped stroke being shown and edited.
 pub(crate) struct ShapeEdit {
     shape: Shape,
+    /// As it first snapped; as it was before each drag, the latest last; and what undo took back
+    /// of those, for redo.
+    first: Shape,
+    earlier: Vec<Shape>,
+    later: Vec<Shape>,
     choices: Vec<ShapeKind>,
     /// The stroke as drawn (canvas points), which other kinds are fitted to.
     drawn: Vec<Vec2>,
@@ -80,6 +85,48 @@ pub(crate) struct ShapeEdit {
     pace: f32,
     /// While the pen that drew it is still down.
     held: Option<Held>,
+    /// The stroke it was made of, for undo to go back to.
+    stroke: Option<DrawnStroke>,
+}
+
+impl ShapeEdit {
+    fn new(
+        shape: Shape,
+        choices: Vec<ShapeKind>,
+        drawn: Vec<Vec2>,
+        (pressure, pace): (f32, f32),
+        held: Option<Held>,
+        stroke: Option<DrawnStroke>,
+    ) -> ShapeEdit {
+        let first = shape.clone();
+        ShapeEdit { shape, first, earlier: Vec::new(), later: Vec::new(), choices, drawn, pressure, pace, held, stroke }
+    }
+
+    /// A drag undone can be done again.
+    pub(crate) fn can_redo(&self) -> bool {
+        !self.later.is_empty()
+    }
+}
+
+/// A stroke made a shape, as it can be laid again: where, its builder as it began and its input.
+/// (A dual brush's isn't kept: its shape is its first alone.)
+pub(crate) struct DrawnStroke {
+    layer: LayerId,
+    style: StrokeStyle,
+    builder: StrokeBuilder,
+    samples: Vec<Sample>,
+}
+
+/// A shape kept, as it first snapped, or the stroke it gave way to: the canvas's undo steps once
+/// that was laid tell if it still stands.
+pub(crate) struct KeptShape {
+    first: Shape,
+    choices: Vec<ShapeKind>,
+    drawn: Vec<Vec2>,
+    pressure: f32,
+    pace: f32,
+    stroke: DrawnStroke,
+    steps: u64,
 }
 
 /// A snapped shape whose pen is still down: shown as worked out afresh from the shape as it
@@ -108,6 +155,17 @@ pub(crate) struct LastStroke {
     pub(crate) pace: f32,
     /// The canvas's undo steps once it was kept: anything done since changes them.
     pub(crate) steps: u64,
+    /// Its builder as it began (none for a dual brush), and its input.
+    pub(crate) fresh: Option<StrokeBuilder>,
+    pub(crate) samples: Vec<Sample>,
+}
+
+impl LastStroke {
+    /// The stroke as it can be laid again, given its input.
+    fn laid_again(&self, samples: Vec<Sample>) -> Option<DrawnStroke> {
+        let builder = self.fresh.clone()?;
+        Some(DrawnStroke { layer: self.layer, style: self.style, builder, samples })
+    }
 }
 
 /// The outline is redrawn with samples this far apart (canvas pixels), at the pace its stroke was
@@ -131,6 +189,63 @@ impl State {
             self.drawn.push(s.pos);
             self.drawn_pressure += s.pressure.clamp(0.0, 1.0);
         }
+        self.drawn_samples.extend_from_slice(samples);
+    }
+
+    /// `edit`'s shape was just kept: undo can give back the stroke it was made of.
+    pub(crate) fn note_kept_shape(&mut self, edit: Option<ShapeEdit>) {
+        let Some(ShapeEdit { first, choices, drawn, pressure, pace, stroke: Some(stroke), .. }) = edit else { return };
+        // its step is made now, so that a later change shows against it
+        self.flush();
+        let Some(canvas) = self.canvas.as_ref() else { return };
+        let steps = canvas.steps_made();
+        self.kept_shape = Some(KeptShape { first, choices, drawn, pressure, pace, stroke, steps });
+    }
+
+    /// Whether `kept` is still the last thing done, with nothing undone after it.
+    fn still_stands(&self, kept: &KeptShape) -> bool {
+        self.canvas.as_ref().is_some_and(|c| c.steps_made() == kept.steps && !c.can_redo())
+    }
+
+    /// There is a shape for redo to put back in place of the stroke it gave way to.
+    pub(crate) fn shape_to_redo(&self) -> bool {
+        self.unkept_shape.as_ref().is_some_and(|kept| self.still_stands(kept))
+    }
+
+    /// The shape last kept, if it is the last thing done, gives way to the stroke it was made of.
+    fn back_to_stroke(&mut self) -> bool {
+        self.flush();
+        let Some(mut kept) = self.kept_shape.take().filter(|kept| self.still_stands(kept)) else { return false };
+        let guide = self.doc.stroke_guide();
+        let Some(canvas) = self.canvas.as_mut() else { return false };
+        canvas.undo();
+        canvas.begin_stroke(kept.stroke.layer, kept.stroke.style);
+        let mut builder = kept.stroke.builder.clone();
+        crate::draw_samples(canvas, &mut builder, None, &kept.stroke.samples, &guide);
+        crate::close_stroke(canvas, builder, None, &guide);
+        self.flush();
+        kept.steps = self.canvas.as_ref().map_or(0, Canvas::steps_made);
+        self.unkept_shape = Some(kept);
+        true
+    }
+
+    /// The stroke a shape gave way to, if it is the last thing done, is that shape again, as it
+    /// first snapped.
+    fn back_to_shape(&mut self) -> bool {
+        self.flush();
+        if !self.shape_to_redo() {
+            return false;
+        }
+        let (Some(kept), Some(canvas)) = (self.unkept_shape.take(), self.canvas.as_mut()) else { return false };
+        canvas.undo();
+        canvas.begin_stroke(kept.stroke.layer, kept.stroke.style);
+        self.stroke = Some(kept.stroke.builder.clone());
+        self.second = None;
+        let measures = (kept.pressure, kept.pace);
+        self.shape = Some(ShapeEdit::new(kept.first, kept.choices, kept.drawn, measures, None, Some(kept.stroke)));
+        self.draw_shape();
+        self.finish_stroke();
+        true
     }
 
     /// Redraws the open stroke along the shape's outline.
@@ -205,6 +320,7 @@ impl State {
         last.pressure = self.mean_pressure();
         last.pace = self.pace();
         last.steps = canvas.steps_made();
+        last.samples = std::mem::take(&mut self.drawn_samples);
         self.last_stroke = Some(last);
     }
 
@@ -320,9 +436,9 @@ impl CanvasSession {
         let first = found.first()?.clone();
         let choices = found.iter().map(|s| s.kind).collect();
         let held = st.drawn.last().map(|&at| Held { snapped: first.clone(), from: at, at, finger: false });
-        let (drawn, pressure, pace) = (st.drawn.clone(), st.mean_pressure(), st.pace());
-        st.shape = Some(ShapeEdit { shape: first, choices, drawn, pressure, pace, held });
-        st.began = None;
+        let (drawn, measures) = (st.drawn.clone(), (st.mean_pressure(), st.pace()));
+        let stroke = st.began.take().and_then(|began| began.laid_again(st.drawn_samples.clone()));
+        st.shape = Some(ShapeEdit::new(first, choices, drawn, measures, held, stroke));
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()
@@ -349,11 +465,12 @@ impl CanvasSession {
         canvas.undo();
         canvas.begin_stroke(last.layer, last.style);
         let scale = st.brush_scale();
+        let stroke = last.laid_again(last.samples.clone());
         st.stroke =
             Some(StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), 0x5eed_1234).scaled(scale));
         st.second = None;
-        let (drawn, pressure, pace) = (last.drawn, last.pressure, last.pace);
-        st.shape = Some(ShapeEdit { shape: first, choices, drawn, pressure, pace, held: None });
+        let measures = (last.pressure, last.pace);
+        st.shape = Some(ShapeEdit::new(first, choices, last.drawn, measures, None, stroke));
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()
@@ -372,14 +489,76 @@ impl CanvasSession {
         // a kind chosen is kept: the pen, if still down, no longer moves it
         edit.held = None;
         let current = edit.shape.kind;
+        let before = edit.shape.clone();
         // a kind already shown keeps its edits; another is fitted to the stroke as drawn
         edit.shape = edit.shape.as_kind(kind.into(), &edit.drawn);
         if edit.shape.kind == current && ShapeKind::from(kind) != current {
             return st.shape_info();
         }
+        edit.earlier.push(before);
+        edit.later.clear();
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()
+    }
+
+    /// A drag of the snapped shape begins: undo takes it back as a step of its own.
+    pub(crate) fn quickshape_step(&self) {
+        if let Some(edit) = self.shared.lock().shape.as_mut() {
+            edit.earlier.push(edit.shape.clone());
+            edit.later.clear();
+        }
+    }
+
+    /// Undo where a shape is the last thing done: one still edited goes back a drag; with none
+    /// left, or once kept, it gives way to the stroke it was made of, which the next undo takes.
+    /// True if that was the step.
+    pub(crate) fn quickshape_undo(&self) -> bool {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        if let Some(edit) = st.shape.as_mut() {
+            if edit.held.is_none()
+                && let Some(before) = edit.earlier.pop()
+            {
+                edit.later.push(std::mem::replace(&mut edit.shape, before));
+                st.draw_shape();
+                st.revision += 1;
+                self.shared.frame(st);
+                return true;
+            }
+            st.finish_stroke();
+        }
+        let back = st.back_to_stroke();
+        if back {
+            st.revision += 1;
+            self.shared.frame(st);
+        }
+        drop(guard);
+        self.set_shape_editing(false);
+        back
+    }
+
+    /// Redo where a shape was undone: a drag still open to it, or the shape back in place of its
+    /// stroke (as it snapped: its drags went with it). A shape open has nothing else to redo.
+    /// True if there is no more to it.
+    pub(crate) fn quickshape_redo(&self) -> bool {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        if let Some(edit) = st.shape.as_mut() {
+            if let Some(after) = edit.later.pop() {
+                edit.earlier.push(std::mem::replace(&mut edit.shape, after));
+                st.draw_shape();
+                st.revision += 1;
+                self.shared.frame(st);
+            }
+            return true;
+        }
+        let back = st.back_to_shape();
+        if back {
+            st.revision += 1;
+            self.shared.frame(st);
+        }
+        back
     }
 
     /// Drags handle `index` of the snapped shape to window point (`x`, `y`).

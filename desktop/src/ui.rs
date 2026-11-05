@@ -1151,6 +1151,12 @@ impl Interface {
         self.overlays.shape_editing = false;
     }
 
+    /// Undo or redo stepped through a snapped shape: as it now is, if it is still there.
+    fn follow_shape(&mut self, session: &CanvasSession) {
+        self.overlays.shape = session.quickshape_info();
+        self.overlays.shape_editing &= self.overlays.shape.is_some();
+    }
+
     /// Undo (recoloring, the core takes back the open fill first).
     fn undo(&mut self, session: &CanvasSession) {
         self.feedback();
@@ -1177,6 +1183,7 @@ impl Interface {
         if could || name.is_some() {
             self.overlays.notice(name.map_or("Undo".into(), |n| format!("Undo {n}")), false);
         }
+        self.follow_shape(session);
         // a model's tile chosen before comes back, with its channel's colour
         self.layers.follow_channel(session, &mut self.colours);
     }
@@ -1200,6 +1207,7 @@ impl Interface {
         if could {
             self.overlays.notice(name.map_or("Redo".into(), |n| format!("Redo {n}")), false);
         }
+        self.follow_shape(session);
         self.layers.follow_channel(session, &mut self.colours);
         if let Some(id) = text {
             self.text.edit(session, id);
