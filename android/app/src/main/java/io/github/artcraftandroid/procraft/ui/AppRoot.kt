@@ -148,6 +148,10 @@ fun AppRoot(vm: CanvasViewModel) {
                 }
                 NoticeBand(vm)
                 DropBandUi(vm)
+                // a full-screen page covers the timeline, as it covers the canvas; the panels open over it
+                val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.timeLapseReplaying ||
+                    vm.animatedExport != null || vm.modelAnimatedExport != null
+                if (!vm.barsHidden && !pageOver) AnimationBar(vm)
                 // each panel hangs from its button: colour, layers, then the tool that opened the library;
                 // it grows out of its arrow as it opens and fades as it closes
                 PanelPresence(vm.panel, Panel.NONE, fading = vm.panelFading, onFaded = { vm.panelFading = false }) { shown, alpha, scale, origin ->
@@ -249,10 +253,6 @@ fun AppRoot(vm: CanvasViewModel) {
                 if (vm.adjustment == Adjustment.PERSPECTIVE_BLUR) PerspectivePuck(vm)
                 if (vm.recoloring) RecolorReticle(vm)
                 QuickShapeHandles(vm)
-                // a full-screen page covers the timeline, as it covers the canvas
-                val pageOver = vm.canvasInfoOpen || vm.gestureControlsOpen || vm.cropRect != null || vm.timeLapseReplaying ||
-                    vm.animatedExport != null || vm.modelAnimatedExport != null
-                if (!vm.barsHidden && !pageOver) AnimationBar(vm)
                 CopyPastePanel(vm)
                 QuickMenu(vm)
                 LayerChoice(vm)
