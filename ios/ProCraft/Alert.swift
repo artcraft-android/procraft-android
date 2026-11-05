@@ -122,13 +122,13 @@ struct AlertView: View {
 
 /// The card over everything while a file is made or brought in (`shown` not nil): `title` after
 /// its glyph, a file's name under it when there is one, a pie filling clockwise from the top with
-/// how far it has come, and Cancel; once done the pie is full and a check is drawn in it. It comes
+/// how far it has come, and Cancel if it can be; once done the pie is full and a check is drawn in it. It comes
 /// and goes as an alert does, the screen dimmed; nothing under it is touched meanwhile.
 struct ProgressCard: View {
     let shown: ProgressShown?
     let title: String
     let glyph: PcIcon
-    let onCancel: () -> Void
+    let onCancel: (() -> Void)?
 
     /// The last one shown, kept while it goes.
     @State private var kept: ProgressShown?
@@ -193,10 +193,12 @@ struct ProgressCard: View {
                 Spacer().frame(height: 40)
             }
             pie(c)
-            Spacer().frame(height: 22)
-            AlertButton(label: "Cancel", fill: cancelFill, ink: cancelInk) {
-                if shown != nil, !c.done {
-                    onCancel()
+            Spacer().frame(height: onCancel != nil ? 22 : 7)
+            if let onCancel {
+                AlertButton(label: "Cancel", fill: cancelFill, ink: cancelInk) {
+                    if shown != nil, !c.done {
+                        onCancel()
+                    }
                 }
             }
         }

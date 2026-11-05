@@ -155,6 +155,22 @@ final class GalleryModel {
         changing { Gallery.store.putOnto(dir: a.dir, onto: onto.dir) }
     }
 
+    /// Puts artworks the gallery can't show in a stack of their own, after the save of any artwork
+    /// just left: a folder being written isn't lost.
+    @MainActor
+    func recoverLost() async {
+        while Gallery.closingSaves > 0 {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        await withCheckedContinuation { done in
+            work.async {
+                _ = Gallery.store.recoverLostArtworks()
+                done.resume()
+            }
+        }
+        artworkSaved()
+    }
+
     func stack(_ list: [GalleryArtwork]) {
         guard list.count >= 2, openStack == nil else { return }
         changing { _ = Gallery.store.stack(dirs: list.map(\.dir)) }

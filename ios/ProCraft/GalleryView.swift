@@ -17,6 +17,11 @@ private let swipeDeleteFill = Color(argb: 0xFFFE_604D)
 private let swipedFade = 0.64
 private let doneBlue = Color(argb: 0xFF01_90FF)
 private let renameBlur: CGFloat = 20
+/// How long Gallery Recovery's pie takes to come most of the way, the card shown long enough to be
+/// read however quick the search; and how long it stays once done.
+private let recoverySearchSteps = 44
+private let recoveryStep = Duration.milliseconds(16)
+private let recoveryDone = Duration.milliseconds(900)
 
 /// A gallery cell's sizes: its pitch both ways (the screen's width over the columns, three upright
 /// and four on its side), the content's width (40 less) and the thumbnail box's height (82 less).
@@ -82,6 +87,9 @@ struct GalleryView: View {
     /// An artwork two fingers are spreading open into Preview.
     @State private var opening: PinchOpening?
     @State private var drag = GalleryDragShown()
+    @State private var about = false
+    /// Gallery Recovery's card, while it shows.
+    @State private var recovery: ProgressShown?
 
     init(onOpen: @escaping (OpenArtwork) -> Void) {
         self.onOpen = onOpen
@@ -100,7 +108,7 @@ struct GalleryView: View {
     /// Nothing is open over the gallery, so a touch on a cell can be taken for a drag or a spread.
     private func quiet() -> Bool {
         guard !selecting, !newCanvasOpen, !model.customOpen, sharing == nil, renaming == nil, deleting == nil,
-              pdfFor == nil, previewing == nil, opening == nil
+              pdfFor == nil, previewing == nil, opening == nil, !about
         else { return false }
         return true
     }
@@ -255,6 +263,7 @@ struct GalleryView: View {
                 backLit: drag.backLit,
                 onBackPlaced: { model.backAt = $0 },
                 onBack: { model.showStack(nil) },
+                onAbout: { withAnimation(Motion.easeInOut(0.3)) { about = true } },
                 onSelect: {
                     swiped = nil
                     selecting = true
@@ -263,6 +272,23 @@ struct GalleryView: View {
                 onPhoto: { photoAsked = true },
                 onNew: { withAnimation(Motion.menuOpen) { newCanvasOpen.toggle() } }
             )
+        }
+    }
+
+    private func startRecovery() {
+        guard recovery == nil else { return }
+        let said = "Looking for lost or corrupted artworks"
+        Task { @MainActor in
+            let search = Task { @MainActor in await model.recoverLost() }
+            for step in 0 ..< recoverySearchSteps {
+                recovery = ProgressShown(progress: 0.95 * Float(step) / Float(recoverySearchSteps), detail: said)
+                try? await Task.sleep(for: recoveryStep)
+            }
+            await search.value
+            recovery = ProgressShown(progress: 1, done: true, detail: said)
+            try? await Task.sleep(for: recoveryDone)
+            recovery = nil
+            withAnimation(Motion.easeInOut(0.15)) { about = false }
         }
     }
 
@@ -285,6 +311,12 @@ struct GalleryView: View {
         }
         if let list = previewing {
             ArtworkPreview(list: list, version: model.version, start: previewFrom) { previewing = nil }
+        }
+        if about {
+            AboutApp(onRecover: startRecovery) {
+                withAnimation(Motion.easeInOut(0.15)) { about = false }
+            }
+            .transition(.opacity)
         }
     }
 
@@ -387,7 +419,7 @@ struct GalleryView: View {
 
     var body: some View {
         GeometryReader { screen in
-            let renamed = renaming != nil
+            let renamed = renaming != nil || about
             ZStack(alignment: .topLeading) {
                 VStack(spacing: 0) {
                     header(screen.size)
@@ -460,6 +492,9 @@ struct GalleryView: View {
         .overlay {
             ProgressCard(shown: model.importShown, title: "Importing", glyph: PcIcons.tabImport, onCancel: model.cancelImport)
         }
+        .overlay {
+            ProgressCard(shown: recovery, title: "Gallery Recovery", glyph: PcIcons.tabImport, onCancel: nil)
+        }
         .onAppear {
             model.onOpen = onOpen
             model.reload()
@@ -516,6 +551,11 @@ struct GalleryView: View {
                 renaming = first.map { Renaming(id: $0.dir, name: $0.name, shown: $0, stack: false) }
             case "gallery-custom", "gallery-custom-colour":
                 model.openCustom()
+            case "gallery-about":
+                about = true
+            case "gallery-recovery":
+                about = true
+                recovery = ProgressShown(progress: 0.6, detail: "Looking for lost or corrupted artworks")
             case "gallery-drag":
                 drag.dragging = model.artworks.dropFirst().first?.dir
                 drag.onto = first?.dir
@@ -546,6 +586,7 @@ private struct GalleryHeader: View {
     let backLit: Bool
     let onBackPlaced: (CGRect) -> Void
     let onBack: () -> Void
+    let onAbout: () -> Void
     let onSelect: () -> Void
     let onImport: () -> Void
     let onPhoto: () -> Void
@@ -589,6 +630,8 @@ private struct GalleryHeader: View {
                 Text(verbatim: "ProCraft")
                     .font(.system(size: 36, weight: .bold))
                     .foregroundStyle(Pc.galleryTitle)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onAbout)
                     .padding(.leading, 32)
                     .padding(.top, 11)
             }
@@ -877,8 +920,11 @@ private struct StackCell: View {
 enum Gallery {
     /// An artwork left has been saved; its object is why it couldn't be, if it couldn't.
     static let keptNotification = Notification.Name("ProCraft.artworkKept")
+    /// Artworks left and still being saved, on the main thread.
+    static var closingSaves = 0
 
     static func artworkKept(failure: String?) {
+        closingSaves -= 1
         NotificationCenter.default.post(name: keptNotification, object: failure)
     }
 

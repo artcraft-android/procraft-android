@@ -286,6 +286,95 @@ struct ImageFormats: View {
     }
 }
 
+// as measured: the gallery under a near-black veil, the light round close button
+private let aboutVeil = Color(argb: 0xD90B_0B0B)
+private let aboutIconField = Color(argb: 0xFF0B_0B0C)
+private let aboutInk = Color(argb: 0xFFBD_BDBD)
+private let aboutClose = Color(argb: 0xFFE3_E3E3)
+private let aboutCloseInk = Color(argb: 0xFF1C_1C1C)
+// the button 520 under the icon's top, 220 x 38
+private let aboutButtonTop: CGFloat = 615
+private let aboutButtonFill = Color(argb: 0xFF1A_1A1A)
+private let aboutButtonInk = Color(argb: 0xFFC4_C4C4)
+
+/// What the app is, over the gallery (blurred and dimmed under it): its icon 300 across, its name,
+/// its version, Gallery Recovery; a round button at the top right closes it.
+struct AboutApp: View {
+    let onRecover: () -> Void
+    let onClose: () -> Void
+
+    private var version: String {
+        let info = Bundle.main.infoDictionary
+        let name = info?["CFBundleShortVersionString"] as? String ?? ""
+        let build = info?["CFBundleVersion"] as? String ?? ""
+        return "Version \(name) Build \(build)"
+    }
+
+    private var closeButton: some View {
+        Canvas { context, size in
+            var cross = Path()
+            cross.move(to: .zero)
+            cross.addLine(to: CGPoint(x: size.width, y: size.height))
+            cross.move(to: CGPoint(x: size.width, y: 0))
+            cross.addLine(to: CGPoint(x: 0, y: size.height))
+            context.stroke(cross, with: .color(aboutCloseInk), style: StrokeStyle(lineWidth: 1.8, lineCap: .round))
+        }
+        .frame(width: 8, height: 8)
+        .frame(width: 22.5, height: 22.5)
+        .background(Circle().fill(aboutClose))
+        // more to touch than to see
+        .padding(10)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onClose)
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            aboutVeil
+                .contentShape(Rectangle())
+                .onTapGesture {}
+            VStack(spacing: 0) {
+                // the app's picture on its field, at the icon's full size
+                ZStack {
+                    aboutIconField
+                    if let mark = UIImage(named: "procraft_mark.png") {
+                        Image(uiImage: mark)
+                            .resizable()
+                            .frame(width: 450, height: 450)
+                    }
+                }
+                .frame(width: 300, height: 300)
+                .clipShape(RoundedRectangle(cornerRadius: 67, style: .circular))
+                Text(verbatim: "ProCraft")
+                    .font(.system(size: 64, weight: .bold))
+                    .foregroundStyle(Color.white)
+                    .lineLimit(1)
+                    .padding(.top, 12)
+                Text(verbatim: version)
+                    .font(.system(size: 13))
+                    .foregroundStyle(aboutInk)
+                    .lineLimit(1)
+                    .padding(.top, 14)
+            }
+            .padding(.top, 95)
+            Text(verbatim: "Start Gallery Recovery")
+                .font(.system(size: 15))
+                .foregroundStyle(aboutButtonInk)
+                .lineLimit(1)
+                .frame(width: 220, height: 38)
+                .background(RoundedRectangle(cornerRadius: 8, style: .circular).fill(aboutButtonFill))
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onRecover)
+                .padding(.top, aboutButtonTop)
+            closeButton
+                .padding(.top, 21)
+                .padding(.trailing, 21.5)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .ignoresSafeArea()
+    }
+}
+
 /// More options for the picked artworks: Preview, Stack (two or more) and Duplicate, under More.
 struct MoreOptions: View {
     let screen: CGSize

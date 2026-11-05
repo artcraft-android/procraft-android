@@ -551,6 +551,7 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
         leave()
+        Gallery.closingSaves += 1
         // off the main thread: a large artwork takes a while, and the gallery shows meanwhile
         DispatchQueue.global(qos: .userInitiated).async {
             // after the autosave under way, if one is, and no save of its own after this one
