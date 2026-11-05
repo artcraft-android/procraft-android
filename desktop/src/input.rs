@@ -246,7 +246,8 @@ impl Input {
 
     fn lifted(&mut self, session: &CanvasSession, id: u64, at: (f32, f32), pressure: f32, cancelled: bool) {
         self.down.retain(|d| *d != id);
-        let out = if cancelled { session.touch_cancel() } else { session.touch_up(id, self.sample(id, at, pressure)) };
+        let out =
+            if cancelled { session.touch_cancel_one(id) } else { session.touch_up(id, self.sample(id, at, pressure)) };
         self.take(out);
     }
 
@@ -449,6 +450,11 @@ impl Input {
 
     fn on_touch(&mut self, session: &CanvasSession, touch: &Touch, over: &impl Fn((f32, f32)) -> bool) -> bool {
         let p = (touch.location.x as f32, touch.location.y as f32);
+        // a contact the system took back (a palm, say): what it did goes
+        let phase = match touch.phase {
+            TouchPhase::Ended if crate::pen::was_taken_back(touch.id) => TouchPhase::Cancelled,
+            phase => phase,
+        };
         // a pen with its pressure, or a finger: as the system says which (a touch screen may give
         // its fingers a pressure too), else a pressure means a pen
         let force = touch.force.map(|f| f.normalized() as f32);
@@ -468,7 +474,7 @@ impl Input {
         // with keys held the pen moves the view, as the mouse does: Space moves it, Space and Ctrl
         // (⌘) zoom it, R turns it, and nothing is painted
         if pen.is_some() {
-            match touch.phase {
+            match phase {
                 TouchPhase::Started
                     if (self.space || self.r_key.is_some()) && self.down.is_empty() && !self.panning && !over(p) =>
                 {
@@ -500,7 +506,7 @@ impl Input {
             self.cursor = Some(p);
         }
         let known = self.down.contains(&touch.id);
-        match touch.phase {
+        match phase {
             TouchPhase::Started => {
                 // the first touch must land on the canvas; more may land anywhere (one that didn't
                 // is kept, so no outline hovers while it is down)
@@ -573,6 +579,19 @@ mod tests {
         })
     }
 
+    /// A finger's touch at (`x`, `y`), with a pressure as a laptop's screen may give it, the system
+    /// having said it is a finger.
+    fn finger(id: u64, phase: TouchPhase, x: f64, y: f64) -> WindowEvent {
+        crate::pen::pointer_kind(id, false);
+        WindowEvent::Touch(Touch {
+            device_id: DeviceId::dummy(),
+            phase,
+            location: PhysicalPosition::new(x, y),
+            force: Some(Force::Normalized(0.5)),
+            id,
+        })
+    }
+
     fn send(input: &mut Input, session: &CanvasSession, event: &WindowEvent) {
         input.on_event(session, event, false, |_| false);
     }
@@ -592,6 +611,46 @@ mod tests {
     fn view(session: &CanvasSession) -> (f32, f32, (f32, f32)) {
         let m = session.view_matrix();
         (m[0].hypot(m[1]), m[1].atan2(m[0]), (m[4], m[5]))
+    }
+
+    #[test]
+    fn a_pinch_with_finger_painting_on_leaves_no_stroke_and_zooms_however_hard_the_fingers_press() {
+        let (session, mut input) = (shown(), Input::default());
+        session.set_touch_settings(procraft_core::TouchSettings::default());
+        let before = view(&session).0;
+        // the first paints until the second lands, each move its own event, as the system's frames
+        // give them
+        send(&mut input, &session, &finger(9001, TouchPhase::Started, 300.0, 300.0));
+        send(&mut input, &session, &finger(9001, TouchPhase::Moved, 302.0, 301.0));
+        assert!(painted(&input), "a finger paints as it lands");
+        send(&mut input, &session, &finger(9002, TouchPhase::Started, 500.0, 300.0));
+        for step in 1..=10 {
+            let out = f64::from(step) * 8.0;
+            send(&mut input, &session, &finger(9001, TouchPhase::Moved, 302.0 - out, 300.0));
+            send(&mut input, &session, &finger(9002, TouchPhase::Moved, 500.0 + out, 300.0));
+        }
+        send(&mut input, &session, &finger(9001, TouchPhase::Ended, 222.0, 300.0));
+        send(&mut input, &session, &finger(9002, TouchPhase::Ended, 580.0, 300.0));
+        assert!(view(&session).0 > before * 1.5, "{} from {before}", view(&session).0);
+        assert!(!input.commands.contains(&TouchCommand::StrokeEnded), "{:?}", input.commands);
+    }
+
+    #[test]
+    fn a_finger_the_system_takes_back_leaves_no_stroke() {
+        let (session, mut input) = (shown(), Input::default());
+        session.set_touch_settings(procraft_core::TouchSettings::default());
+        send(&mut input, &session, &finger(9003, TouchPhase::Started, 300.0, 300.0));
+        send(&mut input, &session, &finger(9003, TouchPhase::Moved, 340.0, 320.0));
+        assert!(painted(&input), "a finger paints as it lands");
+        crate::pen::taken_back(9003);
+        send(&mut input, &session, &finger(9003, TouchPhase::Ended, 340.0, 320.0));
+        assert!(!input.commands.contains(&TouchCommand::StrokeEnded), "{:?}", input.commands);
+        // and only that one: the next finger paints and keeps its stroke
+        input.commands.clear();
+        send(&mut input, &session, &finger(9004, TouchPhase::Started, 300.0, 300.0));
+        send(&mut input, &session, &finger(9004, TouchPhase::Moved, 340.0, 320.0));
+        send(&mut input, &session, &finger(9004, TouchPhase::Ended, 340.0, 320.0));
+        assert!(input.commands.contains(&TouchCommand::StrokeEnded), "{:?}", input.commands);
     }
 
     #[test]

@@ -37,6 +37,9 @@ static KINDS: Mutex<Option<HashMap<u64, bool>>> = Mutex::new(None);
 /// paints, or isn't (false).
 static ON_SCREEN: Mutex<Option<HashMap<u64, bool>>> = Mutex::new(None);
 
+/// Pointers the system took back whose lift hasn't come yet.
+static TAKEN_BACK: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
 /// A tablet's pen moving the mouse pointer (X11 and a Mac give it as the mouse): its pressure
 /// (0..1) and whether its eraser end is the one on the screen.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -145,6 +148,23 @@ pub(crate) fn pointer_kind(id: u64, pen: bool) {
     if let Ok(mut kinds) = KINDS.lock() {
         kinds.get_or_insert_with(Default::default).insert(id, pen);
     }
+}
+
+/// The system took pointer `id` back (a palm it has made out, say).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn taken_back(id: u64) {
+    if let Ok(mut all) = TAKEN_BACK.lock()
+        && !all.contains(&id)
+    {
+        all.push(id);
+    }
+}
+
+/// Whether pointer `id`, lifting, is one the system took back: winit gives that as any other lift.
+pub fn was_taken_back(id: u64) -> bool {
+    let Ok(mut all) = TAKEN_BACK.lock() else { return false };
+    let found = all.iter().position(|p| *p == id);
+    found.map(|at| all.swap_remove(at)).is_some()
 }
 
 /// Whether pointer `id` is a pen that isn't on the screen it paints on: a tablet without one, or
@@ -638,6 +658,9 @@ mod system {
     const PEN_MASK_TILT_Y: u32 = 0x8;
     /// A pointer message's flags (its `wparam`'s high word): the pointer touches the screen.
     const POINTER_FLAG_INCONTACT: usize = 0x4;
+    /// A pointer's flags, as a message's and as a frame gives them: the system took it back, and
+    /// what it did is to be undone.
+    const POINTER_FLAG_CANCELED: u32 = 0x8000;
 
     /// winit's procedure for the window, called after ours.
     static WINIT: AtomicIsize = AtomicIsize::new(0);
@@ -656,9 +679,10 @@ mod system {
         WINIT.store(winit, Ordering::Relaxed);
     }
 
-    /// Notes what the other pointers in `id`'s frame are. winit takes a whole frame from its first
-    /// message and skips the rest, so a second finger's own messages never come here: unnoted, a
-    /// finger with a pressure would be taken for a pen, and draw whatever the finger settings say.
+    /// Notes what the other pointers in `id`'s frame are, and any taken back. winit takes a whole
+    /// frame from its first message and skips the rest, so a second finger's own messages never
+    /// come here: unnoted, a finger with a pressure would be taken for a pen, and draw whatever the
+    /// finger settings say.
     fn frame_kinds(id: u32) {
         let mut count = 0;
         // SAFETY: a count to fill, no pointers asked for yet
@@ -673,6 +697,9 @@ mod system {
         for pointer in pointers.iter().take(count as usize) {
             if pointer.pointerType == PT_PEN || pointer.pointerType == PT_TOUCH {
                 super::pointer_kind(u64::from(pointer.pointerId), pointer.pointerType == PT_PEN);
+            }
+            if pointer.pointerFlags.0 & POINTER_FLAG_CANCELED != 0 {
+                super::taken_back(u64::from(pointer.pointerId));
             }
         }
     }
@@ -716,6 +743,9 @@ mod system {
                 super::pointer_kind(u64::from(id), kind == PT_PEN);
             }
             frame_kinds(id);
+            if (wparam.0 >> 16) as u32 & POINTER_FLAG_CANCELED != 0 {
+                super::taken_back(u64::from(id));
+            }
             if msg == WM_POINTERDOWN && kind == PT_PEN {
                 super::pen_on_screen(u64::from(id), pen_device(id) == Some(POINTER_DEVICE_TYPE_INTEGRATED_PEN));
             }
@@ -806,6 +836,16 @@ mod tests {
         assert_eq!(mouse_pen_at((30.0, 20.0)), Some(pen(0.7)));
         set_mouse_pen(None);
         assert_eq!(mouse_pen_at((12.5, 20.0)), None);
+    }
+
+    #[test]
+    fn a_pointer_taken_back_is_told_once() {
+        assert!(!was_taken_back(921));
+        taken_back(921);
+        taken_back(921);
+        assert!(!was_taken_back(922));
+        assert!(was_taken_back(921));
+        assert!(!was_taken_back(921));
     }
 
     #[test]
