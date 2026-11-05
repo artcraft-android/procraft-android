@@ -3540,7 +3540,7 @@ impl Canvas {
         });
         let depth = flattening.max().unwrap_or(0);
         self.make_groups(device, depth);
-        let ops = in_pieces(std::mem::take(&mut self.ops), self.full(), self.work_at_once);
+        let ops = in_pieces(without_passing_tips(std::mem::take(&mut self.ops)), self.full(), self.work_at_once);
 
         // this frame's stamps in one upload
         let mut instances: Vec<StampInstance> = Vec::new();
@@ -8218,6 +8218,24 @@ impl UniformData {
         self.data.resize(offset + (slots * SLOT) as usize, 0);
         u32::try_from(offset).unwrap_or(0)
     }
+}
+
+/// `ops` without the tips taken off again among them: what a tip covered comes back as it was, so
+/// one that never reached the screen is work for nothing. Behind with a fast stroke, a frame has
+/// a tip for every input event since the last, and drawing them all left it further behind.
+fn without_passing_tips(ops: Vec<Op>) -> Vec<Op> {
+    let mut kept: Vec<Op> = Vec::with_capacity(ops.len());
+    for op in ops {
+        if let Op::Untip(rect) = op
+            && let [.., Op::SaveTip(saved), Op::Stamps { .. }] = kept.as_slice()
+            && *saved == rect
+        {
+            kept.truncate(kept.len() - 2);
+            continue;
+        }
+        kept.push(op);
+    }
+    kept
 }
 
 /// The work of `stamps` on a canvas `full` (see [`stamp_work`]).

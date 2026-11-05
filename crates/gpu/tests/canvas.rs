@@ -2827,6 +2827,39 @@ fn a_stroke_sent_in_pieces_lays_what_it_would_in_one() {
     }
 }
 
+/// Behind with a fast stroke, a frame finds a tip for each input event since the last: only the
+/// last is ever seen, so the others are left out, and the stroke comes out the same.
+#[test]
+fn a_tip_taken_off_before_it_shows_is_not_drawn() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let laid = |frames: usize| {
+        let mut doc = Document::new(128, 128);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.set_work_at_once(1);
+        canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 0.6));
+        for i in 0..60 {
+            let at = Vec2::new(20.0 + i as f32, 40.0);
+            canvas.add_stamps(&[dot(at, 6.0)]);
+            canvas.set_tip(&[dot(at + Vec2::new(6.0, 12.0), 14.0), dot(at + Vec2::new(12.0, 16.0), 14.0)]);
+            if i % frames == 0 {
+                canvas.render(&gpu, &mut doc, None);
+            }
+        }
+        canvas.render(&gpu, &mut doc, None);
+        let sent = canvas.pieces_sent();
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        (canvas.read_layer(&gpu, doc.current()).unwrap(), sent)
+    };
+    // each event its own frame, then a frame every twenty
+    let (each, sent_each) = laid(1);
+    let (behind, sent_behind) = laid(20);
+    assert!(each == behind, "the stroke came out differently");
+    // in one frame, sixty stamps and at most the last tip's two: none of the others were sent
+    assert!(sent_behind < sent_each / 2 + 8, "{sent_behind} pieces of {sent_each}");
+}
+
 /// A stroke redrawn at its end goes to the GPU as many pieces however it was drawn, and a stamp
 /// reaching past the canvas counts only for what it covers on it.
 #[test]
