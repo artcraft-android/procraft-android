@@ -541,7 +541,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** [s] goes by the plugins that reach a canvas. */
     private fun applyPlugins(s: CanvasSession) {
         s.usePatches(plugins)
-        s.setFillGap(plugins.fillGap())
     }
 
     /** The interface shows at [size] now: what hit-tests its handles, and what clears its bars, go with it. */
@@ -6182,6 +6181,29 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         pourLater("threshold") { s.pourThreshold(t) }
     }
 
+    /** A fill a patch is finishing, on a thread of its own: nothing is touched until it is done. */
+    var fillFinishing by mutableStateOf(false)
+        private set
+
+    /** Waits, the screen free, for a fill a patch is finishing, saying so if it takes a while. */
+    private fun watchFill(s: CanvasSession) {
+        if (fillFinishing || !s.pourFinishing()) return
+        fillFinishing = true
+        viewModelScope.launch {
+            val since = android.os.SystemClock.uptimeMillis()
+            var said = false
+            while (s.pourFinishing()) {
+                kotlinx.coroutines.delay(16)
+                if (!said && android.os.SystemClock.uptimeMillis() - since >= FILL_SAYS_MS) {
+                    said = true
+                    showNotice("Finishing the fill…")
+                }
+            }
+            fillFinishing = false
+            refresh()
+        }
+    }
+
     /** The fill under way ends: [keep] makes it an undo step, else it is taken back. */
     fun pourEnd(keep: Boolean) {
         val s = session ?: return
@@ -6964,6 +6986,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Re-reads the layers and undo state from the session. */
     fun refresh() {
         val s = session ?: return
+        watchFill(s)
         refreshReference()
         recordFrame()
         // undo and redo keep a snapped shape as drawn first
@@ -7254,6 +7277,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
         /** How long the band offers Continue filling after a drop. */
         private const val DROP_BAND_MS = 2_500L
+        /** How long a fill being finished by a patch goes unmentioned. */
+        private const val FILL_SAYS_MS = 500L
 
         fun hsvToRgb(h: Float, s: Float, v: Float): Int {
             val hsv = floatArrayOf((h * 360f) % 360f, s, v)

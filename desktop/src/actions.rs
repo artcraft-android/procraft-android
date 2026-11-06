@@ -1004,8 +1004,7 @@ impl Actions {
     }
 }
 
-/// Whether a card's controls show: an extra's always, a patch's once applied. A filter's are on
-/// its own panel.
+/// Whether a card's controls show: a patch's once applied. A filter's are on its own panel.
 fn controls_show(plugin: &PluginInfo) -> bool {
     plugin.on && plugin.problem.is_none() && plugin.kind != PluginKind::Filter
 }
@@ -1401,10 +1400,9 @@ mod tests {
     const SHADER: &str = "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }";
     const SHADER_SHA: &str = "55f0107972b862c96fe458e60620daf4d655f0d1dfb7704a6358a20e6a4c5891";
 
-    /// A patch's module, as small as one can be: every sample goes to the corner.
-    const MODULE: &str =
-        "0061736d0100000001070160027d7d017e030201000715011170726f63726166745f706f736974696f6e00000a0601040042000b";
-    const MODULE_SHA: &str = "f0491d3d48103d36e31e89c7bd4d8de782239dcb8f8158235c7d9c6b0425ecde";
+    /// A patch's module, as small as one with a slider can be: every sample goes to the corner.
+    const MODULE: &str = "0061736d01000000010c0260027d7d017e60027f7d0003030200010728021170726f63726166745f706f736974696f6e00001070726f63726166745f636f6e74726f6c00010a0902040042000b02000b";
+    const MODULE_SHA: &str = "1cc0369933a504bea35bd0c6b656f6bb97c5fe6b183a1c03dfc341d50be7c2d9";
 
     /// A patch file, as small as one can be.
     fn patch_file() -> Vec<u8> {
@@ -1413,7 +1411,8 @@ mod tests {
         let manifest = format!(
             r#"{{"schema":1,"id":"org.example.patch","name":"A patch","version":"1.0.0","kind":"patch",
             "publisher":{{"name":"Someone"}},"description":"Changes the app.","compat":{{"procraft":{{"interface":1}}}},
-            "files":[{{"path":"patch.wasm","sha256":"{MODULE_SHA}","size":{}}}],"permissions":[],"hooks":["position"]}}"#,
+            "files":[{{"path":"patch.wasm","sha256":"{MODULE_SHA}","size":{}}}],"permissions":[],"hooks":["position"],
+            "controls":[{{"key":"cut","type":"slider","label":"Cut","least":0,"most":32,"step":1,"starts":0}}]}}"#,
             module.len()
         );
         let mut zip = procraft_engine::zip::ZipWriter::new();
@@ -1527,47 +1526,61 @@ mod tests {
             pos2(body().center().x, self.cards()[card].1 - ROW_HEIGHT / 2.0 - up * (ROW_HEIGHT + 1.0))
         }
 
-        /// A point on the first card's slider, `along` its way (0..1): its last row.
+        /// A point on the first card's slider, `along` its way (0..1): over its two action rows.
         fn on_slider(&self, along: f32) -> Pos2 {
             let (left, right) = (body().left() + 12.0 + 16.0, body().right() - 12.0 - 16.0);
-            pos2(left + along * (right - left), self.cards()[0].1 - SLIDE_HEIGHT / 2.0)
+            let y = self.cards()[0].1 - 2.0 * (ROW_HEIGHT + 1.0) - SLIDE_HEIGHT / 2.0;
+            pos2(left + along * (right - left), y)
+        }
+
+        /// The value of the first card's slider.
+        fn slider_value(&self) -> f32 {
+            match &self.list()[0].controls[0] {
+                PluginControl::Slider { control } => control.value,
+                other => panic!("{other:?}"),
+            }
         }
     }
 
-    #[test]
-    fn the_extras_show_with_their_controls_and_nothing_to_apply_or_remove() {
-        let page = Page::new(false);
-        assert_eq!(page.cards().len(), 1);
-        assert!(page.list().iter().all(|p| card_rows(p).is_empty() && controls_show(p)));
+    /// The Patches page with a patch of one slider applied, and where its files are.
+    fn with_slider(name: &str) -> (Page, std::path::PathBuf) {
+        let (mut page, dir) = with_store(true, name);
+        assert_eq!(page.prefs.plugins.install(patch_file()), None);
+        assert!(page.prefs.plugins.set_on("org.example.patch".to_owned(), true));
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        (page, dir)
     }
 
     #[test]
-    fn an_extra_s_slider_goes_in_as_it_lets_go() {
-        let mut page = Page::new(false);
+    fn a_patch_s_slider_goes_in_as_it_lets_go() {
+        let (mut page, dir) = with_slider("slider");
         let (end, start) = (page.on_slider(1.0), page.on_slider(0.5));
         page.frame(vec![Event::PointerMoved(end)]);
         page.frame(vec![press(end, true)]);
         page.frame(Vec::new());
         // held, the row follows and nothing else does
         assert_eq!(page.actions.plugin_moved.as_ref().map(|m| m.1), Some(32.0));
-        assert_eq!(page.prefs.plugins.fill_gap(), 0);
+        assert_eq!(page.slider_value(), 0.0);
         page.frame(vec![Event::PointerMoved(start)]);
         page.frame(Vec::new());
         assert_eq!(page.actions.plugin_moved.as_ref().map(|m| m.1), Some(16.0));
-        assert_eq!(page.prefs.plugins.fill_gap(), 0);
+        assert_eq!(page.slider_value(), 0.0);
         let lifted = page.frame(vec![press(start, false)]);
         let after = page.frame(Vec::new());
         assert!(lifted || after);
-        assert_eq!(page.prefs.plugins.fill_gap(), 16);
+        assert_eq!(page.slider_value(), 16.0);
         assert!(page.actions.plugin_moved.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_tap_along_an_extra_s_slider_sets_it() {
-        let mut page = Page::new(false);
+    fn a_tap_along_a_patch_s_slider_sets_it() {
+        let (mut page, dir) = with_slider("slider-tap");
         let at = page.on_slider(0.25);
         assert!(page.tap(at));
-        assert_eq!(page.prefs.plugins.fill_gap(), 8);
+        assert_eq!(page.slider_value(), 8.0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1600,10 +1613,10 @@ mod tests {
         assert_eq!(page.prefs.plugins.install(plugin_file()), None);
         page.frame(Vec::new());
         page.frame(Vec::new());
-        assert_eq!(page.cards().len(), 2);
-        let at = page.on_row(1, 0.0);
-        assert!(page.tap(at));
         assert_eq!(page.cards().len(), 1);
+        let at = page.on_row(0, 0.0);
+        assert!(page.tap(at));
+        assert!(page.cards().is_empty());
         assert!(!dir.join("org.example.filter").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1619,6 +1632,8 @@ mod tests {
         let at = page.on_row(0, 1.0);
         assert!(page.tap(at));
         assert!(page.list()[0].on);
+        // applied, its slider shows over the same two rows
+        let at = page.on_row(0, 1.0);
         assert!(page.tap(at));
         assert!(!page.list()[0].on);
         let at = page.on_row(0, 0.0);
@@ -1635,8 +1650,8 @@ mod tests {
             id: "someone.stranger".to_owned(),
             name: "Stranger".to_owned(),
             description: "No code answers to it.".to_owned(),
-            source: PluginSource::Bundled,
-            kind: PluginKind::Extra,
+            source: PluginSource::File,
+            kind: PluginKind::Patch,
             version: "1.0.0".to_owned(),
             publisher: "Someone".to_owned(),
             experimental: false,

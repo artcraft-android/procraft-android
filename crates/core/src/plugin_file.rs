@@ -223,8 +223,8 @@ fn windows_keeps(name: &str) -> bool {
     matches!(stem.as_str(), "con" | "prn" | "aux" | "nul") || numbered("com") || numbered("lpt")
 }
 
-/// An id: lowercase, dotted, each part plain, and at least two of them. A bundled plugin's id has
-/// no dot, so no key of an imported plugin can be one of theirs.
+/// An id: lowercase, dotted, each part plain, and at least two of them. A moved setting's key has
+/// no dot, so no key of an imported plugin can be one, but for a control that says it keeps it.
 fn valid_id(id: &str) -> bool {
     let plain = |part: &str| {
         !part.is_empty()
