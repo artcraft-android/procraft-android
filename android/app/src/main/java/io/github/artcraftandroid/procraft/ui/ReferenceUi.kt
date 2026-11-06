@@ -93,7 +93,7 @@ fun BoxScope.ReferenceWindow(vm: CanvasViewModel) {
 }
 
 /** Touches here go no further: not to the picture under a bar. */
-private val Modifier.ownTouches get() = pointerInput(Unit) {
+private val Modifier.ownTouches get() = this.pointerInput(Unit) {
     awaitEachGesture { awaitFirstDown(requireUnconsumed = false).consume() }
 }
 
