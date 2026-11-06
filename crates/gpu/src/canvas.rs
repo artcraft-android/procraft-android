@@ -4256,24 +4256,36 @@ impl Canvas {
                         if commit && let Some(rect) = painted {
                             // painted on: only where it was painted changed, and nothing if nowhere
                             if !rect.is_empty() {
-                                let texture = region_copy(device, &mut encoder, &t.before, rect);
+                                let mut spare = None;
+                                let pixels: Vec<Snapshot> = std::iter::once(t)
+                                    .chain(more)
+                                    .map(|t| {
+                                        let texture = region_copy(device, &mut encoder, &t.before, rect);
+                                        spare = Some(t.before);
+                                        Snapshot { layer: t.layer, rect, texture }
+                                    })
+                                    .collect();
+                                if spare.is_some() {
+                                    self.spare_before = spare;
+                                }
                                 self.push_step(Step {
                                     made: 0,
                                     name: None,
                                     doc: None,
-                                    pixels: vec![Snapshot { layer: t.layer, rect, texture }],
+                                    pixels,
                                     selection: None,
                                     flip: None,
                                 });
                                 history_changed = true;
+                            } else {
+                                self.spare_before = Some(t.before);
                             }
-                            self.spare_before = Some(t.before);
                         } else if commit {
                             let full = self.full();
                             // only the part changed, when that is known
                             let part = within.map(|r| r.intersect(full)).filter(|r| !r.is_empty() && *r != full);
                             let mut spare = None;
-                            let pixels = std::iter::once(t)
+                            let pixels: Vec<Snapshot> = std::iter::once(t)
                                 .chain(more)
                                 .map(|t| match part {
                                     Some(rect) => {

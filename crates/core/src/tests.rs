@@ -5002,6 +5002,41 @@ fn picked_layers_paint_an_adjustment_on_together() {
 }
 
 #[test]
+fn picked_layers_pencil_undo_together() {
+    use crate::Adjustment;
+    let Some(s) = session(100, 100) else { return };
+    let dot = |x: f32, y: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    s.set_color(1.0, 0.0, 0.0);
+    dot(20.0, 20.0);
+    let below = s.layers()[0].id;
+    s.add_layer();
+    s.set_color(0.0, 0.0, 1.0);
+    dot(60.0, 60.0);
+    assert!(s.pick_layer(below));
+    let before = (pixel(&s, 20, 20), pixel(&s, 60, 60));
+
+    assert!(s.adjustment_start(Adjustment::Noise));
+    s.adjustment_amount_by(1.0);
+    s.adjustment_pencil(true);
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 20.0, 0.0)]);
+    s.stroke_end(vec![]);
+    s.stroke_begin(PointerKind::Finger, vec![sample(60.0, 60.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert!(s.adjustment_end(true));
+    let after = (pixel(&s, 20, 20), pixel(&s, 60, 60));
+    assert_ne!(after.0, before.0, "the bottom changed");
+    assert_ne!(after.1, before.1, "the top changed");
+
+    s.undo();
+    assert_eq!((pixel(&s, 20, 20), pixel(&s, 60, 60)), before, "one undo puts both layers back");
+    s.redo();
+    assert_eq!((pixel(&s, 20, 20), pixel(&s, 60, 60)), after, "one redo puts both strokes back");
+}
+
+#[test]
 fn picked_layers_liquify_together() {
     use crate::Adjustment;
     let Some(s) = session(100, 100) else { return };
