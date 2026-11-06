@@ -1010,10 +1010,22 @@ impl Interface {
     /// isn't, and the system's pointer stays where the pen went down, so the outline or the cross
     /// go on through the stroke.
     fn hover_cursor(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo, input: &mut Input) {
-        let painting = session.adjustment_shown().adjustment.is_none() && !self.selection.on && !self.transform.on;
+        let shown = session.adjustment_shown();
+        let painting = shown.adjustment.is_none() && !self.selection.on && !self.transform.on;
         let on_canvas = |at: egui::Pos2| {
             self.canvas_rect.contains(at) && ctx.layer_id_at(at).is_none_or(|l| l.order == egui::Order::Background)
         };
+        // Liquify's brush shows as a ring of its reach, hovering and pressed
+        if let (Some(procraft_core::Adjustment::Liquify), Some(&size)) = (shown.adjustment, shown.liquify.first()) {
+            let ppp = ctx.pixels_per_point();
+            input.hover_shown = true;
+            let at = input.hovering().map(|(x, y)| egui::pos2(x, y) / ppp).or_else(|| ctx.pointer_latest_pos());
+            if let Some(at) = at.filter(|at| on_canvas(*at)) {
+                ctx.set_cursor_icon(egui::CursorIcon::None);
+                hover_ring(ctx, at, procraft_core::liquify_reach(size) * info.zoom / ppp);
+            }
+            return;
+        }
         if !input.idle() {
             if painting
                 && input.pressing()
@@ -2432,6 +2444,19 @@ fn hover_cross(ctx: &egui::Context, at: egui::Pos2) {
         .interactable(false)
         .fixed_pos(at)
         .show(ctx, |ui| fine_cross(ui.painter(), at));
+}
+
+/// A fine ring `radius` points round `at`, a cross at its middle, seen on any colour.
+fn hover_ring(ctx: &egui::Context, at: egui::Pos2, radius: f32) {
+    egui::Area::new(egui::Id::unique("hover ring")).order(egui::Order::Tooltip).interactable(false).fixed_pos(at).show(
+        ctx,
+        |ui| {
+            for (width, colour) in [(3.0, Color32::WHITE), (1.0, Color32::BLACK)] {
+                ui.painter().circle_stroke(at, radius, Stroke::new(width, colour));
+            }
+            fine_cross(ui.painter(), at);
+        },
+    );
 }
 
 /// The desktop's pointer over the canvas where no outline shows: a fine cross at `at` (points),

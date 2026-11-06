@@ -48,6 +48,12 @@ pub(crate) fn radius(size: f32) -> f32 {
     4.0 + 1596.0 * size.clamp(0.0, 1.0).powf(2.2)
 }
 
+/// How far a Liquify brush at `size` (0..1) reaches, canvas pixels: for showing it.
+#[uniffi::export]
+pub fn liquify_reach(size: f32) -> f32 {
+    radius(size)
+}
+
 /// How hard a brush at the `pressure` slider (0..1) presses, at full force.
 fn strength(pressure: f32) -> f32 {
     0.01 + 0.99 * pressure.clamp(0.0, 1.0)
