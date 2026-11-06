@@ -1888,6 +1888,15 @@ impl CanvasSession {
                 self.pour_end(!cancelled, None);
                 out.push(TouchCommand::Filled);
             }
+            // a tap on a handle rather than a drag of it: a curve's anchor steps to its next state
+            Mode::Shape(i) => {
+                let tapped = !t.shape_dragged && now - t.tap_start <= TAP_MS;
+                drop(t);
+                if tapped {
+                    self.quickshape_cycle_anchor(i);
+                    out.push(TouchCommand::ShapeChanged);
+                }
+            }
             // a tap, on its outline or elsewhere, ends the editing; a drag only turned or moved it
             Mode::ShapePin | Mode::ShapeMove => {
                 let tapped = !t.shape_dragged && now - t.tap_start <= TAP_MS;

@@ -2,7 +2,7 @@
 //! an ellipse or circle, a triangle, a quadrilateral, a rectangle or square for closed ones. Each
 //! comes with the nodes it is edited by and the outline the brush redraws it along.
 
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::TAU;
 
 use crate::geom::Vec2;
 
@@ -23,6 +23,16 @@ pub enum ShapeKind {
 
 /// A recognised shape: its kind and the nodes that define and edit it.
 ///
+/// What an anchor's controls are doing: mirrored either side of it, free of each other, or turned
+/// along their own spans as a corner. Smooth and broken are the same shape, so which one an anchor
+/// is has to be remembered rather than read off it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Anchor {
+    Smooth,
+    Broken,
+    Corner,
+}
+
 /// Nodes, by kind: a line's two ends; a polyline's corners; an arc's start, middle and end, then
 /// the centre of the ellipse it is a stretch of and the ends of two conjugate half-axes of that; an
 /// ellipse's or circle's centre and the four ends of its axes; a polygon's corners.
@@ -119,7 +129,7 @@ impl Shape {
                     self.kind = ShapeKind::Triangle;
                 }
             }
-            ShapeKind::Curve => self.move_curve_handle(index, to),
+            ShapeKind::Curve => self.move_curve_handle(index, to, true),
             _ => {
                 if let Some(p) = self.nodes.get_mut(index) {
                     *p = to;
@@ -154,11 +164,12 @@ impl Shape {
     }
 
     /// Moves one of the curve's control points, taking the one the other side of its anchor with it
-    /// so the curve stays smooth through there. An anchor itself moves alone.
-    fn move_curve_handle(&mut self, index: usize, to: Vec2) {
+    /// so the curve stays smooth through there, unless the anchor is set broken. An anchor itself
+    /// moves alone.
+    fn move_curve_handle(&mut self, index: usize, to: Vec2, mirror: bool) {
         let Some(slot) = self.nodes.get_mut(index) else { return };
         *slot = to;
-        if index.is_multiple_of(3) {
+        if index.is_multiple_of(3) || !mirror {
             return;
         }
         // a control starts the span after its anchor at 3i+1, or ends the one before it at 3i-1:
@@ -168,6 +179,69 @@ impl Shape {
         let Some(about) = self.nodes.get(anchor).copied() else { return };
         if let Some(other) = pair.and_then(|p| self.nodes.get_mut(p)) {
             *other = about * 2.0 - to;
+        }
+    }
+
+    /// As [`Shape::move_handle`], but a curve's controls stay free of each other: for an anchor set
+    /// broken, where moving one is meant to leave the other where it is.
+    pub fn move_handle_free(&mut self, index: usize, to: Vec2) {
+        if !to.is_finite() {
+            return;
+        }
+        if self.kind == ShapeKind::Curve {
+            self.move_curve_handle(index, to, false);
+            return;
+        }
+        self.move_handle(index, to);
+    }
+
+    /// Puts the anchor at `at` into one of its states, its controls following. Broken leaves them
+    /// alone, so setting it changes nothing about the curve; a corner turns each of them along its
+    /// own span, leaving a sharp bend whose anchor is still free to be taken hold of; smooth sets
+    /// them mirrored either side again, along the way the stroke went.
+    pub fn set_anchor(&mut self, at: usize, to: Anchor) {
+        if !at.is_multiple_of(3) {
+            return;
+        }
+        let Some(&here) = self.nodes.get(at) else { return };
+        match to {
+            Anchor::Broken => {}
+            Anchor::Corner => {
+                let before = self.nodes.get(at.wrapping_sub(3)).copied().unwrap_or(here);
+                let after = self.nodes.get(at + 3).copied().unwrap_or(here);
+                let back = (before - here).normalized_or(Vec2::ZERO) * (here.distance(before) / 3.0);
+                let ahead = (after - here).normalized_or(Vec2::ZERO) * (here.distance(after) / 3.0);
+                if let Some(slot) = at.checked_sub(1).and_then(|i| self.nodes.get_mut(i)) {
+                    *slot = here + back;
+                }
+                if let Some(slot) = self.nodes.get_mut(at + 1) {
+                    *slot = here + ahead;
+                }
+            }
+            Anchor::Smooth => {
+                let back = self.nodes.get(at.wrapping_sub(1)).copied().unwrap_or(here);
+                let ahead = self.nodes.get(at + 1).copied().unwrap_or(here);
+                let mut dir = ((ahead - here).normalized_or(Vec2::ZERO) + (here - back).normalized_or(Vec2::ZERO))
+                    .normalized_or(Vec2::ZERO);
+                let mut len = (here.distance(ahead) + here.distance(back)) * 0.5;
+                if dir.length() <= 0.5 || len <= 0.5 {
+                    // folded onto the anchor, so there is nothing to lean on: run along the anchors
+                    // either side of it instead, reaching a third of the way to the nearer one
+                    let before = self.nodes.get(at.wrapping_sub(3)).copied().unwrap_or(here);
+                    let after = self.nodes.get(at + 3).copied().unwrap_or(here);
+                    dir = (after - before).normalized_or(Vec2::ZERO);
+                    len = here.distance(after).max(here.distance(before)) / 3.0;
+                }
+                if dir.length() <= 0.5 || len <= 0.5 {
+                    return;
+                }
+                if let Some(slot) = at.checked_sub(1).and_then(|i| self.nodes.get_mut(i)) {
+                    *slot = here - dir * len;
+                }
+                if let Some(slot) = self.nodes.get_mut(at + 1) {
+                    *slot = here + dir * len;
+                }
+            }
         }
     }
 
@@ -202,6 +276,7 @@ impl Shape {
             ShapeKind::Polyline => {
                 Shape { kind: ShapeKind::Polyline, nodes: simplify(stroke, CORNER_TOLERANCE * size(stroke)) }
             }
+            ShapeKind::Curve => fit_curve(stroke),
         }
     }
 
@@ -1009,12 +1084,12 @@ mod tests {
             .collect();
         for (stroke, kind) in [(&arc, ShapeKind::Arc), (&bend, ShapeKind::Polyline)] {
             let found = recognise(stroke);
-            assert_eq!(found.iter().map(|s| s.kind).collect::<Vec<_>>(), [kind, ShapeKind::Line]);
-            let line = found[0].as_kind(ShapeKind::Line, stroke);
+            let held = found.iter().find(|s| s.kind == kind).unwrap_or_else(|| panic!("{kind:?} offered"));
+            let line = held.as_kind(ShapeKind::Line, stroke);
             assert_eq!(line.kind, ShapeKind::Line);
             let back = line.as_kind(kind, stroke);
             assert_eq!(back.kind, kind);
-            assert_eq!(back.nodes, found[0].nodes);
+            assert_eq!(back.nodes, held.nodes, "{kind:?}");
         }
     }
 

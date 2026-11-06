@@ -8,7 +8,7 @@ use procraft_engine::brush::Brush;
 use procraft_engine::document::LayerId;
 use procraft_engine::geom::Vec2;
 use procraft_engine::input::Sample;
-use procraft_engine::quickshape::{Shape, ShapeKind, end_hook_reach, fit_ellipse, recognise, without_end_hook};
+use procraft_engine::quickshape::{Anchor, Shape, ShapeKind, end_hook_reach, fit_ellipse, recognise, without_end_hook};
 use procraft_engine::stroke::StrokeBuilder;
 use procraft_gpu::{Canvas, StrokeStyle};
 
@@ -65,13 +65,23 @@ impl From<QuickShapeKind> for ShapeKind {
     }
 }
 
+/// How a curve's anchor sits: its controls mirrored either side of it, free of each other, or turned
+/// along their own spans as a corner. Smooth and broken are the same shape, so this is remembered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum QuickShapeAnchor {
+    Smooth,
+    Broken,
+    Corner,
+}
+
 /// The shape a stroke snapped to: its kind, the kinds it can be shown as instead (its own first),
-/// and its editing handles (window points, x and y in turn).
+/// its editing handles (window points, x and y in turn), and how each of a curve's anchors sits.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct QuickShapeInfo {
     pub kind: QuickShapeKind,
     pub choices: Vec<QuickShapeKind>,
     pub handles: Vec<f32>,
+    pub anchors: Vec<QuickShapeAnchor>,
 }
 
 /// A snapped stroke being shown and edited.
@@ -87,6 +97,12 @@ pub(crate) struct ShapeEdit {
     drawn: Vec<Vec2>,
     /// What the pen did along it.
     along: StrokeAlong,
+    /// How each of a curve's anchors sits, by anchor number: a mode, kept rather than read off the
+    /// shape, because a broken pair can look like a corner.
+    modes: Vec<Anchor>,
+    /// Shapes of other kinds it has been shown as, so a kind picked by mistake can be gone back on
+    /// and found as it was. Anything edited since takes them away.
+    saved: Vec<(ShapeKind, Shape)>,
     /// While the pen that drew it is still down.
     held: Option<Held>,
     /// The stroke it was made of, for undo to go back to.
@@ -103,7 +119,19 @@ impl ShapeEdit {
         stroke: Option<DrawnStroke>,
     ) -> ShapeEdit {
         let first = shape.clone();
-        ShapeEdit { shape, first, earlier: Vec::new(), later: Vec::new(), choices, drawn, along, held, stroke }
+        ShapeEdit {
+            shape,
+            first,
+            earlier: Vec::new(),
+            later: Vec::new(),
+            choices,
+            drawn,
+            along,
+            modes: Vec::new(),
+            saved: Vec::new(),
+            held,
+            stroke,
+        }
     }
 
     /// A drag undone can be done again.
@@ -368,7 +396,35 @@ impl State {
                     [w.x, w.y]
                 })
                 .collect(),
+            anchors: anchor_list(&edit.shape, &edit.modes),
         })
+    }
+}
+
+/// How each of a curve's anchors sits, for the handles to be drawn as.
+fn anchor_list(shape: &Shape, modes: &[Anchor]) -> Vec<QuickShapeAnchor> {
+    if shape.kind != ShapeKind::Curve {
+        return Vec::new();
+    }
+    (0..shape.nodes.len().saturating_sub(1) / 3 + 1)
+        .map(|k| match modes.get(k).copied().unwrap_or(Anchor::Smooth) {
+            Anchor::Smooth => QuickShapeAnchor::Smooth,
+            Anchor::Broken => QuickShapeAnchor::Broken,
+            Anchor::Corner => QuickShapeAnchor::Corner,
+        })
+        .collect()
+}
+
+/// Puts every corner's controls back where they belong, pointing at the anchors either side: the
+/// shape around them may have moved, and a corner's controls are worked out rather than dragged.
+fn refresh_corners(shape: &mut Shape, modes: &[Anchor]) {
+    if shape.kind != ShapeKind::Curve {
+        return;
+    }
+    for k in 0..shape.nodes.len().saturating_sub(1) / 3 + 1 {
+        if modes.get(k).copied() == Some(Anchor::Corner) {
+            shape.set_anchor(3 * k, Anchor::Corner);
+        }
     }
 }
 
@@ -598,14 +654,27 @@ impl CanvasSession {
         let edit = st.shape.as_mut()?;
         // a kind chosen is kept: the pen, if still down, no longer moves it
         edit.held = None;
+        let want = ShapeKind::from(kind);
         let current = edit.shape.kind;
-        let before = edit.shape.clone();
-        // a kind already shown keeps its edits; another is fitted to the stroke as drawn
-        edit.shape = edit.shape.as_kind(kind.into(), &edit.drawn);
-        if edit.shape.kind == current && ShapeKind::from(kind) != current {
+        if want == current {
             return st.shape_info();
         }
-        edit.earlier.push(before);
+        // the one being left is put by, so coming back to it finds it as it was: a kind picked by
+        // mistake costs nothing, as long as nothing has been edited since
+        let leaving = edit.shape.clone();
+        match edit.saved.iter_mut().find(|(k, _)| *k == current) {
+            Some(slot) => slot.1 = leaving.clone(),
+            None => edit.saved.push((current, leaving.clone())),
+        }
+        edit.shape = match edit.saved.iter().find(|(k, _)| *k == want) {
+            Some((_, kept)) => kept.clone(),
+            None => {
+                // fitted afresh, so the anchors it had are no guide to this one
+                edit.modes.clear();
+                edit.shape.as_kind(want, &edit.drawn)
+            }
+        };
+        edit.earlier.push(leaving);
         edit.later.clear();
         st.draw_shape();
         self.shared.frame(st);
@@ -676,9 +745,66 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let to = st.view?.screen_to_canvas(Vec2::new(x, y))?;
-        let edit = st.shape.as_mut()?;
-        edit.held = None;
-        edit.shape.move_handle(index as usize, to);
+        {
+            let edit = st.shape.as_mut()?;
+            edit.held = None;
+            // editing a shape takes the kinds it was shown as with it
+            edit.saved.clear();
+            let index = index as usize;
+            // a control of an anchor set broken moves on its own; otherwise its pair follows it
+            let anchor = match index % 3 {
+                1 => (index - 1) / 3,
+                2 => (index + 1) / 3,
+                _ => usize::MAX,
+            };
+            if edit.modes.get(anchor).copied() == Some(Anchor::Broken) {
+                edit.shape.move_handle_free(index, to);
+            } else {
+                edit.shape.move_handle(index, to);
+            }
+            let modes = edit.modes.clone();
+            refresh_corners(&mut edit.shape, &modes);
+        }
+        st.draw_shape();
+        self.shared.frame(st);
+        st.shape_info()
+    }
+
+    /// Taps the curve's anchor `index` on to the next of its three states: smooth, then broken, then
+    /// a corner. A corner's controls are worked out from the anchors either side of it, and smooth
+    /// sets them mirrored either side again. Kept as a step of undo, as a drag is.
+    pub fn quickshape_cycle_anchor(&self, index: u32) -> Option<QuickShapeInfo> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        {
+            let edit = st.shape.as_mut()?;
+            if edit.shape.kind != ShapeKind::Curve {
+                return None;
+            }
+            let at = index as usize;
+            if !at.is_multiple_of(3) {
+                return None;
+            }
+            let k = at / 3;
+            edit.held = None;
+            edit.saved.clear();
+            edit.earlier.push(edit.shape.clone());
+            edit.later.clear();
+            let next = match edit.modes.get(k).copied().unwrap_or(Anchor::Smooth) {
+                Anchor::Smooth => Anchor::Broken,
+                Anchor::Broken => Anchor::Corner,
+                Anchor::Corner => Anchor::Smooth,
+            };
+            if edit.modes.len() <= k {
+                edit.modes.resize(k + 1, Anchor::Smooth);
+            }
+            if let Some(mode) = edit.modes.get_mut(k) {
+                *mode = next;
+            }
+            edit.shape.set_anchor(at, next);
+            let modes = edit.modes.clone();
+            refresh_corners(&mut edit.shape, &modes);
+        }
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()
@@ -831,6 +957,73 @@ mod tests {
         assert!(s.quickshape_hold().is_some());
         let st = s.shared.lock();
         st.stroke.as_ref().unwrap().stamps()
+    }
+
+    /// A stroke drawn as an S: two bends the other way round, so it snaps to a curve.
+    fn s_stroke() -> Vec<Sample> {
+        (0..=60)
+            .map(|i| {
+                let t = i as f32 / 60.0;
+                Sample::at(
+                    Vec2::new(100.0 + 500.0 * t, 300.0 + 160.0 * (t * std::f32::consts::TAU).sin()),
+                    0.6,
+                    i as f64 * 8.0,
+                )
+            })
+            .collect()
+    }
+
+    /// A session with a stroke snapped to its shape, for the editing calls to work on.
+    fn held_session(samples: &[Sample]) -> std::sync::Arc<CanvasSession> {
+        let s = CanvasSession::new(1000, 800);
+        {
+            let mut st = s.shared.lock();
+            st.view = Some(procraft_engine::view::View::fit((1000, 800), (1000, 800)));
+            let mut builder = StrokeBuilder::new(procraft_engine::brush::Brush::round_pen(), 8.0, Pointer::Stylus);
+            builder.add(samples);
+            st.stroke = Some(builder);
+            st.remember_input(samples);
+        }
+        assert!(s.quickshape_hold().is_some());
+        s
+    }
+
+    #[test]
+    fn a_curve_anchor_steps_through_smooth_broken_and_a_corner() {
+        use crate::quickshape::QuickShapeAnchor;
+        let s = held_session(&s_stroke());
+        let info = s.quickshape_info().expect("a shape");
+        assert_eq!(info.kind, QuickShapeKind::Curve);
+        assert_eq!(info.anchors.first().copied(), Some(QuickShapeAnchor::Smooth));
+        // tapped once, its controls come free of each other
+        let once = s.quickshape_cycle_anchor(0).unwrap();
+        assert_eq!(once.anchors.first().copied(), Some(QuickShapeAnchor::Broken));
+        // again, and they turn along their own spans as a corner
+        let twice = s.quickshape_cycle_anchor(0).unwrap();
+        assert_eq!(twice.anchors.first().copied(), Some(QuickShapeAnchor::Corner));
+        // and again, back to smooth
+        let thrice = s.quickshape_cycle_anchor(0).unwrap();
+        assert_eq!(thrice.anchors.first().copied(), Some(QuickShapeAnchor::Smooth));
+    }
+
+    #[test]
+    fn a_kind_gone_from_comes_back_as_it_was() {
+        let s = held_session(&s_stroke());
+        let curve = s.quickshape_info().expect("a shape");
+        assert_eq!(curve.kind, QuickShapeKind::Curve);
+        let line = s.quickshape_choose(QuickShapeKind::Line).unwrap();
+        assert_eq!(line.kind, QuickShapeKind::Line);
+        // the curve is found again rather than fitted afresh
+        let back = s.quickshape_choose(QuickShapeKind::Curve).unwrap();
+        assert_eq!(back.kind, QuickShapeKind::Curve);
+        assert_eq!(back.handles, curve.handles);
+    }
+
+    #[test]
+    fn a_curve_can_be_shown_as_a_polyline() {
+        let s = held_session(&s_stroke());
+        let polyline = s.quickshape_choose(QuickShapeKind::Polyline).unwrap();
+        assert_eq!(polyline.kind, QuickShapeKind::Polyline);
     }
 
     #[test]
