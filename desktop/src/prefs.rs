@@ -60,6 +60,9 @@ pub struct Prefs {
     pub pad_3d: bool,
     /// The canvas shown on a second display too.
     pub project_canvas: bool,
+    /// Brushes turned by the pen's barrel take its turn as it is, not as far as it turns in a
+    /// stroke (a turn chosen while hovering, then held, comes through).
+    pub absolute_barrel_roll: bool,
     /// The Patches and Plugins pages' lists, their values kept here with the rest.
     pub plugins: Arc<Plugins>,
     /// Advanced settings: an artwork opens as it was left; fitting the canvas keeps it clear of
@@ -109,6 +112,7 @@ impl Default for Prefs {
             actions_tab: 0,
             pad_3d: false,
             project_canvas: false,
+            absolute_barrel_roll: false,
             plugins: Plugins::new(),
             orientation_memory: true,
             fit_inside: false,
@@ -169,6 +173,7 @@ impl Prefs {
                 "tip_attached" => p.tip_attached = on,
                 "pad_3d" => p.pad_3d = on,
                 "project_canvas" => p.project_canvas = on,
+                "absolute_barrel_roll" => p.absolute_barrel_roll = on,
                 "orientation_memory" => p.orientation_memory = on,
                 "fit_inside" => p.fit_inside = on,
                 "no_time_lapse" => p.no_time_lapse = on,
@@ -221,6 +226,7 @@ impl Prefs {
             format!("actions_tab {}", self.actions_tab),
             format!("pad_3d {}", self.pad_3d),
             format!("project_canvas {}", self.project_canvas),
+            format!("absolute_barrel_roll {}", self.absolute_barrel_roll),
             format!("orientation_memory {}", self.orientation_memory),
             format!("fit_inside {}", self.fit_inside),
             format!("no_time_lapse {}", self.no_time_lapse),
@@ -249,6 +255,7 @@ impl Prefs {
         session.use_patches(Arc::clone(&self.plugins));
         session.set_simplified_undos(self.simplified_undos);
         session.set_speed_distance(self.speed_distance);
+        session.set_absolute_barrel_roll(self.absolute_barrel_roll);
         session.set_input_settings(
             self.stabilization,
             self.motion_filtering,

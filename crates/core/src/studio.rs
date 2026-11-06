@@ -419,7 +419,18 @@ impl CanvasSession {
             pressure_curve: if pts.len() >= 2 { Curve::new(&pts) } else { Curve::linear() },
             speed_distance: st.input.speed_distance,
             tip_attached,
+            absolute_roll: st.input.absolute_roll,
         };
+    }
+
+    /// Brushes turned by the pen's barrel turn their stamps as the barrel is turned, not as far
+    /// as it has turned since the stroke began (the brushes themselves unchanged).
+    pub fn set_absolute_barrel_roll(&self, on: bool) {
+        self.shared.lock().input.absolute_roll = on;
+    }
+
+    pub fn absolute_barrel_roll(&self) -> bool {
+        self.shared.lock().input.absolute_roll
     }
 
     /// How far input must move for the speed dynamics to count it as fast, as a part of the usual

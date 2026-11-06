@@ -2202,6 +2202,7 @@ impl Interface {
                         | Act::RightHanded
                         | Act::BrushCursor
                         | Act::ProjectCanvas
+                        | Act::AbsoluteBarrelRoll
                         | Act::ResetInput,
                     )
                     | None => {}

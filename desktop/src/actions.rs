@@ -117,6 +117,7 @@ pub enum Act {
     RightHanded,
     BrushCursor,
     ProjectCanvas,
+    AbsoluteBarrelRoll,
     ResetInput,
 }
 
@@ -355,6 +356,7 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                         Some(Act::ScalingMenu),
                     ),
                     Switch("Project canvas", prefs.project_canvas, Some(Act::ProjectCanvas)),
+                    Switch("Absolute barrel rotation", prefs.absolute_barrel_roll, Some(Act::AbsoluteBarrelRoll)),
                     Switch("Brush cursor", prefs.brush_cursor, Some(Act::BrushCursor)),
                     Button("Advanced cursor settings", None, Some(Act::Page(Page::Cursor))),
                 ],
@@ -633,6 +635,10 @@ impl Actions {
             }
             Some(Tapped::Act(Act::ProjectCanvas)) => {
                 prefs.project_canvas = !prefs.project_canvas;
+                Some(Act::Prefs)
+            }
+            Some(Tapped::Act(Act::AbsoluteBarrelRoll)) => {
+                prefs.absolute_barrel_roll = !prefs.absolute_barrel_roll;
                 Some(Act::Prefs)
             }
             Some(Tapped::Act(Act::ResetInput)) => {
