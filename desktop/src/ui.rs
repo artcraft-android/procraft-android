@@ -343,9 +343,9 @@ impl Interface {
         crate::files::DRAG_FORMATS.get(self.prefs.drag_format).copied().unwrap_or(crate::files::Format::Procraft)
     }
 
-    /// How big the whole interface is set to show (Prefs).
-    pub fn interface_size(&self) -> f32 {
-        self.prefs.plugins.interface_size()
+    /// The patches and plugins, which say how big the interface shows.
+    pub fn plugins(&self) -> &procraft_core::Plugins {
+        &self.prefs.plugins
     }
 
     /// Tap Assistance is on (Advanced settings).

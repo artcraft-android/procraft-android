@@ -1518,22 +1518,22 @@ mod tests {
             pos2(body().center().x, self.cards()[card].1 - ROW_HEIGHT / 2.0 - up * (ROW_HEIGHT + 1.0))
         }
 
-        /// A point on the first card's slider, `along` its way (0..1): its last row.
+        /// A point on the second card's slider, `along` its way (0..1): its last row.
         fn on_slider(&self, along: f32) -> Pos2 {
             let (left, right) = (body().left() + 12.0 + 16.0, body().right() - 12.0 - 16.0);
-            pos2(left + along * (right - left), self.cards()[0].1 - SLIDE_HEIGHT / 2.0)
+            pos2(left + along * (right - left), self.cards()[1].1 - SLIDE_HEIGHT / 2.0)
         }
 
-        /// The middle of the second card's switch row, its last.
+        /// The middle of the first card's switch row, its last.
         fn on_switch(&self) -> Pos2 {
-            self.on_row(1, 0.0)
+            self.on_row(0, 0.0)
         }
     }
 
     #[test]
     fn the_extras_show_with_their_controls_and_nothing_to_apply_or_remove() {
         let page = Page::new(false);
-        assert_eq!(page.cards().len(), 3);
+        assert_eq!(page.cards().len(), 2);
         assert!(page.list().iter().all(|p| card_rows(p).is_empty() && controls_show(p)));
     }
 
@@ -1551,30 +1551,30 @@ mod tests {
     #[test]
     fn an_extra_s_slider_goes_in_as_it_lets_go() {
         let mut page = Page::new(false);
-        let (end, start) = (page.on_slider(1.0), page.on_slider(0.0));
+        let (end, start) = (page.on_slider(1.0), page.on_slider(0.5));
         page.frame(vec![Event::PointerMoved(end)]);
         page.frame(vec![press(end, true)]);
         page.frame(Vec::new());
         // held, the row follows and nothing else does
-        assert_eq!(page.actions.plugin_moved.as_ref().map(|m| m.1), Some(1.25));
-        assert_eq!(page.prefs.plugins.interface_size(), 1.0);
+        assert_eq!(page.actions.plugin_moved.as_ref().map(|m| m.1), Some(32.0));
+        assert_eq!(page.prefs.plugins.fill_gap(), 0);
         page.frame(vec![Event::PointerMoved(start)]);
         page.frame(Vec::new());
-        assert_eq!(page.actions.plugin_moved.as_ref().map(|m| m.1), Some(0.75));
-        assert_eq!(page.prefs.plugins.interface_size(), 1.0);
+        assert_eq!(page.actions.plugin_moved.as_ref().map(|m| m.1), Some(16.0));
+        assert_eq!(page.prefs.plugins.fill_gap(), 0);
         let lifted = page.frame(vec![press(start, false)]);
         let after = page.frame(Vec::new());
         assert!(lifted || after);
-        assert_eq!(page.prefs.plugins.interface_size(), 0.75);
+        assert_eq!(page.prefs.plugins.fill_gap(), 16);
         assert!(page.actions.plugin_moved.is_none());
     }
 
     #[test]
     fn a_tap_along_an_extra_s_slider_sets_it() {
         let mut page = Page::new(false);
-        let at = page.on_slider(0.6);
+        let at = page.on_slider(0.25);
         assert!(page.tap(at));
-        assert_eq!(page.prefs.plugins.interface_size(), 1.05);
+        assert_eq!(page.prefs.plugins.fill_gap(), 8);
     }
 
     #[test]
@@ -1607,10 +1607,10 @@ mod tests {
         assert_eq!(page.prefs.plugins.install(plugin_file()), None);
         page.frame(Vec::new());
         page.frame(Vec::new());
-        assert_eq!(page.cards().len(), 4);
-        let at = page.on_row(3, 0.0);
-        assert!(page.tap(at));
         assert_eq!(page.cards().len(), 3);
+        let at = page.on_row(2, 0.0);
+        assert!(page.tap(at));
+        assert_eq!(page.cards().len(), 2);
         assert!(!dir.join("org.example.filter").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

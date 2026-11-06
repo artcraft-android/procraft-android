@@ -45,7 +45,7 @@ import io.github.artcraftandroid.procraft.core.ToolKind
 /** The canvas screen: the canvas, the bars over it, and the panel that is open. */
 @Composable
 fun AppRoot(vm: CanvasViewModel) {
-    val interfaceSize = fittedInterfaceSize(vm.interfaceSize)
+    val interfaceSize = fittedInterfaceSize(vm.plugins, vm.patchList)
     androidx.compose.runtime.SideEffect { vm.interfaceShownAt(interfaceSize) }
     ProCraftTheme(interfaceSize) {
         if (vm.screen == Screen.GALLERY) {

@@ -57,9 +57,9 @@ class SettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("interface", Context.MODE_PRIVATE)
-        val interfaceSize = keptPlugins(this, prefs).interfaceSize()
+        val plugins = keptPlugins(this, prefs)
         setContent {
-            val size = fittedInterfaceSize(interfaceSize)
+            val size = fittedInterfaceSize(plugins)
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density * size, density.fontScale)) {
                 SettingsScreen(prefs) { finish() }

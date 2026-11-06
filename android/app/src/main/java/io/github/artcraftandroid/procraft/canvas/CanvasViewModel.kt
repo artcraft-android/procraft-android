@@ -418,17 +418,13 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** The patches and plugins, their values kept with the interface settings, and what their two pages draw. */
-    private val plugins = keptPlugins(app, interfacePrefs)
+    val plugins = keptPlugins(app, interfacePrefs)
     var patchList by mutableStateOf(plugins.patches())
         private set
     var pluginList by mutableStateOf(plugins.plugins())
         private set
 
-    /** How big the whole interface is set to show (1: as measured). */
-    var interfaceSize by mutableFloatStateOf(plugins.interfaceSize())
-        private set
-
-    /** How big it shows now: [interfaceSize], as far as the window has room. */
+    /** How big the interface shows now, as a patch says (1: as measured). */
     var interfaceShown = 1f
         private set
 
@@ -539,7 +535,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** What the patches and extras do now; a plugin nothing answers to does nothing. */
     private fun pluginsChanged() {
         readPlugins()
-        interfaceSize = plugins.interfaceSize()
         session?.let(::applyPlugins)
     }
 

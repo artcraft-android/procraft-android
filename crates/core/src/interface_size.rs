@@ -1,25 +1,16 @@
-//! The Interface size preference: the whole interface shown a little bigger or smaller than it is
-//! measured, for a screen it doesn't suit. At 100% it is as it always was. The canvas, brushes and
-//! gestures don't follow it, only what the interface draws: see
+//! How big the interface shows beside what is measured: a number, which a patch gives or nothing
+//! does (1). The canvas, brushes and gestures don't follow it, only what the interface draws: see
 //! [`crate::CanvasSession::set_interface_size`].
 
-/// What it can be set to and the steps it moves in, percent.
-pub(crate) const LEAST: f32 = 75.0;
-pub(crate) const MOST: f32 = 125.0;
-pub(crate) const STEP: f32 = 5.0;
-
-/// What a bigger size must leave the interface (points): the smallest window the desktop opens,
-/// which every panel fits. A window with less shows the interface at 100%.
+/// What every panel needs (points): the smallest window the desktop opens.
 const LEAST_WIDTH: f32 = 640.0;
 const LEAST_HEIGHT: f32 = 480.0;
 
-/// The size to show in a window `width` × `height` points (at 100%) with `chosen` set: as chosen,
-/// but a bigger one only as far as it leaves the interface the room it needs, on a step so a window
-/// dragged smaller doesn't lay everything out again at each pixel.
-#[uniffi::export]
-pub fn interface_size_fitted(chosen: f32, width: f32, height: f32) -> f32 {
-    let room = (width / LEAST_WIDTH).min(height / LEAST_HEIGHT) * 100.0;
-    chosen.min(((room / STEP).floor() * STEP / 100.0).max(1.0))
+/// The most the interface may show at in a window `width` × `height` points at 1: as far as it
+/// leaves the panels what they need, so a patch can't push its own Unapply out of reach. A window
+/// with less than that shows as measured. A patch that fits itself never gets here.
+pub(crate) fn most_for(width: f32, height: f32) -> f32 {
+    (width / LEAST_WIDTH).min(height / LEAST_HEIGHT).max(1.0)
 }
 
 #[cfg(test)]
@@ -27,22 +18,8 @@ mod tests {
     use procraft_engine::geom::Affine;
     use procraft_engine::view::View;
 
-    use super::*;
+    use super::most_for;
     use crate::{CanvasSession, PenSample, PointerKind, TransformTouch};
-
-    #[test]
-    fn a_bigger_size_goes_no_further_than_the_window_has_room() {
-        // room to spare: as chosen
-        assert_eq!(interface_size_fitted(1.25, 1440.0, 900.0), 1.25);
-        assert_eq!(interface_size_fitted(1.25, 800.0, 600.0), 1.25);
-        // the smallest window keeps the interface it always had
-        assert_eq!(interface_size_fitted(1.25, 640.0, 480.0), 1.0);
-        // the shorter side decides, by steps
-        assert_eq!(interface_size_fitted(1.25, 1440.0, 540.0), 1.1);
-        assert_eq!(interface_size_fitted(1.25, 710.0, 900.0), 1.1);
-        // a window smaller than that never goes below 100%
-        assert_eq!(interface_size_fitted(1.25, 500.0, 400.0), 1.0);
-    }
 
     /// A session shown 1:1 at twice the pixels a point, the interface at `size`, in a transform of
     /// a box from (100, 100) to (500, 500) whose corners move on their own.
@@ -140,12 +117,14 @@ mod tests {
     }
 
     #[test]
-    fn a_smaller_size_fits_any_window() {
-        assert_eq!(interface_size_fitted(1.0, 1440.0, 900.0), 1.0);
-        assert_eq!(interface_size_fitted(0.75, 1440.0, 900.0), 0.75);
-        assert_eq!(interface_size_fitted(0.75, 500.0, 400.0), 0.75);
-        // a window not known yet leaves it alone
-        assert_eq!(interface_size_fitted(0.9, 0.0, 0.0), 0.9);
-        assert_eq!(interface_size_fitted(1.25, f32::NAN, f32::NAN), 1.0);
+    fn the_panels_keep_what_they_need() {
+        assert_eq!(most_for(1280.0, 960.0), 2.0);
+        assert_eq!(most_for(960.0, 960.0), 1.5);
+        assert_eq!(most_for(1280.0, 600.0), 1.25);
+        assert_eq!(most_for(640.0, 480.0), 1.0);
+        // less than they need, or a window not known yet, shows as measured
+        assert_eq!(most_for(500.0, 400.0), 1.0);
+        assert_eq!(most_for(0.0, 0.0), 1.0);
+        assert_eq!(most_for(f32::NAN, f32::NAN), 1.0);
     }
 }

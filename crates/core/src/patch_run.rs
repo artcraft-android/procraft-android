@@ -7,6 +7,8 @@
 //!   pixels lands, x's bits in the low half and y's in the high.
 //! - `procraft_pick_layer() -> i32`: for the hook `pick_layer`, whether the eyedropper reads the
 //!   current layer (not 0) or the canvas as it is composited (0).
+//! - `procraft_interface_scale(width: f32, height: f32) -> f32`: for the hook `interface_scale`, how
+//!   big the interface shows (1: as measured) in a window of that size, in points at 1.
 //! - `procraft_control(index: i32, value: f32)`: a control's value (a switch is 0 or 1), by its
 //!   place in the manifest: each as the patch starts, then each as it changes. Needed if it has any.
 
@@ -31,9 +33,12 @@ const START_FUEL: u64 = 1_000_000;
 const SAMPLE_FUEL: u64 = 100_000;
 /// How far a sample may be moved, window pixels: further was never meant.
 const MOST_MOVE: f32 = 16_384.0;
+/// The scales an interface can be used at: past these nobody could reach the page to undo it.
+const SCALES: std::ops::RangeInclusive<f32> = 0.5..=2.0;
 
 const POSITION: &str = "procraft_position";
 const PICK_LAYER: &str = "procraft_pick_layer";
+const INTERFACE_SCALE: &str = "procraft_interface_scale";
 const CONTROL: &str = "procraft_control";
 
 /// What a patch may step into, by the name a manifest gives it.
@@ -41,6 +46,7 @@ const CONTROL: &str = "procraft_control";
 pub(crate) enum Hook {
     Position,
     PickLayer,
+    InterfaceScale,
 }
 
 impl Hook {
@@ -48,6 +54,7 @@ impl Hook {
         match name {
             "position" => Some(Hook::Position),
             "pick_layer" => Some(Hook::PickLayer),
+            "interface_scale" => Some(Hook::InterfaceScale),
             _ => None,
         }
     }
@@ -57,6 +64,7 @@ impl Hook {
         match self {
             Hook::Position => "This patch can change where your strokes land.",
             Hook::PickLayer => "This patch can make the eyedropper read the current layer alone.",
+            Hook::InterfaceScale => "This patch can make the interface bigger or smaller.",
         }
     }
 
@@ -70,6 +78,7 @@ impl Hook {
         match self {
             Hook::Position => exports(module, POSITION, &[ValType::F32, ValType::F32], &[ValType::I64]),
             Hook::PickLayer => exports(module, PICK_LAYER, &[], &[ValType::I32]),
+            Hook::InterfaceScale => exports(module, INTERFACE_SCALE, &[ValType::F32, ValType::F32], &[ValType::F32]),
         }
     }
 }
@@ -90,7 +99,7 @@ impl Stop {
             Stop::TooSlow => "Switched off: it took too long.",
             Stop::Crashed => "Switched off: it crashed.",
             Stop::Memory => "Switched off: it asked for too much memory.",
-            Stop::Nonsense => "Switched off: it gave a position that makes no sense.",
+            Stop::Nonsense => "Switched off: it gave an answer that makes no sense.",
             Stop::Damaged => "Can't run: its files don't hold up.",
         }
     }
@@ -175,6 +184,7 @@ pub(crate) struct Running {
     store: Store<StoreLimits>,
     position: Option<TypedFunc<(f32, f32), i64>>,
     pick_layer: Option<TypedFunc<(), i32>>,
+    interface_scale: Option<TypedFunc<(f32, f32), f32>>,
     control: Option<TypedFunc<(i32, f32), ()>>,
 }
 
@@ -199,8 +209,9 @@ impl Running {
             let instance = linker.instantiate_and_start(&mut store, &module).map_err(|e| stop_of(&e))?;
             let position = instance.get_typed_func(&store, POSITION).ok();
             let pick_layer = instance.get_typed_func(&store, PICK_LAYER).ok();
+            let interface_scale = instance.get_typed_func(&store, INTERFACE_SCALE).ok();
             let control = instance.get_typed_func(&store, CONTROL).ok();
-            Ok(Running { store, position, pick_layer, control })
+            Ok(Running { store, position, pick_layer, interface_scale, control })
         })?;
         for (index, value) in controls.iter().enumerate() {
             running.control(index, *value)?;
@@ -227,6 +238,17 @@ impl Running {
             pick_layer.call(&mut *store, ()).map_err(|e| stop_of(&e))
         })?;
         Ok(said != 0)
+    }
+
+    /// How big it says the interface shows in a window `width` × `height` points at 1.
+    pub(crate) fn interface_scale(&mut self, width: f32, height: f32) -> Result<f32, Stop> {
+        let Running { store, interface_scale, .. } = self;
+        let Some(interface_scale) = interface_scale else { return Ok(1.0) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            interface_scale.call(&mut *store, (width, height)).map_err(|e| stop_of(&e))
+        })?;
+        if SCALES.contains(&said) { Ok(said) } else { Err(Stop::Nonsense) }
     }
 
     /// Where it says a sample at (x, y) lands.
@@ -379,6 +401,22 @@ pub(crate) mod tests {
         assert_eq!(running.position(1.0, 2.0), Ok((1.0, 2.0)));
         let wrong = r#"(module (func (export "procraft_pick_layer") (param i32) (result i32) (i32.const 1)))"#;
         assert!(!can_run(&wat::parse_str(wrong).unwrap(), &[Hook::PickLayer], false));
+    }
+
+    #[test]
+    fn a_scale_nobody_could_use_is_refused() {
+        let says = |value: &str| {
+            let text = format!(
+                r#"(module (func (export "procraft_interface_scale") (param f32 f32) (result f32) (f32.const {value})))"#
+            );
+            started(&wat::parse_str(text).unwrap()).interface_scale(800.0, 600.0)
+        };
+        assert_eq!(says("1.25"), Ok(1.25));
+        assert_eq!(says("0.5"), Ok(0.5));
+        assert_eq!(says("2"), Ok(2.0));
+        for bad in ["0", "-1", "0.49", "2.01", "nan", "inf"] {
+            assert_eq!(says(bad), Err(Stop::Nonsense), "{bad}");
+        }
     }
 
     #[test]

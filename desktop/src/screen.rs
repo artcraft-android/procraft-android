@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use procraft_core::{CanvasSession, configure, interface_size_fitted, screen_profile};
+use procraft_core::{CanvasSession, Plugins, configure, screen_profile};
 use procraft_gpu::{Gpu, wgpu};
 use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
@@ -170,14 +170,14 @@ impl Screen {
         }
     }
 
-    /// The interface at `chosen`, as far as the window has room; `session` is told, so what it
-    /// hit-tests goes with what is drawn. Everything in points follows, the canvas stays in pixels.
+    /// The interface as `plugins` say for this window; `session` is told, so what it hit-tests goes
+    /// with what is drawn. Everything in points follows, the canvas stays in pixels.
     /// A press under way holds it as it is: a slider growing with its own drag would run from the
     /// pointer dragging it.
-    pub fn size_interface(&self, chosen: f32, session: Option<&CanvasSession>) {
+    pub fn size_interface(&self, plugins: &Plugins, session: Option<&CanvasSession>) {
         let ctx = self.egui.egui_ctx();
         let (size, scale) = (self.window.inner_size(), self.window.scale_factor() as f32);
-        let shown = interface_size_fitted(chosen, size.width as f32 / scale, size.height as f32 / scale);
+        let shown = plugins.interface_scale(size.width as f32 / scale, size.height as f32 / scale);
         if ctx.zoom_factor() != shown {
             ctx.request_repaint();
             if ctx.input(|i| i.pointer.any_down()) {

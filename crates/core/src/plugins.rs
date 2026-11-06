@@ -6,18 +6,16 @@
 //!
 //! All are plain data, a name, a line on what it does and its controls, so a page draws any of them
 //! without knowing it, and a file describes itself the same way. What a bundled one does is the
-//! app's: it asks for the values it knows ([`Plugins::interface_size`]).
+//! app's: it asks for the values it knows ([`Plugins::fill_gap`]).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::hooks::Hooks;
-use crate::interface_size;
 use crate::patch_run::{Running, Stop};
 use crate::plugin_file::{self, Manifest, Refusal};
 
 /// What the bundled extras' values are kept under, as they were before there was a list.
-const INTERFACE_SIZE: &str = "interface_size";
 const PASTE_INTO_MASK: &str = "paste_into_mask";
 const FILL_GAP: &str = "fill_gap";
 
@@ -29,7 +27,10 @@ struct Moved {
     name: &'static str,
 }
 
-const MOVED: &[Moved] = &[Moved { key: "eyedropper_layer", starts: 0.0, name: "Eyedropper picks from layer" }];
+const MOVED: &[Moved] = &[
+    Moved { key: "eyedropper_layer", starts: 0.0, name: "Eyedropper picks from layer" },
+    Moved { key: "interface_size", starts: 1.0, name: "Interface size" },
+];
 
 impl Moved {
     /// Whether a value kept as `value` is one someone changed.
@@ -266,21 +267,6 @@ fn extras() -> Vec<PluginInfo> {
     let switch = |key: &str, label: &str| PluginControl::Switch {
         control: PluginSwitch { key: key.to_owned(), label: label.to_owned(), on: false, starts: false },
     };
-    let size = PluginControl::Slider {
-        control: PluginSlider {
-            key: INTERFACE_SIZE.to_owned(),
-            label: "Size".to_owned(),
-            least: interface_size::LEAST / 100.0,
-            most: interface_size::MOST / 100.0,
-            step: interface_size::STEP / 100.0,
-            value: 1.0,
-            starts: 1.0,
-            shown_times: 100.0,
-            unit: "%".to_owned(),
-            at_least: None,
-            live: false,
-        },
-    };
     let gap = PluginControl::Slider {
         control: PluginSlider {
             key: FILL_GAP.to_owned(),
@@ -297,12 +283,6 @@ fn extras() -> Vec<PluginInfo> {
         },
     };
     vec![
-        extra(
-            INTERFACE_SIZE,
-            "Interface size",
-            "Makes the bars, panels and text bigger or smaller to suit your screen.",
-            size,
-        ),
         extra(
             PASTE_INTO_MASK,
             "Paste into masks",
@@ -689,12 +669,10 @@ impl Plugins {
         Some(keys.chain([gone.on_key.clone()]).collect())
     }
 
-    /// How big the whole interface is set to show (1: as measured).
-    pub fn interface_size(&self) -> f32 {
-        match self.control(INTERFACE_SIZE) {
-            Some(PluginControl::Slider { control }) => control.value,
-            _ => 1.0,
-        }
+    /// How big the interface shows in a window `width` × `height` points at 1: as a patch says, or
+    /// as measured.
+    pub fn interface_scale(&self, width: f32, height: f32) -> f32 {
+        self.hooks().interface_scale(width, height)
     }
 
     /// Whether what is pasted with a mask current goes into the mask.
@@ -719,10 +697,20 @@ mod tests {
     use crate::patch_run::tests::position_module;
     use crate::plugin_file::tests::{SHADER, filter, pack, patch};
 
-    fn size_slider(plugins: &Plugins) -> PluginSlider {
-        match plugins.control(INTERFACE_SIZE) {
-            Some(PluginControl::Slider { control }) => control,
-            other => panic!("{other:?}"),
+    /// A slider in steps of 5% from 75% to 125%.
+    fn size_slider() -> PluginSlider {
+        PluginSlider {
+            key: "size".to_owned(),
+            label: "Size".to_owned(),
+            least: 0.75,
+            most: 1.25,
+            step: 0.05,
+            value: 1.0,
+            starts: 1.0,
+            shown_times: 100.0,
+            unit: "%".to_owned(),
+            at_least: None,
+            live: false,
         }
     }
 
@@ -805,18 +793,16 @@ mod tests {
         assert!(plugins.patches().is_empty());
         let list = plugins.plugins();
         let ids: Vec<&str> = list.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, ["interface_size", "paste_into_mask", "fill_gap"]);
+        assert_eq!(ids, ["paste_into_mask", "fill_gap"]);
         for p in &list {
             assert!(p.source == PluginSource::Bundled && p.kind == PluginKind::Extra, "{p:?}");
             assert!(p.experimental && p.on && p.on_key.is_empty(), "{p:?}");
             assert!(!p.name.is_empty() && !p.description.is_empty() && !p.controls.is_empty(), "{p:?}");
             assert!(!p.id.contains('.'), "an extra's id can't be a file's key's start: {p:?}");
         }
-        assert_eq!(plugins.interface_size(), 1.0);
+        assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
         assert!(!plugins.paste_into_mask());
         assert_eq!(plugins.fill_gap(), 0);
-        let size = size_slider(&plugins);
-        assert_eq!((size.least, size.most, size.value), (0.75, 1.25, 1.0));
     }
 
     #[test]
@@ -834,10 +820,8 @@ mod tests {
     fn values_kept_before_there_was_a_list_carry_over() {
         // as both apps wrote them: the desktop's `interface` lines, Android's preferences as text
         let plugins = Plugins::new();
-        plugins.read_kept("interface_size".to_owned(), "0.85".to_owned());
         plugins.read_kept("paste_into_mask".to_owned(), "true".to_owned());
         plugins.read_kept("fill_gap".to_owned(), "12".to_owned());
-        assert_eq!(plugins.interface_size(), 0.85);
         assert!(plugins.paste_into_mask());
         assert_eq!(plugins.fill_gap(), 12);
     }
@@ -846,14 +830,18 @@ mod tests {
     fn a_kept_value_comes_back_usable() {
         let read = |text: &str| {
             let plugins = Plugins::new();
-            plugins.read_kept("interface_size".to_owned(), text.to_owned());
-            plugins.interface_size()
+            plugins.listed().files.push(stranger());
+            plugins.read_kept("someone.stranger.slider".to_owned(), text.to_owned());
+            match plugins.control("someone.stranger.slider") {
+                Some(PluginControl::Slider { control }) => control.value,
+                other => panic!("{other:?}"),
+            }
         };
-        assert_eq!(read("0.86"), 0.85);
-        assert_eq!(read("9"), 1.25);
-        assert_eq!(read("0"), 0.75);
+        assert_eq!(read("3.3"), 3.5);
+        assert_eq!(read("90"), 10.0);
+        assert_eq!(read("-1"), 0.0);
         for bad in ["NaN", "inf", "-inf", "", "big", "true"] {
-            assert_eq!(read(bad), 1.0, "{bad}");
+            assert_eq!(read(bad), 2.0, "{bad}");
         }
         let plugins = Plugins::new();
         plugins.read_kept("paste_into_mask".to_owned(), "yes".to_owned());
@@ -863,13 +851,12 @@ mod tests {
     #[test]
     fn what_is_kept_reads_back_the_same() {
         let plugins = Plugins::new();
-        assert_eq!(plugins.set_slider(INTERFACE_SIZE.to_owned(), 1.15), Some(1.15));
+        assert_eq!(plugins.set_slider(FILL_GAP.to_owned(), 7.0), Some(7.0));
         assert!(plugins.set_switch(PASTE_INTO_MASK.to_owned(), true));
         let lines = plugins.kept_lines();
-        assert!(lines.contains(&"interface_size 1.15".to_owned()), "{lines:?}");
         assert!(lines.contains(&"paste_into_mask true".to_owned()), "{lines:?}");
-        assert!(lines.contains(&"fill_gap 0".to_owned()), "{lines:?}");
-        assert_eq!(lines.len(), 3, "the extras have their controls and nothing else: {lines:?}");
+        assert!(lines.contains(&"fill_gap 7".to_owned()), "{lines:?}");
+        assert_eq!(lines.len(), 2, "the extras have their controls and nothing else: {lines:?}");
         let again = Plugins::new();
         for line in &lines {
             let (key, value) = line.split_once(' ').unwrap();
@@ -880,7 +867,7 @@ mod tests {
 
     #[test]
     fn a_slider_moves_in_steps_with_100_in_the_middle() {
-        let size = size_slider(&Plugins::new());
+        let size = size_slider();
         assert_eq!(plugin_slider_at(size.clone(), 0.0), 0.75);
         assert_eq!(plugin_slider_at(size.clone(), 0.5), 1.0);
         assert_eq!(plugin_slider_at(size.clone(), 1.0), 1.25);
@@ -899,7 +886,7 @@ mod tests {
 
     #[test]
     fn a_slider_reads_as_its_step_needs() {
-        let size = size_slider(&Plugins::new());
+        let size = size_slider();
         assert_eq!(plugin_slider_shown(size.clone(), 0.85), "85%");
         assert_eq!(plugin_slider_shown(size, 1.0), "100%");
         let PluginControl::Slider { control } = stranger().controls[1].clone() else { panic!() };
@@ -929,7 +916,7 @@ mod tests {
     fn a_count_is_kept_as_a_whole_number() {
         let plugins = Plugins::new();
         assert!(plugin_slider_whole(gap_slider(&plugins)));
-        assert!(!plugin_slider_whole(size_slider(&plugins)));
+        assert!(!plugin_slider_whole(size_slider()));
         plugins.set_slider(FILL_GAP.to_owned(), 12.0);
         // as the desktop has always written it
         assert!(plugins.kept_lines().contains(&"fill_gap 12".to_owned()));
@@ -946,21 +933,20 @@ mod tests {
         assert!(!plugins.set_on("nobody".to_owned(), true));
         assert_eq!(plugins.remove("nobody".to_owned()), None);
         // nor does a value of the wrong kind reach a control
-        assert!(!plugins.set_switch(INTERFACE_SIZE.to_owned(), true));
+        assert!(!plugins.set_switch(FILL_GAP.to_owned(), true));
         assert_eq!(plugins.set_slider(PASTE_INTO_MASK.to_owned(), 1.0), None);
-        assert_eq!(plugins.set_slider(INTERFACE_SIZE.to_owned(), f32::NAN), None);
+        assert_eq!(plugins.set_slider(FILL_GAP.to_owned(), f32::NAN), None);
         // and an extra can't be turned off or removed
-        assert!(!plugins.set_on(INTERFACE_SIZE.to_owned(), false));
-        assert_eq!(plugins.remove(INTERFACE_SIZE.to_owned()), None);
+        assert!(!plugins.set_on(FILL_GAP.to_owned(), false));
+        assert_eq!(plugins.remove(FILL_GAP.to_owned()), None);
         assert_eq!(plugins.plugins(), before);
-        assert_eq!(plugins.interface_size(), 1.0);
+        assert_eq!(plugins.fill_gap(), 0);
     }
 
     #[test]
     fn without_an_extra_the_app_goes_on_as_it_starts() {
         let plugins = Plugins::new();
         plugins.listed().bundled.clear();
-        assert_eq!(plugins.interface_size(), 1.0);
         assert!(!plugins.paste_into_mask());
         assert_eq!(plugins.fill_gap(), 0);
     }
@@ -996,7 +982,7 @@ mod tests {
         // its values change and are kept like any other's, and touch nothing else
         assert!(plugins.set_switch("someone.stranger.switch".to_owned(), true));
         assert_eq!(plugins.set_slider("someone.stranger.slider".to_owned(), 3.3), Some(3.5));
-        assert_eq!(plugins.interface_size(), 1.0);
+        assert_eq!(plugins.fill_gap(), 0);
         assert!(!plugins.paste_into_mask());
     }
 
@@ -1038,20 +1024,20 @@ mod tests {
     fn a_plugin_can_t_reach_an_extra_s_value() {
         let dir = store("collide");
         let plugins = at(&dir);
-        plugins.set_slider(INTERFACE_SIZE.to_owned(), 1.1);
+        plugins.set_slider(FILL_GAP.to_owned(), 11.0);
         let mut manifest = filter("org.example.filter");
         manifest["controls"] = json!([{
-            "key": "interface_size", "type": "slider", "label": "Size", "least": 0, "most": 5, "step": 1, "starts": 3,
+            "key": "fill_gap", "type": "slider", "label": "Gap", "least": 0, "most": 5, "step": 1, "starts": 3,
         }]);
         assert_eq!(plugins.install(filter_file(&manifest)), None);
-        let key = "org.example.filter.interface_size".to_owned();
+        let key = "org.example.filter.fill_gap".to_owned();
         assert_eq!(plugins.set_slider(key.clone(), 4.0), Some(4.0));
-        assert_eq!(plugins.interface_size(), 1.1, "its own value is its own");
+        assert_eq!(plugins.fill_gap(), 11, "its own value is its own");
         plugins.read_kept(key, "2".to_owned());
-        assert_eq!(plugins.interface_size(), 1.1);
+        assert_eq!(plugins.fill_gap(), 11);
         // and the extra's key goes on reaching the extra's value
-        assert_eq!(plugins.set_slider(INTERFACE_SIZE.to_owned(), 0.8), Some(0.8));
-        assert_eq!(plugins.interface_size(), 0.8);
+        assert_eq!(plugins.set_slider(FILL_GAP.to_owned(), 8.0), Some(8.0));
+        assert_eq!(plugins.fill_gap(), 8);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

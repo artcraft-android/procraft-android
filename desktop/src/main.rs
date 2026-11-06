@@ -590,7 +590,7 @@ impl App {
         // an export shows its own card; the veil is for a slow save
         let exporting = !self.ui.export_card.busy()
             && files::exporting_since().is_some_and(|since| since.elapsed() >= SLOW_OPENING);
-        screen.size_interface(self.ui.interface_size(), Some(session.as_ref()));
+        screen.size_interface(self.ui.plugins(), Some(session.as_ref()));
         let raw = screen.egui.take_egui_input(&screen.window);
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             self.ui.show(ui, &session, &mut self.input);
@@ -645,7 +645,7 @@ impl App {
     fn gallery_frame(&mut self) {
         let Some(screen) = self.screen.as_mut() else { return };
         self.last_frame = Instant::now();
-        screen.size_interface(self.ui.interface_size(), None);
+        screen.size_interface(self.ui.plugins(), None);
         let raw = screen.egui.take_egui_input(&screen.window);
         let mut asked = None;
         let (gallery, interface) = (&mut self.gallery, &mut self.ui);

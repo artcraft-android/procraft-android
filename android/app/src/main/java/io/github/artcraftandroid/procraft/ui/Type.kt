@@ -25,7 +25,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.em
-import io.github.artcraftandroid.procraft.core.interfaceSizeFitted
+import io.github.artcraftandroid.procraft.core.Plugins
 
 /** Touches leave no ripple: the controls show presses in their own ways, or not at all. */
 private object NoIndication : androidx.compose.foundation.IndicationNodeFactory {
@@ -115,9 +115,11 @@ private fun sizeSettled(interfaceSize: Float): Int {
 
 /** How big the interface shows with [chosen] set: as far as the window has room. */
 @Composable
-fun fittedInterfaceSize(chosen: Float): Float {
+fun fittedInterfaceSize(plugins: Plugins, changes: Any? = null): Float {
     val screen = LocalConfiguration.current
-    return interfaceSizeFitted(chosen, screen.screenWidthDp.toFloat(), screen.screenHeightDp.toFloat())
+    return remember(plugins, changes, screen.screenWidthDp, screen.screenHeightDp) {
+        plugins.interfaceScale(screen.screenWidthDp.toFloat(), screen.screenHeightDp.toFloat())
+    }
 }
 
 /** The screen as the interface measures it at [interfaceSize]: as many of its dp as fit across it. */

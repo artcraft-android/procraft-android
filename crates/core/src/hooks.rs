@@ -117,6 +117,17 @@ impl Hooks {
             && self.through(Hook::PickLayer, false, |running, said| Ok(said | running.pick_layer()?))
     }
 
+    /// The scale hook: how big the interface shows in a window `width` × `height` points at 1. The
+    /// number is the patch's, and all the app adds is what keeps every page in reach: see
+    /// [`crate::interface_size`].
+    pub(crate) fn interface_scale(&self, width: f32, height: f32) -> f32 {
+        if !self.has(Hook::InterfaceScale) {
+            return 1.0;
+        }
+        let said = self.through(Hook::InterfaceScale, 1.0, |running, _| running.interface_scale(width, height));
+        said.min(crate::interface_size::most_for(width, height))
+    }
+
     pub(crate) fn is_on(&self, id: &str) -> bool {
         self.patches().applied.iter().any(|p| p.id == id)
     }
@@ -189,6 +200,11 @@ mod tests {
     use crate::{PenSample, PointerKind};
 
     const ID: &str = "org.example.offset";
+    /// Answers the scale hook by its one slider.
+    const SCALES: &str = r#"(module
+        (global $size (mut f32) (f32.const 1))
+        (func (export "procraft_control") (param i32 f32) (global.set $size (local.get 1)))
+        (func (export "procraft_interface_scale") (param f32 f32) (result f32) (global.get $size)))"#;
     /// Answers the pick hook by its one switch.
     const PICKS: &str = r#"(module
         (global $layer (mut i32) (i32.const 0))
@@ -333,6 +349,82 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A patch that scales the interface by its one slider, in a store at `dir`.
+    fn scaling(dir: &str) -> Arc<Plugins> {
+        let module = wat::parse_str(SCALES).unwrap();
+        let plugins = Plugins::with_store(dir.to_owned());
+        let mut manifest = patch(ID, &module);
+        manifest["hooks"] = json!(["interface_scale"]);
+        manifest["controls"] = json!([{
+            "key": "size", "type": "slider", "label": "Size", "least": 0.5, "most": 2, "step": 0.05, "starts": 1,
+            "keeps": "interface_size",
+        }]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        plugins
+    }
+
+    #[test]
+    fn the_interface_shows_as_a_patch_says_and_as_measured_without_one() {
+        let dir = store("scale");
+        let plugins = scaling(&dir);
+        assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0, "imported, it says nothing");
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert_eq!(plugins.set_slider("interface_size".to_owned(), 1.2), Some(1.2));
+        assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.2);
+        assert_eq!(plugins.set_slider("interface_size".to_owned(), 0.75), Some(0.75));
+        assert_eq!(plugins.interface_scale(1600.0, 1000.0), 0.75);
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn whatever_a_patch_says_every_page_stays_in_reach() {
+        let dir = store("scale-room");
+        let plugins = scaling(&dir);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        plugins.set_slider("interface_size".to_owned(), 2.0);
+        assert_eq!(plugins.interface_scale(2000.0, 1500.0), 2.0);
+        // the panels need 640 x 480 points: past what leaves them that, it goes no further
+        assert_eq!(plugins.interface_scale(960.0, 1500.0), 1.5);
+        assert_eq!(plugins.interface_scale(2000.0, 600.0), 1.25);
+        // a window with less shows as measured
+        assert_eq!(plugins.interface_scale(640.0, 480.0), 1.0);
+        assert_eq!(plugins.interface_scale(500.0, 400.0), 1.0);
+        // smaller is the patch's to say, whatever the window
+        plugins.set_slider("interface_size".to_owned(), 0.75);
+        assert_eq!(plugins.interface_scale(500.0, 400.0), 0.75);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_kept_interface_size_comes_back_through_a_restart() {
+        let dir = store("scale-restart");
+        let plugins = scaling(&dir);
+        plugins.set_on(ID.to_owned(), true);
+        plugins.set_slider("interface_size".to_owned(), 1.25);
+        let next = restarted(&dir, &plugins);
+        assert_eq!(next.interface_scale(1600.0, 1000.0), 1.25);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_scale_patch_that_goes_wrong_leaves_the_interface_as_measured() {
+        let dir = store("scale-wrong");
+        let module = wat::parse_str(
+            r#"(module (func (export "procraft_interface_scale") (param f32 f32) (result f32) (f32.const 40)))"#,
+        )
+        .unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = patch(ID, &module);
+        manifest["hooks"] = json!(["interface_scale"]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
+        assert_eq!(card(&plugins).problem.as_deref(), Some("Switched off: it gave an answer that makes no sense."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_patch_goes_on_as_applied_and_off_as_unapplied_with_no_restart() {
         let dir = store("apply");
@@ -446,7 +538,7 @@ mod tests {
     fn a_patch_that_returns_garbage_is_switched_off() {
         // two NaNs
         let nan = "(i64.const 0x7fc000007fc00000)";
-        stops("garbage", "", nan, "Switched off: it gave a position that makes no sense.");
+        stops("garbage", "", nan, "Switched off: it gave an answer that makes no sense.");
     }
 
     #[test]
@@ -647,6 +739,30 @@ mod tests {
             slowest = slowest.min(start.elapsed().as_secs_f64() * 1000.0);
         }
         println!("a patch spending all its fuel on a sample: {slowest:.3} ms");
+
+        let picks = Hooks::default();
+        picks.put_on(
+            "pick".to_owned(),
+            Running::start(&wat::parse_str(PICKS).unwrap(), &[1.0]).unwrap(),
+            &[Hook::PickLayer],
+        );
+        let start = Instant::now();
+        for _ in 0..1_000_000 {
+            std::hint::black_box(picks.pick_layer());
+        }
+        println!("the pick hook, a patch on it: {:.1} ns a pick", start.elapsed().as_secs_f64() * 1000.0);
+
+        let scales = Hooks::default();
+        scales.put_on(
+            "scale".to_owned(),
+            Running::start(&wat::parse_str(SCALES).unwrap(), &[1.1]).unwrap(),
+            &[Hook::InterfaceScale],
+        );
+        let start = Instant::now();
+        for _ in 0..1_000_000 {
+            std::hint::black_box(scales.interface_scale(std::hint::black_box(1600.0), 1000.0));
+        }
+        println!("the scale hook, a patch on it: {:.1} ns a frame", start.elapsed().as_secs_f64() * 1000.0);
 
         let start = Instant::now();
         let mut running = Running::start(&offset(), &[]).unwrap();

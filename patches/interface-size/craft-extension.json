@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.interface-size",
+  "name": "Interface size",
+  "version": "1.0.0",
+  "kind": "patch",
+  "publisher": { "name": "ProCraft" },
+  "description": "Makes the bars, panels and text bigger or smaller to suit your screen.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["interface_scale"],
+  "controls": [
+    {
+      "key": "size", "type": "slider", "label": "Size", "least": 0.75, "most": 1.25, "step": 0.05, "starts": 1,
+      "shown_times": 100, "unit": "%", "keeps": "interface_size"
+    }
+  ]
+}
