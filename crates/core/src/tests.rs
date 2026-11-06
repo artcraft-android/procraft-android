@@ -9549,7 +9549,12 @@ fn a_snapped_ellipse_stays_open_where_its_stroke_did_not_close() {
     let dark = |x: u32, y: u32| {
         (x.saturating_sub(4)..=x + 4).any(|x| (y.saturating_sub(4)..=y + 4).any(|y| pixel(&s, x, y)[0] < 128))
     };
-    assert!(dark(160, 100) && dark(100, 160) && dark(40, 100));
+    // the line the shape is fitted to is the smoothed one, which can sit a few pixels in from
+    // where the raw points went, so painted probes reach further and the gap's stays where it was
+    let painted = |x: u32, y: u32| {
+        (x.saturating_sub(8)..=x + 8).any(|x| (y.saturating_sub(8)..=y + 8).any(|y| pixel(&s, x, y)[0] < 128))
+    };
+    assert!(painted(160, 100) && painted(100, 160) && painted(40, 100));
     let gap = (-std::f32::consts::FRAC_PI_2) - std::f32::consts::TAU / 24.0;
     let (gx, gy) = (100.0 + 60.0 * gap.cos(), 100.0 + 60.0 * gap.sin());
     assert!(!dark(gx.round() as u32, gy.round() as u32), "the gap at {gx},{gy} was closed");
