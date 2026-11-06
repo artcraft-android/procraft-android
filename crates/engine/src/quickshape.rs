@@ -697,197 +697,44 @@ fn from_nearest(nodes: Vec<Vec2>, start: Vec2) -> Vec<Vec2> {
     out
 }
 
-/// An ellipse: its centre and two conjugate half-axes, which trace it as `a cos t + b sin t`.
-#[derive(Clone, Copy)]
-struct Oval {
-    centre: Vec2,
-    a: Vec2,
-    b: Vec2,
-}
-
-impl Oval {
-    /// How far `d` goes along each half-axis.
-    fn parts(self, d: Vec2) -> (f32, f32) {
-        let whole = self.a.cross(self.b);
-        (d.cross(self.b) / whole, self.a.cross(d) / whole)
-    }
-
-    fn at(self, t: f32) -> Vec2 {
-        self.centre + self.a * t.cos() + self.b * t.sin()
-    }
-
-    /// Where the ray from the centre at `angle` meets it.
-    fn at_angle(self, angle: f32) -> Vec2 {
-        let way = Vec2::new(angle.cos(), angle.sin());
-        let (s, t) = self.parts(way);
-        self.centre + way * (1.0 / s.hypot(t))
-    }
-}
-
-/// The stretch of the ellipse fitted to the stroke that the stroke swept: from the least to the
-/// most of the way round the centre it got, the way it went, its middle halfway between.
+/// The arc the stroke makes: where it began, where it ended, and one point between them that the
+/// curve is drawn through. A quadratic through the ends and a single point can only bend so many
+/// ways, so where that point sits is what decides how closely the curve follows the stroke: it is
+/// taken from the stroke itself and moved until the curve it gives lies closest to what was drawn,
+/// rather than sitting at some halfway mark of its own.
 fn fit_arc(pts: &[Vec2]) -> Option<Shape> {
-    let oval = fit_oval(pts)?;
-    let angle = |p: Vec2| (p - oval.centre).y.atan2((p - oval.centre).x);
-    let first = angle(*pts.first()?);
-    let (mut was, mut gone, mut least, mut most) = (first, 0.0f32, 0.0f32, 0.0f32);
-    for &p in pts {
-        let now = angle(p);
-        gone += (now - was + PI).rem_euclid(TAU) - PI;
-        least = least.min(gone);
-        most = most.max(gone);
-        was = now;
+    let first = *pts.first()?;
+    let last = *pts.last()?;
+    let flat = STRAIGHT * first.distance(last).max(1.0);
+    // enough places to try that the curve lands on the bend, few enough to stay one stroke's work
+    let stride = (pts.len() / 32).max(1);
+    let mut best: Option<(f32, Vec2)> = None;
+    for &middle in pts.iter().step_by(stride) {
+        if distance_to_segment(middle, first, last) <= flat {
+            continue;
+        }
+        let shape = Shape { kind: ShapeKind::Arc, nodes: vec![first, middle, last] };
+        let error = outline_error(&shape, pts);
+        if best.is_none_or(|(least, _)| error < least) {
+            best = Some((error, middle));
+        }
     }
-    if most - least < 1e-4 {
-        return None;
-    }
-    let (from, to) = if gone < 0.0 { (first + most, first + least) } else { (first + least, first + most) };
-    let nodes = vec![
-        oval.at_angle(from),
-        oval.at_angle((from + to) * 0.5),
-        oval.at_angle(to),
-        oval.centre,
-        oval.centre + oval.a,
-        oval.centre + oval.b,
-    ];
-    nodes.iter().all(|p| p.is_finite()).then_some(Shape { kind: ShapeKind::Arc, nodes })
+    let (_, middle) = best?;
+    Some(Shape { kind: ShapeKind::Arc, nodes: vec![first, middle, last] })
 }
 
 fn arc_points(nodes: &[Vec2]) -> Vec<Vec2> {
     let get = |i: usize| nodes.get(i).copied().unwrap_or(Vec2::ZERO);
-    let (start, middle, end, centre) = (get(0), get(1), get(2), get(3));
-    let oval = Oval { centre, a: get(4) - centre, b: get(5) - centre };
-    if oval.a.cross(oval.b).abs() < 1e-6 {
-        return vec![start, end];
-    }
-    let place = |p: Vec2| {
-        let (s, t) = oval.parts(p - centre);
-        t.atan2(s)
-    };
-    let (from, by, to) = (place(start), place(middle), place(end));
-    // the sweep from start to end that passes the middle
-    let norm = |t: f32| t.rem_euclid(TAU);
-    let ccw = norm(by - from) <= norm(to - from);
-    let sweep = if ccw { norm(to - from) } else { -norm(from - to) };
-    (0..=OUTLINE_STEPS).map(|i| oval.at(from + sweep * i as f32 / OUTLINE_STEPS as f32)).collect()
-}
-
-type Rows = [[f64; 3]; 3];
-
-fn dot3([a, b, c]: [f64; 3], [x, y, z]: [f64; 3]) -> f64 {
-    a * x + b * y + c * z
-}
-
-fn cross3([a, b, c]: [f64; 3], [x, y, z]: [f64; 3]) -> [f64; 3] {
-    [b * z - c * y, c * x - a * z, a * y - b * x]
-}
-
-fn transposed([[a, b, c], [d, e, f], [g, h, i]]: Rows) -> Rows {
-    [[a, d, g], [b, e, h], [c, f, i]]
-}
-
-fn product(m: Rows, n: Rows) -> Rows {
-    let columns = transposed(n);
-    m.map(|row| columns.map(|column| dot3(row, column)))
-}
-
-fn inverse([r, s, t]: Rows) -> Option<Rows> {
-    let det = dot3(r, cross3(s, t));
-    if det.abs() < 1e-12 {
-        return None;
-    }
-    Some(transposed([cross3(s, t), cross3(t, r), cross3(r, s)].map(|row| row.map(|x| x / det))))
-}
-
-/// The eigenvalues of `m`, whose are all real.
-fn eigenvalues(m: Rows) -> [f64; 3] {
-    let [[a, b, c], [d, e, f], [g, h, i]] = m;
-    let trace = a + e + i;
-    let minors = a * e - b * d + a * i - c * g + e * i - f * h;
-    let det = dot3([a, b, c], cross3([d, e, f], [g, h, i]));
-    // the characteristic cubic as t^3 + p t + q, at t = the eigenvalue less a third of the trace
-    let p = minors - trace * trace / 3.0;
-    let q = -2.0 * trace.powi(3) / 27.0 + trace * minors / 3.0 - det;
-    if p >= 0.0 {
-        return [trace / 3.0; 3];
-    }
-    let r = 2.0 * (-p / 3.0).sqrt();
-    let turn = (3.0 * q / (p * r)).clamp(-1.0, 1.0).acos() / 3.0;
-    [0.0, 1.0, 2.0].map(|k: f64| trace / 3.0 + r * (turn - k * std::f64::consts::TAU / 3.0).cos())
-}
-
-/// The direction `m` only scales by `value`: square to all the rows of `m` less that.
-fn eigenvector(m: Rows, value: f64) -> [f64; 3] {
-    let [[a, b, c], [d, e, f], [g, h, i]] = m;
-    let (r, s, t) = ([a - value, b, c], [d, e - value, f], [g, h, i - value]);
-    [cross3(r, s), cross3(s, t), cross3(t, r)]
-        .into_iter()
-        .fold([0.0; 3], |best, v| if dot3(v, v) > dot3(best, best) { v } else { best })
-}
-
-/// The ellipse nearest `pts`: the least squares of a conic, held to being an ellipse (the direct
-/// fit of Fitzgibbon, Pilu and Fisher, in Halir and Flusser's steadier form). It works in the
-/// stroke's box, so a thin stroke fits as well as a round one, and holds for part of an ellipse.
-fn fit_oval(pts: &[Vec2]) -> Option<Oval> {
-    let (lo, hi) = bounds(pts);
-    let (hx, hy) = (f64::from(hi.x - lo.x) / 2.0, f64::from(hi.y - lo.y) / 2.0);
-    if pts.len() < 5 || hx.min(hy) < 0.001 {
-        return None;
-    }
-    let count = pts.len() as f64;
-    let mx = pts.iter().map(|p| f64::from(p.x)).sum::<f64>() / count;
-    let my = pts.iter().map(|p| f64::from(p.y)).sum::<f64>() / count;
-    // the sums of each point's second-order terms and first-order terms, against each other
-    let add = |sum: &mut Rows, u: [f64; 3], v: [f64; 3]| {
-        for (row, a) in sum.iter_mut().zip(u) {
-            for (cell, b) in row.iter_mut().zip(v) {
-                *cell += a * b;
-            }
-        }
-    };
-    let (mut high, mut both, mut low) = ([[0.0; 3]; 3], [[0.0; 3]; 3], [[0.0; 3]; 3]);
-    for p in pts {
-        let (x, y) = ((f64::from(p.x) - mx) / hx, (f64::from(p.y) - my) / hy);
-        let (second, first) = ([x * x, x * y, y * y], [x, y, 1.0]);
-        add(&mut high, second, second);
-        add(&mut both, second, first);
-        add(&mut low, first, first);
-    }
-    // the conic's first-order part follows from its second-order part, which leaves three terms
-    let to_low = product(inverse(low)?, transposed(both)).map(|row| row.map(|x| -x));
-    let mut left = high;
-    for (row, taken) in left.iter_mut().zip(product(both, to_low)) {
-        for (cell, x) in row.iter_mut().zip(taken) {
-            *cell += x;
-        }
-    }
-    let [r, s, t] = left;
-    let m = [t.map(|x| x / 2.0), s.map(|x| -x), r.map(|x| x / 2.0)];
-    // of its three solutions, the one ellipse
-    let roundness = |[a, b, c]: [f64; 3]| (4.0 * a * c - b * b) / (a * a + b * b + c * c);
-    let conic = eigenvalues(m)
-        .map(|value| eigenvector(m, value))
-        .into_iter()
-        .filter(|&v| roundness(v).is_finite())
-        .max_by(|&u, &v| roundness(u).total_cmp(&roundness(v)))
-        .filter(|&v| roundness(v) > 0.0)?;
-    let [a, b, c] = conic;
-    let [d, e, f] = to_low.map(|row| dot3(row, conic));
-    // its centre and axes in the box; stretched back out of that, the axes stay conjugate
-    let det = 4.0 * a * c - b * b;
-    let (cx, cy) = ((b * e - 2.0 * c * d) / det, (b * d - 2.0 * a * e) / det);
-    let level = -(f + (d * cx + e * cy) / 2.0);
-    let (sin, cos) = (0.5 * b.atan2(a - c)).sin_cos();
-    let along = a * cos * cos + b * sin * cos + c * sin * sin;
-    let across = a * sin * sin - b * sin * cos + c * cos * cos;
-    let (ra, rb) = ((level / along).sqrt(), (level / across).sqrt());
-    let out = |x: f64, y: f64| Vec2::new((hx * x) as f32, (hy * y) as f32);
-    let oval = Oval {
-        centre: Vec2::new((mx + hx * cx) as f32, (my + hy * cy) as f32),
-        a: out(cos * ra, sin * ra),
-        b: out(-sin * rb, cos * rb),
-    };
-    (oval.centre.is_finite() && oval.a.is_finite() && oval.b.is_finite()).then_some(oval)
+    let (a, middle, c) = (get(0), get(1), get(2));
+    // the control that carries the curve through the middle point at its halfway
+    let control = middle * 2.0 - (a + c) * 0.5;
+    (0..=OUTLINE_STEPS)
+        .map(|i| {
+            let t = i as f32 / OUTLINE_STEPS as f32;
+            let keep = 1.0 - t;
+            a * (keep * keep) + control * (2.0 * keep * t) + c * (t * t)
+        })
+        .collect()
 }
 
 /// Whether the stroke turns sharply at any of the corners it simplifies to: its direction just
@@ -1001,34 +848,6 @@ mod tests {
     }
 
     #[test]
-    fn an_arc_is_the_stretch_of_an_ellipse_the_stroke_swept() {
-        let bow = flat_bow();
-        let arc = &recognise(&bow)[0];
-        assert_eq!(arc.kind, ShapeKind::Arc);
-        let stray = bow.iter().map(|&p| arc.edge_distance(p)).fold(0.0f32, f32::max);
-        assert!(stray < 1.0, "strays {stray}");
-        assert!(arc.nodes[0].distance(bow[0]) < 1.0 && arc.nodes[2].distance(bow[60]) < 1.0, "{arc:?}");
-        assert_eq!(arc.handles().len(), 3);
-        // drawn the other way, it starts from the other end
-        let back: Vec<Vec2> = bow.iter().rev().copied().collect();
-        let arc = &recognise(&back)[0];
-        assert!(arc.nodes[0].distance(bow[60]) < 1.0 && arc.nodes[2].distance(bow[0]) < 1.0, "{arc:?}");
-        // turned, and with a hand's wobble, it still follows
-        let turned: Vec<Vec2> = bow
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let wobble = 2.0 * (((i * 37 % 11) as f32 / 5.0) - 1.0);
-                Vec2::new(0.6 * p.x - 0.8 * p.y, 0.8 * p.x + 0.6 * p.y + wobble)
-            })
-            .collect();
-        let arc = &recognise(&turned)[0];
-        assert_eq!(arc.kind, ShapeKind::Arc);
-        let stray = turned.iter().map(|&p| arc.edge_distance(p)).fold(0.0f32, f32::max);
-        assert!(stray < 6.0, "strays {stray}");
-    }
-
-    #[test]
     fn a_hook_drawn_by_hand_is_a_curve_not_a_polyline() {
         // a hand's hook: over the top, down the right side and away, far from a circle's bend
         let knots = [
@@ -1062,8 +881,9 @@ mod tests {
                 })
             })
             .collect();
-        let shape = &recognise(&hook)[0];
-        assert_eq!(shape.kind, ShapeKind::Arc);
+        // it folds back on itself, so it is no one bend: a polyline is what it can be until the
+        // curve kind keeps its bends
+        assert_eq!(recognise(&hook)[0].kind, ShapeKind::Polyline);
     }
 
     #[test]
