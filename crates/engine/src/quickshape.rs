@@ -966,9 +966,8 @@ mod tests {
                 })
             })
             .collect();
-        // it folds back on itself, so it is no one bend: a polyline is what it can be until the
-        // curve kind keeps its bends
-        assert_eq!(recognise(&hook)[0].kind, ShapeKind::Polyline);
+        // it folds back on itself, so it is no one bend: a curve keeps both of its bends
+        assert_eq!(recognise(&hook)[0].kind, ShapeKind::Curve);
     }
 
     #[test]
