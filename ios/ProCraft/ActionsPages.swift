@@ -183,6 +183,7 @@ struct PressurePage: View {
         settings.inputMotionFiltering = 0
         settings.inputMotionExpression = 0
         settings.inputPressureSmoothing = 0
+        settings.inputTipAttached = true
         settings.inputCurve = [0, 0, 1, 1]
         model.applyInput()
     }
@@ -199,19 +200,15 @@ struct PressurePage: View {
                         slide("Motion Filtering Expression", settings.inputMotionExpression) { settings.inputMotionExpression = $0 }
                     }
                     Color.clear.frame(height: 16)
-                    // the stroke always starts at the pen's tip here
+                    // with no filtering it has nothing to do
                     group {
-                        HStack(spacing: 0) {
-                            Text(verbatim: "Tip Attachment")
-                                .font(.system(size: 17))
-                                .foregroundStyle(Pc.actionsDisabled)
-                                .lineLimit(1)
-                            Spacer(minLength: 0)
-                            PcSwitch(on: true, enabled: false)
-                        }
-                        .padding(.leading, 16)
-                        .padding(.trailing, 8)
-                        .frame(height: 44)
+                        RowView(row: .toggle(
+                            "Tip Attachment", on: settings.inputTipAttached,
+                            change: settings.inputMotionFiltering > 0 ? {
+                                settings.inputTipAttached = $0
+                                model.applyInput()
+                            } : nil
+                        ))
                     }
                     Color.clear.frame(height: 24)
                     Text(verbatim: "App Pressure Sensitivity")

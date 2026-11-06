@@ -1900,6 +1900,7 @@ final class CanvasModel {
             motionFiltering: s.inputMotionFiltering,
             motionExpression: s.inputMotionExpression,
             pressureSmoothing: s.inputPressureSmoothing,
+            tipAttached: s.inputTipAttached,
             curve: s.inputCurve
         )
     }

@@ -55,6 +55,8 @@ final class AppSettings {
     var inputMotionFiltering: Float { didSet { kept.set(inputMotionFiltering, forKey: Key.inputMotion) } }
     var inputMotionExpression: Float { didSet { kept.set(inputMotionExpression, forKey: Key.inputExpression) } }
     var inputPressureSmoothing: Float { didSet { kept.set(inputPressureSmoothing, forKey: Key.inputSmoothing) } }
+    /// Motion filtering keeps the stroke's end on the pen.
+    var inputTipAttached: Bool { didSet { kept.set(inputTipAttached, forKey: Key.inputTipAttached) } }
     /// The pressure curve: x, y pairs, 0..1.
     var inputCurve: [Float] { didSet { kept.set(inputCurve, forKey: Key.inputCurve) } }
 
@@ -102,6 +104,7 @@ final class AppSettings {
         inputMotionFiltering = d.float(forKey: Key.inputMotion)
         inputMotionExpression = d.float(forKey: Key.inputExpression)
         inputPressureSmoothing = d.float(forKey: Key.inputSmoothing)
+        inputTipAttached = d.object(forKey: Key.inputTipAttached) as? Bool ?? true
         let curve = (d.array(forKey: Key.inputCurve) as? [NSNumber])?.map(\.floatValue) ?? []
         inputCurve = curve.count >= 4 ? curve : [0, 0, 1, 1]
         brushColor = colour(Key.brushColor, [Self.defaultHue, 1, 1])
@@ -129,6 +132,7 @@ final class AppSettings {
         static let inputMotion = "inputMotion"
         static let inputExpression = "inputExpression"
         static let inputSmoothing = "inputSmoothing"
+        static let inputTipAttached = "inputTipAttached"
         static let inputCurve = "inputCurve"
         static let brushColor = "brushColor"
         static let maskColor = "maskColor"
