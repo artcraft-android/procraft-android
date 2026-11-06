@@ -73,6 +73,7 @@ import io.github.artcraftandroid.procraft.core.brushBlendModes
 import io.github.artcraftandroid.procraft.core.grainBlendModes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import androidx.compose.ui.text.TextRange
@@ -1972,18 +1973,25 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
      */
     suspend fun awaitCanvasDrawn() {
         val s = session ?: return
-        val failed = withContext(Dispatchers.IO) {
-            var waited = 0L
-            while (waited < CANVAS_DRAWN_LIMIT_MS) {
-                val info = runCatching { s.info() }.getOrNull() ?: return@withContext false
-                if (info.error != null) return@withContext true
-                if (info.frames != 0uL) return@withContext false
-                kotlinx.coroutines.delay(CANVAS_POLL_MS)
-                waited += CANVAS_POLL_MS
+        // asked apart from the wait: a call into the session blocks while the first frame holds it,
+        // so the limit is the clock's, not the sum of the pauses between calls
+        val asking = viewModelScope.async(Dispatchers.IO) {
+            var failed: Boolean? = null
+            while (failed == null) {
+                val info = runCatching { s.info() }.getOrNull()
+                failed = when {
+                    info == null -> false
+                    info.error != null -> true
+                    info.frames != 0uL -> false
+                    else -> null
+                }
+                if (failed == null) kotlinx.coroutines.delay(CANVAS_POLL_MS)
             }
-            false
+            failed
         }
-        if (failed && session === s) message = "This device's graphics can't draw the canvas."
+        val failed = kotlinx.coroutines.withTimeoutOrNull(CANVAS_DRAWN_LIMIT_MS) { asking.await() }
+        if (failed == null) asking.cancel()
+        if (failed == true && session === s) message = "This device's graphics can't draw the canvas."
     }
 
     /**
