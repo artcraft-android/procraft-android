@@ -13,7 +13,7 @@ A folder under `plugins/` with two files. `filter.wgsl` holds one function, and 
 constants or structs it needs:
 
 ```wgsl
-fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
+fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
     let dark = 1.0 - dot(colour.rgb, vec3<f32>(0.299, 0.587, 0.114));
     return vec4<f32>(vec3<f32>(0.0), step(v.cut, dark) * colour.a);
 }
@@ -22,15 +22,14 @@ fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
 - `colour` is the layer's pixel, in straight colour, not premultiplied.
 - `at` is where it is, in canvas pixels, top left at (0, 0). A pixel's centre is at .5.
 - It returns the new pixel, in straight colour. The app clamps it to 0..1.
-- `filter` is a reserved word in WGSL, so a WGSL tool may complain about it. The app takes it as the
-  name of your function and nothing else: it can't be used anywhere else in the file.
+- It has to be called `pixel`. WGSL keeps the word `filter` for itself, so a function can't have that name.
 
 You're given three things:
 
 | | |
 |---|---|
 | `v.<key>` | Each control's value, as an `f32`. A switch is 0 or 1 |
-| `pixel(at)` | The layer as it was at `at`, straight colour. Past an edge, the edge's pixel |
+| `layer_at(at)` | The layer as it was at `at`, straight colour. Past an edge, the edge's pixel |
 | `canvas_size()` | The canvas's width and height, in pixels |
 
 The app does the rest: premultiplying, the selection, the alpha lock and the copy of the layer. A
@@ -86,7 +85,7 @@ has more than eight controls. So is anything a filter has no use for:
 
 A GPU can't be interrupted, and a shader that runs too long can stop every app on the device. So a
 pixel has a budget: about 65,000 simple operations in loops, where `sin` or `pow` counts as four and
-`pixel()` as about twenty, and as much again outside them. A 31 by 31 neighbourhood fits. Every loop
+`layer_at()` as about twenty, and as much again outside them. A 31 by 31 neighbourhood fits. Every loop
 pays for each round as it goes, and stops when the budget is spent.
 
 Before a filter with a loop touches the layer, the app tries it on a few hundred pixels spread over

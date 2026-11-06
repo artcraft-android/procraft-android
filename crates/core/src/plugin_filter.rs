@@ -246,7 +246,7 @@ mod tests {
     use crate::{Adjustment, PenSample, PointerKind};
 
     /// Clears what isn't dark, by the amount of `cut`.
-    const LINES: &str = "fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
+    const LINES: &str = "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {
         let dark = 1.0 - dot(colour.rgb, vec3<f32>(0.299, 0.587, 0.114));
         let shade = select(vec3<f32>(0.0), colour.rgb, v.keep_colour > 0.5);
         return vec4<f32>(shade, step(v.cut, dark) * colour.a);
@@ -492,15 +492,15 @@ mod tests {
             told
         };
         for code in [
-            "fn filter(",
-            "@group(0) @binding(0) var t: texture_2d<f32>;\nfn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }",
+            "fn pixel(",
+            "@group(0) @binding(0) var t: texture_2d<f32>;\nfn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }",
             "@fragment fn main() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }",
         ] {
             assert_eq!(refused(code).as_deref(), Some("This filter's code can't run in ProCraft."), "{code}");
         }
         // the text is held to its size at the door too
         let huge = format!(
-            "// {}\nfn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {{ return colour; }}",
+            "// {}\nfn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> {{ return colour; }}",
             "x".repeat(70_000)
         );
         assert!(refused(&huge).is_some());

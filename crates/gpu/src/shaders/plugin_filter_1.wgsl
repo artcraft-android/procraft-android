@@ -2,8 +2,8 @@
 // interface gets a file of its own, and filters written to this one go on being built with this.
 // `/*VALUES*/` becomes the fields of `HostValues`, `/*READ*/` the values from the uniform; the
 // filter's text comes after all of this, so nothing it holds can reach back into it. Everything
-// here named host_ is the app's, and a filter can't touch it (plugin_filter.rs); `v`, `pixel` and
-// `canvas_size` are what it is given.
+// here named host_ is the app's, and a filter can't touch it (plugin_filter.rs); `v`, `layer_at` and
+// `canvas_size` are what it is given, and `pixel` is what it brings.
 
 struct HostUniform {
     // the controls' values, in the manifest's order
@@ -39,7 +39,7 @@ fn host_straight(c: vec4<f32>) -> vec4<f32> {
 }
 
 // The layer as it was at `at`, in canvas pixels, colour straight: past an edge, the edge's.
-fn pixel(at: vec2<f32>) -> vec4<f32> {
+fn layer_at(at: vec2<f32>) -> vec4<f32> {
     let most = vec2<i32>(host_u.size.xy) - vec2<i32>(1);
     let i = clamp(vec2<i32>(floor(at)), vec2<i32>(0), most);
     return host_straight(textureLoad(host_copy, i, 0));
@@ -55,7 +55,7 @@ fn canvas_size() -> vec2<f32> {
 fn host_filtered(i: vec2<i32>) -> vec4<f32> {
     v = HostValues(/*READ*/);
     let was = textureLoad(host_copy, i, 0);
-    let made = host_filter(host_straight(was), vec2<f32>(i) + vec2<f32>(0.5));
+    let made = pixel(host_straight(was), vec2<f32>(i) + vec2<f32>(0.5));
     if (host_budget < 0 || !all(abs(made) < vec4<f32>(3.0e38))) {
         return was;
     }
