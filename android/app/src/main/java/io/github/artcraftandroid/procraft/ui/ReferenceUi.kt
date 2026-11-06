@@ -53,7 +53,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import kotlin.math.roundToInt
-import androidx.compose.ui.zIndex //imported for ReferenceWindow
 
 // the dark bars are glass, like the panels: what the picture has under them shows through, blurred
 private val BarFill get() = if (Pc.light) Color(0xFFEDEDED) else Color(0xDE1E1E1E)
@@ -87,7 +86,6 @@ fun BoxScope.ReferenceWindow(vm: CanvasViewModel) {
     Box(
         Modifier
             .fillMaxSize()
-            .zIndex(5f)
             // ... existing modifiers
     ) {
         ReferenceWindowContent(vm)

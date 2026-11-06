@@ -97,11 +97,11 @@ fun AppRoot(vm: CanvasViewModel) {
                 if (vm.transforming) TransformOverlay(vm)
                 if (vm.selecting) SelectionOverlay(vm, Pc.BarHeight)
                 vm.picking?.let { pick ->
-                    // 0f keeps it behind ReferenceWindow; 10f pulls it above ReferenceWindow
-                    val pickingZ = if (pick.fromReference) 10f else 0f
+                    val pickingZ = if (pick.fromReference) 1f else 0f
                     Loupe(pick, CanvasSpace.color(vm.colorRgb()), Modifier.zIndex(pickingZ))
                     if (!vm.barsHidden) PickingBar(Modifier.offset(y = Pc.BarHeight).zIndex(pickingZ), pick.fromReference)
                 }
+                ReferenceWindow(vm) //moved ReferenceWindow to help with z-order
                 // the bars fade out as the interface hides, and back
                 val barsShown = androidx.compose.animation.core.animateFloatAsState(if (vm.barsHidden) 0f else 1f, Motion.bars(), label = "bars").value
                 // with the interface hidden, a button in the top left brings it back
@@ -221,7 +221,6 @@ fun AppRoot(vm: CanvasViewModel) {
                     TransformNumeric(vm)
                 }
                 BrushCursor(vm)
-                ReferenceWindow(vm)
                 TouchCompanion(vm)
                 CropOverlay(vm)
                 if (vm.textInfo != null) TextEditor(vm)
