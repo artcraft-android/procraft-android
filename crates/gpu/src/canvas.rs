@@ -4218,17 +4218,16 @@ impl Canvas {
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     ));
                     self.pencil = Some(PencilMask { view, bounds: IRect::EMPTY });
-                    // the edit's source now takes the mask where it took the selection
-                    let source = self
-                        .transforming
-                        .as_ref()
-                        .map(|t| t.before.create_view(&wgpu::TextureViewDescriptor::default()));
-                    if let Some(view) = source {
-                        let bind = self.adjustment_bind(device, &view, true);
-                        if let Some(t) = self.transforming.as_mut() {
-                            t.bind = bind;
-                            t.masked = true;
-                        }
+                    // the edit's source now takes the mask where it took the selection, on every
+                    // layer the adjustment changes
+                    let mut binds = Vec::new();
+                    for t in self.transforming.iter().chain(&self.transform_more) {
+                        let view = t.before.create_view(&wgpu::TextureViewDescriptor::default());
+                        binds.push(self.adjustment_bind(device, &view, true));
+                    }
+                    for (t, bind) in self.transforming.iter_mut().chain(self.transform_more.iter_mut()).zip(binds) {
+                        t.bind = bind;
+                        t.masked = true;
                     }
                 }
                 Op::LiquifyStamps(stamps) => self.liquify_step(device, &mut encoder, &mut uniforms, &stamps, 1.0),

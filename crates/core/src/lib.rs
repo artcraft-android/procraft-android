@@ -81,7 +81,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use procraft_engine::brush::Brush;
-use procraft_engine::document::Document;
+use procraft_engine::document::{Document, LayerId};
 use procraft_engine::geom::Vec2;
 use procraft_engine::input::{Pointer, Sample};
 use procraft_engine::library::{BrushSet, library};
@@ -526,6 +526,8 @@ pub(crate) struct State {
     colour_source: Option<(Vec<u8>, procraft_engine::selection::ColourFlood)>,
     /// An adjustment is open on the current layer, and what it last drew.
     adjusting: bool,
+    /// The paint layers the open adjustment changes (its target set, kept across pencil strokes).
+    pub(crate) adjust_targets: Vec<LayerId>,
     /// The open adjustment's values, as the apps show them (adjusting.rs).
     adjust: adjusting::Adjusting,
     filters: plugin_filter::Filters,
@@ -1296,6 +1298,7 @@ impl CanvasSession {
             colour_source: None,
             feather_base: None,
             adjusting: false,
+            adjust_targets: Vec::new(),
             adjust: adjusting::Adjusting::default(),
             filters: plugin_filter::Filters::default(),
             crop_edit: crop_edit::CropEdit::default(),

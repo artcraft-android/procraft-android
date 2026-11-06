@@ -48,6 +48,14 @@ fn pixel(s: &CanvasSession, x: u32, y: u32) -> [u8; 4] {
     [px[i], px[i + 1], px[i + 2], px[i + 3]]
 }
 
+/// A layer's own pixel, premultiplied RGBA (not the composite).
+fn layer_pixel(s: &CanvasSession, id: u64, x: u32, y: u32) -> [u8; 4] {
+    let _ = pixel(s, 0, 0);
+    let image = s.copy_layer_contents(id).unwrap();
+    let i = ((y * image.width + x) * 4) as usize;
+    [image.rgba[i], image.rgba[i + 1], image.rgba[i + 2], image.rgba[i + 3]]
+}
+
 /// What a pen stroke costs with the GPU, for a few kinds of brush on a 2048 square canvas: each
 /// event's work, each frame's (one every two events, as a 240 Hz pen at 120 frames a second), and
 /// the whole stroke with the GPU done, an event's share. Run on a device with `--ignored
@@ -4908,6 +4916,163 @@ fn picked_layers_adjust_together() {
         ([255, 255, 255, 255], [255, 255, 255, 255]),
         "The adjustment should affect both picked layers"
     );
+
+    s.undo();
+    let one = pixel(&s, 20, 20);
+    let two = pixel(&s, 40, 40);
+    assert_eq!((one, two), ([255, 0, 0, 255], [255, 0, 0, 255]), "One undo should put both picked layers back");
+}
+
+#[test]
+fn picked_layers_blur_together() {
+    use crate::Adjustment;
+    let Some(s) = session(100, 100) else { return };
+    let dot = |x: f32, y: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    s.set_color(1.0, 0.0, 0.0);
+    dot(20.0, 20.0);
+    let below = s.layers()[0].id;
+    s.add_layer();
+    let above = s.layers().iter().find(|l| l.id != below).unwrap().id;
+    s.set_color(0.0, 0.0, 1.0);
+    dot(80.0, 80.0);
+    assert!(s.pick_layer(below));
+
+    assert_eq!(layer_pixel(&s, below, 20, 20), [255, 0, 0, 255], "the bottom dot is red");
+    assert_eq!(layer_pixel(&s, above, 80, 80), [0, 0, 255, 255], "the top dot is blue");
+    assert_eq!(layer_pixel(&s, below, 80, 80)[3], 0, "the bottom layer is clear at the top dot");
+    assert_eq!(layer_pixel(&s, above, 20, 20)[3], 0, "the top layer is clear at the bottom dot");
+
+    assert!(s.adjustment_start(Adjustment::GaussianBlur));
+    s.adjustment_amount_by(0.1);
+    assert!(s.adjustment_end(true));
+
+    // Each layer blurs its own dot: neither takes the other's colour from the other's place.
+    let bottom = layer_pixel(&s, below, 20, 20);
+    let top = layer_pixel(&s, above, 80, 80);
+    assert!(bottom[3] > 0 && bottom[0] > bottom[2], "bottom red blurred: {bottom:?}");
+    assert!(top[3] > 0 && top[2] > top[0], "top blue blurred: {top:?}");
+    assert!(layer_pixel(&s, below, 80, 80)[3] < 16, "the bottom layer did not take the top's blur");
+    assert!(layer_pixel(&s, above, 20, 20)[3] < 16, "the top layer did not take the bottom's blur");
+}
+
+#[test]
+fn picked_layers_paint_an_adjustment_on_together() {
+    use crate::Adjustment;
+    let Some(s) = session(100, 100) else { return };
+    let dot = |x: f32, y: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    s.set_color(1.0, 0.0, 0.0);
+    dot(20.0, 20.0);
+    dot(60.0, 60.0);
+    let below = s.layers()[0].id;
+    s.add_layer();
+    s.set_color(0.0, 0.0, 1.0);
+    dot(40.0, 40.0);
+    assert!(s.pick_layer(below));
+
+    assert_eq!(pixel(&s, 20, 20), [255, 0, 0, 255], "the bottom dot is red");
+    assert_eq!(pixel(&s, 40, 40), [0, 0, 255, 255], "the top dot is blue");
+
+    assert!(s.adjustment_start(Adjustment::Hsb));
+    s.adjustment_hsb(0.5, 0.5, 1.0);
+    s.adjust_pencil();
+    // Paint the adjustment on at the bottom's first dot.
+    s.stroke_begin(PointerKind::Finger, vec![sample(20.0, 20.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert_eq!(pixel(&s, 20, 20), [255, 255, 255, 255], "the bottom's first dot adjusted");
+    assert_eq!(pixel(&s, 40, 40), [0, 0, 255, 255], "the top dot was not painted on");
+    // The first stroke was kept and the adjustment begun again: the bottom still adjusts.
+    s.stroke_begin(PointerKind::Finger, vec![sample(60.0, 60.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert_eq!(pixel(&s, 60, 60), [255, 255, 255, 255], "the bottom's second dot adjusted after the first was kept");
+    assert_eq!(pixel(&s, 20, 20), [255, 255, 255, 255], "the bottom's first dot kept");
+    // The top, still chosen, adjusts too.
+    s.stroke_begin(PointerKind::Finger, vec![sample(40.0, 40.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert_eq!(pixel(&s, 40, 40), [255, 255, 255, 255], "the top dot adjusted");
+    assert_eq!(pixel(&s, 20, 20), [255, 255, 255, 255], "the bottom's first dot kept");
+    assert_eq!(pixel(&s, 60, 60), [255, 255, 255, 255], "the bottom's second dot kept");
+
+    assert!(s.adjustment_end(true));
+}
+
+#[test]
+fn picked_layers_liquify_together() {
+    use crate::Adjustment;
+    let Some(s) = session(100, 100) else { return };
+    s.set_color(1.0, 0.0, 0.0);
+    s.set_brush_size(0.4);
+    let line = || {
+        s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 50.0, 0.0)]);
+        s.stroke_add(vec![sample(50.0, 50.0, 8.0), sample(70.0, 50.0, 16.0)]);
+        s.stroke_end(vec![]);
+    };
+    line();
+    let below = s.layers()[0].id;
+    s.add_layer();
+    let above = s.layers().iter().find(|l| l.id != below).unwrap().id;
+    line();
+    assert!(s.pick_layer(below));
+    let before = |id: u64| {
+        let _ = pixel(&s, 0, 0);
+        s.copy_layer_contents(id).unwrap().rgba
+    };
+    let (bottom_before, top_before) = (before(below), before(above));
+
+    assert!(s.adjustment_start(Adjustment::Liquify));
+    s.adjustment_liquify_value(0, 0.3);
+    let points = vec![50.0, 40.0, 1.0, 8.0, 50.0, 50.0, 1.0, 8.0, 50.0, 60.0, 1.0, 8.0];
+    s.adjustment_liquify_stroke(points, true, false);
+    assert!(s.adjustment_end(true));
+
+    let _ = pixel(&s, 0, 0);
+    let bottom_after = s.copy_layer_contents(below).unwrap().rgba;
+    let top_after = s.copy_layer_contents(above).unwrap().rgba;
+    assert_ne!(bottom_before, bottom_after, "the bottom layer was liquified");
+    assert_ne!(top_before, top_after, "the top layer was liquified");
+}
+
+#[test]
+fn picked_layers_clone_together() {
+    use crate::Adjustment;
+    let Some(s) = session(100, 100) else { return };
+    let dot = |x: f32, y: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    s.set_color(1.0, 0.0, 0.0);
+    dot(30.0, 50.0);
+    dot(30.0, 20.0);
+    let below = s.layers()[0].id;
+    s.add_layer();
+    s.set_color(0.0, 0.0, 1.0);
+    dot(30.0, 60.0);
+    assert!(s.pick_layer(below));
+
+    assert!(s.adjustment_start(Adjustment::Clone));
+    let stroke = |source: (f32, f32), at: (f32, f32)| {
+        s.clone_source(source.0, source.1);
+        s.stroke_begin(PointerKind::Finger, vec![sample(at.0, at.1, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    // The bottom layer clones its first dot; the top has nothing at that source.
+    stroke((30.0, 50.0), (70.0, 50.0));
+    let p = pixel(&s, 70, 50);
+    assert!(p[0] > 200 && p[0] > p[2], "the bottom cloned its first dot: {p:?}");
+    // The first stroke was kept and the adjustment begun again: the bottom still clones.
+    stroke((30.0, 20.0), (70.0, 20.0));
+    let p = pixel(&s, 70, 20);
+    assert!(p[0] > 200 && p[0] > p[2], "the bottom cloned after the first stroke was kept: {p:?}");
+    // The top, still chosen, clones its own dot.
+    stroke((30.0, 60.0), (70.0, 60.0));
+    let p = pixel(&s, 70, 60);
+    assert!(p[2] > 200 && p[2] > p[0], "the top cloned its dot: {p:?}");
+    assert!(s.adjustment_end(true));
 }
 
 /// On request (`BRUSH_SHEET=path.png`): every library brush's sample stroke, three to a row on

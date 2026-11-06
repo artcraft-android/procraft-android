@@ -176,6 +176,22 @@ pub(crate) const MOTION_DRAG_PT: f32 = 500.0;
 const MOTION_LENGTH_PX: f32 = 256.0;
 
 impl State {
+    /// The open adjustment's paint targets that are still there and can be adjusted.
+    pub(crate) fn adjust_targets_now(&self) -> Vec<LayerId> {
+        let movable = |id: LayerId| {
+            self.doc.layer(id).is_some_and(|l| l.kind == LayerKind::Paint && l.visible && l.text.is_none())
+                && !self.doc.is_locked(id)
+        };
+        let mut targets: Vec<LayerId> = self.adjust_targets.iter().copied().filter(|id| movable(*id)).collect();
+        if targets.is_empty() {
+            let current = self.doc.current();
+            if movable(current) {
+                targets.push(current);
+            }
+        }
+        targets
+    }
+
     /// A stroke that paints the adjustment on, with the paint brush (white into the mask). Cloning,
     /// the first stroke fixes how far from the source it copies.
     pub(crate) fn pencil_stroke(&mut self, pointer: PointerKind, samples: &[PenSample]) {
@@ -216,10 +232,12 @@ impl State {
         if !(self.adjusting && self.pencil) {
             return;
         }
-        let current = self.doc.current();
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.end_transform(true);
-            canvas.begin_transform(current);
+        }
+        let targets = self.adjust_targets_now();
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.begin_transform_layers(&targets);
             canvas.begin_pencil();
             if let Some(filter) = self.last_filter {
                 canvas.set_filter(filter);
@@ -233,13 +251,15 @@ impl State {
         if !(self.adjusting && self.pencil) {
             return;
         }
-        let current = self.doc.current();
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.end_transform(false);
             if let Some(f) = between {
                 f(canvas);
             }
-            canvas.begin_transform(current);
+        }
+        let targets = self.adjust_targets_now();
+        if let Some(canvas) = self.canvas.as_mut() {
+            canvas.begin_transform_layers(&targets);
             canvas.begin_pencil();
             if let Some(filter) = self.last_filter {
                 canvas.set_filter(filter);
@@ -290,6 +310,7 @@ impl State {
             if self.simplified_undos {
                 canvas.collapse_steps();
             }
+            self.adjust_targets.clear();
         }
     }
 
@@ -321,43 +342,62 @@ impl Shared {
     }
 }
 
-#[uniffi::export]
 impl CanvasSession {
-    /// Starts adjusting the current layer; false when it cannot be (locked or hidden). An
-    /// adjustment already open is kept first.
-    pub fn adjust_begin(&self) -> bool {
+    /// Starts an adjustment on the chosen paint layers (`many`), or only the current one.
+    fn adjust_begin_with(&self, many: bool) -> bool {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.finish_stroke();
         st.settle();
-        let current = st.doc.current();
-        if st.doc.is_locked(current) || st.doc.layer(current).is_none_or(|l| !l.visible || l.text.is_some()) {
-            return false;
-        }
-
-        let chosen = st.doc.chosen();
         let movable = |l: &Layer| !st.doc.is_locked(l.id) && l.visible && l.text.is_none();
-        let targets: Vec<LayerId> = st
-            .doc
-            .layers()
-            .iter()
-            .filter(|l| l.kind == LayerKind::Paint && movable(l))
-            .filter(|l| chosen.iter().any(|c| *c == l.id || st.doc.is_inside(l.id, *c)))
-            .map(|l| l.id)
-            .collect();
-
+        let targets: Vec<LayerId> = if many {
+            // with layers picked, every paint layer chosen (those in a chosen group too)
+            let chosen = st.doc.chosen();
+            st.doc
+                .layers()
+                .iter()
+                .filter(|l| l.kind == LayerKind::Paint && movable(l))
+                .filter(|l| chosen.iter().any(|c| *c == l.id || st.doc.is_inside(l.id, *c)))
+                .map(|l| l.id)
+                .collect()
+        } else {
+            let current = st.doc.current();
+            st.doc
+                .layer(current)
+                .filter(|l| l.kind == LayerKind::Paint && movable(l))
+                .map(|l| l.id)
+                .into_iter()
+                .collect()
+        };
         if targets.is_empty() {
+            st.adjust_targets.clear();
             return false;
         }
-
-        let Some(canvas) = st.canvas.as_mut() else { return false };
+        st.adjust_targets = targets.clone();
+        let Some(canvas) = st.canvas.as_mut() else {
+            st.adjust_targets.clear();
+            return false;
+        };
         canvas.mark_steps();
         canvas.begin_transform_layers(&targets);
         st.adjusting = true;
         st.last_filter = None;
         self.shared.frame(st);
-
         true
+    }
+
+    /// Starts an adjustment on the current layer only (filter plugins, which draw one layer).
+    pub(crate) fn adjust_begin_single(&self) -> bool {
+        self.adjust_begin_with(false)
+    }
+}
+
+#[uniffi::export]
+impl CanvasSession {
+    /// Starts adjusting the chosen layers; false when none of them can be (locked or hidden). An
+    /// adjustment already open is kept first.
+    pub fn adjust_begin(&self) -> bool {
+        self.adjust_begin_with(true)
     }
 
     /// Hue, saturation and brightness, each 0..1 with 0.5 leaving the layer as it is: the hue turns
@@ -539,7 +579,7 @@ impl CanvasSession {
         self.shared.frame(st);
     }
 
-    /// Starts liquifying the current layer; false when it cannot be.
+    /// Starts liquifying the chosen layers; false when none of them can be.
     pub fn liquify_begin(&self) -> bool {
         if !self.adjust_begin() {
             return false;
@@ -547,10 +587,13 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.liquify = LiquifyRun::default();
+        let targets = st.adjust_targets.clone();
         if let Some(canvas) = st.canvas.as_mut() {
-            // the layer's mask is pushed along with it
-            if let Some(mask) = st.doc.mask_of(st.doc.current()) {
-                canvas.transform_also(mask);
+            // each layer's mask is pushed along with it
+            for id in targets {
+                if let Some(mask) = st.doc.mask_of(id) {
+                    canvas.transform_also(mask);
+                }
             }
             canvas.begin_liquify();
         }
@@ -676,8 +719,8 @@ impl CanvasSession {
         self.shared.lock().simplified_undos = on;
     }
 
-    /// Starts cloning the current layer: painting copies from the source (see
-    /// [`Self::clone_source`]); false when the layer cannot take it.
+    /// Starts cloning the chosen layers: painting copies from each layer's own source (see
+    /// [`Self::clone_source`]); false when none of them can take it.
     pub fn clone_begin(&self) -> bool {
         if !self.adjust_begin() {
             return false;
