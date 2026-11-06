@@ -1,6 +1,7 @@
 //! Adjustments: the current layer redrawn through a filter while its values are dragged, kept as
 //! one undo step or put back; only what is selected changes.
 
+use procraft_engine::document::{Layer, LayerId, LayerKind};
 use procraft_engine::geom::Vec2;
 use procraft_engine::selection::feather_radius;
 use procraft_engine::tone;
@@ -333,12 +334,29 @@ impl CanvasSession {
         if st.doc.is_locked(current) || st.doc.layer(current).is_none_or(|l| !l.visible || l.text.is_some()) {
             return false;
         }
+
+        let chosen = st.doc.chosen();
+        let movable = |l: &Layer| !st.doc.is_locked(l.id) && l.visible && l.text.is_none();
+        let targets: Vec<LayerId> = st
+            .doc
+            .layers()
+            .iter()
+            .filter(|l| l.kind == LayerKind::Paint && movable(l))
+            .filter(|l| chosen.iter().any(|c| *c == l.id || st.doc.is_inside(l.id, *c)))
+            .map(|l| l.id)
+            .collect();
+
+        if targets.is_empty() {
+            return false;
+        }
+
         let Some(canvas) = st.canvas.as_mut() else { return false };
         canvas.mark_steps();
-        canvas.begin_transform(current);
+        canvas.begin_transform_layers(&targets);
         st.adjusting = true;
         st.last_filter = None;
         self.shared.frame(st);
+
         true
     }
 
