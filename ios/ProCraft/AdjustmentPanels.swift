@@ -82,6 +82,7 @@ struct AdjustmentPanel: View {
             case .halftone: HalftonePanel(model: model, shown: shown)
             case .chromaticAberration: ChromaticPanel(model: model, shown: shown)
             case .perspectiveBlur: PerspectivePanel(model: model, shown: shown)
+            case .plugin: PluginFilterPanel(model: model, shown: shown)
             default: EmptyView()
             }
         }
@@ -106,6 +107,61 @@ private struct Plate: ViewModifier {
 private extension View {
     func plate(_ width: CGFloat, _ height: CGFloat) -> some View {
         modifier(Plate(width: width, height: height))
+    }
+}
+
+/// A plugin's filter's panel: one for all of them, its controls as the file lists them. A slider
+/// goes in as it moves. A filter that stops is closed by the core, so this looks for that while it
+/// is up.
+private struct PluginFilterPanel: View {
+    let model: CanvasModel
+    let shown: AdjustShown
+
+    @ViewBuilder private func control(_ control: PluginControl) -> some View {
+        switch control {
+        case let .slider(slider):
+            OptionSlider(
+                label: slider.label,
+                value: pluginSliderAlong(slider: slider, value: slider.value),
+                shown: pluginSliderShown(slider: slider, value: slider.value),
+                width: 500,
+                onLetGo: { model.letGoPluginFilter(slider.key) }
+            ) { along in
+                model.setPluginFilterSlider(slider.key, pluginSliderAt(slider: slider, along: along))
+            }
+        case let .switch(one):
+            HStack(spacing: 0) {
+                Text(verbatim: one.label)
+                    .font(.system(size: 16))
+                    .foregroundStyle(hsbLabel)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                PcSwitch(on: one.on)
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.setPluginFilterSwitch(one.key, !one.on) }
+            }
+            .padding(.leading, 10)
+            .padding(.trailing, 15)
+            .frame(width: 500, height: 54)
+        }
+    }
+
+    var body: some View {
+        let controls = shown.plugin?.controls ?? []
+        let rows = CGFloat(max(controls.count, 1))
+        VStack(spacing: 8.5) {
+            ForEach(controls.indices, id: \.self) { i in
+                control(controls[i])
+            }
+        }
+        .padding(.top, 24)
+        .plate(532, 41 + 54 * rows + 8.5 * (rows - 1))
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(150))
+                model.checkPluginFilter()
+            }
+        }
     }
 }
 
@@ -476,6 +532,7 @@ struct OptionSlider: View {
     var labelInk: Color?
     var chip = false
     var onChip: (() -> Void)?
+    var onLetGo: (() -> Void)?
     let onChange: (Float) -> Void
 
     var body: some View {
@@ -522,11 +579,15 @@ struct OptionSlider: View {
                 }
                 .frame(width: w, height: 24)
                 .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
-                    guard drag.translation != .zero else { return }
-                    let at = Float(min(max(drag.location.x / max(w, 1), 0), 1))
-                    onChange(both ? at * 2 - 1 : at)
-                })
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { drag in
+                            guard drag.translation != .zero else { return }
+                            let at = Float(min(max(drag.location.x / max(w, 1), 0), 1))
+                            onChange(both ? at * 2 - 1 : at)
+                        }
+                        .onEnded { _ in onLetGo?() }
+                )
             }
             .frame(height: 24)
             .padding(.leading, 10)

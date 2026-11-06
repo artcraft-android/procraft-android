@@ -6,11 +6,11 @@ private func themed(_ dark: UInt32, _ light: UInt32) -> Color {
 
 /// The pages the actions panel turns to.
 enum ActionsPage {
-    case main, cursor, pressure
+    case main, cursor, pressure, patches, plugins
 }
 
 /// A page's title with the way back.
-private struct PageHeader: View {
+struct PageHeader: View {
     let title: String
     let onBack: () -> Void
 

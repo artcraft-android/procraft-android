@@ -230,7 +230,7 @@ struct GalleryView: View {
         .background {
             GeometryReader { place in
                 Color.clear.onChange(of: place.frame(in: .global), initial: true) { _, frame in
-                    model.gridAt = frame
+                    model.gridAt = Interface.shared.rect(frame)
                 }
             }
         }
@@ -626,7 +626,7 @@ private struct GalleryHeader: View {
                 .background {
                     GeometryReader { place in
                         Color.clear.onChange(of: place.frame(in: .global), initial: true) { _, frame in
-                            onBackPlaced(frame)
+                            onBackPlaced(Interface.shared.rect(frame))
                         }
                     }
                 }
@@ -781,7 +781,7 @@ private struct CellPlace: ViewModifier {
             GeometryReader { place in
                 Color.clear
                     .onChange(of: place.frame(in: .global), initial: true) { _, frame in
-                        model.cellAt[dir] = frame
+                        model.cellAt[dir] = Interface.shared.rect(frame)
                     }
                     .onDisappear { model.cellAt[dir] = nil }
             }
@@ -861,7 +861,7 @@ private struct ArtworkCell: View {
                     GeometryReader { place in
                         Color.clear
                             .onChange(of: place.frame(in: .global), initial: true) { _, frame in
-                                model.thumbAt[artwork.dir] = frame
+                                model.thumbAt[artwork.dir] = Interface.shared.rect(frame)
                             }
                             // scrolled away it is nowhere, whatever it last said
                             .onDisappear { model.thumbAt[artwork.dir] = nil }

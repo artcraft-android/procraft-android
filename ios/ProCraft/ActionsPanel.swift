@@ -3,7 +3,7 @@ import SwiftUI
 private let actionsWidth: CGFloat = 390
 
 /// One row of the actions panel. Rows whose features are still to come on the iPad show dimmed.
-private enum ActionRow {
+enum ActionRow {
     /// A button row (dimmed without an action), with its value on the right if it has one.
     case act(String, value: String? = nil, action: (() -> Void)?)
     /// A switch row (dimmed without an action).
@@ -85,6 +85,8 @@ struct ActionsPanel: View {
                 CursorPage { page = .main }
             case .pressure:
                 PressurePage(model: model) { page = .main }
+            case .patches, .plugins:
+                PluginsPage(model: model, patches: page == .patches) { page = .main }
             }
         }
         .overlay(alignment: .topLeading) {
@@ -234,6 +236,8 @@ struct ActionsPanel: View {
                     .act("Gesture controls", action: {
                         withAnimation(Motion.studioIn) { model.gestureControlsOpen = true }
                     }),
+                    .act("Patches", action: { page = .patches }),
+                    .act("Plugins", action: { page = .plugins }),
                 ],
                 [
                     .slide(
@@ -244,10 +248,6 @@ struct ActionsPanel: View {
                     .slide(
                         "Selection mask visibility", value: String(format: "%.1f%%", settings.selectionVisibility * 100),
                         share: settings.selectionVisibility, change: { model.changeSelectionVisibility($0) }
-                    ),
-                    .slide(
-                        "ColorDrop gap closing", value: settings.fillGap == 0 ? "Off" : "\(settings.fillGap) px",
-                        share: Float(settings.fillGap) / Float(AppSettings.mostFillGap), change: { model.changeFillGap($0) }
                     ),
                 ],
                 [.toggle("Size & Opacity sidebar", on: model.showSideBar, change: { model.showSideBar = $0 })],
@@ -301,7 +301,7 @@ private struct ActionsGroup: View {
 }
 
 /// A row: its label, and a value or a switch at its right; a button row turns blue while held.
-private struct RowView: View {
+struct RowView: View {
     let row: ActionRow
     @State private var held = false
 
@@ -354,7 +354,7 @@ private struct RowView: View {
         case let .privately(label, privateLabel, action, onPrivate):
             PrivateRow(label: label, privateLabel: privateLabel, action: action, onPrivate: onPrivate)
         case let .slide(label, value, share, change):
-            SlideRow(label: label, value: value, share: share, change: change)
+            ActionSlideRow(label: label, value: value, share: share, change: change)
         case let .heading(label):
             Text(verbatim: label)
                 .font(.system(size: 17, weight: .semibold))
@@ -431,11 +431,12 @@ private struct PrivateRow: View {
 }
 
 /// A row with a slider along its foot, 16 in from each side; a touch anywhere on it moves it.
-private struct SlideRow: View {
+struct ActionSlideRow: View {
     let label: String
     let value: String
     let share: Float
     let change: (Float) -> Void
+    var onDone: (() -> Void)?
 
     var body: some View {
         GeometryReader { g in
@@ -468,9 +469,13 @@ private struct SlideRow: View {
             }
             .frame(width: w, height: 63, alignment: .topLeading)
             .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
-                change(Float(min(max((drag.location.x - 16) / span, 0), 1)))
-            })
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { drag in
+                        change(Float(min(max((drag.location.x - 16) / span, 0), 1)))
+                    }
+                    .onEnded { _ in onDone?() }
+            )
         }
         .frame(height: 63)
     }

@@ -409,13 +409,13 @@ private struct GradientEditor: View {
                 }
             Spacer(minLength: 0)
             GeometryReader { place in
-                bar(place.size.width, origin: place.frame(in: .global).origin)
+                bar(place.size.width, origin: Interface.shared.rect(place.frame(in: .global)).origin)
                     #if DEBUG
                     .onAppear {
                         guard ScreenCapture.stopOpens, gradient.stops.indices.contains(1) else { return }
                         // once the panel has come up
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                            tool.colour(1, at: top(1, place.size.width, place.frame(in: .global).origin))
+                            tool.colour(1, at: top(1, place.size.width, Interface.shared.rect(place.frame(in: .global)).origin))
                         }
                     }
                     #endif

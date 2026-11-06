@@ -438,7 +438,7 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        model.pixels = view.window?.screen.scale ?? view.traitCollection.displayScale
+        model.pixels = (view.window?.screen.scale ?? view.traitCollection.displayScale) * Interface.shared.scale
         model.screenCentre = CGPoint(x: view.bounds.midX * model.pixels, y: view.bounds.midY * model.pixels)
     }
 

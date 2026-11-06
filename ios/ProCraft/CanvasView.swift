@@ -83,8 +83,14 @@ final class CanvasView: UIView {
     }
 
     /// Pixels to a point on the screen the view is on.
-    private var scale: CGFloat {
+    private var screenScale: CGFloat {
         window?.screen.scale ?? traitCollection.displayScale
+    }
+
+    /// Pixels to one of this view's own points: the interface's size scales it, and the canvas stays
+    /// at the screen's pixels.
+    private var scale: CGFloat {
+        screenScale * Interface.shared.scale
     }
 
     override func didMoveToWindow() {
@@ -135,7 +141,7 @@ final class CanvasView: UIView {
     }
 
     private func remember(width: UInt32, height: UInt32, turn: UInt32) {
-        _ = session.placeGrid(quarters: turn, width: width, height: height, pixelsPerPoint: Float(scale))
+        _ = session.placeGrid(quarters: turn, width: width, height: height, pixelsPerPoint: Float(screenScale))
         windowWidth = width
         windowHeight = height
         windowTurn = turn
@@ -144,7 +150,7 @@ final class CanvasView: UIView {
     /// Hands the layer to the core, whose render thread draws into it from now on.
     private func attach(width: UInt32, height: UInt32) {
         guard let metal = layer as? CAMetalLayer else { return }
-        session.setDisplayScale(pixelsPerPoint: Float(scale))
+        session.setDisplayScale(pixelsPerPoint: Float(screenScale))
         // the core takes a retain of its own, let go with the window
         let pointer = UInt64(UInt(bitPattern: Unmanaged.passRetained(metal).toOpaque()))
         let id = acquireLayer(layer: pointer)

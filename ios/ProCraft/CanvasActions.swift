@@ -148,12 +148,6 @@ extension CanvasModel {
         session.setSelectionVisibility(visibility: share)
     }
 
-    func changeFillGap(_ share: Float) {
-        let gap = wholeNumber(share * Float(AppSettings.mostFillGap))
-        AppSettings.shared.fillGap = gap
-        session.setFillGap(pixels: UInt32(gap))
-    }
-
     func changeBrushScaling(onScreen: Bool) {
         AppSettings.shared.brushOnScreen = onScreen
         session.setBrushScaling(onScreen: onScreen)

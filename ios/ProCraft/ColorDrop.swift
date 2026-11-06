@@ -279,7 +279,7 @@ final class DropTouchView: UIView {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard touch == nil, let first = touches.first else { return }
         touch = first
-        start = first.location(in: nil)
+        start = Interface.shared.point(first.location(in: nil))
         dragging = false
         held = false
         guard onHold != nil else { return }
@@ -291,7 +291,7 @@ final class DropTouchView: UIView {
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch, touches.contains(touch), !held else { return }
-        let at = touch.location(in: nil)
+        let at = Interface.shared.point(touch.location(in: nil))
         if !dragging {
             guard hypot(at.x - start.x, at.y - start.y) > dragSlop else { return }
             holdTimer?.invalidate()
@@ -303,7 +303,7 @@ final class DropTouchView: UIView {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch, touches.contains(touch) else { return }
-        let at = touch.location(in: nil)
+        let at = Interface.shared.point(touch.location(in: nil))
         finish {
             // let go on the top bar, it is put back
             drop?.end(at: at.y > Pc.barHeight ? at : nil)

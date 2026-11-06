@@ -258,7 +258,7 @@ struct ColorPanel: View {
             if background == nil {
                 GeometryReader { place in
                     Color.clear.onChange(of: place.frame(in: .global), initial: true) { _, frame in
-                        model.drop.avoid = frame
+                        model.drop.avoid = Interface.shared.rect(frame)
                     }
                 }
             }
@@ -1448,7 +1448,8 @@ struct CompactColors: View {
         .background {
             GeometryReader { place in
                 Color.clear.onChange(of: place.frame(in: .global), initial: true) { _, frame in
-                    ui.hexRoom = CGRect(x: -frame.minX, y: -frame.minY, width: screen.width, height: screen.height)
+                    let at = Interface.shared.rect(frame)
+                    ui.hexRoom = CGRect(x: -at.minX, y: -at.minY, width: screen.width, height: screen.height)
                 }
             }
         }

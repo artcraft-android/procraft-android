@@ -40,6 +40,7 @@ private func icon(_ a: Adjustment) -> PcIcon {
     case .chromaticAberration: PcIcons.adjustChromatic
     case .liquify: PcIcons.adjustLiquify
     case .clone: PcIcons.adjustClone
+    case .plugin: PcIcons.adjustments
     }
 }
 
@@ -58,7 +59,7 @@ struct AdjustmentBar: View {
                     // drawn in a 32 frame, shown as it is
                     PcIconView(icon(a), size: 32, color: modeText)
                         .frame(width: 33, height: 32)
-                    Text(verbatim: adjustmentLabel(adjustment: a))
+                    Text(verbatim: model.adjustShown?.plugin?.name ?? adjustmentLabel(adjustment: a))
                         .font(.system(size: 17, weight: .bold))
                         .foregroundStyle(modeText)
                         .lineLimit(1)

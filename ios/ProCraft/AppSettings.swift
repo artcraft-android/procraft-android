@@ -21,8 +21,6 @@ final class AppSettings {
     static let defaultHue: Float = 0.59
     /// The shortest and longest rapid undo delay, seconds (the core's).
     static let rapidUndoRange: ClosedRange<Float> = 0.1 ... 1.5
-    /// The widest gap ColorDrop keeps out of, canvas pixels.
-    static let mostFillGap = 32
 
     /// The brush studio's open page, whichever brush it opens on.
     var studioTab: Int { didSet { kept.set(studioTab, forKey: Key.studioTab) } }
@@ -47,7 +45,6 @@ final class AppSettings {
     /// How strongly what isn't selected is banded, 0..1.
     var selectionVisibility: Float { didSet { kept.set(selectionVisibility, forKey: Key.selectionVisibility) } }
     /// ColorDrop keeps out of gaps up to this many canvas pixels wide in its lines (0: none).
-    var fillGap: Int { didSet { kept.set(fillGap, forKey: Key.fillGap) } }
     /// The actions panel's open tab.
     var actionsTab: Int { didSet { kept.set(actionsTab, forKey: Key.actionsTab) } }
     /// The colour panel's mode.
@@ -99,7 +96,6 @@ final class AppSettings {
         projectCanvas = d.bool(forKey: Key.projectCanvas)
         brushOnScreen = d.bool(forKey: Key.brushOnScreen)
         selectionVisibility = float(Key.selectionVisibility, 0.25)
-        fillGap = min(max(d.integer(forKey: Key.fillGap), 0), Self.mostFillGap)
         actionsTab = d.integer(forKey: Key.actionsTab)
         colorMode = d.integer(forKey: Key.colorMode)
         inputStabilization = d.float(forKey: Key.inputStabilization)
@@ -127,7 +123,6 @@ final class AppSettings {
         static let projectCanvas = "projectCanvas"
         static let brushOnScreen = "brushOnScreen"
         static let selectionVisibility = "selectionVisibility"
-        static let fillGap = "fillGap"
         static let actionsTab = "actionsTab"
         static let colorMode = "colorMode"
         static let inputStabilization = "inputStabilization"

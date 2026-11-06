@@ -286,7 +286,8 @@ final class CanvasModel {
         readSetChoices()
         let settings = AppSettings.shared
         session.setSelectionVisibility(visibility: settings.selectionVisibility)
-        session.setFillGap(pixels: UInt32(settings.fillGap))
+        applyPlugins()
+        PluginsModel.shared.onChange = { [weak self] in self?.applyPlugins() }
         session.setBrushScaling(onScreen: settings.brushOnScreen)
         session.setLightInterface(on: settings.lightInterface)
         applyInput()
@@ -971,6 +972,34 @@ final class CanvasModel {
         // cloning paints with the brush: its sliders show
         if a == .clone {
             readSliders()
+        }
+    }
+
+    /// Opens the plugin's filter on the current layer. The core saves the artwork ahead of the
+    /// session's first one and compiles it, which isn't for the main thread.
+    func startPluginFilter(_ filter: PluginInfo) {
+        guard currentTakesChanges() else { return }
+        _ = switchModes(.adjustment)
+        panel = .none
+        let session = session
+        let dir = dir
+        let id = filter.id
+        let plugins = PluginsModel.shared.store
+        Task { @MainActor in
+            let why = await Task.detached(priority: .userInitiated) {
+                session.pluginFilterStart(plugins: plugins, id: id, savedIn: dir)
+            }.value
+            if let why {
+                showNotice(why, warning: true)
+            }
+            adjustModesOpen = false
+            liquifyPopup = 0
+            readAdjust()
+            refresh()
+            // stopped already: no panel comes up to look for that
+            if adjustment == nil, let failure = session.takeFailure() {
+                showNotice(failure, warning: true)
+            }
         }
     }
 
@@ -1869,12 +1898,27 @@ final class CanvasModel {
 
     // MARK: keeping the artwork
 
-    /// Watches for a failed autosave: told once, until a save succeeds again.
+    /// Watches for a failed autosave, told once until a save succeeds again, and for what stops away
+    /// from any touch: a patch or a smudge the GPU had no memory for, or its device lost. A patch's
+    /// card says so too, once its page reads the list again.
     private func watchSaves() {
         let session = session
         saveWatch = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            guard let reason = session.takeSaveFailure() else { return }
-            self?.saveFailed(reason)
+            // off the main thread: a big artwork's first frame holds the session a while
+            DispatchQueue.global(qos: .utility).async {
+                let reason = session.takeSaveFailure()
+                let failure = session.takeFailure()
+                guard reason != nil || failure != nil else { return }
+                DispatchQueue.main.async {
+                    if let reason {
+                        self?.saveFailed(reason)
+                    }
+                    if let failure {
+                        self?.showNotice(failure, warning: true)
+                        PluginsModel.shared.read()
+                    }
+                }
+            }
         }
     }
 

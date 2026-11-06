@@ -9,13 +9,47 @@ struct AdjustmentsPanel: View {
     let model: CanvasModel
     let arrowX: CGFloat
     private let groups = adjustmentGroups()
+    /// The filters imported: the menu's last group is one row to them, there only with some.
+    private let filters = PluginsModel.shared.store.filters()
+    /// The menu has turned to them.
+    @State private var showFilters = false
+
+    private func row(_ label: String, action: @escaping () -> Void) -> some View {
+        Text(verbatim: label)
+            .font(.system(size: 17))
+            .foregroundStyle(menuText)
+            .lineLimit(1)
+            .padding(.leading, 15)
+            .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: action)
+    }
+
+    private func group<Rows: View>(@ViewBuilder _ rows: () -> Rows) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 13, style: .circular)
+        return VStack(spacing: 0) {
+            rows()
+        }
+        .background(shape.fill(Pc.actionsGroup))
+        .clipShape(shape)
+    }
+
+    private var filterRows: some View {
+        group {
+            row("Adjustments") { showFilters = false }
+            ForEach(filters, id: \.id) { filter in
+                Rectangle().fill(Pc.actionsSeparator).frame(height: 1)
+                row(filter.name) { model.startPluginFilter(filter) }
+            }
+        }
+    }
 
     var body: some View {
         Popover(width: adjustmentsWidth, arrowX: arrowX) {
             VStack(alignment: .leading, spacing: 0) {
                 // a 52 header, the title's capitals from 28.5 below the panel's top; the groups 8
                 // into the list under it
-                Text(verbatim: "Adjustments")
+                Text(verbatim: showFilters ? "Plugins" : "Adjustments")
                     .font(.system(size: 24, weight: .bold))
                     .foregroundStyle(Pc.panelTitle)
                     .lineLimit(1)
@@ -24,6 +58,9 @@ struct AdjustmentsPanel: View {
                     .frame(height: 52, alignment: .topLeading)
                 ScrollView {
                     VStack(spacing: 10) {
+                        if showFilters {
+                            filterRows
+                        } else {
                         ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
                             VStack(spacing: 0) {
                                 ForEach(Array(group.enumerated()), id: \.offset) { i, adjustment in
@@ -44,6 +81,10 @@ struct AdjustmentsPanel: View {
                             }
                             .background(RoundedRectangle(cornerRadius: 13, style: .circular).fill(Pc.actionsGroup))
                             .clipShape(RoundedRectangle(cornerRadius: 13, style: .circular))
+                        }
+                        if !filters.isEmpty {
+                            group { row("Plugins") { showFilters = true } }
+                        }
                         }
                     }
                     .padding(.horizontal, 10)

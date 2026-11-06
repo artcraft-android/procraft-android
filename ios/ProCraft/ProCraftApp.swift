@@ -36,6 +36,8 @@ struct RootView: View {
     @State private var open: CanvasModel?
 
     var body: some View {
+        let interface = Interface.shared
+        let scale = interface.scale
         Group {
             if let open {
                 CanvasScreen(model: open)
@@ -50,6 +52,23 @@ struct RootView: View {
                 }
             }
         }
+        // as measured, none of this does anything: only a patch's size lays out in another window
+        .frame(
+            width: scale == 1 ? nil : interface.window.width / scale,
+            height: scale == 1 ? nil : interface.window.height / scale,
+            alignment: .topLeading
+        )
+        .scaleEffect(scale, anchor: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background {
+            GeometryReader { place in
+                Color.clear.onChange(of: place.size, initial: true) { _, size in
+                    Interface.shared.fit(size)
+                }
+            }
+            .ignoresSafeArea()
+        }
+        .overlay { PluginAlerts() }
         #if DEBUG
         .task { ScreenCapture.start { open = $0 } }
         #endif
@@ -263,6 +282,11 @@ enum ScreenCapture {
         case "adjust-modes":
             model.startAdjustment(.gaussianBlur)
             model.adjustModesOpen = true
+        case "interface-small":
+            Interface.shared.force(0.85)
+        case "interface-large":
+            Interface.shared.force(1.2)
+            model.toggle(.color)
         case "effect-gradient":
             model.startAdjustment(.gradientMap)
         case "effect-gradient-edit":

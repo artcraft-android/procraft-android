@@ -119,7 +119,7 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
 
     func dragInteraction(_ interaction: UIDragInteraction, itemsForBeginning session: any UIDragSession) -> [UIDragItem] {
         guard canStart(), let window = interaction.view else { return [] }
-        let point = session.location(in: window)
+        let point = Interface.shared.point(session.location(in: window))
         guard let entry = model.entries.first(where: { model.cellAt[$0.dir]?.contains(point) == true }) else { return [] }
         let item: UIDragItem
         if case let .artwork(artwork) = entry {
@@ -140,13 +140,14 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
         else { return nil }
         let place = fitted(thumbnailBox(cell), top)
         let view = UIImageView(image: UIImage(contentsOfFile: (top.dir as NSString).appendingPathComponent("thumbnail.png")))
-        view.frame = CGRect(x: 0, y: 0, width: place.width * artworkLifted, height: place.height * artworkLifted)
+        let lifted = artworkLifted * Interface.shared.scale
+        view.frame = CGRect(x: 0, y: 0, width: place.width * lifted, height: place.height * lifted)
         view.backgroundColor = .white
         view.alpha = dragPictureAlpha
         let parameters = UIDragPreviewParameters()
         parameters.backgroundColor = .clear
         parameters.visiblePath = UIBezierPath(roundedRect: view.bounds, cornerRadius: 8)
-        let target = UIDragPreviewTarget(container: window, center: CGPoint(x: place.midX, y: place.midY))
+        let target = UIDragPreviewTarget(container: window, center: Interface.shared.onWindow(CGPoint(x: place.midX, y: place.midY)))
         return UITargetedDragPreview(view: view, parameters: parameters, target: target)
     }
 
@@ -220,7 +221,7 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
 
     /// The scroll view under the grid's middle.
     private func gridScroller(on window: UIView) -> UIScrollView? {
-        var under = window.hitTest(CGPoint(x: model.gridAt.midX, y: model.gridAt.midY), with: nil)
+        var under = window.hitTest(Interface.shared.onWindow(CGPoint(x: model.gridAt.midX, y: model.gridAt.midY)), with: nil)
         while let view = under {
             if let found = view as? UIScrollView {
                 return found
@@ -298,7 +299,7 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
     func dropInteraction(_ interaction: UIDropInteraction, sessionDidUpdate session: any UIDropSession) -> UIDropProposal {
         guard let entry = ownEntry(session) else { return UIDropProposal(operation: .copy) }
         if let window = interaction.view {
-            track(entry, at: session.location(in: window), on: window)
+            track(entry, at: Interface.shared.point(session.location(in: window)), on: window)
         }
         return UIDropProposal(operation: .move)
     }

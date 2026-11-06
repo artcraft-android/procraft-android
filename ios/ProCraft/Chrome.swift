@@ -290,13 +290,11 @@ private var sliderPanelDot: Color { Look.shared.light ? .black : .white }
 private struct SliderPanelView: View {
     let model: CanvasModel
     let which: SliderPanel
-    @Environment(\.displayScale) private var displayScale
-
     var body: some View {
         let size = which == .size
         let value = size ? model.size : model.opacity
         // read again as the size changes
-        let diameter = CGFloat(model.brushScreenDiameter()) / displayScale
+        let diameter = CGFloat(model.brushScreenDiameter()) / model.pixels
         let shape = model.brushOutline()
         let onNotch = model.notchAt(size: size, value: value) != nil
         let ink = sliderPanelDot.opacity(size ? 1 : Double(min(max(value, 0.02), 1)))

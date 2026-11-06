@@ -334,13 +334,13 @@ struct PinchCatcher: UIViewRepresentable {
             switch pinch.state {
             case .began:
                 pinch.scale = 1
-                following = catcher.onBegin(pinch.location(in: nil))
+                following = catcher.onBegin(Interface.shared.point(pinch.location(in: nil)))
             case .changed:
                 // a finger up ends it, though the recognizer waits for the last
                 if pinch.numberOfTouches < 2 {
                     end()
                 } else if following {
-                    catcher.onChange(pinch.scale, pinch.location(in: nil))
+                    catcher.onChange(pinch.scale, Interface.shared.point(pinch.location(in: nil)))
                 }
             case .ended, .cancelled, .failed:
                 end()
