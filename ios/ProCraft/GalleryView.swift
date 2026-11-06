@@ -432,6 +432,7 @@ struct GalleryView: View {
                         grid(screen.size)
                     }
                 }
+                .padding(.top, Interface.shared.statusBar)
                 .blur(radius: renamed ? renameBlur : 0)
                 .animation(.easeInOut(duration: renamed ? 0.3 : 0.15), value: renamed)
                 overlays(screen.size)

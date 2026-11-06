@@ -35,39 +35,50 @@ struct OpenArtwork {
 struct RootView: View {
     @State private var open: CanvasModel?
 
+    @ViewBuilder private var screens: some View {
+        if let open {
+            CanvasScreen(model: open)
+                .statusBarHidden()
+                .persistentSystemOverlays(.hidden)
+                .defersSystemGestures(on: .all)
+        } else {
+            GalleryView { artwork in
+                let model = CanvasModel(session: artwork.session, dir: artwork.dir)
+                model.onClose = { self.open = nil }
+                self.open = model
+            }
+        }
+    }
+
     var body: some View {
         let interface = Interface.shared
         let scale = interface.scale
-        Group {
-            if let open {
-                CanvasScreen(model: open)
-                    .statusBarHidden()
-                    .persistentSystemOverlays(.hidden)
-                    .defersSystemGestures(on: .all)
-            } else {
-                GalleryView { artwork in
-                    let model = CanvasModel(session: artwork.session, dir: artwork.dir)
-                    model.onClose = { self.open = nil }
-                    self.open = model
-                }
-            }
-        }
-        // as measured, none of this does anything: only a patch's size lays out in another window
-        .frame(
-            width: scale == 1 ? nil : interface.window.width / scale,
-            height: scale == 1 ? nil : interface.window.height / scale,
-            alignment: .topLeading
-        )
-        .scaleEffect(scale, anchor: .topLeading)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background {
+        let sized = scale != 1
+        ZStack(alignment: .topLeading) {
+            // the window as it is offered, beside the screens and not around them: read from what
+            // they lay out in, a size under 1 would make them bigger, and that bigger again
             GeometryReader { place in
                 Color.clear.onChange(of: place.size, initial: true) { _, size in
                     Interface.shared.fit(size)
                 }
             }
             .ignoresSafeArea()
+            // as measured, none of this does anything: only a patch's size lays out in another window
+            screens
+                .frame(
+                    width: sized ? interface.window.width / scale : nil,
+                    height: sized ? interface.window.height / scale : nil,
+                    alignment: .topLeading
+                )
+                .scaleEffect(scale, anchor: .topLeading)
+                // scaled, they hang from the corner of the window, whatever size they were laid out
+                .frame(
+                    width: sized ? interface.window.width : nil,
+                    height: sized ? interface.window.height : nil,
+                    alignment: .topLeading
+                )
         }
+        .ignoresSafeArea(.container, edges: sized ? .all : [])
         .overlay { PluginAlerts() }
         #if DEBUG
         .task { ScreenCapture.start { open = $0 } }
@@ -353,6 +364,9 @@ enum ScreenCapture {
             if let filter = PluginsModel.shared.store.filters().first {
                 model.startPluginFilter(filter)
             }
+        case "interface-again":
+            // brought back at the size it was left at, nothing else asked of it
+            break
         case "interface-small":
             sized(0.85)
         case "interface-large":

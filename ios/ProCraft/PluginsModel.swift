@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 
 /// How big the interface shows, as a patch says (1: as measured). SwiftUI has no density to turn,
 /// so the screens are laid out in a window smaller or larger by this and scaled to fill the real
@@ -23,8 +24,18 @@ final class Interface {
     }
 
     func fit(_ size: CGSize) {
-        window = size
+        if size != window {
+            window = size
+        }
         ask()
+    }
+
+    /// What the status bar takes from the top of a screen that shows it, in the interface's points.
+    /// None as measured: the safe area sees to it, which a size of a patch's lays out past.
+    var statusBar: CGFloat {
+        guard scale != 1 else { return 0 }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        return (scenes.first?.keyWindow?.safeAreaInsets.top ?? 0) / scale
     }
 
     /// A place on the window, in the interface's points.

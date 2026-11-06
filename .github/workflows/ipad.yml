@@ -174,7 +174,7 @@ jobs:
           shelf="gallery-select gallery-swipe gallery-new gallery-formats gallery-rename gallery-custom gallery-custom-colour gallery-preview gallery-preview-controls gallery-pinch gallery-drag gallery-more gallery-about gallery-recovery"
           # the patches stay applied from one launch to the next: what they scale goes last
           plugged="prefs-patches prefs-plugins plugin-offer adjust-plugins effect-plugin prefs-patch-on"
-          fitted="reference reference-bars reference-image interface-small interface-large"
+          fitted="reference reference-bars reference-image interface-large interface-small gallery-sized interface-again"
           for screen in gallery canvas brushes layers colors actions adjustments $studio $over $source $library $layers $colours $settings $adjusting $quick $tools $shelf $plugged $fitted; do
             SIMCTL_CHILD_CAPTURE_PLUGINS="$PWD/packed" xcrun simctl launch --terminate-running-process "$device" io.github.artcraftandroid.procraft -screen "$screen"
             sleep 10
