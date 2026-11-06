@@ -2430,7 +2430,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         // a model is lit by the environment it was last lit by, else the default
         if (model != null) chooseEnvironment(s.modelEnvironment()?.takeIf { it in ENVIRONMENTS } ?: DEFAULT_ENVIRONMENT)
         // brush files that came while no canvas was open
-        addPendingBrushes(s)
+        addPendingBrushes()
         pushSecondary()
         artworkDir = dir
         applyFitInsets()
@@ -4218,22 +4218,32 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Whether a file named [name] holds another app's brushes (see [OTHER_BRUSH_EXTENSIONS]). */
     private fun isOtherBrushFile(name: String) = OTHER_BRUSH_EXTENSIONS.any { name.endsWith(".$it", ignoreCase = true) }
 
-    /** Brush files kept while no canvas was open, added now. */
-    private fun addPendingBrushes(s: CanvasSession) {
-        val files = pendingBrushDir.listFiles()?.sortedBy { it.name } ?: return
-        var any = false
-        for (f in files) {
-            // another app's (kept as .abr by earlier versions)
-            val other = f.name.endsWith(".other") || f.name.endsWith(".abr")
-            runCatching { if (other) s.importOtherBrushes(f.readBytes(), f.nameWithoutExtension.substringAfter('-')) else s.importBrushes(f.readBytes()) }.getOrNull()?.let {
-                shownSet = it.toInt()
-                any = true
+    /** The reading of the files kept for a canvas, while it goes on. */
+    private var pendingBrushesReading: Job? = null
+
+    /**
+     * Brush files kept while no canvas was open, each joining the library once read: off the main
+     * thread, as a big set takes seconds. A file stays for the next canvas if this one closes first.
+     */
+    private fun addPendingBrushes() {
+        if (pendingBrushesReading?.isActive == true) return
+        pendingBrushesReading = viewModelScope.launch {
+            var any = false
+            while (session != null) {
+                val f = withContext(Dispatchers.IO) { pendingBrushDir.listFiles()?.minByOrNull { it.name } } ?: break
+                val read = withContext(Dispatchers.Default) {
+                    // named after the set, for another app's (kept as .abr by earlier versions)
+                    runCatching { io.github.artcraftandroid.procraft.core.readBrushes(f.readBytes(), f.name.substringAfter('-')) }.getOrNull()
+                }
+                if (session == null) break
+                read?.let {
+                    brushesRead += it
+                    addBrushesRead()
+                    any = true
+                }
+                withContext(Dispatchers.IO) { f.delete() }
             }
-            f.delete()
-        }
-        if (any) {
-            libraryChanged()
-            message = "Brushes added to the library."
+            if (any) message = "Brushes added to the library."
         }
     }
 
@@ -4489,7 +4499,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun readStudioSources() {
         val s = session ?: return
-        val images = SourceKind.entries.mapNotNull { k -> sourceBitmap(s.studioSource(k), shape = k == SourceKind.SHAPE)?.let { k to it } }
+        val images = SourceKind.entries.mapNotNull { k -> sourceBitmap(s.studioSourcePicture(k), shape = k == SourceKind.SHAPE)?.let { k to it } }
         studioSources = images.associate { (k, b) -> k to small(b, SOURCE_ROW_PX) }
         studioSourcesBig = images.associate { (k, b) -> k to small(b, SOURCE_BOX_PX) }
     }
@@ -4514,7 +4524,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** The image the studio brush's [kind] of source uses now: square greyscale, white = paint; empty for the round tip, no grain or the amount all over. */
-    fun studioSourcePixels(kind: SourceKind): ByteArray = session?.studioSource(kind) ?: ByteArray(0)
+    fun studioSourcePixels(kind: SourceKind): ByteArray = session?.studioSourcePicture(kind) ?: ByteArray(0)
+
+    /** A source image at the size a brush always holds, quick enough to make repeat as a slider moves. */
+    fun smallSource(pixels: ByteArray): ByteArray = io.github.artcraftandroid.procraft.core.smallSource(pixels)
 
     /** [pixels] made to repeat without seams (the grain editor's Auto repeat). */
     fun repeatSource(pixels: ByteArray, scale: Float, rotation: Float, overlap: Float, hardness: Float, mirror: Boolean, pyramid: Boolean): ByteArray =
@@ -4569,7 +4582,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
             message = "This picture can't be opened."
             return null
         }
-        return sourceFrom(bitmap)
+        return withContext(Dispatchers.Default) { sourceFrom(bitmap) }
     }
 
     /** A picture on the clipboard as a source image; none if there isn't one. */

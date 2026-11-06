@@ -1,7 +1,7 @@
 //! The canvas on a real GPU (skipped where the machine has none).
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
-use procraft_engine::brush::{Brush, Rendering, Taper};
+use procraft_engine::brush::{Brush, Rendering, Shape, Source, Taper};
 use procraft_engine::document::Document;
 use procraft_engine::geom::{Homography, Vec2};
 use procraft_engine::input::{Pointer, Sample};
@@ -2662,6 +2662,224 @@ fn wet_paint_runs_out_with_the_path_not_with_how_far_jitter_threw_its_stamps() {
     };
     let (kept, thrown) = (far_end(0.0), far_end(8.0));
     assert!(kept.abs_diff(thrown) < 10, "{kept} {thrown}");
+}
+
+/// Stripes four texels wide over an image 1024 a side, and a brush with the same at the size of
+/// the brush images, where four pixels are one texel.
+fn striped_shape() -> (Vec<u8>, Brush) {
+    let side = 1024usize;
+    let stripes = (0..side * side).map(|i| if (i % side / 4).is_multiple_of(2) { 255 } else { 0 }).collect();
+    let small = (0..TEXTURE_SIZE * TEXTURE_SIZE).map(|i| if i.is_multiple_of(2) { 255 } else { 0 }).collect();
+    let shape = Shape { source: Source::new(small), ..Shape::default() };
+    (stripes, Brush { shape, ..Brush::round_pen() })
+}
+
+/// How many of a row's pixels are neither paint nor bare: a magnified shape's blur.
+fn in_between(values: impl Iterator<Item = u8>) -> usize {
+    values.filter(|a| (40..215).contains(a)).count()
+}
+
+#[test]
+fn a_shape_at_its_own_size_stays_sharp_where_the_brush_images_would_be_magnified() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let (stripes, brush) = striped_shape();
+    let row = |wet_pull: Option<f32>, own: bool| {
+        let mut doc = Document::new(1100, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let mut style = StrokeStyle { wet_pull, ..style(StrokeTool::Paint, 1.0) };
+        canvas.use_sources(&gpu, &mut style, &brush);
+        if own {
+            canvas.use_full_shape(&gpu, &mut style, 7, 1024, &stripes);
+        }
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(550.0, 32.0), 512.0, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        in_between((200..900).map(|x| pixel(&layer, 1100, x, 32)[3]))
+    };
+    // laid by the stamp pipeline, and wet
+    for wet_pull in [None, Some(0.5)] {
+        let (sharp, magnified) = (row(wet_pull, true), row(wet_pull, false));
+        assert!(magnified > 300 && sharp * 3 < magnified, "{wet_pull:?}: {sharp} {magnified}");
+    }
+}
+
+#[test]
+fn a_shape_at_its_own_size_lays_as_the_brush_images_do_where_they_hold_enough() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // the same picture at both sizes, each texel of the small one four of the big one's a side:
+    // squares that a stamp of any size here reads through its mip levels and its coarsest
+    let n = TEXTURE_SIZE;
+    let small: Vec<u8> = (0..n * n).map(|i| if (i % n / 8 + i / n / 8).is_multiple_of(2) { 255 } else { 40 }).collect();
+    let side = n * 4;
+    let big: Vec<u8> = (0..side * side).map(|i| small[(i / side / 4) * n + i % side / 4]).collect();
+    let brush = Brush { shape: Shape { source: Source::new(small), ..Shape::default() }, ..Brush::round_pen() };
+    let row = |wet_pull: Option<f32>, radius: f32, cap: f32, own: bool| {
+        let mut doc = Document::new(256, 256);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let mut style = StrokeStyle { wet_pull, shape_lod_cap: cap, ..style(StrokeTool::Paint, 1.0) };
+        canvas.use_sources(&gpu, &mut style, &brush);
+        if own {
+            canvas.use_full_shape(&gpu, &mut style, 7, side as u32, &big);
+        }
+        canvas.begin_stroke(doc.current(), style);
+        canvas.add_stamps(&[Stamp::round(Vec2::new(128.0, 128.0), radius, 1.0)]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (0..256).map(|x| pixel(&layer, 256, x, 128)[3]).collect::<Vec<u8>>()
+    };
+    // (both coarsest levels, and from stamps the cap holds to ones read near the images' full size)
+    for wet_pull in [None, Some(0.5)] {
+        for cap in [4.0, 5.0] {
+            for radius in [3.0, 10.0, 40.0, 100.0] {
+                let (own, shipped) = (row(wet_pull, radius, cap, true), row(wet_pull, radius, cap, false));
+                let most = own.iter().zip(&shipped).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+                assert!(shipped.iter().any(|&a| a > 0) && most <= 6, "{wet_pull:?} {cap} {radius}: {most}");
+            }
+        }
+    }
+    // and as a predicted tail, which reads it for itself
+    let (w, h) = (256u32, 256u32);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let predicted = |radius: f32, own: bool| {
+        let mut doc = Document::new(w, h);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        let mut style = style(StrokeTool::Paint, 1.0);
+        canvas.use_sources(&gpu, &mut style, &brush);
+        if own {
+            canvas.use_full_shape(&gpu, &mut style, 7, side as u32, &big);
+        }
+        canvas.begin_stroke(doc.current(), style);
+        canvas.set_prediction(&[Stamp::round(Vec2::new(128.0, 128.0), radius, 1.0)]);
+        canvas.render(
+            &gpu,
+            &mut doc,
+            Some(Target {
+                view: &view,
+                format,
+                size: (w, h),
+                to_screen: View::fit((w, h), (w, h)).to_screen(),
+                surround: [0.0; 3],
+                grid: None,
+                selection: None,
+                backdrop: None,
+                convert: None,
+                lut: None,
+                crisp_from: f32::INFINITY,
+                grey: false,
+            }),
+        );
+        let px = read(&gpu, &target, w, h);
+        canvas.end_stroke();
+        (0..w).map(|x| pixel(&px, w, x, 128)[0]).collect::<Vec<u8>>()
+    };
+    for radius in [10.0, 40.0, 100.0] {
+        let (own, shipped) = (predicted(radius, true), predicted(radius, false));
+        let most = own.iter().zip(&shipped).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+        assert!(most <= 6, "predicted {radius}: {most}");
+    }
+}
+
+#[test]
+fn a_smudge_goes_by_a_shape_at_its_own_size() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let (stripes, brush) = striped_shape();
+    let row = |own: bool| {
+        let mut doc = Document::new(1100, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        // paint to the left of the middle, none to the right, and the first stamp carries it over
+        canvas.begin_stroke(doc.current(), style(StrokeTool::Paint, 1.0));
+        let along = (0..55).map(|i| Stamp::round(Vec2::new(i as f32 * 10.0, 32.0), 40.0, 1.0)).collect::<Vec<_>>();
+        canvas.add_stamps(&along);
+        canvas.end_stroke();
+        let mut smudge = style(StrokeTool::Smudge, 1.0);
+        smudge.pull = 1.0;
+        canvas.use_sources(&gpu, &mut smudge, &brush);
+        if own {
+            canvas.use_full_shape(&gpu, &mut smudge, 7, 1024, &stripes);
+        }
+        canvas.begin_stroke(doc.current(), smudge);
+        canvas.add_stamps(&[
+            Stamp::round(Vec2::new(300.0, 32.0), 512.0, 1.0),
+            Stamp::round(Vec2::new(800.0, 32.0), 512.0, 1.0),
+        ]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        (600..1000).map(|x| pixel(&layer, 1100, x, 32)[3]).collect::<Vec<u8>>()
+    };
+    let (sharp, magnified) = (row(true), row(false));
+    // the paint carried over shows through the shape, stripes and all
+    assert!(sharp.iter().any(|&a| a > 200) && sharp.iter().any(|&a| a < 40), "{sharp:?}");
+    let (a, b) = (in_between(sharp.iter().copied()), in_between(magnified.iter().copied()));
+    assert!(a * 2 < b, "{a} {b}");
+}
+
+#[test]
+fn a_predicted_tail_shows_a_shape_at_its_own_size() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    let (stripes, brush) = striped_shape();
+    let (w, h) = (1100u32, 64u32);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let mut doc = Document::new(w, h);
+    let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+    let mut style = style(StrokeTool::Paint, 1.0);
+    canvas.use_sources(&gpu, &mut style, &brush);
+    canvas.use_full_shape(&gpu, &mut style, 7, 1024, &stripes);
+    canvas.begin_stroke(doc.current(), style);
+    canvas.set_prediction(&[Stamp::round(Vec2::new(550.0, 32.0), 512.0, 1.0)]);
+    canvas.render(
+        &gpu,
+        &mut doc,
+        Some(Target {
+            view: &view,
+            format,
+            size: (w, h),
+            to_screen: View::fit((w, h), (w, h)).to_screen(),
+            surround: [0.0; 3],
+            grid: None,
+            selection: None,
+            backdrop: None,
+            convert: None,
+            lut: None,
+            crisp_from: f32::INFINITY,
+            grey: false,
+        }),
+    );
+    let px = read(&gpu, &target, w, h);
+    let row: Vec<u8> = (200..900).map(|x| pixel(&px, w, x, 32)[0]).collect();
+    // on white, black paint in stripes: both, as the shape has them, and not the first brush image
+    let (paint, bare) = (row.iter().filter(|&&v| v < 40).count(), row.iter().filter(|&&v| v > 215).count());
+    assert!(paint > 200 && bare > 200, "{paint} {bare}");
+    canvas.end_stroke();
 }
 
 #[test]
