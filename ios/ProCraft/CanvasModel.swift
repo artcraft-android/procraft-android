@@ -1319,6 +1319,21 @@ final class CanvasModel {
     /// What was cut or copied, on a new layer; a private one is left out of the gallery's thumbnail.
     func paste(isPrivate: Bool = false) {
         guard let image = clipboard else { return }
+        // through a patch it takes a moment on a big canvas: the screen doesn't wait for it
+        if !isPrivate, session.pastesIntoMask() {
+            closePanels()
+            let session = session
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let pasted = session.paste(image: image)
+                DispatchQueue.main.async {
+                    if pasted == nil {
+                        self?.noRoomForLayers()
+                    }
+                    self?.refresh()
+                }
+            }
+            return
+        }
         if (isPrivate ? session.pastePrivate(image: image) : session.paste(image: image)) == nil {
             noRoomForLayers()
         }

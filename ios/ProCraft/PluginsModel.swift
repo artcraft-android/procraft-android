@@ -29,7 +29,12 @@ final class Interface {
         if size != window {
             window = size
         }
+        let was = scale
         ask()
+        // a patch may fit itself to the window: what hit-tests the canvas's handles goes with it
+        if scale != was {
+            PluginsModel.shared.onChange()
+        }
     }
 
 
