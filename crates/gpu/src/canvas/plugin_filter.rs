@@ -850,6 +850,8 @@ mod tests {
         assert!(cost.unwrap() > 400, "{cost:?}");
     }
 
+    // Apple's systems have no OpenGL, so no GLSL writer to read it from
+    #[cfg(not(target_vendor = "apple"))]
     #[test]
     fn the_same_code_goes_to_each_backend_with_its_loops_paying() {
         use naga::back::glsl;
