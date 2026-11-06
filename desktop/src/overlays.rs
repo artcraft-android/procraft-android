@@ -524,7 +524,8 @@ fn icon(kind: QuickShapeKind) -> &'static icons::Icon {
 /// as the strokes turn them: with the canvas, unless the brush is oriented to the screen; and, for a
 /// brush that follows the pen, as the pen near the window leans (its azimuth). The barrel's roll
 /// turns the stamps from where it was as a stroke begins, so a stroke's first stamp is as the
-/// outline shows it however the barrel is turned.
+/// outline shows it however the barrel is turned; but with absolute barrel rotation (Prefs) the
+/// stamps turn as the barrel is, so the outline turns with it too.
 fn cursor_turn(session: &CanvasSession) -> f32 {
     let setting = |key: &str| session.current_brush_setting(key.into());
     let mut turn = 0.0;
@@ -534,6 +535,12 @@ fn cursor_turn(session: &CanvasSession) -> f32 {
     }
     if let Some(azimuth) = crate::pen::azimuth().filter(|_| setting("input_style") >= 0.5) {
         turn += azimuth;
+    }
+    if setting("input_style") >= 1.5
+        && session.absolute_barrel_roll()
+        && let Some(roll) = crate::pen::barrel_roll()
+    {
+        turn += roll;
     }
     turn
 }

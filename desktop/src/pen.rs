@@ -104,6 +104,12 @@ pub fn azimuth() -> Option<f32> {
     Some(lean(id).map_or(0.0, |(_, towards)| towards))
 }
 
+/// The barrel roll of the pen near the window (radians), if a pen is near and gives one.
+pub fn barrel_roll() -> Option<f32> {
+    let id = (*LATEST.lock().ok()?)?;
+    roll(id)
+}
+
 /// Pointer `id`'s lean and roll as they now are; it is the pen last heard from.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn keep_pose(id: u64, lean: (f32, f32), roll: Option<f32>) {

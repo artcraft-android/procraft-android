@@ -254,7 +254,8 @@ impl State {
         // the outline is the path: nothing smooths it, or round its corners
         let mut builder = StrokeBuilder::with_seed(old.brush().clone(), old.diameter(), old.pointer(), 0x5eed_1234)
             .scaled(self.brush_scale())
-            .exact_path();
+            .exact_path()
+            .roll_absolutely(old.rolls_absolutely());
         // an ellipse goes where the stroke went, each of its points taken onto it: a stroke that
         // didn't close stays open there, as drawn, rather than meeting itself in a seam
         let outline = match edit.shape.kind {
@@ -550,8 +551,11 @@ impl CanvasSession {
         let scale = st.brush_scale();
         let stroke = last.laid_again(last.samples.clone());
         let along = StrokeAlong::of(&last.samples, last.pace);
-        st.stroke =
-            Some(StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), 0x5eed_1234).scaled(scale));
+        st.stroke = Some(
+            StrokeBuilder::with_seed(last.brush, last.diameter, last.pointer.into(), 0x5eed_1234)
+                .scaled(scale)
+                .roll_absolutely(st.input.absolute_roll),
+        );
         st.second = None;
         st.shape = Some(ShapeEdit::new(first, choices, last.drawn, along, None, stroke));
         st.draw_shape();

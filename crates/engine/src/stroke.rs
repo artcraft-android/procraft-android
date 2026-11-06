@@ -782,7 +782,9 @@ pub struct StrokeBuilder {
     /// How far the canvas is turned on screen, for a brush whose shapes keep to the screen.
     screen_turn: f32,
     /// The brush's input style is azimuth and barrel roll: its stamps turn as the pen's barrel
-    /// does, from how it was turned as the stroke began.
+    /// does, from how it was turned as the stroke began; or, with the app's absolute barrel
+    /// rotation, as the barrel is turned from its zero (a turn chosen before the stroke, and held,
+    /// kept).
     roll_turns: bool,
     roll_from: Option<f32>,
     /// Screen points a canvas pixel spans, for the speed dynamics.
@@ -832,6 +834,10 @@ pub struct InputSettings {
     /// Motion filtering keeps the stroke's end on the pen; off, the end falls short of it as much
     /// as the filter smooths.
     pub tip_attached: bool,
+    /// A brush turned by the pen's barrel turns its stamps as the barrel is turned (from its
+    /// zero), not as far as it has turned since the stroke began: a turn chosen while hovering and
+    /// held comes through. The brushes themselves are as they were.
+    pub absolute_roll: bool,
 }
 
 impl Default for InputSettings {
@@ -844,6 +850,7 @@ impl Default for InputSettings {
             pressure_curve: Curve::linear(),
             speed_distance: 1.0,
             tip_attached: true,
+            absolute_roll: false,
         }
     }
 }
@@ -873,8 +880,25 @@ impl StrokeBuilder {
     pub fn with_input(mut self, input: InputSettings) -> StrokeBuilder {
         // the stronger of the app's and the brush's
         self.extras.stabilization = self.extras.stabilization.max(input.stabilization.clamp(0.0, 1.0));
+        let absolute = input.absolute_roll;
         self.input = input;
+        self.roll_absolutely(absolute)
+    }
+
+    /// With `on`, a brush turned by the barrel turns its stamps as the barrel is turned (from its
+    /// zero), not from where the stroke's first sample has it; for a stroke not begun yet.
+    pub fn roll_absolutely(mut self, on: bool) -> StrokeBuilder {
+        self.input.absolute_roll = on;
+        // off, the turn the stroke begins at is taken as it begins
+        if self.roll_turns && self.last_sample.is_none() {
+            self.roll_from = on.then_some(0.0);
+        }
         self
+    }
+
+    /// Whether its stamps turn as the barrel is turned ([`Self::roll_absolutely`]).
+    pub fn rolls_absolutely(&self) -> bool {
+        self.input.absolute_roll
     }
 
     /// The stroke drawn on a canvas turned `rotation` radians on screen: a brush oriented to the
@@ -1247,7 +1271,8 @@ impl StrokeBuilder {
         self.pressure = Some(pressure);
         let (tilt, azimuth) = if pen { (s.tilt, s.azimuth) } else { (0.0, 0.0) };
         let roll = if pen && s.roll.is_finite() { s.roll } else { 0.0 };
-        // a brush turned by the barrel turns from where it was as the stroke began
+        // a brush turned by the barrel turns from where it was as the stroke began (unless it turns
+        // as the barrel is, its zero already taken)
         if self.roll_turns && self.roll_from.is_none() {
             self.roll_from = Some(roll);
         }
@@ -3983,6 +4008,53 @@ mod tests {
         // the azimuth alone, or a finger: no turn
         assert_eq!(angles(1.0, Pointer::Stylus), (Some(0.0), Some(0.0)));
         assert_eq!(angles(2.0, Pointer::Finger), (Some(0.0), Some(0.0)));
+    }
+
+    #[test]
+    fn absolute_barrel_rotation_keeps_the_turn_the_barrel_has() {
+        use std::f32::consts::{FRAC_PI_2, PI, TAU};
+        // angles a whole turn apart are the same
+        let near = |a: Option<f32>, b: f32| {
+            a.is_some_and(|a| {
+                let d = (a - b).rem_euclid(TAU);
+                d.min(TAU - d) < 0.05
+            })
+        };
+        // a stroke's first and last stamps, the barrel turned `from` as it begins and `to` as it
+        // ends (no azimuth, scatter, following or canvas turn)
+        let stroke = |style: f32, absolute: bool, pointer: Pointer, from: f32, to: f32| {
+            let mut b = plain();
+            b.set_setting("input_style", style);
+            let input = InputSettings { absolute_roll: absolute, ..InputSettings::default() };
+            let mut s = StrokeBuilder::new(b, 10.0, pointer).with_input(input);
+            let samples: Vec<Sample> = (0..=20u8)
+                .map(|i| {
+                    let at = Sample::at(Vec2::new(f32::from(i) * 5.0, 0.0), 1.0, f64::from(i) * 8.0);
+                    Sample { roll: from + (to - from) * f32::from(i) / 20.0, ..at }
+                })
+                .collect();
+            s.add(&samples);
+            let stamps = s.finish();
+            (stamps.first().map(|s| s.angle), stamps.last().map(|s| s.angle))
+        };
+        // a turn chosen before the stroke and held: every stamp has it, the first too
+        let (first, last) = stroke(2.0, true, Pointer::Stylus, FRAC_PI_2, FRAC_PI_2);
+        assert!(near(first, FRAC_PI_2) && near(last, FRAC_PI_2), "{first:?} {last:?}");
+        // the next stroke at that turn keeps it too, and one at another turn differs by as much
+        let again = stroke(2.0, true, Pointer::Stylus, FRAC_PI_2, FRAC_PI_2).0;
+        assert!(near(again, FRAC_PI_2), "{again:?}");
+        let half = stroke(2.0, true, Pointer::Stylus, PI, PI).0;
+        assert!(near(half.zip(again).map(|(h, q)| h - q), FRAC_PI_2), "{half:?} {again:?}");
+        // turned during the stroke: as the barrel is, not as far as it turned
+        let (first, last) = stroke(2.0, true, Pointer::Stylus, 1.0, 1.0 + FRAC_PI_2);
+        assert!(near(first, 1.0) && near(last, 1.0 + FRAC_PI_2), "{first:?} {last:?}");
+        // off: from the turn the stroke began at, as before
+        let (first, last) = stroke(2.0, false, Pointer::Stylus, 1.0, 1.0 + FRAC_PI_2);
+        assert!(near(first, 0.0) && near(last, FRAC_PI_2), "{first:?} {last:?}");
+        // without barrel roll as the input style, or from a finger: no turn
+        assert_eq!(stroke(1.0, true, Pointer::Stylus, FRAC_PI_2, FRAC_PI_2), (Some(0.0), Some(0.0)));
+        assert_eq!(stroke(0.0, true, Pointer::Stylus, FRAC_PI_2, FRAC_PI_2), (Some(0.0), Some(0.0)));
+        assert_eq!(stroke(2.0, true, Pointer::Finger, FRAC_PI_2, FRAC_PI_2), (Some(0.0), Some(0.0)));
     }
 
     #[test]
