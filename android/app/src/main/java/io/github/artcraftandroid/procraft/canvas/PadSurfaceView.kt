@@ -41,7 +41,7 @@ class PadSurfaceView(context: Context, private val vm: CanvasViewModel) : Surfac
         if (id == 0L) return
         try {
             pad.attachWindow(id.toULong(), width.toUInt(), height.toUInt())
-            pad.setDisplayScale(resources.displayMetrics.density)
+            pad.setDisplayScale(resources.displayMetrics.density * vm.interfaceShown)
             attached = true
             // uncovered once it has drawn a frame of its own
             uncoverWhenDrawn(pad)

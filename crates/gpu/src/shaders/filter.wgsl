@@ -385,12 +385,21 @@ fn fs_balance(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     return kept(i, vec4<f32>(out * c.a, c.a));
 }
 
-// liquify: the copy from as far back as the field's offsets say, a.x of them
+// liquify: the copy from as far away as the field says, a.x of it; the field is a.yz of the canvas
+// across and down, read between its pixels
 @fragment
 fn fs_liquified(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let i = vec2<i32>(pos.xy);
-    let offset = textureLoad(table, i, 0).xy * fu.a.x;
-    return kept(i, textureSampleLevel(src, smp, (pos.xy - offset) / fu.size.xy, 0.0));
+    let last = vec2<i32>(textureDimensions(table)) - 1;
+    let at = pos.xy * fu.a.yz - 0.5;
+    let below = floor(at);
+    let t = at - below;
+    let a = clamp(vec2<i32>(below), vec2<i32>(0), last);
+    let b = clamp(vec2<i32>(below) + 1, vec2<i32>(0), last);
+    let top = mix(textureLoad(table, a, 0).xy, textureLoad(table, vec2<i32>(b.x, a.y), 0).xy, t.x);
+    let bottom = mix(textureLoad(table, vec2<i32>(a.x, b.y), 0).xy, textureLoad(table, b, 0).xy, t.x);
+    let offset = mix(top, bottom, t.y) * fu.a.x;
+    return kept(i, textureSampleLevel(src, smp, (pos.xy + offset) / fu.size.xy, 0.0));
 }
 
 // clone: the copy from a.xy (pixels) away

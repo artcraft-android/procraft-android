@@ -55,6 +55,13 @@ impl Bar {
 /// The colour button's brightness under which it is ringed on the dark bar.
 const DARK_RING_BELOW: f32 = 0.35;
 
+/// Adds `rect` (points, its corners `corner`) to `glass`: frost, or a window (window pixels: left,
+/// top, right, bottom, corner, how much shows).
+pub fn frost(glass: &mut Vec<f32>, rect: Rect, corner: f32, ppp: f32) {
+    glass.extend([rect.left(), rect.top(), rect.right(), rect.bottom(), corner].map(|v| v * ppp));
+    glass.push(1.0);
+}
+
 /// The bar across the top of the canvas: artwork actions on the left, painting tools on the right.
 pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, brightness: f32, lit: &Lit) -> Bar {
     let mut bar = Bar::default();
@@ -198,8 +205,8 @@ const SLIDER_PANEL_INK: Themed = Themed(0xFFF0F0F0, 0xFF393939);
 
 impl SideBar {
     /// The side bar against the window's left edge (the right one, `right`-handed: everything
-    /// mirrored but the glyphs); a slider's panel adds its frost to `backdrops` (window pixels:
-    /// left, top, right, bottom, corner, how much shows).
+    /// mirrored but the glyphs); it and a slider's panel add their frost to `backdrops`, and its
+    /// slider tracks their thin glass to `windows` (see [`frost`]).
     #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
@@ -210,6 +217,7 @@ impl SideBar {
         modify_lit: bool,
         right: bool,
         backdrops: &mut Vec<f32>,
+        windows: &mut Vec<f32>,
     ) -> SideTaps {
         let mut taps = SideTaps::default();
         let ctx = ui.ctx().clone();
@@ -227,6 +235,17 @@ impl SideBar {
         let x = |left: f32, width: f32| if right { pc::SIDE_BAR_WIDTH - left - width } else { left };
         let at = |l: f32, y: f32, w: f32, h: f32| Rect::from_min_size(bar.min + vec2(x(l, w), y), vec2(w, h));
         let tracks = [(Slider::Size, SIZE_TRACK_TOP, info.size), (Slider::Opacity, opacity_top, info.opacity)];
+        // its frost goes past the window's edge, so that side's corners are square
+        let ppp = ctx.pixels_per_point();
+        let past = if right {
+            bar.with_max_x(bar.right() + pc::SIDE_BAR_CORNER)
+        } else {
+            bar.with_min_x(bar.left() - pc::SIDE_BAR_CORNER)
+        };
+        frost(backdrops, past, pc::SIDE_BAR_CORNER, ppp);
+        for (_, y, _) in tracks {
+            frost(windows, at(SLIDER_LEFT, y, pc::SLIDER_WIDTH, track_height), pc::SLIDER_CORNER, ppp);
+        }
         egui::Area::new(egui::Id::unique("side bar")).fixed_pos(bar.min).order(egui::Order::Middle).show(&ctx, |ui| {
             ui.set_min_size(bar.size());
             // translucent, with windows where the slider tracks are: they show what is behind
@@ -427,8 +446,7 @@ fn slider_panel(
     let mut toggled = false;
     let ppp = ctx.pixels_per_point();
     let corner = 22.0;
-    backdrops.extend([rect.left(), rect.top(), rect.right(), rect.bottom(), corner].map(|v| v * ppp));
-    backdrops.push(1.0);
+    frost(backdrops, rect, corner, ppp);
     egui::Area::new(egui::Id::unique("slider panel")).fixed_pos(rect.min).order(egui::Order::Foreground).show(
         ctx,
         |ui| {

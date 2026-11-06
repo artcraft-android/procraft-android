@@ -1,6 +1,7 @@
 //! The reference window's picture (the canvas, or a picture imported): fitted whole into the
-//! window, then zoomed and moved there by two fingers, a view of its own apart from the canvas's;
-//! and which of its pixels is under a point in the window, for its eyedropper.
+//! window (all of it: the window's bars lie over the picture), then moved there by a finger and
+//! zoomed by two, a view of its own apart from the canvas's; and which of its pixels is under a
+//! point in the window, for its eyedropper.
 
 /// How a picture sits in the reference window: its zoom past fitting whole (1 fits it), and how
 /// far its middle is from the window's (window pixels).

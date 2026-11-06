@@ -12,6 +12,7 @@ mod sphere;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
+pub use canvas::plugin_filter::{FilterCode, FilterProgram, FilterRun, read_filter};
 pub use canvas::{
     Backdrop, Canvas, DisplayLut, Filter, LiquifyMode, LiquifyStamp, Readback, ReadyToPark, RemakeStats, Resample,
     SecondStroke, SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target,
@@ -367,7 +368,10 @@ impl Gpu {
 
     /// The pipelines canvases draw with, made by the first canvas on this device.
     pub(crate) fn canvas_pipelines(&self) -> Arc<canvas::Pipelines> {
-        Arc::clone(self.canvas_pipelines.get_or_init(|| Arc::new(canvas::Pipelines::new(&self.device))))
+        Arc::clone(
+            self.canvas_pipelines
+                .get_or_init(|| Arc::new(canvas::Pipelines::new(&self.device, canvas::liquify_format(&self.adapter)))),
+        )
     }
 
     /// GPU validation errors so far (each one is logged); tests expect none.

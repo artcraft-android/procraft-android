@@ -166,14 +166,19 @@ private const val LIGHT_RING_ABOVE = 0.85f
  * mirrored but the glyphs.
  */
 @Composable
-fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean = false, trackHeight: Dp = Pc.SliderHeight) {
+fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean = false, trackHeight: Dp = Pc.SliderHeight, shown: Float = 1f) {
     // a control's left edge, mirrored on the right
     fun x(left: Dp, width: Dp) = if (right) Pc.SideBarWidth - left - width else left
     // shorter tracks bring what is under each up with them
     val shorter = Pc.SliderHeight - trackHeight
     val opacityTop = OpacityTrackTop - shorter
+    // its glass slides out with it as the interface hides, its screen side's corners off the screen
+    val aside = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.SideBarWidth.toPx() } * (1f - shown) * if (right) 1f else -1f
+    val moved = Offset(aside, 0f)
+    val body = BarGlass(shown, moved, pastLeft = if (right) 0.dp else Pc.SideBarCorner, pastRight = if (right) Pc.SideBarCorner else 0.dp)
+    val track = BarGlass(shown, moved, window = true)
     Box(
-        modifier.size(Pc.SideBarWidth, Pc.SideBarHeight - shorter * 2)
+        Modifier.then(rememberFrost(Pc.SideBarCorner, body)).then(modifier).size(Pc.SideBarWidth, Pc.SideBarHeight - shorter * 2)
             .drawBehind {
                 // translucent, with windows where the slider tracks are: they show what is behind
                 val r = Pc.SideBarCorner.toPx()
@@ -194,7 +199,7 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
                 drawPath(body, Pc.SideBar)
             },
     ) {
-        BrushSlider(vm.size, vm::changeSize, Modifier.offset(x(SliderLeft, Pc.SliderWidth), SizeTrackTop), panel(vm, CanvasViewModel.SliderPanel.SIZE), vm.sizeNotches, trackHeight)
+        BrushSlider(vm.size, vm::changeSize, Modifier.offset(x(SliderLeft, Pc.SliderWidth), SizeTrackTop).then(rememberFrost(Pc.SliderCorner, track)), panel(vm, CanvasViewModel.SliderPanel.SIZE), vm.sizeNotches, trackHeight)
         // the modify button: the next touch on the canvas picks a colour
         Box(
             Modifier.offset(x(5.dp, 40.dp), 191.dp - shorter).size(40.dp, 41.dp).pointerInput(Unit) {
@@ -222,7 +227,7 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
                 },
             )
         }
-        BrushSlider(vm.opacity, vm::changeOpacity, Modifier.offset(x(SliderLeft, Pc.SliderWidth), opacityTop), panel(vm, CanvasViewModel.SliderPanel.OPACITY), vm.opacityNotches, trackHeight)
+        BrushSlider(vm.opacity, vm::changeOpacity, Modifier.offset(x(SliderLeft, Pc.SliderWidth), opacityTop).then(rememberFrost(Pc.SliderCorner, track)), panel(vm, CanvasViewModel.SliderPanel.OPACITY), vm.opacityNotches, trackHeight)
         // beside the slider it belongs to, a little above it, outside the bar
         vm.sliderPanel?.let { which ->
             val top = if (which == CanvasViewModel.SliderPanel.SIZE) SizeTrackTop else opacityTop

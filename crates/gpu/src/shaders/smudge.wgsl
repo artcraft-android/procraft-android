@@ -261,6 +261,14 @@ fn carried(p: vec2<i32>) -> vec4<f32> {
     return mix(top, bottom, f.y);
 }
 
+// how far a stamp's quad reaches past the stamp each way (pixels)
+const QUAD_REACH: f32 = 0.70710678;
+
+// half the stamp across each way (pixels)
+fn stamp_half() -> vec2<f32> {
+    return vec2<f32>(st.radius, max(st.radius * st.roundness, 1e-3));
+}
+
 fn mask(t: vec2<f32>) -> f32 {
     if (st.shape < 0) {
         let d = length(t) * st.radius;
@@ -268,15 +276,16 @@ fn mask(t: vec2<f32>) -> f32 {
         let soft = 1.0 - smoothstep(min(st.hardness, 0.999) * st.radius, st.radius + 0.5, d);
         return min(rim, soft);
     }
-    // the shape fills the stamp and half a pixel round it, as a brush stamp's does
-    let uv = t * vec2<f32>(st.flip_x, st.flip_y) * (st.radius / (st.radius + 0.5)) * 0.5 + 0.5;
+    // the shape fills the stamp's quad, as a brush stamp's does
+    let half = stamp_half();
+    let uv = t * vec2<f32>(st.flip_x, st.flip_y) * half / (half + QUAD_REACH) * 0.5 + 0.5;
     if (st.shape_sharp > 0.5) {
         // unfiltered: the texel under it
         let size = vec2<i32>(textureDimensions(shapes));
         let at = clamp(vec2<i32>(floor(uv * vec2<f32>(size))), vec2<i32>(0), size - 1);
         return textureLoad(shapes, at, st.shape, 0).r;
     }
-    let lod = clamp(log2(256.0 / max(2.0 * st.radius + 1.0, 1.0)), 0.0, st.shape_lod_cap);
+    let lod = clamp(log2(128.0 / (st.radius + QUAD_REACH)), 0.0, st.shape_lod_cap);
     return textureSampleLevel(shapes, shape_smp, uv, st.shape, lod).r;
 }
 
@@ -348,9 +357,10 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     let s = sin(st.angle);
     let local = vec2<f32>(d.x * c + d.y * s, -d.x * s + d.y * c);
     let t = vec2<f32>(local.x / st.radius, local.y / (st.radius * st.roundness));
-    // the stamp and half a pixel round it
-    let reach = (st.radius + 0.5) / st.radius;
-    if (abs(t.x) > reach || abs(t.y) > reach) {
+    // the stamp's quad
+    let half = stamp_half();
+    let reach = (half + QUAD_REACH) / half;
+    if (abs(t.x) > reach.x || abs(t.y) > reach.y) {
         return;
     }
     let shape = mask(t);

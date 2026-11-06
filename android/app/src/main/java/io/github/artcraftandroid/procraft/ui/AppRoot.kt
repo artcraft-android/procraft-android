@@ -45,12 +45,15 @@ import io.github.artcraftandroid.procraft.core.ToolKind
 /** The canvas screen: the canvas, the bars over it, and the panel that is open. */
 @Composable
 fun AppRoot(vm: CanvasViewModel) {
-    ProCraftTheme {
+    val interfaceSize = fittedInterfaceSize(vm.plugins, vm.patchList)
+    androidx.compose.runtime.SideEffect { vm.interfaceShownAt(interfaceSize) }
+    ProCraftTheme(interfaceSize) {
         if (vm.screen == Screen.GALLERY) {
             ZoomingGallery(vm, overlay = false)
             // a share from the gallery shows its card there, and a file brought in its own
             ExportProgress(vm.exportShown, vm::cancelExport)
             ImportProgress(vm.importShown, vm::cancelImport)
+            PluginOfferAlert(vm)
             return@ProCraftTheme
         }
         // back closes an open panel first, then leaves the artwork for the gallery
@@ -134,7 +137,9 @@ fun AppRoot(vm: CanvasViewModel) {
                     val fade = Modifier.graphicsLayer { alpha = barsShown }
                     val up = Modifier.graphicsLayer { translationY = -size.height * (1f - barsShown) }
                     val aside = Modifier.graphicsLayer { translationX = size.width * (1f - barsShown) * if (vm.rightHanded) 1f else -1f }
-                    TopBar(vm, Modifier.align(Alignment.TopCenter).then(up).then(fade))
+                    val height = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.BarHeight.toPx() }
+                    val topGlass = BarGlass(barsShown, androidx.compose.ui.geometry.Offset(0f, -height * (1f - barsShown)))
+                    TopBar(vm, Modifier.align(Alignment.TopCenter).then(rememberFrost(0.dp, topGlass)).then(up).then(fade))
                     val sideBar = Pc.sideBarFit(maxHeight)
                     // a mode taking the screen slides it off its edge, and back when it ends
                     androidx.compose.animation.AnimatedVisibility(
@@ -145,7 +150,7 @@ fun AppRoot(vm: CanvasViewModel) {
                         enter = Motion.sideBarIn(vm.rightHanded),
                         exit = Motion.sideBarOut(vm.rightHanded),
                     ) {
-                        SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track)
+                        SideBar(vm, aside.then(fade), right = vm.rightHanded, trackHeight = sideBar.track, shown = barsShown)
                     }
                 }
                 NoticeBand(vm)
@@ -234,6 +239,7 @@ fun AppRoot(vm: CanvasViewModel) {
                     exit = androidx.compose.animation.slideOutVertically(Motion.studioOut()) { it },
                 ) { Box(Modifier.fillMaxSize()) { GestureControls(vm) } }
                 BlockedDialog(vm)
+                PluginOfferAlert(vm)
                 ExportProgress(vm.exportShown, vm::cancelExport)
                 ImportProgress(vm.importShown, vm::cancelImport)
                 // a passing message goes in the band under the top bar, as what undo and redo did
@@ -288,6 +294,7 @@ fun AppRoot(vm: CanvasViewModel) {
                             Adjustment.CHROMATIC_ABERRATION -> ChromaticPanel(vm, Modifier)
                             Adjustment.PERSPECTIVE_BLUR -> PerspectivePanel(vm, Modifier)
                             Adjustment.LIQUIFY -> LiquifyPanel(vm, maxWidth, maxHeight, Modifier)
+                            Adjustment.PLUGIN -> PluginFilterPanel(vm, Modifier)
                             else -> Unit
                         }
                     }
@@ -365,6 +372,7 @@ private fun BlockedDialog(vm: CanvasViewModel) {
 private val BottomPanels = setOf(
     Adjustment.HSB, Adjustment.COLOR_BALANCE, Adjustment.CURVES, Adjustment.GRADIENT_MAP, Adjustment.GLITCH, Adjustment.NOISE,
     Adjustment.BLOOM, Adjustment.HALFTONE, Adjustment.CHROMATIC_ABERRATION, Adjustment.PERSPECTIVE_BLUR, Adjustment.LIQUIFY,
+    Adjustment.PLUGIN,
 )
 
 /**

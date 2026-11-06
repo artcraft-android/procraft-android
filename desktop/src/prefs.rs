@@ -2,7 +2,9 @@
 //! the app's folder (`interface`, a setting a line), as the Android app keeps them in its interface
 //! preferences.
 
-use procraft_core::CanvasSession;
+use std::sync::Arc;
+
+use procraft_core::{CanvasSession, Plugins};
 
 /// When the brush cursor shows: while the pointer hovers, while painting, or both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +30,7 @@ pub const DRAG_IMAGE_FORMATS: [&str; 3] = ["JPEG", "PNG", "TIFF"];
 pub const RAPID_UNDO_MIN_S: f32 = 0.1;
 pub const RAPID_UNDO_MAX_S: f32 = 1.5;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Prefs {
     /// Panels and bars light grey with dark text.
     pub light_interface: bool,
@@ -45,13 +47,12 @@ pub struct Prefs {
     pub rapid_undo_delay: f32,
     /// How strongly what isn't selected is banded, 0..1.
     pub selection_visibility: f32,
-    /// ColorDrop keeps out of gaps up to this many canvas pixels wide in its lines (0: none).
-    pub fill_gap: u32,
     /// The app's own smoothing for every stroke, each 0..1, and its pressure curve.
     pub stabilization: f32,
     pub motion_filtering: f32,
     pub motion_expression: f32,
     pub pressure_smoothing: f32,
+    pub tip_attached: bool,
     pub curve: Vec<[f32; 2]>,
     /// The Actions panel's tab open.
     pub actions_tab: usize,
@@ -59,8 +60,8 @@ pub struct Prefs {
     pub pad_3d: bool,
     /// The canvas shown on a second display too.
     pub project_canvas: bool,
-    /// The eyedropper picks from the current layer alone, not the canvas as composited.
-    pub eyedropper_layer: bool,
+    /// The Patches and Plugins pages' lists, their values kept here with the rest.
+    pub plugins: Arc<Plugins>,
     /// Advanced settings: an artwork opens as it was left; fitting the canvas keeps it clear of
     /// the top bar and the side bar; new artworks don't record their time-lapse; strokes made in
     /// an adjustment undo together; how far the pen moves before it counts as fast (0.25..1); the
@@ -99,16 +100,16 @@ impl Default for Prefs {
             colour_model: crate::colour_models::ColourModel::Hsb,
             rapid_undo_delay: 0.65,
             selection_visibility: 0.25,
-            fill_gap: 0,
             stabilization: 0.0,
             motion_filtering: 0.0,
             motion_expression: 0.0,
             pressure_smoothing: 0.0,
+            tip_attached: true,
             curve: straight(),
             actions_tab: 0,
             pad_3d: false,
             project_canvas: false,
-            eyedropper_layer: false,
+            plugins: Plugins::new(),
             orientation_memory: true,
             fit_inside: false,
             no_time_lapse: false,
@@ -137,7 +138,8 @@ const STYLES: [CursorStyle; 3] = [CursorStyle::Contrast, CursorStyle::Colour, Cu
 impl Prefs {
     /// As kept (anything missing or unreadable as it starts).
     pub fn kept() -> Prefs {
-        let mut p = Prefs::default();
+        let store = crate::files::app_dir().join("plugins").to_string_lossy().into_owned();
+        let mut p = Prefs { plugins: Plugins::with_store(store), ..Prefs::default() };
         let text = std::fs::read_to_string(crate::files::app_dir().join("interface")).unwrap_or_default();
         for line in text.lines() {
             let Some((name, value)) = line.split_once(' ') else { continue };
@@ -160,18 +162,13 @@ impl Prefs {
                     }
                 }
                 "selection_visibility" => p.selection_visibility = unit.unwrap_or(p.selection_visibility),
-                "fill_gap" => {
-                    if let Some(v) = number {
-                        p.fill_gap = (v.max(0.0).round() as u32).min(procraft_engine::fill::MOST_GAP);
-                    }
-                }
                 "stabilization" => p.stabilization = unit.unwrap_or(0.0),
                 "motion_filtering" => p.motion_filtering = unit.unwrap_or(0.0),
                 "motion_expression" => p.motion_expression = unit.unwrap_or(0.0),
                 "pressure_smoothing" => p.pressure_smoothing = unit.unwrap_or(0.0),
+                "tip_attached" => p.tip_attached = on,
                 "pad_3d" => p.pad_3d = on,
                 "project_canvas" => p.project_canvas = on,
-                "eyedropper_layer" => p.eyedropper_layer = on,
                 "orientation_memory" => p.orientation_memory = on,
                 "fit_inside" => p.fit_inside = on,
                 "no_time_lapse" => p.no_time_lapse = on,
@@ -195,7 +192,7 @@ impl Prefs {
                         p.curve = points;
                     }
                 }
-                _ => {}
+                _ => p.plugins.read_kept(name.to_owned(), value.to_owned()),
             }
         }
         // the interface shows as it was left
@@ -215,16 +212,15 @@ impl Prefs {
             format!("colour_model {}", self.colour_model.key()),
             format!("rapid_undo_delay {}", self.rapid_undo_delay),
             format!("selection_visibility {}", self.selection_visibility),
-            format!("fill_gap {}", self.fill_gap),
             format!("stabilization {}", self.stabilization),
             format!("motion_filtering {}", self.motion_filtering),
             format!("motion_expression {}", self.motion_expression),
             format!("pressure_smoothing {}", self.pressure_smoothing),
+            format!("tip_attached {}", self.tip_attached),
             format!("curve {}", curve.join(",")),
             format!("actions_tab {}", self.actions_tab),
             format!("pad_3d {}", self.pad_3d),
             format!("project_canvas {}", self.project_canvas),
-            format!("eyedropper_layer {}", self.eyedropper_layer),
             format!("orientation_memory {}", self.orientation_memory),
             format!("fit_inside {}", self.fit_inside),
             format!("no_time_lapse {}", self.no_time_lapse),
@@ -239,6 +235,7 @@ impl Prefs {
             format!("drag_image_format {}", self.drag_image_format),
             format!("recolor_threshold {}", self.recolor_threshold),
         ];
+        let lines: Vec<String> = lines.into_iter().chain(self.plugins.kept_lines()).collect();
         crate::files::keep_text("interface", &(lines.join("\n") + "\n"));
     }
 
@@ -248,7 +245,8 @@ impl Prefs {
         session.set_light_interface(self.light_interface);
         session.set_brush_scaling(self.brush_on_screen);
         session.set_selection_visibility(self.selection_visibility);
-        session.set_fill_gap(self.fill_gap);
+        session.set_fill_gap(self.plugins.fill_gap());
+        session.use_patches(Arc::clone(&self.plugins));
         session.set_simplified_undos(self.simplified_undos);
         session.set_speed_distance(self.speed_distance);
         session.set_input_settings(
@@ -256,6 +254,7 @@ impl Prefs {
             self.motion_filtering,
             self.motion_expression,
             self.pressure_smoothing,
+            self.tip_attached,
             self.curve.iter().flatten().copied().collect(),
         );
     }

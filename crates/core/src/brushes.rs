@@ -362,10 +362,11 @@ impl CanvasSession {
         // a dual brush's second, drawn along the same sample stroke at its size beside the first's
         let stamp_only = brush.setting("preview_stamp") >= 0.5;
         let second = brush.secondary.as_deref().filter(|_| !stamp_only && style.takes_second()).and_then(|second| {
+            let second = second.clone().as_second();
             let mut second_style =
-                StrokeStyle::for_brush(second, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false).as_second();
+                StrokeStyle::for_brush(&second, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false).as_second();
             second_style.preview = true;
-            canvas.use_sources(&gpu, &mut second_style, second);
+            canvas.use_sources(&gpu, &mut second_style, &second);
             let ratio = second.diameter(0.5) / brush.diameter(0.5).max(1e-3);
             let mode = brush.setting("dual_blend").round().max(0.0) as u32;
             (!second_style.in_place()).then(|| {
@@ -384,7 +385,7 @@ impl CanvasSession {
         } else {
             let samples = preview::samples(&brush);
             if let Some((second, _, diameter)) = second {
-                let mut stroke = StrokeBuilder::new(second.clone(), diameter, Pointer::Stylus).steady();
+                let mut stroke = StrokeBuilder::new(second, diameter, Pointer::Stylus).steady();
                 canvas.add_second_stamps(&stroke.add(&samples));
                 canvas.replace_second_stamps(&stroke.finish());
             }

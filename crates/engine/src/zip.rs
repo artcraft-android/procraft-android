@@ -13,10 +13,22 @@ pub struct ZipReader<'a> {
 struct Entry {
     name: String,
     method: u16,
+    flags: u16,
     compressed: usize,
     size: usize,
     crc: u32,
     local: usize,
+    attributes: u32,
+}
+
+/// What the directory claims of an entry, for a reader that can't take an archive at its word.
+pub struct EntryFacts<'a> {
+    pub name: &'a str,
+    pub size: usize,
+    pub compressed: usize,
+    pub encrypted: bool,
+    /// A plain file, by its attributes: not a link, a folder or a device.
+    pub plain: bool,
 }
 
 /// The largest entry read: anything claiming more is refused.
@@ -44,6 +56,29 @@ impl<'a> ZipReader<'a> {
     /// Every entry's name, folders included.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|e| e.name.as_str())
+    }
+
+    /// What the directory claims of each entry, in order, those of a repeated name too.
+    pub fn facts(&self) -> impl Iterator<Item = EntryFacts<'_>> {
+        self.entries.iter().map(|e| {
+            // the kind of file in a Unix mode, and a DOS folder's bit
+            let kind = (e.attributes >> 16) & 0o170_000;
+            let plain = (kind == 0 || kind == 0o100_000) && e.attributes & 0x10 == 0 && !e.name.ends_with('/');
+            EntryFacts { name: &e.name, size: e.size, compressed: e.compressed, encrypted: e.flags & 1 != 0, plain }
+        })
+    }
+
+    /// Whether each entry's own header names what the directory says it does: two readers of an
+    /// archive that doesn't would see different files.
+    pub fn names_agree(&self) -> bool {
+        self.entries.iter().all(|e| {
+            let named = || {
+                let len = usize::from(u16le(self.bytes, e.local + 26)?);
+                (u32le(self.bytes, e.local)? == 0x0403_4B50).then_some(())?;
+                self.bytes.get(e.local + 30..e.local + 30 + len)
+            };
+            named().is_some_and(|n| String::from_utf8_lossy(n) == e.name)
+        })
     }
 
     /// The size entry `name` says it has once read (`read` gives no more).
@@ -85,6 +120,7 @@ fn central_entries(bytes: &[u8], mut at: usize, count: usize) -> Option<Vec<Entr
         if u32le(bytes, at)? != 0x0201_4B50 {
             return None;
         }
+        let flags = u16le(bytes, at + 8)?;
         let method = u16le(bytes, at + 10)?;
         let crc = u32le(bytes, at + 16)?;
         let compressed = usize::try_from(u32le(bytes, at + 20)?).ok()?;
@@ -92,9 +128,10 @@ fn central_entries(bytes: &[u8], mut at: usize, count: usize) -> Option<Vec<Entr
         let name_len = usize::from(u16le(bytes, at + 28)?);
         let extra = usize::from(u16le(bytes, at + 30)?);
         let comment = usize::from(u16le(bytes, at + 32)?);
+        let attributes = u32le(bytes, at + 38)?;
         let local = usize::try_from(u32le(bytes, at + 42)?).ok()?;
         let name = String::from_utf8_lossy(bytes.get(at + 46..at + 46 + name_len)?).into_owned();
-        entries.push(Entry { name, method, compressed, size, crc, local });
+        entries.push(Entry { name, method, flags, compressed, size, crc, local, attributes });
         at += 46 + name_len + extra + comment;
     }
     Some(entries)
@@ -313,6 +350,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(names.unwrap(), ["Document.archive", "layer/0~0.chunk", "QuickLook/Thumbnail.png"]);
         assert_eq!(none, (None, None));
+    }
+
+    #[test]
+    fn an_entry_says_what_kind_of_thing_it_is() {
+        let mut w = ZipWriter::new();
+        w.add("plain.txt", b"words");
+        w.add("folder/", b"");
+        let mut bytes = w.finish();
+        let plain = |bytes: &[u8]| {
+            let r = ZipReader::new(bytes).unwrap();
+            r.facts().map(|f| f.plain).collect::<Vec<_>>()
+        };
+        assert_eq!(plain(&bytes), [true, false]);
+        // the first central entry made a link, as Unix's zip writes one
+        let central = bytes.windows(4).position(|w| w == [0x50, 0x4B, 0x01, 0x02]).unwrap();
+        bytes[central + 38..central + 42].copy_from_slice(&(0o120_777u32 << 16).to_le_bytes());
+        assert_eq!(plain(&bytes), [false, false]);
+    }
+
+    #[test]
+    fn names_agree_only_where_headers_and_directory_do() {
+        let mut w = ZipWriter::new();
+        w.add("aa.txt", b"words");
+        let mut bytes = w.finish();
+        assert!(ZipReader::new(&bytes).unwrap().names_agree());
+        // the local header's name changed, the directory's not
+        bytes[30] = b'z';
+        assert!(!ZipReader::new(&bytes).unwrap().names_agree());
     }
 
     #[test]

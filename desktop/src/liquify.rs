@@ -258,12 +258,12 @@ impl Liquify {
         egui::Area::new(Id::unique("liquify adjust")).fixed_pos(rect.min).order(Order::Tooltip).show(ctx, |ui| {
             popover_frame(ui, rect, tip_x, tip_y);
             let inner = rect.shrink(10.0);
-            menu_title(ui, inner, "Adjust");
+            menu_title(ui, inner, "Strength");
             let group = Rect::from_min_size(pos2(inner.left(), inner.top() + 44.0), vec2(inner.width(), 59.0 + 16.0));
             ui.painter().rect_filled(group, 13, argb(MENU_GROUP));
             let row = Rect::from_min_size(group.min + vec2(0.0, 8.0), vec2(group.width(), 59.0));
             let amount = shown.liquify_amount;
-            let label = format!("{}%", (amount * 100.0).round() as i32);
+            let label = percent(amount, None);
             if let Some(v) = menu_slider(ui, row, "Amount", amount, &label) {
                 session.adjustment_liquify_amount(v);
             }

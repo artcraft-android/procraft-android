@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
@@ -35,19 +36,26 @@ import androidx.compose.ui.unit.dp
 /** Where frosted panels are told about: on the canvas screen only, which has a canvas behind them. */
 val LocalBackdrops = staticCompositionLocalOf<Backdrops?> { null }
 
-/** The rounded bodies of the frosted panels open now (window pixels), sent on whenever they change. */
-class Backdrops(private val send: (List<Float>) -> Unit) {
+/**
+ * The rounded bodies of the frosted panels and bars shown now, and the thin glass of the side bar's
+ * tracks (window pixels), sent on whenever they change.
+ */
+class Backdrops(private val send: (List<Float>, List<Float>) -> Unit) {
     private val regions = LinkedHashMap<Any, FloatArray>()
+    private val windows = LinkedHashMap<Any, FloatArray>()
 
-    fun put(key: Any, region: FloatArray) {
-        if (regions[key]?.contentEquals(region) == true) return
-        regions[key] = region
-        send(regions.values.flatMap { it.asList() })
+    private fun sendAll() = send(regions.values.flatMap { it.asList() }, windows.values.flatMap { it.asList() })
+
+    fun put(key: Any, region: FloatArray, window: Boolean = false) {
+        val into = if (window) windows else regions
+        if (into[key]?.contentEquals(region) == true) return
+        into[key] = region
+        sendAll()
     }
 
     fun remove(key: Any) {
-        if (regions.remove(key) == null) return
-        send(regions.values.flatMap { it.asList() })
+        if (regions.remove(key) == null && windows.remove(key) == null) return
+        sendAll()
     }
 }
 
@@ -56,7 +64,18 @@ class Backdrops(private val send: (List<Float>) -> Unit) {
  * rounded box ([corner]) is blurred. Works from popups too (it goes by screen position).
  */
 @Composable
-fun rememberFrost(corner: Dp): Modifier {
+fun rememberFrost(corner: Dp): Modifier = rememberFrost(corner, BarGlass())
+
+/**
+ * How a bar's glass differs from a panel's: it shows as much as [shown], [moved] (window pixels) as
+ * the bar slides out of its place, its box goes [pastLeft] and [pastRight] further (to take the
+ * corners of a bar's screen edge off the screen), and as a [window] what is behind only softens.
+ */
+data class BarGlass(val shown: Float = 1f, val moved: Offset = Offset.Zero, val pastLeft: Dp = 0.dp, val pastRight: Dp = 0.dp, val window: Boolean = false)
+
+/** [rememberFrost] for a bar, as [glass] says. */
+@Composable
+fun rememberFrost(corner: Dp, glass: BarGlass): Modifier {
     val backdrops = LocalBackdrops.current ?: return Modifier
     val key = remember { Any() }
     val density = LocalDensity.current
@@ -64,15 +83,23 @@ fun rememberFrost(corner: Dp): Modifier {
     val look = LocalPanelLook.current
     var box by remember { mutableStateOf<FloatArray?>(null) }
     DisposableEffect(backdrops) { onDispose { backdrops.remove(key) } }
+    // read here, not in the effect: a bar that never changes must still be told where it landed
+    val placed = box
     SideEffect {
-        box?.let { (x0, y0, x1, y1, corner) ->
+        placed?.let { (x0, y0, x1, y1, corner) ->
             val (px, py, k) = Triple(look.pivot.x, look.pivot.y, look.scale)
-            backdrops.put(key, floatArrayOf(px + (x0 - px) * k, py + (y0 - py) * k, px + (x1 - px) * k, py + (y1 - py) * k, corner * k, look.alpha))
+            val (dx, dy) = glass.moved
+            val region = floatArrayOf(
+                px + (x0 + dx - px) * k, py + (y0 + dy - py) * k, px + (x1 + dx - px) * k, py + (y1 + dy - py) * k,
+                corner * k, look.alpha * glass.shown,
+            )
+            backdrops.put(key, region, glass.window)
         }
     }
     return Modifier.onGloballyPositioned { c ->
         val at = c.positionOnScreen()
-        box = floatArrayOf(at.x, at.y, at.x + c.size.width, at.y + c.size.height, with(density) { corner.toPx() })
+        val (left, right) = with(density) { glass.pastLeft.toPx() to glass.pastRight.toPx() }
+        box = floatArrayOf(at.x - left, at.y, at.x + c.size.width + right, at.y + c.size.height, with(density) { corner.toPx() })
     }
 }
 

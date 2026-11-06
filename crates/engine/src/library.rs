@@ -791,7 +791,8 @@ fn gouache() -> Brush {
 
 fn oil_paint() -> Brush {
     with(
-        named("Oil Paint", Brush { flow: 1.0, max_size: 180.0, ..bristle_brush() }),
+        // building up, so its wet mix is laid (the Flat Brush's Light Glaze it comes from never mixes)
+        named("Oil Paint", Brush { flow: 1.0, max_size: 180.0, rendering: Rendering::BuildUp, ..bristle_brush() }),
         &[("wet_dilution", 0.1), ("wet_attack", 0.35), ("wet_pull", 0.6), ("wet_grade", 0.3)],
     )
 }
@@ -812,6 +813,7 @@ fn palette_knife() -> Brush {
                     ..Shape::default()
                 },
                 grain: moving(grain::CRUMPLED, 120.0, 0.35),
+                rendering: Rendering::BuildUp,
                 ..flat_brush()
             },
         ),
@@ -999,6 +1001,9 @@ fn conte() -> Brush {
 
 // ---- Watercolour ----
 
+/// The wash the others start from. The Heavy Glaze thins the paint through the wet of the stroke
+/// and mixes it into what is under it; `wet_charge` keeps enough pigment in it to show, and a full
+/// `wet_grade` lets it pool at the rims instead of beading along the stroke.
 fn wet_wash() -> Brush {
     with(
         named(
@@ -1013,13 +1018,13 @@ fn wet_wash() -> Brush {
                 pressure_opacity: 0.6,
                 shape: Shape { image: Some(shape::CLOUD), randomise: true, ..Shape::default() },
                 grain: paper(grain::WASH, 400.0, 0.45),
-                rendering: Rendering::Strongest,
+                rendering: Rendering::Gradual,
                 pen_taper: Taper::NONE,
                 touch_taper: Taper::NONE,
                 ..Brush::round_pen()
             },
         ),
-        &[("wet_dilution", 0.55), ("wet_pull", 0.2), ("wet_edges", 0.55)],
+        &[("wet_dilution", 0.55), ("wet_charge", 0.8), ("wet_pull", 0.5), ("wet_grade", 1.0), ("wet_edges", 0.8)],
     )
 }
 
@@ -1033,18 +1038,18 @@ fn round_wash() -> Brush {
                 flow: 0.9,
                 pressure_size: 0.8,
                 shape: Shape::default(),
-                pen_taper: Taper { start: 0.1, end: 0.2, size: 0.8, opacity: 0.0 },
+                pen_taper: Taper { start: 0.0, end: 0.2, size: 0.8, opacity: 0.0 },
                 ..wet_wash()
             },
         ),
-        &[("wet_dilution", 0.35), ("wet_edges", 0.4)],
+        &[("wet_dilution", 0.45), ("wet_charge", 0.85), ("wet_edges", 1.0)],
     )
 }
 
 fn granulating_wash() -> Brush {
     with(
-        named("Granulating Wash", Brush { grain: paper(grain::WASH, 220.0, 0.85), flow: 0.9, ..wet_wash() }),
-        &[("burnt_edges", 0.3)],
+        named("Granulating Wash", Brush { grain: paper(grain::WASH, 220.0, 0.8), flow: 0.9, ..wet_wash() }),
+        &[("wet_dilution", 0.5), ("wet_charge", 0.85), ("burnt_edges", 0.3)],
     )
 }
 
@@ -1053,9 +1058,9 @@ fn blot() -> Brush {
         named(
             "Blot",
             Brush {
-                spacing: 0.9,
-                max_size: 220.0,
-                flow: 0.9,
+                spacing: 0.6,
+                max_size: 400.0,
+                flow: 1.0,
                 shape: Shape {
                     image: Some(shape::BLOT),
                     randomise: true,
@@ -1067,12 +1072,16 @@ fn blot() -> Brush {
                 ..wet_wash()
             },
         ),
-        &[("wet_edges", 0.7), ("preview_size", 0.25)],
+        &[("wet_dilution", 0.4), ("wet_charge", 0.9), ("wet_edges", 1.0), ("preview_size", 0.25)],
     )
 }
 
+/// Thin paint that runs on through itself, so it blends with its own stroke as well.
 fn bleeding_wash() -> Brush {
-    with(named("Bleeding Wash", Brush { flow: 0.8, ..wet_wash() }), &[("wet_dilution", 0.8), ("wet_blur", 0.6)])
+    with(
+        named("Bleeding Wash", Brush { flow: 0.8, ..wet_wash() }),
+        &[("rendering_mode", 5.0), ("wet_dilution", 0.75), ("wet_charge", 0.6), ("wet_pull", 0.8), ("wet_blur", 0.6)],
+    )
 }
 
 // ---- Calligraphy ----
@@ -1699,6 +1708,7 @@ fn filbert() -> Brush {
                 hardness: 0.7,
                 shape: Shape { roundness: 0.6, ..along(shape::FLAT) },
                 grain: moving(grain::FIBRE, 120.0, 0.4),
+                rendering: Rendering::BuildUp,
                 ..flat_brush()
             },
         ),
@@ -1775,7 +1785,15 @@ fn impasto() -> Brush {
 
 fn acrylic() -> Brush {
     with(
-        named("Acrylic", Brush { flow: 0.95, grain: moving(grain::WEAVE, 100.0, 0.45), ..bristle_brush() }),
+        named(
+            "Acrylic",
+            Brush {
+                flow: 0.95,
+                grain: moving(grain::WEAVE, 100.0, 0.45),
+                rendering: Rendering::BuildUp,
+                ..bristle_brush()
+            },
+        ),
         &[("wet_dilution", 0.1), ("wet_attack", 0.6), ("wet_pull", 0.35)],
     )
 }
@@ -1996,13 +2014,16 @@ fn litho_crayon() -> Brush {
 // Watercolour
 
 fn flat_wash() -> Brush {
-    with(named("Flat Wash", Brush { max_size: 200.0, shape: along(shape::FLAT), ..wet_wash() }), &[("wet_edges", 0.5)])
+    with(
+        named("Flat Wash", Brush { max_size: 200.0, shape: along(shape::FLAT), ..wet_wash() }),
+        &[("wet_dilution", 0.4), ("wet_charge", 0.9), ("wet_edges", 0.6)],
+    )
 }
 
 fn dry_wash() -> Brush {
     with(
-        named("Dry Wash", Brush { flow: 0.7, grain: paper(grain::COARSE, 300.0, 0.85), ..wet_wash() }),
-        &[("wet_dilution", 0.3)],
+        named("Dry Wash", Brush { flow: 0.7, grain: paper(grain::COARSE, 300.0, 0.9), ..wet_wash() }),
+        &[("wet_dilution", 0.25), ("wet_charge", 0.6), ("wet_pull", 0.2)],
     )
 }
 
@@ -2012,8 +2033,9 @@ fn salt() -> Brush {
         named(
             "Salt",
             Brush {
-                spacing: 0.3,
+                spacing: 0.14,
                 max_size: 240.0,
+                flow: 1.0,
                 shape: Shape {
                     image: Some(shape::SPONGE),
                     randomise: true,
@@ -2024,7 +2046,7 @@ fn salt() -> Brush {
                 ..wet_wash()
             },
         ),
-        &[("wet_edges", 0.6)],
+        &[("wet_dilution", 0.45), ("wet_charge", 0.9), ("wet_edges", 1.0)],
     )
 }
 
@@ -2034,19 +2056,20 @@ fn splash() -> Brush {
             "Splash",
             Brush {
                 spacing: 0.8,
-                max_size: 260.0,
-                flow: 0.9,
+                max_size: 320.0,
+                flow: 1.0,
                 shape: Shape {
                     image: Some(shape::SPLATTER),
                     randomise: true,
                     throw: 0.8,
                     size_jitter: 0.6,
+                    count: 2,
                     ..Shape::default()
                 },
                 ..wet_wash()
             },
         ),
-        &[("wet_edges", 0.7), ("preview_size", 0.25)],
+        &[("wet_dilution", 0.3), ("wet_charge", 1.0), ("wet_edges", 1.0), ("preview_size", 0.25)],
     )
 }
 
@@ -2062,7 +2085,7 @@ fn mop_brush() -> Brush {
                 ..wet_wash()
             },
         ),
-        &[("wet_dilution", 0.45), ("wet_edges", 0.35)],
+        &[("rendering_mode", 5.0), ("wet_dilution", 0.8), ("wet_charge", 0.7), ("wet_pull", 0.7), ("wet_edges", 0.5)],
     )
 }
 
@@ -2369,7 +2392,20 @@ fn grime() -> Brush {
 }
 
 fn oil_stain() -> Brush {
-    with(named("Oil Stain", Brush { flow: 0.5, ..blot() }), &[("blend_mode", MULTIPLY)])
+    let blot = blot();
+    with(
+        named(
+            "Oil Stain",
+            Brush {
+                spacing: 0.21,
+                flow: 0.9,
+                grain: paper(grain::WASH, 400.0, 0.8),
+                shape: Shape { size_jitter: 0.8, ..blot.shape },
+                ..blot
+            },
+        ),
+        &[("wet_pull", 0.7), ("wet_edges", 0.5), ("burnt_edges", 0.6), ("blend_mode", MULTIPLY)],
+    )
 }
 
 // ---- Organic ----
@@ -2610,8 +2646,8 @@ fn old_paper() -> Brush {
 
 fn sepia_wash() -> Brush {
     with(
-        named("Sepia Wash", Brush { grain: paper(grain::WASH, 300.0, 0.6), flow: 0.6, ..wet_wash() }),
-        &[("blend_mode", MULTIPLY)],
+        named("Sepia Wash", Brush { grain: paper(grain::WASH, 300.0, 0.6), flow: 1.0, ..wet_wash() }),
+        &[("wet_dilution", 0.5), ("wet_charge", 0.85), ("wet_pull", 0.4), ("blend_mode", MULTIPLY)],
     )
 }
 
@@ -2754,5 +2790,18 @@ mod tests {
             }
             assert!(width_leaning(b, 60.0) > upright * 1.5, "{}", b.name);
         }
+    }
+
+    #[test]
+    fn a_brush_given_wet_paint_mixes_it() {
+        // a brush with water in its wet mix that keeps the strongest stamp (the Light Glaze) never
+        // mixes: its wet settings would do nothing
+        let dry: Vec<String> = library()
+            .into_iter()
+            .flat_map(|s| s.brushes)
+            .filter(|b| b.setting("wet_dilution") > 0.0 && !b.mixes_wet())
+            .map(|b| b.name)
+            .collect();
+        assert!(dry.is_empty(), "wet brushes that don't mix: {dry:?}");
     }
 }

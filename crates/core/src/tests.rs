@@ -504,8 +504,8 @@ fn much_of_the_work_in_one_session_gives_the_gpu_no_errors() {
             match adjustment {
                 Adjustment::Hsb => s.adjustment_hsb(0.7, 0.6, 0.4),
                 Adjustment::Liquify => {
-                    let points = (0..60).flat_map(|i| [40.0 + i as f32 * 3.0, 150.0, 1.0]).collect();
-                    s.adjustment_liquify_stroke(points, true);
+                    let points = (0..60).flat_map(|i| [40.0 + i as f32 * 3.0, 150.0, 1.0, 8.0]).collect();
+                    s.adjustment_liquify_stroke(points, true, false);
                 }
                 Adjustment::Clone => {
                     s.stroke_begin(PointerKind::Finger, vec![sample(60.0, 60.0, 0.0)]);
@@ -562,12 +562,12 @@ fn a_long_liquify_drag_between_frames_renders_without_errors() {
         .flat_map(|leg| {
             (0..=46).map(move |i| {
                 let x = if leg % 2 == 0 { 10.0 + i as f32 * 5.0 } else { 240.0 - i as f32 * 5.0 };
-                [x, 20.0 + leg as f32 * 10.0, 1.0]
+                [x, 20.0 + leg as f32 * 10.0, 1.0, 8.0]
             })
         })
         .flatten()
         .collect();
-    s.adjustment_liquify_stroke(points, true);
+    s.adjustment_liquify_stroke(points, true, false);
     // `pixel` renders and asserts the GPU took every command
     pixel(&s, 128, 128);
     assert!(s.adjustment_end(true));
@@ -606,8 +606,9 @@ fn a_save_leaves_liquify_working_and_the_next_keeps_how_it_ended() {
         contents(&opened)
     };
     // a small brush pushed down across the line
-    let push =
-        |x: f32| s.adjustment_liquify_stroke((0..12).flat_map(|i| [x, 24.0 + i as f32 * 8.0, 1.0]).collect(), true);
+    let push = |x: f32| {
+        s.adjustment_liquify_stroke((0..12).flat_map(|i| [x, 24.0 + i as f32 * 8.0, 1.0, 8.0]).collect(), true, false)
+    };
     assert!(s.adjustment_start(Adjustment::Liquify));
     s.adjustment_liquify_value(0, 0.1);
     push(32.0);
@@ -1913,19 +1914,21 @@ fn liquify_moves_paint_as_one_undo_step() {
     s.stroke_end(vec![]);
     assert!(s.liquify_begin());
     let brush = LiquifyBrush { kind: LiquifyKind::Push, size: 0.15, pressure: 1.0, distortion: 0.0 };
-    let path: Vec<f32> = (0..=20).flat_map(|i| [30.0 + i as f32, 50.0, 1.0]).collect();
-    s.liquify_stroke(path, true, brush);
+    let path: Vec<f32> = (0..=20).flat_map(|i| [30.0 + i as f32, 50.0, 1.0, 8.0]).collect();
+    s.liquify_stroke(path, true, false, brush);
     assert!(pixel(&s, 45, 50)[0] < 128, "{:?}", pixel(&s, 45, 50));
     s.liquify_amount(0.5);
     s.liquify_reset();
     assert_eq!(pixel(&s, 45, 50), [255, 255, 255, 255]);
-    s.liquify_stroke((0..=20).flat_map(|i| [30.0 + i as f32, 50.0, 1.0]).collect(), true, brush);
-    // lifted while moving, it carries on further right
+    s.liquify_stroke((0..=20).flat_map(|i| [30.0 + i as f32, 50.0, 1.0, 8.0]).collect(), true, false, brush);
+    // lifted while moving, it carries on further right as time passes
     let row = |s: &CanvasSession| (40..90).map(|x| pixel(s, x, 50)).collect::<Vec<_>>();
     let before = row(&s);
-    s.liquify_coast(0.1, 0.0, 1.0, brush);
+    assert!(s.liquify_lift(1.0, brush));
+    assert_eq!(row(&s), before, "it goes on over time, not at once");
+    assert!(s.liquify_tick(0.1, brush));
     assert_ne!(row(&s), before);
-    s.liquify_coast(f32::NAN, 0.0, 1.0, brush);
+    assert!(!s.liquify_lift(f32::NAN, brush) || s.liquify_tick(0.1, brush));
     s.adjust_end(true);
     s.undo();
     assert_eq!(pixel(&s, 30, 50), [0, 0, 0, 255]);
@@ -1947,12 +1950,15 @@ fn liquify_pushes_a_layer_s_mask_along() {
     assert!(s.select_layer(layer));
     assert!(s.liquify_begin());
     let brush = LiquifyBrush { kind: LiquifyKind::Push, size: 0.15, pressure: 1.0, distortion: 0.0 };
-    s.liquify_stroke((0..=20).flat_map(|i| [30.0 + i as f32, 50.0, 1.0]).collect(), true, brush);
+    s.liquify_stroke((0..=20).flat_map(|i| [30.0 + i as f32, 50.0, 1.0, 8.0]).collect(), true, false, brush);
     // pushed right, the dot still hidden where it went
     assert_eq!(pixel(&s, 45, 50), [255, 255, 255, 255]);
     s.adjust_end(true);
     assert_eq!(pixel(&s, 45, 50), [255, 255, 255, 255]);
-    assert_eq!(pixel(&s, 30, 50), [255, 255, 255, 255]);
+    // only the two dots' soft edges, each moved as the other was, show at all
+    for x in 15..60 {
+        assert!(pixel(&s, x, 50)[0] > 180, "{x}: {:?}", pixel(&s, x, 50));
+    }
 }
 
 #[test]
@@ -1967,7 +1973,7 @@ fn liquify_moves_a_small_canvas_shown_large() {
     let before = row(&s);
     assert!(s.liquify_begin());
     let brush = LiquifyBrush { kind: LiquifyKind::Push, size: 0.5, pressure: 1.0, distortion: 0.0 };
-    s.liquify_stroke((0..=30).flat_map(|i| [300.0 + i as f32 * 10.0, 400.0, 1.0]).collect(), true, brush);
+    s.liquify_stroke((0..=30).flat_map(|i| [300.0 + i as f32 * 10.0, 400.0, 1.0, 8.0]).collect(), true, false, brush);
     assert_ne!(row(&s), before, "the push moved nothing");
     s.adjust_end(false);
 }
@@ -2390,6 +2396,164 @@ fn a_shape_still_held_follows_the_pen_and_a_finger_snaps_it() {
     s.stroke_end(vec![]);
     assert_eq!(s.quickshape_info().unwrap().kind, QuickShapeKind::Circle);
     s.quickshape_done();
+}
+
+#[test]
+fn undo_goes_back_through_a_shapes_drags_to_the_stroke_it_was_made_of() {
+    use crate::quickshape::QuickShapeKind;
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.02);
+    // a wavering line, a line once it snaps
+    let pts: Vec<PenSample> = (0..=40)
+        .map(|i| {
+            let t = i as f32 / 40.0;
+            sample(20.0 + 160.0 * t, 100.0 + 5.0 * (t * 18.0).sin(), f64::from(i) * 8.0)
+        })
+        .collect();
+    let draw = || {
+        s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+        s.stroke_add(pts[1..].to_vec());
+    };
+    // (as drawn, an open shape staying open)
+    let seen = || {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+        canvas.read_composite(gpu).unwrap()
+    };
+    let blank = seen();
+    draw();
+    s.stroke_end(vec![]);
+    let stroke = seen();
+    s.undo();
+    assert_eq!(seen(), blank);
+    draw();
+    let info = s.quickshape_hold().expect("a shape");
+    assert_eq!(info.kind, QuickShapeKind::Line);
+    s.stroke_end(vec![]);
+    let snapped = seen();
+    assert_ne!(snapped, stroke);
+    // a drag is a step of its own, back and forward, the shape staying open
+    s.quickshape_step();
+    let moved = s.quickshape_move_handle(1, 180.0, 60.0).unwrap();
+    assert!(!s.info().can_redo);
+    s.undo();
+    assert_eq!(s.quickshape_info().unwrap().handles, info.handles);
+    assert_eq!(seen(), snapped);
+    assert!(s.info().can_redo);
+    s.redo();
+    assert_eq!(s.quickshape_info().unwrap().handles, moved.handles);
+    assert!(!s.info().can_redo);
+    s.undo();
+    // past the drags the shape goes, its stroke back as drawn
+    s.undo();
+    assert!(s.quickshape_info().is_none());
+    assert_eq!(seen(), stroke);
+    assert!(s.info().can_undo && s.info().can_redo);
+    // redone, it is the shape as it snapped, kept, its drags gone
+    s.redo();
+    assert!(s.quickshape_info().is_none());
+    assert_eq!(seen(), snapped);
+    assert!(!s.info().can_redo);
+    // and so on either way, a kept shape as one being edited
+    s.undo();
+    assert_eq!(seen(), stroke);
+    s.undo();
+    assert_eq!(seen(), blank);
+    s.redo();
+    assert_eq!(seen(), stroke);
+    s.redo();
+    assert_eq!(seen(), snapped);
+    // with something done since, undo takes that, and the shape is a step like any other
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 900.0)]);
+    s.stroke_end(vec![]);
+    s.undo();
+    assert_eq!(seen(), snapped);
+    s.undo();
+    assert_eq!(seen(), blank);
+}
+
+#[test]
+fn a_nodes_drag_by_touch_is_one_step_of_undo_and_a_tap_on_it_none() {
+    let Some(s) = session(200, 200) else { return };
+    s.set_brush_size(0.02);
+    let pts: Vec<PenSample> = (0..=40).map(|i| sample(20.0 + 4.0 * i as f32, 100.0, f64::from(i) * 8.0)).collect();
+    s.stroke_begin(PointerKind::Finger, pts[..1].to_vec());
+    s.stroke_add(pts[1..].to_vec());
+    let info = s.quickshape_hold().expect("a shape");
+    s.stroke_end(vec![]);
+    s.set_shape_editing(true);
+    let (x, y) = (info.handles[2], info.handles[3]);
+    let drag = |by: f32, from: f64| {
+        s.touch_down(7, PointerKind::Finger, vec![sample(x, y, from)]);
+        for i in 1..=5 {
+            let (i, t) = (i as f32, f64::from(i) * 16.0);
+            s.touch_move(7, vec![sample(x, y + by * i / 5.0, from + t)]);
+        }
+        s.touch_up(7, vec![]);
+    };
+    s.touch_down(7, PointerKind::Finger, vec![sample(x, y, 1900.0)]);
+    s.touch_up(7, vec![]);
+    drag(40.0, 2000.0);
+    let moved = s.quickshape_info().unwrap();
+    // it stayed for the first ten points of the way (two pixels each here), then went as the
+    // finger did, behind it
+    let lag = 40.0 - (moved.handles[3] - info.handles[3]);
+    assert!((20.0..=28.0).contains(&lag), "{lag}");
+    assert!((moved.handles[2] - info.handles[2]).abs() < 1.0, "{:?}", moved.handles);
+    // five moves, one step: one undo has it all back, the shape still open
+    s.undo();
+    assert_eq!(s.quickshape_info().unwrap().handles, info.handles);
+    s.redo();
+    assert_eq!(s.quickshape_info().unwrap().handles, moved.handles);
+    s.undo();
+    // past it the shape goes: the tap made no step of its own
+    s.undo();
+    assert!(s.quickshape_info().is_none());
+}
+
+#[test]
+fn a_mask_takes_what_is_pasted_by_its_brightness_only_when_asked() {
+    let Some(s) = session(64, 64) else { return };
+    s.set_color(1.0, 0.0, 0.0);
+    let layer = s.layers().iter().find(|l| l.current).unwrap().id;
+    assert!(s.fill_layer(layer));
+    let mask = s.add_mask(layer).unwrap();
+    s.select_layer(mask);
+    // white on the left, clear on the right: a sketch on a layer of its own
+    let rgba: Vec<u8> = (0..64 * 64).flat_map(|i| if i % 64 < 32 { [255; 4] } else { [0; 4] }).collect();
+    let picture = crate::layers::ThumbnailImage { width: 64, height: 64, rgba };
+    // as anything pasted, a new layer
+    let layers = s.layers().len();
+    let pasted = s.paste(picture.clone()).unwrap();
+    assert_eq!(s.layers().len(), layers + 1);
+    assert_ne!(pasted, mask);
+    s.undo();
+    assert_eq!(s.layers().len(), layers);
+    s.select_layer(mask);
+    // asked to, the mask holds it: the layer shows where it was bright, nowhere else
+    let (_patches, patch_files) = crate::hooks::tests::paste_into_masks(&s, "mask-takes-paste");
+    assert_eq!(s.paste(picture.clone()), Some(mask));
+    assert_eq!(s.layers().len(), layers);
+    assert_eq!(pixel(&s, 10, 32), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 50, 32), [255, 255, 255, 255]);
+    // one step back to the mask as it was
+    s.undo();
+    assert_eq!(pixel(&s, 50, 32), [255, 0, 0, 255]);
+    // from another app too: smaller than the canvas, in the middle of it, the rest hidden
+    let square = crate::layers::ThumbnailImage { width: 16, height: 16, rgba: vec![255; 16 * 16 * 4] };
+    assert!(s.paste_picture_into_mask(square.clone()));
+    assert_eq!(s.layers().len(), layers);
+    assert_eq!(pixel(&s, 32, 32), [255, 0, 0, 255]);
+    assert_eq!(pixel(&s, 4, 4), [255, 255, 255, 255]);
+    s.undo();
+    // on any other layer it is a new layer still
+    s.select_layer(layer);
+    assert!(!s.paste_picture_into_mask(square));
+    assert_ne!(s.paste(picture), Some(layer));
+    assert_eq!(s.layers().len(), layers + 1);
+    let _ = std::fs::remove_dir_all(patch_files);
 }
 
 #[test]
@@ -3486,7 +3650,9 @@ fn the_last_stroke_snaps_to_a_shape_until_something_else_is_done() {
     assert_eq!(pixel(&s, 40, 64), [255, 255, 255, 255]);
     assert_eq!(pixel(&s, 76, 54), [255, 255, 255, 255]);
     assert!((50..70).any(|y| pixel(&s, 100, y)[0] < 128));
-    // one step: undone, nothing is left
+    // undone, the stroke is back as drawn; undone again, nothing is left
+    s.undo();
+    assert!(near(40, 64) && near(76, 54));
     s.undo();
     assert!((50..70).all(|y| pixel(&s, 100, y) == [255, 255, 255, 255]));
     // once something else is done (an undo here), there is no last stroke to snap
@@ -4085,6 +4251,12 @@ fn frosted_panels_come_six_numbers_each() {
     assert_eq!(s.shared.lock().backdrops, vec![[10.0, 20.0, 60.0, 80.0, 12.0, 0.5]]);
     s.set_backdrops(Vec::new());
     assert!(s.shared.lock().backdrops.is_empty());
+    // the thin glass goes with them, and with them being cleared
+    s.set_glass(vec![1.0, 2.0, 3.0, 4.0, 5.0, 1.0], vec![6.0, 7.0, 8.0, 9.0, 2.0, 0.5, 1.0]);
+    assert_eq!(s.shared.lock().backdrops, vec![[1.0, 2.0, 3.0, 4.0, 5.0, 1.0]]);
+    assert_eq!(s.shared.lock().backdrop_windows, vec![[6.0, 7.0, 8.0, 9.0, 2.0, 0.5]]);
+    s.set_backdrops(Vec::new());
+    assert!(s.shared.lock().backdrop_windows.is_empty());
 }
 
 #[test]
@@ -7228,8 +7400,8 @@ fn adjustments_among_other_work_undo_and_redo_whole() {
                                 next(100) as f32 / 100.0,
                             ),
                             Adjustment::Liquify => {
-                                let points = (0..20).flat_map(|i| [x + i as f32 * 2.0, y, 1.0]).collect();
-                                s.adjustment_liquify_stroke(points, true);
+                                let points = (0..20).flat_map(|i| [x + i as f32 * 2.0, y, 1.0, 8.0]).collect();
+                                s.adjustment_liquify_stroke(points, true, false);
                             }
                             Adjustment::Clone => {
                                 s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
@@ -7962,7 +8134,12 @@ fn painting_in_every_mode_undoes_redoes_and_saves_whole() {
                         ];
                         let brush =
                             LiquifyBrush { kind: kinds[next(5) as usize], size: 0.2, pressure: 1.0, distortion: 0.3 };
-                        s.liquify_stroke((0..=10).flat_map(|k| [x + k as f32, y, 1.0]).collect(), true, brush);
+                        s.liquify_stroke(
+                            (0..=10).flat_map(|k| [x + k as f32, y, 1.0, 8.0]).collect(),
+                            true,
+                            false,
+                            brush,
+                        );
                         s.adjust_end(next(4) != 0);
                     }
                 }
@@ -8874,13 +9051,13 @@ fn leaving_with_liquify_or_crop_open_keeps_the_work() {
     // liquified, then off to the gallery with Liquify still open: saved as shown
     assert!(s.liquify_begin());
     let brush = LiquifyBrush { kind: LiquifyKind::Push, size: 0.2, pressure: 1.0, distortion: 0.0 };
-    s.liquify_stroke((0..=20).flat_map(|i| [40.0, 30.0 + i as f32 * 2.0, 1.0]).collect(), true, brush);
+    s.liquify_stroke((0..=20).flat_map(|i| [40.0, 30.0 + i as f32 * 2.0, 1.0, 8.0]).collect(), true, false, brush);
     let liquified = composite(&s);
     s.save(dir.join("a").to_string_lossy().into_owned()).unwrap();
     assert!(reopened(&dir.join("a")) == liquified, "Liquify's work lost on leaving");
     // undone inside Liquify, it still liquifies
     s.undo();
-    s.liquify_stroke((0..=20).flat_map(|i| [60.0, 30.0 + i as f32 * 2.0, 1.0]).collect(), true, brush);
+    s.liquify_stroke((0..=20).flat_map(|i| [60.0, 30.0 + i as f32 * 2.0, 1.0, 8.0]).collect(), true, false, brush);
     assert!(composite(&s) != liquified, "Liquify stopped after an undo");
     s.adjust_end(true);
     // Crop and Resize open, a smaller frame not applied, off to the gallery: the canvas as it was
@@ -9246,6 +9423,44 @@ fn a_touch_with_a_panel_open_paints_only_as_a_drag() {
     assert!(s.info().can_undo);
 }
 
+/// Lifted moving with momentum, liquify goes on by the touch timer until it runs out, and then
+/// the timer stops; without momentum it stops as it lifts.
+#[test]
+fn liquify_lifted_moving_goes_on_by_the_touch_timer() {
+    use crate::Adjustment;
+    let drag = |momentum: f32| -> Option<std::sync::Arc<CanvasSession>> {
+        let s = session(256, 256)?;
+        s.set_brush_size(0.1);
+        s.stroke_begin(PointerKind::Finger, vec![sample(128.0, 10.0, 0.0)]);
+        s.stroke_add((1..30).map(|i| sample(128.0, 10.0 + i as f32 * 8.0, i as f64 * 8.0)).collect());
+        s.stroke_end(vec![]);
+        assert!(s.adjustment_start(Adjustment::Liquify));
+        s.adjustment_liquify_value(0, 0.2);
+        s.adjustment_liquify_value(3, momentum);
+        s.touch_down(1, PointerKind::Finger, vec![sample(60.0, 128.0, 1000.0)]);
+        for i in 1..=10 {
+            s.touch_move(1, vec![sample(60.0 + i as f32 * 6.0, 128.0, 1000.0 + f64::from(i) * 8.0)]);
+        }
+        s.touch_up(1, vec![sample(120.0, 128.0, 1088.0)]);
+        Some(s)
+    };
+    let Some(still) = drag(0.0) else { return };
+    assert_eq!(still.touch_deadline(), None);
+    let Some(s) = drag(1.0) else { return };
+    let row = |s: &CanvasSession| (100..220).map(|x| pixel(s, x, 128)).collect::<Vec<_>>();
+    let lifted = row(&s);
+    let mut now = 1088.0f64;
+    let mut ticks = 0;
+    while let Some(due) = s.touch_deadline() {
+        now = now.max(due);
+        s.touch_tick(now);
+        ticks += 1;
+        assert!(ticks < 200, "it never stopped");
+    }
+    assert!(ticks > 30, "{ticks} ticks");
+    assert_ne!(row(&s), lifted, "it went on after the lift");
+}
+
 /// Liquify held still works on as the time passes, a stamp at a time adding up to the whole of it.
 #[test]
 fn liquify_held_still_works_on() {
@@ -9269,7 +9484,7 @@ fn liquify_held_still_works_on() {
         s.adjustment_liquify_value(0, 0.28);
         s.adjustment_liquify_kind(kind);
         s.touch_down(1, PointerKind::Finger, vec![sample(128.0, 128.0, 1000.0)]);
-        assert_eq!(s.touch_deadline(), Some(1110.0));
+        assert_eq!(s.touch_deadline(), Some(1016.0));
         for ms in (1016..=1500).step_by(16) {
             s.touch_tick(f64::from(ms));
         }
@@ -9284,20 +9499,20 @@ fn liquify_held_still_works_on() {
         p[0] > 150 && p[1] < 150
     };
     let Some(right) = held(LiquifyKind::TwirlRight, false) else { return };
-    // 0.39 s at 4 a second, 50 from the middle of a brush of 101: turned 51 degrees, clockwise
-    assert!(ink(&right, 159, 167) && !ink(&right, 159, 89), "turned clockwise on the screen");
+    // 0.39 s at 4 a second, 50 from the middle of a brush of 101: turned 44 degrees, clockwise
+    assert!(ink(&right, 164, 163) && !ink(&right, 164, 93), "turned clockwise on the screen");
     assert!(!ink(&right, 178, 128), "turned away from where it was");
     let Some(left) = held(LiquifyKind::TwirlLeft, false) else { return };
-    assert!(ink(&left, 159, 89) && !ink(&left, 159, 167), "turned anticlockwise on the screen");
+    assert!(ink(&left, 164, 93) && !ink(&left, 164, 163), "turned anticlockwise on the screen");
     let Some(pinch) = held(LiquifyKind::Pinch, true) else { return };
     assert!(ink(&pinch, 152, 128) && !ink(&pinch, 168, 128), "drawn in");
     let Some(expand) = held(LiquifyKind::Expand, true) else { return };
-    assert!(ink(&expand, 186, 128) && !ink(&expand, 168, 128), "pushed out");
-    // a push held still does nothing more: nothing to wait for
+    assert!(ink(&expand, 183, 128) && !ink(&expand, 168, 128), "pushed out");
+    // a push held still does nothing more
     let Some(s) = session(256, 256) else { return };
     assert!(s.adjustment_start(Adjustment::Liquify));
     s.touch_down(1, PointerKind::Finger, vec![sample(128.0, 128.0, 0.0)]);
-    s.touch_tick(200.0);
-    assert_eq!(s.touch_deadline(), None);
+    assert!(s.touch_tick(200.0).is_empty());
     s.touch_up(1, vec![sample(128.0, 128.0, 210.0)]);
+    assert_eq!(s.touch_deadline(), None);
 }

@@ -3,6 +3,9 @@
 // Written premultiplied; the pipeline blends them "over" (light glaze) or keeps the maximum
 // (uniform glaze).
 
+// how far a stamp's quad reaches past the stamp each way (pixels): its shape fills all of it
+const QUAD_REACH: f32 = 0.70710678;
+
 struct StampUniform {
     canvas_size: vec2<f32>,
     hardness: f32,
@@ -27,6 +30,8 @@ struct StampUniform {
     shape_sharp: u32,
     // the coarsest mip level the shape is read from: a small stamp's thin shape keeps its strength
     shape_lod_cap: f32,
+    // pixels a side of the image a moving grain is read from
+    grain_side: f32,
 }
 
 @group(0) @binding(0) var<uniform> su: StampUniform;
@@ -66,7 +71,8 @@ struct StampOut {
     // where a moving grain is read from: the stamp's middle in it, plus the point's place from
     // there on the canvas, turned as far as the stamp says
     @location(3) grain_at: vec2<f32>,
-    @location(4) flip: vec2<f32>,
+    // how much of its quad the stamp itself is across each way, mirrored as the stamp says
+    @location(4) fill: vec2<f32>,
     // the stamp's colour: the brush's tinted, mixed with the secondary
     @location(5) color: vec3<f32>,
     // how hard the paint is pressed into a moving grain, and how much that counts
@@ -83,11 +89,12 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
     );
-    let r = max(inst.radius, 0.25);
+    // a shape's quad keeps its reach however small the stamp; the round tip thins out by its area
+    let r = max(inst.radius, select(0.25, 0.01, su.shape >= 0));
+    let half = vec2<f32>(r, max(r * inst.roundness, 1e-3));
     // one pixel to spare for anti-aliasing
-    let grow = (r + 1.0) / r;
-    let q = corners[vi % 6u] * grow;
-    let local = vec2<f32>(q.x * r, q.y * r * inst.roundness);
+    let q = corners[vi % 6u] * (half + 1.0) / half;
+    let local = q * half;
     let c = cos(inst.angle);
     let s = sin(inst.angle);
     let p = inst.center + vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
@@ -100,7 +107,7 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
     let gs = sin(inst.grain_turn);
     let from_middle = p - inst.center;
     o.grain_at = inst.grain_offset + vec2<f32>(from_middle.x * gc - from_middle.y * gs, from_middle.x * gs + from_middle.y * gc);
-    o.flip = inst.flip;
+    o.fill = inst.flip * half / (half + QUAD_REACH);
     o.color = mix(tinted(su.color.rgb, inst.tint, inst.brightness_add), su.secondary.rgb, inst.look.z);
     o.look = inst.look;
     o.grain_press = inst.more.x;
@@ -167,11 +174,10 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         let soft = 1.0 - smoothstep(min(su.hardness, 0.999) * r, r + 0.5, d);
         a = min(rim, soft);
     } else {
-        // the shape fills its stamp and half a pixel round it (as far as the quad it is drawn on
-        // reaches past the stamp), which shows on a stamp a few pixels across
-        let uv = i.q * (r / (r + 0.5)) * i.flip * 0.5 + 0.5;
-        // the mip level that matches the stamp's size on the canvas
-        let lod = clamp(log2(256.0 / max(2.0 * r + 1.0, 1.0)), 0.0, su.shape_lod_cap);
+        // the shape fills the quad it is drawn on, which shows on a stamp a few pixels across
+        let uv = i.q * i.fill * 0.5 + 0.5;
+        // the mip level that matches the quad's size on the canvas
+        let lod = clamp(log2(128.0 / (r + QUAD_REACH)), 0.0, su.shape_lod_cap);
         let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
         var s = textureSampleLevel(shapes, shape_smp, uv, su.shape, lod).r;
         if (su.shape_sharp == 1u) {
@@ -186,10 +192,18 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         let at = i.grain_at;
         let g_uv = vec2<f32>(at.x * gc - at.y * gs, at.x * gs + at.y * gc) / scale;
         let sharp = su.grain_sharp == 1u;
-        let g_lod = select(max(log2(256.0 / scale), 0.0), 0.0, sharp);
-        var raw = textureSampleLevel(grains, grain_smp, g_uv, su.grain, g_lod).r;
+        // a brush file's own image has the fine detail itself; ours only stands in for it
+        let own = su.grain_side > 256.0;
+        let g_lod = max(log2(su.grain_side / scale), 0.0);
+        var raw = textureSampleLevel(grains, grain_smp, g_uv, su.grain, select(g_lod, 0.0, sharp && !own)).r;
         if (sharp) {
-            raw = sharp_grain(raw, g_uv);
+            if (own) {
+                // unfiltered: the texel under it at its level
+                let l = i32(round(g_lod));
+                raw = textureLoad(grains, vec2<i32>(fract(g_uv) * vec2<f32>(textureDimensions(grains, l))), su.grain, l).r;
+            } else {
+                raw = sharp_grain(raw, g_uv);
+            }
         }
         let g = clamp((raw - 0.5) * (1.0 + su.grain_contrast) + 0.5 + su.grain_brightness, 0.0, 1.0);
         // combined with the shape by the grain's blend mode, as deep as it says, inside the shape

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.outline",
+  "name": "Outline",
+  "version": "1.0.0",
+  "kind": "filter",
+  "publisher": { "name": "ProCraft" },
+  "description": "Draws a line round what is on the layer, in place of it.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "controls": [
+    { "key": "reach", "type": "slider", "label": "Width", "least": 1, "most": 12, "step": 1, "starts": 3, "unit": " px", "live": true }
+  ]
+}

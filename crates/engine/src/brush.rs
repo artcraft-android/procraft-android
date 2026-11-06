@@ -708,8 +708,12 @@ impl Brush {
     /// Canvas pixels a stamp is across for each unit of size as brush files keep it: the
     /// stamp's square, of which a round tip of ours covers [`crate::brushfile::ROUND_TIP_SHARE`].
     pub fn size_unit(&self) -> f32 {
-        let round_tip = self.shape.image.is_none() && self.shape.source.is_none();
-        crate::brushfile::PIXELS_PER_SIZE * if round_tip { crate::brushfile::ROUND_TIP_SHARE } else { 1.0 }
+        crate::brushfile::PIXELS_PER_SIZE * if self.round_tip() { crate::brushfile::ROUND_TIP_SHARE } else { 1.0 }
+    }
+
+    /// Whether it draws the round tip, not a shape image.
+    pub fn round_tip(&self) -> bool {
+        self.shape.image.is_none() && self.shape.source.is_none()
     }
 
     /// The brush as a dual brush's second: drawn apart as coverage alone, its grain goes on stamp

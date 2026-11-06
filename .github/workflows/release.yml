@@ -3,6 +3,7 @@
 # GitHub and publish the draft) of:
 #
 #   procraft-<version>-android-arm64.apk          64-bit ARM tablets, signed with the release key
+#   procraft-<version>-android-arm32.apk          32-bit ARM tablets, signed likewise
 #   procraft-<version>-windows-x64.msi            the desktop app's installer (packaging/windows)
 #   procraft-<version>-windows-x64-portable.zip   the desktop app to run from anywhere
 #   procraft-<version>-windows-arm64.msi          the same for Windows on ARM (Snapdragon PCs)
@@ -76,7 +77,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          targets: aarch64-linux-android
+          targets: aarch64-linux-android, armv7-linux-androideabi
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -113,8 +114,10 @@ jobs:
           PROCRAFT_KEY_PASSWORD: ${{ secrets.PROCRAFT_KEY_PASSWORD }}
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          ./gradlew --no-daemon :app:assembleRelease -Pprocraft.abis=arm64-v8a "-Pprocraft.version=$VERSION"
-          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/dist/procraft-$VERSION-android-arm64.apk"
+          for build in arm64-v8a:arm64 armeabi-v7a:arm32; do
+            ./gradlew --no-daemon :app:assembleRelease "-Pprocraft.abis=${build%:*}" "-Pprocraft.version=$VERSION"
+            cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/dist/procraft-$VERSION-android-${build#*:}.apk"
+          done
 
       - name: APK
         run: |

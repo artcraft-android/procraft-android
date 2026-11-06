@@ -15,6 +15,7 @@
 
 use std::sync::Mutex;
 
+mod box_pinch;
 mod pen;
 
 pub use pen::{HoverCursor, PenHover, PenPreferred, SqueezePhase};
@@ -26,10 +27,8 @@ use crate::{CanvasSession, PenSample, PointerKind, ToolKind};
 
 /// A tap: down and up within this, moving no further than [`TAP_SLOP`] points.
 const TAP_MS: f64 = 300.0;
-/// A liquify brush lifted within this long of its last move carries on.
-const LIQUIFY_STILL_MS: f64 = 60.0;
-/// Liquify held still works on: from this long after it stops, a stamp this often, as measured;
-/// moved less than this (points) it counts as still.
+/// Liquify held still works on from this long after it stops, as measured; moved less than this
+/// (points) it counts as still. Time passes for it, and for what it set going, this often.
 const LIQUIFY_HELD_WAIT_MS: f64 = 110.0;
 const LIQUIFY_HELD_STEP_MS: f64 = 16.0;
 const LIQUIFY_HELD_SLOP: f32 = 3.0;
@@ -70,6 +69,9 @@ const SWIPE_DOWN: f32 = 70.0;
 const QUICKSHAPE_STILL: f32 = 6.0;
 /// A snapped shape being edited: a handle within this takes a drag, and its outline within this.
 const QUICKSHAPE_GRAB: f32 = 22.0;
+/// A shape's node stays where it is until the finger has gone this far (points), and then goes as
+/// it does, that far behind it.
+const NODE_SLOP: f32 = 10.0;
 /// A fill's touch slid past this (points) changes its threshold, this much more gently than a
 /// selection's.
 const POUR_SLOP: f32 = 15.0;
@@ -449,13 +451,12 @@ pub(crate) struct Touches {
     select_moved: bool,
     lasso_snapped: bool,
     /// An adjustment's touch went past the slop (it is not a tap), and has begun displacing;
-    /// liquify's brush, where it last was (window pixels), when, and how fast (pixels a
-    /// millisecond).
+    /// liquify's brush, when it last moved and when time last passed for it, and whether a pen
+    /// holds it.
     adjust_moved: bool,
     adjust_displacing: bool,
-    liquify_at: (f32, f32),
     liquify_ms: f64,
-    liquify_velocity: (f32, f32),
+    liquify_tick_ms: f64,
     liquify_pen: bool,
     /// Where the pen's barrel last was (radians), once the stroke has read it.
     liquify_roll: Option<f32>,
@@ -476,6 +477,9 @@ pub(crate) struct Touches {
     transforming: Option<TransformTouch>,
     transform_handle: crate::TransformHandle,
     transform_grabbed: bool,
+    /// Two fingers came down with one on the box: what it holds is theirs, once they've gone a
+    /// little way (until then they may yet be a tap); then where they took it.
+    box_pinch: Option<Option<[(f32, f32); 2]>>,
     pour_moved: bool,
     pour_last: (f32, f64),
     /// Layer Opacity is on: the layer a drag changes and its opacity as dragged; whether the
@@ -504,8 +508,10 @@ pub(crate) struct Touches {
     /// A panel is open over the canvas, and the touch waiting for it to go.
     panel_open: bool,
     held: Option<Held>,
-    /// Window pixels a point.
+    /// Window pixels a point: how far a touch has to go.
     scale: f32,
+    /// Window pixels a point of the interface: how near a touch has to be to a handle it draws.
+    handle_scale: f32,
 }
 
 impl Default for Touches {
@@ -552,9 +558,8 @@ impl Default for Touches {
             lasso_snapped: false,
             adjust_moved: false,
             adjust_displacing: false,
-            liquify_at: (0.0, 0.0),
             liquify_ms: 0.0,
-            liquify_velocity: (0.0, 0.0),
+            liquify_tick_ms: 0.0,
             liquify_pen: false,
             liquify_roll: None,
             liquify_rest: (0.0, 0.0),
@@ -569,6 +574,7 @@ impl Default for Touches {
             transforming: None,
             transform_handle: crate::TransformHandle::Move,
             transform_grabbed: false,
+            box_pinch: None,
             pour_moved: false,
             pour_last: (0.0, 0.0),
             layer_opacity: None,
@@ -587,6 +593,7 @@ impl Default for Touches {
             panel_open: false,
             held: None,
             scale: 1.0,
+            handle_scale: 1.0,
         }
     }
 }
@@ -622,9 +629,15 @@ fn barrel_turn(last: &mut Option<f32>, now: f32) -> f32 {
     if turn > std::f32::consts::PI { turn - std::f32::consts::TAU } else { turn }
 }
 
-/// A liquify stroke's points, (x, y, pressure) each: a finger's (or a mouse's) at full pressure.
-fn liquify_points(pen: bool, samples: &[PenSample]) -> Vec<f32> {
-    samples.iter().flat_map(|s| [s.x, s.y, if pen { s.pressure } else { 1.0 }]).collect()
+/// A liquify stroke's points, (x, y, pressure, milliseconds since the last) each, the first since
+/// `since`: a finger's (or a mouse's) at full pressure.
+fn liquify_points(pen: bool, samples: &[PenSample], mut since: f64) -> Vec<f32> {
+    let mut points = Vec::with_capacity(samples.len() * 4);
+    for s in samples {
+        points.extend([s.x, s.y, if pen { s.pressure } else { 1.0 }, (s.time_ms - since) as f32]);
+        since = s.time_ms;
+    }
+    points
 }
 
 fn is_pen(kind: PointerKind) -> bool {
@@ -792,7 +805,10 @@ impl CanvasSession {
         let Some(first) = last_of(&samples).copied() else { return Vec::new() };
         let mut out = Vec::new();
         let mut t = self.touches();
-        t.scale = self.shared.lock().display_scale;
+        (t.scale, t.handle_scale) = {
+            let st = self.shared.lock();
+            (st.display_scale, st.interface_scale())
+        };
         let at = (first.x, first.y);
         t.down.retain(|d| d.id != id);
         t.down.push(Down { id, at, from: at });
@@ -1034,16 +1050,8 @@ impl CanvasSession {
                     (st.adjust.open().map(|o| o.0), st.adjust.displacing())
                 };
                 if open == Some(Adjustment::Liquify) {
-                    // the brush liquifies along the drag, its speed followed for when it lifts
+                    // the brush liquifies along the drag
                     let mut t = self.touches();
-                    let dt = (last.time_ms - t.liquify_ms) as f32;
-                    if dt > 0.0 {
-                        let (vx, vy) = t.liquify_velocity;
-                        let (px, py) = t.liquify_at;
-                        t.liquify_velocity = (vx * 0.5 + (at.0 - px) / dt * 0.5, vy * 0.5 + (at.1 - py) / dt * 0.5);
-                        t.liquify_at = at;
-                        t.liquify_ms = last.time_ms;
-                    }
                     if dist(at, t.liquify_rest) > LIQUIFY_HELD_SLOP * t.scale {
                         t.liquify_rest = at;
                         t.liquify_rest_ms = last.time_ms;
@@ -1052,8 +1060,10 @@ impl CanvasSession {
                     let pen = t.liquify_pen;
                     let rolled = pen && t.settings.liquify_roll;
                     let turn = if rolled { barrel_turn(&mut t.liquify_roll, last.roll) } else { 0.0 };
+                    let points = liquify_points(pen, &samples, t.liquify_ms);
+                    t.liquify_ms = last.time_ms;
                     drop(t);
-                    self.adjustment_liquify_stroke(liquify_points(pen, &samples), false);
+                    self.adjustment_liquify_stroke(points, false, pen);
                     if turn != 0.0 {
                         self.adjustment_liquify_rolled(at.0, at.1, turn);
                     }
@@ -1110,24 +1120,40 @@ impl CanvasSession {
                 Self::note_fingers_moved(&mut t);
                 if t.down.len() >= 3 {
                     Self::scrub(&mut t, &mut out);
+                } else if t.box_pinch.is_some() {
+                    self.pinch_box(&mut t, &mut out);
                 } else if self.move_gesture(&mut t, last.time_ms) {
                     out.push(TouchCommand::ViewMoved);
                 }
             }
             Mode::Shape(i) => {
-                drop(t);
-                self.quickshape_move_handle(i, at.0, at.1);
-                out.push(TouchCommand::ShapeChanged);
+                let began = !t.shape_dragged && dist(at, t.down_at) > NODE_SLOP * t.scale;
+                if began {
+                    // from here on, the node's way from the finger
+                    t.shape_dragged = true;
+                    t.shape_last = (t.shape_last.0 - at.0, t.shape_last.1 - at.1);
+                }
+                if t.shape_dragged {
+                    let grip = t.shape_last;
+                    drop(t);
+                    if began {
+                        self.quickshape_step();
+                    }
+                    self.quickshape_move_handle(i, at.0 + grip.0, at.1 + grip.1);
+                    out.push(TouchCommand::ShapeChanged);
+                }
             }
             Mode::ShapePin | Mode::ShapeMove if id == t.stroke_pointer => {
                 // only a drag past a tap's slop moves it, then from where it began
-                if !t.shape_dragged {
-                    t.shape_dragged = dist(at, t.down_at) > slop;
-                }
+                let began = !t.shape_dragged && dist(at, t.down_at) > slop;
+                t.shape_dragged |= began;
                 if t.shape_dragged {
                     let (pin, from) = (t.mode == Mode::ShapePin, t.shape_last);
                     t.shape_last = at;
                     drop(t);
+                    if began {
+                        self.quickshape_step();
+                    }
                     if pin {
                         self.quickshape_pin(at.0, at.1, false);
                     } else {
@@ -1171,22 +1197,25 @@ impl CanvasSession {
             self.held_goes_on(t, false, &mut out);
             t = self.touches();
         }
-        // liquify held still works on, as the time passes
+        // liquify held still works on as the time passes, and what it set going goes on
         if t.liquify_due.is_some_and(|due| due <= now_ms) {
             t.liquify_due = None;
-            if t.mode == Mode::Adjust {
+            let passed = ((now_ms - t.liquify_tick_ms) / 1000.0) as f32;
+            t.liquify_tick_ms = now_ms;
+            let held = (t.mode == Mode::Adjust).then(|| {
                 let to = ((now_ms - t.liquify_rest_ms - LIQUIFY_HELD_WAIT_MS) / 1000.0).max(0.0) as f32;
-                let from = std::mem::replace(&mut t.liquify_held, to);
-                let at = t.liquify_rest;
-                drop(t);
-                let works = to <= from || self.adjustment_liquify_held(at.0, at.1, from, to);
-                t = self.touches();
-                if works {
-                    t.liquify_due = Some(now_ms + LIQUIFY_HELD_STEP_MS);
-                    if to > from {
-                        out.push(TouchCommand::AdjustChanged);
-                    }
-                }
+                (t.liquify_rest, std::mem::replace(&mut t.liquify_held, to), to)
+            });
+            drop(t);
+            let worked =
+                held.is_some_and(|(at, from, to)| to > from && self.adjustment_liquify_held(at.0, at.1, from, to));
+            let going = self.adjustment_liquify_tick(passed);
+            t = self.touches();
+            if going || held.is_some() {
+                t.liquify_due = Some(now_ms + LIQUIFY_HELD_STEP_MS);
+            }
+            if worked || going {
+                out.push(TouchCommand::AdjustChanged);
             }
         }
         // a freehand selection held still snaps to a shape, which the lift then selects
@@ -1369,7 +1398,7 @@ impl CanvasSession {
         // a snapped shape's handle is dragged; while it is edited, a drag on its outline turns and
         // resizes it, one elsewhere moves it (a tap ends the editing); anything else keeps the
         // shape and draws on
-        let grab = QUICKSHAPE_GRAB * t.scale;
+        let grab = QUICKSHAPE_GRAB * t.handle_scale;
         if t.shape_editing
             && let Some(info) = self.quickshape_info()
         {
@@ -1379,11 +1408,13 @@ impl CanvasSession {
                 .0
                 .iter()
                 .enumerate()
-                .map(|(i, &[x, y])| (i, dist((x, y), at)))
-                .filter(|(_, d)| *d <= grab)
-                .min_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((i, _)) = handle {
+                .map(|(i, &[x, y])| (i, (x, y), dist((x, y), at)))
+                .filter(|(.., d)| *d <= grab)
+                .min_by(|a, b| a.2.total_cmp(&b.2));
+            if let Some((i, node, _)) = handle {
                 t.mode = Mode::Shape(i as u32);
+                t.shape_dragged = false;
+                t.shape_last = node;
                 return;
             }
             t.stroke_pointer = id;
@@ -1406,7 +1437,7 @@ impl CanvasSession {
         {
             t.stroke_pointer = id;
             if let Some(puck) = self.clone_puck_at()
-                && dist(puck, at) <= (CLONE_PUCK_RADIUS + CLONE_PUCK_SLOP) * t.scale
+                && dist(puck, at) <= (CLONE_PUCK_RADIUS + CLONE_PUCK_SLOP) * t.handle_scale
             {
                 // the clone source is dragged
                 t.puck_grab = (at.0 - puck.0, at.1 - puck.1);
@@ -1429,19 +1460,18 @@ impl CanvasSession {
             t.pour_last = (at.0, now);
             t.mode = Mode::Adjust;
             // perspective blur: a touch on its puck moves the puck or turns its arrow
-            t.puck_drag = self.perspective_drag_at(at, t.scale);
+            t.puck_drag = self.perspective_drag_at(at, t.handle_scale);
             t.puck_dragging = false;
             if open == Adjustment::Liquify {
-                t.liquify_at = at;
                 t.liquify_ms = now;
-                t.liquify_velocity = (0.0, 0.0);
+                t.liquify_tick_ms = now;
                 t.liquify_pen = is_pen(kind);
                 t.liquify_roll = None;
                 t.liquify_rest = at;
                 t.liquify_rest_ms = now;
                 t.liquify_held = 0.0;
-                t.liquify_due = Some(now + LIQUIFY_HELD_WAIT_MS);
-                self.adjustment_liquify_stroke(liquify_points(t.liquify_pen, samples), true);
+                t.liquify_due = Some(now + LIQUIFY_HELD_STEP_MS);
+                self.adjustment_liquify_stroke(liquify_points(t.liquify_pen, samples, now), true, t.liquify_pen);
                 out.push(TouchCommand::AdjustChanged);
             }
             return;
@@ -1579,8 +1609,9 @@ impl CanvasSession {
             return;
         }
         t.held = None;
-        // a second finger takes back the fill the first one made, and a transform's drag; it keeps
-        // the opacity dragged so far
+        // a second finger takes back the fill the first one made, and a transform's drag (a move
+        // of what the box holds is kept when the fingers go on to take it); it keeps the opacity
+        // dragged so far
         if t.mode == Mode::Pour {
             self.pour_end(false, None);
         }
@@ -1603,11 +1634,7 @@ impl CanvasSession {
                 }
             }
         }
-        if t.mode == Mode::Transform && t.transform_grabbed {
-            t.transform_grabbed = false;
-            let transform = self.transform_cancel_drag();
-            out.push(TouchCommand::TransformMoved { transform });
-        }
+        self.second_finger_on_box(t, out);
         out.push(TouchCommand::CursorGone);
         if t.mode == Mode::Finger {
             self.stroke_cancel();
@@ -1705,11 +1732,12 @@ impl CanvasSession {
             if t.mode == Mode::Gesture {
                 t.tap_lifted.get_or_insert(now);
                 let parted = t.gesture_pair.is_some_and(|(a, b)| a == id || b == id);
+                let pinched = parted && self.end_box_pinch(&mut t, cancelled, &mut out);
                 Self::follow_fingers(&mut t);
                 // two fingers parting as they close fast fit a canvas pinched smaller than it
                 // fits, settling into place (a tap's fingers aren't a pinch)
                 let tap = Self::fingers_tapped(&t, now);
-                if parted && !cancelled && !tap && t.tap_pointers == 2 && t.gesture_pair.is_none() {
+                if parted && !pinched && !cancelled && !tap && t.tap_pointers == 2 && t.gesture_pair.is_none() {
                     let flicked = Self::pinch_speed(&t, now) < QUICK_PINCH_SPEED;
                     if flicked && self.pinched_smaller_than_fit() {
                         out.push(TouchCommand::Fit);
@@ -1772,11 +1800,9 @@ impl CanvasSession {
                 let liquifying = self.shared.lock().adjust.open().is_some_and(|o| o.0 == Adjustment::Liquify);
                 if liquifying {
                     // still moving when it lifts, liquify carries on
-                    if !cancelled && now - t.liquify_ms <= LIQUIFY_STILL_MS {
-                        let (vx, vy) = t.liquify_velocity;
-                        drop(t);
-                        self.adjustment_liquify_coast(vx, vy);
-                    }
+                    drop(t);
+                    let going = !cancelled && self.adjustment_liquify_lift();
+                    self.touches().liquify_due = going.then_some(now + LIQUIFY_HELD_STEP_MS);
                 } else if !cancelled && !t.adjust_moved && now - t.tap_start <= TAP_MS {
                     out.push(TouchCommand::AdjustMenu { x: at.0, y: at.1 });
                 }
@@ -2034,7 +2060,7 @@ impl CanvasSession {
         let (shown, view, density, warping) = {
             let st = self.shared.lock();
             let warping = st.transform_mode == procraft_engine::transform::TransformMode::Warp;
-            (st.transform_box(), st.view.map(|v| v.to_screen()), st.display_scale, warping)
+            (st.transform_box(), st.view.map(|v| v.to_screen()), st.interface_scale(), warping)
         };
         let (Some(b), Some(m)) = (shown, view) else { return crate::TransformHandle::Move };
         let view = vec![m.a, m.b, m.c, m.d, m.e, m.f];
@@ -2051,7 +2077,7 @@ impl CanvasSession {
     fn numeric_at(&self, handle: crate::TransformHandle) -> Option<TouchCommand> {
         let (b, m, density) = {
             let st = self.shared.lock();
-            (st.transform_box()?, st.view?.to_screen(), st.display_scale)
+            (st.transform_box()?, st.view?.to_screen(), st.interface_scale())
         };
         let s = crate::screen_box(b.corners, vec![m.a, m.b, m.c, m.d, m.e, m.f], density)?;
         let point = |v: &[f32], i: usize| Some((*v.get(2 * i)?, *v.get(2 * i + 1)?));

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.posterise",
+  "name": "Posterise",
+  "version": "1.0.0",
+  "kind": "filter",
+  "publisher": { "name": "ProCraft" },
+  "description": "Holds each colour to a few flat steps.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "controls": [
+    { "key": "steps", "type": "slider", "label": "Steps", "least": 2, "most": 16, "step": 1, "starts": 4, "live": true }
+  ]
+}

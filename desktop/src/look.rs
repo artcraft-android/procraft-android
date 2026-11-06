@@ -92,7 +92,7 @@ pub mod pc {
     pub const COLOR_DOT: f32 = 31.0;
 
     pub const SIDE_BAR: Themed = Themed(0xE7171717, 0xCFE5E5E5);
-    pub const SLIDER_TRACK: Themed = Themed(0xC93E3E3E, 0xFFE9E9E9);
+    pub const SLIDER_TRACK: Themed = Themed(0xC93E3E3E, 0xBFF0F0F0);
     pub const SLIDER_RIM: Themed = Themed(0xB96E6E6E, 0xFFE9E9E9);
     pub const SLIDER_RIM_WIDTH: f32 = 0.8;
     pub const SLIDER_THUMB: Themed = Themed(0xFFA6A6A6, 0xFFF8F8F8);

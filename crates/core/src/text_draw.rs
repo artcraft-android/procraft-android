@@ -20,19 +20,21 @@ use crate::text::{TextAlignment, TextInfo};
 
 /// The bundled face, as text layers name it.
 const INTER: &str = "inter";
-/// An imported font's name in a text layer: this, then its file's path.
+/// An imported font's name in a text layer: this, then its file's path; a family of a collection
+/// other than its first, then `#` and where in the file its faces start.
 const FILE: &str = "file:";
 /// An outline's width, as a fraction of the size.
 const OUTLINE: f32 = 0.04;
 
 /// The fonts text is drawn with, the glyphs drawn so far, the names standing for families (the
-/// generic ones a platform maps to its own), and the files read in (path to family).
+/// generic ones a platform maps to its own), and the files read in (path to the name of each of
+/// its families and where in the file its faces start).
 struct Fonts {
     system: FontSystem,
     glyphs: SwashCache,
     strokes: ScaleContext,
     aliases: HashMap<String, String>,
-    files: HashMap<String, String>,
+    files: HashMap<String, Vec<(String, u32)>>,
 }
 
 /// Where the user's imported fonts are kept, and the typefaces they offer (by name): apart from
@@ -84,22 +86,31 @@ pub fn add_text_font_file(path: String) -> Vec<String> {
     add_file(&mut f, &path)
 }
 
+/// The family of the file at `path` whose faces start at `start`, as text layers name it.
+fn file_family(path: &str, start: u32) -> String {
+    if start == 0 { format!("{FILE}{path}") } else { format!("{FILE}{path}#{start}") }
+}
+
 fn add_file(f: &mut Fonts, path: &str) -> Vec<String> {
     let db = f.system.db_mut();
     let ids = db.load_font_source(fontdb::Source::File(path.into()));
-    let names = families_of(db, &ids);
-    // the file's faces under a family of their own (its name in text layers), so text set in it
-    // draws in this file and not in another font of the same family
-    let own = format!("{FILE}{path}");
+    // the file's faces under families of their own (their names in text layers), so text set in
+    // one draws in this file and not in another font of the same family
+    let mut families: Vec<(String, u32)> = Vec::new();
     for id in ids {
-        if let Some(mut info) = db.face(id).cloned() {
-            db.remove_face(id);
-            info.families = vec![(own.clone(), fontdb::Language::English_UnitedStates)];
-            db.push_face_info(info);
+        let Some(mut info) = db.face(id).cloned() else { continue };
+        let name = info.families.first().map(|(n, _)| n.clone()).unwrap_or_default();
+        let start = families.iter().find(|(n, _)| *n == name).map_or(info.index, |&(_, start)| start);
+        if !families.iter().any(|(n, _)| *n == name) {
+            families.push((name, start));
         }
+        db.remove_face(id);
+        info.families = vec![(file_family(path, start), fontdb::Language::English_UnitedStates)];
+        db.push_face_info(info);
     }
-    if !names.is_empty() {
-        f.files.insert(path.to_owned(), own);
+    let names = families.iter().map(|(name, _)| name.clone()).collect();
+    if !families.is_empty() {
+        f.files.insert(path.to_owned(), families);
     }
     names
 }
@@ -109,34 +120,51 @@ fn add_file(f: &mut Fonts, path: &str) -> Vec<String> {
 /// received artwork says) is never opened.
 fn font_file(font: &str) -> Option<std::path::PathBuf> {
     let path = font.strip_prefix(FILE)?;
-    let name = path.rsplit(['/', '\\']).next().filter(|n| !n.is_empty() && *n != "." && *n != "..")?;
+    let name = path.rsplit(['/', '\\']).next()?.split('#').next();
+    let name = name.filter(|n| !n.is_empty() && *n != "." && *n != "..")?;
     let at = imported().0.clone()?.join(name);
     at.is_file().then_some(at)
 }
 
-/// Whether `path` is named as a font file (TrueType or OpenType).
-fn is_font(path: &std::path::Path) -> bool {
-    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"))
+/// What a font file ends in: TrueType, OpenType, and collections of them.
+const FONT_ENDINGS: [&str; 4] = ["ttf", "otf", "ttc", "otc"];
+
+/// Whether `ending` is a font file's.
+fn font_ending(ending: &str) -> bool {
+    FONT_ENDINGS.iter().any(|e| ending.eq_ignore_ascii_case(e))
 }
 
-/// The font file at `path` read in and offered as a typeface (named by the file), in name order;
-/// none if it isn't a font.
+/// Whether `path` is named as a font file.
+fn is_font(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(font_ending)
+}
+
+/// The font file at `path` read in and offered, in name order, as a typeface named by the file, or
+/// a collection's families as typefaces by their own names; its first, none if it isn't a font.
 fn offer_file(path: &std::path::Path) -> Option<TextTypeface> {
     let at = path.to_string_lossy().into_owned();
-    {
+    let families = {
         let mut f = fonts();
-        if !f.files.contains_key(&at) && add_file(&mut f, &at).is_empty() {
-            return None;
+        if !f.files.contains_key(&at) {
+            add_file(&mut f, &at);
+        }
+        f.files.get(&at).cloned().unwrap_or_default()
+    };
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let alone = families.len() == 1;
+    let name = |family: String| if alone { stem.clone() } else { family };
+    let offered: Vec<TextTypeface> = families
+        .into_iter()
+        .map(|(family, start)| TextTypeface { name: name(family), family: file_family(&at, start) })
+        .collect();
+    let list = &mut imported().1;
+    for typeface in &offered {
+        if !list.contains(typeface) {
+            list.push(typeface.clone());
         }
     }
-    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let typeface = TextTypeface { name, family: format!("{FILE}{at}") };
-    let list = &mut imported().1;
-    if !list.contains(&typeface) {
-        list.push(typeface.clone());
-        list.sort_by_key(|t| t.name.to_lowercase());
-    }
-    Some(typeface)
+    list.sort_by_key(|t| t.name.to_lowercase());
+    offered.into_iter().next()
 }
 
 /// Where the user's imported fonts are kept (a folder of the app's), the fonts already there read
@@ -162,11 +190,9 @@ pub fn set_text_font_folder(dir: String) {
 pub fn import_text_font(bytes: Vec<u8>, file_name: String) -> Option<TextTypeface> {
     let dir = imported().0.clone()?;
     let safe: String = file_name.chars().filter(|c| c.is_alphanumeric() || " ._-".contains(*c)).collect();
-    // its name and ending as the file's (TrueType unless it says OpenType)
+    // its name and ending as the file's (TrueType unless it says otherwise)
     let (stem, ending) = match safe.rsplit_once('.') {
-        Some((stem, ext)) if ext.eq_ignore_ascii_case("ttf") || ext.eq_ignore_ascii_case("otf") => {
-            (stem, ext.to_lowercase())
-        }
+        Some((stem, ext)) if font_ending(ext) => (stem, ext.to_lowercase()),
         _ => (safe.as_str(), "ttf".to_owned()),
     };
     let stem = stem.trim_matches(|c: char| c == '.' || c.is_whitespace());
@@ -268,8 +294,11 @@ fn family_name(f: &mut Fonts, font: &str) -> String {
             if !f.files.contains_key(&at) {
                 add_file(f, &at);
             }
-            if let Some(name) = f.files.get(&at) {
-                return name.clone();
+            // a family the file has, else its first
+            let start = font.rsplit_once('#').and_then(|(_, start)| start.parse().ok()).unwrap_or(0);
+            if let Some(families) = f.files.get(&at) {
+                let start = if families.iter().any(|&(_, s)| s == start) { start } else { 0 };
+                return file_family(&at, start);
             }
         }
         return f.aliases.get("sans-serif").cloned().unwrap_or_else(|| "sans-serif".to_owned());
@@ -818,6 +847,66 @@ fn stroked(f: &mut Fonts, key: CacheKey, width: f32) -> Option<swash::scale::ima
 mod tests {
     use super::{fonts, lay_out, shown};
     use crate::text::{TextAlignment, TextInfo};
+
+    /// A font collection of the faces in `fonts`.
+    fn collection(fonts: &[Vec<u8>]) -> Vec<u8> {
+        let word = |at: usize, font: &[u8]| u32::from_be_bytes([font[at], font[at + 1], font[at + 2], font[at + 3]]);
+        let mut out = b"ttcf\0\x01\0\0".to_vec();
+        out.extend((fonts.len() as u32).to_be_bytes());
+        let mut at = 12 + 4 * fonts.len();
+        for font in fonts {
+            out.extend((at as u32).to_be_bytes());
+            at += font.len().next_multiple_of(4);
+        }
+        let mut place = out.len();
+        for font in fonts {
+            // its tables are found from the start of the file
+            let mut font = font.clone();
+            for table in 0..usize::from(u16::from_be_bytes([font[4], font[5]])) {
+                let entry = 12 + 16 * table + 8;
+                let moved = word(entry, &font) + place as u32;
+                font[entry..entry + 4].copy_from_slice(&moved.to_be_bytes());
+            }
+            place += font.len().next_multiple_of(4);
+            font.resize(font.len().next_multiple_of(4), 0);
+            out.extend(font);
+        }
+        out
+    }
+
+    #[test]
+    fn a_collections_families_are_each_offered_and_text_set_in_one_draws_in_it() {
+        let dir = std::env::temp_dir().join(format!("procraft-fonts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        super::set_text_font_folder(dir.to_string_lossy().into_owned());
+        let inter = include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec();
+        // the same font under a family of another name, wherever the file writes it
+        let (from, to): (Vec<u8>, Vec<u8>) = (
+            "Inter".encode_utf16().flat_map(u16::to_be_bytes).collect(),
+            "Oxter".encode_utf16().flat_map(u16::to_be_bytes).collect(),
+        );
+        let mut other = inter.clone();
+        for at in 0..other.len() - from.len() {
+            if other[at..at + from.len()] == from[..] {
+                other[at..at + to.len()].copy_from_slice(&to);
+            }
+        }
+        let first = super::import_text_font(collection(&[inter, other]), "Two.ttc".to_owned()).unwrap();
+        assert_eq!(first.name, "Inter");
+        let offered = super::text_typefaces();
+        let second = offered.iter().find(|t| t.name == "Oxter").expect("the second family");
+        assert!(second.family.ends_with("Two.ttc#1"), "{second:?}");
+        assert!(first.family.ends_with("Two.ttc"), "{first:?}");
+        // each draws in its own family, a place the file hasn't in its first, and it reads back after
+        let family = |font: &str| super::family_name(&mut fonts(), font);
+        assert_eq!(family(&first.family), first.family);
+        assert_eq!(family(&second.family), second.family);
+        assert_eq!(family(&format!("{}#7", first.family)), first.family);
+        // not a font: nothing kept
+        assert!(super::import_text_font(b"not a font".to_vec(), "Bad.ttc".to_owned()).is_none());
+        assert!(!dir.join("Bad.ttc").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn inter() {
         crate::add_text_font(include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec());

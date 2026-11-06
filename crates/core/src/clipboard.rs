@@ -1,6 +1,6 @@
 //! Copy, cut and paste, the canvas flipped, and pictures brought in as layers.
 
-use procraft_engine::document::LayerId;
+use procraft_engine::document::{LayerId, LayerKind};
 use procraft_engine::geom::IRect;
 
 use crate::layers::ThumbnailImage;
@@ -61,6 +61,17 @@ impl State {
         }
         Some(out)
     }
+}
+
+/// `image`'s straight colours premultiplied, as layers hold them.
+fn premultiplied(mut image: ThumbnailImage) -> ThumbnailImage {
+    for px in image.rgba.as_chunks_mut::<4>().0 {
+        let a = u16::from(px[3]);
+        for c in px.iter_mut().take(3) {
+            *c = ((u16::from(*c) * a + 127) / 255) as u8;
+        }
+    }
+    image
 }
 
 /// `image` placed on a `width` × `height` canvas: centred, and scaled down to fit when `fit` and
@@ -152,9 +163,19 @@ impl CanvasSession {
     }
 
     /// A new layer above the current one holding `image` where it was copied from (centred when
-    /// it is another size); returns its id.
+    /// it is another size), or the current mask holding it, if a patch says to and it can; returns
+    /// the layer's id.
     pub fn paste(&self, image: ThumbnailImage) -> Option<u64> {
+        if let Some(pasted) = self.mask_to_paste_into().and_then(|mask| self.paste_into(mask, image.clone(), false)) {
+            return Some(pasted);
+        }
         self.add_picture(image, false, false)
+    }
+
+    /// Whether what is pasted now goes into the current mask: through a patch a row at a time, which
+    /// on a big canvas takes a moment.
+    pub fn pastes_into_mask(&self) -> bool {
+        self.mask_to_paste_into().is_some()
     }
 
     /// As [`paste`](Self::paste), on a private layer: one the gallery's thumbnail leaves out.
@@ -166,14 +187,13 @@ impl CanvasSession {
     /// centred and scaled down to fit (on a private layer, one the gallery's thumbnail leaves
     /// out, if `private`); returns its id.
     pub fn insert_image(&self, image: ThumbnailImage, private: bool) -> Option<u64> {
-        let mut premultiplied = image;
-        for px in premultiplied.rgba.as_chunks_mut::<4>().0 {
-            let a = u16::from(px[3]);
-            for c in px.iter_mut().take(3) {
-                *c = ((u16::from(*c) * a + 127) / 255) as u8;
-            }
-        }
-        self.add_picture(premultiplied, true, private)
+        self.add_picture(premultiplied(image), true, private)
+    }
+
+    /// The current mask holding `image` (from another app, straight RGBA8), centred and scaled
+    /// down to fit, if a patch says to and it can; whether it does.
+    pub fn paste_picture_into_mask(&self, image: ThumbnailImage) -> bool {
+        self.mask_to_paste_into().is_some_and(|mask| self.paste_into(mask, premultiplied(image), true).is_some())
     }
 
     /// The frames of the animated GIF `bytes` as layers above the current one, each fitted to the
@@ -242,6 +262,38 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
+    /// The current layer, if it is a mask and a patch says what is pasted goes into it.
+    fn mask_to_paste_into(&self) -> Option<LayerId> {
+        let st = self.shared.lock();
+        let current = st.doc.current();
+        let is_mask = st.doc.layer(current).is_some_and(|l| l.kind == LayerKind::Mask);
+        let asked = is_mask && st.hooks.as_ref().is_some_and(|hooks| hooks.paste_mask());
+        (asked && !st.doc.is_locked(current)).then_some(current)
+    }
+
+    /// `mask` holds `image` as the patch makes it, a row at a time: one undo step. None if it
+    /// couldn't. What takes a while is done with the session free.
+    fn paste_into(&self, mask: LayerId, image: ThumbnailImage, fit: bool) -> Option<u64> {
+        let (width, height, hooks) = {
+            let st = self.shared.lock();
+            (st.doc.width(), st.doc.height(), st.hooks.clone()?)
+        };
+        let mut pixels = placed(image, width, height, fit)?;
+        if !hooks.paste_rows(&mut pixels, width as usize) {
+            return None;
+        }
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.finish_stroke();
+        st.settle();
+        let canvas = st.canvas.as_mut()?;
+        canvas.name_next_step("paste");
+        canvas.write_layer(mask, pixels);
+        st.revision += 1;
+        self.shared.frame(st);
+        Some(mask.0)
+    }
+
     fn add_picture(&self, image: ThumbnailImage, fit: bool, private: bool) -> Option<u64> {
         let (w, h) = {
             let st = self.shared.lock();

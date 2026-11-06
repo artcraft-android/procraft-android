@@ -213,6 +213,18 @@ impl CanvasSession {
         st.brush(st.tool).name.clone()
     }
 
+    /// Names the brush open in the studio (a dual brush's whole, not a part), as a set is named;
+    /// Cancel puts the old name back with the rest. Returns its name now: for a name of nothing
+    /// but spaces, which no brush has, the one it had when the studio opened.
+    pub fn set_studio_name(&self, name: String) -> String {
+        let name = name.trim();
+        let mut st = self.shared.lock();
+        let Some(opened) = st.studio.as_ref().map(|(_, before)| before.name.clone()) else { return String::new() };
+        let Some(brush) = st.studio_whole() else { return String::new() };
+        brush.name = if name.is_empty() { opened } else { name.chars().take(256).collect() };
+        brush.name.clone()
+    }
+
     /// Whether the brush open in the studio is a dual brush.
     pub fn studio_is_dual(&self) -> bool {
         self.shared.lock().studio_whole().is_some_and(|b| b.secondary.is_some())
@@ -384,14 +396,16 @@ impl CanvasSession {
         }
     }
 
-    /// The app's own smoothing and pressure for every stroke, each 0..1, and its pressure curve
-    /// (x, y pairs, 0..1; fewer than two points keep it straight).
+    /// The app's own smoothing and pressure for every stroke, each 0..1, whether motion filtering
+    /// keeps the stroke's end on the pen, and its pressure curve (x, y pairs, 0..1; fewer than two
+    /// points keep it straight).
     pub fn set_input_settings(
         &self,
         stabilization: f32,
         motion_filtering: f32,
         motion_expression: f32,
         pressure_smoothing: f32,
+        tip_attached: bool,
         curve: Vec<f32>,
     ) {
         let unit = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
@@ -404,6 +418,7 @@ impl CanvasSession {
             pressure_smoothing: unit(pressure_smoothing),
             pressure_curve: if pts.len() >= 2 { Curve::new(&pts) } else { Curve::linear() },
             speed_distance: st.input.speed_distance,
+            tip_attached,
         };
     }
 
@@ -981,4 +996,61 @@ fn evenly(path: &[Vec2], steps: usize) -> Vec<Vec2> {
 pub(crate) struct PadSync {
     pub(crate) running: bool,
     pub(crate) next: Option<(std::sync::Arc<CanvasSession>, [f32; 3])>,
+}
+
+#[cfg(test)]
+mod naming {
+    use crate::CanvasSession;
+
+    fn name(s: &CanvasSession, set: usize, index: usize) -> String {
+        s.brush_library().get(set).and_then(|x| x.brushes.get(index)).map(|b| b.name.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_studio_names_a_brush_kept_by_done_and_put_back_by_cancel() {
+        let s = CanvasSession::new(64, 64);
+        assert!(s.select_brush(1, 2));
+        let was = name(&s, 1, 2);
+
+        // nothing open: nothing named
+        assert_eq!(s.set_studio_name("Mine".to_owned()), "");
+        assert_eq!(name(&s, 1, 2), was);
+
+        // cancelled, the old name comes back
+        assert_eq!(s.studio_begin(), was);
+        assert_eq!(s.set_studio_name("  Mine  ".to_owned()), "Mine");
+        s.studio_end(false);
+        assert_eq!(name(&s, 1, 2), was);
+
+        // typed away to nothing, it is the name it opened with; a long name is cut where a set's is
+        s.studio_begin();
+        assert_eq!(s.set_studio_name("M".to_owned()), "M");
+        assert_eq!(s.set_studio_name("   ".to_owned()), was);
+        assert_eq!(s.set_studio_name("x".repeat(300)).chars().count(), 256);
+        assert_eq!(s.set_studio_name("Mine".to_owned()), "Mine");
+        s.studio_end(true);
+        assert_eq!(name(&s, 1, 2), "Mine");
+        assert_eq!(s.current_brush().name, "Mine");
+
+        // a brush that ships keeps the name kept for it, and resetting it leaves the name
+        let t = CanvasSession::new(64, 64);
+        assert!(t.load_brush_library(s.saved_brush_library()));
+        assert_eq!(name(&t, 1, 2), "Mine");
+        assert!(t.select_brush(1, 2));
+        t.studio_begin();
+        t.studio_reset();
+        t.studio_end(true);
+        assert_eq!(name(&t, 1, 2), "Mine");
+    }
+
+    #[test]
+    fn a_dual_brush_is_named_whole_whichever_part_shows() {
+        let s = CanvasSession::new(64, 64);
+        assert!(s.select_brush(1, 0) && s.combine_brushes(1, 0, 1));
+        s.studio_begin();
+        s.studio_show_second(true);
+        assert_eq!(s.set_studio_name("Pair".to_owned()), "Pair");
+        s.studio_end(true);
+        assert_eq!(name(&s, 1, 0), "Pair");
+    }
 }

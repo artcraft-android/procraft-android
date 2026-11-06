@@ -548,8 +548,6 @@ impl State {
         self.set_choices.iter().find(|c| c.0 == set).map(|c| c.1)
     }
 
-    /// Notes `place` as the brush last painted with, in the Recent set (a pinned one stays where
-    /// it is): to the end if it is there already, else past the others, the oldest giving way.
     /// The brush files' grains anything here can still read: the library's, what ships, the brush
     /// as the studio found it and the last stroke's. Recent, the pinned, the tools' and the
     /// QuickMenu's brushes are places in the library, not brushes of their own, and brushes brought
@@ -562,6 +560,8 @@ impl State {
         library.chain(shipped).chain(studio).chain(last).flat_map(Brush::full_grains).map(|g| g.id).collect()
     }
 
+    /// Notes `place` as the brush last painted with, in the Recent set (a pinned one stays where
+    /// it is): to the end if it is there already, else past the others, the oldest giving way.
     pub(crate) fn note_recent(&mut self, place: (usize, usize)) {
         if self.pinned_brushes.contains(&place) {
             return;
@@ -608,6 +608,9 @@ impl State {
         let holds = |&(s, i): &(usize, usize)| library.get(s).is_some_and(|set| i < set.brushes.len());
         self.recent_brushes.retain(holds);
         self.pinned_brushes.retain(holds);
+        // two brushes made one can leave a place in both lists: pinned, it shows once, there
+        let pinned = &self.pinned_brushes;
+        self.recent_brushes.retain(|place| !pinned.contains(place));
         // a QuickMenu button's brush follows it, a brush gone leaving its button with none
         self.quick_brushes = std::mem::take(&mut self.quick_brushes)
             .into_iter()
@@ -776,8 +779,11 @@ impl CanvasSession {
             entry.origins.remove(i);
         }
         let left = entry.brushes.len();
-        // a QuickMenu button set to it is left with none (a tool takes the brush in its place)
+        // a QuickMenu button set to it is left with none (a tool takes the brush in its place), and
+        // it leaves the Recent set
         st.quick_brushes.retain(|q| q.1 != (s, i));
+        st.recent_brushes.retain(|&p| p != (s, i));
+        st.pinned_brushes.retain(|&p| p != (s, i));
         st.move_brush_refs(|(rs, ri)| match (rs == s, ri.cmp(&i)) {
             (true, std::cmp::Ordering::Greater) => Some((rs, ri - 1)),
             // the brush below moves up into its place, or the one above when it was last
@@ -1291,5 +1297,92 @@ mod keeping {
         assert_eq!(s.import_any_brushes(file, None, 0), Some(0), "no name: told by its contents");
         assert_eq!(s.import_any_brushes(vec![1, 2, 3], Some("junk.abr".into()), 0), None);
         assert_eq!(s.import_any_brushes(vec![1, 2, 3], None, 0), None);
+    }
+}
+
+#[cfg(test)]
+mod recent {
+    use crate::CanvasSession;
+
+    /// The Recent set as places: its list keys its rows by them, and a place twice stops the app.
+    fn places(s: &CanvasSession) -> Vec<(u32, u32)> {
+        s.recent_brushes().iter().map(|r| (r.set, r.index)).collect()
+    }
+
+    #[test]
+    fn a_brush_pinned_and_one_combined_into_it_show_once_in_the_recent_set() {
+        let s = CanvasSession::new(32, 32);
+        s.shared.lock().note_recent((1, 0));
+        s.shared.lock().note_recent((1, 1));
+        assert!(s.pin_recent_brush(1, 0, true));
+        assert!(s.combine_brushes(1, 0, 1));
+        assert_eq!(places(&s), [(1, 0)]);
+    }
+
+    #[test]
+    fn a_brush_deleted_leaves_the_recent_set_and_the_one_under_it_stays_once() {
+        let s = CanvasSession::new(32, 32);
+        s.shared.lock().note_recent((1, 0));
+        s.shared.lock().note_recent((1, 1));
+        s.shared.lock().note_recent((1, 3));
+        assert!(s.pin_recent_brush(1, 1, true));
+        let kept = s.brush_library()[1].brushes[1].name.clone();
+        assert!(s.delete_brush(1, 0));
+        assert_eq!(places(&s), [(1, 0), (1, 2)], "the pinned one up a place, then the other");
+        assert_eq!(s.recent_brushes()[0].name, kept);
+    }
+
+    #[test]
+    fn a_set_moved_any_way_leaves_every_place_on_its_own_brush() {
+        let s = CanvasSession::new(32, 32);
+        let sets = s.brush_library().len() as u32;
+        assert!(sets >= 6);
+        // each kind of place on a brush of its own, named as it was
+        let names = |s: &CanvasSession, places: &[(u32, u32)]| -> Vec<String> {
+            let library = s.brush_library();
+            places.iter().map(|&(set, i)| library[set as usize].brushes[i as usize].name.clone()).collect()
+        };
+        let mut seen = vec![(1, 0), (2, 1), (3, 0)];
+        let was = names(&s, &seen);
+        s.shared.lock().note_recent((1, 0));
+        s.shared.lock().note_recent((2, 1));
+        s.shared.lock().note_recent((3, 0));
+        assert!(s.pin_recent_brush(3, 0, true));
+        assert!(s.select_brush(2, 1));
+        let key = s.quick_brush_key(1, 0);
+        let mut state = 0x54u32;
+        let mut next = |n: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % n
+        };
+        for _ in 0..2000 {
+            // past the end too: a row where a set no longer is
+            let (from, to) = (next(sets), next(sets + 3));
+            assert!(s.move_brush_set(from, to));
+            let at = to.min(sets - 1);
+            for place in &mut seen {
+                place.0 = match place.0 {
+                    p if p == from => at,
+                    p if p > from && p <= at => p - 1,
+                    p if p >= at && p < from => p + 1,
+                    p => p,
+                };
+            }
+            assert_eq!(names(&s, &seen), was);
+            let mut found = places(&s);
+            found.sort_unstable();
+            let mut wanted = seen.clone();
+            wanted.sort_unstable();
+            assert_eq!(found, wanted, "the Recent set followed, each brush once");
+            let c = s.current_brush();
+            assert_eq!((c.set, c.index), seen[1]);
+            assert_eq!(s.quick_brush(key).map(|b| (b.set, b.index)), Some(seen[0]));
+        }
+        // kept and read back after all that, each still where the choices say
+        let t = CanvasSession::new(32, 32);
+        assert!(t.load_brush_library(s.saved_brush_library()));
+        assert!(t.load_brush_choices(s.saved_brush_choices()));
+        assert_eq!(names(&t, &seen), was);
+        assert_eq!(t.recent_brushes().len(), 3);
     }
 }

@@ -135,6 +135,9 @@ pub struct Interface {
     /// Share's PDF asks how well it keeps its pictures first (for this format).
     pdf_alert: Alert,
     pdf_for: Option<Format>,
+    /// A plugin file's one screen, and the file while it asks.
+    plugin_alert: Alert,
+    plugin_file: Option<Vec<u8>>,
     /// An export under way, as its card shows it.
     pub export_card: crate::export_card::ExportCard,
     /// The brushes changed (the library closed, a slider let go, a notch saved): keep them.
@@ -232,6 +235,8 @@ impl Default for Interface {
             blocked_alert: Alert::default(),
             pdf_alert: Alert::default(),
             pdf_for: None,
+            plugin_alert: Alert::default(),
+            plugin_file: None,
             export_card: crate::export_card::ExportCard::default(),
             keep_brushes: false,
             tool_hold_acted: false,
@@ -338,6 +343,11 @@ impl Interface {
         crate::files::DRAG_FORMATS.get(self.prefs.drag_format).copied().unwrap_or(crate::files::Format::Procraft)
     }
 
+    /// The patches and plugins, which say how big the interface shows.
+    pub fn plugins(&self) -> &procraft_core::Plugins {
+        &self.prefs.plugins
+    }
+
     /// Tap Assistance is on (Advanced settings).
     pub fn tap_assistance(&self) -> bool {
         self.prefs.tap_assistance
@@ -408,8 +418,6 @@ impl Interface {
         // a mask current paints with masks' own colour
         let on_mask = session.layers().iter().any(|l| l.current && l.kind == procraft_core::LayerType::Mask);
         self.colours.follow_mask(session, on_mask);
-        // the eyedropper picks from the current layer or the canvas, as the preferences say
-        session.set_eyedropper_from_layer(self.prefs.eyedropper_layer);
         let paste_shown = (self.open == Some(Popover::Actions) || self.copy_paste) && ctx.input(|i| i.focused);
         if paste_shown && !self.paste_shown {
             self.system_clipboard.offer();
@@ -421,9 +429,11 @@ impl Interface {
         }
         // the pen's barrel buttons: what Gesture controls set Pen button and Pen second button to
         // do (the first, set to nothing, the eraser and back), where the pointer is; one set to
-        // the eyedropper picks while it is held, where the pen hovers, and lets go to take it
-        let presses = crate::pen::take_button_presses();
-        let held = crate::pen::buttons_held();
+        // the eyedropper picks while it is held, where the pen hovers, and lets go to take it;
+        // with the canvas out of sight they do nothing, then or later: the tool would change unseen
+        let covered = self.studio.open || self.time_lapse.replaying();
+        let presses = crate::pen::take_button_presses().map(|n| if covered { 0 } else { n });
+        let held = crate::pen::buttons_held().map(|h| h && !covered);
         let purposes = [Trigger::PenDoubleTap, Trigger::PenSqueeze].map(|t| self.gestures.purpose_of(t));
         let (x, y) = input.cursor().unwrap_or_default();
         for (button, (&pressed, &is_held)) in presses.iter().zip(&held).enumerate() {
@@ -453,6 +463,11 @@ impl Interface {
         self.keep_brushes |= self.brushes_were_open && !brushes_open;
         self.brushes_were_open = brushes_open;
         let info = session.info();
+        // a snapped shape's handles sit at window points, and the view can move under them from a
+        // zoom, a pan or a turn that comes in through the input layer rather than as a command
+        if self.overlays.shape.is_some() {
+            self.overlays.shape = session.quickshape_info();
+        }
         self.follow_brush(session, info.tool);
         self.shortcuts(&ctx, session, &info);
         self.overlays.cursor_style = self.prefs.cursor_style;
@@ -566,6 +581,7 @@ impl Interface {
             self.quick_menu(&ctx, session);
             self.blocked_alert(&ctx, session);
             self.pdf_quality_alert(&ctx);
+            self.plugin_alert(&ctx);
             self.export_card.show(&ctx, &mut self.look);
             self.touch_companion(&ctx, session);
             if self.show_interface_button(&ctx) {
@@ -620,7 +636,10 @@ impl Interface {
             }
         }
         self.canvas_rect = ui.available_rect_before_wrap();
-        let mut backdrops = Vec::new();
+        // the bars are glass over the canvas: the top bar's frost, the side bar's and its tracks'
+        let (mut backdrops, mut windows) = (Vec::new(), Vec::new());
+        let top_bar = ctx.content_rect().with_max_y(ctx.content_rect().top() + crate::look::pc::BAR_HEIGHT);
+        crate::chrome::frost(&mut backdrops, top_bar, 0.0, ctx.pixels_per_point());
         // a mode taking the screen puts the side bar away
         let adjusting = session.adjustment_shown();
         let side_bar = self.side_bar_shown
@@ -633,7 +652,7 @@ impl Interface {
         let taps = if side_bar {
             let modify_lit = session.pick_next();
             let right = self.prefs.right_handed;
-            self.side_bar.show(ui, &mut self.look, session, &info, modify_lit, right, &mut backdrops)
+            self.side_bar.show(ui, &mut self.look, session, &info, modify_lit, right, &mut backdrops, &mut windows)
         } else {
             crate::chrome::SideTaps::default()
         };
@@ -681,6 +700,10 @@ impl Interface {
             Popover::Layers => bar.rect(BarButton::Layers),
             Popover::Colour => bar.rect(BarButton::Colour),
         };
+        // it opens as the adjustments, however it was left
+        if self.open != Some(Popover::Adjustments) {
+            self.adjustments.showing_filters = false;
+        }
         if let Some(open) = self.open {
             self.popover(&ctx, session, open, anchor(open), info.tool, &mut backdrops);
         }
@@ -735,6 +758,7 @@ impl Interface {
         self.quick_menu(&ctx, session);
         self.blocked_alert(&ctx, session);
         self.pdf_quality_alert(&ctx);
+        self.plugin_alert(&ctx);
         self.export_card.show(&ctx, &mut self.look);
         self.text_editor(&ctx, session);
         // a gesture setting changed: the touches follow it, and it is kept
@@ -773,7 +797,7 @@ impl Interface {
         self.shortcut_list.show(&ctx, keys_to_canvas);
         self.name_colour(&ctx);
         self.place_canvas(session, ctx.pixels_per_point());
-        session.set_backdrops(backdrops);
+        session.set_glass(backdrops, windows);
         if input.moving_view() && !ctx.is_pointer_over_egui() {
             let icon = if input.zooming_view() { egui::CursorIcon::ZoomIn } else { egui::CursorIcon::Grab };
             ctx.set_cursor_icon(icon);
@@ -986,10 +1010,22 @@ impl Interface {
     /// isn't, and the system's pointer stays where the pen went down, so the outline or the cross
     /// go on through the stroke.
     fn hover_cursor(&mut self, ctx: &egui::Context, session: &CanvasSession, info: &CanvasInfo, input: &mut Input) {
-        let painting = session.adjustment_shown().adjustment.is_none() && !self.selection.on && !self.transform.on;
+        let shown = session.adjustment_shown();
+        let painting = shown.adjustment.is_none() && !self.selection.on && !self.transform.on;
         let on_canvas = |at: egui::Pos2| {
             self.canvas_rect.contains(at) && ctx.layer_id_at(at).is_none_or(|l| l.order == egui::Order::Background)
         };
+        // Liquify's brush shows as a ring of its reach, hovering and pressed
+        if let (Some(procraft_core::Adjustment::Liquify), Some(&size)) = (shown.adjustment, shown.liquify.first()) {
+            let ppp = ctx.pixels_per_point();
+            input.hover_shown = true;
+            let at = input.hovering().map(|(x, y)| egui::pos2(x, y) / ppp).or_else(|| ctx.pointer_latest_pos());
+            if let Some(at) = at.filter(|at| on_canvas(*at)) {
+                ctx.set_cursor_icon(egui::CursorIcon::None);
+                hover_ring(ctx, at, procraft_core::liquify_reach(size) * info.zoom / ppp);
+            }
+            return;
+        }
         if !input.idle() {
             if painting
                 && input.pressing()
@@ -1151,6 +1187,12 @@ impl Interface {
         self.overlays.shape_editing = false;
     }
 
+    /// Undo or redo stepped through a snapped shape: as it now is, if it is still there.
+    fn follow_shape(&mut self, session: &CanvasSession) {
+        self.overlays.shape = session.quickshape_info();
+        self.overlays.shape_editing &= self.overlays.shape.is_some();
+    }
+
     /// Undo (recoloring, the core takes back the open fill first).
     fn undo(&mut self, session: &CanvasSession) {
         self.feedback();
@@ -1177,6 +1219,7 @@ impl Interface {
         if could || name.is_some() {
             self.overlays.notice(name.map_or("Undo".into(), |n| format!("Undo {n}")), false);
         }
+        self.follow_shape(session);
         // a model's tile chosen before comes back, with its channel's colour
         self.layers.follow_channel(session, &mut self.colours);
     }
@@ -1200,6 +1243,7 @@ impl Interface {
         if could {
             self.overlays.notice(name.map_or("Redo".into(), |n| format!("Redo {n}")), false);
         }
+        self.follow_shape(session);
         self.layers.follow_channel(session, &mut self.colours);
         if let Some(id) = text {
             self.text.edit(session, id);
@@ -1548,6 +1592,21 @@ impl Interface {
         session.adjustment_start(a);
     }
 
+    /// Opens the plugin's filter `id` on the current layer, as [`Self::start_adjustment`] does. The
+    /// artwork is saved first, the first time in a session.
+    fn start_plugin_filter(&mut self, session: &CanvasSession, id: String) {
+        if !self.takes_changes(session) {
+            return;
+        }
+        self.switch_modes(session, ModeButton::Adjustment);
+        self.open = None;
+        session.set_pick_next(false);
+        let plugins = std::sync::Arc::clone(&self.prefs.plugins);
+        if let Some(why) = session.plugin_filter_start(plugins, id, self.artwork_dir.clone()) {
+            self.overlays.notice(why, true);
+        }
+    }
+
     /// Ends the open adjustment: `commit` keeps it (and says so), otherwise the layer goes back.
     fn end_adjustment(&mut self, session: &CanvasSession, commit: bool) {
         self.adjustments.menu_at = None;
@@ -1670,6 +1729,8 @@ impl Interface {
     fn pasted(&mut self, session: &Arc<CanvasSession>) -> bool {
         match self.system_clipboard.take_pasted() {
             Some(Pasted::Own { private }) => self.paste_own(session, private),
+            // (a mask that takes what is pasted has no use for a copy of the picture)
+            Some(Pasted::Picture { image, private: false }) if session.paste_picture_into_mask(image.clone()) => {}
             Some(Pasted::Picture { image, private }) => {
                 if session.insert_image(image, private).is_some() {
                     self.toggle_transform(session);
@@ -1751,6 +1812,46 @@ impl Interface {
         if let Some(quality) = crate::alert::pdf_jpeg(answer) {
             self.actions.push(Action::Export(format, quality));
             self.open = None;
+        }
+    }
+
+    /// Asks whether to import the plugin file at `path`: nothing in it runs, and nothing is kept
+    /// until the answer comes. What can't be imported says why.
+    pub fn offer_plugin_file(&mut self, path: &std::path::Path) {
+        let cant = "Can't import this plugin";
+        let Some(bytes) = procraft_core::read_plugin_file(path) else {
+            self.plugin_alert.tell(cant, "This file can't be read.", None);
+            return;
+        };
+        let offer = self.prefs.plugins.inspect(bytes.clone());
+        if let Some(why) = offer.refused {
+            self.plugin_alert.tell(cant, &why, None);
+            return;
+        }
+        self.plugin_file = Some(bytes);
+        self.plugin_alert.ask(Asking {
+            title: offer.name,
+            message: offer.message,
+            action: "Import".to_owned(),
+            icon: None,
+            destructive: false,
+            extra: None,
+            first: None,
+            alone: false,
+        });
+    }
+
+    /// A plugin file's screen, while it shows: answered, the file is imported, or it was only
+    /// being told something.
+    pub fn plugin_alert(&mut self, ctx: &egui::Context) {
+        if let Some(said) = self.prefs.plugins.take_moved_notice() {
+            self.plugin_alert.tell("Now a patch", &said, None);
+        }
+        let Some(answer) = self.plugin_alert.show(ctx, &mut self.look) else { return };
+        let Some(bytes) = self.plugin_file.take().filter(|_| answer == Answer::Action) else { return };
+        match self.prefs.plugins.install(bytes) {
+            Some(why) => self.plugin_alert.tell("Can't import this plugin", &why, None),
+            None => self.prefs.keep(),
         }
     }
 
@@ -1956,9 +2057,20 @@ impl Interface {
                 rect
             }
             Popover::Adjustments => {
-                let (shown, tapped) = crate::adjustments::menu(ctx, &mut self.look, button, backdrops);
-                if let Some(a) = tapped {
-                    self.start_adjustment(session, a);
+                use crate::adjustments::MenuRow;
+                let filters = self.prefs.plugins.filters();
+                let turned = self.adjustments.showing_filters && !filters.is_empty();
+                let (shown, tapped) =
+                    crate::adjustments::menu(ctx, &mut self.look, button, backdrops, &filters, turned);
+                match tapped {
+                    Some(MenuRow::Open(a)) => self.start_adjustment(session, a),
+                    Some(MenuRow::Plugins) => self.adjustments.showing_filters = true,
+                    Some(MenuRow::Back) => self.adjustments.showing_filters = false,
+                    Some(MenuRow::Filter(id)) => {
+                        self.adjustments.showing_filters = false;
+                        self.start_plugin_filter(session, id);
+                    }
+                    None => {}
                 }
                 shown
             }
@@ -1980,6 +2092,11 @@ impl Interface {
                 let (shown, act) =
                     self.actions_panel.show(ctx, &mut self.look, button, &showing, &mut self.prefs, backdrops);
                 match act {
+                    Some(Act::ImportPlugin) => {
+                        if let Some(path) = crate::files::pick_plugin() {
+                            self.offer_plugin_file(&path);
+                        }
+                    }
                     Some(Act::Prefs) => {
                         self.prefs.apply(session);
                         session.set_touch_settings(self.gestures.touch_settings(self.prefs.rapid_undo_ms()));
@@ -2080,11 +2197,11 @@ impl Interface {
                     Some(
                         Act::Page(_)
                         | Act::ScalingMenu
+                        | Act::TipAttachment
                         | Act::LightInterface
                         | Act::RightHanded
                         | Act::BrushCursor
                         | Act::ProjectCanvas
-                        | Act::EyedropperLayer
                         | Act::ResetInput,
                     )
                     | None => {}
@@ -2327,6 +2444,19 @@ fn hover_cross(ctx: &egui::Context, at: egui::Pos2) {
         .interactable(false)
         .fixed_pos(at)
         .show(ctx, |ui| fine_cross(ui.painter(), at));
+}
+
+/// A fine ring `radius` points round `at`, a cross at its middle, seen on any colour.
+fn hover_ring(ctx: &egui::Context, at: egui::Pos2, radius: f32) {
+    egui::Area::new(egui::Id::unique("hover ring")).order(egui::Order::Tooltip).interactable(false).fixed_pos(at).show(
+        ctx,
+        |ui| {
+            for (width, colour) in [(3.0, Color32::WHITE), (1.0, Color32::BLACK)] {
+                ui.painter().circle_stroke(at, radius, Stroke::new(width, colour));
+            }
+            fine_cross(ui.painter(), at);
+        },
+    );
 }
 
 /// The desktop's pointer over the canvas where no outline shows: a fine cross at `at` (points),

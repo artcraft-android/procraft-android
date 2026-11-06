@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
@@ -707,10 +708,15 @@ private fun StudioSettings(vm: CanvasViewModel, modifier: Modifier) {
         var above: Any = Edge.TOP
         tab.sections.forEachIndexed { k, section ->
             // the About page is headed by the brush's name
-            val title = section.title ?: vm.studioName.takeIf { section.controls.firstOrNull() == StudioControl.About }
+            val about = section.controls.firstOrNull() == StudioControl.About
+            val title = section.title ?: vm.studioName.takeIf { about }
             title?.let {
                 Spacer(Modifier.height(if (k == 0) 25.dp else gap(above, Edge.TITLE)))
-                Text(it, color = StudioHeader, fontSize = 21.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 8.dp))
+                if (about) {
+                    BrushNameHeading(vm)
+                } else {
+                    Text(it, color = StudioHeader, fontSize = 21.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 8.dp))
+                }
                 above = Edge.TITLE
             }
             for (control in section.controls) {
@@ -824,6 +830,28 @@ private fun StudioControlView(vm: CanvasViewModel, c: StudioControl) {
             }
         }
         StudioControl.About -> AboutBrush(vm)
+    }
+}
+
+/** The About page's heading: the brush's name, tapped to change it there. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun BrushNameHeading(vm: CanvasViewModel) {
+    var renaming by remember { mutableStateOf(false) }
+    if (!renaming) {
+        Text(vm.studioName, color = StudioHeader, fontSize = 21.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 8.dp).tap { renaming = true })
+        return
+    }
+    // the keyboard put away ends it, the name as typed
+    val focus = androidx.compose.ui.platform.LocalFocusManager.current
+    val keyboard = androidx.compose.foundation.layout.WindowInsets.isImeVisible
+    var hadKeyboard by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(keyboard) {
+        if (keyboard) hadKeyboard = true else if (hadKeyboard) focus.clearFocus()
+    }
+    // named as it is typed, so that Done with the keyboard up keeps it
+    InlineName(vm.studioName, StudioHeader, 21.sp, Modifier.padding(start = 8.dp).fillMaxWidth(), FontWeight.Bold, vm::renameStudio) {
+        renaming = false
     }
 }
 

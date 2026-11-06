@@ -210,7 +210,7 @@ impl CanvasSession {
         let st = &mut *guard;
         let Some(rect) = st.crop_edit.rect else { return };
         let (Some(view), Some(from)) = (st.view, st.window_to_canvas(x, y)) else { return };
-        let reach = REACH * st.display_scale;
+        let reach = REACH * st.interface_scale();
         let at = Vec2::new(x, y);
         let cs = st.crop_edit.corners(rect).map(|p| view.to_screen().apply(p));
         let mid = |a: Vec2, b: Vec2| Vec2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);

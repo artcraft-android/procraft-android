@@ -32,17 +32,24 @@ mod gradients;
 mod grain_store;
 mod guide;
 mod history;
+mod hooks;
 mod host;
 mod hues;
+mod interface_size;
 mod keys;
 #[cfg(target_os = "ios")]
 mod layer;
 mod layer_ops;
 mod layers;
+mod liquify;
 mod modes;
 mod palettes;
+mod patch_run;
 mod pick;
 mod pickers;
+mod plugin_file;
+mod plugin_filter;
+mod plugins;
 mod pour;
 mod presets;
 mod project;
@@ -118,12 +125,19 @@ pub use layers::{
     BlendModeInfo, Blocked, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
     brush_blend_modes, combine_blend_modes, grain_blend_modes, layers_for, set_resident_budget,
 };
+pub use liquify::liquify_reach;
 pub use modes::{ModeButton, ModeSwitch, Modes, mode_switch};
 pub use palettes::{PaletteInfo, Palettes, colour_name};
 pub use pick::Pick;
 pub use pickers::{
     disc_picture, disc_to_square, disc_to_square_point, harmony_wheel, p3_hsv_of, p3_hsv_to_rgb, rgb_to_p3_hsv,
     square_to_disc, square_to_disc_point,
+};
+pub use plugin_file::read_plugin_file;
+pub use plugin_filter::PluginFilterShown;
+pub use plugins::{
+    PluginControl, PluginInfo, PluginKind, PluginOffer, PluginSlider, PluginSource, PluginSwitch, Plugins,
+    plugin_file_most_bytes, plugin_slider_along, plugin_slider_at, plugin_slider_shown, plugin_slider_whole,
 };
 pub use presets::{
     CanvasPreset, P3, SRGB, per_inch, preset_height, preset_label, preset_number, preset_width, presets_from_json,
@@ -379,6 +393,8 @@ pub(crate) struct State {
     pub(crate) brush_on_screen: bool,
     /// ColorDrop keeps out of gaps up to this many pixels wide in what bounds it (0: none).
     pub(crate) fill_gap: u32,
+    /// What samples go through on their way to a stroke, if anything.
+    pub(crate) hooks: Option<Arc<hooks::Hooks>>,
     /// Crops kept for undo: the canvas and document from before; and one undone, for redo, with
     /// the steps the canvas then put back had made (redo only while that hasn't changed).
     crop_undo: Option<(Canvas, Document)>,
@@ -452,12 +468,13 @@ pub(crate) struct State {
     pub(crate) sphere: Option<crate::studio::SpherePad>,
     pub(crate) frame_interval_ms: f32,
     pub(crate) error: Option<String>,
-    /// Window pixels per interface point.
+    /// Window pixels per point at the screen's density: the canvas and gestures go by it.
     pub(crate) display_scale: f32,
+    /// How big the interface shows beside that (1: as measured).
+    pub(crate) interface_size: f32,
     /// The canvas shown in perceptual greys (the window's view only).
     pub(crate) grey_view: bool,
     /// The eyedropper picks from the current layer alone, not the canvas as composited.
-    pub(crate) eyedropper_from_layer: bool,
     /// Where the middle of one of the surround grid's lines is, across and down (window pixels);
     /// none given, half a point in from the top-left corner.
     grid_origin: Option<[f32; 2]>,
@@ -486,6 +503,8 @@ pub(crate) struct State {
     /// pixels).
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub(crate) backdrops: Vec<[f32; 6]>,
+    /// Where the glass over the canvas is thin (the side bar's slider tracks), the same way.
+    pub(crate) backdrop_windows: Vec<[f32; 6]>,
     /// The view kept with the artwork, shown when the window first comes.
     pub(crate) saved_view: Option<project::SavedView>,
     pub(crate) revision: u64,
@@ -510,11 +529,12 @@ pub(crate) struct State {
     adjusting: bool,
     /// The open adjustment's values, as the apps show them (adjusting.rs).
     adjust: adjusting::Adjusting,
+    filters: plugin_filter::Filters,
     /// Crop and Resize as it is edited.
     crop_edit: crop_edit::CropEdit,
     last_filter: Option<procraft_gpu::Filter>,
-    /// The liquify brush's last stamp (canvas pixels).
-    liquify_last: Option<Vec2>,
+    /// The liquify brush as it goes.
+    liquify: liquify::LiquifyRun,
     /// The brush studio is open on this (set, brush), and the brush as it opened.
     studio: Option<((usize, usize), Brush)>,
     /// It shows a dual brush's second, not its first.
@@ -533,17 +553,22 @@ pub(crate) struct State {
     feather_base: Option<(procraft_engine::selection::Mask, Vec<f32>)>,
     /// The last drag step on the box (window point, when), for its speed.
     last_drag: Option<(Vec2, std::time::Instant)>,
-    /// The stroke being drawn as input (canvas points) and its pressures summed, for QuickShape,
+    /// The stroke being drawn as input (canvas points), for QuickShape,
     /// and the shape it snapped to while that is shown.
     drawn: Vec<Vec2>,
-    drawn_pressure: f32,
     /// How long it was on the move, and when it was last heard from (milliseconds).
     drawn_moving: f64,
     drawn_at: f64,
+    /// Its input as the stroke took it, for a shape to go back to.
+    drawn_samples: Vec<Sample>,
     shape: Option<quickshape::ShapeEdit>,
     /// The open stroke as it began, and the last stroke kept, for QuickShape afterwards.
     began: Option<quickshape::LastStroke>,
     last_stroke: Option<quickshape::LastStroke>,
+    /// The last shape kept, which undo gives back the stroke it was made of; and the shape whose
+    /// stroke that gave back, which redo makes a shape again.
+    kept_shape: Option<quickshape::KeptShape>,
+    unkept_shape: Option<quickshape::KeptShape>,
     /// Strokes follow the drawing guide even where drawing assist is off (□ held down).
     force_assist: bool,
     /// Where the stroke began (canvas pixels), for assisted drawing; the guide and view as the
@@ -556,6 +581,11 @@ pub(crate) struct State {
 }
 
 impl State {
+    /// Window pixels per point of what the interface draws, its handles over the canvas too.
+    pub(crate) fn interface_scale(&self) -> f32 {
+        self.display_scale * self.interface_size
+    }
+
     /// The surround's grid in window pixels, shifted by `by` (where the window's corner lands on
     /// the target).
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -565,7 +595,7 @@ impl State {
         procraft_gpu::SurroundGrid {
             spacing: GRID_SPACING_PT * s,
             origin: [x + by.x, y + by.y],
-            top: GRID_TOP_PT * s + by.y,
+            top: GRID_TOP_PT * self.interface_scale() + by.y,
             width: GRID_WIDTH_PT * s,
             color: if self.light { GRID_LINE_LIGHT } else { GRID_LINE },
         }
@@ -600,7 +630,7 @@ impl State {
 
     /// Finishes an open stroke.
     fn finish_stroke(&mut self) {
-        self.shape = None;
+        let shape = self.shape.take();
         // a stroke on a model ends there, as the pen lifting would end it
         if self.scene_shown() && self.scene.as_ref().is_some_and(|s| s.stroking) {
             self.scene_stroke_add(&[], true);
@@ -610,6 +640,7 @@ impl State {
             close_stroke(canvas, open, self.second.take(), &self.doc.stroke_guide());
             self.bake_painted_on();
         }
+        self.note_kept_shape(shape);
     }
 
     /// Ends a continuous change still open (a slider drag, a transform): it becomes one undo step.
@@ -690,9 +721,8 @@ impl State {
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.use_sources(gpu, &mut style, &brush);
         }
-        // a grain fixed to the canvas, from a brush file's own image
-        let texturized = brush.grain.mode == procraft_engine::brush::GrainMode::Texturized;
-        let full = brush.grain_file_now().filter(|_| texturized).and_then(|f| f.full.as_ref());
+        // a brush file's grain at its own size, fixed to the canvas or moving with each stamp
+        let full = brush.grain_file_now().and_then(|f| f.full.as_ref());
         if let Some(full) = full
             && let Some(pixels) = self.grain_store.pixels(full)
             && let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref())
@@ -845,13 +875,16 @@ impl State {
         let Some(inv) = self.view.and_then(|v| v.to_screen().inverse()) else { return Vec::new() };
         samples
             .iter()
-            .map(|s| Sample {
-                pos: inv.apply(Vec2::new(s.x, s.y)),
-                pressure: s.pressure,
-                tilt: s.tilt,
-                azimuth: s.orientation,
-                roll: s.roll,
-                time_ms: s.time_ms,
+            .map(|s| {
+                let (x, y) = self.hooks.as_ref().map_or((s.x, s.y), |hooks| hooks.position(s.x, s.y));
+                Sample {
+                    pos: inv.apply(Vec2::new(x, y)),
+                    pressure: s.pressure,
+                    tilt: s.tilt,
+                    azimuth: s.orientation,
+                    roll: s.roll,
+                    time_ms: s.time_ms,
+                }
             })
             .collect()
     }
@@ -915,6 +948,7 @@ fn close_stroke(
         canvas.replace_second_stamps(&guide::mirrored(guide, &second.finish()));
     }
     let drawn = builder.stamp_count();
+    let for_good = if canvas.shows_tip() { builder.drawn_for_good() } else { None };
     let all = builder.finish();
     // what undo calls it
     canvas.name_next_step(match canvas.stroke_tool() {
@@ -925,6 +959,9 @@ fn close_stroke(
     });
     if canvas.stroke_tool() == Some(StrokeTool::Smudge) || canvas.is_pencil() {
         canvas.add_stamps(&guide::mirrored(guide, all.get(drawn..).unwrap_or(&[])));
+    } else if let Some(rest) = for_good.and_then(|stamps| all.strip_prefix(stamps.as_slice())) {
+        // nothing laid changes: a long stroke's end needn't lay it all again
+        canvas.add_stamps(&guide::mirrored(guide, rest));
     } else {
         canvas.replace_stamps(&guide::mirrored(guide, &all));
     }
@@ -1196,6 +1233,7 @@ impl CanvasSession {
             selection_visibility: 0.25,
             brush_on_screen: false,
             fill_gap: 0,
+            hooks: None,
             input: procraft_engine::stroke::InputSettings::default(),
             crop_redo: None,
             library: shelf,
@@ -1233,8 +1271,8 @@ impl CanvasSession {
             frame_interval_ms: 0.0,
             error: None,
             display_scale: 2.0,
+            interface_size: 1.0,
             grey_view: false,
-            eyedropper_from_layer: false,
             grid_origin: None,
             light: false,
             pending_doc: None,
@@ -1260,9 +1298,10 @@ impl CanvasSession {
             feather_base: None,
             adjusting: false,
             adjust: adjusting::Adjusting::default(),
+            filters: plugin_filter::Filters::default(),
             crop_edit: crop_edit::CropEdit::default(),
             last_filter: None,
-            liquify_last: None,
+            liquify: liquify::LiquifyRun::default(),
             studio: None,
             studio_second: false,
             pencil: false,
@@ -1273,12 +1312,14 @@ impl CanvasSession {
             clone_offset: None,
             last_drag: None,
             drawn: Vec::new(),
-            drawn_pressure: 0.0,
             drawn_moving: 0.0,
+            drawn_samples: Vec::new(),
             drawn_at: 0.0,
             shape: None,
             began: None,
             last_stroke: None,
+            kept_shape: None,
+            unkept_shape: None,
             force_assist: false,
             assist_from: None,
             assist_angle: None,
@@ -1289,6 +1330,7 @@ impl CanvasSession {
             closed: false,
             fit_insets: [0.0; 4],
             backdrops: Vec::new(),
+            backdrop_windows: Vec::new(),
             saved_view: None,
         };
         Arc::new(CanvasSession {
@@ -1448,11 +1490,13 @@ impl CanvasSession {
         st.assist_angle = None;
         let canvas_samples = st.assisted(canvas_samples);
         st.drawn.clear();
-        st.drawn_pressure = 0.0;
         st.drawn_moving = 0.0;
+        st.drawn_samples.clear();
         st.remember_input(&canvas_samples);
         // painted and erased strokes can be made shapes once they end
         st.last_stroke = None;
+        st.kept_shape = None;
+        st.unkept_shape = None;
         st.began =
             matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase).then(|| quickshape::LastStroke {
                 layer: current,
@@ -1461,9 +1505,10 @@ impl CanvasSession {
                 diameter,
                 pointer,
                 drawn: Vec::new(),
-                pressure: 1.0,
                 pace: quickshape::SAMPLE_PACE,
                 steps: 0,
+                fresh: second.is_none().then(|| builder.clone()),
+                samples: Vec::new(),
             });
         let Some(canvas) = st.canvas.as_mut() else { return };
         match second {
@@ -1557,7 +1602,10 @@ impl CanvasSession {
         }
         let (Some(mut builder), Some(canvas)) = (st.stroke.take(), st.canvas.as_mut()) else { return };
         let stamps = builder.add(&canvas_samples);
-        canvas.add_stamps(&guide::mirrored(&st.doc.stroke_guide(), &stamps));
+        // (a stroke shown with a tip lays them with the rest of it, as it ends)
+        if !(canvas.shows_tip() && builder.shows_tip()) {
+            canvas.add_stamps(&guide::mirrored(&st.doc.stroke_guide(), &stamps));
+        }
         let mut second = st.second.take();
         if let Some(second) = second.as_mut() {
             second.add(&canvas_samples);
@@ -1623,22 +1671,25 @@ impl CanvasSession {
         self.shared.lock().grey_view
     }
 
-    /// The eyedropper picks from the current layer alone (`on`), or from the canvas as it is
-    /// composited (all its layers and the background).
-    pub fn set_eyedropper_from_layer(&self, on: bool) {
-        self.shared.lock().eyedropper_from_layer = on;
-    }
-
-    pub fn eyedropper_from_layer(&self) -> bool {
-        self.shared.lock().eyedropper_from_layer
-    }
-
     /// How many window pixels make one interface point (the screen's density).
     pub fn set_display_scale(&self, pixels_per_point: f32) {
         if pixels_per_point.is_finite() && pixels_per_point > 0.0 {
             let mut st = self.shared.lock();
             st.display_scale = pixels_per_point;
             self.shared.frame(&mut st);
+        }
+    }
+
+    /// How big the interface shows beside the screen's density (1: as measured). The canvas, its
+    /// brushes and how far a gesture goes stay as they are: only the handles the interface draws
+    /// over the canvas take touches where they show.
+    pub fn set_interface_size(&self, size: f32) {
+        if size.is_finite() && size > 0.0 {
+            let mut st = self.shared.lock();
+            if st.interface_size != size {
+                st.interface_size = size;
+                self.shared.frame(&mut st);
+            }
         }
     }
 
@@ -1748,10 +1799,17 @@ impl CanvasSession {
     /// The frosted panels open over the canvas, five numbers each (left, top, right, bottom and
     /// corner radius, window pixels): what is behind them is drawn blurred.
     pub fn set_backdrops(&self, regions: Vec<f32>) {
-        let (regions, _) = regions.as_chunks::<6>();
+        self.set_glass(regions, Vec::new());
+    }
+
+    /// The same, with `windows` drawn over them, where the glass is thin: what is behind only
+    /// softens there.
+    pub fn set_glass(&self, regions: Vec<f32>, windows: Vec<f32>) {
+        let ((regions, _), (windows, _)) = (regions.as_chunks::<6>(), windows.as_chunks::<6>());
         let mut st = self.shared.lock();
-        if st.backdrops != regions {
+        if st.backdrops != regions || st.backdrop_windows != windows {
             st.backdrops = regions.to_vec();
+            st.backdrop_windows = windows.to_vec();
             self.shared.frame(&mut st);
         }
     }
@@ -1841,6 +1899,9 @@ impl CanvasSession {
         if let Some(name) = self.step_adjusting(Self::undo_step, true) {
             return name;
         }
+        if self.quickshape_undo() {
+            return None;
+        }
         self.undo_step()
     }
 
@@ -1863,6 +1924,9 @@ impl CanvasSession {
         // an adjustment open on the layer, with nothing changed yet: the step after it
         if let Some(name) = self.step_adjusting(Self::redo_step, false) {
             return name;
+        }
+        if self.quickshape_redo() {
+            return None;
         }
         // recoloring, the open fill steps aside and is made again over what comes back
         let recoloring = self.recolor_step_aside();
@@ -1936,10 +2000,11 @@ impl CanvasSession {
                 || st.shape.is_some()
                 || st.adjust.touched()
                 || st.text_edit.as_ref().is_some_and(|e| e.has_step(true)),
-            // keeping an open shape drops what could be redone
-            can_redo: (st.shape.is_none()
-                && (st.canvas.as_ref().is_some_and(Canvas::can_redo) || st.crop_redo_ready()))
-                || st.text_edit.as_ref().is_some_and(|e| e.has_step(false)),
+            // an open shape has only its own drags to redo
+            can_redo: st.shape.as_ref().map_or_else(
+                || st.canvas.as_ref().is_some_and(Canvas::can_redo) || st.crop_redo_ready() || st.shape_to_redo(),
+                quickshape::ShapeEdit::can_redo,
+            ) || st.text_edit.as_ref().is_some_and(|e| e.has_step(false)),
             zoom: st.view.map_or(1.0, |v| v.zoom()),
             frames: st.frames,
             frame_interval_ms: st.frame_interval_ms,

@@ -284,6 +284,51 @@ impl State {
     }
 }
 
+impl CanvasSession {
+    /// Whether two fingers at these window points take what the box holds: any of them on it,
+    /// though never a warp's, whose fingers move the canvas.
+    pub(crate) fn fingers_on_box(&self, fingers: impl Iterator<Item = (f32, f32)>) -> bool {
+        let st = self.shared.lock();
+        let Some(t) = st.transform.as_ref().filter(|_| st.transform_mode != TransformMode::Warp) else {
+            return false;
+        };
+        let frame = t.frame();
+        fingers.filter_map(|(x, y)| st.window_to_canvas(x, y)).any(|p| on_quad(frame, p))
+    }
+
+    /// Two fingers at these window points take what the box holds.
+    pub(crate) fn transform_pinch_grab(&self, a: (f32, f32)) {
+        let mut st = self.shared.lock();
+        let Some(at) = st.window_to_canvas(a.0, a.1) else { return };
+        if let Some(t) = st.transform.as_mut() {
+            t.grab(Handle::Move, at);
+        }
+    }
+
+    /// The fingers that took what the box holds at the window points `from` reached those at
+    /// `to`: it goes with them. Returns the box.
+    pub(crate) fn transform_pinch(&self, from: [(f32, f32); 2], to: [(f32, f32); 2]) -> Option<TransformBox> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let canvas = |st: &State, [a, b]: [(f32, f32); 2]| {
+            Some([st.window_to_canvas(a.0, a.1)?, st.window_to_canvas(b.0, b.1)?])
+        };
+        let (from, to) = (canvas(st, from)?, canvas(st, to)?);
+        if st.transform.as_mut()?.pinch(from, to) {
+            st.show_transform();
+            self.shared.frame(st);
+        }
+        st.transform_box()
+    }
+}
+
+/// Whether `p` is on the box `q`: inside it (a box is convex until distorted past that, and then
+/// this is near enough for a finger).
+fn on_quad([a, b, c, d]: [Vec2; 4], p: Vec2) -> bool {
+    let sides = [(a, b), (b, c), (c, d), (d, a)].map(|(from, to)| (to - from).cross(p - from));
+    sides.iter().all(|&s| s >= 0.0) || sides.iter().all(|&s| s <= 0.0)
+}
+
 #[uniffi::export]
 impl CanvasSession {
     /// Starts transforming the current layer and returns the box around what it holds; none when

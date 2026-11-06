@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use procraft_core::{CanvasSession, configure, screen_profile};
+use procraft_core::{CanvasSession, Plugins, configure, screen_profile};
 use procraft_gpu::{Gpu, wgpu};
 use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
@@ -167,6 +167,27 @@ impl Screen {
         if let Some(format) = self.config.as_ref().map(|c| c.format).filter(|f| *f != self.format) {
             self.format = format;
             self.renderer = egui_wgpu::Renderer::new(&self.gpu.device, format, egui_wgpu::RendererOptions::default());
+        }
+    }
+
+    /// The interface as `plugins` say for this window; `session` is told, so what it hit-tests goes
+    /// with what is drawn. Everything in points follows, the canvas stays in pixels.
+    /// A press under way holds it as it is: a slider growing with its own drag would run from the
+    /// pointer dragging it.
+    pub fn size_interface(&self, plugins: &Plugins, session: Option<&CanvasSession>) {
+        let ctx = self.egui.egui_ctx();
+        let (size, scale) = (self.window.inner_size(), self.window.scale_factor() as f32);
+        let shown = plugins.interface_scale(size.width as f32 / scale, size.height as f32 / scale);
+        if ctx.zoom_factor() != shown {
+            ctx.request_repaint();
+            if ctx.input(|i| i.pointer.any_down()) {
+                return;
+            }
+            // at once, not from the next frame on: this one's input is about to be read at it
+            ctx.options_mut(|o| o.zoom_factor = shown);
+        }
+        if let Some(session) = session {
+            session.set_interface_size(shown);
         }
     }
 

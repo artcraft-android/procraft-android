@@ -1,6 +1,9 @@
 // The predicted tail of the stroke being drawn: stamps straight onto the window over the canvas,
 // never into the layer. They cover the gap between the latest input and where the pen already is.
 
+// how far a stamp's quad reaches past the stamp each way (canvas pixels): its shape fills all of it
+const QUAD_REACH: f32 = 0.70710678;
+
 struct OverlayUniform {
     // canvas pixels to clip space: (a, b, c, d) ...
     m0: vec4<f32>,
@@ -30,6 +33,7 @@ struct StampIn {
     @location(3) angle: f32,
     @location(4) roundness: f32,
     @location(5) grain_offset: vec2<f32>,
+    @location(6) flip: vec2<f32>,
 }
 
 struct Out {
@@ -38,6 +42,8 @@ struct Out {
     // radius in screen pixels
     @location(1) radius: f32,
     @location(2) alpha: f32,
+    // how much of its quad the stamp itself is across each way, mirrored as the stamp says
+    @location(3) fill: vec2<f32>,
 }
 
 @vertex
@@ -49,11 +55,10 @@ fn vs_overlay(@builtin(vertex_index) vi: u32, inst: StampIn) -> Out {
     let zoom = max(ou.m1.z, 1e-3);
     let r = max(inst.radius, 0.25);
     let rs = r * zoom;
-    // one screen pixel to spare for anti-aliasing, or the half a canvas pixel a shape reaches past
-    // the stamp
-    let grow = (rs + max(1.0, 0.5 * zoom)) / rs;
-    let q = corners[vi % 6u] * grow;
-    let local = vec2<f32>(q.x * r, q.y * r * inst.roundness);
+    let half = vec2<f32>(r, max(r * inst.roundness, 1e-3));
+    // one screen pixel to spare for anti-aliasing, or as far as a shape's quad reaches
+    let q = corners[vi % 6u] * (half + max(1.0 / zoom, QUAD_REACH)) / half;
+    let local = q * half;
     let c = cos(inst.angle);
     let s = sin(inst.angle);
     let p = inst.center + vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
@@ -62,6 +67,7 @@ fn vs_overlay(@builtin(vertex_index) vi: u32, inst: StampIn) -> Out {
     o.q = q;
     o.radius = rs;
     o.alpha = inst.alpha;
+    o.fill = inst.flip * half / (half + QUAD_REACH);
     return o;
 }
 
@@ -84,9 +90,9 @@ fn fs_overlay(i: Out) -> @location(0) vec4<f32> {
         let small = min(2.0 * r / zoom, 1.0);
         a = min(rim, soft) * small * small;
     } else {
-        // as a stamp's: filling it and half a canvas pixel round it, at the same mip level
-        let uv = i.q * (r / (r + 0.5 * zoom)) * 0.5 + 0.5;
-        let lod = clamp(log2(256.0 / max(2.0 * r / zoom + 1.0, 1.0)), 0.0, ou.shape_lod_cap);
+        // as a stamp's: filling its quad, at the same mip level
+        let uv = i.q * i.fill * 0.5 + 0.5;
+        let lod = clamp(log2(128.0 / (r / zoom + QUAD_REACH)), 0.0, ou.shape_lod_cap);
         let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
         a = select(0.0, textureSampleLevel(shapes, shape_smp, uv, ou.shape, lod).r, inside);
     }
