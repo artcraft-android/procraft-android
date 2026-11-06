@@ -73,8 +73,14 @@ struct CanvasScreen: View {
                     .frame(maxWidth: .infinity, alignment: right ? .trailing : .leading)
                     .offset(x: sideBarShift(right), y: screen.size.height * Pc.sideBarCentre - Pc.sideBarHeight / 2)
                     .opacity(hidden ? 0 : 1)
-                if model.panel != .none {
+                if model.panel != .none || model.panelFading {
+                    // the one view all the way, so a list fading keeps its place
                     PanelHost(model: model, screen: screen.size)
+                        .opacity(model.panelFading ? 0 : 1)
+                        .allowsHitTesting(!model.panelFading)
+                }
+                if !hidden {
+                    FloatingColors(model: model, screen: screen.size)
                 }
                 QuickShapeHandles(model: model)
                 if !hidden {
@@ -336,7 +342,7 @@ private struct PanelHost: View {
     }
 
     var body: some View {
-        switch model.panel {
+        switch model.panel == .none ? model.lastPanel : model.panel {
         case .brushes:
             let buttonX = screen.width - Pc.toolCentreFromRight(libraryButton(model.tool), barWidth: screen.width)
             let place = place(brushLibraryWidth, buttonX)

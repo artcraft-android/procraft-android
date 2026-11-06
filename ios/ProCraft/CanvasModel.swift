@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 import UIKit
 
 /// Which panel hangs from the top bar.
@@ -76,7 +77,21 @@ final class CanvasModel {
     private(set) var hue: Float = 0
     private(set) var saturation: Float = 0
     private(set) var brightness: Float = 0
-    private(set) var panel: Panel = .none
+    private(set) var panel: Panel = .none {
+        didSet {
+            if panel != .none {
+                lastPanel = panel
+            }
+        }
+    }
+    /// The panel shown last, for one fading away.
+    @ObservationIgnored private(set) var lastPanel = Panel.none
+    /// The panel just closed is fading away (an adjustment picked from its list), not gone at once.
+    private(set) var panelFading = false
+    /// The colour panel floating, dragged out by its grabber: its window's top left.
+    var floatingColorsAt: CGPoint?
+    /// The colour panel's grabber is being dragged out: the panel stays, unseen, until let go.
+    var colorsUndocking = false
     private(set) var canUndo = false
     private(set) var canRedo = false
     private(set) var currentBrush: BrushInfo?
@@ -762,6 +777,12 @@ final class CanvasModel {
             return
         }
         _ = switchModes(.panel(colour: p == .color))
+        // the colour button with the panel floating: it goes back in its place
+        if p == .color, floatingColorsAt != nil {
+            floatingColorsAt = nil
+            panel = .none
+        }
+        panelFading = false
         panel = panel == p ? .none : p
         if panel == .layers {
             refreshThumbnails()
@@ -771,6 +792,20 @@ final class CanvasModel {
     func closePanels() {
         panel = .none
         swipedBrush = nil
+    }
+
+    /// The list of adjustments fades away rather than going at once as one is picked.
+    private func closeForAdjustment() {
+        guard panel == .adjustments else {
+            panel = .none
+            return
+        }
+        panel = .none
+        withAnimation(Motion.panelFade, completionCriteria: .logicallyComplete) {
+            panelFading = true
+        } completion: { [weak self] in
+            self?.panelFading = false
+        }
     }
 
     /// Something is about to show over the canvas: all that hangs over it goes first.
@@ -961,7 +996,7 @@ final class CanvasModel {
     func startAdjustment(_ a: Adjustment) {
         guard currentTakesChanges() else { return }
         _ = switchModes(.adjustment)
-        panel = .none
+        closeForAdjustment()
         // Gradient Map maps by the library
         if a == .gradientMap {
             _ = gradientMap
@@ -981,7 +1016,7 @@ final class CanvasModel {
     func startPluginFilter(_ filter: PluginInfo) {
         guard currentTakesChanges() else { return }
         _ = switchModes(.adjustment)
-        panel = .none
+        closeForAdjustment()
         let session = session
         let dir = dir
         let id = filter.id

@@ -18,6 +18,11 @@ private let brightnessTrack: [UInt32] = [0x000000, 0xFFFFFF]
 /// The space the panel's rows and the menus they open are placed in.
 private let colorsSpace = "colors"
 private let compactWidth: CGFloat = 260
+/// How far the grabber is dragged before the panel floats.
+private let undockDrag: CGFloat = 30
+/// Where the floating window's grabber is held from: its middle.
+private let floatingGrab = CGPoint(x: 130, y: 7.5)
+private let floatingGroup = Color.white.opacity(0.06)
 private let compactFill = Color(argb: 0xFF1E_1E1E)
 private let compactGroup = Color(argb: 0xFF29_2929)
 private let compactHexField = Color(argb: 0xFF34_3434)
@@ -89,6 +94,9 @@ private final class ColorUi {
     var hexSet: ((UInt32) -> Void)?
     /// The window in the panel's own space, where a panel that can be anywhere keeps the keypad.
     var hexRoom: CGRect?
+    /// Where the harmony kinds list goes, from the panel's top left: to the left of it, level with the
+    /// wheel, unless it is floating.
+    var harmonyAt = CGPoint(x: -184, y: 86 + Pc.arrowHeight)
     var renaming: Int?
     var choosingPhoto = false
     var choosingFile = false
@@ -195,6 +203,10 @@ struct ColorPanel: View {
                 .frame(width: 40, height: 4)
                 .padding(.top, 4)
                 .frame(maxWidth: .infinity)
+            if background == nil {
+                UndockHandle(model: model)
+                    .frame(maxWidth: .infinity)
+            }
             if model.colorMode == .harmony {
                 // the harmony kind under the title; tapping it lists the kinds
                 Text(verbatim: model.harmonyKind.label)
@@ -253,6 +265,8 @@ struct ColorPanel: View {
             ModeTabs(model: model)
         }
         .coordinateSpace(.named(colorsSpace))
+        // dragged out by its grabber, it isn't seen until let go, the window floating
+        .opacity(background == nil && model.colorsUndocking ? 0 : 1)
         // a swatch dragged out and let go over the panel itself fills nothing
         .background {
             if background == nil {
@@ -469,6 +483,8 @@ private struct HarmonyPicker: View {
     let c: any ColorPick
     let short: Bool
     var compact = false
+    /// Its wheel's radius, where it isn't the usual one.
+    var across: CGFloat?
 
     /// The hue, saturation and brightness dragged to, kept while the colour they make is the colour
     /// (not worked out again from it: a dark or greyish colour's would wander, and black's be lost).
@@ -486,7 +502,7 @@ private struct HarmonyPicker: View {
         let p3 = CanvasSpace.shared.p3
         let rgb = c.rgb()
         let hsv = held.flatMap { $0.rgb == rgb ? $0.hsv : nil } ?? rgbToP3Hsv(rgb: rgb, p3: p3)
-        let radius: CGFloat = compact ? 100 : short ? harmonyRadius - 1 : harmonyRadius
+        let radius: CGFloat = across ?? (compact ? 100 : short ? harmonyRadius - 1 : harmonyRadius)
         let value = hsv[2]
         let at: (Float) -> CGPoint = { turn in
             let a = CGFloat(turn) * 2 * .pi
@@ -923,12 +939,13 @@ private struct PaletteTiles: View {
     let c: any ColorPick
     let index: Int
     let palette: PaletteInfo
+    var across = 3
 
     var body: some View {
         let filled: [(slot: Int, rgb: UInt32)] = palette.colors.enumerated().compactMap { slot, rgb in
             rgb.map { (slot: slot, rgb: $0) }
         }
-        LazyVGrid(columns: Array(repeating: GridItem(.fixed(120), spacing: 0), count: 3), spacing: 0) {
+        LazyVGrid(columns: Array(repeating: GridItem(.fixed(120), spacing: 0), count: across), spacing: 0) {
             ForEach(filled, id: \.slot) { tile in
                 let bright = max((tile.rgb >> 16) & 0xFF, (tile.rgb >> 8) & 0xFF, tile.rgb & 0xFF) >= 217
                 ZStack(alignment: .bottomLeading) {
@@ -1126,7 +1143,7 @@ private struct ColorMenus: View {
         .padding(.vertical, 9)
         .frame(width: 195)
         .background(RoundedRectangle(cornerRadius: 24, style: .circular).fill(Pc.menuFill))
-        .offset(x: -184, y: 86 + Pc.arrowHeight)
+        .offset(x: ui.harmonyAt.x, y: ui.harmonyAt.y)
         .menuTransition(.topTrailing)
     }
 
@@ -1417,20 +1434,6 @@ struct CompactColors: View {
         }
     }
 
-    /// The modes as a row of icons, the chosen one blue.
-    private var tabs: some View {
-        HStack(spacing: 0) {
-            ForEach(ColorMode.allCases, id: \.self) { m in
-                // the tabs' 36-unit glyphs, a little smaller here
-                PcIconView(m.icon, size: 33, color: m == mode ? Pc.accent : Pc.panelTitle)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .onTapGesture { mode = m }
-            }
-        }
-        .frame(height: 52)
-    }
-
     var body: some View {
         Popover(width: compactWidth, arrowX: arrowX, fill: compactFill, side: side) {
             // a 16.5 cap, as measured over a gradient stop
@@ -1442,7 +1445,7 @@ struct CompactColors: View {
                 .padding(.bottom, 5)
                 .frame(maxWidth: .infinity, alignment: .leading)
             picker
-            tabs
+            CompactTabs(mode: mode) { mode = $0 }
         }
         .coordinateSpace(.named(colorsSpace))
         .background {
@@ -1467,10 +1470,303 @@ struct CompactColors: View {
     }
 }
 
+/// The compact pickers' modes as a row of icons, the chosen one blue.
+private struct CompactTabs: View {
+    let mode: ColorMode
+    let onMode: (ColorMode) -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(ColorMode.allCases, id: \.self) { m in
+                // the tabs' 36-unit glyphs, a little smaller here
+                PcIconView(m.icon, size: 33, color: m == mode ? Pc.accent : Pc.panelTitle)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture { onMode(m) }
+            }
+        }
+        .frame(height: 52)
+    }
+}
+
+/// The panel's grabber: dragged out past `undockDrag`, the panel floats and the window follows.
+private struct UndockHandle: View {
+    let model: CanvasModel
+
+    var body: some View {
+        Color.clear
+            .frame(width: 150, height: 30)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { drag in
+                        guard model.colorsUndocking || hypot(drag.translation.width, drag.translation.height) > undockDrag else { return }
+                        let at = Interface.shared.point(drag.location)
+                        model.colorsUndocking = true
+                        model.floatingColorsAt = CGPoint(x: at.x - floatingGrab.x, y: at.y - floatingGrab.y)
+                    }
+                    .onEnded { _ in
+                        if model.colorsUndocking {
+                            model.colorsUndocking = false
+                            model.closePanels()
+                        }
+                    }
+            )
+    }
+}
+
+/// Close: a disc with a cross cut out of it.
+private struct FloatingClose: View {
+    let onClose: () -> Void
+
+    var body: some View {
+        Canvas { context, size in
+            let o = CGPoint(x: size.width / 2, y: size.height / 2)
+            let r: CGFloat = 8.5
+            context.fill(Path(ellipseIn: CGRect(x: o.x - r, y: o.y - r, width: r * 2, height: r * 2)), with: .color(.white.opacity(0.15)))
+            let d: CGFloat = 3.2
+            var cross = Path()
+            cross.move(to: CGPoint(x: o.x - d, y: o.y - d))
+            cross.addLine(to: CGPoint(x: o.x + d, y: o.y + d))
+            cross.move(to: CGPoint(x: o.x + d, y: o.y - d))
+            cross.addLine(to: CGPoint(x: o.x - d, y: o.y + d))
+            context.stroke(cross, with: .color(.black.opacity(0.3)), lineWidth: 1.3)
+        }
+        .frame(width: 40, height: 40)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onClose)
+    }
+}
+
+/// Palettes floating: Compact or Cards, then each palette as a card of swatches six to a row, or as
+/// named tiles two to a row.
+private struct FloatingPalettes: View {
+    let model: CanvasModel
+    let c: any ColorPick
+    let ui: ColorUi
+
+    private func option(_ label: String, cards: Bool) -> some View {
+        let on = AppSettings.shared.paletteCards == cards
+        return Text(verbatim: label)
+            .font(.system(size: 15, weight: on ? .semibold : .regular))
+            .foregroundStyle(on ? Color.white : Pc.panelTitle)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(RoundedRectangle(cornerRadius: 9, style: .circular).fill(on ? Pc.accent : Color.clear))
+            .contentShape(Rectangle())
+            .onTapGesture { AppSettings.shared.paletteCards = cards }
+    }
+
+    private func swatches(_ palette: PaletteInfo) -> some View {
+        VStack(spacing: 0) {
+            ForEach(0 ..< (palette.colors.count + 5) / 6, id: \.self) { row in
+                HStack(spacing: 0) {
+                    ForEach(0 ..< 6, id: \.self) { col in
+                        let slot = row * 6 + col
+                        let rgb = palette.colors.indices.contains(slot) ? palette.colors[slot] : nil
+                        Rectangle()
+                            .fill(rgb.map(canvasColor) ?? Pc.emptySlot)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if let rgb {
+                                    c.setRgb(rgb)
+                                }
+                            }
+                    }
+                }
+                .frame(height: 40)
+            }
+        }
+    }
+
+    private func card(_ i: Int, _ palette: PaletteInfo) -> some View {
+        let isDefault = i == model.defaultPalette
+        let shape = RoundedRectangle(cornerRadius: 10, style: .circular)
+        return VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                if isDefault {
+                    PcIconView(PcIcons.tick, size: 13, color: .white)
+                        .frame(width: 21, height: 21)
+                        .background(Circle().fill(Pc.accent))
+                        .padding(.leading, 8.5)
+                }
+                Text(verbatim: palette.name)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Pc.panelTitle)
+                    .lineLimit(1)
+                    .padding(.leading, isDefault ? 6 : 12)
+                Spacer(minLength: 0)
+                PcIconView(PcIcons.more, size: 20, color: Pc.panelTitle)
+                    .frame(width: 30, height: 44)
+                    .overlay {
+                        GeometryReader { g in
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    ui.paletteButton = g.frame(in: .named(colorsSpace))
+                                    withAnimation(Motion.menuOpen) { ui.paletteMenu = i }
+                                }
+                        }
+                    }
+                    .padding(.trailing, 8.5)
+            }
+            .frame(height: 44)
+            if AppSettings.shared.paletteCards {
+                // as measured: the tiles' block with its top corners rounded
+                PaletteTiles(model: model, c: c, index: i, palette: palette, across: 2)
+                    .clipShape(UnevenRoundedRectangle(topLeadingRadius: 10, topTrailingRadius: 10, style: .circular))
+            } else {
+                swatches(palette)
+            }
+        }
+        .background(shape.fill(floatingGroup))
+        .clipShape(shape)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                option("Compact", cards: false)
+                option("Cards", cards: true)
+            }
+            .frame(height: 36)
+            .background(RoundedRectangle(cornerRadius: 9, style: .circular).fill(floatingGroup))
+            .padding(.horizontal, 10)
+            .padding(.top, 4)
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach(Array(model.palettes.enumerated()), id: \.offset) { i, palette in
+                        card(i, palette)
+                    }
+                }
+                .padding(.horizontal, 10)
+            }
+            .scrollIndicators(.hidden)
+            .frame(height: 246)
+            .padding(.top, 6)
+        }
+    }
+}
+
+/// The colour panel floating: a window of its own, 260 wide, moved by its grabber and closed by its
+/// Close (the colour button then opens the panel again). The same colour and mode as the panel; no
+/// swatches, history or palette under the pickers, the modes as icons under them.
+struct FloatingColors: View {
+    let model: CanvasModel
+    let screen: CGSize
+
+    @State private var ui = ColorUi()
+    /// Where the window was as the drag on its grabber began.
+    @State private var dragFrom: CGPoint?
+
+    private var title: some View {
+        Text(verbatim: model.colorMode == .palettes ? "Palettes" : "Colors")
+            .font(.system(size: 24, weight: .bold))
+            .foregroundStyle(Pc.panelTitle)
+            .frame(height: 40)
+            .padding(.leading, 18)
+            .padding(.top, 4)
+    }
+
+    private var grabber: some View {
+        ZStack(alignment: .top) {
+            Capsule()
+                .fill(Pc.grabber)
+                .frame(width: 40, height: 4)
+                .padding(.top, 5.5)
+            Color.clear
+                .frame(width: 150, height: 30)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                        .onChanged { drag in
+                            let from = dragFrom ?? model.floatingColorsAt ?? .zero
+                            dragFrom = from
+                            let k = Interface.shared.scale
+                            model.floatingColorsAt = CGPoint(x: from.x + drag.translation.width / k, y: from.y + drag.translation.height / k)
+                        }
+                        .onEnded { _ in dragFrom = nil }
+                )
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder private func picker(_ c: any ColorPick) -> some View {
+        switch model.colorMode {
+        case .disc:
+            DiscPicker(c: c, short: false, compact: true)
+                .padding(.top, 5)
+        case .classic:
+            ClassicPicker(c: c, square: 248, compact: true)
+                .padding(.top, 6)
+        case .harmony:
+            ZStack(alignment: .topLeading) {
+                HarmonyPicker(kind: model.harmonyKind, c: c, short: false, compact: true, across: 106)
+                    .padding(.top, 21)
+                // tapping the kind lists them
+                Text(verbatim: model.harmonyKind.label)
+                    .font(.system(size: 17))
+                    .foregroundStyle(Pc.panelTitle)
+                    .frame(height: 28)
+                    .contentShape(Rectangle())
+                    .onTapGesture { withAnimation(Motion.menuOpen) { ui.harmonyMenu = true } }
+                    .padding(.leading, 18)
+            }
+        case .value:
+            CompactValue(c: c, ui: ui, group: floatingGroup, fieldFill: floatingGroup)
+                .padding(.top, 4)
+        case .palettes:
+            FloatingPalettes(model: model, c: c, ui: ui)
+        }
+    }
+
+    var body: some View {
+        if let at = model.floatingColorsAt {
+            let height: CGFloat = model.colorMode == .disc ? 351 : 390
+            // kept on the screen
+            let x = min(max(at.x, 0), max(screen.width - compactWidth, 0))
+            let y = min(max(at.y, 0), max(screen.height - height, 0))
+            Popover(width: compactWidth, arrowX: 0, side: .none) {
+                ZStack(alignment: .topLeading) {
+                    VStack(spacing: 0) {
+                        Color.clear.frame(height: 44)
+                        picker(BrushColor(model: model))
+                    }
+                    title
+                    grabber
+                    FloatingClose { model.floatingColorsAt = nil }
+                        .padding(.top, 4)
+                        .padding(.trailing, 4)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .frame(height: height - 52, alignment: .top)
+                CompactTabs(mode: model.colorMode) { model.colorMode = $0 }
+            }
+            .frame(height: height, alignment: .top)
+            .coordinateSpace(.named(colorsSpace))
+            // the canvas under it takes no touch
+            .contentShape(Rectangle())
+            .onTapGesture {}
+            .background {
+                GeometryReader { place in
+                    Color.clear.onChange(of: place.frame(in: .global), initial: true) { _, frame in
+                        let on = Interface.shared.rect(frame)
+                        ui.hexRoom = CGRect(x: -on.minX, y: -on.minY, width: screen.width, height: screen.height)
+                    }
+                }
+            }
+            .overlay(alignment: .topLeading) { ColorMenus(model: model, ui: ui) }
+            .offset(x: x, y: y)
+            .onAppear { ui.harmonyAt = CGPoint(x: 0, y: 72) }
+        }
+    }
+}
+
 /// Value, compact: HSB or RGB (a switch picks), then the hex code; 240 wide.
 private struct CompactValue: View {
     let c: any ColorPick
     let ui: ColorUi
+    var group = compactGroup
+    var fieldFill = compactHexField
 
     @State private var rgbShown = false
 
@@ -1498,7 +1794,7 @@ private struct CompactValue: View {
                 choice("RGB", rgb: true)
             }
             .frame(height: 36)
-            .background(RoundedRectangle(cornerRadius: 9, style: .circular).fill(compactGroup))
+            .background(RoundedRectangle(cornerRadius: 9, style: .circular).fill(group))
             VStack(spacing: 18) {
                 if rgbShown {
                     CompactValueRow(letter: "R", value: Float(r) / 255, colours: [packed(0, g, b), packed(255, g, b)], shown: "\(r)") {
@@ -1526,9 +1822,9 @@ private struct CompactValue: View {
             .padding(.top, 10)
             .frame(maxWidth: .infinity)
             .frame(height: 188, alignment: .top)
-            .background(RoundedRectangle(cornerRadius: 10, style: .circular).fill(compactGroup))
+            .background(RoundedRectangle(cornerRadius: 10, style: .circular).fill(group))
             .padding(.top, 6)
-            HexRow(rgb: rgb, ui: ui, rowFill: compactGroup, fieldFill: compactHexField) { c.setRgb($0) }
+            HexRow(rgb: rgb, ui: ui, rowFill: group, fieldFill: fieldFill) { c.setRgb($0) }
             Color.clear.frame(height: 10)
         }
         .padding(.horizontal, 10)

@@ -312,6 +312,9 @@ enum ScreenCapture {
         case "adjust-modes":
             model.startAdjustment(.gaussianBlur)
             model.adjustModesOpen = true
+        case "colors-floating", "colors-floating-palettes", "colors-floating-harmony", "colors-floating-value":
+            model.colorMode = ColorMode.allCases.first { name.hasSuffix($0.label.lowercased()) } ?? .disc
+            model.floatingColorsAt = CGPoint(x: 300, y: 160)
         case "reference":
             model.reference.setOn(true)
         case "reference-bars":
