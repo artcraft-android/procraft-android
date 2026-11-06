@@ -415,7 +415,7 @@ fn csp_brush(c: &procraft_engine::csp::CspBrush) -> Brush {
 fn paper(b: &mut Brush, pngs: &[Vec<u8>], inverted: bool, depth: f32, scale: f32) {
     let found = pngs.iter().find_map(|png| {
         let source = gray_texture(png, inverted).filter(|s| s.pixels.iter().any(|&v| v > 0))?;
-        Some((source, decode_png(png)?.0))
+        Some((source, decode_picture(png)?.0))
     });
     if let Some((source, width)) = found {
         b.grain.image = None;
@@ -593,7 +593,7 @@ fn krita_brush(k: &procraft_engine::krita::KritaBrush) -> Brush {
 
 /// A PNG tip as a grey one: its opaque pixels paint, the light ones if `white`, else the dark.
 fn png_tip(png: &[u8], white: bool) -> Option<procraft_engine::abr::AbrTip> {
-    let (w, h, channels, buf) = decode_png(png)?;
+    let (w, h, channels, buf) = decode_picture(png)?;
     let pixels: Vec<u8> = buf
         .chunks_exact(channels.max(1))
         .take(w * h)
@@ -691,7 +691,7 @@ fn brush_from(file: &BrushFile) -> Brush {
 /// A preview image (PNG) as premultiplied RGBA8, with its width and height; none if it can't be
 /// read.
 pub(crate) fn thumbnail_pixels(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
-    let (w, h, channels, buf) = decode_png(bytes)?;
+    let (w, h, channels, buf) = decode_picture(bytes)?;
     let mut rgba = Vec::with_capacity(w * h * 4);
     for px in buf.chunks_exact(channels.max(1)).take(w * h) {
         let get = |k: usize| px.get(k).copied().unwrap_or(0);
@@ -707,7 +707,24 @@ pub(crate) fn thumbnail_pixels(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     (rgba.len() == w * h * 4).then_some((w as u32, h as u32, rgba))
 }
 
-/// A PNG's pixels at 8 bits a sample: width, height, samples a pixel and the samples.
+/// An image's pixels at 8 bits a sample: width, height, samples a pixel and the samples. A brush
+/// file's images are PNG or JPEG, whatever they are named.
+fn decode_picture(bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
+    decode_png(bytes).or_else(|| decode_jpeg(bytes))
+}
+
+fn decode_jpeg(bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
+    let reader = || image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Jpeg);
+    // a small file can claim a picture of gigabytes
+    let (w, h) = reader().into_dimensions().ok()?;
+    let (w, h) = (w as usize, h as usize);
+    if w == 0 || h == 0 || w.checked_mul(h)?.checked_mul(3)? > MOST_PNG_BYTES {
+        return None;
+    }
+    Some((w, h, 3, reader().decode().ok()?.into_rgb8().into_raw()))
+}
+
+/// A PNG's pixels, as [`decode_picture`] gives them.
 fn decode_png(bytes: &[u8]) -> Option<(usize, usize, usize, Vec<u8>)> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
@@ -725,7 +742,10 @@ pub(crate) fn shape_for(t: &Texture) -> (Option<u32>, Option<Source>, Option<f32
         Texture::None => (None, None, None),
         Texture::Image { bytes, inverted } => match gray_texture(bytes, *inverted) {
             Some(s) => (None, Some(s), None),
-            None => (Some(shape::GRAINY_DISC), None, None),
+            None => {
+                log::warn!("a brush file's shape can't be read: drawing with a stand-in");
+                (Some(shape::GRAINY_DISC), None, None)
+            }
         },
         Texture::Stock { name, inverted } => {
             let (image, source, hardness) = stock_stand_in(name, *inverted);
@@ -980,7 +1000,7 @@ fn named_grain(n: &str) -> Option<u32> {
 /// An image (PNG) as a shape or grain: grey (its alpha taken in), [`TEXTURE_SIZE`] square, white
 /// for paint; none if it can't be read.
 fn gray_texture(bytes: &[u8], inverted: bool) -> Option<Source> {
-    let (w, h, channels, buf) = decode_png(bytes)?;
+    let (w, h, channels, buf) = decode_picture(bytes)?;
     Source::new(gray_square((w, h, channels), &buf, inverted, TEXTURE_SIZE))
 }
 
@@ -988,7 +1008,7 @@ fn gray_texture(bytes: &[u8], inverted: bool) -> Option<Source> {
 /// to [`FULL_GRAIN_MOST`] a side if it has more than `source` holds.
 fn grain_file_for(t: &Texture, source: Option<&Source>) -> Option<GrainFile> {
     let (Texture::Image { bytes, inverted }, Some(source)) = (t, source) else { return None };
-    let (w, h, channels, buf) = decode_png(bytes)?;
+    let (w, h, channels, buf) = decode_picture(bytes)?;
     let longest = w.max(h);
     let full = (longest > TEXTURE_SIZE)
         .then(|| longest.next_power_of_two().min(FULL_GRAIN_MOST))
@@ -1321,6 +1341,28 @@ mod tests {
         // our own textures go out and come back the same
         let back = gray_texture(&gray_png(&textures::grains()[3].pixels), false).unwrap();
         assert_eq!(*back.pixels, textures::grains()[3].pixels);
+    }
+
+    #[test]
+    fn a_brush_file_s_jpeg_is_read_as_its_image_not_taken_for_a_bad_one() {
+        // a bright disc on black
+        let n = 64usize;
+        let disc: Vec<u8> = (0..n * n)
+            .map(|i| {
+                let (x, y) = ((i % n) as f32 - 31.5, (i / n) as f32 - 31.5);
+                if x.hypot(y) < 20.0 { 255 } else { 0 }
+            })
+            .collect();
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 95)
+            .encode(&disc, n as u32, n as u32, image::ExtendedColorType::L8)
+            .unwrap();
+        let (image, source, _) = shape_for(&Texture::Image { bytes, inverted: false });
+        assert_eq!(image, None, "not the grainy disc");
+        let pixels = source.unwrap().pixels;
+        let at = |x: usize, y: usize| pixels[y * TEXTURE_SIZE + x];
+        let half = TEXTURE_SIZE / 2;
+        assert!(at(half, half) > 240 && at(4, 4) < 16, "{} {}", at(half, half), at(4, 4));
     }
 
     #[test]
