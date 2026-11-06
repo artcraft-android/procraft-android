@@ -30,6 +30,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.requiredWidth
@@ -190,6 +192,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
             label = "blur",
         )
         val dropCell = cellSize(screenWidth, if (screenWidth > screenHeight) 4 else 3)
+        // the header keeps clear of the screen's cutout, and the menus hanging from it go down with it
+        val headerTop = with(LocalDensity.current) { WindowInsets.displayCutout.getTop(this).toDp() }
         Column(
             Modifier.fillMaxSize().then(if (blur > 0.dp) Modifier.blur(blur) else Modifier).then(
                 galleryDrop(
@@ -209,11 +213,11 @@ fun GalleryScreen(vm: CanvasViewModel) {
             ),
         ) {
             if (selecting) {
-                val screen = androidx.compose.ui.platform.LocalConfiguration.current
                 SelectHeader(
                     title = vm.openStack?.name ?: "ProCraft",
                     count = selected.size,
-                    wide = screen.screenWidthDp > screen.screenHeightDp,
+                    // the five buttons side by side only where they fit
+                    wide = screenWidth > screenHeight && screenWidth >= WideSelectWidth,
                     canStack = vm.openStack == null,
                     onStack = {
                         vm.stackArtworks(picked())
@@ -231,6 +235,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                     onDelete = { deletingSelected = true },
                     onMore = { moreOpen = !moreOpen },
                     onDone = ::endSelecting,
+                    top = headerTop,
                 )
             } else {
                 GalleryHeader(
@@ -243,6 +248,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                     onNew = { newCanvas = !newCanvas },
                     onImport = { importFile.launch(arrayOf("*/*")) },
                     onPhoto = { photo.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                    top = headerTop,
                 )
             }
             // into a stack the gallery goes at once and the stack's artworks fly out of its cell to
@@ -505,7 +511,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
         val newArrow = maxWidth - 49.dp - newLeft
         MenuPresence(newCanvas, androidx.compose.ui.graphics.TransformOrigin(newArrow / NewCanvasWidth, 0f)) { look ->
             NewCanvasPanel(
-                Modifier.offset(x = newLeft, y = 56.5.dp).then(look), arrowX = newArrow, presets = vm.canvasPresets,
+                Modifier.offset(x = newLeft, y = headerTop + 56.5.dp).then(look), arrowX = newArrow, presets = vm.canvasPresets,
                 // Custom Canvas opens over the list, which is still there when it closes
                 onCustom = { vm.openCustomCanvas() },
                 onEdit = { vm.openCustomCanvas(it) },
@@ -525,7 +531,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
         MenuPresence(moreOpen, androidx.compose.ui.graphics.TransformOrigin(morePlace.arrowX / 250.dp, 0f)) { look ->
             val place = morePlace
             MoreOptions(
-                Modifier.offset(x = place.left, y = 60.dp).then(look),
+                Modifier.offset(x = place.left, y = headerTop + 60.dp).then(look),
                 place.arrowX,
                 count = selected.size,
                 canStack = vm.openStack == null,
@@ -553,7 +559,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
         shown?.let { share ->
             val density = LocalDensity.current.density
             val from = share.from?.let { r -> androidx.compose.ui.geometry.Rect(r.left / density, r.top / density, r.right / density, r.bottom / density) }
-            val place = formatsPlace(from, maxWidth, maxHeight, selectShareCentre(maxWidth))
+            val place = formatsPlace(from, maxWidth, maxHeight, selectShareCentre(maxWidth), headerTop)
             MenuPresence(sharing != null, place.origin) { look ->
                 ImageFormats(Modifier.offset(x = place.left, y = place.top).then(look), place.side, place.arrowAt) { format ->
                     sharing = null
@@ -710,8 +716,9 @@ private fun GalleryHeader(
     onNew: () -> Unit,
     onImport: () -> Unit,
     onPhoto: () -> Unit,
+    top: Dp,
 ) {
-    Box(Modifier.fillMaxWidth().height(55.dp)) {
+    TitleRow(top, title = {
         // into a stack the title changes at once; back out, the stack's name fades out as the
         // gallery's fades in
         androidx.compose.animation.AnimatedContent(
@@ -746,7 +753,7 @@ private fun GalleryHeader(
                     Box(Modifier.width(40.dp), contentAlignment = Alignment.Center) {
                         Icon(PcIcons.ChevronLeft, contentDescription = "Back", tint = ink, modifier = Modifier.size(28.dp))
                     }
-                    Text(name, color = ink, fontSize = 36.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    Text(name, color = ink, fontSize = 36.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                 }
             } else {
                 Text(
@@ -754,12 +761,15 @@ private fun GalleryHeader(
                     color = Pc.GalleryTitle,
                     fontSize = 36.sp,
                     fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(start = 32.dp, top = 11.dp)
                         .clickable(remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null, onClick = onAbout),
                 )
             }
         }
-        Row(Modifier.align(Alignment.TopEnd).padding(top = 10.dp, end = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+    }) {
+        Row(Modifier.padding(top = 10.dp, end = 20.dp), verticalAlignment = Alignment.CenterVertically) {
             Row(
                 Modifier.height(45.dp).clip(CircleShape).background(Pc.Capsule).border(1.dp, Pc.CapsuleEdge, CircleShape),
                 verticalAlignment = Alignment.CenterVertically,
@@ -783,6 +793,39 @@ private fun GalleryHeader(
     }
 }
 
+/**
+ * A title row [top] under the screen's cutout: the [title] on the left and the [actions] on the
+ * right, side by side where the whole title fits beside them; narrower (a phone), the title goes
+ * under them, the screen's width, cut short if it must be. The actions stay where they are either
+ * way, so the menus hanging from them do too.
+ */
+@Composable
+private fun TitleRow(top: Dp, title: @Composable () -> Unit, actions: @Composable () -> Unit) {
+    androidx.compose.ui.layout.Layout(content = { title(); actions() }, modifier = Modifier.fillMaxWidth().padding(top = top)) { measurables, c ->
+        val (t, a) = measurables
+        val loose = c.copy(minWidth = 0, minHeight = 0)
+        val acts = a.measure(loose)
+        val beside = c.maxWidth - acts.width
+        val header = HeaderHeight.roundToPx()
+        val stacked = t.maxIntrinsicWidth(header) > beside
+        val name = t.measure(loose.copy(maxWidth = if (stacked) c.maxWidth else beside.coerceAtLeast(0)))
+        val nameTop = if (stacked) acts.height - StackedTitleTuck.roundToPx() else 0
+        val height = maxOf(header, acts.height, nameTop + name.height)
+        layout(c.maxWidth, height) {
+            acts.place(c.maxWidth - acts.width, 0)
+            name.place(0, nameTop)
+        }
+    }
+}
+
+private val HeaderHeight = 55.dp
+
+/** The narrowest Select's five buttons go side by side in: the title, the capsule (371) and Done. */
+private val WideSelectWidth = 640.dp
+
+/** How far a title under its row's actions comes up into their row's foot. */
+private val StackedTitleTuck = 6.dp
+
 /** One of Select's buttons: its label, width, whether it can act now, and what it does. */
 private class SelectAction(val label: String, val width: Dp, val enabled: Boolean, val onClick: () -> Unit)
 
@@ -805,6 +848,7 @@ private fun SelectHeader(
     onDelete: () -> Unit,
     onMore: () -> Unit,
     onDone: () -> Unit,
+    top: Dp,
 ) {
     val any = count > 0
     val actions = if (wide) {
@@ -818,9 +862,10 @@ private fun SelectHeader(
     } else {
         listOf(SelectAction("Share", 65.dp, any, onShare), SelectAction("Delete", 70.dp, any, onDelete), SelectAction("More", 61.dp, true, onMore))
     }
-    Box(Modifier.fillMaxWidth().height(55.dp)) {
-        Text(title, color = Pc.GalleryTitle, fontSize = 36.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(start = 32.dp, top = 11.dp))
-        Row(Modifier.align(Alignment.TopEnd).padding(top = 10.dp, end = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+    TitleRow(top, title = {
+        Text(title, color = Pc.GalleryTitle, fontSize = 36.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 32.dp, top = 11.dp))
+    }) {
+        Row(Modifier.padding(top = 10.dp, end = 20.dp), verticalAlignment = Alignment.CenterVertically) {
             Row(Modifier.height(45.dp).clip(CircleShape).background(Pc.Capsule).border(1.dp, Pc.CapsuleEdge, CircleShape), verticalAlignment = Alignment.CenterVertically) {
                 for (a in actions) {
                     Box(Modifier.width(a.width).height(45.dp).clickable(enabled = a.enabled, onClick = a.onClick), contentAlignment = Alignment.Center) {
@@ -1185,10 +1230,10 @@ private fun selectShareCentre(screenWidth: Dp): Dp = screenWidth - 20.dp - 44.dp
  * else on its left, kept 2 inside the screen; with no button, under Select's Share, centred on it
  * and 15 below it, kept 4 inside.
  */
-private fun formatsPlace(from: androidx.compose.ui.geometry.Rect?, screenWidth: Dp, screenHeight: Dp, selectShare: Dp): FormatsPlace {
+private fun formatsPlace(from: androidx.compose.ui.geometry.Rect?, screenWidth: Dp, screenHeight: Dp, selectShare: Dp, headerTop: Dp): FormatsPlace {
     if (from == null) {
         val left = (selectShare - FormatsWidth / 2).coerceIn(4.dp, (screenWidth - 4.dp - FormatsWidth).coerceAtLeast(4.dp))
-        return FormatsPlace(left, 69.dp, ArrowSide.NONE, 0.dp, androidx.compose.ui.graphics.TransformOrigin((selectShare - left) / FormatsWidth, 0f))
+        return FormatsPlace(left, headerTop + 69.dp, ArrowSide.NONE, 0.dp, androidx.compose.ui.graphics.TransformOrigin((selectShare - left) / FormatsWidth, 0f))
     }
     val gap = 2.dp
     val centreY = from.center.y.dp
