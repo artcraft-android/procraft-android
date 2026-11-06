@@ -1424,7 +1424,9 @@ private fun ModeTabs(vm: CanvasViewModel) {
 private fun ModeTab(icon: ImageVector, label: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
     // the chosen tab lights up as it is let go; held, its icon shrinks
     val press = rememberPressScale(Motion.TAB_PRESSED, Motion.highlightOn(), Motion.highlightOff())
-    Box(modifier.fillMaxSize().then(press.touch).clickable(onClick = onClick)) {
+    // in ProCraft Pocket the chosen tab sits on a rounded light
+    val lit = if (Pc.pocket && selected) Modifier.padding(4.dp).clip(RoundedCornerShape(16.dp)).background(Pc.SetCell) else Modifier
+    Box(modifier.fillMaxSize().then(lit).then(press.touch).clickable(onClick = onClick)) {
         Icon(
             icon,
             contentDescription = null,

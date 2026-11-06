@@ -341,8 +341,14 @@ fun BrushLibrary(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 ) {
                     Text("Delete", color = SwipeInk, fontSize = 15.sp, maxLines = 1)
                 }
-            } else Box(Modifier.padding(top = 12.dp).size(41.dp, 40.dp).clickable { adding = true }, contentAlignment = Alignment.Center) {
-                Icon(PcIcons.PlusMedium, contentDescription = "Add", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(41.dp))
+            } else Box(
+                Modifier.padding(top = 12.dp)
+                    // ProCraft Pocket's plus sits on a disc
+                    .then(if (Pc.pocket) Modifier.size(40.dp).background(Pc.HeaderDisc, CircleShape) else Modifier.size(41.dp, 40.dp))
+                    .clickable { adding = true },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(PcIcons.PlusMedium, contentDescription = "Add", tint = Pc.PanelGlyph, modifier = Modifier.requiredSize(if (Pc.pocket) 34.dp else 41.dp))
                 // hangs below the plus, their right edges in line
                 LibraryMenu(adding, androidx.compose.ui.graphics.TransformOrigin(1f, 0f), MenuPlace { a, size -> IntOffset(a.right - size.width, a.bottom) }, onDismiss = { adding = false }, overPanel = true) {
                     // the Recent set holds no brushes of its own to add one to

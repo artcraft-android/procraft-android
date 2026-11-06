@@ -74,6 +74,8 @@ object Pc {
     val PocketCardHeight: Dp get() = PocketPadding * 2 + PocketRowHeight * 2 + PocketRowGap * 2 + PocketGrabber
     val PocketPillHeight: Dp get() = PocketPadding * 2 + PocketRowHeight
     val PocketGlass: Color get() = pick(0xD9262626, 0xDEF2F2F2)
+    /** The disc under a round button in a panel's title row (ProCraft Pocket's ••• and +). */
+    val HeaderDisc: Color get() = pick(0xFF3A3A3A, 0xFFFFFFFF)
 
     /** The top bar's height (ProCraft Pocket's: down to under its card, folded or not), under the cutout. */
     val BarHeight: Dp get() = when {
