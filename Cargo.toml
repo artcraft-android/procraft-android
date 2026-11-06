@@ -29,7 +29,7 @@ too_many_arguments = "allow"
 [workspace.dependencies]
 procraft-engine = { path = "crates/engine" }
 procraft-gpu = { path = "crates/gpu" }
-wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "dx12", "wgsl"] }
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "dx12", "wgsl", "naga-ir"] }
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 log = "0.4"

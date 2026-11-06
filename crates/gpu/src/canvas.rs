@@ -20,6 +20,8 @@ use wgpu::util::DeviceExt;
 
 use crate::{Gpu, GpuError};
 
+pub(crate) mod plugin_filter;
+
 const LAYER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// The most textures the canvas's size kept for reuse (see `Canvas::spares`).
@@ -1216,6 +1218,8 @@ pub struct SecondStroke {
 }
 
 enum Op {
+    /// A plugin's filter, drawn as [`Op::FilterSet`] is, in pieces of its own.
+    PluginFilter(plugin_filter::FilterValues),
     /// The open stroke's second cleared (a dual brush's stroke begins, with this second).
     ClearSecond(SecondStroke),
     /// The open stroke goes on without its second.
@@ -1640,6 +1644,8 @@ pub(crate) struct Pipelines {
     before_layout: wgpu::BindGroupLayout,
     /// Adjustment passes by their fragment entry.
     filters: HashMap<&'static str, wgpu::RenderPipeline>,
+    /// What every adjustment's passes are laid out by, a plugin's filter too.
+    filter_layout: wgpu::PipelineLayout,
     /// Liquify's stamps added up and the field carried along by them, the format the field
     /// takes here, and what that second pass reads.
     liquify_stamp: wgpu::RenderPipeline,
@@ -1765,6 +1771,8 @@ pub struct Canvas {
     work_at_once: u64,
     /// Pieces of work sent early, there being too much for one.
     pieces_sent: u64,
+    /// How the last plugin filter's draw went, not yet asked for.
+    filter_run: Option<plugin_filter::FilterRun>,
     /// How many times the composite has been redrawn.
     composites: u64,
     active: Option<ActiveStroke>,
@@ -2080,6 +2088,7 @@ impl Canvas {
             stamp_capacity,
             work_at_once: WORK_AT_ONCE,
             pieces_sent: 0,
+            filter_run: None,
             composites: 0,
             active: None,
             smudge: None,
@@ -3481,7 +3490,9 @@ impl Canvas {
 
     /// Queues a redraw of the layer being transformed; only the latest needs drawing.
     fn replace_placement(&mut self, op: Op) {
-        if let Some(Op::TransformSet { .. } | Op::TransformMesh { .. } | Op::FilterSet(_)) = self.ops.last() {
+        if let Some(Op::TransformSet { .. } | Op::TransformMesh { .. } | Op::FilterSet(_) | Op::PluginFilter(_)) =
+            self.ops.last()
+        {
             self.ops.pop();
         }
         self.ops.push(op);
@@ -4174,6 +4185,9 @@ impl Canvas {
                 }
                 Op::FilterSet(filter) => {
                     self.filter(gpu, &mut encoder, &mut uniforms, filter);
+                }
+                Op::PluginFilter(filter) => {
+                    self.plugin_filter(gpu, &mut encoder, &mut uniforms, &filter);
                 }
                 Op::LiquifyBegin => {
                     let (width, height) = (self.width.div_ceil(2), self.height.div_ceil(2));
@@ -6373,7 +6387,7 @@ impl Canvas {
                 let added = ops.iter().filter(|o| matches!(o, Op::TransformAlso(_))).count();
                 1 + self.transform_more.len() + added
             }
-            Op::FilterSet(_) => FILTER_SLOTS,
+            Op::FilterSet(_) | Op::PluginFilter(_) => FILTER_SLOTS,
             _ => 2,
         }
     }
@@ -6412,6 +6426,7 @@ impl Canvas {
             Op::TransformSet { .. }
             | Op::TransformMesh { .. }
             | Op::FilterSet(_)
+            | Op::PluginFilter(_)
             | Op::LiquifyBegin
             | Op::PencilBegin
             | Op::LiquifyStamps(_)
@@ -8219,6 +8234,7 @@ impl Pipelines {
             crop,
             before_layout,
             filters,
+            filter_layout: filter_pipeline_layout,
             liquify_stamp,
             liquify_step,
             liquify_format,
