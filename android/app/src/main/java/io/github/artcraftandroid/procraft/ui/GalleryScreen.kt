@@ -808,12 +808,14 @@ private fun TitleRow(top: Dp, title: @Composable () -> Unit, actions: @Composabl
         val beside = c.maxWidth - acts.width
         val header = HeaderHeight.roundToPx()
         val stacked = t.maxIntrinsicWidth(header) > beside
-        val name = t.measure(loose.copy(maxWidth = if (stacked) c.maxWidth else beside.coerceAtLeast(0)))
-        val nameTop = if (stacked) acts.height - StackedTitleTuck.roundToPx() else 0
+        // under them, it is a large title of its own line, as wide as the screen less the same margin as the actions
+        val shift = if (stacked) StackedTitleShift.roundToPx() else 0
+        val name = t.measure(loose.copy(maxWidth = if (stacked) c.maxWidth + shift else beside.coerceAtLeast(0)))
+        val nameTop = if (stacked) acts.height + StackedTitleGap.roundToPx() else 0
         val height = maxOf(header, acts.height, nameTop + name.height)
         layout(c.maxWidth, height) {
             acts.place(c.maxWidth - acts.width, 0)
-            name.place(0, nameTop)
+            name.place(-shift, nameTop)
         }
     }
 }
@@ -823,8 +825,9 @@ private val HeaderHeight = 55.dp
 /** The narrowest Select's five buttons go side by side in: the title, the capsule (371) and Done. */
 private val WideSelectWidth = 640.dp
 
-/** How far a title under its row's actions comes up into their row's foot. */
-private val StackedTitleTuck = 6.dp
+/** A title under its row's actions: how far below them, and how far left of where it sits beside them (to the actions' 20 margin). */
+private val StackedTitleGap = 2.dp
+private val StackedTitleShift = 12.dp
 
 /** One of Select's buttons: its label, width, whether it can act now, and what it does. */
 private class SelectAction(val label: String, val width: Dp, val enabled: Boolean, val onClick: () -> Unit)

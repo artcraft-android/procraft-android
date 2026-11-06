@@ -5,6 +5,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -114,8 +118,14 @@ fun rememberFrost(corner: Dp, glass: BarGlass): Modifier {
 /** The side of a popover its arrow sticks out of, pointing at its button; or none. */
 enum class ArrowSide { TOP, BOTTOM, LEFT, RIGHT, NONE }
 
-/** The panel inside is a sheet rising from the bottom (ProCraft Pocket): it hangs from no button, so it has no arrow. */
-val LocalPopoverSheet = staticCompositionLocalOf { false }
+/**
+ * A panel shown as a sheet rising from the bottom (ProCraft Pocket): it hangs from no button, so
+ * it has no arrow, and a grabber across its top closes it ([close]) when tapped or pulled down;
+ * without [close] it keeps a grabber of its own.
+ */
+class PopoverSheet(val close: (() -> Unit)?)
+
+val LocalPopoverSheet = staticCompositionLocalOf<PopoverSheet?> { null }
 
 /**
  * A panel hanging from the top bar, with an arrow pointing up at its button: [arrowX] is the tip's
@@ -134,7 +144,8 @@ fun Popover(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val sheet = LocalPopoverSheet.current
-    val edge = if (sheet && side == ArrowSide.TOP) ArrowSide.NONE else side
+    val edge = if (sheet != null && side == ArrowSide.TOP) ArrowSide.NONE else side
+    val close = sheet?.close.takeIf { edge == ArrowSide.NONE }
     val backdrops = LocalBackdrops.current.takeIf { fill == null && Pc.PopoverFrost.alpha < 1f }
     val paint = fill ?: if (backdrops != null) Pc.PopoverFrost else Pc.PopoverFill
     val key = remember { Any() }
@@ -232,10 +243,37 @@ fun Popover(
         // what opens from inside the sheet (a menu, a popover) points at its own button again
         Column(inset.clip(RoundedCornerShape(corner))) {
             val scope = this
-            androidx.compose.runtime.CompositionLocalProvider(LocalPopoverSheet provides false) { scope.content() }
+            androidx.compose.runtime.CompositionLocalProvider(LocalPopoverSheet provides null) { scope.content() }
         }
+        if (close != null) SheetGrabber(close, Modifier.align(androidx.compose.ui.Alignment.TopCenter))
     }
 }
+
+/** A sheet's grabber: tapped, or pulled down, it [close]s the sheet. */
+@Composable
+private fun SheetGrabber(close: () -> Unit, modifier: Modifier) {
+    val closing by androidx.compose.runtime.rememberUpdatedState(close)
+    Box(
+        modifier.size(SheetGrabberReach, SheetGrabberHeight)
+            .pointerInput(Unit) {
+                var pulled = 0f
+                detectVerticalDragGestures(onDragStart = { pulled = 0f }) { change, dy ->
+                    change.consume()
+                    pulled += dy
+                    if (pulled > SheetPull.toPx()) closing()
+                }
+            }
+            .pointerInput(Unit) { detectTapGestures { closing() } },
+        contentAlignment = androidx.compose.ui.Alignment.Center,
+    ) {
+        Box(Modifier.size(36.dp, 5.dp).clip(RoundedCornerShape(2.5.dp)).drawBehind { drawRect(Pc.Grabber) })
+    }
+}
+
+/** A sheet's grabber: what takes the touch (over the sheet's top middle, clear of its title and buttons), and how far it is pulled down to close. */
+private val SheetGrabberReach = 72.dp
+private val SheetGrabberHeight = 18.dp
+private val SheetPull = 40.dp
 
 /** Where a popover [width] wide goes on a screen [screenWidth] wide: its left edge and arrow tip. */
 data class PopoverPlace(val left: Dp, val arrowX: Dp)

@@ -14,6 +14,9 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -187,6 +190,13 @@ fun PocketBar(vm: CanvasViewModel, modifier: Modifier = Modifier, shown: Float =
                         ToolButtons(vm, Pc.PocketButton, tool, disc = true, colorScale = 1f)
                     }
                     Row(Modifier.height(Pc.PocketRowHeight), verticalAlignment = Alignment.CenterVertically) { PocketActions(vm) }
+                    // the grabber: tapped (or the card swiped up), the card folds away
+                    Box(
+                        Modifier.width(Pc.PocketButton * 5).height(Pc.PocketGrabber).tap { Pc.pocketFolded = true }.semantics { contentDescription = "Hide the tools" },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(Modifier.size(36.dp, 5.dp).clip(CircleShape).background(Pc.Grabber))
+                    }
                 }
             }
         }

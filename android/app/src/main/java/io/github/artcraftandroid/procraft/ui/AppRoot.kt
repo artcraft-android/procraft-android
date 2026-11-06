@@ -176,7 +176,9 @@ fun AppRoot(vm: CanvasViewModel) {
                     androidx.compose.animation.AnimatedVisibility(
                         vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
                             vm.opacityLayer == null &&
-                            (vm.adjustment == null || vm.adjustPencil),
+                            (vm.adjustment == null || vm.adjustPencil) &&
+                            // ProCraft Pocket's sheets rise over where it floats: it steps aside while one is open
+                            !(Pc.pocket && vm.panel != Panel.NONE),
                         Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart)
                             .offset(x = if (vm.rightHanded) -(Pc.safeRight + sideInset) else Pc.safeLeft + sideInset, y = sideBar.top),
                         enter = Motion.sideBarIn(vm.rightHanded),
@@ -264,7 +266,9 @@ fun AppRoot(vm: CanvasViewModel) {
                         contentAlignment = Alignment.BottomStart,
                     ) {
                         ProvidePanelLook(PanelLook(alpha, scale * fit, pivot)) {
-                            CompositionLocalProvider(LocalPopoverSheet provides sheet) {
+                            // the colour panel's grabber is its own: pulled, it floats over the canvas
+                            val sheetLook = if (!sheet) null else PopoverSheet(if (shown == Panel.COLOR || (shown == Panel.LAYERS && vm.backgroundPicking)) null else ({ vm.closePanels() }))
+                            CompositionLocalProvider(LocalPopoverSheet provides sheetLook) {
                                 when (shown) {
                                     Panel.LAYERS -> if (vm.backgroundPicking) {
                                         ColorPanel(vm, place.arrowX, Pc.BarHeight + 25.dp + tall(25.dp), at, background = true)

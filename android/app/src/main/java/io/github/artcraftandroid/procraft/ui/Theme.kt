@@ -69,7 +69,9 @@ object Pc {
     val PocketToolDisc = 38.dp
     /** How far the panels, as sheets, keep from the screen's edges. */
     val PocketSheetGap = 8.dp
-    val PocketCardHeight: Dp get() = PocketPadding * 2 + PocketRowHeight * 2 + PocketRowGap
+    /** The strip under the card's rows holding its grabber. */
+    val PocketGrabber = 14.dp
+    val PocketCardHeight: Dp get() = PocketPadding * 2 + PocketRowHeight * 2 + PocketRowGap * 2 + PocketGrabber
     val PocketPillHeight: Dp get() = PocketPadding * 2 + PocketRowHeight
     val PocketGlass: Color get() = pick(0xD9262626, 0xDEF2F2F2)
 
