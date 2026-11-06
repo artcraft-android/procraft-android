@@ -128,6 +128,27 @@ impl Hooks {
         said.min(crate::interface_size::most_for(width, height))
     }
 
+    /// The paste hook: whether a picture pasted with a mask current goes into the mask.
+    pub(crate) fn paste_mask(&self) -> bool {
+        self.has(Hook::PasteMask)
+            && self.through(Hook::PasteMask, false, |running, said| Ok(said | running.paste_mask()?))
+    }
+
+    /// `rgba`, rows of `width` pixels, as the patch on the paste hook makes it; false if it can't,
+    /// and what has gone through is no use. The first that takes it has it all: it holds up nothing
+    /// that doesn't need the same patch.
+    pub(crate) fn paste_rows(&self, rgba: &mut [u8], width: usize) -> bool {
+        let mut stopped = false;
+        let done = self.through(Hook::PasteMask, false, |running, done| {
+            if done || stopped {
+                return Ok(done);
+            }
+            running.paste_rows(rgba, width).inspect_err(|_| stopped = true)?;
+            Ok(true)
+        });
+        done && !stopped
+    }
+
     pub(crate) fn is_on(&self, id: &str) -> bool {
         self.patches().applied.iter().any(|p| p.id == id)
     }
@@ -186,7 +207,7 @@ impl CanvasSession {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::time::Instant;
 
     use procraft_engine::view::View;
@@ -200,6 +221,29 @@ mod tests {
     use crate::{PenSample, PointerKind};
 
     const ID: &str = "org.example.offset";
+    /// Turns a row to its brightness, as the app used to.
+    const PASTES: &str = r#"(module
+        (memory (export "memory") 2)
+        (global $on (mut i32) (i32.const 0))
+        (func (export "procraft_control") (param i32 f32)
+            (global.set $on (f32.ne (local.get 1) (f32.const 0))))
+        (func (export "procraft_paste_mask") (result i32) (global.get $on))
+        (func (export "procraft_row_buffer") (param i32) (result i32) (i32.const 65536))
+        (func (export "procraft_paste_row") (param $at i32) (param $width i32)
+            (local $end i32) (local $p i32) (local $grey i32)
+            (local.set $end (i32.add (local.get $at) (i32.shl (local.get $width) (i32.const 2))))
+            (block $done (loop $next
+                (br_if $done (i32.ge_u (local.get $at) (local.get $end)))
+                (local.set $p (i32.load (local.get $at)))
+                (local.set $grey (i32.shr_u (i32.add (i32.add (i32.add
+                    (i32.mul (i32.and (local.get $p) (i32.const 255)) (i32.const 54))
+                    (i32.mul (i32.and (i32.shr_u (local.get $p) (i32.const 8)) (i32.const 255)) (i32.const 183)))
+                    (i32.mul (i32.and (i32.shr_u (local.get $p) (i32.const 16)) (i32.const 255)) (i32.const 19)))
+                    (i32.const 128)) (i32.const 8)))
+                (i32.store (local.get $at)
+                    (i32.or (i32.const 0xff000000) (i32.mul (local.get $grey) (i32.const 0x010101))))
+                (local.set $at (i32.add (local.get $at) (i32.const 4)))
+                (br $next)))))"#;
     /// Answers the scale hook by its one slider.
     const SCALES: &str = r#"(module
         (global $size (mut f32) (f32.const 1))
@@ -422,6 +466,91 @@ mod tests {
         assert!(plugins.set_on(ID.to_owned(), true));
         assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
         assert_eq!(card(&plugins).problem.as_deref(), Some("Switched off: it gave an answer that makes no sense."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A list holding the paste patch, its switch kept as the setting it took over, in `dir`.
+    fn pasting(dir: &str) -> Arc<Plugins> {
+        let module = wat::parse_str(PASTES).unwrap();
+        let plugins = Plugins::with_store(dir.to_owned());
+        let mut manifest = patch(ID, &module);
+        manifest["hooks"] = json!(["paste_mask"]);
+        manifest["controls"] = json!([
+            { "key": "into", "type": "switch", "label": "Into", "keeps": "paste_into_mask" },
+        ]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        plugins
+    }
+
+    /// `s` with the paste patch applied and on, and where its files are.
+    pub(crate) fn paste_into_masks(s: &CanvasSession, name: &str) -> (Arc<Plugins>, String) {
+        let dir = store(name);
+        let plugins = pasting(&dir);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert!(plugins.set_switch("paste_into_mask".to_owned(), true));
+        s.use_patches(Arc::clone(&plugins));
+        (plugins, dir)
+    }
+
+    #[test]
+    fn a_picture_goes_into_the_mask_only_while_a_patch_says_so() {
+        let dir = store("paste");
+        let plugins = pasting(&dir);
+        let hooks = plugins.hooks();
+        assert!(!hooks.paste_mask(), "imported, it says nothing");
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert!(!hooks.paste_mask(), "applied, it goes by its switch");
+        assert!(plugins.set_switch("paste_into_mask".to_owned(), true));
+        assert!(hooks.paste_mask());
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert!(!hooks.paste_mask());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rows_come_back_as_the_brightness_the_app_used_to_make() {
+        let dir = store("paste-rows");
+        let plugins = pasting(&dir);
+        plugins.set_on(ID.to_owned(), true);
+        let hooks = plugins.hooks();
+        let colours: [[u8; 4]; 6] = [
+            [255, 255, 255, 255],
+            [0, 0, 0, 0],
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [10, 200, 90, 200],
+        ];
+        let mut rgba: Vec<u8> = colours.concat();
+        assert!(hooks.paste_rows(&mut rgba, 3));
+        for (px, [r, g, b, _]) in rgba.chunks(4).zip(colours.map(|c| c.map(u32::from))) {
+            let grey = ((54 * r + 183 * g + 19 * b + 128) >> 8).min(255) as u8;
+            assert_eq!(px, [grey, grey, grey, 255]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_paste_patch_that_stops_leaves_the_picture_to_paste_as_any_is() {
+        let Some(s) = session() else { return };
+        let layer = s.layers().iter().find(|l| l.current).unwrap().id;
+        let mask = s.add_mask(layer).unwrap();
+        s.select_layer(mask);
+        let dir = store("paste-stops");
+        let module = crate::patch_run::tests::paste_module("(i32.const 65536)", "(unreachable)");
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = patch(ID, &module);
+        manifest["hooks"] = json!(["paste_mask"]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_patches(Arc::clone(&plugins));
+        let layers = s.layers().len();
+        let picture = crate::layers::ThumbnailImage { width: 200, height: 200, rgba: vec![255; 200 * 200 * 4] };
+        let pasted = s.paste(picture).unwrap();
+        assert_ne!(pasted, mask, "a new layer, as anything pasted");
+        assert_eq!(s.layers().len(), layers + 1);
+        assert_eq!(s.take_failure().as_deref(), Some("A patch stopped. Switched off: it crashed."));
+        assert_eq!(card(&plugins).problem.as_deref(), Some("Switched off: it crashed."));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -768,6 +897,53 @@ mod tests {
         let mut running = Running::start(&offset(), &[]).unwrap();
         println!("starting a patch: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0);
         running.control(0, 1.0).unwrap();
+    }
+
+    /// What a 4096 square costs going through a paste patch. With `PROCRAFT_PATCH_FILE` naming one
+    /// it goes through that, otherwise through [`PASTES`]: run on a device with
+    /// `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn a_paste_of_a_4096_square_costs() {
+        let dir = store("paste-cost");
+        let plugins = match std::env::var("PROCRAFT_PATCH_FILE") {
+            Ok(path) => {
+                let plugins = Plugins::with_store(dir.clone());
+                assert_eq!(plugins.install(std::fs::read(path).unwrap()), None);
+                let id = card(&plugins).id;
+                assert!(plugins.set_on(id, true));
+                plugins
+            }
+            Err(_) => {
+                let plugins = pasting(&dir);
+                plugins.set_on(ID.to_owned(), true);
+                plugins
+            }
+        };
+        let hooks = plugins.hooks();
+        const SIDE: usize = 4096;
+        let picture: Vec<u8> = (0..SIDE * SIDE * 4).map(|i| (i % 251) as u8).collect();
+        for _ in 0..3 {
+            let mut rgba = picture.clone();
+            let start = Instant::now();
+            assert!(hooks.paste_rows(&mut rgba, SIDE));
+            let took = start.elapsed().as_secs_f64();
+            println!(
+                "4096 square through the patch: {:.0} ms, {:.0} ns a pixel",
+                took * 1e3,
+                took * 1e9 / (SIDE * SIDE) as f64
+            );
+            let mut native = picture.clone();
+            let start = Instant::now();
+            for px in native.as_chunks_mut::<4>().0 {
+                let [r, g, b, _] = px.map(u32::from);
+                let grey = ((54 * r + 183 * g + 19 * b + 128) >> 8).min(255) as u8;
+                *px = [grey, grey, grey, 255];
+            }
+            println!("the same, native: {:.0} ms", start.elapsed().as_secs_f64() * 1e3);
+            assert!(rgba == native);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The same stroke, with the list on the session and without: run on a device with

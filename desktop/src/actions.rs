@@ -1518,34 +1518,18 @@ mod tests {
             pos2(body().center().x, self.cards()[card].1 - ROW_HEIGHT / 2.0 - up * (ROW_HEIGHT + 1.0))
         }
 
-        /// A point on the second card's slider, `along` its way (0..1): its last row.
+        /// A point on the first card's slider, `along` its way (0..1): its last row.
         fn on_slider(&self, along: f32) -> Pos2 {
             let (left, right) = (body().left() + 12.0 + 16.0, body().right() - 12.0 - 16.0);
-            pos2(left + along * (right - left), self.cards()[1].1 - SLIDE_HEIGHT / 2.0)
-        }
-
-        /// The middle of the first card's switch row, its last.
-        fn on_switch(&self) -> Pos2 {
-            self.on_row(0, 0.0)
+            pos2(left + along * (right - left), self.cards()[0].1 - SLIDE_HEIGHT / 2.0)
         }
     }
 
     #[test]
     fn the_extras_show_with_their_controls_and_nothing_to_apply_or_remove() {
         let page = Page::new(false);
-        assert_eq!(page.cards().len(), 2);
+        assert_eq!(page.cards().len(), 1);
         assert!(page.list().iter().all(|p| card_rows(p).is_empty() && controls_show(p)));
-    }
-
-    #[test]
-    fn a_tap_on_an_extra_s_switch_flips_it() {
-        let mut page = Page::new(false);
-        let at = page.on_switch();
-        assert!(!page.prefs.plugins.paste_into_mask());
-        assert!(page.tap(at));
-        assert!(page.prefs.plugins.paste_into_mask());
-        assert!(page.tap(at));
-        assert!(!page.prefs.plugins.paste_into_mask());
     }
 
     #[test]
@@ -1607,10 +1591,10 @@ mod tests {
         assert_eq!(page.prefs.plugins.install(plugin_file()), None);
         page.frame(Vec::new());
         page.frame(Vec::new());
-        assert_eq!(page.cards().len(), 3);
-        let at = page.on_row(2, 0.0);
-        assert!(page.tap(at));
         assert_eq!(page.cards().len(), 2);
+        let at = page.on_row(1, 0.0);
+        assert!(page.tap(at));
+        assert_eq!(page.cards().len(), 1);
         assert!(!dir.join("org.example.filter").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

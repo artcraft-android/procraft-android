@@ -418,8 +418,6 @@ impl Interface {
         // a mask current paints with masks' own colour
         let on_mask = session.layers().iter().any(|l| l.current && l.kind == procraft_core::LayerType::Mask);
         self.colours.follow_mask(session, on_mask);
-        // and what is pasted goes into a mask only if they say so
-        session.set_paste_into_mask(self.prefs.plugins.paste_into_mask());
         let paste_shown = (self.open == Some(Popover::Actions) || self.copy_paste) && ctx.input(|i| i.focused);
         if paste_shown && !self.paste_shown {
             self.system_clipboard.offer();

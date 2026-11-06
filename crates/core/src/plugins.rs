@@ -16,7 +16,6 @@ use crate::patch_run::{Running, Stop};
 use crate::plugin_file::{self, Manifest, Refusal};
 
 /// What the bundled extras' values are kept under, as they were before there was a list.
-const PASTE_INTO_MASK: &str = "paste_into_mask";
 const FILL_GAP: &str = "fill_gap";
 
 /// A setting the app used to have and a patch now brings: what it was kept under, as it started
@@ -30,6 +29,7 @@ struct Moved {
 const MOVED: &[Moved] = &[
     Moved { key: "eyedropper_layer", starts: 0.0, name: "Eyedropper picks from layer" },
     Moved { key: "interface_size", starts: 1.0, name: "Interface size" },
+    Moved { key: "paste_into_mask", starts: 0.0, name: "Paste into masks" },
 ];
 
 impl Moved {
@@ -264,9 +264,6 @@ fn extra(id: &str, name: &str, description: &str, control: PluginControl) -> Plu
 
 /// The bundled extras, each as it starts.
 fn extras() -> Vec<PluginInfo> {
-    let switch = |key: &str, label: &str| PluginControl::Switch {
-        control: PluginSwitch { key: key.to_owned(), label: label.to_owned(), on: false, starts: false },
-    };
     let gap = PluginControl::Slider {
         control: PluginSlider {
             key: FILL_GAP.to_owned(),
@@ -282,20 +279,12 @@ fn extras() -> Vec<PluginInfo> {
             live: false,
         },
     };
-    vec![
-        extra(
-            PASTE_INTO_MASK,
-            "Paste into masks",
-            "With a mask selected, Paste puts the picture's brightness into the mask.",
-            switch(PASTE_INTO_MASK, "Paste into the mask"),
-        ),
-        extra(
-            FILL_GAP,
-            "ColorDrop gap closing",
-            "Keeps ColorDrop from running out through gaps in your lines, up to this wide.",
-            gap,
-        ),
-    ]
+    vec![extra(
+        FILL_GAP,
+        "ColorDrop gap closing",
+        "Keeps ColorDrop from running out through gaps in your lines, up to this wide.",
+        gap,
+    )]
 }
 
 /// `manifest` as a list entry: a patch unapplied, a filter on. Nothing runs a filter yet, so each
@@ -675,11 +664,6 @@ impl Plugins {
         self.hooks().interface_scale(width, height)
     }
 
-    /// Whether what is pasted with a mask current goes into the mask.
-    pub fn paste_into_mask(&self) -> bool {
-        matches!(self.control(PASTE_INTO_MASK), Some(PluginControl::Switch { control }) if control.on)
-    }
-
     /// How wide a gap in its lines ColorDrop keeps out of, canvas pixels (0: none).
     pub fn fill_gap(&self) -> u32 {
         match self.control(FILL_GAP) {
@@ -793,7 +777,7 @@ mod tests {
         assert!(plugins.patches().is_empty());
         let list = plugins.plugins();
         let ids: Vec<&str> = list.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, ["paste_into_mask", "fill_gap"]);
+        assert_eq!(ids, ["fill_gap"]);
         for p in &list {
             assert!(p.source == PluginSource::Bundled && p.kind == PluginKind::Extra, "{p:?}");
             assert!(p.experimental && p.on && p.on_key.is_empty(), "{p:?}");
@@ -801,7 +785,6 @@ mod tests {
             assert!(!p.id.contains('.'), "an extra's id can't be a file's key's start: {p:?}");
         }
         assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
-        assert!(!plugins.paste_into_mask());
         assert_eq!(plugins.fill_gap(), 0);
     }
 
@@ -820,9 +803,7 @@ mod tests {
     fn values_kept_before_there_was_a_list_carry_over() {
         // as both apps wrote them: the desktop's `interface` lines, Android's preferences as text
         let plugins = Plugins::new();
-        plugins.read_kept("paste_into_mask".to_owned(), "true".to_owned());
         plugins.read_kept("fill_gap".to_owned(), "12".to_owned());
-        assert!(plugins.paste_into_mask());
         assert_eq!(plugins.fill_gap(), 12);
     }
 
@@ -844,19 +825,20 @@ mod tests {
             assert_eq!(read(bad), 2.0, "{bad}");
         }
         let plugins = Plugins::new();
-        plugins.read_kept("paste_into_mask".to_owned(), "yes".to_owned());
-        assert!(!plugins.paste_into_mask());
+        plugins.listed().files.push(stranger());
+        plugins.read_kept("someone.stranger.switch".to_owned(), "yes".to_owned());
+        assert!(
+            matches!(plugins.control("someone.stranger.switch"), Some(PluginControl::Switch { control }) if !control.on)
+        );
     }
 
     #[test]
     fn what_is_kept_reads_back_the_same() {
         let plugins = Plugins::new();
         assert_eq!(plugins.set_slider(FILL_GAP.to_owned(), 7.0), Some(7.0));
-        assert!(plugins.set_switch(PASTE_INTO_MASK.to_owned(), true));
         let lines = plugins.kept_lines();
-        assert!(lines.contains(&"paste_into_mask true".to_owned()), "{lines:?}");
         assert!(lines.contains(&"fill_gap 7".to_owned()), "{lines:?}");
-        assert_eq!(lines.len(), 2, "the extras have their controls and nothing else: {lines:?}");
+        assert_eq!(lines.len(), 1, "the extras have their controls and nothing else: {lines:?}");
         let again = Plugins::new();
         for line in &lines {
             let (key, value) = line.split_once(' ').unwrap();
@@ -934,7 +916,6 @@ mod tests {
         assert_eq!(plugins.remove("nobody".to_owned()), None);
         // nor does a value of the wrong kind reach a control
         assert!(!plugins.set_switch(FILL_GAP.to_owned(), true));
-        assert_eq!(plugins.set_slider(PASTE_INTO_MASK.to_owned(), 1.0), None);
         assert_eq!(plugins.set_slider(FILL_GAP.to_owned(), f32::NAN), None);
         // and an extra can't be turned off or removed
         assert!(!plugins.set_on(FILL_GAP.to_owned(), false));
@@ -947,7 +928,6 @@ mod tests {
     fn without_an_extra_the_app_goes_on_as_it_starts() {
         let plugins = Plugins::new();
         plugins.listed().bundled.clear();
-        assert!(!plugins.paste_into_mask());
         assert_eq!(plugins.fill_gap(), 0);
     }
 
@@ -983,7 +963,6 @@ mod tests {
         assert!(plugins.set_switch("someone.stranger.switch".to_owned(), true));
         assert_eq!(plugins.set_slider("someone.stranger.slider".to_owned(), 3.3), Some(3.5));
         assert_eq!(plugins.fill_gap(), 0);
-        assert!(!plugins.paste_into_mask());
     }
 
     #[test]

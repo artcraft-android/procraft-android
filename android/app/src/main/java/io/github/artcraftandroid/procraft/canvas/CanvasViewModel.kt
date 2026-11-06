@@ -541,7 +541,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** [s] goes by the plugins that reach a canvas. */
     private fun applyPlugins(s: CanvasSession) {
         s.usePatches(plugins)
-        s.setPasteIntoMask(plugins.pasteIntoMask())
         s.setFillGap(plugins.fillGap())
     }
 
@@ -2601,6 +2600,15 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun paste(private: Boolean = false) {
         val image = clipboard ?: return
         val s = session
+        // through a patch it takes a moment on a big canvas: the screen doesn't wait for it
+        if (!private && s?.pastesIntoMask() == true) {
+            closePanels()
+            viewModelScope.launch {
+                if (withContext(Dispatchers.Default) { s.paste(image) } == null) message = noRoom()
+                refresh()
+            }
+            return
+        }
         if ((if (private) s?.pastePrivate(image) else s?.paste(image)) == null) message = noRoom()
         closePanels()
         refresh()

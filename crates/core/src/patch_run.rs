@@ -9,6 +9,11 @@
 //!   current layer (not 0) or the canvas as it is composited (0).
 //! - `procraft_interface_scale(width: f32, height: f32) -> f32`: for the hook `interface_scale`, how
 //!   big the interface shows (1: as measured) in a window of that size, in points at 1.
+//! - `procraft_paste_mask() -> i32`: for the hook `paste_mask`, whether a picture pasted with a mask
+//!   current goes into the mask (not 0). If it does, the picture goes through the module a row at a
+//!   time: `procraft_row_buffer(bytes: i32) -> i32` says where in its exported `memory` a row of that
+//!   many bytes can go, and for each row, written there, `procraft_paste_row(at: i32, width: i32)`
+//!   turns its `width` RGBA pixels (premultiplied, top to bottom) into what the mask holds, in place.
 //! - `procraft_control(index: i32, value: f32)`: a control's value (a switch is 0 or 1), by its
 //!   place in the manifest: each as the patch starts, then each as it changes. Needed if it has any.
 
@@ -16,8 +21,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use wasmi::errors::ErrorKind;
 use wasmi::{
-    Config, EnforcedLimits, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, TrapCode, TypedFunc,
-    ValType,
+    Config, EnforcedLimits, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TrapCode,
+    TypedFunc, ValType,
 };
 
 /// The module's name in a patch's folder.
@@ -31,6 +36,10 @@ const MOST_CALLS_DEEP: usize = 256;
 /// comes every 4 ms from a 240 Hz pen, so one spent in full must stay far inside that.
 const START_FUEL: u64 = 1_000_000;
 const SAMPLE_FUEL: u64 = 100_000;
+/// What a row may spend, by the pixel, and to start with: a picture goes through at a few times what
+/// a fair conversion takes, and what never ends is stopped on its first row.
+const PIXEL_FUEL: u64 = 64;
+const ROW_FUEL: u64 = 10_000;
 /// How far a sample may be moved, window pixels: further was never meant.
 const MOST_MOVE: f32 = 16_384.0;
 /// The scales an interface can be used at: past these nobody could reach the page to undo it.
@@ -39,6 +48,10 @@ const SCALES: std::ops::RangeInclusive<f32> = 0.5..=2.0;
 const POSITION: &str = "procraft_position";
 const PICK_LAYER: &str = "procraft_pick_layer";
 const INTERFACE_SCALE: &str = "procraft_interface_scale";
+const PASTE_MASK: &str = "procraft_paste_mask";
+const ROW_BUFFER: &str = "procraft_row_buffer";
+const PASTE_ROW: &str = "procraft_paste_row";
+const MEMORY: &str = "memory";
 const CONTROL: &str = "procraft_control";
 
 /// What a patch may step into, by the name a manifest gives it.
@@ -47,6 +60,7 @@ pub(crate) enum Hook {
     Position,
     PickLayer,
     InterfaceScale,
+    PasteMask,
 }
 
 impl Hook {
@@ -55,6 +69,7 @@ impl Hook {
             "position" => Some(Hook::Position),
             "pick_layer" => Some(Hook::PickLayer),
             "interface_scale" => Some(Hook::InterfaceScale),
+            "paste_mask" => Some(Hook::PasteMask),
             _ => None,
         }
     }
@@ -65,6 +80,7 @@ impl Hook {
             Hook::Position => "This patch can change where your strokes land.",
             Hook::PickLayer => "This patch can make the eyedropper read the current layer alone.",
             Hook::InterfaceScale => "This patch can make the interface bigger or smaller.",
+            Hook::PasteMask => "This patch can put what you paste into the current mask.",
         }
     }
 
@@ -79,6 +95,12 @@ impl Hook {
             Hook::Position => exports(module, POSITION, &[ValType::F32, ValType::F32], &[ValType::I64]),
             Hook::PickLayer => exports(module, PICK_LAYER, &[], &[ValType::I32]),
             Hook::InterfaceScale => exports(module, INTERFACE_SCALE, &[ValType::F32, ValType::F32], &[ValType::F32]),
+            Hook::PasteMask => {
+                exports(module, PASTE_MASK, &[], &[ValType::I32])
+                    && exports(module, ROW_BUFFER, &[ValType::I32], &[ValType::I32])
+                    && exports(module, PASTE_ROW, &[ValType::I32, ValType::I32], &[])
+                    && module.exports().any(|export| export.name() == MEMORY && export.ty().memory().is_some())
+            }
         }
     }
 }
@@ -185,6 +207,10 @@ pub(crate) struct Running {
     position: Option<TypedFunc<(f32, f32), i64>>,
     pick_layer: Option<TypedFunc<(), i32>>,
     interface_scale: Option<TypedFunc<(f32, f32), f32>>,
+    paste_mask: Option<TypedFunc<(), i32>>,
+    row_buffer: Option<TypedFunc<i32, i32>>,
+    paste_row: Option<TypedFunc<(i32, i32), ()>>,
+    memory: Option<Memory>,
     control: Option<TypedFunc<(i32, f32), ()>>,
 }
 
@@ -210,8 +236,22 @@ impl Running {
             let position = instance.get_typed_func(&store, POSITION).ok();
             let pick_layer = instance.get_typed_func(&store, PICK_LAYER).ok();
             let interface_scale = instance.get_typed_func(&store, INTERFACE_SCALE).ok();
+            let paste_mask = instance.get_typed_func(&store, PASTE_MASK).ok();
+            let row_buffer = instance.get_typed_func(&store, ROW_BUFFER).ok();
+            let paste_row = instance.get_typed_func(&store, PASTE_ROW).ok();
+            let memory = instance.get_memory(&store, MEMORY);
             let control = instance.get_typed_func(&store, CONTROL).ok();
-            Ok(Running { store, position, pick_layer, interface_scale, control })
+            Ok(Running {
+                store,
+                position,
+                pick_layer,
+                interface_scale,
+                paste_mask,
+                row_buffer,
+                paste_row,
+                memory,
+                control,
+            })
         })?;
         for (index, value) in controls.iter().enumerate() {
             running.control(index, *value)?;
@@ -249,6 +289,41 @@ impl Running {
             interface_scale.call(&mut *store, (width, height)).map_err(|e| stop_of(&e))
         })?;
         if SCALES.contains(&said) { Ok(said) } else { Err(Stop::Nonsense) }
+    }
+
+    /// Whether it says a picture pasted with a mask current goes into the mask.
+    pub(crate) fn paste_mask(&mut self) -> Result<bool, Stop> {
+        let Running { store, paste_mask, .. } = self;
+        let Some(paste_mask) = paste_mask else { return Ok(false) };
+        let said = guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            paste_mask.call(&mut *store, ()).map_err(|e| stop_of(&e))
+        })?;
+        Ok(said != 0)
+    }
+
+    /// `rgba`, rows of `width` pixels, through it a row at a time: a picture is too big for its
+    /// memory, a row never is, and each gets fuel by its width. Part of it may have gone through
+    /// when it stops.
+    pub(crate) fn paste_rows(&mut self, rgba: &mut [u8], width: usize) -> Result<(), Stop> {
+        let Running { store, row_buffer, paste_row, memory, .. } = self;
+        let (Some(row_buffer), Some(paste_row), Some(memory)) = (row_buffer, paste_row, memory) else {
+            return Err(Stop::Damaged);
+        };
+        let bytes = width * 4;
+        guarded(|| {
+            store.set_fuel(SAMPLE_FUEL).map_err(|_| Stop::Damaged)?;
+            let at = row_buffer.call(&mut *store, bytes as i32).map_err(|e| stop_of(&e))?;
+            let place = usize::try_from(at).map_err(|_| Stop::Nonsense)?;
+            let fuel = ROW_FUEL + PIXEL_FUEL * width as u64;
+            for row in rgba.chunks_exact_mut(bytes.max(1)) {
+                memory.write(&mut *store, place, row).map_err(|_| Stop::Nonsense)?;
+                store.set_fuel(fuel).map_err(|_| Stop::Damaged)?;
+                paste_row.call(&mut *store, (at, width as i32)).map_err(|e| stop_of(&e))?;
+                memory.read(&*store, place, row).map_err(|_| Stop::Nonsense)?;
+            }
+            Ok(())
+        })
     }
 
     /// Where it says a sample at (x, y) lands.
@@ -417,6 +492,67 @@ pub(crate) mod tests {
         for bad in ["0", "-1", "0.49", "2.01", "nan", "inf"] {
             assert_eq!(says(bad), Err(Stop::Nonsense), "{bad}");
         }
+    }
+
+    /// A paste module whose `procraft_paste_row` does `body`, its buffer where `buffer` says.
+    pub(crate) fn paste_module(buffer: &str, body: &str) -> Vec<u8> {
+        let text = format!(
+            r#"(module (memory (export "memory") 2)
+                (func (export "procraft_paste_mask") (result i32) (i32.const 1))
+                (func (export "procraft_row_buffer") (param i32) (result i32) {buffer})
+                (func (export "procraft_paste_row") (param $at i32) (param $width i32) {body}))"#
+        );
+        wat::parse_str(text).unwrap()
+    }
+
+    #[test]
+    fn a_picture_goes_through_a_row_at_a_time_and_comes_back() {
+        // each row's first byte set to its width, to show it went in and came back
+        let bytes = paste_module("(i32.const 65536)", "(i32.store8 (local.get $at) (local.get $width))");
+        assert!(can_run(&bytes, &[Hook::PasteMask], false));
+        let mut running = started(&bytes);
+        assert_eq!(running.paste_mask(), Ok(true));
+        let mut rgba = vec![9_u8; 3 * 2 * 4];
+        assert_eq!(running.paste_rows(&mut rgba, 3), Ok(()));
+        assert_eq!(rgba[..14], [3, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 3, 9]);
+    }
+
+    #[test]
+    fn the_paste_hook_needs_its_memory_and_all_its_exports() {
+        let good = paste_module("(i32.const 65536)", "");
+        assert!(can_run(&good, &[Hook::PasteMask], false));
+        for wrong in [
+            r#"(module (func (export "procraft_paste_mask") (result i32) (i32.const 1)))"#,
+            r#"(module (memory 1)
+                (func (export "procraft_paste_mask") (result i32) (i32.const 1))
+                (func (export "procraft_row_buffer") (param i32) (result i32) (i32.const 0))
+                (func (export "procraft_paste_row") (param i32 i32)))"#,
+        ] {
+            assert!(!can_run(&wat::parse_str(wrong).unwrap(), &[Hook::PasteMask], false));
+        }
+    }
+
+    #[test]
+    fn a_row_put_nowhere_stops_it() {
+        let mut rgba = vec![0_u8; 16];
+        for buffer in ["(i32.const -4)", "(i32.const 1000000)", "(i32.const 131070)"] {
+            let mut running = started(&paste_module(buffer, ""));
+            assert_eq!(running.paste_rows(&mut rgba, 4), Err(Stop::Nonsense), "{buffer}");
+        }
+    }
+
+    #[test]
+    fn a_row_that_never_ends_runs_out_of_fuel() {
+        let mut rgba = vec![0_u8; 16];
+        let mut running = started(&paste_module("(i32.const 65536)", "(loop (br 0))"));
+        assert_eq!(running.paste_rows(&mut rgba, 4), Err(Stop::TooSlow));
+    }
+
+    #[test]
+    fn a_row_that_crashes_stops_it() {
+        let mut rgba = vec![0_u8; 16];
+        let mut running = started(&paste_module("(i32.const 65536)", "(unreachable)"));
+        assert_eq!(running.paste_rows(&mut rgba, 4), Err(Stop::Crashed));
     }
 
     #[test]

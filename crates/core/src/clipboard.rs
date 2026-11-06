@@ -163,13 +163,19 @@ impl CanvasSession {
     }
 
     /// A new layer above the current one holding `image` where it was copied from (centred when
-    /// it is another size), or the current mask holding its brightness if masks take what is
-    /// pasted; returns the layer's id.
+    /// it is another size), or the current mask holding it, if a patch says to and it can; returns
+    /// the layer's id.
     pub fn paste(&self, image: ThumbnailImage) -> Option<u64> {
-        match self.mask_to_paste_into() {
-            Some(mask) => self.paste_into(mask, image, false),
-            None => self.add_picture(image, false, false),
+        if let Some(pasted) = self.mask_to_paste_into().and_then(|mask| self.paste_into(mask, image.clone(), false)) {
+            return Some(pasted);
         }
+        self.add_picture(image, false, false)
+    }
+
+    /// Whether what is pasted now goes into the current mask: through a patch a row at a time, which
+    /// on a big canvas takes a moment.
+    pub fn pastes_into_mask(&self) -> bool {
+        self.mask_to_paste_into().is_some()
     }
 
     /// As [`paste`](Self::paste), on a private layer: one the gallery's thumbnail leaves out.
@@ -184,8 +190,8 @@ impl CanvasSession {
         self.add_picture(premultiplied(image), true, private)
     }
 
-    /// The current mask holding the brightness of `image` (from another app, straight RGBA8),
-    /// centred and scaled down to fit, if masks take what is pasted; whether it does.
+    /// The current mask holding `image` (from another app, straight RGBA8), centred and scaled
+    /// down to fit, if a patch says to and it can; whether it does.
     pub fn paste_picture_into_mask(&self, image: ThumbnailImage) -> bool {
         self.mask_to_paste_into().is_some_and(|mask| self.paste_into(mask, premultiplied(image), true).is_some())
     }
@@ -256,25 +262,28 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
-    /// The current layer, if it is a mask that takes what is pasted.
+    /// The current layer, if it is a mask and a patch says what is pasted goes into it.
     fn mask_to_paste_into(&self) -> Option<LayerId> {
         let st = self.shared.lock();
         let current = st.doc.current();
         let is_mask = st.doc.layer(current).is_some_and(|l| l.kind == LayerKind::Mask);
-        (st.paste_into_mask && is_mask && !st.doc.is_locked(current)).then_some(current)
+        let asked = is_mask && st.hooks.as_ref().is_some_and(|hooks| hooks.paste_mask());
+        (asked && !st.doc.is_locked(current)).then_some(current)
     }
 
-    /// `mask` shows `image` by its brightness, what is clear in that hiding: one undo step.
+    /// `mask` holds `image` as the patch makes it, a row at a time: one undo step. None if it
+    /// couldn't. What takes a while is done with the session free.
     fn paste_into(&self, mask: LayerId, image: ThumbnailImage, fit: bool) -> Option<u64> {
+        let (width, height, hooks) = {
+            let st = self.shared.lock();
+            (st.doc.width(), st.doc.height(), st.hooks.clone()?)
+        };
+        let mut pixels = placed(image, width, height, fit)?;
+        if !hooks.paste_rows(&mut pixels, width as usize) {
+            return None;
+        }
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        let mut pixels = placed(image, st.doc.width(), st.doc.height(), fit)?;
-        for px in pixels.as_chunks_mut::<4>().0 {
-            // (colours are premultiplied, so what is clear counts as black)
-            let [r, g, b, _] = px.map(u32::from);
-            let grey = ((54 * r + 183 * g + 19 * b + 128) >> 8).min(255) as u8;
-            *px = [grey, grey, grey, 255];
-        }
         st.finish_stroke();
         st.settle();
         let canvas = st.canvas.as_mut()?;
