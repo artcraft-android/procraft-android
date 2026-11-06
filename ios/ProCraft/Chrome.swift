@@ -62,7 +62,13 @@ struct TopBar: View {
             .frame(height: Pc.barHeight)
         }
         .frame(height: Pc.barHeight)
-        .background(Pc.bar)
+        // frosted: what the canvas has under it shows blurred
+        .background {
+            ZStack {
+                Rectangle().fill(.ultraThinMaterial)
+                Pc.bar
+            }
+        }
     }
 }
 
@@ -150,18 +156,20 @@ struct SideBar: View {
 
     var body: some View {
         let fill = Pc.sideBar
+        let r = Pc.sideBarCorner
+        let corners = right
+            ? RectangleCornerRadii(topLeading: r, bottomLeading: r, bottomTrailing: 0, topTrailing: 0)
+            : RectangleCornerRadii(topLeading: 0, bottomLeading: 0, bottomTrailing: r, topTrailing: r)
         ZStack(alignment: .topLeading) {
+            // frosted, as the top bar is
+            UnevenRoundedRectangle(cornerRadii: corners, style: .circular)
+                .fill(.ultraThinMaterial)
+                .frame(width: Pc.sideBarWidth, height: Pc.sideBarHeight)
+                .allowsHitTesting(false)
             // translucent, with windows where the slider tracks are: they show what is behind
             Canvas { context, size in
-                let r = Pc.sideBarCorner
                 var shape = Path()
-                shape.addRoundedRect(
-                    in: CGRect(origin: .zero, size: size),
-                    cornerRadii: right
-                        ? RectangleCornerRadii(topLeading: r, bottomLeading: r, bottomTrailing: 0, topTrailing: 0)
-                        : RectangleCornerRadii(topLeading: 0, bottomLeading: 0, bottomTrailing: r, topTrailing: r),
-                    style: .circular
-                )
+                shape.addRoundedRect(in: CGRect(origin: .zero, size: size), cornerRadii: corners, style: .circular)
                 for top in [sizeTrackTop, opacityTrackTop] {
                     let track = CGRect(x: x(sliderLeft, Pc.sliderWidth), y: top, width: Pc.sliderWidth, height: Pc.sliderHeight)
                     shape.addRoundedRect(in: track, cornerSize: CGSize(width: Pc.sliderCorner, height: Pc.sliderCorner), style: .circular)

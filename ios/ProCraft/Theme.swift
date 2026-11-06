@@ -152,7 +152,7 @@ enum Pc {
     // the side bar: the bar and the tracks translucent, each straight over what is behind; the
     // thumbs opaque
     static var sideBar: Color { pick(0xE717_1717, 0xCFE5_E5E5) }
-    static var sliderTrack: Color { pick(0xC93E_3E3E, 0xFFE9_E9E9) }
+    static var sliderTrack: Color { pick(0xC93E_3E3E, 0xBFF0_F0F0) }
     // a lighter rim round each track, more of what is behind showing through it
     static var sliderRim: Color { pick(0xB96E_6E6E, 0xFFE9_E9E9) }
     static let sliderRimWidth: CGFloat = 0.8

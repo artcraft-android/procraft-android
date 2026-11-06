@@ -99,7 +99,7 @@ enum ScreenCapture {
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
-    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text"]
+    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference"]
     /// What opens over the gallery.
     static var galleryShows: String?
     /// A gradient's second stop opens its colours, in this mode.
@@ -282,6 +282,14 @@ enum ScreenCapture {
         case "adjust-modes":
             model.startAdjustment(.gaussianBlur)
             model.adjustModesOpen = true
+        case "reference":
+            model.reference.setOn(true)
+        case "reference-bars":
+            model.reference.setOn(true)
+            model.reference.toggleBars()
+        case "reference-image":
+            model.reference.setOn(true)
+            model.reference.setMode(.image)
         case "interface-small":
             Interface.shared.force(0.85)
         case "interface-large":

@@ -57,6 +57,8 @@ enum Motion {
     static let artworkPinchOpen: CGFloat = 1.35
     /// An artwork spread open, let go: settling fitted over the screen (or back into its place).
     static let pinchSettle = easeOut(0.3)
+    /// The reference window fading in where it is, and out when closed.
+    static let referenceFade = easeInOut(0.28)
     /// A dragged artwork's cell fading to what stays behind, and back.
     static let artworkLift = easeInOut(0.25)
     /// Rows moving to make room.

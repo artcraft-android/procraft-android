@@ -180,7 +180,7 @@ struct ActionsPanel: View {
                     // only with the guide on
                     .act("Edit Drawing Guide", action: model.guideOn ? { model.guide.open() } : nil),
                 ],
-                [.toggle("Reference", on: false, change: nil)],
+                [.toggle("Reference", on: model.reference.on, change: { model.reference.setOn($0) })],
                 [
                     .act("Flip horizontal", action: { model.flipCanvas(horizontal: true) }),
                     .act("Flip vertical", action: { model.flipCanvas(horizontal: false) }),

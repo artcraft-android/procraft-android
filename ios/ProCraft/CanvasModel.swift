@@ -238,6 +238,7 @@ final class CanvasModel {
     @ObservationIgnored private(set) lazy var crop = CropTool(model: self)
     @ObservationIgnored private(set) lazy var recolor = RecolorTool(model: self)
     @ObservationIgnored private(set) lazy var guide = GuideTool(model: self)
+    @ObservationIgnored private(set) lazy var reference = ReferenceTool(model: self)
     @ObservationIgnored private(set) lazy var text = TextTool(model: self)
     /// The middle of the screen, window pixels.
     @ObservationIgnored var screenCentre = CGPoint.zero
@@ -1244,6 +1245,7 @@ final class CanvasModel {
 
     /// Reads again what the core may have changed (a stroke, an undo).
     func refresh() {
+        reference.refresh()
         refreshFlags()
         // undo and redo step through a snapped shape: its handles where they now are, and past its
         // drags it gives way to the stroke as drawn and ends
@@ -1786,6 +1788,12 @@ final class CanvasModel {
                 self.readPick()
             }
         }
+    }
+
+    /// The eyedropper over the reference window's picture, the finger at `at` on the screen: what
+    /// it sees there, already read.
+    func pickFromReference(_ image: UIImage?, rgb: UInt32?, at: CGPoint) {
+        picking = PickState(x: Float(at.x * pixels), y: Float(at.y * pixels), image: image, rgb: rgb, fromReference: true)
     }
 
     /// The eyedropper lets go: its colour becomes the current one (a quick tap ends before the

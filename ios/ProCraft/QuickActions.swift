@@ -147,6 +147,7 @@ extension CanvasModel {
         case .cut: cutLayer()
         case .paste: paste()
         case .copyPasteMenu: copyPasteOpen = true
+        case .reference: reference.setOn(!reference.on)
         case .flipHorizontal: flipCanvas(horizontal: true)
         case .flipVertical: flipCanvas(horizontal: false)
         case .undo: undo()

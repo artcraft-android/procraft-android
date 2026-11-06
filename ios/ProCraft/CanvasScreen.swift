@@ -156,6 +156,10 @@ struct CanvasScreen: View {
                         .offset(x: left)
                 }
                 TextEditing(model: model, screen: screen.size)
+                if model.reference.on {
+                    ReferenceWindow(model: model, screen: screen.size)
+                        .transition(.opacity)
+                }
                 CropOverlay(model: model)
                 if model.guide.editing {
                     GuideEditor(model: model, screen: screen.size)
