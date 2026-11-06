@@ -158,7 +158,7 @@ pub use scene3d::{ModelFile, ModelInfo, ModelLight, ModelTextureFile, SubmeshInf
 pub use selection::{SelectionDisplay, SelectionJoin};
 pub use studio::{
     SliderExtrasInfo, SourceImage, SourceKind, StudioAbout, curve_samples, repeatable_source, slider_extras,
-    source_from_picture, source_library, source_size,
+    small_source, source_from_picture, source_library, source_size,
 };
 pub use text::{TextAlignment, TextDraw, TextDrawn, TextInfo, TextSide};
 pub use text_draw::{
@@ -726,7 +726,18 @@ impl State {
         {
             canvas.use_full_grain(gpu, &mut style, full.id, full.side, &pixels);
         }
+        self.use_full_shape(&mut style, &brush);
         (brush, style, diameter)
+    }
+
+    /// `style` reads `brush`'s shape from its file's image at its own size, if it has one.
+    fn use_full_shape(&mut self, style: &mut StrokeStyle, brush: &Brush) {
+        if let Some(full) = brush.shape_file_now().map(|f| &f.full)
+            && let Some(pixels) = self.grain_store.pixels(full)
+            && let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref())
+        {
+            canvas.use_full_shape(gpu, style, full.id, full.side, &pixels);
+        }
     }
 
     /// A dual brush's second for a stroke of `tool` on `layer` with `first` (as
@@ -763,6 +774,7 @@ impl State {
         if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
             canvas.use_sources(gpu, &mut style, &second);
         }
+        self.use_full_shape(&mut style, &second);
         let mode = first.setting("dual_blend").round().max(0.0) as u32;
         Some((second, SecondStroke { style, mode, threshold: style.alpha_threshold }, diameter))
     }

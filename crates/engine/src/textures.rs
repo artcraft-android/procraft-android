@@ -1790,16 +1790,16 @@ pub struct Repeat {
     pub pyramid: bool,
 }
 
-/// `pixels` (a `TEXTURE_SIZE` square greyscale image; anything else comes back unchanged) made to
-/// tile without seams as `repeat` says: faded at its edges into a copy shifted by half a tile,
+/// `pixels` (a square greyscale image; anything else comes back unchanged) made to tile without
+/// seams as `repeat` says, alike at any size: faded at its edges into a copy shifted by half a tile,
 /// which runs on across them, then scaled and turned (wrapping round) and faded again.
 pub fn repeatable(pixels: &[u8], repeat: Repeat) -> Vec<u8> {
-    let n = TEXTURE_SIZE;
-    if pixels.len() != n * n {
+    let n = pixels.len().isqrt();
+    if n == 0 || n * n != pixels.len() {
         return pixels.to_vec();
     }
     let img: Vec<f32> = pixels.iter().map(|&v| f32::from(v)).collect();
-    let seamless = blend_edges(&img, repeat);
+    let seamless = blend_edges(&img, n, repeat);
     let scale = if repeat.scale.is_finite() { repeat.scale.clamp(1.0, 4.0) } else { 1.0 };
     let rotation = if repeat.rotation.is_finite() { repeat.rotation } else { 0.0 };
     let out = if (scale - 1.0).abs() < 1e-4 && rotation.abs() < 1e-4 {
@@ -1819,15 +1819,14 @@ pub fn repeatable(pixels: &[u8], repeat: Repeat) -> Vec<u8> {
                 }
             }
         }
-        blend_edges(&moved, repeat)
+        blend_edges(&moved, n, repeat)
     };
     out.iter().map(|&v| v.round().clamp(0.0, 255.0) as u8).collect()
 }
 
 /// `img` faded at its edges into its copy shifted by half a tile (turned round too, with
 /// mirror), over a band `overlap` of the way to the middle.
-fn blend_edges(img: &[f32], repeat: Repeat) -> Vec<f32> {
-    let n = TEXTURE_SIZE;
+fn blend_edges(img: &[f32], n: usize, repeat: Repeat) -> Vec<f32> {
     let half = n / 2;
     let at = |x: usize, y: usize| img.get(y * n + x).copied().unwrap_or(0.0);
     let other: Vec<f32> = (0..n * n)
@@ -1861,7 +1860,7 @@ fn blend_edges(img: &[f32], repeat: Repeat) -> Vec<f32> {
         return mix(img, &other, width);
     }
     // broad tones over the whole band, fine detail over a third of it
-    let (low_a, low_b) = (blurred(img, n / 32), blurred(&other, n / 32));
+    let (low_a, low_b) = (wrapped_blur(img, n, n / 32), wrapped_blur(&other, n, n / 32));
     let high = |v: &[f32], low: &[f32]| v.iter().zip(low).map(|(a, b)| a - b).collect::<Vec<f32>>();
     let tones = mix(&low_a, &low_b, width);
     let detail = mix(&high(img, &low_a), &high(&other, &low_b), width / 3.0);
@@ -1885,6 +1884,32 @@ fn blurred(img: &[f32], r: usize) -> Vec<f32> {
                 if let Some(px) = out.get_mut(y * n + x) {
                     *px = sum / span;
                 }
+            }
+        }
+        out
+    };
+    pass(&pass(img, true), false)
+}
+
+/// A box blur of radius `r` (less than `n`) over the `n` square image, wrapping round its edges.
+/// The window's sum is carried along each row, so a bigger image's wider radius costs no more.
+/// Not [`blurred`], whose exact sums the stock shapes' stand-ins are ranked by.
+fn wrapped_blur(img: &[f32], n: usize, r: usize) -> Vec<f32> {
+    let span = (2 * r + 1) as f64;
+    let pass = |src: &[f32], across: bool| -> Vec<f32> {
+        let at = |a: usize, b: usize| {
+            let (x, y) = if across { (a % n, b) } else { (b, a % n) };
+            f64::from(src.get(y * n + x).copied().unwrap_or(0.0))
+        };
+        let mut out = vec![0.0; n * n];
+        for b in 0..n {
+            let mut sum: f64 = (0..=2 * r).map(|k| at(n - r + k, b)).sum();
+            for a in 0..n {
+                let (x, y) = if across { (a, b) } else { (b, a) };
+                if let Some(px) = out.get_mut(y * n + x) {
+                    *px = (sum / span) as f32;
+                }
+                sum += at(a + n + r + 1, b) - at(a + n - r, b);
             }
         }
         out
@@ -2061,5 +2086,63 @@ mod tests {
         // no overlap: left as it was
         assert_eq!(repeatable(&ramp, Repeat { overlap: 0.0, ..base }), ramp);
         assert_eq!(repeatable(&[1, 2, 3], base), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn a_bigger_image_repeats_as_the_smaller_one_does() {
+        let (small, big) = (TEXTURE_SIZE, TEXTURE_SIZE * 4);
+        let base = Repeat { scale: 1.0, rotation: 0.0, overlap: 1.0, hardness: 0.0, mirror: false, pyramid: false };
+        let settings = [
+            base,
+            Repeat { overlap: 0.3, hardness: 0.5, ..base },
+            Repeat { pyramid: true, ..base },
+            Repeat { mirror: true, ..base },
+            Repeat { scale: 2.0, rotation: 0.6, ..base },
+        ];
+        // a ramp: a hard edge where it wraps round, gone at any size
+        let ramp: Vec<u8> = (0..big * big).map(|i| (i % big * 255 / (big - 1)) as u8).collect();
+        // broad tones and fine detail, the same at any size. Odd across and even down, so a copy
+        // shifted half a tile both ways is its opposite: all the fading shows, and where the
+        // pyramid parts the two
+        let waves = |n: usize| -> Vec<u8> {
+            let turn = std::f32::consts::TAU / n as f32;
+            let at = |i: usize| {
+                let (x, y) = (((i % n) as f32 + 0.5) * turn, ((i / n) as f32 + 0.5) * turn);
+                0.6 * (x * 3.0).sin() * (y * 2.0).cos() + 0.4 * (x * 17.0).sin() * (y * 16.0).sin()
+            };
+            (0..n * n).map(|i| (128.0 + 100.0 * at(i)).round() as u8).collect()
+        };
+        for r in settings {
+            let out = repeatable(&ramp, r);
+            assert_eq!(out.len(), big * big, "{r:?}");
+            let jump = (0..big).map(|y| (i32::from(out[y * big]) - i32::from(out[y * big + big - 1])).abs()).max();
+            assert!(jump.unwrap() <= 6, "{r:?}: {jump:?}");
+            // the same picture: each small pixel against the big ones it covers
+            let (a, b) = (repeatable(&waves(small), r), repeatable(&waves(big), r));
+            let worst = (0..small * small)
+                .map(|i| {
+                    let (x, y) = (i % small * 4, i / small * 4);
+                    let sum: i32 = (0..16).map(|k| i32::from(b[(y + k / 4) * big + x + k % 4])).sum();
+                    (sum / 16 - i32::from(a[i])).abs()
+                })
+                .max();
+            assert!(worst.unwrap() <= 6, "{r:?}: {worst:?}");
+        }
+    }
+
+    #[test]
+    fn the_blur_is_a_box_that_wraps_round() {
+        let (n, r) = (24, 3);
+        let img: Vec<f32> = (0..n * n).map(|i| ((i * 37) % 101) as f32).collect();
+        let at = |x: usize, y: usize| img[(y % n) * n + x % n];
+        let out = wrapped_blur(&img, n, r);
+        for y in 0..n {
+            for x in 0..n {
+                let window = (0..=2 * r).flat_map(|j| (0..=2 * r).map(move |i| (i, j)));
+                let sum: f32 = window.map(|(i, j)| at(x + n + i - r, y + n + j - r)).sum();
+                let want = sum / ((2 * r + 1) * (2 * r + 1)) as f32;
+                assert!((out[y * n + x] - want).abs() < 1e-2, "({x}, {y}): {} against {want}", out[y * n + x]);
+            }
+        }
     }
 }

@@ -103,9 +103,14 @@ fun SourceEditor(vm: CanvasViewModel) {
     var hardness by remember { mutableFloatStateOf(0f) }
     var mirror by remember { mutableStateOf(false) }
     var pyramid by remember { mutableStateOf(true) }
-    fun result(): ByteArray =
-        if (repeating && image.isNotEmpty()) vm.repeatSource(image, 1f + scale * 3f, rotate * 360f, overlap, hardness, mirror, pyramid) else image
-    val shown = remember(image, repeating, scale, rotate, overlap, hardness, mirror, pyramid) { vm.sourceBitmap(result(), shape = !grain) }
+    fun repeated(pixels: ByteArray): ByteArray =
+        vm.repeatSource(pixels, 1f + scale * 3f, rotate * 360f, overlap, hardness, mirror, pyramid)
+    fun result(): ByteArray = if (repeating && image.isNotEmpty()) repeated(image) else image
+    // Auto repeat shows on the small image, quick enough to follow the sliders; the tick makes it at full size
+    val small = remember(image, repeating) { if (repeating) vm.smallSource(image) else image }
+    val shown = remember(small, repeating, scale, rotate, overlap, hardness, mirror, pyramid) {
+        vm.sourceBitmap(if (repeating && small.isNotEmpty()) repeated(small) else small, shape = !grain)
+    }
     fun take(pixels: ByteArray?) {
         if (pixels != null && pixels.isNotEmpty()) {
             image = pixels
