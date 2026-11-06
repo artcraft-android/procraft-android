@@ -12,6 +12,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -83,41 +85,135 @@ fun TopBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                     val fontSize = with(androidx.compose.ui.platform.LocalDensity.current) { (18.dp * k).toSp() }
                     Text("Gallery", color = Pc.BarText, fontSize = fontSize, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false, modifier = Modifier.offset(y = (-1).dp))
                 }
-                ActionButton(PcIcons.Actions, "Actions", fit.button, k, selected = vm.panel == Panel.ACTIONS) { vm.toggle(Panel.ACTIONS) }
-                ActionButton(PcIcons.Adjustments, "Adjustments", fit.button, k, selected = vm.panel == Panel.ADJUSTMENTS || vm.adjustment != null || vm.opacityLayer != null || vm.recoloring) { vm.adjustmentsPressed() }
-                ActionButton(PcIcons.Selection, "Selection", fit.button, k, selected = vm.selecting, glyph = 33.dp) { vm.toggleSelecting() }
-                ActionButton(PcIcons.Transform, "Transform", fit.button, k, selected = vm.transforming, glyph = 44.dp) { vm.toggleTransform() }
+                ActionButtons(vm, fit.button, k)
             }
-            // the layers and colour panels take the highlight from the current tool while open
-            val panelOpen = vm.panel == Panel.LAYERS || vm.panel == Panel.COLOR || vm.transforming || vm.selecting || vm.adjustment != null
             Row(
                 Modifier.align(Alignment.BottomEnd).height(Pc.BarRowHeight).padding(end = fit.margin),
                 horizontalArrangement = Arrangement.spacedBy(fit.toolGap),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // painting an adjustment on (or cloning), the brush shows it
-                ToolButton(
-                    if (vm.adjustPencil) PcIcons.BrushPaintedOn else PcIcons.Brush,
-                    "Paint",
-                    fit.button,
-                    k,
-                    selected = vm.adjustPencil || (!panelOpen && vm.tool == ToolKind.PAINT),
-                    onHold = { vm.toolHeld(ToolKind.PAINT) },
-                ) {
-                    vm.toolPressed(ToolKind.PAINT)
-                }
-                ToolButton(PcIcons.Smudge, "Smudge", fit.button, k, selected = !panelOpen && vm.tool == ToolKind.SMUDGE, onHold = { vm.toolHeld(ToolKind.SMUDGE) }) {
-                    vm.toolPressed(ToolKind.SMUDGE)
-                }
-                ToolButton(PcIcons.Erase, "Erase", fit.button, k, selected = !panelOpen && vm.tool == ToolKind.ERASE, onHold = { vm.toolHeld(ToolKind.ERASE) }) {
-                    vm.toolPressed(ToolKind.ERASE)
-                }
-                ToolButton(PcIcons.Layers, "Layers", fit.button, k, selected = vm.panel == Panel.LAYERS) { vm.toggle(Panel.LAYERS) }
-                ColorButton(vm, fit.button, k)
+                ToolButtons(vm, fit.button, k)
             }
         }
     }
 }
+
+/** Actions, Adjustments, Selection and Transform, [width] wide each and [scale]d. */
+@Composable
+private fun ActionButtons(vm: CanvasViewModel, width: Dp, scale: Float) {
+    ActionButton(PcIcons.Actions, "Actions", width, scale, selected = vm.panel == Panel.ACTIONS) { vm.toggle(Panel.ACTIONS) }
+    ActionButton(PcIcons.Adjustments, "Adjustments", width, scale, selected = vm.panel == Panel.ADJUSTMENTS || vm.adjustment != null || vm.opacityLayer != null || vm.recoloring) { vm.adjustmentsPressed() }
+    ActionButton(PcIcons.Selection, "Selection", width, scale, selected = vm.selecting, glyph = 33.dp) { vm.toggleSelecting() }
+    ActionButton(PcIcons.Transform, "Transform", width, scale, selected = vm.transforming, glyph = 44.dp) { vm.toggleTransform() }
+}
+
+/** Paint, Smudge, Erase, Layers and the colour, [width] wide each and [scale]d; the tool lit on a blue [disc] in ProCraft Pocket. */
+@Composable
+private fun ToolButtons(vm: CanvasViewModel, width: Dp, scale: Float, disc: Boolean = false, colorScale: Float = scale) {
+    // the layers and colour panels take the highlight from the current tool while open
+    val panelOpen = vm.panel == Panel.LAYERS || vm.panel == Panel.COLOR || vm.transforming || vm.selecting || vm.adjustment != null
+    // painting an adjustment on (or cloning), the brush shows it
+    ToolButton(
+        if (vm.adjustPencil) PcIcons.BrushPaintedOn else PcIcons.Brush,
+        "Paint",
+        width,
+        scale,
+        selected = vm.adjustPencil || (!panelOpen && vm.tool == ToolKind.PAINT),
+        disc = disc,
+        onHold = { vm.toolHeld(ToolKind.PAINT) },
+    ) {
+        vm.toolPressed(ToolKind.PAINT)
+    }
+    ToolButton(PcIcons.Smudge, "Smudge", width, scale, selected = !panelOpen && vm.tool == ToolKind.SMUDGE, disc = disc, onHold = { vm.toolHeld(ToolKind.SMUDGE) }) {
+        vm.toolPressed(ToolKind.SMUDGE)
+    }
+    ToolButton(PcIcons.Erase, "Erase", width, scale, selected = !panelOpen && vm.tool == ToolKind.ERASE, disc = disc, onHold = { vm.toolHeld(ToolKind.ERASE) }) {
+        vm.toolPressed(ToolKind.ERASE)
+    }
+    ToolButton(PcIcons.Layers, "Layers", width, scale, selected = vm.panel == Panel.LAYERS, disc = disc) { vm.toggle(Panel.LAYERS) }
+    ColorButton(vm, width, colorScale)
+}
+
+/**
+ * ProCraft Pocket's bar: a card of glass in the top left, the painting tools over the artwork's
+ * actions; on a phone held sideways ([Pc.pocketSplit]) two pills across the top, the actions on the
+ * left and the tools on the right. Swiped up, the card folds to a pill of the current tool and a
+ * button that opens it again. It slides up off the screen and fades as the interface hides ([shown]).
+ */
+@Composable
+fun PocketBar(vm: CanvasViewModel, modifier: Modifier = Modifier, shown: Float = 1f) {
+    val top = Pc.safeTop + Pc.PocketInset
+    val lift = with(androidx.compose.ui.platform.LocalDensity.current) { (top + Pc.PocketCardHeight).toPx() } * (1f - shown)
+    val glass = BarGlass(shown, Offset(0f, -lift))
+    val slide = Modifier.graphicsLayer {
+        translationY = -lift
+        alpha = shown
+    }
+    val fold = Modifier.pointerInput(Unit) {
+        var pulled = 0f
+        detectVerticalDragGestures(onDragStart = { pulled = 0f }) { change, dy ->
+            change.consume()
+            pulled += dy
+            if (pulled < -PocketFoldPull.toPx()) Pc.pocketFolded = true
+        }
+    }
+    val tool = Pc.PocketToolDisc / 44.dp
+    Box(modifier.fillMaxWidth().padding(top = top, start = Pc.safeLeft + Pc.PocketInset, end = Pc.safeRight + Pc.PocketInset)) {
+        when {
+            Pc.pocketFolded -> PocketGlass(Modifier.align(Alignment.TopStart), glass, slide) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val brush = when (vm.tool) {
+                        ToolKind.SMUDGE -> PcIcons.Smudge
+                        ToolKind.ERASE -> PcIcons.Erase
+                        else -> if (vm.adjustPencil) PcIcons.BrushPaintedOn else PcIcons.Brush
+                    }
+                    ToolButton(brush, "Brushes", Pc.PocketButton, tool, selected = true, disc = true) { vm.toolPressed(vm.tool) }
+                    Box(Modifier.size(Pc.PocketButton, Pc.PocketRowHeight).tap { Pc.pocketFolded = false }, contentAlignment = Alignment.Center) {
+                        Icon(PcIcons.More, contentDescription = "Show the tools", tint = Pc.BarGlyph, modifier = Modifier.size(26.dp))
+                    }
+                }
+            }
+            Pc.pocketSplit -> {
+                PocketGlass(Modifier.align(Alignment.TopStart), glass, slide) {
+                    Row(verticalAlignment = Alignment.CenterVertically) { PocketActions(vm) }
+                }
+                PocketGlass(Modifier.align(Alignment.TopEnd), glass, slide) {
+                    Row(verticalAlignment = Alignment.CenterVertically) { ToolButtons(vm, Pc.PocketButton, tool, disc = true, colorScale = 1f) }
+                }
+            }
+            else -> PocketGlass(Modifier.align(Alignment.TopStart).then(fold), glass, slide) {
+                androidx.compose.foundation.layout.Column(verticalArrangement = Arrangement.spacedBy(Pc.PocketRowGap)) {
+                    Row(Modifier.height(Pc.PocketRowHeight), verticalAlignment = Alignment.CenterVertically) {
+                        ToolButtons(vm, Pc.PocketButton, tool, disc = true, colorScale = 1f)
+                    }
+                    Row(Modifier.height(Pc.PocketRowHeight), verticalAlignment = Alignment.CenterVertically) { PocketActions(vm) }
+                }
+            }
+        }
+    }
+}
+
+/** Back to the gallery, then the actions, in ProCraft Pocket's bar. */
+@Composable
+private fun PocketActions(vm: CanvasViewModel) {
+    Box(Modifier.size(Pc.PocketButton, Pc.PocketRowHeight).tap { vm.closeArtwork() }, contentAlignment = Alignment.Center) {
+        Icon(PcIcons.ChevronLeft, contentDescription = "Gallery", tint = Pc.BarGlyph, modifier = Modifier.size(28.dp))
+    }
+    ActionButtons(vm, Pc.PocketButton, 1f)
+}
+
+/** A piece of ProCraft Pocket's glass: rounded, frosted over the canvas, sliding with the bar ([slide], [glass]). */
+@Composable
+private fun PocketGlass(modifier: Modifier, glass: BarGlass, slide: Modifier, content: @Composable () -> Unit) {
+    val shape = RoundedCornerShape(Pc.PocketCorner)
+    Box(
+        modifier.then(rememberFrost(Pc.PocketCorner, glass)).then(slide).clip(shape).background(Pc.PocketGlass)
+            .border(1.dp, Pc.GlassMenuEdge, shape).padding(Pc.PocketPadding),
+    ) { content() }
+}
+
+/** How far ProCraft Pocket's card is swiped up to fold away. */
+private val PocketFoldPull = 24.dp
 
 /** An action button: its glyph on a dark disc, which turns blue while its panel is open; all of it [scale]d with the bar. */
 @Composable
@@ -139,11 +235,15 @@ private fun Modifier.tapOrHold(onClick: () -> Unit, onHold: () -> Unit): Modifie
 
 /** A tool button: tapped, the tool (or its brushes); held ([onHold]), it takes the current brush. */
 @Composable
-private fun ToolButton(icon: ImageVector, label: String, width: Dp, scale: Float, selected: Boolean, onHold: (() -> Unit)? = null, onClick: () -> Unit) {
+private fun ToolButton(icon: ImageVector, label: String, width: Dp, scale: Float, selected: Boolean, disc: Boolean = false, onHold: (() -> Unit)? = null, onClick: () -> Unit) {
     val touch = if (onHold != null) Modifier.tapOrHold(onClick, onHold) else Modifier.tap(onClick = onClick)
+    val lit = animateHighlight(selected)
     Box(Modifier.size(width, Pc.BarButtonHeight).then(touch), contentAlignment = Alignment.Center) {
+        // on a disc, the glyph goes white over the blue
+        if (disc) Box(Modifier.requiredSize(44.dp * scale).clip(CircleShape).background(Pc.BarGlyphSelected.copy(alpha = lit)))
+        val tint = if (disc) lerp(Pc.BarGlyph, Color.White, lit) else lerp(Pc.BarGlyph, Pc.BarGlyphSelected, lit)
         // a 44 frame shown as wide as the button, over the 38 tall button
-        Icon(icon, contentDescription = label, tint = lerp(Pc.BarGlyph, Pc.BarGlyphSelected, animateHighlight(selected)), modifier = Modifier.requiredSize(44.dp * scale))
+        Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.requiredSize(44.dp * scale))
     }
 }
 
@@ -170,10 +270,10 @@ private const val LIGHT_RING_ABOVE = 0.85f
 /**
  * The side bar against the left edge (the right one, [right]-handed): brush size, the modify
  * button, opacity, undo and redo, its tracks [trackHeight] long. On the right everything is
- * mirrored but the glyphs.
+ * mirrored but the glyphs. [floating] (ProCraft Pocket), it stands off the edge, rounded all round.
  */
 @Composable
-fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean = false, trackHeight: Dp = Pc.SliderHeight, shown: Float = 1f) {
+fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean = false, trackHeight: Dp = Pc.SliderHeight, shown: Float = 1f, floating: Boolean = false) {
     // a control's left edge, mirrored on the right
     fun x(left: Dp, width: Dp) = if (right) Pc.SideBarWidth - left - width else left
     // shorter tracks bring what is under each up with them
@@ -182,7 +282,8 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
     // its glass slides out with it as the interface hides, its screen side's corners off the screen
     val aside = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.SideBarWidth.toPx() } * (1f - shown) * if (right) 1f else -1f
     val moved = Offset(aside, 0f)
-    val body = BarGlass(shown, moved, pastLeft = if (right) 0.dp else Pc.SideBarCorner, pastRight = if (right) Pc.SideBarCorner else 0.dp)
+    val past = if (floating) 0.dp else Pc.SideBarCorner
+    val body = BarGlass(shown, moved, pastLeft = if (right) 0.dp else past, pastRight = if (right) past else 0.dp)
     val track = BarGlass(shown, moved, window = true)
     Box(
         Modifier.then(rememberFrost(Pc.SideBarCorner, body)).then(modifier).size(Pc.SideBarWidth, Pc.SideBarHeight - shorter * 2)
@@ -193,7 +294,7 @@ fun SideBar(vm: CanvasViewModel, modifier: Modifier = Modifier, right: Boolean =
                 val trackR = CornerRadius(Pc.SliderCorner.toPx())
                 val body = Path().apply {
                     fillType = PathFillType.EvenOdd
-                    val (inner, outer) = CornerRadius.Zero to CornerRadius(r)
+                    val (inner, outer) = (if (floating) CornerRadius(r) else CornerRadius.Zero) to CornerRadius(r)
                     addRoundRect(
                         if (right) RoundRect(0f, 0f, size.width, size.height, outer, inner, inner, outer)
                         else RoundRect(0f, 0f, size.width, size.height, inner, outer, outer, inner),

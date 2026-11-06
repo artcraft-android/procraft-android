@@ -114,6 +114,9 @@ fun rememberFrost(corner: Dp, glass: BarGlass): Modifier {
 /** The side of a popover its arrow sticks out of, pointing at its button; or none. */
 enum class ArrowSide { TOP, BOTTOM, LEFT, RIGHT, NONE }
 
+/** The panel inside is a sheet rising from the bottom (ProCraft Pocket): it hangs from no button, so it has no arrow. */
+val LocalPopoverSheet = staticCompositionLocalOf { false }
+
 /**
  * A panel hanging from the top bar, with an arrow pointing up at its button: [arrowX] is the tip's
  * distance from the panel's left edge (from its top, for an arrow on the [side]). [popoverPlace]
@@ -130,6 +133,8 @@ fun Popover(
     side: ArrowSide = ArrowSide.TOP,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val sheet = LocalPopoverSheet.current
+    val edge = if (sheet && side == ArrowSide.TOP) ArrowSide.NONE else side
     val backdrops = LocalBackdrops.current.takeIf { fill == null && Pc.PopoverFrost.alpha < 1f }
     val paint = fill ?: if (backdrops != null) Pc.PopoverFrost else Pc.PopoverFill
     val key = remember { Any() }
@@ -151,12 +156,12 @@ fun Popover(
             val at = c.positionInWindow()
             val k = look.scale
             val (arrowH, radius) = with(density) { Pc.ArrowHeight.toPx() to corner.toPx() }
-            val (l, t, r) = Triple(if (side == ArrowSide.LEFT) arrowH else 0f, if (side == ArrowSide.TOP) arrowH else 0f, if (side == ArrowSide.RIGHT) arrowH else 0f)
-            val b = if (side == ArrowSide.BOTTOM) arrowH else 0f
+            val (l, t, r) = Triple(if (edge == ArrowSide.LEFT) arrowH else 0f, if (edge == ArrowSide.TOP) arrowH else 0f, if (edge == ArrowSide.RIGHT) arrowH else 0f)
+            val b = if (edge == ArrowSide.BOTTOM) arrowH else 0f
             body = floatArrayOf(at.x + l * k, at.y + t * k, at.x + (c.size.width - r) * k, at.y + (c.size.height - b) * k, radius * k)
         }
     }
-    val sideways = side == ArrowSide.LEFT || side == ArrowSide.RIGHT
+    val sideways = edge == ArrowSide.LEFT || edge == ArrowSide.RIGHT
     Box(
         modifier.width(if (sideways) width + Pc.ArrowHeight else width).then(frost).drawBehind {
             val arrowH = Pc.ArrowHeight.toPx()
@@ -165,7 +170,7 @@ fun Popover(
             val tip = 2.dp.toPx()
             val radius = CornerRadius(corner.toPx())
             val outline = Path().apply {
-                when (side) {
+                when (edge) {
                     ArrowSide.TOP -> {
                         addRoundRect(RoundRect(0f, arrowH, size.width, size.height, radius))
                         moveTo(at - half - tip, arrowH + 0.5f)
@@ -217,14 +222,18 @@ fun Popover(
             drawPath(outline, paint)
         },
     ) {
-        val inset = when (side) {
+        val inset = when (edge) {
             ArrowSide.TOP -> Modifier.padding(top = Pc.ArrowHeight)
             ArrowSide.BOTTOM -> Modifier.padding(bottom = Pc.ArrowHeight)
             ArrowSide.LEFT -> Modifier.padding(start = Pc.ArrowHeight)
             ArrowSide.RIGHT -> Modifier.padding(end = Pc.ArrowHeight)
             ArrowSide.NONE -> Modifier
         }
-        Column(inset.clip(RoundedCornerShape(corner)), content = content)
+        // what opens from inside the sheet (a menu, a popover) points at its own button again
+        Column(inset.clip(RoundedCornerShape(corner))) {
+            val scope = this
+            androidx.compose.runtime.CompositionLocalProvider(LocalPopoverSheet provides false) { scope.content() }
+        }
     }
 }
 

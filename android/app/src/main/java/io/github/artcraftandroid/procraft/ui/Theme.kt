@@ -46,8 +46,39 @@ object Pc {
     var safeLeft by mutableStateOf(0.dp)
     var safeRight by mutableStateOf(0.dp)
 
-    /** The top bar's height: its rows, under the cutout. */
-    val BarHeight: Dp get() = safeTop + BarRowHeight * barRows
+    /**
+     * ProCraft Pocket, the phone's interface (a window whose shorter side is under [PocketBelow]):
+     * the bar is a card of glass in the top left, the side bar floats, the panels rise from the bottom.
+     */
+    var pocket by mutableStateOf(false)
+
+    /** ProCraft Pocket on a phone held sideways ([PocketSplitFrom] wide): the card is two pills across the top. */
+    var pocketSplit by mutableStateOf(false)
+
+    /** ProCraft Pocket's card folded away to a pill (swiped up), the canvas clear. */
+    var pocketFolded by mutableStateOf(false)
+
+    val PocketBelow = 600.dp
+    val PocketSplitFrom = 640.dp
+    val PocketInset = 8.dp
+    val PocketPadding = 6.dp
+    val PocketButton = 46.dp
+    val PocketRowHeight = 44.dp
+    val PocketRowGap = 2.dp
+    val PocketCorner = 26.dp
+    val PocketToolDisc = 38.dp
+    /** How far the panels, as sheets, keep from the screen's edges. */
+    val PocketSheetGap = 8.dp
+    val PocketCardHeight: Dp get() = PocketPadding * 2 + PocketRowHeight * 2 + PocketRowGap
+    val PocketPillHeight: Dp get() = PocketPadding * 2 + PocketRowHeight
+    val PocketGlass: Color get() = pick(0xD9262626, 0xDEF2F2F2)
+
+    /** The top bar's height (ProCraft Pocket's: down to under its card, folded or not), under the cutout. */
+    val BarHeight: Dp get() = when {
+        !pocket -> safeTop + BarRowHeight * barRows
+        pocketSplit -> safeTop + PocketInset + PocketPillHeight
+        else -> safeTop + PocketInset + PocketCardHeight
+    }
     val BarMargin = 40.dp
     val BarButtonWidth = 44.dp
     val BarButtonHeight = 38.dp
