@@ -94,6 +94,9 @@ struct AdjustmentsPanel: View {
                 .scrollIndicators(.hidden)
             }
         }
+        #if DEBUG
+        .onAppear { showFilters = ScreenCapture.filtersShow }
+        #endif
     }
 }
 

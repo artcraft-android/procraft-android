@@ -128,7 +128,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          targets: aarch64-apple-ios-sim
+          targets: aarch64-apple-ios-sim,wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -146,6 +146,10 @@ jobs:
             -destination 'generic/platform=iOS Simulator' -derivedDataPath build/simulator build \
             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO >build-simulator.log 2>&1 \
             || { grep -E "error|failed" build-simulator.log | head -60; exit 1; }
+
+      - name: Pack the plugins
+        continue-on-error: true
+        run: python3 tools/pack_patch.py --out "$PWD/packed"
 
       - name: Capture the screens
         run: |
@@ -168,9 +172,11 @@ jobs:
           quick="quick-menu quick-menus quick-picker copy-paste"
           tools="transform transform-snapping transform-interpolation transform-warp transform-numeric selection selection-feather selection-saved crop crop-settings recolor layer-opacity guide guide-edit guide-symmetry text text-style canvas-info licences"
           shelf="gallery-select gallery-swipe gallery-new gallery-formats gallery-rename gallery-custom gallery-custom-colour gallery-preview gallery-preview-controls gallery-pinch gallery-drag gallery-more gallery-about gallery-recovery"
-          fitted="interface-small interface-large reference reference-bars reference-image"
-          for screen in gallery canvas brushes layers colors actions adjustments $studio $over $source $library $layers $colours $settings $adjusting $quick $tools $shelf $fitted; do
-            xcrun simctl launch --terminate-running-process "$device" io.github.artcraftandroid.procraft -screen "$screen"
+          # the patches stay applied from one launch to the next: what they scale goes last
+          plugged="prefs-patches prefs-plugins plugin-offer adjust-plugins effect-plugin prefs-patch-on"
+          fitted="reference reference-bars reference-image interface-small interface-large"
+          for screen in gallery canvas brushes layers colors actions adjustments $studio $over $source $library $layers $colours $settings $adjusting $quick $tools $shelf $plugged $fitted; do
+            SIMCTL_CHILD_CAPTURE_PLUGINS="$PWD/packed" xcrun simctl launch --terminate-running-process "$device" io.github.artcraftandroid.procraft -screen "$screen"
             sleep 10
             xcrun simctl io "$device" screenshot "screens/$screen.png"
           done

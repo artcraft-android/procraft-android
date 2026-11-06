@@ -27,13 +27,6 @@ final class Interface {
         ask()
     }
 
-    #if DEBUG
-        /// For a capture: nothing asks after this.
-        func force(_ size: CGFloat) {
-            scale = size
-        }
-    #endif
-
     /// A place on the window, in the interface's points.
     func point(_ p: CGPoint) -> CGPoint {
         CGPoint(x: p.x / scale, y: p.y / scale)

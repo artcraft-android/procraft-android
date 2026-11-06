@@ -102,6 +102,8 @@ enum ScreenCapture {
     private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference"]
     /// What opens over the gallery.
     static var galleryShows: String?
+    /// The Adjustments menu opens on the filters.
+    static var filtersShow = false
     /// A gradient's second stop opens its colours, in this mode.
     static var stopOpens = false
     static var compactMode: ColorMode?
@@ -182,6 +184,42 @@ enum ScreenCapture {
             model.pickLayer(other)
         }
         model.toggle(.layers)
+    }
+
+    /// The folder of plugin files the capture packed.
+    private static var pluginFiles: String? {
+        ProcessInfo.processInfo.environment["CAPTURE_PLUGINS"]
+    }
+
+    /// Brings in the plugin files packed for the captures, as a person's are: read, then kept.
+    private static func importPlugins() {
+        guard let folder = pluginFiles, let names = try? FileManager.default.contentsOfDirectory(atPath: folder) else { return }
+        let plugins = PluginsModel.shared
+        for name in names where name.hasSuffix(".procraftplugin") {
+            guard let bytes = FileManager.default.contents(atPath: folder + "/" + name) else { continue }
+            if plugins.store.inspect(bytes: bytes).refused == nil {
+                _ = plugins.store.install(bytes: bytes)
+            }
+        }
+        plugins.read()
+    }
+
+    /// The patch called `name`, applied.
+    private static func apply(_ name: String) -> PluginInfo? {
+        importPlugins()
+        let plugins = PluginsModel.shared
+        guard let patch = plugins.patches.first(where: { $0.name == name }) else { return nil }
+        plugins.setOn(patch, true)
+        return plugins.patches.first { $0.name == name }
+    }
+
+    /// The interface at `size`, through its patch.
+    private static func sized(_ size: Float) {
+        for control in apply("Interface size")?.controls ?? [] {
+            if case let .slider(slider) = control {
+                PluginsModel.shared.setSlider(slider, size)
+            }
+        }
     }
 
     /// The actions panel on its Prefs tab, turned to `page`.
@@ -290,10 +328,35 @@ enum ScreenCapture {
         case "reference-image":
             model.reference.setOn(true)
             model.reference.setMode(.image)
+        case "prefs-patches":
+            importPlugins()
+            prefs(model, .patches)
+        case "prefs-plugins":
+            importPlugins()
+            prefs(model, .plugins)
+        case "prefs-patch-on":
+            _ = apply("Touch position offset")
+            prefs(model, .patches)
+        case "plugin-offer":
+            if let folder = pluginFiles {
+                PluginsModel.shared.offer(URL(fileURLWithPath: folder + "/extract-lines.procraftplugin")) { _ in }
+            }
+        case "adjust-plugins":
+            importPlugins()
+            filtersShow = true
+            model.toggle(.adjustments)
+        case "effect-plugin":
+            importPlugins()
+            if let l = model.layers.first(where: { $0.current }) {
+                model.fillLayer(l)
+            }
+            if let filter = PluginsModel.shared.store.filters().first {
+                model.startPluginFilter(filter)
+            }
         case "interface-small":
-            Interface.shared.force(0.85)
+            sized(0.85)
         case "interface-large":
-            Interface.shared.force(1.2)
+            sized(1.15)
             model.toggle(.color)
         case "effect-gradient":
             model.startAdjustment(.gradientMap)
