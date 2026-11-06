@@ -61,20 +61,27 @@ struct PinchOpeningOverlay: View {
     @State private var settled: CGFloat = 0
     @State private var opens = false
 
+    /// Its thumbnail on the window, which this is over the whole of: the gallery may show at another
+    /// size.
+    private var thumbnailPlace: CGRect {
+        Interface.shared.onWindow(opening.from)
+    }
+
     /// Following the fingers: grown about the thumbnail's middle and moved with them.
     private var following: CGRect {
-        let from = opening.from
+        let from = thumbnailPlace
+        let k = Interface.shared.scale
         let width = from.width * opening.scale
         let height = from.height * opening.scale
         return CGRect(
-            x: from.midX + opening.moved.width - width / 2, y: from.midY + opening.moved.height - height / 2,
+            x: from.midX + opening.moved.width * k - width / 2, y: from.midY + opening.moved.height * k - height / 2,
             width: width, height: height
         )
     }
 
     /// Fitted to the screen, as Preview shows it.
     private func full(_ screen: CGSize) -> CGRect {
-        let from = opening.from
+        let from = thumbnailPlace
         let fit = min(screen.width / from.width, screen.height / from.height)
         let width = from.width * fit
         let height = from.height * fit
@@ -83,7 +90,7 @@ struct PinchOpeningOverlay: View {
 
     private func shown(_ screen: CGSize) -> CGRect {
         guard let held else { return following }
-        let to = opens ? full(screen) : opening.from
+        let to = opens ? full(screen) : thumbnailPlace
         func along(_ a: CGFloat, _ b: CGFloat) -> CGFloat {
             a + (b - a) * settled
         }
@@ -96,9 +103,9 @@ struct PinchOpeningOverlay: View {
     var body: some View {
         GeometryReader { place in
             let rect = shown(place.size)
-            let reach = max(full(place.size).width - opening.from.width, 1)
+            let reach = max(full(place.size).width - thumbnailPlace.width, 1)
             // how near the whole screen it is: the gallery darkens as far
-            let near = min(max((rect.width - opening.from.width) / reach, 0), 1)
+            let near = min(max((rect.width - thumbnailPlace.width) / reach, 0), 1)
             ZStack(alignment: .topLeading) {
                 Color.black.opacity(near)
                 if let picture {

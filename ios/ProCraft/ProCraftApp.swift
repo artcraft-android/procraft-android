@@ -51,35 +51,16 @@ struct RootView: View {
     }
 
     var body: some View {
-        let interface = Interface.shared
-        let scale = interface.scale
-        let sized = scale != 1
-        ZStack(alignment: .topLeading) {
-            // the window as it is offered, beside the screens and not around them: read from what
-            // they lay out in, a size under 1 would make them bigger, and that bigger again
-            GeometryReader { place in
-                Color.clear.onChange(of: place.size, initial: true) { _, size in
-                    Interface.shared.fit(size)
+        screens
+            .background {
+                GeometryReader { place in
+                    Color.clear.onChange(of: place.size, initial: true) { _, size in
+                        Interface.shared.fit(size)
+                    }
                 }
+                .ignoresSafeArea()
             }
-            .ignoresSafeArea()
-            // as measured, none of this does anything: only a patch's size lays out in another window
-            screens
-                .frame(
-                    width: sized ? interface.window.width / scale : nil,
-                    height: sized ? interface.window.height / scale : nil,
-                    alignment: .topLeading
-                )
-                .scaleEffect(scale, anchor: .topLeading)
-                // scaled, they hang from the corner of the window, whatever size they were laid out
-                .frame(
-                    width: sized ? interface.window.width : nil,
-                    height: sized ? interface.window.height : nil,
-                    alignment: .topLeading
-                )
-        }
-        .ignoresSafeArea(.container, edges: sized ? .all : [])
-        .overlay { PluginAlerts() }
+            .overlay { PluginAlerts() }
         #if DEBUG
         .task { ScreenCapture.start { open = $0 } }
         #endif

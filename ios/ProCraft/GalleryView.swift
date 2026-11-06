@@ -418,7 +418,8 @@ struct GalleryView: View {
     }
 
     var body: some View {
-        GeometryReader { screen in
+        GeometryReader { place in
+            let screen = Interface.shared.screen(place.size)
             let renamed = renaming != nil || about
             ZStack(alignment: .topLeading) {
                 VStack(spacing: 0) {
@@ -432,7 +433,6 @@ struct GalleryView: View {
                         grid(screen.size)
                     }
                 }
-                .padding(.top, Interface.shared.statusBar)
                 .blur(radius: renamed ? renameBlur : 0)
                 .animation(.easeInOut(duration: renamed ? 0.3 : 0.15), value: renamed)
                 overlays(screen.size)
@@ -471,6 +471,7 @@ struct GalleryView: View {
                 }
             }
             .animation(Motion.studioIn, value: model.customOpen)
+            .sized(screen)
         }
         .background(Pc.galleryBackground.ignoresSafeArea())
         // Preview has the whole screen, its close button where the status bar's battery is

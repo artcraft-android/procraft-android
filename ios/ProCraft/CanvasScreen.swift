@@ -23,7 +23,8 @@ struct CanvasScreen: View {
     }
 
     var body: some View {
-        GeometryReader { screen in
+        GeometryReader { place in
+            let screen = Interface.shared.screen(place.size)
             let right = AppSettings.shared.rightHanded
             let hidden = model.barsHidden
             ZStack(alignment: .topLeading) {
@@ -249,6 +250,7 @@ struct CanvasScreen: View {
             }
             .animation(Motion.bars, value: hidden)
             .animation(model.sideBarShown ? Motion.sideBarIn : Motion.sideBarOut, value: model.sideBarShown)
+            .sized(screen)
         }
         .ignoresSafeArea()
         .fileImporter(isPresented: asked(.file), allowedContentTypes: [.image]) { result in

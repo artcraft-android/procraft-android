@@ -1,11 +1,13 @@
 import Foundation
 import Observation
-import UIKit
+import SwiftUI
 
 /// How big the interface shows, as a patch says (1: as measured). SwiftUI has no density to turn,
-/// so the screens are laid out in a window smaller or larger by this and scaled to fill the real
-/// one: their points are this much bigger than the window's. A view drawing pixels (the canvas's)
-/// is scaled with them, and takes this many more pixels to its point to stay at the screen's own.
+/// so each screen is laid out in a window smaller or larger by this and scaled to fill the real one
+/// (`sized`): their points are this much bigger than the window's. A view drawing pixels (the
+/// canvas's) is scaled with them, and takes this many more pixels to its point to stay at the
+/// screen's own. It is done inside each screen's reader of its geometry, which pins its corner: done
+/// around them it goes by the safe area, and a size under 1 grows what measures the window.
 @Observable
 final class Interface {
     static let shared = Interface()
@@ -30,13 +32,6 @@ final class Interface {
         ask()
     }
 
-    /// What the status bar takes from the top of a screen that shows it, in the interface's points.
-    /// None as measured: the safe area sees to it, which a size of a patch's lays out past.
-    var statusBar: CGFloat {
-        guard scale != 1 else { return 0 }
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        return (scenes.first?.keyWindow?.safeAreaInsets.top ?? 0) / scale
-    }
 
     /// A place on the window, in the interface's points.
     func point(_ p: CGPoint) -> CGPoint {
@@ -50,6 +45,28 @@ final class Interface {
     /// The way back: a place in the interface's points, on the window.
     func onWindow(_ p: CGPoint) -> CGPoint {
         CGPoint(x: p.x * scale, y: p.y * scale)
+    }
+
+    func onWindow(_ r: CGRect) -> CGRect {
+        CGRect(x: r.minX * scale, y: r.minY * scale, width: r.width * scale, height: r.height * scale)
+    }
+
+    /// A screen `size` points on the window, in the interface's points.
+    func screen(_ size: CGSize) -> InterfaceScreen {
+        InterfaceScreen(size: CGSize(width: size.width / scale, height: size.height / scale))
+    }
+}
+
+/// A screen as what is on it sees it.
+struct InterfaceScreen {
+    let size: CGSize
+}
+
+extension View {
+    /// Laid out in `screen`, then scaled to fill what it came from. As measured, this changes nothing.
+    func sized(_ screen: InterfaceScreen) -> some View {
+        frame(width: screen.size.width, height: screen.size.height, alignment: .topLeading)
+            .scaleEffect(Interface.shared.scale, anchor: .topLeading)
     }
 }
 
