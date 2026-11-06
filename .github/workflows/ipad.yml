@@ -52,6 +52,71 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # plugin filters' GPU path on Metal, which nothing else here runs it on. A test with no GPU says
+  # "skipped" and passes, so this job's colour means nothing: its summary says what ran. The hostile
+  # tests are ignored elsewhere to spare a machine's driver; a runner has none to spare, so they run
+  # here, cut off if a guard fails to.
+  metal:
+    name: Plugin filters on Metal
+    if: ${{ !github.event.repository.private }}
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ipad-metal
+
+      - name: The Metal device
+        run: |
+          cat >device.swift <<'SWIFT'
+          import Metal
+          if let d = MTLCreateSystemDefaultDevice() {
+              print("Metal device: \(d.name), unified memory \(d.hasUnifiedMemory), Apple7 \(d.supportsFamily(.apple7))")
+          } else {
+              print("Metal device: none")
+          }
+          SWIFT
+          xcrun swift device.swift | tee metal.log
+          cat metal.log >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Build the tests
+        run: cargo test -p procraft-gpu -p procraft-core --no-run
+
+      - name: The filter tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test -p procraft-gpu --test plugin_filter -- --nocapture --test-threads=1 2>&1 | tee gpu.log
+          cargo test -p procraft-core plugin_filter -- --nocapture --test-threads=1 2>&1 | tee -a gpu.log
+
+      - name: The hostile filter tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          perl -e 'alarm 420; exec @ARGV' cargo test -p procraft-gpu --test plugin_filter -- --ignored --nocapture --test-threads=1 2>&1 | tee hostile.log
+
+      - name: What ran
+        if: always()
+        run: |
+          for log in gpu.log hostile.log; do
+            [ -f "$log" ] || { echo "$log: none" >>"$GITHUB_STEP_SUMMARY"; continue; }
+            echo "$log: $(grep -c 'skipped:' "$log") skipped" >>"$GITHUB_STEP_SUMMARY"
+            grep -E '^test result|FAILED|panicked|^test .* \.\.\. ' "$log" >>"$GITHUB_STEP_SUMMARY" || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: metal-tests
+          path: "*.log"
+          if-no-files-found: warn
+
   # the app on the iPad mini simulator (the reference's model), each screen captured, to compare
   screens:
     name: iPad screens (simulator)
@@ -103,7 +168,8 @@ jobs:
           quick="quick-menu quick-menus quick-picker copy-paste"
           tools="transform transform-snapping transform-interpolation transform-warp transform-numeric selection selection-feather selection-saved crop crop-settings recolor layer-opacity guide guide-edit guide-symmetry text text-style canvas-info licences"
           shelf="gallery-select gallery-swipe gallery-new gallery-formats gallery-rename gallery-custom gallery-custom-colour gallery-preview gallery-preview-controls gallery-pinch gallery-drag gallery-more gallery-about gallery-recovery"
-          for screen in gallery canvas brushes layers colors actions adjustments $studio $over $source $library $layers $colours $settings $adjusting $quick $tools $shelf; do
+          fitted="interface-small interface-large"
+          for screen in gallery canvas brushes layers colors actions adjustments $studio $over $source $library $layers $colours $settings $adjusting $quick $tools $shelf $fitted; do
             xcrun simctl launch --terminate-running-process "$device" io.github.artcraftandroid.procraft -screen "$screen"
             sleep 10
             xcrun simctl io "$device" screenshot "screens/$screen.png"
