@@ -700,6 +700,10 @@ impl Interface {
             Popover::Layers => bar.rect(BarButton::Layers),
             Popover::Colour => bar.rect(BarButton::Colour),
         };
+        // it opens as the adjustments, however it was left
+        if self.open != Some(Popover::Adjustments) {
+            self.adjustments.showing_filters = false;
+        }
         if let Some(open) = self.open {
             self.popover(&ctx, session, open, anchor(open), info.tool, &mut backdrops);
         }
@@ -1576,6 +1580,21 @@ impl Interface {
         session.adjustment_start(a);
     }
 
+    /// Opens the plugin's filter `id` on the current layer, as [`Self::start_adjustment`] does. The
+    /// artwork is saved first, the first time in a session.
+    fn start_plugin_filter(&mut self, session: &CanvasSession, id: String) {
+        if !self.takes_changes(session) {
+            return;
+        }
+        self.switch_modes(session, ModeButton::Adjustment);
+        self.open = None;
+        session.set_pick_next(false);
+        let plugins = std::sync::Arc::clone(&self.prefs.plugins);
+        if let Some(why) = session.plugin_filter_start(plugins, id, self.artwork_dir.clone()) {
+            self.overlays.notice(why, true);
+        }
+    }
+
     /// Ends the open adjustment: `commit` keeps it (and says so), otherwise the layer goes back.
     fn end_adjustment(&mut self, session: &CanvasSession, commit: bool) {
         self.adjustments.menu_at = None;
@@ -2026,9 +2045,20 @@ impl Interface {
                 rect
             }
             Popover::Adjustments => {
-                let (shown, tapped) = crate::adjustments::menu(ctx, &mut self.look, button, backdrops);
-                if let Some(a) = tapped {
-                    self.start_adjustment(session, a);
+                use crate::adjustments::MenuRow;
+                let filters = self.prefs.plugins.filters();
+                let turned = self.adjustments.showing_filters && !filters.is_empty();
+                let (shown, tapped) =
+                    crate::adjustments::menu(ctx, &mut self.look, button, backdrops, &filters, turned);
+                match tapped {
+                    Some(MenuRow::Open(a)) => self.start_adjustment(session, a),
+                    Some(MenuRow::Plugins) => self.adjustments.showing_filters = true,
+                    Some(MenuRow::Back) => self.adjustments.showing_filters = false,
+                    Some(MenuRow::Filter(id)) => {
+                        self.adjustments.showing_filters = false;
+                        self.start_plugin_filter(session, id);
+                    }
+                    None => {}
                 }
                 shown
             }

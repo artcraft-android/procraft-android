@@ -258,6 +258,9 @@ impl State {
     /// Ends an open adjustment: `commit` keeps it as one undo step, otherwise the layer goes back.
     pub(crate) fn end_adjustment(&mut self, commit: bool) {
         let within = if commit && self.adjusting { self.changed_since_begin() } else { None };
+        if self.heed_filter_run() {
+            return;
+        }
         self.pencil = false;
         self.cloning = false;
         self.clone_source = None;
@@ -274,7 +277,8 @@ impl State {
                 Some(Filter::Zoom { .. }) => None,
                 _ => Some("adjustment"),
             };
-            if let (true, Some(name)) = (commit, name) {
+            let filter = self.filters.close();
+            if let (true, Some(name)) = (commit, filter.as_deref().or(name)) {
                 canvas.name_next_step(name);
             }
             // only where it changed is kept
@@ -686,6 +690,11 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         if !st.adjusting {
+            return;
+        }
+        // back from it, a plugin's filter draws as it does on any change
+        if !original && st.draw_filter() {
+            self.shared.frame(st);
             return;
         }
         // nothing sharpened is the layer as it was

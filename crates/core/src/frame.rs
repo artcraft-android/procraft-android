@@ -142,6 +142,7 @@ impl State {
                 self.frames += 1;
             }
         }
+        self.heed_filter_run();
     }
 }
 

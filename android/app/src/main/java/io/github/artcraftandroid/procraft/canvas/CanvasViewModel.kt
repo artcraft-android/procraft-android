@@ -717,6 +717,10 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var selectionThreshold by mutableFloatStateOf(transformPrefs.getFloat(SELECTION_THRESHOLD, 0.5f))
         private set
 
+    /** The plugin's filter open, for its panel: its name and its controls. */
+    var pluginFilter by mutableStateOf<io.github.artcraftandroid.procraft.core.PluginFilterShown?>(null)
+        private set
+
     /** The adjustment open on the current layer, and its values. */
     var adjustment by mutableStateOf<Adjustment?>(null)
         private set
@@ -5500,6 +5504,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private fun readAdjust() {
         val a = session?.adjustmentShown() ?: return
         adjustment = a.adjustment
+        pluginFilter = a.plugin
         adjustAmount = a.amount
         adjustPencil = a.pencil
         adjustPreview = a.preview
@@ -5555,6 +5560,55 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         readAdjust()
         // cloning paints with the brush: its sliders show
         if (a == Adjustment.CLONE) readSliders()
+    }
+
+    /**
+     * Opens the plugin's filter [filter] on the current layer. The core saves the artwork ahead of the
+     * session's first one and compiles it, which isn't for the main thread.
+     */
+    fun startPluginFilter(filter: io.github.artcraftandroid.procraft.core.PluginInfo) {
+        val s = session ?: return
+        if (!currentTakesChanges()) return
+        switchModes(ModeButton.Adjustment)
+        if (panel == Panel.ADJUSTMENTS) panelFading = true
+        panel = Panel.NONE
+        val dir = artworkDir?.path
+        viewModelScope.launch {
+            val why = withContext(Dispatchers.IO) { s.pluginFilterStart(plugins, filter.id, dir) }
+            if (why != null) showNotice(why, warning = true)
+            adjustModesOpen = false
+            liquifyPopup = 0
+            readAdjust()
+            refresh()
+            // stopped already: no panel comes up to look for that
+            if (adjustment == null) s.takeFailure()?.let { showNotice(it, warning = true) }
+        }
+    }
+
+    fun setPluginFilterSlider(key: String, value: Float) {
+        session?.pluginFilterSlider(key, value, false)
+        readAdjust()
+    }
+
+    /** The finger left the slider [key]: a filter too slow to follow it redraws now. */
+    fun letGoPluginFilter(key: String) {
+        val slider = pluginFilter?.controls?.firstNotNullOfOrNull { (it as? io.github.artcraftandroid.procraft.core.PluginControl.Slider)?.control?.takeIf { s -> s.key == key } }
+        if (slider != null) session?.pluginFilterSlider(key, slider.value, true)
+    }
+
+    fun setPluginFilterSwitch(key: String, on: Boolean) {
+        session?.pluginFilterSwitch(key, on)
+        readAdjust()
+    }
+
+    /** A filter that stopped was closed by the core, which says why. */
+    fun checkPluginFilter() {
+        val s = session ?: return
+        if (adjustment != Adjustment.PLUGIN || s.adjustmentShown().adjustment != null) return
+        s.takeFailure()?.let { showNotice(it, warning = true) }
+        adjustMenuAt = null
+        readAdjust()
+        refresh()
     }
 
     /** Ends the adjustment: [commit] keeps it as one undo step, otherwise the layer goes back. */

@@ -65,6 +65,12 @@ import io.github.artcraftandroid.procraft.core.GlitchKind
 import io.github.artcraftandroid.procraft.core.HalftoneKind
 import io.github.artcraftandroid.procraft.core.NoiseKind
 import io.github.artcraftandroid.procraft.core.PerspectiveKind
+import io.github.artcraftandroid.procraft.core.PluginControl
+import io.github.artcraftandroid.procraft.core.PluginInfo
+import io.github.artcraftandroid.procraft.core.PluginSlider
+import io.github.artcraftandroid.procraft.core.pluginSliderAlong
+import io.github.artcraftandroid.procraft.core.pluginSliderAt
+import io.github.artcraftandroid.procraft.core.pluginSliderShown
 import io.github.artcraftandroid.procraft.core.QuickShapeKind
 import io.github.artcraftandroid.procraft.core.LiquifyKind
 import kotlin.math.roundToInt
@@ -77,32 +83,58 @@ private val HsbPanelFill get() = if (Pc.light) Color(0xF7F1F1F1) else Color(0xF7
 private val HsbLabel get() = if (Pc.light) Color(0xFF595959) else Color(0xFF808080)
 private val HsbValue get() = if (Pc.light) Color(0xFF363636) else Color(0xFFEDEDED)
 
-/** The adjustments menu hanging from its button, in groups: colour, blurs, effects, painting. */
+/** A row of the adjustments menu's groups. */
+@Composable
+private fun MenuRow(label: String, onTap: () -> Unit) {
+    Box(
+        Modifier.fillMaxWidth().height(44.dp).tap(onTap).padding(start = 15.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(label, color = MenuText, fontSize = 17.sp, maxLines = 1)
+    }
+}
+
+/**
+ * The adjustments menu hanging from its button, in groups: colour, blurs, effects, painting. With a
+ * filter imported, a group more: a row that turns the menu to the filters. With none, it isn't there.
+ */
 @Composable
 fun AdjustmentsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier) {
+    val filters = remember { vm.plugins.filters() }
+    var showFilters by remember { mutableStateOf(false) }
     Popover(330.dp, arrowX, modifier) {
         // a 52 header, the title's capitals from 28.5 below the panel's top; the groups 8 into the
         // list under it
         Box(Modifier.fillMaxWidth().height(52.dp).padding(start = 24.dp, top = 22.5.dp)) {
-            Text("Adjustments", color = Pc.PanelTitle, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(if (showFilters) "Plugins" else "Adjustments", color = Pc.PanelTitle, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1)
         }
         Column(
             Modifier.verticalScroll(rememberScrollState()).padding(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            for (group in Adjustment.groups) {
-                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Pc.ActionsGroup)) {
-                    group.forEachIndexed { i, a ->
-                        if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
-                        Box(
-                            Modifier.fillMaxWidth().height(44.dp).tap { vm.startAdjustment(a) }.padding(start = 15.dp),
-                            contentAlignment = Alignment.CenterStart,
-                        ) {
-                            Text(a.label, color = MenuText, fontSize = 17.sp, maxLines = 1)
-                        }
-                    }
+            if (showFilters) {
+                MenuGroup(listOf<PluginInfo?>(null) + filters) { filter ->
+                    if (filter == null) MenuRow("Adjustments") { showFilters = false } else MenuRow(filter.name) { vm.startPluginFilter(filter) }
+                }
+            } else {
+                for (group in Adjustment.groups) {
+                    MenuGroup(group) { a -> MenuRow(a.label) { vm.startAdjustment(a) } }
+                }
+                if (filters.isNotEmpty()) {
+                    MenuGroup(listOf("Plugins")) { label -> MenuRow(label) { showFilters = true } }
                 }
             }
+        }
+    }
+}
+
+/** One of the adjustments menu's groups: [rows] apart, on its card. */
+@Composable
+private fun <T> MenuGroup(rows: List<T>, row: @Composable (T) -> Unit) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Pc.ActionsGroup)) {
+        rows.forEachIndexed { i, item ->
+            if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+            row(item)
         }
     }
 }
@@ -141,7 +173,7 @@ fun AdjustmentBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
                 // drawn in a 32 frame, shown as it is
                 Icon(a.icon(), contentDescription = null, tint = ModeText, modifier = Modifier.requiredSize(32.dp))
             }
-            Text(a.label, color = ModeText, fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(vm.pluginFilter?.name ?: a.label, color = ModeText, fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1)
             if (a.swiped) {
                 Spacer(Modifier.width(3.dp))
                 Text("${(vm.adjustAmount * 100).roundToInt()}%", color = ModeText, fontSize = 14.sp, maxLines = 1)
@@ -215,6 +247,7 @@ private fun Adjustment.icon() = when (this) {
     Adjustment.CHROMATIC_ABERRATION -> PcIcons.AdjustChromatic
     Adjustment.LIQUIFY -> PcIcons.AdjustLiquify
     Adjustment.CLONE -> PcIcons.AdjustClone
+    Adjustment.PLUGIN -> PcIcons.Adjustments
 }
 
 /**
@@ -1130,8 +1163,9 @@ internal fun shown(v: Float, max: Boolean = false) = when {
  * 0..1. A [chip] value sits on a rounded chip (one that can be typed: [onChip] opens its keypad).
  */
 @Composable
-internal fun OptionSlider(label: String, value: Float, shown: String, width: Dp, both: Boolean = false, labelColor: Color = HsbLabel, chip: Boolean = false, onChip: (() -> Unit)? = null, onChange: (Float) -> Unit) {
+internal fun OptionSlider(label: String, value: Float, shown: String, width: Dp, both: Boolean = false, labelColor: Color = HsbLabel, chip: Boolean = false, onChip: (() -> Unit)? = null, onLetGo: () -> Unit = {}, onChange: (Float) -> Unit) {
     val change by rememberUpdatedState(onChange)
+    val letGo by rememberUpdatedState(onLetGo)
     Column(Modifier.width(width).height(54.dp)) {
         Row(Modifier.fillMaxWidth().padding(start = 10.dp, end = 15.dp, top = 6.dp)) {
             Text(label, color = labelColor, fontSize = 16.sp, maxLines = 1, modifier = Modifier.weight(1f))
@@ -1159,6 +1193,7 @@ internal fun OptionSlider(label: String, value: Float, shown: String, width: Dp,
                         change(at(c.position.x))
                         c.consume()
                     }
+                    letGo()
                 }
             }.drawBehind {
                 val y = size.height / 2f
@@ -1275,6 +1310,50 @@ fun BloomPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
             OptionSlider("Burn", vm.bloomBurn, shown(vm.bloomBurn, max = true), 500.dp) { vm.setBloomValue(2, it) }
         }
     }
+}
+
+/**
+ * A plugin's filter's panel: one for all of them, its controls as the file lists them. A slider goes
+ * in as it moves. A filter that stops is closed by the core, so this looks for that while it is up.
+ */
+@Composable
+fun PluginFilterPanel(vm: CanvasViewModel, modifier: Modifier = Modifier) {
+    val controls = vm.pluginFilter?.controls ?: return
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(150)
+            vm.checkPluginFilter()
+        }
+    }
+    val rows = controls.size.coerceAtLeast(1)
+    OptionsPanel(532.dp, 41.dp + 54.dp * rows + 8.5.dp * (rows - 1), modifier, 24.dp) {
+        Column(Modifier.width(500.dp), verticalArrangement = Arrangement.spacedBy(8.5.dp)) {
+            for (control in controls) {
+                when (control) {
+                    is PluginControl.Slider -> PluginFilterSlider(vm, control.control)
+                    is PluginControl.Switch -> Row(
+                        Modifier.fillMaxWidth().height(54.dp).padding(start = 10.dp, end = 15.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(control.control.label, color = HsbLabel, fontSize = 16.sp, maxLines = 1)
+                        Box(Modifier.tap { vm.setPluginFilterSwitch(control.control.key, !control.control.on) }) { Switch(control.control.on, enabled = true) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PluginFilterSlider(vm: CanvasViewModel, slider: PluginSlider) {
+    OptionSlider(
+        slider.label,
+        pluginSliderAlong(slider, slider.value),
+        pluginSliderShown(slider, slider.value),
+        500.dp,
+        onLetGo = { vm.letGoPluginFilter(slider.key) },
+    ) { along -> vm.setPluginFilterSlider(slider.key, pluginSliderAt(slider, along)) }
 }
 
 private val MoreFill get() = if (Pc.light) Color(0xFFFAFAFA) else Color(0xFF1C1C1C)

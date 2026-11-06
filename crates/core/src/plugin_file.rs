@@ -31,6 +31,8 @@ const MOST_ENTRY: usize = 16 << 20;
 const MOST_UNPACKED: usize = 64 << 20;
 const MOST_MANIFEST: usize = 64 << 10;
 const MOST_SHADER: usize = 64 << 10;
+/// A filter's code in its folder.
+pub(crate) const FILTER_CODE: &str = "filter.wgsl";
 /// How far an entry may shrink in the archive, from this size on: text never gets near it.
 const MOST_RATIO: usize = 100;
 const RATIO_FROM: usize = 64 << 10;
@@ -55,6 +57,7 @@ pub(crate) enum Refusal {
     Described,
     Permissions,
     Code,
+    FilterCode,
     Newer,
     OtherApp,
     NewerInstalled,
@@ -73,6 +76,7 @@ impl Refusal {
             Refusal::Described => "This plugin describes itself wrongly.",
             Refusal::Permissions => "This plugin asks for permissions ProCraft doesn't give.",
             Refusal::Code => "This patch's code can't run in ProCraft.",
+            Refusal::FilterCode => "This filter's code can't run in ProCraft.",
             Refusal::Newer => "This plugin needs a newer ProCraft.",
             Refusal::OtherApp => "This plugin isn't for ProCraft.",
             Refusal::NewerInstalled => "A newer version of this plugin is already imported.",
@@ -410,8 +414,12 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         if !module || hooks.is_empty() || compat.interface.is_none() {
             return Err(Refusal::Described);
         }
-    } else if !files.iter().any(|f| f.path.ends_with(".wgsl") && f.size <= MOST_SHADER) {
-        return Err(Refusal::Described);
+    } else {
+        let code = files.iter().any(|f| f.path == FILTER_CODE && f.size <= MOST_SHADER);
+        let moved = controls.iter().any(|c| !c.key().starts_with(&format!("{id}.")));
+        if !code || moved || compat.interface.is_none() {
+            return Err(Refusal::Described);
+        }
     }
     Ok(Manifest {
         id,
@@ -427,9 +435,19 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     })
 }
 
+/// What a filter's code calls `controls`, in their order: their keys, without the plugin's id.
+pub(crate) fn value_names(controls: &[PluginControl]) -> Vec<String> {
+    controls.iter().map(|control| control.key().rsplit('.').next().unwrap_or("").to_owned()).collect()
+}
+
 /// Whether `data`, listed by `manifest` under `path`, is code that can run, if it is code at all:
-/// checked by reading it, as nothing in it runs until the patch is applied.
+/// checked by reading it, as nothing in it runs until the patch is applied or the filter opened.
 fn code_holds(manifest: &Manifest, path: &str, data: &[u8]) -> bool {
+    if manifest.kind == PluginKind::Filter && path == FILTER_CODE {
+        let text = std::str::from_utf8(data).map_err(|e| e.to_string());
+        let read = text.and_then(|text| procraft_gpu::read_filter(text, &value_names(&manifest.controls)));
+        return read.map_err(|why| log::warn!("a filter's code was refused: {why}")).is_ok();
+    }
     let controls = !manifest.controls.is_empty();
     manifest.kind != PluginKind::Patch || path != MODULE || patch_run::can_run(data, &manifest.hooks, controls)
 }
@@ -476,7 +494,7 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<Package, Refusal> {
             return Err(Refusal::Mismatch);
         }
         if !code_holds(&manifest, &listed.path, &data) {
-            return Err(Refusal::Code);
+            return Err(if manifest.kind == PluginKind::Patch { Refusal::Code } else { Refusal::FilterCode });
         }
         files.push((listed.path.clone(), data));
     }
@@ -634,6 +652,48 @@ pub(crate) fn read_code(dir: &Path, id: &str, version: &str) -> Option<(Vec<Hook
     Some((manifest.hooks, read_capped(&folder.join(MODULE), MOST_MODULE)?))
 }
 
+/// The manifest and the code of the filter `id` at `version` in `dir`, if all of it holds up as it
+/// did.
+pub(crate) fn read_filter_code(dir: &Path, id: &str, version: &str) -> Option<(Manifest, String)> {
+    let folder = dir.join(id).join(version);
+    let manifest = read_folder(&folder, id, version)?;
+    let text = String::from_utf8(read_capped(&folder.join(FILTER_CODE), MOST_SHADER)?).ok()?;
+    Some((manifest, text))
+}
+
+/// Where it is written down which filter is on trial: compiling, or not yet drawn. It is there on
+/// a start only if the app ended meanwhile.
+fn trying_note(dir: &Path) -> PathBuf {
+    dir.join("filter-trying")
+}
+
+/// Writes down that filter `id` is on trial, on the disk before anything happens to it.
+pub(crate) fn note_trying(dir: &Path, id: &str) {
+    if let Err(e) = write_replacing(&trying_note(dir), id.as_bytes()) {
+        log::warn!("couldn't note a filter on trial: {e}");
+    }
+}
+
+pub(crate) fn clear_trying(dir: &Path) {
+    let _ = std::fs::remove_file(trying_note(dir));
+}
+
+/// `data` as `path`, on the disk when this returns.
+fn write_replacing(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(data)?;
+    file.sync_all()
+}
+
+/// A filter on trial when the app last ended is written down as stopped, `why`.
+pub(crate) fn settle_trying(dir: &Path, why: &str) {
+    if let Some(id) = read_capped(&trying_note(dir), MOST_STOP_NOTE).and_then(|id| String::from_utf8(id).ok()) {
+        log::warn!("the app ended with a filter on trial: {id}");
+        note_stopped(dir, &id, why);
+    }
+    clear_trying(dir);
+}
+
 /// Where it is written down that patch `id` stopped: beside its folder, which holds only what its
 /// manifest lists.
 fn stopped_note(dir: &Path, id: &str) -> PathBuf {
@@ -722,7 +782,7 @@ pub(crate) fn read_all(dir: &Path) -> Vec<Manifest> {
 }
 
 /// SHA-256 of `data`, in lowercase hex.
-fn sha256(data: &[u8]) -> String {
+pub(crate) fn sha256(data: &[u8]) -> String {
     const K: [u32; 64] = [
         0x428a_2f98,
         0x7137_4491,

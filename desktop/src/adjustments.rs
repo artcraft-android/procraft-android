@@ -6,7 +6,8 @@
 
 use egui::{Align2, Color32, Id, LayerId, Order, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use procraft_core::{
-    AdjustShown, Adjustment, CLONE_PUCK_RADIUS, CanvasSession, PerspectiveKind, adjustment_groups, adjustment_label,
+    AdjustShown, Adjustment, CLONE_PUCK_RADIUS, CanvasSession, PerspectiveKind, PluginInfo, adjustment_groups,
+    adjustment_label,
 };
 
 use crate::icons::{self, Icon};
@@ -48,6 +49,7 @@ fn icon(a: Adjustment) -> &'static Icon {
         Adjustment::ChromaticAberration => &icons::ADJUST_CHROMATIC,
         Adjustment::Liquify => &icons::ADJUST_LIQUIFY,
         Adjustment::Clone => &icons::ADJUST_CLONE,
+        Adjustment::Plugin => &icons::ADJUSTMENTS,
     }
 }
 
@@ -61,18 +63,47 @@ pub enum Asked {
     Reset,
 }
 
+/// What a row of the adjustments menu does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MenuRow {
+    Open(Adjustment),
+    /// The menu turns to the filters imported, or back.
+    Plugins,
+    Back,
+    /// Opens the filter of this id.
+    Filter(String),
+}
+
+/// The menu's groups: the adjustments and, with a filter imported, a group more for the row that
+/// turns to them. With none, it isn't there.
+fn menu_groups(filters: &[PluginInfo], showing_filters: bool) -> Vec<Vec<(String, MenuRow)>> {
+    if showing_filters {
+        let rows = filters.iter().map(|filter| (filter.name.clone(), MenuRow::Filter(filter.id.clone())));
+        return vec![std::iter::once(("Adjustments".to_owned(), MenuRow::Back)).chain(rows).collect()];
+    }
+    let row = |a: &Adjustment| (adjustment_label(*a), MenuRow::Open(*a));
+    let mut groups: Vec<Vec<(String, MenuRow)>> =
+        adjustment_groups().iter().map(|group| group.iter().map(row).collect()).collect();
+    if !filters.is_empty() {
+        groups.push(vec![("Plugins".to_owned(), MenuRow::Plugins)]);
+    }
+    groups
+}
+
 /// The adjustments menu hanging from its `button`, in groups: colour, blurs, effects, painting.
-/// Returns where it is (points) and the adjustment tapped.
+/// Returns where it is (points) and the row tapped.
 pub fn menu(
     ctx: &egui::Context,
     look: &mut Look,
     button: Rect,
     backdrops: &mut Vec<f32>,
-) -> (Rect, Option<Adjustment>) {
+    filters: &[PluginInfo],
+    showing_filters: bool,
+) -> (Rect, Option<MenuRow>) {
     let screen = ctx.content_rect();
     let (left, arrow_x) = panel::place(ctx, MENU_WIDTH, button.center().x);
     let top = screen.top() + pc::BAR_HEIGHT;
-    let groups = adjustment_groups();
+    let groups = menu_groups(filters, showing_filters);
     let rows: f32 = groups.iter().map(|g| g.len() as f32 * 44.0 + g.len().saturating_sub(1) as f32).sum::<f32>()
         + 10.0 * groups.len().saturating_sub(1) as f32;
     let content = panel::ARROW_HEIGHT + 52.0 + 8.0 + rows + 10.0;
@@ -86,7 +117,8 @@ pub fn menu(
         // a 52 header, the title's capitals from 28.5 below the panel's top; the groups 8 into the
         // list under it
         let title = pos2(body.left() + 24.0, body.top() + 22.5);
-        text(ui.painter(), title, Align2::LEFT_TOP, "Adjustments", 24.0, Weight::Bold, argb(panel::PANEL_TITLE));
+        let heading = if showing_filters { "Plugins" } else { "Adjustments" };
+        text(ui.painter(), title, Align2::LEFT_TOP, heading, 24.0, Weight::Bold, argb(panel::PANEL_TITLE));
         let list = Rect::from_min_max(pos2(body.left() + 10.0, body.top() + 52.0 + 8.0), body.max - vec2(10.0, 10.0));
         ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
             ScrollArea::vertical()
@@ -101,7 +133,7 @@ pub fn menu(
                         let height = group.len() as f32 * 44.0 + group.len().saturating_sub(1) as f32;
                         let (card, _) = ui.allocate_exact_size(vec2(list.width(), height), Sense::hover());
                         ui.painter().rect_filled(card, 13, argb(GROUP_FILL));
-                        for (i, &a) in group.iter().enumerate() {
+                        for (i, (label, tap)) in group.iter().enumerate() {
                             let row = Rect::from_min_size(
                                 pos2(card.left(), card.top() + i as f32 * 45.0),
                                 vec2(card.width(), 44.0),
@@ -112,17 +144,9 @@ pub fn menu(
                                 ui.painter().rect_filled(line, 0, argb(GROUP_LINE));
                             }
                             let at = pos2(row.left() + 15.0, row.center().y);
-                            text(
-                                ui.painter(),
-                                at,
-                                Align2::LEFT_CENTER,
-                                &adjustment_label(a),
-                                17.0,
-                                Weight::Regular,
-                                argb(MENU_TEXT),
-                            );
+                            text(ui.painter(), at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(MENU_TEXT));
                             if ui.interact(row, ui.scope_id().with(("adjustment", k, i)), Sense::click()).clicked() {
-                                tapped = Some(a);
+                                tapped = Some(tap.clone());
                             }
                         }
                     }
@@ -138,6 +162,8 @@ pub struct Adjustments {
     pub menu_at: Option<Pos2>,
     /// The Layer / Pencil choice is open (a touch on the canvas closes it).
     pub modes_open: bool,
+    /// The menu has turned to the filters imported.
+    pub showing_filters: bool,
     /// The effect adjustments' toolbars.
     toolbars: crate::adjust_panels::Toolbars,
 }
@@ -341,7 +367,7 @@ fn bar_in(ui: &Ui, look: &mut Look, shown: &AdjustShown, a: Adjustment, band: Re
     let painter = ui.painter();
     painter.rect_filled(band, 0, argb(MODE_BAR));
     let ink = argb(MODE_TEXT);
-    let label = adjustment_label(a);
+    let label = shown.plugin.as_ref().map_or_else(|| adjustment_label(a), |filter| filter.name.clone());
     let swiped = procraft_core::adjustment_swiped(a);
     let paintable = procraft_core::adjustment_paintable(a);
     let amount = format!("{}%", (shown.amount * 100.0).round() as i32);
@@ -543,4 +569,49 @@ fn hsb_row(ui: &Ui, row: Rect, label: &str, value: f32, track: Track) -> Option<
     let response = ui.interact(bar, ui.scope_id().with(("hsb", label)), Sense::click_and_drag());
     let p = response.interact_pointer_pos()?;
     Some(((p.x - bar.left()) / bar.width().max(1.0)).clamp(0.0, 1.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use procraft_core::{PluginKind, PluginSource};
+
+    use super::*;
+
+    fn filter() -> PluginInfo {
+        PluginInfo {
+            id: "org.example.lines".to_owned(),
+            name: "Lines".to_owned(),
+            description: String::new(),
+            source: PluginSource::File,
+            kind: PluginKind::Filter,
+            version: "1.0.0".to_owned(),
+            publisher: String::new(),
+            experimental: true,
+            on: true,
+            on_key: String::new(),
+            problem: None,
+            controls: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn with_no_filter_the_menu_is_the_adjustments_alone() {
+        let groups = menu_groups(&[], false);
+        assert_eq!(groups.len(), adjustment_groups().len());
+        assert!(groups.iter().flatten().all(|(_, row)| matches!(row, MenuRow::Open(_))));
+    }
+
+    #[test]
+    fn a_filter_adds_one_row_and_that_turns_the_menu_to_them() {
+        let filters = [filter()];
+        let groups = menu_groups(&filters, false);
+        assert_eq!(groups.len(), adjustment_groups().len() + 1);
+        assert_eq!(groups.last().unwrap(), &vec![("Plugins".to_owned(), MenuRow::Plugins)]);
+        let turned = menu_groups(&filters, true);
+        let rows = [
+            ("Adjustments".to_owned(), MenuRow::Back),
+            ("Lines".to_owned(), MenuRow::Filter("org.example.lines".to_owned())),
+        ];
+        assert_eq!(turned, vec![rows.to_vec()]);
+    }
 }

@@ -542,6 +542,12 @@ impl Canvas {
         self.filter_run.take()
     }
 
+    /// Tells of a filter's draw as if it had gone so: for tests of what comes after.
+    #[doc(hidden)]
+    pub fn tell_filter_run(&mut self, run: FilterRun) {
+        self.filter_run = Some(run);
+    }
+
     /// Draws a filter: all of it, or the layer goes back as it was and the run says why.
     pub(super) fn plugin_filter(
         &mut self,
@@ -585,10 +591,13 @@ impl Canvas {
             waited.map(|_| ()).map_err(|_| FilterRun::Cut)
         };
 
-        // what came before goes first: the time from here on is the filter's
+        // what came before goes first, and however long that takes isn't held against the filter
         self.send_now(gpu, encoder, uniforms);
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         let mut run = || -> Result<Duration, FilterRun> {
-            finished(gpu)?;
+            if gpu.is_lost() {
+                return Err(FilterRun::Lost);
+            }
             let started = Instant::now();
             if filter.program.loops {
                 let probe = &filter.program.probe_target;

@@ -294,6 +294,7 @@ fun AppRoot(vm: CanvasViewModel) {
                             Adjustment.CHROMATIC_ABERRATION -> ChromaticPanel(vm, Modifier)
                             Adjustment.PERSPECTIVE_BLUR -> PerspectivePanel(vm, Modifier)
                             Adjustment.LIQUIFY -> LiquifyPanel(vm, maxWidth, maxHeight, Modifier)
+                            Adjustment.PLUGIN -> PluginFilterPanel(vm, Modifier)
                             else -> Unit
                         }
                     }
@@ -371,6 +372,7 @@ private fun BlockedDialog(vm: CanvasViewModel) {
 private val BottomPanels = setOf(
     Adjustment.HSB, Adjustment.COLOR_BALANCE, Adjustment.CURVES, Adjustment.GRADIENT_MAP, Adjustment.GLITCH, Adjustment.NOISE,
     Adjustment.BLOOM, Adjustment.HALFTONE, Adjustment.CHROMATIC_ABERRATION, Adjustment.PERSPECTIVE_BLUR, Adjustment.LIQUIFY,
+    Adjustment.PLUGIN,
 )
 
 /**

@@ -97,6 +97,8 @@ pub struct AdjustShown {
     pub perspective_puck: Option<Vec<f32>>,
     /// Anything was changed since it opened (or was last kept).
     pub changed: bool,
+    /// A plugin's filter: its name, and its controls for one panel to draw.
+    pub plugin: Option<crate::plugin_filter::PluginFilterShown>,
 }
 
 pub(crate) struct Adjusting {
@@ -263,6 +265,25 @@ impl Adjusting {
         self.open == Some(Adjustment::ChromaticAberration) && self.chroma_kind == ChromaticKind::Displace
     }
 
+    /// A plugin's filter is open, as if just begun.
+    pub(crate) fn open_plugin(&mut self) {
+        self.open = Some(Adjustment::Plugin);
+        self.pencil = false;
+        self.preview = false;
+        self.touched = false;
+    }
+
+    /// The plugin's filter open has stopped.
+    pub(crate) fn close_plugin(&mut self) {
+        self.open = None;
+        self.preview = false;
+    }
+
+    /// Something open was changed.
+    pub(crate) fn touch(&mut self) {
+        self.touched = true;
+    }
+
     /// Open, and changed since it opened: undo takes that back.
     pub(crate) fn touched(&self) -> bool {
         self.open.is_some() && self.touched
@@ -273,7 +294,7 @@ impl Adjusting {
             Some(Adjustment::Hsb) => self.hsb.iter().any(|&v| v != 0.5),
             Some(Adjustment::ColorBalance) => self.balance.iter().any(|&v| v != 0.5),
             Some(Adjustment::Curves) => self.curves.iter().any(|c| *c != straight()),
-            Some(Adjustment::GradientMap) => true,
+            Some(Adjustment::GradientMap | Adjustment::Plugin) => true,
             Some(Adjustment::PerspectiveBlur) => self.amount > 0.0 || !self.perspective_before.is_empty(),
             _ => self.amount > 0.0,
         }
@@ -312,6 +333,7 @@ impl Adjusting {
             perspective_kind: self.perspective_kind,
             perspective_puck: self.perspective_puck(view, middle),
             changed: self.changed(),
+            plugin: None,
         }
     }
 
@@ -504,6 +526,7 @@ impl CanvasSession {
         let begun = match adjustment {
             Adjustment::Liquify => self.liquify_begin(),
             Adjustment::Clone => self.clone_begin(),
+            Adjustment::Plugin => return self.plugin_filter_again(),
             _ => self.adjust_begin(),
         };
         if !begun {
@@ -560,7 +583,8 @@ impl CanvasSession {
     /// What the open adjustment shows.
     pub fn adjustment_shown(&self) -> AdjustShown {
         let st = self.shared.lock();
-        st.adjust.shown(st.view, Vec2::new(st.doc.width() as f32 / 2.0, st.doc.height() as f32 / 2.0))
+        let shown = st.adjust.shown(st.view, Vec2::new(st.doc.width() as f32 / 2.0, st.doc.height() as f32 / 2.0));
+        AdjustShown { plugin: st.filters.shown(), ..shown }
     }
 
     /// The amount moved by `step` (a swipe's), within 0..1.
@@ -743,8 +767,13 @@ impl CanvasSession {
 
     /// Keeps what the adjustment did as one undo step and starts it again from there.
     pub fn adjustment_apply(&self) {
-        if let Some(open) = self.adjusting(|a, _| a.open) {
-            self.adjustment_again(open, true);
+        match self.adjusting(|a, _| a.open) {
+            // it draws as it opens: opened again, it would go over what it did
+            Some(Adjustment::Plugin) => {
+                self.adjustment_end(true);
+            }
+            Some(open) => self.adjustment_again(open, true),
+            None => {}
         }
     }
 

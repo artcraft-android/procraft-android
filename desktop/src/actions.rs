@@ -1004,9 +1004,10 @@ impl Actions {
     }
 }
 
-/// Whether a card's controls show: a patch's once applied, a filter's while it can do something.
+/// Whether a card's controls show: an extra's always, a patch's once applied. A filter's are on
+/// its own panel.
 fn controls_show(plugin: &PluginInfo) -> bool {
-    plugin.on && plugin.problem.is_none()
+    plugin.on && plugin.problem.is_none() && plugin.kind != PluginKind::Filter
 }
 
 /// A row under a card's controls.
@@ -1014,6 +1015,7 @@ fn controls_show(plugin: &PluginInfo) -> bool {
 enum CardRow {
     Apply,
     Unapply,
+    TurnOn,
     Remove,
 }
 
@@ -1022,6 +1024,10 @@ fn card_rows(plugin: &PluginInfo) -> Vec<CardRow> {
     let mut rows = Vec::new();
     if plugin.kind == PluginKind::Patch {
         rows.push(if plugin.on { CardRow::Unapply } else { CardRow::Apply });
+    }
+    // a filter that stopped stays off until someone asks
+    if plugin.kind == PluginKind::Filter && !plugin.on {
+        rows.push(CardRow::TurnOn);
     }
     if plugin.source == PluginSource::File {
         rows.push(CardRow::Remove);
@@ -1125,13 +1131,16 @@ fn plugin_card(
         let label = match row {
             CardRow::Apply => "Apply",
             CardRow::Unapply => "Unapply",
+            CardRow::TurnOn => "Turn on",
             CardRow::Remove => "Remove",
         };
         let at = pos2(cell.left() + 16.0, cell.center().y);
         text(&painter, at, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
         if ui.interact(cell, ui.scope_id().with(("plugin action", g, r)), Sense::click()).clicked() {
             match row {
-                CardRow::Apply | CardRow::Unapply => changed |= plugins.set_on(plugin.id.clone(), !plugin.on),
+                CardRow::Apply | CardRow::Unapply | CardRow::TurnOn => {
+                    changed |= plugins.set_on(plugin.id.clone(), !plugin.on);
+                }
                 CardRow::Remove if plugins.remove(plugin.id.clone()).is_some() => changed = true,
                 CardRow::Remove => crate::files::say("This couldn't be removed."),
             }

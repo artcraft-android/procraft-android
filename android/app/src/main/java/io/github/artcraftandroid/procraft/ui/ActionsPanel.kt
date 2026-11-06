@@ -614,8 +614,8 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
             Text(plugin.description, color = Pc.ActionsRow, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
             plugin.problem?.let { Text(it, color = Pc.SlideValue, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 4.dp)) }
         }
-        // an extra's always, a patch's once applied, a filter's while it can do something
-        if (plugin.on && plugin.problem == null) {
+        // an extra's always, a patch's once applied; a filter's are on its own panel
+        if (plugin.on && plugin.problem == null && plugin.kind != PluginKind.FILTER) {
             for (control in plugin.controls) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
                 when (control) {
@@ -627,6 +627,11 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
         if (plugin.kind == PluginKind.PATCH) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
             ActionRowView(Act(if (plugin.on) "Unapply" else "Apply") { vm.setPluginOn(plugin, !plugin.on) })
+        }
+        // a filter that stopped stays off until someone asks
+        if (plugin.kind == PluginKind.FILTER && !plugin.on) {
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+            ActionRowView(Act("Turn on") { vm.setPluginOn(plugin, true) })
         }
         if (plugin.source == PluginSource.FILE) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))

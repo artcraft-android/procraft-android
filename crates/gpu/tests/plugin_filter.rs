@@ -122,6 +122,32 @@ fn a_filter_is_kept_to_the_alpha_lock_and_sees_its_neighbours() {
 }
 
 #[test]
+fn a_filter_is_kept_to_the_selection() {
+    let Some(gpu) = gpu() else { return };
+    let (mut canvas, mut doc) = with_a_dot(&gpu, 64);
+    let red = program(
+        &gpu,
+        "fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }",
+        &[],
+    );
+    // the left half chosen: the right half never knows
+    let coverage: Vec<u8> = (0..64 * 64).map(|i| if i % 64 < 32 { 255 } else { 0 }).collect();
+    canvas.set_selection(&gpu, Some(&coverage));
+    let before = layer(&mut canvas, &gpu, &doc);
+    canvas.begin_transform(doc.current());
+    canvas.set_plugin_filter(&red, &[], false);
+    canvas.render(&gpu, &mut doc, None);
+    drew(canvas.take_filter_run());
+    let px = layer(&mut canvas, &gpu, &doc);
+    assert_eq!(at(&px, 64, 10, 32), [255, 0, 0, 255]);
+    assert_eq!(at(&px, 64, 40, 32), at(&before, 64, 40, 32));
+    assert_eq!(at(&px, 64, 60, 2), at(&before, 64, 60, 2));
+    canvas.end_transform(false);
+    canvas.render(&gpu, &mut doc, None);
+    assert_eq!(gpu.errors(), 0);
+}
+
+#[test]
 fn a_filter_with_a_loop_goes_in_pieces_and_comes_out_whole() {
     let Some(gpu) = gpu() else { return };
     let size = 700;
@@ -146,6 +172,25 @@ fn a_filter_with_a_loop_goes_in_pieces_and_comes_out_whole() {
     canvas.end_transform(false);
     canvas.render(&gpu, &mut doc, None);
     assert_eq!(gpu.errors(), 0);
+}
+
+/// What a sample with no loop costs a large layer: run on a device with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn extract_lines_follows_a_finger() {
+    let Some(gpu) = gpu() else { return };
+    let (mut canvas, mut doc) = with_a_dot(&gpu, 2048);
+    let code = include_str!("../../../plugins/extract-lines/filter.wgsl");
+    let filter = program(&gpu, code, &["cut", "soft", "keep_colour"]);
+    canvas.begin_transform(doc.current());
+    for round in 0..4 {
+        canvas.set_plugin_filter(&filter, &[0.15 + round as f32 * 0.1, 0.1, 0.0], false);
+        canvas.render(&gpu, &mut doc, None);
+        let took = drew(canvas.take_filter_run());
+        println!("extract lines, 2048 px, round {round}: {took:?}");
+    }
+    canvas.end_transform(false);
+    canvas.render(&gpu, &mut doc, None);
 }
 
 /// Only on a machine whose graphics driver may be stopped by a broken guard.

@@ -49,8 +49,10 @@ pub(crate) fn moved(key: &str) -> bool {
     MOVED.iter().any(|moved| moved.key == key)
 }
 
-/// What a plugin this app can't yet do anything with says.
-const NEEDS_NEWER: &str = "Needs a newer ProCraft";
+/// Why a filter the app ended on, or that stopped the GPU, is off.
+pub(crate) const STOPPED_DRIVER: &str = "Switched off: it stopped the graphics driver.";
+/// Why a filter whose files no longer hold up can't open.
+const FILTER_DAMAGED: &str = "This filter's files don't hold up.";
 
 /// Where one came from. The route decides this, never the plugin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -140,7 +142,7 @@ pub struct PluginOffer {
 }
 
 impl PluginControl {
-    fn key(&self) -> &str {
+    pub(crate) fn key(&self) -> &str {
         match self {
             PluginControl::Switch { control } => &control.key,
             PluginControl::Slider { control } => &control.key,
@@ -163,8 +165,16 @@ impl PluginControl {
         }
     }
 
-    /// Its value as a patch is told it.
-    fn number(&self) -> f32 {
+    /// Back as it starts.
+    pub(crate) fn back_to_start(&mut self) {
+        match self {
+            PluginControl::Switch { control } => control.on = control.starts,
+            PluginControl::Slider { control } => control.value = control.starts,
+        }
+    }
+
+    /// Its value as a patch or a filter is told it.
+    pub(crate) fn number(&self) -> f32 {
         match self {
             PluginControl::Switch { control } => f32::from(u8::from(control.on)),
             PluginControl::Slider { control } => control.value,
@@ -287,8 +297,7 @@ fn extras() -> Vec<PluginInfo> {
     )]
 }
 
-/// `manifest` as a list entry: a patch unapplied, a filter on. Nothing runs a filter yet, so each
-/// says it needs a newer app.
+/// `manifest` as a list entry: a patch unapplied, a filter on.
 fn from_file(manifest: Manifest) -> PluginInfo {
     let patch = manifest.kind == PluginKind::Patch;
     PluginInfo {
@@ -302,7 +311,7 @@ fn from_file(manifest: Manifest) -> PluginInfo {
         publisher: manifest.publisher,
         experimental: manifest.experimental,
         on: !patch,
-        problem: (!patch).then(|| NEEDS_NEWER.to_owned()),
+        problem: None,
         controls: manifest.controls,
     }
 }
@@ -310,10 +319,17 @@ fn from_file(manifest: Manifest) -> PluginInfo {
 /// What the offer says `manifest` can do.
 fn can_do(manifest: &Manifest) -> String {
     if manifest.kind != PluginKind::Patch {
-        return "This adds a filter. It needs a newer ProCraft, so it won't do anything yet.".to_owned();
+        return "This adds a filter to Adjustments. It can change only the layer you use it on, and can't reach your files or the internet.".to_owned();
     }
     let sentences: Vec<&str> = manifest.hooks.iter().map(|hook| hook.sentence()).collect();
     format!("{} It can't reach your files, your layers or the internet.", sentences.join(" "))
+}
+
+/// A filter whose files have held up again, for opening.
+pub(crate) struct FilterToOpen {
+    pub name: String,
+    pub controls: Vec<PluginControl>,
+    pub code: procraft_gpu::FilterCode,
 }
 
 #[derive(Debug)]
@@ -369,8 +385,10 @@ impl Plugins {
         let files = store.as_deref().map(plugin_file::read_all).unwrap_or_default();
         let mut files: Vec<PluginInfo> = files.into_iter().map(from_file).collect();
         if let Some(store) = &store {
-            for patch in files.iter_mut().filter(|p| p.kind == PluginKind::Patch) {
-                patch.problem = plugin_file::stopped_why(store, &patch.id);
+            plugin_file::settle_trying(store, STOPPED_DRIVER);
+            for plugin in &mut files {
+                plugin.problem = plugin_file::stopped_why(store, &plugin.id);
+                plugin.on &= plugin.kind == PluginKind::Patch || plugin.problem.is_none();
             }
         }
         let list = Listed { bundled: extras(), files, moved: Vec::new(), notice_asked: false };
@@ -473,6 +491,50 @@ impl Plugins {
         Ok(())
     }
 
+    /// The filter `id` as it can be opened; what to tell if it can't.
+    pub(crate) fn filter_to_open(&self, id: &str) -> Result<FilterToOpen, String> {
+        let list = self.listed();
+        let plugin = list.files.iter().find(|p| p.id == id && p.kind == PluginKind::Filter);
+        let plugin = plugin.ok_or_else(|| FILTER_DAMAGED.to_owned())?;
+        if let Some(problem) = &plugin.problem {
+            return Err(problem.clone());
+        }
+        let store = self.store.as_deref().ok_or_else(|| FILTER_DAMAGED.to_owned())?;
+        let read = plugin_file::read_filter_code(store, id, &plugin.version);
+        let (manifest, text) = read.ok_or_else(|| FILTER_DAMAGED.to_owned())?;
+        let code = procraft_gpu::read_filter(&text, &plugin_file::value_names(&manifest.controls));
+        let code = code.map_err(|why| {
+            log::warn!("a kept filter's code was refused: {why}");
+            FILTER_DAMAGED.to_owned()
+        })?;
+        Ok(FilterToOpen { name: manifest.name, controls: manifest.controls, code })
+    }
+
+    /// Filter `id` is on trial: if the app ends before it has drawn, it is put down to it.
+    pub(crate) fn filter_trying(&self, id: &str) {
+        if let Some(store) = &self.store {
+            plugin_file::note_trying(store, id);
+        }
+    }
+
+    /// No filter is on trial any more.
+    pub(crate) fn filter_tried(&self) {
+        if let Some(store) = &self.store {
+            plugin_file::clear_trying(store);
+        }
+    }
+
+    /// Switches filter `id` off, `why` on its card and through a restart, until someone turns it on.
+    pub(crate) fn stop_filter(&self, id: &str, why: &str) {
+        if let Some(store) = &self.store {
+            plugin_file::note_stopped(store, id, why);
+        }
+        if let Some(filter) = self.listed().files.iter_mut().find(|p| p.id == id) {
+            filter.on = false;
+            filter.problem = Some(why.to_owned());
+        }
+    }
+
     /// Whether what is here lets a plugin of `manifest` in: an older file doesn't replace a newer,
     /// and a moved setting has one holder.
     fn can_take(&self, manifest: &Manifest) -> Result<(), Refusal> {
@@ -515,6 +577,14 @@ impl Plugins {
         list.bundled.iter().chain(filters).cloned().collect()
     }
 
+    /// The filters that can be opened now: the Adjustments menu's, which has none to show with none
+    /// imported.
+    pub fn filters(&self) -> Vec<PluginInfo> {
+        let list = self.listed();
+        let ready = |p: &&PluginInfo| p.kind == PluginKind::Filter && p.on && p.problem.is_none();
+        list.files.iter().filter(ready).cloned().collect()
+    }
+
     /// A value read back from where it was kept, as text. A key nothing has, or anything that
     /// isn't its kind of value, leaves things as they are. A patch that stopped stays off, whatever
     /// its flag says, until someone asks it to run.
@@ -522,7 +592,7 @@ impl Plugins {
         let mut list = self.listed();
         if let Some(plugin) = list.files.iter_mut().find(|p| p.on_key == key) {
             if let Ok(on) = value.parse::<bool>() {
-                plugin.on = on && (plugin.kind != PluginKind::Patch || plugin.problem.is_none());
+                plugin.on = on && plugin.problem.is_none();
             }
             return;
         }
@@ -596,12 +666,12 @@ impl Plugins {
         let mut list = self.listed();
         let Some(plugin) = list.files.iter_mut().find(|p| p.id == id) else { return false };
         plugin.on = on;
+        plugin.problem = None;
+        if let Some(store) = &self.store {
+            plugin_file::clear_stopped(store, &id);
+        }
         if plugin.kind == PluginKind::Patch {
             self.hooks.take_off(&id);
-            plugin.problem = None;
-            if let Some(store) = &self.store {
-                plugin_file::clear_stopped(store, &id);
-            }
             self.start(plugin);
         }
         true
@@ -975,7 +1045,7 @@ mod tests {
         let card = filters(&plugins).remove(0);
         assert_eq!(card.source, PluginSource::File);
         assert_eq!((card.version.as_str(), card.publisher.as_str()), ("1.0.0", "Someone"));
-        assert_eq!(card.problem.as_deref(), Some(NEEDS_NEWER));
+        assert_eq!(card.problem, None);
         assert!(card.on && card.experimental);
         assert_eq!(card.controls.len(), 2);
         assert_eq!(card.on_key, "org.example.filter.enabled");
@@ -1043,7 +1113,7 @@ mod tests {
         assert_eq!(offer.name, "A filter");
         assert!(offer.message.contains("Version 1.0.0"), "{offer:?}");
         assert!(offer.message.contains("Someone (not checked)"), "{offer:?}");
-        assert!(offer.message.contains("won't do anything yet"), "{offer:?}");
+        assert!(offer.message.contains("only the layer you use it on"), "{offer:?}");
         // nothing was kept by asking
         assert!(filters(&plugins).is_empty());
         let refused = plugins.inspect(b"nothing".to_vec());

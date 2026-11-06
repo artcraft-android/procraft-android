@@ -48,6 +48,7 @@ mod patch_run;
 mod pick;
 mod pickers;
 mod plugin_file;
+mod plugin_filter;
 mod plugins;
 mod pour;
 mod presets;
@@ -131,6 +132,7 @@ pub use pickers::{
     square_to_disc, square_to_disc_point,
 };
 pub use plugin_file::read_plugin_file;
+pub use plugin_filter::PluginFilterShown;
 pub use plugins::{
     PluginControl, PluginInfo, PluginKind, PluginOffer, PluginSlider, PluginSource, PluginSwitch, Plugins,
     plugin_file_most_bytes, plugin_slider_along, plugin_slider_at, plugin_slider_shown, plugin_slider_whole,
@@ -525,6 +527,7 @@ pub(crate) struct State {
     adjusting: bool,
     /// The open adjustment's values, as the apps show them (adjusting.rs).
     adjust: adjusting::Adjusting,
+    filters: plugin_filter::Filters,
     /// Crop and Resize as it is edited.
     crop_edit: crop_edit::CropEdit,
     last_filter: Option<procraft_gpu::Filter>,
@@ -1293,6 +1296,7 @@ impl CanvasSession {
             feather_base: None,
             adjusting: false,
             adjust: adjusting::Adjusting::default(),
+            filters: plugin_filter::Filters::default(),
             crop_edit: crop_edit::CropEdit::default(),
             last_filter: None,
             liquify: liquify::LiquifyRun::default(),
