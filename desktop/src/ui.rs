@@ -463,6 +463,11 @@ impl Interface {
         self.keep_brushes |= self.brushes_were_open && !brushes_open;
         self.brushes_were_open = brushes_open;
         let info = session.info();
+        // a snapped shape's handles sit at window points, and the view can move under them from a
+        // zoom, a pan or a turn that comes in through the input layer rather than as a command
+        if self.overlays.shape.is_some() {
+            self.overlays.shape = session.quickshape_info();
+        }
         self.follow_brush(session, info.tool);
         self.shortcuts(&ctx, session, &info);
         self.overlays.cursor_style = self.prefs.cursor_style;
