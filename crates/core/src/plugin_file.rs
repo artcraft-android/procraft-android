@@ -901,7 +901,7 @@ pub(crate) mod tests {
 
     use super::*;
 
-    pub(crate) const SHADER: &[u8] = b"fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }";
+    pub(crate) const SHADER: &[u8] = b"fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }";
 
     /// A manifest as a test starts from: a filter, valid, listing [`SHADER`].
     pub(crate) fn filter(id: &str) -> Value {

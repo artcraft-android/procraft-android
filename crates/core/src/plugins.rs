@@ -1289,7 +1289,7 @@ mod tests {
         let plugins = at(&dir);
         assert_eq!(plugins.install(filter_file(&filter("org.example.filter"))), None);
         let shader = std::path::Path::new(&dir).join("org.example.filter/1.0.0/filter.wgsl");
-        std::fs::write(shader, b"fn filter() {}").unwrap();
+        std::fs::write(shader, b"fn pixel() {}").unwrap();
         let next = at(&dir);
         assert!(filters(&next).is_empty());
         // a value kept for it finds nothing to go to

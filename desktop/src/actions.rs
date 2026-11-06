@@ -1398,8 +1398,8 @@ mod tests {
 
     use super::*;
 
-    const SHADER: &str = "fn filter(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }";
-    const SHADER_SHA: &str = "bd416b9b96feb1bc64443427e430c45e1dab90fd55790939eaf5f2a35f5b55a0";
+    const SHADER: &str = "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }";
+    const SHADER_SHA: &str = "55f0107972b862c96fe458e60620daf4d655f0d1dfb7704a6358a20e6a4c5891";
 
     /// A patch's module, as small as one can be: every sample goes to the corner.
     const MODULE: &str =
