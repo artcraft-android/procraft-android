@@ -12,6 +12,8 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -28,6 +30,7 @@ import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -91,6 +94,18 @@ fun AppRoot(vm: CanvasViewModel) {
                     target = dropped,
                 ),
             ) {
+                // the bars keep clear of the screen's cutout, and the top bar takes two rows where one is too narrow
+                val density = androidx.compose.ui.platform.LocalDensity.current
+                val cutout = WindowInsets.displayCutout
+                val direction = androidx.compose.ui.platform.LocalLayoutDirection.current
+                with(density) {
+                    Pc.safeTop = cutout.getTop(this).toDp()
+                    Pc.safeLeft = cutout.getLeft(this, direction).toDp()
+                    Pc.safeRight = cutout.getRight(this, direction).toDp()
+                }
+                Pc.barRows = Pc.barFit(maxWidth - Pc.safeLeft - Pc.safeRight).rows
+                val barHeight = Pc.BarHeight
+                androidx.compose.runtime.LaunchedEffect(barHeight) { vm.applyFitInsets() }
                 AndroidView(factory = { CanvasSurfaceView(it, vm) }, modifier = Modifier.fillMaxSize())
                 // the drawing guide is the canvas's: under every bar and panel
                 GuideOverlay(vm)
@@ -106,7 +121,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 // with the interface hidden, a button in the top left brings it back
                 if (barsShown < 1f) {
                     Box(
-                        Modifier.offset(x = 20.dp).size(44.dp).graphicsLayer { alpha = 1f - barsShown }
+                        Modifier.offset(x = Pc.safeLeft + 20.dp, y = Pc.safeTop).size(44.dp).graphicsLayer { alpha = 1f - barsShown }
                             .pointerInput(Unit) { detectTapGestures { if (vm.barsHidden) vm.toggleBars() } },
                         contentAlignment = Alignment.Center,
                     ) {
@@ -146,7 +161,8 @@ fun AppRoot(vm: CanvasViewModel) {
                         vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
                             vm.opacityLayer == null &&
                             (vm.adjustment == null || vm.adjustPencil),
-                        Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = sideBar.top),
+                        Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart)
+                            .offset(x = if (vm.rightHanded) -Pc.safeRight else Pc.safeLeft, y = sideBar.top),
                         enter = Motion.sideBarIn(vm.rightHanded),
                         exit = Motion.sideBarOut(vm.rightHanded),
                     ) {
@@ -176,32 +192,45 @@ fun AppRoot(vm: CanvasViewModel) {
                     }
                     val fromLeft = shown == Panel.ACTIONS || shown == Panel.ADJUSTMENTS
                     val buttonX = if (fromLeft) Pc.actionCentre(button, maxWidth) else maxWidth - Pc.toolCentreFromRight(button, maxWidth)
-                    // panels keep clear of the side bar, on whichever side it is
-                    val clear = if (vm.showSideBar) Pc.SideBarWidth + Pc.PopoverGap else Pc.PopoverGap
-                    val place = if (vm.rightHanded) popoverPlace(width, buttonX, maxWidth, minRight = clear) else popoverPlace(width, buttonX, maxWidth, clear)
+                    // panels keep clear of the side bar, on whichever side it is, and of the cutout
+                    val bar = if (vm.showSideBar) Pc.SideBarWidth else 0.dp
+                    val minLeft = Pc.safeLeft + Pc.PopoverGap + if (vm.rightHanded) 0.dp else bar
+                    val minRight = Pc.safeRight + Pc.PopoverGap + if (vm.rightHanded) bar else 0.dp
+                    // on a screen narrower than the panel (a phone), all of it shrinks to fit
+                    val fit = if (width > 0.dp) ((maxWidth - Pc.safeLeft - Pc.safeRight - Pc.PopoverGap * 2) / width).coerceIn(0.1f, 1f) else 1f
+                    val fitted = popoverPlace(width * fit, buttonX, maxWidth, minLeft, minRight)
+                    // the arrow stays on the panel's straight edge, clear of its rounded corners
+                    val reach = Pc.PopoverCorner + PanelArrowClear
+                    val arrowX = (fitted.arrowX / fit).coerceIn(reach, (width - reach).coerceAtLeast(reach))
+                    // shrinking about its arrow, its body lands where [fitted] put it
+                    val left = fitted.left - arrowX * (1f - fit)
+                    val place = PopoverPlace(left, arrowX)
+                    val tipX = left + arrowX
                     val pivot = with(androidx.compose.ui.platform.LocalDensity.current) {
-                        origin + androidx.compose.ui.geometry.Offset((place.left + place.arrowX).toPx(), Pc.BarHeight.toPx())
+                        origin + androidx.compose.ui.geometry.Offset(tipX.toPx(), Pc.BarHeight.toPx())
                     }
                     val at = Modifier.offset(x = place.left, y = Pc.BarHeight).graphicsLayer {
                         this.alpha = alpha
-                        scaleX = scale
-                        scaleY = scale
+                        scaleX = scale * fit
+                        scaleY = scale * fit
                         transformOrigin = androidx.compose.ui.graphics.TransformOrigin(place.arrowX / width, 0f)
                     }.then(if (vm.panel == Panel.NONE) Modifier.takingNoTouches() else Modifier)
-                    ProvidePanelLook(PanelLook(alpha, scale, pivot)) {
+                    // shrunk, a panel can be as much taller as it shows shorter
+                    fun tall(rest: Dp) = (maxHeight - Pc.BarHeight - rest) / fit
+                    ProvidePanelLook(PanelLook(alpha, scale * fit, pivot)) {
                         when (shown) {
                             Panel.LAYERS -> if (vm.backgroundPicking) {
-                                ColorPanel(vm, place.arrowX, maxHeight, at, background = true)
+                                ColorPanel(vm, place.arrowX, Pc.BarHeight + 25.dp + tall(25.dp), at, background = true)
                                 // closed any way at all, the colour is kept
                                 androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.endBackgroundPick() } }
                             } else {
-                                LayersPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - Pc.PopoverGap))
+                                LayersPanel(vm, place.arrowX, at.heightIn(max = tall(Pc.PopoverGap)))
                             }
-                            Panel.COLOR -> ColorPanel(vm, place.arrowX, maxHeight, at)
-                            Panel.BRUSHES -> BrushLibrary(vm, place.arrowX, at.height(maxHeight - Pc.BarHeight - 25.dp))
+                            Panel.COLOR -> ColorPanel(vm, place.arrowX, Pc.BarHeight + 25.dp + tall(25.dp), at)
+                            Panel.BRUSHES -> BrushLibrary(vm, place.arrowX, at.height(tall(25.dp)))
                             // ending 25 above the screen's edge, their rows scrolling (as measured)
-                            Panel.ACTIONS -> ActionsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
-                            Panel.ADJUSTMENTS -> AdjustmentsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
+                            Panel.ACTIONS -> ActionsPanel(vm, place.arrowX, at.heightIn(max = tall(25.dp)))
+                            Panel.ADJUSTMENTS -> AdjustmentsPanel(vm, place.arrowX, at.heightIn(max = tall(25.dp)))
                             Panel.NONE -> Unit
                         }
                     }
@@ -369,6 +398,9 @@ private fun BlockedDialog(vm: CanvasViewModel) {
 }
 
 /** The adjustments whose controls are a panel at the bottom of the screen. */
+/** How far past its rounded corner a panel's arrow stays, so that it sits on the straight edge. */
+private val PanelArrowClear = 6.dp
+
 private val BottomPanels = setOf(
     Adjustment.HSB, Adjustment.COLOR_BALANCE, Adjustment.CURVES, Adjustment.GRADIENT_MAP, Adjustment.GLITCH, Adjustment.NOISE,
     Adjustment.BLOOM, Adjustment.HALFTONE, Adjustment.CHROMATIC_ABERRATION, Adjustment.PERSPECTIVE_BLUR, Adjustment.LIQUIFY,
