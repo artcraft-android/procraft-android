@@ -1,12 +1,10 @@
 //! What the app does beyond its measured look and behaviour, in two lists on two pages. A patch is
 //! a file with code in it, run in a sandbox on the [hooks](crate::hooks) it asks for: none is in
 //! the app, so with none applied the app is as measured. A plugin is a file that adds something
-//! new; the Plugins page also has the extras still bundled, each off (or at 100%) until asked for.
-//! See [`crate::plugin_file`] for what is asked of a file.
+//! new. See [`crate::plugin_file`] for what is asked of a file.
 //!
 //! All are plain data, a name, a line on what it does and its controls, so a page draws any of them
-//! without knowing it, and a file describes itself the same way. What a bundled one does is the
-//! app's: it asks for the values it knows ([`Plugins::fill_gap`]).
+//! without knowing it.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -14,9 +12,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::hooks::Hooks;
 use crate::patch_run::{Running, Stop};
 use crate::plugin_file::{self, Manifest, Refusal};
-
-/// What the bundled extras' values are kept under, as they were before there was a list.
-const FILL_GAP: &str = "fill_gap";
 
 /// A setting the app used to have and a patch now brings: what it was kept under, as it started
 /// (a switch off is 0), and its name. Its value stays there for the patch, whose control says so.
@@ -30,6 +25,7 @@ const MOVED: &[Moved] = &[
     Moved { key: "eyedropper_layer", starts: 0.0, name: "Eyedropper picks from layer" },
     Moved { key: "interface_size", starts: 1.0, name: "Interface size" },
     Moved { key: "paste_into_mask", starts: 0.0, name: "Paste into masks" },
+    Moved { key: "fill_gap", starts: 0.0, name: "ColorDrop gap closing" },
 ];
 
 impl Moved {
@@ -57,7 +53,6 @@ const FILTER_DAMAGED: &str = "This filter's files don't hold up.";
 /// Where one came from. The route decides this, never the plugin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum PluginSource {
-    Bundled,
     File,
     Catalogue,
 }
@@ -65,8 +60,6 @@ pub enum PluginSource {
 /// What one is, and so which page it is on and what its card offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum PluginKind {
-    /// In the app, its controls always there.
-    Extra,
     Filter,
     /// Applied or not, and running on its hooks while it is.
     Patch,
@@ -117,14 +110,14 @@ pub struct PluginInfo {
     pub description: String,
     pub source: PluginSource,
     pub kind: PluginKind,
-    /// As its file says; empty for what is bundled.
+    /// As its file says.
     pub version: String,
     pub publisher: String,
     /// Tagged as experimental on its page.
     pub experimental: bool,
-    /// The real on-off: a patch applied, a filter enabled; always on for what is bundled.
+    /// The real on-off: a patch applied, a filter enabled.
     pub on: bool,
-    /// What `on` is kept under; empty for what is bundled, whose controls are all it has.
+    /// What `on` is kept under.
     pub on_key: String,
     /// Why it does nothing, to show on it.
     pub problem: Option<String>,
@@ -254,49 +247,6 @@ pub fn plugin_file_most_bytes() -> u64 {
     plugin_file::MOST_FILE as u64
 }
 
-/// A bundled extra.
-fn extra(id: &str, name: &str, description: &str, control: PluginControl) -> PluginInfo {
-    PluginInfo {
-        id: id.to_owned(),
-        name: name.to_owned(),
-        description: description.to_owned(),
-        source: PluginSource::Bundled,
-        kind: PluginKind::Extra,
-        version: String::new(),
-        publisher: String::new(),
-        experimental: true,
-        on: true,
-        on_key: String::new(),
-        problem: None,
-        controls: vec![control],
-    }
-}
-
-/// The bundled extras, each as it starts.
-fn extras() -> Vec<PluginInfo> {
-    let gap = PluginControl::Slider {
-        control: PluginSlider {
-            key: FILL_GAP.to_owned(),
-            label: "Gap".to_owned(),
-            least: 0.0,
-            most: procraft_engine::fill::MOST_GAP as f32,
-            step: 1.0,
-            value: 0.0,
-            starts: 0.0,
-            shown_times: 1.0,
-            unit: " px".to_owned(),
-            at_least: Some("Off".to_owned()),
-            live: false,
-        },
-    };
-    vec![extra(
-        FILL_GAP,
-        "ColorDrop gap closing",
-        "Keeps ColorDrop from running out through gaps in your lines, up to this wide.",
-        gap,
-    )]
-}
-
 /// `manifest` as a list entry: a patch unapplied, a filter on.
 fn from_file(manifest: Manifest) -> PluginInfo {
     let patch = manifest.kind == PluginKind::Patch;
@@ -334,7 +284,6 @@ pub(crate) struct FilterToOpen {
 
 #[derive(Debug)]
 struct Listed {
-    bundled: Vec<PluginInfo>,
     files: Vec<PluginInfo>,
     /// Moved settings read back with no patch yet to take them: key and value, kept as they are.
     moved: Vec<(String, String)>,
@@ -343,13 +292,9 @@ struct Listed {
 }
 
 impl Listed {
-    fn every_mut(&mut self) -> impl Iterator<Item = &mut PluginInfo> {
-        self.bundled.iter_mut().chain(self.files.iter_mut())
-    }
-
     /// The one holding the control kept under `key`, and the control's place in it.
     fn control_mut(&mut self, key: &str) -> Option<(&mut PluginInfo, usize)> {
-        self.every_mut().find_map(|plugin| {
+        self.files.iter_mut().find_map(|plugin| {
             let at = plugin.controls.iter().position(|c| c.key() == key)?;
             Some((plugin, at))
         })
@@ -391,7 +336,7 @@ impl Plugins {
                 plugin.on &= plugin.kind == PluginKind::Patch || plugin.problem.is_none();
             }
         }
-        let list = Listed { bundled: extras(), files, moved: Vec::new(), notice_asked: false };
+        let list = Listed { files, moved: Vec::new(), notice_asked: false };
         Arc::new(Plugins { list: Mutex::new(list), hooks: Arc::new(Hooks::kept_in(store.clone())), store })
     }
 
@@ -404,10 +349,11 @@ impl Plugins {
         let values: Vec<f32> = patch.controls.iter().map(PluginControl::number).collect();
         let store = self.store.as_deref();
         let code = store.and_then(|store| plugin_file::read_code(store, &patch.id, &patch.version));
-        let started =
-            code.ok_or(Stop::Damaged).and_then(|(hooks, bytes)| Ok((hooks, Running::start(&bytes, &values)?)));
+        let started = code
+            .ok_or(Stop::Damaged)
+            .and_then(|(hooks, bytes)| Ok((Running::start_on(&bytes, &values, &hooks)?, hooks)));
         match started {
-            Ok((hooks, running)) => self.hooks.put_on(patch.id.clone(), running, &hooks),
+            Ok((running, hooks)) => self.hooks.put_on(patch.id.clone(), running, &hooks),
             Err(stop) => {
                 self.hooks.failed(&patch.id, stop);
                 patch.on = false;
@@ -438,6 +384,7 @@ impl Plugins {
         Some(changed)
     }
 
+    #[cfg(test)]
     fn control(&self, key: &str) -> Option<PluginControl> {
         let mut list = self.listed();
         let (plugin, at) = list.control_mut(key)?;
@@ -447,8 +394,7 @@ impl Plugins {
     /// Each value as a line of a settings file, its key and then what [`Plugins::read_kept`] reads.
     pub fn kept_lines(&self) -> Vec<String> {
         let list = self.listed();
-        let every = list.bundled.iter().chain(&list.files);
-        let values = every.flat_map(|p| &p.controls).map(|c| format!("{} {}", c.key(), c.kept()));
+        let values = list.files.iter().flat_map(|p| &p.controls).map(|c| format!("{} {}", c.key(), c.kept()));
         let flags = list.files.iter().map(|p| format!("{} {}", p.on_key, p.on));
         values.chain(flags).chain(list.moved.iter().map(|(key, value)| format!("{key} {value}"))).collect()
     }
@@ -553,13 +499,13 @@ impl Plugins {
 
 #[uniffi::export]
 impl Plugins {
-    /// The bundled extras, with nowhere to keep a file.
+    /// Nothing, and nowhere to keep a file.
     #[uniffi::constructor]
     pub fn new() -> Arc<Plugins> {
         Plugins::kept_in(None)
     }
 
-    /// The bundled extras, and every file kept in the folder `dir` that holds up.
+    /// Every file kept in the folder `dir` that holds up.
     #[uniffi::constructor]
     pub fn with_store(dir: String) -> Arc<Plugins> {
         Plugins::kept_in(Some(PathBuf::from(dir)))
@@ -570,11 +516,9 @@ impl Plugins {
         self.listed().files.iter().filter(|p| p.kind == PluginKind::Patch).cloned().collect()
     }
 
-    /// What the Plugins page shows: the bundled extras and the filters imported.
+    /// What the Plugins page shows: the filters imported.
     pub fn plugins(&self) -> Vec<PluginInfo> {
-        let list = self.listed();
-        let filters = list.files.iter().filter(|p| p.kind != PluginKind::Patch);
-        list.bundled.iter().chain(filters).cloned().collect()
+        self.listed().files.iter().filter(|p| p.kind != PluginKind::Patch).cloned().collect()
     }
 
     /// The filters that can be opened now: the Adjustments menu's, which has none to show with none
@@ -733,14 +677,6 @@ impl Plugins {
     pub fn interface_scale(&self, width: f32, height: f32) -> f32 {
         self.hooks().interface_scale(width, height)
     }
-
-    /// How wide a gap in its lines ColorDrop keeps out of, canvas pixels (0: none).
-    pub fn fill_gap(&self) -> u32 {
-        match self.control(FILL_GAP) {
-            Some(PluginControl::Slider { control }) => control.value as u32,
-            _ => 0,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -768,10 +704,20 @@ mod tests {
         }
     }
 
-    fn gap_slider(plugins: &Plugins) -> PluginSlider {
-        match plugins.control(FILL_GAP) {
-            Some(PluginControl::Slider { control }) => control,
-            other => panic!("{other:?}"),
+    /// A slider of whole pixels, from Off.
+    fn gap_slider() -> PluginSlider {
+        PluginSlider {
+            key: "gap".to_owned(),
+            label: "Gap".to_owned(),
+            least: 0.0,
+            most: 32.0,
+            step: 1.0,
+            value: 0.0,
+            starts: 0.0,
+            shown_times: 1.0,
+            unit: " px".to_owned(),
+            at_least: Some("Off".to_owned()),
+            live: false,
         }
     }
 
@@ -842,39 +788,12 @@ mod tests {
     }
 
     #[test]
-    fn the_extras_are_on_the_plugins_page_and_no_patch_is_in_the_app() {
+    fn nothing_is_in_the_app_until_a_file_is_imported() {
         let plugins = Plugins::new();
         assert!(plugins.patches().is_empty());
-        let list = plugins.plugins();
-        let ids: Vec<&str> = list.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, ["fill_gap"]);
-        for p in &list {
-            assert!(p.source == PluginSource::Bundled && p.kind == PluginKind::Extra, "{p:?}");
-            assert!(p.experimental && p.on && p.on_key.is_empty(), "{p:?}");
-            assert!(!p.name.is_empty() && !p.description.is_empty() && !p.controls.is_empty(), "{p:?}");
-            assert!(!p.id.contains('.'), "an extra's id can't be a file's key's start: {p:?}");
-        }
+        assert!(plugins.plugins().is_empty());
         assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
-        assert_eq!(plugins.fill_gap(), 0);
-    }
-
-    #[test]
-    fn no_two_controls_share_a_key() {
-        let plugins = Plugins::new();
-        let list = plugins.plugins();
-        let mut keys: Vec<String> = list.iter().flat_map(|p| &p.controls).map(|c| c.key().into()).collect();
-        let all = keys.len();
-        keys.sort();
-        keys.dedup();
-        assert_eq!(keys.len(), all);
-    }
-
-    #[test]
-    fn values_kept_before_there_was_a_list_carry_over() {
-        // as both apps wrote them: the desktop's `interface` lines, Android's preferences as text
-        let plugins = Plugins::new();
-        plugins.read_kept("fill_gap".to_owned(), "12".to_owned());
-        assert_eq!(plugins.fill_gap(), 12);
+        assert!(plugins.kept_lines().is_empty());
     }
 
     #[test]
@@ -905,11 +824,12 @@ mod tests {
     #[test]
     fn what_is_kept_reads_back_the_same() {
         let plugins = Plugins::new();
-        assert_eq!(plugins.set_slider(FILL_GAP.to_owned(), 7.0), Some(7.0));
+        plugins.listed().files.push(stranger());
+        assert_eq!(plugins.set_slider("someone.stranger.slider".to_owned(), 7.0), Some(7.0));
         let lines = plugins.kept_lines();
-        assert!(lines.contains(&"fill_gap 7".to_owned()), "{lines:?}");
-        assert_eq!(lines.len(), 1, "the extras have their controls and nothing else: {lines:?}");
+        assert!(lines.contains(&"someone.stranger.slider 7".to_owned()), "{lines:?}");
         let again = Plugins::new();
+        again.listed().files.push(stranger());
         for line in &lines {
             let (key, value) = line.split_once(' ').unwrap();
             again.read_kept(key.to_owned(), value.to_owned());
@@ -948,35 +868,25 @@ mod tests {
     }
 
     #[test]
-    fn the_gap_keeps_its_range_and_how_it_reads() {
-        let plugins = Plugins::new();
-        let gap = gap_slider(&plugins);
-        assert_eq!((gap.least, gap.most, gap.step), (0.0, 32.0, 1.0));
+    fn a_slider_can_read_as_a_word_at_its_least() {
+        let gap = gap_slider();
         assert_eq!(plugin_slider_shown(gap.clone(), 0.0), "Off");
         assert_eq!(plugin_slider_shown(gap.clone(), 1.0), "1 px");
         assert_eq!(plugin_slider_shown(gap.clone(), 32.0), "32 px");
         assert_eq!(plugin_slider_at(gap.clone(), 0.5), 16.0);
         assert_eq!(plugin_slider_along(gap, 8.0), 0.25);
-        // what was kept past its ends comes back inside them, as it always did
-        plugins.read_kept(FILL_GAP.to_owned(), "40".to_owned());
-        assert_eq!(plugins.fill_gap(), 32);
-        plugins.read_kept(FILL_GAP.to_owned(), "-3".to_owned());
-        assert_eq!(plugins.fill_gap(), 0);
     }
 
     #[test]
     fn a_count_is_kept_as_a_whole_number() {
-        let plugins = Plugins::new();
-        assert!(plugin_slider_whole(gap_slider(&plugins)));
+        assert!(plugin_slider_whole(gap_slider()));
         assert!(!plugin_slider_whole(size_slider()));
-        plugins.set_slider(FILL_GAP.to_owned(), 12.0);
-        // as the desktop has always written it
-        assert!(plugins.kept_lines().contains(&"fill_gap 12".to_owned()));
     }
 
     #[test]
     fn a_key_nothing_has_is_left_alone() {
         let plugins = Plugins::new();
+        plugins.listed().files.push(stranger());
         let before = plugins.plugins();
         assert!(!plugins.set_switch("nobody".to_owned(), true));
         assert_eq!(plugins.set_slider("nobody".to_owned(), 1.0), None);
@@ -985,20 +895,9 @@ mod tests {
         assert!(!plugins.set_on("nobody".to_owned(), true));
         assert_eq!(plugins.remove("nobody".to_owned()), None);
         // nor does a value of the wrong kind reach a control
-        assert!(!plugins.set_switch(FILL_GAP.to_owned(), true));
-        assert_eq!(plugins.set_slider(FILL_GAP.to_owned(), f32::NAN), None);
-        // and an extra can't be turned off or removed
-        assert!(!plugins.set_on(FILL_GAP.to_owned(), false));
-        assert_eq!(plugins.remove(FILL_GAP.to_owned()), None);
+        assert!(!plugins.set_switch("someone.stranger.slider".to_owned(), true));
+        assert_eq!(plugins.set_slider("someone.stranger.slider".to_owned(), f32::NAN), None);
         assert_eq!(plugins.plugins(), before);
-        assert_eq!(plugins.fill_gap(), 0);
-    }
-
-    #[test]
-    fn without_an_extra_the_app_goes_on_as_it_starts() {
-        let plugins = Plugins::new();
-        plugins.listed().bundled.clear();
-        assert_eq!(plugins.fill_gap(), 0);
     }
 
     #[test]
@@ -1032,7 +931,6 @@ mod tests {
         // its values change and are kept like any other's, and touch nothing else
         assert!(plugins.set_switch("someone.stranger.switch".to_owned(), true));
         assert_eq!(plugins.set_slider("someone.stranger.slider".to_owned(), 3.3), Some(3.5));
-        assert_eq!(plugins.fill_gap(), 0);
     }
 
     #[test]
@@ -1070,23 +968,22 @@ mod tests {
     }
 
     #[test]
-    fn a_plugin_can_t_reach_an_extra_s_value() {
+    fn a_plugin_can_t_reach_a_moved_value_without_saying_so() {
         let dir = store("collide");
         let plugins = at(&dir);
-        plugins.set_slider(FILL_GAP.to_owned(), 11.0);
+        plugins.read_kept("fill_gap".to_owned(), "11".to_owned());
         let mut manifest = filter("org.example.filter");
         manifest["controls"] = json!([{
-            "key": "fill_gap", "type": "slider", "label": "Gap", "least": 0, "most": 5, "step": 1, "starts": 3,
+            "key": "fill_gap", "type": "slider", "label": "Gap", "least": 0, "most": 5, "step": 1, "starts": 3
         }]);
         assert_eq!(plugins.install(filter_file(&manifest)), None);
-        let key = "org.example.filter.fill_gap".to_owned();
-        assert_eq!(plugins.set_slider(key.clone(), 4.0), Some(4.0));
-        assert_eq!(plugins.fill_gap(), 11, "its own value is its own");
-        plugins.read_kept(key, "2".to_owned());
-        assert_eq!(plugins.fill_gap(), 11);
-        // and the extra's key goes on reaching the extra's value
-        assert_eq!(plugins.set_slider(FILL_GAP.to_owned(), 8.0), Some(8.0));
-        assert_eq!(plugins.fill_gap(), 8);
+        let key = "org.example.filter.fill_gap";
+        let value = |plugins: &Plugins| match plugins.control(key) {
+            Some(PluginControl::Slider { control }) => control.value,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(value(&plugins), 3.0, "its own value is its own");
+        assert!(plugins.kept_lines().contains(&"fill_gap 11".to_owned()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

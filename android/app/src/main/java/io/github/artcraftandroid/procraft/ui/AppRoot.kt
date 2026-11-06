@@ -240,6 +240,14 @@ fun AppRoot(vm: CanvasViewModel) {
                 ) { Box(Modifier.fillMaxSize()) { GestureControls(vm) } }
                 BlockedDialog(vm)
                 PluginOfferAlert(vm)
+                // a fill a patch is finishing: nothing is touched until it is done
+                if (vm.fillFinishing) {
+                    Box(
+                        Modifier.fillMaxSize().pointerInput(Unit) {
+                            awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
+                        },
+                    )
+                }
                 ExportProgress(vm.exportShown, vm::cancelExport)
                 ImportProgress(vm.importShown, vm::cancelImport)
                 // a passing message goes in the band under the top bar, as what undo and redo did

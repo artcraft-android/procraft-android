@@ -390,8 +390,6 @@ pub(crate) struct State {
     /// Brush scaling relative to the screen: the brush keeps its size on the screen as the canvas
     /// zooms (else it keeps its size on the canvas).
     pub(crate) brush_on_screen: bool,
-    /// ColorDrop keeps out of gaps up to this many pixels wide in what bounds it (0: none).
-    pub(crate) fill_gap: u32,
     /// What samples go through on their way to a stroke, if anything.
     pub(crate) hooks: Option<Arc<hooks::Hooks>>,
     /// Crops kept for undo: the canvas and document from before; and one undone, for redo, with
@@ -1231,7 +1229,6 @@ impl CanvasSession {
             crop_undo: None,
             selection_visibility: 0.25,
             brush_on_screen: false,
-            fill_gap: 0,
             hooks: None,
             input: procraft_engine::stroke::InputSettings::default(),
             crop_redo: None,
@@ -1883,6 +1880,7 @@ impl CanvasSession {
 
     /// Undoes the last step; returns what it was called, if it was named.
     pub fn undo(&self) -> Option<String> {
+        self.await_pour();
         // editing text, a change to its box's width goes back first, the text still edited
         if let Some(name) = self.text_box_undo() {
             return Some(name);
@@ -1914,6 +1912,7 @@ impl CanvasSession {
 
     /// Redoes the last step undone; returns what it was called, if it was named.
     pub fn redo(&self) -> Option<String> {
+        self.await_pour();
         if let Some(name) = self.text_box_redo() {
             return Some(name);
         }

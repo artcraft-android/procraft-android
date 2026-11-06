@@ -11,9 +11,16 @@ use crate::patch_run::{Hook, Running, Stop};
 use crate::plugin_file;
 use crate::plugins::Plugins;
 
+/// A patch at work: a lock of its own, so a long call holds up nothing but it.
+type Shared = Arc<Mutex<Running>>;
+
+fn at_work(running: &Shared) -> MutexGuard<'_, Running> {
+    running.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 struct Applied {
     id: String,
-    running: Running,
+    running: Shared,
     /// The hooks it is on, as bits.
     hooks: u32,
 }
@@ -24,8 +31,8 @@ struct Patches {
     applied: Vec<Applied>,
     /// What stopped since the list last asked, and why.
     stopped: Vec<(String, Stop)>,
-    /// A stop the app hasn't told yet: whoever is drawing sees the stroke change, not the list.
-    untold: Option<Stop>,
+    /// What the app hasn't told yet: whoever is drawing sees the stroke change, not the list.
+    untold: Option<String>,
 }
 
 /// The applied patches, shared by a list and the sessions going through it. Not a static: they go
@@ -61,7 +68,7 @@ impl Hooks {
             plugin_file::note_stopped(store, &id, stop.text());
         }
         patches.stopped.push((id, stop));
-        patches.untold = Some(stop);
+        patches.untold = Some(format!("A patch stopped. {}", stop.text()));
     }
 
     fn has(&self, hook: Hook) -> bool {
@@ -85,7 +92,8 @@ impl Hooks {
                 i += 1;
                 continue;
             }
-            match step(&mut patch.running, at) {
+            let answer = step(&mut at_work(&patch.running), at);
+            match answer {
                 Ok(to) => {
                     at = to;
                     i += 1;
@@ -134,19 +142,56 @@ impl Hooks {
             && self.through(Hook::PasteMask, false, |running, said| Ok(said | running.paste_mask()?))
     }
 
+    /// The patches on `hook`, to be called with the list let go: a long call holds up only them.
+    fn long_calls(&self, hook: Hook) -> Vec<(String, Shared)> {
+        let patches = self.patches();
+        let on = patches.applied.iter().filter(|patch| patch.hooks & hook.bit() != 0);
+        on.map(|patch| (patch.id.clone(), Arc::clone(&patch.running))).collect()
+    }
+
+    /// `id` comes off the hooks, having stopped in a long call.
+    fn stopped(&self, id: &str, stop: Stop) {
+        let mut patches = self.patches();
+        patches.applied.retain(|p| p.id != id);
+        self.note_stop(&mut patches, id.to_owned(), stop);
+        self.rehook(&patches);
+    }
+
     /// `rgba`, rows of `width` pixels, as the patch on the paste hook makes it; false if it can't,
-    /// and what has gone through is no use. The first that takes it has it all: it holds up nothing
-    /// that doesn't need the same patch.
+    /// and what has gone through is no use. The first that takes it has it all.
     pub(crate) fn paste_rows(&self, rgba: &mut [u8], width: usize) -> bool {
-        let mut stopped = false;
-        let done = self.through(Hook::PasteMask, false, |running, done| {
-            if done || stopped {
-                return Ok(done);
+        let Some((id, running)) = self.long_calls(Hook::PasteMask).into_iter().next() else { return false };
+        let done = at_work(&running).paste_rows(rgba, width);
+        done.inspect_err(|stop| self.stopped(&id, *stop)).is_ok()
+    }
+
+    /// The fill hook: whether a fill being let go has anything to go through.
+    pub(crate) fn fill_mask(&self) -> bool {
+        self.has(Hook::FillMask) && self.through(Hook::FillMask, false, |running, said| Ok(said | running.fill_mask()?))
+    }
+
+    /// `rows`, a fill of `width` × `height` from `seed`, a bit a pixel in words of 64, through each
+    /// patch on the fill hook, each taking out what it says: a long call, not for the main thread.
+    /// Whether anything came out. One that stops takes nothing out.
+    pub(crate) fn fill_rows(&self, rows: &mut Vec<u64>, width: usize, height: usize, seed: (usize, usize)) -> bool {
+        let mut changed = false;
+        for (id, running) in self.long_calls(Hook::FillMask) {
+            let mut left = rows.clone();
+            match at_work(&running).fill(&mut left, width, height, seed) {
+                Ok(true) => {
+                    *rows = left;
+                    changed = true;
+                }
+                Ok(false) => {}
+                Err(stop) => self.stopped(&id, stop),
             }
-            running.paste_rows(rgba, width).inspect_err(|_| stopped = true)?;
-            Ok(true)
-        });
-        done && !stopped
+        }
+        changed
+    }
+
+    /// `words` for the app to tell, once.
+    pub(crate) fn say(&self, words: &str) {
+        self.patches().untold = Some(words.to_owned());
     }
 
     pub(crate) fn is_on(&self, id: &str) -> bool {
@@ -158,7 +203,7 @@ impl Hooks {
         patches.applied.retain(|p| p.id != id);
         let at = patches.applied.partition_point(|p| p.id < id);
         let hooks = hooks.iter().fold(0, |bits, hook| bits | hook.bit());
-        patches.applied.insert(at, Applied { id, running, hooks });
+        patches.applied.insert(at, Applied { id, running: Arc::new(Mutex::new(running)), hooks });
         self.rehook(&patches);
     }
 
@@ -173,7 +218,7 @@ impl Hooks {
     pub(crate) fn control(&self, id: &str, index: usize, value: f32) {
         let mut patches = self.patches();
         let Some(at) = patches.applied.iter().position(|p| p.id == id) else { return };
-        let told = patches.applied.get_mut(at).map(|p| p.running.control(index, value));
+        let told = patches.applied.get(at).map(|p| at_work(&p.running).control(index, value));
         if let Some(Err(stop)) = told {
             let gone = patches.applied.remove(at);
             self.note_stop(&mut patches, gone.id, stop);
@@ -186,9 +231,9 @@ impl Hooks {
         self.note_stop(&mut self.patches(), id.to_owned(), stop);
     }
 
-    /// A stop in words for the app to tell, once.
+    /// What there is for the app to tell, once.
     pub(crate) fn take_said(&self) -> Option<String> {
-        self.patches().untold.take().map(|stop| format!("A patch stopped. {}", stop.text()))
+        self.patches().untold.take()
     }
 
     /// What stopped since this was last asked.
@@ -215,7 +260,7 @@ pub(crate) mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::patch_run::tests::{OFFSET, position_module};
+    use crate::patch_run::tests::{FILL_AT, OFFSET, TAKES_MOST, fill_module, position_module};
     use crate::patch_run::{MODULE, Running};
     use crate::plugin_file::tests::{pack, patch};
     use crate::{PenSample, PointerKind};
@@ -551,6 +596,265 @@ pub(crate) mod tests {
         assert_eq!(s.layers().len(), layers + 1);
         assert_eq!(s.take_failure().as_deref(), Some("A patch stopped. Switched off: it crashed."));
         assert_eq!(card(&plugins).problem.as_deref(), Some("Switched off: it crashed."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Takes out everything past the first two words of each row, as a patch of real use might.
+    const RIGHT_OF_128: &str = "(local $i i32) (local.set $i (i32.const 16))
+        (i64.store (i32.const 65536) (i64.const 0))
+        (i64.store (i32.const 65544) (i64.const 0))
+        (block $done (loop $next
+            (br_if $done (i32.ge_u (local.get $i) (i32.const 32)))
+            (i64.store (i32.add (i32.const 65536) (local.get $i)) (i64.const -1))
+            (local.set $i (i32.add (local.get $i) (i32.const 8)))
+            (br $next)))";
+
+    /// A session with `module` applied on the fill hook, and the list holding it.
+    fn filling(s: &CanvasSession, dir: &str, module: &[u8]) -> Arc<Plugins> {
+        let plugins = Plugins::with_store(dir.to_owned());
+        let mut manifest = patch(ID, module);
+        manifest["hooks"] = json!(["fill_mask"]);
+        assert_eq!(plugins.install(file(&manifest, module)), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_patches(Arc::clone(&plugins));
+        plugins
+    }
+
+    /// A layer's pixel, once the fill being finished is done.
+    fn red_at(s: &CanvasSession, x: usize, y: usize) -> bool {
+        s.await_pour();
+        let rgba = picture(s);
+        let at = (y * 200 + x) * 4;
+        rgba[at] > 200 && rgba[at + 3] > 200
+    }
+
+    fn pour_at(s: &CanvasSession, x: f32, y: f32) {
+        assert!(s.pour_begin(x, y, 1.0, 0.0, 0.0, 0.3));
+        s.pour_end(true, None);
+    }
+
+    #[test]
+    fn a_fill_is_finished_by_the_patch_on_its_own_thread_and_is_one_step() {
+        let Some(s) = session() else { return };
+        let dir = store("fill-real");
+        let plugins = filling(&s, &dir, &fill_module(FILL_AT, "(i32.const 1)", RIGHT_OF_128));
+        pour_at(&s, 30.0, 30.0);
+        assert!(red_at(&s, 30, 30) && red_at(&s, 120, 190));
+        assert!(!red_at(&s, 130, 30) && !red_at(&s, 199, 199), "past where the patch keeps it");
+        assert!(!s.pour_finishing());
+        // one undo takes the whole fill back
+        s.undo();
+        assert!(!red_at(&s, 30, 30));
+        // unapplied, the same fill runs on through
+        plugins.set_on(ID.to_owned(), false);
+        pour_at(&s, 30.0, 30.0);
+        assert!(red_at(&s, 30, 30) && red_at(&s, 199, 199));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fill_keeps_to_a_selection_with_a_patch_as_it_does_without() {
+        let Some(s) = session() else { return };
+        let dir = store("fill-selection");
+        filling(&s, &dir, &fill_module(FILL_AT, "(i32.const 1)", RIGHT_OF_128));
+        // what is selected: a band across, on both sides of where the patch cuts
+        let mut mask = vec![0u8; 200 * 200];
+        for y in 60..120 {
+            mask[y * 200..(y + 1) * 200].fill(255);
+        }
+        s.shared.lock().selection = Some(procraft_engine::selection::Mask { width: 200, height: 200, data: mask });
+        pour_at(&s, 30.0, 80.0);
+        assert!(red_at(&s, 30, 80), "in the selection, this side of the cut");
+        assert!(!red_at(&s, 30, 30), "out of the selection");
+        assert!(!red_at(&s, 150, 80), "in the selection, past the cut");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fill_box_goes_through_alone_with_a_pixel_round_it() {
+        // a square of paper in a filled layer: the fill's box is a corner of the canvas. The patch
+        // says how much it was handed in the fill's own terms
+        let Some(s) = session() else { return };
+        let dir = store("fill-box");
+        s.set_color(0.0, 0.0, 1.0);
+        let layer = s.layers().iter().find(|l| l.current).unwrap().id;
+        assert!(s.fill_layer(layer));
+        {
+            let mut st = s.shared.lock();
+            let id = st.doc.current();
+            let mut pixels = st.layer_pixels(id).unwrap();
+            for y in 10..50 {
+                for x in 20..70 {
+                    pixels[(y * 200 + x) * 4..(y * 200 + x + 1) * 4].fill(0);
+                }
+            }
+            st.canvas.as_mut().unwrap().write_layer(id, pixels);
+        }
+        // the row it is told of: 52 wide, 42 tall (50 x 40 and a pixel each way), the seed in terms
+        // of that: anything else and it says nothing comes out
+        let module = fill_module(
+            "(if (i32.or (i32.ne (local.get 0) (i32.const 52)) (i32.or (i32.ne (local.get 1) (i32.const 42))
+                (i32.or (i32.ne (local.get 2) (i32.const 11)) (i32.ne (local.get 3) (i32.const 11)))))
+                (then (unreachable)))
+             (i32.const 65536)",
+            "(i32.const 1)",
+            "(i64.store (i32.const 65536) (i64.const 0x00ffff0000000000))",
+        );
+        let plugins = filling(&s, &dir, &module);
+        pour_at(&s, 30.0, 20.0);
+        assert!(red_at(&s, 30, 20));
+        assert!(!red_at(&s, 19 + 45, 20), "taken out, at its place in the box");
+        assert_eq!(card(&plugins).problem, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a patch that goes wrong on a fill must come to: the fill as it was, one step, and why.
+    fn fill_goes_wrong(name: &str, module: &[u8], reason: &str) {
+        let Some(s) = session() else { return };
+        let dir = store(name);
+        let plugins = filling(&s, &dir, module);
+        pour_at(&s, 30.0, 30.0);
+        assert!(red_at(&s, 30, 30) && red_at(&s, 199, 199), "the fill stays unclosed");
+        assert_eq!(s.take_failure().as_deref(), Some(format!("A patch stopped. {reason}").as_str()));
+        let stopped = card(&plugins);
+        assert!(!stopped.on);
+        assert_eq!(stopped.problem.as_deref(), Some(reason));
+        s.undo();
+        assert!(!red_at(&s, 30, 30), "and it is one step");
+        // the next fill takes no time over it
+        pour_at(&s, 30.0, 30.0);
+        assert!(!s.pour_finishing());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fill_patch_that_never_ends_leaves_the_fill_unclosed() {
+        let module = fill_module(FILL_AT, "(loop (br 0)) (i32.const 1)", "");
+        fill_goes_wrong("fill-loop", &module, "Switched off: it took too long.");
+    }
+
+    #[test]
+    fn a_fill_patch_that_crashes_leaves_the_fill_unclosed() {
+        let module = fill_module(FILL_AT, "(unreachable)", "");
+        fill_goes_wrong("fill-trap", &module, "Switched off: it crashed.");
+    }
+
+    #[test]
+    fn a_fill_patch_that_takes_the_seed_leaves_the_fill_unclosed() {
+        let module = fill_module(FILL_AT, "(i32.const 1)", "(i64.store (i32.const 65536) (i64.const -1))");
+        fill_goes_wrong("fill-seed", &module, "Switched off: it gave an answer that makes no sense.");
+    }
+
+    #[test]
+    fn a_fill_patch_that_asks_too_much_leaves_the_fill_unclosed() {
+        let module = fill_module(FILL_AT, "(drop (memory.grow (i32.const 2000))) (i32.const 1)", "");
+        fill_goes_wrong("fill-memory", &module, "Switched off: it asked for too much memory.");
+    }
+
+    #[test]
+    fn a_fill_too_big_for_a_patch_stays_unclosed_and_says_so() {
+        let hooks = Hooks::default();
+        let module = fill_module(FILL_AT, "(i32.const 1)", TAKES_MOST);
+        hooks.put_on("fill".to_owned(), Running::start(&module, &[]).unwrap(), &[Hook::FillMask]);
+        let mask = crate::pour::tests::mask_of_box(9000, 9000);
+        assert!(crate::pour::closed_by(&hooks, mask, (5, 5)).is_none());
+        let said = hooks.take_said().unwrap();
+        assert!(said.contains("too big"), "{said}");
+        assert!(hooks.is_on("fill"), "it isn't the patch's doing");
+    }
+
+    #[test]
+    fn a_long_call_holds_up_no_other_hook() {
+        // a patch on the fill hook at work, and another on the position hook goes on answering
+        let hooks = Arc::new(Hooks::default());
+        let body = "(local $i i32) (local.set $i (i32.const 30000000))
+            (loop (local.set $i (i32.sub (local.get $i) (i32.const 1))) (br_if 0 (local.get $i)))
+            (i32.const 0)";
+        let slow = fill_module(FILL_AT, body, "");
+        hooks.put_on("fill".to_owned(), Running::start(&slow, &[]).unwrap(), &[Hook::FillMask]);
+        let mut moves = Running::start(&offset(), &[]).unwrap();
+        moves.control(0, 1.0).unwrap();
+        hooks.put_on("offset".to_owned(), moves, &[Hook::Position]);
+        let working = Arc::clone(&hooks);
+        let long = std::thread::spawn(move || {
+            let mut rows = vec![!0_u64; 2048 * 32];
+            working.fill_rows(&mut rows, 2048, 2048, (0, 0))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(hooks.position(1.0, 1.0), (2.0, 1.0));
+        assert!(!long.is_finished(), "answered while the other was at work");
+        assert!(!long.join().unwrap());
+    }
+
+    /// What whole-canvas fills cost going through a real patch file, up to the most that can: with
+    /// `PROCRAFT_PATCH_FILE` naming the gap-closing patch, `--ignored --nocapture`, on a device.
+    #[test]
+    #[ignore]
+    fn a_built_gap_patch_costs() {
+        let bytes = std::fs::read(std::env::var("PROCRAFT_PATCH_FILE").unwrap()).unwrap();
+        let dir = store("built-gap-cost");
+        let plugins = Plugins::with_store(dir.clone());
+        assert_eq!(plugins.install(bytes), None);
+        let found = card(&plugins);
+        assert!(plugins.set_on(found.id.clone(), true));
+        plugins.set_slider("fill_gap".to_owned(), 8.0);
+        let hooks = plugins.hooks();
+        assert!(hooks.fill_mask());
+        for side in [512_usize, 2048, 4096, 8192] {
+            // two rooms, a wall down the middle with an opening 4 tall
+            let mut data = vec![255_u8; side * side];
+            for y in (0..side).filter(|y| !(side / 2..side / 2 + 4).contains(y)) {
+                data[y * side + side / 2..y * side + side / 2 + 6].fill(0);
+            }
+            let filled = data.iter().filter(|&&v| v > 0).count();
+            let mask = procraft_engine::selection::Mask { width: side as u32, height: side as u32, data };
+            let start = Instant::now();
+            let closed = crate::pour::closed_by(&hooks, mask, (side as u32 / 4, side as u32 / 4));
+            let took = start.elapsed().as_secs_f64() * 1e3;
+            let kept = closed.map(|m| m.data.iter().filter(|&&v| v > 0).count());
+            let memory = hooks.long_calls(Hook::FillMask).first().map_or(0, |(_, r)| at_work(r).memory_used());
+            println!(
+                "fill {side}: {took:.0} ms, {:.1} MiB so far, kept {kept:?} of {filled}",
+                memory as f64 / (1 << 20) as f64
+            );
+        }
+        println!("{:?}", hooks.take_said());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A gap closed by a real patch file: with `PROCRAFT_PATCH_FILE` naming the gap-closing patch and
+    /// `--ignored`. Two rooms, the same fill through a gap, with the patch on and off.
+    #[test]
+    #[ignore]
+    fn a_built_gap_patch_closes_a_real_fill() {
+        let bytes = std::fs::read(std::env::var("PROCRAFT_PATCH_FILE").unwrap()).unwrap();
+        let Some(s) = session() else { return };
+        s.set_color(0.0, 0.0, 0.0);
+        s.set_brush_size(0.1);
+        for (y0, y1) in [(-10.0, 90.0), (110.0, 210.0)] {
+            s.stroke_begin(PointerKind::Finger, vec![sample(100.0, y0, 0.0)]);
+            s.stroke_add(
+                (1..20).map(|i| sample(100.0, y0 + (y1 - y0) * i as f32 / 20.0, f64::from(i) * 8.0)).collect(),
+            );
+            s.stroke_end(vec![]);
+        }
+        let dir = store("built-gap");
+        let plugins = Plugins::with_store(dir.clone());
+        assert_eq!(plugins.install(bytes), None);
+        let found = card(&plugins);
+        assert!(plugins.set_on(found.id.clone(), true));
+        assert_eq!(plugins.set_slider("fill_gap".to_owned(), 32.0), Some(32.0));
+        s.use_patches(Arc::clone(&plugins));
+        assert!(s.pour_begin(40.0, 100.0, 1.0, 0.0, 0.0, 0.3));
+        s.pour_end(true, None);
+        assert!(red_at(&s, 40, 100) && red_at(&s, 40, 30));
+        assert!(!red_at(&s, 160, 100) && !red_at(&s, 160, 30), "kept to its side");
+        s.undo();
+        s.await_pour();
+        assert!(plugins.set_on(found.id.clone(), false));
+        assert!(s.pour_begin(40.0, 100.0, 1.0, 0.0, 0.0, 0.3));
+        s.pour_end(true, None);
+        assert!(red_at(&s, 40, 100) && red_at(&s, 160, 100), "unapplied, it runs through the gap");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -245,7 +245,6 @@ impl Prefs {
         session.set_light_interface(self.light_interface);
         session.set_brush_scaling(self.brush_on_screen);
         session.set_selection_visibility(self.selection_visibility);
-        session.set_fill_gap(self.plugins.fill_gap());
         session.use_patches(Arc::clone(&self.plugins));
         session.set_simplified_undos(self.simplified_undos);
         session.set_speed_distance(self.speed_distance);

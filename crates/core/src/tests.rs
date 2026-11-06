@@ -5399,7 +5399,7 @@ fn a_dragged_threshold_leaves_the_layer_as_a_pour_made_at_it() {
 }
 
 #[test]
-fn color_fill_set_to_close_gaps_stays_on_its_side_of_a_wall_with_a_gap() {
+fn a_fill_runs_through_a_gap_in_a_wall() {
     let Some(s) = session(120, 120) else { return };
     s.set_brush_size(0.1);
     // a wall down the middle, open for a short way half down
@@ -5412,17 +5412,11 @@ fn color_fill_set_to_close_gaps_stays_on_its_side_of_a_wall_with_a_gap() {
         let p = pixel(s, x, y);
         p[0] > 200 && p[1] < 100
     };
-    // through the gap as it ships; kept to its side with gap closing
     assert!(s.pour_begin(30.0, 60.0, 0.9, 0.2, 0.1, 0.3));
     s.pour_end(true, None);
     assert!(red(&s, 30, 20) && red(&s, 100, 60) && red(&s, 100, 20));
     s.undo();
     assert!(!red(&s, 30, 20));
-    s.set_fill_gap(32);
-    assert!(s.pour_begin(30.0, 60.0, 0.9, 0.2, 0.1, 0.3));
-    s.pour_end(true, None);
-    assert!(red(&s, 30, 20) && red(&s, 50, 100) && red(&s, 5, 115));
-    assert!(!red(&s, 100, 60) && !red(&s, 100, 20) && !red(&s, 115, 115));
 }
 
 #[test]
