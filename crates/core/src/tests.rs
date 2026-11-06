@@ -4876,6 +4876,40 @@ fn picked_layers_transform_together() {
     assert_eq!(pixel(&s, 40, 40), [0, 0, 0, 255]);
 }
 
+#[test]
+fn picked_layers_adjust_together() {
+    use crate::Adjustment;
+    let Some(s) = session(100, 100) else { return };
+    s.set_color(1.0, 0.0, 0.0);
+    let dot = |x: f32, y: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, y, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    dot(20.0, 20.0);
+    let below = s.layers()[0].id;
+    s.add_layer();
+    dot(40.0, 40.0);
+    assert!(s.pick_layer(below));
+
+    assert_eq!(s.chosen_layers().len(), 2, "Both layers are selected");
+
+    assert_eq!(pixel(&s, 20, 20), [255, 0, 0, 255], "The dot from layer 1 is red at the beginning");
+    assert_eq!(pixel(&s, 40, 40), [255, 0, 0, 255], "The dot from layer 2 is red at the beginning");
+
+    // Makes everything white
+    assert!(s.adjustment_start(Adjustment::Hsb));
+    s.adjustment_hsb(0.5, 0.5, 1.0);
+    assert!(s.adjustment_end(true));
+
+    let one = pixel(&s, 20, 20);
+    let two = pixel(&s, 40, 40);
+    assert_eq!(
+        (one, two),
+        ([255, 255, 255, 255], [255, 255, 255, 255]),
+        "The adjustment should affect both picked layers"
+    );
+}
+
 /// On request (`BRUSH_SHEET=path.png`): every library brush's sample stroke, three to a row on
 /// dark grey, with their names listed beside it (`path.txt`), to look the library over.
 #[test]
