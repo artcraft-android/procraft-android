@@ -2682,6 +2682,46 @@ fn copy_cut_paste_and_flip() {
 }
 
 #[test]
+fn a_copy_from_a_bigger_canvas_pastes_whole() {
+    let Some(s) = session(100, 100) else { return };
+    // a 400 × 300 canvas's copy: a red block near its top left corner, and a blue one near the
+    // bottom right, both outside a 100 × 100 canvas's middle
+    let (w, h) = (400usize, 300usize);
+    let mut rgba = vec![0u8; w * h * 4];
+    let mut block = |x0: usize, y0: usize, c: [u8; 4]| {
+        for y in y0..y0 + 20 {
+            for x in x0..x0 + 20 {
+                rgba[(y * w + x) * 4..][..4].copy_from_slice(&c);
+            }
+        }
+    };
+    block(10, 10, [255, 0, 0, 255]);
+    block(370, 270, [0, 0, 255, 255]);
+    let copied = crate::layers::ThumbnailImage { width: w as u32, height: h as u32, rgba };
+    let id = s.paste(copied).unwrap();
+    // what is painted (380 × 280) scaled down to the canvas's width, centred: both blocks are there
+    let layer = s.copy_layer_contents(id).unwrap();
+    let at = |x: usize, y: usize| <[u8; 4]>::try_from(&layer.rgba[(y * 100 + x) * 4..][..4]).unwrap();
+    assert_eq!(at(2, 16), [255, 0, 0, 255]);
+    assert_eq!(at(97, 82), [0, 0, 255, 255]);
+    assert_eq!(at(50, 50)[3], 0);
+    // nothing of it is outside the strip it fills
+    assert_eq!(at(50, 10)[3], 0);
+    assert_eq!(at(50, 90)[3], 0);
+    // a small part of a big canvas comes in at its own size, in the middle
+    let mut rgba = vec![0u8; w * h * 4];
+    for y in 0..10 {
+        for x in 380..390 {
+            rgba[(y * w + x) * 4..][..4].copy_from_slice(&[0, 255, 0, 255]);
+        }
+    }
+    let id = s.paste(crate::layers::ThumbnailImage { width: w as u32, height: h as u32, rgba }).unwrap();
+    let layer = s.copy_layer_contents(id).unwrap();
+    let painted = crate::layer_ops::painted_rect(&layer.rgba, 100).unwrap();
+    assert_eq!((painted.x0, painted.y0, painted.x1, painted.y1), (45, 45, 55, 55));
+}
+
+#[test]
 fn a_copy_reads_only_what_is_selected_and_painted_as_the_whole_layer_would_give() {
     use crate::selection::SelectionJoin;
     let Some(s) = session(300, 300) else { return };
