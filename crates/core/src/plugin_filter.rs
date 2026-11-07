@@ -127,7 +127,7 @@ impl CanvasSession {
     /// Opens `open` on the current layer, drawn at once; false if the layer can't be adjusted.
     fn open_filter(&self, open: OpenFilter) -> bool {
         let tried = open.trying.then(|| Arc::clone(&open.plugins));
-        if !self.adjust_begin() {
+        if !self.adjust_begin_single() {
             if let Some(plugins) = tried {
                 plugins.filter_tried();
             }

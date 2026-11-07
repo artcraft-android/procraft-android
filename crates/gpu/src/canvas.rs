@@ -4286,17 +4286,16 @@ impl Canvas {
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     ));
                     self.pencil = Some(PencilMask { view, bounds: IRect::EMPTY });
-                    // the edit's source now takes the mask where it took the selection
-                    let source = self
-                        .transforming
-                        .as_ref()
-                        .map(|t| t.before.create_view(&wgpu::TextureViewDescriptor::default()));
-                    if let Some(view) = source {
-                        let bind = self.adjustment_bind(device, &view, true);
-                        if let Some(t) = self.transforming.as_mut() {
-                            t.bind = bind;
-                            t.masked = true;
-                        }
+                    // the edit's source now takes the mask where it took the selection, on every
+                    // layer the adjustment changes
+                    let mut binds = Vec::new();
+                    for t in self.transforming.iter().chain(&self.transform_more) {
+                        let view = t.before.create_view(&wgpu::TextureViewDescriptor::default());
+                        binds.push(self.adjustment_bind(device, &view, true));
+                    }
+                    for (t, bind) in self.transforming.iter_mut().chain(self.transform_more.iter_mut()).zip(binds) {
+                        t.bind = bind;
+                        t.masked = true;
                     }
                 }
                 Op::LiquifyStamps(stamps) => self.liquify_step(device, &mut encoder, &mut uniforms, &stamps, 1.0),
@@ -4325,24 +4324,36 @@ impl Canvas {
                         if commit && let Some(rect) = painted {
                             // painted on: only where it was painted changed, and nothing if nowhere
                             if !rect.is_empty() {
-                                let texture = region_copy(device, &mut encoder, &t.before, rect);
+                                let mut spare = None;
+                                let pixels: Vec<Snapshot> = std::iter::once(t)
+                                    .chain(more)
+                                    .map(|t| {
+                                        let texture = region_copy(device, &mut encoder, &t.before, rect);
+                                        spare = Some(t.before);
+                                        Snapshot { layer: t.layer, rect, texture }
+                                    })
+                                    .collect();
+                                if spare.is_some() {
+                                    self.spare_before = spare;
+                                }
                                 self.push_step(Step {
                                     made: 0,
                                     name: None,
                                     doc: None,
-                                    pixels: vec![Snapshot { layer: t.layer, rect, texture }],
+                                    pixels,
                                     selection: None,
                                     flip: None,
                                 });
                                 history_changed = true;
+                            } else {
+                                self.spare_before = Some(t.before);
                             }
-                            self.spare_before = Some(t.before);
                         } else if commit {
                             let full = self.full();
                             // only the part changed, when that is known
                             let part = within.map(|r| r.intersect(full)).filter(|r| !r.is_empty() && *r != full);
                             let mut spare = None;
-                            let pixels = std::iter::once(t)
+                            let pixels: Vec<Snapshot> = std::iter::once(t)
                                 .chain(more)
                                 .map(|t| match part {
                                     Some(rect) => {
@@ -5537,15 +5548,15 @@ impl Canvas {
         }
     }
 
-    /// Draws the layer being edited from its copy through `filter`, kept to the selection.
-    fn filter(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, uniforms: &mut UniformData, filter: Filter) {
-        let Some(t) = &self.transforming else { return };
-        let Some(layer) = self.layers.get(&t.layer) else { return };
+    /// The fragment pass and uniform that draw `filter`, with `masked` saying whether the
+    /// selection or pencil mask applies.
+    fn filter_pass(&self, t: &Transforming, filter: Filter) -> (&'static str, FilterUniform) {
         let (w, h) = (self.width as f32, self.height as f32);
         let full = [w, h, if t.masked { 1.0 } else { 0.0 }, 0.0];
         let values = |a: [f32; 4], b: [f32; 4]| FilterUniform { a, b, size: full, c: [0.0; 4] };
+
         // most adjustments are one pass from the copy into the layer
-        let (pass, uniform) = match filter {
+        match filter {
             Filter::Hsb { hue, saturation, brightness } => {
                 ("fs_hsb", values([hue, saturation, brightness, 0.0], [0.0; 4]))
             }
@@ -5587,39 +5598,39 @@ impl Canvas {
                 "fs_balance",
                 FilterUniform { a: [s0, s1, s2, 0.0], b: [m0, m1, m2, 0.0], size: full, c: [h0, h1, h2, 0.0] },
             ),
-        };
-        let blurred = match filter {
-            Filter::Blur { sigma } | Filter::Bloom { sigma, .. } => self.blur_copy(gpu, encoder, uniforms, sigma),
+        }
+    }
+
+    /// Draws every layer being edited from its copy through `filter`, kept to the selection.
+    fn filter(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, uniforms: &mut UniformData, filter: Filter) {
+        let sigma = match filter {
+            Filter::Blur { sigma } | Filter::Bloom { sigma, .. } => Some(sigma),
             _ => None,
         };
-        let Some(pipeline) = self.pipelines.filters.get(pass) else { return };
-        let offset = uniforms.push(&uniform);
         // the last pass reads the copy, or the blurred copy, and takes the selection from the edit
-        let source = blurred.as_ref().map(|view| self.adjustment_bind(&gpu.device, view, t.masked));
-        let mut out = render_pass(encoder, "adjustment", &layer.view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
-        out.set_pipeline(pipeline);
-        out.set_bind_group(0, source.as_ref().unwrap_or(&t.bind), &[]);
-        out.set_bind_group(1, &self.uniform_bind, &[offset]);
-        // liquify reads its field where the others read the table
-        let last = match (filter, &self.liquify) {
-            (Filter::Liquify { .. }, Some(field)) => &field.bind,
-            _ => &t.before_bind,
-        };
-        out.set_bind_group(2, last, &[]);
-        out.draw(0..3, 0..1);
-        drop(out);
-        // liquify pushes what is edited along with it (a layer's mask) the same way
-        if let (Filter::Liquify { .. }, Some(field)) = (filter, &self.liquify) {
-            for more in &self.transform_more {
-                let Some(target) = self.layers.get(&more.layer) else { continue };
-                let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
-                let mut along = render_pass(encoder, "liquify along", &target.view, clear);
-                along.set_pipeline(pipeline);
-                along.set_bind_group(0, &more.bind, &[]);
-                along.set_bind_group(1, &self.uniform_bind, &[offset]);
-                along.set_bind_group(2, &field.bind, &[]);
-                along.draw(0..3, 0..1);
-            }
+        for t in self.transforming.iter().chain(&self.transform_more) {
+            let (pass, uniform) = self.filter_pass(t, filter);
+            let Some(pipeline) = self.pipelines.filters.get(pass) else { continue };
+            let offset = uniforms.push(&uniform);
+            let blurred = match sigma {
+                Some(s) => self.blur_copy(t, gpu, encoder, uniforms, s),
+                _ => None,
+            };
+            let source = blurred.as_ref().map(|view| self.adjustment_bind(&gpu.device, view, t.masked));
+            let Some(layer) = self.layers.get(&t.layer) else { continue };
+            let mut out =
+                render_pass(encoder, "adjustment", &layer.view, wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT));
+            out.set_pipeline(pipeline);
+            out.set_bind_group(0, source.as_ref().unwrap_or(&t.bind), &[]);
+            out.set_bind_group(1, &self.uniform_bind, &[offset]);
+            // liquify reads its field where the others read the table
+            let last = match (filter, &self.liquify) {
+                (Filter::Liquify { .. }, Some(field)) => &field.bind,
+                _ => &t.before_bind,
+            };
+            out.set_bind_group(2, last, &[]);
+            out.draw(0..3, 0..1);
+            drop(out);
         }
         self.dirty = self.full();
     }
@@ -5758,13 +5769,13 @@ impl Canvas {
     /// until the blur is a few pixels wide where it runs); none when the blur is too small to do.
     fn blur_copy(
         &self,
+        t: &Transforming,
         gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &mut UniformData,
         sigma: f32,
     ) -> Option<wgpu::TextureView> {
         let device = &gpu.device;
-        let t = self.transforming.as_ref()?;
         let (w, h) = (self.width, self.height);
         let mut scale = 1u32;
         while sigma / scale as f32 > 8.0 && scale < 32 && w / (scale * 2) > 0 && h / (scale * 2) > 0 {
