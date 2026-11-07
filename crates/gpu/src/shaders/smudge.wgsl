@@ -387,7 +387,12 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
             amount[l] = bitcast<f32>(work[k]);
         }
         let first = unpack4x8unorm(bitcast<u32>(amount[l]));
-        let strongest = max(held, m * g);
+        // crisp: the shape and grain cut where it drags, each part all the way or not at all,
+        // and the stamp's strength (opacity, pressure) how much of them is let through; at full
+        // strength nearly all of it (a part half dragged is the soft mush a blur is)
+        let through = shape * clamp(2.0 * g, 0.0, 1.0);
+        let cut = 1.0 - sqrt(st.alpha);
+        let strongest = max(held, smoothstep(cut - 0.06, cut + 0.06, through));
         amount[k] = strongest;
         out = mix(first, carried(p), strongest);
     }
