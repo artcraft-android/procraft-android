@@ -99,9 +99,11 @@ enum ScreenCapture {
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
-    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse"]
+    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist"]
     /// What opens over the gallery.
     static var galleryShows: String?
+    /// Animation Assist's settings open on the onion skins' colours.
+    static var animationColors = false
     /// The Adjustments menu opens on the filters.
     static var filtersShow = false
     /// A gradient's second stop opens its colours, in this mode.
@@ -376,6 +378,19 @@ enum ScreenCapture {
         case "colors-floating", "colors-floating-palettes", "colors-floating-harmony", "colors-floating-value":
             model.colorMode = ColorMode.allCases.first { name.hasSuffix($0.label.lowercased()) } ?? .disc
             model.floatingColorsAt = CGPoint(x: 300, y: 160)
+        case "animation", "animation-settings", "animation-frame", "animation-colors":
+            model.animationAssist.setAssist(true, pages: false)
+            for _ in 0 ..< 3 {
+                model.addLayer()
+            }
+            model.animationAssist.settingsOpen = name == "animation-settings" || name == "animation-colors"
+            model.animationAssist.frameOptionsOpen = name == "animation-frame"
+            if name == "animation-colors" {
+                animationColors = true
+            }
+        case "page-assist":
+            model.animationAssist.setAssist(true, pages: true)
+            model.addLayer()
         case "companion":
             UserDefaults.standard.set(true, forKey: "singleTouchCompanion")
             model.readAppSettings()

@@ -1470,6 +1470,39 @@ struct CompactColors: View {
     }
 }
 
+/// The compact picker's body and its mode tabs, 260 wide, for a page of its own.
+struct CompactPicker: View {
+    let c: any ColorPick
+
+    @State private var mode = ColorMode.disc
+    @State private var ui = ColorUi()
+    @State private var palettes: [PaletteInfo] = []
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Group {
+                switch mode {
+                case .disc: DiscPicker(c: c, short: false, compact: true)
+                case .classic: ClassicPicker(c: c, square: 248, compact: true)
+                case .harmony: HarmonyPicker(kind: .complementary, c: c, short: false, compact: true)
+                case .value: CompactValue(c: c, ui: ui)
+                case .palettes: CompactPalettes(c: c, palettes: palettes)
+                }
+            }
+            .frame(width: compactWidth, height: 340, alignment: .top)
+            CompactTabs(mode: mode) { mode = $0 }
+                .frame(width: compactWidth)
+        }
+        .coordinateSpace(.named(colorsSpace))
+        .overlay(alignment: .topLeading) {
+            ZStack(alignment: .topLeading) {
+                HexOverlay(ui: ui)
+            }
+        }
+        .onAppear { palettes = CanvasModel.paletteStore.list() }
+    }
+}
+
 /// The compact pickers' modes as a row of icons, the chosen one blue.
 private struct CompactTabs: View {
     let mode: ColorMode

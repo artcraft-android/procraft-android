@@ -264,6 +264,7 @@ final class CanvasModel {
     @ObservationIgnored private(set) lazy var guide = GuideTool(model: self)
     @ObservationIgnored private(set) lazy var reference = ReferenceTool(model: self)
     @ObservationIgnored private(set) lazy var timeLapse = TimeLapseTool(model: self)
+    @ObservationIgnored private(set) lazy var animationAssist = AnimationAssist(model: self)
     @ObservationIgnored private(set) lazy var text = TextTool(model: self)
     /// The middle of the screen, window pixels.
     @ObservationIgnored var screenCentre = CGPoint.zero
@@ -1307,6 +1308,7 @@ final class CanvasModel {
     func refresh() {
         reference.refresh()
         timeLapse.record()
+        animationAssist.refresh()
         refreshFlags()
         // undo and redo step through a snapped shape: its handles where they now are, and past its
         // drags it gives way to the stroke as drawn and ends

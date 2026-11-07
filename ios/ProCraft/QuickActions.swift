@@ -148,6 +148,12 @@ extension CanvasModel {
         case .paste: paste()
         case .copyPasteMenu: copyPasteOpen = true
         case .reference: reference.setOn(!reference.on)
+        case .animationAssist:
+            animationAssist.setAssist(!(animationAssist.settings != nil && animationAssist.settings?.pages == false), pages: false)
+        case .pageAssist: animationAssist.setAssist(animationAssist.settings?.pages != true, pages: true)
+        case .nextFrame: animationAssist.step(1)
+        case .previousFrame: animationAssist.step(-1)
+        case .onionSkin: animationAssist.toggleOnionSkin()
         case .companionMove: toggleCompanionMode(.move)
         case .companionZoom: toggleCompanionMode(.zoom)
         case .flipHorizontal: flipCanvas(horizontal: true)

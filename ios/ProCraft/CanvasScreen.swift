@@ -73,6 +73,11 @@ struct CanvasScreen: View {
                     .frame(maxWidth: .infinity, alignment: right ? .trailing : .leading)
                     .offset(x: sideBarShift(right), y: screen.size.height * Pc.sideBarCentre - Pc.sideBarHeight / 2)
                     .opacity(hidden ? 0 : 1)
+                // over the canvas, under the panels; not over a page that takes the screen
+                if !hidden, !model.canvasInfoOpen, !model.gestureControlsOpen, model.crop.shown == nil, !model.timeLapse.replaying {
+                    AnimationBar(model: model, screen: screen.size)
+                        .frame(width: screen.size.width, height: screen.size.height, alignment: .bottom)
+                }
                 if model.panel != .none || model.panelFading {
                     // the one view all the way, so a list fading keeps its place
                     PanelHost(model: model, screen: screen.size)

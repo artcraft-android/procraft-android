@@ -57,6 +57,8 @@ enum Motion {
     static let artworkPinchOpen: CGFloat = 1.35
     /// An artwork spread open, let go: settling fitted over the screen (or back into its place).
     static let pinchSettle = easeOut(0.3)
+    /// A frame chosen or added sliding into the middle of the timeline.
+    static let frameSlide = settle(0.35)
     /// The time-lapse replay fading in over everything, and out.
     static let replayFade = easeInOut(0.25)
     /// The reference window fading in where it is, and out when closed.
