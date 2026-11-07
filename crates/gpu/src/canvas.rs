@@ -843,8 +843,11 @@ const STROKE_ERASE: u32 = 2;
 const STROKE_PAINT_LOCKED: u32 = 3;
 const STROKE_LAID: u32 = 4;
 
-/// How much of what it carries a smudge brush keeps at each stamp.
+/// How much of what it carries a smudge brush keeps each `PULL_SPACING` of its size it goes.
 const DEFAULT_PULL: f32 = 0.93;
+/// The share of a smudge brush's size that `DEFAULT_PULL` is kept over: a common spacing, so a
+/// brush stamped that far apart smudges as it always did.
+const PULL_SPACING: f32 = 0.1;
 /// A number in 0..1 that looks random, from `n`.
 fn unit_hash(n: u32) -> f32 {
     let mut x = n.wrapping_mul(0x9e37_79b9) ^ 0x85eb_ca6b;
@@ -1195,6 +1198,8 @@ struct Smudge {
     kept: i32,
     /// Stamps laid so far (for the wetness jitter).
     stamps: u32,
+    /// The stroke's last stamp's middle, for how far the brush went to the next.
+    last_center: Option<[f32; 2]>,
     /// Wet paint with a texturized grain: the stroke without the grain, then the layer as it was,
     /// the grain laid over the change once (see `grain_once`).
     grained: Option<wgpu::Buffer>,
@@ -4613,6 +4618,7 @@ impl Canvas {
             smudge.scale = 1.0;
             smudge.kept = -1;
             smudge.stamps = 0;
+            smudge.last_center = None;
             smudge.pending.clear();
             smudge.passes = 0;
             smudge.plot = 0;
@@ -4739,6 +4745,7 @@ impl Canvas {
                 scale: 1.0,
                 kept: -1,
                 stamps: 0,
+                last_center: None,
                 grained,
                 amount,
                 apart,
@@ -4794,8 +4801,15 @@ impl Canvas {
             }
             let anchor = if smudge.scale <= 1.0 { s.center.map(f32::floor) } else { s.center };
             let half = ((reach / smudge.scale).ceil() as i32).clamp(1, SMUDGE_REACH);
+            // the pull goes by how far the brush went, not by the stamp: what it carries lasts as
+            // far along the stroke at any spacing (a dense brush otherwise lets go of it within a
+            // fraction of its size, and only blurs in place)
+            let went = smudge.last_center.map_or(0.0, |[x, y]| (s.center[0] - x).hypot(s.center[1] - y));
+            smudge.last_center = Some(s.center);
+            let steps = went / (PULL_SPACING * 2.0 * s.radius.max(0.5));
+            let pull = (style.pull.clamp(0.0, 1.0) * smudge_pull_by).powf(steps);
             let offset = params.push(&SmudgeUniform {
-                pull: style.pull.clamp(0.0, 1.0) * smudge_pull_by,
+                pull,
                 kept: smudge.kept,
                 blur,
                 anchor,
