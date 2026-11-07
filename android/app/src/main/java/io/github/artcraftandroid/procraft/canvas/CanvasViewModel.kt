@@ -6118,9 +6118,17 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return io.github.artcraftandroid.procraft.core.SelectTouch(kind, join, selectionThreshold)
     }
 
-    /** The freehand path as the touches have drawn it (canvas pixels). */
+    /** The freehand path is read at the next frame: a pen sends many moves a frame, each a longer path. */
+    private var freehandDue = false
+
+    /** The freehand path as the touches have drawn it (canvas pixels), read once a frame. */
     fun freehandChanged() {
-        freehand = session?.freehandPath().orEmpty().chunked(2).mapNotNull { (x, y) -> windowToCanvas(Offset(x, y)) }
+        if (freehandDue) return
+        freehandDue = true
+        android.view.Choreographer.getInstance().postFrameCallback {
+            freehandDue = false
+            freehand = session?.freehandPath().orEmpty().chunked(2).mapNotNull { (x, y) -> windowToCanvas(Offset(x, y)) }
+        }
     }
 
     /** The touches made a selection (or a shape dragged out ended): Color Fill fills it. */
@@ -6129,13 +6137,25 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         selectionChanged()
     }
 
+    /** The threshold slid last and not yet shown: shown once a frame, however many moves come in one. */
+    private var colourDue: Pair<Offset, Float>? = null
+
     /** A colour selection's threshold slid from window point [p]: shown as it goes; [done], kept for the next one. */
     fun colourSlid(p: Offset, threshold: Float, done: Boolean) {
         if (!done) {
-            selectByColour(p, threshold, live = true)
+            val waiting = colourDue != null
+            colourDue = p to threshold
+            if (!waiting) {
+                android.view.Choreographer.getInstance().postFrameCallback {
+                    val (at, slid) = colourDue ?: return@postFrameCallback
+                    colourDue = null
+                    selectByColour(at, slid, live = true)
+                }
+            }
             return
         }
-        // the touches made the selection as it was let go
+        // the touches made the selection as it was let go (a move still waiting is left out)
+        colourDue = null
         thresholdDrag = null
         selectionThreshold = threshold
         transformPrefs.edit().putFloat(SELECTION_THRESHOLD, threshold).apply()
@@ -6144,7 +6164,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Closes the freehand path into a selection (a path of fewer than three points is dropped). */
     fun closeFreehand() {
         val s = session ?: return
-        val drawn = freehand.isNotEmpty()
+        // (one drawn within a frame may not have been read yet)
+        val drawn = freehand.isNotEmpty() || freehandDue
         freehand = emptyList()
         s.closeFreehand()
         if (drawn) selectionChanged()
