@@ -42,8 +42,7 @@ pub fn samples(brush: &Brush) -> Vec<Sample> {
     let gain = PRESSURE_GAIN * 2.0 * brush.setting("preview_pressure_scale");
     // the preview's pen is held a quarter turn from upright, turned further by the preview's own
     // offset (a quarter turn at 1)
-    let azimuth = -std::f32::consts::FRAC_PI_2
-        + brush.setting("preview_tilt_offset") * std::f32::consts::FRAC_PI_2;
+    let azimuth = -std::f32::consts::FRAC_PI_2 + brush.setting("preview_tilt_offset") * std::f32::consts::FRAC_PI_2;
     (0..SAMPLES)
         .map(|i| {
             let t = i as f32 / (SAMPLES - 1) as f32;
