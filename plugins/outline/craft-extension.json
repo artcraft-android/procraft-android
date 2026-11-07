@@ -3,7 +3,7 @@
   "id": "io.github.artcraftandroid.outline",
   "name": "Outline",
   "version": "1.0.0",
-  "kind": "filter",
+  "holds": ["filter"],
   "publisher": { "name": "ProCraft" },
   "description": "Draws a line round what is on the layer, in place of it.",
   "compat": { "procraft": { "interface": 1 } },

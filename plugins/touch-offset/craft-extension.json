@@ -3,7 +3,7 @@
   "id": "io.github.artcraftandroid.touch-offset",
   "name": "Touch position offset",
   "version": "1.0.0",
-  "kind": "patch",
+  "holds": ["hooks"],
   "publisher": { "name": "ProCraft" },
   "description": "Moves where your strokes land, for a pen whose ink doesn't sit under its tip.",
   "compat": { "procraft": { "interface": 1 } },

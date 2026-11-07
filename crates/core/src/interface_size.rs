@@ -1,4 +1,4 @@
-//! How big the interface shows beside what is measured: a number, which a patch gives or nothing
+//! How big the interface shows beside what is measured: a number, which a plugin gives or nothing
 //! does (1). The canvas, brushes and gestures don't follow it, only what the interface draws: see
 //! [`crate::CanvasSession::set_interface_size`].
 
@@ -7,8 +7,8 @@ const LEAST_WIDTH: f32 = 640.0;
 const LEAST_HEIGHT: f32 = 480.0;
 
 /// The most the interface may show at in a window `width` × `height` points at 1: as far as it
-/// leaves the panels what they need, so a patch can't push its own Unapply out of reach. A window
-/// with less than that shows as measured. A patch that fits itself never gets here.
+/// leaves the panels what they need, so a plugin can't push its own Turn off out of reach. A window
+/// with less than that shows as measured. A plugin that fits itself never gets here.
 pub(crate) fn most_for(width: f32, height: f32) -> f32 {
     (width / LEAST_WIDTH).min(height / LEAST_HEIGHT).max(1.0)
 }

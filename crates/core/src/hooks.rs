@@ -1,24 +1,24 @@
-//! The points where an applied patch steps in. Each does nothing with none applied, and holds no
-//! feature of its own: what a patch does is in its file. They stay for good, so there are as few as
-//! patches need, and each is as narrow as it can be.
+//! The points where a plugin that's on steps in. Each does nothing with none on, and holds no
+//! feature of its own: what a plugin does is in its file. They stay for good, so there are as few as
+//! plugins need, and each is as narrow as it can be.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::CanvasSession;
-use crate::patch_run::{Hook, Running, Stop};
 use crate::plugin_file;
+use crate::plugin_run::{Hook, Running, Stop};
 use crate::plugins::Plugins;
 
-/// A patch at work: a lock of its own, so a long call holds up nothing but it.
+/// A plugin at work: a lock of its own, so a long call holds up nothing but it.
 type Shared = Arc<Mutex<Running>>;
 
 fn at_work(running: &Shared) -> MutexGuard<'_, Running> {
     running.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-struct Applied {
+struct OnHook {
     id: String,
     running: Shared,
     /// The hooks it is on, as bits.
@@ -26,22 +26,22 @@ struct Applied {
 }
 
 #[derive(Default)]
-struct Patches {
-    /// In id order, so patches go in the same order however they were applied.
-    applied: Vec<Applied>,
+struct Working {
+    /// In id order, so plugins go in the same order however they were turned on.
+    on: Vec<OnHook>,
     /// What stopped since the list last asked, and why.
     stopped: Vec<(String, Stop)>,
     /// What the app hasn't told yet: whoever is drawing sees the stroke change, not the list.
     untold: Option<String>,
 }
 
-/// The applied patches, shared by a list and the sessions going through it. Not a static: they go
+/// The plugins that are on, shared by a list and the sessions going through it. Not a static: they go
 /// with the list, so one comes off at once, no restart.
 #[derive(Default)]
 pub(crate) struct Hooks {
-    /// The hooks with a patch on them, as bits: all a stroke with none pays for is reading this.
+    /// The hooks with a plugin on them, as bits: all a stroke with none pays for is reading this.
     hooked: AtomicU32,
-    patches: Mutex<Patches>,
+    working: Mutex<Working>,
     /// Where a stop is written down, to stay off through a restart.
     store: Option<PathBuf>,
 }
@@ -57,18 +57,18 @@ impl Hooks {
         Hooks { store, ..Hooks::default() }
     }
 
-    fn patches(&self) -> MutexGuard<'_, Patches> {
-        self.patches.lock().unwrap_or_else(|e| e.into_inner())
+    fn working(&self) -> MutexGuard<'_, Working> {
+        self.working.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Writes down that `id` stopped, for the list and for the next start.
-    fn note_stop(&self, patches: &mut Patches, id: String, stop: Stop) {
-        log::warn!("a patch stopped: {id}: {stop:?}");
+    fn note_stop(&self, working: &mut Working, id: String, stop: Stop) {
+        log::warn!("a plugin stopped: {id}: {stop:?}");
         if let Some(store) = &self.store {
             plugin_file::note_stopped(store, &id, stop.text());
         }
-        patches.stopped.push((id, stop));
-        patches.untold = Some(format!("A patch stopped. {}", stop.text()));
+        working.stopped.push((id, stop));
+        working.untold = Some(format!("A plugin stopped. {}", stop.text()));
     }
 
     fn has(&self, hook: Hook) -> bool {
@@ -76,42 +76,42 @@ impl Hooks {
     }
 
     /// The bits go by what is on now.
-    fn rehook(&self, patches: &Patches) {
-        let hooked = patches.applied.iter().fold(0, |bits, patch| bits | patch.hooks);
+    fn rehook(&self, working: &Working) {
+        let hooked = working.on.iter().fold(0, |bits, plugin| bits | plugin.hooks);
         self.hooked.store(hooked, Ordering::Relaxed);
     }
 
-    /// `start` through each patch on `hook`, in turn. One that stops is off the hooks there and then,
+    /// `start` through each plugin on `hook`, in turn. One that stops is off the hooks there and then,
     /// and what it was handed goes on as it came to it.
     fn through<T: Copy>(&self, hook: Hook, start: T, mut step: impl FnMut(&mut Running, T) -> Result<T, Stop>) -> T {
-        let mut patches = self.patches();
+        let mut working = self.working();
         let mut at = start;
         let mut i = 0;
-        while let Some(patch) = patches.applied.get_mut(i) {
-            if patch.hooks & hook.bit() == 0 {
+        while let Some(plugin) = working.on.get_mut(i) {
+            if plugin.hooks & hook.bit() == 0 {
                 i += 1;
                 continue;
             }
-            let answer = step(&mut at_work(&patch.running), at);
+            let answer = step(&mut at_work(&plugin.running), at);
             match answer {
                 Ok(to) => {
                     at = to;
                     i += 1;
                 }
                 Err(stop) => {
-                    let gone = patches.applied.remove(i);
-                    self.note_stop(&mut patches, gone.id, stop);
+                    let gone = working.on.remove(i);
+                    self.note_stop(&mut working, gone.id, stop);
                 }
             }
         }
-        self.rehook(&patches);
+        self.rehook(&working);
         at
     }
 
     /// The position hook: where a sample in window pixels lands, before the stroke sees it.
     #[inline]
     pub(crate) fn position(&self, x: f32, y: f32) -> (f32, f32) {
-        // what isn't a position goes on as it came, and no patch answers for it
+        // what isn't a position goes on as it came, and no plugin answers for it
         if !self.has(Hook::Position) || !x.is_finite() || !y.is_finite() {
             return (x, y);
         }
@@ -126,7 +126,7 @@ impl Hooks {
     }
 
     /// The scale hook: how big the interface shows in a window `width` × `height` points at 1. The
-    /// number is the patch's, and all the app adds is what keeps every page in reach: see
+    /// number is the plugin's, and all the app adds is what keeps every page in reach: see
     /// [`crate::interface_size`].
     pub(crate) fn interface_scale(&self, width: f32, height: f32) -> f32 {
         if !self.has(Hook::InterfaceScale) {
@@ -142,22 +142,22 @@ impl Hooks {
             && self.through(Hook::PasteMask, false, |running, said| Ok(said | running.paste_mask()?))
     }
 
-    /// The patches on `hook`, to be called with the list let go: a long call holds up only them.
+    /// The plugins on `hook`, to be called with the list let go: a long call holds up only them.
     fn long_calls(&self, hook: Hook) -> Vec<(String, Shared)> {
-        let patches = self.patches();
-        let on = patches.applied.iter().filter(|patch| patch.hooks & hook.bit() != 0);
-        on.map(|patch| (patch.id.clone(), Arc::clone(&patch.running))).collect()
+        let working = self.working();
+        let on = working.on.iter().filter(|plugin| plugin.hooks & hook.bit() != 0);
+        on.map(|plugin| (plugin.id.clone(), Arc::clone(&plugin.running))).collect()
     }
 
     /// `id` comes off the hooks, having stopped in a long call.
     fn stopped(&self, id: &str, stop: Stop) {
-        let mut patches = self.patches();
-        patches.applied.retain(|p| p.id != id);
-        self.note_stop(&mut patches, id.to_owned(), stop);
-        self.rehook(&patches);
+        let mut working = self.working();
+        working.on.retain(|p| p.id != id);
+        self.note_stop(&mut working, id.to_owned(), stop);
+        self.rehook(&working);
     }
 
-    /// `rgba`, rows of `width` pixels, as the patch on the paste hook makes it; false if it can't,
+    /// `rgba`, rows of `width` pixels, as the plugin on the paste hook makes it; false if it can't,
     /// and what has gone through is no use. The first that takes it has it all.
     pub(crate) fn paste_rows(&self, rgba: &mut [u8], width: usize) -> bool {
         let Some((id, running)) = self.long_calls(Hook::PasteMask).into_iter().next() else { return false };
@@ -171,7 +171,7 @@ impl Hooks {
     }
 
     /// `rows`, a fill of `width` × `height` from `seed`, a bit a pixel in words of 64, through each
-    /// patch on the fill hook, each taking out what it says: a long call, not for the main thread.
+    /// plugin on the fill hook, each taking out what it says: a long call, not for the main thread.
     /// Whether anything came out. One that stops takes nothing out.
     pub(crate) fn fill_rows(&self, rows: &mut Vec<u64>, width: usize, height: usize, seed: (usize, usize)) -> bool {
         let mut changed = false;
@@ -191,61 +191,61 @@ impl Hooks {
 
     /// `words` for the app to tell, once.
     pub(crate) fn say(&self, words: &str) {
-        self.patches().untold = Some(words.to_owned());
+        self.working().untold = Some(words.to_owned());
     }
 
     pub(crate) fn is_on(&self, id: &str) -> bool {
-        self.patches().applied.iter().any(|p| p.id == id)
+        self.working().on.iter().any(|p| p.id == id)
     }
 
     pub(crate) fn put_on(&self, id: String, running: Running, hooks: &[Hook]) {
-        let mut patches = self.patches();
-        patches.applied.retain(|p| p.id != id);
-        let at = patches.applied.partition_point(|p| p.id < id);
+        let mut working = self.working();
+        working.on.retain(|p| p.id != id);
+        let at = working.on.partition_point(|p| p.id < id);
         let hooks = hooks.iter().fold(0, |bits, hook| bits | hook.bit());
-        patches.applied.insert(at, Applied { id, running: Arc::new(Mutex::new(running)), hooks });
-        self.rehook(&patches);
+        working.on.insert(at, OnHook { id, running: Arc::new(Mutex::new(running)), hooks });
+        self.rehook(&working);
     }
 
     /// Takes `id` off: from the next sample on, the app is as if it had never been.
     pub(crate) fn take_off(&self, id: &str) {
-        let mut patches = self.patches();
-        patches.applied.retain(|p| p.id != id);
-        self.rehook(&patches);
+        let mut working = self.working();
+        working.on.retain(|p| p.id != id);
+        self.rehook(&working);
     }
 
     /// Tells `id`, if it is on, control `index` has `value`.
     pub(crate) fn control(&self, id: &str, index: usize, value: f32) {
-        let mut patches = self.patches();
-        let Some(at) = patches.applied.iter().position(|p| p.id == id) else { return };
-        let told = patches.applied.get(at).map(|p| at_work(&p.running).control(index, value));
+        let mut working = self.working();
+        let Some(at) = working.on.iter().position(|p| p.id == id) else { return };
+        let told = working.on.get(at).map(|p| at_work(&p.running).control(index, value));
         if let Some(Err(stop)) = told {
-            let gone = patches.applied.remove(at);
-            self.note_stop(&mut patches, gone.id, stop);
-            self.rehook(&patches);
+            let gone = working.on.remove(at);
+            self.note_stop(&mut working, gone.id, stop);
+            self.rehook(&working);
         }
     }
 
     /// Writes down that `id` couldn't start, as if it had stopped.
     pub(crate) fn failed(&self, id: &str, stop: Stop) {
-        self.note_stop(&mut self.patches(), id.to_owned(), stop);
+        self.note_stop(&mut self.working(), id.to_owned(), stop);
     }
 
     /// What there is for the app to tell, once.
     pub(crate) fn take_said(&self) -> Option<String> {
-        self.patches().untold.take()
+        self.working().untold.take()
     }
 
     /// What stopped since this was last asked.
     pub(crate) fn take_stopped(&self) -> Vec<(String, Stop)> {
-        std::mem::take(&mut self.patches().stopped)
+        std::mem::take(&mut self.working().stopped)
     }
 }
 
 #[uniffi::export]
 impl CanvasSession {
-    /// Strokes go through the patches `plugins` has applied, as they come and go, from here on.
-    pub fn use_patches(&self, plugins: Arc<Plugins>) {
+    /// Strokes go through the plugins on in `plugins`, as they come and go, from here on.
+    pub fn use_plugins(&self, plugins: Arc<Plugins>) {
         let hooks = plugins.hooks();
         self.shared.lock().hooks = Some(hooks);
     }
@@ -260,9 +260,9 @@ pub(crate) mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::patch_run::tests::{FILL_AT, OFFSET, TAKES_MOST, fill_module, position_module};
-    use crate::patch_run::{MODULE, Running};
-    use crate::plugin_file::tests::{pack, patch};
+    use crate::plugin_file::tests::{coded, pack};
+    use crate::plugin_run::tests::{FILL_AT, OFFSET, TAKES_MOST, fill_module, position_module};
+    use crate::plugin_run::{MODULE, Running};
     use crate::{PenSample, PointerKind};
 
     const ID: &str = "org.example.offset";
@@ -316,7 +316,7 @@ pub(crate) mod tests {
     }
 
     fn offset_manifest() -> Value {
-        let mut manifest = patch(ID, &offset());
+        let mut manifest = coded(ID, &offset());
         manifest["controls"] = json!([
             { "key": "x", "type": "slider", "label": "X", "least": -100, "most": 100, "step": 1, "starts": 0 },
             { "key": "y", "type": "slider", "label": "Y", "least": -100, "most": 100, "step": 1, "starts": 0 },
@@ -324,24 +324,24 @@ pub(crate) mod tests {
         manifest
     }
 
-    /// A list holding the offset patch, in `dir`.
+    /// A list holding the offset plugin, in `dir`.
     fn with_offset(dir: &str) -> Arc<Plugins> {
         let plugins = Plugins::with_store(dir.to_owned());
         assert_eq!(plugins.install(file(&offset_manifest(), &offset())), None);
         plugins
     }
 
-    /// A patch of no controls whose `procraft_position` does `body`, imported and applied.
-    fn applied(dir: &str, before: &str, body: &str) -> Arc<Plugins> {
+    /// A plugin of no controls whose `procraft_position` does `body`, imported and on.
+    fn turned_on(dir: &str, before: &str, body: &str) -> Arc<Plugins> {
         let module = position_module(before, body);
         let plugins = Plugins::with_store(dir.to_owned());
-        assert_eq!(plugins.install(file(&patch(ID, &module), &module)), None);
+        assert_eq!(plugins.install(file(&coded(ID, &module), &module)), None);
         assert!(plugins.set_on(ID.to_owned(), true));
         plugins
     }
 
     fn card(plugins: &Plugins) -> crate::plugins::PluginInfo {
-        plugins.patches().remove(0)
+        plugins.plugins().remove(0)
     }
 
     /// A list as the next start reads it back.
@@ -358,13 +358,13 @@ pub(crate) mod tests {
     fn with_nothing_applied_a_sample_goes_through_as_it_came() {
         let hooks = Hooks::default();
         assert_eq!(hooks.position(1.5, -2.5), (1.5, -2.5));
-        // whatever it is, even what no patch could hand on
+        // whatever it is, even what no plugin could hand on
         let (x, y) = hooks.position(f32::NAN, f32::INFINITY);
         assert!(x.is_nan() && y == f32::INFINITY);
     }
 
     #[test]
-    fn a_sample_that_isn_t_a_position_doesn_t_stop_a_patch() {
+    fn a_sample_that_isn_t_a_position_doesn_t_stop_a_plugin() {
         let hooks = Hooks::default();
         hooks.put_on("offset".to_owned(), Running::start(&offset(), &[]).unwrap(), &[Hook::Position]);
         assert!(hooks.position(f32::NAN, 2.0).0.is_nan());
@@ -373,11 +373,11 @@ pub(crate) mod tests {
         assert_eq!(hooks.take_stopped(), []);
     }
 
-    /// A patch that says the pick reads the layer as its one switch says, in a store at `dir`.
+    /// A plugin that says the pick reads the layer as its one switch says, in a store at `dir`.
     fn picking(dir: &str) -> Arc<Plugins> {
         let module = wat::parse_str(PICKS).unwrap();
         let plugins = Plugins::with_store(dir.to_owned());
-        let mut manifest = patch(ID, &module);
+        let mut manifest = coded(ID, &module);
         manifest["hooks"] = json!(["pick_layer"]);
         manifest["controls"] = json!([
             { "key": "layer", "type": "switch", "label": "Layer", "keeps": "eyedropper_layer" },
@@ -387,13 +387,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_pick_reads_the_layer_only_while_a_patch_says_so() {
+    fn the_pick_reads_the_layer_only_while_a_plugin_says_so() {
         let dir = store("pick");
         let plugins = picking(&dir);
         let hooks = plugins.hooks();
         assert!(!hooks.pick_layer(), "imported, it says nothing");
         assert!(plugins.set_on(ID.to_owned(), true));
-        assert!(!hooks.pick_layer(), "applied, it goes by its switch");
+        assert!(!hooks.pick_layer(), "on, it goes by its switch");
         assert!(plugins.set_switch("eyedropper_layer".to_owned(), true));
         assert!(hooks.pick_layer());
         assert!(plugins.set_on(ID.to_owned(), false));
@@ -402,12 +402,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_pick_patch_that_crashes_leaves_the_pick_on_the_canvas() {
+    fn a_pick_plugin_that_crashes_leaves_the_pick_on_the_canvas() {
         let dir = store("pick-crash");
         let module =
             wat::parse_str(r#"(module (func (export "procraft_pick_layer") (result i32) (unreachable)))"#).unwrap();
         let plugins = Plugins::with_store(dir.clone());
-        let mut manifest = patch(ID, &module);
+        let mut manifest = coded(ID, &module);
         manifest["hooks"] = json!(["pick_layer"]);
         assert_eq!(plugins.install(file(&manifest, &module)), None);
         assert!(plugins.set_on(ID.to_owned(), true));
@@ -419,7 +419,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_eyedropper_reads_the_current_layer_while_a_patch_says_so() {
+    fn the_eyedropper_reads_the_current_layer_while_a_plugin_says_so() {
         let Some(s) = session() else { return };
         // paint on the first layer, then an empty one over it
         draw(&s);
@@ -428,8 +428,8 @@ pub(crate) mod tests {
         assert!(shown.is_some());
         let dir = store("pick-session");
         let plugins = picking(&dir);
-        s.use_patches(Arc::clone(&plugins));
-        assert_eq!(s.pick(100.0, 50.0, 21).unwrap().rgb, shown, "with none applied, the canvas");
+        s.use_plugins(Arc::clone(&plugins));
+        assert_eq!(s.pick(100.0, 50.0, 21).unwrap().rgb, shown, "with none on, the canvas");
         plugins.set_on(ID.to_owned(), true);
         plugins.set_switch("eyedropper_layer".to_owned(), true);
         assert_eq!(s.pick(100.0, 50.0, 21).unwrap().rgb, None, "the current layer is clear there");
@@ -438,11 +438,11 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A patch that scales the interface by its one slider, in a store at `dir`.
+    /// A plugin that scales the interface by its one slider, in a store at `dir`.
     fn scaling(dir: &str) -> Arc<Plugins> {
         let module = wat::parse_str(SCALES).unwrap();
         let plugins = Plugins::with_store(dir.to_owned());
-        let mut manifest = patch(ID, &module);
+        let mut manifest = coded(ID, &module);
         manifest["hooks"] = json!(["interface_scale"]);
         manifest["controls"] = json!([{
             "key": "size", "type": "slider", "label": "Size", "least": 0.5, "most": 2, "step": 0.05, "starts": 1,
@@ -453,7 +453,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_interface_shows_as_a_patch_says_and_as_measured_without_one() {
+    fn the_interface_shows_as_a_plugin_says_and_as_measured_without_one() {
         let dir = store("scale");
         let plugins = scaling(&dir);
         assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0, "imported, it says nothing");
@@ -468,7 +468,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn whatever_a_patch_says_every_page_stays_in_reach() {
+    fn whatever_a_plugin_says_every_page_stays_in_reach() {
         let dir = store("scale-room");
         let plugins = scaling(&dir);
         assert!(plugins.set_on(ID.to_owned(), true));
@@ -480,7 +480,7 @@ pub(crate) mod tests {
         // a window with less shows as measured
         assert_eq!(plugins.interface_scale(640.0, 480.0), 1.0);
         assert_eq!(plugins.interface_scale(500.0, 400.0), 1.0);
-        // smaller is the patch's to say, whatever the window
+        // smaller is the plugin's to say, whatever the window
         plugins.set_slider("interface_size".to_owned(), 0.75);
         assert_eq!(plugins.interface_scale(500.0, 400.0), 0.75);
         let _ = std::fs::remove_dir_all(&dir);
@@ -498,14 +498,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_scale_patch_that_goes_wrong_leaves_the_interface_as_measured() {
+    fn a_scale_plugin_that_goes_wrong_leaves_the_interface_as_measured() {
         let dir = store("scale-wrong");
         let module = wat::parse_str(
             r#"(module (func (export "procraft_interface_scale") (param f32 f32) (result f32) (f32.const 40)))"#,
         )
         .unwrap();
         let plugins = Plugins::with_store(dir.clone());
-        let mut manifest = patch(ID, &module);
+        let mut manifest = coded(ID, &module);
         manifest["hooks"] = json!(["interface_scale"]);
         assert_eq!(plugins.install(file(&manifest, &module)), None);
         assert!(plugins.set_on(ID.to_owned(), true));
@@ -514,11 +514,11 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A list holding the paste patch, its switch kept as the setting it took over, in `dir`.
+    /// A list holding the paste plugin, its switch kept as the setting it took over, in `dir`.
     fn pasting(dir: &str) -> Arc<Plugins> {
         let module = wat::parse_str(PASTES).unwrap();
         let plugins = Plugins::with_store(dir.to_owned());
-        let mut manifest = patch(ID, &module);
+        let mut manifest = coded(ID, &module);
         manifest["hooks"] = json!(["paste_mask"]);
         manifest["controls"] = json!([
             { "key": "into", "type": "switch", "label": "Into", "keeps": "paste_into_mask" },
@@ -527,24 +527,24 @@ pub(crate) mod tests {
         plugins
     }
 
-    /// `s` with the paste patch applied and on, and where its files are.
+    /// `s` with the paste plugin on, its switch too, and where its files are.
     pub(crate) fn paste_into_masks(s: &CanvasSession, name: &str) -> (Arc<Plugins>, String) {
         let dir = store(name);
         let plugins = pasting(&dir);
         assert!(plugins.set_on(ID.to_owned(), true));
         assert!(plugins.set_switch("paste_into_mask".to_owned(), true));
-        s.use_patches(Arc::clone(&plugins));
+        s.use_plugins(Arc::clone(&plugins));
         (plugins, dir)
     }
 
     #[test]
-    fn a_picture_goes_into_the_mask_only_while_a_patch_says_so() {
+    fn a_picture_goes_into_the_mask_only_while_a_plugin_says_so() {
         let dir = store("paste");
         let plugins = pasting(&dir);
         let hooks = plugins.hooks();
         assert!(!hooks.paste_mask(), "imported, it says nothing");
         assert!(plugins.set_on(ID.to_owned(), true));
-        assert!(!hooks.paste_mask(), "applied, it goes by its switch");
+        assert!(!hooks.paste_mask(), "on, it goes by its switch");
         assert!(plugins.set_switch("paste_into_mask".to_owned(), true));
         assert!(hooks.paste_mask());
         assert!(plugins.set_on(ID.to_owned(), false));
@@ -576,30 +576,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_paste_patch_that_stops_leaves_the_picture_to_paste_as_any_is() {
+    fn a_paste_plugin_that_stops_leaves_the_picture_to_paste_as_any_is() {
         let Some(s) = session() else { return };
         let layer = s.layers().iter().find(|l| l.current).unwrap().id;
         let mask = s.add_mask(layer).unwrap();
         s.select_layer(mask);
         let dir = store("paste-stops");
-        let module = crate::patch_run::tests::paste_module("(i32.const 65536)", "(unreachable)");
+        let module = crate::plugin_run::tests::paste_module("(i32.const 65536)", "(unreachable)");
         let plugins = Plugins::with_store(dir.clone());
-        let mut manifest = patch(ID, &module);
+        let mut manifest = coded(ID, &module);
         manifest["hooks"] = json!(["paste_mask"]);
         assert_eq!(plugins.install(file(&manifest, &module)), None);
         assert!(plugins.set_on(ID.to_owned(), true));
-        s.use_patches(Arc::clone(&plugins));
+        s.use_plugins(Arc::clone(&plugins));
         let layers = s.layers().len();
         let picture = crate::layers::ThumbnailImage { width: 200, height: 200, rgba: vec![255; 200 * 200 * 4] };
         let pasted = s.paste(picture).unwrap();
         assert_ne!(pasted, mask, "a new layer, as anything pasted");
         assert_eq!(s.layers().len(), layers + 1);
-        assert_eq!(s.take_failure().as_deref(), Some("A patch stopped. Switched off: it crashed."));
+        assert_eq!(s.take_failure().as_deref(), Some("A plugin stopped. Switched off: it crashed."));
         assert_eq!(card(&plugins).problem.as_deref(), Some("Switched off: it crashed."));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Takes out everything past the first two words of each row, as a patch of real use might.
+    /// Takes out everything past the first two words of each row, as a plugin of real use might.
     const RIGHT_OF_128: &str = "(local $i i32) (local.set $i (i32.const 16))
         (i64.store (i32.const 65536) (i64.const 0))
         (i64.store (i32.const 65544) (i64.const 0))
@@ -609,14 +609,14 @@ pub(crate) mod tests {
             (local.set $i (i32.add (local.get $i) (i32.const 8)))
             (br $next)))";
 
-    /// A session with `module` applied on the fill hook, and the list holding it.
+    /// A session with `module` on the fill hook, and the list holding it.
     fn filling(s: &CanvasSession, dir: &str, module: &[u8]) -> Arc<Plugins> {
         let plugins = Plugins::with_store(dir.to_owned());
-        let mut manifest = patch(ID, module);
+        let mut manifest = coded(ID, module);
         manifest["hooks"] = json!(["fill_mask"]);
         assert_eq!(plugins.install(file(&manifest, module)), None);
         assert!(plugins.set_on(ID.to_owned(), true));
-        s.use_patches(Arc::clone(&plugins));
+        s.use_plugins(Arc::clone(&plugins));
         plugins
     }
 
@@ -634,18 +634,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_fill_is_finished_by_the_patch_on_its_own_thread_and_is_one_step() {
+    fn a_fill_is_finished_by_the_plugin_on_its_own_thread_and_is_one_step() {
         let Some(s) = session() else { return };
         let dir = store("fill-real");
         let plugins = filling(&s, &dir, &fill_module(FILL_AT, "(i32.const 1)", RIGHT_OF_128));
         pour_at(&s, 30.0, 30.0);
         assert!(red_at(&s, 30, 30) && red_at(&s, 120, 190));
-        assert!(!red_at(&s, 130, 30) && !red_at(&s, 199, 199), "past where the patch keeps it");
+        assert!(!red_at(&s, 130, 30) && !red_at(&s, 199, 199), "past where the plugin keeps it");
         assert!(!s.pour_finishing());
         // one undo takes the whole fill back
         s.undo();
         assert!(!red_at(&s, 30, 30));
-        // unapplied, the same fill runs on through
+        // off, the same fill runs on through
         plugins.set_on(ID.to_owned(), false);
         pour_at(&s, 30.0, 30.0);
         assert!(red_at(&s, 30, 30) && red_at(&s, 199, 199));
@@ -653,11 +653,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_fill_keeps_to_a_selection_with_a_patch_as_it_does_without() {
+    fn a_fill_keeps_to_a_selection_with_a_plugin_as_it_does_without() {
         let Some(s) = session() else { return };
         let dir = store("fill-selection");
         filling(&s, &dir, &fill_module(FILL_AT, "(i32.const 1)", RIGHT_OF_128));
-        // what is selected: a band across, on both sides of where the patch cuts
+        // what is selected: a band across, on both sides of where the plugin cuts
         let mut mask = vec![0u8; 200 * 200];
         for y in 60..120 {
             mask[y * 200..(y + 1) * 200].fill(255);
@@ -672,7 +672,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_fill_box_goes_through_alone_with_a_pixel_round_it() {
-        // a square of paper in a filled layer: the fill's box is a corner of the canvas. The patch
+        // a square of paper in a filled layer: the fill's box is a corner of the canvas. The plugin
         // says how much it was handed in the fill's own terms
         let Some(s) = session() else { return };
         let dir = store("fill-box");
@@ -708,14 +708,14 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// What a patch that goes wrong on a fill must come to: the fill as it was, one step, and why.
+    /// What a plugin that goes wrong on a fill must come to: the fill as it was, one step, and why.
     fn fill_goes_wrong(name: &str, module: &[u8], reason: &str) {
         let Some(s) = session() else { return };
         let dir = store(name);
         let plugins = filling(&s, &dir, module);
         pour_at(&s, 30.0, 30.0);
         assert!(red_at(&s, 30, 30) && red_at(&s, 199, 199), "the fill stays unclosed");
-        assert_eq!(s.take_failure().as_deref(), Some(format!("A patch stopped. {reason}").as_str()));
+        assert_eq!(s.take_failure().as_deref(), Some(format!("A plugin stopped. {reason}").as_str()));
         let stopped = card(&plugins);
         assert!(!stopped.on);
         assert_eq!(stopped.problem.as_deref(), Some(reason));
@@ -728,31 +728,31 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_fill_patch_that_never_ends_leaves_the_fill_unclosed() {
+    fn a_fill_plugin_that_never_ends_leaves_the_fill_unclosed() {
         let module = fill_module(FILL_AT, "(loop (br 0)) (i32.const 1)", "");
         fill_goes_wrong("fill-loop", &module, "Switched off: it took too long.");
     }
 
     #[test]
-    fn a_fill_patch_that_crashes_leaves_the_fill_unclosed() {
+    fn a_fill_plugin_that_crashes_leaves_the_fill_unclosed() {
         let module = fill_module(FILL_AT, "(unreachable)", "");
         fill_goes_wrong("fill-trap", &module, "Switched off: it crashed.");
     }
 
     #[test]
-    fn a_fill_patch_that_takes_the_seed_leaves_the_fill_unclosed() {
+    fn a_fill_plugin_that_takes_the_seed_leaves_the_fill_unclosed() {
         let module = fill_module(FILL_AT, "(i32.const 1)", "(i64.store (i32.const 65536) (i64.const -1))");
         fill_goes_wrong("fill-seed", &module, "Switched off: it gave an answer that makes no sense.");
     }
 
     #[test]
-    fn a_fill_patch_that_asks_too_much_leaves_the_fill_unclosed() {
+    fn a_fill_plugin_that_asks_too_much_leaves_the_fill_unclosed() {
         let module = fill_module(FILL_AT, "(drop (memory.grow (i32.const 2000))) (i32.const 1)", "");
         fill_goes_wrong("fill-memory", &module, "Switched off: it asked for too much memory.");
     }
 
     #[test]
-    fn a_fill_too_big_for_a_patch_stays_unclosed_and_says_so() {
+    fn a_fill_too_big_for_a_plugin_stays_unclosed_and_says_so() {
         let hooks = Hooks::default();
         let module = fill_module(FILL_AT, "(i32.const 1)", TAKES_MOST);
         hooks.put_on("fill".to_owned(), Running::start(&module, &[]).unwrap(), &[Hook::FillMask]);
@@ -760,12 +760,12 @@ pub(crate) mod tests {
         assert!(crate::pour::closed_by(&hooks, mask, (5, 5)).is_none());
         let said = hooks.take_said().unwrap();
         assert!(said.contains("too big"), "{said}");
-        assert!(hooks.is_on("fill"), "it isn't the patch's doing");
+        assert!(hooks.is_on("fill"), "it isn't the plugin's doing");
     }
 
     #[test]
     fn a_long_call_holds_up_no_other_hook() {
-        // a patch on the fill hook at work, and another on the position hook goes on answering
+        // a plugin on the fill hook at work, and another on the position hook goes on answering
         let hooks = Arc::new(Hooks::default());
         let body = "(local $i i32) (local.set $i (i32.const 30000000))
             (loop (local.set $i (i32.sub (local.get $i) (i32.const 1))) (br_if 0 (local.get $i)))
@@ -786,12 +786,12 @@ pub(crate) mod tests {
         assert!(!long.join().unwrap());
     }
 
-    /// What whole-canvas fills cost going through a real patch file, up to the most that can: with
-    /// `PROCRAFT_PATCH_FILE` naming the gap-closing patch, `--ignored --nocapture`, on a device.
+    /// What whole-canvas fills cost going through a real plugin file, up to the most that can: with
+    /// `PROCRAFT_PLUGIN_FILE` naming the gap-closing plugin, `--ignored --nocapture`, on a device.
     #[test]
     #[ignore]
-    fn a_built_gap_patch_costs() {
-        let bytes = std::fs::read(std::env::var("PROCRAFT_PATCH_FILE").unwrap()).unwrap();
+    fn a_built_gap_plugin_costs() {
+        let bytes = std::fs::read(std::env::var("PROCRAFT_PLUGIN_FILE").unwrap()).unwrap();
         let dir = store("built-gap-cost");
         let plugins = Plugins::with_store(dir.clone());
         assert_eq!(plugins.install(bytes), None);
@@ -822,12 +822,12 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A gap closed by a real patch file: with `PROCRAFT_PATCH_FILE` naming the gap-closing patch and
-    /// `--ignored`. Two rooms, the same fill through a gap, with the patch on and off.
+    /// A gap closed by a real plugin file: with `PROCRAFT_PLUGIN_FILE` naming the gap-closing plugin and
+    /// `--ignored`. Two rooms, the same fill through a gap, with the plugin on and off.
     #[test]
     #[ignore]
-    fn a_built_gap_patch_closes_a_real_fill() {
-        let bytes = std::fs::read(std::env::var("PROCRAFT_PATCH_FILE").unwrap()).unwrap();
+    fn a_built_gap_plugin_closes_a_real_fill() {
+        let bytes = std::fs::read(std::env::var("PROCRAFT_PLUGIN_FILE").unwrap()).unwrap();
         let Some(s) = session() else { return };
         s.set_color(0.0, 0.0, 0.0);
         s.set_brush_size(0.1);
@@ -844,7 +844,7 @@ pub(crate) mod tests {
         let found = card(&plugins);
         assert!(plugins.set_on(found.id.clone(), true));
         assert_eq!(plugins.set_slider("fill_gap".to_owned(), 32.0), Some(32.0));
-        s.use_patches(Arc::clone(&plugins));
+        s.use_plugins(Arc::clone(&plugins));
         assert!(s.pour_begin(40.0, 100.0, 1.0, 0.0, 0.0, 0.3));
         s.pour_end(true, None);
         assert!(red_at(&s, 40, 100) && red_at(&s, 40, 30));
@@ -854,12 +854,12 @@ pub(crate) mod tests {
         assert!(plugins.set_on(found.id.clone(), false));
         assert!(s.pour_begin(40.0, 100.0, 1.0, 0.0, 0.0, 0.3));
         s.pour_end(true, None);
-        assert!(red_at(&s, 40, 100) && red_at(&s, 160, 100), "unapplied, it runs through the gap");
+        assert!(red_at(&s, 40, 100) && red_at(&s, 160, 100), "off, it runs through the gap");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_patch_goes_on_as_applied_and_off_as_unapplied_with_no_restart() {
+    fn a_plugin_goes_on_as_applied_and_off_as_unapplied_with_no_restart() {
         let dir = store("apply");
         let plugins = with_offset(&dir);
         let hooks = plugins.hooks();
@@ -904,10 +904,10 @@ pub(crate) mod tests {
         let hooks = plugins.hooks();
         assert_eq!(hooks.position(1.0, 1.0), (8.0, 1.0));
         let keys = plugins.remove(ID.to_owned()).unwrap();
-        assert!(keys.contains(&format!("{ID}.x")) && keys.contains(&format!("{ID}.applied")), "{keys:?}");
+        assert!(keys.contains(&format!("{ID}.x")) && keys.contains(&format!("{ID}.on")), "{keys:?}");
         assert_eq!(hooks.position(1.0, 1.0), (1.0, 1.0));
-        assert!(plugins.patches().is_empty());
-        assert!(Plugins::with_store(dir.clone()).patches().is_empty());
+        assert!(plugins.plugins().is_empty());
+        assert!(Plugins::with_store(dir.clone()).plugins().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -923,14 +923,14 @@ pub(crate) mod tests {
         assert_eq!(plugins.install(file(&newer, &offset())), None);
         assert_eq!(card(&plugins).version, "1.1.0");
         assert!(card(&plugins).on);
-        assert_eq!(hooks.position(1.0, 1.0), (8.0, 1.0), "applied still, with what was set");
+        assert_eq!(hooks.position(1.0, 1.0), (8.0, 1.0), "on still, with what was set");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// What a patch that goes wrong on a sample must come to, whatever went wrong.
+    /// What a plugin that goes wrong on a sample must come to, whatever went wrong.
     fn stops(name: &str, before: &str, body: &str, reason: &str) {
         let dir = store(name);
-        let plugins = applied(&dir, before, body);
+        let plugins = turned_on(&dir, before, body);
         let hooks = plugins.hooks();
         assert_eq!(hooks.position(3.0, 4.0), (3.0, 4.0), "the sample goes through unchanged");
         let stopped = card(&plugins);
@@ -938,14 +938,14 @@ pub(crate) mod tests {
         assert_eq!(stopped.problem.as_deref(), Some(reason));
         assert_eq!(hooks.position(5.0, 6.0), (5.0, 6.0), "and it is off the hook");
         assert_eq!(hooks.hooked.load(Ordering::Relaxed), 0);
-        // it stays off through a restart, even with its flag kept as applied, and says why
+        // it stays off through a restart, even with its flag kept as on, and says why
         let next = Plugins::with_store(dir.clone());
-        next.read_kept(format!("{ID}.applied"), "true".to_owned());
+        next.read_kept(format!("{ID}.on"), "true".to_owned());
         assert_eq!(next.hooks().position(3.0, 4.0), (3.0, 4.0));
         let kept = card(&next);
         assert!(!kept.on);
         assert_eq!(kept.problem.as_deref(), Some(reason));
-        // unapplied, it says nothing more; asked again, it gets its chance
+        // off, it says nothing more; asked again, it gets its chance
         assert!(next.set_on(ID.to_owned(), false));
         assert_eq!(card(&next).problem, None);
         assert_eq!(card(&Plugins::with_store(dir.clone())).problem, None);
@@ -958,34 +958,34 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_patch_that_loops_for_ever_is_stopped_and_switched_off() {
+    fn a_plugin_that_loops_for_ever_is_stopped_and_switched_off() {
         stops("loop", "", "(loop (br 0)) (i64.const 0)", "Switched off: it took too long.");
     }
 
     #[test]
-    fn a_patch_that_traps_is_switched_off() {
+    fn a_plugin_that_traps_is_switched_off() {
         stops("trap", "", "(unreachable)", "Switched off: it crashed.");
     }
 
     #[test]
-    fn a_patch_that_returns_garbage_is_switched_off() {
+    fn a_plugin_that_returns_garbage_is_switched_off() {
         // two NaNs
         let nan = "(i64.const 0x7fc000007fc00000)";
         stops("garbage", "", nan, "Switched off: it gave an answer that makes no sense.");
     }
 
     #[test]
-    fn a_patch_over_the_memory_cap_is_switched_off() {
+    fn a_plugin_over_the_memory_cap_is_switched_off() {
         let grows = "(drop (memory.grow (i32.const 1000))) (i64.const 0)";
         stops("memory", "(memory 1)", grows, "Switched off: it asked for too much memory.");
     }
 
     #[test]
-    fn a_patch_stopped_on_a_stroke_is_told_once_by_the_session() {
+    fn a_plugin_stopped_on_a_stroke_is_told_once_by_the_session() {
         let dir = store("told");
-        let plugins = applied(&dir, "", "(unreachable)");
+        let plugins = turned_on(&dir, "", "(unreachable)");
         let s = CanvasSession::new(200, 200);
-        s.use_patches(Arc::clone(&plugins));
+        s.use_plugins(Arc::clone(&plugins));
         assert_eq!(s.take_failure(), None);
         {
             let mut st = s.shared.lock();
@@ -999,17 +999,17 @@ pub(crate) mod tests {
                 .apply(procraft_engine::geom::Vec2::new(10.0, 20.0));
             assert_eq!(at[0].pos, plain, "the sample goes through unchanged");
         }
-        assert_eq!(s.take_failure().as_deref(), Some("A patch stopped. Switched off: it crashed."));
+        assert_eq!(s.take_failure().as_deref(), Some("A plugin stopped. Switched off: it crashed."));
         assert_eq!(s.take_failure(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_patch_that_can_t_start_stays_off_and_says_why() {
+    fn a_plugin_that_can_t_start_stays_off_and_says_why() {
         let dir = store("start");
         let module = position_module("(memory 1000)", "(i64.const 0)");
         let plugins = Plugins::with_store(dir.clone());
-        assert_eq!(plugins.install(file(&patch(ID, &module), &module)), None);
+        assert_eq!(plugins.install(file(&coded(ID, &module), &module)), None);
         assert!(plugins.set_on(ID.to_owned(), true));
         let stopped = card(&plugins);
         assert!(!stopped.on);
@@ -1019,7 +1019,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_stopped_patch_leaves_the_others_on() {
+    fn a_stopped_plugin_leaves_the_others_on() {
         let bad = position_module("", "(unreachable)");
         let hooks = Hooks::default();
         let mut good = Running::start(&offset(), &[]).unwrap();
@@ -1033,7 +1033,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn patches_go_in_id_order_however_they_were_applied() {
+    fn plugins_go_in_id_order_however_they_were_applied() {
         // the second moves what the first gave it, so the order shows
         let doubles = position_module(
             "",
@@ -1099,22 +1099,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_stroke_lands_where_the_patch_says_and_as_it_did_once_it_is_gone() {
+    fn a_stroke_lands_where_the_plugin_says_and_as_it_did_once_it_is_gone() {
         let Some(plain) = session() else { return };
         draw(&plain);
         let drawn = picture(&plain);
         assert!(!rows_drawn(&drawn).is_empty());
 
-        // with the list on the session and nothing applied, nothing differs at all
+        // with the list on the session and nothing on, nothing differs at all
         let dir = store("stroke");
         let plugins = with_offset(&dir);
         let Some(s) = session() else { return };
-        s.use_patches(Arc::clone(&plugins));
+        s.use_plugins(Arc::clone(&plugins));
         draw(&s);
         assert!(picture(&s) == drawn);
 
         let Some(s) = session() else { return };
-        s.use_patches(Arc::clone(&plugins));
+        s.use_plugins(Arc::clone(&plugins));
         plugins.set_on(ID.to_owned(), true);
         plugins.set_slider(format!("{ID}.y"), 40.0);
         draw(&s);
@@ -1122,9 +1122,9 @@ pub(crate) mod tests {
         let want: Vec<usize> = rows_drawn(&drawn).iter().map(|y| y + 40).collect();
         assert_eq!(moved, want, "the same stroke, 40 pixels down");
 
-        // unapplied it is as if it had never been
+        // off it is as if it had never been
         let Some(s) = session() else { return };
-        s.use_patches(Arc::clone(&plugins));
+        s.use_plugins(Arc::clone(&plugins));
         plugins.set_on(ID.to_owned(), false);
         draw(&s);
         assert!(picture(&s) == drawn);
@@ -1143,27 +1143,21 @@ pub(crate) mod tests {
         start.elapsed().as_secs_f64() * 1e9 / f64::from(SAMPLES)
     }
 
-    /// What the hook costs a sample, and what a patch that spends all its fuel costs: run on a
+    /// What the hook costs a sample, and what a plugin that spends all its fuel costs: run on a
     /// device with `--ignored --nocapture`.
     #[test]
     #[ignore]
     fn hook_cost() {
         let none = Hooks::default();
-        println!(
-            "position hook, none applied: {:.2} ns a sample",
-            (0..5).map(|_| cost(&none)).fold(f64::MAX, f64::min)
-        );
+        println!("position hook, none on: {:.2} ns a sample", (0..5).map(|_| cost(&none)).fold(f64::MAX, f64::min));
 
-        let applied = Hooks::default();
+        let with_one = Hooks::default();
         let mut running = Running::start(&offset(), &[]).unwrap();
         running.control(0, 3.0).unwrap();
-        applied.put_on("offset".to_owned(), running, &[Hook::Position]);
-        println!(
-            "the offset patch applied: {:.1} ns a sample",
-            (0..5).map(|_| cost(&applied)).fold(f64::MAX, f64::min)
-        );
+        with_one.put_on("offset".to_owned(), running, &[Hook::Position]);
+        println!("the offset plugin on: {:.1} ns a sample", (0..5).map(|_| cost(&with_one)).fold(f64::MAX, f64::min));
 
-        // the worst a patch can do to a sample before it is stopped, over and over
+        // the worst a plugin can do to a sample before it is stopped, over and over
         let mut slowest = f64::MAX;
         for _ in 0..50 {
             let mut running = Running::start(&position_module("", "(loop (br 0)) (i64.const 0)"), &[]).unwrap();
@@ -1171,7 +1165,7 @@ pub(crate) mod tests {
             assert_eq!(running.position(1.0, 2.0), Err(Stop::TooSlow));
             slowest = slowest.min(start.elapsed().as_secs_f64() * 1000.0);
         }
-        println!("a patch spending all its fuel on a sample: {slowest:.3} ms");
+        println!("a plugin spending all its fuel on a sample: {slowest:.3} ms");
 
         let picks = Hooks::default();
         picks.put_on(
@@ -1183,7 +1177,7 @@ pub(crate) mod tests {
         for _ in 0..1_000_000 {
             std::hint::black_box(picks.pick_layer());
         }
-        println!("the pick hook, a patch on it: {:.1} ns a pick", start.elapsed().as_secs_f64() * 1000.0);
+        println!("the pick hook, a plugin on it: {:.1} ns a pick", start.elapsed().as_secs_f64() * 1000.0);
 
         let scales = Hooks::default();
         scales.put_on(
@@ -1195,22 +1189,22 @@ pub(crate) mod tests {
         for _ in 0..1_000_000 {
             std::hint::black_box(scales.interface_scale(std::hint::black_box(1600.0), 1000.0));
         }
-        println!("the scale hook, a patch on it: {:.1} ns a frame", start.elapsed().as_secs_f64() * 1000.0);
+        println!("the scale hook, a plugin on it: {:.1} ns a frame", start.elapsed().as_secs_f64() * 1000.0);
 
         let start = Instant::now();
         let mut running = Running::start(&offset(), &[]).unwrap();
-        println!("starting a patch: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0);
+        println!("starting a plugin: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0);
         running.control(0, 1.0).unwrap();
     }
 
-    /// What a 4096 square costs going through a paste patch. With `PROCRAFT_PATCH_FILE` naming one
+    /// What a 4096 square costs going through a paste plugin. With `PROCRAFT_PLUGIN_FILE` naming one
     /// it goes through that, otherwise through [`PASTES`]: run on a device with
     /// `--ignored --nocapture`.
     #[test]
     #[ignore]
     fn a_paste_of_a_4096_square_costs() {
         let dir = store("paste-cost");
-        let plugins = match std::env::var("PROCRAFT_PATCH_FILE") {
+        let plugins = match std::env::var("PROCRAFT_PLUGIN_FILE") {
             Ok(path) => {
                 let plugins = Plugins::with_store(dir.clone());
                 assert_eq!(plugins.install(std::fs::read(path).unwrap()), None);
@@ -1233,7 +1227,7 @@ pub(crate) mod tests {
             assert!(hooks.paste_rows(&mut rgba, SIDE));
             let took = start.elapsed().as_secs_f64();
             println!(
-                "4096 square through the patch: {:.0} ms, {:.0} ns a pixel",
+                "4096 square through the plugin: {:.0} ms, {:.0} ns a pixel",
                 took * 1e3,
                 took * 1e9 / (SIDE * SIDE) as f64
             );
@@ -1254,7 +1248,7 @@ pub(crate) mod tests {
     /// `--ignored --nocapture`.
     #[test]
     #[ignore]
-    fn a_stroke_costs_the_same_with_nothing_applied() {
+    fn a_stroke_costs_the_same_with_nothing_on() {
         let to_canvas_ns = |hooks: Option<Arc<Hooks>>| {
             let s = CanvasSession::new(200, 200);
             let mut st = s.shared.lock();
@@ -1274,16 +1268,16 @@ pub(crate) mod tests {
         for _ in 0..3 {
             let bare = to_canvas_ns(None);
             let hooked = to_canvas_ns(Some(Arc::new(Hooks::default())));
-            println!("to_canvas a sample: {bare:.2} ns without the list, {hooked:.2} ns with it, none applied");
+            println!("to_canvas a sample: {bare:.2} ns without the list, {hooked:.2} ns with it, none on");
         }
     }
 
-    /// A real patch file, built by `tools/pack_patch.py`, end to end on the hook. Run with
-    /// `--ignored` and `PROCRAFT_PATCH_FILE` naming it.
+    /// A real plugin file, built by `tools/pack_plugin.py`, end to end on the hook. Run with
+    /// `--ignored` and `PROCRAFT_PLUGIN_FILE` naming it.
     #[test]
     #[ignore]
-    fn a_built_patch_file_works() {
-        let bytes = std::fs::read(std::env::var("PROCRAFT_PATCH_FILE").unwrap()).unwrap();
+    fn a_built_plugin_file_works() {
+        let bytes = std::fs::read(std::env::var("PROCRAFT_PLUGIN_FILE").unwrap()).unwrap();
         let dir = store("built");
         let plugins = Plugins::with_store(dir.clone());
         let offer = plugins.inspect(bytes.clone());
@@ -1304,7 +1298,7 @@ pub(crate) mod tests {
         assert!(next.set_on(found.id.clone(), false));
         assert_eq!(next.hooks().position(100.0, 100.0), (100.0, 100.0));
         assert!(next.remove(found.id).is_some());
-        assert!(next.patches().is_empty());
+        assert!(next.plugins().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -78,8 +78,7 @@ pub enum MenuRow {
 /// turns to them. With none, it isn't there.
 fn menu_groups(filters: &[PluginInfo], showing_filters: bool) -> Vec<Vec<(String, MenuRow)>> {
     if showing_filters {
-        let rows = filters.iter().map(|filter| (filter.name.clone(), MenuRow::Filter(filter.id.clone())));
-        return vec![std::iter::once(("Adjustments".to_owned(), MenuRow::Back)).chain(rows).collect()];
+        return vec![filters.iter().map(|filter| (filter.name.clone(), MenuRow::Filter(filter.id.clone()))).collect()];
     }
     let row = |a: &Adjustment| (adjustment_label(*a), MenuRow::Open(*a));
     let mut groups: Vec<Vec<(String, MenuRow)>> =
@@ -88,6 +87,11 @@ fn menu_groups(filters: &[PluginInfo], showing_filters: bool) -> Vec<Vec<(String
         groups.push(vec![("Plugins".to_owned(), MenuRow::Plugins)]);
     }
     groups
+}
+
+/// Where the way back from the filters is, in the menu's `body`.
+fn menu_back(body: Rect) -> Rect {
+    Rect::from_min_size(pos2(body.left() + 8.0, body.top() + 17.0), vec2(44.0, 34.0))
 }
 
 /// The adjustments menu hanging from its `button`, in groups: colour, blurs, effects, painting.
@@ -116,9 +120,19 @@ pub fn menu(
         let body = panel::body(rect);
         // a 52 header, the title's capitals from 28.5 below the panel's top; the groups 8 into the
         // list under it
-        let title = pos2(body.left() + 24.0, body.top() + 22.5);
-        let heading = if showing_filters { "Plugins" } else { "Adjustments" };
-        text(ui.painter(), title, Align2::LEFT_TOP, heading, 24.0, Weight::Bold, argb(panel::PANEL_TITLE));
+        if showing_filters {
+            // turned to the filters, the way back is the panels' own, the title beside it
+            let back = menu_back(body);
+            look.icon(ui, &icons::CHEVRON_LEFT, back.center(), 22.0, argb(panel::PANEL_TITLE));
+            let at = pos2(back.right(), back.center().y);
+            text(ui.painter(), at, Align2::LEFT_CENTER, "Plugins", 22.0, Weight::Bold, argb(panel::PANEL_TITLE));
+            if ui.interact(back, ui.scope_id().with("back"), Sense::click()).clicked() {
+                tapped = Some(MenuRow::Back);
+            }
+        } else {
+            let title = pos2(body.left() + 24.0, body.top() + 22.5);
+            text(ui.painter(), title, Align2::LEFT_TOP, "Adjustments", 24.0, Weight::Bold, argb(panel::PANEL_TITLE));
+        }
         let list = Rect::from_min_max(pos2(body.left() + 10.0, body.top() + 52.0 + 8.0), body.max - vec2(10.0, 10.0));
         ui.scope_builder(UiBuilder::new().max_rect(list), |ui| {
             ScrollArea::vertical()
@@ -573,7 +587,7 @@ fn hsb_row(ui: &Ui, row: Rect, label: &str, value: f32, track: Track) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use procraft_core::{PluginKind, PluginSource};
+    use procraft_core::{PluginPart, PluginSource};
 
     use super::*;
 
@@ -583,7 +597,7 @@ mod tests {
             name: "Lines".to_owned(),
             description: String::new(),
             source: PluginSource::File,
-            kind: PluginKind::Filter,
+            holds: vec![PluginPart::Filter],
             version: "1.0.0".to_owned(),
             publisher: String::new(),
             experimental: true,
@@ -608,10 +622,51 @@ mod tests {
         assert_eq!(groups.len(), adjustment_groups().len() + 1);
         assert_eq!(groups.last().unwrap(), &vec![("Plugins".to_owned(), MenuRow::Plugins)]);
         let turned = menu_groups(&filters, true);
-        let rows = [
-            ("Adjustments".to_owned(), MenuRow::Back),
-            ("Lines".to_owned(), MenuRow::Filter("org.example.lines".to_owned())),
-        ];
-        assert_eq!(turned, vec![rows.to_vec()]);
+        let rows = [("Lines".to_owned(), MenuRow::Filter("org.example.lines".to_owned()))];
+        assert_eq!(turned, vec![rows.to_vec()], "only the filters: the way back isn't a row");
+    }
+
+    /// What a tap at the top of the menu asks, with it turned to the filters or not.
+    fn tapped_at_the_back(turned: bool) -> Option<MenuRow> {
+        use egui::{Event, Modifiers, PointerButton, RawInput};
+        let (ctx, mut look, filters) = (egui::Context::default(), Look::default(), [filter()]);
+        crate::look::install_fonts(&ctx);
+        let button = Rect::from_min_size(pos2(500.0, 10.0), vec2(40.0, 40.0));
+        let mut time = 0.0;
+        let (mut at, mut tapped) = (Pos2::ZERO, None);
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        for step in 0..6 {
+            time += 1.0 / 60.0;
+            let events = match step {
+                2 => vec![Event::PointerMoved(at)],
+                3 => vec![press(at, true)],
+                4 => vec![press(at, false)],
+                _ => Vec::new(),
+            };
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))),
+                time: Some(time),
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                let (rect, row) = menu(ui.ctx(), &mut look, button, &mut Vec::new(), &filters, turned);
+                at = menu_back(panel::body(rect)).center();
+                tapped = tapped.clone().or(row);
+            });
+            output.textures_delta.clear();
+        }
+        tapped
+    }
+
+    #[test]
+    fn turned_to_the_filters_the_chevron_turns_it_back_and_otherwise_nothing_is_there() {
+        assert_eq!(tapped_at_the_back(true), Some(MenuRow::Back));
+        assert_eq!(tapped_at_the_back(false), None);
     }
 }

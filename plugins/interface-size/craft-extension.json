@@ -3,7 +3,7 @@
   "id": "io.github.artcraftandroid.interface-size",
   "name": "Interface size",
   "version": "1.0.0",
-  "kind": "patch",
+  "holds": ["hooks"],
   "publisher": { "name": "ProCraft" },
   "description": "Makes the bars, panels and text bigger or smaller to suit your screen.",
   "compat": { "procraft": { "interface": 1 } },

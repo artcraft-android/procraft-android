@@ -44,11 +44,11 @@ mod layers;
 mod liquify;
 mod modes;
 mod palettes;
-mod patch_run;
 mod pick;
 mod pickers;
 mod plugin_file;
 mod plugin_filter;
+mod plugin_run;
 mod plugins;
 mod pour;
 mod presets;
@@ -135,7 +135,7 @@ pub use pickers::{
 pub use plugin_file::read_plugin_file;
 pub use plugin_filter::PluginFilterShown;
 pub use plugins::{
-    PluginControl, PluginInfo, PluginKind, PluginOffer, PluginSlider, PluginSource, PluginSwitch, Plugins,
+    PluginControl, PluginInfo, PluginOffer, PluginPart, PluginSlider, PluginSource, PluginSwitch, Plugins,
     plugin_file_most_bytes, plugin_slider_along, plugin_slider_at, plugin_slider_shown, plugin_slider_whole,
 };
 pub use presets::{

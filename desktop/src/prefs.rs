@@ -60,7 +60,7 @@ pub struct Prefs {
     pub pad_3d: bool,
     /// The canvas shown on a second display too.
     pub project_canvas: bool,
-    /// The Patches and Plugins pages' lists, their values kept here with the rest.
+    /// The Plugins page's list, its values kept here with the rest.
     pub plugins: Arc<Plugins>,
     /// Advanced settings: an artwork opens as it was left; fitting the canvas keeps it clear of
     /// the top bar and the side bar; new artworks don't record their time-lapse; strokes made in
@@ -245,7 +245,7 @@ impl Prefs {
         session.set_light_interface(self.light_interface);
         session.set_brush_scaling(self.brush_on_screen);
         session.set_selection_visibility(self.selection_visibility);
-        session.use_patches(Arc::clone(&self.plugins));
+        session.use_plugins(Arc::clone(&self.plugins));
         session.set_simplified_undos(self.simplified_undos);
         session.set_speed_distance(self.speed_distance);
         session.set_input_settings(

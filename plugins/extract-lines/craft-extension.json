@@ -3,7 +3,7 @@
   "id": "io.github.artcraftandroid.extract-lines",
   "name": "Extract lines",
   "version": "1.0.0",
-  "kind": "filter",
+  "holds": ["filter"],
   "publisher": { "name": "ProCraft" },
   "description": "Keeps the dark lines of a scanned drawing and clears the paper, so you can colour under them.",
   "compat": { "procraft": { "interface": 1 } },

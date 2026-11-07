@@ -417,25 +417,23 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         interfacePrefs.edit().putBoolean(LIGHT_INTERFACE, on).apply()
     }
 
-    /** The patches and plugins, their values kept with the interface settings, and what their two pages draw. */
+    /** The plugins, their values kept with the interface settings, and what their page draws. */
     val plugins = keptPlugins(app, interfacePrefs)
-    var patchList by mutableStateOf(plugins.patches())
-        private set
     var pluginList by mutableStateOf(plugins.plugins())
         private set
 
-    /** How big the interface shows now, as a patch says (1: as measured). */
+    /** How big the interface shows now, as a plugin says (1: as measured). */
     var interfaceShown = 1f
         private set
 
-    /** Applies or unapplies a patch: it goes on or off its hooks at once, and its values wait for it. */
+    /** Turns a plugin on or off: it goes on or off its hooks at once, and its values wait for it. */
     fun setPluginOn(plugin: io.github.artcraftandroid.procraft.core.PluginInfo, on: Boolean) {
         if (!plugins.setOn(plugin.id, on)) return
         interfacePrefs.edit().putBoolean(plugin.onKey, on).apply()
         pluginsChanged()
     }
 
-    /** Words for someone who changed a setting that now comes as a patch, said once. */
+    /** Words for someone who changed a setting that now comes as a plugin, said once. */
     var movedNotice by mutableStateOf(plugins.takeMovedNotice())
         private set
 
@@ -526,13 +524,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         pluginsChanged()
     }
 
-    /** The two lists as they stand: a patch may have stopped on a stroke since they were read. */
+    /** The list as it stands: a plugin may have stopped on a stroke since it was read. */
     fun readPlugins() {
-        patchList = plugins.patches()
         pluginList = plugins.plugins()
     }
 
-    /** What the patches and extras do now; a plugin nothing answers to does nothing. */
+    /** What the plugins do now; one nothing answers to does nothing. */
     private fun pluginsChanged() {
         readPlugins()
         session?.let(::applyPlugins)
@@ -540,7 +537,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** [s] goes by the plugins that reach a canvas. */
     private fun applyPlugins(s: CanvasSession) {
-        s.usePatches(plugins)
+        s.usePlugins(plugins)
     }
 
     /** The interface shows at [size] now: what hit-tests its handles, and what clears its bars, go with it. */
@@ -2603,7 +2600,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun paste(private: Boolean = false) {
         val image = clipboard ?: return
         val s = session
-        // through a patch it takes a moment on a big canvas: the screen doesn't wait for it
+        // through a plugin it takes a moment on a big canvas: the screen doesn't wait for it
         if (!private && s?.pastesIntoMask() == true) {
             closePanels()
             viewModelScope.launch {
@@ -6194,11 +6191,11 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         pourLater("threshold") { s.pourThreshold(t) }
     }
 
-    /** A fill a patch is finishing, on a thread of its own: nothing is touched until it is done. */
+    /** A fill a plugin is finishing, on a thread of its own: nothing is touched until it is done. */
     var fillFinishing by mutableStateOf(false)
         private set
 
-    /** Waits, the screen free, for a fill a patch is finishing, saying so if it takes a while. */
+    /** Waits, the screen free, for a fill a plugin is finishing, saying so if it takes a while. */
     private fun watchFill(s: CanvasSession) {
         if (fillFinishing || !s.pourFinishing()) return
         fillFinishing = true
@@ -7290,7 +7287,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
         /** How long the band offers Continue filling after a drop. */
         private const val DROP_BAND_MS = 2_500L
-        /** How long a fill being finished by a patch goes unmentioned. */
+        /** How long a fill being finished by a plugin goes unmentioned. */
         private const val FILL_SAYS_MS = 500L
 
         fun hsvToRgb(h: Float, s: Float, v: Float): Int {

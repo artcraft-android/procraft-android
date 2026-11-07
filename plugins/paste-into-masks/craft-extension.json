@@ -3,7 +3,7 @@
   "id": "io.github.artcraftandroid.paste-into-masks",
   "name": "Paste into masks",
   "version": "1.0.0",
-  "kind": "patch",
+  "holds": ["hooks"],
   "publisher": { "name": "ProCraft" },
   "description": "With a mask selected, Paste puts the picture's brightness into the mask.",
   "compat": { "procraft": { "interface": 1 } },

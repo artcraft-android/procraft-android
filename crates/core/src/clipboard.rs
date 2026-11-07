@@ -163,7 +163,7 @@ impl CanvasSession {
     }
 
     /// A new layer above the current one holding `image` where it was copied from (centred when
-    /// it is another size), or the current mask holding it, if a patch says to and it can; returns
+    /// it is another size), or the current mask holding it, if a plugin says to and it can; returns
     /// the layer's id.
     pub fn paste(&self, image: ThumbnailImage) -> Option<u64> {
         if let Some(pasted) = self.mask_to_paste_into().and_then(|mask| self.paste_into(mask, image.clone(), false)) {
@@ -172,7 +172,7 @@ impl CanvasSession {
         self.add_picture(image, false, false)
     }
 
-    /// Whether what is pasted now goes into the current mask: through a patch a row at a time, which
+    /// Whether what is pasted now goes into the current mask: through a plugin a row at a time, which
     /// on a big canvas takes a moment.
     pub fn pastes_into_mask(&self) -> bool {
         self.mask_to_paste_into().is_some()
@@ -191,7 +191,7 @@ impl CanvasSession {
     }
 
     /// The current mask holding `image` (from another app, straight RGBA8), centred and scaled
-    /// down to fit, if a patch says to and it can; whether it does.
+    /// down to fit, if a plugin says to and it can; whether it does.
     pub fn paste_picture_into_mask(&self, image: ThumbnailImage) -> bool {
         self.mask_to_paste_into().is_some_and(|mask| self.paste_into(mask, premultiplied(image), true).is_some())
     }
@@ -262,7 +262,7 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
-    /// The current layer, if it is a mask and a patch says what is pasted goes into it.
+    /// The current layer, if it is a mask and a plugin says what is pasted goes into it.
     fn mask_to_paste_into(&self) -> Option<LayerId> {
         let st = self.shared.lock();
         let current = st.doc.current();
@@ -271,7 +271,7 @@ impl CanvasSession {
         (asked && !st.doc.is_locked(current)).then_some(current)
     }
 
-    /// `mask` holds `image` as the patch makes it, a row at a time: one undo step. None if it
+    /// `mask` holds `image` as the plugin makes it, a row at a time: one undo step. None if it
     /// couldn't. What takes a while is done with the session free.
     fn paste_into(&self, mask: LayerId, image: ThumbnailImage, fit: bool) -> Option<u64> {
         let (width, height, hooks) = {

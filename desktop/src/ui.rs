@@ -343,7 +343,7 @@ impl Interface {
         crate::files::DRAG_FORMATS.get(self.prefs.drag_format).copied().unwrap_or(crate::files::Format::Procraft)
     }
 
-    /// The patches and plugins, which say how big the interface shows.
+    /// The plugins, which say how big the interface shows.
     pub fn plugins(&self) -> &procraft_core::Plugins {
         &self.prefs.plugins
     }
@@ -1845,7 +1845,7 @@ impl Interface {
     /// being told something.
     pub fn plugin_alert(&mut self, ctx: &egui::Context) {
         if let Some(said) = self.prefs.plugins.take_moved_notice() {
-            self.plugin_alert.tell("Now a patch", &said, None);
+            self.plugin_alert.tell("Now a plugin", &said, None);
         }
         let Some(answer) = self.plugin_alert.show(ctx, &mut self.look) else { return };
         let Some(bytes) = self.plugin_file.take().filter(|_| answer == Answer::Action) else { return };

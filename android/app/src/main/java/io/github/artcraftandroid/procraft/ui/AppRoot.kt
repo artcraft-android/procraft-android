@@ -45,7 +45,7 @@ import io.github.artcraftandroid.procraft.core.ToolKind
 /** The canvas screen: the canvas, the bars over it, and the panel that is open. */
 @Composable
 fun AppRoot(vm: CanvasViewModel) {
-    val interfaceSize = fittedInterfaceSize(vm.plugins, vm.patchList)
+    val interfaceSize = fittedInterfaceSize(vm.plugins, vm.pluginList)
     androidx.compose.runtime.SideEffect { vm.interfaceShownAt(interfaceSize) }
     ProCraftTheme(interfaceSize) {
         if (vm.screen == Screen.GALLERY) {
@@ -240,7 +240,7 @@ fun AppRoot(vm: CanvasViewModel) {
                 ) { Box(Modifier.fillMaxSize()) { GestureControls(vm) } }
                 BlockedDialog(vm)
                 PluginOfferAlert(vm)
-                // a fill a patch is finishing: nothing is touched until it is done
+                // a fill a plugin is finishing: nothing is touched until it is done
                 if (vm.fillFinishing) {
                     Box(
                         Modifier.fillMaxSize().pointerInput(Unit) {
