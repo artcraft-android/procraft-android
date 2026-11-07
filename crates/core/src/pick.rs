@@ -25,6 +25,9 @@ impl CanvasSession {
         let side = side.clamp(1, 1024);
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        if st.scene_shown() {
+            return st.scene_pick(x, y, side);
+        }
         let view = st.view?;
         // the window shifted so that the point lands in the middle of the small target
         let corner = Vec2::new(x - side as f32 / 2.0, y - side as f32 / 2.0);

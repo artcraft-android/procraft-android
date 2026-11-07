@@ -39,6 +39,7 @@ mod lighting;
 mod liquify;
 mod look;
 mod menu;
+mod model_picture;
 mod overlays;
 mod panel;
 mod pdf;

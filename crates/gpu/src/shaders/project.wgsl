@@ -8,15 +8,22 @@
 struct Proj {
     // clip from world
     view_proj: mat4x4<f32>,
-    // the screen's size (pixels), and 1 when strokes paint through the model
+    // the screen's size (pixels), 1 when strokes paint through the model, and how it's carried: 0
+    // a stroke; else a surface turned away takes as much as one facing the camera, and 2 what's
+    // carried takes the layer's place
     screen: vec4<f32>,
     // the camera's place
     eye: vec4<f32>,
+    // a picture carried on: picture pixels from window pixels, x then y (a·x + b·y + c)
+    picture_x: vec4<f32>,
+    picture_y: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> proj: Proj;
 @group(0) @binding(1) var stroke: texture_2d<f32>;
 @group(0) @binding(2) var nearest: texture_2d<f32>;
+// what may be reached, in the texture's space: the selection (a white texel when there is none)
+@group(0) @binding(3) var within: texture_2d<f32>;
 
 struct In {
     @location(0) position: vec3<f32>,
@@ -60,10 +67,9 @@ fn vs_project(v: In) -> ProjectOut {
     return o;
 }
 
-@fragment
-fn fs_project(i: ProjectOut) -> @location(0) vec4<f32> {
-    // behind the camera, off the screen or hidden: left as it is (another surface sharing these
-    // texels may take the stroke)
+// Where a texel's surface lands on the screen, pixels. Behind the camera, off the screen or
+// hidden: left as it is (another surface sharing these texels may take the stroke).
+fn landing(i: ProjectOut) -> vec2<f32> {
     if (i.screen.w <= 0.0) {
         discard;
     }
@@ -72,16 +78,98 @@ fn fs_project(i: ProjectOut) -> @location(0) vec4<f32> {
     if (at.x < 0.0 || at.y < 0.0 || at.x >= proj.screen.x || at.y >= proj.screen.y) {
         discard;
     }
-    let p = vec2<i32>(at);
     // a small share of the distance for precision
-    let front = textureLoad(nearest, p, 0).r;
+    let front = textureLoad(nearest, vec2<i32>(at), 0).r;
     if (proj.screen.z < 0.5 && i.screen.w > front * 1.002 + 1e-4) {
         discard;
     }
-    // a surface turned away takes less: none at grazing angles (either side of an open surface)
+    return at;
+}
+
+// A surface turned away takes less: none at grazing angles (either side of an open surface).
+fn facing_weight(i: ProjectOut) -> f32 {
     let facing = abs(dot(normalize(i.normal), normalize(proj.eye.xyz - i.world)));
-    let weight = 1.0 - saturate(6.0 * (1.0 - facing) - 4.6);
-    return textureLoad(stroke, p, 0) * weight;
+    return select(1.0 - saturate(6.0 * (1.0 - facing) - 4.6), 1.0, proj.screen.w > 0.5);
+}
+
+@fragment
+fn fs_project(i: ProjectOut) -> @location(0) vec4<f32> {
+    return textureLoad(stroke, vec2<i32>(landing(i)), 0) * facing_weight(i);
+}
+
+// What's carried at q (its pixels, their middles at whole numbers), read between them.
+fn between(q: vec2<f32>) -> vec4<f32> {
+    let size = vec2<i32>(textureDimensions(stroke));
+    let low = vec2<i32>(floor(q));
+    let t = q - floor(q);
+    let top = vec2<i32>(0);
+    let high = size - vec2<i32>(1);
+    let a = textureLoad(stroke, clamp(low, top, high), 0);
+    let b = textureLoad(stroke, clamp(low + vec2<i32>(1, 0), top, high), 0);
+    let c = textureLoad(stroke, clamp(low + vec2<i32>(0, 1), top, high), 0);
+    let d = textureLoad(stroke, clamp(low + vec2<i32>(1, 1), top, high), 0);
+    return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
+}
+
+// A picture placed on the screen.
+@fragment
+fn fs_project_picture(i: ProjectOut) -> @location(0) vec4<f32> {
+    let at = vec3<f32>(landing(i), 1.0);
+    let q = vec2<f32>(dot(proj.picture_x.xyz, at), dot(proj.picture_y.xyz, at)) - vec2<f32>(0.5);
+    let size = vec2<i32>(textureDimensions(stroke));
+    if (q.x < -0.5 || q.y < -0.5 || q.x > f32(size.x) - 0.5 || q.y > f32(size.y) - 0.5) {
+        discard;
+    }
+    return between(q) * facing_weight(i);
+}
+
+// A layer as the camera sees it, changed on the screen (binding 1; binding 3 as it was): each texel
+// takes what the screen now holds where that changed, its alpha marked by 1 (see the canvas's laid
+// strokes). What is opaque stays so: past the model's edge the screen is clear, and what is dragged
+// in from there isn't a hole in it.
+@fragment
+fn fs_project_laid(i: ProjectOut) -> @location(0) vec4<f32> {
+    let at = landing(i);
+    let p = vec2<i32>(at);
+    let was = textureLoad(within, p, 0);
+    if (all(abs(textureLoad(stroke, p, 0) - was) < vec4<f32>(0.75 / 255.0))) {
+        discard;
+    }
+    var c = between(at - vec2<f32>(0.5));
+    if (was.a > 0.996) {
+        if (c.a <= 0.0) {
+            discard;
+        }
+        c = vec4<f32>(c.rgb / c.a, 1.0);
+    }
+    return vec4<f32>(c.rgb, c.a + 1.0);
+}
+
+// ---- a layer as the camera sees it (binding 1), the model's other surfaces hiding it ----------
+
+struct SeenOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_seen(v: In) -> SeenOut {
+    var o: SeenOut;
+    o.clip = proj.view_proj * vec4<f32>(v.position, 1.0);
+    o.uv = v.uv;
+    return o;
+}
+
+@fragment
+fn fs_seen(i: SeenOut) -> @location(0) vec4<f32> {
+    // texture rows run down from v = 1
+    let t = fract(vec2<f32>(i.uv.x, 1.0 - i.uv.y));
+    return between(t * vec2<f32>(textureDimensions(stroke)) - vec2<f32>(0.5));
+}
+
+@fragment
+fn fs_seen_hiding() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
 }
 
 // ---- the part's islands: 1 wherever its triangles lie in the texture -------------------------
@@ -108,11 +196,17 @@ fn vs_full(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(x, y, 0.0, 1.0);
 }
 
+// how much of a texel may be reached (all or nothing when what's carried takes the layer's place)
+fn kept(p: vec2<i32>) -> f32 {
+    let k = textureLoad(within, min(p, vec2<i32>(textureDimensions(within)) - vec2<i32>(1)), 0).r;
+    return select(k, step(0.5, k), proj.screen.w > 1.5);
+}
+
 @fragment
 fn fs_dilate(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let p = vec2<i32>(pos.xy);
     if (textureLoad(nearest, p, 0).r > 0.5) {
-        return textureLoad(stroke, p, 0);
+        return textureLoad(stroke, p, 0) * kept(p);
     }
     let size = vec2<i32>(textureDimensions(stroke));
     var best = vec4<f32>(0.0);
@@ -127,7 +221,7 @@ fn fs_dilate(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             }
         }
     }
-    return best;
+    return best * kept(p);
 }
 
 // ---- a stroke's roughness or metalness: the colour's coverage (binding 1, in the texture's

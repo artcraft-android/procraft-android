@@ -153,6 +153,8 @@ pub struct TouchSettings {
     pub undo_taps: bool,
     /// Two fingers turn the canvas as they zoom it.
     pub rotate: bool,
+    /// One finger paints a model, and turns it with the modify button held (else it turns it).
+    pub model_finger_paint: bool,
     /// Pausing at the end of a stroke snaps it to a shape.
     pub draw_and_hold: bool,
     pub touch: Option<GestureAction>,
@@ -184,6 +186,7 @@ impl Default for TouchSettings {
             one_finger_pan: false,
             undo_taps: true,
             rotate: true,
+            model_finger_paint: false,
             draw_and_hold: true,
             touch: None,
             pen: None,
@@ -330,6 +333,8 @@ pub enum TouchCommand {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     None,
+    /// A picture being placed on a model follows the touch.
+    Picture,
     Pen,
     Finger,
     /// Down, doing nothing (a touch that only waits for a hold, or did its thing).
@@ -811,6 +816,15 @@ impl CanvasSession {
         }
         // a touch made while the modify button is held does what □ + Touch (□ + Pen) is set to
         if t.modify_held && t.modify_pointer.is_none() && (t.down.len() == 1 || t.mode == Mode::None) {
+            // on a model painted with a finger, the button held makes a finger turn it
+            if kind == PointerKind::Finger && t.settings.model_finger_paint && self.shared.lock().scene_shown() {
+                t.modify_used = true;
+                t.stroke_pointer = id;
+                t.turn_last = (first.x, first.y);
+                t.down_at = t.turn_last;
+                t.mode = Mode::Turn;
+                return out;
+            }
             let purpose = if is_pen(kind) { t.settings.modify_pen } else { t.settings.modify_touch };
             if let Some(purpose) = purpose {
                 t.modify_used = true;
@@ -968,8 +982,16 @@ impl CanvasSession {
                     out.push(TouchCommand::BrushChanged);
                 }
             }
+            Mode::Picture if id == t.stroke_pointer => {
+                let last = std::mem::replace(&mut t.turn_last, at);
+                drop(t);
+                self.model_picture_move(at.0 - last.0, at.1 - last.1, 1.0, 0.0);
+            }
             Mode::Turn if id == t.stroke_pointer => {
                 let last = std::mem::replace(&mut t.turn_last, at);
+                if dist(at, t.down_at) > TAP_SLOP * t.scale {
+                    t.hold_due = None;
+                }
                 drop(t);
                 self.turn_model(at.0 - last.0, at.1 - last.1);
             }
@@ -1227,7 +1249,7 @@ impl CanvasSession {
         }
         if t.hold_due.is_some_and(|due| due <= now_ms) {
             t.hold_due = None;
-            if matches!(t.mode, Mode::Finger | Mode::Idle)
+            if matches!(t.mode, Mode::Finger | Mode::Idle | Mode::Turn)
                 && let Some(purpose) = t.settings.hold
             {
                 let painting = t.mode == Mode::Finger;
@@ -1456,8 +1478,17 @@ impl CanvasSession {
             }
             return;
         }
-        // the selection tool: the touch selects, nothing paints
-        if t.selecting.is_some() {
+        // a picture being placed on a model is moved by what lands on it (a pen or mouse, anywhere);
+        // otherwise a finger turns the model under it
+        let placing = self.shared.lock().scene_picture_under(at);
+        if placing == Some(true) || (placing.is_some() && kind != PointerKind::Finger) {
+            t.stroke_pointer = id;
+            t.turn_last = at;
+            t.mode = Mode::Picture;
+            return;
+        }
+        // on a shown model a finger still turns it while a selection is drawn with the pen
+        if t.selecting.is_some() && !self.finger_turns_model(kind, t) {
             t.stroke_pointer = id;
             t.select_moved = false;
             t.lasso_snapped = false;
@@ -1490,11 +1521,16 @@ impl CanvasSession {
             }
             return;
         }
-        // on a shown model a finger turns it; the pen paints
-        if kind == PointerKind::Finger && self.shared.lock().scene_shown() {
+        // on a shown model a finger turns it, unless set to paint; the pen paints. Held still, it
+        // does what a hold does anywhere
+        let on_model = kind == PointerKind::Finger && self.shared.lock().scene_shown();
+        if on_model && !t.settings.model_finger_paint {
             t.stroke_pointer = id;
             t.turn_last = at;
             t.mode = Mode::Turn;
+            if t.settings.hold.is_some() {
+                t.hold_due = Some(now + t.settings.hold_ms);
+            }
             return;
         }
         let pen = is_pen(kind);
@@ -1522,7 +1558,7 @@ impl CanvasSession {
             }
         }
         // a finger set not to paint (a mouse, a desktop's drawing tool, paints as the pen does)
-        if kind == PointerKind::Finger && does.is_none() && !t.settings.finger_paint {
+        if kind == PointerKind::Finger && does.is_none() && !t.settings.finger_paint && !on_model {
             t.mode = Mode::Idle;
             // set to move the canvas: it does once it moves past a tap's slop
             if t.settings.one_finger_pan {
@@ -1561,6 +1597,11 @@ impl CanvasSession {
         if t.settings.draw_and_hold {
             t.quickshape_due = Some(now + t.settings.quickshape_ms);
         }
+    }
+
+    /// Whether a touch of `kind` on the screen turns a shown model.
+    fn finger_turns_model(&self, kind: PointerKind, t: &Touches) -> bool {
+        kind == PointerKind::Finger && !t.settings.model_finger_paint && self.shared.lock().scene_shown()
     }
 
     fn another_down(&self, t: &mut Touches, kind: PointerKind, now: f64, out: &mut Vec<TouchCommand>) {
@@ -1629,6 +1670,7 @@ impl CanvasSession {
                 | Mode::Select
                 | Mode::Recolor
                 | Mode::Turn
+                | Mode::Picture
                 | Mode::Held
         ) {
             t.gesture_scale = 1.0;

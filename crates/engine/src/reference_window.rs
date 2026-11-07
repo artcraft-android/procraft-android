@@ -68,10 +68,12 @@ pub struct ReferenceWindow {
     /// How the canvas and the image each sit in it: zoom, then how far moved.
     pub canvas_view: [f32; 3],
     pub image_view: [f32; 3],
+    /// On a model, the canvas kind shows the model itself, turned on its own, not its texture.
+    /// Kept as it came on an artwork that isn't a model, which shows the canvas.
+    pub three_d: bool,
     /// What a package said that this app doesn't use, kept to be written back as it came.
     pub corner: i64,
     pub docked: bool,
-    pub three_d: bool,
     pub face_background_hidden: bool,
 }
 

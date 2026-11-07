@@ -130,7 +130,7 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
             // back; a finger moves it, two zoom and move it, a finger held still picks a colour
             // from it; touches here never reach the canvas under the window
             val shown = when (vm.referenceMode) {
-                CanvasViewModel.ReferenceMode.CANVAS -> vm.referenceCanvas
+                CanvasViewModel.ReferenceMode.CANVAS, CanvasViewModel.ReferenceMode.MODEL -> vm.referenceCanvas
                 CanvasViewModel.ReferenceMode.IMAGE -> vm.referenceImage
                 CanvasViewModel.ReferenceMode.FACE -> null
             }
@@ -160,7 +160,7 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
                     }
                 }
                 when (vm.referenceMode) {
-                    CanvasViewModel.ReferenceMode.CANVAS -> Unit
+                    CanvasViewModel.ReferenceMode.CANVAS, CanvasViewModel.ReferenceMode.MODEL -> Unit
                     CanvasViewModel.ReferenceMode.IMAGE -> {
                         if (vm.referenceImage == null) {
                             Box(
@@ -213,7 +213,9 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
                     Modifier.width(270.dp).height(35.dp).clip(CircleShape).background(SegmentTrack).padding(2.dp),
                     horizontalArrangement = Arrangement.spacedBy(11.dp),
                 ) {
-                    for ((mode, label) in listOf(CanvasViewModel.ReferenceMode.CANVAS to "Canvas", CanvasViewModel.ReferenceMode.IMAGE to "Image", CanvasViewModel.ReferenceMode.FACE to "Face")) {
+                    // on a model the third is the model itself
+                    val third = if (vm.modelOpen) CanvasViewModel.ReferenceMode.MODEL to "3D" else CanvasViewModel.ReferenceMode.FACE to "Face"
+                    for ((mode, label) in listOf(CanvasViewModel.ReferenceMode.CANVAS to "Canvas", CanvasViewModel.ReferenceMode.IMAGE to "Image", third)) {
                         val on = vm.referenceMode == mode
                         Box(
                             Modifier.weight(1f).fillMaxHeight().clip(CircleShape).background(if (on) Pc.Accent else Color.Transparent)

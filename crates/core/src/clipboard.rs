@@ -64,7 +64,7 @@ impl State {
 }
 
 /// `image`'s straight colours premultiplied, as layers hold them.
-fn premultiplied(mut image: ThumbnailImage) -> ThumbnailImage {
+pub(crate) fn premultiplied(mut image: ThumbnailImage) -> ThumbnailImage {
     for px in image.rgba.as_chunks_mut::<4>().0 {
         let a = u16::from(px[3]);
         for c in px.iter_mut().take(3) {

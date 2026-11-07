@@ -15,13 +15,15 @@ use std::sync::Arc;
 use procraft_engine::document::{Document, LayerId, LayerKind};
 use procraft_engine::geom::{IRect, Vec2};
 use procraft_engine::input::Sample;
-use procraft_engine::mesh::{MAX_TRIANGLES, Mesh, MeshError, PartImages, read_obj};
+use procraft_engine::mesh::{MAX_TRIANGLES, Mesh, MeshError, PartImages, SurfaceHit, read_obj};
 use procraft_engine::stroke::StrokeBuilder;
 use procraft_engine::studio::MAX_GRAIN_SCALE;
 use procraft_engine::usd::{read_usd, read_usdc, read_usdz};
 use procraft_engine::view::View;
+use procraft_gpu::wgpu::util::DeviceExt as _;
 use procraft_gpu::{
-    Canvas, Gpu, Light, Lighting, MOST_LIGHTS, MeshView, Orbit, SharedStroke, StrokeStyle, StrokeTool, wgpu,
+    Canvas, Gpu, Light, Lighting, MOST_LIGHTS, MeshView, Orbit, SharedStroke, ShownSelection, StrokeStyle, StrokeTool,
+    wgpu,
 };
 
 use crate::project::{THUMBNAIL_SIDE, file_error, pixels_hash, read_png, write_atomically, write_png};
@@ -68,6 +70,63 @@ const MOST_TEXTURE_SIZE: u32 = 4096;
 
 /// Layers' pixels (premultiplied RGBA8), by layer.
 pub(crate) type Pixels = Vec<(LayerId, Vec<u8>)>;
+
+impl CanvasSession {
+    /// Moves the picture being placed as `change` says.
+    fn change_picture(&self, change: impl FnOnce(&mut PicturePlace)) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        if let Some(placing) = st.scene.as_mut().and_then(|s| s.placing.as_mut()) {
+            change(&mut placing.place);
+            self.shared.frame(st);
+        }
+    }
+
+    /// `flags` of the model's look, one for each of `count`'s (false where none was set).
+    fn look_flags(&self, flags: impl Fn(&MeshLook) -> &Vec<bool>, count: impl Fn(&Mesh) -> usize) -> Vec<bool> {
+        let st = self.shared.lock();
+        let Some(scene) = st.scene.as_ref() else { return Vec::new() };
+        let set = flags(&scene.look);
+        (0..count(&scene.mesh)).map(|i| set.get(i).copied().unwrap_or(false)).collect()
+    }
+
+    /// Changes the model's look as an undo step named `name` in the canvas painted on.
+    fn change_look(&self, name: &str, change: impl FnOnce(&mut MeshLook, &Mesh)) {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let Some(scene) = st.scene.as_mut() else { return };
+        // a picture being placed holds the canvas's stroke open
+        if scene.placing.is_some() {
+            return;
+        }
+        let before = scene.look.clone();
+        change(&mut scene.look, &scene.mesh);
+        if scene.look == before {
+            return;
+        }
+        let after = scene.look.clone();
+        let (part, channel) = (scene.current, scene.channel);
+        if st.scene_shown() {
+            st.scene_stroke_cancel();
+        } else {
+            st.finish_stroke();
+        }
+        st.settle();
+        if let Some(c) = st.canvas.as_mut() {
+            c.record_outside_change(name);
+        }
+        st.flush();
+        let step = st.canvas.as_ref().and_then(Canvas::undo_step);
+        if let (Some(step), Some(scene)) = (step, st.scene.as_mut()) {
+            if scene.look_steps.len() >= MOST_JOINT_STEPS {
+                scene.look_steps.remove(0);
+            }
+            scene.look_steps.push(LookStep { part, channel, step, before, after });
+        }
+        st.revision += 1;
+        self.shared.frame(st);
+    }
+}
 
 /// A texture set waiting while another is painted on: its document, its canvas once the model
 /// has been drawn, and until then the pixels it was opened with.
@@ -160,6 +219,30 @@ pub(crate) struct ModelSource {
     bytes: Vec<u8>,
     extension: String,
     mtl: Option<String>,
+}
+
+/// A feature of a model that painting on it may not go well with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ModelWarning {
+    /// Texels several surfaces share: paint on one shows on the others.
+    OverlappingUvs,
+    /// Texture coordinates outside the texture: paint shows on every repeat.
+    RepeatingTextures,
+}
+
+/// How much of a texture set may be covered twice before it's worth a warning.
+const OVERLAP_WARNED: f32 = 0.01;
+
+/// What a newly opened model warns of.
+fn warnings_of(mesh: &Mesh) -> Vec<ModelWarning> {
+    let mut out = Vec::new();
+    if (0..mesh.parts.len()).any(|i| mesh.uv_overlap(i, 256) > OVERLAP_WARNED) {
+        out.push(ModelWarning::OverlappingUvs);
+    }
+    if mesh.repeats_textures() {
+        out.push(ModelWarning::RepeatingTextures);
+    }
+    out
 }
 
 /// A file picked along with a model: an OBJ's material file, or an image its materials map.
@@ -271,11 +354,75 @@ fn unzip_model(bytes: &[u8]) -> Option<Zipped> {
     Some(Zipped { name, model, files })
 }
 
+/// Whether a zip holding `names` is a model's artwork: its folder, as
+/// [`CanvasSession::export_model_artwork`] writes it.
+pub(crate) fn is_model_artwork<'n>(mut names: impl Iterator<Item = &'n str>) -> bool {
+    let (mut artwork, mut model) = (false, false);
+    names.any(|n| {
+        artwork |= n == "artwork.json";
+        model |= !n.contains('/') && n.starts_with("model.") && is_model_name(n);
+        artwork && model
+    })
+}
+
+/// Every file under `dir` into `zip`, named by its path from `root`.
+fn zip_folder(zip: &mut procraft_engine::zip::ZipWriter, root: &Path, dir: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            zip_folder(zip, root, &path)?;
+        } else if let Ok(name) = path.strip_prefix(root) {
+            let name: Vec<String> = name.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            zip.add(&name.join("/"), &fs::read(&path)?);
+        }
+    }
+    Ok(())
+}
+
+/// Unpacks a model's artwork (see [`CanvasSession::export_model_artwork`]) from file `path` into
+/// the empty folder `dir`: false, with nothing kept, if it isn't one. Nothing goes outside `dir`.
+#[uniffi::export]
+pub fn unpack_model_artwork(path: String, dir: String) -> bool {
+    let Ok(bytes) = fs::read(&path) else { return false };
+    let Some(zip) = procraft_engine::zip::ZipReader::new(&bytes) else { return false };
+    if !is_model_artwork(zip.names()) {
+        return false;
+    }
+    let root = Path::new(&dir);
+    let inside = |name: &str| {
+        let parts = || name.split('/');
+        !name.contains('\\') && !name.contains(':') && parts().all(|p| !p.is_empty() && p != "." && p != "..")
+    };
+    let wrote = zip.names().filter(|n| !n.ends_with('/') && inside(n)).try_for_each(|name| {
+        let bytes = zip.read(name).ok_or(())?;
+        let to = root.join(name);
+        to.parent().map_or(Ok(()), fs::create_dir_all).map_err(|_| ())?;
+        fs::write(to, bytes).map_err(|_| ())
+    });
+    if wrote.is_err() {
+        let _ = fs::remove_dir_all(root);
+    }
+    wrote.is_ok()
+}
+
 /// The model a zip of one holds (its path in the zip), as the gallery's Import opens it; none if
 /// it holds none or is an artwork, a layered package or brushes.
 #[uniffi::export]
 pub fn zip_model_name(bytes: Vec<u8>) -> Option<String> {
     zipped_model_name(&procraft_engine::zip::ZipReader::new(&bytes)?)
+}
+
+/// Sets flag `index` of `flags`, `count` of them.
+fn set_flag(flags: &mut Vec<bool>, count: usize, index: u32, value: bool) {
+    flags.resize(count, false);
+    if let Some(f) = flags.get_mut(index as usize) {
+        *f = value;
+    }
+}
+
+/// The places of the flags set.
+fn places(flags: &[bool]) -> Vec<usize> {
+    flags.iter().enumerate().filter(|(_, f)| **f).map(|(i, _)| i).collect()
 }
 
 /// The kinds of model file that open: OBJ (with its MTL), USDZ, and USD binary or text.
@@ -330,8 +477,25 @@ pub(crate) struct Scene {
     /// The Lighting Studio is showing, seen through its own camera (kept while the model is open).
     studio_open: bool,
     studio: Option<Orbit>,
-    /// Which of its submeshes are hidden.
-    hidden: Vec<bool>,
+    /// The texture shows flat only for a tool that works on it, back to the model when it ends.
+    flat_for_tool: bool,
+    /// A picture being placed on the model.
+    placing: Option<PlacedPicture>,
+    /// What a model opened from its file warns of, until it has been said.
+    warnings: Vec<ModelWarning>,
+    /// What fills and adjustments reach while meshes are picked: the meshes it was made for, and
+    /// where they lie in the texture.
+    reach: Option<(Vec<usize>, procraft_engine::selection::Mask)>,
+    /// The selection as it was before an adjustment was kept to the meshes picked.
+    held_selection: Option<Option<procraft_engine::selection::Mask>>,
+    /// How the Reference window sees the model, from when it first has.
+    reference_orbit: Option<Orbit>,
+    /// The window as the eyedropper last saw it.
+    seen: Option<SeenFrame>,
+    /// What of the model is hidden, locked and picked.
+    look: MeshLook,
+    /// The hide, lock and pick changes, each an undo step in the canvas it was made on.
+    look_steps: Vec<LookStep>,
     /// Each part's roughness and metalness documents, once made; the place of the channel painted
     /// is empty (it is the session's own).
     channels: Vec<[Option<TextureSet>; 2]>,
@@ -352,6 +516,9 @@ pub(crate) struct Scene {
     /// square), shown as they are; and whether the view has them as they are now.
     surface_maps: Vec<[Option<Arc<Vec<u8>>>; 2]>,
     surface_shown: bool,
+    /// The stroke under way changes what's under it (a smudge, wet paint): the layer as the camera
+    /// saw it as it began, on the screen's canvas, and as it was.
+    laying: Option<wgpu::TextureView>,
     /// A stroke is being carried onto the model each frame; `ending`: once more, then it ends.
     pub(crate) stroking: bool,
     ending: bool,
@@ -408,6 +575,179 @@ struct TileStep {
     steps: [Option<u64>; 3],
 }
 
+/// What of a model is hidden or locked, and which of its meshes strokes reach.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct MeshLook {
+    /// By submesh: hidden ones aren't drawn or painted, locked ones are drawn but take no paint.
+    hidden: Vec<bool>,
+    locked: Vec<bool>,
+    /// By texture set, the same for all its meshes.
+    sets_hidden: Vec<bool>,
+    sets_locked: Vec<bool>,
+    /// The meshes picked, in the texture set painted on: strokes reach only them. None picked:
+    /// the whole set.
+    active: Vec<usize>,
+}
+
+/// A change to [`MeshLook`] kept in `part`'s `channel` canvas as `step`, with the look before and
+/// after it, for undo and redo to follow.
+#[derive(Clone, Debug, PartialEq)]
+struct LookStep {
+    part: usize,
+    channel: usize,
+    step: u64,
+    before: MeshLook,
+    after: MeshLook,
+}
+
+/// A picture being placed on a model, shown as it lands, a stroke on its own new layer until it
+/// is kept.
+struct PlacedPicture {
+    view: wgpu::TextureView,
+    size: (u32, u32),
+    place: PicturePlace,
+    first: PicturePlace,
+    /// Where it was last carried onto the model, and how the model was seen then.
+    carried: Option<(PicturePlace, Orbit)>,
+}
+
+/// Where a picture lies on the window: its middle, how far it reaches from there along its own
+/// sides (one negative: it is flipped), and its turn (radians, clockwise on the window).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PicturePlace {
+    middle: [f32; 2],
+    half: [f32; 2],
+    turn: f32,
+}
+
+impl PicturePlace {
+    /// A `size` picture first placed on a `window`: in its middle, its long side this share of
+    /// the window's shorter side.
+    const FIRST_SHARE: f32 = 0.7;
+
+    fn first(size: (u32, u32), window: (u32, u32)) -> PicturePlace {
+        let long = size.0.max(size.1).max(1) as f32;
+        let reach = window.0.min(window.1) as f32 * Self::FIRST_SHARE / 2.0;
+        PicturePlace {
+            middle: [window.0 as f32 / 2.0, window.1 as f32 / 2.0],
+            half: [size.0 as f32 / long * reach, size.1 as f32 / long * reach],
+            turn: 0.0,
+        }
+    }
+
+    /// Its four corners on the window, clockwise from its top left.
+    fn corners(&self) -> [[f32; 2]; 4] {
+        let (s, c) = self.turn.sin_cos();
+        [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].map(|(u, v)| {
+            let (x, y) = (u * self.half[0], v * self.half[1]);
+            [self.middle[0] + x * c - y * s, self.middle[1] + x * s + y * c]
+        })
+    }
+
+    /// Where window point `p` lies across it: -1 to 1 along each of its sides.
+    fn across(&self, p: [f32; 2]) -> [f32; 2] {
+        let (s, c) = self.turn.sin_cos();
+        let (x, y) = (p[0] - self.middle[0], p[1] - self.middle[1]);
+        [(x * c + y * s) / self.half[0], (y * c - x * s) / self.half[1]]
+    }
+
+    fn holds(&self, p: [f32; 2]) -> bool {
+        self.across(p).iter().all(|t| t.abs() <= 1.0)
+    }
+
+    /// A `size` picture's pixels from the window's, x then y (a·x + b·y + c).
+    fn to_picture(self, size: (u32, u32)) -> [[f32; 3]; 2] {
+        let (s, c) = self.turn.sin_cos();
+        let row = |extent: u32, half: f32, a: f32, b: f32| {
+            let k = extent as f32 / (2.0 * half);
+            [a * k, b * k, extent as f32 / 2.0 - (a * self.middle[0] + b * self.middle[1]) * k]
+        };
+        [row(size.0, self.half[0], c, s), row(size.1, self.half[1], -s, c)]
+    }
+}
+
+/// The window as last drawn for the eyedropper, and what it was drawn from.
+struct SeenFrame {
+    size: (u32, u32),
+    orbit: Orbit,
+    revision: u64,
+    pixels: Vec<u8>,
+}
+
+/// The `side` square of RGBA8 `pixels` (a window `size`) centred on `at`: what lies off the window
+/// clear.
+fn window_round(pixels: &[u8], size: (u32, u32), at: (f32, f32), side: u32) -> Vec<u8> {
+    let (w, h) = (size.0 as i64, size.1 as i64);
+    let (x0, y0) = (at.0 as i64 - i64::from(side) / 2, at.1 as i64 - i64::from(side) / 2);
+    let mut out = vec![0u8; side as usize * side as usize * 4];
+    for (row, line) in out.chunks_exact_mut(side as usize * 4).enumerate() {
+        let y = y0 + row as i64;
+        if !(0..h).contains(&y) {
+            continue;
+        }
+        for (col, px) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let x = x0 + col as i64;
+            if !(0..w).contains(&x) {
+                continue;
+            }
+            let at = ((y * w + x) * 4) as usize;
+            if let Some(from) = pixels.get(at..at + 4) {
+                px.copy_from_slice(from);
+            }
+        }
+    }
+    out
+}
+
+/// How long a model takes to go round in the gallery's Preview.
+const MODEL_PREVIEW_FRAMES: u32 = 72;
+const MODEL_PREVIEW_FPS: u32 = 18;
+
+/// What undo and redo call a channel's content replaced.
+const MAP_REPLACED: &str = "replace material map content";
+
+/// `image` (premultiplied RGBA8) stretched over a `side` square, read between its pixels. None if
+/// it holds nothing.
+fn stretched(image: &crate::layers::ThumbnailImage, side: u32) -> Option<Vec<u8>> {
+    let (w, h) = (image.width as usize, image.height as usize);
+    if w == 0 || h == 0 || image.rgba.len() != w * h * 4 {
+        return None;
+    }
+    let at = |x: usize, y: usize, c: usize| f32::from(image.rgba.get((y * w + x) * 4 + c).copied().unwrap_or(0));
+    let mut out = Vec::with_capacity(side as usize * side as usize * 4);
+    for y in 0..side {
+        let fy = ((y as f32 + 0.5) * h as f32 / side as f32 - 0.5).clamp(0.0, (h - 1) as f32);
+        let (y0, ty) = (fy as usize, fy.fract());
+        let y1 = (y0 + 1).min(h - 1);
+        for x in 0..side {
+            let fx = ((x as f32 + 0.5) * w as f32 / side as f32 - 0.5).clamp(0.0, (w - 1) as f32);
+            let (x0, tx) = (fx as usize, fx.fract());
+            let x1 = (x0 + 1).min(w - 1);
+            for c in 0..4 {
+                let top = at(x0, y0, c) * (1.0 - tx) + at(x1, y0, c) * tx;
+                let low = at(x0, y1, c) * (1.0 - tx) + at(x1, y1, c) * tx;
+                out.push((top * (1.0 - ty) + low * ty).round() as u8);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// How far past the meshes picked fills and adjustments reach, texels: as far as strokes do.
+const REACH_GROWN: usize = 2;
+
+/// What undo and redo call a mesh or texture set hidden, shown, locked or unlocked, or meshes
+/// picked.
+const MESHES_SELECTED: &str = "select meshes";
+
+/// Which part a texel of a `side` square texture holds texture coordinates `uv`: the coordinates
+/// wrapped into the texture, rows running down from v = 1.
+fn texel_of(uv: [f32; 2], side: u32) -> (u32, u32) {
+    let wrap = |t: f32| t - t.floor();
+    let along = |t: f32| ((t * side as f32) as u32).min(side.saturating_sub(1));
+    (along(wrap(uv[0])), along(1.0 - wrap(uv[1])))
+}
+
 /// What undo and redo call a tile chosen, and the layer's row chosen again.
 const TILE_CHOSEN: &str = "select material layer";
 const ROW_CHOSEN: &str = "deselect material layer";
@@ -461,7 +801,15 @@ impl Scene {
             lights: Light::DEFAULTS.iter().map(ModelLight::from_gpu).collect(),
             studio_open: false,
             studio: None,
-            hidden: Vec::new(),
+            flat_for_tool: false,
+            placing: None,
+            warnings: Vec::new(),
+            reach: None,
+            held_selection: None,
+            reference_orbit: None,
+            seen: None,
+            look: MeshLook::default(),
+            look_steps: Vec::new(),
             channels: Vec::new(),
             channel: 0,
             tile_chosen: false,
@@ -470,6 +818,7 @@ impl Scene {
             picked: Vec::new(),
             surface_maps: Vec::new(),
             surface_shown: false,
+            laying: None,
             stroking: false,
             ending: false,
             material_paint: None,
@@ -497,9 +846,140 @@ impl Scene {
             .collect()
     }
 
+    /// A picture of the model through `orbit`, `side` square, on the surround, with its environment
+    /// behind it if one shows. None until it has been drawn.
+    fn picture_through(&mut self, gpu: &Gpu, orbit: Orbit, side: u32) -> Option<crate::layers::ThumbnailImage> {
+        let s = crate::SURROUND;
+        let clear = [f64::from(s[0]), f64::from(s[1]), f64::from(s[2]), 1.0];
+        let environment = self.lit && self.environment_shown;
+        let rgba = self.view.as_mut()?.picture_from(gpu, orbit, side, side, clear, environment);
+        match rgba {
+            Ok(rgba) => Some(crate::layers::ThumbnailImage { width: side, height: side, rgba }),
+            Err(e) => {
+                log::warn!("a picture of the model: {e}");
+                None
+            }
+        }
+    }
+
     /// How the model is seen now.
     fn orbit(&self) -> Option<Orbit> {
         self.view.as_ref().map(|v| v.orbit).or(self.orbit)
+    }
+
+    /// Submesh `index`'s texture set.
+    fn set_of(&self, index: usize) -> Option<usize> {
+        self.mesh.submeshes.get(index).map(|m| m.part)
+    }
+
+    /// Whether submesh `index` is hidden, itself or with its texture set.
+    fn mesh_hidden(&self, index: usize) -> bool {
+        let set = self.set_of(index).and_then(|p| self.look.sets_hidden.get(p)).copied();
+        self.look.hidden.get(index).copied().unwrap_or(false) || set.unwrap_or(false)
+    }
+
+    /// Whether submesh `index` is locked, itself or with its texture set.
+    fn mesh_locked(&self, index: usize) -> bool {
+        let set = self.set_of(index).and_then(|p| self.look.sets_locked.get(p)).copied();
+        self.look.locked.get(index).copied().unwrap_or(false) || set.unwrap_or(false)
+    }
+
+    /// The meshes a stroke is meant for: those picked, else the texture set's.
+    fn meant_meshes(&self) -> Vec<usize> {
+        if !self.look.active.is_empty() {
+            return self.look.active.clone();
+        }
+        (0..self.mesh.submeshes.len()).filter(|&i| self.set_of(i) == Some(self.current)).collect()
+    }
+
+    /// Whether submesh `index` takes strokes now.
+    fn mesh_painted(&self, index: usize) -> bool {
+        let meant = self.look.active.is_empty() || self.look.active.contains(&index);
+        meant && !self.mesh_hidden(index) && !self.mesh_locked(index)
+    }
+
+    /// Draws `layer` of the current part as the camera sees it (a window `size`) onto the screen's
+    /// canvas, and gives that picture back. None before the model has been drawn.
+    fn see_layer(&mut self, gpu: &Gpu, layer: &wgpu::TextureView, size: (u32, u32)) -> Option<wgpu::TextureView> {
+        self.tell_view_what_takes_paint();
+        let part = self.current;
+        let (doc, screen) = self.screen.as_mut()?;
+        let view = self.view.as_mut()?;
+        screen.render(gpu, doc, None);
+        let seen = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("layer as seen"),
+            size: wgpu::Extent3d { width: size.0.max(1), height: size.1.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target = seen.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder =
+            gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("layer as seen") });
+        view.draw_seen(gpu, &mut encoder, part, layer, &target, size.0, size.1);
+        gpu.queue.submit([encoder.finish()]);
+        screen.copy_to_layer(gpu, doc.current(), &seen).then_some(target)
+    }
+
+    /// Gives the view the meshes that show.
+    fn tell_view_what_shows(&mut self) {
+        let hidden: Vec<bool> = (0..self.mesh.submeshes.len()).map(|i| self.mesh_hidden(i)).collect();
+        if let Some(view) = self.view.as_mut() {
+            for (i, hide) in hidden.into_iter().enumerate() {
+                view.set_hidden(i, hide);
+            }
+        }
+    }
+
+    /// Gives the view the meshes strokes reach.
+    fn tell_view_what_takes_paint(&mut self) {
+        let painted: Vec<bool> = (0..self.mesh.submeshes.len()).map(|i| self.mesh_painted(i)).collect();
+        if let Some(view) = self.view.as_mut() {
+            for (i, takes) in painted.into_iter().enumerate() {
+                view.set_painted(i, takes);
+            }
+        }
+    }
+
+    /// Where fills and adjustments stay on the current texture set while some of its meshes are
+    /// picked, or locked or hidden; none while they reach all of it.
+    fn reach(&mut self) -> Option<procraft_engine::selection::Mask> {
+        let all: Vec<usize> =
+            (0..self.mesh.submeshes.len()).filter(|&i| self.set_of(i) == Some(self.current)).collect();
+        let mut picked: Vec<usize> = all.iter().copied().filter(|&i| self.mesh_painted(i)).collect();
+        picked.sort_unstable();
+        if picked.is_empty() || picked.len() >= all.len() {
+            return None;
+        }
+        if self.reach.as_ref().is_none_or(|(made, _)| *made != picked) {
+            let side = self.texture_size;
+            let data = self.mesh.submesh_coverage(&picked, side as usize, REACH_GROWN);
+            self.reach = Some((picked, procraft_engine::selection::Mask { width: side, height: side, data }));
+        }
+        self.reach.as_ref().map(|(_, m)| m.clone())
+    }
+
+    /// Why strokes can't land: every mesh they're meant for is hidden, or hidden or locked.
+    fn why_blocked(&self) -> Option<crate::layers::Blocked> {
+        let meant = self.meant_meshes();
+        if self.flat || meant.is_empty() {
+            return None;
+        }
+        if meant.iter().all(|&i| self.mesh_hidden(i)) {
+            return Some(crate::layers::Blocked::MeshHidden);
+        }
+        meant.iter().all(|&i| self.mesh_hidden(i) || self.mesh_locked(i)).then_some(crate::layers::Blocked::MeshLocked)
+    }
+
+    /// The surface under window point (`x`, `y`) of a `width` × `height` window, among what shows.
+    fn surface_at(&self, x: f32, y: f32, (width, height): (u32, u32)) -> Option<SurfaceHit> {
+        let (from, along) = self.orbit()?.sight(x, y, width, height);
+        self.mesh.first_surface(from, along, |i| self.mesh_hidden(i))
     }
 }
 
@@ -531,8 +1011,10 @@ impl CanvasSession {
         let mesh = read_model(&file, &extension, mtl.as_deref())
             .map_err(|e| file_error("opening the model", mesh_error_text(&e)))?;
         let side = if texture_size == 0 { DEFAULT_TEXTURE_SIZE } else { texture_size.clamp(64, MOST_TEXTURE_SIZE) };
+        let warnings = warnings_of(&mesh);
         let mut scene = Scene::new(mesh, ModelSource { bytes: file, extension, mtl }, side, 0, Vec::new());
         scene.picked = picked;
+        scene.warnings = warnings;
         // each texture set's Base Layer the material's colour, where the model brings no image
         let brings = scene.brings_colour();
         let colour =
@@ -554,6 +1036,19 @@ impl CanvasSession {
         self.shared.lock().scene.as_ref().map(ModelInfo::of)
     }
 
+    /// Each texture set's layers, in order, whichever is painted on; none unless a model is open.
+    pub fn texture_set_stats(&self) -> Vec<TextureSetStats> {
+        let st = self.shared.lock();
+        let Some(scene) = st.scene.as_ref() else { return Vec::new() };
+        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let row = |(name, doc): (String, &Document)| TextureSetStats {
+            name,
+            used: count(doc.pixel_layer_ids().count()),
+            maximum: count(doc.layer_cap()),
+        };
+        scene.set_names().into_iter().zip(st.colour_docs()).map(row).collect()
+    }
+
     /// The texture set painted on (the layers show its layers).
     pub fn texture_set(&self) -> u32 {
         self.shared.lock().scene.as_ref().map_or(0, |s| u32::try_from(s.current).unwrap_or(0))
@@ -564,6 +1059,202 @@ impl CanvasSession {
         let mut st = self.shared.lock();
         st.choose_texture_set(index as usize);
         self.shared.frame(&mut st);
+    }
+
+    /// Starts placing `image` (RGBA8, `straight` or premultiplied) on the shown model, on a new layer: it shows as it
+    /// lands, taken from the camera, until [`CanvasSession::model_picture_end`]. False if it can't
+    /// be (no model shown, no room for a layer, nothing to place).
+    pub fn model_picture_begin(&self, image: crate::layers::ThumbnailImage, straight: bool) -> bool {
+        let image = if straight { crate::clipboard::premultiplied(image) } else { image };
+        let (w, h) = (image.width, image.height);
+        if w == 0 || h == 0 || image.rgba.len() != w as usize * h as usize * 4 {
+            return false;
+        }
+        if !self.shared.lock().scene_shown() || self.add_layer() == 0 {
+            return false;
+        }
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let layer = st.doc.current();
+        let size = st.window_size;
+        let (Some(gpu), Some(scene), Some(canvas)) = (st.gpu.as_ref(), st.scene.as_mut(), st.canvas.as_mut()) else {
+            return false;
+        };
+        let texture = gpu.device.create_texture_with_data(
+            &gpu.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("picture placed on the model"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &image.rgba,
+        );
+        let first = PicturePlace::first((w, h), size);
+        scene.placing = Some(PlacedPicture {
+            view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            size: (w, h),
+            place: first,
+            first,
+            carried: None,
+        });
+        canvas.begin_drawn_stroke(layer, StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0));
+        self.shared.frame(st);
+        true
+    }
+
+    /// The corners of the picture being placed on the window (x, y pairs clockwise from its top
+    /// left), while one is: for the box round it.
+    pub fn model_picture_box(&self) -> Option<Vec<f32>> {
+        let st = self.shared.lock();
+        let placing = st.scene.as_ref()?.placing.as_ref()?;
+        Some(placing.place.corners().into_iter().flatten().collect())
+    }
+
+    /// Moves the picture being placed by (`dx`, `dy`) window pixels, scales it by `scale` and turns
+    /// it by `turn` radians about its middle.
+    pub fn model_picture_move(&self, dx: f32, dy: f32, scale: f32, turn: f32) {
+        self.change_picture(|p| {
+            p.middle = [p.middle[0] + dx, p.middle[1] + dy];
+            if scale.is_finite() && scale > 0.0 {
+                p.half = p.half.map(|h| h * scale);
+            }
+            p.turn += turn;
+        });
+    }
+
+    /// Flips the picture being placed across (`horizontal`) or up and down.
+    pub fn model_picture_flip(&self, horizontal: bool) {
+        self.change_picture(|p| {
+            let side = usize::from(!horizontal);
+            if let Some(h) = p.half.get_mut(side) {
+                *h = -*h;
+            }
+        });
+    }
+
+    /// Puts the picture being placed back where it first lay.
+    pub fn model_picture_reset(&self) {
+        let first = self.shared.lock().scene.as_ref().and_then(|s| s.placing.as_ref()).map(|p| p.first);
+        if let Some(first) = first {
+            self.change_picture(|p| *p = first);
+        }
+    }
+
+    /// Ends placing a picture: it stays on its layer (`keep`), or goes with the layer.
+    pub fn model_picture_end(&self, keep: bool) {
+        let layer = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let Some(scene) = st.scene.as_mut() else { return };
+            if scene.placing.take().is_none() {
+                return;
+            }
+            let (Some(gpu), Some(canvas)) = (st.gpu.as_ref(), st.canvas.as_mut()) else { return };
+            if keep {
+                canvas.end_stroke();
+                canvas.render(gpu, &mut st.doc, None);
+            } else {
+                canvas.cancel_stroke();
+            }
+            st.revision += 1;
+            self.shared.frame(st);
+            st.doc.current()
+        };
+        if !keep {
+            self.delete_layer(layer.0);
+        }
+    }
+
+    /// The model as the Reference window shows it, `side` square: through a camera of its own, at
+    /// first where the model is seen from, its textures as they are now (shown flat or not).
+    pub fn reference_model_picture(&self, side: u32) -> Option<crate::layers::ThumbnailImage> {
+        let side = side.clamp(8, 2048);
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.scene.as_ref()?;
+        st.scene_frame(None, wgpu::TextureFormat::Rgba8Unorm, st.window_size, None);
+        let (Some(gpu), Some(scene)) = (st.gpu.as_ref(), st.scene.as_mut()) else { return None };
+        let orbit = scene.reference_orbit.or_else(|| scene.orbit())?;
+        scene.reference_orbit = Some(orbit);
+        scene.picture_through(gpu, orbit, side)
+    }
+
+    /// A finger dragged by (`dx`, `dy`) pixels across the Reference window, `side` pixels across,
+    /// turns its model.
+    pub fn reference_model_turn(&self, dx: f32, dy: f32, side: f32) {
+        let mut st = self.shared.lock();
+        let Some(scene) = st.scene.as_mut() else { return };
+        let Some(mut orbit) = scene.reference_orbit.or_else(|| scene.orbit()) else { return };
+        let length = (dx * dx + dy * dy).sqrt();
+        orbit.turn(dx, dy, length / side.max(1.0) * TURN_PER_SIDE);
+        scene.reference_orbit = Some(orbit);
+    }
+
+    /// How many frames a model turns through in the gallery's Preview, and at how many a second.
+    pub fn model_preview_frames(&self) -> u32 {
+        MODEL_PREVIEW_FRAMES
+    }
+
+    pub fn model_preview_fps(&self) -> u32 {
+        MODEL_PREVIEW_FPS
+    }
+
+    /// Frame `index` of a model turning in the gallery's Preview, `side` square, opened without a
+    /// window ([`CanvasSession::draw_without_window`]).
+    pub fn model_preview_picture(&self, index: u32, side: u32) -> Option<crate::layers::ThumbnailImage> {
+        let side = side.clamp(8, 2048);
+        {
+            let mut st = self.shared.lock();
+            if index == 0 || st.scene.as_ref().is_none_or(|s| s.view.is_none()) {
+                st.window_size = (side, side);
+                st.scene_frame(None, wgpu::TextureFormat::Rgba8Unorm, (side, side), None);
+            }
+        }
+        let seconds = MODEL_PREVIEW_FRAMES as f32 / MODEL_PREVIEW_FPS as f32;
+        let turntable = Turntable { swing: false, seconds, zoom: 0.0, ease: 0.0, environment: false };
+        self.model_turntable_picture(index, MODEL_PREVIEW_FRAMES, turntable, side, side, false)
+    }
+
+    /// Replaces layer `id`'s content in `channel` (0 its colour, 1 roughness, 2 metalness) with
+    /// `image` (straight RGBA8) stretched over the texture, as an undo step; that channel is
+    /// painted from now on. False if it can't be.
+    pub fn replace_material_map(&self, id: u64, channel: u32, image: crate::layers::ThumbnailImage) -> bool {
+        let layer = LayerId(id);
+        {
+            let st = self.shared.lock();
+            if channel > 2 || st.scene.is_none() || st.doc.layer(layer).is_none_or(|l| st.doc.is_locked(l.id)) {
+                return false;
+            }
+        }
+        let side = self.shared.lock().doc.width();
+        let Some(pixels) = stretched(&crate::clipboard::premultiplied(image), side) else { return false };
+        self.choose_channel_tile(channel);
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.settle();
+        let Some(canvas) = st.canvas.as_mut() else { return false };
+        canvas.name_next_step(MAP_REPLACED);
+        canvas.write_layer(layer, pixels);
+        st.flush();
+        st.revision += 1;
+        self.shared.frame(st);
+        true
+    }
+
+    /// Whether a selection drawn on a model reaches every surface under it.
+    pub fn selection_x_ray(&self) -> bool {
+        self.shared.lock().x_ray
+    }
+
+    /// Sets whether a selection drawn on a model reaches every surface under it (X-Ray).
+    pub fn set_selection_x_ray(&self, on: bool) {
+        self.shared.lock().x_ray = on;
     }
 
     /// Whether strokes paint through the model: every surface under them, not only the
@@ -854,24 +1545,153 @@ impl CanvasSession {
         true
     }
 
-    /// Which of the model's submeshes are hidden, in order.
+    /// Which of the model's submeshes are hidden, in order (themselves, not by their texture set).
     pub fn submeshes_hidden(&self) -> Vec<bool> {
-        let st = self.shared.lock();
-        st.scene.as_ref().map_or_else(Vec::new, |s| {
-            (0..s.mesh.submeshes.len()).map(|i| s.hidden.get(i).copied().unwrap_or(false)).collect()
-        })
+        self.look_flags(|l| &l.hidden, |m| m.submeshes.len())
     }
 
-    /// Hides submesh `index` (not drawn or painted), or shows it again.
+    /// Hides submesh `index` (not drawn or painted), or shows it again: an undo step.
     pub fn set_submesh_hidden(&self, index: u32, hidden: bool) {
-        let mut st = self.shared.lock();
-        let Some(scene) = st.scene.as_mut() else { return };
-        let count = scene.mesh.submeshes.len();
-        scene.hidden.resize(count, false);
-        if let Some(h) = scene.hidden.get_mut(index as usize) {
-            *h = hidden;
+        let name = if hidden { "Hide Submesh" } else { "Show Submesh" };
+        self.change_look(name, |look, mesh| set_flag(&mut look.hidden, mesh.submeshes.len(), index, hidden));
+    }
+
+    /// Which of the model's submeshes are locked (themselves, not by their texture set).
+    pub fn submeshes_locked(&self) -> Vec<bool> {
+        self.look_flags(|l| &l.locked, |m| m.submeshes.len())
+    }
+
+    /// Locks submesh `index` (drawn, but taking no paint), or unlocks it: an undo step.
+    pub fn set_submesh_locked(&self, index: u32, locked: bool) {
+        let name = if locked { "Lock mesh" } else { "Unlock mesh" };
+        self.change_look(name, |look, mesh| set_flag(&mut look.locked, mesh.submeshes.len(), index, locked));
+    }
+
+    /// Which texture sets are hidden.
+    pub fn texture_sets_hidden(&self) -> Vec<bool> {
+        self.look_flags(|l| &l.sets_hidden, |m| m.parts.len())
+    }
+
+    /// Hides texture set `index` with all its meshes, or shows it again: an undo step.
+    pub fn set_texture_set_hidden(&self, index: u32, hidden: bool) {
+        let name = if hidden { "Hide Texture Set" } else { "Show Texture Set" };
+        self.change_look(name, |look, mesh| set_flag(&mut look.sets_hidden, mesh.parts.len(), index, hidden));
+    }
+
+    /// Which texture sets are locked.
+    pub fn texture_sets_locked(&self) -> Vec<bool> {
+        self.look_flags(|l| &l.sets_locked, |m| m.parts.len())
+    }
+
+    /// Locks texture set `index` with all its meshes, or unlocks it: an undo step.
+    pub fn set_texture_set_locked(&self, index: u32, locked: bool) {
+        let name = if locked { "Lock Texture Set" } else { "Unlock Texture Set" };
+        self.change_look(name, |look, mesh| set_flag(&mut look.sets_locked, mesh.parts.len(), index, locked));
+    }
+
+    /// The meshes picked, which alone take strokes (none: the whole texture set does).
+    pub fn active_submeshes(&self) -> Vec<u32> {
+        let st = self.shared.lock();
+        st.scene.as_ref().map_or_else(Vec::new, |s| s.look.active.iter().map(|&i| i as u32).collect())
+    }
+
+    /// Picks mesh `index` alone, its texture set the one painted on.
+    pub fn pick_submesh(&self, index: u32) {
+        let index = index as usize;
+        let set = {
+            let st = self.shared.lock();
+            let Some(scene) = st.scene.as_ref() else { return };
+            let Some(set) = scene.set_of(index) else { return };
+            if scene.look.active == [index] && scene.current == set {
+                return;
+            }
+            set
+        };
+        self.choose_texture_set(set as u32);
+        self.change_look(MESHES_SELECTED, |look, _| look.active = vec![index]);
+    }
+
+    /// Adds mesh `index` to those picked, or takes it away (the last one stays). False, with
+    /// nothing changed, for a mesh of a texture set other than the one painted on: meshes picked
+    /// together share a texture set.
+    pub fn pick_more_submeshes(&self, index: u32) -> bool {
+        let index = index as usize;
+        {
+            let st = self.shared.lock();
+            let Some(scene) = st.scene.as_ref() else { return false };
+            if scene.set_of(index) != Some(scene.current) {
+                return false;
+            }
         }
-        self.shared.frame(&mut st);
+        self.change_look(MESHES_SELECTED, |look, _| {
+            if !look.active.contains(&index) {
+                look.active.push(index);
+            } else if look.active.len() > 1 {
+                look.active.retain(|&i| i != index);
+            }
+        });
+        true
+    }
+
+    /// The mesh shown under window point (`x`, `y`), if there is one.
+    pub fn submesh_at(&self, x: f32, y: f32) -> Option<u32> {
+        let st = self.shared.lock();
+        let hit = st.scene.as_ref()?.surface_at(x, y, st.window_size)?;
+        hit.submesh.map(|i| i as u32)
+    }
+
+    /// Picks the mesh under window point (`x`, `y`), its texture set the one painted on, and says
+    /// what is painted on now. None off the model.
+    pub fn pick_submesh_at(&self, x: f32, y: f32) -> Option<String> {
+        let index = self.submesh_at(x, y)?;
+        self.pick_submesh(index);
+        let st = self.shared.lock();
+        let mesh = st.scene.as_ref()?.mesh.submeshes.get(index as usize)?.name.clone();
+        let layer = st.doc.layer(st.doc.current())?.name.clone();
+        Some(format!("{layer} on {mesh}"))
+    }
+
+    /// Shows and unlocks the meshes strokes are meant for, and their texture set: what the
+    /// dialog over a stroke that couldn't land offers.
+    pub fn free_meant_meshes(&self) {
+        let meant = {
+            let st = self.shared.lock();
+            let Some(scene) = st.scene.as_ref() else { return };
+            scene.meant_meshes()
+        };
+        self.change_look("Show Submesh", |look, mesh| {
+            look.hidden.resize(mesh.submeshes.len(), false);
+            look.locked.resize(mesh.submeshes.len(), false);
+            for i in meant {
+                if let Some(h) = look.hidden.get_mut(i) {
+                    *h = false;
+                }
+                if let Some(l) = look.locked.get_mut(i) {
+                    *l = false;
+                }
+                let set = mesh.submeshes.get(i).map(|m| m.part).unwrap_or(0);
+                if let Some(h) = look.sets_hidden.get_mut(set) {
+                    *h = false;
+                }
+                if let Some(l) = look.sets_locked.get_mut(set) {
+                    *l = false;
+                }
+            }
+        });
+    }
+
+    /// The name of the first of the meshes strokes are meant for, for a dialog about them.
+    pub fn meant_mesh_name(&self) -> Option<String> {
+        let st = self.shared.lock();
+        let scene = st.scene.as_ref()?;
+        let first = *scene.meant_meshes().first()?;
+        Some(scene.mesh.submeshes.get(first)?.name.clone())
+    }
+
+    /// What a model newly opened from its file warns of, once.
+    pub fn take_model_warnings(&self) -> Vec<ModelWarning> {
+        let mut st = self.shared.lock();
+        st.scene.as_mut().map_or_else(Vec::new, |s| std::mem::take(&mut s.warnings))
     }
 
     /// Submesh `index` on its own, seen as the model is now, filling a `side` square on nothing:
@@ -1045,6 +1865,18 @@ impl CanvasSession {
         }
         let bytes = zip.finish();
         write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("exporting the model", e)))
+    }
+
+    /// The artwork, saved to `dir` first, as one file at `path` that comes back whole in another
+    /// copy of the app: its folder zipped, the model, every texture set's layers and how it was
+    /// seen.
+    pub fn export_model_artwork(&self, dir: String, path: String) -> Result<(), MobileError> {
+        self.save(dir.clone())?;
+        let root = Path::new(&dir);
+        let mut zip = procraft_engine::zip::ZipWriter::new();
+        zip_folder(&mut zip, root, root).map_err(|e| file_error("saving", e))?;
+        let bytes = zip.finish();
+        write_atomically(Path::new(&path), |p| fs::write(p, &bytes).map_err(|e| file_error("saving", e)))
     }
 
     /// Writes the model as a glTF binary at `path`, for a viewer that shows it in the room: as
@@ -1514,6 +2346,7 @@ fn to_session(gpu: &Gpu, canvas: &mut Canvas) {
 fn mesh_error_text(e: &MeshError) -> String {
     match e {
         MeshError::NoFaces => "it has no faces".to_owned(),
+        MeshError::PointCloud => "it is a point cloud, with no faces to paint".to_owned(),
         MeshError::NoTextureCoordinates => "it has no texture coordinates".to_owned(),
         MeshError::TooLarge => format!("it has more than {MAX_TRIANGLES} triangles"),
         MeshError::Malformed(line) => format!("line {line} can't be read"),
@@ -1547,6 +2380,15 @@ pub(crate) struct SavedModel {
     /// The submeshes hidden, by place.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     hidden: Vec<usize>,
+    /// The submeshes locked, the texture sets hidden and locked, the meshes picked, by place.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    locked: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sets_hidden: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sets_locked: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    active: Vec<usize>,
     /// Each part's roughness and metalness documents, by part, if made.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     channels: Vec<[Option<Document>; 2]>,
@@ -1662,7 +2504,11 @@ impl State {
                 exposure: (scene.exposure != 1.0).then_some(scene.exposure),
                 environment_shown: (!scene.environment_shown).then_some(false),
                 lights: Some(scene.lights.clone()),
-                hidden: scene.hidden.iter().enumerate().filter(|(_, h)| **h).map(|(i, _)| i).collect(),
+                hidden: places(&scene.look.hidden),
+                locked: places(&scene.look.locked),
+                sets_hidden: places(&scene.look.sets_hidden),
+                sets_locked: places(&scene.look.sets_locked),
+                active: scene.look.active.clone(),
                 channels,
             },
             source: scene.source.clone(),
@@ -1812,7 +2658,16 @@ pub(crate) fn open_saved_model(dir: &Path, saved: &SavedModel) -> Result<Scene, 
     if let Some(lights) = &saved.lights {
         scene.lights = lights.iter().take(MOST_LIGHTS).map(|l| l.sane()).collect();
     }
-    scene.hidden = (0..scene.mesh.submeshes.len()).map(|i| saved.hidden.contains(&i)).collect();
+    let (meshes, sets) = (scene.mesh.submeshes.len(), scene.mesh.parts.len());
+    let flags = |places: &[usize], count: usize| (0..count).map(|i| places.contains(&i)).collect();
+    let in_set = |i: &usize| scene.set_of(*i) == Some(saved.current.min(sets.saturating_sub(1)));
+    scene.look = MeshLook {
+        hidden: flags(&saved.hidden, meshes),
+        locked: flags(&saved.locked, meshes),
+        sets_hidden: flags(&saved.sets_hidden, sets),
+        sets_locked: flags(&saved.sets_locked, sets),
+        active: saved.active.iter().copied().filter(in_set).collect(),
+    };
     scene.channels = channels;
     scene.surface_maps = (0..scene.mesh.parts.len())
         .map(|part| {
@@ -2036,6 +2891,204 @@ impl State {
         }
     }
 
+    /// After an undo or redo (`before`: the session canvas's next undo and redo steps before it),
+    /// a hide, lock or pick undone or redone puts the model's look back.
+    pub(crate) fn follow_look_step(&mut self, before: (Option<u64>, Option<u64>)) {
+        let Some((step, undone)) = self.canvas.as_ref().and_then(|c| stepped(before, c)) else { return };
+        let Some(scene) = self.scene.as_mut() else { return };
+        let (part, channel) = (scene.current, scene.channel);
+        let found = scene.look_steps.iter().rev().find(|t| t.part == part && t.channel == channel && t.step == step);
+        if let Some(found) = found {
+            scene.look = if undone { found.before.clone() } else { found.after.clone() };
+        }
+    }
+
+    /// The eyedropper on a shown model: the window as it shows round (`x`, `y`), and the colour
+    /// painted there, in the channel being painted, on whichever texture set is under the point.
+    pub(crate) fn scene_pick(&mut self, x: f32, y: f32, side: u32) -> Option<crate::pick::Pick> {
+        let size = self.window_size;
+        let s = crate::SURROUND;
+        let clear = [f64::from(s[0]), f64::from(s[1]), f64::from(s[2]), 1.0];
+        let revision = self.revision;
+        let gpu = self.gpu.as_ref()?;
+        let scene = self.scene.as_mut()?;
+        let orbit = scene.orbit()?;
+        let hit = scene.surface_at(x, y, size);
+        // the window drawn once for all the moves of one pick
+        let stale = scene.seen.as_ref().is_none_or(|f| f.size != size || f.orbit != orbit || f.revision != revision);
+        if stale {
+            let view = scene.view.as_mut()?;
+            let pixels = view.picture(gpu, size.0, size.1, clear).ok()?;
+            scene.seen = Some(SeenFrame { size, orbit, revision, pixels });
+        }
+        let pixels = scene.seen.as_ref().map(|f| window_round(&f.pixels, size, (x, y), side))?;
+        let channel = scene.channel;
+        let current = scene.current;
+        let rgb = hit.and_then(|hit| {
+            let (tx, ty) = texel_of(hit.uv, scene.texture_size);
+            let canvas = if hit.part == current {
+                self.canvas.as_mut()
+            } else {
+                scene.slot(hit.part, channel)?.as_mut().and_then(|s| s.canvas.as_mut())
+            }?;
+            let [r, g, b, _] = canvas.read_composite_pixel(gpu, tx, ty)?;
+            Some(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b))
+        });
+        Some(crate::pick::Pick { rgb, side, pixels })
+    }
+
+    /// A tool that works on the texture, not through the camera (a transform, Liquify, Clone), is
+    /// opening: a shown model gives way to its texture, flat, until the tool ends.
+    pub(crate) fn scene_flat_for_tool(&mut self) {
+        if !self.scene_shown() {
+            return;
+        }
+        self.scene_stroke_cancel();
+        if let Some(scene) = self.scene.as_mut() {
+            scene.flat = true;
+            scene.flat_for_tool = true;
+        }
+        self.view = Some(self.fitted_view());
+    }
+
+    /// The tool that had the texture shown flat has ended: the model shows again.
+    pub(crate) fn scene_back_from_tool(&mut self) {
+        if let Some(scene) = self.scene.as_mut().filter(|s| s.flat_for_tool) {
+            scene.flat = false;
+            scene.flat_for_tool = false;
+        }
+    }
+
+    /// Whether a picture is being placed on the model, and whether window point `at` is on it.
+    pub(crate) fn scene_picture_under(&self, at: (f32, f32)) -> Option<bool> {
+        let placing = self.scene.as_ref()?.placing.as_ref()?;
+        Some(placing.place.holds([at.0, at.1]))
+    }
+
+    /// Carries the picture being placed onto the model, if it has moved or the model has.
+    fn carry_picture(&mut self) {
+        let size = self.window_size;
+        let (Some(gpu), Some(scene), Some(canvas)) = (self.gpu.as_ref(), self.scene.as_mut(), self.canvas.as_mut())
+        else {
+            return;
+        };
+        scene.tell_view_what_takes_paint();
+        let (part, through) = (scene.current, scene.paint_through);
+        let (Some(placing), Some(view)) = (scene.placing.as_mut(), scene.view.as_mut()) else { return };
+        let now = (placing.place, view.orbit);
+        if placing.carried == Some(now) {
+            return;
+        }
+        placing.carried = Some(now);
+        view.paint_through = through;
+        view.within = canvas.selection_view().cloned();
+        let mut encoder =
+            gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("picture on the model") });
+        view.project_picture(
+            gpu,
+            &mut encoder,
+            part,
+            &placing.view,
+            placing.place.to_picture(placing.size),
+            size.0,
+            size.1,
+            canvas.stroke_target(),
+        );
+        gpu.queue.submit([encoder.finish()]);
+        canvas.stroke_drawn(IRect::from_size(view.texture_size(), view.texture_size()));
+    }
+
+    /// The documents holding the artwork's layers, each once: the canvas's, or on a model its
+    /// texture sets' colours in order, whichever is painted on.
+    pub(crate) fn colour_docs(&self) -> Vec<&Document> {
+        let Some(scene) = self.scene.as_ref() else { return vec![&self.doc] };
+        let own = (scene.channel == 0).then_some(scene.current);
+        let waiting = scene.sets.iter().map(|set| set.as_ref().map(|s| &s.doc));
+        waiting.enumerate().filter_map(|(i, doc)| if Some(i) == own { Some(&self.doc) } else { doc }).collect()
+    }
+
+    /// The selection as fills take it: on a model, kept to the meshes picked.
+    pub(crate) fn reach_selection(&mut self) -> Option<procraft_engine::selection::Mask> {
+        let selection = self.selection.clone();
+        let Some(reach) = self.scene.as_mut().and_then(Scene::reach) else { return selection };
+        let Some(mut within) = selection else { return Some(reach) };
+        for (c, r) in within.data.iter_mut().zip(&reach.data) {
+            *c = ((u16::from(*c) * u16::from(*r) + 127) / 255) as u8;
+        }
+        Some(within)
+    }
+
+    /// An adjustment opens: on a model with meshes picked, it keeps to them, as it does to a
+    /// selection, until [`State::scene_selection_back`].
+    pub(crate) fn scene_selection_for_adjustment(&mut self) {
+        if self.scene.as_mut().and_then(Scene::reach).is_none() {
+            return;
+        }
+        let narrowed = self.reach_selection();
+        let held = self.selection.clone();
+        if let Some(scene) = self.scene.as_mut() {
+            scene.held_selection = Some(held);
+        }
+        if let (Some(canvas), Some(gpu), Some(mask)) = (self.canvas.as_mut(), self.gpu.as_ref(), narrowed.as_ref()) {
+            canvas.set_selection(gpu, Some(&mask.data));
+        }
+    }
+
+    /// The adjustment has ended: the selection is what it was.
+    pub(crate) fn scene_selection_back(&mut self) {
+        let Some(held) = self.scene.as_mut().and_then(|s| s.held_selection.take()) else { return };
+        self.flush();
+        self.selection = held;
+        if let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) {
+            canvas.set_selection(gpu, self.selection.as_ref().map(|m| m.data.as_slice()));
+        }
+    }
+
+    /// How the selection shows on the model from now on, if there is one.
+    pub(crate) fn scene_selection_look(&mut self, look: Option<procraft_gpu::SelectionLook>) {
+        let mask = self.canvas.as_ref().and_then(Canvas::selection_view).cloned();
+        let Some(scene) = self.scene.as_mut() else { return };
+        let part = scene.current;
+        let Some(view) = scene.view.as_mut() else { return };
+        view.selection = mask.zip(look).map(|(mask, look)| ShownSelection { mask, part, look });
+    }
+
+    /// The window polygon `window` carried onto the texture set painted on, as a selection: its
+    /// surfaces under it nearest the camera, or with X-Ray all of them.
+    pub(crate) fn scene_mask(&mut self, window: &[Vec2]) -> Option<procraft_engine::selection::Mask> {
+        let size = self.window_size;
+        let shape = procraft_engine::selection::Mask::polygon(size.0, size.1, window);
+        let x_ray = self.x_ray;
+        let gpu = self.gpu.as_ref()?;
+        let scene = self.scene.as_mut()?;
+        scene.tell_view_what_takes_paint();
+        let (part, side) = (scene.current, scene.texture_size);
+        let view = scene.view.as_mut()?;
+        let through = std::mem::replace(&mut view.paint_through, x_ray);
+        let data = view.project_coverage(gpu, part, &shape.data, size.0, size.1);
+        view.paint_through = through;
+        match data {
+            Ok(data) => Some(procraft_engine::selection::Mask { width: side, height: side, data }),
+            Err(e) => {
+                log::error!("a selection on the model: {e}");
+                None
+            }
+        }
+    }
+
+    /// Why a stroke on the model can't land, if it can't.
+    pub(crate) fn scene_blocked(&self) -> Option<crate::layers::Blocked> {
+        self.scene.as_ref().filter(|_| self.scene_shown()).and_then(Scene::why_blocked)
+    }
+
+    /// The texel of the texture set painted on under window point (`x`, `y`), on a shown model:
+    /// none off the model, or on another texture set's surface.
+    pub(crate) fn scene_texel(&self, x: f32, y: f32) -> Option<(u32, u32)> {
+        let scene = self.scene.as_ref()?;
+        let hit = scene.surface_at(x, y, self.window_size)?;
+        (hit.part == scene.current).then(|| texel_of(hit.uv, scene.texture_size))
+    }
+
     /// Runs `f` with the colour of the current part as the session's document (as saves need),
     /// the channel painted on put back after.
     pub(crate) fn with_colour<T>(&mut self, f: impl FnOnce(&mut State) -> T) -> T {
@@ -2082,6 +3135,8 @@ impl State {
             *slot = Some(old);
         }
         scene.current = index;
+        // meshes picked together share a texture set
+        scene.look.active.clear();
         self.ensure_canvas();
     }
 
@@ -2097,7 +3152,7 @@ impl State {
             return;
         }
         let tool = if pointer == PointerKind::StylusEraser { ToolKind::Erase } else { self.tool };
-        if !matches!(tool.stroke_tool(), StrokeTool::Paint | StrokeTool::Erase) {
+        if self.scene.as_ref().is_some_and(|s| s.why_blocked().is_some() || s.placing.is_some()) {
             return;
         }
         let (brush, mut style, diameter) = self.stroke_brush(tool, current);
@@ -2133,6 +3188,17 @@ impl State {
         } else if canvas_style.grain_mode == procraft_engine::brush::GrainMode::Texturized {
             canvas_style.grain = None;
         }
+        // a stroke changing what's under it works on the layer as the camera sees it, there
+        let laid = style.in_place();
+        scene.laying = None;
+        if laid {
+            let Some(canvas) = self.canvas.as_mut() else { return };
+            canvas.render(gpu, &mut self.doc, None);
+            let Some(layer) = canvas.layer_view(current) else { return };
+            let Some(seen) = scene.see_layer(gpu, layer, size) else { return };
+            scene.laying = Some(seen);
+            canvas_style = StrokeStyle::new(StrokeTool::Laid, [0.0; 3], 1.0);
+        }
         let Some((screen_doc, screen)) = scene.screen.as_mut() else { return };
         // the screen's canvas holds its own copies of the brush's shape and grain
         screen.use_sources(gpu, &mut style, &brush);
@@ -2143,12 +3209,14 @@ impl State {
         scene.ending = false;
         if let Some(canvas) = self.canvas.as_mut() {
             canvas.begin_drawn_stroke(current, canvas_style);
-            if let Some(grain) = &grain {
+            if let Some(grain) = grain.as_ref().filter(|_| !laid) {
                 canvas.set_stroke_grain(&gpu.device, grain);
             }
         }
         self.stroke = Some(builder);
-        self.begin_material_strokes(&brush, canvas_style, current);
+        if !laid {
+            self.begin_material_strokes(&brush, canvas_style, current);
+        }
     }
 
     /// A stroke on a part's colour paints its roughness and metalness too, on the same layer and
@@ -2209,14 +3277,22 @@ impl State {
 
     pub(crate) fn scene_stroke_add(&mut self, samples: &[PenSample], last: bool) {
         let Some(builder) = self.stroke.as_mut() else { return };
-        let mut stamps = builder.add(&window_samples(samples));
-        if last && let Some(mut b) = self.stroke.take() {
-            stamps.extend(b.finish());
-        }
+        let stamps = builder.add(&window_samples(samples));
+        let drawn = builder.stamp_count();
+        let all = if last { self.stroke.take().map(|mut b| b.finish()) } else { None };
         let Some(scene) = self.scene.as_mut() else { return };
         scene.bounds = scene.bounds.union(bounds_of(&stamps));
         if let Some((_, screen)) = scene.screen.as_mut() {
             screen.add_stamps(&stamps);
+            if let Some(all) = all {
+                scene.bounds = scene.bounds.union(bounds_of(&all));
+                // a smudge has already changed what's under it: only the rest of it goes on
+                if screen.stroke_tool() == Some(StrokeTool::Smudge) {
+                    screen.add_stamps(all.get(drawn..).unwrap_or(&[]));
+                } else {
+                    screen.replace_stamps(&all);
+                }
+            }
         }
         if last {
             // carried on at once and kept, so undo sees it as soon as the pen lifts
@@ -2230,6 +3306,7 @@ impl State {
         let Some(scene) = self.scene.as_mut() else { return };
         scene.stroking = false;
         scene.ending = false;
+        scene.laying = None;
         if let Some((_, screen)) = scene.screen.as_mut() {
             screen.cancel_stroke();
         }
@@ -2282,6 +3359,7 @@ impl State {
         if !scene.stroking {
             return;
         }
+        scene.tell_view_what_takes_paint();
         let (Some((screen_doc, screen)), Some(view), Some(canvas)) =
             (scene.screen.as_mut(), scene.view.as_mut(), self.canvas.as_mut())
         else {
@@ -2289,18 +3367,33 @@ impl State {
         };
         screen.render(gpu, screen_doc, None);
         view.paint_through = scene.paint_through;
+        view.within = canvas.selection_view().cloned();
         let mut encoder =
             gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("3D stroke") });
-        let reach = view.project_stroke(
-            gpu,
-            &mut encoder,
-            scene.current,
-            screen.stroke_view(),
-            scene.bounds,
-            size.0,
-            size.1,
-            canvas.stroke_target(),
-        );
+        let seen = screen.layer_view(screen_doc.current());
+        let reach = match (scene.laying.as_ref(), seen) {
+            (Some(was), Some(now)) => view.project_laid(
+                gpu,
+                &mut encoder,
+                scene.current,
+                now,
+                was,
+                scene.bounds,
+                size.0,
+                size.1,
+                canvas.stroke_target(),
+            ),
+            _ => view.project_stroke(
+                gpu,
+                &mut encoder,
+                scene.current,
+                screen.stroke_view(),
+                scene.bounds,
+                size.0,
+                size.1,
+                canvas.stroke_target(),
+            ),
+        };
         gpu.queue.submit([encoder.finish()]);
         canvas.stroke_drawn(reach);
         // as the pen lifts, where the stroke really reached in the texture (the colour, roughness
@@ -2365,6 +3458,7 @@ impl State {
             screen.render(gpu, screen_doc, None);
             scene.stroking = false;
             scene.ending = false;
+            scene.laying = None;
         }
     }
 
@@ -2408,6 +3502,17 @@ impl State {
         size: (u32, u32),
         convert: Option<[[f32; 3]; 3]>,
     ) {
+        self.scene_frame(Some(target), format, size, convert);
+    }
+
+    /// Brings the model up to date with its textures and draws it into `target` if there is one.
+    fn scene_frame(
+        &mut self,
+        target: Option<&wgpu::TextureView>,
+        format: wgpu::TextureFormat,
+        size: (u32, u32),
+        convert: Option<[[f32; 3]; 3]>,
+    ) {
         {
             let (Some(gpu), Some(scene)) = (self.gpu.as_ref(), self.scene.as_mut()) else { return };
             if scene.view.is_none() {
@@ -2439,6 +3544,7 @@ impl State {
             }
         }
         self.carry_stroke();
+        self.carry_picture();
         let grid = self.surround_grid(Vec2::ZERO);
         let (Some(gpu), Some(scene)) = (self.gpu.as_ref(), self.scene.as_mut()) else { return };
         // a new environment: prefiltered now, shown behind the model unless that's turned off
@@ -2456,6 +3562,7 @@ impl State {
             let stroke = scene.stroke(gpu, scene.channel != 0);
             canvas.draw_strokes_in(gpu, &stroke);
         }
+        scene.tell_view_what_shows();
         let Some(view) = scene.view.as_mut() else { return };
         view.set_convert(convert);
         view.set_grid(Some(grid));
@@ -2513,12 +3620,13 @@ impl State {
             scene.surface_shown = true;
         }
         view.lights = scene.lights.iter().map(|l| l.to_gpu()).collect();
-        for i in 0..scene.mesh.submeshes.len() {
-            view.set_hidden(i, scene.hidden.get(i).copied().unwrap_or(false));
-        }
         let s = crate::SURROUND;
         let clear = [f64::from(s[0]), f64::from(s[1]), f64::from(s[2]), 1.0];
         let studio = scene.studio_open.then(|| *scene.studio.get_or_insert_with(|| view.studio_orbit()));
+        let Some(target) = target else {
+            gpu.queue.submit([encoder.finish()]);
+            return;
+        };
         match studio {
             Some(orbit) => view.render_studio(gpu, &mut encoder, target, size.0, size.1, clear, orbit),
             None => view.render(gpu, &mut encoder, target, size.0, size.1, clear),
@@ -2691,12 +3799,19 @@ impl LightsView<'_> {
 pub struct ModelInfo {
     pub texture_sets: Vec<String>,
     pub triangles: u32,
-    /// How much of each set's texture its triangles cover twice (0..1).
-    pub overlaps: Vec<f32>,
     /// The model's meshes, each in its texture set, in order.
     pub submeshes: Vec<SubmeshInfo>,
     /// Each texture set's side, pixels.
     pub texture_size: u32,
+}
+
+/// A texture set's share of a model's layers, as Canvas information lists it.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct TextureSetStats {
+    pub name: String,
+    /// Its layers with pixels, and how many it can hold.
+    pub used: u32,
+    pub maximum: u32,
 }
 
 /// An image a model's file brings for a texture set's channel (0 colour, 1 roughness, 2
@@ -2722,7 +3837,6 @@ impl ModelInfo {
         ModelInfo {
             texture_sets: scene.set_names(),
             triangles: u32::try_from(scene.mesh.triangles.len()).unwrap_or(u32::MAX),
-            overlaps: (0..scene.mesh.parts.len()).map(|i| scene.mesh.uv_overlap(i, 256)).collect(),
             submeshes: scene
                 .mesh
                 .submeshes
@@ -2732,6 +3846,16 @@ impl ModelInfo {
             texture_size: scene.texture_size,
         }
     }
+}
+
+/// What each warning is called, as a list in a dialog shows it.
+#[uniffi::export]
+pub fn model_warning_name(warning: ModelWarning) -> String {
+    match warning {
+        ModelWarning::OverlappingUvs => "Overlapping UV Coordinates",
+        ModelWarning::RepeatingTextures => "Repeating Textures",
+    }
+    .to_owned()
 }
 
 #[cfg(test)]
@@ -2920,6 +4044,608 @@ mod tests {
         assert!(distance(&s) < far, "{} from {far}", distance(&s));
         frame(&s, 200);
         assert_eq!(painted(&s), kept);
+    }
+
+    /// Two squares facing the camera side by side, Left and Right, one material: Left on the left
+    /// half of the texture, Right on the right.
+    const TWO_MESHES: &str = "v -2 -1 0\nv -0.2 -1 0\nv -0.2 1 0\nv -2 1 0\n\
+                              v 0.2 -1 0\nv 2 -1 0\nv 2 1 0\nv 0.2 1 0\n\
+                              vt 0 0\nvt 0.5 0\nvt 0.5 1\nvt 0 1\nvt 0.5 0\nvt 1 0\nvt 1 1\nvt 0.5 1\n\
+                              o Left\nf 1/1 2/2 3/3 4/4\no Right\nf 5/5 6/6 7/7 8/8\n";
+
+    /// A pen stroke from (`x0`, `y`) to (`x1`, `y`), each step drawn.
+    fn pen_across(s: &CanvasSession, x0: f32, x1: f32, y: f32, t: f64) {
+        s.touch_down(7, PointerKind::Stylus, vec![sample(x0, y, t)]);
+        frame(s, 200);
+        let at = |i: u32| x0 + (x1 - x0) * i as f32 / 20.0;
+        s.touch_move(7, (1..20).map(|i| sample(at(i), y, t + f64::from(i) * 8.0)).collect());
+        frame(s, 200);
+        s.touch_up(7, vec![sample(x1, y, t + 170.0)]);
+        frame(s, 200);
+    }
+
+    /// How many texels of the current set's left and right halves are painted.
+    fn painted_halves(s: &CanvasSession) -> (usize, usize) {
+        let fresh = fresh(s);
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let side = st.doc.width() as usize;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+        let pixels = canvas.read_composite(gpu).unwrap();
+        let on = pixels.chunks(4).enumerate().filter(|(_, p)| *p != fresh).map(|(i, _)| i % side);
+        on.fold((0, 0), |(l, r), x| if x < side / 2 { (l + 1, r) } else { (l, r + 1) })
+    }
+
+    #[test]
+    fn a_stroke_reaches_the_mesh_picked_and_spares_a_locked_one() {
+        let s = CanvasSession::open_model(TWO_MESHES.into(), "two.obj".into(), Vec::new(), "Two".into(), 128).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        assert_eq!(s.model_info().unwrap().submeshes.len(), 2);
+        // a mesh under each side of the window, nothing in the gap or round the edge
+        assert_eq!((s.submesh_at(60.0, 100.0), s.submesh_at(140.0, 100.0)), (Some(0), Some(1)));
+        assert_eq!((s.submesh_at(100.0, 100.0), s.submesh_at(100.0, 10.0)), (None, None));
+        // the left picked: a stroke across both stays on it
+        s.pick_submesh(0);
+        assert_eq!(s.active_submeshes(), [0]);
+        pen_across(&s, 40.0, 160.0, 100.0, 0.0);
+        let (left, right) = painted_halves(&s);
+        assert!(left > 50 && right == 0, "{left} {right}");
+        // both picked, it reaches both
+        assert!(s.pick_more_submeshes(1));
+        pen_across(&s, 40.0, 160.0, 80.0, 500.0);
+        let (more, right) = painted_halves(&s);
+        assert!(more > left && right > 50, "{more} {right}");
+        // the left locked: it stays as it is, the right goes on taking paint
+        s.set_submesh_locked(0, true);
+        assert_eq!(s.submeshes_locked(), [true, false]);
+        pen_across(&s, 40.0, 160.0, 120.0, 1000.0);
+        let (still, grown) = painted_halves(&s);
+        assert!(still == more && grown > right, "{still} {grown}");
+        // the locks and picks undo as steps of their own
+        s.undo();
+        assert!(s.submeshes_locked() == [true, false], "the stroke goes first");
+        s.undo();
+        assert_eq!(s.submeshes_locked(), [false, false]);
+        s.redo();
+        assert_eq!(s.submeshes_locked(), [true, false]);
+        // every mesh meant locked or hidden, a stroke can't land and the session says why
+        s.set_submesh_locked(1, true);
+        assert_eq!(s.why_blocked(), Some(crate::Blocked::MeshLocked));
+        s.set_submesh_hidden(0, true);
+        s.set_submesh_hidden(1, true);
+        assert_eq!(s.why_blocked(), Some(crate::Blocked::MeshHidden));
+        assert_eq!(s.submesh_at(60.0, 100.0), None);
+        s.set_submesh_hidden(0, false);
+        s.set_submesh_hidden(1, false);
+        s.set_submesh_locked(0, false);
+        s.set_submesh_locked(1, false);
+        assert_eq!(s.why_blocked(), None);
+        // a texture set locked or hidden takes its meshes with it
+        s.set_texture_set_locked(0, true);
+        assert_eq!(s.why_blocked(), Some(crate::Blocked::MeshLocked));
+        s.undo();
+        assert_eq!(s.texture_sets_locked(), [false]);
+        s.set_texture_set_hidden(0, true);
+        assert_eq!(s.why_blocked(), Some(crate::Blocked::MeshHidden));
+        assert_eq!(s.submesh_at(60.0, 100.0), None);
+    }
+
+    /// A pen stroke on the model with `tool`, from (`x0`, `y`) to (`x1`, `y`).
+    fn tool_across(s: &CanvasSession, tool: crate::ToolKind, x0: f32, x1: f32, y: f32, t: f64) {
+        s.shared.lock().tool = tool;
+        pen_across(s, x0, x1, y, t);
+    }
+
+    /// The texels of the current set that aren't `like`, with the left half of the texture's
+    /// colour most changed, red first.
+    fn texels(s: &CanvasSession) -> Vec<[u8; 4]> {
+        let mut guard = s.shared.lock();
+        let st = &mut *guard;
+        let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+        canvas.render(gpu, &mut st.doc, None);
+        canvas.read_composite(gpu).unwrap().as_chunks::<4>().0.to_vec()
+    }
+
+    #[test]
+    fn a_smudge_on_a_model_only_drags_paint_the_way_it_goes() {
+        let s = CanvasSession::open_model(TWO_MESHES.into(), "two.obj".into(), Vec::new(), "Two".into(), 128).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        s.set_color(1.0, 0.0, 0.0);
+        pen_across(&s, 40.0, 80.0, 100.0, 0.0);
+        let before = texels(&s);
+        let side = 128usize;
+        let band = (0..side).find(|y| before[y * side..(y + 1) * side].iter().any(|p| p[1] < 200)).unwrap();
+        assert!(band > 30, "{band}");
+        // down the model, across the band
+        s.shared.lock().tool = crate::ToolKind::Smudge;
+        let (x, top, bottom, t) = (60.0, 70.0, 130.0, 1000.0);
+        s.touch_down(7, PointerKind::Stylus, vec![sample(x, top, t)]);
+        frame(&s, 200);
+        let at = |i: u32| top + (bottom - top) * i as f32 / 20.0;
+        s.touch_move(7, (1..20).map(|i| sample(x, at(i), t + f64::from(i) * 8.0)).collect());
+        frame(&s, 200);
+        s.touch_up(7, vec![sample(x, bottom, t + 170.0)]);
+        frame(&s, 200);
+        let after = texels(&s);
+        // what lies before the band stays bare, and what lies past it takes some on
+        let upper = (band - 4) * side;
+        assert_eq!(before[..upper], after[..upper]);
+        let last_row = &after[(side - 8) * side..(side - 7) * side];
+        assert!(last_row.iter().any(|p| p[1] < 250), "nothing was dragged past the band");
+    }
+
+    #[test]
+    fn a_smudge_on_a_model_drags_what_is_painted_along_its_surface() {
+        let s = CanvasSession::open_model(TWO_MESHES.into(), "two.obj".into(), Vec::new(), "Two".into(), 128).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        s.set_color(1.0, 0.0, 0.0);
+        // a red band on the left mesh, then a smudge across it, on and off it
+        pen_across(&s, 55.0, 80.0, 100.0, 0.0);
+        let before = texels(&s);
+        let red = |t: &[[u8; 4]]| t.iter().filter(|p| p[0] > 200 && p[1] < 120).count();
+        let pink = |t: &[[u8; 4]]| t.iter().filter(|p| p[1] < 245 && p[1] >= 40).count();
+        tool_across(&s, crate::ToolKind::Smudge, 65.0, 88.0, 100.0, 1000.0);
+        let after = texels(&s);
+        assert_ne!(before, after);
+        assert!(pink(&after) > pink(&before), "{} from {}", pink(&after), pink(&before));
+        assert!(after.iter().all(|p| p[3] == 255), "the base layer stays opaque");
+        // one undo step, whole
+        s.undo();
+        assert_eq!(texels(&s), before);
+        s.redo();
+        assert_eq!(texels(&s), after);
+        assert!(red(&after) > 0);
+        // the right mesh, and what the smudge didn't reach, are as they were
+        let side = 128usize;
+        let right = |t: &[[u8; 4]]| {
+            t.iter().enumerate().filter(|(i, _)| i % side >= side / 2).map(|(_, p)| *p).collect::<Vec<_>>()
+        };
+        assert_eq!(right(&before), right(&after));
+    }
+
+    #[test]
+    fn fills_and_adjustments_keep_to_the_mesh_picked() {
+        let s = CanvasSession::open_model(TWO_MESHES.into(), "two.obj".into(), Vec::new(), "Two".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let base = s.layers().first().unwrap().id;
+        s.set_color(1.0, 0.0, 0.0);
+        // with nothing picked a fill reaches the whole set
+        assert!(s.fill_layer(base));
+        frame(&s, 200);
+        let (left, right) = painted_halves(&s);
+        assert!(left > 500 && right > 500, "{left} {right}");
+        s.undo();
+        // the left mesh picked, the right stays as it was
+        s.pick_submesh(0);
+        assert!(s.fill_layer(base));
+        frame(&s, 200);
+        let (left, right) = painted_halves(&s);
+        // (it reaches two texels past its edge, as a stroke does: two columns, here)
+        assert!(left > 500 && right <= 2 * 64, "{left} {right}");
+        s.undo();
+        // an adjustment too, and it leaves no selection behind
+        let paint = s.add_layer();
+        assert!(s.fill_layer(paint));
+        s.pick_submesh(1);
+        frame(&s, 200);
+        assert!(s.adjustment_start(crate::Adjustment::Hsb));
+        s.adjustment_hsb(0.7, 0.5, 0.5);
+        frame(&s, 200);
+        assert!(s.adjustment_end(true));
+        frame(&s, 200);
+        assert!(!s.has_selection());
+        let t = texels(&s);
+        let (red, turned) =
+            (t.iter().filter(|p| p[0] > 200 && p[2] < 40).count(), t.iter().filter(|p| p[2] > 100).count());
+        assert!(red > 500 && turned > 500, "{red} {turned}");
+        // a clear keeps to it as well
+        s.clear_layer();
+        frame(&s, 200);
+        assert!(texels(&s).iter().filter(|p| p[0] > 200 && p[2] < 40).count() > 500);
+    }
+
+    #[test]
+    fn a_channels_content_is_replaced_by_a_picture_as_an_undo_step() {
+        let s = CanvasSession::open_model(TWO_MESHES.into(), "two.obj".into(), Vec::new(), "Two".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let base = s.layers().first().unwrap().id;
+        let grey = crate::layers::ThumbnailImage { width: 2, height: 2, rgba: [128u8, 128, 128, 255].repeat(4) };
+        assert!(s.replace_material_map(base, 1, grey));
+        assert_eq!((s.model_channel(), s.channel_tile_chosen()), (1, true));
+        frame(&s, 200);
+        assert!(texels(&s).iter().all(|p| p[0] == 128 && p[3] == 255));
+        s.undo();
+        assert!(texels(&s).iter().all(|p| p[0] != 128));
+    }
+
+    #[test]
+    fn the_reference_window_has_a_camera_of_its_own_on_the_model() {
+        let s = CanvasSession::open_model(TWO_MESHES.into(), "two.obj".into(), Vec::new(), "Two".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let first = s.reference_model_picture(64).unwrap();
+        let seen = s.shared.lock().scene.as_ref().unwrap().orbit();
+        s.reference_model_turn(30.0, 0.0, 300.0);
+        let turned = s.reference_model_picture(64).unwrap();
+        assert_ne!(first.rgba, turned.rgba);
+        assert_eq!(s.shared.lock().scene.as_ref().unwrap().orbit(), seen);
+        // shown flat, it still shows what is painted
+        s.set_model_flat(true);
+        s.set_color(1.0, 0.0, 0.0);
+        let base = s.layers().first().unwrap().id;
+        assert!(s.fill_layer(base));
+        let painted = s.reference_model_picture(64).unwrap();
+        assert_ne!(painted.rgba, turned.rgba);
+    }
+
+    #[test]
+    fn a_model_left_showing_itself_in_the_reference_window_opens_on_it_again() {
+        let s = CanvasSession::open_model(TWO_MESHES.into(), "two.obj".into(), Vec::new(), "Two".into(), 64).unwrap();
+        let mut window = s.reference_window();
+        assert_eq!(window.shows, crate::ReferenceShows::Canvas);
+        window.shown = true;
+        window.shows = crate::ReferenceShows::Model;
+        s.set_reference_window(window);
+        assert_eq!(s.reference_window(), window);
+        let dir = std::env::temp_dir().join(format!("procraft-model-reference-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.to_string_lossy().into_owned();
+        s.save(path.clone()).unwrap();
+        assert_eq!(CanvasSession::open(path.clone()).unwrap().reference_window(), window);
+        // and in the model's own file
+        let shared = std::env::temp_dir().join(format!("procraft-model-reference-{}.procraft", std::process::id()));
+        let unpacked = std::env::temp_dir().join(format!("procraft-model-reference-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&unpacked);
+        s.export_model_artwork(path.clone(), shared.to_string_lossy().into_owned()).unwrap();
+        assert!(crate::unpack_model_artwork(
+            shared.to_string_lossy().into_owned(),
+            unpacked.to_string_lossy().into_owned()
+        ));
+        let opened = CanvasSession::open(unpacked.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(opened.reference_window().shows, crate::ReferenceShows::Model);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&unpacked);
+        let _ = std::fs::remove_file(&shared);
+    }
+
+    #[test]
+    fn a_saved_model_turns_in_the_gallerys_preview_without_a_window() {
+        let s = CanvasSession::open_model(TWO_MESHES.into(), "two.obj".into(), Vec::new(), "Two".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let dir = std::env::temp_dir().join(format!("procraft-model-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.to_string_lossy().into_owned();
+        s.save(path.clone()).unwrap();
+        assert!(crate::project::artwork_plays(path.clone()));
+        let opened = CanvasSession::open(path).unwrap();
+        assert!(opened.draw_without_window());
+        let a = opened.model_preview_picture(0, 64).unwrap();
+        let b = opened.model_preview_picture(opened.model_preview_frames() / 4, 64).unwrap();
+        assert_eq!(a.rgba.len(), 64 * 64 * 4);
+        assert_ne!(a.rgba, b.rgba);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_model_warns_once_of_what_painting_it_may_not_go_well_with() {
+        use super::ModelWarning::{OverlappingUvs, RepeatingTextures};
+        let open = |text: &str| {
+            CanvasSession::open_model(text.as_bytes().to_vec(), "m.obj".into(), Vec::new(), "M".into(), 64).unwrap()
+        };
+        let s = open(TWO_MESHES);
+        assert_eq!(s.take_model_warnings(), []);
+        // every face of the cube covers the whole texture
+        let s = open(CUBE);
+        assert_eq!(s.take_model_warnings(), [OverlappingUvs]);
+        assert_eq!(s.take_model_warnings(), []);
+        // coordinates past the texture's edge
+        let tiled = TWO_MESHES.replace("vt 1 1", "vt 2 1");
+        let s = open(&tiled);
+        assert!(s.take_model_warnings().contains(&RepeatingTextures));
+    }
+
+    #[test]
+    fn a_models_artwork_goes_out_as_one_file_and_comes_back_whole() {
+        let s = CanvasSession::open_model(TWO_MESHES.into(), "two.obj".into(), Vec::new(), "Two".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        pen_across(&s, 40.0, 160.0, 100.0, 0.0);
+        s.set_submesh_locked(1, true);
+        let painted = painted_halves(&s);
+        let work = std::env::temp_dir().join(format!("procraft-model-artwork-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        let (dir, file, again) = (work.join("artwork"), work.join("Two.procraft"), work.join("again"));
+        std::fs::create_dir_all(&work).unwrap();
+        let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        s.export_model_artwork(path(&dir), path(&file)).unwrap();
+        assert_eq!(crate::zip_file_kind(path(&file)), crate::ZipKind::ModelArtwork);
+        assert!(super::unpack_model_artwork(path(&file), path(&again)));
+        let opened = CanvasSession::open(path(&again)).unwrap();
+        assert!(shown(&opened));
+        frame(&opened, 200);
+        assert_eq!(opened.model_info().unwrap().submeshes.len(), 2);
+        assert_eq!(opened.submeshes_locked(), [false, true]);
+        assert_eq!(painted_halves(&opened), painted);
+        // a file that isn't one is left alone, and nothing leaves the folder given
+        let mut zip = procraft_engine::zip::ZipWriter::new();
+        zip.add("artwork.json", b"{}");
+        zip.add("model.obj", b"");
+        zip.add("../outside.txt", b"x");
+        std::fs::write(work.join("sly.procraft"), zip.finish()).unwrap();
+        assert!(super::unpack_model_artwork(path(&work.join("sly.procraft")), path(&work.join("sly"))));
+        assert!(!work.join("outside.txt").exists());
+        assert!(!super::unpack_model_artwork(path(&work.join("artwork/artwork.json")), path(&work.join("no"))));
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    const TWO_SETS: &str = "v -2 -1 0\nv -0.2 -1 0\nv -0.2 1 0\nv -2 1 0\nv 0.2 -1 0\nv 2 -1 0\nv 2 1 0\nv 0.2 1 0\n\
+                            vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n\
+                            usemtl a\no A\nf 1/1 2/2 3/3 4/4\nusemtl b\no B\nf 5/1 6/2 7/3 8/4\n";
+
+    #[test]
+    fn canvas_information_counts_a_models_layers_by_texture_set() {
+        let s = CanvasSession::open_model(TWO_SETS.into(), "two.obj".into(), Vec::new(), "Two".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let most = s.layer_stats().maximum;
+        let used = |s: &CanvasSession| s.texture_set_stats().iter().map(|t| t.used).collect::<Vec<_>>();
+        let names = s.texture_set_stats().into_iter().map(|t| t.name).collect::<Vec<_>>();
+        assert_eq!(names, s.model_info().unwrap().texture_sets);
+        assert!(s.texture_set_stats().iter().all(|t| t.maximum == most));
+        assert_eq!((used(&s), s.layer_stats().used), (vec![1, 1], 2));
+        // a layer on the first, counted where it is whichever set or channel is painted on
+        assert_ne!(s.add_layer(), 0);
+        assert_eq!((used(&s), s.layer_stats().used), (vec![2, 1], 3));
+        s.set_model_channel(1);
+        assert_eq!((used(&s), s.layer_stats().used), (vec![2, 1], 3));
+        s.set_model_channel(0);
+        s.choose_texture_set(1);
+        assert_eq!((used(&s), s.layer_stats().used), (vec![2, 1], 3));
+        assert_eq!(s.layer_stats().maximum, most);
+    }
+
+    #[test]
+    fn meshes_of_another_texture_set_cant_be_picked_together() {
+        let s = CanvasSession::open_model(TWO_SETS.into(), "two.obj".into(), Vec::new(), "Two".into(), 64).unwrap();
+        assert_eq!(s.model_info().unwrap().texture_sets.len(), 2);
+        s.pick_submesh(0);
+        assert!(!s.pick_more_submeshes(1));
+        assert_eq!(s.active_submeshes(), [0]);
+        // picking it alone moves to its texture set
+        s.pick_submesh(1);
+        assert_eq!((s.active_submeshes(), s.texture_set()), (vec![1], 1));
+    }
+
+    #[test]
+    fn a_picture_placed_on_a_model_lands_on_a_layer_of_its_own() {
+        let s = CanvasSession::open_model(TWO_MESHES.into(), "two.obj".into(), Vec::new(), "Two".into(), 128).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        let layers = s.layers().len();
+        let rgba = [255u8, 0, 0, 255].repeat(16 * 16);
+        assert!(s.model_picture_begin(crate::layers::ThumbnailImage { width: 16, height: 16, rgba }, true));
+        assert_eq!(s.layers().len(), layers + 1);
+        // centred on the window, it starts as a square: over the gap and both meshes
+        let corners = s.model_picture_box().unwrap();
+        assert_eq!(corners.len(), 8);
+        assert!((corners[0] - 30.0).abs() < 1.0 && (corners[2] - 170.0).abs() < 1.0, "{corners:?}");
+        frame(&s, 200);
+        let (left, right) = painted_halves(&s);
+        assert!(left > 50 && right > 50, "{left} {right}");
+        // moved over the left mesh it leaves the right one
+        s.model_picture_move(-40.0, 0.0, 0.3, 0.0);
+        frame(&s, 200);
+        let (left, right) = painted_halves(&s);
+        assert!(left > 10 && right == 0, "{left} {right}");
+        // kept, it stays and the box goes; undo takes it back
+        s.model_picture_end(true);
+        assert_eq!(s.model_picture_box(), None);
+        frame(&s, 200);
+        assert_eq!(painted_halves(&s), (left, 0));
+        s.undo();
+        frame(&s, 200);
+        assert_eq!(painted_halves(&s), (0, 0));
+        // cancelled, the layer goes too
+        s.redo();
+        let rgba = [0u8, 255, 0, 255].repeat(4);
+        assert!(s.model_picture_begin(crate::layers::ThumbnailImage { width: 2, height: 2, rgba }, true));
+        frame(&s, 200);
+        s.model_picture_end(false);
+        assert_eq!(s.layers().len(), layers + 1);
+        frame(&s, 200);
+        assert_eq!(painted_halves(&s), (left, 0));
+    }
+
+    #[test]
+    fn a_transform_on_a_model_shows_its_texture_flat_until_it_ends() {
+        let s = CanvasSession::open_model(TWO_MESHES.into(), "two.obj".into(), Vec::new(), "Two".into(), 64).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        pen_across(&s, 40.0, 160.0, 100.0, 0.0);
+        assert!(!s.model_flat());
+        assert!(s.transform_begin().is_some());
+        assert!(s.model_flat());
+        s.transform_end(false);
+        assert!(!s.model_flat());
+        // shown flat by the switch, it stays so
+        s.set_model_flat(true);
+        assert!(s.transform_begin().is_some());
+        s.transform_end(false);
+        assert!(s.model_flat());
+    }
+
+    #[test]
+    fn a_placed_pictures_place_maps_the_window_onto_the_picture() {
+        let place =
+            super::PicturePlace { middle: [100.0, 50.0], half: [40.0, 20.0], turn: std::f32::consts::FRAC_PI_2 };
+        // turned a quarter clockwise: its right side points down the window
+        let [_, top_right, ..] = place.corners();
+        assert!((top_right[0] - 120.0).abs() < 1e-3 && (top_right[1] - 90.0).abs() < 1e-3, "{top_right:?}");
+        let [x, y] = place.to_picture((80, 40));
+        let at = |p: [f32; 2]| (x[0] * p[0] + x[1] * p[1] + x[2], y[0] * p[0] + y[1] * p[1] + y[2]);
+        let (px, py) = at(top_right);
+        assert!((px - 80.0).abs() < 1e-3 && py.abs() < 1e-3, "{px} {py}");
+        assert!(place.holds([100.0, 50.0]) && !place.holds([50.0, 50.0]));
+        // flipped, the same corner reads the other side of the picture
+        let flipped = super::PicturePlace { half: [-40.0, 20.0], ..place };
+        let [x, _] = flipped.to_picture((80, 40));
+        assert!((x[0] * 120.0 + x[1] * 90.0 + x[2]).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_eyedropper_reads_what_is_painted_on_the_model_under_it() {
+        let s = CanvasSession::open_model(TWO_MESHES.into(), "two.obj".into(), Vec::new(), "Two".into(), 128).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        s.set_color(1.0, 0.0, 0.0);
+        frame(&s, 200);
+        pen_across(&s, 40.0, 160.0, 100.0, 0.0);
+        let pick = s.pick(60.0, 100.0, 9).unwrap();
+        let rgb = pick.rgb.unwrap();
+        assert!(rgb >> 16 > 200 && rgb & 0xff < 60, "{rgb:06x}");
+        assert_eq!(pick.pixels.len(), 9 * 9 * 4);
+        // what shows there is the model, lit, in the picture round the point
+        let middle = &pick.pixels[(4 * 9 + 4) * 4..][..4];
+        assert!(middle[0] > middle[2], "{middle:?}");
+        // off the model, no colour, but still a picture
+        let pick = s.pick(100.0, 10.0, 9).unwrap();
+        assert_eq!(pick.rgb, None);
+        // where nothing is painted, the model's own white
+        let top = (0..100).find(|&y| s.submesh_at(60.0, y as f32).is_some()).unwrap() as f32;
+        assert_eq!(s.pick(60.0, top + 1.0, 1).unwrap().rgb, Some(0xffffff));
+    }
+
+    /// One square behind another, both filling the same place on the screen: the near one on the
+    /// left half of the texture, the far one on the right.
+    const FRONT_AND_BACK: &str = "v -2 -2 0\nv 2 -2 0\nv 2 2 0\nv -2 2 0\nv -2 -2 -1\nv 2 -2 -1\nv 2 2 -1\nv -2 2 -1\n\
+                                  vt 0 0\nvt 0.5 0\nvt 0.5 1\nvt 0 1\nvt 0.5 0\nvt 1 0\nvt 1 1\nvt 0.5 1\n\
+                                  o Near\nf 1/1 2/2 3/3 4/4\no Far\nf 5/5 6/6 7/7 8/8\n";
+
+    /// How much of the selection lies on each half of the texture.
+    fn selected_halves(s: &CanvasSession) -> (usize, usize) {
+        let st = s.shared.lock();
+        let Some(m) = st.selection.as_ref() else { return (0, 0) };
+        let side = m.width as usize;
+        let on = m.data.iter().enumerate().filter(|(_, c)| **c > 127).map(|(i, _)| i % side);
+        on.fold((0, 0), |(l, r), x| if x < side / 2 { (l + 1, r) } else { (l, r + 1) })
+    }
+
+    #[test]
+    fn a_selection_is_drawn_on_the_screen_and_x_ray_reaches_through_the_model() {
+        use crate::SelectionJoin::Add;
+        let s =
+            CanvasSession::open_model(FRONT_AND_BACK.into(), "two.obj".into(), Vec::new(), "Two".into(), 128).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        // only the near surface takes it
+        s.select_shape(false, 80.0, 80.0, 120.0, 120.0, Add);
+        let (near, far) = selected_halves(&s);
+        assert!(near > 100 && far == 0, "{near} {far}");
+        // a stroke across the window stays inside it
+        pen_across(&s, 20.0, 180.0, 100.0, 0.0);
+        let (left, right) = painted_halves(&s);
+        assert!(left > 10 && left <= near && right == 0, "{left} {right} of {near}");
+        {
+            let st = s.shared.lock();
+            let selection = st.selection.as_ref().unwrap();
+            let side = selection.width as usize;
+            drop(st);
+            let fresh = fresh(&s);
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+            canvas.render(gpu, &mut st.doc, None);
+            let pixels = canvas.read_composite(gpu).unwrap();
+            let selection = st.selection.as_ref().unwrap();
+            let outside = pixels.chunks(4).zip(&selection.data).filter(|(p, c)| *p != fresh && **c == 0).count();
+            assert_eq!(outside, 0, "{outside} texels painted outside, of {side} square");
+        }
+        // the selection shows on the model
+        let plain = frame_pixels(&s, 200);
+        {
+            let mut guard = s.shared.lock();
+            guard.scene_selection_look(Some(procraft_gpu::SelectionLook::Fill([1.0, 0.0, 0.0])));
+        }
+        let covered = frame_pixels(&s, 200);
+        let at = |p: &[u8], x: usize, y: usize| p[(y * 200 + x) * 4..][..3].to_vec();
+        assert_ne!(at(&plain, 100, 100), at(&covered, 100, 100));
+        assert_eq!(at(&covered, 100, 100), [255, 0, 0]);
+        assert_eq!(at(&plain, 60, 60), at(&covered, 60, 60));
+        s.select_none();
+        // with X-Ray, the surface behind as well
+        s.set_selection_x_ray(true);
+        s.select_shape(false, 80.0, 80.0, 120.0, 120.0, Add);
+        let (near, far) = selected_halves(&s);
+        assert!(near > 100 && far > 100, "{near} {far}");
+        // tapped with Automatic, the texel under the touch is what the flood starts from
+        s.select_none();
+        s.select_by_colour(100.0, 100.0, 0.1, Add, false);
+        let (near, far) = selected_halves(&s);
+        assert!(near > 0 && far == 0, "{near} {far}");
+    }
+
+    #[test]
+    fn a_finger_held_still_on_a_model_picks_and_set_to_paint_it_paints() {
+        let s = CanvasSession::open_model(TWO_MESHES.into(), "two.obj".into(), Vec::new(), "Two".into(), 128).unwrap();
+        if !shown(&s) {
+            return;
+        }
+        frame(&s, 200);
+        s.touch_down(1, PointerKind::Finger, vec![sample(60.0, 100.0, 0.0)]);
+        let out = s.touch_tick(10_000.0);
+        assert!(out.iter().any(|c| matches!(c, crate::TouchCommand::Pick { .. })), "{out:?}");
+        s.touch_up(1, vec![sample(60.0, 100.0, 10_016.0)]);
+        // set to paint, a finger paints and with the modify button held it turns the model
+        s.set_touch_settings(crate::TouchSettings { model_finger_paint: true, ..Default::default() });
+        s.touch_down(2, PointerKind::Finger, vec![sample(40.0, 100.0, 20_000.0)]);
+        frame(&s, 200);
+        s.touch_move(2, (1..20).map(|i| sample(40.0 + i as f32 * 6.0, 100.0, 20_000.0 + f64::from(i) * 8.0)).collect());
+        frame(&s, 200);
+        s.touch_up(2, vec![sample(160.0, 100.0, 20_200.0)]);
+        frame(&s, 200);
+        assert!(painted(&s) > 50);
+        let orbit = |s: &CanvasSession| s.shared.lock().scene.as_ref().and_then(|c| c.view.as_ref()).map(|v| v.orbit);
+        let kept = (painted(&s), orbit(&s));
+        s.set_modify_held(true);
+        s.touch_down(3, PointerKind::Finger, vec![sample(70.0, 100.0, 30_000.0)]);
+        s.touch_move(3, vec![sample(130.0, 100.0, 30_016.0)]);
+        s.touch_up(3, vec![sample(130.0, 100.0, 30_032.0)]);
+        s.set_modify_held(false);
+        frame(&s, 200);
+        assert_eq!(painted(&s), kept.0);
+        assert_ne!(orbit(&s), kept.1);
     }
 
     #[test]

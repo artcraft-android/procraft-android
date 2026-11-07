@@ -12,12 +12,13 @@ use crate::{CanvasSession, ReferenceView};
 /// The window's imported picture, beside the artwork's layers.
 pub(crate) const REFERENCE_PICTURE: &str = "reference.png";
 
-/// What the window shows.
+/// What the window shows. `Model`, the model itself, only on a model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum ReferenceShows {
     Canvas,
     Image,
     Face,
+    Model,
 }
 
 /// The window as an app shows it, in points. Until it has been `sized` or `placed` the app chooses
@@ -51,15 +52,18 @@ fn kept_view(v: ReferenceView) -> [f32; 3] {
     if [v.zoom, v.x, v.y].iter().all(|n| n.is_finite()) { [v.zoom, v.x, v.y] } else { [1.0, 0.0, 0.0] }
 }
 
-fn state_of(w: &ReferenceWindow) -> ReferenceWindowState {
+/// `w` as an app shows it, on a `model` or not: an artwork that isn't one shows its canvas where
+/// a model would show itself, and a model, which has no face to show, shows its canvas there.
+fn state_of(w: &ReferenceWindow, model: bool) -> ReferenceWindowState {
     let [width, height] = w.size.unwrap_or_default();
     let [x, y] = w.at.unwrap_or_default();
     ReferenceWindowState {
         shown: w.shown,
-        shows: match w.kind {
-            ReferenceKind::Canvas => ReferenceShows::Canvas,
-            ReferenceKind::Image => ReferenceShows::Image,
-            ReferenceKind::Face => ReferenceShows::Face,
+        shows: match (w.kind, model) {
+            (ReferenceKind::Image, _) => ReferenceShows::Image,
+            (ReferenceKind::Canvas | ReferenceKind::Face, true) if w.three_d => ReferenceShows::Model,
+            (ReferenceKind::Face, false) => ReferenceShows::Face,
+            (ReferenceKind::Canvas | ReferenceKind::Face, _) => ReferenceShows::Canvas,
         },
         sized: w.size.is_some(),
         width,
@@ -72,15 +76,19 @@ fn state_of(w: &ReferenceWindow) -> ReferenceWindowState {
     }
 }
 
-/// `w` as `state` says, what only a file said staying as it was.
-fn take_state(w: &mut ReferenceWindow, state: ReferenceWindowState) {
+/// `w` as `state` says on a `model` or not, what only a file said staying as it was: the model
+/// shown is the canvas kind turned to it, and the canvas on a model the same turned back.
+fn take_state(w: &mut ReferenceWindow, state: ReferenceWindowState, model: bool) {
     let pair = |on: bool, a: f32, b: f32| (on && a.is_finite() && b.is_finite()).then_some([a, b]);
     w.shown = state.shown;
     w.kind = match state.shows {
-        ReferenceShows::Canvas => ReferenceKind::Canvas,
+        ReferenceShows::Canvas | ReferenceShows::Model => ReferenceKind::Canvas,
         ReferenceShows::Image => ReferenceKind::Image,
         ReferenceShows::Face => ReferenceKind::Face,
     };
+    if model && matches!(state.shows, ReferenceShows::Canvas | ReferenceShows::Model) {
+        w.three_d = state.shows == ReferenceShows::Model;
+    }
     w.size = pair(state.sized, state.width, state.height);
     w.at = pair(state.placed, state.x, state.y);
     w.canvas_view = kept_view(state.canvas_view);
@@ -150,7 +158,8 @@ pub fn reference_window_fitted(
 impl CanvasSession {
     /// The Reference window as this artwork left it.
     pub fn reference_window(&self) -> ReferenceWindowState {
-        state_of(&self.shared.lock().reference_window)
+        let st = self.shared.lock();
+        state_of(&st.reference_window, st.scene.is_some())
     }
 
     /// The window has changed: kept with the artwork, saved with it (a change being an edit, the
@@ -158,7 +167,7 @@ impl CanvasSession {
     pub fn set_reference_window(&self, state: ReferenceWindowState) {
         let mut st = self.shared.lock();
         let mut next = st.reference_window.clone();
-        take_state(&mut next, state);
+        take_state(&mut next, state, st.scene.is_some());
         if next != st.reference_window {
             st.reference_window = next;
             st.revision += 1;
@@ -332,17 +341,78 @@ mod tests {
 
     #[test]
     fn a_state_comes_back_as_it_was_set_and_what_a_file_said_stays() {
-        let mut window = ReferenceWindow { corner: 3, docked: true, ..ReferenceWindow::default() };
-        take_state(&mut window, state());
-        assert_eq!(state_of(&window), state());
-        assert_eq!((window.corner, window.docked), (3, true));
+        let mut window = ReferenceWindow { corner: 3, docked: true, three_d: true, ..ReferenceWindow::default() };
+        take_state(&mut window, state(), false);
+        assert_eq!(state_of(&window, false), state());
+        assert_eq!((window.corner, window.docked, window.three_d), (3, true, true));
+        // the canvas chosen on an artwork that isn't a model leaves a file's 3D as it was
+        take_state(&mut window, ReferenceWindowState { shows: ReferenceShows::Canvas, ..state() }, false);
+        assert!(window.three_d);
+    }
+
+    #[test]
+    fn the_model_shows_only_on_a_model() {
+        let shows = |kind, three_d, model| {
+            let w = ReferenceWindow { kind, three_d, ..ReferenceWindow::default() };
+            state_of(&w, model).shows
+        };
+        use ReferenceKind as K;
+        use ReferenceShows as S;
+        assert_eq!(shows(K::Canvas, true, true), S::Model);
+        assert_eq!(shows(K::Canvas, false, true), S::Canvas);
+        // an artwork that isn't a model, left on 3D, shows its canvas
+        assert_eq!(shows(K::Canvas, true, false), S::Canvas);
+        assert_eq!(shows(K::Image, true, true), S::Image);
+        // a model has no face to show
+        assert_eq!(shows(K::Face, false, true), S::Canvas);
+        assert_eq!(shows(K::Face, true, true), S::Model);
+        assert_eq!(shows(K::Face, true, false), S::Face);
+        // the model chosen is the canvas kind turned to it; the image keeps that for the canvas
+        let mut w = ReferenceWindow::default();
+        take_state(&mut w, ReferenceWindowState { shows: S::Model, ..state() }, true);
+        assert_eq!((w.kind, w.three_d), (K::Canvas, true));
+        take_state(&mut w, ReferenceWindowState { shows: S::Image, ..state() }, true);
+        assert_eq!((w.kind, w.three_d), (K::Image, true));
+        take_state(&mut w, ReferenceWindowState { shows: S::Canvas, ..state() }, true);
+        assert_eq!((w.kind, w.three_d), (K::Canvas, false));
+        // one sent on an artwork that isn't a model is its canvas
+        take_state(&mut w, ReferenceWindowState { shows: S::Model, ..state() }, false);
+        assert_eq!((w.kind, w.three_d, state_of(&w, false).shows), (K::Canvas, false, S::Canvas));
+    }
+
+    #[test]
+    fn a_package_keeps_the_model_shown_as_its_3d_flag() {
+        use procraft_engine::document::Document;
+        let window = ReferenceWindow { shown: true, three_d: true, ..ReferenceWindow::default() };
+        let doc = Document::new(64, 48);
+        let bytes = procraft_engine::native::write(&procraft_engine::native::Export {
+            document: &doc,
+            pixels: &std::collections::HashMap::new(),
+            composite: &[255; 64 * 48 * 4],
+            thumbnail_png: &[],
+            name: "Package",
+            author: "",
+            strokes: 0,
+            tracked_seconds: 0.0,
+            seed: 3,
+            time_lapse: None,
+            reference: Some(&window),
+            reference_picture: None,
+        });
+        let package = std::env::temp_dir().join(format!("procraft-reference-3d-{}.procraft", std::process::id()));
+        std::fs::write(&package, &bytes).unwrap();
+        // a flat artwork shows its canvas, and keeps the flag to write back
+        let s = CanvasSession::open_package(package.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(s.reference_window().shows, ReferenceShows::Canvas);
+        assert!(s.shared.lock().reference_window.three_d);
+        let _ = std::fs::remove_file(&package);
     }
 
     #[test]
     fn numbers_that_mean_nothing_are_not_kept() {
         let mut window = ReferenceWindow::default();
         let unset = ReferenceWindowState { sized: false, placed: false, ..state() };
-        take_state(&mut window, unset);
+        take_state(&mut window, unset, false);
         assert_eq!((window.size, window.at), (None, None));
         let broken = ReferenceWindowState {
             width: f32::NAN,
@@ -350,7 +420,7 @@ mod tests {
             image_view: ReferenceView { zoom: f32::NAN, x: 0.0, y: 0.0 },
             ..state()
         };
-        take_state(&mut window, broken);
+        take_state(&mut window, broken, false);
         assert_eq!((window.size, window.at), (None, None));
         assert_eq!(window.image_view, [1.0, 0.0, 0.0]);
     }

@@ -44,6 +44,8 @@ const ABOVE_BOTTOM: f32 = 50.0;
 /// The canvas is read again at most this often while it changes, this large.
 const REFRESH: Duration = Duration::from_millis(300);
 const CANVAS_PIXELS: u32 = 700;
+/// The side of the picture of a model it shows.
+const MODEL_PIXELS: u32 = 720;
 /// A picture imported is kept at most this large.
 const MOST_PICTURE: u32 = 2048;
 
@@ -114,11 +116,16 @@ enum Mode {
     Canvas,
     Image,
     Face,
+    /// The model, turned by a finger or the mouse.
+    Model,
 }
 
 pub struct Reference {
     pub on: bool,
     mode: Mode,
+    /// How far the model has been turned since it was last drawn (pixels).
+    turned: (f32, f32),
+    turn_from: Option<Pos2>,
     /// Where the window is (its top left, points), once placed, and its picture's size.
     at: Option<Pos2>,
     size: Vec2,
@@ -155,6 +162,8 @@ impl Default for Reference {
         Reference {
             on: false,
             mode: Mode::Canvas,
+            turned: (0.0, 0.0),
+            turn_from: None,
             at: None,
             size: START,
             canvas: None,
@@ -189,6 +198,7 @@ impl Reference {
                 ReferenceShows::Canvas => Mode::Canvas,
                 ReferenceShows::Image => Mode::Image,
                 ReferenceShows::Face => Mode::Face,
+                ReferenceShows::Model => Mode::Model,
             },
             at: w.placed.then(|| pos2(w.x, w.y)),
             size: if w.sized { vec2(w.width, w.height) } else { START },
@@ -209,6 +219,7 @@ impl Reference {
                 Mode::Canvas => ReferenceShows::Canvas,
                 Mode::Image => ReferenceShows::Image,
                 Mode::Face => ReferenceShows::Face,
+                Mode::Model => ReferenceShows::Model,
             },
             sized: self.size != START,
             width: self.size.x,
@@ -253,7 +264,12 @@ impl Reference {
             ctx.request_repaint_after(REFRESH - at.elapsed());
             return;
         }
-        if let Some(t) = session.canvas_thumbnail(CANVAS_PIXELS) {
+        let picture = if self.mode == Mode::Model {
+            session.reference_model_picture(MODEL_PIXELS)
+        } else {
+            session.canvas_thumbnail(CANVAS_PIXELS)
+        };
+        if let Some(t) = picture {
             let image = egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
             let crisp =
                 egui::TextureOptions { magnification: egui::TextureFilter::Nearest, ..egui::TextureOptions::LINEAR };
@@ -307,7 +323,13 @@ impl Reference {
         if !self.on {
             return None;
         }
-        if self.mode == Mode::Canvas {
+        // the model turned since it was last drawn: drawn again at once
+        let (dx, dy) = std::mem::take(&mut self.turned);
+        if dx != 0.0 || dy != 0.0 {
+            session.reference_model_turn(dx, dy, self.size.x);
+            (self.canvas_edits, self.read_at) = (None, None);
+        }
+        if matches!(self.mode, Mode::Canvas | Mode::Model) {
             self.read_canvas(ctx, session);
         }
         let screen = ctx.content_rect();
@@ -343,7 +365,7 @@ impl Reference {
             // the picture: the whole window's, under the bars
             let area = window;
             let shown = match self.mode {
-                Mode::Canvas => self.canvas.as_ref(),
+                Mode::Canvas | Mode::Model => self.canvas.as_ref(),
                 Mode::Image => self.image.as_ref(),
                 Mode::Face => None,
             };
@@ -478,8 +500,10 @@ impl Reference {
                 let track = Rect::from_center_size(bottom.center(), vec2(270.0, 35.0));
                 ui.painter().rect_filled(track, 17.5, argb(SEGMENT_TRACK));
                 let item = (track.width() - 4.0 - 22.0) / 3.0;
+                // on a model the third is the model itself
+                let third = if session.model_info().is_some() { (Mode::Model, "3D") } else { (Mode::Face, "Face") };
                 for (i, (mode, label)) in
-                    [(Mode::Canvas, "Canvas"), (Mode::Image, "Image"), (Mode::Face, "Face")].into_iter().enumerate()
+                    [(Mode::Canvas, "Canvas"), (Mode::Image, "Image"), third].into_iter().enumerate()
                 {
                     let cell =
                         Rect::from_min_size(track.min + vec2(2.0 + (item + 11.0) * i as f32, 2.0), vec2(item, 31.0));
@@ -491,6 +515,7 @@ impl Reference {
                     text(ui.painter(), cell.center(), Align2::CENTER_CENTER, label, 15.0, Weight::Regular, ink);
                     if ui.interact(cell, ui.scope_id().with(("mode", i)), Sense::click()).clicked() {
                         self.mode = mode;
+                        self.read_at = None;
                         self.canvas_edits = None;
                     }
                 }
@@ -557,6 +582,10 @@ impl Reference {
     }
 
     fn set_view(&mut self, view: ReferenceView) {
+        // the model turns under the pointer, and doesn't move in the window
+        if self.mode == Mode::Model {
+            return;
+        }
         if self.mode == Mode::Image {
             self.image_view = view;
         } else {
@@ -591,6 +620,15 @@ impl Reference {
             }
             (spread, i.multi_touch(), i.pointer.latest_pos())
         });
+        if self.mode == Mode::Model {
+            let pressed =
+                ui.input(|i| i.pointer.press_origin().filter(|p| i.pointer.primary_down() && area.contains(*p)));
+            let at = ui.input(|i| i.pointer.interact_pos()).filter(|_| pressed.is_some());
+            if let (Some(at), Some(from)) = (at, self.turn_from) {
+                self.turned = (self.turned.0 + at.x - from.x, self.turned.1 + at.y - from.y);
+            }
+            self.turn_from = at;
+        }
         let local = |p: Pos2| p - area.min;
         if let Some(t) = touch.filter(|_| touched.hovered() || touched.dragged()) {
             // two fingers or more: no eyedropper

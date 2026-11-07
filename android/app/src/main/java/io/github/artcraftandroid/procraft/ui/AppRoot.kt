@@ -248,7 +248,10 @@ fun AppRoot(vm: CanvasViewModel) {
                     enter = androidx.compose.animation.slideInVertically(Motion.studioIn()) { it },
                     exit = androidx.compose.animation.slideOutVertically(Motion.studioOut()) { it },
                 ) { Box(Modifier.fillMaxSize()) { GestureControls(vm) } }
+                ModelPicture(vm)
                 BlockedDialog(vm)
+                ModelWarningsAlert(vm)
+                SharedLayerAlert(vm)
                 PluginOfferAlert(vm)
                 // a fill a plugin is finishing: nothing is touched until it is done
                 if (vm.fillFinishing) {
@@ -359,6 +362,8 @@ private fun BlockedDialog(vm: CanvasViewModel) {
                 CanvasViewModel.Blocked.LOCKED -> "Layer is locked"
                 CanvasViewModel.Blocked.HIDDEN -> "Layer is hidden"
                 CanvasViewModel.Blocked.EMPTY_GROUP -> "Group is empty"
+                CanvasViewModel.Blocked.MESH_HIDDEN -> "Mesh is hidden"
+                CanvasViewModel.Blocked.MESH_LOCKED -> "Mesh is locked"
             }
         },
         message = { (w, l) ->
@@ -366,23 +371,56 @@ private fun BlockedDialog(vm: CanvasViewModel) {
                 CanvasViewModel.Blocked.LOCKED -> "“${l.name}” can't be changed while it is locked."
                 CanvasViewModel.Blocked.HIDDEN -> "“${l.name}” can't be changed while it is hidden."
                 CanvasViewModel.Blocked.EMPTY_GROUP -> "“${l.name}” holds no layers to change."
+                CanvasViewModel.Blocked.MESH_HIDDEN -> "“${vm.meantMeshName()}” can't be painted while it is hidden."
+                CanvasViewModel.Blocked.MESH_LOCKED -> "“${vm.meantMeshName()}” can't be painted while it is locked."
             }
         },
         action = "Open Layers",
         onCancel = { vm.answerBlocked(fix = false, openLayers = false) },
         onAction = { vm.answerBlocked(fix = false, openLayers = true) },
         icon = when (why) {
-            CanvasViewModel.Blocked.LOCKED -> PcIcons.PageLocked
-            CanvasViewModel.Blocked.HIDDEN -> PcIcons.EyeStruck
+            CanvasViewModel.Blocked.LOCKED, CanvasViewModel.Blocked.MESH_LOCKED -> PcIcons.PageLocked
+            CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.MESH_HIDDEN -> PcIcons.EyeStruck
             else -> PcIcons.Folder
         },
         destructive = false,
         extra = when (why) {
-            CanvasViewModel.Blocked.LOCKED -> "Unlock"
-            CanvasViewModel.Blocked.HIDDEN -> "Show"
+            CanvasViewModel.Blocked.LOCKED, CanvasViewModel.Blocked.MESH_LOCKED -> "Unlock"
+            CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.MESH_HIDDEN -> "Show"
             else -> null
         },
         onExtra = { vm.answerBlocked(fix = true, openLayers = false) },
+    )
+}
+
+/** A layer a texture set's meshes share is about to go from all of them. */
+@Composable
+internal fun SharedLayerAlert(vm: CanvasViewModel) {
+    Alert(
+        vm.deletingShared,
+        title = { "Delete shared layer?" },
+        message = { "“${it.name}” is on every mesh of this texture set." },
+        action = "Delete",
+        onCancel = { vm.deletingShared = null },
+        onAction = {
+            vm.deletingShared = null
+            vm.delete(it)
+        },
+    )
+}
+
+/** What a model newly opened may not paint well with, said once. */
+@Composable
+internal fun ModelWarningsAlert(vm: CanvasViewModel) {
+    Alert(
+        vm.modelWarnings.takeIf { it.isNotEmpty() },
+        title = { "Unsupported model features" },
+        message = { w -> "Painting on this model may not go as expected because of:\n" + w.joinToString("\n") },
+        action = "OK",
+        onCancel = { vm.modelWarnings = emptyList() },
+        onAction = { vm.modelWarnings = emptyList() },
+        destructive = false,
+        alone = true,
     )
 }
 
