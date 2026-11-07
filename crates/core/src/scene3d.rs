@@ -4038,8 +4038,8 @@ mod tests {
         s.touch_down(4, PointerKind::Finger, vec![sample(120.0, 100.0, 316.0)]);
         s.touch_move(3, vec![sample(60.0, 100.0, 332.0)]);
         s.touch_move(4, vec![sample(150.0, 100.0, 332.0)]);
-        s.touch_up(4, vec![sample(150.0, 100.0, 348.0)]);
-        let out = s.touch_up(3, vec![sample(60.0, 100.0, 348.0)]);
+        let mut out = s.touch_up(4, vec![sample(150.0, 100.0, 348.0)]);
+        out.extend(s.touch_up(3, vec![sample(60.0, 100.0, 348.0)]));
         assert!(!out.contains(&crate::TouchCommand::Undo), "{out:?}");
         assert!(distance(&s) < far, "{} from {far}", distance(&s));
         frame(&s, 200);
