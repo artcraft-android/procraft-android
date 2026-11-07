@@ -70,6 +70,14 @@ fn make_canvases(gpu: &Gpu, wake: winit::event_loop::EventLoopProxy<()>) -> Opti
 /// is shown in sRGB there, as on screens without wide colour.
 const INTERFACE_WIDE: bool = false;
 
+/// How soon a window left without its surface asks for it again.
+const SURFACE_RETRY: Duration = Duration::from_millis(100);
+
+/// A window of no size is minimised: nothing shows until it has one.
+fn is_minimised(size: winit::dpi::PhysicalSize<u32>) -> bool {
+    size.width == 0 || size.height == 0
+}
+
 impl Screen {
     /// The window's surface, and a device that can show it, and which backend made them: the
     /// first from backend `from` on (round to those before it) that makes both and can show on
@@ -154,6 +162,11 @@ impl Screen {
             return None;
         }
         Some(self.canvases.take()?.join().unwrap_or(false))
+    }
+
+    /// Whether nothing can show: its next size brings it back.
+    pub fn minimised(&self) -> bool {
+        is_minimised(self.window.inner_size())
     }
 
     /// The window is `width` × `height` pixels now.
@@ -271,7 +284,15 @@ impl Screen {
         for id in std::mem::take(&mut textures_delta.free) {
             self.renderer.free_texture(&id);
         }
-        let config = self.config.as_ref()?;
+        // a surface the GPU refused (it couldn't come idle, another thread submitting work) is asked
+        // for again here: only a new size would, and the window would stay as it was until then
+        let window = self.window.inner_size();
+        if self.config.is_none() && !is_minimised(window) {
+            self.resize(window.width, window.height);
+        }
+        let Some(config) = self.config.as_ref() else {
+            return (!is_minimised(window)).then_some(SURFACE_RETRY);
+        };
         let size = (config.width, config.height);
         let (format, screen) = (config.format, screen_profile(config));
         let frame = match self.surface.get_current_texture() {
@@ -322,5 +343,19 @@ impl Screen {
         // the backend shows: a crash from now on isn't its start's
         crate::startup::gpu_shown();
         if canvas_soon { Some(Duration::ZERO) } else { interface_after }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use winit::dpi::PhysicalSize;
+
+    use super::is_minimised;
+
+    #[test]
+    fn only_a_window_of_no_size_counts_as_minimised() {
+        assert!(is_minimised(PhysicalSize::new(0, 0)));
+        assert!(is_minimised(PhysicalSize::new(0, 600)));
+        assert!(!is_minimised(PhysicalSize::new(1, 1)));
     }
 }

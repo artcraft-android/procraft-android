@@ -488,7 +488,9 @@ impl ApplicationHandler for App {
         // the touches' waits (a hold, a repeat) run out
         if self.input.tick(session) || !self.input.commands.is_empty() {
             screen.window.request_redraw();
-        } else if let Some(due) = self.again.or_else(|| session.wants_frame().then(Instant::now)) {
+        } else if let Some(due) =
+            self.again.or_else(|| (session.wants_frame() && !screen.minimised()).then(Instant::now))
+        {
             // what moves by itself (the selection's bands, a fade) draws once a refresh, not as
             // fast as frames can be made
             let due = due.max(self.last_frame + frame_gap(&screen.window));
