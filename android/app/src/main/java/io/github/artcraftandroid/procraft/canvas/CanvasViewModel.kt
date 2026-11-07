@@ -3660,7 +3660,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- the reference window ----
 
-    enum class ReferenceMode { CANVAS, IMAGE, FACE, MODEL }
+    /** What the window shows. A face needs face tracking, which this app doesn't have yet, so an
+     *  artwork saved showing one opens on the canvas, and Face isn't offered. */
+    enum class ReferenceMode { CANVAS, IMAGE, MODEL }
 
     var referenceOn by mutableStateOf(false)
         private set
@@ -3731,9 +3733,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         forgetReference()
         val w = s.referenceWindow()
         referenceMode = when (w.shows) {
-            io.github.artcraftandroid.procraft.core.ReferenceShows.CANVAS -> ReferenceMode.CANVAS
             io.github.artcraftandroid.procraft.core.ReferenceShows.IMAGE -> ReferenceMode.IMAGE
-            io.github.artcraftandroid.procraft.core.ReferenceShows.FACE -> ReferenceMode.FACE
+            io.github.artcraftandroid.procraft.core.ReferenceShows.CANVAS,
+            io.github.artcraftandroid.procraft.core.ReferenceShows.FACE -> ReferenceMode.CANVAS
             io.github.artcraftandroid.procraft.core.ReferenceShows.MODEL -> ReferenceMode.MODEL
         }
         if (w.sized) referenceSize = DpSize(w.width.dp, w.height.dp)
@@ -3785,7 +3787,6 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
                 shows = when (referenceMode) {
                     ReferenceMode.CANVAS -> io.github.artcraftandroid.procraft.core.ReferenceShows.CANVAS
                     ReferenceMode.IMAGE -> io.github.artcraftandroid.procraft.core.ReferenceShows.IMAGE
-                    ReferenceMode.FACE -> io.github.artcraftandroid.procraft.core.ReferenceShows.FACE
                     ReferenceMode.MODEL -> io.github.artcraftandroid.procraft.core.ReferenceShows.MODEL
                 },
                 sized = referenceSize != DpSize(REFERENCE_WIDTH_DP.dp, REFERENCE_HEIGHT_DP.dp),

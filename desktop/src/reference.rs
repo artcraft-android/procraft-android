@@ -115,7 +115,6 @@ pub enum Picked {
 enum Mode {
     Canvas,
     Image,
-    Face,
     /// The model, turned by a finger or the mouse.
     Model,
 }
@@ -195,9 +194,9 @@ impl Reference {
         *self = Reference {
             on: w.shown,
             mode: match w.shows {
-                ReferenceShows::Canvas => Mode::Canvas,
                 ReferenceShows::Image => Mode::Image,
-                ReferenceShows::Face => Mode::Face,
+                // a face needs face tracking, which this app doesn't have: the canvas shows
+                ReferenceShows::Canvas | ReferenceShows::Face => Mode::Canvas,
                 ReferenceShows::Model => Mode::Model,
             },
             at: w.placed.then(|| pos2(w.x, w.y)),
@@ -218,7 +217,6 @@ impl Reference {
             shows: match self.mode {
                 Mode::Canvas => ReferenceShows::Canvas,
                 Mode::Image => ReferenceShows::Image,
-                Mode::Face => ReferenceShows::Face,
                 Mode::Model => ReferenceShows::Model,
             },
             sized: self.size != START,
@@ -367,7 +365,6 @@ impl Reference {
             let shown = match self.mode {
                 Mode::Canvas | Mode::Model => self.canvas.as_ref(),
                 Mode::Image => self.image.as_ref(),
-                Mode::Face => None,
             };
             // and how it sits there, for the bars' glass
             let mut placed = None;
@@ -408,23 +405,13 @@ impl Reference {
                     argb(MUTED),
                 );
                 import |= ui.interact(button, ui.scope_id().with("import image"), Sense::click()).clicked();
-            } else if self.mode == Mode::Face {
-                text(
-                    ui.painter(),
-                    area.center(),
-                    Align2::CENTER_CENTER,
-                    "Not available on this device",
-                    14.0,
-                    Weight::Regular,
-                    argb(MUTED),
-                );
             }
             // (letting go of the eyedropper is no click)
             if picked.is_none() {
                 self.clicks(ui, &touched);
             }
             let glass = if self.mode == Mode::Image { self.image_glass.clone() } else { self.canvas_glass.clone() };
-            let glass = placed.zip(glass.filter(|_| self.mode != Mode::Face));
+            let glass = placed.zip(glass);
             // what a bar has behind it: the window, and the picture blurred
             let over_picture = |ui: &egui::Ui, bar: Rect, corners: egui::CornerRadius| {
                 ui.painter().rect_filled(bar, corners, argb(PICTURE));
@@ -493,18 +480,20 @@ impl Reference {
                         right = shown.left() - 12.0;
                     }
                 }
-                // the bottom bar: Canvas, Image and Face
+                // the bottom bar: Canvas and Image, and on a model the model itself (no Face without
+                // face tracking)
                 let corners = egui::CornerRadius { nw: 0, ne: 0, sw: CORNER as u8, se: CORNER as u8 };
                 over_picture(ui, bottom, corners);
                 ui.interact(bottom.intersect(window), ui.scope_id().with("bottom bar"), Sense::click_and_drag());
                 let track = Rect::from_center_size(bottom.center(), vec2(270.0, 35.0));
                 ui.painter().rect_filled(track, 17.5, argb(SEGMENT_TRACK));
-                let item = (track.width() - 4.0 - 22.0) / 3.0;
-                // on a model the third is the model itself
-                let third = if session.model_info().is_some() { (Mode::Model, "3D") } else { (Mode::Face, "Face") };
-                for (i, (mode, label)) in
-                    [(Mode::Canvas, "Canvas"), (Mode::Image, "Image"), third].into_iter().enumerate()
-                {
+                let mut kinds = vec![(Mode::Canvas, "Canvas"), (Mode::Image, "Image")];
+                if session.model_info().is_some() {
+                    kinds.push((Mode::Model, "3D"));
+                }
+                let gaps = 11.0 * (kinds.len() - 1) as f32;
+                let item = (track.width() - 4.0 - gaps) / kinds.len() as f32;
+                for (i, (mode, label)) in kinds.into_iter().enumerate() {
                     let cell =
                         Rect::from_min_size(track.min + vec2(2.0 + (item + 11.0) * i as f32, 2.0), vec2(item, 31.0));
                     let on = self.mode == mode;
