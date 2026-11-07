@@ -58,6 +58,7 @@ mod quick_menu;
 mod quickshape;
 mod recolor;
 mod reference_view;
+mod reference_window;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 mod render;
 mod scene3d;
@@ -154,6 +155,7 @@ pub use quickshape::{QuickShapeInfo, QuickShapeKind};
 pub use reference_view::{
     ReferenceSizes, ReferenceView, reference_picture_point, reference_picture_rect, reference_view_pinched,
 };
+pub use reference_window::{ReferencePlace, ReferenceShows, ReferenceWindowState, reference_window_fitted};
 pub use scene3d::{ModelFile, ModelInfo, ModelLight, ModelTextureFile, SubmeshInfo, Turntable, zip_model_name};
 pub use selection::{SelectionDisplay, SelectionJoin};
 pub use studio::{
@@ -504,6 +506,10 @@ pub(crate) struct State {
     pub(crate) backdrop_windows: Vec<[f32; 6]>,
     /// The view kept with the artwork, shown when the window first comes.
     pub(crate) saved_view: Option<project::SavedView>,
+    /// The Reference window as the artwork keeps it, and its imported picture (a PNG, upright):
+    /// apart from the document, so that undoing never moves it.
+    pub(crate) reference_window: procraft_engine::reference_window::ReferenceWindow,
+    pub(crate) reference_picture: Option<Arc<Vec<u8>>>,
     pub(crate) revision: u64,
     /// The open transform, how its handles act and how it resamples.
     transform: Option<procraft_engine::transform::Transform>,
@@ -1343,6 +1349,8 @@ impl CanvasSession {
             backdrops: Vec::new(),
             backdrop_windows: Vec::new(),
             saved_view: None,
+            reference_window: Default::default(),
+            reference_picture: None,
         };
         Arc::new(CanvasSession {
             shared: Arc::new(Shared {

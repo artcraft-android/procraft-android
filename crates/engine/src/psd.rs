@@ -227,6 +227,8 @@ pub fn read(bytes: &[u8]) -> Result<Imported, PsdError> {
         author: String::new(),
         strokes: 0,
         tracked_seconds: 0.0,
+        reference: crate::reference_window::ReferenceWindow::default(),
+        reference_picture: None,
     })
 }
 

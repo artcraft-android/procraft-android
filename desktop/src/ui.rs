@@ -286,6 +286,8 @@ impl Interface {
 
     /// `session` is shown now (at `scale` window pixels a point): it paints in the colour chosen.
     pub fn opened(&mut self, session: &Arc<CanvasSession>, scale: f32) {
+        // each artwork its own Reference window, none if it never had one
+        self.reference.restore(session);
         self.model = session.model_info().is_some();
         self.lighting.forget();
         // brush files given while no canvas was open
@@ -317,6 +319,7 @@ impl Interface {
     /// The artwork is put away (to the gallery, for another, or with the window): brushes coming
     /// in from files are waited for, Recolor ends keeping what it filled, and Layer Opacity ends.
     pub fn closing(&mut self, session: &CanvasSession) {
+        self.reference.keep(session);
         self.library.finish_importing(session);
         self.end_recolor(session);
         session.set_touch_layer_opacity(None);
@@ -732,7 +735,10 @@ impl Interface {
             self.adjustment_asked(session, asked);
         }
         let hold = std::time::Duration::from_secs_f32(self.gestures.delay(GesturePurpose::Eyedropper).max(0.0));
-        match self.reference.show(&ctx, &mut self.look, session, hold) {
+        let picked = self.reference.show(&ctx, &mut self.look, session, hold);
+        // kept with the artwork as it changes, a toggle elsewhere last frame included
+        self.reference.keep(session);
+        match picked {
             Some(crate::reference::Picked::Moving { at, side, rgba, rgb }) => {
                 self.overlays.pick_reference(&ctx, at, side, &rgba, rgb);
             }
