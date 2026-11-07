@@ -1766,6 +1766,36 @@ fn a_stamps_bleed_lays_its_strong_parts_whole_and_its_faint_ones_not_at_all() {
 }
 
 #[test]
+fn a_little_pressure_bleed_lays_even_a_stamp_s_whole_middle_short_of_full() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // the bleed's contrast is (1 + b) a - b / sqrt(b p), b eight times the bleed and p its
+    // pressure: a little bleed cuts more than it lifts, so even a whole part lays 1 + b - sqrt(b)
+    // at full pressure (0.815 for a bleed of 0.0075), less at a lighter one; a bleed of 1/8 or
+    // more lays it whole
+    let laid = |bleed: f32, press: f32| {
+        let mut doc = Document::new(64, 64);
+        let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+        canvas.begin_stroke(doc.current(), StrokeStyle::new(StrokeTool::Paint, [0.0; 3], 1.0));
+        canvas.add_stamps(&[Stamp { grain_bleed: bleed, grain_press: press, ..dot(Vec2::new(32.0, 32.0), 24.0) }]);
+        canvas.end_stroke();
+        canvas.render(&gpu, &mut doc, None);
+        let layer = canvas.read_layer(&gpu, doc.current()).unwrap();
+        i32::from(pixel(&layer, 64, 32, 32)[3])
+    };
+    let contrast = |bleed: f32, press: f32| {
+        let b = 8.0 * bleed;
+        (((1.0 + b) - b / (b * press).sqrt()).clamp(0.0, 1.0) * 255.0).round() as i32
+    };
+    assert!(laid(0.0, 1.0) > 250, "{}", laid(0.0, 1.0));
+    for (bleed, press) in [(0.0075, 1.0), (0.0075, 0.5), (0.125, 1.0)] {
+        let (got, formula) = (laid(bleed, press), contrast(bleed, press));
+        assert!((got - formula).abs() <= 3, "bleed {bleed} at {press}: {got}, formula {formula}");
+    }
+    assert!(contrast(0.0075, 1.0) < 210 && contrast(0.125, 1.0) == 255);
+}
+
+#[test]
 fn a_wet_stamps_bleed_lays_its_strong_parts_whole_and_its_faint_ones_not_at_all() {
     let Some(gpu) = gpu() else { return };
     let _check = NoErrors(&gpu);
