@@ -2,7 +2,8 @@
 //! thumbnail, name, blend letter and visibility box; groups with their line and arrow; the
 //! background under them. Tap a layer to make it current, the current one for its options (where
 //! it is renamed in place), its blend letter for its blend mode and opacity, its box to show or
-//! hide it (hold it to show it alone), the plus for a new layer; hold a row and drag it to move it;
+//! hide it (hold it to show it alone), the plus for a new layer; hold a row and drag it to move it
+//! (with a mouse, just drag it up or down);
 //! slide it left for lock, duplicate and delete, or a little right to pick it. On a model: each
 //! texture set's name over its meshes (each its picture and box), the open mesh's layers under it,
 //! and under a layer its channels (colour, roughness, metalness), one of which a click paints on.
@@ -107,7 +108,8 @@ enum Way {
 }
 
 /// A press on a row, followed until let go: whose, where and when it went down, what it became,
-/// how far the row was slid as it went down, and how far it has been dragged down.
+/// how far the row was slid as it went down, how far it has been dragged down, and whether it is a
+/// mouse's (not a finger's).
 #[derive(Clone, Copy)]
 struct RowPress {
     id: u64,
@@ -116,6 +118,7 @@ struct RowPress {
     way: Way,
     start: f32,
     dy: f32,
+    mouse: bool,
 }
 
 /// The blend editor open under a layer's row: how far its modes are scrolled (points, the first
@@ -448,8 +451,16 @@ impl Layers {
                                     {
                                         let since = Instant::now();
                                         let way = Way::Undecided;
-                                        self.press =
-                                            Some(RowPress { id: l.id, origin, since, way, start: slide, dy: 0.0 });
+                                        let mouse = !ui.input(|i| i.any_touches());
+                                        self.press = Some(RowPress {
+                                            id: l.id,
+                                            origin,
+                                            since,
+                                            way,
+                                            start: slide,
+                                            dy: 0.0,
+                                            mouse,
+                                        });
                                     }
                                     let mut row_ui = ui.new_child(UiBuilder::new().max_rect(row));
                                     row_ui.set_clip_rect(row.intersect(ui.clip_rect()));
@@ -981,8 +992,9 @@ impl Layers {
     }
 
     /// Follows the press on a row: moved sideways it slides the row (let go past half its buttons,
-    /// it stays open; slid right past half the way, it picks the layer); held still, the row is
-    /// dragged up and down and, let go, the layer moves next to the row it is over.
+    /// it stays open; slid right past half the way, it picks the layer); held still (or, with a
+    /// mouse, moved up or down: a finger doing that scrolls the list), the row is dragged up and down
+    /// and, let go, the layer moves next to the row it is over.
     fn follow_press(
         &mut self,
         ctx: &egui::Context,
@@ -999,9 +1011,10 @@ impl Layers {
         if down {
             match p.way {
                 Way::Undecided => {
-                    if d.length() > SLOP {
-                        p.way = if d.x.abs() > d.y.abs() { Way::Swipe } else { Way::Ignored };
-                    } else if p.since.elapsed() >= HOLD {
+                    let sideways = d.x.abs() > d.y.abs();
+                    if d.length() > SLOP && (sideways || !p.mouse) {
+                        p.way = if sideways { Way::Swipe } else { Way::Ignored };
+                    } else if p.since.elapsed() >= HOLD || d.length() > SLOP {
                         // a mask stays with its layer
                         if l.is_some_and(|l| l.kind != LayerType::Mask) {
                             p.way = Way::Reorder;
