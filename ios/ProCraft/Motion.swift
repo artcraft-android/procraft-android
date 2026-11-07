@@ -63,8 +63,20 @@ enum Motion {
     static let replayFade = easeInOut(0.25)
     /// The reference window fading in where it is, and out when closed.
     static let referenceFade = easeInOut(0.28)
-    /// A dragged artwork's cell fading to what stays behind, and back.
+    /// A dragged artwork's cell fading to what stays behind, and back; held, its thumbnail lifting,
+    /// and settling when let go.
     static let artworkLift = easeInOut(0.25)
+    static let artworkDrop = easeInOut(0.25)
+    /// An artwork pressed shrinks a moment after the touch, as much as this.
+    static let artworkPress = easeInOut(0.15)
+    static let artworkPressed: CGFloat = 0.87
+    static let artworkPressDelay = 0.1
+    static let artworkLifted: CGFloat = 1.07
+    /// Into a stack its artworks fly out of the stack's cell to their places; back out, they fly back
+    /// into it as the gallery grows back into place, fading in.
+    static let stackPushMove = Animation.spring(duration: 0.45, bounce: 0.2)
+    static let stackPop = Animation.spring(duration: 0.3, bounce: 0.2)
+    static let stackPopScale: CGFloat = 0.8
     /// Rows moving to make room.
     static let rowMove = settle(0.35)
     /// The QuickMenu's buttons spreading from its middle, and drawing back in.

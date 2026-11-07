@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 import UniformTypeIdentifiers
 
 /// How faint an artwork's cell stays while it is dragged.
@@ -202,8 +203,20 @@ final class GalleryDragger: NSObject, UIDragInteractionDelegate, UIDropInteracti
         withAnimation(Motion.artworkLift) { shown.dragging = entry.dir }
     }
 
+    /// Held long enough to drag, the thumbnail lifts where it is; not dragged after all, it settles.
+    func dragInteraction(_: UIDragInteraction, willAnimateLiftWith animator: any UIDragAnimating, session: any UIDragSession) {
+        guard case let .artwork(artwork)? = session.localContext as? GalleryEntry else { return }
+        withAnimation(Motion.artworkLift) { model.lifted = artwork.dir }
+        animator.addCompletion { [model] position in
+            if position == .start {
+                withAnimation(Motion.artworkDrop) { model.lifted = nil }
+            }
+        }
+    }
+
     func dragInteraction(_: UIDragInteraction, session _: any UIDragSession, didEndWith _: UIDropOperation) {
         withAnimation(Motion.artworkLift) { shown.dragging = nil }
+        withAnimation(Motion.artworkDrop) { model.lifted = nil }
         settle()
     }
 
@@ -411,6 +424,108 @@ struct GalleryDragCatcher: UIViewRepresentable {
     static func dismantleUIView(_ host: Host, coordinator _: GalleryDragger) {
         for interaction in host.kept {
             interaction.view?.removeInteraction(interaction)
+        }
+    }
+}
+
+/// The gallery's presses, read on the window: a touch on an artwork's cell shrinks its thumbnail a
+/// moment later, and it settles when the touch ends or goes to a scroll. It takes nothing from them.
+final class GalleryPresses: UIGestureRecognizer {
+    weak var model: GalleryModel?
+    /// Whether a press may show now.
+    var canPress: () -> Bool = { false }
+    private var waiting: DispatchWorkItem?
+    private var start = CGPoint.zero
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard (event.allTouches?.count ?? touches.count) == 1, let touch = touches.first, canPress(), let model else {
+            release()
+            return
+        }
+        start = touch.location(in: nil)
+        let point = Interface.shared.point(start)
+        guard let artwork = model.artworks.first(where: { model.cellAt[$0.dir]?.contains(point) == true }) else { return }
+        let work = DispatchWorkItem { [weak model] in
+            withAnimation(Motion.artworkPress) { model?.pressed = artwork.dir }
+        }
+        waiting = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Motion.artworkPressDelay, execute: work)
+    }
+
+    /// Moved past a tap's slop (a scroll, a swipe), the press lets go.
+    override func touchesMoved(_ touches: Set<UITouch>, with _: UIEvent) {
+        guard let touch = touches.first else { return }
+        let at = touch.location(in: nil)
+        if hypot(at.x - start.x, at.y - start.y) > 10 {
+            release()
+        }
+    }
+
+    override func touchesEnded(_: Set<UITouch>, with _: UIEvent) {
+        release()
+        state = .failed
+    }
+
+    override func touchesCancelled(_: Set<UITouch>, with _: UIEvent) {
+        release()
+        state = .failed
+    }
+
+    private func release() {
+        waiting?.cancel()
+        waiting = nil
+        if model?.pressed != nil {
+            withAnimation(Motion.artworkDrop) { model?.pressed = nil }
+        }
+    }
+}
+
+/// Puts `GalleryPresses` on the window while the gallery shows.
+struct PressCatcher: UIViewRepresentable {
+    let model: GalleryModel
+    let presses: GalleryPresses
+    let canPress: () -> Bool
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizer(_: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith _: UIGestureRecognizer) -> Bool {
+            true
+        }
+    }
+
+    final class Host: UIView {
+        var presses: GalleryPresses?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard let presses else { return }
+            presses.view?.removeGestureRecognizer(presses)
+            window?.addGestureRecognizer(presses)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> Host {
+        let host = Host()
+        host.isUserInteractionEnabled = false
+        presses.cancelsTouchesInView = false
+        presses.delaysTouchesBegan = false
+        presses.delaysTouchesEnded = false
+        presses.delegate = context.coordinator
+        host.presses = presses
+        return host
+    }
+
+    func updateUIView(_: Host, context _: Context) {
+        presses.model = model
+        presses.canPress = canPress
+    }
+
+    static func dismantleUIView(_ host: Host, coordinator _: Coordinator) {
+        if let presses = host.presses {
+            presses.view?.removeGestureRecognizer(presses)
         }
     }
 }

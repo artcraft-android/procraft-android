@@ -89,6 +89,17 @@ final class GalleryModel {
     /// Where each cell showing is on the window, the grid itself, and a stack's way back: where a
     /// drag lands.
     @ObservationIgnored var cellAt: [String: CGRect] = [:]
+    /// Where each stack opened was, for its artworks to fly out of and back into.
+    @ObservationIgnored private var stackPlaces: [String: CGRect] = [:]
+    /// A stack just opened: where its cell was, for its artworks to fly out of.
+    private(set) var flyOutOf: CGRect?
+    /// A stack just left: its artworks where they were, flying back into its cell.
+    private(set) var flyingBack: (cells: [(artwork: GalleryArtwork, at: CGRect)], to: CGRect)?
+    /// Goes up each time a stack is left, for what grows the gallery back.
+    private(set) var leftStack = 0
+    /// The artwork pressed, shrunk, or lifted when held.
+    var pressed: String?
+    var lifted: String?
     @ObservationIgnored var gridAt = CGRect.zero
     @ObservationIgnored var backAt = CGRect.zero
     @ObservationIgnored var onOpen: (OpenArtwork) -> Void = { _ in }
@@ -133,6 +144,16 @@ final class GalleryModel {
     }
 
     func showStack(_ dir: String?, name: String = "") {
+        if let dir, openStack == nil, let at = cellAt[dir] {
+            stackPlaces[dir] = at
+            flyOutOf = at
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.flyOutOf = nil }
+        } else if dir == nil, let open = openStack, let to = stackPlaces[open.dir] {
+            let cells = artworks.compactMap { a in cellAt[a.dir].map { (artwork: a, at: $0) } }
+            flyingBack = (cells, to)
+            leftStack += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.flyingBack = nil }
+        }
         openStack = dir.map { ($0, name) }
         reload()
     }

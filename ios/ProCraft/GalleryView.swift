@@ -87,6 +87,11 @@ struct GalleryView: View {
     /// An artwork two fingers are spreading open into Preview.
     @State private var opening: PinchOpening?
     @State private var drag = GalleryDragShown()
+    @State private var presses = GalleryPresses()
+    /// The gallery growing back into place as a stack is left (0 to 1), and the stack's artworks
+    /// flying back into its cell over it.
+    @State private var regrown: CGFloat = 1
+    @State private var flown: CGFloat = 0
     @State private var about = false
     /// Gallery Recovery's card, while it shows.
     @State private var recovery: ProgressShown?
@@ -103,6 +108,30 @@ struct GalleryView: View {
         selecting = false
         selected = []
         moreOpen = false
+    }
+
+    /// A stack's artworks flying back into its cell, over the gallery growing back.
+    @ViewBuilder private func flyingBack(_ screen: CGSize) -> some View {
+        if let back = model.flyingBack {
+            let columns = screen.width > screen.height ? 4 : 3
+            let cell = CellSize(screenWidth: screen.width, columns: columns)
+            GeometryReader { place in
+                let origin = Interface.shared.rect(place.frame(in: .global)).origin
+                ZStack(alignment: .topLeading) {
+                    ForEach(back.cells, id: \.artwork.dir) { flying in
+                        let at = flying.at
+                        ArtworkCell(
+                            model: model, artwork: flying.artwork, cell: cell, version: model.version, chosen: nil, wash: false
+                        )
+                        .offset(
+                            x: at.minX - origin.x + (back.to.minX - at.minX) * flown,
+                            y: at.minY - origin.y + (back.to.minY - at.minY) * flown
+                        )
+                    }
+                }
+            }
+            .allowsHitTesting(false)
+        }
     }
 
     /// Nothing is open over the gallery, so a touch on a cell can be taken for a drag or a spread.
@@ -153,9 +182,11 @@ struct GalleryView: View {
         let chosen = selected.contains(a.dir)
         return ArtworkCell(
             model: model, artwork: a, cell: cell, version: model.version,
-            chosen: selecting ? chosen : nil, wash: drag.onto == a.dir
+            chosen: selecting ? chosen : nil, wash: drag.onto == a.dir,
+            lift: model.lifted == a.dir ? Motion.artworkLifted : model.pressed == a.dir ? Motion.artworkPressed : 1
         )
         .modifier(CellPlace(model: model, dir: a.dir))
+        .modifier(FlyIn(from: model.flyOutOf))
         // dragged, it stays behind faint
         .opacity(drag.dragging == a.dir ? draggedAlpha : 1)
         .opacity(open ? 1 - swipedFade : 1)
@@ -227,6 +258,9 @@ struct GalleryView: View {
         }
         .scrollIndicators(.hidden)
         .scrollDisabled(opening != nil)
+        // a stack left: the gallery grows back into place, fading in
+        .scaleEffect(Motion.stackPopScale + (1 - Motion.stackPopScale) * regrown)
+        .opacity(Double(regrown))
         .background {
             GeometryReader { place in
                 Color.clear.onChange(of: place.frame(in: .global), initial: true) { _, frame in
@@ -433,6 +467,7 @@ struct GalleryView: View {
                         grid(screen.size)
                     }
                 }
+                .overlay { flyingBack(screen.size) }
                 .blur(radius: renamed ? renameBlur : 0)
                 .animation(.easeInOut(duration: renamed ? 0.3 : 0.15), value: renamed)
                 overlays(screen.size)
@@ -484,6 +519,15 @@ struct GalleryView: View {
             )
         }
         .background { GalleryDragCatcher(model: model, shown: drag, canStart: quiet) }
+        .background { PressCatcher(model: model, presses: presses) { quiet() || selecting } }
+        .onChange(of: model.leftStack) {
+            regrown = 0
+            flown = 0
+            withAnimation(Motion.stackPop) {
+                regrown = 1
+                flown = 1
+            }
+        }
         .overlay {
             ZStack {
                 previews
@@ -564,6 +608,17 @@ struct GalleryView: View {
             case "gallery-recovery":
                 about = true
                 recovery = ProgressShown(progress: 0.6, detail: "Looking for lost or corrupted artworks")
+            case "gallery-press":
+                model.pressed = first?.dir
+            case "gallery-lift":
+                model.lifted = first?.dir
+            case "gallery-stack":
+                model.stack(Array(model.artworks.prefix(2)))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    if case let .stack(dir, name, _)? = model.entries.first(where: { if case .stack = $0 { return true } else { return false } }) {
+                        model.showStack(dir, name: name)
+                    }
+                }
             case "gallery-drag":
                 drag.dragging = model.artworks.dropFirst().first?.dir
                 drag.onto = first?.dir
@@ -773,6 +828,35 @@ private struct SwipeActions: View {
     }
 }
 
+/// Flies what it is on in from where `from` (the window, in the interface's points) is, as its own
+/// top left there; hidden until it is placed. Nothing moves without `from`.
+private struct FlyIn: ViewModifier {
+    let from: CGRect?
+
+    @State private var placed = false
+    @State private var shift = CGSize.zero
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                GeometryReader { place in
+                    Color.clear.onChange(of: place.frame(in: .global), initial: true) { _, frame in
+                        guard let from, !placed else { return }
+                        placed = true
+                        let at = Interface.shared.rect(frame).origin
+                        shift = CGSize(width: from.minX - at.x, height: from.minY - at.y)
+                        DispatchQueue.main.async {
+                            withAnimation(Motion.stackPushMove) { shift = .zero }
+                        }
+                    }
+                }
+            }
+            .offset(shift)
+            .opacity(from == nil || placed ? 1 : 0)
+            .zIndex(from == nil ? 0 : 2)
+    }
+}
+
 /// Tells the gallery where a cell is on the window while it shows, for where a drag lands.
 private struct CellPlace: ViewModifier {
     let model: GalleryModel
@@ -855,6 +939,8 @@ private struct ArtworkCell: View {
     let version: Int
     let chosen: Bool?
     let wash: Bool
+    /// How big its thumbnail shows: shrunk while pressed, lifted while held.
+    var lift: CGFloat = 1
 
     var body: some View {
         VStack(spacing: 0) {
@@ -870,6 +956,7 @@ private struct ArtworkCell: View {
                     }
                 }
                 .frame(width: cell.width, height: cell.thumb, alignment: .bottom)
+                .scaleEffect(lift)
                 .padding(.top, 39)
             Text(verbatim: artwork.name)
                 .font(.system(size: 13, weight: .semibold))

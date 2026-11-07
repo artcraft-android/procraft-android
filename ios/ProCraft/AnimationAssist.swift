@@ -749,10 +749,11 @@ private struct OnionColorsPage: View {
             .padding(.leading, 13)
             .padding(.top, 7)
             if let picked {
-                CompactPicker(c: picked)
+                // drawn 282 wide in a body 365 tall, over the panel's padding at its sides
+                CompactPicker(c: picked, shown: 282, bodyHeight: 365)
                     .id(after)
                     .padding(.top, 11)
-                    .frame(maxWidth: .infinity)
+                    .frame(width: 274)
             }
         }
         .onAppear { take(after: false) }

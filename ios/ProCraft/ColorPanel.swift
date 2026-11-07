@@ -1473,6 +1473,10 @@ struct CompactColors: View {
 /// The compact picker's body and its mode tabs, 260 wide, for a page of its own.
 struct CompactPicker: View {
     let c: any ColorPick
+    /// How wide it shows: its body laid out at 260 and scaled to this, the tabs this wide.
+    var shown: CGFloat = 260
+    /// The body's height as it shows.
+    var bodyHeight: CGFloat = 340
 
     @State private var mode = ColorMode.disc
     @State private var ui = ColorUi()
@@ -1489,9 +1493,11 @@ struct CompactPicker: View {
                 case .palettes: CompactPalettes(c: c, palettes: palettes)
                 }
             }
-            .frame(width: compactWidth, height: 340, alignment: .top)
+            .frame(width: compactWidth, height: bodyHeight * compactWidth / shown, alignment: .top)
+            .scaleEffect(shown / compactWidth, anchor: .topLeading)
+            .frame(width: shown, height: bodyHeight, alignment: .topLeading)
             CompactTabs(mode: mode) { mode = $0 }
-                .frame(width: compactWidth)
+                .frame(width: shown)
         }
         .coordinateSpace(.named(colorsSpace))
         .overlay(alignment: .topLeading) {
