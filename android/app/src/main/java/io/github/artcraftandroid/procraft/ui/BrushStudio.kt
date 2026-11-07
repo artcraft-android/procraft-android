@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -593,7 +594,9 @@ fun BrushStudio(vm: CanvasViewModel) {
 @Composable
 private fun Studio(vm: CanvasViewModel) {
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
-    Box(Modifier.fillMaxSize().background(StudioBack).pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } }) {
+    BoxWithConstraints(
+        Modifier.fillMaxSize().background(StudioBack).pointerInput(Unit) { awaitEachGesture { awaitFirstDown().consume() } },
+    ) {
         if (landscape) {
             // the pages listed by name on a card, the settings beside them, the pad on the right
             Row(Modifier.fillMaxSize()) {
@@ -603,10 +606,13 @@ private fun Studio(vm: CanvasViewModel) {
                 StudioPad(vm, Modifier.fillMaxSize())
             }
         } else {
+            // a short screen (a split window, or a tablet held upright) gives the pad at most 45%
+            // of its height, so the settings under it always have room to show and scroll
+            val pad = if (maxHeight * 0.45f < PadHeight) maxHeight * 0.45f else PadHeight
             Row(Modifier.fillMaxSize()) {
                 StudioRail(vm)
                 Column(Modifier.fillMaxSize()) {
-                    StudioPad(vm, Modifier.fillMaxWidth().height(PadHeight))
+                    StudioPad(vm, Modifier.fillMaxWidth().height(pad))
                     Box(Modifier.fillMaxWidth().height(1.dp).background(StudioLine))
                     StudioSettings(vm, Modifier.fillMaxSize())
                 }
