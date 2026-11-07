@@ -132,11 +132,7 @@ impl SourceEditor {
 
     /// The image as it would be kept: made to repeat while Auto repeat is on.
     fn result(&self) -> Vec<u8> {
-        if self.repeating && !self.image.is_empty() {
-            self.repeated(self.image.clone())
-        } else {
-            self.image.clone()
-        }
+        if self.repeating && !self.image.is_empty() { self.repeated(self.image.clone()) } else { self.image.clone() }
     }
 
     /// The image as it shows: Auto repeat's on the small image, quick enough to follow the sliders.

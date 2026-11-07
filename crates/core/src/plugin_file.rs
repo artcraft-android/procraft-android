@@ -13,14 +13,14 @@ use procraft_engine::zip::ZipReader;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::patch_run::{self, Hook, MODULE, MOST_MODULE};
-use crate::plugins::{self, PluginControl, PluginKind, PluginSlider, PluginSwitch};
+use crate::plugin_run::{self, Hook, MODULE, MOST_MODULE};
+use crate::plugins::{self, PluginControl, PluginPart, PluginSlider, PluginSwitch};
 
 /// The manifest's name in a plugin file, and in its folder.
 const MANIFEST: &str = "craft-extension.json";
 /// The manifest format read here: a newer one may mean anything, so it is refused.
 const SCHEMA: u64 = 1;
-/// What a plugin's code is written to, see [`crate::patch_run`]: a newer one is refused too.
+/// What a plugin's code is written to, see [`crate::plugin_run`]: a newer one is refused too.
 const INTERFACE: u32 = 1;
 /// What ids of our own start with: no file may claim one.
 const OWN_PREFIX: &str = "procraft.";
@@ -41,8 +41,10 @@ const MOST_DEPTH: usize = 8;
 const MOST_PATH: usize = 200;
 const MOST_CONTROLS: usize = 8;
 const MOST_HOOKS: usize = 8;
-/// The reason a stopped patch gives, in bytes.
+/// The reason a stopped plugin gives, in bytes.
 const MOST_STOP_NOTE: usize = 200;
+/// What the note of a stop ends with, after the plugin's id.
+const STOPPED_NOTE: &str = ".stopped";
 /// A slider's stops: past this a range and step were not meant.
 const MOST_STOPS: f64 = 100_000.0;
 
@@ -75,7 +77,7 @@ impl Refusal {
             Refusal::Damaged => "This plugin file is damaged.",
             Refusal::Described => "This plugin describes itself wrongly.",
             Refusal::Permissions => "This plugin asks for permissions ProCraft doesn't give.",
-            Refusal::Code => "This patch's code can't run in ProCraft.",
+            Refusal::Code => "This plugin's code can't run in ProCraft.",
             Refusal::FilterCode => "This filter's code can't run in ProCraft.",
             Refusal::Newer => "This plugin needs a newer ProCraft.",
             Refusal::OtherApp => "This plugin isn't for ProCraft.",
@@ -99,12 +101,12 @@ pub(crate) struct Listed {
 pub(crate) struct Manifest {
     pub id: String,
     pub name: String,
-    pub kind: PluginKind,
+    pub holds: Vec<PluginPart>,
     pub version: String,
     pub publisher: String,
     pub description: String,
     pub experimental: bool,
-    /// Where a patch steps in; none for a filter.
+    /// Where its code steps in, if it holds any.
     pub hooks: Vec<Hook>,
     pub controls: Vec<PluginControl>,
     files: Vec<Listed>,
@@ -127,7 +129,7 @@ struct RawManifest {
     id: String,
     name: String,
     version: String,
-    kind: String,
+    holds: Vec<String>,
     #[serde(default)]
     publisher: Option<RawPublisher>,
     #[serde(default)]
@@ -224,7 +226,8 @@ fn windows_keeps(name: &str) -> bool {
 }
 
 /// An id: lowercase, dotted, each part plain, and at least two of them. A moved setting's key has
-/// no dot, so no key of an imported plugin can be one, but for a control that says it keeps it.
+/// no dot, so no key of an imported plugin can be one, but for a control that says it keeps it. It
+/// can't end as a stop's note does, or one plugin's folder would be where another's stop is noted.
 fn valid_id(id: &str) -> bool {
     let plain = |part: &str| {
         !part.is_empty()
@@ -232,15 +235,18 @@ fn valid_id(id: &str) -> bool {
             && !part.ends_with('-')
             && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     };
-    id.len() <= 100 && id.split('.').count() >= 2 && id.split('.').all(plain) && !windows_keeps(id)
+    id.len() <= 100
+        && id.split('.').count() >= 2
+        && id.split('.').all(plain)
+        && !windows_keeps(id)
+        && !id.ends_with(STOPPED_NOTE)
 }
 
 /// A control's key: it goes in a settings line, after the plugin's id, so it is one plain word.
 fn valid_key(key: &str) -> bool {
     let mut bytes = key.bytes();
     key.len() <= 32
-        && key != "enabled"
-        && key != "applied"
+        && key != "on"
         && bytes.next().is_some_and(|b| b.is_ascii_lowercase())
         && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
@@ -286,7 +292,7 @@ fn checked_control(id: &str, raw: RawControl) -> Result<PluginControl, Refusal> 
     if !valid_key(&raw.key) || raw.label.trim().is_empty() || !shows_plainly(&raw.label, 40) {
         return Err(Refusal::Described);
     }
-    // what the app no longer has stays where it was kept, for the patch that took it over
+    // what the app no longer has stays where it was kept, for the plugin that took it over
     let key = match &raw.keeps {
         Some(kept) if plugins::moved(kept) => kept.clone(),
         Some(_) => return Err(Refusal::Described),
@@ -360,11 +366,9 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
         return Err(Refusal::Permissions);
     }
     let compat = raw.compat.procraft.ok_or(Refusal::OtherApp)?;
-    let kind = match raw.kind.as_str() {
-        "filter" => PluginKind::Filter,
-        "patch" => PluginKind::Patch,
-        _ => return Err(Refusal::Newer),
-    };
+    // a part this app doesn't have is for a newer one
+    let holds = raw.holds.iter().map(|name| PluginPart::named(name).ok_or(Refusal::Newer));
+    let holds = holds.collect::<Result<Vec<_>, _>>()?;
     if compat.interface.is_some_and(|interface| interface > INTERFACE) {
         return Err(Refusal::Newer);
     }
@@ -400,9 +404,21 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
     if id.starts_with(OWN_PREFIX) {
         return Err(Refusal::Described);
     }
+    let distinct: HashSet<_> = holds.iter().collect();
+    if holds.is_empty() || distinct.len() != holds.len() || compat.interface.is_none() {
+        return Err(Refusal::Described);
+    }
+    // what it says it holds and what it lists agree, so what the import screen tells is all of it
+    let has = |part| holds.contains(&part);
+    let fits = |path: &str, most: usize| files.iter().find(|f| f.path == path).map(|f| f.size <= most);
+    let module = fits(MODULE, MOST_MODULE) == has(PluginPart::Hooks).then_some(true);
+    let filter = fits(FILTER_CODE, MOST_SHADER) == has(PluginPart::Filter).then_some(true);
+    if !module || !filter {
+        return Err(Refusal::Described);
+    }
     let mut hooks = Vec::new();
-    if kind == PluginKind::Patch {
-        // a hook this app doesn't have is a patch for a newer one
+    if has(PluginPart::Hooks) {
+        // a hook this app doesn't have is a plugin for a newer one
         for name in raw.hooks.iter().take(MOST_HOOKS + 1) {
             let hook = Hook::named(name).ok_or(Refusal::Newer)?;
             if hooks.contains(&hook) {
@@ -410,21 +426,20 @@ fn read_manifest(text: &[u8]) -> Result<Manifest, Refusal> {
             }
             hooks.push(hook);
         }
-        let module = files.iter().any(|f| f.path == MODULE && f.size <= MOST_MODULE);
-        if !module || hooks.is_empty() || compat.interface.is_none() {
+        if hooks.is_empty() {
             return Err(Refusal::Described);
         }
-    } else {
-        let code = files.iter().any(|f| f.path == FILTER_CODE && f.size <= MOST_SHADER);
-        let moved = controls.iter().any(|c| !c.key().starts_with(&format!("{id}.")));
-        if !code || moved || compat.interface.is_none() {
-            return Err(Refusal::Described);
-        }
+    } else if !raw.hooks.is_empty() {
+        return Err(Refusal::Described);
+    }
+    // a filter's controls are its own, so none of them can be a moved setting
+    if has(PluginPart::Filter) && controls.iter().any(|c| !c.key().starts_with(&format!("{id}."))) {
+        return Err(Refusal::Described);
     }
     Ok(Manifest {
         id,
         name: raw.name,
-        kind,
+        holds,
         version: raw.version,
         publisher,
         description: raw.description,
@@ -440,16 +455,18 @@ pub(crate) fn value_names(controls: &[PluginControl]) -> Vec<String> {
     controls.iter().map(|control| control.key().rsplit('.').next().unwrap_or("").to_owned()).collect()
 }
 
-/// Whether `data`, listed by `manifest` under `path`, is code that can run, if it is code at all:
-/// checked by reading it, as nothing in it runs until the patch is applied or the filter opened.
-fn code_holds(manifest: &Manifest, path: &str, data: &[u8]) -> bool {
-    if manifest.kind == PluginKind::Filter && path == FILTER_CODE {
+/// Why `data`, listed by `manifest` under `path`, can't run, if it is code at all: checked by
+/// reading it, as nothing in it runs until the plugin is on or the filter opened.
+fn code_refused(manifest: &Manifest, path: &str, data: &[u8]) -> Option<Refusal> {
+    if manifest.holds.contains(&PluginPart::Filter) && path == FILTER_CODE {
         let text = std::str::from_utf8(data).map_err(|e| e.to_string());
         let read = text.and_then(|text| procraft_gpu::read_filter(text, &value_names(&manifest.controls)));
-        return read.map_err(|why| log::warn!("a filter's code was refused: {why}")).is_ok();
+        let refused = read.map_err(|why| log::warn!("a filter's code was refused: {why}")).is_err();
+        return refused.then_some(Refusal::FilterCode);
     }
+    let code = manifest.holds.contains(&PluginPart::Hooks) && path == MODULE;
     let controls = !manifest.controls.is_empty();
-    manifest.kind != PluginKind::Patch || path != MODULE || patch_run::can_run(data, &manifest.hooks, controls)
+    (code && !plugin_run::can_run(data, &manifest.hooks, controls)).then_some(Refusal::Code)
 }
 
 /// `bytes` read as a plugin file. Every entry is checked by what it claims before any is read,
@@ -493,8 +510,8 @@ pub(crate) fn read_package(bytes: &[u8]) -> Result<Package, Refusal> {
         if sha256(&data) != listed.sha256 {
             return Err(Refusal::Mismatch);
         }
-        if !code_holds(&manifest, &listed.path, &data) {
-            return Err(if manifest.kind == PluginKind::Patch { Refusal::Code } else { Refusal::FilterCode });
+        if let Some(refusal) = code_refused(&manifest, &listed.path, &data) {
+            return Err(refusal);
         }
         files.push((listed.path.clone(), data));
     }
@@ -637,14 +654,14 @@ pub(crate) fn read_folder(folder: &Path, id: &str, version: &str) -> Option<Mani
         if data.len() != listed.size || sha256(&data) != listed.sha256 {
             return None;
         }
-        if !code_holds(&manifest, &listed.path, &data) {
+        if code_refused(&manifest, &listed.path, &data).is_some() {
             return None;
         }
     }
     Some(manifest)
 }
 
-/// The hooks and the module of the patch `id` at `version` in `dir`, if all of it holds up as it
+/// The hooks and the module of the plugin `id` at `version` in `dir`, if all of it holds up as it
 /// did.
 pub(crate) fn read_code(dir: &Path, id: &str, version: &str) -> Option<(Vec<Hook>, Vec<u8>)> {
     let folder = dir.join(id).join(version);
@@ -694,20 +711,20 @@ pub(crate) fn settle_trying(dir: &Path, why: &str) {
     clear_trying(dir);
 }
 
-/// Where it is written down that patch `id` stopped: beside its folder, which holds only what its
+/// Where it is written down that plugin `id` stopped: beside its folder, which holds only what its
 /// manifest lists.
 fn stopped_note(dir: &Path, id: &str) -> PathBuf {
-    dir.join(format!("{id}.stopped"))
+    dir.join(format!("{id}{STOPPED_NOTE}"))
 }
 
-/// Writes down why patch `id` stopped, so it stays off through a restart.
+/// Writes down why plugin `id` stopped, so it stays off through a restart.
 pub(crate) fn note_stopped(dir: &Path, id: &str, why: &str) {
     if let Err(e) = std::fs::write(stopped_note(dir, id), why) {
-        log::warn!("couldn't note a patch stopped: {e}");
+        log::warn!("couldn't note a plugin stopped: {e}");
     }
 }
 
-/// Why patch `id` stopped, if it did and nobody has asked it to run since.
+/// Why plugin `id` stopped, if it did and nobody has asked it to run since.
 pub(crate) fn stopped_why(dir: &Path, id: &str) -> Option<String> {
     String::from_utf8(read_capped(&stopped_note(dir, id), MOST_STOP_NOTE)?).ok()
 }
@@ -910,7 +927,7 @@ pub(crate) mod tests {
             "id": id,
             "name": "A filter",
             "version": "1.0.0",
-            "kind": "filter",
+            "holds": ["filter"],
             "publisher": { "name": "Someone" },
             "description": "Changes a layer.",
             "compat": { "procraft": { "min_app": "0.0.1", "interface": 1 } },
@@ -923,14 +940,14 @@ pub(crate) mod tests {
         })
     }
 
-    /// A manifest for a patch of `module`, valid, on the position hook, with no controls.
-    pub(crate) fn patch(id: &str, module: &[u8]) -> Value {
+    /// A manifest for a plugin of `module`, valid, on the position hook, with no controls.
+    pub(crate) fn coded(id: &str, module: &[u8]) -> Value {
         json!({
             "schema": 1,
             "id": id,
-            "name": "A patch",
+            "name": "A plugin",
             "version": "1.0.0",
-            "kind": "patch",
+            "holds": ["hooks"],
             "publisher": { "name": "Someone" },
             "description": "Changes the app.",
             "compat": { "procraft": { "min_app": "0.0.1", "interface": 1 } },
@@ -1169,7 +1186,7 @@ pub(crate) mod tests {
             ("/controls/0/step", json!(0.000_001)),
             ("/controls/0/most", json!(1e30)),
             ("/controls/0/label", json!("")),
-            ("/controls/0/key", json!("enabled")),
+            ("/controls/0/key", json!("on")),
             ("/controls/0/key", json!("with space")),
             ("/controls/0/key", json!("Upper")),
             ("/controls/0/key", json!("../up")),
@@ -1210,8 +1227,8 @@ pub(crate) mod tests {
         assert_eq!(refusal(&a_filter_file(&with(a_filter(), "/schema", json!(2)))), Refusal::Newer);
         // whatever else has changed in it
         assert_eq!(refusal(&pack_text(br#"{"schema": 9, "everything": "different"}"#, &[])), Refusal::Newer);
-        assert_eq!(refusal(&a_filter_file(&with(a_filter(), "/kind", json!("tool")))), Refusal::Newer);
-        assert_eq!(refusal(&a_filter_file(&with(a_filter(), "/kind", json!("unlock")))), Refusal::Newer);
+        assert_eq!(refusal(&a_filter_file(&with(a_filter(), "/holds", json!(["tool"])))), Refusal::Newer);
+        assert_eq!(refusal(&a_filter_file(&with(a_filter(), "/holds", json!(["unlock"])))), Refusal::Newer);
         let dial = with(a_filter(), "/controls/0/type", json!("dial"));
         assert_eq!(refusal(&a_filter_file(&dial)), Refusal::Newer);
         assert_eq!(refusal(&a_filter_file(&with(a_filter(), "/schema", json!(0)))), Refusal::NotAPlugin);
@@ -1257,27 +1274,27 @@ pub(crate) mod tests {
     }
 
     fn a_module() -> Vec<u8> {
-        crate::patch_run::tests::position_module("", "(i64.const 0)")
+        crate::plugin_run::tests::position_module("", "(i64.const 0)")
     }
 
-    fn a_patch_file(manifest: &Value, module: &[u8]) -> Vec<u8> {
+    fn a_coded_file(manifest: &Value, module: &[u8]) -> Vec<u8> {
         pack(manifest, &[(MODULE, module)])
     }
 
     #[test]
-    fn a_good_patch_is_read() {
+    fn a_good_plugin_is_read() {
         let module = a_module();
-        let manifest = patch("org.example.patch", &module);
-        let package = read_package(&a_patch_file(&manifest, &module)).unwrap();
-        assert_eq!(package.manifest.kind, PluginKind::Patch);
+        let manifest = coded("org.example.plugin", &module);
+        let package = read_package(&a_coded_file(&manifest, &module)).unwrap();
+        assert_eq!(package.manifest.holds, [PluginPart::Hooks]);
         assert_eq!(package.manifest.hooks, [Hook::Position]);
     }
 
     #[test]
-    fn a_patch_says_what_it_steps_into_and_what_it_is_written_to() {
+    fn a_plugin_says_what_it_steps_into_and_what_it_is_written_to() {
         let module = a_module();
         let of = |path: &str, value: Value| {
-            refusal(&a_patch_file(&with(patch("org.example.patch", &module), path, value), &module))
+            refusal(&a_coded_file(&with(coded("org.example.plugin", &module), path, value), &module))
         };
         // a hook or an interface this app doesn't have is for a newer one
         assert_eq!(of("/hooks", json!(["position", "layers"])), Refusal::Newer);
@@ -1287,17 +1304,17 @@ pub(crate) mod tests {
         assert_eq!(of("/compat/procraft", json!({ "min_app": "0.0.1" })), Refusal::Described);
         // nor may it ask for anything
         assert_eq!(of("/permissions", json!(["files"])), Refusal::Permissions);
-        // and a kind that isn't one yet is for a newer one too
-        assert_eq!(of("/kind", json!("module")), Refusal::Newer);
+        // and a part that isn't one yet is for a newer one too
+        assert_eq!(of("/holds", json!(["module"])), Refusal::Newer);
     }
 
     #[test]
     fn a_control_takes_over_a_moved_setting_and_nothing_else() {
         let module = a_module();
         let with_keeps = |keeps: &str| {
-            let mut manifest = patch("org.example.patch", &module);
-            manifest["controls"] = json!([{ "key": "on", "type": "switch", "label": "On", "keeps": keeps }]);
-            a_patch_file(&manifest, &module)
+            let mut manifest = coded("org.example.plugin", &module);
+            manifest["controls"] = json!([{ "key": "flag", "type": "switch", "label": "On", "keeps": keeps }]);
+            a_coded_file(&manifest, &module)
         };
         // (it needs its controls told; here only what it may be kept under is looked at)
         assert_eq!(refusal(&with_keeps("light_interface")), Refusal::Described);
@@ -1306,45 +1323,115 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_id_can_t_end_as_the_note_of_a_stop_does() {
+        // or its folder would be where another plugin's stop is written down
+        let refused = with(a_filter(), "/id", json!("org.example.stopped"));
+        assert_eq!(refusal(&a_filter_file(&refused)), Refusal::Described);
+        // the word is fine anywhere else
+        assert!(read_package(&a_filter_file(&with(a_filter(), "/id", json!("org.stopped.example")))).is_ok());
+        assert!(read_package(&a_filter_file(&with(a_filter(), "/id", json!("org.example.unstopped")))).is_ok());
+        // and a folder of that name, however it came to be there, is no plugin and leaves the note be
+        let dir = folder("stopped-id");
+        let package = read_package(&a_filter_file(&a_filter())).unwrap();
+        keep(&dir, &package).unwrap();
+        std::fs::rename(dir.join("org.example.filter"), dir.join("org.example.other.stopped")).unwrap();
+        assert!(read_all(&dir).is_empty());
+        note_stopped(&dir, "org.example.filter", "why");
+        assert_eq!(stopped_why(&dir, "org.example.filter").as_deref(), Some("why"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A manifest holding a filter and `module`, each listed.
+    fn both(module: &[u8]) -> Value {
+        let mut manifest = a_filter();
+        manifest["holds"] = json!(["filter", "hooks"]);
+        manifest["hooks"] = json!(["position"]);
+        manifest["controls"] = json!([]);
+        manifest["files"] = json!([
+            { "path": FILTER_CODE, "sha256": sha256(SHADER), "size": SHADER.len() },
+            { "path": MODULE, "sha256": sha256(module), "size": module.len() },
+        ]);
+        manifest
+    }
+
+    #[test]
+    fn a_file_says_what_it_holds_and_lists_just_that() {
+        let module = a_module();
+        let both_file = |manifest: &Value| pack(manifest, &[(FILTER_CODE, SHADER), (MODULE, &module)]);
+        let package = read_package(&both_file(&both(&module))).unwrap();
+        assert_eq!(package.manifest.holds, [PluginPart::Filter, PluginPart::Hooks]);
+        assert_eq!(package.manifest.hooks, [Hook::Position]);
+        // nothing, the same twice, or left out
+        assert_eq!(refusal(&both_file(&with(both(&module), "/holds", json!([])))), Refusal::Described);
+        let twice = json!(["filter", "hooks", "filter"]);
+        assert_eq!(refusal(&both_file(&with(both(&module), "/holds", twice))), Refusal::Described);
+        let mut none = both(&module);
+        none.as_object_mut().unwrap().remove("holds");
+        assert_eq!(refusal(&both_file(&none)), Refusal::Described);
+        // code in the file it doesn't say it holds, and the other way round
+        let hidden = with(both(&module), "/holds", json!(["filter"]));
+        assert_eq!(refusal(&both_file(&hidden)), Refusal::Described);
+        let hidden = with(both(&module), "/holds", json!(["hooks"]));
+        assert_eq!(refusal(&both_file(&hidden)), Refusal::Described);
+        let mut lacking = both(&module);
+        lacking["files"].as_array_mut().unwrap().remove(1);
+        assert_eq!(refusal(&pack(&lacking, &[(FILTER_CODE, SHADER)])), Refusal::Described);
+        // hooks named by what holds none
+        assert_eq!(refusal(&a_filter_file(&with_hooks(a_filter()))), Refusal::Described);
+        // each part is looked at for what it is
+        let not_code = b"nothing a machine would run".as_slice();
+        assert_eq!(refusal(&pack(&both(not_code), &[(FILTER_CODE, SHADER), (MODULE, not_code)])), Refusal::Code);
+        let mut broken = both(&module);
+        let bad = b"fn pixel() {}".as_slice();
+        broken["files"][0] = json!({ "path": FILTER_CODE, "sha256": sha256(bad), "size": bad.len() });
+        assert_eq!(refusal(&pack(&broken, &[(FILTER_CODE, bad), (MODULE, &module)])), Refusal::FilterCode);
+    }
+
+    fn with_hooks(mut manifest: Value) -> Value {
+        manifest["hooks"] = json!(["position"]);
+        manifest
+    }
+
+    #[test]
     fn a_control_can_t_be_called_what_a_flag_is_kept_under() {
         let module = a_module();
-        let mut manifest = patch("org.example.patch", &module);
-        manifest["controls"] = json!([{ "key": "applied", "type": "switch", "label": "On" }]);
-        assert_eq!(refusal(&a_patch_file(&manifest, &module)), Refusal::Described);
+        let mut manifest = coded("org.example.plugin", &module);
+        manifest["controls"] = json!([{ "key": "on", "type": "switch", "label": "On" }]);
+        assert_eq!(refusal(&a_coded_file(&manifest, &module)), Refusal::Described);
     }
 
     #[test]
-    fn a_patch_needs_its_module_and_a_module_that_can_run() {
+    fn a_plugin_needs_its_module_and_a_module_that_can_run() {
         let module = a_module();
         // listed under another name, or too big by its list
-        let mut named = patch("org.example.patch", &module);
+        let mut named = coded("org.example.plugin", &module);
         named["files"][0]["path"] = json!("other.wasm");
         assert_eq!(refusal(&pack(&named, &[("other.wasm", &module)])), Refusal::Described);
-        let big = with(patch("org.example.patch", &module), "/files/0/size", json!(MOST_MODULE + 1));
-        assert_eq!(refusal(&a_patch_file(&big, &module)), Refusal::Described);
+        let big = with(coded("org.example.plugin", &module), "/files/0/size", json!(MOST_MODULE + 1));
+        assert_eq!(refusal(&a_coded_file(&big, &module)), Refusal::Described);
         // not code, code that wants things, code with no controls to be told
         let not_code = b"nothing a machine would run".as_slice();
-        let manifest = patch("org.example.patch", not_code);
-        assert_eq!(refusal(&a_patch_file(&manifest, not_code)), Refusal::Code);
-        let wants = crate::patch_run::tests::position_module(r#"(import "env" "open" (func))"#, "(i64.const 0)");
-        let manifest = patch("org.example.patch", &wants);
-        assert_eq!(refusal(&a_patch_file(&manifest, &wants)), Refusal::Code);
-        let mut manifest = patch("org.example.patch", &module);
-        manifest["controls"] = json!([{ "key": "on", "type": "switch", "label": "On" }]);
-        assert_eq!(refusal(&a_patch_file(&manifest, &module)), Refusal::Code);
+        let manifest = coded("org.example.plugin", not_code);
+        assert_eq!(refusal(&a_coded_file(&manifest, not_code)), Refusal::Code);
+        let wants = crate::plugin_run::tests::position_module(r#"(import "env" "open" (func))"#, "(i64.const 0)");
+        let manifest = coded("org.example.plugin", &wants);
+        assert_eq!(refusal(&a_coded_file(&manifest, &wants)), Refusal::Code);
+        let mut manifest = coded("org.example.plugin", &module);
+        manifest["controls"] = json!([{ "key": "flag", "type": "switch", "label": "On" }]);
+        assert_eq!(refusal(&a_coded_file(&manifest, &module)), Refusal::Code);
     }
 
     #[test]
-    fn a_kept_patch_with_its_module_changed_counts_as_absent() {
-        let dir = folder("patch");
+    fn a_kept_plugin_with_its_module_changed_counts_as_absent() {
+        let dir = folder("plugin");
         let module = a_module();
-        let package = read_package(&a_patch_file(&patch("org.example.patch", &module), &module)).unwrap();
+        let package = read_package(&a_coded_file(&coded("org.example.plugin", &module), &module)).unwrap();
         keep(&dir, &package).unwrap();
         assert_eq!(read_all(&dir).len(), 1);
-        assert_eq!(read_code(&dir, "org.example.patch", "1.0.0"), Some((vec![Hook::Position], module)));
-        std::fs::write(dir.join("org.example.patch/1.0.0").join(MODULE), b"something else").unwrap();
+        assert_eq!(read_code(&dir, "org.example.plugin", "1.0.0"), Some((vec![Hook::Position], module)));
+        std::fs::write(dir.join("org.example.plugin/1.0.0").join(MODULE), b"something else").unwrap();
         assert!(read_all(&dir).is_empty());
-        assert_eq!(read_code(&dir, "org.example.patch", "1.0.0"), None);
+        assert_eq!(read_code(&dir, "org.example.plugin", "1.0.0"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

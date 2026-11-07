@@ -1,7 +1,7 @@
 //! Dropping a colour on the canvas: the colour poured into the area joined to a point whose colour
 //! is near the point's own, measured on the reference layer if there is one. While the finger stays
 //! down the threshold can change and the pour is redone from the layer as it was; it ends as one
-//! undo step. Recolor keeps a pour open while its point moves and its colour changes. A patch on
+//! undo step. Recolor keeps a pour open while its point moves and its colour changes. A plugin on
 //! the fill hook has its say as a pour is let go, on a thread of its own: the pour stays open, its
 //! layer held, until it has.
 
@@ -13,13 +13,13 @@ use procraft_engine::geom::Vec2;
 use procraft_engine::selection::Mask;
 
 use crate::hooks::Hooks;
-use crate::patch_run::MOST_FILL;
+use crate::plugin_run::MOST_FILL;
 use crate::{CanvasSession, Shared, State};
 
-/// What is said of a fill with more in it than can go through a patch.
-const TOO_BIG: &str = "This fill is too big for a patch: it stays as it is.";
+/// What is said of a fill with more in it than can go through a plugin.
+const TOO_BIG: &str = "This fill is too big for a plugin: it stays as it is.";
 
-/// A pour a patch is finishing: when it has, and whoever is waiting for that.
+/// A pour a plugin is finishing: when it has, and whoever is waiting for that.
 #[derive(Default)]
 pub(crate) struct Finishing {
     done: Mutex<bool>,
@@ -58,9 +58,9 @@ pub(crate) struct Pour {
     shown_region: Option<[u32; 4]>,
     /// What it last poured, as the flood reached (within the selection).
     shown_mask: Option<Mask>,
-    /// The flood as a patch left it, once one has.
+    /// The flood as a plugin left it, once one has.
     closed: Option<Mask>,
-    /// Being finished by a patch: nothing more changes it.
+    /// Being finished by a plugin: nothing more changes it.
     finishing: Option<Arc<Finishing>>,
 }
 
@@ -163,7 +163,7 @@ impl Pour {
     }
 }
 
-/// `mask`, a fill from `seed`, as the patches on the fill hook leave it: its box goes through with
+/// `mask`, a fill from `seed`, as the plugins on the fill hook leave it: its box goes through with
 /// a pixel round it, which, in the picture, is a pixel of no fill, and past the picture's edge
 /// nothing. None if they change nothing, or it is too big to go through. Takes a while: nothing
 /// is held while it does.
@@ -366,7 +366,7 @@ impl CanvasSession {
 
     /// Ends the open pour: `keep` makes it one undo step, called `name` if given (else
     /// "ColorDrop"); otherwise (or with nothing poured) the layer goes back to how it was. Kept,
-    /// with a patch on the fill hook, it ends when that has had its say, on a thread of its own:
+    /// with a plugin on the fill hook, it ends when that has had its say, on a thread of its own:
     /// [`CanvasSession::pour_finishing`] until then.
     pub fn pour_end(&self, keep: bool, name: Option<String>) {
         self.await_pour();
@@ -378,7 +378,7 @@ impl CanvasSession {
         end_pour(&self.shared, st, keep, name.as_deref());
     }
 
-    /// Whether a fill let go is still being finished by a patch: nothing should be started until
+    /// Whether a fill let go is still being finished by a plugin: nothing should be started until
     /// it is. The pour's own calls wait for it.
     pub fn pour_finishing(&self) -> bool {
         self.shared.lock().pour.as_ref().is_some_and(|pour| pour.finishing.is_some())
@@ -386,7 +386,7 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
-    /// Waits for a fill a patch is finishing, if there is one.
+    /// Waits for a fill a plugin is finishing, if there is one.
     pub(crate) fn await_pour(&self) {
         let finishing = self.shared.lock().pour.as_ref().and_then(|pour| pour.finishing.clone());
         if let Some(finishing) = finishing {
@@ -394,7 +394,7 @@ impl CanvasSession {
         }
     }
 
-    /// Hands the open pour to a thread of its own, to end when the patches on the fill hook have
+    /// Hands the open pour to a thread of its own, to end when the plugins on the fill hook have
     /// had their say; false if none wants to, and it is to end now.
     fn finish_pour(&self, st: &mut State, name: &Option<String>) -> bool {
         let Some(hooks) = st.hooks.clone().filter(|hooks| hooks.fill_mask()) else { return false };
@@ -436,8 +436,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_fill_goes_through_a_row_of_bits_and_comes_back_by_where_it_was() {
-        use crate::patch_run::tests::{FILL_AT, fill_module};
-        use crate::patch_run::{Hook, Running};
+        use crate::plugin_run::tests::{FILL_AT, fill_module};
+        use crate::plugin_run::{Hook, Running};
         // takes out the fifth pixel of every row it is handed
         let out = "(i64.store (i32.const 65536) (i64.const 16))";
         let hooks = Hooks::default();
@@ -460,8 +460,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_box_at_the_picture_s_edge_has_nothing_past_it() {
-        use crate::patch_run::tests::fill_module;
-        use crate::patch_run::{Hook, Running};
+        use crate::plugin_run::tests::fill_module;
+        use crate::plugin_run::{Hook, Running};
         // it must be told 3 wide and 2 tall (nothing left or above, a pixel right and below) and
         // the seed at (1, 0), or it crashes
         let begin = "(if (i32.or (i32.ne (local.get 0) (i32.const 3)) (i32.or (i32.ne (local.get 1) (i32.const 2))

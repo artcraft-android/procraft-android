@@ -61,7 +61,6 @@ import androidx.lifecycle.viewModelScope
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.core.PluginControl
 import io.github.artcraftandroid.procraft.core.PluginInfo
-import io.github.artcraftandroid.procraft.core.PluginKind
 import io.github.artcraftandroid.procraft.core.PluginSlider
 import io.github.artcraftandroid.procraft.core.PluginSource
 import io.github.artcraftandroid.procraft.core.pluginSliderAlong
@@ -94,7 +93,7 @@ private class Heading(val label: String) : ActionRow
 private class Slide(val label: String, val value: String, val fraction: Float, val tall: Dp = 63.dp, val onDone: () -> Unit = {}, val onChange: (Float) -> Unit) : ActionRow
 
 /** The pages the panel shows: its tabs, or a page of settings reached from one of them. */
-private enum class ActionsPage { TABS, PRESSURE, CURSOR, PATCHES, PLUGINS }
+private enum class ActionsPage { TABS, PRESSURE, CURSOR, PLUGINS }
 
 private val CurveFill get() = if (Pc.light) Color(0xFFE7E7E9) else Color(0xFF262626)
 
@@ -293,7 +292,6 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
             listOf(
                 Act("Pressure and Smoothing") { page = ActionsPage.PRESSURE },
                 Act("Gesture controls") { vm.gestureControlsOpen = true },
-                Act("Patches") { page = ActionsPage.PATCHES },
                 Act("Plugins") { page = ActionsPage.PLUGINS },
             ),
             listOf(
@@ -340,8 +338,8 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                     CursorPage(vm) { page = ActionsPage.TABS }
                     return@Column
                 }
-                if (shown == ActionsPage.PATCHES || shown == ActionsPage.PLUGINS) {
-                    PluginsPage(vm, patches = shown == ActionsPage.PATCHES) { page = ActionsPage.TABS }
+                if (shown == ActionsPage.PLUGINS) {
+                    PluginsPage(vm) { page = ActionsPage.TABS }
                     return@Column
                 }
                 Text(
@@ -563,9 +561,9 @@ private fun CursorPage(vm: CanvasViewModel, onBack: () -> Unit) {
     }
 }
 
-/** The patches, or the plugins, a page of the panel: a card each, drawn from what the list says of them. */
+/** The plugins, a page of the panel: a card each, drawn from what the list says of them. */
 @Composable
-private fun PluginsPage(vm: CanvasViewModel, patches: Boolean, onBack: () -> Unit) {
+private fun PluginsPage(vm: CanvasViewModel, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
     androidx.compose.runtime.LaunchedEffect(Unit) { vm.readPlugins() }
     val importer = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
@@ -575,12 +573,12 @@ private fun PluginsPage(vm: CanvasViewModel, patches: Boolean, onBack: () -> Uni
         Box(Modifier.size(44.dp, 34.dp).clickable(onClick = onBack), contentAlignment = Alignment.Center) {
             Icon(PcIcons.ChevronLeft, contentDescription = "Back", tint = Pc.PanelTitle, modifier = Modifier.size(22.dp))
         }
-        Text(if (patches) "Patches" else "Plugins", color = Pc.PanelTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
+        Text("Plugins", color = Pc.PanelTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
         Box(Modifier.height(34.dp).clickable { importer.launch(arrayOf("*/*")) }.padding(horizontal = 16.dp), contentAlignment = Alignment.Center) {
             Text("Import", color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
         }
     }
-    val shown = if (patches) vm.patchList else vm.pluginList
+    val shown = vm.pluginList
     Column(
         Modifier.verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp),
         verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(20.dp),
@@ -593,7 +591,7 @@ private fun PluginsPage(vm: CanvasViewModel, patches: Boolean, onBack: () -> Uni
 /** The tag on a card. */
 private val PluginTag get() = if (Pc.light) Color(0x14000000) else Color(0x1FFFFFFF)
 
-/** A patch or plugin: its name and tag, what it does, what is the matter with it, its controls whatever they are, and the row that applies or removes it. */
+/** A plugin: its name and tag, what it does, what is the matter with it, its controls whatever they are, and the rows that turn it on or off and remove it. */
 @Composable
 private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Pc.ActionsGroup)) {
@@ -614,8 +612,7 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
             Text(plugin.description, color = Pc.ActionsRow, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
             plugin.problem?.let { Text(it, color = Pc.SlideValue, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 4.dp)) }
         }
-        // an extra's always, a patch's once applied; a filter's are on its own panel
-        if (plugin.on && plugin.problem == null && plugin.kind != PluginKind.FILTER) {
+        if (plugin.on && plugin.problem == null) {
             for (control in plugin.controls) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
                 when (control) {
@@ -624,15 +621,8 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
                 }
             }
         }
-        if (plugin.kind == PluginKind.PATCH) {
-            Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
-            ActionRowView(Act(if (plugin.on) "Unapply" else "Apply") { vm.setPluginOn(plugin, !plugin.on) })
-        }
-        // a filter that stopped stays off until someone asks
-        if (plugin.kind == PluginKind.FILTER && !plugin.on) {
-            Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
-            ActionRowView(Act("Turn on") { vm.setPluginOn(plugin, true) })
-        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
+        ActionRowView(Act(if (plugin.on) "Turn off" else "Turn on") { vm.setPluginOn(plugin, !plugin.on) })
         if (plugin.source == PluginSource.FILE) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
             ActionRowView(Act("Remove") { vm.removePlugin(plugin) })
@@ -662,12 +652,12 @@ private fun PluginSliderRow(slider: PluginSlider, onSet: (PluginSlider, Float) -
     )
 }
 
-/** The one screen that asks whether to import a plugin file: what it is, and what it can do. Also where a setting that has moved to a patch is said, once. */
+/** The one screen that asks whether to import a plugin file: what it is, and what it can do. Also where a setting that has moved to a plugin is said, once. */
 @Composable
 fun PluginOfferAlert(vm: CanvasViewModel) {
     Alert(
         vm.movedNotice,
-        title = { "Now a patch" },
+        title = { "Now a plugin" },
         message = { it },
         action = "OK",
         onCancel = vm::movedNoticeRead,

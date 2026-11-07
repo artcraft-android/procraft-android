@@ -1,4 +1,4 @@
-//! A patch's code: a WebAssembly module, interpreted under caps on its time and memory. It gets no
+//! A plugin's code: a WebAssembly module, interpreted under caps on its time and memory. It gets no
 //! imports at all, no files, network or layers, so all it ever sees is the numbers a hook hands it
 //! and all it can do is hand some back.
 //!
@@ -23,7 +23,7 @@
 //!   out there. All it can do is take away: what isn't in the fill stays out of it, and the seed
 //!   stays in.
 //! - `procraft_control(index: i32, value: f32)`: a control's value (a switch is 0 or 1), by its
-//!   place in the manifest: each as the patch starts, then each as it changes. Needed if it has any.
+//!   place in the manifest: each as the plugin starts, then each as it changes. Needed if it has any.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
@@ -34,12 +34,12 @@ use wasmi::{
     TypedFunc, TypedResumableCall, ValType, WasmParams, WasmResults,
 };
 
-/// The module's name in a patch's folder.
-pub(crate) const MODULE: &str = "patch.wasm";
+/// The module's name in a plugin's folder.
+pub(crate) const MODULE: &str = "plugin.wasm";
 /// The most a module may be, and may ask for as it runs, in bytes.
 pub(crate) const MOST_MODULE: usize = 1 << 20;
 const MOST_MEMORY: usize = 16 << 20;
-/// What a patch on the fill hook may ask for: a few planes of a bit a pixel, for the fills
+/// What a plugin on the fill hook may ask for: a few planes of a bit a pixel, for the fills
 /// [`MOST_FILL`] lets through.
 const MOST_FILL_MEMORY: usize = 64 << 20;
 const MOST_TABLE: usize = 10_000;
@@ -60,7 +60,7 @@ const FILL_FUEL: u64 = 20_000_000;
 const FILL_PIXEL_FUEL: u64 = 1024;
 const MOST_FILL_TIME: Duration = Duration::from_secs(30);
 const FUEL_SLICE: u64 = 200_000_000;
-/// The most pixels of a fill's box that go through a patch: a whole canvas of 8192 a side.
+/// The most pixels of a fill's box that go through a plugin: a whole canvas of 8192 a side.
 pub(crate) const MOST_FILL: u64 = 8194 * 8194;
 /// How far a sample may be moved, window pixels: further was never meant.
 const MOST_MOVE: f32 = 16_384.0;
@@ -81,7 +81,7 @@ const FILL_OUT: &str = "procraft_fill_out";
 const MEMORY: &str = "memory";
 const CONTROL: &str = "procraft_control";
 
-/// What a patch may step into, by the name a manifest gives it.
+/// What a plugin may step into, by the name a manifest gives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Hook {
     Position,
@@ -103,14 +103,14 @@ impl Hook {
         }
     }
 
-    /// What it lets a patch do, for the screen that asks whether to import one.
+    /// What it lets a plugin do, for the screen that asks whether to import one.
     pub(crate) fn sentence(self) -> &'static str {
         match self {
-            Hook::Position => "This patch can change where your strokes land.",
-            Hook::PickLayer => "This patch can make the eyedropper read the current layer alone.",
-            Hook::InterfaceScale => "This patch can make the interface bigger or smaller.",
-            Hook::PasteMask => "This patch can put what you paste into the current mask.",
-            Hook::FillMask => "This patch can take parts out of a ColorDrop fill.",
+            Hook::Position => "This plugin can change where your strokes land.",
+            Hook::PickLayer => "This plugin can make the eyedropper read the current layer alone.",
+            Hook::InterfaceScale => "This plugin can make the interface bigger or smaller.",
+            Hook::PasteMask => "This plugin can put what you paste into the current mask.",
+            Hook::FillMask => "This plugin can take parts out of a ColorDrop fill.",
         }
     }
 
@@ -143,7 +143,7 @@ impl Hook {
     }
 }
 
-/// Why a patch stopped, or never ran. Each stays on its card, in plain words.
+/// Why a plugin stopped, or never ran. Each stays on its card, in plain words.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stop {
     TooSlow,
@@ -174,7 +174,7 @@ fn stop_of(error: &wasmi::Error) -> Stop {
     }
 }
 
-/// `run`, a panic in the interpreter counting as a crash of the patch: a file must not take the
+/// `run`, a panic in the interpreter counting as a crash of the plugin: a file must not take the
 /// app down with it.
 fn guarded<T>(run: impl FnOnce() -> Result<T, Stop>) -> Result<T, Stop> {
     catch_unwind(AssertUnwindSafe(run)).unwrap_or(Err(Stop::Crashed))
@@ -228,7 +228,7 @@ fn has_memory(module: &Module) -> bool {
     module.exports().any(|export| export.name() == MEMORY && export.ty().memory().is_some())
 }
 
-/// Whether `bytes` is a module a patch on `hooks` can be: valid, wanting nothing from outside, and
+/// Whether `bytes` is a module a plugin on `hooks` can be: valid, wanting nothing from outside, and
 /// exporting what it must (`controls`: it has some). Nothing in it runs.
 pub(crate) fn can_run(bytes: &[u8], hooks: &[Hook], controls: bool) -> bool {
     if bytes.len() > MOST_MODULE || !code_counts_hold(bytes) {
@@ -286,7 +286,7 @@ fn long_call<P: WasmParams, R: WasmResults>(
     }
 }
 
-/// A patch's module, instantiated, with what it has of ours to call.
+/// A plugin's module, instantiated, with what it has of ours to call.
 pub(crate) struct Running {
     store: Store<StoreLimits>,
     position: Option<TypedFunc<(f32, f32), i64>>,
@@ -301,7 +301,7 @@ pub(crate) struct Running {
 }
 
 impl Running {
-    /// `bytes` started, under the caps of a patch on `hooks`, and told `controls`.
+    /// `bytes` started, under the caps of a plugin on `hooks`, and told `controls`.
     pub(crate) fn start_on(bytes: &[u8], controls: &[f32], hooks: &[Hook]) -> Result<Running, Stop> {
         let most_memory = if hooks.contains(&Hook::FillMask) { MOST_FILL_MEMORY } else { MOST_MEMORY };
         Running::start_within(bytes, controls, most_memory)
@@ -510,7 +510,7 @@ impl Running {
 pub(crate) mod tests {
     use super::*;
 
-    /// Moves a sample by its two controls, as a patch of real use does.
+    /// Moves a sample by its two controls, as a plugin of real use does.
     pub(crate) const OFFSET: &str = r#"(module
         (global $x (mut f32) (f32.const 0))
         (global $y (mut f32) (f32.const 0))
@@ -537,7 +537,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_patch_moves_a_sample_by_what_its_controls_say() {
+    fn a_plugin_moves_a_sample_by_what_its_controls_say() {
         let bytes = wat::parse_str(OFFSET).unwrap();
         assert!(can_run(&bytes, &[Hook::Position], true));
         let mut running = Running::start(&bytes, &[3.0, -2.0]).unwrap();
@@ -803,7 +803,7 @@ pub(crate) mod tests {
         };
         assert_eq!(run(&grows(fits), &[Hook::FillMask]), Ok(false));
         assert_eq!(run(&grows(over), &[Hook::FillMask]), Err(Stop::Memory));
-        // a patch on any other hook has the cap it always had
+        // a plugin on any other hook has the cap it always had
         assert_eq!(run(&grows(fits), &[Hook::Position]), Err(Stop::Memory));
     }
 

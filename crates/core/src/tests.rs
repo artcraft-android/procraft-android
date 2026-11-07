@@ -2533,7 +2533,7 @@ fn a_mask_takes_what_is_pasted_by_its_brightness_only_when_asked() {
     assert_eq!(s.layers().len(), layers);
     s.select_layer(mask);
     // asked to, the mask holds it: the layer shows where it was bright, nowhere else
-    let (_patches, patch_files) = crate::hooks::tests::paste_into_masks(&s, "mask-takes-paste");
+    let (_plugins, plugin_files) = crate::hooks::tests::paste_into_masks(&s, "mask-takes-paste");
     assert_eq!(s.paste(picture.clone()), Some(mask));
     assert_eq!(s.layers().len(), layers);
     assert_eq!(pixel(&s, 10, 32), [255, 0, 0, 255]);
@@ -2553,7 +2553,7 @@ fn a_mask_takes_what_is_pasted_by_its_brightness_only_when_asked() {
     assert!(!s.paste_picture_into_mask(square));
     assert_ne!(s.paste(picture), Some(layer));
     assert_eq!(s.layers().len(), layers + 1);
-    let _ = std::fs::remove_dir_all(patch_files);
+    let _ = std::fs::remove_dir_all(plugin_files);
 }
 
 #[test]

@@ -402,9 +402,8 @@ mod tests {
 
     #[test]
     fn a_picture_is_kept_at_its_own_size_up_to_the_most() {
-        let side = |w: u32, h: u32| {
-            crate::studio::source_from_picture(vec![200; (w * h * 4) as usize], w, h).len().isqrt()
-        };
+        let side =
+            |w: u32, h: u32| crate::studio::source_from_picture(vec![200; (w * h * 4) as usize], w, h).len().isqrt();
         assert_eq!(side(100, 40), TEXTURE_SIZE);
         assert_eq!(side(256, 256), TEXTURE_SIZE);
         assert_eq!(side(300, 100), 512);

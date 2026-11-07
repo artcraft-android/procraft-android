@@ -241,7 +241,7 @@ struct App {
     /// moving, or a hold to be timed).
     last_frame: Instant,
     again: Option<Instant>,
-    /// Since when a patch has been finishing a fill.
+    /// Since when a plugin has been finishing a fill.
     finishing_since: Option<Instant>,
     /// An artwork's canvas being made on a thread of its own as it opens, and since when.
     opening: Option<(Instant, std::thread::JoinHandle<()>)>,
@@ -404,7 +404,7 @@ impl ApplicationHandler for App {
                 let Some(session) = session else { return };
                 // with a popover open, a press on the canvas only closes it (a panel alone lets it
                 // through, to wait there to be a tap or a drag); while the artwork is being
-                // exported, or a patch finishes a fill, none reaches it (nothing either would end is
+                // exported, or a plugin finishes a fill, none reaches it (nothing either would end is
                 // started)
                 let through = self.ui.popover_open && self.ui.panel_lets_through;
                 let blocked = (self.ui.popover_open && !through)
@@ -593,7 +593,7 @@ impl App {
         {
             zoom.hold();
         }
-        // a patch finishing a fill: after a moment it says so
+        // a plugin finishing a fill: after a moment it says so
         let finishing = session.pour_finishing();
         self.finishing_since = finishing.then(|| self.finishing_since.unwrap_or_else(Instant::now));
         let finishing_slowly = self.finishing_since.is_some_and(|since| since.elapsed() >= SLOW_OPENING);
