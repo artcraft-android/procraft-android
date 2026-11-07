@@ -37,6 +37,19 @@ fn is_picture(path: &std::path::Path) -> bool {
     let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     PICTURES.contains(&extension.as_str())
 }
+
+/// Why layer or group `name`, which would hide a change, takes none, by what hides it (`by`).
+fn hidden_message(name: &str, by: Option<procraft_core::HiddenBy>) -> String {
+    use procraft_core::HiddenBy as H;
+    let why = match by {
+        Some(H::MaskLayer) => "its layer is hidden",
+        Some(H::Group) => "its group is hidden",
+        Some(H::Inside) => "a layer in it is hidden",
+        Some(H::Solo) => "another layer is shown alone",
+        Some(H::Itself) | None => "it is hidden",
+    };
+    format!("\u{201c}{name}\u{201d} can't be changed while {why}.")
+}
 /// A video's frames come in at the animation's frame rate, or this one; this many at most.
 const VIDEO_FPS: u32 = 15;
 const MOST_VIDEO_FRAMES: u32 = 999;
@@ -1186,11 +1199,12 @@ impl Interface {
         if let Some((x, y, threshold)) = sliding {
             session.show_colour_selection(x, y, threshold);
         }
-        // a stroke on a locked or hidden layer drew nothing: say why (a text layer takes none
-        // until it is rasterized, which it asks about itself)
+        // a stroke on a locked or hidden layer, or a group, drew nothing: say why (a text layer
+        // takes none until it is rasterized, which it asks about itself)
         let on_text = session.layers().iter().any(|l| l.current && l.text);
         if stroke_ended && !on_text {
-            self.takes_changes(session);
+            let why = session.why_unpainted();
+            self.say_blocked(session, why);
         }
     }
 
@@ -1795,10 +1809,16 @@ impl Interface {
         }
     }
 
-    /// Whether the current layer takes a change; if not (locked, hidden, or an empty group), an
-    /// alert says why. What was tried is not done afterwards.
+    /// Whether the current layer takes a change; if not (locked, hidden or left out of the
+    /// picture, or an empty group), an alert says why. What was tried is not done afterwards.
     fn takes_changes(&mut self, session: &CanvasSession) -> bool {
-        let Some(why) = session.why_blocked() else { return true };
+        let why = session.why_blocked();
+        self.say_blocked(session, why)
+    }
+
+    /// As [`Self::takes_changes`], for why the current layer took nothing (`why`, if anything).
+    fn say_blocked(&mut self, session: &CanvasSession, why: Option<Blocked>) -> bool {
+        let Some(why) = why else { return true };
         let Some(l) = session.layers().into_iter().find(|l| l.current) else { return true };
         let (title, message, icon, extra) = match why {
             Blocked::Locked => (
@@ -1807,11 +1827,17 @@ impl Interface {
                 &crate::icons::PAGE_LOCKED,
                 Some("Unlock"),
             ),
-            Blocked::Hidden => (
-                "Layer is hidden",
-                format!("\u{201c}{}\u{201d} can't be changed while it is hidden.", l.name),
+            Blocked::Hidden | Blocked::GroupHidden => (
+                if why == Blocked::Hidden { "Layer is hidden" } else { "Group is hidden" },
+                hidden_message(&l.name, session.hidden_by()),
                 &crate::icons::EYE_STRUCK,
                 Some("Show"),
+            ),
+            Blocked::Group => (
+                "Group is selected",
+                format!("\u{201c}{}\u{201d} is a group: choose one of its layers to paint on.", l.name),
+                &crate::icons::FOLDER,
+                None,
             ),
             Blocked::EmptyGroup => (
                 "Group is empty",
@@ -1927,7 +1953,12 @@ impl Interface {
         let Some((why, id)) = self.blocked.take() else { return };
         match answer {
             Answer::Extra if why == Blocked::Locked => _ = session.set_layer_locked(id, false),
-            Answer::Extra if why == Blocked::Hidden => _ = session.set_layer_visible(id, true),
+            // its own box ticked (what else hides it stays)
+            Answer::Extra if matches!(why, Blocked::Hidden | Blocked::GroupHidden) => {
+                if let Some(said) = session.show_layer(id) {
+                    self.overlays.notice(said, false);
+                }
+            }
             Answer::Extra if matches!(why, Blocked::MeshHidden | Blocked::MeshLocked) => session.free_meant_meshes(),
             Answer::Action => self.open = Some(Popover::Layers),
             _ => {}

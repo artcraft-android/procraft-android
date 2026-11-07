@@ -1,7 +1,7 @@
 //! Layers: the list the layers panel shows and every change to it, each one undoable. A slider
 //! drag (opacity, background colour) is one undo step from where it began to `done`.
 
-use procraft_engine::document::{BlendMode, Document, LayerId, LayerKind};
+use procraft_engine::document::{BlendMode, Document, LayerId, LayerKind, Unseen};
 
 use crate::CanvasSession;
 
@@ -588,22 +588,61 @@ impl CanvasSession {
     }
 
     /// Why the current layer takes no change (a stroke, a transform, an adjustment, clearing,
-    /// cutting): it is locked, hidden, or a group with nothing in it. None if it takes them.
+    /// cutting): it is locked, hidden (itself, by a group it is in, or left out while another
+    /// layer is shown alone), or a group with nothing in it. None if it takes them.
     pub fn why_blocked(&self) -> Option<Blocked> {
         if let Some(why) = self.shared.lock().scene_blocked() {
             return Some(why);
         }
         let layers = self.layers();
         let l = layers.iter().find(|l| l.current)?;
+        let unseen = self.shared.lock().doc.unseen(LayerId(l.id));
         if l.locked {
             Some(Blocked::Locked)
-        } else if !l.visible {
-            Some(Blocked::Hidden)
+        } else if unseen.is_some() {
+            // the alert is a group's or a layer's by what is current, whatever hides it
+            Some(if l.kind == LayerType::Group { Blocked::GroupHidden } else { Blocked::Hidden })
         } else if l.kind == LayerType::Group && !layers.iter().any(|o| o.parent == Some(l.id)) {
             Some(Blocked::EmptyGroup)
         } else {
             None
         }
+    }
+
+    /// Why a change to the current layer would go unseen, if it would (what a hidden alert
+    /// says, [`Blocked::Hidden`] and [`Blocked::GroupHidden`]).
+    pub fn hidden_by(&self) -> Option<HiddenBy> {
+        let st = self.shared.lock();
+        Some(match st.doc.unseen(st.doc.current())? {
+            Unseen::Itself => HiddenBy::Itself,
+            Unseen::MaskLayer => HiddenBy::MaskLayer,
+            Unseen::Group => HiddenBy::Group,
+            Unseen::Inside => HiddenBy::Inside,
+            Unseen::Solo => HiddenBy::Solo,
+        })
+    }
+
+    /// Why a stroke or a fill on the current layer would leave nothing: why it takes no change
+    /// ([`CanvasSession::why_blocked`]), or a group is current, an empty one too (strokes and fills
+    /// go into layers). None if it takes paint.
+    pub fn why_unpainted(&self) -> Option<Blocked> {
+        let why = self.why_blocked();
+        let group = {
+            let st = self.shared.lock();
+            st.doc.layer(st.doc.current()).is_some_and(|l| l.kind == LayerKind::Group)
+        };
+        match why {
+            Some(Blocked::EmptyGroup) => Some(Blocked::Group),
+            None if group => Some(Blocked::Group),
+            other => other,
+        }
+    }
+
+    /// A hidden alert's Show: layer `id`'s own box ticked (one step), nothing else, so a layer kept
+    /// hidden by a group, by its layer (a mask) or by another shown alone stays so. Returns what
+    /// the notice band says, or None if its box was ticked already.
+    pub fn show_layer(&self, id: u64) -> Option<String> {
+        self.set_layer_visible(id, true).then(|| "Show layer".to_owned())
     }
 
     /// The rows a drag of layer `id` in the panel takes along (see
@@ -1012,12 +1051,34 @@ impl CanvasSession {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Blocked {
     Locked,
+    /// A layer that doesn't show: hidden itself, in a hidden group (a mask, on a hidden layer),
+    /// or left out while another layer is shown alone.
     Hidden,
     EmptyGroup,
     /// On a model, every mesh a stroke is meant for is hidden.
     MeshHidden,
     /// On a model, every mesh a stroke is meant for is hidden or locked.
     MeshLocked,
+    /// A group that doesn't show (as [`Blocked::Hidden`] is a layer).
+    GroupHidden,
+    /// A group is current where a stroke or a fill takes a layer
+    /// ([`CanvasSession::why_unpainted`]).
+    Group,
+}
+
+/// Why a change to the current layer would go unseen (see [`CanvasSession::hidden_by`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum HiddenBy {
+    /// Its own box is off.
+    Itself,
+    /// A mask whose layer is hidden.
+    MaskLayer,
+    /// A group it is in is hidden.
+    Group,
+    /// A group with something hidden in it.
+    Inside,
+    /// Left out while another layer is shown alone, and so is every layer picked with it.
+    Solo,
 }
 
 /// What a drag of layer `id` takes along, and whether that is the chosen layers together: it with

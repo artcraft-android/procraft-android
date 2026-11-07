@@ -338,8 +338,8 @@ struct CanvasScreen: View {
     }
 }
 
-/// The current layer turned a change away (locked, hidden, or an empty group): Cancel, unlock or
-/// show it, or open Layers. What was tried is not done afterwards.
+/// The current layer turned a change away (locked, hidden or left out of the picture, or an empty
+/// group): Cancel, unlock or show it, or open Layers. What was tried is not done afterwards.
 private struct BlockedDialog: View {
     let model: CanvasModel
 
@@ -360,10 +360,15 @@ private struct BlockedDialog: View {
                 title: "Layer is locked", message: "\u{201C}\(name)\u{201D} can't be changed while it is locked.",
                 action: "Open Layers", icon: PcIcons.pageLocked, destructive: false, extra: "Unlock"
             )
-        case .hidden:
+        case .hidden, .groupHidden:
             return AlertContent(
-                title: "Layer is hidden", message: "\u{201C}\(name)\u{201D} can't be changed while it is hidden.",
+                title: b.why == .hidden ? "Layer is hidden" : "Group is hidden", message: Self.hiddenMessage(name, b.by),
                 action: "Open Layers", icon: PcIcons.eyeStruck, destructive: false, extra: "Show"
+            )
+        case .group:
+            return AlertContent(
+                title: "Group is selected", message: "\u{201C}\(name)\u{201D} is a group: choose one of its layers to paint on.",
+                action: "Open Layers", icon: PcIcons.folder, destructive: false
             )
         case .emptyGroup:
             return AlertContent(
@@ -382,6 +387,18 @@ private struct BlockedDialog: View {
                 action: "Open Layers", icon: PcIcons.pageLocked, destructive: false, extra: "Unlock"
             )
         }
+    }
+
+    /// Why layer or group `name`, which would hide a change, takes none, by what hides it (`by`).
+    private static func hiddenMessage(_ name: String, _ by: HiddenBy?) -> String {
+        let why: String = switch by {
+        case .maskLayer: "its layer is hidden."
+        case .group: "its group is hidden."
+        case .inside: "a layer in it is hidden."
+        case .solo: "another layer is shown alone."
+        case .itself, nil: "it is hidden."
+        }
+        return "\u{201C}\(name)\u{201D} can't be changed while " + why
     }
 }
 

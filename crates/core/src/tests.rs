@@ -1132,6 +1132,23 @@ fn nothing_is_saved_from_a_lost_graphics_device() {
 }
 
 #[test]
+fn a_stroke_on_a_canvas_whose_graphics_stopped_tells_so_again() {
+    let Some(s) = session(64, 64) else { return };
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    gpu.device.destroy();
+    let _ = gpu.device.poll(procraft_gpu::wgpu::PollType::wait_indefinitely());
+    assert!(gpu.is_lost());
+    let told = s.take_failure();
+    assert!(told.is_some());
+    assert_eq!(s.take_failure(), None, "told once");
+    // the notice gone (the app away meanwhile), a stroke that can't show says why again
+    s.stroke_begin(PointerKind::Finger, vec![sample(30.0, 30.0, 0.0)]);
+    s.stroke_end(vec![]);
+    assert_eq!(s.take_failure(), told);
+    assert_eq!(s.take_failure(), None);
+}
+
+#[test]
 fn an_artwork_opened_again_has_every_layer_as_it_was() {
     let Some(s) = session(160, 160) else { return };
     // a few strokes on one, nothing on another, all of a third filled
@@ -5685,6 +5702,179 @@ fn a_group_shown_alone_shows_its_layers_and_opens_whole_once_hidden() {
     opened.stroke_begin(PointerKind::Finger, vec![sample(90.0, 50.0, 0.0)]);
     opened.stroke_end(vec![]);
     assert_eq!(pixel(&opened, 90, 50), black);
+}
+
+/// The artwork saved and opened again in a new session, as after a restart (same GPU and window).
+fn reopened(s: &CanvasSession, name: &str) -> std::sync::Arc<CanvasSession> {
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let side = s.shared.lock().window_size;
+    let dir = std::env::temp_dir().join(format!("procraft-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    opened.use_gpu(gpu);
+    {
+        let mut st = opened.shared.lock();
+        let canvas = (st.doc.width(), st.doc.height());
+        st.window_size = side;
+        st.view = Some(View::fit(canvas, side));
+        st.ensure_canvas();
+    }
+    opened
+}
+
+#[test]
+fn a_layer_that_doesnt_show_takes_no_paint_and_says_why_until_shown() {
+    use crate::layers::Blocked;
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    let dot = |s: &CanvasSession, x: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 50.0, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    let black = [0, 0, 0, 255];
+    let white = [255, 255, 255, 255];
+    dot(&s, 20.0);
+    let first = s.layers()[0].id;
+    // the painted layer shown alone, then a new layer: it is left out of the picture
+    assert!(s.set_solo(Some(first)));
+    let top = s.add_layer();
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    // still so once saved and opened again, as after a restart: strokes on it say why rather
+    // than going in unseen
+    let s = reopened(&s, "soloed-out");
+    s.set_brush_size(0.4);
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    dot(&s, 80.0);
+    // Show ticks its own box only (ticked already: nothing), so solo stays and so does the alert
+    assert_eq!(s.show_layer(top), None);
+    assert_eq!((s.solo(), s.why_blocked()), (Some(first), Some(Blocked::Hidden)));
+    // its box tapped ends solo (as in the panel); the stroke left nothing behind, the next paints
+    assert!(s.tap_visibility(top).is_some());
+    assert_eq!((s.solo(), s.why_blocked()), (None, None));
+    assert_eq!([pixel(&s, 20, 50), pixel(&s, 80, 50)], [black, white]);
+    dot(&s, 80.0);
+    assert_eq!(pixel(&s, 80, 50), black);
+    // hidden by its own box, Show ticks it: one step, told as a tap is
+    assert!(s.set_layer_visible(top, false));
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    assert_eq!(s.show_layer(top).as_deref(), Some("Show layer"));
+    assert_eq!(s.why_blocked(), None);
+    s.undo();
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    s.redo();
+
+    // in a hidden group: visible itself, but not seen
+    let group = s.group_picked();
+    assert_ne!(group, 0);
+    assert!(s.set_layer_visible(group, false));
+    assert!(s.layers().iter().any(|l| l.id == top && l.current && l.visible));
+    let s = reopened(&s, "hidden-group");
+    s.set_brush_size(0.4);
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    dot(&s, 50.0);
+    // Show leaves the group hidden: the alert stays until the group's box is ticked
+    assert_eq!(s.show_layer(top), None);
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden));
+    assert!(s.set_layer_visible(group, true));
+    assert_eq!(s.why_blocked(), None);
+    assert_eq!(pixel(&s, 50, 50), white);
+    dot(&s, 50.0);
+    assert_eq!(pixel(&s, 50, 50), black);
+    s.undo();
+    s.undo();
+    assert_eq!(s.why_blocked(), Some(Blocked::Hidden), "the stroke and the group's box undone");
+    // the group itself current: its own alert, whatever hides it
+    assert!(s.select_layer(group));
+    assert_eq!(s.why_blocked(), Some(Blocked::GroupHidden));
+    assert!(s.set_layer_visible(group, true));
+    assert!(s.set_solo(Some(first)));
+    assert_eq!(s.why_blocked(), Some(Blocked::GroupHidden));
+    assert_eq!(s.show_layer(group), None, "its box was ticked: solo stays");
+    assert!(s.set_solo(None));
+    assert_eq!(s.why_blocked(), None);
+    assert!(s.set_layer_visible(group, false));
+    assert!(s.select_layer(top));
+
+    // a mask shown alone shows its layer with it, which takes paint
+    let s = reopened(&s, "mask-alone");
+    s.set_brush_size(0.4);
+    assert!(s.set_layer_visible(group, true));
+    let mask = s.add_mask(top).unwrap();
+    assert!(s.set_solo(Some(mask)));
+    assert!(s.select_layer(top));
+    assert_eq!(s.why_blocked(), None);
+    assert_eq!([pixel(&s, 20, 50), pixel(&s, 80, 50)], [white, black]);
+    dot(&s, 35.0);
+    assert_eq!(pixel(&s, 35, 50), black);
+}
+
+#[test]
+fn a_stroke_or_a_fill_with_a_group_current_says_so() {
+    use crate::layers::Blocked;
+    let Some(s) = session(100, 100) else { return };
+    s.set_brush_size(0.4);
+    let dot = |s: &CanvasSession, x: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 50.0, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    let black = [0, 0, 0, 255];
+    let white = [255, 255, 255, 255];
+    dot(&s, 20.0);
+    let layer = s.layers()[0].id;
+    // another layer beside the group, so that the one in it can go
+    assert_ne!(s.add_layer(), 0);
+    assert!(s.select_layer(layer));
+    let group = s.group_picked();
+    assert_ne!(group, 0);
+    assert!(s.select_layer(group));
+    // still current once saved and opened again, as after a restart
+    let s = reopened(&s, "group-current");
+    s.set_brush_size(0.4);
+    assert_eq!(s.why_blocked(), None, "a group still takes other changes (it transforms whole)");
+    assert_eq!(s.why_unpainted(), Some(Blocked::Group));
+    dot(&s, 80.0);
+    assert_eq!(pixel(&s, 80, 50), white, "no paint went anywhere");
+    assert!(s.layers().iter().any(|l| l.id == group && l.current));
+    // a layer in it takes paint
+    assert!(s.select_layer(layer));
+    assert_eq!(s.why_unpainted(), None);
+    dot(&s, 80.0);
+    assert_eq!(pixel(&s, 80, 50), black);
+    // locked or hidden, those say so first; empty, a stroke still asks for a layer
+    assert!(s.select_layer(group));
+    assert!(s.set_layer_visible(group, false));
+    assert_eq!(s.why_unpainted(), Some(Blocked::GroupHidden));
+    assert!(s.set_layer_visible(group, true));
+    assert!(s.delete_layer(layer));
+    assert!(s.select_layer(group));
+    assert_eq!(s.why_blocked(), Some(Blocked::EmptyGroup));
+    assert_eq!(s.why_unpainted(), Some(Blocked::Group));
+}
+
+#[test]
+fn a_group_with_a_hidden_layer_in_it_takes_no_change_and_says_so() {
+    use crate::layers::{Blocked, HiddenBy};
+    let Some(s) = session(64, 64) else { return };
+    let lower = s.layers()[0].id;
+    let upper = s.add_layer();
+    assert!(s.pick_layer(lower));
+    let group = s.group_picked();
+    assert_ne!(group, 0);
+    assert!(s.set_layer_visible(lower, false));
+    assert!(s.select_layer(group));
+    // the group's own box ticked: still hidden for a change, as a group, a stroke too
+    assert_eq!(s.why_blocked(), Some(Blocked::GroupHidden));
+    assert_eq!(s.why_unpainted(), Some(Blocked::GroupHidden));
+    assert_eq!(s.hidden_by(), Some(HiddenBy::Inside));
+    // the visible layer in it takes them
+    assert!(s.select_layer(upper));
+    assert_eq!((s.why_blocked(), s.hidden_by()), (None, None));
+    assert!(s.set_layer_visible(lower, true));
+    assert!(s.select_layer(group));
+    assert_eq!(s.why_blocked(), None);
+    assert_eq!(s.why_unpainted(), Some(Blocked::Group));
 }
 
 #[test]

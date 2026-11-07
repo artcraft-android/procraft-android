@@ -19,6 +19,7 @@ mod animation;
 mod brush_files;
 mod brush_library;
 mod brushes;
+mod bundled;
 mod clipboard;
 mod colour;
 mod colour_drag;
@@ -123,7 +124,7 @@ pub use history::ColourHistory;
 pub use hues::{HueControl, RING_HUES, SLIDER_HUES, hue_at, hue_position, hue_stops};
 pub use keys::{KeyCombo, KeyDrag, KeyShortcut, ShortcutGroup, ShortcutRow, key_shortcut, key_shortcut_list};
 pub use layers::{
-    BlendModeInfo, Blocked, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
+    BlendModeInfo, Blocked, HiddenBy, LayerInfo, LayerOption, LayerOptionRow, LayerType, ThumbnailImage, blend_modes,
     brush_blend_modes, combine_blend_modes, grain_blend_modes, layers_for, set_resident_budget,
 };
 pub use liquify::liquify_reach;
@@ -1449,6 +1450,11 @@ impl CanvasSession {
     pub fn stroke_begin(&self, pointer: PointerKind, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // the graphics stopped (perhaps while the app was away, its notice long gone): nothing
+        // drawn will show, so each stroke tells it again
+        if st.gpu.as_ref().is_some_and(Gpu::is_lost) {
+            st.crop_edit.lost_told = false;
+        }
         if let Some(kept) = st.pad_strokes.as_mut() {
             kept.push((pointer, samples.clone()));
         }
@@ -1470,12 +1476,14 @@ impl CanvasSession {
         let current = st.doc.current();
         st.finish_stroke();
         st.settle();
-        // locked and hidden layers, groups and text layers take no paint
+        // locked layers, those that don't show (hidden themselves or by a group, or left out
+        // while another is shown alone), groups and text layers take no paint
         if st.doc.is_locked(current)
+            || st.doc.unseen(current).is_some()
             || st
                 .doc
                 .layer(current)
-                .is_none_or(|l| !l.visible || l.kind == procraft_engine::document::LayerKind::Group || l.text.is_some())
+                .is_none_or(|l| l.kind == procraft_engine::document::LayerKind::Group || l.text.is_some())
         {
             return;
         }

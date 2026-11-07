@@ -210,7 +210,7 @@ final class ColorDrop {
 
     /// Fills from window point `p` with the dropped colour; false if nothing was filled.
     private func pourBegin(_ p: CGPoint) -> Bool {
-        guard model.currentTakesChanges() else { return false }
+        guard model.currentTakesChanges(paint: true) else { return false }
         // text takes no colour until it is rasterized
         if model.layers.first(where: { $0.current })?.text == true {
             model.askRasterize = true

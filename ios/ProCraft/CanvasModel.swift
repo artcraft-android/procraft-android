@@ -26,6 +26,8 @@ struct Notice: Equatable {
 struct BlockedLayer {
     let why: Blocked
     let layer: LayerInfo
+    /// What hides it, while `why` says it is hidden.
+    let by: HiddenBy?
 }
 
 /// A question over everything before something that can't be undone: what it asks, and what
@@ -1732,9 +1734,10 @@ final class CanvasModel {
         if quickShape != nil {
             quickShape = session.quickshapeInfo() ?? quickShape
         }
-        // a stroke on a locked or hidden layer drew nothing: say why (text layers ask to rasterize)
+        // a stroke on a locked or hidden layer, or a group, drew nothing: say why (text layers ask
+        // to rasterize)
         if !adjusting, layers.first(where: { $0.current })?.text != true {
-            _ = currentTakesChanges()
+            _ = currentTakesChanges(paint: true)
         }
         refreshFlags()
         reference.refresh()
@@ -1821,10 +1824,11 @@ final class CanvasModel {
 
     /// Whether the current layer takes a change (a stroke, a transform, an adjustment, clearing,
     /// cutting); if not (locked, hidden, or an empty group), a dialog says why. What was tried is
-    /// not done afterwards.
-    func currentTakesChanges() -> Bool {
-        guard let l = layers.first(where: { $0.current }), let why = session.whyBlocked() else { return true }
-        blocked = BlockedLayer(why: why, layer: l)
+    /// not done afterwards. With `paint` (a stroke or a fill) a group current says so too.
+    func currentTakesChanges(paint: Bool = false) -> Bool {
+        guard let l = layers.first(where: { $0.current }),
+              let why = paint ? session.whyUnpainted() : session.whyBlocked() else { return true }
+        blocked = BlockedLayer(why: why, layer: l, by: session.hiddenBy())
         return false
     }
 
@@ -1836,9 +1840,13 @@ final class CanvasModel {
             switch b.why {
             case .locked:
                 toggleLocked(b.layer)
-            case .hidden:
-                toggleVisible(b.layer)
-            case .emptyGroup:
+            case .hidden, .groupHidden:
+                // its own box ticked (what else hides it stays)
+                if let said = session.showLayer(id: b.layer.id) {
+                    showNotice(said)
+                }
+                refresh()
+            case .emptyGroup, .group:
                 break
             case .meshHidden, .meshLocked:
                 session.freeMeantMeshes()

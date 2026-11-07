@@ -45,6 +45,8 @@ const MOST_HOOKS: usize = 8;
 const MOST_STOP_NOTE: usize = 200;
 /// What the note of a stop ends with, after the plugin's id.
 const STOPPED_NOTE: &str = ".stopped";
+/// The list of what the app came with and added, in bytes.
+const MOST_ADDED: usize = 64 << 10;
 /// A slider's stops: past this a range and step were not meant.
 const MOST_STOPS: f64 = 100_000.0;
 
@@ -117,6 +119,27 @@ pub(crate) struct Package {
     pub manifest: Manifest,
     text: Vec<u8>,
     files: Vec<(String, Vec<u8>)>,
+}
+
+#[cfg(test)]
+impl Package {
+    /// The file it lists at `path`.
+    pub(crate) fn file(&self, path: &str) -> Option<&[u8]> {
+        self.files.iter().find(|(name, _)| name == path).map(|(_, data)| data.as_slice())
+    }
+
+    pub(crate) fn manifest_text(&self) -> &[u8] {
+        &self.text
+    }
+}
+
+/// A plugin the app came with and added to the store once, as if imported: `off`, it starts off
+/// until someone turns it on, as it was added. It stays written down after it is removed, so it
+/// isn't added again.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Added {
+    pub id: String,
+    pub off: bool,
 }
 
 #[derive(Deserialize)]
@@ -750,6 +773,39 @@ pub(crate) fn note_told(dir: &Path, told: &[String]) {
     if let Err(e) = written {
         log::warn!("couldn't note what has been told: {e}");
     }
+}
+
+/// Where it is written down what the app came with and added, a plugin a line: its id, then ` off`
+/// if it starts off.
+fn added_note(dir: &Path) -> PathBuf {
+    dir.join("added")
+}
+
+/// What the app came with and added, each line that reads as one.
+pub(crate) fn read_added(dir: &Path) -> Vec<Added> {
+    let text = read_capped(&added_note(dir), MOST_ADDED).unwrap_or_default();
+    let text = String::from_utf8_lossy(&text);
+    let added = text.lines().filter_map(|line| {
+        let (id, off) = line.trim().strip_suffix(" off").map_or((line.trim(), false), |id| (id, true));
+        valid_id(id).then(|| Added { id: id.to_owned(), off })
+    });
+    added.collect()
+}
+
+/// Writes down `added`, whole: written beside, then moved into place, so a start finds the list as
+/// it was or as it is, never part of one. False if it couldn't be.
+pub(crate) fn note_added(dir: &Path, added: &[Added]) -> bool {
+    let lines: Vec<String> = added.iter().map(|a| if a.off { format!("{} off", a.id) } else { a.id.clone() }).collect();
+    let written = std::fs::create_dir_all(dir).and_then(|()| {
+        let beside = spare(dir, "added");
+        let moved =
+            write_new(&beside, lines.join("\n").as_bytes()).and_then(|()| std::fs::rename(&beside, added_note(dir)));
+        if moved.is_err() {
+            let _ = std::fs::remove_file(&beside);
+        }
+        moved
+    });
+    written.map_err(|e| log::warn!("couldn't note what the app added: {e}")).is_ok()
 }
 
 /// `path`, if it is a plain file of at most `most` bytes.

@@ -1,16 +1,18 @@
 //! What the app does beyond its measured look and behaviour: its plugins, on one list and one page.
-//! A plugin is a file. None is in the app, so with none on the app is as measured. Its manifest says
-//! what it holds: code run in a sandbox on the [hooks](crate::hooks) it asks for, a filter, or both.
-//! See [`crate::plugin_file`] for what is asked of a file.
+//! A plugin is a file. The files the app comes with for now ([`crate::bundled`]) are added once, as
+//! if imported, off, and are then like any other. With none on the app is as measured. A plugin's
+//! manifest says what it holds: code run in a sandbox on the [hooks](crate::hooks) it asks for, a
+//! filter, or both. See [`crate::plugin_file`] for what is asked of a file.
 //!
 //! All are plain data, a name, a line on what it does and its controls, so the page draws any of
 //! them without knowing what it holds.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::hooks::Hooks;
-use crate::plugin_file::{self, Manifest, Refusal};
+use crate::plugin_file::{self, Added, Manifest, Refusal};
 use crate::plugin_run::{Running, Stop};
 
 /// A setting the app used to have and a plugin now brings: what it was kept under, as it started
@@ -43,6 +45,11 @@ impl Moved {
 /// Whether `key` is a setting the app used to have.
 pub(crate) fn moved(key: &str) -> bool {
     MOVED.iter().any(|moved| moved.key == key)
+}
+
+/// Whether `value`, kept under `key`, is a setting the app used to have that someone changed.
+fn moved_and_changed(key: &str, value: &str) -> bool {
+    MOVED.iter().any(|moved| moved.key == key && moved.changed(value))
 }
 
 /// Why a filter the app ended on, or that stopped the GPU, is off.
@@ -310,9 +317,18 @@ struct Listed {
     moved: Vec<(String, String)>,
     /// The notice about them has been asked for: a start has one chance to say it.
     notice_asked: bool,
+    /// The plugins whose on or off has been read back.
+    flagged: HashSet<String>,
+    /// What the app came with and added, as written down in the store.
+    added: Vec<Added>,
 }
 
 impl Listed {
+    /// Whether plugin `id` is one the app added that starts off until someone turns it on.
+    fn added_off(&self, id: &str) -> bool {
+        self.added.iter().any(|added| added.off && added.id == id)
+    }
+
     /// The one holding the control kept under `key`, and the control's place in it.
     fn control_mut(&mut self, key: &str) -> Option<(&mut PluginInfo, usize)> {
         self.files.iter_mut().find_map(|plugin| {
@@ -350,6 +366,7 @@ impl Plugins {
     fn kept_in(store: Option<PathBuf>) -> Arc<Plugins> {
         let files = store.as_deref().map(plugin_file::read_all).unwrap_or_default();
         let mut files: Vec<PluginInfo> = files.into_iter().map(from_file).collect();
+        let added = store.as_deref().map(plugin_file::read_added).unwrap_or_default();
         if let Some(store) = &store {
             plugin_file::settle_trying(store, STOPPED_DRIVER);
             for plugin in &mut files {
@@ -357,8 +374,74 @@ impl Plugins {
                 plugin.on &= plugin.problem.is_none();
             }
         }
-        let list = Listed { files, moved: Vec::new(), notice_asked: false };
+        // what the app added starts off until someone turns it on, whatever it holds
+        for plugin in &mut files {
+            plugin.on &= !added.iter().any(|added| added.off && added.id == plugin.id);
+        }
+        let list = Listed { files, moved: Vec::new(), notice_asked: false, flagged: HashSet::new(), added };
         Arc::new(Plugins { list: Mutex::new(list), hooks: Arc::new(Hooks::kept_in(store.clone())), store })
+    }
+
+    /// Adds each of `files`, which the app comes with, the first time it comes with it: as if
+    /// imported, but off, and from then on like any other plugin. One the store holds older takes
+    /// the newer file, as an import of it would, keeping what was set. It is written down that each
+    /// was added, before it is, so one removed since stays removed.
+    pub(crate) fn add_bundled(&self, files: &[(&str, &[u8])]) {
+        let Some(store) = &self.store else { return };
+        // each to take in, and whether it is new
+        let mut taking = Vec::new();
+        {
+            let mut list = self.listed();
+            let mut added = list.added.clone();
+            for (name, bytes) in files {
+                let manifest = match plugin_file::read_package(bytes) {
+                    Ok(package) => package.manifest,
+                    Err(refusal) => {
+                        log::warn!("{name}, which comes with the app, doesn't hold up: {refusal:?}");
+                        continue;
+                    }
+                };
+                let kept = list.files.iter().find(|p| p.id == manifest.id).map(|p| p.version.as_str());
+                let noted = added.iter().any(|added| added.id == manifest.id);
+                if !noted {
+                    // one imported before the app came with it goes on as it was
+                    added.push(Added { id: manifest.id.clone(), off: kept.is_none() });
+                }
+                let take = match kept {
+                    // removed since it was added
+                    None => !noted,
+                    // taken again only if this one is newer
+                    Some(kept) => plugin_file::version_is_older(kept, &manifest.version),
+                };
+                if take {
+                    taking.push((*name, *bytes, manifest.id, kept.is_none()));
+                }
+            }
+            if added != list.added {
+                if !plugin_file::note_added(store, &added) {
+                    return;
+                }
+                list.added = added;
+            }
+        }
+        let mut failed = Vec::new();
+        for (name, bytes, id, new) in taking {
+            if let Err(refusal) = self.take_in(bytes) {
+                log::warn!("{name}, which comes with the app, couldn't be added: {refusal:?}");
+                if new {
+                    failed.push(id);
+                }
+            }
+        }
+        // to be tried again on the next start
+        if !failed.is_empty() {
+            let mut list = self.listed();
+            let mut added = list.added.clone();
+            added.retain(|added| !failed.contains(&added.id));
+            if plugin_file::note_added(store, &added) {
+                list.added = added;
+            }
+        }
     }
 
     /// Puts `plugin` on its hooks, if it has code, is on and isn't there yet. One that can't start
@@ -431,6 +514,7 @@ impl Plugins {
         let manifest = plugin_file::read_folder(&folder, id, version).ok_or(Refusal::NotKept)?;
         let mut fresh = from_file(manifest);
         let mut list = self.listed();
+        fresh.on &= !list.added_off(&fresh.id);
         // a moved setting read back goes to the plugin that takes it over
         for control in &mut fresh.controls {
             if let Some(at) = list.moved.iter().position(|(key, _)| key == control.key()) {
@@ -534,6 +618,15 @@ impl Plugins {
         Plugins::kept_in(Some(PathBuf::from(dir)))
     }
 
+    /// The app's plugins: every file kept in the folder `dir` that holds up, with the files the app
+    /// comes with added there first if it never added them before.
+    #[uniffi::constructor]
+    pub fn with_bundled(dir: String) -> Arc<Plugins> {
+        let plugins = Plugins::kept_in(Some(PathBuf::from(dir)));
+        plugins.add_bundled(crate::bundled::BUNDLED);
+        plugins
+    }
+
     /// What the Plugins page shows: every plugin imported.
     pub fn plugins(&self) -> Vec<PluginInfo> {
         self.listed().files.clone()
@@ -550,21 +643,35 @@ impl Plugins {
     /// A value read back from where it was kept, as text. A key nothing has, or anything that
     /// isn't its kind of value, leaves things as they are. A plugin that stopped stays off, whatever
     /// its flag says, until someone asks it to run.
+    ///
+    /// A setting the app used to have, that someone changed, starts the plugin the app added to
+    /// hold it on, so the app goes on as they left it: unless that plugin's own on or off is read
+    /// back too, in whatever order, which says instead.
     pub fn read_kept(&self, key: String, value: String) {
         let mut list = self.listed();
-        if let Some(plugin) = list.files.iter_mut().find(|p| p.on_key == key) {
+        let Listed { files, moved: unheld, flagged, added, .. } = &mut *list;
+        if let Some(plugin) = files.iter_mut().find(|p| p.on_key == key) {
             if let Ok(on) = value.parse::<bool>() {
                 plugin.on = on && plugin.problem.is_none();
+                flagged.insert(plugin.id.clone());
             }
             return;
         }
-        if let Some((plugin, at)) = list.control_mut(&key) {
+        let held = files.iter_mut().find_map(|plugin| {
+            let at = plugin.controls.iter().position(|c| c.key() == key)?;
+            Some((plugin, at))
+        });
+        if let Some((plugin, at)) = held {
             if let Some(control) = plugin.controls.get_mut(at) {
                 control.read(&value);
             }
+            let added_off = added.iter().any(|added| added.off && added.id == plugin.id);
+            if added_off && moved_and_changed(&key, &value) && !flagged.contains(&plugin.id) {
+                plugin.on = plugin.problem.is_none();
+            }
         } else if moved(&key) {
-            list.moved.retain(|(kept, _)| *kept != key);
-            list.moved.push((key, value));
+            unheld.retain(|(kept, _)| *kept != key);
+            unheld.push((key, value));
         }
     }
 
@@ -684,6 +791,18 @@ impl Plugins {
         }
         self.hooks.take_off(&id);
         let gone = list.files.remove(at);
+        list.flagged.remove(&id);
+        // one the app added stays written down, so it isn't added again; imported again, it is as
+        // any import
+        if list.added_off(&id)
+            && let Some(store) = &self.store
+        {
+            let mut added = list.added.clone();
+            added.iter_mut().filter(|added| added.id == id).for_each(|added| added.off = false);
+            if plugin_file::note_added(store, &added) {
+                list.added = added;
+            }
+        }
         let keys = gone.controls.iter().map(|c| c.key().to_owned());
         Some(keys.chain([gone.on_key.clone()]).collect())
     }
@@ -1331,6 +1450,264 @@ mod tests {
     fn with_nowhere_to_keep_it_a_file_isn_t_taken() {
         let file = filter_file(&filter("org.example.filter"));
         assert_eq!(Plugins::new().install(file).as_deref(), Some("This plugin couldn't be saved."));
+    }
+
+    const POSTERISE: &str = "io.github.artcraftandroid.posterise";
+    const GAP: &str = "io.github.artcraftandroid.gap-closing";
+    const SIZE: &str = "io.github.artcraftandroid.interface-size";
+    const EYEDROPPER: &str = "io.github.artcraftandroid.eyedropper-layer";
+    const PASTE: &str = "io.github.artcraftandroid.paste-into-masks";
+    const TOUCH: &str = "io.github.artcraftandroid.touch-offset";
+
+    /// The app's plugins kept in `dir`, what it comes with added.
+    fn app_at(dir: &str) -> Arc<Plugins> {
+        Plugins::with_bundled(dir.to_owned())
+    }
+
+    /// The app's plugins kept in `dir`, as an app that comes with `files` adds them.
+    fn app_with(dir: &str, files: &[(&str, Vec<u8>)]) -> Arc<Plugins> {
+        let plugins = Plugins::kept_in(Some(PathBuf::from(dir)));
+        let files: Vec<(&str, &[u8])> = files.iter().map(|(name, bytes)| (*name, bytes.as_slice())).collect();
+        plugins.add_bundled(&files);
+        plugins
+    }
+
+    /// The file of `name` that the app comes with, said to be `version`.
+    fn bundled_file(name: &str, version: &str) -> Vec<u8> {
+        let (_, bytes) = crate::bundled::BUNDLED.iter().find(|(n, _)| *n == name).unwrap();
+        let package = plugin_file::read_package(bytes).unwrap();
+        let mut manifest: Value = serde_json::from_slice(package.manifest_text()).unwrap();
+        manifest["version"] = json!(version);
+        let inside = [plugin_file::FILTER_CODE, crate::plugin_run::MODULE];
+        let files: Vec<(&str, &[u8])> =
+            inside.into_iter().filter_map(|path| Some((path, package.file(path)?))).collect();
+        pack(&manifest, &files)
+    }
+
+    /// Every file the app comes with, as it comes.
+    fn all_bundled() -> Vec<(&'static str, Vec<u8>)> {
+        crate::bundled::BUNDLED.iter().map(|(name, bytes)| (*name, bytes.to_vec())).collect()
+    }
+
+    fn card(plugins: &Plugins, id: &str) -> PluginInfo {
+        plugins.plugins().into_iter().find(|p| p.id == id).unwrap()
+    }
+
+    fn has(plugins: &Plugins, id: &str) -> bool {
+        plugins.plugins().iter().any(|p| p.id == id)
+    }
+
+    fn slider_value(plugins: &Plugins, key: &str) -> f32 {
+        match plugins.control(key) {
+            Some(PluginControl::Slider { control }) => control.value,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn read_lines(plugins: &Plugins, lines: &[String]) {
+        for line in lines {
+            let (key, value) = line.split_once(' ').unwrap();
+            plugins.read_kept(key.to_owned(), value.to_owned());
+        }
+    }
+
+    #[test]
+    fn the_first_start_adds_what_the_app_comes_with_as_files_all_off() {
+        let dir = store("bundled");
+        let plugins = app_at(&dir);
+        let cards = plugins.plugins();
+        assert_eq!(cards.len(), crate::bundled::BUNDLED.len());
+        for card in &cards {
+            // as an import: a card like any other, kept in the store
+            assert_eq!(card.source, PluginSource::File, "{card:?}");
+            assert!(!card.on && card.problem.is_none(), "{card:?}");
+            assert!(dir_holds(&dir, &format!("{}/{}", card.id, card.version)), "{}", card.id);
+        }
+        // off, the app is as it was
+        assert!(plugins.filters().is_empty());
+        assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
+        assert_eq!(landing(&plugins), UNTOUCHED);
+        assert!(!plugins.hooks().pick_layer());
+        assert!(!plugins.hooks().paste_mask() && !plugins.hooks().fill_mask());
+        assert_eq!(plugins.take_moved_notice(), None);
+        // and so on the next start, the filters too, with nothing kept for them
+        let next = app_at(&dir);
+        assert_eq!(next.plugins(), cards);
+        assert!(next.filters().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn each_the_app_added_runs_as_any_imported() {
+        let dir = store("bundled-run");
+        let plugins = app_at(&dir);
+        for card in plugins.plugins() {
+            assert!(plugins.set_on(card.id.clone(), true));
+            let on = self::card(&plugins, &card.id);
+            assert!(on.on && on.problem.is_none(), "{on:?}");
+            if card.holds.contains(&PluginPart::Filter) {
+                let opened = plugins.filter_to_open(&card.id).map(|open| open.name);
+                assert_eq!(opened.as_deref(), Ok(card.name.as_str()));
+            }
+            if card.holds.contains(&PluginPart::Hooks) {
+                assert!(plugins.hooks().is_on(&card.id), "{}", card.name);
+            }
+        }
+        assert_eq!(plugins.filters().len(), 3);
+        // each does what it says, by its controls
+        assert_eq!(plugins.set_slider(format!("{TOUCH}.x"), 10.0), Some(10.0));
+        assert_eq!(landing(&plugins), (UNTOUCHED.0 + 10.0, UNTOUCHED.1));
+        assert!(plugins.set_slider("interface_size".to_owned(), 0.9).is_some());
+        assert!((plugins.interface_scale(1600.0, 1000.0) - 0.9).abs() < 1e-6);
+        assert!(plugins.set_switch("eyedropper_layer".to_owned(), true));
+        assert!(plugins.hooks().pick_layer());
+        assert!(plugins.set_switch("paste_into_mask".to_owned(), true));
+        assert!(plugins.hooks().paste_mask());
+        assert_eq!(plugins.set_slider("fill_gap".to_owned(), 4.0), Some(4.0));
+        assert!(plugins.hooks().fill_mask());
+        // kept, so through a restart
+        let next = app_at(&dir);
+        read_lines(&next, &plugins.kept_lines());
+        assert_eq!(next.plugins(), plugins.plugins());
+        assert_eq!(landing(&next), (UNTOUCHED.0 + 10.0, UNTOUCHED.1));
+        assert_eq!(next.filters().len(), 3);
+        // and off again, none does
+        for card in plugins.plugins() {
+            assert!(plugins.set_on(card.id, false));
+        }
+        assert!(plugins.filters().is_empty());
+        assert_eq!(landing(&plugins), UNTOUCHED);
+        assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
+        assert!(!plugins.hooks().pick_layer() && !plugins.hooks().paste_mask() && !plugins.hooks().fill_mask());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_the_app_added_and_someone_removed_stays_removed() {
+        let dir = store("bundled-removed");
+        let plugins = app_at(&dir);
+        assert!(plugins.set_on(GAP.to_owned(), true));
+        assert_eq!(plugins.set_slider("fill_gap".to_owned(), 6.0), Some(6.0));
+        assert_eq!(plugins.remove(POSTERISE.to_owned()), Some(vec![format!("{POSTERISE}.on")]));
+        let keys = plugins.remove(GAP.to_owned()).unwrap();
+        assert!(keys.contains(&"fill_gap".to_owned()) && keys.contains(&format!("{GAP}.on")), "{keys:?}");
+        assert!(!has(&plugins, POSTERISE) && !has(&plugins, GAP) && !plugins.hooks().is_on(GAP));
+        assert!(!dir_holds(&dir, POSTERISE) && !dir_holds(&dir, GAP));
+        // through a restart, and an app that comes with a newer one
+        let lines = plugins.kept_lines();
+        let next = app_at(&dir);
+        read_lines(&next, &lines);
+        assert!(!has(&next, POSTERISE) && !has(&next, GAP));
+        assert_eq!(next.plugins().len(), crate::bundled::BUNDLED.len() - 2);
+        let mut newer = all_bundled();
+        newer.retain(|(name, _)| *name != "posterise");
+        newer.push(("posterise", bundled_file("posterise", "1.1.0")));
+        assert!(!has(&app_with(&dir, &newer), POSTERISE));
+        // imported again, it is as any import: a filter starts on, and stays so
+        assert_eq!(next.install(bundled_file("posterise", "1.0.0")), None);
+        assert!(card(&next, POSTERISE).on);
+        assert!(card(&app_at(&dir), POSTERISE).on);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_newer_app_adds_what_it_never_added_and_updates_what_is_there() {
+        let dir = store("bundled-newer");
+        let mut first = all_bundled();
+        first.retain(|(name, _)| *name != "touch-offset");
+        let plugins = app_with(&dir, &first);
+        assert!(!has(&plugins, TOUCH));
+        assert!(plugins.set_on(POSTERISE.to_owned(), true));
+        assert!(plugins.set_on(GAP.to_owned(), true));
+        assert_eq!(plugins.set_slider("fill_gap".to_owned(), 7.0), Some(7.0));
+        let lines = plugins.kept_lines();
+        // the next comes with touch offset, and newer ones of these two
+        let mut next = all_bundled();
+        next.retain(|(name, _)| !["posterise", "gap-closing"].contains(name));
+        next.push(("posterise", bundled_file("posterise", "1.1.0")));
+        next.push(("gap-closing", bundled_file("gap-closing", "1.0.1")));
+        let updated = app_with(&dir, &next);
+        read_lines(&updated, &lines);
+        assert!(!card(&updated, TOUCH).on);
+        let (posterise, gap) = (card(&updated, POSTERISE), card(&updated, GAP));
+        assert_eq!((posterise.version.as_str(), posterise.on), ("1.1.0", true));
+        assert_eq!((gap.version.as_str(), gap.on), ("1.0.1", true));
+        assert_eq!(slider_value(&updated, "fill_gap"), 7.0);
+        // one newer than the app's stays as it is
+        let older = app_at(&dir);
+        assert_eq!(card(&older, POSTERISE).version, "1.1.0");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plugin_imported_before_the_app_came_with_it_is_left_as_it_was() {
+        let dir = store("bundled-imported");
+        // a filter, so it started on
+        assert_eq!(at(&dir).install(bundled_file("posterise", "1.0.0")), None);
+        assert_eq!(at(&dir).install(bundled_file("touch-offset", "0.5.0")), None);
+        let plugins = app_at(&dir);
+        assert!(card(&plugins, POSTERISE).on);
+        assert!(card(&app_at(&dir), POSTERISE).on);
+        // an older one is updated
+        let touch = card(&plugins, TOUCH);
+        assert_eq!((touch.version.as_str(), touch.on), ("1.0.0", false));
+        assert!(!card(&plugins, "io.github.artcraftandroid.outline").on);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_moved_setting_someone_changed_starts_what_the_app_added_on_with_it() {
+        let dir = store("bundled-moved");
+        // as an earlier version kept them: the gap and the eyedropper changed, the rest not
+        let plugins = app_at(&dir);
+        plugins.read_kept("fill_gap".to_owned(), "5".to_owned());
+        plugins.read_kept("eyedropper_layer".to_owned(), "true".to_owned());
+        plugins.read_kept("interface_size".to_owned(), "1.0".to_owned());
+        plugins.read_kept("paste_into_mask".to_owned(), "false".to_owned());
+        assert!(card(&plugins, GAP).on && card(&plugins, EYEDROPPER).on);
+        assert_eq!(slider_value(&plugins, "fill_gap"), 5.0);
+        assert!(plugins.hooks().is_on(GAP) && plugins.hooks().pick_layer());
+        assert!(!card(&plugins, SIZE).on && !card(&plugins, PASTE).on);
+        // nothing to import: it's here, and on
+        assert_eq!(plugins.take_moved_notice(), None);
+        let lines = plugins.kept_lines();
+        assert!(lines.contains(&format!("{GAP}.on true")), "{lines:?}");
+        assert_eq!(lines.iter().filter(|line| line.starts_with("fill_gap ")).count(), 1, "{lines:?}");
+        // on the next start with only the setting kept, as one platform keeps them
+        let next = app_at(&dir);
+        next.read_kept("fill_gap".to_owned(), "5".to_owned());
+        assert!(card(&next, GAP).on);
+        // the size too, from where it was kept as a number
+        next.read_kept("interface_size".to_owned(), "0.85".to_owned());
+        assert!(card(&next, SIZE).on);
+        assert!((next.interface_scale(1600.0, 1000.0) - 0.85).abs() < 1e-6);
+        // its own on or off says instead, read before or after
+        for flag_first in [true, false] {
+            let next = app_at(&dir);
+            let flag = || next.read_kept(format!("{GAP}.on"), "false".to_owned());
+            if flag_first {
+                flag();
+            }
+            next.read_kept("fill_gap".to_owned(), "5".to_owned());
+            if !flag_first {
+                flag();
+            }
+            assert!(!card(&next, GAP).on, "flag first: {flag_first}");
+            assert_eq!(slider_value(&next, "fill_gap"), 5.0);
+        }
+        // nor does one that stopped come back on for it
+        app_at(&dir).stop_filter(GAP, STOPPED_DRIVER);
+        let again = app_at(&dir);
+        again.read_kept("fill_gap".to_owned(), "5".to_owned());
+        assert!(!card(&again, GAP).on);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_nowhere_to_keep_them_nothing_is_added() {
+        let plugins = Plugins::new();
+        plugins.add_bundled(crate::bundled::BUNDLED);
+        assert!(plugins.plugins().is_empty());
     }
 
     #[test]
