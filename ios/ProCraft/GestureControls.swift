@@ -123,7 +123,8 @@ struct GestureControls: View {
     private var page: some View {
         let settings = Gestures.shared
         let purpose = model.gesturePage
-        let options = gestureOptions(purpose: purpose)
+        // painting models isn't here yet: its switch would do nothing
+        let options = gestureOptions(purpose: purpose).filter { $0.key != "MODEL_FINGER" }
         return ScrollView {
             VStack(spacing: 0) {
                 VStack(spacing: 0) {
