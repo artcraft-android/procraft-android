@@ -677,8 +677,7 @@ impl Layers {
         let ink = if looks.chosen || l.picked { Color32::WHITE } else { argb(PANEL_TITLE) };
         let box_fill = if looks.chosen || l.picked { Color32::WHITE } else { argb(CHECK_FILL) };
         if l.kind == LayerType::Group {
-            self.group_row(ui, look, session, l, at.translate(vec2(looks.indent, 0.0)), ink, box_fill);
-            false
+            self.group_row(ui, look, session, l, at.translate(vec2(looks.indent, 0.0)), ink, box_fill, modes)
         } else {
             self.layer_row(ui, look, session, l, at, ink, box_fill, looks, modes, read)
         }
@@ -1593,13 +1592,20 @@ impl Layers {
         row: Rect,
         ink: Color32,
         box_fill: Color32,
-    ) {
+        modes: &[BlendModeInfo],
+    ) -> bool {
         let x = row.left() + GROUP_INDENT * l.depth as f32;
         let line = Rect::from_min_size(pos2(x + 4.0, row.center().y - 2.0), vec2(93.0, 4.0));
         ui.painter().rect_filled(line, 2, argb(GROUP_LINE));
         let visibility = Rect::from_min_size(pos2(row.right() - 8.0 - 44.0, row.top()), vec2(44.0, GROUP_HEIGHT));
         let arrow = Rect::from_min_size(pos2(visibility.left() - 44.0 + 8.0, row.top()), vec2(44.0, GROUP_HEIGHT));
-        self.name(ui, look, session, l, pos2(line.right(), row.center().y), arrow.left() - 8.0, ink);
+        let blend = Rect::from_min_size(pos2(arrow.left() - 44.0 + 8.0, row.top()), vec2(44.0, GROUP_HEIGHT));
+        // as a layer's: the letter opens the group's modes and opacity
+        let letter = if l.locked && !l.current && !l.picked { argb(LOCKED_LETTER) } else { ink };
+        let code = blend_code(modes, l.blend);
+        crate::look::text(ui.painter(), blend.center(), Align2::CENTER_CENTER, &code, 14.0, Weight::SemiBold, letter);
+        let blend_tapped = ui.interact(blend, ui.scope_id().with(("blend", l.id)), Sense::click_and_drag()).clicked();
+        self.name(ui, look, session, l, pos2(line.right(), row.center().y), blend.left() - 8.0, ink);
         let icon = if l.collapsed { &icons::CHEVRON_RIGHT } else { &icons::CHEVRON_DOWN };
         look.icon(ui, icon, arrow.center(), 16.0, ink);
         if ui.interact(arrow, ui.scope_id().with(("fold", l.id)), Sense::click()).clicked() {
@@ -1607,6 +1613,7 @@ impl Layers {
         }
         check_box(ui, look, visibility.center(), l.visible && !l.soloed_out, box_fill);
         self.visibility_touch(ui, session, l, visibility);
+        blend_tapped
     }
 
     /// A layer's thumbnail, read again when its pixels' version is new: what is drawn, fitted on
