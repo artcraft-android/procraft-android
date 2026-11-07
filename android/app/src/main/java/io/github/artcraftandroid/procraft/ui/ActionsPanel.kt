@@ -583,7 +583,7 @@ private fun PluginsPage(vm: CanvasViewModel, onBack: () -> Unit) {
         Modifier.verticalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 13.dp),
         verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(20.dp),
     ) {
-        if (shown.isEmpty()) Text("Nothing imported yet. Import a .procraftplugin file to add one.", color = Pc.ActionsRow, fontSize = 15.sp, modifier = Modifier.padding(16.dp))
+        if (shown.isEmpty()) Text("Nothing imported yet. Import a .procraft-plugin file to add one.", color = Pc.ActionsRow, fontSize = 15.sp, modifier = Modifier.padding(16.dp))
         for (plugin in shown) PluginCard(plugin, vm)
     }
 }

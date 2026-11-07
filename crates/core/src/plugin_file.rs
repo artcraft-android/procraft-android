@@ -1548,7 +1548,7 @@ pub(crate) mod tests {
         let dir = folder("plain");
         assert_eq!(read_plugin_file(&dir), None, "a folder");
         assert_eq!(read_plugin_file(&dir.join("missing")), None);
-        let file = dir.join("a.procraftplugin");
+        let file = dir.join("a.procraft-plugin");
         std::fs::write(&file, b"hello").unwrap();
         assert_eq!(read_plugin_file(&file).as_deref(), Some(&b"hello"[..]));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1558,7 +1558,7 @@ pub(crate) mod tests {
     #[test]
     fn a_pipe_is_passed_over_rather_than_waited_on() {
         let dir = folder("pipe");
-        let pipe = dir.join("a.procraftplugin");
+        let pipe = dir.join("a.procraft-plugin");
         let made = std::process::Command::new("mkfifo").arg(&pipe).status();
         if made.is_ok_and(|s| s.success()) {
             assert_eq!(read_plugin_file(&pipe), None);

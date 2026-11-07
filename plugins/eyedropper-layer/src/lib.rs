@@ -1,5 +1,5 @@
 //! Eyedropper picks from layer: the eyedropper reads the current layer alone, not the whole canvas.
-//! It's a plugin, not part of the app: `tools/pack_plugin.py` makes a `.procraftplugin` file of it.
+//! It's a plugin, not part of the app: `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
 //!
 //! The app asks one question and gives it nothing else. Reading a pixel stays the app's: this only
 //! says which pixel. The interface is written down at the top of `crates/core/src/plugin_run.rs`.

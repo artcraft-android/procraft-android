@@ -1,4 +1,4 @@
-"""Builds the plugins under plugins/ and packs each as a .procraftplugin file, which the app imports:
+"""Builds the plugins under plugins/ and packs each as a .procraft-plugin file, which the app imports:
 
     python tools/pack_plugin.py [touch-offset | extract-lines] [--out DIR]
 
@@ -53,7 +53,7 @@ def pack(name, out):
     ]
     place = os.path.abspath(out) if out else TARGET_DIR
     os.makedirs(place, exist_ok=True)
-    path = os.path.join(place, f'{name}.procraftplugin')
+    path = os.path.join(place, f'{name}.procraft-plugin')
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as file:
         file.writestr(MANIFEST, json.dumps(manifest, indent=2))
         for inside, data in files.items():
