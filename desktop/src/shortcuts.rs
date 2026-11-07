@@ -1,8 +1,9 @@
 //! The keyboard shortcuts' list (#31), the core's (keys.rs) with the desktop's own: Ctrl (⌘) held
 //! alone a moment shows it for as long as it is held, as a tablet's system shows an app's
 //! shortcuts while its command key is held; Help's Keyboard shortcuts opens it until Done, Esc or
-//! a click beside it. A shortcut's keys clicked there are bound again: the next key pressed takes
-//! them, Backspace takes them away, Esc gives up; the list keeps them between runs (prefs.rs).
+//! a click beside it. A shortcut's row clicked there is bound again: the next key pressed takes
+//! them, Backspace takes them away, Esc gives up; the list keeps them between runs (prefs.rs). It
+//! rises into place quickly, and Ctrl (⌘) held shows it only if the setting says so (prefs.rs).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,7 +17,11 @@ use crate::look::{Weight, argb, pc, text};
 use crate::prefs::Prefs;
 
 /// How long Ctrl (⌘) is held alone before the list shows.
-const HOLD: Duration = Duration::from_millis(1000);
+const HOLD: Duration = Duration::from_millis(900);
+/// How long the list takes to rise into place: fast, then easing out.
+const RISE: Duration = Duration::from_millis(150);
+/// How far up (points) the list rises into place.
+const RISE_BY: f32 = 16.0;
 const FILL: u32 = 0xF21E1E1E;
 const EDGE: u32 = 0x24FFFFFF;
 const TITLE: u32 = 0xFFE5E5E5;
@@ -31,7 +36,7 @@ const ROW_GAP: f32 = 6.0;
 const HEADING_HEIGHT: f32 = 28.0;
 const GROUP_GAP: f32 = 14.0;
 const DONE: f32 = 40.0;
-/// The keys a shortcut's row is bound again from, lit while the pointer is over them.
+/// A shortcut's row lit while the pointer is over it: its keys and what it does.
 const OVER: u32 = 0x1FFFFFFF;
 
 /// The list, opened from Help or shown while Ctrl (⌘) is held.
@@ -43,6 +48,8 @@ pub struct Shortcuts {
     /// the hold until it is let go.
     held_since: Option<Instant>,
     spoiled: bool,
+    /// Since when the list has been showing: it rises into place from here.
+    shown_at: Option<Instant>,
     /// The shortcut whose keys are being chosen: the next key pressed is bound to it.
     capturing: Option<KeyAction>,
 }
@@ -54,8 +61,8 @@ impl Shortcuts {
     }
 
     /// Shows the list if it is open, or Ctrl (⌘) has been held alone long enough while `keys` go
-    /// to the canvas (no text being typed) and the setting for it is on. A shortcut's keys clicked
-    /// are bound again, and the bindings kept: true if one changed.
+    /// to the canvas (no text being typed) and the setting for it is on. A shortcut's row clicked
+    /// is bound again, and the bindings kept: true if one changed.
     pub fn show(&mut self, ctx: &egui::Context, keys: bool, prefs: &mut Prefs) -> bool {
         let (alone, other) = ctx.input(|i| {
             let m = i.modifiers;
@@ -87,17 +94,29 @@ impl Shortcuts {
             }
         }
         let mut changed = false;
-        if self.open {
-            let (close, bound) = panel(ctx, true, &mut self.capturing, &mut prefs.keys);
-            self.open = !close;
-            if close {
-                // nothing is left waiting for a key once the list is put away
-                self.capturing = None;
+        let showing = self.open || held;
+        if !showing {
+            self.shown_at = None;
+        } else {
+            // it rises into place, fast and easing out, however it was asked for
+            let risen = self.shown_at.get_or_insert_with(Instant::now).elapsed().as_secs_f32() / RISE.as_secs_f32();
+            let rise = risen.clamp(0.0, 1.0);
+            if rise < 1.0 {
+                ctx.request_repaint_after(Duration::from_millis(8));
             }
-            changed |= bound;
-        } else if held {
-            let (_, bound) = panel(ctx, false, &mut self.capturing, &mut prefs.keys);
-            changed |= bound;
+            let rise = 1.0 - (1.0 - rise).powi(3);
+            if self.open {
+                let (close, bound) = panel(ctx, true, &mut self.capturing, &mut prefs.keys, rise);
+                self.open = !close;
+                if close {
+                    // nothing is left waiting for a key once the list is put away
+                    self.capturing = None;
+                }
+                changed |= bound;
+            } else {
+                let (_, bound) = panel(ctx, false, &mut self.capturing, &mut prefs.keys, rise);
+                changed |= bound;
+            }
         }
         changed
     }
@@ -235,6 +254,7 @@ fn panel(
     closable: bool,
     capturing: &mut Option<KeyAction>,
     bindings: &mut KeyBindings,
+    rise: f32,
 ) -> (bool, bool) {
     let mut close = false;
     let mut changed = false;
@@ -245,7 +265,7 @@ fn panel(
     if closable {
         egui::Area::new(Id::unique("shortcuts scrim")).fixed_pos(screen.min).order(Order::Foreground).show(ctx, |ui| {
             let beside = ui.allocate_rect(screen, Sense::click());
-            ui.painter().rect_filled(screen, 0, Color32::from_black_alpha(0x99));
+            ui.painter().rect_filled(screen, 0, Color32::from_black_alpha((0x99 as f32 * rise) as u8));
             close |= crate::ui::escape(ui.ctx()) || beside.clicked();
         });
     }
@@ -258,8 +278,10 @@ fn panel(
     let width = 2.0 * PAD + cols.len() as f32 * (COLUMN + COLUMN_GAP) - COLUMN_GAP;
     let done_height = if closable { 16.0 + DONE } else { 0.0 };
     let height = PAD + TITLE_HEIGHT + 16.0 + body_height + done_height + PAD;
-    let panel = Rect::from_center_size(screen.center(), vec2(width, height.min(screen.height() - 40.0)));
+    let panel = Rect::from_center_size(screen.center(), vec2(width, height.min(screen.height() - 40.0)))
+        .translate(vec2(0.0, (1.0 - rise) * RISE_BY));
     egui::Area::new(Id::unique("shortcuts")).fixed_pos(panel.min).order(Order::Tooltip).show(ctx, |ui| {
+        ui.set_opacity(rise);
         ui.allocate_rect(panel, Sense::click());
         ui.painter().rect_filled(panel, 28, argb(FILL));
         ui.painter().rect_stroke(panel, 28, Stroke::new(1.0, argb(EDGE)), StrokeKind::Inside);
@@ -288,13 +310,13 @@ fn panel(
                         y += HEADING_HEIGHT;
                         for row in &group.rows {
                             let row_height = row.keys.size().y.max(row.does.size().y);
-                            // the whole slot the row sits in, gap and all, so a click between
-                            // two rows' lines still chooses one of them
-                            let keys = Rect::from_min_size(pos2(x, y), vec2(KEYS_WIDTH, row_height + ROW_GAP));
+                            // the whole row, keys and what it does, gap and all, so a click
+                            // between two rows' lines still chooses one of them
+                            let slot = Rect::from_min_size(pos2(x, y), vec2(COLUMN, row_height + ROW_GAP));
                             let mut over = false;
                             if closable && let Some(action) = row.action {
                                 let response =
-                                    ui.interact(keys, ui.scope_id().with(("shortcut", action.key())), Sense::click());
+                                    ui.interact(slot, ui.scope_id().with(("shortcut", action.key())), Sense::click());
                                 over = response.hovered();
                                 if over {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -315,7 +337,11 @@ fn panel(
                                 );
                             } else {
                                 if over {
-                                    let lit = keys.shrink2(vec2(3.0, ROW_GAP * 0.5));
+                                    // the row lit as one: its keys and its name
+                                    let lit = Rect::from_min_max(
+                                        pos2(slot.left() - 6.0, slot.top() + ROW_GAP * 0.5),
+                                        pos2(slot.right(), slot.bottom() - ROW_GAP * 0.5),
+                                    );
                                     ui.painter().rect_filled(lit, 6, argb(OVER));
                                 }
                                 ui.painter().galley(pos2(x, y), row.keys.clone(), argb(TITLE));
