@@ -63,13 +63,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.core.AnimationPlayback
+import kotlin.math.floor
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
-/** The bar is 657 wide on a wide screen, 446 upright; the timeline 12 in from each side. */
-private val WideBarWidth = 657.dp
-private val UprightBarWidth = 446.dp
 private val BarHeight = 96.dp
 private val HeldFrame = Color(0xFFA3A3A3)
 private val BarGap = 25.dp
@@ -83,6 +81,53 @@ private const val MAX_ONION = 12
 /** Play's and Add Frame's inset from the bar's ends. */
 private val BarInset = 26.dp
 
+/** A frame's card's shape: the canvas's, a [cw] x [ch] one (two thirds as wide as tall when not known). */
+private fun frameAspect(cw: Int, ch: Int): Float = if (cw > 0 && ch > 0) (cw.toFloat() / ch).coerceIn(0.25f, 2f) else 0.66f
+
+/** How far apart the timeline's frames are counted for the bar's width: whole points across a card, and 2. */
+internal fun framePitch(aspect: Float): Dp = floor(FrameHeight.value * aspect).coerceAtLeast(1f).dp + 2.dp
+
+/**
+ * The bar's width in a window [window] wide on a screen [screen] wide, its frames [pitch] apart:
+ * the timeline holds as many whole frames as fit the room the window leaves it (an odd number, so
+ * that the current one is in the middle) and 2 more, the bar 12 more each side. The room: the window
+ * less 20 under 700, less 300 under 982, and from there less 180, or less 500 on a screen 1112 or
+ * wider (446 upright on a 744 screen, about 657 in landscape on a 1133 one). Kept 8 inside each side
+ * of the window.
+ */
+internal fun animationBarWidth(window: Dp, screen: Dp, pitch: Dp): Dp {
+    val room = when {
+        window < 700.dp -> window - 20.dp
+        window < 982.dp -> window - 300.dp
+        screen < 1112.dp -> window - 180.dp
+        else -> window - 500.dp
+    }
+    val fits = minOf(room, window - 16.dp - 26.dp)
+    var frames = floor(fits / pitch).toInt().coerceAtLeast(1)
+    if (frames % 2 == 0) frames -= 1
+    return pitch * frames + 26.dp
+}
+
+/** The screen's width as it is turned now ([window]'s, where it can't be told). */
+@Composable
+private fun displayWidth(window: Dp): Dp {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val config = androidx.compose.ui.platform.LocalConfiguration.current
+    val density = LocalDensity.current
+    return remember(config, density, window) {
+        val manager = context.getSystemService(android.view.WindowManager::class.java)
+        val px = when {
+            manager == null -> null
+            android.os.Build.VERSION.SDK_INT >= 30 -> manager.maximumWindowMetrics.bounds.width()
+            else -> android.util.DisplayMetrics().also {
+                @Suppress("DEPRECATION")
+                manager.defaultDisplay.getRealMetrics(it)
+            }.widthPixels
+        }
+        px?.let { with(density) { it.toDp() } } ?: window
+    }
+}
+
 /**
  * Animation Assist's bar at the bottom: Play, Settings and Add Frame over the timeline of frames,
  * the current one in the middle; with its settings or the current frame's options above it.
@@ -90,8 +135,9 @@ private val BarInset = 26.dp
 @Composable
 fun BoxScope.AnimationBar(vm: CanvasViewModel) {
     if (vm.animation == null) return
-    val screen = androidx.compose.ui.platform.LocalConfiguration.current
-    val barWidth = if (screen.screenWidthDp > screen.screenHeightDp) WideBarWidth else UprightBarWidth
+    val window = windowWidth()
+    val (cw, ch) = vm.canvasSize()
+    val barWidth = animationBarWidth(window, displayWidth(window), framePitch(frameAspect(cw, ch)))
     Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
         // where Settings' middle is along the bar, for the arrow of its popover
         var settingsAt by remember { mutableStateOf(281.5.dp) }
@@ -151,8 +197,7 @@ private fun Timeline(vm: CanvasViewModel, width: Dp, modifier: Modifier) {
     val slots = vm.frameSlots
     val focus = vm.playingSlot ?: vm.currentSlot ?: 0
     val (cw, ch) = vm.canvasSize()
-    val aspect = if (cw > 0 && ch > 0) (cw.toFloat() / ch).coerceIn(0.25f, 2f) else 0.66f
-    val frameWidth = FrameHeight * aspect + 1.dp
+    val frameWidth = FrameHeight * frameAspect(cw, ch) + 1.dp
     val pitch = frameWidth + 1.dp
     val pitchPx = with(LocalDensity.current) { pitch.toPx() }
     val last = (slots.size - 1).coerceAtLeast(0)

@@ -74,10 +74,18 @@ fun rememberFrost(corner: Dp): Modifier = rememberFrost(corner, BarGlass())
 
 /**
  * How a bar's glass differs from a panel's: it shows as much as [shown], [moved] (window pixels) as
- * the bar slides out of its place, its box goes [pastLeft] and [pastRight] further (to take the
- * corners of a bar's screen edge off the screen), and as a [window] what is behind only softens.
+ * the bar slides out of its place, its box goes [pastLeft], [pastRight] and [pastBottom] further (to
+ * take the corners of a bar's or a sheet's screen edge off the screen), and as a [window] what is
+ * behind only softens.
  */
-data class BarGlass(val shown: Float = 1f, val moved: Offset = Offset.Zero, val pastLeft: Dp = 0.dp, val pastRight: Dp = 0.dp, val window: Boolean = false)
+data class BarGlass(
+    val shown: Float = 1f,
+    val moved: Offset = Offset.Zero,
+    val pastLeft: Dp = 0.dp,
+    val pastRight: Dp = 0.dp,
+    val window: Boolean = false,
+    val pastBottom: Dp = 0.dp,
+)
 
 /** [rememberFrost] for a bar, as [glass] says. */
 @Composable
@@ -106,7 +114,8 @@ fun rememberFrost(corner: Dp, glass: BarGlass): Modifier {
         // by the screen, so that it works from popups too, then in the window as the canvas is
         val at = c.positionOnScreen() - backdrops.windowOnScreen()
         val (left, right) = with(density) { glass.pastLeft.toPx() to glass.pastRight.toPx() }
-        box = floatArrayOf(at.x - left, at.y, at.x + c.size.width + right, at.y + c.size.height, with(density) { corner.toPx() })
+        val below = with(density) { glass.pastBottom.toPx() }
+        box = floatArrayOf(at.x - left, at.y, at.x + c.size.width + right, at.y + c.size.height + below, with(density) { corner.toPx() })
     }
 }
 

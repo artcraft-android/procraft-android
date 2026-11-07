@@ -623,8 +623,9 @@ impl Interface {
         if self.guide_editor.open {
             self.canvas_rect = Rect::EVERYTHING;
             guide_lines(ui.painter(), session);
-            self.guide_editor.show(&ctx, &mut self.look, session);
-            session.set_backdrops(Vec::new());
+            let mut glass = Vec::new();
+            self.guide_editor.show(&ctx, &mut self.look, session, &mut glass);
+            session.set_backdrops(glass);
             self.popover_open = false;
             return;
         }
