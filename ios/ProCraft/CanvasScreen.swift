@@ -393,7 +393,7 @@ private struct PanelHost: View {
             let buttonX = screen.width - Pc.toolCentreFromRight(libraryButton(model.tool), barWidth: screen.width)
             let place = place(brushLibraryWidth, buttonX)
             // ending 25 above the screen's edge, as measured
-            BrushLibrary(model: model, arrowX: place.arrowX)
+            BrushLibrary(model: model, arrowX: place.arrowX, origin: CGPoint(x: place.left, y: Pc.barHeight), screen: screen)
                 .frame(height: screen.height - Pc.barHeight - 25)
                 .offset(x: place.left, y: Pc.barHeight)
         case .layers:

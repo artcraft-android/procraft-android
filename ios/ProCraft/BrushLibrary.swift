@@ -16,6 +16,8 @@ private let swipeDelete = Color(argb: 0xFFFF_3A46)
 private let searchFill = Color(argb: 0x1F76_7680)
 private let searchHint = Color(argb: 0x4DEB_EBF5)
 private let resultFill = Color(argb: 0x14FF_FFFF)
+/// The search field with the room above and below it, which scrolls away with the lists.
+private let searchBlock: CGFloat = 60
 /// Menus stay below the top bar.
 private let menuTop: CGFloat = 57
 /// The set icon picker: how many of the icons it offers, its columns, how far left of the set it
@@ -78,8 +80,9 @@ private final class LibraryUi {
     var iconPicker = false
     var importing = false
     var query = ""
-    /// The search field has come down (pulled past a list's top).
-    var searchShown = false
+    /// How far the search field (and the lists under it) has scrolled up out of sight: all of it
+    /// when the library opens.
+    var searchAway = searchBlock
     var dragged: BrushInfo?
     var draggedSet: Int?
     /// Where the finger is, and where on the row it took hold.
@@ -87,8 +90,6 @@ private final class LibraryUi {
     var grab = CGPoint.zero
     var setFrames: [Int: CGRect] = [:]
     var brushFrames: [String: CGRect] = [:]
-    /// How tall the panel is.
-    var height: CGFloat = 0
 
     /// The set the dragged brush or set is over, if any.
     var overSet: Int? {
@@ -139,18 +140,6 @@ private struct BrushFrames: PreferenceKey {
     }
 }
 
-/// How far a list's top has been pulled down past where it rests.
-private struct ListPull: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    /// Of the two lists, the one being moved: the other rests at its top.
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        let next = nextValue()
-        if abs(next) > abs(value) {
-            value = next
-        }
-    }
-}
-
 /// The brush library hanging from the tool that opened it: the sets down its left, the shown
 /// set's brushes (each its name over its sample stroke) on its right. Tap the chosen set for its
 /// menu, swipe a brush left to share, duplicate or delete it, hold and drag it onto a set or to
@@ -158,6 +147,10 @@ private struct ListPull: PreferenceKey {
 struct BrushLibrary: View {
     let model: CanvasModel
     let arrowX: CGFloat
+    /// The library's top left corner on the screen (its arrow's top), and the screen's size: the
+    /// menus are kept on it.
+    let origin: CGPoint
+    let screen: CGSize
     @State private var ui = LibraryUi()
     @FocusState private var searching: Bool
 
@@ -176,11 +169,14 @@ struct BrushLibrary: View {
                     .padding(.top, 12)
             }
             VStack(spacing: 0) {
-                // the search field comes down as a list is pulled past its top, and goes again as
-                // the lists scroll up
-                if ui.searchShown || searching || !ui.query.isEmpty {
-                    LibrarySearch(ui: ui, focus: $searching)
-                }
+                // the search field scrolls away with the lists: out of sight at first, it comes down
+                // as a list is pulled down past its top, and goes again as the lists scroll up; what
+                // is left of it shows its lower part, as if slid up under the header
+                let away = searching || !ui.query.isEmpty ? 0 : ui.searchAway
+                LibrarySearch(ui: ui, focus: $searching)
+                    .frame(height: searchBlock - away, alignment: .bottom)
+                    .clipped()
+                    .contentShape(Rectangle())
                 if searching || !ui.query.isEmpty {
                     SearchResults(model: model, query: ui.query)
                 } else {
@@ -192,23 +188,11 @@ struct BrushLibrary: View {
                 }
             }
             .frame(maxHeight: .infinity)
-            .onPreferenceChange(ListPull.self) { pull in
-                if pull > 24, !ui.searchShown {
-                    withAnimation(Motion.settle(0.25)) { ui.searchShown = true }
-                } else if pull < -6, ui.searchShown, ui.query.isEmpty, !searching {
-                    withAnimation(Motion.settle(0.25)) { ui.searchShown = false }
-                }
-            }
         }
         .coordinateSpace(.named(librarySpace))
-        .background(GeometryReader { g in
-            Color.clear
-                .onAppear { ui.height = g.size.height }
-                .onChange(of: g.size.height) { _, height in ui.height = height }
-        })
         .onPreferenceChange(SetFrames.self) { ui.setFrames = $0 }
         .onPreferenceChange(BrushFrames.self) { ui.brushFrames = $0 }
-        .overlay(alignment: .topLeading) { LibraryMenus(model: model, ui: ui) }
+        .overlay(alignment: .topLeading) { LibraryMenus(model: model, ui: ui, origin: origin, screen: screen) }
         .overlay(alignment: .topLeading) { DragGhost(model: model, ui: ui) }
         .fileImporter(isPresented: $ui.importing, allowedContentTypes: [.item]) { result in
             if case let .success(url) = result {
@@ -226,7 +210,7 @@ struct BrushLibrary: View {
                 ui.setMenu = model.shownSet
                 ui.iconPicker = true
             case "search":
-                ui.searchShown = true
+                ui.searchAway = 0
             case "recent":
                 model.showSet(CanvasModel.recentSet)
             case "swipe":
@@ -457,7 +441,8 @@ private struct SetColumn: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
-                PullReader()
+                SearchScroll(ui: ui)
+                    .frame(height: 0)
                 LazyVStack(spacing: 12) {
                     RecentRow(model: model, ui: ui)
                     ForEach(Array(model.brushSets.enumerated()), id: \.offset) { i, set in
@@ -467,7 +452,6 @@ private struct SetColumn: View {
                 .padding(12)
             }
         }
-        .coordinateSpace(.named(listSpace))
         .scrollIndicators(.hidden)
         .scrollDisabled(ui.dragging)
         .frame(width: setsWidth)
@@ -475,16 +459,76 @@ private struct SetColumn: View {
     }
 }
 
-/// The name of the space a list's top is read in.
-private let listSpace = "list"
+/// Gives the search field above the lists its share of their scrolling, as if the field and the
+/// list were one column: a list scrolled up moves the field away first, and one pulled down past
+/// its top by a finger (not flung there) brings the field back first. At the top of a list's
+/// content, it finds the scroll view holding it.
+private struct SearchScroll: UIViewRepresentable {
+    let ui: LibraryUi
 
-/// Says how far the list it heads has been pulled down.
-private struct PullReader: View {
-    var body: some View {
-        GeometryReader { g in
-            Color.clear.preference(key: ListPull.self, value: g.frame(in: .named(listSpace)).minY)
+    func makeUIView(context: Context) -> Sharer {
+        let view = Sharer()
+        view.ui = ui
+        return view
+    }
+
+    func updateUIView(_ view: Sharer, context: Context) {
+        view.ui = ui
+    }
+
+    final class Sharer: UIView {
+        weak var ui: LibraryUi?
+        private weak var list: UIScrollView?
+        private var watch: NSKeyValueObservation?
+        /// Where the list was scrolled to when last seen.
+        private var last: CGFloat = 0
+        /// Set while the list is moved back by what the field took.
+        private var giving = false
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else {
+                watch = nil
+                list = nil
+                return
+            }
+            var under = superview
+            while let view = under, !(view is UIScrollView) {
+                under = view.superview
+            }
+            guard let found = under as? UIScrollView, found !== list else { return }
+            list = found
+            last = found.contentOffset.y
+            watch = found.observe(\.contentOffset, options: [.new]) { [weak self] list, _ in
+                MainActor.assumeIsolated { self?.moved(list) }
+            }
         }
-        .frame(height: 0)
+
+        private func moved(_ list: UIScrollView) {
+            guard !giving, let ui else { return }
+            let top = -list.adjustedContentInset.top
+            let y = list.contentOffset.y
+            let step = y - last
+            last = y
+            if step > 0, y > top, ui.searchAway < searchBlock {
+                // scrolling up, the field goes first
+                let taken = min(step, searchBlock - ui.searchAway, y - top)
+                ui.searchAway += taken
+                give(list, to: y - taken)
+            } else if y < top, list.isTracking, ui.searchAway > 0 {
+                // pulled down past the top, the field comes back first
+                let taken = min(top - y, ui.searchAway)
+                ui.searchAway -= taken
+                give(list, to: y + taken)
+            }
+        }
+
+        private func give(_ list: UIScrollView, to y: CGFloat) {
+            giving = true
+            list.contentOffset.y = y
+            giving = false
+            last = y
+        }
     }
 }
 
@@ -610,7 +654,8 @@ private struct BrushColumn: View {
         ScrollViewReader { reader in
             ScrollView {
                 VStack(spacing: 0) {
-                    PullReader()
+                    SearchScroll(ui: ui)
+                        .frame(height: 0)
                     LazyVStack(spacing: brushGap) {
                         ForEach(listed) { item in
                             BrushRow(model: model, ui: ui, brush: item.brush, pinned: item.pinned, listed: listed.map { $0.brush })
@@ -623,7 +668,6 @@ private struct BrushColumn: View {
                     .padding(.bottom, 12)
                 }
             }
-            .coordinateSpace(.named(listSpace))
             // a brush found from the Recent set is scrolled to in its own
             .onChange(of: model.foundBrush, initial: true) { _, found in
                 if let found {
@@ -875,18 +919,27 @@ private struct DragGhost: View {
 }
 
 /// The library's menus: the plus's, hanging below it with their right edges in line; a set's, left
-/// of it and centred on it; the Recent set's, as a set's, of one item.
+/// of it, 6 clear and centred on it; the Recent set's, as a set's, of one item. Each is kept on the
+/// screen, and all but the plus's below the top bar.
 private struct LibraryMenus: View {
     let model: CanvasModel
     let ui: LibraryUi
+    /// The library's top left corner on the screen, and the screen's size.
+    let origin: CGPoint
+    let screen: CGSize
 
-    /// Where a menu `height` tall goes for a row: left of it, 6 clear, centred on it, kept below the
-    /// top bar and on the screen.
+    /// `p`, a menu `size` big's place in the library, moved as little as keeps the menu on the
+    /// screen and its top at least `top` down it.
+    private func kept(_ p: CGPoint, _ size: CGSize, below top: CGFloat = 0) -> CGPoint {
+        CGPoint(
+            x: min(max(origin.x + p.x, 0), max(screen.width - size.width, 0)) - origin.x,
+            y: min(max(origin.y + p.y, top), max(screen.height - size.height, top)) - origin.y
+        )
+    }
+
+    /// Where a menu `height` tall goes for a row: left of it, 6 clear, centred on it.
     private func beside(_ frame: CGRect, height: CGFloat) -> CGPoint {
-        // the panel starts under the top bar and ends 25 above the screen's edge
-        let top = menuTop - Pc.barHeight
-        let bottom = ui.height + 25 - height
-        return CGPoint(x: frame.minX - glassMenuWidth - 6, y: min(max(frame.midY - height / 2, top), max(bottom, top)))
+        kept(CGPoint(x: frame.minX - glassMenuWidth - 6, y: frame.midY - height / 2), CGSize(width: glassMenuWidth, height: height), below: menuTop)
     }
 
     var body: some View {
@@ -925,9 +978,16 @@ private struct LibraryMenus: View {
     }
 
     private var addMenu: some View {
-        GlassMenu(overPanel: true) {
+        let recent = model.shownSet == CanvasModel.recentSet
+        // its rows, and Import under a line 11 clear of them
+        let height: CGFloat = 14 + (recent ? 40 : 80) + 23 + 40
+        // the plus's lower right corner: 12 in from the header's right, its 40 under the header's
+        // first 12 (the header starting under the arrow)
+        let plus = CGPoint(x: libraryWidth - 12, y: Pc.arrowHeight + 12 + 40)
+        let spot = kept(CGPoint(x: plus.x - glassMenuWidth, y: plus.y), CGSize(width: glassMenuWidth, height: height))
+        return GlassMenu(overPanel: true) {
             // the Recent set holds no brushes of its own to add one to
-            if model.shownSet != CanvasModel.recentSet {
+            if !recent {
                 MenuRow(icon: PcIcons.menuNewBrush, label: "Create new brush") {
                     closeAll()
                     model.newBrush()
@@ -943,7 +1003,7 @@ private struct LibraryMenus: View {
                 ui.importing = true
             }
         }
-        .offset(x: libraryWidth - glassMenuWidth - 12, y: 64)
+        .offset(x: spot.x, y: spot.y)
         .menuTransition(.topTrailing)
     }
 
@@ -991,8 +1051,8 @@ private struct LibraryMenus: View {
     private func iconPicker(_ i: Int, set: BrushSetInfo, frame: CGRect, rowTop: CGFloat) -> some View {
         let tall: CGFloat = 325
         let below = rowTop + 40
-        let room = ui.height + 25 - pickerMargin
-        let y = below + tall <= room ? below : rowTop - tall
+        let room = screen.height - pickerMargin - origin.y
+        let spot = kept(CGPoint(x: frame.minX - pickerInset, y: below + tall <= room ? below : rowTop - tall), CGSize(width: 250, height: tall), below: menuTop)
         let shape = RoundedRectangle(cornerRadius: 26, style: .circular)
         return ScrollViewReader { reader in
             ScrollView {
@@ -1025,7 +1085,7 @@ private struct LibraryMenus: View {
         .background(shape.fill(Color(argb: 0xFA30_3335)))
         .overlay(shape.strokeBorder(Color(argb: 0xFF5A_5D5F), lineWidth: 1))
         .clipShape(shape)
-        .offset(x: frame.minX - pickerInset, y: y)
+        .offset(x: spot.x, y: spot.y)
         .menuTransition(.topLeading)
     }
 }
