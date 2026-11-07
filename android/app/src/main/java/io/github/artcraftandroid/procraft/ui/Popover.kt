@@ -41,6 +41,12 @@ val LocalBackdrops = staticCompositionLocalOf<Backdrops?> { null }
  * tracks (window pixels), sent on whenever they change.
  */
 class Backdrops(private val send: (List<Float>, List<Float>) -> Unit) {
+    /**
+     * Where the app's window is on the screen (pixels): not its corner in a split screen or a
+     * window of its own, so a place on the screen is made one in the window.
+     */
+    var windowOnScreen: () -> Offset = { Offset.Zero }
+
     private val regions = LinkedHashMap<Any, FloatArray>()
     private val windows = LinkedHashMap<Any, FloatArray>()
 
@@ -97,7 +103,8 @@ fun rememberFrost(corner: Dp, glass: BarGlass): Modifier {
         }
     }
     return Modifier.onGloballyPositioned { c ->
-        val at = c.positionOnScreen()
+        // by the screen, so that it works from popups too, then in the window as the canvas is
+        val at = c.positionOnScreen() - backdrops.windowOnScreen()
         val (left, right) = with(density) { glass.pastLeft.toPx() to glass.pastRight.toPx() }
         box = floatArrayOf(at.x - left, at.y, at.x + c.size.width + right, at.y + c.size.height, with(density) { corner.toPx() })
     }
