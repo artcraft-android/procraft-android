@@ -1,5 +1,5 @@
 //! Paste into masks: with a mask selected, Paste puts the picture's brightness into the mask. It's a
-//! plugin, not part of the app: `tools/pack_plugin.py` makes a `.procraftplugin` file of it.
+//! plugin, not part of the app: `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
 //!
 //! The app asks where the picture goes, and if it goes here, hands it over a row at a time and
 //! writes back what it gets. The interface is written down at the top of

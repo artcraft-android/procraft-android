@@ -1,5 +1,5 @@
 //! Interface size: the whole interface a little bigger or smaller, for a screen it doesn't suit.
-//! It's a plugin, not part of the app: `tools/pack_plugin.py` makes a `.procraftplugin` file of it.
+//! It's a plugin, not part of the app: `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
 //!
 //! The app asks how big to show and draws at that number. The slider, its range and the rule that
 //! fits a bigger size to the window are all here. The interface is written down at the top of

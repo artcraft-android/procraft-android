@@ -876,7 +876,7 @@ impl Actions {
                     if shown.is_empty() {
                         let width = ui.available_width();
                         let (area, _) = ui.allocate_exact_size(vec2(width, PLUGINS_EMPTY), Sense::hover());
-                        let words = "Nothing imported yet. Import a .procraftplugin file to add one.";
+                        let words = "Nothing imported yet. Import a .procraft-plugin file to add one.";
                         let inside = width - 2.0 * PLUGIN_INSET;
                         let said = wrapped(ui.painter(), words, 15.0, Weight::Regular, argb(ACTIONS_ROW), inside);
                         ui.painter().galley(area.min + vec2(PLUGIN_INSET, 8.0), said, argb(ACTIONS_ROW));

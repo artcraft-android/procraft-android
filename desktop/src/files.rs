@@ -389,12 +389,17 @@ pub fn import_profile() -> Option<String> {
 
 /// Whether the file at `path` is a plugin, by its name.
 pub fn is_plugin_file(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("procraftplugin"))
+    // (the old name too, from before the hyphen)
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("procraft-plugin") || e.eq_ignore_ascii_case("procraftplugin"))
 }
 
 /// A plugin file the user picks.
 pub fn pick_plugin() -> Option<PathBuf> {
-    FileDialog::new().set_title("Import").add_filter("ProCraft plugins", &["procraftplugin"]).pick_file()
+    FileDialog::new()
+        .set_title("Import")
+        .add_filter("ProCraft plugins", &["procraft-plugin", "procraftplugin"])
+        .pick_file()
 }
 
 /// A picture the user picks (PNG, JPEG, WebP, GIF, BMP or TIFF), to make a new artwork of

@@ -1,6 +1,6 @@
 # Writing a plugin
 
-A plugin is a `.procraftplugin` file. Someone imports it on the Plugins page, and it has a card there
+A plugin is a `.procraft-plugin` file. Someone imports it on the Plugins page, and it has a card there
 with Turn on, Turn off and Remove. None of a plugin's code is in the app, so with none on, the app is
 as it always was.
 
@@ -303,7 +303,7 @@ rustup target add wasm32-unknown-unknown
 python tools/pack_plugin.py nudge --out somewhere
 ```
 
-That writes `nudge.procraftplugin`. Only code needs the `rustup` line. To try it, import it through
+That writes `nudge.procraft-plugin`. Only code needs the `rustup` line. To try it, import it through
 the Plugins page, and tap Turn on if it starts off.
 
 ## When the app changes

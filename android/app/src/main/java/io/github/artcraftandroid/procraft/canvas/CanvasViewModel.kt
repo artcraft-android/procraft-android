@@ -458,7 +458,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     private var offeredPlugin: ByteArray? = null
 
     /** Whether [uri] is a plugin file, by its name. */
-    fun isPluginFile(uri: android.net.Uri) = fileName(uri)?.endsWith(".procraftplugin", ignoreCase = true) == true
+    fun isPluginFile(uri: android.net.Uri) = fileName(uri)?.let { it.endsWith(".procraft-plugin", ignoreCase = true) || it.endsWith(".procraftplugin", ignoreCase = true) } == true
 
     /** Asks about the plugin file at [uri]: nothing in it runs, and nothing is kept until it is accepted. What can't be imported says why. */
     fun offerPlugin(uri: android.net.Uri) {

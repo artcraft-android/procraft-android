@@ -1,5 +1,5 @@
 //! ColorDrop gap closing: a fill keeps out of gaps up to this wide in the lines that bound it. It's
-//! a plugin, not part of the app: `tools/pack_plugin.py` makes a `.procraftplugin` file of it.
+//! a plugin, not part of the app: `tools/pack_plugin.py` makes a `.procraft-plugin` file of it.
 //!
 //! The app hands over the fill as it is let go, a row of bits at a time, and clears what comes back.
 //! The rule is all in [`closer`]. The interface is written down at the top of
