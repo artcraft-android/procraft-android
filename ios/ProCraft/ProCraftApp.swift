@@ -207,6 +207,15 @@ enum ScreenCapture {
         plugins.read()
     }
 
+    /// The plugins holding a filter turned on, as a person would (the app's own come in off).
+    private static func filtersOn() {
+        importPlugins()
+        let plugins = PluginsModel.shared
+        for plugin in plugins.plugins where plugin.holds.contains(.filter) && !plugin.on {
+            plugins.setOn(plugin, true)
+        }
+    }
+
     /// The plugin called `name`, on.
     private static func apply(_ name: String) -> PluginInfo? {
         importPlugins()
@@ -485,11 +494,11 @@ enum ScreenCapture {
                 PluginsModel.shared.offer(URL(fileURLWithPath: folder + "/extract-lines.procraft-plugin")) { _ in }
             }
         case "adjust-plugins":
-            importPlugins()
+            filtersOn()
             filtersShow = true
             model.toggle(.adjustments)
         case "effect-plugin":
-            importPlugins()
+            filtersOn()
             if let l = model.layers.first(where: { $0.current }) {
                 model.fillLayer(l)
             }
