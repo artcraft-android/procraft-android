@@ -5844,6 +5844,59 @@ fn a_layer_shown_alone_hides_the_others_until_solo_ends() {
 }
 
 #[test]
+fn a_group_shown_alone_shows_its_layers_and_opens_whole_once_hidden() {
+    let Some(s) = session(100, 100) else { return };
+    s.shared.lock().canvas.as_mut().unwrap().set_cache_composites(true);
+    s.set_brush_size(0.4);
+    let dot = |x: f32| {
+        s.stroke_begin(PointerKind::Finger, vec![sample(x, 50.0, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    let black = [0, 0, 0, 255];
+    let white = [255, 255, 255, 255];
+    dot(10.0);
+    let a = s.add_layer();
+    dot(40.0);
+    s.add_layer();
+    dot(70.0);
+    // the top two grouped, then the group shown alone
+    assert!(s.pick_layer(a));
+    let group = s.group_picked();
+    assert_ne!(group, 0);
+    assert!(s.set_solo(Some(group)));
+    assert_eq!([pixel(&s, 10, 50), pixel(&s, 40, 50), pixel(&s, 70, 50)], [white, black, black]);
+    // hidden as well, it leaves only the background; saved so, it opens with every layer shown
+    // but the group's
+    assert!(s.set_layer_visible(group, false));
+    assert_eq!([pixel(&s, 10, 50), pixel(&s, 40, 50), pixel(&s, 70, 50)], [white, white, white]);
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let dir = std::env::temp_dir().join(format!("procraft-solo-group-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    opened.use_gpu(gpu);
+    {
+        let mut st = opened.shared.lock();
+        st.window_size = (100, 100);
+        st.view = Some(View::fit((100, 100), (100, 100)));
+        st.ensure_canvas();
+        st.canvas.as_mut().unwrap().set_cache_composites(true);
+    }
+    assert_eq!(opened.solo(), None);
+    assert_eq!(opened.layers().len(), s.layers().len());
+    assert_eq!([pixel(&opened, 10, 50), pixel(&opened, 40, 50), pixel(&opened, 70, 50)], [black, white, white]);
+    // and a new layer shows
+    let bottom = opened.layers().last().unwrap().id;
+    assert!(opened.select_layer(bottom));
+    opened.set_brush_size(0.4);
+    assert_ne!(opened.add_layer(), 0);
+    opened.stroke_begin(PointerKind::Finger, vec![sample(90.0, 50.0, 0.0)]);
+    opened.stroke_end(vec![]);
+    assert_eq!(pixel(&opened, 90, 50), black);
+}
+
+#[test]
 fn a_documents_pages_come_in_as_page_layers() {
     let dir = std::env::temp_dir().join(format!("procraft-pages-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -9743,4 +9796,254 @@ fn liquify_held_still_works_on() {
     assert!(s.touch_tick(200.0).is_empty());
     s.touch_up(1, vec![sample(128.0, 128.0, 210.0)]);
     assert_eq!(s.touch_deadline(), None);
+}
+
+/// Whether each of `spots` shows a dot in the composite (the background is white).
+fn dots_shown(s: &CanvasSession, spots: &[(u32, u32)]) -> Vec<bool> {
+    let mut guard = s.shared.lock();
+    let st = &mut *guard;
+    let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+    canvas.render_finished(gpu, &mut st.doc);
+    assert_eq!(gpu.errors(), 0, "GPU validation errors");
+    let px = canvas.read_composite(gpu).unwrap();
+    let w = st.doc.width();
+    spots
+        .iter()
+        .map(|&(x, y)| {
+            let i = ((y * w + x) * 4) as usize;
+            px[i..i + 3].iter().any(|c| *c < 200)
+        })
+        .collect()
+}
+
+/// Whether each of `spots` should show a dot by the layers panel: some paint layer holding it (as
+/// its pixels say) has its box ticked, and so does every group it is in. Checks the boxes too: while
+/// a layer or group is shown alone, only it and what is in it may show ticked.
+fn dots_listed(s: &CanvasSession, spots: &[(u32, u32)]) -> Vec<bool> {
+    use crate::layers::{LayerInfo, LayerType};
+    let layers = s.layers();
+    let solo = s.solo();
+    let by_id = |id: u64| layers.iter().find(|l| l.id == id);
+    let ancestors = |l: &LayerInfo| {
+        let mut out = Vec::new();
+        let mut at = l.parent;
+        while let Some(g) = at.and_then(by_id) {
+            if out.len() > layers.len() {
+                break;
+            }
+            out.push(g);
+            at = g.parent;
+        }
+        out
+    };
+    let ticked = |l: &LayerInfo| l.visible && !l.soloed_out;
+    let mut guard = s.shared.lock();
+    let st = &mut *guard;
+    let (canvas, gpu) = (st.canvas.as_mut().unwrap(), st.gpu.as_ref().unwrap());
+    canvas.render_finished(gpu, &mut st.doc);
+    let w = st.doc.width();
+    let mut out = vec![false; spots.len()];
+    for l in layers.iter().filter(|l| l.kind == LayerType::Paint) {
+        let up = ancestors(l);
+        let alone = solo.is_none_or(|g| l.id == g || up.iter().any(|a| a.id == g));
+        assert_eq!(l.soloed_out, !alone, "{} #{} shown alone or not", l.name, l.id);
+        let shows = ticked(l) && up.iter().all(|g| ticked(g));
+        let px = canvas.read_layer(gpu, procraft_engine::document::LayerId(l.id)).unwrap();
+        for (k, &(x, y)) in spots.iter().enumerate() {
+            if shows && px[((y * w + x) * 4 + 3) as usize] > 200 {
+                out[k] = true;
+            }
+        }
+    }
+    out
+}
+
+/// Each row as the panel lists it, for a failure's message.
+fn rows(s: &CanvasSession) -> String {
+    let rows: Vec<String> = s
+        .layers()
+        .iter()
+        .map(|l| {
+            let indent = "  ".repeat(l.depth as usize);
+            let flags = [
+                (!l.visible, " hidden"),
+                (l.soloed_out, " soloed out"),
+                (l.current, " current"),
+                (l.picked, " picked"),
+            ];
+            let flags: String = flags.iter().filter(|(on, _)| *on).map(|(_, f)| *f).collect();
+            format!("{indent}{} #{} {:?}{flags}", l.name, l.id, l.kind)
+        })
+        .collect();
+    rows.join("\n")
+}
+
+/// Layers made, painted, picked, grouped (by Group, Combine Down and into groups below), moved,
+/// duplicated, deleted, hidden and shown alone, with undo and redo, then saved and opened again:
+/// after every step the picture shows a layer's dot exactly when the panel shows it ticked in
+/// ticked groups. A `side` canvas, its layers' textures held to `resident` layers (0: all).
+fn picture_follows_the_panel(seed: u32, side: u32, resident: u64, steps: usize) {
+    use crate::layers::LayerType;
+    let Some(s) = session(side, side) else { return };
+    {
+        let mut st = s.shared.lock();
+        let canvas = st.canvas.as_mut().unwrap();
+        canvas.set_cache_composites(true);
+        if resident > 0 {
+            canvas.set_resident_budget(resident * u64::from(side) * u64::from(side) * 4);
+        }
+    }
+    s.set_brush_size(0.2);
+    let mut state = seed;
+    let mut next = |n: u32| {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) % n.max(1)
+    };
+    // one dot per new layer, apart (copies share theirs)
+    let cell = side / 10;
+    let spots: Vec<(u32, u32)> = (0..81).map(|k| ((k % 9 + 1) * cell, (k / 9 + 1) * cell)).collect();
+    let dot = |s: &CanvasSession, k: usize| {
+        let (x, y) = spots[k];
+        let c = (k as f32 * 0.37) % 1.0;
+        s.set_color(c * 0.6, 0.2, 0.8 - c * 0.5);
+        s.stroke_begin(PointerKind::Finger, vec![sample(x as f32, y as f32, 0.0)]);
+        s.stroke_end(vec![]);
+    };
+    dot(&s, 0);
+    let mut used = 1;
+    let mut done: Vec<String> = Vec::new();
+    for step in 0..steps {
+        let layers = s.layers();
+        let any = |k: u32| layers.get(k as usize % layers.len().max(1)).map_or(0, |l| l.id);
+        let groups: Vec<u64> = layers.iter().filter(|l| l.kind == LayerType::Group).map(|l| l.id).collect();
+        let group = |k: u32| groups.get(k as usize % groups.len().max(1)).copied();
+        let what = match next(18) {
+            0 | 1 => {
+                if used < spots.len() && s.add_layer() != 0 {
+                    dot(&s, used);
+                    used += 1;
+                }
+                "new layer, painted".to_owned()
+            }
+            2 => {
+                let id = any(next(64));
+                format!("select {id}: {}", s.select_layer(id))
+            }
+            3 | 4 => {
+                let id = any(next(64));
+                format!("pick {id}: {}", s.pick_layer(id))
+            }
+            5 | 6 => format!("group picked: {}", s.group_picked()),
+            7 => {
+                let id = any(next(64));
+                format!("combine down {id}: {:?}", s.combine_down(id))
+            }
+            8 => group(next(8)).map_or_else(String::new, |g| format!("ungroup {g}: {}", s.ungroup(g))),
+            9 => {
+                let (id, to) = (any(next(64)), next(layers.len() as u32 + 1));
+                format!("move {id} to {to}: {}", s.move_layer(id, to))
+            }
+            10 => {
+                let (id, by, above) = (any(next(64)), any(next(64)), next(2) == 0);
+                format!("move {id} next to {by} (above {above}): {}", s.move_next_to(id, by, above))
+            }
+            11 => {
+                let id = group(next(8)).filter(|_| next(2) == 0).unwrap_or_else(|| any(next(64)));
+                let visible = next(2) == 0;
+                format!("visible {id} {visible}: {}", s.set_layer_visible(id, visible))
+            }
+            12 => {
+                let id = any(next(64));
+                format!("duplicate {id}: {:?}", s.duplicate_layer(id))
+            }
+            13 => format!("duplicate picked: {}", s.duplicate_picked()),
+            14 => {
+                let id = any(next(64));
+                format!("delete {id}: {}", s.delete_layer(id))
+            }
+            15 => {
+                if next(2) == 0 {
+                    format!("undo: {:?}", s.undo())
+                } else {
+                    format!("redo: {:?}", s.redo())
+                }
+            }
+            16 => format!("pick all: {}", s.pick_all_layers()),
+            _ => {
+                let id = group(next(8)).filter(|_| next(2) == 0).unwrap_or_else(|| any(next(64)));
+                if next(3) == 0 {
+                    format!("box tapped {id}: {:?}", s.tap_visibility(id))
+                } else {
+                    format!("box held {id}: {:?}", s.hold_visibility(id))
+                }
+            }
+        };
+        done.push(format!("{step}: {what}"));
+        let (listed, shown) = (dots_listed(&s, &spots[..used]), dots_shown(&s, &spots[..used]));
+        let differ: Vec<usize> = (0..used).filter(|k| listed[*k] != shown[*k]).collect();
+        assert!(
+            differ.is_empty(),
+            "seed {seed}, side {side}: dots {differ:?} show otherwise than listed after\n{}\nrows:\n{}",
+            done.join("\n"),
+            rows(&s)
+        );
+    }
+    let before = dots_shown(&s, &spots[..used]);
+    let gpu = s.shared.lock().gpu.clone().unwrap();
+    let dir = std::env::temp_dir().join(format!("procraft-panel-{}-{seed}-{side}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    s.save(dir.to_string_lossy().into_owned()).unwrap();
+    let opened = CanvasSession::open(dir.to_string_lossy().into_owned()).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    opened.use_gpu(gpu);
+    {
+        let mut st = opened.shared.lock();
+        st.window_size = (side, side);
+        st.view = Some(View::fit((side, side), (side, side)));
+        st.ensure_canvas();
+        st.canvas.as_mut().unwrap().set_cache_composites(true);
+    }
+    let after = dots_shown(&opened, &spots[..used]);
+    assert_eq!(after, dots_listed(&opened, &spots[..used]), "seed {seed}: opened again\n{}", done.join("\n"));
+    // the same picture, unless what was shown alone couldn't show (then every layer shows)
+    if opened.solo() == s.solo() {
+        assert_eq!(after, before, "seed {seed}: opened again\n{}", done.join("\n"));
+    }
+}
+
+#[test]
+fn the_picture_shows_what_the_layers_panel_shows_through_group_work() {
+    for seed in 1..=10 {
+        picture_follows_the_panel(seed, 100, 0, 60);
+    }
+    // layers past what the GPU holds kept compressed
+    for seed in 11..=13 {
+        picture_follows_the_panel(seed, 400, 3, 60);
+    }
+}
+
+#[test]
+fn while_a_layer_is_shown_alone_the_other_boxes_show_hidden_and_a_tap_ends_it() {
+    let Some(s) = session(100, 100) else { return };
+    let below = s.layers()[0].id;
+    let top = s.add_layer();
+    let ticked = |s: &CanvasSession| s.layers().iter().map(|l| l.visible && !l.soloed_out).collect::<Vec<_>>();
+    assert_eq!(ticked(&s), [true, true]);
+    assert_eq!(s.hold_visibility(top).as_deref(), Some("Solo visibility on"));
+    assert_eq!(s.solo(), Some(top));
+    // listed top first
+    assert_eq!(ticked(&s), [true, false]);
+    // a tap on any box shows every layer again, changing none
+    assert_eq!(s.tap_visibility(below).as_deref(), Some("Solo visibility off"));
+    assert_eq!((s.solo(), ticked(&s)), (None, vec![true, true]));
+    assert_eq!(s.hold_visibility(below).as_deref(), Some("Solo visibility on"));
+    assert_eq!(s.tap_visibility(below).as_deref(), Some("Solo visibility off"));
+    assert!(s.layers().iter().all(|l| l.visible));
+    // otherwise a tap shows or hides it, and holding again ends it
+    assert_eq!(s.tap_visibility(top).as_deref(), Some("Hide layer"));
+    assert_eq!(ticked(&s), [false, true]);
+    assert_eq!(s.tap_visibility(top).as_deref(), Some("Show layer"));
+    assert_eq!(s.hold_visibility(below).as_deref(), Some("Solo visibility on"));
+    assert_eq!(s.hold_visibility(below).as_deref(), Some("Solo visibility off"));
+    assert_eq!(s.tap_visibility(999), None);
 }

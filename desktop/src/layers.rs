@@ -1096,8 +1096,9 @@ impl Layers {
         }
     }
 
-    /// A row's visibility box at `rect`: tapped, the layer shows or hides; held, it shows alone (or,
-    /// alone already, every layer shows again), a notice saying which.
+    /// A row's visibility box at `rect`: tapped, the layer shows or hides (or, with a layer shown
+    /// alone, every layer shows again); held, it shows alone (or, alone already, every layer shows
+    /// again), a notice saying which.
     fn visibility_touch(&mut self, ui: &Ui, session: &CanvasSession, l: &LayerInfo, rect: Rect) {
         let response = ui.interact(rect, ui.scope_id().with(("visible", l.id)), Sense::click_and_drag());
         if response.is_pointer_button_down_on() {
@@ -1106,10 +1107,8 @@ impl Layers {
                 let held = since.elapsed();
                 if held >= HOLD {
                     *done = true;
-                    let on = session.solo() != Some(l.id);
-                    if session.set_solo(on.then_some(l.id)) {
-                        let said = if on { "Solo visibility on" } else { "Solo visibility off" };
-                        self.notice = Some((said.into(), false));
+                    if let Some(said) = session.hold_visibility(l.id) {
+                        self.notice = Some((said, false));
                     }
                 } else {
                     ui.ctx().request_repaint_after(HOLD - held);
@@ -1118,8 +1117,11 @@ impl Layers {
         }
         let held = self.box_press.is_some_and(|(id, _, done)| id == l.id && done);
         // as measured, the notice band says so
-        if response.clicked() && !held && session.set_layer_visible(l.id, !l.visible) {
-            self.notice = Some((if l.visible { "Hide layer" } else { "Show layer" }.to_owned(), false));
+        if response.clicked()
+            && !held
+            && let Some(said) = session.tap_visibility(l.id)
+        {
+            self.notice = Some((said, false));
         }
         if !response.is_pointer_button_down_on() && self.box_press.is_some_and(|(id, _, _)| id == l.id) {
             self.box_press = None;
@@ -1401,7 +1403,7 @@ impl Layers {
             // it takes drags too, so a press on it is never the row's
             blend_tapped = ui.interact(blend, ui.scope_id().with(("blend", l.id)), Sense::click_and_drag()).clicked();
         }
-        check_box(ui, look, visibility.center(), l.visible, box_fill);
+        check_box(ui, look, visibility.center(), l.visible && !l.soloed_out, box_fill);
         self.visibility_touch(ui, session, l, visibility);
         blend_tapped
     }
@@ -1471,7 +1473,7 @@ impl Layers {
         if ui.interact(arrow, ui.scope_id().with(("fold", l.id)), Sense::click()).clicked() {
             session.set_group_collapsed(l.id, !l.collapsed);
         }
-        check_box(ui, look, visibility.center(), l.visible, box_fill);
+        check_box(ui, look, visibility.center(), l.visible && !l.soloed_out, box_fill);
         self.visibility_touch(ui, session, l, visibility);
     }
 

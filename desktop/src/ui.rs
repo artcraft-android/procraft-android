@@ -1388,13 +1388,10 @@ impl Interface {
             QuickAction::FillLayer => _ = id.map(|id| session.fill_layer(id)),
             QuickAction::SelectLayer => _ = id.map(|id| session.select_layer_contents(id)),
             QuickAction::AlphaLock => _ = current.map(|l| session.set_layer_alpha_lock(l.id, !l.alpha_lock)),
-            QuickAction::LayerVisibility => _ = current.map(|l| session.set_layer_visible(l.id, !l.visible)),
+            QuickAction::LayerVisibility => _ = current.map(|l| session.tap_visibility(l.id)),
             QuickAction::Solo => {
-                if let Some(id) = id {
-                    let on = session.solo() != Some(id);
-                    if session.set_solo(on.then_some(id)) {
-                        self.overlays.notice(if on { "Solo visibility on" } else { "Solo visibility off" }, false);
-                    }
+                if let Some(said) = id.and_then(|id| session.hold_visibility(id)) {
+                    self.overlays.notice(said, false);
                 }
             }
             QuickAction::Copy => self.copy_layer(session),
