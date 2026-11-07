@@ -2890,12 +2890,12 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Layer [l] shown alone, or, already alone, every layer again; a message says which. */
+    /** Layer [l] shown alone, or, already alone, every layer again; a message says which (the core's words). */
     fun toggleSolo(l: LayerInfo) {
-        val s = session ?: return
-        val on = s.solo() != l.id
-        if (!s.setSolo(if (on) l.id else null)) return
-        showNotice(if (on) "Solo visibility on" else "Solo visibility off")
+        var said: String? = null
+        // the other rows' boxes show them hidden while it is alone
+        layerChange(thumbs = false) { said = it.holdVisibility(l.id) }
+        said?.let { showNotice(it) }
     }
 
     // Layer opacity: a drag across the canvas changes the current layer's opacity, read in the band
@@ -6905,11 +6905,14 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     // no layer's pixels change, so the thumbnails stay (an artwork's hundreds would load again)
     fun selectLayer(id: ULong) = layerChange(thumbs = false) { it.selectLayer(id) }
 
-    /** Shows or hides [l], saying so in the notice band as measured ("Hide layer"). */
+    /**
+     * [l]'s box tapped: it shows or hides, saying so in the notice band as measured ("Hide layer"), or, with a
+     * layer shown alone, every layer shows again (the core decides and words it).
+     */
     fun toggleVisible(l: LayerInfo) {
-        var done = false
-        layerChange { done = it.setLayerVisible(l.id, !l.visible) }
-        if (done) showNotice(if (l.visible) "Hide layer" else "Show layer")
+        var said: String? = null
+        layerChange { said = it.tapVisibility(l.id) }
+        said?.let { showNotice(it) }
     }
 
     fun setLayerOpacity(l: LayerInfo, value: Float, done: Boolean) = layerChange(thumbs = false) { it.setLayerOpacity(l.id, value, done) }

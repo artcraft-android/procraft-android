@@ -655,13 +655,30 @@ impl Document {
     }
 
     /// Whether layer `id` is left out of the picture while another is shown alone (solo): all
-    /// but that layer, its mask and the groups it is in.
+    /// but that layer with its mask, what is in it (a group shown alone shows its layers as they
+    /// are set) and the groups it is in.
     pub fn soloed_out(&self, id: LayerId) -> bool {
         let Some(solo) = self.solo.filter(|s| self.layer(*s).is_some()) else { return false };
-        if id == solo || self.mask_of(solo) == Some(id) {
+        if id == solo || self.mask_of(solo) == Some(id) || self.is_inside(id, solo) {
             return false;
         }
         !(self.layer(id).is_some_and(|l| l.kind == LayerKind::Group) && self.is_inside(solo, id))
+    }
+
+    /// Whether layer `id` can show: it is visible, and so is every group it is in.
+    fn shows(&self, id: LayerId) -> bool {
+        if self.layer(id).is_none_or(|l| !l.visible) {
+            return false;
+        }
+        let mut at = self.group_of(id);
+        for _ in 0..self.layers.len() {
+            let Some(g) = at else { return true };
+            if self.layer(g).is_none_or(|l| !l.visible) {
+                return false;
+            }
+            at = self.group_of(g);
+        }
+        true
     }
 
     /// The reference layer, if one is set.
@@ -1552,7 +1569,9 @@ impl Document {
         if self.layer(self.current).is_none() {
             self.current = self.layers.last().map_or(LayerId(0), |l| l.id);
         }
-        if self.solo.is_some_and(|s| self.layer(s).is_none()) {
+        // a layer shown alone that can't show (hidden, or in a hidden group) leaves only the
+        // background, the panel's boxes still ticked: such an artwork opens with every layer shown
+        if self.solo.is_some_and(|s| !self.shows(s)) {
             self.solo = None;
         }
         // drawing assist was once the guide's, not each layer's: it goes to the current layer
@@ -1877,6 +1896,46 @@ mod tests {
         let fixed = looped.repaired();
         assert_eq!(fixed.layers().len(), 6);
         assert!(fixed.max_depth() <= 2);
+    }
+
+    #[test]
+    fn a_group_shown_alone_shows_what_is_in_it_and_one_that_cant_show_opens_without_solo() {
+        let mut d = Document::new(10, 10);
+        let below = d.current();
+        let a = d.add_layer();
+        let b = d.add_layer();
+        let m = d.add_mask(b).unwrap();
+        assert!(d.set_current(a));
+        assert!(d.toggle_pick(b));
+        let g = d.group_chosen().unwrap();
+        assert!(d.set_current(g));
+        let above = d.add_layer();
+        d.solo = Some(g);
+        for id in [g, a, b, m] {
+            assert!(!d.soloed_out(id), "{id:?} is in the group shown alone");
+        }
+        assert!(d.soloed_out(below) && d.soloed_out(above));
+        // nested: the outer group's layers show, the group around it too
+        assert!(d.set_current(g));
+        assert!(d.toggle_pick(below));
+        let outer = d.group_chosen().unwrap();
+        assert!(!d.soloed_out(outer) && !d.soloed_out(a) && d.soloed_out(below));
+        d.solo = Some(outer);
+        assert!(!d.soloed_out(below) && !d.soloed_out(a) && d.soloed_out(above));
+        // saved shown alone and showing: kept
+        d.solo = Some(g);
+        assert_eq!(d.clone().repaired().solo, Some(g));
+        // saved shown alone but hidden, or in a hidden group: every layer shows again on opening
+        let mut hidden = d.clone();
+        hidden.set_visible(g, false);
+        assert_eq!(hidden.repaired().solo, None);
+        let mut inside = d.clone();
+        inside.solo = Some(a);
+        assert_eq!(inside.clone().repaired().solo, Some(a));
+        inside.set_visible(outer, false);
+        let fixed = inside.repaired();
+        assert_eq!(fixed.solo, None);
+        assert_eq!(fixed.layers().len(), d.layers().len());
     }
 
     #[test]

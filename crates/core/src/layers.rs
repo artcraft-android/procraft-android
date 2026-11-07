@@ -34,6 +34,9 @@ pub struct LayerInfo {
     pub text: bool,
     /// How many groups it is inside.
     pub depth: u32,
+    /// Left out of the picture while another layer is shown alone (solo visibility): its box
+    /// shows it hidden, whatever it is set to.
+    pub soloed_out: bool,
     /// Whether Merge Down, Combine Down and Clipping Mask apply to it.
     pub can_merge: bool,
     pub can_combine: bool,
@@ -377,6 +380,7 @@ impl CanvasSession {
                 collapsed: l.collapsed,
                 text: l.text.is_some(),
                 depth: u32::try_from(st.doc.depth(l.id)).unwrap_or(u32::MAX),
+                soloed_out: st.doc.soloed_out(l.id),
                 // as measured, not onto a locked layer: both left out of its menu then
                 can_merge: st.doc.merge_target(l.id).is_some_and(|b| !st.doc.is_locked(b)),
                 can_combine: l.kind != LayerKind::Mask && st.doc.below(l.id).is_some_and(|b| !st.doc.is_locked(b)),
@@ -696,6 +700,25 @@ impl CanvasSession {
     pub fn solo(&self) -> Option<u64> {
         let st = self.shared.lock();
         st.doc.solo.filter(|s| st.doc.layer(*s).is_some()).map(|s| s.0)
+    }
+
+    /// Layer `id`'s visibility box tapped: while a layer is shown alone, every layer shows as it
+    /// is set again (the others' boxes showed them hidden); otherwise the layer shows or hides.
+    /// Returns what the notice band says, or None if nothing changed.
+    pub fn tap_visibility(&self, id: u64) -> Option<String> {
+        if self.solo().is_some() {
+            return self.set_solo(None).then(|| "Solo visibility off".to_owned());
+        }
+        let visible = self.shared.lock().doc.layer(LayerId(id))?.visible;
+        self.set_layer_visible(id, !visible).then(|| if visible { "Hide layer" } else { "Show layer" }.to_owned())
+    }
+
+    /// Layer `id`'s visibility box held: it shows alone, or, alone already, every layer shows as
+    /// it is set again. Returns what the notice band says, or None if nothing changed.
+    pub fn hold_visibility(&self, id: u64) -> Option<String> {
+        let on = self.solo() != Some(id);
+        self.set_solo(on.then_some(id))
+            .then(|| if on { "Solo visibility on" } else { "Solo visibility off" }.to_owned())
     }
 
     /// Opacity 0..1; `done` ends the drag (one undo step for the whole drag).

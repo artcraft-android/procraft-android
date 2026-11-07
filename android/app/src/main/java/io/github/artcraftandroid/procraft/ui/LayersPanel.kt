@@ -677,7 +677,7 @@ private fun GroupRow(
             Icon(if (l.collapsed) PcIcons.ChevronRight else PcIcons.ChevronDown, contentDescription = if (l.collapsed) "Open" else "Close", tint = ink, modifier = Modifier.size(16.dp))
         }
         Box(Modifier.size(44.dp, GroupHeight).visibilityTouch(vm, l), contentAlignment = Alignment.Center) {
-            CheckBox(l.visible, if (l.current || l.picked) Color.White else Pc.CheckFill)
+            CheckBox(l.visible && !l.soloedOut, if (l.current || l.picked) Color.White else Pc.CheckFill)
         }
         Spacer(Modifier.width(8.dp))
     }
@@ -761,7 +761,7 @@ private fun LayerRow(
             }
         }
         Box(Modifier.size(44.dp, 47.dp).visibilityTouch(vm, l), contentAlignment = Alignment.Center) {
-            CheckBox(l.visible, if (selected || l.picked) Color.White else Pc.CheckFill)
+            CheckBox(l.visible && !l.soloedOut, if (selected || l.picked) Color.White else Pc.CheckFill)
         }
         Spacer(Modifier.width(8.dp))
     }
@@ -1139,7 +1139,7 @@ private fun BackgroundRow(vm: CanvasViewModel) {
     }
 }
 
-/** A layer's visibility box: tapped, shown or hidden; held, shown alone (or every layer again). */
+/** A layer's visibility box: tapped, shown or hidden (or, with a layer shown alone, every layer again); held, shown alone (or every layer again). */
 private fun Modifier.visibilityTouch(vm: CanvasViewModel, l: LayerInfo): Modifier =
     pointerInput(l) { detectTapGestures(onTap = { vm.toggleVisible(l) }, onLongPress = { vm.toggleSolo(l) }) }
 
