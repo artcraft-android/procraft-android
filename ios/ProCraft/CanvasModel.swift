@@ -178,6 +178,8 @@ final class CanvasModel {
     }
     /// Share's animated export, while its screen is up.
     var animatedExport: AnimatedFormat?
+    /// A CMYK canvas's inks for the Value picker: the inks a canvas colour prints with, and back.
+    private(set) var inks: Inks?
     /// The single touch gestures companion shows, and what a lone finger on the canvas does with it.
     var singleTouchCompanion = false
     var companionMode: CompanionMode?
@@ -320,6 +322,7 @@ final class CanvasModel {
         session.setSelectionVisibility(visibility: settings.selectionVisibility)
         applyPlugins()
         PluginsModel.shared.onChange = { [weak self] in self?.applyPlugins() }
+        refreshCanvasSpace()
         if !SystemSettings.orientationMemory {
             session.forgetSavedView()
         }
@@ -1350,6 +1353,8 @@ final class CanvasModel {
         layers = session.layers()
         followMaskColour()
         background = session.background()
+        // undoing may put the canvas back in another profile
+        refreshCanvasSpace()
         if panel == .layers {
             refreshThumbnails()
         }
@@ -2094,6 +2099,43 @@ final class CanvasModel {
     func noticeGone(_ n: Notice) {
         if notice == n {
             notice = nil
+        }
+    }
+}
+
+/// A CMYK canvas's inks (cyan, magenta, yellow, black; 0..1) for a canvas colour, and back.
+struct Inks {
+    let of: (UInt32) -> [Float]
+    let rgb: ([Float]) -> UInt32
+}
+
+extension CanvasModel {
+    /// How the colour panel and swatches show the canvas's colours: its space, its press.
+    func refreshCanvasSpace() {
+        let session = session
+        let name = session.profile()
+        let space = CanvasSpace.shared
+        if session.isCmyk() {
+            space.set(p3: true) { session.proofColor(rgb: $0) }
+            if inks == nil {
+                inks = Inks(
+                    of: { rgb in
+                        let inks = session.cmykOf(rgb: rgb)
+                        return inks.count == 4 ? inks : [0, 0, 0, 0]
+                    },
+                    rgb: { session.rgbOfCmyk(cmyk: $0) }
+                )
+            }
+            return
+        }
+        let p3 = "Display P3"
+        if profileIsBuiltIn(name: name) {
+            space.set(p3: name == p3)
+        } else {
+            space.set(p3: true) { convertColor(rgb: $0, from: name, to: p3) }
+        }
+        if inks != nil {
+            inks = nil
         }
     }
 }

@@ -231,7 +231,11 @@ struct ColorPanel: View {
         case .harmony:
             HarmonyPicker(kind: model.harmonyKind, c: c, short: short)
         case .value:
-            ValuePicker(c: c, ui: ui, short: short)
+            if let inks = model.inks {
+                InkPicker(c: c, ui: ui, inks: inks)
+            } else {
+                ValuePicker(c: c, ui: ui, short: short)
+            }
         case .palettes:
             PalettesList(model: model, c: c, ui: ui, short: short)
         }
@@ -614,6 +618,68 @@ private struct ValuePicker: View {
             if short {
                 Color.clear.frame(height: 2)
             }
+        }
+        .padding(.horizontal, 8)
+    }
+}
+
+/// Value on a CMYK canvas: the hue, saturation and brightness, the four inks, then the hex code.
+private struct InkPicker: View {
+    let c: any ColorPick
+    let ui: ColorUi
+    let inks: Inks
+
+    /// The inks dragged to, kept while the colour they make is the colour (not worked out again
+    /// from it, which could move the other inks).
+    @State private var held: (rgb: UInt32, inks: [Float])?
+
+    private func group<Rows: View>(height: CGFloat, gap: CGFloat, @ViewBuilder _ rows: () -> Rows) -> some View {
+        VStack(spacing: gap) {
+            rows()
+        }
+        .padding(.top, 1)
+        .frame(maxWidth: .infinity)
+        .frame(height: height, alignment: .top)
+        .background(RoundedRectangle(cornerRadius: 10, style: .circular).fill(Pc.valueGroup))
+    }
+
+    var body: some View {
+        let rgb = c.rgb()
+        let now = held.flatMap { $0.rgb == rgb ? $0.inks : nil } ?? inks.of(rgb)
+        let hue = c.hue
+        let with: (Int, Float) -> [Float] = { k, v in
+            var next = now
+            if next.indices.contains(k) {
+                next[k] = min(max(v, 0), 1)
+            }
+            return next
+        }
+        VStack(spacing: 0) {
+            group(height: 142, gap: 4) {
+                ValueRow(letter: "H", value: huePosition(control: .slider, hue: hue), colours: sliderHues, shown: "\(wholeNumber(hue * 360))°") {
+                    c.setHsv(hueAt(control: .slider, position: $0), c.saturation, c.brightness)
+                }
+                ValueRow(letter: "S", value: c.saturation, colours: [0x7F7F7F, CanvasModel.rgb(hue: hue, saturation: 1, brightness: 1)], shown: "\(wholeNumber(c.saturation * 100))%") {
+                    c.setHsv(hue, $0, c.brightness)
+                }
+                ValueRow(letter: "B", value: c.brightness, colours: brightnessTrack, shown: "\(wholeNumber(c.brightness * 100))%") {
+                    c.setHsv(hue, c.saturation, $0)
+                }
+            }
+            group(height: 187, gap: 3) {
+                ForEach(Array(["C", "M", "Y", "K"].enumerated()), id: \.offset) { k, letter in
+                    let v = now.indices.contains(k) ? now[k] : 0
+                    ValueRow(letter: letter, value: v, colours: [inks.rgb(with(k, 0)), inks.rgb(with(k, 1))], shown: "\(wholeNumber(v * 100))%") {
+                        let next = with(k, $0)
+                        let made = inks.rgb(next)
+                        held = (made, next)
+                        c.setRgb(made)
+                    }
+                }
+            }
+            .padding(.top, 8)
+            HexRow(rgb: rgb, ui: ui) { c.setRgb($0) }
+                .padding(.top, 2)
         }
         .padding(.horizontal, 8)
     }

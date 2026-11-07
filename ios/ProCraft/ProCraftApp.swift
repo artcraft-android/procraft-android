@@ -425,6 +425,11 @@ enum ScreenCapture {
             model.addLayer()
         case "import-card":
             model.importShown = ProgressShown(progress: 0.4, detail: "Inking.brushset")
+        case "colors-cmyk":
+            _ = model.session.setNewProfile(name: cmykProfiles().first ?? "")
+            model.refreshCanvasSpace()
+            model.setRgb(0x3366CC)
+            colors(model, .value)
         case "projection-check":
             // no second display on the simulator: what is said is what the app has to work with
             model.changeProjectCanvas(true)

@@ -194,13 +194,35 @@ enum Pc {
 final class CanvasSpace {
     static let shared = CanvasSpace()
     private(set) var p3 = false
+    /// How the canvas shows a colour of its own, when not as its numbers say: as a CMYK canvas's
+    /// press prints it, or an imported profile's colour in Display P3.
+    @ObservationIgnored private var shown: ((UInt32) -> UInt32)?
+    @ObservationIgnored private var seen: [UInt32: UInt32] = [:]
+    /// Goes up as what it shows by changes, for what draws with it.
+    private(set) var version = 0
 
-    func set(p3: Bool) {
+    /// The canvas's colours are Display P3 numbers (else sRGB), shown through `shown` if given.
+    func set(p3: Bool, shown: ((UInt32) -> UInt32)? = nil) {
+        seen = [:]
+        self.shown = shown
+        if self.p3 != p3 || shown != nil || version == 0 {
+            version += 1
+        }
         self.p3 = p3
     }
 
     /// A canvas colour, in the canvas's space.
-    func color(_ rgb: UInt32) -> Color {
+    func color(_ given: UInt32) -> Color {
+        var rgb = given & 0xFF_FFFF
+        if let shown {
+            if let known = seen[rgb] {
+                rgb = known
+            } else {
+                let made = shown(rgb) & 0xFF_FFFF
+                seen[rgb] = made
+                rgb = made
+            }
+        }
         let r = Double((rgb >> 16) & 0xFF) / 255
         let g = Double((rgb >> 8) & 0xFF) / 255
         let b = Double(rgb & 0xFF) / 255
