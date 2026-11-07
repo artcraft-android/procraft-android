@@ -38,6 +38,12 @@ const GROUP_GAP: f32 = 14.0;
 const DONE: f32 = 40.0;
 /// A shortcut's row lit while the pointer is over it: its keys and what it does.
 const OVER: u32 = 0x1FFFFFFF;
+/// The capsule behind the keys of a row that can be bound again, while the pointer is over it (or
+/// it waits for a key): the accent, faint enough to read through.
+const CAPSULE: u32 = 0x330076FD;
+/// Those keys' text, brightened from the list's own white towards the accent, so a row that can be
+/// changed reads as one from a row that cannot.
+const KEYS_LIT: u32 = 0xFF6FB2FF;
 
 /// The list, opened from Help or shown while Ctrl (⌘) is held.
 #[derive(Default)]
@@ -334,7 +340,25 @@ fn panel(
                                     }
                                 }
                             }
-                            if row.action.is_some() && *capturing == row.action {
+                            let binds = row.action.is_some();
+                            let lit = over && binds;
+                            let waiting = binds && *capturing == row.action;
+                            // the row lit as one, keys and name, whatever the row does
+                            if over {
+                                let lit_row = Rect::from_min_max(
+                                    pos2(slot.left() - 6.0, slot.top() + ROW_GAP * 0.5),
+                                    pos2(slot.right(), slot.bottom() - ROW_GAP * 0.5),
+                                );
+                                ui.painter().rect_filled(lit_row, 6, argb(OVER));
+                            }
+                            // one whose keys can be bound again says so: a capsule of the accent
+                            // behind them, where the pointer would click, and brighter text
+                            if lit || waiting {
+                                let wide = row.keys.size().x.min(KEYS_WIDTH - 12.0) + 12.0;
+                                let capsule = Rect::from_min_size(pos2(x - 6.0, y - 1.0), vec2(wide, row_height + 2.0));
+                                ui.painter().rect_filled(capsule, 6, argb(CAPSULE));
+                            }
+                            if waiting {
                                 text(
                                     ui.painter(),
                                     pos2(x, y),
@@ -342,20 +366,20 @@ fn panel(
                                     "Press a key…",
                                     15.0,
                                     Weight::Medium,
-                                    argb(pc::ACCENT),
+                                    argb(KEYS_LIT),
                                 );
                             } else {
-                                if over {
-                                    // the row lit as one: its keys and its name
-                                    let lit = Rect::from_min_max(
-                                        pos2(slot.left() - 6.0, slot.top() + ROW_GAP * 0.5),
-                                        pos2(slot.right(), slot.bottom() - ROW_GAP * 0.5),
-                                    );
-                                    ui.painter().rect_filled(lit, 6, argb(OVER));
-                                }
-                                ui.painter().galley(pos2(x, y), row.keys.clone(), argb(TITLE));
+                                ui.painter().galley(
+                                    pos2(x, y),
+                                    row.keys.clone(),
+                                    argb(if lit { KEYS_LIT } else { TITLE }),
+                                );
                             }
-                            ui.painter().galley(pos2(x + KEYS_WIDTH, y), row.does.clone(), argb(INK));
+                            ui.painter().galley(
+                                pos2(x + KEYS_WIDTH, y),
+                                row.does.clone(),
+                                argb(if lit || waiting { TITLE } else { INK }),
+                            );
                             y += row_height + ROW_GAP;
                         }
                         y += GROUP_GAP;
