@@ -3521,3 +3521,42 @@ fn a_long_stroke_of_large_stamps_is_more_than_one_piece() {
     canvas.render(&gpu, &mut doc, None);
     assert_eq!(canvas.pieces_sent(), sent);
 }
+
+#[test]
+fn a_hard_round_tip_s_thinnest_line_keeps_close_to_its_size() {
+    let Some(gpu) = gpu() else { return };
+    let _check = NoErrors(&gpu);
+    // the ink across a line of hard round stamps (pixels of full paint, wherever the line falls
+    // on the pixels), laid as a stroke spaces them
+    let ink = |radius: f32, gap: f32| {
+        let offsets = [0.0, 0.25, 0.5, 0.75];
+        let total: f32 = offsets
+            .iter()
+            .map(|&off| {
+                let mut doc = Document::new(64, 64);
+                let mut canvas = Canvas::new(&gpu, &doc).unwrap();
+                let mut s = style(StrokeTool::Paint, 1.0);
+                s.hardness = 0.98;
+                canvas.begin_stroke(doc.current(), s);
+                let stamps: Vec<Stamp> = (0..)
+                    .map(|i| 8.0 + i as f32 * gap)
+                    .take_while(|&x| x < 56.0)
+                    .map(|x| dot(Vec2::new(x, 32.0 + off), radius))
+                    .collect();
+                canvas.add_stamps(&stamps);
+                canvas.end_stroke();
+                canvas.render(&gpu, &mut doc, None);
+                let px = canvas.read_composite(&gpu).unwrap();
+                (16..48).map(|y| f32::from(255 - pixel(&px, 64, 32, y)[0]) / 255.0).sum::<f32>()
+            })
+            .sum();
+        total / offsets.len() as f32
+    };
+    // the least tip (half a pixel across) lays a line about one and a half pixels of paint, not
+    // the two and a quarter a tip reaching as far as a big one's would
+    let least = ink(0.25, 0.6);
+    assert!(least > 1.2 && least < 1.8, "{least}");
+    // from about 6 px across a line is as wide as before: d + 1.5 or so
+    let wide = ink(4.0, 1.35);
+    assert!((wide - 9.5).abs() < 0.3, "{wide}");
+}

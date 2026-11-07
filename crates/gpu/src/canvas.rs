@@ -601,25 +601,30 @@ fn capped_alpha(style: &StrokeStyle, capped: bool, s: &Stamp) -> (f32, f32) {
     }
 }
 
-/// How far past its size a round tip reaches, by its hardness: (scale, growth) for its drawn
-/// radius, scale·r + growth. Measured for a hard tip (0.95: a stroke of diameter d is 0.971·d +
-/// 1.87 px across) and a medium hard one (0.75: 1.043·d + 1.44 px), whose soft rim builds up
-/// past the size along a stroke; between them in between, and no further either way.
-fn round_tip_reach(hardness: f32) -> (f32, f32) {
+/// How far past its size a round tip of radius `r` reaches, by its hardness: (scale, growth) for
+/// its drawn radius, scale·r + growth. Measured for a hard tip (0.95: a stroke of diameter d is
+/// 0.971·d + 1.87 px across) and a medium hard one (0.75: 1.043·d + 1.44 px), whose soft rim
+/// builds up past the size along a stroke; between them in between, and no further either way.
+/// Those were measured from 5 px across up. Below about 6 px a hard tip reaches less far, down to
+/// 0.55 of it for the least tip: a shape so small is laid on a quad only 0.71 px past it, from
+/// its coarsest image, so a thin line keeps close to its size (a medium hard tip's softer rim
+/// already does).
+fn round_tip_reach(hardness: f32, r: f32) -> (f32, f32) {
     let t = if hardness.is_finite() { ((hardness - 0.75) / 0.2).clamp(0.0, 1.0) } else { 1.0 };
-    (1.096 + (0.971 - 1.096) * t, 0.36 + (0.735 - 0.36) * t)
+    let small = 1.0 - t * (0.45 - 0.14 * r).max(0.0);
+    (1.096 + (0.971 - 1.096) * t, (0.36 + (0.735 - 0.36) * t) * small)
 }
 
 /// The radius a stamp of `radius` is drawn at in `style`, thinned `taper` of the way by a taper
 /// (the round tip's rim with it: measured, a taper narrows a thin brush and a wide one to the same
-/// shares of their widths).
+/// shares of their widths, so its reach goes by the stamp's size before the taper).
 fn drawn_radius(style: &StrokeStyle, radius: f32, taper: f32) -> f32 {
     let r = radius.max(0.0);
     if style.shape.is_some() || r <= 0.0 {
         return r;
     }
-    let (scale, growth) = round_tip_reach(style.hardness);
     let taper = if taper.is_finite() { taper.clamp(0.0, 1.0) } else { 1.0 };
+    let (scale, growth) = round_tip_reach(style.hardness, if taper > 0.0 { r / taper } else { r });
     r * scale + growth * taper
 }
 

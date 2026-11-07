@@ -10080,3 +10080,50 @@ fn while_a_layer_is_shown_alone_the_other_boxes_show_hidden_and_a_tap_ends_it() 
     assert_eq!(s.hold_visibility(below).as_deref(), Some("Solo visibility off"));
     assert_eq!(s.tap_visibility(999), None);
 }
+
+#[test]
+fn a_dip_pen_at_its_least_draws_a_fine_line_at_any_zoom_and_pressure() {
+    // the ink across a pen line with the Dip Pen at `slider` and `pressure`, the canvas zoomed in
+    // `zoom` times (brush sizes kept relative to the canvas), where the line falls `off` into a
+    // pixel; in canvas pixels of full paint
+    let ink = |slider: f32, pressure: f32, zoom: f32, off: f32| {
+        let s = session(400, 400)?;
+        let dip = s.shared.lock().library.iter().enumerate().find_map(|(set, brushes)| {
+            brushes.brushes.iter().position(|b| b.name == "Dip Pen").map(|i| (set as u32, i as u32))
+        });
+        let (set, index) = dip.unwrap();
+        assert!(s.select_brush(set, index));
+        s.set_brush_size(slider);
+        if zoom != 1.0 {
+            s.view_gesture(200.0, 200.0, 0.0, 0.0, zoom, 0.0);
+        }
+        let at = |i: usize| {
+            let x = 200.0 + (150.0 + i as f32 - 200.0) * zoom;
+            PenSample { pressure, ..sample(x, 200.0 + off * zoom, i as f64 * 8.0) }
+        };
+        s.stroke_begin(PointerKind::Stylus, vec![at(0)]);
+        for i in 1..100 {
+            s.stroke_add(vec![at(i)]);
+        }
+        s.stroke_end(vec![at(100)]);
+        let _ = pixel(&s, 0, 0);
+        let px = {
+            let mut guard = s.shared.lock();
+            let st = &mut *guard;
+            st.canvas.as_mut().unwrap().read_composite(st.gpu.as_ref().unwrap()).unwrap()
+        };
+        let column =
+            |x: u32| (180..220u32).map(|y| 1.0 - f32::from(px[((y * 400 + x) * 4) as usize]) / 255.0).sum::<f32>();
+        Some((190..210).map(column).sum::<f32>() / 20.0)
+    };
+    for off in [0.0, 0.5] {
+        let Some(least) = ink(0.01, 1.0, 1.0, off) else { return };
+        // a line of about a pixel and a half at its least, the same zoomed in
+        assert!(least < 1.8, "{least} at {off}");
+        assert!((ink(0.01, 1.0, 4.0, off).unwrap() - least).abs() < 0.02);
+        // a light touch takes its usual size down to about that, a firm one doesn't
+        let light = ink(0.335, 0.02, 1.0, off).unwrap();
+        assert!(light < least + 0.1, "{light} {least}");
+        assert!(ink(0.335, 1.0, 1.0, off).unwrap() > 5.0);
+    }
+}
