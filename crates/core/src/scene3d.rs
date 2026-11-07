@@ -3144,10 +3144,11 @@ impl State {
     /// carried onto the current texture set's layer.
     pub(crate) fn scene_stroke_begin(&mut self, pointer: PointerKind, samples: &[PenSample]) {
         let current = self.doc.current();
-        if self
-            .doc
-            .layer(current)
-            .is_none_or(|l| self.doc.is_locked(l.id) || !l.visible || l.kind == LayerKind::Group || l.text.is_some())
+        if !self.doc.in_picture(current)
+            || self
+                .doc
+                .layer(current)
+                .is_none_or(|l| self.doc.is_locked(l.id) || l.kind == LayerKind::Group || l.text.is_some())
         {
             return;
         }

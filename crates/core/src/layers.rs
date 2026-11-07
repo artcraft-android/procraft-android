@@ -588,22 +588,75 @@ impl CanvasSession {
     }
 
     /// Why the current layer takes no change (a stroke, a transform, an adjustment, clearing,
-    /// cutting): it is locked, hidden, or a group with nothing in it. None if it takes them.
+    /// cutting): it is locked, hidden (itself, by a group it is in, or left out while another
+    /// layer is shown alone), or a group with nothing in it. None if it takes them.
     pub fn why_blocked(&self) -> Option<Blocked> {
         if let Some(why) = self.shared.lock().scene_blocked() {
             return Some(why);
         }
         let layers = self.layers();
         let l = layers.iter().find(|l| l.current)?;
+        let seen = self.shared.lock().doc.in_picture(LayerId(l.id));
         if l.locked {
             Some(Blocked::Locked)
-        } else if !l.visible {
-            Some(Blocked::Hidden)
+        } else if !seen {
+            // the alert is a group's or a layer's by what is current, whatever hides it
+            Some(if l.kind == LayerType::Group { Blocked::GroupHidden } else { Blocked::Hidden })
         } else if l.kind == LayerType::Group && !layers.iter().any(|o| o.parent == Some(l.id)) {
             Some(Blocked::EmptyGroup)
         } else {
             None
         }
+    }
+
+    /// Why a stroke or a fill on the current layer would leave nothing: why it takes no change
+    /// ([`CanvasSession::why_blocked`]), or a group is current, an empty one too (strokes and fills
+    /// go into layers). None if it takes paint.
+    pub fn why_unpainted(&self) -> Option<Blocked> {
+        let why = self.why_blocked();
+        let group = {
+            let st = self.shared.lock();
+            st.doc.layer(st.doc.current()).is_some_and(|l| l.kind == LayerKind::Group)
+        };
+        match why {
+            Some(Blocked::EmptyGroup) => Some(Blocked::Group),
+            None if group => Some(Blocked::Group),
+            other => other,
+        }
+    }
+
+    /// Layer `id` made to show, as a blocked alert's Show does: no longer left out by another
+    /// layer shown alone, and visible with every group it is in (and a mask's layer), the boxes
+    /// one step. False if it showed already or isn't a layer.
+    pub fn show_layer(&self, id: u64) -> bool {
+        let id = LayerId(id);
+        let soloed_out = {
+            let st = self.shared.lock();
+            if st.doc.layer(id).is_none() {
+                return false;
+            }
+            st.doc.soloed_out(id)
+        };
+        let unsoloed = soloed_out && self.set_solo(None);
+        let shown = self
+            .change("Toggle visibility", |d| {
+                let mut hidden = Vec::new();
+                let mut at = Some(id);
+                for _ in 0..=d.layers().len() {
+                    let Some(l) = at.and_then(|a| d.layer(a)) else { break };
+                    if !l.visible {
+                        hidden.push(l.id);
+                    }
+                    // a mask's layer, then each group up from the layer
+                    at = match l.kind {
+                        LayerKind::Mask => l.parent,
+                        _ => d.group_of(l.id),
+                    };
+                }
+                (!hidden.is_empty()).then(|| hidden.into_iter().for_each(|h| _ = d.set_visible(h, true)))
+            })
+            .is_some();
+        unsoloed || shown
     }
 
     /// The rows a drag of layer `id` in the panel takes along (see
@@ -1012,12 +1065,19 @@ impl CanvasSession {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Blocked {
     Locked,
+    /// A layer that doesn't show: hidden itself, in a hidden group (a mask, on a hidden layer),
+    /// or left out while another layer is shown alone.
     Hidden,
     EmptyGroup,
     /// On a model, every mesh a stroke is meant for is hidden.
     MeshHidden,
     /// On a model, every mesh a stroke is meant for is hidden or locked.
     MeshLocked,
+    /// A group that doesn't show (as [`Blocked::Hidden`] is a layer).
+    GroupHidden,
+    /// A group is current where a stroke or a fill takes a layer
+    /// ([`CanvasSession::why_unpainted`]).
+    Group,
 }
 
 /// What a drag of layer `id` takes along, and whether that is the chosen layers together: it with

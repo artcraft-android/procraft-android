@@ -4174,7 +4174,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun currentIsText() = layers.firstOrNull { it.current }?.text == true
 
     /** Why the current layer turned a change away. */
-    enum class Blocked { LOCKED, HIDDEN, EMPTY_GROUP, MESH_HIDDEN, MESH_LOCKED }
+    enum class Blocked { LOCKED, HIDDEN, EMPTY_GROUP, MESH_HIDDEN, MESH_LOCKED, GROUP_HIDDEN, GROUP }
 
     /** The current layer turned a change away, and why: a dialog offers to unlock or show it, or open Layers. */
     var blocked by mutableStateOf<Pair<Blocked, LayerInfo>?>(null)
@@ -4183,17 +4183,19 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Whether the current layer takes a change (a stroke, a transform, an adjustment, clearing,
      * cutting); if not (locked, hidden, or an empty group), a dialog says why. What was tried is
-     * not done afterwards.
+     * not done afterwards. With [paint] (a stroke or a fill) a group current says so too.
      */
-    fun currentTakesChanges(): Boolean {
+    fun currentTakesChanges(paint: Boolean = false): Boolean {
         val l = layers.firstOrNull { it.current } ?: return true
         // the shared core decides
-        val why = when (session?.whyBlocked()) {
+        val why = when (if (paint) session?.whyUnpainted() else session?.whyBlocked()) {
             io.github.artcraftandroid.procraft.core.Blocked.LOCKED -> Blocked.LOCKED
             io.github.artcraftandroid.procraft.core.Blocked.HIDDEN -> Blocked.HIDDEN
             io.github.artcraftandroid.procraft.core.Blocked.EMPTY_GROUP -> Blocked.EMPTY_GROUP
             io.github.artcraftandroid.procraft.core.Blocked.MESH_HIDDEN -> Blocked.MESH_HIDDEN
             io.github.artcraftandroid.procraft.core.Blocked.MESH_LOCKED -> Blocked.MESH_LOCKED
+            io.github.artcraftandroid.procraft.core.Blocked.GROUP_HIDDEN -> Blocked.GROUP_HIDDEN
+            io.github.artcraftandroid.procraft.core.Blocked.GROUP -> Blocked.GROUP
             null -> return true
         }
         blocked = why to l
@@ -4207,8 +4209,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         if (fix) {
             when (why) {
                 Blocked.LOCKED -> toggleLocked(l)
-                Blocked.HIDDEN -> toggleVisible(l)
-                Blocked.EMPTY_GROUP -> Unit
+                // shown, whatever hid it (its box, a group's, another layer shown alone)
+                Blocked.HIDDEN, Blocked.GROUP_HIDDEN -> layerChange { it.showLayer(l.id) }
+                Blocked.EMPTY_GROUP, Blocked.GROUP -> Unit
                 Blocked.MESH_HIDDEN, Blocked.MESH_LOCKED -> {
                     session?.freeMeantMeshes()
                     readMeshes()
@@ -6500,7 +6503,7 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     /** Fills from window point [p] with the dropped colour; false if nothing was filled. */
     fun pourBegin(p: Offset): Boolean {
         val s = session ?: return false
-        if (!currentTakesChanges()) return false
+        if (!currentTakesChanges(paint = true)) return false
         // text takes no colour until it is rasterized
         if (currentIsText()) {
             askRasterize = true
@@ -6908,8 +6911,8 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     fun strokeEnded() {
         // a snapped shape the pen moved: its handles where it now is
         if (quickShape != null) quickShape = session?.quickshapeInfo() ?: quickShape
-        // a stroke on a locked or hidden layer drew nothing: say why (text layers ask to rasterize instead)
-        if (adjustment == null && !currentIsText()) currentTakesChanges()
+        // a stroke on a locked or hidden layer, or a group, drew nothing: say why (text layers ask to rasterize instead)
+        if (adjustment == null && !currentIsText()) currentTakesChanges(paint = true)
         refreshFlags()
         if (animation != null) refreshFrameThumbnails()
         refreshReference()

@@ -1451,6 +1451,11 @@ impl CanvasSession {
     pub fn stroke_begin(&self, pointer: PointerKind, samples: Vec<PenSample>) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
+        // the graphics stopped (perhaps while the app was away, its notice long gone): nothing
+        // drawn will show, so each stroke tells it again
+        if st.gpu.as_ref().is_some_and(Gpu::is_lost) {
+            st.crop_edit.lost_told = false;
+        }
         if let Some(kept) = st.pad_strokes.as_mut() {
             kept.push((pointer, samples.clone()));
         }
@@ -1472,12 +1477,14 @@ impl CanvasSession {
         let current = st.doc.current();
         st.finish_stroke();
         st.settle();
-        // locked and hidden layers, groups and text layers take no paint
+        // locked layers, those that don't show (hidden themselves or by a group, or left out
+        // while another is shown alone), groups and text layers take no paint
         if st.doc.is_locked(current)
+            || !st.doc.in_picture(current)
             || st
                 .doc
                 .layer(current)
-                .is_none_or(|l| !l.visible || l.kind == procraft_engine::document::LayerKind::Group || l.text.is_some())
+                .is_none_or(|l| l.kind == procraft_engine::document::LayerKind::Group || l.text.is_some())
         {
             return;
         }

@@ -266,7 +266,7 @@ class CanvasSurfaceView(context: Context, private val vm: CanvasViewModel) : Sur
         predictor.record(e)
         if (e.actionMasked == MotionEvent.ACTION_DOWN) {
             // Continue filling on a layer that takes no fill: the dialog says why, and the touch does nothing
-            if (vm.dropBand == CanvasViewModel.DropBand.FILLING && !vm.currentTakesChanges()) {
+            if (vm.dropBand == CanvasViewModel.DropBand.FILLING && !vm.currentTakesChanges(paint = true)) {
                 skipping = true
                 return true
             }

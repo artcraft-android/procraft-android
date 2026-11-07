@@ -347,8 +347,8 @@ fun AppRoot(vm: CanvasViewModel) {
 }
 
 /**
- * The current layer turned a change away (locked, hidden, or an empty group): Cancel, unlock or
- * show it, or open Layers. What was tried is not done afterwards.
+ * The current layer turned a change away (locked, hidden or left out of the picture, or an empty
+ * group): Cancel, unlock or show it, or open Layers. What was tried is not done afterwards.
  */
 @Composable
 private fun BlockedDialog(vm: CanvasViewModel) {
@@ -364,13 +364,16 @@ private fun BlockedDialog(vm: CanvasViewModel) {
                 CanvasViewModel.Blocked.EMPTY_GROUP -> "Group is empty"
                 CanvasViewModel.Blocked.MESH_HIDDEN -> "Mesh is hidden"
                 CanvasViewModel.Blocked.MESH_LOCKED -> "Mesh is locked"
+                CanvasViewModel.Blocked.GROUP_HIDDEN -> "Group is hidden"
+                CanvasViewModel.Blocked.GROUP -> "Group is selected"
             }
         },
         message = { (w, l) ->
             when (w) {
                 CanvasViewModel.Blocked.LOCKED -> "“${l.name}” can't be changed while it is locked."
-                CanvasViewModel.Blocked.HIDDEN -> "“${l.name}” can't be changed while it is hidden."
+                CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> hiddenMessage(l)
                 CanvasViewModel.Blocked.EMPTY_GROUP -> "“${l.name}” holds no layers to change."
+                CanvasViewModel.Blocked.GROUP -> "“${l.name}” is a group: choose one of its layers to paint on."
                 CanvasViewModel.Blocked.MESH_HIDDEN -> "“${vm.meantMeshName()}” can't be painted while it is hidden."
                 CanvasViewModel.Blocked.MESH_LOCKED -> "“${vm.meantMeshName()}” can't be painted while it is locked."
             }
@@ -380,17 +383,25 @@ private fun BlockedDialog(vm: CanvasViewModel) {
         onAction = { vm.answerBlocked(fix = false, openLayers = true) },
         icon = when (why) {
             CanvasViewModel.Blocked.LOCKED, CanvasViewModel.Blocked.MESH_LOCKED -> PcIcons.PageLocked
-            CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.MESH_HIDDEN -> PcIcons.EyeStruck
+            CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.MESH_HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> PcIcons.EyeStruck
             else -> PcIcons.Folder
         },
         destructive = false,
         extra = when (why) {
             CanvasViewModel.Blocked.LOCKED, CanvasViewModel.Blocked.MESH_LOCKED -> "Unlock"
-            CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.MESH_HIDDEN -> "Show"
+            CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.MESH_HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> "Show"
             else -> null
         },
         onExtra = { vm.answerBlocked(fix = true, openLayers = false) },
     )
+}
+
+/** Why a layer or group that doesn't show takes no change: hidden itself, left out by solo, or in what is hidden. */
+private fun hiddenMessage(l: LayerInfo): String = when {
+    !l.visible -> "“${l.name}” can't be changed while it is hidden."
+    l.soloedOut -> "“${l.name}” can't be changed while another layer is shown alone."
+    l.kind == io.github.artcraftandroid.procraft.core.LayerType.MASK -> "“${l.name}” can't be changed while its layer is hidden."
+    else -> "“${l.name}” can't be changed while its group is hidden."
 }
 
 /** A layer a texture set's meshes share is about to go from all of them. */
