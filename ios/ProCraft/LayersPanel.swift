@@ -948,7 +948,8 @@ private struct LayerRow: View {
     }
 }
 
-/// A layer's visibility box: tapped, shown or hidden; held, shown alone (or every layer again).
+/// A layer's visibility box: tapped, shown or hidden (or, with a layer shown alone, every layer
+/// again); held, shown alone (or every layer again). A layer another's solo hides shows unticked.
 private struct VisibilityBox: View {
     let model: CanvasModel
     let layer: LayerInfo
@@ -956,7 +957,7 @@ private struct VisibilityBox: View {
     let height: CGFloat
 
     var body: some View {
-        CheckBox(checked: layer.visible, fill: fill)
+        CheckBox(checked: layer.visible && !layer.soloedOut, fill: fill)
             .frame(width: 44, height: height)
             .contentShape(Rectangle())
             .onTapGesture { model.toggleVisible(layer) }

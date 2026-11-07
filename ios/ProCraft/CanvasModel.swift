@@ -1507,10 +1507,11 @@ final class CanvasModel {
         refresh()
     }
 
-    /// Shows or hides `l`, saying so in the notice band as measured ("Hide layer").
+    /// `l`'s box tapped: it shows or hides, saying so in the notice band as measured ("Hide
+    /// layer"), or, with a layer shown alone, every layer shows again (the core decides and words it).
     func toggleVisible(_ l: LayerInfo) {
-        if session.setLayerVisible(id: l.id, visible: !l.visible) {
-            showNotice(l.visible ? "Hide layer" : "Show layer")
+        if let said = session.tapVisibility(id: l.id) {
+            showNotice(said)
         }
         refresh()
     }

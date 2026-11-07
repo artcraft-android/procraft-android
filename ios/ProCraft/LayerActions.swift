@@ -50,11 +50,13 @@ extension CanvasModel {
         refresh()
     }
 
-    /// Layer `l` shown alone, or, already alone, every layer again; a message says which.
+    /// Layer `l` shown alone, or, already alone, every layer again; a message says which (the
+    /// core's words). The other rows' boxes show them hidden while it is alone.
     func toggleSolo(_ l: LayerInfo) {
-        let on = session.solo() != l.id
-        guard session.setSolo(id: on ? l.id : nil) else { return }
-        showNotice(on ? "Solo visibility on" : "Solo visibility off")
+        if let said = session.holdVisibility(id: l.id) {
+            showNotice(said)
+        }
+        refresh()
     }
 
     func rename(_ l: LayerInfo, _ name: String) {
