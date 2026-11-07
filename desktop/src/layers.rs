@@ -172,6 +172,8 @@ pub struct Layers {
     pub edit_text: Option<u64>,
     /// Layer Opacity asked for the current layer (two fingers tapped on its row).
     pub layer_opacity: bool,
+    /// The background's colour asked for: its row tapped anywhere but on its box.
+    pub pick_background: bool,
     /// On a model: the mesh open (its texture set's layers under it), the layer whose channels
     /// show, the channel whose colour shows, each channel's own colour (hue, saturation,
     /// brightness) kept while another is painted, the meshes' and channels' pictures, and the
@@ -517,7 +519,7 @@ impl Layers {
                             }
                             if model.is_none() {
                                 ui.add_space(10.0);
-                                background_row(ui, look, session);
+                                self.pick_background |= background_row(ui, look, session);
                             }
                             ui.add_space(12.0);
                             // the pinched rows over the rest, the upper over the lower
@@ -1739,8 +1741,9 @@ fn blend_rows(ui: &Ui, look: &mut Look, list: Rect, modes: &[BlendModeInfo], cho
     }
 }
 
-/// The background: its colour and whether it shows.
-fn background_row(ui: &mut Ui, look: &mut Look, session: &CanvasSession) {
+/// The background: its colour and whether it shows. True when the row is tapped anywhere but on its
+/// box, for its colour to be picked.
+fn background_row(ui: &mut Ui, look: &mut Look, session: &CanvasSession) -> bool {
     let background = session.background();
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), Sense::hover());
     ui.painter().rect_filled(row, 17, argb(BACKGROUND_ROW));
@@ -1760,7 +1763,10 @@ fn background_row(ui: &mut Ui, look: &mut Look, session: &CanvasSession) {
     check_box(ui, look, visibility.center(), background.visible, argb(CHECK_FILL));
     if ui.interact(visibility, ui.scope_id().with("background visible"), Sense::click()).clicked() {
         session.set_background_visible(!background.visible);
+        return false;
     }
+    let rest = Rect::from_min_max(row.min, pos2(visibility.left(), row.max.y));
+    ui.interact(rest, ui.scope_id().with("background colour"), Sense::click()).clicked()
 }
 
 /// A visibility box: filled with a check cut out of it when shown, an outline when hidden.
@@ -1896,5 +1902,54 @@ impl Pinch {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, Modifiers, PointerButton, RawInput};
+
+    /// A tap on the background's row, on its box or left of it: whether the row asked for its
+    /// colour, and whether the background shows after.
+    fn tap_background_row(on_box: bool) -> (bool, bool) {
+        let (ctx, mut look) = (egui::Context::default(), Look::default());
+        crate::look::install_fonts(&ctx);
+        let session = CanvasSession::new(64, 64);
+        let (mut row, mut asked) = (Rect::NOTHING, false);
+        let press = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        for step in 0..6 {
+            // the box's middle 8 + 22 in from the row's right; the name half way along the row
+            let at = if on_box { pos2(row.right() - 30.0, row.center().y) } else { row.center() };
+            let events = match step {
+                2 => vec![Event::PointerMoved(at)],
+                3 => vec![press(at, true)],
+                4 => vec![press(at, false)],
+                _ => Vec::new(),
+            };
+            let raw = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(384.0, 200.0))),
+                time: Some(f64::from(step) / 60.0),
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.clone().run_ui(raw, |ui| {
+                row = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 50.0));
+                asked |= background_row(ui, &mut look, &session);
+            });
+            output.textures_delta.clear();
+        }
+        (asked, session.background().visible)
+    }
+
+    #[test]
+    fn the_background_row_tapped_asks_for_its_colour_and_its_box_tapped_hides_it() {
+        assert_eq!(tap_background_row(false), (true, true), "the row: its colour, still shown");
+        assert_eq!(tap_background_row(true), (false, false), "the box: hidden, no colour asked");
     }
 }

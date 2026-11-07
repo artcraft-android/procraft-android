@@ -15,7 +15,7 @@ use crate::actions::{Act, Actions};
 use crate::alert::{Alert, Answer, Asking};
 use crate::chrome::{BarButton, Lit, SideBar};
 use crate::colour_drop::{ColourDrop, Touch};
-use crate::colours::{Colours, srgb, to_hex};
+use crate::colours::{Colours, hsv_to_rgb, of_hex, srgb, take_rgb, to_hex};
 use crate::copy_paste::Choice;
 use crate::files::Format;
 use crate::input::Input;
@@ -76,6 +76,41 @@ enum Popover {
     Colour,
 }
 
+/// The background's colour picked in the colour panel: as the panel shows it (hue, saturation,
+/// brightness), the colour last sent to the background (0xRRGGBB), and whether any was.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BackgroundPick {
+    hsv: [f32; 3],
+    sent: u32,
+    changed: bool,
+}
+
+impl BackgroundPick {
+    /// Starts on the background's colour `rgb`, a grey taking the hue `hue`.
+    fn new(rgb: u32, hue: f32) -> BackgroundPick {
+        let mut hsv = [hue, 0.0, 0.0];
+        take_rgb(&mut hsv, rgb);
+        BackgroundPick { hsv, sent: rgb, changed: false }
+    }
+
+    /// What the panel shows now (`hsv`): the colour to send to the background while it is open, if
+    /// it differs from the last one sent.
+    fn follow(&mut self, hsv: [f32; 3]) -> Option<u32> {
+        self.hsv = hsv;
+        let rgb = to_hex(hsv_to_rgb(hsv));
+        (rgb != self.sent).then(|| {
+            self.sent = rgb;
+            self.changed = true;
+            rgb
+        })
+    }
+
+    /// The colour to keep as one undo step as the panel closes: the last sent, if any was.
+    fn kept(self) -> Option<u32> {
+        self.changed.then_some(self.sent)
+    }
+}
+
 pub struct Interface {
     pub actions: Vec<Action>,
     /// Where the canvas shows, clear of the bar (points).
@@ -97,6 +132,9 @@ pub struct Interface {
     /// A Save As being written: where and at which edits, or why it couldn't be.
     pub saving: Option<std::sync::mpsc::Receiver<Result<(std::path::PathBuf, u64), String>>>,
     open: Option<Popover>,
+    /// The background's colour being picked, in the colour panel shown in the Layers panel's
+    /// place.
+    background_pick: Option<BackgroundPick>,
     pub(crate) colours: Colours,
     drop: ColourDrop,
     library: Library,
@@ -215,6 +253,7 @@ impl Default for Interface {
             saving: None,
             inserting: Vec::new(),
             open: None,
+            background_pick: None,
             colours: Colours::default(),
             drop: ColourDrop::default(),
             library: Library::default(),
@@ -313,6 +352,7 @@ impl Interface {
             self.model_warnings(session);
         }
         self.layers.forget();
+        self.background_pick = None;
         self.text.forget();
         crate::text::prepare_fonts();
         self.transform.on = false;
@@ -336,6 +376,7 @@ impl Interface {
     /// in from files are waited for, Recolor ends keeping what it filled, and Layer Opacity ends.
     pub fn closing(&mut self, session: &CanvasSession) {
         self.reference.keep(session);
+        self.end_background_pick(session);
         self.library.finish_importing(session);
         self.end_recolor(session);
         session.set_touch_layer_opacity(None);
@@ -725,6 +766,10 @@ impl Interface {
         }
         if let Some(open) = self.open {
             self.popover(&ctx, session, open, anchor(open), info.tool, &mut backdrops);
+        }
+        // the background's colour is kept, however its panel closed
+        if self.open != Some(Popover::Layers) {
+            self.end_background_pick(session);
         }
         // the colour panel dragged out by its grabber: a window over the canvas until closed
         self.colours.show_floating(&ctx, &mut self.look, session, &mut backdrops);
@@ -2097,6 +2142,53 @@ impl Interface {
         goes_on
     }
 
+    /// The colour panel picking the background's colour, hanging from the Layers button: what is
+    /// picked goes to the background as it changes, the brush keeping its colour; its tick closes
+    /// it. Returns where it is.
+    fn background_panel(
+        &mut self,
+        ctx: &egui::Context,
+        session: &CanvasSession,
+        button: Rect,
+        backdrops: &mut Vec<f32>,
+    ) -> Rect {
+        let Some(pick) = self.background_pick.as_mut() else { return Rect::NOTHING };
+        let brush = std::mem::replace(&mut self.colours.hsv, pick.hsv);
+        self.colours.background = true;
+        let history = self.prefs.colour_history_shown;
+        let shown = self.colours.show(
+            ctx,
+            &mut self.look,
+            session,
+            &mut self.drop,
+            button,
+            &mut self.prefs.colour_history_shown,
+            backdrops,
+        );
+        if self.prefs.colour_history_shown != history {
+            self.prefs.keep();
+        }
+        self.colours.background = false;
+        let picked = std::mem::replace(&mut self.colours.hsv, brush);
+        if let Some(rgb) = pick.follow(picked) {
+            let [r, g, b] = of_hex(rgb);
+            session.set_background_color(r, g, b, false);
+        }
+        if std::mem::take(&mut self.colours.background_done) {
+            self.open = None;
+        }
+        shown
+    }
+
+    /// The background's colour picked is kept, as one undo step (if it changed), and the panel
+    /// goes back to the brush's.
+    fn end_background_pick(&mut self, session: &CanvasSession) {
+        if let Some(rgb) = self.background_pick.take().and_then(BackgroundPick::kept) {
+            let [r, g, b] = of_hex(rgb);
+            session.set_background_color(r, g, b, true);
+        }
+    }
+
     /// The open panel, hanging from its button; a press anywhere else, or Escape, closes it.
     fn popover(
         &mut self,
@@ -2120,6 +2212,7 @@ impl Interface {
                 self.keep_brushes |= std::mem::take(&mut self.library.changed);
                 shown
             }
+            Popover::Layers if self.background_pick.is_some() => self.background_panel(ctx, session, button, backdrops),
             Popover::Layers => {
                 let shown = self.layers.show(ctx, &mut self.look, session, &mut self.colours, button, backdrops);
                 if let Some((text, warning)) = self.layers.notice.take() {
@@ -2138,6 +2231,11 @@ impl Interface {
                 }
                 if std::mem::take(&mut self.layers.layer_opacity) {
                     self.start_layer_opacity(session);
+                }
+                // its background row tapped: the colour panel in its place, on the background's
+                if std::mem::take(&mut self.layers.pick_background) {
+                    let b = session.background();
+                    self.background_pick = Some(BackgroundPick::new(to_hex([b.r, b.g, b.b]), self.colours.hsv[0]));
                 }
                 shown
             }
@@ -2315,6 +2413,7 @@ impl Interface {
     /// One of the menus of popover `which` is open.
     fn modal(&self, which: Popover) -> bool {
         match which {
+            Popover::Layers if self.background_pick.is_some() => self.colours.modal(),
             Popover::Layers => self.layers.modal(),
             Popover::Brushes => self.library.modal(),
             Popover::Colour => self.colours.modal(),
@@ -2339,7 +2438,10 @@ impl Interface {
     /// A hex keypad, or text being edited, takes the keys (a text field's are egui's own).
     fn keys_taken(&self) -> bool {
         self.text.editing()
-            || ((self.open == Some(Popover::Colour) || self.colours.floating.is_some()) && self.colours.takes_keys())
+            || ((self.open == Some(Popover::Colour)
+                || self.colours.floating.is_some()
+                || self.background_pick.is_some())
+                && self.colours.takes_keys())
             || self.animation.takes_keys()
     }
 
@@ -2646,5 +2748,28 @@ fn read_insert(session: &CanvasSession, path: &std::path::Path, private: bool) -
             })
         }
         Err(_) => Inserted::Failed("This picture can't be opened."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_background_pick_sends_each_change_and_keeps_the_last_as_it_closes() {
+        // white, a grey, starts on the brush's hue
+        let mut pick = BackgroundPick::new(0xFFFFFF, 0.6);
+        assert_eq!(pick.hsv, [0.6, 0.0, 1.0]);
+        // shown as it was: nothing to send, nothing to keep
+        assert_eq!(pick.follow([0.6, 0.0, 1.0]), None);
+        assert_eq!(pick.kept(), None);
+        // each new colour sent once, the last kept
+        assert_eq!(pick.follow([0.0, 1.0, 1.0]), Some(0xFF0000));
+        assert_eq!(pick.follow([0.0, 1.0, 1.0]), None);
+        assert_eq!(pick.follow([1.0 / 3.0, 1.0, 1.0]), Some(0x00FF00));
+        assert_eq!(pick.kept(), Some(0x00FF00));
+        // back where it began is still a change to keep (the live changes were sent)
+        assert_eq!(pick.follow([0.6, 0.0, 1.0]), Some(0xFFFFFF));
+        assert_eq!(pick.kept(), Some(0xFFFFFF));
     }
 }
