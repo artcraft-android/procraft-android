@@ -216,10 +216,15 @@ struct ActionsPanel: View {
         case 3:
             return [
                 [
-                    .act("Time-lapse Replay", action: nil),
-                    .toggle("Time-lapse Recording", on: true, change: nil),
+                    // Replay and Export wait for something recorded
+                    .act("Time-lapse Replay", action: model.timeLapse.recorded ? {
+                        // the panel fades away as the replay takes the screen
+                        model.fadePanels()
+                        withAnimation(Motion.replayFade) { model.timeLapse.replaying = true }
+                    } : nil),
+                    .toggle("Time-lapse Recording", on: model.timeLapse.recording, change: { model.timeLapse.setRecording($0) }),
                 ],
-                [.act("Export time-lapse video", action: nil)],
+                [.act("Export time-lapse video", action: model.timeLapse.recorded ? { model.timeLapse.lengthAsking = true } : nil)],
             ]
         case 4:
             return [

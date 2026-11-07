@@ -167,6 +167,10 @@ struct CanvasScreen: View {
                     ReferenceWindow(model: model, screen: screen.size)
                         .transition(.opacity)
                 }
+                if model.timeLapse.replaying {
+                    TimeLapseReplay(model: model)
+                        .transition(.opacity)
+                }
                 CropOverlay(model: model)
                 if model.guide.editing {
                     GuideEditor(model: model, screen: screen.size)
@@ -218,6 +222,30 @@ struct CanvasScreen: View {
                     },
                     onCancel: { model.saying = nil },
                     onAction: { model.saying = nil }
+                )
+                // the time-lapse in full or cut to 30 seconds (a tap outside: neither)
+                AlertView(
+                    content: model.timeLapse.lengthAsking ? AlertContent(
+                        title: "Video length", action: "30 Seconds", icon: PcIcons.clock, destructive: false, cancel: "Full length"
+                    ) : nil,
+                    onCancel: { model.timeLapse.lengthAsking = false },
+                    onAction: {
+                        model.timeLapse.lengthAsking = false
+                        model.shareTimeLapse(seconds: 30)
+                    },
+                    onFirst: {
+                        model.timeLapse.lengthAsking = false
+                        model.shareTimeLapse(seconds: nil)
+                    }
+                )
+                // recording turned off with something recorded: deleted, or kept (a tap beside it keeps it)
+                AlertView(
+                    content: model.timeLapse.purgeAsking ? AlertContent(
+                        title: "Purge Video?", message: "The video recorded so far will be deleted.\nIt can't be brought back.",
+                        action: "Purge", icon: PcIcons.alertQuestion, cancel: "Don't Purge"
+                    ) : nil,
+                    onCancel: { model.timeLapse.answerPurge(false) },
+                    onAction: { model.timeLapse.answerPurge(true) }
                 )
                 BlockedDialog(model: model)
                 AlertView(
@@ -556,6 +584,7 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
     private func close() {
         let session = model.session
         let dir = model.dir
+        let lapse = model.timeLapse.lapse
         model.noteTime()
         model.stopWatching()
         model.keepChoicesNow()
@@ -575,6 +604,9 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
                 failure = "\(error)"
                 NSLog("ProCraft: keeping the artwork: %@", "\(error)")
             }
+            // the artwork file keeps a time-lapse as video
+            _ = lapse.forPackage()
+            lapse.close()
             // its memory free at once, not when the object goes
             session.releaseCanvas()
             DispatchQueue.main.async { Gallery.artworkKept(failure: failure) }

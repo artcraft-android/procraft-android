@@ -1,3 +1,4 @@
+import AVFoundation
 import os
 import SwiftUI
 import UIKit
@@ -91,7 +92,7 @@ enum ScreenCapture {
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
-    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference"]
+    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse"]
     /// What opens over the gallery.
     static var galleryShows: String?
     /// The Adjustments menu opens on the filters.
@@ -214,6 +215,59 @@ enum ScreenCapture {
         }
     }
 
+    /// Frames of the canvas in four colours recorded, off the main thread; then `then`.
+    private static func recordFrames(_ model: CanvasModel, then: @escaping () -> Void) {
+        let session = model.session
+        let lapse = model.timeLapse.lapse
+        let side = timeLapseSide(s: lapse.settings)
+        DispatchQueue.global(qos: .userInitiated).async {
+            for colour: [Float] in [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0]] {
+                _ = session.setBackgroundColor(r: colour[0], g: colour[1], b: colour[2], done: true)
+                if let shot = session.timeLapseFrame(maxSide: side) {
+                    lapse.record(shot)
+                }
+            }
+            DispatchQueue.main.async(execute: then)
+        }
+    }
+
+    /// The middle pixel of `picture`, as hex.
+    private static func middle(of picture: UIImage?) -> String {
+        guard let image = picture?.cgImage else { return "none" }
+        var pixel: [UInt8] = [0, 0, 0, 0]
+        let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        pixel.withUnsafeMutableBytes { bytes in
+            let context = CGContext(
+                data: bytes.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )
+            context?.draw(image, in: CGRect(x: -image.width / 2, y: -image.height / 2, width: image.width, height: image.height))
+        }
+        return String(format: "%02X%02X%02X", pixel[0], pixel[1], pixel[2])
+    }
+
+    /// What only a run can show, said on the screen: frames recorded, made into a video and read
+    /// back out of it, as a person's are.
+    private static func checkTimeLapse(_ model: CanvasModel) {
+        let lapse = model.timeLapse.lapse
+        recordFrames(model) {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let frames = lapse.count
+                let out = Sharing.exportsDir.appendingPathComponent("check.mp4")
+                let made = lapse.export(to: out, seconds: nil) { _ in true }
+                let asset = AVURLAsset(url: out)
+                let size = asset.tracks(withMediaType: .video).first?.naturalSize ?? .zero
+                let bytes = (try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                // the pictures gone, so these come out of the video
+                let package = lapse.forPackage()
+                let text = "\(frames) frames recorded. Made: \(made), \(asset.duration.seconds) s, \(Int(size.width)) x \(Int(size.height)), \(bytes) bytes. "
+                    + "Package: \(package.segments.count) videos, \(package.width) x \(package.height). "
+                    + "From the video: first \(middle(of: lapse.frame(0))), last \(middle(of: lapse.frame(frames - 1))), count \(lapse.count)."
+                DispatchQueue.main.async { model.saying = ("Time-lapse check", text) }
+            }
+        }
+    }
+
     /// The actions panel on its Prefs tab, turned to `page`.
     private static func prefs(_ model: CanvasModel, _ page: ActionsPage) {
         actionsPage = page
@@ -315,6 +369,20 @@ enum ScreenCapture {
         case "colors-floating", "colors-floating-palettes", "colors-floating-harmony", "colors-floating-value":
             model.colorMode = ColorMode.allCases.first { name.hasSuffix($0.label.lowercased()) } ?? .disc
             model.floatingColorsAt = CGPoint(x: 300, y: 160)
+        case "timelapse-tab":
+            recordFrames(model) {
+                model.refresh()
+                model.actionsTab = 3
+                model.toggle(.actions)
+            }
+        case "timelapse-replay":
+            recordFrames(model) { model.timeLapse.replaying = true }
+        case "timelapse-purge":
+            recordFrames(model) { model.timeLapse.setRecording(false) }
+        case "timelapse-length":
+            model.timeLapse.lengthAsking = true
+        case "timelapse-check":
+            checkTimeLapse(model)
         case "reference":
             model.reference.setOn(true)
         case "reference-bars":

@@ -254,6 +254,7 @@ final class CanvasModel {
     @ObservationIgnored private(set) lazy var recolor = RecolorTool(model: self)
     @ObservationIgnored private(set) lazy var guide = GuideTool(model: self)
     @ObservationIgnored private(set) lazy var reference = ReferenceTool(model: self)
+    @ObservationIgnored private(set) lazy var timeLapse = TimeLapseTool(model: self)
     @ObservationIgnored private(set) lazy var text = TextTool(model: self)
     /// The middle of the screen, window pixels.
     @ObservationIgnored var screenCentre = CGPoint.zero
@@ -794,17 +795,23 @@ final class CanvasModel {
         swipedBrush = nil
     }
 
-    /// The list of adjustments fades away rather than going at once as one is picked.
-    private func closeForAdjustment() {
-        guard panel == .adjustments else {
-            panel = .none
-            return
-        }
+    /// Closes the open panel by fading it away, as picking something that takes the screen does.
+    func fadePanels() {
+        guard panel != .none else { return }
         panel = .none
         withAnimation(Motion.panelFade, completionCriteria: .logicallyComplete) {
             panelFading = true
         } completion: { [weak self] in
             self?.panelFading = false
+        }
+    }
+
+    /// The list of adjustments fades away rather than going at once as one is picked.
+    private func closeForAdjustment() {
+        if panel == .adjustments {
+            fadePanels()
+        } else {
+            panel = .none
         }
     }
 
@@ -1281,6 +1288,7 @@ final class CanvasModel {
     /// Reads again what the core may have changed (a stroke, an undo).
     func refresh() {
         reference.refresh()
+        timeLapse.record()
         refreshFlags()
         // undo and redo step through a snapped shape: its handles where they now are, and past its
         // drags it gives way to the stroke as drawn and ends
@@ -1669,6 +1677,8 @@ final class CanvasModel {
             _ = currentTakesChanges()
         }
         refreshFlags()
+        reference.refresh()
+        timeLapse.record()
         // the stroke's colour went into the history
         history = Self.colourHistory.colours()
         if panel == .layers {

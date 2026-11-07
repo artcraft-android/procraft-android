@@ -406,9 +406,16 @@ struct CanvasInfoPage: View {
                 profileRows(session.isCmyk() ? cmykProfiles() : colorProfiles(), picked: profile == current ? nil : profile)
             }
         case 4:
+            let lapse = model.timeLapse.lapse
+            let seconds = lapse.count / Int(timeLapseFps())
+            // the settings the artwork was made with: quality, resolution, codec
+            let names = timeLapseSettingNames(s: lapse.settings)
             Rows(rows: [
-                ("Video length", "00:00:00"), ("Video quality", "—"), ("Video resolution", "—"),
-                ("Video file size", megabytes(0)), ("Video codec", "—"),
+                ("Video length", String(format: "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)),
+                ("Video quality", names.first ?? "—"),
+                ("Video resolution", names.dropFirst().first ?? "—"),
+                ("Video file size", megabytes(lapse.bytes)),
+                ("Video codec", names.last ?? "—"),
             ])
         default:
             let minutes = info.trackedMs / 60000

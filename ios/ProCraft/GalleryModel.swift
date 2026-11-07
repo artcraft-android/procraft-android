@@ -222,7 +222,11 @@ final class GalleryModel {
             backgroundVisible: !p.backgroundHidden, name: "Untitled Artwork"
         )
         _ = session.setNewProfile(name: p.profile)
-        onOpen(OpenArtwork(session: session, dir: Gallery.store.newFolder(folder: folder)))
+        let dir = Gallery.store.newFolder(folder: folder)
+        ArtworkTimeLapse(dir: dir).settings = TimeLapseSettings(
+            resolution: p.timeLapseResolution, quality: p.timeLapseQuality, hevc: p.timeLapseHevc
+        )
+        onOpen(OpenArtwork(session: session, dir: dir))
     }
 
     private func savePresets(_ list: [CanvasPreset]) {
@@ -534,6 +538,12 @@ final class GalleryModel {
             Gallery.store.delete(dir: dir)
             return .said("This file can't be opened.")
         }
+        // its time-lapse: the settings, and its videos as they are
+        let segments = FileManager.default.temporaryDirectory.appendingPathComponent("segments-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: segments) }
+        if let lapse = try? packageTimeLapse(path: copy.path, dir: segments.path) {
+            ArtworkTimeLapse(dir: dir).take(lapse)
+        }
         return .made(dir)
     }
 
@@ -623,7 +633,7 @@ final class GalleryModel {
             case "TIFF": try session.exportTiff(path: url.path)
             case "PNG": try session.exportPng(path: url.path)
             case "JPEG": try session.exportJpeg(path: url.path)
-            default: try session.exportPackage(path: url.path, seed: UInt64.random(in: 0 ... UInt64.max), timeLapse: nil)
+            default: try session.exportPackage(path: url.path, seed: UInt64.random(in: 0 ... UInt64.max), timeLapse: ArtworkTimeLapse(dir: a.dir).forPackage())
             }
             return true
         } catch {

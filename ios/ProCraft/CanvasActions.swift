@@ -17,14 +17,17 @@ extension CanvasModel {
     /// Runs `work`, an export by the core, off the main thread with the export card showing how far
     /// it has come and a check once made; what it made goes to the share sheet. Cancelled, nothing
     /// is shared; made nothing, `failed` is told.
-    private func exporting(failed: String, _ work: @escaping (CanvasSession) -> [URL]) {
+    private func exporting(
+        failed: @escaping @autoclosure () -> String, progress: (() -> Float)? = nil,
+        _ work: @escaping (CanvasSession) -> [URL]
+    ) {
         guard exportShown == nil else { return }
         let session = session
         session.resetExportProgress()
         exportCancelled = false
         exportShown = ProgressShown(progress: 0)
         let poll = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            self?.exportShown = ProgressShown(progress: session.exportProgress())
+            self?.exportShown = ProgressShown(progress: progress?() ?? session.exportProgress())
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let files = work(session)
@@ -35,7 +38,7 @@ extension CanvasModel {
                     self.exportShown = nil
                 } else if files.isEmpty {
                     self.exportShown = nil
-                    self.showNotice(failed, warning: true)
+                    self.showNotice(failed(), warning: true)
                 } else {
                     self.exportShown = ProgressShown(progress: 1, done: true)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
@@ -47,12 +50,35 @@ extension CanvasModel {
         }
     }
 
+    /// The time-lapse as a video to share: all of it, or `seconds` long; its card shows how far it has
+    /// come. Which of two things went wrong, if it can't be made, is told: they are different faults.
+    func shareTimeLapse(seconds: Int?) {
+        let lapse = timeLapse.lapse
+        guard lapse.count > 0 else {
+            saying = ("Time-lapse", "There is no time-lapse to export yet.")
+            return
+        }
+        let meter = ExportMeter()
+        exporting(
+            failed: lapse.frame(0) != nil ? "The time-lapse video couldn't be made." : "The time-lapse can't be read on this device.",
+            progress: { meter.share }
+        ) { [weak self] session in
+            let out = Sharing.exportsDir.appendingPathComponent(exportFileName(name: session.name(), package: false) + ".mp4")
+            let made = lapse.export(to: out, seconds: seconds) { share in
+                meter.share = share
+                return self?.exportCancelled != true
+            }
+            return made ? [out] : []
+        }
+    }
+
     /// The layered package, named with `suffix`.
     func sharePackage(suffix: String) {
+        let lapse = timeLapse.lapse
         exporting(failed: "The artwork couldn't be exported.") { session in
             let base = exportFileName(name: session.name(), package: true)
             let out = Sharing.exportsDir.appendingPathComponent(base + suffix)
-            let made = (try? session.exportPackage(path: out.path, seed: UInt64.random(in: 0 ... UInt64.max), timeLapse: nil)) != nil
+            let made = (try? session.exportPackage(path: out.path, seed: UInt64.random(in: 0 ... UInt64.max), timeLapse: lapse.forPackage())) != nil
             return made ? [out] : []
         }
     }
