@@ -173,6 +173,8 @@ final class CanvasModel {
     var showSideBar = true {
         didSet { applyFitInsets() }
     }
+    /// Share's animated export, while its screen is up.
+    var animatedExport: AnimatedFormat?
     /// The single touch gestures companion shows, and what a lone finger on the canvas does with it.
     var singleTouchCompanion = false
     var companionMode: CompanionMode?

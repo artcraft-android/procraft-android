@@ -211,10 +211,10 @@ struct ActionsPanel: View {
                     .heading("Share Layers"),
                     .act("PDF", action: { model.pdfAsking = .layersPdf }),
                     .act("PNG Files", action: { model.share(.layerPngs) }),
-                    .act("Animated GIF", action: nil),
-                    .act("Animated PNG", action: nil),
-                    .act("Animated MP4", action: nil),
-                    .act("Animated HEVC", action: nil),
+                    .act("Animated GIF", action: { model.openAnimatedExport(.gif) }),
+                    .act("Animated PNG", action: { model.openAnimatedExport(.png) }),
+                    .act("Animated MP4", action: { model.openAnimatedExport(.mp4) }),
+                    .act("Animated HEVC", action: { model.openAnimatedExport(.hevc) }),
                 ],
             ]
         case 3:

@@ -28,8 +28,10 @@ enum VideoWriter {
     /// left at `url` then.
     static func write(
         to url: URL, width: Int, height: Int, count: Int, hevc: Bool, bitsPerPixel: Int,
-        draw: (Int, CGContext) -> Bool
+        fps: Float = Float(framesASecond), draw: (Int, CGContext) -> Bool
     ) -> Bool {
+        // each frame's time exact, for a rate in thousandths
+        let rate = frameRate(fps: fps)
         try? FileManager.default.removeItem(at: url)
         guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mp4) else { return false }
         let settings: [String: Any] = [
@@ -70,7 +72,8 @@ enum VideoWriter {
             )
             let drawn = context.map { draw(n, $0) } ?? false
             CVPixelBufferUnlockBaseAddress(buffer, [])
-            guard drawn, adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(n), timescale: framesASecond)) else {
+            let at = CMTime(value: Int64(n) * Int64(rate.seconds), timescale: CMTimeScale(max(rate.frames, 1)))
+            guard drawn, adaptor.append(buffer, withPresentationTime: at) else {
                 whole = false
                 break
             }

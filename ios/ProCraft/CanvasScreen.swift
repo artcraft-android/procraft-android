@@ -74,7 +74,8 @@ struct CanvasScreen: View {
                     .offset(x: sideBarShift(right), y: screen.size.height * Pc.sideBarCentre - Pc.sideBarHeight / 2)
                     .opacity(hidden ? 0 : 1)
                 // over the canvas, under the panels; not over a page that takes the screen
-                if !hidden, !model.canvasInfoOpen, !model.gestureControlsOpen, model.crop.shown == nil, !model.timeLapse.replaying {
+                if !hidden, !model.canvasInfoOpen, !model.gestureControlsOpen, model.crop.shown == nil, !model.timeLapse.replaying,
+                   model.animatedExport == nil {
                     AnimationBar(model: model, screen: screen.size)
                         .frame(width: screen.size.width, height: screen.size.height, alignment: .bottom)
                 }
@@ -174,6 +175,10 @@ struct CanvasScreen: View {
                 }
                 if model.singleTouchCompanion {
                     TouchCompanion(model: model, screen: screen.size)
+                }
+                if let format = model.animatedExport {
+                    AnimatedExport(model: model, format: format)
+                        .transition(.move(edge: .bottom))
                 }
                 if model.timeLapse.replaying {
                     TimeLapseReplay(model: model)

@@ -99,7 +99,7 @@ enum ScreenCapture {
     /// The studio laid out on its side: the simulator stays upright whatever is asked of it.
     static var sideways = false
     /// The screens, by how their names begin, that need the canvas attached.
-    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist"]
+    private static let canvasScreens = ["liquify", "adjust-", "transform", "selection", "effect-", "crop", "recolor", "layer-opacity", "guide", "text", "reference", "timelapse", "animation", "page-assist", "export-"]
     /// What opens over the gallery.
     static var galleryShows: String?
     /// Animation Assist's settings open on the onion skins' colours.
@@ -387,6 +387,36 @@ enum ScreenCapture {
             model.animationAssist.frameOptionsOpen = name == "animation-frame"
             if name == "animation-colors" {
                 animationColors = true
+            }
+        case "export-gif", "export-mp4":
+            model.animationAssist.setAssist(true, pages: false)
+            for _ in 0 ..< 3 {
+                model.addLayer()
+            }
+            model.animatedExport = name == "export-gif" ? .gif : .mp4
+        case "export-check":
+            // what only a run can show: each format made, its size, frames back out of the video
+            model.animationAssist.setAssist(true, pages: false)
+            recordFrames(model) {
+                for _ in 0 ..< 3 {
+                    model.addLayer()
+                }
+                let session = model.session
+                DispatchQueue.global(qos: .userInitiated).async {
+                    var said: [String] = []
+                    for format in [AnimatedFormat.gif, .png, .mp4, .hevc] {
+                        let url = CanvasModel.exportAnimation(session, format, AnimatedChoices(fps: 12))
+                        let bytes = url.flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize } ?? 0
+                        var more = ""
+                        if format.video, let url {
+                            let asset = AVURLAsset(url: url)
+                            more = " \(asset.duration.seconds) s, \(asset.tracks(withMediaType: .video).first?.nominalFrameRate ?? 0) fps"
+                        }
+                        said.append("\(format.title): \(url == nil ? "failed" : "\(bytes) bytes")\(more)")
+                    }
+                    let text = "\(session.animationFrameCount()) frames.\n" + said.joined(separator: "\n")
+                    DispatchQueue.main.async { model.saying = ("Export check", text) }
+                }
             }
         case "page-assist":
             model.animationAssist.setAssist(true, pages: true)
