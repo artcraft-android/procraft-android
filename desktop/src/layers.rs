@@ -172,6 +172,8 @@ pub struct Layers {
     pub edit_text: Option<u64>,
     /// Layer Opacity asked for the current layer (two fingers tapped on its row).
     pub layer_opacity: bool,
+    /// The background's colour asked for (its row tapped off its visibility box), as Procreate.
+    pub pick_background: bool,
     /// On a model: the mesh open (its texture set's layers under it), the layer whose channels
     /// show, the channel whose colour shows, each channel's own colour (hue, saturation,
     /// brightness) kept while another is painted, the meshes' and channels' pictures, and the
@@ -517,7 +519,9 @@ impl Layers {
                             }
                             if model.is_none() {
                                 ui.add_space(10.0);
-                                background_row(ui, look, session);
+                                if background_row(ui, look, session) {
+                                    self.pick_background = true;
+                                }
                             }
                             ui.add_space(12.0);
                             // the pinched rows over the rest, the upper over the lower
@@ -1739,8 +1743,9 @@ fn blend_rows(ui: &Ui, look: &mut Look, list: Rect, modes: &[BlendModeInfo], cho
     }
 }
 
-/// The background: its colour and whether it shows.
-fn background_row(ui: &mut Ui, look: &mut Look, session: &CanvasSession) {
+/// The background: its colour and whether it shows; true when the row is tapped off its
+/// visibility box, for its colour to be picked.
+fn background_row(ui: &mut Ui, look: &mut Look, session: &CanvasSession) -> bool {
     let background = session.background();
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), Sense::hover());
     ui.painter().rect_filled(row, 17, argb(BACKGROUND_ROW));
@@ -1760,7 +1765,10 @@ fn background_row(ui: &mut Ui, look: &mut Look, session: &CanvasSession) {
     check_box(ui, look, visibility.center(), background.visible, argb(CHECK_FILL));
     if ui.interact(visibility, ui.scope_id().with("background visible"), Sense::click()).clicked() {
         session.set_background_visible(!background.visible);
+        return false;
     }
+    let rest = Rect::from_min_max(row.min, pos2(visibility.left() - 4.0, row.max.y));
+    ui.interact(rest, ui.scope_id().with("background colour"), Sense::click()).clicked()
 }
 
 /// A visibility box: filled with a check cut out of it when shown, an outline when hidden.
