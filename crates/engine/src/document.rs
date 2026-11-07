@@ -656,18 +656,37 @@ impl Document {
 
     /// Whether layer `id` is left out of the picture while another is shown alone (solo): all
     /// but that layer with its mask, what is in it (a group shown alone shows its layers as they
-    /// are set) and the groups it is in.
+    /// are set) and the groups it is in. A mask shown alone shows its layer with it.
     pub fn soloed_out(&self, id: LayerId) -> bool {
         let Some(solo) = self.solo.filter(|s| self.layer(*s).is_some()) else { return false };
+        let solo = self.mask_owner(solo).unwrap_or(solo);
         if id == solo || self.mask_of(solo) == Some(id) || self.is_inside(id, solo) {
             return false;
         }
         !(self.layer(id).is_some_and(|l| l.kind == LayerKind::Group) && self.is_inside(solo, id))
     }
 
-    /// Whether layer `id` can show: it is visible, and so is every group it is in.
-    fn shows(&self, id: LayerId) -> bool {
+    /// Whether what is drawn on layer `id` is seen: it can show ([`Document::shows`]) and isn't
+    /// left out while another layer is shown alone.
+    pub fn in_picture(&self, id: LayerId) -> bool {
+        self.shows(id) && !self.soloed_out(id)
+    }
+
+    /// The layer mask `id` belongs to, if it is a mask.
+    fn mask_owner(&self, id: LayerId) -> Option<LayerId> {
+        let l = self.layer(id).filter(|l| l.kind == LayerKind::Mask)?;
+        l.parent.filter(|p| self.mask_of(*p) == Some(id))
+    }
+
+    /// Whether layer `id` can show: it is visible, and so is every group it is in (and a mask's
+    /// layer).
+    pub fn shows(&self, id: LayerId) -> bool {
         if self.layer(id).is_none_or(|l| !l.visible) {
+            return false;
+        }
+        if let Some(owner) = self.mask_owner(id)
+            && self.layer(owner).is_none_or(|l| !l.visible)
+        {
             return false;
         }
         let mut at = self.group_of(id);
@@ -1936,6 +1955,35 @@ mod tests {
         let fixed = inside.repaired();
         assert_eq!(fixed.solo, None);
         assert_eq!(fixed.layers().len(), d.layers().len());
+    }
+
+    #[test]
+    fn what_is_drawn_on_a_layer_is_seen_only_if_nothing_hides_it_or_leaves_it_out() {
+        let mut d = Document::new(10, 10);
+        let below = d.current();
+        let a = d.add_layer();
+        let m = d.add_mask(a).unwrap();
+        assert!(d.set_current(a));
+        let g = d.group_chosen().unwrap();
+        for id in [below, a, m, g] {
+            assert!(d.in_picture(id), "{id:?}");
+        }
+        // a group it is in hidden, or for a mask its layer
+        d.set_visible(g, false);
+        assert!(!d.in_picture(a) && !d.in_picture(m) && d.layer(a).unwrap().visible);
+        d.set_visible(g, true);
+        d.set_visible(a, false);
+        assert!(!d.in_picture(m) && d.layer(m).unwrap().visible);
+        d.set_visible(a, true);
+        // another layer shown alone
+        d.solo = Some(below);
+        assert!(d.in_picture(below) && !d.in_picture(a) && !d.in_picture(m));
+        // a mask shown alone shows its layer with it (not only the background)
+        d.solo = Some(m);
+        assert!(d.in_picture(a) && d.in_picture(m) && d.in_picture(g) && !d.in_picture(below));
+        // one shown alone on a hidden layer can't show: it opens with every layer shown
+        d.set_visible(a, false);
+        assert_eq!(d.clone().repaired().solo, None);
     }
 
     #[test]
