@@ -213,6 +213,23 @@ impl StrokeStyle {
         StrokeStyle { laid_in_place: false, wet_pull: None, wet_from_before: false, ..self }
     }
 
+    /// The style without its wet mix: dry, as the brush would be with none set (a preview that
+    /// shows it dry).
+    pub fn dry(self) -> StrokeStyle {
+        StrokeStyle {
+            wet_pull: None,
+            wet_from_before: false,
+            load: 0.0,
+            dilution: 0.0,
+            attack: 0.0,
+            grade: 0.0,
+            blur: 0.0,
+            wet_jitter: 0.0,
+            blur_jitter: 0.0,
+            ..self
+        }
+    }
+
     /// Whether the stroke paints its layer as it goes: wet paint, or dry paint laid in place.
     fn paints_in_place(&self) -> bool {
         self.tool == StrokeTool::Paint && (self.wet_pull.is_some() || self.laid_in_place)
