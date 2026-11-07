@@ -4811,7 +4811,7 @@ impl Canvas {
             smudge.last_center = Some(s.center);
             // (and the weaker the stamp, the sooner it lets go: the strength drags it as far)
             let strength = (s.alpha * style.opacity).clamp(0.05, 1.0);
-            let steps = went / (PULL_SPACING * 2.0 * s.radius.max(0.5)) / strength;
+            let steps = went / (PULL_SPACING * 2.0 * s.radius.max(0.5)) / strength.powf(0.15);
             let pull = (style.pull.clamp(0.0, 1.0) * smudge_pull_by).powf(steps);
             let offset = params.push(&SmudgeUniform {
                 pull,

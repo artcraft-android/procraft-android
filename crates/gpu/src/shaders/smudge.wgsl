@@ -393,9 +393,10 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
         // strength nearly all of it (a part half dragged is the soft mush a blur is)
         let through = shape * clamp(2.0 * g, 0.0, 1.0);
         // never at nothing: what the shape or grain leaves out stays out at any strength
-        let cut = max(1.0 - sqrt(st.alpha), 0.12);
-        // and how far each part goes over: all the way from two thirds strength up, less below
-        let strongest = max(held, smoothstep(cut - 0.06, cut + 0.06, through) * clamp(1.5 * st.alpha, 0.0, 1.0));
+        let cut = 0.12;
+        // and the strength how much each part goes over (with how far, in the pull, making the
+        // whole follow the slider evenly)
+        let strongest = max(held, smoothstep(cut - 0.06, cut + 0.06, through) * pow(clamp(st.alpha, 0.0, 1.0), 0.15));
         amount[k] = strongest;
         out = paint_mix(first, carried(p), strongest);
     }
