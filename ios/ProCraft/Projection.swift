@@ -85,7 +85,8 @@ final class ProjectionView: UIView {
     }
 }
 
-/// The second display's scene: one window of one view, shown while the display is there.
+/// The second display's scene: one window of one view, shown while the display is there. Named in
+/// `project.yml`'s scene manifest for the external display's role; the app's own scene is SwiftUI's.
 final class ProjectionSceneDelegate: NSObject, UIWindowSceneDelegate {
     var window: UIWindow?
 
@@ -105,17 +106,5 @@ final class ProjectionSceneDelegate: NSObject, UIWindowSceneDelegate {
     func sceneDidDisconnect(_: UIScene) {
         Projection.shared.display(nil)
         window = nil
-    }
-}
-
-/// The app's delegate, for the second display's scene; every other scene is SwiftUI's.
-final class AppDelegate: NSObject, UIApplicationDelegate {
-    func application(
-        _: UIApplication, configurationForConnecting session: UISceneSession, options _: UIScene.ConnectionOptions
-    ) -> UISceneConfiguration {
-        guard session.role == .windowExternalDisplayNonInteractive else { return session.configuration }
-        let made = UISceneConfiguration(name: "Projection", sessionRole: session.role)
-        made.delegateClass = ProjectionSceneDelegate.self
-        return made
     }
 }

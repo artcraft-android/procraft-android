@@ -55,6 +55,11 @@ targets:
         LSRequiresIPhoneOS: true
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+          # a second display's own scene, for Project canvas
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleExternalDisplayNonInteractive:
+              - UISceneConfigurationName: Projection
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).ProjectionSceneDelegate
         # a mouse's or trackpad's clicks come as a pointer's, not as fingers
         UIApplicationSupportsIndirectInputEvents: true
         UILaunchScreen: {}

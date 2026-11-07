@@ -8,8 +8,6 @@ import UniformTypeIdentifiers
 /// on with the Pencil and moved with fingers, the interface over it.
 @main
 struct ProCraftApp: App {
-    @UIApplicationDelegateAdaptor private var delegate: AppDelegate
-
     init() {
         // the layers' textures may take a quarter of what the app may use (an iPad app is ended
         // well short of the device's memory); none said (the simulator), all of them
@@ -433,9 +431,11 @@ enum ScreenCapture {
         case "projection-check":
             // no second display on the simulator: what is said is what the app has to work with
             model.changeProjectCanvas(true)
-            let delegate = UIApplication.shared.delegate.map { String(describing: type(of: $0)) } ?? "none"
+            let manifest = Bundle.main.object(forInfoDictionaryKey: "UIApplicationSceneManifest") as? [String: Any]
+            let configs = (manifest?["UISceneConfigurations"] as? [String: Any])?.keys.sorted().joined(separator: ", ") ?? "none"
+            let named = NSClassFromString("ProCraft.ProjectionSceneDelegate") != nil
             let scenes = UIApplication.shared.connectedScenes.map { $0.session.role.rawValue }.joined(separator: ", ")
-            model.saying = ("Projection check", "Project canvas on: \(AppSettings.shared.projectCanvas). Delegate: \(delegate). Scenes: \(scenes).")
+            model.saying = ("Projection check", "Project canvas on: \(AppSettings.shared.projectCanvas). Configurations: \(configs). Delegate found: \(named). Scenes: \(scenes).")
         case "companion":
             UserDefaults.standard.set(true, forKey: "singleTouchCompanion")
             model.readAppSettings()
