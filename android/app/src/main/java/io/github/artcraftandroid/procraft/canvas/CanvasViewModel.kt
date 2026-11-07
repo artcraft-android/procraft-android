@@ -131,6 +131,16 @@ enum class SelectionKind(val label: String) { AUTOMATIC("Automatic"), FREEHAND("
 /** A popover over the selection toolbar. */
 enum class SelectionPopup { NONE, FEATHER, SAVED }
 
+/**
+ * A brush ([single]) or a brush set called [name] as a file it is shared in: its letters and
+ * digits, in any script, its spaces, `_` and `-` (anything else a file name may not hold made `_`).
+ */
+internal fun brushFileName(name: String, single: Boolean): String {
+    val kept = name.map { if (it.isLetterOrDigit() || it in " _-") it else '_' }.joinToString("").trim()
+    val base = kept.ifEmpty { if (single) "Brush" else "Brush Set" }
+    return base + if (single) ".${CanvasViewModel.BRUSH_EXTENSION}" else ".${CanvasViewModel.BRUSH_SET_EXTENSION}"
+}
+
 /** The gallery, the open artwork and the state of the controls around it; outlives configuration changes. */
 class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     var session: CanvasSession? = null
@@ -4191,19 +4201,26 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** A brush, or (no brush) the shown set, written to a brush or set file to share. */
-    suspend fun brushFileToShare(b: BrushInfo?): File? = withContext(Dispatchers.IO) {
-        val s = session ?: return@withContext null
-        val (name, bytes) = if (b != null) {
-            b.name to (s.brushAsFile(b.set, b.index) ?: return@withContext null)
-        } else {
-            val set = brushSets.getOrNull(shownSet) ?: return@withContext null
-            set.name to (s.brushSetAsFile(shownSet.toUInt()) ?: return@withContext null)
+    suspend fun brushFileToShare(b: BrushInfo?): File? {
+        val s = session ?: return null
+        val file = withContext(Dispatchers.IO) {
+            // a big set is put together in memory: running out of it, or a write that fails, is
+            // told rather than ending the app
+            runCatching {
+                val (name, bytes) = if (b != null) {
+                    b.name to (s.brushAsFile(b.set, b.index) ?: return@runCatching null)
+                } else {
+                    val set = brushSets.getOrNull(shownSet) ?: return@runCatching null
+                    set.name to (s.brushSetAsFile(shownSet.toUInt()) ?: return@runCatching null)
+                }
+                // in a folder of its own, so another of the same name can't write over it while
+                // it is being shared
+                val dir = File(getApplication<Application>().cacheDir, "exports/${System.nanoTime()}").apply { mkdirs() }
+                File(dir, brushFileName(name, single = b != null)).apply { writeBytes(bytes) }
+            }.getOrNull()
         }
-        runCatching {
-            val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
-            val safe = name.replace(Regex("[^A-Za-z0-9 _-]"), "_").ifBlank { "Brush" }
-            File(dir, safe + if (b != null) ".$BRUSH_EXTENSION" else ".$BRUSH_SET_EXTENSION").apply { writeBytes(bytes) }
-        }.getOrNull()
+        if (file == null) showNotice(if (b != null) "This brush couldn't be shared." else "This brush set couldn't be shared.", warning = true)
+        return file
     }
 
     /**
