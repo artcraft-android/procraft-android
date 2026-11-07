@@ -176,6 +176,12 @@ extension CanvasModel {
         session.setSelectionVisibility(visibility: share)
     }
 
+    /// Project canvas: the picture on a second display while there is one.
+    func changeProjectCanvas(_ on: Bool) {
+        AppSettings.shared.projectCanvas = on
+        Projection.shared.update()
+    }
+
     func changeBrushScaling(onScreen: Bool) {
         AppSettings.shared.brushOnScreen = onScreen
         session.setBrushScaling(onScreen: onScreen)

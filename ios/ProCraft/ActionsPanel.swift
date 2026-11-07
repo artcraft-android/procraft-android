@@ -239,7 +239,7 @@ struct ActionsPanel: View {
                         model.applyFitInsets()
                     }),
                     .act("Brush scaling", value: AppSettings.shared.brushOnScreen ? "Screen" : "Canvas", action: { scalingMenu = true }),
-                    .toggle("Project canvas", on: false, change: nil),
+                    .toggle("Project canvas", on: AppSettings.shared.projectCanvas, change: { model.changeProjectCanvas($0) }),
                     .toggle("Brush cursor", on: AppSettings.shared.brushCursorOn, change: { AppSettings.shared.brushCursorOn = $0 }),
                     .act("Advanced cursor settings", action: { page = .cursor }),
                 ],

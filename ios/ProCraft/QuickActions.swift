@@ -154,6 +154,7 @@ extension CanvasModel {
         case .nextFrame: animationAssist.step(1)
         case .previousFrame: animationAssist.step(-1)
         case .onionSkin: animationAssist.toggleOnionSkin()
+        case .projectCanvas: changeProjectCanvas(!AppSettings.shared.projectCanvas)
         case .companionMove: toggleCompanionMode(.move)
         case .companionZoom: toggleCompanionMode(.zoom)
         case .flipHorizontal: flipCanvas(horizontal: true)

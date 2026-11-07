@@ -480,6 +480,8 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
             model.startedNew()
         }
         canvas.addInteraction(UIDropInteraction(delegate: dropper))
+        // on a second display too, with Project canvas on
+        Projection.shared.artwork(session)
         // kept saved by the core a few seconds after it changes; a failure told
         session.startAutosave(dir: dir)
         canvas.onCommands = { [weak self] in self?.obey($0) }
@@ -670,6 +672,8 @@ final class CanvasViewController: UIViewController, UIPencilInteractionDelegate 
         canvas.detach()
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
+        // the second display let go before the canvas is
+        Projection.shared.artwork(nil)
         leave()
         Gallery.closingSaves += 1
         // off the main thread: a large artwork takes a while, and the gallery shows meanwhile
